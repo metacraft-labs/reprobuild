@@ -44,6 +44,7 @@
 ## git hardlink instead of borrow). Skip rule: ``git`` missing on PATH.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import shared_clones
 

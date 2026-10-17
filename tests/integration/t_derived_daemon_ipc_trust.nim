@@ -132,6 +132,31 @@
 ## A fixture root under a long `TMPDIR` pushes the socket path past it and the
 ## daemon fails to bind — which looks exactly like a real red. `makeFixture`
 ## refuses such a root loudly instead of producing one.
+##
+## PLATFORM CONTRACT — LINUX GRADES THE MECHANISM, EVERY OTHER HOST GRADES ITS
+## REFUSAL. `reprobuild-pm/milestones/Dependency-Attribution.milestones.org`,
+## DA-2's `:status:`, records the mechanism as "INERT on macOS ALWAYS
+## (`processStartIdentity` is `when defined(linux)`, and an unre-validatable
+## peer is refused)". That is a specified outcome, not a gap in this suite:
+## without a kernel start-time identity a registration could never be
+## re-validated at grading time, so `trustDaemonWeSpawned` registers nothing,
+## `revalidatedTrustedDaemons` drops every fact, and an IPC loss is never
+## forgiven. A case whose Linux outcome needs that identity therefore has TWO
+## arms selected by `KernelIdentityHost`:
+##
+##   * on Linux, the original assertions, unchanged;
+##   * everywhere else, the REFUSAL the milestone specifies, asserted as
+##     concretely as the Linux outcome is — the edge does not publish and the
+##     warm run re-launches, the registration is empty, the identity readers
+##     answer "" for a LIVE pid. Never a skip and never a vacuous pass: a host
+##     where the mechanism is inert must still prove it fails CLOSED.
+##
+## Cases that never needed a kernel identity (the unregistered-daemon negative,
+## the `compiles` structural case) have one arm and are graded identically on
+## every host. WHEN A NON-LINUX IDENTITY BACKEND LANDS (`proc_pidinfo` start
+## time on macOS, say) `KernelIdentityHost` is the switch to flip, and every
+## non-Linux arm below is then expected to go RED — that is how a re-grade of
+## DA-2 for that platform finds every case it has to re-measure.
 
 import std/[os, osproc, sequtils, sets, strutils, tempfiles, unittest]
 
@@ -178,6 +203,15 @@ proc byId(res: BuildRunResult; id: string): ActionResult =
   raise newException(ValueError, "missing result " & id)
 
 const ReuseDecisions = {cdHit, cdHybridCutoff}
+
+const KernelIdentityHost = defined(linux)
+  ## Does this host publish the kernel start-time identity DA-2's trust is
+  ## re-validated against? Mirrors the `when defined(linux)` arm of
+  ## `processStartIdentity` (and of `processImagePath` / `processCommName` /
+  ## `processEffectiveUid` beside it) — see the PLATFORM CONTRACT in the header.
+  ## A runtime `if` on this constant, not a `when`, selects each case's arm, so
+  ## BOTH arms are compiled on every host and a Linux arm cannot rot unseen on
+  ## a macOS developer's machine.
 
 proc ccPath(): string =
   result = findExe("cc")
@@ -356,14 +390,21 @@ proc makeFixture(): Fixture =
     daemonPath: binDir / "ipctrust_daemon",
     clientPath: binDir / "ipctrust_client",
     logDir: logDir)
-  # `sockaddr_un.sun_path` is 108 bytes and a long `TMPDIR` silently exceeds
-  # it. Refuse here, where the reason is legible, rather than in a `bind`
-  # failure that reads like a real red.
-  let probeSocket = workRoot / "d.sock"
-  if probeSocket.len >= 108:
+  # A long `TMPDIR` silently exceeds `sockaddr_un.sun_path`. Refuse here,
+  # where the reason is legible, rather than in a `bind` failure that reads
+  # like a real red. The sockets are bound and dialled by the C helpers, so
+  # the KERNEL's limit applies (not std/net's): 108 bytes on Linux, 104 on
+  # macOS and the BSDs, terminating NUL included. This used to hard-code 108
+  # — Linux's value, which let a 104..107-byte path through on macOS — and to
+  # probe `d.sock`, eight bytes shorter than the longest name `startDaemon`
+  # is actually given (`untrusted`).
+  const SunPathBytes = when defined(linux): 108 else: 104
+  let probeSocket = workRoot / "untrusted.sock"
+  if probeSocket.len >= SunPathBytes:
     raise newException(IOError,
       "fixture socket path is " & $probeSocket.len & " bytes, which will not " &
-      "fit sockaddr_un.sun_path (108); use a shorter TMPDIR")
+      "fit sockaddr_un.sun_path (" & $SunPathBytes & " on this host); " &
+      "use a shorter TMPDIR")
   compileC(DaemonSource, result.daemonPath, workRoot, "dmn.c")
   compileC(ClientSource, result.clientPath, workRoot, "cli.c")
 
@@ -552,13 +593,116 @@ proc foldCapture(records: openArray[MonitorRecord];
   result.diagnostics =
     evidence.diagnostics.filterIt(it.contains("ipc peer attributed"))
 
+# ---------------------------------------------------------------------------
+# The non-Linux arms — see the PLATFORM CONTRACT in the header. Each is the
+# refusal one family of cases is specified to give, written once so the arms
+# that share it cannot drift apart. Templates, so they expand into the case
+# body that uses them and every `check` is attributed to that case.
+# ---------------------------------------------------------------------------
+
+template checkSpawnRegistersNothing(daemonProcess: Process) =
+  ## DA-2's refusal at the registration: no kernel identity for the spawned
+  ## pid, so `trustDaemonWeSpawned` records nothing and nothing re-validates.
+  ## The pid is asserted LIVE first, so the empty identity is the host's
+  ## answer for a running process and not the answer for a dead one.
+  check daemonProcess.running
+  check processStartIdentity(processID(daemonProcess)) == ""
+  trustDaemonWeSpawned(daemonProcess, "ipctrust-daemon", tdcNoContent)
+  check derivedTrustedDaemonRegistry().len == 0
+  check not isLiveTrustedPid(processID(daemonProcess))
+
+proc namesInertHostPeer(line: string; peerPid: int; peerPath: string): bool =
+  ## Does io-mon's IPC-loss line name THIS daemon? On a host without kernel
+  ## peer identity (PLATFORM CONTRACT) the socket PATH is the deterministic
+  ## identifier: io-mon's macOS hook reads the peer pid through
+  ## `LOCAL_PEERPID` best-effort, and records 0 when the kernel would not
+  ## answer (`macos_interpose.recordIpcConnect`: "0 => unobtainable"). That
+  ## was measured intermittently on aarch64-darwin, when the daemon had
+  ## already closed the connection. So the line must carry this endpoint's
+  ## `path=`, and its `peer=` must be this daemon's pid or the documented
+  ## "unknown" 0, never some other process.
+  "ipc peer outside monitored tree" in line and
+    (line.endsWith(" path=" & peerPath) or
+      (" path=" & peerPath & " ") in line) and
+    ((" peer=" & $peerPid & " ") in line or " peer=0 " in line)
+
+template checkIpcLossStands(f: Fixture; edge: BuildAction;
+                            config: BuildEngineConfig; logName: string;
+                            peerPid: int; peerPath: string) =
+  ## THE SYMPTOM, STILL PRESENT — which is what the milestone specifies for a
+  ## host DA-2 cannot reach. The edge runs, is NOT forgiven, does NOT publish,
+  ## and the warm run LAUNCHES AGAIN. The loss is asserted to be the IPC peer
+  ## loss naming this daemon (`namesInertHostPeer`: its socket `peerPath`, and
+  ## `peerPid` or io-mon's "unknown" 0), so the downgrade is the one DA-2 would have
+  ## forgiven and not some unrelated monitor failure that would make this arm
+  ## green for the wrong reason.
+  # Bound once: the arguments may be expressions, and a template would
+  # otherwise re-evaluate them at every use.
+  let theEdge = edge
+  let theConfig = config
+  let cold = runBuild(graph([theEdge]), theConfig)
+  let c0 = cold.byId(theEdge.id)
+  checkpoint("inert host, cold: status=" & $c0.status & " reason=" &
+    c0.reason & " diagnostics=" & $c0.evidence.diagnostics)
+  check c0.status == asSucceeded
+  check c0.launched
+  check f.runCount(logName) == 1
+  check attributionDiagnostics(c0).len == 0
+  check c0.evidence.diagnostics.anyIt(
+    namesInertHostPeer(it, peerPid, peerPath))
+  check not f.publishedRecordExists(theEdge)
+  let warm = runBuild(graph([theEdge]), theConfig)
+  let c1 = warm.byId(theEdge.id)
+  checkpoint("inert host, warm: decision=" & $c1.cacheDecision &
+    " launched=" & $c1.launched)
+  check c1.cacheDecision notin ReuseDecisions
+  check c1.launched
+  check f.runCount(logName) == 2
+
+template checkFoldForgivesNothing(records: openArray[MonitorRecord];
+                                  peerPid: int) =
+  ## The hand-built capture cases' refusal. The trust fact naming this
+  ## process carries the identity the host reports — "" — and is dropped; so
+  ## is one carrying a FORGED non-empty identity, which is what proves the
+  ## refusal comes from the kernel-side re-read and not merely from the
+  ## empty-field guard in `revalidatedTrustedDaemons`.
+  let honest = selfAsTrustedDaemon("capture-daemon")
+  check honest.pid == peerPid
+  check honest.identity == ""
+  var forged = honest
+  forged.identity = "1"
+  for trusted in [honest, forged]:
+    let outcome = foldCapture(records, [trusted])
+    checkpoint("inert host fold (identity='" & trusted.identity &
+      "'): status=" & $outcome.status & " attributed=" & $outcome.attributed &
+      " diagnostics=" & $outcome.diagnostics)
+    check outcome.status == mesUnknownScopeLoss
+    check outcome.attributed == 0
+    check outcome.diagnostics.len == 0
+
 suite "derived IPC trust: the daemons this process spawned":
 
   test "an action that talks only to a trusted daemon publishes, and a warm run hits":
     ## THE SYMPTOM, GONE — and measured as "publishes and is reused", not as a
     ## completeness enum, because the enum is not what rebuilt forever.
+    ##
+    ## NON-LINUX: the symptom is SPECIFIED TO REMAIN (DA-2 "INERT on macOS
+    ## ALWAYS"), so that arm asserts it does — the spawn registers nothing,
+    ## the edge does not publish, and the warm run launches again.
     if ccPath().len == 0:
       skip()
+    elif not KernelIdentityHost:
+      forgetDerivedTrustedDaemons()
+      let repoRoot = findRepoRoot()
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      var daemon = f.startDaemon("unix", "trusted")
+      defer: stopDaemon(daemon)
+      checkSpawnRegistersNothing(daemon.process)
+      let edge = f.clientEdge("ipctrust/trusted", "unix", daemon.address,
+        "trusted")
+      checkIpcLossStands(f, edge, monitoredConfig(repoRoot, f.cacheRoot),
+        "trusted", processID(daemon.process), daemon.address)
     else:
       forgetDerivedTrustedDaemons()
       let repoRoot = findRepoRoot()
@@ -676,8 +820,14 @@ suite "derived IPC trust: the daemons this process spawned":
       defer: removeDir(f.root)
       var daemon = f.startDaemon("inet", "inet")
       defer: stopDaemon(daemon)
-      trustDaemonWeSpawned(daemon.process, "ipctrust-daemon", tdcNoContent)
-      check isLiveTrustedPid(processID(daemon.process))
+      if KernelIdentityHost:
+        trustDaemonWeSpawned(daemon.process, "ipctrust-daemon", tdcNoContent)
+        check isLiveTrustedPid(processID(daemon.process))
+      else:
+        # The most favourable configuration is not reachable here: the
+        # registration itself is refused (PLATFORM CONTRACT). What remains
+        # graded below — the INET edge downgrades — is the same property.
+        checkSpawnRegistersNothing(daemon.process)
 
       let edge = f.clientEdge("ipctrust/inet", "inet", daemon.address, "inet")
       let g = graph([edge])
@@ -728,8 +878,32 @@ suite "derived IPC trust: the daemons this process spawned":
     ## stale identity reaches the trust set intact, reddened NOTHING in this
     ## suite until the last two arms existed. Grading the helper is not grading
     ## the wire.
+    ##
+    ## NON-LINUX: there is no identity to recycle, and the specified answer is
+    ## that NOTHING is trusted rather than that a bare pid is. The arm asserts
+    ## a live daemon reads as "", that a fact carrying ANY identity for it —
+    ## the empty one or a forged one — is dropped by the helper, that the same
+    ## holds on the production fold path, and that registration is refused.
     if ccPath().len == 0:
       skip()
+    elif not KernelIdentityHost:
+      forgetDerivedTrustedDaemons()
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      var daemon = f.startDaemon("unix", "recycle")
+      defer: stopDaemon(daemon)
+      let pid = processID(daemon.process)
+      check daemon.process.running
+      check processStartIdentity(pid) == ""
+      for identity in ["", "1"]:
+        check revalidatedTrustedDaemons(
+          [TrustedDaemonPeer(pid: pid, identity: identity, name: "d",
+            contribution: tdcNoContent)]).len == 0
+      let selfPid = getCurrentProcessId()
+      checkFoldForgivesNothing([
+        ipcConnectRecord(4242, selfPid, "/ipctrust/recycled.sock"),
+        ipcLossRecord(4242, selfPid, "", "/ipctrust/recycled.sock")], selfPid)
+      checkSpawnRegistersNothing(daemon.process)
     else:
       forgetDerivedTrustedDaemons()
       let f = makeFixture()
@@ -809,8 +983,37 @@ suite "derived IPC trust: the daemons this process spawned":
     ## precisely what the miscount collapses. The normally-named pair is the
     ## control: the miscount leaves it correct, so a red on the spaced arm
     ## alone names the comm parse and not the helper.
+    ##
+    ## NON-LINUX: there is no `/proc/<pid>/stat` to parse, and the contract is
+    ## FAIL-CLOSED — the readers answer "" rather than a guess, for a process
+    ## that is demonstrably alive, under either name. A non-Linux reader that
+    ## returned some constant for every pid would be exactly the false accept
+    ## this case exists for, so the arm asserts emptiness, not mere agreement.
     if ccPath().len == 0:
       skip()
+    elif not KernelIdentityHost:
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      let spacedBin = f.binDir / "ipc daemon"
+      let plainBin = f.binDir / "ipcdaemon"
+      compileC(SleeperSource, spacedBin, f.workRoot, "slp.c")
+      copyFile(spacedBin, plainBin)
+      setFilePermissions(plainBin, getFilePermissions(spacedBin))
+      for binary in [plainBin, spacedBin]:
+        let p = startProcess(binary, options = {poStdErrToStdOut})
+        try:
+          checkpoint("inert host, live sleeper " & binary.extractFilename &
+            " pid=" & $processID(p))
+          check p.running
+          check processStartIdentity(processID(p)) == ""
+          check processCommName(processID(p)) == ""
+        finally:
+          try:
+            p.terminate()
+            discard p.waitForExit()
+            p.close()
+          except CatchableError:
+            discard
     else:
       let f = makeFixture()
       defer: removeDir(f.root)
@@ -867,42 +1070,56 @@ suite "derived IPC trust: the daemons this process spawned":
     ## The positive control is the same loss with its record present. Without
     ## it this case would pass against an engine that had simply stopped
     ## attributing anything.
-    let peer = selfAsTrustedDaemon("capture-daemon")
-    check peer.identity.len > 0
-    let loss = ipcLossRecord(4242, peer.pid, "", "/ipctrust/absent.sock")
+    if not KernelIdentityHost:
+      # NON-LINUX (PLATFORM CONTRACT): with or without its connect record the
+      # loss stands, because no trust fact re-validates. The with-record
+      # capture is the Linux arm's positive control; here it is the refusal.
+      let selfPid = getCurrentProcessId()
+      let loss = ipcLossRecord(4242, selfPid, "", "/ipctrust/absent.sock")
+      checkFoldForgivesNothing([loss], selfPid)
+      checkFoldForgivesNothing(
+        [ipcConnectRecord(4242, selfPid, "/ipctrust/absent.sock"), loss],
+        selfPid)
+    else:
+      let peer = selfAsTrustedDaemon("capture-daemon")
+      check peer.identity.len > 0
+      let loss = ipcLossRecord(4242, peer.pid, "", "/ipctrust/absent.sock")
 
-    let withoutRecord = foldCapture([loss], [peer])
-    checkpoint("without connect record: status=" & $withoutRecord.status &
-      " attributed=" & $withoutRecord.attributed)
-    check withoutRecord.status == mesUnknownScopeLoss
-    check withoutRecord.attributed == 0
-    check withoutRecord.diagnostics.len == 0
+      let withoutRecord = foldCapture([loss], [peer])
+      checkpoint("without connect record: status=" & $withoutRecord.status &
+        " attributed=" & $withoutRecord.attributed)
+      check withoutRecord.status == mesUnknownScopeLoss
+      check withoutRecord.attributed == 0
+      check withoutRecord.diagnostics.len == 0
 
-    let withRecord = foldCapture(
-      [ipcConnectRecord(4242, peer.pid, "/ipctrust/absent.sock"), loss], [peer])
-    checkpoint("with connect record: status=" & $withRecord.status &
-      " attributed=" & $withRecord.attributed &
-      " diagnostics=" & $withRecord.diagnostics)
-    check withRecord.status == mesComplete
-    check withRecord.attributed == 1
-    check withRecord.diagnostics.len == 1
-    # Rule 3 — NAMED, not merely counted. The daemon and the §Class 3 branch
-    # that let it be forgiven must both be in the line an operator reads,
-    # because io-mon's own text identifies the peer by a bare pid and nothing
-    # else (on Linux `recordIpcConnect` never sets `record.path`).
-    check "capture-daemon" in withRecord.diagnostics[0]
-    check "branch (a)" in withRecord.diagnostics[0]
-    check ("pid " & $peer.pid) in withRecord.diagnostics[0]
+      let withRecord = foldCapture(
+        [ipcConnectRecord(4242, peer.pid, "/ipctrust/absent.sock"), loss], [peer])
+      checkpoint("with connect record: status=" & $withRecord.status &
+        " attributed=" & $withRecord.attributed &
+        " diagnostics=" & $withRecord.diagnostics)
+      check withRecord.status == mesComplete
+      check withRecord.attributed == 1
+      check withRecord.diagnostics.len == 1
+      # Rule 3 — NAMED, not merely counted. The daemon and the §Class 3 branch
+      # that let it be forgiven must both be in the line an operator reads,
+      # because io-mon's own text identifies the peer by a bare pid and nothing
+      # else (on Linux `recordIpcConnect` never sets `record.path`).
+      check "capture-daemon" in withRecord.diagnostics[0]
+      check "branch (a)" in withRecord.diagnostics[0]
+      check ("pid " & $peer.pid) in withRecord.diagnostics[0]
 
   test "a colliding dedup key is not forgiven by another record's exemption":
     ## FAIL-OPEN #2, and the one the trust set cannot be blamed for.
-    ## `unmonitoredSubtreeLossDetails` dedups on `pid:<peer>@<peerstart>` and
-    ## emits the text of the FIRST NON-EXEMPT record per key. Which record that
+    ## `unmonitoredSubtreeLossDetails` dedups on
+    ## `pid:<peer>@<peerstart>|dest:<endpoint>` (the endpoint joined io-mon's key
+    ## with endpoint-keyed daemon trust, so connects to DIFFERENT sockets no
+    ## longer share a key) and emits the text of the FIRST NON-EXEMPT record per
+    ## key. Which record that
     ## is differs between io-mon's run and the engine's recomputation, so the
     ## TEXT is not comparable across the two and only the KEY is.
     ##
-    ## The capture: two connects to the SAME trusted peer, sharing one dedup
-    ## key. The second carries a DUPLICATED `peerstart=` token — io-mon's
+    ## The capture: two connects to the SAME trusted peer AT THE SAME
+    ## ENDPOINT, sharing one dedup key. The second carries a DUPLICATED `peerstart=` token — io-mon's
     ## attacker-controlled-evidence signal, which its rule fails CLOSED on and
     ## never exempts, trusted peer or not. io-mon (trusting nothing, as the
     ## merge does) flagged the FIRST record and dedup-suppressed the second, so
@@ -913,30 +1130,41 @@ suite "derived IPC trust: the daemons this process spawned":
     ##
     ## Comparing keys closes it: the key is in both answers, so the trust set
     ## is not what removed it, so the loss stands.
-    let peer = selfAsTrustedDaemon("capture-daemon")
-    check peer.identity.len > 0
-    let plain = ipcConnectRecord(101, peer.pid, "/ipctrust/first.sock")
-    let duplicated = ipcConnectRecord(202, peer.pid, "/ipctrust/second.sock",
-      detail = "peerstart=42 peerstart=42")
-    # What io-mon emitted: the FIRST record's text, under the shared key.
-    let loss = ipcLossRecord(101, peer.pid, "", "/ipctrust/first.sock")
+    if not KernelIdentityHost:
+      # NON-LINUX (PLATFORM CONTRACT): neither the collided capture nor its
+      # uncollided control is forgiven, because no trust fact re-validates.
+      let selfPid = getCurrentProcessId()
+      let plain = ipcConnectRecord(101, selfPid, "/ipctrust/first.sock")
+      let duplicated = ipcConnectRecord(202, selfPid, "/ipctrust/first.sock",
+        detail = "peerstart=42 peerstart=42")
+      let loss = ipcLossRecord(101, selfPid, "", "/ipctrust/first.sock")
+      checkFoldForgivesNothing([plain, duplicated, loss], selfPid)
+      checkFoldForgivesNothing([plain, loss], selfPid)
+    else:
+      let peer = selfAsTrustedDaemon("capture-daemon")
+      check peer.identity.len > 0
+      let plain = ipcConnectRecord(101, peer.pid, "/ipctrust/first.sock")
+      let duplicated = ipcConnectRecord(202, peer.pid, "/ipctrust/first.sock",
+        detail = "peerstart=42 peerstart=42")
+      # What io-mon emitted: the FIRST record's text, under the shared key.
+      let loss = ipcLossRecord(101, peer.pid, "", "/ipctrust/first.sock")
 
-    let collided = foldCapture([plain, duplicated, loss], [peer])
-    checkpoint("collided: status=" & $collided.status &
-      " attributed=" & $collided.attributed &
-      " diagnostics=" & $collided.diagnostics)
-    check collided.status == mesUnknownScopeLoss
-    check collided.attributed == 0
-    check collided.diagnostics.len == 0
+      let collided = foldCapture([plain, duplicated, loss], [peer])
+      checkpoint("collided: status=" & $collided.status &
+        " attributed=" & $collided.attributed &
+        " diagnostics=" & $collided.diagnostics)
+      check collided.status == mesUnknownScopeLoss
+      check collided.attributed == 0
+      check collided.diagnostics.len == 0
 
-    # POSITIVE CONTROL — the identical capture with the duplicate-token record
-    # removed IS forgiven. The two differ in exactly the record that collides,
-    # so the red above is caused by the collision and by nothing else.
-    let uncollided = foldCapture([plain, loss], [peer])
-    checkpoint("uncollided: status=" & $uncollided.status &
-      " attributed=" & $uncollided.attributed)
-    check uncollided.status == mesComplete
-    check uncollided.attributed == 1
+      # POSITIVE CONTROL — the identical capture with the duplicate-token record
+      # removed IS forgiven. The two differ in exactly the record that collides,
+      # so the red above is caused by the collision and by nothing else.
+      let uncollided = foldCapture([plain, loss], [peer])
+      checkpoint("uncollided: status=" & $uncollided.status &
+        " attributed=" & $uncollided.attributed)
+      check uncollided.status == mesComplete
+      check uncollided.attributed == 1
 
   test "the real CLI spawn arm registers the daemon it started":
     ## THE PRODUCTION WIRING, which the cases above deliberately do not touch:
@@ -950,8 +1178,42 @@ suite "derived IPC trust: the daemons this process spawned":
     ## provisioned: both early returns test reachability, an absent socket is
     ## unreachable, and the spawn arm is taken. The function then overwrites
     ## `RUNQUOTA_SOCKET` with the per-PID socket it actually bound.
+    ##
+    ## NON-LINUX: the spawn arm is taken exactly as on Linux — the daemon is
+    ## started and live — and its registration is REFUSED, because the pid has
+    ## no kernel identity to re-validate (PLATFORM CONTRACT). The warm arm
+    ## still adopts and still registers nothing, so the registry is empty
+    ## after both calls rather than holding one entry.
     if findRunQuotaDaemonBin().len == 0:
       skip()
+    elif not KernelIdentityHost:
+      forgetDerivedTrustedDaemons()
+      let scratch = createTempDir("repro-ipcwire-", "", dir = nonVolatileTempBase())
+      defer: removeDir(scratch)
+      let priorSocket = getEnv("RUNQUOTA_SOCKET", "")
+      putEnv("RUNQUOTA_SOCKET", scratch / "no-such-runquota.sock")
+      putEnv("REPROBUILD_AUTO_RUNQUOTA", "1")
+      var daemon = startAutoRunQuotaIfNeeded(false)
+      defer:
+        releaseAutoRunQuotaProcess(daemon)
+        putEnv("RUNQUOTA_SOCKET", priorSocket)
+        forgetDerivedTrustedDaemons()
+      check daemon != nil
+      if daemon != nil:
+        checkpoint("inert host, spawned runquotad pid=" & $processID(daemon))
+        check daemon.running
+        check processStartIdentity(processID(daemon)) == ""
+        check not isLiveTrustedPid(processID(daemon))
+      check derivedTrustedDaemonRegistry().len == 0
+      # The warm arm (1), with its preconditions checked as on Linux, so the
+      # empty registry below is the adopt early-return and not a second spawn.
+      let publishedSocket = getEnv("RUNQUOTA_SOCKET", "")
+      check publishedSocket.len > 0
+      check publishedSocket != scratch / "no-such-runquota.sock"
+      var adopted = startAutoRunQuotaIfNeeded(false)
+      defer: releaseAutoRunQuotaProcess(adopted)
+      check adopted == nil
+      check derivedTrustedDaemonRegistry().len == 0
     else:
       forgetDerivedTrustedDaemons()
       let scratch = createTempDir("repro-ipcwire-", "", dir = nonVolatileTempBase())
@@ -1046,8 +1308,58 @@ suite "derived IPC trust: the daemons this process spawned":
     ## suppresses (Dependency-Observation-Attribution.md §"Attribution, not
     ## suppression") is checked against the bytes on disk: the `mrIpcConnect`
     ## and the injected loss text are both still there while the edge publishes.
+    ##
+    ## NON-LINUX: the same fold site, refusing. The capture on disk still
+    ## carries the `mrIpcConnect` to the daemon's socket (with its pid, which
+    ## io-mon reads best-effort through `LOCAL_PEERPID`, or 0 where the kernel
+    ## would not answer) and the loss text — so the evidence DA-2 would
+    ## attribute is present and the refusal is the engine's, per the PLATFORM
+    ## CONTRACT — and the edge does not publish and re-launches warm.
     if ccPath().len == 0:
       skip()
+    elif not KernelIdentityHost:
+      forgetDerivedTrustedDaemons()
+      let repoRoot = findRepoRoot()
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      var daemon = f.startDaemon("unix", "reported")
+      defer: stopDaemon(daemon)
+      let daemonPid = processID(daemon.process)
+      checkSpawnRegistersNothing(daemon.process)
+
+      let capturePath = f.workRoot / "rep.iomon"
+      let edge = f.reportEdge(repoRoot, "ipctrust/report", daemon.address,
+        "report", capturePath)
+      let config = monitoredConfig(repoRoot, f.cacheRoot)
+      let res = runBuild(graph([edge]), config)
+      let r0 = res.byId(edge.id)
+      checkpoint("inert host, report: status=" & $r0.status & " reason=" &
+        r0.reason & " stderr=" & r0.stderr &
+        " diagnostics=" & $r0.evidence.diagnostics)
+      check r0.status == asSucceeded
+      check f.runCount("report") == 1
+      check fileExists(capturePath)
+      check attributionDiagnostics(r0).len == 0
+      check not f.publishedRecordExists(edge)
+      var sawConnect = false
+      var sawLoss = false
+      if fileExists(capturePath):
+        for record in streamMonitorDepFileRecords(capturePath,
+            defaultMonitorDepFileReaderOptions()):
+          # Keyed on the socket path, with the pid this daemon's or the
+          # documented "unobtainable" 0 — see `namesInertHostPeer`.
+          if record.kind == mrIpcConnect and record.path == daemon.address and
+              record.childOsPid in [uint64(daemonPid), 0'u64]:
+            sawConnect = true
+          if record.kind == mrEventLoss and
+              namesInertHostPeer(record.detail, daemonPid, daemon.address):
+            sawLoss = true
+      check sawConnect
+      check sawLoss
+      let warm = runBuild(graph([edge]), config)
+      check warm.byId(edge.id).cacheDecision notin ReuseDecisions
+      check warm.byId(edge.id).launched
+      check f.runCount("report") == 2
     else:
       forgetDerivedTrustedDaemons()
       let repoRoot = findRepoRoot()

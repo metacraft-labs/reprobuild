@@ -40,12 +40,12 @@ import std/[options, os, osproc, strutils, tables]
 
 import types
 import resolver
-import reader
 
 import repro_build_engine
 import git_tool
 import git_actions
 import workspace_branch
+import settings
 
 type
   ManifestLayerRefreshStatus* = enum
@@ -181,22 +181,39 @@ proc canFastForward(identity: GitToolIdentity;
     ["-C", repoPath, "merge-base", "--is-ancestor", localRef, remoteRef])
   res.code == 0
 
-proc refreshOneUrlLayer(identity: GitToolIdentity;
-                        workspaceRoot, dotRepo: string;
-                        layerIdx: int;
-                        entry: ManifestLayer): ManifestLayerRefreshEntry =
-  result.index = layerIdx
-  result.provenance = entry.url.get()
-  let target = dotRepo / layerDirName(layerIdx, entry)
-  result.layerPath = target
-  if not dirExists(target):
-    result.status = mrsSkippedAbsent
-    return
-
+proc fastForwardManifestCheckout(identity: GitToolIdentity;
+                                 workspaceRoot, dotRepo, target: string;
+                                 fetchId: string;
+                                 ignoreUntracked: bool;
+                                 fallbackRemote: string;
+                                 result: var ManifestLayerRefreshEntry) =
+  ## Fetch the upstream of ``target``'s checked-out branch and fast-forward
+  ## onto it, recording the outcome in ``result``. Shared by the ``url``
+  ## layers and the workspace-root checkout so both follow ONE rule set:
+  ## refuse on local edits, on a detached HEAD, on a missing upstream and on
+  ## divergence, and never raise (sync reads whatever is on disk).
+  ##
+  ## ``fallbackRemote``: the remote assumed when the branch has no configured
+  ## upstream. ``url`` layers pass ``origin`` (the composer's clone, and the
+  ## behaviour this refresh always had); the workspace root passes "" so an
+  ## untracked branch is left alone rather than guessed at.
+  ##
+  ## ``ignoreUntracked``: the workspace root's directory also holds every
+  ## sibling checkout and generated file, so untracked entries there are the
+  ## normal state and do not make a fast-forward unsafe (``merge --ff-only``
+  ## itself refuses to overwrite an untracked file). A ``url`` layer's
+  ## checkout is owned by the workspace, so any stray file there still skips.
   let beforeSha = headSha(identity, target)
   result.beforeSha = beforeSha
 
-  if not isClean(identity, target):
+  let clean =
+    if ignoreUntracked:
+      let res = runGit(identity, ["-C", target, "status", "--porcelain",
+        "--untracked-files=no"])
+      res.code == 0 and res.output.strip().len == 0
+    else:
+      isClean(identity, target)
+  if not clean:
     result.status = mrsSkippedDirty
     result.afterSha = beforeSha
     result.diagnostic =
@@ -205,24 +222,42 @@ proc refreshOneUrlLayer(identity: GitToolIdentity;
 
   let branch = currentBranch(identity, target)
   if branch.len == 0:
-    # Detached HEAD on a manifest layer. Don't try to fast-forward —
-    # the operator is mid-investigation. Treat as up-to-date wrt sync's
-    # responsibilities so we don't block reconciliation.
+    # Detached HEAD on a manifest checkout (or a rebase in flight, which
+    # also detaches). Don't try to fast-forward — the operator is
+    # mid-investigation. Treat as up-to-date wrt sync's responsibilities so
+    # we don't block reconciliation.
     result.status = mrsSkippedDivergent
     result.afterSha = beforeSha
     result.diagnostic =
       "manifest checkout is in detached HEAD; refresh skipped"
     return
 
+  # The branch's configured upstream. ``url`` layers are cloned by the
+  # composer with an ``origin/<branch>`` upstream; the workspace root is
+  # cloned by the operator and may track any remote (or a differently named
+  # branch), so the upstream is read rather than assumed.
+  let configuredRemote = block:
+    let r = runGit(identity, ["-C", target, "config", "--get",
+      "branch." & branch & ".remote"])
+    if r.code == 0: r.output.strip() else: ""
+  let hasUpstream = configuredRemote.len > 0 and configuredRemote != "."
+  let remoteName = if hasUpstream: configuredRemote else: fallbackRemote
+  if remoteName.len == 0:
+    result.status = mrsSkippedDivergent
+    result.afterSha = beforeSha
+    result.diagnostic = "manifest branch '" & branch &
+      "' has no remote upstream; refresh skipped"
+    return
+
   # Schedule the fetch via the M2 fetch action so the engine sees the
   # work + receipt the rest of the workspace VCS pipeline produces.
   let receiptDir = dotRepo / "engine-cache" / "manifest-refresh-receipts"
   createDir(receiptDir)
-  let receiptPath = receiptDir / ("manifest-fetch-" & $layerIdx & ".receipt")
+  let receiptPath = receiptDir / (fetchId & ".receipt")
   var action = gitFetchAction(
-    "m10-manifest-fetch-" & $layerIdx,
+    fetchId,
     identity,
-    remoteName = "origin",
+    remoteName = remoteName,
     repoPath = target,
     receiptPath = receiptPath,
     cacheable = false)
@@ -243,25 +278,26 @@ proc refreshOneUrlLayer(identity: GitToolIdentity;
       (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: "")
     return
 
-  # Try a fast-forward. ``origin/<branch>`` is the canonical upstream
-  # for the layer's checked-out branch — if the layer had any other
-  # arrangement (custom upstream, multiple remotes) the operator
-  # already opted out of the simple sync model.
   let remoteTip = block:
-    let r = runGit(identity, ["-C", target, "rev-parse",
-      "refs/remotes/origin/" & branch])
+    let upstreamRef =
+      if hasUpstream: branch & "@{upstream}"
+      else: "refs/remotes/" & remoteName & "/" & branch
+    let r = runGit(identity, ["-C", target, "rev-parse", "--verify", "-q",
+      upstreamRef])
     if r.code == 0: r.output.strip() else: ""
   if remoteTip.len == 0:
     result.status = mrsSkippedDivergent
     result.afterSha = beforeSha
     result.diagnostic =
-      "no remote-tracking branch 'origin/" & branch & "' after fetch"
+      "no remote-tracking branch for '" & branch & "' after fetch"
     return
   if remoteTip == beforeSha:
     result.status = mrsUpToDate
     result.afterSha = beforeSha
     return
   if not canFastForward(identity, target, beforeSha, remoteTip):
+    # Either local commits not yet pushed (the upstream is an ancestor of
+    # HEAD) or a real divergence. Both leave the checkout alone.
     result.status = mrsSkippedDivergent
     result.afterSha = beforeSha
     result.diagnostic =
@@ -269,7 +305,7 @@ proc refreshOneUrlLayer(identity: GitToolIdentity;
     return
 
   let mergeRes = runGit(identity, ["-C", target, "merge", "--ff-only",
-    "refs/remotes/origin/" & branch])
+    remoteTip])
   if mergeRes.code != 0:
     result.status = mrsFailed
     result.afterSha = beforeSha
@@ -278,20 +314,73 @@ proc refreshOneUrlLayer(identity: GitToolIdentity;
   result.afterSha = headSha(identity, target)
   result.status = mrsRefreshed
 
+proc refreshOneUrlLayer(identity: GitToolIdentity;
+                        workspaceRoot, dotRepo: string;
+                        layerIdx: int;
+                        entry: ManifestLayer): ManifestLayerRefreshEntry =
+  result.index = layerIdx
+  result.provenance = entry.url.get()
+  let target = dotRepo / layerDirName(layerIdx, entry)
+  result.layerPath = target
+  if not dirExists(target):
+    result.status = mrsSkippedAbsent
+    return
+  fastForwardManifestCheckout(identity, workspaceRoot, dotRepo, target,
+    "m10-manifest-fetch-" & $layerIdx, ignoreUntracked = false,
+    fallbackRemote = "origin", result)
+
+const workspaceRootLayerIndex* = -1
+  ## ``ManifestLayerRefreshEntry.index`` of the workspace-root checkout. It
+  ## is not a ``[[manifest]]`` layer, so it gets no layer position.
+
+const workspaceRootLayerProvenance* = "workspace-root"
+
+proc refreshWorkspaceRootCheckout(identity: GitToolIdentity;
+                                  absRoot, dotRepo: string):
+    ManifestLayerRefreshEntry =
+  ## The FLAT shape: the workspace root is itself a clone of the manifest
+  ## repository (``<org>/repro-workspace``), with ``projects/`` and
+  ## ``repos/`` at its top level. That checkout IS the bill of materials,
+  ## so "fast-forward every configured manifest layer" has to include it —
+  ## otherwise a fragment change (a new repo, a moved ``path``, a declared
+  ## rename) published upstream never reaches the planner, and a machine
+  ## running ``repro sync`` keeps reconciling against a manifest it never
+  ## updates.
+  result.index = workspaceRootLayerIndex
+  result.provenance = workspaceRootLayerProvenance
+  result.layerPath = absRoot
+  if manifestsRoot(absRoot) != absRoot or
+      not (dirExists(absRoot / ".git") or fileExists(absRoot / ".git")):
+    # Manifests come from a ``.repro/manifests`` checkout (a ``url`` layer
+    # or a shared-cache symlink the workspace does not own), or the root is
+    # not a git checkout at all.
+    result.status = mrsSkippedAbsent
+    return
+  fastForwardManifestCheckout(identity, absRoot, dotRepo, absRoot,
+    "m10-manifest-fetch-workspace-root", ignoreUntracked = true,
+    fallbackRemote = "", result)
+
 proc refreshOneLocalLayer(layerIdx: int;
                           entry: ManifestLayer): ManifestLayerRefreshEntry =
   result.index = layerIdx
   result.provenance = entry.local_path.get()
   result.status = mrsSkippedLocal
 
-proc refreshManifestLayers*(workspaceRoot: string):
+proc refreshManifestLayers*(workspaceRoot: string;
+                            includeWorkspaceRoot = false):
     ManifestRefreshReport =
   ## Refresh every ``url``-backed manifest layer declared in
-  ## ``<workspaceRoot>/.repro/workspace.toml``. Returns a per-layer
+  ## the workspace (state file and settings files). Returns a per-layer
   ## report. Raises ``WorkspaceManifestParseError`` if the workspace
   ## TOML itself is missing or malformed; per-layer failures are
   ## reported in the result, NOT raised (sync should continue even if
   ## one layer can't be refreshed).
+  ##
+  ## ``includeWorkspaceRoot``: also fast-forward the workspace root when it
+  ## is itself the manifest checkout (the flat shape), reported FIRST with
+  ## index ``workspaceRootLayerIndex``. Opt-in because only the commands
+  ## whose job is to converge the workspace (``sync``, ``pull``) may move the
+  ## operator's root checkout; ``status`` and the post-merge hook must not.
   let absRoot =
     if isAbsolute(workspaceRoot): workspaceRoot
     else: absolutePath(workspaceRoot)
@@ -299,16 +388,28 @@ proc refreshManifestLayers*(workspaceRoot: string):
   let workspaceTomlPath = workspaceTomlPath(absRoot)
   let dotRepo = absRoot / ".repro"
   result.workspaceTomlPath = workspaceTomlPath
+  if includeWorkspaceRoot:
+    let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+    let rootEntry = refreshWorkspaceRootCheckout(identity, absRoot, dotRepo)
+    if rootEntry.status != mrsSkippedAbsent:
+      result.layers.add(rootEntry)
   if not fileExists(workspaceTomlPath):
-    # No workspace.toml means M6/M7 single-project mode: nothing to
+    # No state file means M6/M7 single-project mode: nothing to
     # refresh. Return an empty report; the caller treats that as a
     # successful no-op.
     return
-  let workspaceLocal = readWorkspaceLocal(workspaceTomlPath)
+  # The SAME layer list the composer acquires — the state file's own layers
+  # and the settings files' — so a layer's position, and with it the
+  # `manifests-<i>-…` directory it was cloned into, agrees between the two.
+  let workspaceLocal = effectiveWorkspaceLocal(absRoot)
   if workspaceLocal.manifest.len == 0:
     return
   let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
   for layerIdx, entry in workspaceLocal.manifest:
+    if entry.name == some(workspaceRootLayerName):
+      # The root repository's base layer; `includeWorkspaceRoot` decides
+      # whether the root is refreshed, above.
+      continue
     let hasUrl = entry.url.isSome and entry.url.get().len > 0
     if hasUrl:
       result.layers.add(refreshOneUrlLayer(identity, absRoot, dotRepo,

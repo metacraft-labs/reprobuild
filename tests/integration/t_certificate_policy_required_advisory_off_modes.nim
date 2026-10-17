@@ -4,9 +4,12 @@
 ## unconditionally (no cert check at all).
 ##
 ## This drives the SAME real gateway bare + installed ``pre-receive`` /
-## ``post-receive`` hooks as the key test, but flips ONLY the gateway config's
-## ``gate_mode`` and asserts the receiving-side outcome per mode against a real
-## second "upstream" bare:
+## ``post-receive`` hooks as the key test, but flips ONLY the mode and asserts
+## the receiving-side outcome per mode against a real second "upstream" bare.
+## Since TC-9d the mode is the one the PUSHED commit records: its
+## ``repro.lock`` carries a ``[certificate_policy]`` with one rule for every branch
+## under that mode; the gateway
+## config carries no policy. ``off`` is the default-off state: no policy.
 ##
 ##   - off      : an uncovered push is ACCEPTED and FORWARDED (upstream gets it).
 ##   - advisory : an uncovered push is ACCEPTED and FORWARDED (upstream gets it),
@@ -27,8 +30,9 @@
 ##
 ## The fix is to make each arm assert something only a gate that READ the
 ## pushed certificate note can produce. Every push now carries a REAL
-## certificate note — attached to the pushed commit, pushed on
-## ``refs/notes/reprobuild/certificates`` alongside the branch — signed by a
+## certificate note — attached to the pushed commit's TREE (TC-8c), pushed on
+## ``refs/notes/test-certificates/certificates`` alongside the branch — signed
+## by a
 ## key that is deliberately NOT in the (empty) registry. The gateway must
 ## therefore report, in its own words, that it saw a certificate and rejected
 ## it BY KEY ID:
@@ -62,11 +66,15 @@
 ## Hermetic: only local ``git init`` / ``git init --bare`` repos + the REAL
 ## installed hooks; no network. Skip rule: ``git`` missing on PATH.
 
+import repro_test_support/reasoned_skip
 import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
 import repro_cli_support
 import repro_workspace_manifests
+import repro_lock
+import repro_lock/certificate_policy
+import ./every_branch_policy
 
 proc q(value: string): string = quoteShell(value)
 
@@ -129,16 +137,38 @@ proc setupModeFixture(gitBin, slug: string): ModeFixture =
   discard requireGit(q(gitBin) & " -C " & q(result.clone) &
     " config user.name \"TC6 Tester\"")
 
-proc wire(gitBin: string; fx: ModeFixture; mode: CertificateGateMode) =
+proc wire(gitBin: string; fx: ModeFixture; bakedMode = "") =
+  ## Wire the gateway. Since TC-9d its config carries no policy: the mode is
+  ## the one the PUSHED commit's ``repro.lock`` records (``stagePolicy``).
+  ## ``bakedMode`` non-empty rewrites the config as a pre-TC-9d writer wrote
+  ## it, baking that ``gate_mode`` (and, unless ``off``, ``t-unit`` on this
+  ## platform), so a case can show the baked keys are reported and ignored.
   let cfg = GatewayConfig(
-    gateMode: mode,
-    requiredTargets: @["t-unit"],
-    requiredPlatforms: @[currentPlatformTag()],
     lockRecordsDir: "",   # no lock subtree here: the generic checks decide
     registeredKeysPath: "")  # empty registry: every cert would be untrusted
   let wired = wirePushGateway(gitBin, fx.clone, fx.gatewayBare,
     fileUrl(fx.upstreamBare), cfg)
   check wired.ok
+  if bakedMode.len > 0:
+    let path = gatewayConfigPath(fx.gatewayBare)
+    let lists =
+      if bakedMode == "off": "required_targets = []\nrequired_platforms = []\n"
+      else: "required_targets = [\"t-unit\"]\nrequired_platforms = [\"" &
+        currentPlatformTag() & "\"]\n"
+    writeFile(path, readFile(path).replace("[gateway]\n",
+      "[gateway]\ngate_mode = \"" & bakedMode & "\"\n" & lists))
+
+proc stagePolicy(gitBin: string; fx: ModeFixture; mode: CertificateGateMode) =
+  ## Stage a ``repro.lock`` whose ``[certificate_policy]`` is one rule for
+  ## every branch under ``mode``, ``t-unit`` on this platform
+  ## (``everyBranchSnapshot``), so the next commit carries
+  ## it to the gateway.
+  let snapshot = everyBranchSnapshot(toPolicyMode(mode), ["t-unit"],
+    [currentPlatformTag()], name = "modes")
+  writeFile(fx.clone / "repro.lock", replaceCertificatePolicySection(
+    serializeLockedDependencies(LockedDependencies(
+      schema: "reprobuild.solved-graph-lock.v2", deps: @[])), snapshot))
+  discard requireGit(q(gitBin) & " -C " & q(fx.clone) & " add repro.lock")
 
 proc makeNewCommit(gitBin: string; fx: ModeFixture; content: string): string =
   writeFile(fx.clone / "change.txt", content)
@@ -179,8 +209,12 @@ proc attachUntrustedCert(gitBin: string; fx: ModeFixture; commit: string):
     issuedAt: "2026-08-27T00:00:00Z",
     issuer: "w9-modes-fixture",
     keyId: modesUnregisteredKeyId,
-    vcs: TestCertificateVcs(repo: "clone", commit: commit,
-      clean: true, untracked: false),
+    # TC-8b: the record names the commit's CONTENT (its tree), which is what
+    # makes it describe the pushed commit; ``base`` is informational.
+    vcs: TestCertificateVcs(repo: "clone",
+      content: "git-tree-sha1:" & requireGit(q(gitBin) & " -C " &
+        q(fx.clone) & " rev-parse " & commit & "^{tree}").strip(),
+      untracked: false, base: commit),
     commands: @[TestCertificateCommand(argv: @["repro", "test"])],
     signature: TestCertificateSignature(
       algorithm: "ed25519",
@@ -188,7 +222,7 @@ proc attachUntrustedCert(gitBin: string; fx: ModeFixture; commit: string):
       # registry, so TC-5 stops at ``svUnregisteredKey`` before any crypto.
       value: "dzktbW9kZXMtbm90LWEtcmVhbC1zaWduYXR1cmU="))
   cert.result = tcrPassed
-  let att = attachCertificate(gitBin, fx.clone, commit, cert)
+  let att = attachCertificate(gitBin, fx.clone, cert)
   doAssert att.ok, att.diagnostic
   cert
 
@@ -212,7 +246,8 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
       block:
         let fx = setupModeFixture(gitBin, "off")
         defer: removeDir(fx.scratch)
-        wire(gitBin, fx, cgmOff)
+        # No policy at all: the default-off state.
+        wire(gitBin, fx)
         let newSha = makeNewCommit(gitBin, fx, "off-mode change\n")
         discard attachUntrustedCert(gitBin, fx, newSha)
         let pushed = pushThroughGateway(gitBin, fx)
@@ -231,7 +266,8 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
       block:
         let fx = setupModeFixture(gitBin, "advisory")
         defer: removeDir(fx.scratch)
-        wire(gitBin, fx, cgmAdvisory)
+        wire(gitBin, fx)
+        stagePolicy(gitBin, fx, cgmAdvisory)
         let newSha = makeNewCommit(gitBin, fx, "advisory-mode change\n")
         discard attachUntrustedCert(gitBin, fx, newSha)
         let pushed = pushThroughGateway(gitBin, fx)
@@ -254,7 +290,8 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
         let fx = setupModeFixture(gitBin, "required")
         defer: removeDir(fx.scratch)
         let seedTip = upstreamTip(gitBin, fx.upstreamBare)
-        wire(gitBin, fx, cgmRequired)
+        wire(gitBin, fx)
+        stagePolicy(gitBin, fx, cgmRequired)
         let newSha = makeNewCommit(gitBin, fx, "required-mode change\n")
         discard attachUntrustedCert(gitBin, fx, newSha)
         let pushed = pushThroughGateway(gitBin, fx)
@@ -274,6 +311,72 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
         check ("key_id '" & modesUnregisteredKeyId & "' not registered") in
           pushed.output
         check "untrusted certs ignored" in pushed.output
+
+  test "t_certificate_policy_modes_come_from_the_pushed_snapshot":
+    ## TC-9c reconciliation, kept by TC-9d. The pushed commit's ``repro.lock``
+    ## carries a ``[certificate_policy]`` whose rule for ``main`` sets the
+    ## mode, and the gateway config is rewritten in the pre-TC-9d format
+    ## baking the OPPOSITE mode. Such keys are never applied: they are
+    ## reported IGNORED (and an ``off`` config, which asked for nothing, is
+    ## not reported):
+    ##
+    ##   * snapshot ``required``, baked ``off``  → REJECTED, by key id;
+    ##   * snapshot ``advisory``, baked ``required`` → ACCEPTED + FORWARDED,
+    ##     the advisory naming the key id;
+    ##   * snapshot ``off``, baked ``required`` → ACCEPTED + FORWARDED, no
+    ##     certificate verdict (only the policy line saying ``off``).
+    ##
+    ## The upstream ``main`` carries no snapshot, so the ratchet's anchor sets
+    ## no floor here (that is the gateway test of TC-9c).
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case pushes through a real gateway")
+    else:
+      for (snapshotMode, bakedMode) in [(pmRequired, "off"),
+          (pmAdvisory, "required"), (pmOff, "required")]:
+        let fx = setupModeFixture(gitBin, "snapshot-" & $snapshotMode)
+        defer: removeDir(fx.scratch)
+        let seedTip = upstreamTip(gitBin, fx.upstreamBare)
+        wire(gitBin, fx, bakedMode)
+        let snapshot = renderCertificatePolicySnapshot(BranchCertificatePolicy(
+          name: "modes", package: "certpolicy", rules: @[PolicyRule(
+            branches: @["main"], gateMode: snapshotMode,
+            commitGate: snapshotMode,
+            requires: @[PolicyRequirement(certificate: "t-unit",
+              platforms: @[currentPlatformTag()])])]))
+        writeFile(fx.clone / "repro.lock", replaceCertificatePolicySection(
+          serializeLockedDependencies(LockedDependencies(
+            schema: "reprobuild.solved-graph-lock.v2", deps: @[])), snapshot))
+        discard requireGit(q(gitBin) & " -C " & q(fx.clone) &
+          " add repro.lock")
+        let newSha = makeNewCommit(gitBin, fx, $snapshotMode & " change\n")
+        discard attachUntrustedCert(gitBin, fx, newSha)
+        let pushed = pushThroughGateway(gitBin, fx)
+        checkpoint($snapshotMode & " (baked " & $bakedMode & ") push output: " &
+          pushed.output)
+        check ("rule \"main\"") in pushed.output
+        check ("applied gate_mode " & $snapshotMode) in pushed.output
+        if bakedMode != "off":
+          check "IGNORED" in pushed.output
+        else:
+          # A pre-TC-9d `off` config asked for nothing: nothing to report.
+          check "IGNORED" notin pushed.output
+        case snapshotMode
+        of pmRequired:
+          check pushed.code != 0
+          check upstreamTip(gitBin, fx.upstreamBare) == seedTip
+          check ("key_id '" & modesUnregisteredKeyId & "' not registered") in
+            pushed.output
+        of pmAdvisory:
+          check pushed.code == 0
+          check upstreamTip(gitBin, fx.upstreamBare) == newSha
+          check "advisory" in pushed.output
+          check ("key_id '" & modesUnregisteredKeyId & "' not registered") in
+            pushed.output
+        of pmOff:
+          check pushed.code == 0
+          check upstreamTip(gitBin, fx.upstreamBare) == newSha
+          check modesUnregisteredKeyId notin pushed.output
 
   test "t_certificate_note_ref_name_read_tells_unreadable_from_absent":
     ## W11 — the ref-NAME certificate-note read reports an UNREADABLE note
@@ -338,6 +441,12 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
         " rev-parse HEAD").strip()
       doAssert covered != uncovered,
         "fixture collision: the two commits have the same sha"
+      # TC-8c: notes are keyed by the TREE the content names; a reader
+      # evaluating a commit looks the note up on ``<commit>^{tree}``.
+      let coveredTree = requireGit(q(gitBin) & " -C " & q(repo) &
+        " rev-parse " & covered & "^{tree}").strip()
+      let uncoveredTree = requireGit(q(gitBin) & " -C " & q(repo) &
+        " rev-parse " & uncovered & "^{tree}").strip()
 
       var cert = TestCertificate(
         schema: testCertificateSchemaV1,
@@ -348,14 +457,16 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
         issuedAt: "2026-08-27T00:00:00Z",
         issuer: "w11-fixture",
         keyId: "w11-note-read-key",
-        vcs: TestCertificateVcs(repo: "repo", commit: covered,
-          clean: true, untracked: false),
+        vcs: TestCertificateVcs(repo: "repo",
+          content: "git-tree-sha1:" & requireGit(q(gitBin) & " -C " &
+            q(repo) & " rev-parse " & covered & "^{tree}").strip(),
+          untracked: false, base: covered),
         commands: @[TestCertificateCommand(argv: @["repro", "test"])],
         signature: TestCertificateSignature(
           algorithm: "ed25519",
           value: "dzExLW5vdC1hLXJlYWwtc2lnbmF0dXJl"))
       cert.result = tcrPassed
-      let att = attachCertificate(gitBin, repo, covered, cert)
+      let att = attachCertificate(gitBin, repo, cert)
       check att.ok
 
       # ---- (1) the note IS there and readable -----------------------------
@@ -370,7 +481,7 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
 
       # ---- (2) GENUINE ABSENCE: a commit with no note, ref intact ---------
       let rawAbsent = runCmd(q(gitBin) & " -C " & q(repo) & " notes --ref " &
-        q(certificateNotesRef) & " show " & q(uncovered))
+        q(certificateNotesRef) & " show " & q(uncoveredTree))
       checkpoint("git notes show <no-note> exit=" & $rawAbsent.code &
         " output=" & rawAbsent.output.strip())
       # git's own premise, before the product's: this exit code and no other is
@@ -384,7 +495,7 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
 
       # ---- (3) UNREADABLE: the note blob is gone, the ref is not ----------
       let noteBlob = requireGit(q(gitBin) & " -C " & q(repo) & " notes --ref " &
-        q(certificateNotesRef) & " list " & q(covered)).strip().
+        q(certificateNotesRef) & " list " & q(coveredTree)).strip().
         splitWhitespace()[0]
       check noteBlob.len in {40, 64}
       let looseBlob = repo / ".git" / "objects" / noteBlob[0 ..< 2] /
@@ -405,7 +516,7 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
       check refStillResolves.code == 0
       check refStillResolves.output.strip().len > 0
       let rawBroken = runCmd(q(gitBin) & " -C " & q(repo) & " notes --ref " &
-        q(certificateNotesRef) & " show " & q(covered))
+        q(certificateNotesRef) & " show " & q(coveredTree))
       checkpoint("git notes show <broken-blob> exit=" & $rawBroken.code &
         " output=" & rawBroken.output.strip())
       check rawBroken.code != 0
@@ -419,7 +530,7 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
       # The diagnostic has to be actionable, which means naming what could not
       # be read and what git said — the wrong remedy this milestone removes is
       # the one the gate renders from this string.
-      check covered in unreadable.diagnostic
+      check coveredTree in unreadable.diagnostic
       check certificateNotesRef in unreadable.diagnostic
       check ("git notes show exit " & $rawBroken.code) in unreadable.diagnostic
       check noteBlob in unreadable.diagnostic

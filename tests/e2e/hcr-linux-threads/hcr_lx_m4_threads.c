@@ -63,6 +63,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <ucontext.h>
@@ -86,8 +87,8 @@ extern unsigned long long repro_hcr_lx_probe_last_original_word(void);
 extern unsigned long long repro_hcr_lx_probe_last_generation(void);
 extern long repro_hcr_lx_probe_last_membarrier_result(void);
 extern int repro_hcr_lx_probe_membarrier_sync_core(void);
-extern int repro_hcr_lx_probe_text_rwx_transition(void);
-extern int repro_hcr_lx_probe_last_transient_kept_exec(void);
+extern unsigned long long repro_hcr_lx_probe_wx_requests_refused(void);
+extern int repro_hcr_lx_probe_last_text_replaced(void);
 extern unsigned long long repro_hcr_lx_probe_membarrier_issued_count(void);
 extern unsigned long long repro_hcr_lx_probe_publication_count(void);
 extern void repro_hcr_lx_probe_set_sync_core_suppressed(int value);
@@ -99,8 +100,6 @@ extern int repro_hcr_lx_probe_quiesce_trampoline_verified(void);
 extern int repro_hcr_lx_probe_quiesce_trampoline_mismatch(void);
 extern unsigned long long repro_hcr_lx_probe_quiesce_nested_adjust_count(void);
 extern unsigned long long repro_hcr_lx_probe_quiesce_nested_frames_seen(void);
-extern long repro_hcr_lx_probe_raw_mprotect(unsigned long long address,
-                                            size_t length, int protection);
 extern size_t repro_hcr_lx_probe_page_size(void);
 extern int repro_hcr_lx_probe_last_quiesced(void);
 extern int repro_hcr_lx_probe_last_ip_adjustments(void);
@@ -122,10 +121,6 @@ extern unsigned long long repro_hcr_lx_probe_quiesce_park_ns(void);
 extern unsigned long long repro_hcr_lx_probe_quiesce_release_ns(void);
 extern unsigned long long repro_hcr_lx_probe_quiesce_adjust_count(void);
 extern int repro_hcr_lx_probe_quiesce_signo(void);
-
-#define REPRO_HCR_LX_PROT_READ 0x1
-#define REPRO_HCR_LX_PROT_WRITE 0x2
-#define REPRO_HCR_LX_PROT_EXEC 0x4
 
 /* ---- shared state ------------------------------------------------------- */
 
@@ -290,6 +285,87 @@ static size_t parse_hex(const char *text, unsigned char *out, size_t capacity) {
   return length / 2;
 }
 
+/* ---- quiescence, with the §6.3 timeout treated as the outcome it is ------ */
+
+/*
+ * `HCR/Linux-ELF-Provider.md` §6.3 DEFINES a quiescence timeout: the provider
+ * releases every parked thread and writes nothing, and the caller may try
+ * again ("repeated timeouts are surfaced as a capability degradation, not
+ * retried indefinitely"). This fixture used to `continue` past such a round,
+ * so a single 250 ms timeout on a busy host silently cost the run one of its
+ * publications (or one of its sample rounds), and the harness, which requires
+ * all of them, reported the specified outcome as a failure.
+ *
+ * So a timeout is now retried, a bounded number of times in a row, and every
+ * one of them is COUNTED and CHECKED rather than absorbed: the eight bytes a
+ * publication would overwrite are read before the attempt and again after the
+ * abort, and an abort that left them different is counted separately for the
+ * harness to assert zero.
+ *
+ * Two statuses are retried. TIMEOUT is the §6.3 outcome itself. SIGNAL_BLOCKED
+ * is what the provider reports for the SAME event when a thread that missed
+ * the deadline is, at the moment of the post-deadline census, executing the
+ * quiescence handler late — the kernel blocks the signal for the handler's
+ * duration, and the census reads that as "can never park". No thread in this
+ * fixture blocks the signal, so here it can only be that misreading (recorded
+ * as reprobuild-pm issues/2026-10-15-hcr-linux-quiescence-census-reads-a-late-
+ * handler-as-signal-blocked.md); a provider that reported it persistently
+ * would exhaust the attempts and lose the round, which the harness fails
+ * inside its conditions. Every other refusal (handler not installed,
+ * enumeration failure, ...) is non-transient and is never retried.
+ */
+/* §6.3's default. `HCR_M4_QUIESCE_TIMEOUT_NS` overrides it, for one purpose:
+ * a deadline no thread group can meet (1 ns) makes every attempt time out, so
+ * the abort accounting below can be tested deterministically rather than by
+ * waiting for a busy host. */
+#define QUIESCE_TIMEOUT_NS 250000000ull
+static unsigned long long g_quiesce_timeout_ns = QUIESCE_TIMEOUT_NS;
+#define QUIESCE_TIMEOUT_STATUS 2 /* REPRO_HCR_LX_QUIESCE_TIMEOUT */
+#define QUIESCE_SIGNAL_BLOCKED_STATUS 8 /* REPRO_HCR_LX_QUIESCE_SIGNAL_BLOCKED */
+#define QUIESCE_ATTEMPTS 8
+
+typedef struct quiesce_tally {
+  int aborts;          /* §6.3 timeouts, every one of them */
+  int blocked_aborts;  /* of which reported as SIGNAL_BLOCKED (see above) */
+  int abort_writes;    /* aborts after which the window's bytes had changed */
+  int abandoned;       /* rounds that timed out QUIESCE_ATTEMPTS times in a row */
+  int other_failures;  /* any non-timeout refusal; never retried */
+  int last_other_status;
+} quiesce_tally;
+
+static uint64_t read_window_word(unsigned long long window_address) {
+  return __atomic_load_n((const uint64_t *)(uintptr_t)window_address,
+                         __ATOMIC_ACQUIRE);
+}
+
+/* Returns 1 with every thread parked, 0 when the round must be skipped. */
+static int quiesce_round(unsigned long long window_address,
+                         quiesce_tally *tally) {
+  int attempt;
+  for (attempt = 0; attempt < QUIESCE_ATTEMPTS; ++attempt) {
+    uint64_t before = read_window_word(window_address);
+    int status = repro_hcr_lx_probe_quiesce_begin(g_quiesce_timeout_ns);
+    if (status == 0) {
+      return 1;
+    }
+    if (status != QUIESCE_TIMEOUT_STATUS &&
+        status != QUIESCE_SIGNAL_BLOCKED_STATUS) {
+      tally->other_failures += 1;
+      tally->last_other_status = status;
+      return 0;
+    }
+    tally->aborts += 1;
+    if (status == QUIESCE_SIGNAL_BLOCKED_STATUS) {
+      tally->blocked_aborts += 1;
+    }
+    if (read_window_word(window_address) != before) {
+      tally->abort_writes += 1;
+    }
+  }
+  tally->abandoned += 1;
+  return 0;
+}
+
 /* ---- the non-atomic control -------------------------------------------- */
 
 /*
@@ -301,8 +377,15 @@ static size_t parse_hex(const char *text, unsigned char *out, size_t capacity) {
  *
  * This is in the fixture, not in the provider: production code must have no
  * path that publishes non-atomically, however well guarded. The control writes
- * the target's own text directly, exactly as the provider would, and therefore
- * exercises the same detector.
+ * the target's own text directly and therefore exercises the same detector.
+ *
+ * It maps the page writable AND executable for the duration, through libc's
+ * `mprotect` rather than the provider's (which refuses `PROT_WRITE|PROT_EXEC`
+ * by construction). That is deliberate and confined to this control: the tear
+ * has to be OBSERVABLE as a wrong branch, and a page that lost `PROT_EXEC`
+ * would instead fault every worker anywhere in it — a different signal that
+ * the detector would not attribute to the window. The provider never does
+ * this; `wxRequestsRefused` in the output is how the gate checks that.
  */
 static void torn_publish(unsigned long long window_address,
                          unsigned long long word) {
@@ -310,10 +393,8 @@ static void torn_publish(unsigned long long window_address,
   unsigned long long page = window_address & ~(unsigned long long)(page_size - 1);
   volatile unsigned char *bytes = (volatile unsigned char *)(uintptr_t)window_address;
   int i;
-  if (repro_hcr_lx_probe_raw_mprotect(page, page_size,
-                                      REPRO_HCR_LX_PROT_READ |
-                                          REPRO_HCR_LX_PROT_WRITE |
-                                          REPRO_HCR_LX_PROT_EXEC) != 0) {
+  if (mprotect((void *)(uintptr_t)page, page_size,
+               PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
     return;
   }
   for (i = 0; i < 8; ++i) {
@@ -321,9 +402,7 @@ static void torn_publish(unsigned long long window_address,
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     sched_yield();
   }
-  (void)repro_hcr_lx_probe_raw_mprotect(page, page_size,
-                                        REPRO_HCR_LX_PROT_READ |
-                                            REPRO_HCR_LX_PROT_EXEC);
+  (void)mprotect((void *)(uintptr_t)page, page_size, PROT_READ | PROT_EXEC);
 }
 
 /* ---- main --------------------------------------------------------------- */
@@ -357,6 +436,8 @@ int main(int argc, char **argv) {
   int last_refusal = 0;
   int quiesce_rounds = 0;
   int quiesce_failures = 0;
+  quiesce_tally qtally;
+  unsigned long long planned_window;
   uint64_t in_window_parks = 0;
   uint64_t in_sled_parks = 0;
   uint64_t total_parks = 0;
@@ -410,12 +491,35 @@ int main(int argc, char **argv) {
             "HCR-M4-FATAL: no __patchable_function_entries sled for the victim\n");
     return 66;
   }
+  /* The window every publication of this victim overwrites: the lowest
+   * 8-aligned boundary in the sled, the provider's own rule (it is announced
+   * as HCR-M4-WINDOW below). `quiesce_round` reads it around every abort. */
+  planned_window = (sled_address + 7ull) & ~7ull;
+  memset(&qtally, 0, sizeof(qtally));
+  /* The retry keys on the provider's status NUMBER, which this fixture cannot
+   * include; refuse to run if the number no longer means "timeout" rather
+   * than silently retrying something else. */
+  if (strcmp(repro_hcr_lx_probe_quiesce_status_name(QUIESCE_TIMEOUT_STATUS),
+             "quiescence-timeout") != 0 ||
+      strcmp(repro_hcr_lx_probe_quiesce_status_name(
+                 QUIESCE_SIGNAL_BLOCKED_STATUS),
+             "quiescence-signal-blocked") != 0) {
+    fprintf(stderr, "HCR-M4-FATAL: quiescence status numbers changed\n");
+    return 68;
+  }
 
   if (strcmp(mode, "tier1-nosync") == 0) {
     repro_hcr_lx_probe_set_sync_core_suppressed(1);
   }
   if (strcmp(mode, "tier2-noadjust") == 0) {
     repro_hcr_lx_probe_set_quiesce_suppress_adjust(1);
+  }
+  if (getenv("HCR_M4_QUIESCE_TIMEOUT_NS") != NULL) {
+    g_quiesce_timeout_ns = strtoull(getenv("HCR_M4_QUIESCE_TIMEOUT_NS"), NULL, 10);
+    if (g_quiesce_timeout_ns == 0) {
+      fprintf(stderr, "HCR-M4-FATAL: HCR_M4_QUIESCE_TIMEOUT_NS must be > 0\n");
+      return 64;
+    }
   }
   if (getenv("HCR_M4_DISABLE_NESTED_SCAN") != NULL) {
     repro_hcr_lx_probe_set_nested_scan_enabled(0);
@@ -491,8 +595,7 @@ int main(int argc, char **argv) {
     window_address = (sled_address + 7ull) & ~7ull;
     for (sample_rounds = 0; sample_rounds < (uint64_t)publications;
          ++sample_rounds) {
-      int status = repro_hcr_lx_probe_quiesce_begin(250000000ull);
-      if (status != 0) {
+      if (!quiesce_round(planned_window, &qtally)) {
         quiesce_failures += 1;
         continue;
       }
@@ -524,8 +627,7 @@ int main(int argc, char **argv) {
       int quiesced_here = 0;
 
       if (strcmp(mode, "tier2") == 0 || strcmp(mode, "tier2-noadjust") == 0) {
-        int status = repro_hcr_lx_probe_quiesce_begin(250000000ull);
-        if (status != 0) {
+        if (!quiesce_round(planned_window, &qtally)) {
           quiesce_failures += 1;
           continue;
         }
@@ -664,6 +766,13 @@ int main(int argc, char **argv) {
   printf("  \"distinctWorkerTids\": %d,\n", distinct_tids);
   printf("  \"quiesceRounds\": %d,\n", quiesce_rounds);
   printf("  \"quiesceFailures\": %d,\n", quiesce_failures);
+  printf("  \"quiesceAborts\": %d,\n", qtally.aborts);
+  printf("  \"quiesceBlockedAborts\": %d,\n", qtally.blocked_aborts);
+  printf("  \"quiesceAbortWrites\": %d,\n", qtally.abort_writes);
+  printf("  \"quiesceAbandoned\": %d,\n", qtally.abandoned);
+  printf("  \"quiesceOtherFailures\": %d,\n", qtally.other_failures);
+  printf("  \"lastQuiesceOtherFailure\": \"%s\",\n",
+         repro_hcr_lx_probe_quiesce_status_name(qtally.last_other_status));
   printf("  \"quiesceSignal\": %d,\n", repro_hcr_lx_probe_quiesce_signo());
   printf("  \"quiesceLastParkNs\": %llu,\n",
          repro_hcr_lx_probe_quiesce_park_ns());
@@ -701,10 +810,10 @@ int main(int argc, char **argv) {
          repro_hcr_lx_probe_publication_count());
   printf("  \"lastMembarrierResult\": %ld,\n",
          repro_hcr_lx_probe_last_membarrier_result());
-  printf("  \"textRwxTransition\": %s,\n",
-         repro_hcr_lx_probe_text_rwx_transition() ? "true" : "false");
-  printf("  \"lastTransientKeptExec\": %s,\n",
-         repro_hcr_lx_probe_last_transient_kept_exec() ? "true" : "false");
+  printf("  \"wxRequestsRefused\": %llu,\n",
+         repro_hcr_lx_probe_wx_requests_refused());
+  printf("  \"lastTextReplaced\": %s,\n",
+         repro_hcr_lx_probe_last_text_replaced() ? "true" : "false");
   printf("  \"lastGeneration\": %llu\n",
          repro_hcr_lx_probe_last_generation());
   printf("}\n");

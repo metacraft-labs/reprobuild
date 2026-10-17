@@ -38,6 +38,8 @@ import std/[json, strutils, unittest]
 
 import repro_attest
 
+import ./reproos_shaped_uki
+
 # ---------------------------------------------------------------------
 # Anchors from a real measured boot
 #
@@ -128,77 +130,13 @@ const
 
 # ---------------------------------------------------------------------
 # A synthetic PE32+ image, built here from the specification.
+#
+# It used to be written in this file. It moved to
+# `reproos_shaped_uki` when a second gate needed one: a copy of a PE
+# writer is two answers to what a unified kernel image is, and the two
+# would drift. The cases below are unchanged and are this module's
+# regression test.
 # ---------------------------------------------------------------------
-
-const
-  OptionalHeaderSize = 240
-  PeOffset = 0x40
-  SectionTableAt = PeOffset + 4 + 20 + OptionalHeaderSize
-  FileAlignment = 512
-  SectionAlignment = 4096
-
-proc putU16(b: var string; at, v: int) =
-  b[at] = char(v and 0xFF)
-  b[at + 1] = char((v shr 8) and 0xFF)
-
-proc putU32(b: var string; at: int; v: int) =
-  for i in 0 ..< 4:
-    b[at + i] = char((v shr (8 * i)) and 0xFF)
-
-proc syntheticUki(sections: openArray[(string, string)]): string =
-  ## A real PE32+ image carrying `sections` in the given file order.
-  let headerRoom = max(SectionTableAt + sections.len * 40 + 64, FileAlignment)
-  var body = ""
-  var headers = newString(headerRoom)
-  headers[0] = 'M'
-  headers[1] = 'Z'
-  putU32(headers, 0x3C, PeOffset)
-  headers[PeOffset] = 'P'
-  headers[PeOffset + 1] = 'E'
-  let coff = PeOffset + 4
-  putU16(headers, coff, 0x8664)
-  putU16(headers, coff + 2, sections.len)
-  putU16(headers, coff + 16, OptionalHeaderSize)
-  let opt = coff + 20
-  putU16(headers, opt, 0x20B)
-  putU32(headers, opt + 32, SectionAlignment)
-  putU32(headers, opt + 36, FileAlignment)
-  putU32(headers, opt + 60, headerRoom)
-  var nextRaw = ((headerRoom + FileAlignment - 1) div FileAlignment) * FileAlignment
-  var nextVirtual = SectionAlignment
-  for i, (name, content) in sections:
-    let at = SectionTableAt + i * 40
-    for j in 0 ..< name.len:
-      headers[at + j] = name[j]
-    let rawSize = ((content.len + FileAlignment - 1) div FileAlignment) * FileAlignment
-    putU32(headers, at + 8, content.len)
-    putU32(headers, at + 12, nextVirtual)
-    putU32(headers, at + 16, rawSize)
-    putU32(headers, at + 20, nextRaw)
-    putU32(headers, at + 36, 0x40000040)
-    var padded = content
-    while padded.len < rawSize: padded.add '\0'
-    body.add padded
-    nextRaw += rawSize
-    nextVirtual += ((content.len + SectionAlignment - 1) div SectionAlignment) *
-      SectionAlignment
-  putU32(headers, opt + 56, nextVirtual)
-  var image = headers
-  while image.len < ((headerRoom + FileAlignment - 1) div FileAlignment) * FileAlignment:
-    image.add '\0'
-  image.add body
-  image
-
-proc demoUki(cmdline = "root=/dev/mapper/reproos ro quiet"): string =
-  ## The file order is DELIBERATELY not the measurement order, and
-  ## `.sbat` is written first the way a stub's own section is.
-  syntheticUki(@[
-    (".sbat", "sbat,1\nreproos,1,ReproOS,reproos,1,https://example.invalid\n"),
-    (".osrel", "ID=reproos\nVERSION_ID=0.1.0\n"),
-    (".cmdline", cmdline),
-    (".uname", "6.12.0-reproos"),
-    (".initrd", repeat("I", 3000)),
-    (".linux", repeat("K", 9000))])
 
 proc demoManifest(image: string;
                   fingerprint = "reproos-image-v1:a1b2c3"): AttestedImageManifest =

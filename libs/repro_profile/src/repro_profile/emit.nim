@@ -107,10 +107,17 @@ proc encodeActivity(a: ActivityIntent): string =
   result = "{\"name\":" & encodeStr(a.name) &
     ",\"body\":" & encodeActivityElementSeq(a.body) & "}"
 
+proc encodeGuard(g: PredicateExpr): string =
+  ## A guard is `null` when the element applies on every host, else the
+  ## predicate text. Always emitted, so a consumer never mistakes an
+  ## absent key for "unconditional".
+  if g.expr.len == 0: "null" else: encodeStr(g.expr)
+
 proc encodeConfigOverride(c: ConfigOverride): string =
   result = "{\"pkg\":" & encodeStr(c.pkg) &
     ",\"key\":" & encodeStr(c.key) &
-    ",\"value\":" & encodeConfigValue(c.value) & "}"
+    ",\"value\":" & encodeConfigValue(c.value) &
+    ",\"guard\":" & encodeGuard(c.guard) & "}"
 
 proc encodeResource(r: ResourceIntent): string =
   result = "{\"kind\":" & encodeStr(r.kind) &
@@ -131,7 +138,29 @@ proc encodeResource(r: ResourceIntent): string =
     if i > 0:
       result.add ","
     result.add encodeAddress(dep)
-  result.add "]}"
+  # `activity` (GM9) is always emitted, `null` for a profile-wide resource,
+  # for the reason `guard` is: a consumer must never read an absent key as
+  # "every host".
+  result.add "],\"guard\":" & encodeGuard(r.guard) &
+    ",\"activity\":" &
+    (if r.activity.len == 0: "null" else: encodeStr(r.activity)) & "}"
+
+proc encodeSystemManagedElsewhere(t: Table[string, string]): string =
+  ## `{"<host>": {"managedBy": "<pointer>" | null}, ...}`, hosts sorted so
+  ## the bytes are stable.
+  var keys: seq[string] = @[]
+  for k in t.keys:
+    keys.add k
+  keys.sort(cmp[string])
+  result = "{"
+  for i, k in keys:
+    if i > 0:
+      result.add ","
+    result.add encodeStr(k)
+    result.add ":{\"managedBy\":"
+    result.add(if t[k].len > 0: encodeStr(t[k]) else: "null")
+    result.add "}"
+  result.add "}"
 
 proc encodeHosts(h: Table[string, seq[string]]): string =
   var keys: seq[string] = @[]
@@ -248,6 +277,44 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
   result.add "]"
   result.add ",\"adapterPreference\":" &
     encodeAdapterPreference(p.adapterPreference)
+  # GM4: the plan-time data-file references, only when the profile
+  # declares any. An expanded intent (what `repro home export` prints) has
+  # none: its rows are already merged into `activities`, so a consumer can
+  # never expand them twice, and the key set of a profile without a
+  # `data:` section is unchanged.
+  if p.dataFiles.len > 0:
+    result.add ",\"dataFiles\":" & encodeStringArray(p.dataFiles)
+  # The contribution catalogs the profile imports, only when it declares
+  # any, so the key set of a profile without a `catalogs:` section is
+  # unchanged.
+  if p.catalogImports.len > 0:
+    result.add ",\"catalogImports\":" & encodeStringArray(p.catalogImports)
+  # The concerns Reprobuild applies per host (`applies:` in a block-form
+  # `hosts:` entry), only when some host declares them, so the key set of a
+  # profile without a declaration is unchanged
+  # (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply).
+  if p.hostApplies.len > 0:
+    result.add ",\"hostApplies\":" & encodeHosts(p.hostApplies)
+  # GM10: the hosts whose system scope is managed elsewhere, only when some
+  # host says so, so the key set of a profile without the attribute is
+  # unchanged. Each value is an object so the attribute can grow without a
+  # change of shape; `managedBy` is null when the entry names no manager.
+  if p.systemManagedElsewhere.len > 0:
+    result.add ",\"systemManagedElsewhere\":" &
+      encodeSystemManagedElsewhere(p.systemManagedElsewhere)
+  # GM11: the activities' stow claims, only when some activity has a
+  # `stow:` block, so the key set of a profile without one is unchanged.
+  # In declaration order; `guard` always emitted (null: none), as for
+  # resources.
+  if p.stowScopes.len > 0:
+    result.add ",\"stowScopes\":["
+    for i, s in p.stowScopes:
+      if i > 0:
+        result.add ","
+      result.add "{\"package\":" & encodeStr(s.package) &
+        ",\"activity\":" & encodeStr(s.activity) &
+        ",\"guard\":" & encodeGuard(s.guard) & "}"
+    result.add "]"
   result.add "}"
 
 # ---------------------------------------------------------------------
@@ -280,6 +347,11 @@ proc parseConfigValue(n: JsonNode): ConfigValue =
   else:
     raise newException(ValueError,
       "unknown ConfigValue kind: '" & kind & "'")
+
+proc parseGuard(n: JsonNode): PredicateExpr =
+  ## `null` / absent (an intent written before guards existed) -> no guard.
+  if n.isNil or n.kind == JNull: PredicateExpr(expr: "")
+  else: PredicateExpr(expr: n.getStr())
 
 proc parseAddress(n: JsonNode): ResourceAddress =
   ResourceAddress(kind: n["kind"].getStr(), name: n["name"].getStr())
@@ -323,7 +395,8 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
     result.configOverrides.add ConfigOverride(
       pkg: c["pkg"].getStr(),
       key: c["key"].getStr(),
-      value: parseConfigValue(c["value"]))
+      value: parseConfigValue(c["value"]),
+      guard: parseGuard(c.getOrDefault("guard")))
   for k, v in root["hosts"]:
     var acts: seq[string] = @[]
     for it in v:
@@ -331,7 +404,16 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
     result.hosts[k] = acts
   for r in root["resources"]:
     var ri = ResourceIntent(kind: r["kind"].getStr(),
-      address: r["address"].getStr())
+      address: r["address"].getStr(),
+      guard: parseGuard(r.getOrDefault("guard")))
+    # GM9: `null` / absent (an intent written before activity-scoped
+    # resources) -> profile-wide. Anything but a string or null is refused.
+    let activity = r.getOrDefault("activity")
+    if not activity.isNil and activity.kind != JNull:
+      if activity.kind != JString:
+        raise newException(ValueError, "resource `" & ri.address &
+          "`: `activity` must be a string or null, got " & $activity.kind)
+      ri.activity = activity.getStr()
     for fk, fv in r["fields"]:
       ri.fields[fk] = parseFieldValue(fv)
     for dep in r["dependsOn"]:
@@ -373,6 +455,54 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
       for it in chainNode:
         chain.add it.getStr()
       result.adapterPreference[osKey] = chain
+  # GM4: optional; absent when the profile declares no data files.
+  if root.hasKey("dataFiles"):
+    for it in root["dataFiles"]:
+      result.dataFiles.add it.getStr()
+  # Optional; absent when the profile imports no contribution catalog.
+  if root.hasKey("catalogImports"):
+    for it in root["catalogImports"]:
+      result.catalogImports.add it.getStr()
+  # Optional; absent when no host declares the concerns Reprobuild applies.
+  if root.hasKey("hostApplies"):
+    for k, v in root["hostApplies"]:
+      var concerns: seq[string] = @[]
+      for it in v:
+        concerns.add it.getStr()
+      result.hostApplies[k] = concerns
+  # GM10: optional; absent when no host's system is managed elsewhere. A
+  # malformed entry is refused, never read as "managed here".
+  if root.hasKey("systemManagedElsewhere"):
+    let sme = root["systemManagedElsewhere"]
+    if sme.kind != JObject:
+      raise newException(ValueError,
+        "systemManagedElsewhere must be an object (host -> {managedBy})")
+    for host, v in sme:
+      if v.kind != JObject or not v.hasKey("managedBy") or
+          v["managedBy"].kind notin {JString, JNull}:
+        raise newException(ValueError, "systemManagedElsewhere." & host &
+          " must be an object with `managedBy` (a string or null)")
+      result.systemManagedElsewhere[host] =
+        if v["managedBy"].kind == JString: v["managedBy"].getStr() else: ""
+  # GM11: optional; absent when no activity claims a stow package. A
+  # malformed claim is refused, never dropped (dropping it would put the
+  # package on every host).
+  if root.hasKey("stowScopes"):
+    let ss = root["stowScopes"]
+    if ss.kind != JArray:
+      raise newException(ValueError,
+        "stowScopes must be an array of {package, activity, guard}")
+    for i in 0 ..< ss.len:
+      let c = ss[i]
+      if c.kind != JObject or
+          not c.hasKey("package") or c["package"].kind != JString or
+          not c.hasKey("activity") or c["activity"].kind != JString or
+          not c.hasKey("guard") or c["guard"].kind notin {JString, JNull}:
+        raise newException(ValueError, "stowScopes[" & $i &
+          "] must be an object with `package` and `activity` (strings) " &
+          "and `guard` (a string or null)")
+      result.stowScopes.add StowScope(package: c["package"].getStr(),
+        activity: c["activity"].getStr(), guard: parseGuard(c["guard"]))
 
 # ---------------------------------------------------------------------
 # M9.R.20: SystemIntent encode / decode.
@@ -753,6 +883,41 @@ proc parseSystemActivityJson*(s: string): SystemActivitySpec =
   result.systemServices = parseStrList(root["systemServices"])
   result.groups = parseStrList(root["groups"])
   result.homeContributions = parseStrList(root["homeContributions"])
+
+# ---------------------------------------------------------------------
+# Platform probe record.
+#
+# `repro home export` evaluates a home profile for platforms other than the
+# one compiling it by running `nim check --os:<os> --cpu:<cpu>` with
+# `-d:reproProfilePlatformProbe`: the `profile` macro then evaluates the
+# intent in Nim's compile-time VM and prints it between these markers (see
+# `macros.nim` and `repro_profile_compile/platforms.nim`). One definition of
+# the markers, here, read by both sides.
+# ---------------------------------------------------------------------
+
+const
+  ProfilePlatformProbeDefine* = "reproProfilePlatformProbe"
+    ## The `-d:` symbol that turns a profile check into a platform probe.
+  ProfilePlatformProbeBegin* = "@@repro-profile-platform-probe-begin@@"
+  ProfilePlatformProbeEnd* = "@@repro-profile-platform-probe-end@@"
+
+proc platformProbeRecord*(intentJson: string): string =
+  ## The line a platform probe prints: the intent JSON between the markers.
+  ProfilePlatformProbeBegin & intentJson & ProfilePlatformProbeEnd
+
+proc parsePlatformProbeRecord*(output: string; intentJson: var string): bool =
+  ## Extract the intent JSON a probe printed from the checker's combined
+  ## output. False when the output carries no complete record (the check
+  ## failed before or while evaluating the profile).
+  let a = output.find(ProfilePlatformProbeBegin)
+  if a < 0:
+    return false
+  let start = a + ProfilePlatformProbeBegin.len
+  let b = output.find(ProfilePlatformProbeEnd, start)
+  if b < 0:
+    return false
+  intentJson = output[start ..< b]
+  true
 
 # ---------------------------------------------------------------------
 # Entry-point helper.

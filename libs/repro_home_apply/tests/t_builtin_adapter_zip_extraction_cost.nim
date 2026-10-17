@@ -22,6 +22,7 @@
 ## is 3,000 entries in 60 s.
 
 import std/[os, osproc, strutils, times, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_home_apply/builtin_adapter {.all.}
 

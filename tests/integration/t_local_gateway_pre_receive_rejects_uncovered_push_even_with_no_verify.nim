@@ -11,6 +11,9 @@
 ## receiving side where ``--no-verify`` has no effect. On success a
 ## ``post-receive`` FORWARDS the push to a SECOND bare standing in for the real
 ## upstream (GitHub); on failure the push is rejected and never reaches it.
+## The requirement (``required``, ``t-unit`` on this platform) is the
+## ``[certificate_policy]`` the pushed commit carries in its ``repro.lock``
+## (TC-9d); the gateway config carries none.
 ##
 ##   (a) A push with NO covering cert — even ``git push --no-verify`` — is
 ##       REJECTED by the gateway ``pre-receive`` (git reports a non-zero push;
@@ -35,6 +38,9 @@ import std/[json, os, osproc, strutils, tempfiles, unittest]
 import repro_test_support
 import repro_cli_support
 import repro_workspace_manifests
+import repro_lock
+import repro_lock/certificate_policy
+import ./every_branch_policy
 
 include tc5_cert_signing_helpers
 
@@ -62,8 +68,12 @@ proc reproBinary(): string =
     "reprobuild.apps.repro")
 
 proc seedGitUpstream(gitBin, upstreamPath, workPath: string;
-                     branch = "main"): string =
+                     policyLock = ""; branch = "main"): string =
   ## Seed the REAL upstream bare with an initial commit, then return its SHA.
+  ## ``policyLock``, when given, is committed as the seed's ``repro.lock``:
+  ## since TC-9d the certificate policy lives there, in the content a gate
+  ## judges (a record-store project included), and every later commit
+  ## carries it to the gateway.
   discard requireGit(q(gitBin) & " init --bare -b " & branch & " " &
     q(upstreamPath))
   discard requireGit(q(gitBin) & " init -b " & branch & " " & q(workPath))
@@ -72,7 +82,9 @@ proc seedGitUpstream(gitBin, upstreamPath, workPath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.name \"TC6 Seeder\"")
   writeFile(workPath / "README.md", "TC-6 fixture\n")
-  discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
+  if policyLock.len > 0:
+    writeFile(workPath / "repro.lock", policyLock)
+  discard requireGit(q(gitBin) & " -C " & q(workPath) & " add -A")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " commit -m seed")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " remote add origin " & q(upstreamPath))
@@ -88,13 +100,14 @@ proc cloneInto(gitBin, upstreamPath, targetPath: string) =
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.name \"TC6 Tester\"")
 
-proc projectToml(libAUrl, certificatesTable: string): string =
+proc projectToml(libAUrl: string): string =
+  ## No certificate policy here: the retired `[certificates]` table would
+  ## make the manifest refuse to load (TC-9d).
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
   "default_revision = \"main\"\n" &
   "trunk = \"main\"\n\n" &
-  certificatesTable &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n]\n"
 
@@ -118,14 +131,16 @@ type
     libAPath: string       ## the developer's clone
     seedSha: string
     daemonKey: string
+    certStore: string      ## the scratch local certificate store (user root)
 
-proc setupFixture(gitBin, certificatesTable: string): Fixture =
+proc setupFixture(gitBin, policyLock: string): Fixture =
   result.scratch = createTempDir("repro-tc6-", "")
+  result.certStore = isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.upstreamBare = result.scratch / "upstream-lib-a.git"
   result.gatewayBare = result.scratch / "gateway-lib-a.git"
   result.seedSha = seedGitUpstream(gitBin, result.upstreamBare,
-    result.scratch / "seed-lib-a")
+    result.scratch / "seed-lib-a", policyLock)
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
@@ -134,7 +149,7 @@ proc setupFixture(gitBin, certificatesTable: string): Fixture =
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
-    projectToml(fileUrl(result.upstreamBare), certificatesTable))
+    projectToml(fileUrl(result.upstreamBare)))
   result.workspaceRoot = workspaceRoot
   seedManifestLockStore(gitBin, workspaceRoot)
   result.libAPath = workspaceRoot / "lib-a"
@@ -230,13 +245,16 @@ proc issueAndAttachCert(gitBin: string; fx: Fixture; headSha: string):
   if issued.code != 0:
     checkpoint("repro test output: " & issued.output)
   check issued.code == 0
-  let certFile = defaultCertificatePath(
-    fx.workspaceRoot, headSha, currentPlatformTag())
-  check fileExists(certFile)
-  result = readCertificateFile(certFile)
-  check result.vcs.commit == headSha
+  # TC-8c: the certificate is in the local store under the tested CONTENT
+  # (HEAD's tree, the tree being clean); the record names that content and,
+  # informationally, the commit it was issued on top of.
+  let content = treeContentId(gitBin, fx.libAPath, headSha)
+  result = issuedCertificate(fx.certStore, content, currentPlatformTag()).cert
+  check result.vcs.base == headSha
+  check result.vcs.content == content
   check "t-unit" in result.targets
-  let att = attachCertificate(gitBin, fx.libAPath, headSha, result)
+  # The note is keyed by that tree, on the shared notes ref.
+  let att = attachCertificate(gitBin, fx.libAPath, result)
   check att.ok
 
 proc upstreamHasCommit(gitBin, upstreamBare, sha: string): bool =
@@ -259,19 +277,22 @@ suite "TC-6 — local gateway pre-receive rejects uncovered push even " &
     if gitBin.len == 0 or sshKeygen.len == 0:
       skip()
     else:
-      let policy =
-        "[certificates]\n" &
-        "gate_mode = \"required\"\n" &
-        "required_targets = [\"t-unit\"]\n" &
-        "required_platforms = [\"" & currentPlatformTag() & "\"]\n\n"
+      # The policy the pushed tree records (TC-9d): one every-branch
+      # `required` rule, `t-unit` on this platform, committed
+      # in lib-a's repro.lock by the seed.
+      let policy = replaceCertificatePolicySection(
+        serializeLockedDependencies(LockedDependencies(
+          schema: "reprobuild.solved-graph-lock.v2", deps: @[])),
+        everyBranchSnapshot(pmRequired, ["t-unit"],
+    [currentPlatformTag()], name = "lib-a"))
       let fx = setupFixture(gitBin, policy)
       defer: removeDir(fx.scratch)
 
       # ---- wire the gateway as the developer clone's PUSH remote ----------
       # TC-7: the gateway is configured with the per-repo LOCK SUBTREE rather
       # than a lock digest, and resolves the lock at the attested commit
-      # itself — modelling the daemon configuring the gateway from the
-      # project's resolved policy. The subtree is empty until ``seedLock``
+      # itself. It carries no policy (TC-9d): the requirement is the one the
+      # pushed commit records in its repro.lock. The subtree is empty until ``seedLock``
       # runs below, which is exactly the state the (a) reject path is in.
       let registeredKeysPath = registeredKeyStorePath(fx.workspaceRoot)
 
@@ -280,9 +301,6 @@ suite "TC-6 — local gateway pre-receive rejects uncovered push even " &
 
       # Wire the gateway now (push-remote → gateway bare; fetch stays upstream).
       var cfgA = GatewayConfig(
-        gateMode: cgmRequired,
-        requiredTargets: @["t-unit"],
-        requiredPlatforms: @[currentPlatformTag()],
         lockRecordsDir: lockRecordsDirFor(
           fx.workspaceRoot / ".repro" / "manifests", "lib-a", "lib-a"),
         registeredKeysPath: registeredKeysPath)
@@ -314,7 +332,7 @@ suite "TC-6 — local gateway pre-receive rejects uncovered push even " &
       # currency precondition of issuance holds (the lock binds the closure at
       # the commit being certified).
       seedLock(fx)
-      let cert = issueAndAttachCert(gitBin, fx, newSha)
+      discard issueAndAttachCert(gitBin, fx, newSha)
       rewindUpstreamToSeed(gitBin, fx)
       # Confirm the rewind: the upstream tip is back at seed before the gateway
       # push, so the forward assertion below proves the gateway advanced it.
@@ -323,20 +341,18 @@ suite "TC-6 — local gateway pre-receive rejects uncovered push even " &
       # value ``wirePushGateway`` filled in on the first wiring).
       #
       # TC-7: there is no lock DIGEST to copy out of the certificate any more.
-      # The gateway resolves the lock ITSELF, in the per-repo lock subtree
-      # below, keyed by the commit the certificate attests — so a certificate
-      # naming a commit with no committed lock record is refused on the
-      # receiving side even when its signature is impeccable.
+      # This fixture's project opted into a lock record store, so the gateway
+      # resolves the lock ITSELF, in the per-repo lock subtree below, keyed by
+      # the PUSHED commit (never by the certificate's ``base``) — so a pushed
+      # commit with no lock record is refused on the receiving side even when
+      # the certificate's signature is impeccable.
       let gatewayLockRecordsDir = lockRecordsDirFor(
         fx.workspaceRoot / ".repro" / "manifests", "lib-a", "lib-a")
       check dirExists(gatewayLockRecordsDir)
       check resolveLockAtCommit(gatewayLockRecordsDir,
-        cert.vcs.commit).status == lacPresent
+        newSha).status == lacPresent
       writeFile(gatewayConfigPath(fx.gatewayBare),
         serializeGatewayConfig(GatewayConfig(
-          gateMode: cgmRequired,
-          requiredTargets: @["t-unit"],
-          requiredPlatforms: @[currentPlatformTag()],
           lockRecordsDir: gatewayLockRecordsDir,
           registeredKeysPath: registeredKeysPath,
           upstreamUrl: fileUrl(fx.upstreamBare))))

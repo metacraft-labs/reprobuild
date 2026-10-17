@@ -91,6 +91,15 @@ test-buildusers:
 list-standalone-gates:
     bash ./scripts/list_standalone_shell_gates.sh
 
+# The dev shell installs the committed .pre-commit-config.yaml as the
+# pre-commit hook here, and writes nothing into any other repository; a
+# commit runs `just lint` in the dev shell and is refused when it fails.
+# Enters the dev shell repeatedly and lints twice, so it is not part of
+# `just test`.
+dev-shell-hooks:
+    bash ./tests/test_dev_shell_writes_nothing_elsewhere.sh
+    bash ./tests/test_pre_commit_runs_lint_in_dev_shell.sh
+
 dev-env-full-regression:
     mkdir -p test-logs
     bash ./scripts/run_tests.sh 2>&1 | tee test-logs/dev-env-full-regression.log
@@ -478,15 +487,28 @@ e2e_reprobuild_cmake_m11_coverage_nightly:
 
 lint:
     mkdir -p test-logs
-    bash ./scripts/check_repo_requirements.sh 2>&1 | tee test-logs/lint.log
-    bash ./scripts/check_nim_sources.sh 2>&1 | tee -a test-logs/lint.log
-    bash ./scripts/check_ambient_execution.sh 2>&1 | tee -a test-logs/lint.log
     # The dev-shell honesty gate. Here rather than only in the suite for the
     # same reason as the case-count gate below: it reads .envrc and .direnv and
     # needs nothing compiled, and the failure it catches — a cached dev shell
-    # built from a source that has since moved — is the failure that makes
-    # every OTHER lint step below it report a fiction. First, for that reason.
-    bash ./scripts/check_dev_shell_env.sh 2>&1 | tee -a test-logs/lint.log
+    # built from a source that has since moved, or from a source behind the
+    # revision flake.lock pins for it — is the failure that makes every OTHER
+    # lint step below it report a fiction. First, for that reason.
+    #
+    # It is FIRST IN BYTES, not only in prose. This comment claimed the
+    # position for a long time while the recipe ran the gate fourth, behind
+    # check_nim_sources.sh — so the step whose output this paragraph calls
+    # worthless without the gate ran a full compile sweep BEFORE it. That cost
+    # an hour of wall clock and roughly seven thousand lines of cascade naming
+    # repositories that were not at fault, where the gate answers in seconds
+    # with one line naming the stale sibling. A rationale that the ordering
+    # contradicts is worse than no rationale: it reads as though the question
+    # had been settled. Keep this line immediately after `mkdir -p test-logs`,
+    # and note that it is the step that TRUNCATES test-logs/lint.log (`tee`,
+    # not `tee -a`) — whichever check runs first owns that.
+    bash ./scripts/check_dev_shell_env.sh 2>&1 | tee test-logs/lint.log
+    bash ./scripts/check_repo_requirements.sh 2>&1 | tee -a test-logs/lint.log
+    bash ./scripts/check_nim_sources.sh 2>&1 | tee -a test-logs/lint.log
+    bash ./scripts/check_ambient_execution.sh 2>&1 | tee -a test-logs/lint.log
     # The "poEvalCommand is not a shell" gate. Same shape as the ambient
     # check above and for the same reason: it is a source scan, so it can
     # answer before anything is compiled. Five defects in one campaign came
@@ -500,6 +522,91 @@ lint:
     # silently. Runs here rather than in the suite for the same reason as the
     # gate itself: it compiles nothing.
     bash ./scripts/check_shell_command_strings.sh --self-test 2>&1 | tee -a test-logs/lint.log
+    # The vacuous-case gate, sibling to the case-count gate below and for the
+    # same reason: a source scan, no compiler, answers in seconds. It refuses
+    # a test case whose only assertion is `check true` -- a shape that reports
+    # [OK] and increments the pass count, so running the suite can never
+    # surface it. See the script header for the 268-case incident that
+    # motivated it.
+    python3 ./scripts/check_vacuous_test_cases.py 2>&1 | tee -a test-logs/lint.log
+    # The bare-skip ratchet, immediately beside the vacuous-case gate because
+    # the two guard opposite ends of the same property. That one refuses a case
+    # that PRETENDS to have run; this one refuses a case that declines to run
+    # and will not say why. Since #347, `completed_clean_runs()` records a suite
+    # run as COMPLETE only when every case is a pass or a skip THAT CARRIES A
+    # REASON, so one unexplained skip anywhere makes the whole run
+    # unrecordable. Measured on dev: 1222 bare skips against 122 explained, so
+    # the predicate is unsatisfiable today. Burning that down is separate work;
+    # scripts/bare-skips-baseline.tsv pins the population so it cannot grow
+    # while that happens. Source scan, no compiler, same cost class as its
+    # neighbours.
+    python3 ./scripts/check_bare_skips.py 2>&1 | tee -a test-logs/lint.log
+    # Refuse a test source that declares a FIXED scratch path at module level
+    # (`const TmpDir = "build/test-tmp/x"`). Every case runs as its own process,
+    # concurrently with the binary's other cases, so such a path is shared
+    # between them: one case's reset deletes what a sibling is still using, a
+    # fixture compiled to a fixed output is relinked under a sibling executing
+    # it. Each instance passed alone and failed only in full runs. No
+    # allowlist; source scan, no compiler, same cost class as its neighbours.
+    python3 ./scripts/check_fixed_test_scratch_dirs.py 2>&1 | tee -a test-logs/lint.log
+    # Graph-Owned-Test-Artifacts M3: refuse a NEW test that compiles a helper
+    # program in its own body instead of declaring a `repro.nim` build edge.
+    # Source scan, no compiler, same class as the two gates above. It does NOT
+    # flag a test for invoking `repro` -- the product runs compilers by design
+    # and M3 says to preserve those tests; see the script header for how the
+    # two are told apart, and scripts/test-body-helper-compilation-dispositions.tsv
+    # for the reviewed baseline.
+    python3 ./scripts/check_test_body_helper_compilation.py 2>&1 | tee -a test-logs/lint.log
+    # HX-S-10: the HCR lane manifest against the tree. Same class as the
+    # inventory gates at the end of this recipe -- a source scan, no compiler, seconds -- and here
+    # for the same reason. What it refuses is an HCR gate added to ONE
+    # platform's lane: every gate source in the tree must carry a row declaring
+    # what all THREE platforms do with it. The census it holds the manifest to
+    # is a live walk of `tests/`, not a list, so a new file cannot be invisible
+    # to it (Verification-Harness-Traps.md Sec. 35).
+    python3 ./scripts/check_hcr_lane_manifest.py --check 2>&1 | tee -a test-logs/lint.log
+    # The version-literal gate, beside the vacuous-case and bare-skip gates
+    # because it guards the same property from a third side: a case that
+    # PRETENDS to have run, a case that declines to run, and -- this one -- a
+    # case that runs and measures the wrong thing. It refuses an integer
+    # literal standing in for a format version: a number poked into the
+    # version word at byte 4/5, a hand-listed set of version numbers driving
+    # such a poke, or a literal pinned against one, unless the line carries
+    # `# version-literal-ok: <reason>`. Measured at ee229299f: SEVENTEEN
+    # unannotated instances across seven files, ten of them live defects
+    # and three of those a verbatim `[2, 3, 4, 5]` that had silently stopped
+    # covering version 6 when the action-record epoch moved 6 -> 7. Source
+    # scan, no compiler, seconds -- same cost class as its neighbours.
+    python3 ./scripts/check_version_literals.py 2>&1 | tee -a test-logs/lint.log
+    # ...and the proof it still has the power it claims, on the model of the
+    # shell-command-strings self-test above. Every exemption is a licence to
+    # ignore a real defect, so each shape is probed with an instance that
+    # must be caught and each allowance with one that must not be.
+    python3 ./scripts/check_version_literals.py --self-test 2>&1 | tee -a test-logs/lint.log
+    # Every attestation mutation row must still be able to NAME ITS SITE in
+    # the tree. Same class as its neighbours -- a source scan, no compiler,
+    # under a second -- and here because of what it catches, which nothing
+    # else does. A row is applied by substring replacement and reverted in a
+    # `finally`; when that revert does not happen the tree keeps the
+    # REPLACEMENT, and a weakened check still passes. Case counts are
+    # identical before and after, the suite is green, and the mutation
+    # journal says RED because it attests to the tree at the moment the row
+    # ran rather than to the tree being shipped. One such residue did ship
+    # and was caught only by re-running the table against the delivered
+    # tree; this makes that question cost a second instead of an afternoon.
+    python3 ./tools/attestation-mutations/fixture_lifecycle_mutations.py --verify-rows 2>&1 | tee -a test-logs/lint.log
+    python3 ./tools/attestation-mutations/cvm_emulator_mutations.py --verify-rows 2>&1 | tee -a test-logs/lint.log
+    bash ./scripts/check_workflows.sh 2>&1 | tee -a test-logs/lint.log
+    # The four suite-description gates, LAST, and that position is the point.
+    # They hold tracked bookkeeping -- the case-count baseline, the inventory
+    # entry set, the edge table -- to the tree, and bookkeeping goes stale
+    # whenever anyone lands a test without regenerating it: the check can be
+    # red through no fault of the change being linted. This recipe runs under
+    # `bash -e`, so while they ran early a stale baseline aborted every audit
+    # after them, and for five `dev` commits none of the audits that grade the
+    # change itself ran at all (reprobuild-pm issue 2026-10-01). Behind
+    # everything else they still fail the recipe; they no longer silence it.
+    #
     # The suite case-count gate. Deliberately here and not only in the test
     # suite: it reads the sources and needs nothing compiled, so it is the
     # one coverage check that can answer before a six-hour build phase.
@@ -532,42 +639,6 @@ lint:
     # so the disagreement surfaces when the RULE is edited rather than when
     # the first file of a new shape lands on it.
     python3 ./scripts/reprobuild_suite_inventory.py --check-shape-parity 2>&1 | tee -a test-logs/lint.log
-    # The vacuous-case gate, sibling to the case-count gate above and for the
-    # same reason: a source scan, no compiler, answers in seconds. It refuses
-    # a test case whose only assertion is `check true` -- a shape that reports
-    # [OK] and increments the pass count, so running the suite can never
-    # surface it. See the script header for the 268-case incident that
-    # motivated it.
-    python3 ./scripts/check_vacuous_test_cases.py 2>&1 | tee -a test-logs/lint.log
-    # The bare-skip ratchet, immediately beside the vacuous-case gate because
-    # the two guard opposite ends of the same property. That one refuses a case
-    # that PRETENDS to have run; this one refuses a case that declines to run
-    # and will not say why. Since #347, `completed_clean_runs()` records a suite
-    # run as COMPLETE only when every case is a pass or a skip THAT CARRIES A
-    # REASON, so one unexplained skip anywhere makes the whole run
-    # unrecordable. Measured on dev: 1222 bare skips against 122 explained, so
-    # the predicate is unsatisfiable today. Burning that down is separate work;
-    # scripts/bare-skips-baseline.tsv pins the population so it cannot grow
-    # while that happens. Source scan, no compiler, same cost class as its
-    # neighbours.
-    python3 ./scripts/check_bare_skips.py 2>&1 | tee -a test-logs/lint.log
-    # Graph-Owned-Test-Artifacts M3: refuse a NEW test that compiles a helper
-    # program in its own body instead of declaring a `repro.nim` build edge.
-    # Source scan, no compiler, same class as the two gates above. It does NOT
-    # flag a test for invoking `repro` -- the product runs compilers by design
-    # and M3 says to preserve those tests; see the script header for how the
-    # two are told apart, and scripts/test-body-helper-compilation-dispositions.tsv
-    # for the reviewed baseline.
-    python3 ./scripts/check_test_body_helper_compilation.py 2>&1 | tee -a test-logs/lint.log
-    # HX-S-10: the HCR lane manifest against the tree. Same class as the three
-    # inventory gates above -- a source scan, no compiler, seconds -- and here
-    # for the same reason. What it refuses is an HCR gate added to ONE
-    # platform's lane: every gate source in the tree must carry a row declaring
-    # what all THREE platforms do with it. The census it holds the manifest to
-    # is a live walk of `tests/`, not a list, so a new file cannot be invisible
-    # to it (Verification-Harness-Traps.md Sec. 35).
-    python3 ./scripts/check_hcr_lane_manifest.py --check 2>&1 | tee -a test-logs/lint.log
-    bash ./scripts/check_workflows.sh 2>&1 | tee -a test-logs/lint.log
 
 format:
     bash ./scripts/format_sources.sh
@@ -650,6 +721,15 @@ bench_cmake_reprobuild_vs_ninja_medium *args:
         --output bench-results/cmake-reprobuild-vs-ninja-medium.json \
         {{args}} \
         2> >(tee test-logs/bench_cmake_reprobuild_vs_ninja_medium.log >&2)
+
+bench_cmake_cross_project_trycompile_reuse *args:
+    mkdir -p bench-results test-logs
+    bash ./scripts/run-cmake-generator-competitiveness-benchmark.sh \
+        --cross-project-only \
+        --cross-project-pair zlib:libuv \
+        --output bench-results/cmake-cross-project-trycompile-reuse.json \
+        {{args}} \
+        2> >(tee test-logs/bench_cmake_cross_project_trycompile_reuse.log >&2)
 
 e2e_reprobuild_mvp_acceptance:
     mkdir -p test-logs
@@ -962,9 +1042,11 @@ e2e_hcr_linux_x86_64_single_threaded_direct_patch:
 # the events either side of the boundary reproduce the body that produced them.
 # Campaigns: reprobuild-specs/HCR-Linux-ELF-Provider.milestones.org HLX-M7;
 #            reprobuild-specs/HCR-Per-Platform-Handoff.milestones.org HX-S-2.
-# Needs the sibling codetracer-native-recorder checkout built
-# (`just build-ct-mcr` there); the gate fails loudly naming that if it is not.
-e2e_hcr_linux_replay_of_patched_recording:
+# Records and replays with the `ct-mcr` bundle that `hcr_ct_mcr_fixture`
+# (below) builds -- the same script the graph edge
+# `reprobuild.test_fixtures.hcr_ct_mcr_bundle` runs -- so the HCR lane, which
+# runs this recipe, has the recorder without anyone building it by hand.
+e2e_hcr_linux_replay_of_patched_recording: hcr_ct_mcr_fixture
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
         --threads:on \
@@ -973,6 +1055,15 @@ e2e_hcr_linux_replay_of_patched_recording:
         --out:build/test-bin/e2e_hcr_linux_replay_of_patched_recording \
         tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_replay_of_patched_recording.log
+
+# The `ct-mcr` recorder bundle `e2e_hcr_linux_replay_of_patched_recording`
+# needs, staged into build/test-fixtures/hcr-ct-mcr: the recorder's own
+# `just build-ct-mcr`, run in the recorder's own flake dev shell (sibling from
+# $CT_CODETRACER_NATIVE_RECORDER_SIBLING, else ../codetracer-native-recorder).
+# The graph edge `reprobuild.test_fixtures.hcr_ct_mcr_bundle` runs this same
+# script; see its header. A no-op that says so off Linux x86_64.
+hcr_ct_mcr_fixture:
+    bash ./scripts/build_hcr_ct_mcr_fixture.sh
 
 # HLX-M2 — a function inside a `dlopen`ed shared library is patched.
 # Campaign: reprobuild-specs/HCR-Linux-ELF-Provider.milestones.org, HLX-M2.
@@ -2833,6 +2924,15 @@ e2e_hcr_linux_concurrent_patch_no_torn_instruction:
         --out:build/test-bin/e2e_hcr_linux_concurrent_patch_no_torn_instruction \
         tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_concurrent_patch_no_torn_instruction.log
+
+integration_hcr_linux_concurrent_patch_gate_conditions:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_concurrent_patch_gate_conditions \
+        --out:build/test-bin/integration_hcr_linux_concurrent_patch_gate_conditions \
+        tests/e2e/hcr-linux-threads/t_integration_hcr_linux_concurrent_patch_gate_conditions.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_concurrent_patch_gate_conditions.log
 
 e2e_hcr_linux_quiescence_handshake_and_release:
     mkdir -p test-logs build/test-bin build/nimcache

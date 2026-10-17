@@ -7,8 +7,9 @@ from repro_core/paths import extendedPath
 
 import repro_home_apply
 import repro_home_resources
+from repro_test_support import testCaseScratchSlug
 
-const SmokeDir = "build/test-tmp/home-apply-smoke"
+let SmokeDir = "build/test-tmp/home-apply-smoke" / testCaseScratchSlug()
 
 proc resetDir(path: string) =
   if dirExists(extendedPath(path)):

@@ -91,6 +91,21 @@ proc resolveVerifySpec*(cfg: WorkspaceBootstrap; configDir: string):
   if cfg.manifest.revision.isSome and cfg.manifest.revision.get().len > 0:
     result.pinnedRevision = cfg.manifest.revision.get()
 
+proc resolveVerifySpec*(cfg: WorkspaceSettings; configDir: string):
+    ManifestVerifySpec =
+  ## `resolveVerifySpec` for the workspace settings record, whichever file it
+  ## was read from. `[verify]` is the same table in both schemas; the RA-17
+  ## pin is the old file's `[manifest] revision` (a `settings.v1` file pins
+  ## per layer instead, Workspace-Settings-Files.md §3).
+  var legacy = WorkspaceBootstrap(verify: cfg.verify)
+  legacy.manifest.revision = cfg.manifestRevision
+  resolveVerifySpec(legacy, configDir)
+
+proc pinnedRevisionSpec*(revision: string): ManifestVerifySpec =
+  ## A spec that checks only a revision pin — what a settings-file layer's
+  ## `revision` asks for.
+  ManifestVerifySpec(pinnedRevision: revision)
+
 proc q(value: string): string = quoteShell(value)
 
 proc runGit(gitBin: string; args: openArray[string]):

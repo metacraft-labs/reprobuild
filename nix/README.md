@@ -101,9 +101,13 @@ fails the build if that literal and the nimble manifest disagree.
 
 The downstream fork is [`metacraft-labs/nixpkgs`](https://github.com/metacraft-labs/nixpkgs).
 It carries the latest release on standing branches named after the
-upstream channel each tracks (`nixos-unstable`, `nixpkgs-unstable`,
-`nixos-YY.MM`, `nixpkgs-YY.MM-darwin`), all generated daily from one
-commit series on its `metacraft` branch; its README explains the layout.
+upstream channel each tracks plus the suffix `-metacraft`
+(`nixos-unstable-metacraft`, `nixpkgs-unstable-metacraft`,
+`nixos-YY.MM-metacraft`, `nixpkgs-YY.MM-darwin-metacraft`), all generated
+daily from one commit series on its `metacraft` branch; its README explains
+the layout, and the transition from the old bare channel names, which it
+keeps publishing until 2026-10-17. Releases are committed to `metacraft`,
+never to a channel branch.
 Users install from there, never from this flake at `dev`.
 
 The fork does not keep a hand-edited copy of this derivation. Its
@@ -123,8 +127,13 @@ gh workflow run sync-channels.yml -R metacraft-labs/nixpkgs
 
 `update.sh` stops if the tag's `flake.lock` has a `*-src` input the fork
 does not pass to `package.nix` yet: a new source input needs a matching
-entry there. The stale `*Src` defaults in this directory's `package.nix`
-are therefore harmless to the fork, which overrides every one of them.
+entry there. The fork overrides every `*Src` default of this directory's
+`package.nix`. Those defaults are one coherent snapshot for a consumer that
+takes the file as it is: `src` names a published commit, `version` is that
+commit's `reprobuild.nimble` version, and every `*Src` default is that
+commit's `flake.lock` pin. `nix build .#checks.<system>.nixpkgs-package-src-sync`
+enforces it. It compares against the `src` commit's lock, not this tree's,
+so refreshing sibling pins here does not require editing `package.nix`.
 
 ## Upstream-submission status
 

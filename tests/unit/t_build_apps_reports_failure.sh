@@ -13,8 +13,17 @@
 # Pinned contract:
 #
 #   1. A ``nim c`` that FAILS makes the script exit non-zero, and the stale
-#      binary for that entrypoint is removed rather than left to answer for a
-#      build that did not happen.
+#      binary for that entrypoint no longer sits at ``build/bin/<name>`` to
+#      answer for a build that did not happen. It is not destroyed either: it
+#      is set aside, byte-for-byte, as ``build/bin/<name>.stale``, because a
+#      failure from outside the tree (a stale sibling checkout, say) must not
+#      cost the developer the tool that worked a minute earlier. A newer
+#      set-aside replaces an older one; with nothing to set aside, an existing
+#      ``.stale`` is left alone; a successful build removes it, so packaging
+#      that copies ``build/bin/*`` never ships one. Only a PREVIOUS build is
+#      set aside: an artifact the failing step wrote itself is removed, so it
+#      cannot replace the last good ``.stale``. The DSL runtime library
+#      follows the same rule.
 #   2. A ``nim c`` that exits 0 without writing its ``--out`` target is
 #      likewise a failure: the artifact check does not take the compiler's
 #      word for it.
@@ -49,9 +58,19 @@ SOURCE_PATHS="${REPO_ROOT}/scripts/source_paths.sh"
 # ships about when a shim is refused.
 PRELOADED_SHIM_LOADER="${REPO_ROOT}/scripts/lib/preloaded_shim_loader.sh"
 DEV_SHELL_OVERRIDES="${REPO_ROOT}/scripts/lib/dev_shell_overrides.sh"
+# The non-Windows arm stages the nix daemon helper through this script, so a
+# sandbox without it fails every run with python3's exit 2 before the parts
+# under test are reached. Copied verbatim for the same reason as the others.
+STAGE_NIX_DAEMON="${REPO_ROOT}/scripts/stage_nix_daemon.py"
+# ``build_apps.sh`` asks this script for the source revision it embeds, and
+# stops when it cannot run it. Copied verbatim for the same reason. The
+# sandbox is not a git work tree, so it reports the revision unknown and the
+# fake ``nim`` sees no ``-d:ReprobuildSourceRevision=`` define.
+SOURCE_REVISION="${REPO_ROOT}/scripts/source_revision.sh"
 
 for required in "${BUILD_APPS}" "${SOURCE_PATHS}" \
-  "${PRELOADED_SHIM_LOADER}" "${DEV_SHELL_OVERRIDES}"; do
+  "${PRELOADED_SHIM_LOADER}" "${DEV_SHELL_OVERRIDES}" \
+  "${STAGE_NIX_DAEMON}" "${SOURCE_REVISION}"; do
   if [ ! -f "${required}" ]; then
     echo "FIXTURE ERROR: missing ${required}" >&2
     exit 2
@@ -132,6 +151,8 @@ new_sandbox() {
   cp "${SOURCE_PATHS}" "${sandbox}/scripts/source_paths.sh"
   cp "${PRELOADED_SHIM_LOADER}" "${sandbox}/scripts/lib/preloaded_shim_loader.sh"
   cp "${DEV_SHELL_OVERRIDES}" "${sandbox}/scripts/lib/dev_shell_overrides.sh"
+  cp "${STAGE_NIX_DAEMON}" "${sandbox}/scripts/stage_nix_daemon.py"
+  cp "${SOURCE_REVISION}" "${sandbox}/scripts/source_revision.sh"
 
   cat > "${sandbox}/apps/entrypoints.txt" <<'ENTRYPOINTS'
 # name path [extra-nim-flags...]
@@ -183,6 +204,24 @@ for skipped in ${FAKE_NIM_FAIL:-}; do
     exit 1
   fi
 done
+for skipped in ${FAKE_NIM_PARTIAL_FAIL:-}; do
+  if [ "${target}" = "${skipped}" ]; then
+    # Writes a truncated artifact and then fails, as a link cut short by a
+    # full disk does.
+    mkdir -p "$(dirname "${out}")"
+    printf 'trunc' > "${out}"
+    echo "fake nim: ld: write failed: No space left on device" >&2
+    exit 1
+  fi
+done
+for skipped in ${FAKE_NIM_EMPTY:-}; do
+  if [ "${target}" = "${skipped}" ]; then
+    # Exits 0 having written an empty artifact.
+    mkdir -p "$(dirname "${out}")"
+    : > "${out}"
+    exit 0
+  fi
+done
 for skipped in ${FAKE_NIM_SILENT_NOOP:-}; do
   if [ "${target}" = "${skipped}" ]; then
     # Exits 0, writes nothing. The compiler claims success; there is no
@@ -225,6 +264,18 @@ run_build() {
 
 nonzero() { if [ "$1" -ne 0 ]; then echo yes; else echo no; fi; }
 exists() { if [ -e "$1" ]; then echo yes; else echo no; fi; }
+executable() { if [ -x "$1" ]; then echo yes; else echo no; fi; }
+# The file's bytes, or a marker that cannot collide with any fixture content
+# when it is missing — so a "contents equal" check also fails on absence.
+contents() { if [ -f "$1" ]; then cat "$1"; else echo '<missing>'; fi; }
+
+# The DSL runtime library's platform extension, mirroring build_apps.sh's own
+# host detection closely enough for the hosts this test runs on (Windows is
+# skipped above).
+case "$(uname -s)" in
+  Darwin) dsl_ext="dylib" ;;
+  *) dsl_ext="so" ;;
+esac
 
 # ----------------------------------------------------------------------------
 # 1. Control: when every step really does produce its artifact, the script
@@ -260,8 +311,9 @@ fi
 # ----------------------------------------------------------------------------
 # 3. THE HEADLINE CASE. A binary left over from an earlier run must not be
 #    accepted as this run's output. Existence is not freshness — and the stale
-#    file is removed, so "is the binary there?" stops answering yes for a
-#    binary nobody built.
+#    file is moved off its canonical name, so "is the binary there?" stops
+#    answering yes for a binary nobody built, while the old build stays
+#    runnable as build/bin/alpha.stale.
 # ----------------------------------------------------------------------------
 sandbox="$(new_sandbox stale)"
 mkdir -p "${sandbox}/build/bin"
@@ -272,6 +324,8 @@ status="$(run_build "${sandbox}" FAKE_NIM_SILENT_NOOP="alpha")"
 check "stale artifact: exits non-zero" "yes" "$(nonzero "${status}")"
 check "stale artifact: the stale build/bin/alpha is removed" \
   "no" "$(exists "${sandbox}/build/bin/alpha")"
+check "stale artifact: the stale binary is kept byte-for-byte as build/bin/alpha.stale" \
+  "binary from three weeks ago" "$(contents "${sandbox}/build/bin/alpha.stale")"
 if grep -qi "stale\|predates" "${sandbox}/run.log"; then
   pass "stale artifact: the diagnostic says the artifact predates the run"
 else
@@ -279,8 +333,9 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-# 4. A genuine compile/link failure fails the build and takes the stale binary
-#    with it — and the loop keeps going, so BOTH failures are reported.
+# 4. A genuine compile/link failure fails the build and moves the stale binary
+#    off its canonical name (keeping it as .stale) — and the loop keeps going,
+#    so BOTH failures are reported.
 # ----------------------------------------------------------------------------
 sandbox="$(new_sandbox link_failure)"
 mkdir -p "${sandbox}/build/bin"
@@ -295,6 +350,10 @@ check "link failure: the stale build/bin/alpha is removed" \
   "no" "$(exists "${sandbox}/build/bin/alpha")"
 check "link failure: the stale build/bin/beta is removed" \
   "no" "$(exists "${sandbox}/build/bin/beta")"
+check "link failure: the stale alpha is kept byte-for-byte as build/bin/alpha.stale" \
+  "binary from three weeks ago" "$(contents "${sandbox}/build/bin/alpha.stale")"
+check "link failure: the stale beta is kept byte-for-byte as build/bin/beta.stale" \
+  "binary from three weeks ago" "$(contents "${sandbox}/build/bin/beta.stale")"
 reported="$(grep -c '^build_apps: FAILED: ' "${sandbox}/run.log" || true)"
 check "link failure: both failing entrypoints are reported, not just the first" \
   "2" "${reported}"
@@ -363,6 +422,164 @@ else
 fi
 check "deferred shim publish: alpha is still built" \
   "yes" "$(exists "${sandbox}/build/bin/alpha")"
+
+# ----------------------------------------------------------------------------
+# 9. THE ISSUE SCENARIO. A previous run produced a working build; a later
+#    rebuild of one entrypoint fails for a reason outside the tree. The build
+#    still fails and build/bin/alpha is gone, but the working binary survives,
+#    still executable, as build/bin/alpha.stale — and the diagnostic says so.
+# ----------------------------------------------------------------------------
+sandbox="$(new_sandbox last_good)"
+status="$(run_build "${sandbox}")"
+check "last good: the first build succeeds" "0" "${status}"
+cp "${sandbox}/build/bin/alpha" "${sandbox}/last_good_alpha"
+status="$(run_build "${sandbox}" FAKE_NIM_FAIL="alpha")"
+check "last good: the failing rebuild exits non-zero" "yes" "$(nonzero "${status}")"
+check "last good: build/bin/alpha is absent after the failed rebuild" \
+  "no" "$(exists "${sandbox}/build/bin/alpha")"
+check "last good: build/bin/alpha.stale holds the previous working build" \
+  "$(contents "${sandbox}/last_good_alpha")" "$(contents "${sandbox}/build/bin/alpha.stale")"
+check "last good: build/bin/alpha.stale is still executable" \
+  "yes" "$(executable "${sandbox}/build/bin/alpha.stale")"
+check "last good: beta, which did build, has no .stale copy" \
+  "no" "$(exists "${sandbox}/build/bin/beta.stale")"
+if grep -q 'alpha:.*kept the previous build as build/bin/alpha\.stale' "${sandbox}/run.log"; then
+  pass "last good: the diagnostic names build/bin/alpha.stale"
+else
+  fail "last good: the diagnostic names build/bin/alpha.stale"
+fi
+if grep -q 'removed the stale' "${sandbox}/run.log"; then
+  fail "last good: the diagnostic no longer claims the binary was removed"
+else
+  pass "last good: the diagnostic no longer claims the binary was removed"
+fi
+
+# ----------------------------------------------------------------------------
+# 10. An older .stale and a newer binary both exist and the build fails: the
+#     newer binary replaces the older set-aside, so .stale is always the most
+#     recent build there was.
+# ----------------------------------------------------------------------------
+sandbox="$(new_sandbox stale_replaced)"
+mkdir -p "${sandbox}/build/bin"
+printf 'older set-aside build\n' > "${sandbox}/build/bin/alpha.stale"
+printf 'newer build\n' > "${sandbox}/build/bin/alpha"
+chmod +x "${sandbox}/build/bin/alpha" "${sandbox}/build/bin/alpha.stale"
+touch -t 202001010000 "${sandbox}/build/bin/alpha" "${sandbox}/build/bin/alpha.stale"
+status="$(run_build "${sandbox}" FAKE_NIM_FAIL="alpha")"
+check "newer replaces older .stale: exits non-zero" "yes" "$(nonzero "${status}")"
+check "newer replaces older .stale: build/bin/alpha is absent" \
+  "no" "$(exists "${sandbox}/build/bin/alpha")"
+check "newer replaces older .stale: build/bin/alpha.stale holds the newer build" \
+  "newer build" "$(contents "${sandbox}/build/bin/alpha.stale")"
+
+# ----------------------------------------------------------------------------
+# 11. A .stale exists with no current binary (an earlier failed run already
+#     set it aside) and the build fails again: there is nothing newer to keep,
+#     so the existing .stale is left exactly as it was.
+# ----------------------------------------------------------------------------
+sandbox="$(new_sandbox stale_untouched)"
+mkdir -p "${sandbox}/build/bin"
+printf 'set aside by an earlier failed run\n' > "${sandbox}/build/bin/alpha.stale"
+chmod +x "${sandbox}/build/bin/alpha.stale"
+touch -t 202001010000 "${sandbox}/build/bin/alpha.stale"
+cp -p "${sandbox}/build/bin/alpha.stale" "${sandbox}/expected_stale"
+status="$(run_build "${sandbox}" FAKE_NIM_FAIL="alpha")"
+check "lone .stale: exits non-zero" "yes" "$(nonzero "${status}")"
+check "lone .stale: build/bin/alpha is absent" \
+  "no" "$(exists "${sandbox}/build/bin/alpha")"
+check "lone .stale: build/bin/alpha.stale is untouched" \
+  "$(contents "${sandbox}/expected_stale")" "$(contents "${sandbox}/build/bin/alpha.stale")"
+if [ "${sandbox}/build/bin/alpha.stale" -nt "${sandbox}/expected_stale" ] ||
+   [ "${sandbox}/build/bin/alpha.stale" -ot "${sandbox}/expected_stale" ]; then
+  fail "lone .stale: build/bin/alpha.stale keeps its timestamp"
+else
+  pass "lone .stale: build/bin/alpha.stale keeps its timestamp"
+fi
+if grep -q 'alpha:.*no previous build was present' "${sandbox}/run.log"; then
+  pass "lone .stale: the diagnostic says no previous build was present"
+else
+  fail "lone .stale: the diagnostic says no previous build was present"
+fi
+
+# ----------------------------------------------------------------------------
+# 12. A leftover .stale and a build that succeeds: the .stale is removed, so a
+#     green build leaves nothing for a ``cp build/bin/*`` packaging step to
+#     ship by accident.
+# ----------------------------------------------------------------------------
+sandbox="$(new_sandbox stale_cleared)"
+mkdir -p "${sandbox}/build/bin" "${sandbox}/build/lib"
+printf 'set aside by an earlier failed run\n' > "${sandbox}/build/bin/alpha.stale"
+printf 'set aside by an earlier failed run\n' > "${sandbox}/build/bin/alpha.exe.stale"
+printf 'set aside by an earlier failed run\n' \
+  > "${sandbox}/build/lib/librepro_project_dsl_runtime.${dsl_ext}.stale"
+status="$(run_build "${sandbox}")"
+check "success clears .stale: exits 0" "0" "${status}"
+check "success clears .stale: build/bin/alpha is the fresh build" \
+  "fake-binary" "$(contents "${sandbox}/build/bin/alpha")"
+check "success clears .stale: build/bin/alpha.stale is removed" \
+  "no" "$(exists "${sandbox}/build/bin/alpha.stale")"
+check "success clears .stale: build/bin/alpha.exe.stale is removed" \
+  "no" "$(exists "${sandbox}/build/bin/alpha.exe.stale")"
+check "success clears .stale: the DSL runtime library's .stale is removed" \
+  "no" "$(exists "${sandbox}/build/lib/librepro_project_dsl_runtime.${dsl_ext}.stale")"
+if ls "${sandbox}/build/bin/"*.stale >/dev/null 2>&1; then
+  fail "success clears .stale: no *.stale is left in build/bin"
+else
+  pass "success clears .stale: no *.stale is left in build/bin"
+fi
+
+# ----------------------------------------------------------------------------
+# 13. The DSL runtime library follows the same rule: when its compile fails,
+#     the previously published library is set aside as .stale rather than
+#     deleted, and the canonical name no longer answers for it.
+# ----------------------------------------------------------------------------
+sandbox="$(new_sandbox dsl_runtime_failure)"
+mkdir -p "${sandbox}/build/lib"
+dsl_lib="${sandbox}/build/lib/librepro_project_dsl_runtime.${dsl_ext}"
+printf 'library from three weeks ago\n' > "${dsl_lib}"
+touch -t 202001010000 "${dsl_lib}"
+status="$(run_build "${sandbox}" \
+  FAKE_NIM_FAIL="librepro_project_dsl_runtime.new.${dsl_ext}")"
+check "DSL runtime failure: exits non-zero" "yes" "$(nonzero "${status}")"
+check "DSL runtime failure: the canonical library is absent" \
+  "no" "$(exists "${dsl_lib}")"
+check "DSL runtime failure: the previous library is kept byte-for-byte as .stale" \
+  "library from three weeks ago" "$(contents "${dsl_lib}.stale")"
+if grep -q "librepro_project_dsl_runtime:.*kept the previous build as build/lib/librepro_project_dsl_runtime\.${dsl_ext}\.stale" "${sandbox}/run.log"; then
+  pass "DSL runtime failure: the diagnostic names the .stale path"
+else
+  fail "DSL runtime failure: the diagnostic names the .stale path"
+fi
+
+# ----------------------------------------------------------------------------
+# 14. Only a PREVIOUS build is set aside. When the failing step itself writes
+#     the artifact (a truncated link, or an empty output the freshness check
+#     refuses), that file is not a build worth keeping: it is removed, and the
+#     last good .stale from an earlier failed run survives untouched instead
+#     of being replaced by it.
+# ----------------------------------------------------------------------------
+for mode in FAKE_NIM_PARTIAL_FAIL FAKE_NIM_EMPTY; do
+  sandbox="$(new_sandbox "own_output_${mode}")"
+  mkdir -p "${sandbox}/build/bin"
+  printf 'last good build\n' > "${sandbox}/build/bin/alpha.stale"
+  chmod +x "${sandbox}/build/bin/alpha.stale"
+  status="$(run_build "${sandbox}" "${mode}=alpha")"
+  check "own output (${mode}): exits non-zero" "yes" "$(nonzero "${status}")"
+  check "own output (${mode}): build/bin/alpha is absent" \
+    "no" "$(exists "${sandbox}/build/bin/alpha")"
+  check "own output (${mode}): the last good .stale is not replaced" \
+    "last good build" "$(contents "${sandbox}/build/bin/alpha.stale")"
+  if grep -q 'alpha:.*removed build/bin/alpha, which the failed step itself wrote' "${sandbox}/run.log"; then
+    pass "own output (${mode}): the diagnostic says the failed step's output was removed"
+  else
+    fail "own output (${mode}): the diagnostic says the failed step's output was removed"
+  fi
+  if grep -q 'alpha:.*kept the previous build' "${sandbox}/run.log"; then
+    fail "own output (${mode}): the diagnostic does not claim a previous build was kept"
+  else
+    pass "own output (${mode}): the diagnostic does not claim a previous build was kept"
+  fi
+done
 
 echo ""
 if [ "${failures}" -ne 0 ]; then

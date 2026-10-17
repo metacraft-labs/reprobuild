@@ -35,14 +35,16 @@
   # ── Source pins ────────────────────────────────────────────────────────────
   # Defaults are ordinary nixpkgs fixed-output fetches, so a nixpkgs consumer
   # needs no flake plumbing. reprobuild's flake passes its own inputs here.
-  # Keep every default in step with the corresponding `flake.lock` entry; the
+  # Keep every default in step with the corresponding entry of the
+  # `flake.lock` of package.nix's `src` commit (the flake check
+  # `nixpkgs-package-src-sync` fails otherwise); the
   # `hash` is the fetched tree's NAR hash (set it to `lib.fakeHash` and copy the
   # `got:` line from the resulting build failure when bumping a rev).
   forkSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim";
-    rev = "0b5b5ec507d2d9c731d222184c625851377a02c8";
-    hash = "sha256-0E1OGS2qRaKobiq2ZGi+nD2djgoLrqXApJzGmRGAFt0=";
+    rev = "1e19cf261413667ef69123a3ef221e239d1f8897";
+    hash = "sha256-q4V7qEJRJGo6f0Wli/aauix78DbIPt4/eu7YQqO8APw=";
   },
   csourcesSrc ? fetchFromGitHub {
     owner = "nim-lang";
@@ -53,8 +55,8 @@
   traceFormatSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer-trace-format-nim";
-    rev = "bc7c5d256d0a4b1246f9a9bbb51a83071d3d8e26";
-    hash = "sha256-feW0vlgU6JTVkCLnZ1iyS2FwjXQuRCXHr3V+27oyDAw=";
+    rev = "808ffdb4507634c3aba0661d96cbc353420ed856";
+    hash = "sha256-ZKkKNbi9AGJmqPwv6MjbR2EoJm8ytfCikub7r7iAnSg=";
   },
   stewSrc ? fetchFromGitHub {
     owner = "status-im";
@@ -236,6 +238,20 @@ stdenv.mkDerivation {
     "$out/bin/nim" --version
     runHook postInstall
   '';
+
+  # The source arguments as given, read back by reprobuild's flake check
+  # `nixpkgs-package-src-sync` to compare the defaults with `flake.lock`.
+  passthru.sources = {
+    inherit
+      forkSrc
+      csourcesSrc
+      traceFormatSrc
+      stewSrc
+      resultsSrc
+      checksumsSrc
+      nimonySrc
+      ;
+  };
 
   meta = {
     description = "metacraft-labs/nim fork (Nim 2.3.1 devel) — reprobuild toolchain";

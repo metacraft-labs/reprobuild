@@ -29,12 +29,24 @@ import std/[options, os, strutils, tables]
 
 import types
 import diagnostics
-import reader
 import resolver
 import compose
 import workspace_branch
 
-proc resolveWorkspaceProjectByName*(workspaceRoot, name: string):
+proc namesOnlyRootVariantOrRepoSet*(workspaceRoot, name: string): bool =
+  ## Whether ``name`` is, at the workspace's manifests root, ONLY a variant or
+  ## a repo-set: no ``projects/<name>.toml`` there, but a
+  ## ``variants/<name>.toml`` or ``repo-sets/<name>.toml``. Such a name
+  ## resolves from the root and is never composed across manifest layers: the
+  ## composer composes projects, and neither kind is defined across layers.
+  ## The one definition of that rule for every name lookup that routes on it.
+  let manifests = manifestsRoot(workspaceRoot)
+  not fileExists(manifests / "projects" / (name & ".toml")) and
+    (fileExists(manifests / "variants" / (name & ".toml")) or
+     fileExists(manifests / repoSetsDirName / (name & ".toml")))
+
+proc resolveWorkspaceProjectByName*(workspaceRoot, name: string;
+                                    layersMayOmitProject = false):
     ResolvedProject =
   ## Resolve ONE project of the set by name, using the same ladder a
   ## single-project workspace uses: the composer when the workspace declares
@@ -45,15 +57,30 @@ proc resolveWorkspaceProjectByName*(workspaceRoot, name: string):
   ## An unresolvable name raises: a project recorded in the active set but
   ## absent from every manifest layer is a membership error the operator has
   ## to see, not a repo set to silently narrow.
-  if isCompositionalWorkspaceToml(workspaceRoot):
+  ##
+  ## The layer stack is the workspace's whole stack — the state file's and the
+  ## settings files' (`effectiveWorkspaceLocal`) — whether or not a state file
+  ## exists yet. A PROJECT is composed across it (Workspace-Settings-Files.md
+  ## §4). By default every DECLARED layer must declare it (the M8 contract);
+  ## `layersMayOmitProject` composes additively instead — the project is the
+  ## union of what the layers declaring it contribute — for callers that look
+  ## a name up rather than compose the workspace's own project (the sync
+  ## scope). A name no layer declares raises the composer's
+  ## `noLayerDeclaresProjectTag` diagnostic either way. A name the root layer
+  ## declares only as a VARIANT or a REPO-SET resolves from the root, as it
+  ## always did: the composer composes projects, and neither kind is defined
+  ## across layers.
+  let manifests = manifestsRoot(workspaceRoot)
+  if not namesOnlyRootVariantOrRepoSet(workspaceRoot, name) and
+      isCompositionalWorkspaceToml(workspaceRoot, name):
     let absToml = absolutePath(workspaceTomlPath(workspaceRoot))
-    var workspaceLocal = readWorkspaceLocal(absToml)
+    var workspaceLocal = effectiveWorkspaceLocal(workspaceRoot, name)
     # Compose the NAMED project across the same layer stack. Only the selected
     # project name changes; the layer list, visibilities and branches are the
     # workspace's own.
     workspaceLocal.workspace.project = name
-    return composeManifestLayers(workspaceLocal, workspaceRoot, absToml)
-  let manifests = manifestsRoot(workspaceRoot)
+    return composeManifestLayersWithOptions(workspaceLocal, workspaceRoot,
+      absToml, ComposeOptions(layersMayOmitProject: layersMayOmitProject)).project
   let projectFile = manifests / "projects" / (name & ".toml")
   let variantFile = manifests / "variants" / (name & ".toml")
   # Workspace-Membership-Model.md — a repo-set that is ENABLED is what used to
@@ -61,7 +88,7 @@ proc resolveWorkspaceProjectByName*(workspaceRoot, name: string):
   # rather than getting a parallel one. Looked up last, so a converted manifest
   # repo and an unconverted one both resolve the name they actually carry, and
   # a workspace mid-conversion keeps preferring the project it already had.
-  let repoSetFile = manifests / "repo-sets" / (name & ".toml")
+  let repoSetFile = manifests / repoSetsDirName / (name & ".toml")
   if fileExists(projectFile):
     return resolveProject(projectFile)
   if fileExists(variantFile):
@@ -91,8 +118,8 @@ proc raiseProjectSetConflict(workspaceRoot, path: string;
   var e = newException(WorkspaceProjectSetConflictError, "")
   e.path = workspaceTomlPath(workspaceRoot)
   e.keyPath = "workspace.projects"
-  e.expectedSchema = schemaWorkspaceLocalV1
-  e.observedSchema = schemaWorkspaceLocalV1
+  e.expectedSchema = schemaWorkspaceStateV1
+  e.observedSchema = schemaWorkspaceStateV1
   e.innerMessage = inner
   e.msg = "[" & e.path & "] at key 'workspace.projects': " & inner
   raise e
@@ -102,10 +129,10 @@ proc unionProjectSet*(workspaceRoot: string; primary: ResolvedProject;
   ## Union `additional` projects onto an already-resolved `primary`.
   ##
   ## The primary project's identity is carried through unchanged
-  ## (`projectName`, `defaultRevision`, `trunk`, `projectFile`,
-  ## `certificatePolicy`): everything that needs exactly ONE project — the
-  ## lock destination, the certificate gate policy, `repro add`'s mutation
-  ## target — keeps resolving to the primary. Only the repo set grows.
+  ## (`projectName`, `defaultRevision`, `trunk`, `projectFile`): everything
+  ## that needs exactly ONE project — the lock destination, `repro add`'s
+  ## mutation target — keeps resolving to the primary. Only the repo set
+  ## grows.
   ##
   ## First-seen order is preserved, so adding a project APPENDS its
   ## previously-unseen repos and never reorders what was already there.
@@ -134,15 +161,11 @@ proc unionProjectSet*(workspaceRoot: string; primary: ResolvedProject;
         result.repos.add(repo)
 
 proc activeProjectSetOrEmpty*(workspaceRoot: string): seq[string] =
-  ## The recorded active project set, or an empty seq when the workspace has
-  ## no readable metadata. A malformed `workspace.toml` is NOT fatal here:
-  ## every caller already resolved a primary project through its own ladder,
-  ## and the pre-existing behaviour for unreadable metadata is to fall back to
-  ## that single project rather than to fail the command.
-  try:
-    readWorkspaceProjects(workspaceRoot)
-  except CatchableError:
-    @[]
+  ## The recorded active project set, or an empty seq when the workspace
+  ## records no state. A state file that exists but does not parse raises the
+  ## strict reader's diagnostic: falling back to the primary project alone
+  ## would silently drop every other active project's repos from the command.
+  readWorkspaceProjects(workspaceRoot)
 
 proc extendWithActiveProjectSet*(workspaceRoot: string;
                                  primary: ResolvedProject): ResolvedProject =

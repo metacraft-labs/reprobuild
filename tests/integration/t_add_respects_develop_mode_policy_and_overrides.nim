@@ -238,7 +238,7 @@ suite "RA-22 — repro add develop-mode policy and overrides":
       # above keys off — intact. No `revision` is written either: it would
       # only restate the project's `default_revision`.
       check fragmentOf(fx, "orglib") ==
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\n" &
         "name = \"orglib\"\n" &
         "path = \"orglib\"\n" &

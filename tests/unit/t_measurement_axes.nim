@@ -17,15 +17,23 @@
 ##   4. The presenters render only what they are given.
 ##   5. PERSIST is outcome-dependent: a successful run writes nothing, a
 ##      failed run writes unasked, and ``--no-write-report`` defeats both.
+##   6. The full report is versioned (``schemaId``) on every provider route,
+##      keeps the compiled-provider members where a provider was compiled,
+##      and on a PREBUILT route names the binary that ran without inventing
+##      a compile record (``buildReportJson``), and a reader of the report
+##      (``reportActionById``) copes with that absence (the CLI end of it is
+##      ``tests/integration/t_build_write_report_on_lowered_provider_routes``).
 ##
 ## Deliberately NOT owned here: the CLI wiring from argv to engine config
 ## (``t_measurement_flags_cli.nim``) and the engine's own collection switches
 ## (``t_integration_build_engine_api_ready_queue.nim``).
 
-import std/[json, os, strutils, tempfiles, unittest]
+import std/[json, options, os, strutils, tempfiles, unittest]
 
 import repro_cli_support
 import repro_build_engine
+import repro_interface_artifacts
+import repro_provider_runtime
 
 suite "measurement axes: COLLECT (--measure)":
 
@@ -124,6 +132,43 @@ suite "measurement axes: PRESENT (--show)":
     # The evidence presenter must not invent trace lines, or vice versa.
     check not evidence.contains("scheduler trace")
 
+suite "measurement axes: the $REPRO_STATS_DIR record's action tally":
+
+  test "the tally separates reuse from execution and counts failures":
+    # The record is what a CMake TryCompile build -- always run with
+    # ``--log=quiet`` -- leaves behind, so it is the only place a caller can
+    # learn whether a probe was served from the action cache.
+    let results = @[
+      ActionResult(id: "compile-ran", status: asSucceeded, launched: true,
+        cacheDecision: cdMiss),
+      ActionResult(id: "compile-restored", status: asCacheHit,
+        cacheDecision: cdHit),
+      ActionResult(id: "compile-cutoff", status: asUpToDate,
+        cacheDecision: cdHybridCutoff),
+      ActionResult(id: "link-unpublishable", status: asSucceeded,
+        launched: true, cacheDecision: cdNotCacheable),
+      ActionResult(id: "probe-failed", status: asFailed, launched: true,
+        cacheDecision: cdMiss),
+      ActionResult(id: "after-failure", status: asBlocked,
+        blockedBy: "probe-failed")]
+    let tally = tallyActionDecisions(results)
+    check tally.total == 6
+    check tally.launched == 3
+    check tally.cacheHit == 2
+    check tally.failed == 2
+
+    let node = actionTallyJson(tally)
+    check node["total"].getInt == 6
+    check node["launched"].getInt == 3
+    check node["cacheHit"].getInt == 2
+    check node["failed"].getInt == 2
+
+  test "an invocation that ran no build records an all-zero tally":
+    let node = actionTallyJson(tallyActionDecisions(newSeq[ActionResult]()))
+    check node["total"].getInt == 0
+    check node["launched"].getInt == 0
+    check node["cacheHit"].getInt == 0
+
 suite "measurement axes: PERSIST (--write-report and the failure report)":
 
   test "the failure report enumerates failures, never successes":
@@ -192,6 +237,106 @@ suite "measurement axes: PERSIST (--write-report and the failure report)":
     let body = readFile(path)
     check not body.contains("compile-ok")
     check not body.contains("compile-cached")
+
+  test "the full report carries its schema id and the compiled-provider record":
+    var compileResult: BuildRunResult
+    compileResult.results.add(ActionResult(id: "provider-compile",
+      status: asSucceeded, launched: true))
+    var runResult: BuildRunResult
+    runResult.results.add(ActionResult(id: "compile-ok",
+      status: asSucceeded, exitCode: 0, launched: true))
+    let provider = ProviderCompileArtifact(
+      outputBinaryPath: "/work/.repro/build/x/provider",
+      executionResult: ProviderCompileExecutionResult(exitCode: 0,
+        output: "compiled"))
+    let refresh = ProviderRefreshReport(
+      persistedSnapshotPath: "/work/.repro/build/x/snapshot.rbsz")
+    let node = buildReportJson(
+      compiledProviderReportContext(provider, compileResult, "artifact-id",
+        refresh, 3),
+      BuildRunResult(), runResult,
+      targetResolutions = some(newSeq[TargetResolutionRecord]()))
+    check node["schemaId"].getStr == BuildReportSchemaId
+    check BuildReportSchemaId == "reprobuild.build.report.v1"
+    check node["providerRoute"].getStr == "compiled-provider"
+    # Every member the compiled route has always written is still there.
+    check node["providerBinary"].getStr == "/work/.repro/build/x/provider"
+    check node.hasKey("providerFingerprint")
+    check node["providerCompileOutput"].getStr == "compiled"
+    check node["providerCompileActions"].len == 1
+    check node["providerSnapshot"].getStr == "/work/.repro/build/x/snapshot.rbsz"
+    check node["providerInvocations"].getInt == 3
+    check node["providerArtifact"].getStr == "artifact-id"
+    check node["actions"].len == 1
+    for key in ["trace", "runQuota", "stats", "cmakeRegenerationActions"]:
+      check node.hasKey(key)
+    # A verified-empty target resolution is distinguishable from an
+    # unobserved one; no workspace-VCS query was passed, so it is unobserved.
+    check node["targetResolution"].len == 0
+    check node["targetResolutionObserved"].getBool
+    check node["workspaceVcs"].kind == JArray
+    check not node["workspaceVcsObserved"].getBool
+
+  test "a prebuilt-provider report names the binary and invents no compile":
+    let scratch = createTempDir("repro-measure-prebuilt-", "")
+    defer: removeDir(scratch)
+    let binary = scratch / "repro-standard-provider"
+    writeFile(binary, "prebuilt provider bytes")
+    let refresh = ProviderRefreshReport(persistedSnapshotPath: "/s.rbsz")
+    let node = buildReportJson(
+      prebuiltProviderReportContext("tier2b-standard-direct", binary,
+        "repro-standard-provider.v1.x", refresh),
+      BuildRunResult(), BuildRunResult())
+    check node["schemaId"].getStr == BuildReportSchemaId
+    check node["providerRoute"].getStr == "tier2b-standard-direct"
+    check node["providerBinary"].getStr == binary
+    check node["providerArtifact"].getStr == "repro-standard-provider.v1.x"
+    # The content identity is the digest of the bytes on disk — the same one
+    # the Tier 2b artifact id is built from.
+    check node["providerBinaryContentDigest"].getStr ==
+      standardProviderArtifactIdForBinary(binary).split('.')[^1]
+    check node["providerSnapshot"].getStr == "/s.rbsz"
+    check node["providerInvocations"].getInt == 0
+    for key in ["providerFingerprint", "providerCompileOutput",
+        "providerCompileActions"]:
+      check not node.hasKey(key)
+    check not node["targetResolutionObserved"].getBool
+
+  test "an action lookup tolerates a prebuilt report's absent compile member":
+    # ``repro why`` reads the last build report through ``reportActionById``.
+    # A prebuilt-provider report has no ``providerCompileActions`` at all,
+    # and a lookup that iterated the missing member crashed the process
+    # (nil iteration is a SIGSEGV, not a catchable error) whenever the id
+    # was not found in ``actions`` first.
+    let scratch = createTempDir("repro-measure-lookup-", "")
+    defer: removeDir(scratch)
+    let binary = scratch / "repro-standard-provider"
+    writeFile(binary, "prebuilt provider bytes")
+    var runResult: BuildRunResult
+    runResult.results.add(ActionResult(id: "compile-ok",
+      status: asSucceeded, launched: true))
+    let node = buildReportJson(
+      prebuiltProviderReportContext("tier2b-standard-direct", binary,
+        "repro-standard-provider.v1.x", ProviderRefreshReport()),
+      BuildRunResult(), runResult)
+    check not node.hasKey("providerCompileActions")
+    let found = reportActionById(node, "compile-ok")
+    check found.isSome
+    check found.get(){"status"}.getStr == "asSucceeded"
+    check reportActionById(node, "not-in-this-report").isNone
+    check reportActionById(newJNull(), "compile-ok").isNone
+
+  test "a lowered-graph-cache report labels the route, not a key":
+    let node = buildReportJson(
+      loweredGraphCacheReportContext("/work/.repro/build/x/lowered.rbsz"),
+      BuildRunResult(), BuildRunResult())
+    check node["schemaId"].getStr == BuildReportSchemaId
+    check node["providerRoute"].getStr == "lowered-graph-cache"
+    check node["loweredGraphCache"]["path"].getStr ==
+      "/work/.repro/build/x/lowered.rbsz"
+    check node["loweredGraphCache"]["keyAvailable"].kind == JBool
+    check not node["loweredGraphCache"]["keyAvailable"].getBool
+    check not node.hasKey("providerFingerprint")
 
   test "reportDestination is opt-in and honours --no-write-report":
     let root = "/ws"

@@ -5,7 +5,8 @@
 ## kinds (``PreInstallActionKind``). Each test exercises ONE allowlist
 ## shape end-to-end against a synthetic staging dir, then validates the
 ## resulting tree. Allowlist-miss handling (``pre_install_unrecognized``
-## landing in the slice with a ``WPreInstallUnrecognized`` warning at
+## landing in the record's ``preInstallUnrecognized`` with a
+## ``WPreInstallUnrecognized`` warning at
 ## realize time) is exercised separately.
 ##
 ## The critical junction-hazard test (per project memory
@@ -18,15 +19,17 @@ from repro_core/paths import extendedPath
 
 import repro_dsl_stdlib/packages_schema
 import repro_home_apply/builtin_adapter
+from repro_test_support import testCaseScratchSlug
 
-const FixtureRoot = "build/test-tmp/t-builtin-adapter-pre-install"
+let FixtureRoot = "build/test-tmp/t-builtin-adapter-pre-install" /
+  testCaseScratchSlug()
 
 proc resetDir(path: string) =
   if dirExists(extendedPath(path)):
     removeDir(extendedPath(path))
   createDir(extendedPath(path))
 
-suite "M3 — cakBuiltin pre_install runner (allowlist)":
+suite "M3 — archive realizer pre_install runner (allowlist)":
 
   test "test_m3_pre_install_runner_new_item_directory":
     ## ``New-Item -ItemType Directory`` → ``os.createDir``.

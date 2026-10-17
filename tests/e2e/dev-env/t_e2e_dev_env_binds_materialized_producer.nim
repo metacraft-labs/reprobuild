@@ -511,9 +511,15 @@ const sessionLauncherScript = "#!/bin/sh\n" &
   "exec \"$1\" dev \"$2\" --foreground --http=127.0.0.1:0" &
   " --debounce-ms=100 > session.out 2> session.err\n"
 
-proc waitForFileContaining(path, needle: string; timeoutMs: int): bool =
+proc waitForFileContaining(path, needle: string; timeoutMs: int;
+                           alive: proc(): bool = nil): bool =
+  ## ``alive``, when given, ends the wait as soon as the producer of ``path``
+  ## is gone; ``timeoutMs`` is then only the backstop for one alive and stuck.
   var waited = 0
   while waited <= timeoutMs:
+    if alive != nil and not alive():
+      # One last read: the producer may have written the line and exited.
+      return fileExists(path) and readFile(path).contains(needle)
     if fileExists(path):
       try:
         if readFile(path).contains(needle):
@@ -611,7 +617,14 @@ suite "e2e_dev_env_binds_materialized_producer_in_a_session":
       session.close()
 
     let pinsLog = consumerRoot / "state" / "pins.log"
-    let sawTask = waitForFileContaining(pinsLog, "PINS=", 300000)
+    # The first watch task runs only after the supervisor has prepared the
+    # environment, which compiles this per-case consumer cold (its project
+    # path is new every case). In a full run that preparation alone passed
+    # 300 s at high load -- session.err still ended at "preparing the
+    # environment" -- so the wait follows the supervisor instead: it ends at
+    # once if the session exits, and the cap is only the backstop.
+    let sawTask = waitForFileContaining(pinsLog, "PINS=", 1_200_000,
+      alive = proc(): bool = session.running())
 
     # The notice, asserted while the supervisor is STILL RUNNING. If it is
     # sitting in a stdio buffer rather than on the developer's terminal this

@@ -12,11 +12,14 @@ from repro_core/paths import extendedPath
 
 import repro_local_store
 import repro_dsl_stdlib/packages_schema
+import repro_interface_artifacts
 
 import repro_home_apply/package_catalog
 import repro_home_apply/builtin_adapter
+from repro_test_support import testCaseScratchSlug
 
-const FixtureRoot = "build/test-tmp/t-builtin-adapter-7z-nested"
+let FixtureRoot = "build/test-tmp/t-builtin-adapter-7z-nested" /
+  testCaseScratchSlug()
 
 proc resetDir(path: string) =
   if dirExists(extendedPath(path)):
@@ -79,13 +82,67 @@ proc seedSevenZipPrefix(store: var Store; hostSevenZ: string): string =
       mechanism = "copy")
   outcome.absolutePath
 
-suite "M3 — cakBuiltin nested 7z":
+# ---------------------------------------------------------------------------
+# GM4b: an archive realization is a `tarball` record of a package definition
+# (Provisioning-Contributions.md §"Profile Package References"). A test
+# realization is a synthetic record for this host, SELECTED by the same
+# `selectRealization` a profile reference goes through and projected by
+# `archiveRealizationOf` into the archive realizer's input — so the realizer
+# is driven exactly as `repro home apply` drives it.
+# ---------------------------------------------------------------------------
+
+proc hostRecord(url, archiveType, executablePath: string;
+                extraExecutables: seq[string] = @[];
+                sha256 = ""; sha1 = ""; version = "1.0.0";
+                installMethod = ""; extractPath = "";
+                installerArgs: seq[string] = @[];
+                pacmanPackages: seq[string] = @[];
+                env: seq[string] = @[]; nested7z = false;
+                msiAdminInstall = false;
+                preInstall: seq[string] = @[];
+                preInstallUnrecognized: seq[string] = @[];
+                launcherEmit: seq[string] = @[];
+                anyCpu = false): InterfaceTarballProvisioning =
+  ## A synthetic `tarball` record for this host's (cpu, os); ``anyCpu``
+  ## leaves the cpu open, as a record for every CPU family does.
+  let host = hostRealizationTarget()
+  result = InterfaceTarballProvisioning(url: url, sha256: sha256,
+    archiveType: archiveType, executablePath: executablePath,
+    cpu: (if anyCpu: "" else: $host.platform.family), os: $host.os)
+  result.detail.version = version
+  result.detail.sha1 = sha1
+  result.detail.installMethod = installMethod
+  result.detail.extractPath = extractPath
+  result.detail.extraExecutables = extraExecutables
+  result.detail.installerArgs = installerArgs
+  result.detail.pacmanPackages = pacmanPackages
+  result.detail.env = env
+  result.detail.nested7z = nested7z
+  result.detail.msiAdminInstall = msiAdminInstall
+  result.detail.preInstall = preInstall
+  result.detail.preInstallUnrecognized = preInstallUnrecognized
+  result.detail.launcherEmit = launcherEmit
+
+proc selectArchive(packageId: string;
+                   records: openArray[InterfaceTarballProvisioning];
+                   version = ""): ArchiveRealization =
+  ## Select among ``records`` for this host (policy ``[tarball]``) and
+  ## project the selection into the archive realizer's input.
+  var useDef = InterfaceToolUse(rawConstraint: packageId,
+    packageSelector: packageId, executableName: packageId)
+  useDef.tarballProvisioning = @records
+  let selection = selectRealization(useDef, SelectionRequest(
+    packageName: packageId, target: hostRealizationTarget(),
+    policy: @[rkTarball], version: version, definitionKnown: true))
+  archiveRealizationOf(packageId, selection.tarball)
+
+suite "M3 — archive realizer nested 7z":
 
   test "test_m3_nested_7z_flatten_synthetic_gcc_winlibs_shape":
     ## Builds a synthetic outer .7z whose payload is itself a sequence
     ## of inner .7z archives (binutils + mingw-w64+gcc, mirroring the
     ## winlibs ``components-*.7z`` shape). Drives realize with
-    ## ``nested_7z = true`` and asserts:
+    ## ``nested7z = true`` and asserts:
     ##   * outer 7z is extracted into the prefix;
     ##   * the inner ``binutils-stub.7z`` + ``mingw-w64+gcc-stub.7z``
     ##     are recursively extracted in place;
@@ -160,24 +217,14 @@ suite "M3 — cakBuiltin nested 7z":
       defer: store.close()
       discard seedSevenZipPrefix(store, hostSeven)
 
-      let vp = initVersionedProvisioning(
-        version = "stub-15.2.0",
-        archive_format = afSevenZip,
-        install_method = imExtract,
-        bin_relpath = @["bin/gcc.exe", "bin/g++.exe", "bin/gfortran.exe"],
-        platforms = @[
-          initPlatformBinary(
-            cpu = detectHostCpu(), os = detectHostOs(),
-            url = fileToUrl(absolutePath(outerArchive)),
-            sha256 = sha,
-            extract_path = outerInnerName,
-            nested_7z = true)
-        ])
-      let res = resolveBuiltinPackage("gcc-nested", @[vp])
-      check res.found
-      check res.resolution.nested7z
+      let res = selectArchive("gcc-nested", [hostRecord(
+        fileToUrl(absolutePath(outerArchive)), "7z", "bin/gcc.exe",
+        @["bin/g++.exe", "bin/gfortran.exe"], sha256 = sha,
+        version = "stub-15.2.0", extractPath = outerInnerName,
+        nested7z = true)])
+      check res.nested7z
 
-      let outR = realizeBuiltinPackage(store, res.resolution)
+      let outR = realizeBuiltinPackage(store, res)
       check (not outR.cacheHit)
 
       # The realized prefix carries all three binaries — both inner
@@ -195,10 +242,10 @@ suite "M3 — cakBuiltin nested 7z":
       check (not fileExists(extendedPath(outR.prefixAbsolutePath / "mingw-w64+gcc-stub.7z")))
 
   test "test_m3_nested_7z_disabled_keeps_inner_archives":
-    ## Sanity: when ``nested_7z = false`` (the default), inner .7z
+    ## Sanity: when ``nested7z = false`` (the default), inner .7z
     ## files inside the extracted tree are LEFT IN PLACE — the recursive
     ## extract is an opt-in feature, not an always-on side effect. This
-    ## protects catalog entries that happen to ship .7z files as data
+    ## protects tarball realizations that happen to ship .7z files as data
     ## (e.g. a documentation tarball containing example archives).
     let fixtureDir = FixtureRoot / "no-nested"
     let storeDir = fixtureDir / "store"
@@ -225,23 +272,12 @@ suite "M3 — cakBuiltin nested 7z":
       var store = openStore(storeDir)
       defer: store.close()
       discard seedSevenZipPrefix(store, hostSeven)
-      let vp = initVersionedProvisioning(
-        version = "stub-1.0.0",
-        archive_format = afSevenZip,
-        install_method = imExtract,
-        bin_relpath = @["marker.txt"],
-        platforms = @[
-          initPlatformBinary(
-            cpu = detectHostCpu(), os = detectHostOs(),
-            url = fileToUrl(absolutePath(outerArchive)),
-            sha256 = sha,
-            extract_path = "payload-stub",
-            nested_7z = false)
-        ])
-      let res = resolveBuiltinPackage("no-nested", @[vp])
-      check res.found
-      check (not res.resolution.nested7z)
-      let outR = realizeBuiltinPackage(store, res.resolution)
+      let res = selectArchive("no-nested", [hostRecord(
+        fileToUrl(absolutePath(outerArchive)), "7z", "marker.txt",
+        sha256 = sha, version = "stub-1.0.0", extractPath = "payload-stub",
+        nested7z = false)])
+      check (not res.nested7z)
+      let outR = realizeBuiltinPackage(store, res)
       check (not outR.cacheHit)
       # The .7z file is still in the prefix because nested extract is off.
       check fileExists(extendedPath(outR.prefixAbsolutePath / "binutils-data.7z"))

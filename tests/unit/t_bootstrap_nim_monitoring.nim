@@ -10,6 +10,7 @@ import std/[os, strutils, tempfiles, unittest]
 import repro_tool_profiles
 import repro_interface_artifacts
 import repro_dsl_stdlib/nixpkgs_pin
+import repro_test_support/reasoned_skip
 
 suite "bootstrap Nim monitoring":
   test "Linux uses the pinned compiler channel instead of the static archive":

@@ -49,9 +49,26 @@
   # source. See ./nim-fork.nix for why the stock nixpkgs `nim` cannot be used.
   nimFork ? callPackage ./nim-fork.nix { },
 
+  # The flake supplies its pinned bundle. A nixpkgs-style build uses the same
+  # shared derivation from the pinned source, without depending on flake APIs.
+  macosTools ? if stdenv.isDarwin then callPackage "${macosToolsSrc}/package.nix" { } else null,
+  # This fixed evaluation-time fetch permits importing the shared recipe
+  # without import-from-derivation; the payload is the same pinned source.
+  macosToolsSrc ? builtins.fetchTarball {
+    url = "https://github.com/metacraft-labs/stackable-hooks-macos-tools/archive/1ad378d58776ec9b6cc73e1c27b8e53c15676f03.tar.gz";
+    sha256 = "sha256-l4rPNg0DzGmaNpBpCFGTM6qFAg2Og0HCA5X/yny0/R0=";
+  },
+
   # ── Sources ────────────────────────────────────────────────────────────────
-  # Every entry mirrors a `flake.lock` pin. Bump a rev and its hash together:
-  # set the hash to `lib.fakeHash`, build, and copy the `got:` line.
+  # Every entry mirrors a pin of the `flake.lock` of the commit `src` (below)
+  # names -- NOT of the tree this file sits in, whose lock moves on every
+  # sibling pin refresh -- and the flake check `nixpkgs-package-src-sync`
+  # fails when one does not (rev, and the hash where the lock records a
+  # `narHash`). The defaults change only when `src` moves; move `version`
+  # and every entry with it. The hash is that lock's `narHash`, or
+  # `nix flake prefetch --json github:<owner>/<repo>/<rev>`'s `hash`
+  # (`fetchFromGitHub` and the flake's github fetcher produce the same store
+  # path for the same revision).
   #
   # `src` and `version` are deliberately NOT arguments: `callPackage` fills an
   # argument from the package set whenever the set HAS that name, default or no
@@ -78,14 +95,14 @@
   stackableHooksSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-stackable-hooks";
-    rev = "41ab1b987aba67e8bcc34a5945ac33e17b6418ed";
-    hash = "sha256-Lv0i9MBGkwPFfEaOxB7y9ixwt7dOvJIKj3W4R/BpyOY=";
+    rev = "6522766fb87f60efb503550042f4f066e2a86a9e";
+    hash = "sha256-ZHXfSvZwLk4i4i5PwWRRO68kxfdx9WyyXOotxFgGqsw=";
   },
   ctTraceFormatSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer-trace-format-nim";
-    rev = "bc7c5d256d0a4b1246f9a9bbb51a83071d3d8e26";
-    hash = "sha256-feW0vlgU6JTVkCLnZ1iyS2FwjXQuRCXHr3V+27oyDAw=";
+    rev = "808ffdb4507634c3aba0661d96cbc353420ed856";
+    hash = "sha256-ZKkKNbi9AGJmqPwv6MjbR2EoJm8ytfCikub7r7iAnSg=";
   },
   # THIS DEFAULT HAD DRIFTED 46 COMMITS BEHIND `flake.lock`, and the drift is
   # exactly what the "Every entry mirrors a `flake.lock` pin" note above is
@@ -97,22 +114,19 @@
   # both come from this input, so they at least agreed with each other; what
   # they disagreed with was every capture file and every other build.
   #
-  # Nothing checks this correspondence yet, so until something does: move this
-  # rev and hash whenever `io-mon-src` in flake.nix moves. The hash is the same
-  # value the lock records as `narHash` — `fetchFromGitHub` and the flake's
-  # github fetcher produce the same store path for the same revision, which is
-  # how to confirm a bump is right rather than merely well-formed.
+  # `nixpkgs-package-src-sync` now checks this correspondence against the
+  # `src` commit's lock (see the Sources header above).
   ioMonSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "io-mon";
-    rev = "e75019940be4722fcaf11f1b239de37adae54f41";
-    hash = "sha256-ZhlF06zxG00Ieaakuh0TCw1SUZv7Y9L7nwIL9k0TlZo=";
+    rev = "295a2e518325440698de013663dab8deeef1dc19";
+    hash = "sha256-Ra6qEQfxHnYgPGTjz/0wZbSfLdnHy/B/HFdSvw8d+7I=";
   },
   shmGsetSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-shm-gset";
-    rev = "c646982b354cb5b1fa8734f94b951a660419d75c";
-    hash = "sha256-nO7XSWxBWrLgL8d9q1zhTcGMMjGokZKjYtX9byb9/Vk=";
+    rev = "c9048e9a7e0ba2b11c1ec137acc5fc2c0bcfec27";
+    hash = "sha256-XhSstf5oG7LjRSlpM2RsiNwwFe/+y5vrPvnZHWPm6H8=";
   },
   shmQueueSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -123,20 +137,20 @@
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer";
-    rev = "033f00a1d9df8d7e2cb0368010746acc272a9dce";
-    hash = "sha256-L5N0v9haMBtmCjkt3aw4V6dBPPJqqHY17YZL2Muedsk=";
+    rev = "47eda1fd580a17099541ead32f5528cb2e37bdc0";
+    hash = "sha256-NCo4cE84K6qeuUsJxhjWuMojq20nBmaE/oEmtdcR2UA=";
   },
   ctTestRunnerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "reprobuild-ct-test-runner";
-    rev = "397fc59ed3e3d8f774523a6723782c535aaabe58";
-    hash = "sha256-Ndf8zh1QB1AeNb+2w0vmMP5UVzakJxj2z4Sv50FfSIQ=";
+    rev = "69167f4226e0faca4fb64cb0e913c7b49eddf853";
+    hash = "sha256-n2acAPw0rBma3KsdKagKpoMKOa2baq5F7xMLVaofIFQ=";
   },
   testAdaptersSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "reprobuild-test-adapters";
-    rev = "360cd50767e548556a0a7510d879f28c87eb3e34";
-    hash = "sha256-mj1z79GUGcOOVzADqIo9toLwM0k5xIHaLstKl4a9u64=";
+    rev = "b0fc1bcb9c2f1cb6a7fc3a558592ae7051782c24";
+    hash = "sha256-bDuj7DYj2nZtvG0em05EMy6/hK/RWIE917GHHZPq62Y=";
   },
   # Source only. reprobuild compiles `runquota_client`/`_codec`/`_core`/`_ipc`/
   # `_process`/`_protocol` out of this tree; it does not build or ship
@@ -145,8 +159,8 @@
   runquotaSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "runquota";
-    rev = "3590066e9c9dc82ca758ff2d7918f3b6f8304f35";
-    hash = "sha256-KD47AShW5Y8trE9vY4WrPtk/ot6qagq3p4vhPw/mQBU=";
+    rev = "86bf4711f6ad4800d739b3e2c402ae657fdc6033";
+    hash = "sha256-2Eeklpwigtf/MnbBPIQqIDUg9BjEUgsd/sl/yPSb5vU=";
   },
 }:
 let
@@ -198,13 +212,19 @@ stdenv.mkDerivation (finalAttrs: {
   # forbids. reprobuild's flake overrides it with the value it parses from the
   # nimble manifest, and `checks.nixpkgs-package-version-sync` fails the build
   # if this literal and the manifest disagree, so the two cannot drift silently.
-  version = "0.1.3";
+  version = "0.2.5";
 
+  # The default source: a published commit whose `reprobuild.nimble` carries
+  # `version` above and whose `flake.lock` pins the `*Src` defaults above
+  # (`nixpkgs-package-src-sync` checks both, fetching this commit by its
+  # hash). Move all three together (reprobuild's flake overrides it with its
+  # own tree; the metacraft-labs/nixpkgs fork overrides it with the release
+  # tag, see nix/README.md).
   src = fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "reprobuild";
-    rev = "f314140067a25fe53acc199481fb115aa1c6be7b";
-    hash = "sha256-CLNxSZCVI1Qj8ggpKzgh4ytUeT0Q47XKMbFjsDZsh5E=";
+    rev = "0bfb3e41e543965d3d0bd02d41f3b97dccf6928b";
+    hash = "sha256-hfSuxLp0uml4C+AC7yPWGovfX+A2qxzMQOtOKy41owM=";
   };
 
   strictDeps = true;
@@ -249,6 +269,7 @@ stdenv.mkDerivation (finalAttrs: {
   ];
 
   env = {
+    STACKABLE_HOOKS_BUILT_TOOLS_DIR = if stdenv.isDarwin then "${macosTools}" else "";
     BLAKE3_PREFIX = "${blake3Prefix}";
     NIMCRYPTO_SRC = "${nimcryptoSrc}";
     BEARSSL_SRC = "${bearsslSrc}";
@@ -479,6 +500,23 @@ stdenv.mkDerivation (finalAttrs: {
       runtimeLibraryPath
       nimFork
       ;
+    # The source arguments as given, read back by the flake check
+    # `nixpkgs-package-src-sync` to compare the defaults with `flake.lock`.
+    sources = {
+      inherit
+        nimcryptoSrc
+        bearsslSrc
+        stackableHooksSrc
+        ctTraceFormatSrc
+        ioMonSrc
+        shmGsetSrc
+        shmQueueSrc
+        codetracerSrc
+        ctTestRunnerSrc
+        testAdaptersSrc
+        runquotaSrc
+        ;
+    };
   };
 
   meta = {
@@ -487,10 +525,10 @@ stdenv.mkDerivation (finalAttrs: {
     license = lib.licenses.mit;
     mainProgram = "repro";
     maintainers = [ ];
+    # nixpkgs 26.11 dropped x86_64-darwin (see flake.nix `systems`).
     platforms = [
       "x86_64-linux"
       "aarch64-linux"
-      "x86_64-darwin"
       "aarch64-darwin"
     ];
   };

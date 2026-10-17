@@ -22,11 +22,12 @@
 ## Phase A constructor names are themselves derived from the M69
 ## `SystemResourceKind` string-enum values.
 
-import std/[strutils, tables]
+import std/[algorithm, strutils, tables]
 
 import repro_elevation
 import repro_profile
 import repro_infra
+import ./resource_scope
 
 proc fieldString(r: ResourceIntent; key: string;
                  default: string = ""): string =
@@ -652,30 +653,10 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
     deps.add((kind: d.kind, name: d.name))
   result.dependsOn = deps
 
-proc isSystemScopeResource(kind: string): bool =
-  ## System-scope resource kinds (M69 + M82). The home-scope kinds
-  ## (env.userPath, env.userVariable, fs.managedBlock, shell.integration,
-  ## windows.registryValueHKCU, windows.startup, fs.userFile) are
-  ## filtered out and handled by the home adapter instead.
-  case kind
-  of "windows.registryValueHKLM",
-     "windows.optionalFeature", "windows.capability",
-     "windows.service", "windows.scheduledTask",
-     "windows.vsInstaller",
-     "windows.firewallRule", "windows.acl",
-     "macos.systemDefault", "systemd.systemUnit",
-     "launchd.systemDaemon", "fs.systemFile", "fs.systemDirectory",
-     "env.systemVariable", "passwd.user",
-     "os.timezone", "os.hostname",
-     "linux.sysctl", "linux.udevRule", "linux.polkitRule",
-     "linux.tmpfilesRule", "linux.sudoersRule",
-     "passwd.group", "linux.nixDaemonSetting",
-     "systemd.systemTimer", "linux.firewallRule",
-     "linux.nixosSystemModule", "macos.darwinSystemModule",
-     "linux.fhsSandbox":
-    true
-  else:
-    false
+proc systemResourceLabel(r: ResourceIntent): string =
+  ## `pkg.homebrewCask `ghostty`` -- the kind, and the address when it has
+  ## one, the way the planner's other diagnostics name a resource.
+  r.kind & (if r.address.len > 0: " `" & r.address & "`" else: "")
 
 proc profileIntentToSystemProfile*(p: ProfileIntent): SystemProfile =
   ## Build a `SystemProfile` value equivalent to what
@@ -685,11 +666,96 @@ proc profileIntentToSystemProfile*(p: ProfileIntent): SystemProfile =
   ## resource stanzas).
   ##
   ## Mapping:
-  ##   ProfileIntent.resources filtered to system-scope kinds ->
+  ##   ProfileIntent.resources (system-scope kinds) ->
   ##     seq[SystemResource] with SystemResourceKind tags + per-kind fields.
+  ##   A resource of any other kind is refused, naming it (see below).
+  # GM4: data-file rows expand into ACTIVITIES, which system scope does not
+  # have. Ignoring the `data:` section would leave its rows declared but
+  # never applied while the run reports success (Core-Invariants.md
+  # §Unrecognised Input Is Rejected, Not Skipped); refuse instead.
+  if p.dataFiles.len > 0:
+    raise newException(ValueError,
+      "system profiles do not read plan-time data files (`data:` declares " &
+      p.dataFiles.join(", ") & "); data rows expand into activities, " &
+      "which only home profiles have")
+  # System profiles carry no package references yet, so there is nothing
+  # an imported contribution catalog could reach; accepting the section
+  # would make it look effective (Core-Invariants.md §Unrecognised Input Is
+  # Rejected, Not Skipped).
+  if p.catalogImports.len > 0:
+    raise newException(ValueError,
+      "system profiles do not import contribution catalogs (`catalogs:` " &
+      "declares " & p.catalogImports.join(", ") & "); catalogs serve " &
+      "package references, which only home profiles have")
+  # GM11: a `stow:` block claims `stow/` packages, which only a home apply
+  # materializes; a system profile has no stow tree to scope, so the block
+  # would look effective and do nothing (Core-Invariants.md §Unrecognised
+  # Input Is Rejected, Not Skipped).
+  if p.stowScopes.len > 0:
+    raise newException(ValueError,
+      "system profiles have no `stow/` tree: activity `" &
+      p.stowScopes[0].activity & "` claims stow package `" &
+      p.stowScopes[0].package & "`; declare `stow:` blocks in the home " &
+      "profile")
+  # GM10: who manages a host's system is an attribute of the host registry,
+  # which is the home profile's `hosts:` (Gradual-Nix-To-Reprobuild-
+  # Migration.md §Hosts). `repro infra` reads it from there; a `system:`
+  # key in a system profile's own `hosts:` would be read by nothing and
+  # look effective, so it is refused (Core-Invariants.md §Unrecognised Input
+  # Is Rejected, Not Skipped).
+  if p.systemManagedElsewhere.len > 0:
+    var hosts: seq[string]
+    for h in p.systemManagedElsewhere.keys:
+      hosts.add h
+    hosts.sort()
+    raise newException(ValueError,
+      "a system profile's `hosts:` cannot say who manages a host's system " &
+      "(`system: managedElsewhere` for " & hosts.join(", ") & "); declare " &
+      "it in the home profile's `hosts:` registry, which `repro infra " &
+      "plan` / `apply` read")
   for r in p.resources:
-    if not isSystemScopeResource(r.kind):
-      continue
+    # A resource the system planner does not apply is refused, naming it,
+    # rather than left out. Leaving it out is how the `pkg.homebrewCask`
+    # resources a macOS system profile declared were never installed by
+    # `repro infra apply` while it reported success (Core-Invariants.md
+    # §Unrecognised Input Is Rejected, Not Skipped). The home adapter
+    # refuses the converse; both read `resource_scope.resourceScope`.
+    case resourceScope(r.kind)
+    of rsSystem:
+      discard
+    of rsHome:
+      raise newException(ValueError,
+        "system profile resource " & systemResourceLabel(r) & " is " &
+        "home-scope: the system planner (`repro infra apply`) does not " &
+        "apply it. Declare it in the home profile (`home.nim`, applied by " &
+        "`repro home apply`)")
+    of rsUnknown:
+      raise newException(ValueError,
+        "system profile resource " & systemResourceLabel(r) & " has a " &
+        "kind that neither the home nor the system planner applies")
+    # A runtime guard (`when linux():` around a resource, GM3) is
+    # evaluated by the HOME planner. System scope has no host selection
+    # (no activities, no per-host evaluation of predicates) and whether it
+    # gets one is undecided, so the system path would apply a guarded
+    # system resource on every host; refuse, naming the resource and the
+    # guard, instead of dropping the guard.
+    if r.guard.expr.len > 0:
+      raise newException(ValueError,
+        "system-scope resource " & r.kind &
+        (if r.address.len > 0: " `" & r.address & "`" else: "") &
+        " is under a runtime predicate `" & r.guard.expr & "`; system " &
+        "profiles do not evaluate runtime predicates (system scope has no " &
+        "host selection) -- use a compile-time `when defined(...)` for " &
+        "system-scope resources")
+    # GM9: activities are a home-profile layer. A system profile has none to
+    # select, so an activity-scoped system resource would apply on every
+    # host; refuse instead of dropping the scope.
+    if r.activity.len > 0:
+      raise newException(ValueError,
+        "system-scope resource " & r.kind &
+        (if r.address.len > 0: " `" & r.address & "`" else: "") &
+        " belongs to activity `" & r.activity & "`; system profiles have " &
+        "no activities to select it with")
     result.resources.add(buildSystemResource(r))
 
 # ---------------------------------------------------------------------------

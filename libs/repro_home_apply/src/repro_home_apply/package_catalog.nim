@@ -1,52 +1,51 @@
-## M72 Deliverable 1: production package catalog.
+## Profile package resolution (GM4b).
 ##
-## `repro home apply` must realize packages WITHOUT the
-## `REPRO_TEST_PACKAGE_*` seams set. This module resolves a
-## `PlannedPackage` reference against the REAL adapter catalog of the
-## host environment.
+## A home profile's ``package "<name>"`` reference resolves through the same
+## selection as a recipe's ``uses: "<name>"`` (Provisioning-Contributions.md
+## §"Profile Package References"; Gradual-Nix-To-Reprobuild-Migration.md
+## §Decision): the canonical package definition and its provisioning
+## contributions, filtered for the target platform and selected by a policy,
+## through ``repro_tool_profiles/realization_selection.selectRealization`` —
+## the one implementation both callers use.
 ##
-## On Windows the preferred production adapter is Scoop: a package is a
-## Scoop package if it is installed (`scoop list`) OR available in a
-## configured Scoop bucket (the bucket directory holds an `<app>.json`
-## manifest). The M55 Scoop adapter
-## (`repro_tool_profiles.resolveScoopTool`) performs the actual
-## realization; this module only decides the binding and computes the
-## cache-hit determination.
+## This module supplies what is specific to the PROFILE caller:
 ##
-## On macOS/Linux the first production adapter is PATH: a package whose
-## executable name is already discoverable on PATH is recorded through
-## the universal path adapter. This prepares the non-Windows home apply
-## path without pretending to have a full package-manager catalog yet.
+## * the candidate records — ``profileToolUse`` projects the reference
+##   exactly as interface extraction projects a recipe's ``uses:``
+##   (``toProjectInterface`` over the definitions the engine links through
+##   ``repro_dsl_stdlib/package_registry`` and their contributions);
+## * the profile's target (``profileRealizationTarget``) and selection policy
+##   (``selectionPolicyFor``, from ``adapterPreference:``);
+## * the host inventory a profile may consult: PATH everywhere, and on a
+##   Windows host the Scoop installed-app table and bucket manifests
+##   (``ScoopHostInventory``);
+## * the shape the home archive realizer consumes (``ArchiveRealization``)
+##   for a ``tarball`` selection that needs it.
 ##
-## Cache-hit rule (per the M72 deliverable text): an app already
-## installed at a version satisfying the profile is a cache-hit — it is
-## recorded as realized, NOT reinstalled. The M55 adapter already reuses
-## an existing `apps/<app>/<version>/` directory without re-running
-## `scoop install`; this module classifies the outcome BEFORE dispatch
-## by probing the Scoop install tree, so the apply pipeline can report
-## `cache-hit` vs `realize` and the gate can assert no `scoop install`
-## ran for an already-installed app.
+## Before GM4b this module held a per-platform adapter chain that read a
+## second copy of the archive realizations (the ``<tool>Catalog`` records).
+## Both are gone; see Core-Invariants.md §"One Implementation Per Concern".
 ##
-## Resolution precedence (M72): an explicit `REPRO_TEST_PACKAGE_*`
-## override is a TEST-ONLY seam and wins over this production catalog.
-## The dispatcher in `realize.nim` consults the env seams first; this
-## module is the fallback path for packages with no seam binding.
-##
-## Efficiency: `scoop list` is queried ONCE per apply (the installed-app
-## table is built lazily and memoized inside `ProductionCatalog`), not
-## once per package.
+## The host-target detection below (microarchitecture level and features) is
+## unchanged PMC-2..PMC-4 machinery: it decides what the host PROVIDES, which
+## the selection then compares against each archive's floor.
 
 import std/[json, options, os, osproc, sets, strutils, tables]
 from repro_core/paths import extendedPath
 
-# M64: the cakBuiltin adapter resolves against the M63 VersionedProvisioning
-# catalog. We import the schema (cross-platform; no Windows-only deps).
+import repro_project_dsl
+import repro_interface_artifacts
 import repro_dsl_stdlib/packages_schema
-# M65: the adapter chain consults the built-in catalog registry to
-# look up `<tool>Catalog` literals for a given tool name. The registry
-# is the single point of truth for "which tools have a built-in catalog
-# entry"; the chain walks it via `getCatalog(toolName)`.
-import repro_dsl_stdlib/catalog_registry
+import repro_dsl_stdlib/package_registry
+import repro_tool_profiles/realization_selection
+
+import ./catalog_projection
+from repro_home_resources/drivers/app_bundle import installerProductPathError
+
+export packages_schema
+export catalog_projection
+export realization_selection
+export package_registry.packageAvailability
 
 # M80: the plan classifier and the apply-time Scoop adapter
 # (`repro_tool_profiles.resolveScoopTool`) share ONE installed-version
@@ -65,150 +64,34 @@ const
     ## collide with `realize.nim`'s own `ScoopOverrideEnvVar*`.
 
 type
-  CatalogAdapterKind* = enum
-    cakPath = "path"
-    cakScoop = "scoop"
-    cakBuiltin = "builtin"
-      ## M64: a tool resolved against a checked-in
-      ## ``<tool>Catalog: seq[VersionedProvisioning]`` literal under
-      ## ``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/``.  The
-      ## adapter downloads the slice URL, verifies the SHA, extracts
-      ## per ``archive_format``, and materializes the bytes directly
-      ## into a content-addressed prefix.  See M63's
-      ## ``packages_schema.nim`` and the M64 ``builtin_adapter`` module
-      ## for the realization flow.
-    cakNix = "nix"
-      ## M65: placeholder for the M21 Nix profile adapter. The M65
-      ## adapter chain accepts ``cakNix`` in the preference list and
-      ## skips it cleanly when the realize-side Nix adapter is not
-      ## present (the parallel work in ``libs/repro_home_*`` will land
-      ## the production Nix branch). Listing ``cakNix`` here keeps the
-      ## chain configuration future-proof so a host can declare
-      ## ``adapter_preference: [nix, builtin, path]`` today without a
-      ## schema migration when the Nix branch lands.
-
-  ChainStepOutcome* = enum
-    ## M65: the per-step verdict the selection chain records in its
-    ## trace. ``csoResolved`` is the terminating outcome; the other
-    ## variants are skip reasons that drive the structured
-    ## diagnostic when the entire chain is exhausted.
-    csoResolved = "resolved"
-    csoAdapterUnavailable = "adapter-unavailable"
-      ## The adapter is platform-incompatible (cakScoop on Linux),
-      ## missing a host binary (cakScoop without ``scoop`` on PATH), or
-      ## not yet implemented (cakNix today). The chain moves on.
-    csoCatalogMiss = "catalog-miss"
-      ## cakBuiltin specific: the tool has no entry in the M65 catalog
-      ## registry, or the registered catalog is empty.
-    csoToolNotFound = "tool-not-found"
-      ## cakPath / cakScoop specific: the executable is not discoverable
-      ## on PATH and no bucket manifest carries it.
-    csoSchemaError = "schema-error"
-      ## cakBuiltin specific: ``resolveBuiltinPackage`` returned a
-      ## structured error (platform-not-supported, schema-invalid,
-      ## version-not-in-catalog). The chain moves on with the detail
-      ## captured in the trace.
-
-  ChainStep* = object
-    ## M65: one step of the adapter selection chain. The full
-    ## ``chainTrace`` is attached to ``CatalogResolution.chainTrace``
-    ## (on a hit, the trace ends at the resolving step; on miss the
-    ## chain reports ``EAdapterChainExhausted`` carrying every step).
-    adapter*: CatalogAdapterKind
-    outcome*: ChainStepOutcome
-    reason*: string
-    capabilityShortfall*: bool
-      ## PMC-4 — this adapter had the package and REFUSED it because the host
-      ## cannot execute what it offers (``breMicroarchFloorNotSatisfied``), as
-      ## opposed to not having it at all.
-      ##
-      ## The distinction is the whole point. "I don't have it" is a reason to
-      ## try the next adapter. "I have it and this machine cannot run it" is
-      ## not: the next adapters include ``cakPath``, which probes PATH for a
-      ## SAME-NAMED executable, and resolving to that looks like success while
-      ## delivering a binary nobody declared. That is PMC-1's
-      ## silent-fallthrough hazard in new clothing, and it is why this is a
-      ## typed field rather than a substring of ``reason`` -- a diagnostic
-      ## string is not a control-flow signal, and sniffing one would break the
-      ## first time the wording changed.
-
-  CatalogResolution* = object
-    ## The production catalog's verdict for one package reference.
+  ArchiveRealization* = object
+    ## A selected ``tarball`` realization in the shape the home archive
+    ## realizer (``builtin_adapter.realizeBuiltinPackage``) consumes.
+    ## Built by ``archiveRealizationOf`` from the selected record — it is a
+    ## projection of that record, never a second source of truth.
     packageId*: string
-    adapter*: CatalogAdapterKind
-    bucket*: string
     app*: string
-    resolvedVersion*: string         ## the version the catalog resolved
+    resolvedVersion*: string         ## the record's version, when declared
     executableName*: string
-    sourcePath*: string              ## path-adapter executable source
-    installed*: bool                 ## already present in the Scoop tree
-    cacheHit*: bool                  ## installed AND version-satisfying
-    searchedCatalogs*: seq[string]   ## buckets / sources searched
-    # M64 cakBuiltin fields — populated by `resolveBuiltinPackage`. They
-    # carry the realization inputs forward so `realizeBuiltinPackage`
-    # does not need to re-resolve the slice.
-    builtinVersion*: string          ## VersionedProvisioning.version
+    cacheHit*: bool                  ## set by the realizer when the CAS
+                                     ## prefix already exists
+    builtinVersion*: string          ## the record's ``detail.version``
     builtinCpuLevel*: MicroarchLevel
-                                     ## PMC-2: the microarchitecture FLOOR of
-                                     ## the arm that was selected, or
-                                     ## ``mlNone`` when it declared none
-                                     ## (every catalog entry today). Recorded
-                                     ## because "which target did this
-                                     ## resolve for" stops being a property
-                                     ## of the host alone once selection
-                                     ## depends on it.
-                                     ##
-                                     ## Deliberately NOT wired into any lock
-                                     ## identity or cache key here — that is
-                                     ## PMC-4's named deliverable and doing
-                                     ## it early would change key material
-                                     ## without the tests that make the
-                                     ## change safe. This field is the datum
-                                     ## PMC-4 will read.
+                                     ## PMC-2: the microarchitecture FLOOR the
+                                     ## selected record declared, or
+                                     ## ``mlNone``.
     builtinCpuFeatures*: set[CpuFeature]
                                      ## PMC-3: the extra extensions the
-                                     ## selected arm declared beyond its
-                                     ## floor, or ``{}`` (every catalog entry
-                                     ## today). Recorded for the same reason
-                                     ## ``builtinCpuLevel`` is, and under the
-                                     ## same restriction: NOT wired into any
-                                     ## lock identity or cache key here — that
-                                     ## is PMC-4's named deliverable.
-                                     ##
-                                     ## The arm's DECLARED set, not its
-                                     ## expansion: what the author wrote is
-                                     ## what a lock entry should record, and
-                                     ## the expansion is recoverable from it
-                                     ## via ``requiredFeatures``.
+                                     ## selected record declared beyond its
+                                     ## floor (the DECLARED set, not its
+                                     ## expansion).
     resolvedTarget*: string
-                                     ## PMC-4: ``builtinCpuLevel`` and
-                                     ## ``builtinCpuFeatures`` rendered as
-                                     ## ONE string by
-                                     ## ``renderResolvedTarget`` — the exact
-                                     ## value that goes into a lock entry
-                                     ## (``LockedPackage.target``) and into a
-                                     ## binary-cache key
-                                     ## (``PlatformTriple.microarch``).
-                                     ##
-                                     ## A derived field rather than a fourth
-                                     ## source of truth: it is a pure
-                                     ## function of the two above, computed
-                                     ## HERE so that the lock writer and the
-                                     ## cache-key deriver cannot each invent
-                                     ## their own spelling of the same
-                                     ## resolution. Two spellings would
-                                     ## separate entries that are in fact
-                                     ## interchangeable, which is a silent
-                                     ## cache miss — quieter than the SIGILL
-                                     ## this milestone prevents, and just as
-                                     ## hard to attribute.
-                                     ##
-                                     ## ``""`` for every catalog entry today,
-                                     ## which is what makes the whole change
-                                     ## byte-neutral for existing keys and
-                                     ## identities.
-    urlUsed*: string                 ## PlatformBinary.url chosen for host
-    digestAlgorithm*: string         ## "sha256" | "sha512"
+                                     ## PMC-4: ``renderResolvedTarget`` of the
+                                     ## two above — the single spelling a lock
+                                     ## entry and a cache key use. ``""`` for a
+                                     ## record that declares no floor.
+    urlUsed*: string
+    digestAlgorithm*: string         ## "sha256" | "sha512" | "sha1"
     digestValue*: string             ## hex digest (lowercase)
     archiveFormat*: ArchiveFormat
     installMethod*: InstallMethod
@@ -218,136 +101,76 @@ type
     pacmanPackages*: seq[string]
     bootstrapArgv*: seq[string]
     envSubstitutions*: seq[tuple[name, value: string]]
-    # M3 (Realize-Closure-And-Catalog-Expansion) — residual 7z family
-    # metadata. ``nested7z`` is per-platform (carried out of the
-    # selected ``PlatformBinary``); ``preInstallActions`` and
-    # ``preInstallUnrecognized`` are per-version (cross-platform).
     nested7z*: bool
     preInstallActions*: seq[PreInstallAction]
     preInstallUnrecognized*: seq[string]
-    # M4 (Realize-Closure-And-Catalog-Expansion) — per-platform MSI
-    # admin-install override. When true, the realize loop uses
-    # ``msiexec /a`` instead of ``dark.exe`` for MSI extraction. The
-    # global ``CAKBUILTIN_PREFER_MSIEXEC=1`` env var has the same
-    # effect; this flag is the per-(cpu, os) override.
     msiAdminInstall*: bool
-    # M5 (Realize-Closure-And-Catalog-Expansion) — Scoop-style launcher
-    # emit. After extract / install_method dispatch, the realize loop
-    # walks this sequence and synthesizes one .ps1 + one .cmd launcher
-    # per spec at ``<prefix>/bin/<launcher_name>.{ps1,cmd}`` invoking
-    # the discovered interpreter against the spec's prefix-relative
-    # ``target``. Composer's .phar wrap is the M5 anchor case.
+      ## When true the realize loop uses ``msiexec /a`` instead of
+      ## ``dark.exe`` for MSI extraction (the per-record form of the global
+      ## ``CAKBUILTIN_PREFER_MSIEXEC=1``).
     launcherEmit*: seq[LauncherEmitSpec]
-    # M65: per-resolution chain trace. Populated by `chainResolvePackage`
-    # to record every adapter consulted, in order, with each adapter's
-    # outcome + skip reason. On a successful resolution the trace ends
-    # at the resolving step (the final entry has
-    # `outcome == csoResolved`); on an exhaustion the trace carries
-    # every step the chain walked before raising. Empty for the legacy
-    # `resolvePackage(cat, packageId)` signature (which does not run
-    # the chain — it preserves the pre-M65 single-adapter behaviour
-    # for callers that have not yet been migrated).
-    chainTrace*: seq[ChainStep]
+    appBundle*: string
+      ## GM4c: the ``.app`` bundle's path inside the archive, for an
+      ## ``imAppBundle`` record (Store-And-Installation-Layout.md § macOS
+      ## Application Bundles). With ``bundleId`` / ``teamId`` and the
+      ## record's version it is what the realizer verifies. For a macOS
+      ## installer application it is the product bundle's path inside the
+      ## installed prefix (§ Installer applications).
+    bundleId*: string
+    teamId*: string
+    installerApp*: string
+      ## The installer application's path inside the archive, for a macOS
+      ## ``imInstallerSilent`` record (Store-And-Installation-Layout.md
+      ## § Installer applications); "" for a Windows installer.
 
-  EUnknownPackage* = object of CatchableError
-    ## Raised when a package reference resolves to no production
-    ## adapter catalog. Carries the package name and the list of
-    ## catalogs searched so the apply pipeline can surface a
-    ## structured diagnostic.
-    packageId*: string
-    searchedCatalogs*: seq[string]
+  ArchiveRoute* = enum
+    ## Which realizer a ``tarball`` selection goes to (see
+    ## ``realization_selection.archiveInstallerFeatures``).
+    arExtract = "tarball"
+      ## A plain archive: the ``uses:`` provisioning edge
+      ## (``repro_tool_profiles.resolveTarballTool``) realizes it, exactly as
+      ## it does for a recipe.
+    arInstaller = "builtin"
+      ## Installers, MSYS2 packages, pre-install steps, launcher emission:
+      ## the home archive realizer (``builtin_adapter``).
 
-  EAdapterChainExhausted* = object of CatchableError
-    ## M65: every adapter in the configured chain was tried and none
-    ## resolved the package. The exception carries the package id, the
-    ## chain that was walked, and the full chain trace (one
-    ## ``ChainStep`` per adapter consulted) so the CLI layer can render
-    ## a per-adapter skip-reason diagnostic. The ``--plan`` extension
-    ## reads ``chainTrace`` directly to render its plan classifier.
-    packageId*: string
-    chain*: seq[CatalogAdapterKind]
-    chainTrace*: seq[ChainStep]
-
-  EPackageUnavailableOnPlatform* = object of CatchableError
-    ## PMC-1 (Platform-And-Microarchitecture-Constraints): the package
-    ## DECLARED, via a package-level ``platforms:`` block, that it cannot
-    ## exist on this host.
-    ##
-    ## Distinct from ``EAdapterChainExhausted`` on purpose, and that is the
-    ## whole milestone. Chain-exhausted means "no adapter could supply this
-    ## package HERE, YET" and its remediation — catalogue it, put it on PATH,
-    ## reorder ``adapter_preference:`` — is advice a reader can act on. For a
-    ## Windows package manager on Linux every one of those is impossible, and
-    ## the old message sent the reader to add a Linux arm for a tool that has
-    ## no POSIX build. This error names the reason instead, and carries the
-    ## author's own ``msg`` when the declaration supplied one.
-    packageId*: string
-    declaredPlatforms*: string
-      ## Rendered form of the declaration, e.g. ``windows only``.
-    hostTarget*: string
-      ## Rendered form of the host, on the same axes, e.g. ``linux``.
-    authorMessage*: string
-
-  ProductionCatalog* = object
-    ## Per-apply catalog handle. Built once; the installed-app table
-    ## and the bucket inventory are memoized so a multi-package apply
-    ## shells out to `scoop` at most once.
+  ScoopHostInventory* = ref object
+    ## Per-apply handle on the host's Scoop: installed apps and configured
+    ## bucket manifests. The installed-app table and the bucket list are
+    ## memoized, so a multi-package apply shells out to `scoop` at most once.
     scoopRoot: string
     scoopExe: string
     installedQueried: bool
     installedApps: Table[string, string]   ## app -> installed version
     buckets: seq[string]                   ## configured bucket names
 
-proc raiseUnknownPackage*(packageId: string;
-                          searched: seq[string]) {.noreturn.} =
-  var e = newException(EUnknownPackage,
-    "no production adapter catalog knows package '" & packageId &
-    "'. Searched: " &
-    (if searched.len > 0: searched.join(", ") else: "<no catalogs configured>") &
-    ". Make the executable available on PATH, declare the package in a " &
-    "configured platform catalog (Scoop on Windows), or set " &
-    "REPRO_TEST_PACKAGE_SOURCE / REPRO_TEST_PACKAGE_SCOOP for a test-only " &
-    "adapter binding.")
-  e.packageId = packageId
-  e.searchedCatalogs = searched
-  raise e
+  ProfilePackageResolution* = object
+    ## A profile reference resolved for one target.
+    packageId*: string
+    requestedVersion*: string
+    selection*: RealizationSelection
+    useDef*: InterfaceToolUse
+      ## The reference projected as a ``uses:``, NARROWED to the selected
+      ## record, so a realizer handed it cannot select something else.
+    archiveRoute*: ArchiveRoute
+    archive*: ArchiveRealization
+      ## Populated for a ``tarball`` selection routed to ``arInstaller``.
+    cacheHit*: bool
+      ## Already present on the host: a PATH selection, or a Scoop app
+      ## installed at a satisfying version.
+    installedVersion*: string
 
 # ---------------------------------------------------------------------------
 # Host target detection
 # ---------------------------------------------------------------------------
 #
-# Declared here rather than beside the M64 built-in resolver because BOTH
-# resolution entry points (the legacy ``resolvePackage`` below and M65's
-# ``chainResolvePackage``) take the host target as a DEFAULTED PARAMETER, and
-# a default expression can only name something already declared. Keeping that
-# seam is a hard requirement of the Platform-And-Microarchitecture-Constraints
-# campaign: every platform test passes a SYNTHETIC host through these
+# Every platform test passes a SYNTHETIC target through the resolver's
 # parameters, so the suite runs identically on any machine. Do not convert
 # them into a global lookup.
 
-proc detectHostCpu*(): PlatformCpu =
-  ## Map the Nim `hostCPU` token to the schema's `PlatformCpu` enum.
-  ## Unknown CPUs fall through to `pcAny` (the realize loop will then
-  ## look for an arch-independent slice; if none exists,
-  ## `selectPlatformBinary` reports `found=false`).
-  when defined(amd64) or defined(x86_64):
-    pcX86_64
-  elif defined(arm64) or defined(aarch64):
-    pcAArch64
-  elif defined(i386) or defined(i686) or defined(x86):
-    pcX86
-  else:
-    pcAny
-
-proc detectHostOs*(): PlatformOs =
-  when defined(windows):
-    poWindows
-  elif defined(linux):
-    poLinux
-  elif defined(macosx) or defined(osx):
-    poMacos
-  else:
-    poAny
+# ``detectHostCpu``, ``detectHostOs`` and ``baselineMicroarchLevel`` live in
+# ``repro_dsl_stdlib/packages_schema`` (GM4b) so the realization selector in
+# ``repro_tool_profiles`` names the host the same way; re-exported above.
 
 const HostMicroarchLevelEnvVar* = "REPRO_HOST_MICROARCH_LEVEL"
   ## PMC-2 deliverable 2, the override half: the microarchitecture level
@@ -368,25 +191,6 @@ const HostMicroarchLevelEnvVar* = "REPRO_HOST_MICROARCH_LEVEL"
   ## loudly rather than ignored: silently falling back to the baseline
   ## would turn a typo in a runner label into a fleet that thinks it is
   ## v1 and quietly stops using every optimised artifact.
-
-proc baselineMicroarchLevel*(family: PlatformCpu): MicroarchLevel =
-  ## The level a CPU family provides BY DEFINITION, with no probing.
-  ##
-  ## ``x86_64`` is exactly ``x86-64-v1``: v1 is the psABI baseline every
-  ## amd64 chip implements, so claiming it needs no detection. Anything
-  ## above it does — v2/v3/v4 are feature-set questions and host FEATURE
-  ## DETECTION is PMC-3's named deliverable, not this one's. Until then a
-  ## host that can run more says so through
-  ## ``REPRO_HOST_MICROARCH_LEVEL``.
-  ##
-  ## Defaulting low rather than high is the same decision Package-Model.md
-  ## §"Two hazards specific to this project" reaches for the cache: Spack
-  ## optimises for the build host and its binaries famously do not run
-  ## elsewhere. A conservative floor costs peak performance and buys cache
-  ## entries that are actually reusable across a fleet.
-  case family
-  of pcX86_64: mlX86_64_v1
-  of pcAny, pcAArch64, pcX86: mlNone
 
 const DefaultTargetFloorEnvVar* = "REPRO_DEFAULT_TARGET_FLOOR"
   ## PMC-4 deliverable 3, the central half: the floor an artifact is BUILT to
@@ -893,43 +697,12 @@ proc detectHostTarget*(): PlatformTarget =
   ## for `buildMachineTarget()` when you mean the machine doing the work.
   hostTarget()
 
-proc raisePackageUnavailableOnPlatform*(packageId: string;
-                                        availability: PackageAvailability;
-                                        hostCpu: PlatformCpu;
-                                        hostOs: PlatformOs) {.noreturn.} =
-  ## PMC-1: the package declared where it can exist and this host is not in
-  ## that set. The message NAMES the reason — "chocolatey is declared for
-  ## windows only; this host is linux" — because the remediation for a
-  ## declared unavailability is categorically different from the remediation
-  ## for a missing catalog entry, and the reader cannot tell the two apart
-  ## from a chain trace.
-  ##
-  ## The advice deliberately does NOT mention PATH. Putting a same-named
-  ## binary on PATH is exactly the silent-wrong-thing this milestone closes:
-  ## it would resolve to something nobody declared.
-  let declared = availability.describeDeclaredPlatforms()
-  let host = availability.describeHostTarget(hostCpu, hostOs)
-  var text = packageId & " is declared for " & declared &
-    "; this host is " & host & "."
-  if availability.message.len > 0:
-    text.add(" " & availability.message)
-  text.add(" This is a declared platform constraint (`platforms:` on the " &
-    "package), not a missing catalog entry: no adapter can supply it here. " &
-    "Guard the dependency at the point of use (`when defined(windows):` " &
-    "around the `uses:` entry) if it is genuinely optional, or widen the " &
-    "package's `platforms:` if it really does exist on this platform.")
-  var e = newException(EPackageUnavailableOnPlatform, text)
-  e.packageId = packageId
-  e.declaredPlatforms = declared
-  e.hostTarget = host
-  e.authorMessage = availability.message
-  raise e
 
 # ---------------------------------------------------------------------------
 # M0 (Realize-Layer-Plumbing-Closures spec) — extractor-discovery edges
 # ---------------------------------------------------------------------------
 #
-# The realize loop's cakBuiltin adapter needs a small set of helper
+# The home archive realizer (``builtin_adapter``) needs a small set of helper
 # executables (``7z.exe``, ``lessmsi.exe``, ``dark.exe``, ``innounp.exe``)
 # depending on the package's ``archive_format`` + ``install_method``.
 # When the operator bundles those extractors as catalog packages in the
@@ -939,8 +712,8 @@ proc raisePackageUnavailableOnPlatform*(packageId: string;
 # cannot realize until its extractor's prefix exists.
 #
 # The mapping below is the M0 hard-coded form. A future milestone could
-# lift it to schema-driven catalog metadata (a ``requires_for_realize:``
-# field on ``VersionedProvisioning``); for M0 the small constant table is
+# lift it to schema-driven metadata (a ``requires_for_realize:`` field on
+# the ``tarball`` realization); for M0 the small constant table is
 # the right tradeoff.
 #
 # Extractor-provider map (M0):
@@ -956,11 +729,12 @@ proc raisePackageUnavailableOnPlatform*(packageId: string;
 #   innounp.exe  ← innounp    (consumed by imInstallerInnoSetup)
 
 # TODO: schema-driven `requires_for_realize:` field on
-# `VersionedProvisioning` would replace this hard-coded map. Migration
-# starting point: move these consts into the per-tool catalog slice
+# the `tarball` realization (`TarballArchiveDetail`) would replace this
+# hard-coded map. Migration starting point: move these consts into the
+# per-package realization
 # (each affected `packages/<tool>.nim` declares its own
 # `requires_for_realize: @["7zip"]` or similar in the
-# `VersionedProvisioning` literal); then have `extractorDependencies`
+# `tarball` statement); then have `extractorDependencies`
 # below read `resolution.requiresForRealize` directly instead of
 # pattern-matching on `archive_format` / `install_method`. The case
 # statements in the proc body would collapse to a one-line passthrough.
@@ -968,33 +742,32 @@ proc raisePackageUnavailableOnPlatform*(packageId: string;
 # Tasks for the planned schema shape.
 const
   ExtractorProvider7zip*    = "7zip"
+    ## The stdlib definition is ``package "7zip"`` (module
+    ## ``packages/pkg_7zip.nim``).
   ExtractorProviderLessmsi* = "lessmsi"
   ExtractorProviderWix3*    = "wix3"
   ExtractorProviderInnounp* = "innounp"
 
 proc extractorDependencies*(packageId: string;
-                            resolution: CatalogResolution): seq[string] =
+                            resolution: ArchiveRealization): seq[string] =
   ## Return the set of catalog-package names that must be realized BEFORE
   ## ``packageId`` can be realized, derived from the resolution's
   ## ``archive_format`` + ``install_method`` requirements.
   ##
   ## Hard-coded extractor-provider map (M0). Future enhancement:
-  ## schema-driven ``requires_for_realize:`` field in
-  ## ``VersionedProvisioning``.
+  ## schema-driven ``requires_for_realize:`` field on
+  ## the ``tarball`` realization.
   ##
-  ## Returns an EMPTY seq when ``resolution.adapter`` is NOT ``cakBuiltin``
-  ## (Scoop / PATH / Nix adapters handle their own extraction — the
-  ## discovery edge does not apply). This matches the M0 spec's
-  ## Outstanding Task note: "topo edges that originate from a
-  ## cakScoop-resolved consumer are silently dropped".
+  ## Callers pass only archives the home archive realizer will realize
+  ## (GM4b: a ``tarball`` selection routed to ``builtin_adapter``); a
+  ## selection of another kind, or a plain archive realized by the
+  ## ``uses:`` provisioning edge, has no extractor-discovery edge.
   ##
   ## The returned seq never contains ``packageId`` itself (self-edges are
-  ## skipped) — even though e.g. ``sevenzip.nim`` itself uses
+  ## skipped) — even though e.g. ``pkg_7zip.nim`` itself uses
   ## ``imInstallerMsi`` which needs ``lessmsi``, that's a real edge
-  ## (sevenzip → lessmsi); the self-edge filter is for the degenerate
+  ## (7zip → lessmsi); the self-edge filter is for the degenerate
   ## case where the mapping ever points a package at itself.
-  if resolution.adapter != cakBuiltin:
-    return @[]
   var deps: seq[string] = @[]
   # archive_format-driven edges
   case resolution.archiveFormat
@@ -1054,10 +827,11 @@ proc resolveScoopRoot(): string =
     return home / "scoop"
   ""
 
-proc openProductionCatalog*(): ProductionCatalog =
-  ## Build a fresh per-apply catalog handle. Cheap: it only records the
-  ## Scoop root + executable paths; the installed-app table and bucket
+proc openScoopHostInventory*(): ScoopHostInventory =
+  ## Build a fresh per-apply Scoop inventory handle. Cheap: it only records
+  ## the Scoop root + executable paths; the installed-app table and bucket
   ## inventory are filled lazily on first query.
+  result = ScoopHostInventory()
   result.scoopRoot = resolveScoopRoot()
   result.scoopExe = resolveScoopExecutable()
   result.installedQueried = false
@@ -1109,7 +883,7 @@ proc readInstalledFromTree(scoopRoot: string;
       if ver != "current":
         outTable[app.toLowerAscii()] = ver
 
-proc ensureInstalledQueried(cat: var ProductionCatalog) =
+proc ensureInstalledQueried(cat: ScoopHostInventory) =
   ## Populate `installedApps` exactly once per apply. Prefers
   ## `scoop list` (the spec-named query) and falls back to walking the
   ## install tree when `scoop list` is unavailable or its output cannot
@@ -1140,7 +914,7 @@ proc ensureInstalledQueried(cat: var ProductionCatalog) =
   readInstalledFromTree(cat.scoopRoot, cat.installedApps)
   discard parsed
 
-proc installedVersion*(cat: var ProductionCatalog; app: string):
+proc installedVersion*(cat: ScoopHostInventory; app: string):
     tuple[installed: bool; version: string] =
   ## Return whether `app` is installed and at which version. Triggers
   ## the one-time `scoop list` query on first call.
@@ -1155,7 +929,7 @@ proc installedVersion*(cat: var ProductionCatalog; app: string):
 # Bucket inventory — "available in a configured bucket"
 # ---------------------------------------------------------------------------
 
-proc ensureBucketsQueried(cat: var ProductionCatalog) =
+proc ensureBucketsQueried(cat: ScoopHostInventory) =
   if cat.buckets.len > 0:
     return
   let bucketsDir = cat.scoopRoot / "buckets"
@@ -1194,7 +968,7 @@ proc manifestBinName(node: JsonNode): string =
   else:
     ""
 
-proc findBucketManifest*(cat: var ProductionCatalog; app: string):
+proc findBucketManifest*(cat: ScoopHostInventory; app: string):
     tuple[found: bool; bucket, version, binName: string] =
   ## Search every configured Scoop bucket for an `<app>.json` manifest.
   ## Returns the first bucket that carries one plus the manifest's
@@ -1231,10 +1005,6 @@ proc installedExecutableName(scoopRoot, app, version: string): string =
     discard
   ""
 
-# ---------------------------------------------------------------------------
-# Resolution entry point
-# ---------------------------------------------------------------------------
-
 proc satisfiesProfile(installedVersion, pinnedVersion,
                       preferredVersion: string): bool =
   ## M80: a cache-hit requires an already-installed version that
@@ -1263,819 +1033,534 @@ proc satisfiesProfile(installedVersion, pinnedVersion,
     # executable is a cache-hit.
     pinnedVersion.len == 0 and preferredVersion.len == 0
 
-proc resolvePathPackage(packageId: string; searched: var seq[string];
-                        binaries: seq[string] = @[]):
-    tuple[found: bool; resolution: CatalogResolution] =
-  ## 2026-06-09 (binaries metadata): when `binaries` is non-empty,
-  ## probe EACH binary name on PATH and report a hit on the first one
-  ## that exists. Empty `binaries` preserves the pre-2026-06 behavior:
-  ## probe the package name itself.
-  searched.add("path:" & getEnv("PATH"))
-  let probeNames =
-    if binaries.len > 0: binaries
-    else: @[packageId]
-  var firstFound = ""
-  for name in probeNames:
-    let exe = findExe(name)
-    if exe.len > 0:
-      firstFound = exe
-      break
-  if firstFound.len == 0:
-    return (false, CatalogResolution())
-  var r = CatalogResolution(
-    packageId: packageId,
-    adapter: cakPath,
-    app: packageId,
-    executableName: extractFilename(firstFound),
-    sourcePath: firstFound,
-    installed: true,
-    cacheHit: true,
-    searchedCatalogs: searched)
-  (true, r)
 
-proc resolvePackage*(cat: var ProductionCatalog; packageId: string;
-                     binaries: seq[string] = @[];
-                     hostCpu = detectHostCpu();
-                     hostOs = detectHostOs();
-                     availability = none(PackageAvailability)):
-    CatalogResolution =
-  ## Resolve one `PlannedPackage` reference against the production
-  ## catalog. Raises `EUnknownPackage` (naming the package and the
-  ## catalogs searched) when no adapter recognizes it.
-  ##
-  ## Resolution order on Windows:
-  ##   1. installed Scoop app (`scoop list`) — cache-hit candidate.
-  ##   2. available in a configured Scoop bucket — realize via Scoop.
-  ##
-  ## PMC-1: raises ``EPackageUnavailableOnPlatform`` first when the package
-  ## declared a ``platforms:`` set this host is not in. This entry point
-  ## needs the gate as much as ``chainResolvePackage`` does — arguably more.
-  ## It is the LEGACY path the realize dispatcher takes for a package with no
-  ## built-in catalog registration (``useChain`` is false in
-  ## ``realizeViaProductionCatalog``), which is exactly the shape a
-  ## DSL-``tarball`` package like ``chocolatey`` has; and both of its exits
-  ## end at ``resolvePathPackage``. Gating only the chain would have left the
-  ## fallthrough-to-PATH hole open on the path that a declared-unavailable
-  ## package actually takes.
-  ##
-  ## PMC-2 deliberately did NOT give this entry point a ``hostLevel``
-  ## parameter. It resolves through Scoop and PATH only — neither consults a
-  ## ``PlatformBinary``, so there is no microarchitecture floor to compare
-  ## against, and a parameter here would be decoration a reader would
-  ## reasonably expect to do something. ``chainResolvePackage`` and
-  ## ``resolveBuiltinPackage``, which DO select arms, carry it.
-  let declaredAvailability =
-    if availability.isSome: availability.get
-    else: packageAvailability(packageId)
-  if not declaredAvailability.isAvailableOn(hostCpu, hostOs):
-    raisePackageUnavailableOnPlatform(packageId, declaredAvailability,
-      hostCpu, hostOs)
-  result.packageId = packageId
-  result.adapter = cakPath
-  result.app = packageId
-  result.executableName = packageId
-  var searched: seq[string]
+# ---------------------------------------------------------------------------
+# Host inventory
+# ---------------------------------------------------------------------------
 
+proc probeScoopApp*(inv: ScoopHostInventory; app: string): ScoopInventoryHit =
+  ## What the host's Scoop knows about ``app``: installed (``scoop list`` /
+  ## the ``apps/`` tree) and/or offered by a configured bucket. An installed
+  ## app's executable name comes from its own copied manifest, its bucket
+  ## from ``install.json`` when no bucket on disk carries it.
+  let inst = installedVersion(inv, app)
+  let manifest = findBucketManifest(inv, app)
+  if (not inst.installed) and (not manifest.found):
+    return ScoopInventoryHit(found: false, app: app)
+  result = ScoopInventoryHit(found: true, app: app, executableName: app)
+  if manifest.found:
+    result.bucket = manifest.bucket
+    result.version = manifest.version
+    if manifest.binName.len > 0:
+      result.executableName = manifest.binName
+  if inst.installed:
+    result.installed = true
+    result.version = inst.version
+    let installedExe = installedExecutableName(inv.scoopRoot, app,
+      inst.version)
+    if installedExe.len > 0:
+      result.executableName = installedExe
+    if result.bucket.len == 0:
+      let installJson = inv.scoopRoot / "apps" / app / inst.version /
+        "install.json"
+      if fileExists(extendedPath(installJson)):
+        try:
+          let parsed = parseJson(readFile(extendedPath(installJson)))
+          if parsed.kind == JObject:
+            result.bucket = parsed{"bucket"}.getStr("")
+        except CatchableError:
+          discard
+    if result.bucket.len == 0:
+      result.bucket = "main"
+
+proc pathInventoryProbe*(): PathProbe =
+  ## The host's PATH: the first of ``names`` ``findExe`` resolves.
+  result = proc(names: seq[string]): string =
+    for name in names:
+      let exe = findExe(name)
+      if exe.len > 0:
+        return exe
+    ""
+
+proc profileHostInventory*(scoop: ScoopHostInventory = nil): HostInventory =
+  ## The inventory a profile on THIS host may consult (Provisioning-
+  ## Contributions.md §"Host inventory"): PATH everywhere, and the Scoop
+  ## installed/bucket inventory on a Windows host.
+  result.probePath = pathInventoryProbe()
   when defined(windows):
-    searched.add("scoop:installed-apps")
-    let inst = installedVersion(cat, packageId)
-    # Find the bucket manifest too: it tells us the bucket name (the
-    # M55 adapter needs `bucket/app`), the available version, and the
-    # declared executable leaf name.
-    let manifest = findBucketManifest(cat, packageId)
-    if manifest.found:
-      result.adapter = cakScoop
-      searched.add("scoop:bucket:" & manifest.bucket)
-      result.bucket = manifest.bucket
-      if manifest.binName.len > 0:
-        result.executableName = manifest.binName
-    if inst.installed:
-      result.adapter = cakScoop
-      result.installed = true
-      # M80: an already-installed package is a cache-hit independent of
-      # whether the Scoop bucket head has drifted ahead of it. A
-      # `home.nim` package reference is a bare/unpinned reference, so
-      # ANY installed version satisfies it — and `satisfiesProfile`
-      # delegates to the SAME `installedVersionSatisfies` predicate
-      # that M77's apply-time `resolveScoopTool` consults. The previous
-      # M72 code required the installed version to EQUAL the bucket
-      # head (`manifest.version`); that made `--plan` report an
-      # installed-but-bucket-drifted package as `realize` while the
-      # actual apply correctly cache-hit it. The bucket head is NOT
-      # consulted here — exactly as `resolveScoopTool` does not consult
-      # it for an installed app.
-      result.resolvedVersion = inst.version
-      result.cacheHit = satisfiesProfile(inst.version,
-        pinnedVersion = "", preferredVersion = "")
-      # Prefer the executable name the installed app's own manifest
-      # declares (Scoop copies the bucket manifest into the version
-      # dir on install; the M55 sandbox fixture writes it too).
-      let installedExe = installedExecutableName(cat.scoopRoot, packageId,
-        inst.version)
-      if installedExe.len > 0:
-        result.executableName = installedExe
-      if result.bucket.len == 0:
-        # Installed but no bucket on disk — read the per-app
-        # install.json to recover the originating bucket so the M55
-        # adapter can still bind `bucket/app`.
-        let installJson = cat.scoopRoot / "apps" / packageId / inst.version /
-          "install.json"
-        if fileExists(extendedPath(installJson)):
-          try:
-            let parsed = parseJson(readFile(extendedPath(installJson)))
-            if parsed.kind == JObject:
-              result.bucket = parsed{"bucket"}.getStr("")
-          except CatchableError:
-            discard
-      if result.bucket.len == 0:
-        result.bucket = "main"
-      return result
-    if manifest.found:
-      # Available but not installed → a genuine realize (the M55
-      # adapter will run `scoop install`).
-      result.adapter = cakScoop
-      result.installed = false
-      result.cacheHit = false
-      result.resolvedVersion = manifest.version
-      return result
-    let pathResolution = resolvePathPackage(packageId, searched, binaries)
-    if pathResolution.found:
-      return pathResolution.resolution
-    result.searchedCatalogs = searched
-    raiseUnknownPackage(packageId, searched)
+    let inv = if scoop.isNil: openScoopHostInventory() else: scoop
+    result.probeScoop = proc(app: string): ScoopInventoryHit =
+      probeScoopApp(inv, app)
   else:
-    let pathResolution = resolvePathPackage(packageId, searched, binaries)
-    if pathResolution.found:
-      return pathResolution.resolution
-    result.searchedCatalogs = searched
-    raiseUnknownPackage(packageId, searched)
+    discard scoop
 
 # ---------------------------------------------------------------------------
-# M64 — cakBuiltin resolver (probe the M63 VersionedProvisioning catalog)
+# Targets and policies
 # ---------------------------------------------------------------------------
-#
-# `resolveBuiltinPackage` takes a packageId + an in-memory catalog
-# (`seq[VersionedProvisioning]`, the shape `<tool>Catalog: seq[...]`
-# literals export from `libs/repro_dsl_stdlib/src/repro_dsl_stdlib/
-# packages/<tool>.nim`) + an optional version constraint and returns a
-# fully-populated `CatalogResolution` whose `adapter == cakBuiltin` and
-# whose `urlUsed / digestAlgorithm / digestValue / archiveFormat /
-# installMethod / binRelpath / extractPath / installerArgs /
-# pacmanPackages / bootstrapArgv / envSubstitutions` carry the
-# realization inputs the cakBuiltin realize loop consumes.
-#
-# Version resolution: an empty `version` selects the catalog default
-# (last entry); a non-empty `version` is matched exactly against
-# `vp.version`. Per-platform resolution uses
-# `packages_schema.selectPlatformBinary` with the host's (cpu, os)
-# tuple.
-#
-# Returns `(found = false, resolution = default)` on miss. Callers
-# (M65's adapter chain) treat a miss as "this adapter cannot resolve
-# the package; try the next adapter" rather than fail-closed.
 
-type
-  BuiltinResolveError* = enum
-    breOk = "ok"
-    breVersionNotInCatalog = "version-not-in-catalog"
-      ## Requested `version` does not match any slice in the catalog.
-    breEmptyCatalog = "empty-catalog"
-      ## The catalog is empty — the packages/<tool>.nim is missing the
-      ## `let <tool>Catalog* = @[...]` literal or shipped a stub.
-    brePlatformNotSupported = "platform-not-supported"
-      ## A matching version was found but it has no `PlatformBinary`
-      ## entry for the current (cpu, os) tuple.
-    breMicroarchFloorNotSatisfied = "microarch-floor-not-satisfied"
-      ## PMC-2: a `PlatformBinary` DOES exist for the host's (cpu, os),
-      ## but every such arm declares a microarchitecture floor above what
-      ## the host provides. Distinct from `brePlatformNotSupported`
-      ## because the remediation is different — the artifact exists and
-      ## the host is below it — and because the alternative to reporting
-      ## it is resolving an arm that traps at `SIGILL` on first use, far
-      ## from anything that points back here. `errorDetail` names the
-      ## shortfall ("needs x86-64-v3, host provides x86-64-v2").
-    breSchemaInvalid = "schema-invalid"
-      ## The selected slice failed `validateVersionedProvisioning`.
-    breLockedTargetNotSatisfied = "locked-target-not-satisfied"
-      ## PMC-4: the caller supplied a `lockedTarget` — the microarchitecture
-      ## a LOCK FILE says this package resolved for — and this host cannot
-      ## run it.
-      ##
-      ## Distinct from `breMicroarchFloorNotSatisfied`, and the distinction
-      ## is the whole of `t_lock_from_a_v3_host_resolves_on_a_v2_host`. That
-      ## error means "the catalog offers nothing this host can run"; this one
-      ## means "the catalog might well offer something, but the lock already
-      ## named a different answer and re-resolving would silently substitute
-      ## it". A lock that quietly re-resolves is worse than one that fails:
-      ## the build succeeds, the artifact is not the pinned one, and nothing
-      ## anywhere says so. The remediations differ too — get a host that
-      ## satisfies the lock, or refresh the lock on this host and commit the
-      ## new pin — so collapsing the two would send the reader to the wrong
-      ## one.
-      ##
-      ## Appended at the END of the enum on purpose: nothing serializes
-      ## `BuiltinResolveError` by ordinal today, and keeping the existing
-      ## members' ordinals fixed means nothing can start to.
-
-  BuiltinResolveResult* = object
-    found*: bool
-    resolution*: CatalogResolution
-    error*: BuiltinResolveError
-    errorDetail*: string
-
-proc resolveBuiltinPackage*(packageId: string;
-                            catalog: openArray[VersionedProvisioning];
-                            version = "";
-                            hostCpu = detectHostCpu();
-                            hostOs = detectHostOs();
-                            hostLevel = detectHostMicroarchLevel(hostCpu);
-                            hostFeatures = detectHostCpuFeatures(hostCpu)):
-    BuiltinResolveResult =
-  ## Probe a checked-in VersionedProvisioning catalog for a satisfying
-  ## (version, platform) tuple and produce a `CatalogResolution`
-  ## carrying every input the M64 realize loop needs.
-  ##
-  ## PMC-2: ``hostLevel`` is what the host PROVIDES on the
-  ## microarchitecture axis, and it is a DEFAULTED PARAMETER for the same
-  ## reason ``hostCpu`` / ``hostOs`` are — a test names a synthetic v2 or
-  ## v3 host and never needs the hardware. Its default reads the
-  ## environment (``detectHostMicroarchLevel``), and that read happens
-  ## only when no caller supplied a value, so the seam stays hermetic.
-  ## Note the default's dependence on ``hostCpu``: a caller that says
-  ## "resolve as if this were aarch64" gets aarch64's baseline, not the
-  ## real machine's.
-  ##
-  ## PMC-3: ``hostFeatures`` is the FOURTH such parameter and is ADDITIVE on
-  ## top of ``hostLevel`` — this host provides its level's set UNION whatever
-  ## it declares here. Its default is ``detectHostCpuFeatures(hostCpu)``,
-  ## which is the only place ``REPRO_HOST_CPU_FEATURES`` can reach selection:
-  ## a caller that supplies a set is never affected by the environment, which
-  ## is what keeps the whole campaign's test suite hermetic.
-  result.found = false
-  result.error = breOk
-  result.resolution.packageId = packageId
-  result.resolution.adapter = cakBuiltin
-  result.resolution.app = packageId
-  result.resolution.searchedCatalogs = @["builtin:" & packageId]
-  if catalog.len == 0:
-    result.error = breEmptyCatalog
-    result.errorDetail = "builtin catalog for '" & packageId & "' is empty"
-    return
-  var picked: VersionedProvisioning
-  if version.len == 0:
-    let def = selectDefault(catalog)
-    if not def.found:
-      result.error = breEmptyCatalog
-      result.errorDetail = "selectDefault returned no entry"
-      return
-    picked = def.entry
-  else:
-    let exact = selectVersion(catalog, version)
-    if not exact.found:
-      result.error = breVersionNotInCatalog
-      result.errorDetail = "no slice with version '" & version &
-        "' in builtin catalog for '" & packageId & "'"
-      return
-    picked = exact.entry
-  let schemaErrors = validateVersionedProvisioning(picked)
-  if schemaErrors.len > 0:
-    result.error = breSchemaInvalid
-    result.errorDetail = "selected slice failed validation: " &
-      schemaErrors.join("; ")
-    return
-  let pb = selectPlatformBinaryEx(picked,
-    initPlatformTarget(hostCpu, hostLevel, hostFeatures), hostOs)
-  if not pb.found:
-    if pb.refusedForLevel:
-      # PMC-2 deliverable 4, widened by PMC-3 deliverable 3. An arm EXISTS for
-      # this (cpu, os); the host simply cannot run it. Say so, and say by how
-      # much — the generic "no platform slice" message would send the reader
-      # looking for a missing build that is right there in the catalog.
-      #
-      # ``describeCapabilityShortfall`` rather than
-      # ``describeMicroarchShortfall``: an arm requiring x86-64-v3 + avx512vl
-      # refused on a v3 host has NO level shortfall, so the PMC-2 sentence
-      # would be empty here — and if it were emitted anyway it would read
-      # "needs x86-64-v3, host provides x86-64-v3", contradicting the refusal.
-      result.error = breMicroarchFloorNotSatisfied
-      result.errorDetail = "builtin catalog for '" & packageId &
-        "' version '" & picked.version & "' has a slice for cpu=" &
-        $hostCpu & " os=" & $hostOs &
-        ", but this host cannot run it: " & describeCapabilityShortfall(pb) &
-        ". Selecting it anyway would resolve cleanly and then trap at " &
-        "SIGILL on the first instruction the host lacks."
-      return
-    result.error = brePlatformNotSupported
-    result.errorDetail = "no platform slice for cpu=" & $hostCpu &
-      " os=" & $hostOs & " in builtin catalog for '" & packageId &
-      "' version '" & picked.version & "'"
-    return
-  # Populate the resolution.
-  result.found = true
-  result.resolution.resolvedVersion = picked.version
-  result.resolution.builtinVersion = picked.version
-  result.resolution.builtinCpuLevel = pb.binary.cpu_level
-  result.resolution.builtinCpuFeatures = pb.binary.cpu_features
-  result.resolution.urlUsed = pb.binary.url
-  if pb.binary.sha256.len > 0:
-    result.resolution.digestAlgorithm = "sha256"
-    result.resolution.digestValue = pb.binary.sha256.toLowerAscii()
-  elif pb.binary.sha512.len > 0:
-    result.resolution.digestAlgorithm = "sha512"
-    result.resolution.digestValue = pb.binary.sha512.toLowerAscii()
-  else:
-    # M1 (Realize-Closure spec): sha1 is the weak fallback; the realize
-    # loop emits a ``WSha1HashAccepted`` warning when it runs. Slice
-    # validation in ``validateVersionedProvisioning`` already enforced
-    # that at least one of the three digests is populated, so reaching
-    # this arm without sha1 set is a schema-validator bug, not a runtime
-    # case.
-    result.resolution.digestAlgorithm = "sha1"
-    result.resolution.digestValue = pb.binary.sha1.toLowerAscii()
-  # M9.5: per-platform overrides for archive_format + bin_relpath. The
-  # cross-OS catalog harvester pass (M9.5) needs them because a single
-  # tool's upstream ships different archive shapes per OS (e.g. gh ships
-  # ``.zip`` on Windows + ``.tar.gz`` on Linux) and the realized binary
-  # path differs by OS (``.exe`` suffix only on Windows). The default
-  # PlatformBinary leaves both unset → fall back to the VersionedProvisioning
-  # values.
-  if pb.binary.has_archive_format_override:
-    result.resolution.archiveFormat = pb.binary.archive_format_override
-  else:
-    result.resolution.archiveFormat = picked.archive_format
-  result.resolution.installMethod = picked.install_method
-  if pb.binary.bin_relpath_override.len > 0:
-    result.resolution.binRelpath = pb.binary.bin_relpath_override
-  else:
-    result.resolution.binRelpath = picked.bin_relpath
-  result.resolution.extractPath = pb.binary.extract_path
-  result.resolution.installerArgs = picked.installer_args
-  result.resolution.pacmanPackages = picked.pacman_packages
-  result.resolution.bootstrapArgv = picked.bootstrap_argv
-  # M3: thread the residual 7z-family metadata through.
-  result.resolution.nested7z = pb.binary.nested_7z
-  result.resolution.preInstallActions = picked.pre_install_actions
-  result.resolution.preInstallUnrecognized = picked.pre_install_unrecognized
-  # M4: thread the per-platform MSI admin-install override through.
-  result.resolution.msiAdminInstall = pb.binary.msi_admin_install
-  # M5: thread the launcher_emit spec list through.
-  result.resolution.launcherEmit = picked.launcher_emit
-  # Use the first bin_relpath as the executable name (leaf only). M9.5:
-  # honor the per-platform bin_relpath_override when present (the Linux
-  # binary is ``gh`` without the ``.exe`` suffix that the Windows slice
-  # carries).
-  let effectiveBinRelpath =
-    if pb.binary.bin_relpath_override.len > 0:
-      pb.binary.bin_relpath_override
+proc profileRealizationTarget*(platform, arch: string; isHost: bool):
+    RealizationTarget =
+  ## The realization target of a profile evaluated for ``platform`` /
+  ## ``arch`` (``HostContext`` spellings: macos | linux | wsl | windows,
+  ## x86_64 | arm64). The host's microarchitecture level and features are
+  ## the ones it DECLARES (``hostTarget()``, PMC-2/3); a cross target is
+  ## taken at its family's definitional baseline. An unrecognised spelling
+  ## is refused: resolving for a platform nobody can name would select for
+  ## "any" and look like success.
+  let os =
+    case platform.toLowerAscii()
+    of "macos", "darwin", "osx": poMacos
+    of "linux", "wsl": poLinux
+    of "windows", "win": poWindows
     else:
-      picked.bin_relpath
-  # ``bin_relpath`` entries are TARGET-platform paths, not host paths: the
-  # Windows slice of ``gh`` carries ``bin\gh.exe``. ``extractFilename`` splits
-  # on the HOST's separator, so on a POSIX host it saw no separator in
-  # ``bin\gh.exe`` and handed back the whole relpath as the executable name.
-  # Split on both separators — the same spelling ``packages_schema``'s
-  # ``launcher_emit`` check uses to take the leaf of a ``bin_relpath`` entry —
-  # so the leaf is the leaf whichever platform is being resolved for.
-  if effectiveBinRelpath.len > 0:
-    result.resolution.executableName =
-      effectiveBinRelpath[0].split({'/', '\\'})[^1]
+      raise newException(ValueError, "cannot resolve packages for platform '" &
+        platform & "' (expected macos, linux, wsl or windows)")
+  let cpu =
+    case arch.toLowerAscii()
+    of "x86_64", "amd64", "x64": pcX86_64
+    of "arm64", "aarch64": pcAArch64
+    else:
+      raise newException(ValueError, "cannot resolve packages for arch '" &
+        arch & "' (expected x86_64 or arm64)")
+  if isHost:
+    var platformTarget = hostTarget()
+    if platformTarget.family != cpu:
+      platformTarget = initPlatformTarget(cpu, baselineMicroarchLevel(cpu))
+    RealizationTarget(os: os, platform: platformTarget, isHost: true)
   else:
-    result.resolution.executableName = packageId
-  # Stable env-substitution order — sort by key so the realize loop
-  # produces deterministic output and `serializeAsCode` round-trips.
-  var keys: seq[string] = @[]
-  for k in picked.env.keys:
-    keys.add(k)
-  for i in 0 ..< keys.len:
-    for j in i + 1 ..< keys.len:
-      if keys[j] < keys[i]:
-        let tmp = keys[i]
-        keys[i] = keys[j]
-        keys[j] = tmp
-  for k in keys:
-    result.resolution.envSubstitutions.add((name: k, value: picked.env[k]))
-  result.resolution.installed = false
-  result.resolution.cacheHit = false  # set true by `realizeBuiltinPackage`
-                                      # when the CAS prefix exists
+    realizationTargetFor(cpu, os, baselineMicroarchLevel(cpu))
+
+proc adapterPreferenceKey*(os: PlatformOs): string =
+  ## The ``adapterPreference:`` key for a target OS (the DSL canonicalizes
+  ## ``macos`` to ``darwin``).
+  case os
+  of poWindows: "windows"
+  of poLinux: "linux"
+  of poMacos: "darwin"
+  of poAny: ""
+
+proc selectionPolicyFor*(adapterPreference: OrderedTable[string, seq[string]];
+                         os: PlatformOs):
+    tuple[policy: SelectionPolicy; source: string] =
+  ## The selection policy for a target OS: the profile's
+  ## ``adapterPreference:`` entry for it, else ``DefaultSelectionPolicy``
+  ## (the same on every platform). An empty entry counts as absent. An
+  ## unknown kind is refused — the DSL parsers reject it first, so reaching
+  ## here with one is a bug.
+  let key = adapterPreferenceKey(os)
+  if key.len > 0 and key in adapterPreference and
+      adapterPreference[key].len > 0:
+    for name in adapterPreference[key]:
+      let parsed = parseRealizationKind(name)
+      if not parsed.ok and name.strip().toLowerAscii() in
+          ["homebrew", "brew", "brewcask", "brewformula"]:
+        # Not a typo: Homebrew is a contribution kind, but only as a BRIDGE
+        # record that consumers installing through Homebrew read (the Nix
+        # helper library). Reprobuild has no Homebrew realizer, so a policy
+        # naming it is refused with that reason rather than as an unknown
+        # word (Provisioning-Contributions.md §"Homebrew bridge records").
+        raise newException(ValueError,
+          "adapterPreference." & key & " names '" & name & "': Homebrew " &
+          "contribution records are bridge records read by Nix consumers; " &
+          "Reprobuild does not realize packages through Homebrew " &
+          "(known kinds: tarball, builtin, nix, scoop, path)")
+      if not parsed.ok:
+        raise newException(ValueError,
+          "adapterPreference." & key & " names unknown realization kind '" &
+          name & "' (known: tarball, builtin, nix, scoop, path)")
+      if parsed.kind notin result.policy:
+        result.policy.add(parsed.kind)
+    result.source = "adapterPreference." & key
+  else:
+    result.policy = DefaultSelectionPolicy
+    result.source = "default"
 
 # ---------------------------------------------------------------------------
-# M65 — adapter selection chain
+# Candidates: the reference projected as a `uses:`
 # ---------------------------------------------------------------------------
-#
-# The chain accepts a per-host-configurable adapter preference list
-# (default: platform-specific) and walks it in order, asking each
-# adapter "can you resolve this package?" until one says yes. The trace
-# of every step is attached to the resolution for ``--plan`` /
-# ``repro show-conventions`` introspection; on exhaustion a structured
-# ``EAdapterChainExhausted`` carrying the same trace is raised.
-#
-# The chain consults adapters in this conceptual order (cache-first is
-# the implicit M56 store lookup that happens inside each adapter's
-# realize loop, NOT a resolution-time concern — the resolver only
-# decides WHICH adapter realizes; the realize loop's own
-# `cacheHit` verdict is reported back through the M64 dispatcher):
-#
-#   1. cakBuiltin — `getCatalog(packageId)` against the M65 registry.
-#                   A registered tool with a non-empty catalog that
-#                   yields a `BuiltinResolveResult.found == true` is a
-#                   chain hit.
-#   2. cakNix     — placeholder. The M21 realize-side Nix adapter is
-#                   landing in a parallel branch; until it is wired
-#                   into the resolver, cakNix is skipped cleanly with
-#                   `csoAdapterUnavailable`.
-#   3. cakScoop   — Windows-only. Falls back to the existing
-#                   `resolvePackage` logic for the Scoop branch.
-#   4. cakPath    — the universal "executable already on PATH" adapter.
-#                   Last-resort.
-#
-# The chain is greedy first-match. Adapters not listed in the
-# preference are skipped silently (no trace entry). A preference of
-# `[builtin, path]` will never consult cakScoop even on Windows.
+
+const ProfileProjectionPackage = "repro-home-profile"
+  ## The synthetic package a profile reference is a ``uses:`` of.
+
+proc profileToolUse*(packageId: string;
+                     catalog = ProfileCatalog()):
+    tuple[useDef: InterfaceToolUse; known: bool] =
+  ## Project ``package "<packageId>"`` exactly as interface extraction
+  ## projects ``uses: "<packageId>"`` (``toProjectInterface``): the canonical
+  ## definitions of that name with their in-package realizations, plus every
+  ## registered contribution targeting it whose interface fingerprint
+  ## matches. ``known`` says whether a definition of the name was found.
+  ##
+  ## The definitions are found in ``usesImportCode``'s order: a bundled
+  ## stdlib selector is the linked stdlib definition; otherwise a definition
+  ## in the ``reprobuild-packages`` catalog (``catalog``, projected by
+  ## ``catalog_projection`` from the profile's location) wins; otherwise the
+  ## other stdlib definitions the engine links (the former catalog packages,
+  ## which a recipe reaches through an explicit import).
+  ##
+  ## When the profile imports contribution catalogs (``catalogs:``), every
+  ## reference with a definition in scope is in ``catalog`` -- bundled ones
+  ## included -- projected by a recipe that imports those catalogs, so the
+  ## contributions they register are candidates exactly as for that recipe.
+  ## Without imports a bundled selector never is, and resolves from the
+  ## linked definition below.
+  if packageId in catalog.failures:
+    raise newException(ValueError, catalog.failures[packageId])
+  if packageId in catalog.uses:
+    var use = catalog.uses[packageId]
+    use.location = SourceLocation(file: "home-profile", line: 1)
+    return (use, true)
+  var home = PackageDef(packageName: ProfileProjectionPackage,
+    sourceFile: "home-profile", sourceLine: 1)
+  home.toolUses.add(PackageUseDef(rawConstraint: packageId,
+    packageSelector: packageId, executableName: packageId,
+    sourceFile: "home-profile", sourceLine: 1))
+  var contributions: seq[ProvisioningContributionDef] = @[]
+  for contribution in registeredProvisioningContributions():
+    if contribution.targetPackage == packageId:
+      contributions.add(contribution)
+  let projected = toProjectInterface(home, registeredPackages(),
+    contributions)
+  (projected.toolUses[0], isLinkedPackage(packageId))
+
+proc narrowedTo(useDef: InterfaceToolUse; selection: RealizationSelection):
+    InterfaceToolUse =
+  result = useDef
+  result.nixProvisioning = @[]
+  result.tarballProvisioning = @[]
+  result.scoopProvisioning = @[]
+  if selection.ambient:
+    return
+  case selection.kind
+  of rkNix: result.nixProvisioning = @[selection.nix]
+  of rkTarball: result.tarballProvisioning = @[selection.tarball]
+  of rkScoop: result.scoopProvisioning = @[selection.scoop]
+  of rkPath: discard
+
+# ---------------------------------------------------------------------------
+# Archive realization inputs
+# ---------------------------------------------------------------------------
 
 const
-  WindowsDefaultChain* = @[cakBuiltin, cakScoop, cakPath]
-    ## M65: the default Windows adapter preference. cakBuiltin is the
-    ## new primary; cakScoop is the user-facing interop branch for
-    ## Scoop-native users; cakPath is the last-resort PATH fallback.
+  MacosPkgInstallRefusal* =
+    "no system-scope realizer runs macOS installer packages yet"
+    ## The reason a ``pkg-install`` record is refused, quoted verbatim in the
+    ## refusal so tests and callers can recognise it.
 
-  LinuxDefaultChain* = @[cakNix, cakBuiltin, cakPath]
-    ## M65: the default Linux adapter preference. cakNix is the
-    ## existing M21 production path (skipped cleanly when the realize-
-    ## side branch is not yet wired); cakBuiltin is the secondary; the
-    ## PATH adapter remains the last-resort fallback.
+proc refuseUnrealizableMacosShape(packageId: string;
+                                  record: InterfaceTarballProvisioning) =
+  ## GM4c: the macOS vendor shapes a contribution may DECLARE but nothing
+  ## realizes (Store-And-Installation-Layout.md § macOS Application Bundles,
+  ## "Shapes this does not cover"), and the application shapes declared for
+  ## another os. Refused at resolution, so ``--plan`` names the reason
+  ## before anything is downloaded. A macOS ``installer-silent`` record is
+  ## an installer application and IS realized (§ Installer applications);
+  ## ``archiveRealizationOf`` refuses one that lacks a field the realizer
+  ## verifies.
+  let detail = record.detail
+  let os = parsePlatformOsToken(record.os)
+  let macos = os.ok and os.os == poMacos
+  if detail.installMethod == $imPkgInstall:
+    raise newException(ValueError,
+      "the tarball realization of package '" & packageId & "' (" &
+      record.url & ") is an installer package that must be run as root " &
+      "(installMethod pkg-install): its scripts and privileged components " &
+      "are what install the product, which makes it system scope (P3). " &
+      "A home profile cannot realize it, and " & MacosPkgInstallRefusal &
+      ". Install it outside Reprobuild until one does.")
+  if detail.installMethod == $imAppBundle and not macos:
+    raise newException(ValueError,
+      "the tarball realization of package '" & packageId & "' (" &
+      record.url & ") declares installMethod app-bundle for os '" &
+      record.os & "'; an application bundle is a macOS realization")
+  if detail.installerApp.len > 0 and not macos:
+    raise newException(ValueError,
+      "the tarball realization of package '" & packageId & "' (" &
+      record.url & ") names the installer application " &
+      detail.installerApp.escape & " for os '" & record.os & "'; an " &
+      "installer application is a macOS realization")
 
-  MacosDefaultChain* = @[cakNix, cakPath]
-    ## M65: the default macOS adapter preference. cakBuiltin is not yet
-    ## supported on macOS per the M64 outstanding-task list (slices
-    ## ship Windows + Linux today; macOS slices land in a future
-    ## campaign). Mac users continue using Nix; PATH is the fallback.
+proc archiveRouteFor*(packageId: string;
+                      record: InterfaceTarballProvisioning): ArchiveRoute =
+  ## Route a selected ``tarball`` record to the realizer that performs
+  ## everything it asks for. A record that asks for work only one realizer
+  ## does AND work only the other does has no realizer; it is refused, as
+  ## is a declared macOS shape nothing realizes.
+  refuseUnrealizableMacosShape(packageId, record)
+  let installer = archiveInstallerFeatures(record)
+  if installer.len == 0:
+    return arExtract
+  let extractOnly = extractRealizerFeatures(record)
+  if extractOnly.len > 0:
+    raise newException(ValueError,
+      "the tarball realization of package '" & packageId & "' (" &
+      record.url & ") needs " & installer.join(", ") &
+      ", which only the home archive realizer performs, and " &
+      extractOnly.join(", ") & ", which only the `uses:` provisioning edge " &
+      "performs; no realizer can realize it")
+  arInstaller
 
-proc defaultAdapterChain*(): seq[CatalogAdapterKind] =
-  ## Return the platform-default adapter preference chain. Callers
-  ## that want to override the default pass an explicit ``chain`` to
-  ## ``chainResolvePackage``; M69's ``adapter_preference:`` DSL hook
-  ## reads the per-host preference out of ``home.nim`` and threads it
-  ## through here.
-  when defined(windows):
-    WindowsDefaultChain
-  elif defined(linux):
-    LinuxDefaultChain
-  elif defined(macosx) or defined(osx):
-    MacosDefaultChain
+proc archiveRealizationOf*(packageId: string;
+                           record: InterfaceTarballProvisioning):
+    ArchiveRealization =
+  ## Project a selected ``tarball`` record into the home archive realizer's
+  ## input. Every field is decoded strictly: an archive format, install
+  ## method, pre-install step or launcher spec the realizer cannot read is a
+  ## refusal, not a default.
+  let detail = record.detail
+  result.packageId = packageId
+  result.app = packageId
+  result.resolvedVersion = detail.version
+  result.builtinVersion = detail.version
+  let level = parseMicroarchLevelToken(detail.cpuLevel)
+  let features = parseCpuFeatureSet(detail.cpuFeatures)
+  if not level.ok or not features.ok:
+    raise newException(ValueError, "package '" & packageId &
+      "': unreadable cpuLevel/cpuFeatures on " & record.url)
+  result.builtinCpuLevel = level.level
+  result.builtinCpuFeatures = features.features
+  result.resolvedTarget = renderResolvedTarget(level.level, features.features)
+  result.urlUsed = record.url
+  if record.sha256.len > 0:
+    result.digestAlgorithm = "sha256"
+    result.digestValue = normalizedHexDigest(record.sha256, "sha256")
+  elif detail.sha512.len > 0:
+    result.digestAlgorithm = "sha512"
+    result.digestValue = normalizedHexDigest(detail.sha512, "sha512")
+  elif detail.sha1.len > 0:
+    result.digestAlgorithm = "sha1"
+    result.digestValue = normalizedHexDigest(detail.sha1, "sha1")
   else:
-    @[cakPath]
+    raise newException(ValueError, "package '" & packageId &
+      "': the tarball realization " & record.url & " names no digest")
+  let format = parseArchiveFormatToken(record.archiveType)
+  if not format.ok:
+    raise newException(ValueError, "package '" & packageId &
+      "': archive type '" & record.archiveType & "' is not one the home " &
+      "archive realizer reads")
+  result.archiveFormat = format.format
+  let installMethod = parseInstallMethodToken(detail.installMethod)
+  if not installMethod.ok:
+    raise newException(ValueError, "package '" & packageId &
+      "': unknown installMethod '" & detail.installMethod & "'")
+  result.installMethod = installMethod.installMethod
+  result.binRelpath = @[record.executablePath] & detail.extraExecutables
+  result.extractPath = detail.extractPath
+  result.installerArgs = detail.installerArgs
+  result.pacmanPackages = detail.pacmanPackages
+  result.bootstrapArgv = detail.bootstrapArgv
+  var env: seq[tuple[name, value: string]] = @[]
+  for binding in detail.env:
+    let eq = binding.find('=')
+    if eq <= 0:
+      raise newException(ValueError, "package '" & packageId &
+        "': env binding " & binding.escape() & " is not NAME=value")
+    env.add((name: binding[0 ..< eq], value: binding[eq + 1 .. ^1]))
+  # Stable order: by name, so the realize loop's output is deterministic.
+  for i in 0 ..< env.len:
+    for j in i + 1 ..< env.len:
+      if env[j].name < env[i].name:
+        swap(env[i], env[j])
+  result.envSubstitutions = env
+  result.nested7z = detail.nested7z
+  result.msiAdminInstall = detail.msiAdminInstall
+  for encoded in detail.preInstall:
+    result.preInstallActions.add(decodePreInstallAction(encoded))
+  result.preInstallUnrecognized = detail.preInstallUnrecognized
+  for encoded in detail.launcherEmit:
+    result.launcherEmit.add(decodeLauncherEmitSpec(encoded))
+  result.appBundle = detail.appBundle
+  result.bundleId = detail.bundleId
+  result.teamId = detail.teamId
+  result.installerApp = detail.installerApp
+  if result.installMethod == imInstallerSilent and
+      (result.installerApp.len > 0 or result.appBundle.len > 0 or
+       result.bundleId.len > 0 or result.teamId.len > 0):
+    # An installer-silent record that names an installer application or
+    # any application field is a macOS installer APPLICATION
+    # (Store-And-Installation-Layout.md § Installer applications): the
+    # realizer verifies the installer against teamId and the product it
+    # produced against appBundle / bundleId / version / teamId, so a record
+    # missing any of them cannot be realized. One that names none of them
+    # is a Windows installer (NSIS / MSI), realized as before.
+    var missing: seq[string] = @[]
+    if result.installerApp.len == 0: missing.add("installerApp")
+    if result.appBundle.len == 0: missing.add("appBundle")
+    if result.bundleId.len == 0: missing.add("bundleId")
+    if result.teamId.len == 0: missing.add("teamId")
+    if result.builtinVersion.len == 0: missing.add("version")
+    if missing.len > 0:
+      raise newException(ValueError, "package '" & packageId &
+        "': the tarball realization " & record.url & " is a macOS " &
+        "installer application (installMethod installer-silent) and must " &
+        "declare installerApp (the installer's path inside the archive), " &
+        "appBundle (the product bundle in the installed prefix), bundleId, " &
+        "teamId and version; it lacks " & missing.join(", "))
+    # The paths the realizer walks, checked before anything is downloaded
+    # (§ Installer applications, "Declaring it"): the product path has one
+    # or two components and the first is the placed item, never a bundle
+    # holding another; the installer is a bundle inside the archive.
+    let productError = installerProductPathError(result.appBundle)
+    if productError.len > 0:
+      raise newException(ValueError, "package '" & packageId &
+        "': the installer application " & record.url & " declares " &
+        "appBundle " & result.appBundle.escape & ", the product bundle in " &
+        "the installed prefix; " & productError)
+    let installerPath = result.installerApp.replace('\\', '/')
+    var installerOk = not installerPath.startsWith("/") and
+      installerPath.endsWith(".app")
+    for part in installerPath.split('/'):
+      if part.len == 0 or part == "." or part == "..":
+        installerOk = false
+    if not installerOk:
+      raise newException(ValueError, "package '" & packageId &
+        "': the installer application " & record.url & " declares " &
+        "installerApp " & result.installerApp.escape & "; it must be a " &
+        "relative path inside the archive naming a .app bundle")
+    if result.archiveFormat notin {afDmg, afZip, afTarGz, afTarXz,
+        afTarBz2}:
+      raise newException(ValueError, "package '" & packageId &
+        "': the installer application " & record.url & " is delivered " &
+        "as " & $result.archiveFormat & "; an installer application is " &
+        "copied out of a dmg, zip, tar.gz, tar.xz or tar.bz2 (a flat " &
+        "installer package that must run is installMethod pkg-install)")
+  if result.installMethod == imAppBundle and (result.appBundle.len == 0 or
+      result.bundleId.len == 0 or result.teamId.len == 0 or
+      result.builtinVersion.len == 0):
+    raise newException(ValueError, "package '" & packageId &
+      "': the app-bundle realization " & record.url & " must declare " &
+      "appBundle, bundleId, teamId and version (the bundle's " &
+      "CFBundleShortVersionString); realization verifies all four")
+  if result.installMethod == imAppBundle:
+    # The commands an application declares (``extraExecutable``) are
+    # exported from the PLACED bundle (Store-And-Installation-Layout.md
+    # § macOS Application Bundles, "Command line"), so each must name a
+    # file inside the bundle, the prefix's only content. The realizer then
+    # refuses one that is absent or not executable after extraction.
+    let leaf = result.appBundle.replace('\\', '/').split('/')[^1]
+    for rel in detail.extraExecutables:
+      let parts = rel.replace('\\', '/').split('/')
+      var inside = parts.len >= 2 and parts[0] == leaf
+      for part in parts:
+        if part.len == 0 or part == "." or part == "..":
+          inside = false
+      if not inside:
+        raise newException(ValueError, "package '" & packageId &
+          "': the app-bundle realization " & record.url & " declares " &
+          "extraExecutable " & rel.escape & "; a command of an application " &
+          "is a path inside its bundle, relative to the realized prefix: " &
+          "it must start with '" & leaf & "/' and contain no '.' or '..' " &
+          "component")
+  # ``executablePath`` is a TARGET-platform path (``bin\gh.exe`` for a
+  # Windows record); split on both separators so the leaf is right whichever
+  # platform the resolution runs on.
+  result.executableName = record.executablePath.split({'/', '\\'})[^1]
 
-proc tryResolveBuiltin(packageId: string;
-                       version: string;
-                       hostCpu: PlatformCpu;
-                       hostOs: PlatformOs;
-                       hostLevel: MicroarchLevel;
-                       hostFeatures: set[CpuFeature];
-                       step: var ChainStep):
-    tuple[found: bool; resolution: CatalogResolution] =
-  ## M65: the cakBuiltin branch of the chain. Looks the tool up in the
-  ## M65 catalog registry; on a hit, runs
-  ## ``resolveBuiltinPackage`` and reports the resolution. On a miss or
-  ## a structured error the resolver fills ``step`` with the skip
-  ## reason and returns ``(false, ...)`` so the chain moves on.
-  step.adapter = cakBuiltin
-  let catOpt = getCatalog(packageId)
-  if catOpt.isNone:
-    step.outcome = csoCatalogMiss
-    step.reason = "no built-in catalog registered for '" & packageId &
-      "' (M65 registry knows " &
-      (if RegisteredTools.len > 0:
-         "@[\"" & RegisteredTools.join("\", \"") & "\"]"
-       else: "<none>") & ")"
-    return (false, CatalogResolution())
-  let cat = catOpt.get
-  if cat.len == 0:
-    step.outcome = csoCatalogMiss
-    step.reason = "built-in catalog for '" & packageId & "' is empty"
-    return (false, CatalogResolution())
-  let res = resolveBuiltinPackage(packageId, cat, version, hostCpu, hostOs,
-    hostLevel, hostFeatures)
-  if not res.found:
-    step.outcome = csoSchemaError
-    # PMC-2: ``res.errorDetail`` carries the microarchitecture shortfall for
-    # ``breMicroarchFloorNotSatisfied``, and the chain-exhausted diagnostic
-    # concatenates every step's ``reason`` — so "needs x86-64-v3, host
-    # provides x86-64-v2" survives all the way to the message a user reads,
-    # rather than stopping at this frame.
-    step.reason = "resolveBuiltinPackage: " & $res.error & " (" &
-      res.errorDetail & ")"
-    # PMC-4: mark a CAPABILITY refusal so the chain can refuse to fall through
-    # to ``cakPath``. See ``ChainStep.capabilityShortfall``.
-    step.capabilityShortfall = res.error == breMicroarchFloorNotSatisfied
-    return (false, CatalogResolution())
-  step.outcome = csoResolved
-  # The SUCCESS reason is left byte-identical to its pre-PMC-2 text. Every
-  # host now has a microarchitecture level (x86_64 baselines at v1), so
-  # appending it would rewrite this string on every successful resolution of
-  # every existing package — a gratuitous compatibility event for a line that
-  # says nothing new when the selected arm declares no floor. The level is
-  # reported where it is load-bearing: the refusal.
-  step.reason = "matched version '" & res.resolution.builtinVersion &
-    "' for " & $hostCpu & "-" & $hostOs
-  if res.resolution.builtinCpuLevel != mlNone:
-    step.reason.add(" (" & describeMicroarchLevel(
-      res.resolution.builtinCpuLevel) & ")")
-  (true, res.resolution)
+# ---------------------------------------------------------------------------
+# Resolution
+# ---------------------------------------------------------------------------
 
-proc tryResolveNix(packageId: string; step: var ChainStep):
-    tuple[found: bool; resolution: CatalogResolution] =
-  ## M65: the cakNix branch of the chain. The M21 realize-side Nix
-  ## adapter lands in a parallel branch under ``libs/repro_home_*``;
-  ## until that integration is wired into the resolver, cakNix is
-  ## skipped cleanly with ``csoAdapterUnavailable``. The chain moves
-  ## on. Windows always skips cakNix regardless of registration —
-  ## Nix is not supported on Windows.
-  step.adapter = cakNix
-  step.outcome = csoAdapterUnavailable
-  when defined(windows):
-    step.reason = "cakNix is not supported on Windows (skipped)"
-  else:
-    step.reason = "cakNix resolver not yet wired into the M65 chain " &
-      "(parallel work in libs/repro_home_*); skipped cleanly so the " &
-      "chain falls through to the next adapter"
-  (false, CatalogResolution())
-
-proc tryResolveScoop(cat: var ProductionCatalog; packageId: string;
-                     step: var ChainStep):
-    tuple[found: bool; resolution: CatalogResolution] =
-  ## M65: the cakScoop branch of the chain. Windows-only; on non-
-  ## Windows hosts the step is recorded as ``csoAdapterUnavailable``
-  ## and the chain moves on. On Windows we look the package up in
-  ## ``scoop list`` + the configured bucket inventory using the same
-  ## helpers the legacy ``resolvePackage`` uses.
-  step.adapter = cakScoop
-  when not defined(windows):
-    step.outcome = csoAdapterUnavailable
-    step.reason = "cakScoop is Windows-only"
-    return (false, CatalogResolution())
-  else:
-    let inst = installedVersion(cat, packageId)
-    let manifest = findBucketManifest(cat, packageId)
-    if (not inst.installed) and (not manifest.found):
-      step.outcome = csoToolNotFound
-      step.reason = "no installed Scoop app named '" & packageId &
-        "' and no bucket manifest carries it"
-      return (false, CatalogResolution())
-    var resolution = CatalogResolution(
-      packageId: packageId,
-      adapter: cakScoop,
-      app: packageId,
-      executableName: packageId)
-    if manifest.found:
-      resolution.bucket = manifest.bucket
-      if manifest.binName.len > 0:
-        resolution.executableName = manifest.binName
-      if not inst.installed:
-        resolution.resolvedVersion = manifest.version
-    if inst.installed:
-      resolution.installed = true
-      resolution.resolvedVersion = inst.version
-      resolution.cacheHit = satisfiesProfile(inst.version,
-        pinnedVersion = "", preferredVersion = "")
-      let installedExe = installedExecutableName(cat.scoopRoot, packageId,
-        inst.version)
-      if installedExe.len > 0:
-        resolution.executableName = installedExe
-      if resolution.bucket.len == 0:
-        let installJson = cat.scoopRoot / "apps" / packageId / inst.version /
-          "install.json"
-        if fileExists(extendedPath(installJson)):
-          try:
-            let parsed = parseJson(readFile(extendedPath(installJson)))
-            if parsed.kind == JObject:
-              resolution.bucket = parsed{"bucket"}.getStr("")
-          except CatchableError:
-            discard
-      if resolution.bucket.len == 0:
-        resolution.bucket = "main"
-    step.outcome = csoResolved
-    step.reason =
+proc resolveProfilePackage*(packageId: string;
+                            target: RealizationTarget;
+                            policy: SelectionPolicy;
+                            requestedVersion = "";
+                            binaries: seq[string] = @[];
+                            contributor = none(string);
+                            inventory = HostInventory();
+                            scoop: ScoopHostInventory = nil;
+                            availability = none(PackageAvailability);
+                            lockIdentity = "";
+                            catalog = ProfileCatalog()):
+    ProfilePackageResolution =
+  ## Resolve one profile package reference for ``target`` under ``policy``.
+  ##
+  ## Raises the selection errors of ``realization_selection``
+  ## (``EPlatformUnavailable``, ``EAmbiguousRealization``,
+  ## ``EMissingRealization``) and ``ValueError`` for a selected record no
+  ## realizer can realize. ``availability`` overrides the registry lookup
+  ## for tests that need a declaration without a linked definition;
+  ## ``scoop`` supplies the cache-hit verdict for a declared Scoop
+  ## realization on a Windows host. ``lockIdentity`` pins the exact
+  ## realization a home-profile lock recorded (``SelectionRequest``).
+  ## ``catalog`` carries the references the ``reprobuild-packages`` catalog
+  ## defines (``projectCatalogPackages``); a resolution without one sees the
+  ## linked definitions only.
+  let projected = profileToolUse(packageId, catalog)
+  let useDef = projected.useDef
+  var probeNames = binaries
+  if probeNames.len == 0:
+    probeNames = @[if useDef.executableName.len > 0: useDef.executableName
+                   else: packageId]
+  let request = SelectionRequest(
+    packageName: packageId,
+    target: target,
+    policy: policy,
+    version: requestedVersion,
+    contributor: contributor,
+    lockIdentity: lockIdentity,
+    availability:
+      if availability.isSome: availability.get
+      else: packageAvailability(packageId),
+    probeNames: probeNames,
+    definitionKnown: projected.known,
+    inventory: inventory)
+  let selection = selectRealization(useDef, request)
+  result.packageId = packageId
+  result.requestedVersion = requestedVersion
+  result.selection = selection
+  result.useDef = narrowedTo(useDef, selection)
+  case selection.kind
+  of rkTarball:
+    result.archiveRoute = archiveRouteFor(packageId, selection.tarball)
+    if result.archiveRoute == arInstaller:
+      result.archive = archiveRealizationOf(packageId, selection.tarball)
+  of rkPath:
+    result.cacheHit = true
+  of rkScoop:
+    if selection.ambient:
+      result.installedVersion =
+        if selection.scoopInventory.installed: selection.scoopInventory.version
+        else: ""
+      result.cacheHit = selection.scoopInventory.installed and
+        satisfiesProfile(selection.scoopInventory.version, requestedVersion,
+          "")
+    elif not scoop.isNil and target.isHost:
+      let inst = installedVersion(scoop, selection.scoop.app)
       if inst.installed:
-        "installed at version '" & inst.version & "' (bucket=" &
-          resolution.bucket & ")"
-      else:
-        "available in bucket '" & manifest.bucket & "' at version '" &
-          manifest.version & "' (not yet installed)"
-    return (true, resolution)
+        result.installedVersion = inst.version
+        result.cacheHit = satisfiesProfile(inst.version,
+          selection.scoop.version, selection.scoop.preferredVersion)
+  of rkNix:
+    discard
 
-proc tryResolvePath(packageId: string; binaries: seq[string];
-                    step: var ChainStep):
-    tuple[found: bool; resolution: CatalogResolution] =
-  ## M65: the cakPath branch of the chain. The last-resort adapter:
-  ## the executable is on PATH, so we record it as a path-adapter
-  ## resolution. Already-on-PATH is an implicit cache-hit.
-  ##
-  ## 2026-06-09 (binaries metadata): when `binaries` is non-empty, the
-  ## adapter probes EACH binary name on PATH and reports a hit on the
-  ## first one that exists. This handles upstream packages whose
-  ## binary name differs from the package name (e.g. nixpkgs `ripgrep`
-  ## ships the `rg` binary; `package("ripgrep", binaries = @["rg"])`
-  ## resolves correctly). Empty `binaries` preserves the pre-2026-06
-  ## behavior: probe the package name itself.
-  step.adapter = cakPath
-  let probeNames =
-    if binaries.len > 0: binaries
-    else: @[packageId]
-  var firstFound = ""
-  var foundName = ""
-  for name in probeNames:
-    let exe = findExe(name)
-    if exe.len > 0:
-      firstFound = exe
-      foundName = name
-      break
-  if firstFound.len == 0:
-    step.outcome = csoToolNotFound
-    if probeNames.len == 1:
-      step.reason = "'" & probeNames[0] & "' not found on PATH"
-    else:
-      step.reason = "none of [" & probeNames.join(", ") & "] found on PATH"
-    return (false, CatalogResolution())
-  step.outcome = csoResolved
-  step.reason = "found '" & firstFound & "' on PATH"
-  var resolution = CatalogResolution(
-    packageId: packageId,
-    adapter: cakPath,
-    app: packageId,
-    executableName: extractFilename(firstFound),
-    sourcePath: firstFound,
-    installed: true,
-    cacheHit: true,
-    searchedCatalogs: @["path:" & getEnv("PATH")])
-  (true, resolution)
+proc offeredVersions*(packageId: string;
+                      catalog = ProfileCatalog()): seq[string] =
+  ## Every version a linked definition of ``packageId`` (or a contribution
+  ## to it) pins a realization at, in declaration order, for any platform.
+  ## ``tarball`` records name theirs in ``version``; ``scoopApp`` records in
+  ## ``version``; ``nixPackage`` records name none.
+  let useDef =
+    try: profileToolUse(packageId, catalog).useDef
+    except ValueError: return
+  for record in useDef.tarballProvisioning:
+    if record.detail.version.len > 0 and record.detail.version notin result:
+      result.add(record.detail.version)
+  for record in useDef.scoopProvisioning:
+    if record.version.len > 0 and record.version notin result:
+      result.add(record.version)
 
-proc raiseAdapterChainExhausted*(packageId: string;
-                                 chain: seq[CatalogAdapterKind];
-                                 trace: seq[ChainStep]) {.noreturn.} =
-  ## M65: every adapter in ``chain`` was tried and none resolved
-  ## ``packageId``. The error carries the chain that was walked plus
-  ## the per-step skip reason so the CLI layer can render a structured
-  ## diagnostic ("nix: no nixPackage branch; builtin: no slice matches;
-  ## scoop: not installed; path: not on PATH"). Mirrors the
-  ## ``EAdapterChainExhausted`` shape the M65 spec specifies.
-  var chainStr = ""
-  for i, a in chain:
-    if i > 0: chainStr.add(", ")
-    chainStr.add($a)
-  var reasonStr = ""
-  for i, step in trace:
-    if i > 0: reasonStr.add("; ")
-    reasonStr.add($step.adapter & ": " & step.reason)
-  var e = newException(EAdapterChainExhausted,
-    "adapter chain exhausted for package '" & packageId &
-    "'. Chain walked: [" & chainStr & "]. Per-adapter outcomes: " &
-    reasonStr & ". Declare the package in a recognized adapter " &
-    "catalog (built-in registry, Scoop, Nix), make its executable " &
-    "available on PATH, or override `adapter_preference:` in home.nim.")
-  e.packageId = packageId
-  e.chain = chain
-  e.chainTrace = trace
-  raise e
-
-proc chainResolvePackage*(cat: var ProductionCatalog;
-                          packageId: string;
-                          chain: seq[CatalogAdapterKind] = @[];
-                          version = "";
-                          binaries: seq[string] = @[];
-                          hostCpu = detectHostCpu();
-                          hostOs = detectHostOs();
-                          availability = none(PackageAvailability);
-                          hostLevel = detectHostMicroarchLevel(hostCpu);
-                          hostFeatures = detectHostCpuFeatures(hostCpu)):
-    CatalogResolution =
-  ## M65: the production adapter selection chain. Walks ``chain`` in
-  ## order, returning the first adapter's resolution. When ``chain`` is
-  ## empty the platform default is used (Windows: builtin/scoop/path;
-  ## Linux: nix/builtin/path; macOS: nix/path).
-  ##
-  ## Raises ``EAdapterChainExhausted`` if every adapter in the chain
-  ## was tried and none resolved.
-  ##
-  ## PMC-1: raises ``EPackageUnavailableOnPlatform`` BEFORE walking the
-  ## chain when the package declared a ``platforms:`` set this host is not
-  ## in. ``availability`` overrides the registry lookup; leave it ``none``
-  ## in production and pass a synthetic value in tests that need a
-  ## declaration without a registered recipe.
-  ##
-  ## The returned ``CatalogResolution.chainTrace`` carries one entry
-  ## per adapter consulted, in order, with the per-adapter outcome +
-  ## skip reason (the final entry on a hit has
-  ## ``outcome == csoResolved`` — the others are skip reasons).
-  ##
-  ## PMC-2: ``hostLevel`` says what this host provides on the
-  ## microarchitecture axis. It is a DEFAULTED PARAMETER for the same
-  ## reason ``hostCpu`` / ``hostOs`` are, and the campaign's testability
-  ## note makes that a requirement rather than a convenience: a v2/v3
-  ## test names its host here and needs no such hardware.
-  ##
-  ## PMC-3: ``hostFeatures`` is the fourth such parameter, additive on top of
-  ## ``hostLevel``. Supplying one changes NOTHING for the standard library —
-  ## every stdlib arm requires ``{}`` and ``{} ⊆ anything`` — which is the
-  ## check that PMC-3 did not move every existing package by adding a field
-  ## nobody uses.
-  ##
-  ## When the builtin catalog holds an arm the host cannot run, the
-  ## cakBuiltin step SKIPS (as it already did for an unsupported
-  ## platform) and the chain continues. That is deliberate — PMC-2 does
-  ## not change chain control flow — but it means the shortfall must
-  ## survive into the eventual ``EAdapterChainExhausted`` message, and it
-  ## does: ``raiseAdapterChainExhausted`` renders every step's reason.
-  ## Note the consequence for a chain ending in ``cakPath``: an
-  ## unsatisfiable floor can still fall through to a same-named PATH
-  ## binary, exactly as an unsupported platform always could. PMC-1
-  ## closed that hole only for a package with an explicit ``platforms:``
-  ## declaration; closing it for a microarchitecture shortfall is a
-  ## behaviour change to the chain, not to selection, and is left to
-  ## PMC-4/PMC-5 rather than smuggled in here.
-  # PMC-1: declared availability is consulted BEFORE the adapter chain.
-  #
-  # Ordering is the substance of the deliverable, not a detail. The last
-  # adapter in every default chain is ``cakPath``, which probes the host's
-  # PATH for a same-named executable — so a package that cannot exist here
-  # did not merely fail with a confusing message, it could RESOLVE, to an
-  # undeclared binary that happened to share the name. That looks like
-  # success. Gating in front of the loop is what makes ``cakPath``
-  # unreachable for a package known to be unavailable.
-  let declaredAvailability =
-    if availability.isSome: availability.get
-    else: packageAvailability(packageId)
-  if not declaredAvailability.isAvailableOn(hostCpu, hostOs):
-    raisePackageUnavailableOnPlatform(packageId, declaredAvailability,
-      hostCpu, hostOs)
-  let effective =
-    if chain.len == 0: defaultAdapterChain()
-    else: chain
-  var trace: seq[ChainStep] = @[]
-  # PMC-4: has some adapter already said "I have this and this host cannot run
-  # it"? See the ``cakPath`` arm below for why that is not the same as "I do
-  # not have it", and why only ``cakPath`` is poisoned by it.
-  var capabilityRefusal = ""
-  for adapter in effective:
-    var step = ChainStep(adapter: adapter, outcome: csoAdapterUnavailable,
-      reason: "")
-    case adapter
-    of cakBuiltin:
-      let outcome = tryResolveBuiltin(packageId, version, hostCpu, hostOs,
-        hostLevel, hostFeatures, step)
-      if step.capabilityShortfall and capabilityRefusal.len == 0:
-        capabilityRefusal = step.reason
-      trace.add(step)
-      if outcome.found:
-        var resolution = outcome.resolution
-        resolution.chainTrace = trace
-        return resolution
-    of cakNix:
-      let outcome = tryResolveNix(packageId, step)
-      trace.add(step)
-      if outcome.found:
-        var resolution = outcome.resolution
-        resolution.chainTrace = trace
-        return resolution
-    of cakScoop:
-      let outcome = tryResolveScoop(cat, packageId, step)
-      trace.add(step)
-      if outcome.found:
-        var resolution = outcome.resolution
-        resolution.chainTrace = trace
-        return resolution
-    of cakPath:
-      # PMC-4 — the silent-wrong-thing gate, and the reason this whole flag
-      # exists.
-      #
-      # ``cakPath`` probes the host's PATH for a SAME-NAMED executable. If an
-      # earlier adapter refused because the host cannot execute what the
-      # catalog offers, probing PATH does not recover from that: it resolves
-      # a DIFFERENT, undeclared binary that merely shares a name, and reports
-      # success. The user asked for a package with an x86-64-v3 floor and got
-      # whatever ``foo.exe`` was first on PATH.
-      #
-      # This is exactly the hazard PMC-1 closed for declared availability
-      # (`Package-Model.md`: "``cakPath`` stops being reachable for a package
-      # known to be unavailable"), reappearing on the capability axis. PMC-1
-      # could gate in front of the loop because availability is known before
-      # any adapter runs; a floor shortfall is only discovered by ASKING the
-      # builtin adapter, so the gate has to live here instead.
-      #
-      # Only ``cakPath`` is poisoned. ``cakNix`` and ``cakScoop`` resolve
-      # genuinely different artifacts that may well satisfy this host, and
-      # refusing them would turn a safety fix into an outage.
-      if capabilityRefusal.len > 0:
-        step.outcome = csoAdapterUnavailable
-        step.reason = "refused: the builtin catalog has this package but " &
-          "this host cannot run it, and resolving a same-named executable " &
-          "from PATH would substitute an undeclared binary for the one that " &
-          "was refused (" & capabilityRefusal & ")"
-        trace.add(step)
-        continue
-      let outcome = tryResolvePath(packageId, binaries, step)
-      trace.add(step)
-      if outcome.found:
-        var resolution = outcome.resolution
-        resolution.chainTrace = trace
-        return resolution
-  raiseAdapterChainExhausted(packageId, effective, trace)
+proc unpinnedHostVersion*(packageId: string;
+                          catalog = ProfileCatalog()): Option[string] =
+  ## The version an UNPINNED reference to ``packageId`` resolves to on this
+  ## host among the versioned kinds (``tarball``, then ``scoop``) — what
+  ## ``repro home add <tool>@latest`` writes, so that pinning a reference
+  ## does not change which realization it selects. ``none`` when no versioned
+  ## realization exists for the host.
+  try:
+    let resolution = resolveProfilePackage(packageId,
+      hostRealizationTarget(), @[rkTarball, rkScoop], catalog = catalog)
+    if resolution.selection.version.len > 0:
+      return some(resolution.selection.version)
+  except CatchableError:
+    discard
+  none(string)

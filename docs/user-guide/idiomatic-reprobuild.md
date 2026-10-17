@@ -824,6 +824,15 @@ Without a primitive you can still build it, but you own the parts:
 - The probe is an edge whose output is a file, declared `cacheable =
   false` — its whole purpose is to re-observe the host. That is fine; it
   is cheap.
+- The probe must **leave its fact file untouched when the fact has not
+  changed** — compare, and write only on a difference. Writing the same
+  bytes again is not enough: a downstream edge revalidates its recorded
+  inputs by timestamp metadata first (the default `ffpTimestamp` policy),
+  so a fresh mtime is a changed input and the expensive edge misses on
+  `input metadata changed: <fact file>` on every build.
+  `scripts/source_revision.sh --nim-module` is the worked example; before
+  it compared, the engine edge rebuilt on every `repro build`
+  (`tests/integration/t_b1_apps_action_cache_hit.nim`).
 - The downstream edge takes that file as a declared input **and must
   actually read it**, because the monitored read set is what keys the
   cache (§2). A declared-but-unread fact file orders the edge and nothing
@@ -1135,11 +1144,14 @@ cold start. The content digest was redundant with Nim's own per-module
 ### The other tell: keying scratch on a fingerprint
 
 It looks principled and it is the same bug. `repro_profile_compile`
-puts its nimcache at `profile-cache/nimcache/<digestHex>`
-(`sources.nim:289`) where the digest is the edge's content identity. So
-**every source edit produces a fresh empty directory** — which defeats
-the entire purpose of an incremental cache, since the thing it exists
-to accelerate is precisely the recompile after an edit.
+used to put its nimcache at `profile-cache/nimcache/<digestHex>`, where
+the digest was the edge's content identity. So **every source edit
+produced a fresh empty directory** — which defeats the entire purpose
+of an incremental cache, since the thing it exists to accelerate is
+precisely the recompile after an edit. It now keys the directory on the
+profile's path (`profileCompileKey`), which is the edge's identity, and
+declares it an ignored input prefix of the edge so the compile's
+read-back of its own scratch never keys the action.
 
 A tool cache should be keyed on the edge's *identity*, never on its
 *contents*.

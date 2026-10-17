@@ -3,6 +3,7 @@
 import std/[options, os, tempfiles, unittest]
 
 import repro_workspace_manifests
+import repro_test_support/process_fixtures
 
 const happyToml = """
 schema = "reprobuild.workspace.local.v1"
@@ -64,6 +65,11 @@ proc writeFixture(dir, name, content: string): string =
 
 suite "M5 — WorkspaceLocal round-trip":
   let dir = createTempDir("reprobuild-m5-workspace-local-", "")
+  # Removed when THIS process exits. Suite-level code runs in every
+  # process the runner starts -- one per case, plus its ``--list-json``
+  # probe -- and nothing removed this directory in any of them. See
+  # ``repro_test_support/process_fixtures``.
+  releaseDirAtProcessExit(dir)
 
   test "happy path populates workspace metadata and manifest layers":
     let path = writeFixture(dir, "workspace-happy.toml", happyToml)
@@ -103,7 +109,9 @@ suite "M5 — WorkspaceLocal round-trip":
     except WorkspaceManifestParseError as e:
       raised = true
       check e.keyPath == "schema"
-      check e.expectedSchema == "reprobuild.workspace.local.v1"
+      # The CURRENT state schema is what a mismatch names as expected; the
+      # old `local.v1` is still read (Workspace-Settings-Files.md §8).
+      check e.expectedSchema == "reprobuild.workspace.state.v1"
       check e.observedSchema == "reprobuild.workspace.local.v2"
     check raised
 

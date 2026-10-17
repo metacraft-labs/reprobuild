@@ -12,7 +12,7 @@
 ##    (including from a linked reprobuild worktree), then run
 ##    ``./build/bin/repro build runquota:runquotad --tool-provisioning=path
 ##    --daemon=off`` and assert it succeeds: no usage dump, exit 0, and
-##    the sibling's ``../runquota/build/bin/runquotad`` artifact present
+##    the sibling's ``private runquota/build/bin/runquotad`` artifact present
 ##    and non-empty afterwards.
 ##
 ##    ``looksLikeUsageDump`` is an ASSERTION here, not a classifier: it
@@ -32,6 +32,7 @@
 import std/[os, osproc, strutils, unittest]
 
 import repro_test_support
+import runquota_case_fixture
 
 const RepoMarker = "repro.nim"
 
@@ -138,48 +139,41 @@ echo "findSiblingProjectFile"                             # NOT a literal
 
   test "engine accepts runquota:runquotad without a usage dump":
     let reprobuildRoot = findRepoRoot()
-    let runquotaCheckout = requireRunQuotaSourceRoot(reprobuildRoot)
-    let reproBin = reprobuildRoot / "build" / "bin" /
-      addFileExt("repro", ExeExt)
-    if not fileExists(reproBin):
-      checkpoint("skipped — " & reproBin &
-        " is missing; run `just build` first")
-      skip()
-    else:
-      let runquotadBinary = runquotaCheckout / "build" / "bin" /
-        addFileExt("runquotad", ExeExt)
-      # Remove any stale artifact so the post-invocation check
-      # measures whether THIS run produced the binary.
-      if fileExists(runquotadBinary):
-        removeFile(runquotadBinary)
+    let sharedBefore = sharedRunQuotaDaemonState(reprobuildRoot)
+    defer: doAssert sharedRunQuotaDaemonState(reprobuildRoot) == sharedBefore
+    let fixture = prepareRunQuotaCase(reprobuildRoot)
+    let reproBin = requireBinary(reprobuildRoot / "build" / "bin" /
+      addFileExt("repro", ExeExt), "reprobuild.apps.repro")
+    let runquotadBinary = fixture.daemon
+    check not fileExists(runquotadBinary)
 
-      let args = @[
-        reproBin.quoteShell,
-        "build",
-        "runquota:runquotad",
-        "--tool-provisioning=path",
-        "--daemon=off",
-      ]
-      let cmd = args.join(" ")
-      checkpoint("running: " & cmd)
-      let (output, exitCode) =
-        execCmdEx(cmd, workingDir = reprobuildRoot)
-      checkpoint("exit=" & $exitCode)
-      # The pre-D2 failure shape, named first because it gives the
-      # sharpest diagnosis: a usage dump means the CLI REJECTED
-      # ``runquota:runquotad`` rather than resolving it.
-      if looksLikeUsageDump(output) or exitCode != 0:
-        checkpoint(output)
-      check not looksLikeUsageDump(output)
-      # And the build itself. Tolerating a non-zero exit here — the
-      # former "MVP arm" — meant the only thing this case could ever
-      # detect was the usage dump: a selector that resolved and then
-      # failed to build anything reported exactly the same green as one
-      # that built the sibling. D2's contract is that the qualified
-      # selector reaches the sibling project and BUILDS it, so that is
-      # what is asserted.
-      check exitCode == 0
-      if exitCode == 0:
-        check fileExists(runquotadBinary)
-        if fileExists(runquotadBinary):
-          check getFileInfo(runquotadBinary).size > 0
+    let args = @[
+      reproBin.quoteShell,
+      "build",
+      "runquota:runquotad",
+      "--tool-provisioning=path",
+      "--daemon=off",
+    ]
+    let cmd = args.join(" ")
+    checkpoint("running: " & cmd)
+    let (output, exitCode) =
+      execCmdEx(cmd, workingDir = fixture.consumer, env = fixture.env)
+    checkpoint("exit=" & $exitCode)
+    # The pre-D2 failure shape, named first because it gives the
+    # sharpest diagnosis: a usage dump means the CLI REJECTED
+    # ``runquota:runquotad`` rather than resolving it.
+    if looksLikeUsageDump(output) or exitCode != 0:
+      checkpoint(output)
+    check not looksLikeUsageDump(output)
+    # And the build itself. Tolerating a non-zero exit here — the
+    # former "MVP arm" — meant the only thing this case could ever
+    # detect was the usage dump: a selector that resolved and then
+    # failed to build anything reported exactly the same green as one
+    # that built the sibling. D2's contract is that the qualified
+    # selector reaches the sibling project and BUILDS it, so that is
+    # what is asserted.
+    check exitCode == 0
+    if exitCode == 0:
+      check fileExists(runquotadBinary)
+      if fileExists(runquotadBinary):
+        check getFileInfo(runquotadBinary).size > 0

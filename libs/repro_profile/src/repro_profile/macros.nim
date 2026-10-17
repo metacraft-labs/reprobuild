@@ -45,16 +45,42 @@
 ##   that append to an in-scope `__profileIntent` builder variable.
 ## - `when` blocks inside an activity body are parsed by inspecting the
 ##   `nnkWhenStmt` AST and emitting a `guardedBody` element.
+## - `when` chains inside `resources:` and `config:` become runtime guards
+##   on the resources / overrides they declare when their conditions are
+##   predicates (`when linux():`), and stay Nim compile-time branches when
+##   they are `defined(...)` conditions (`lowerWhenChain`).
+## - A `resources:` block directly inside `activity <name>:` (GM9) declares
+##   resources that belong to that activity: the planner plans them only on
+##   hosts that select it (`parseActivityResources`).
+## - A `stow:` block directly inside `activity <name>:` (GM11) names the
+##   `stow/` packages that belong to that activity: the planner materializes
+##   them only on hosts that select it (`parseActivityStow`,
+##   `repro_profile/stow_scopes`).
+## - `data:` lists plan-time data files (GM4). The macro records the
+##   paths only; the planner reads and expands the files, so a data edit
+##   never recompiles the profile.
+## - `catalogs:` lists the provisioning-contribution catalogs the profile
+##   imports, as Nim module paths relative to the profile directory. The
+##   macro records the paths only; `repro home apply` imports them where it
+##   resolves the profile's package references.
+## - The intent is built by a proc of its own, so the platform probe can
+##   evaluate it at compile time for other platforms (see the end of the
+##   `profile` macro).
 ##
 ## The accumulator is named `__profileIntent` (double-underscore prefix
 ## reduces accidental shadowing). The `profile` macro declares it as a
 ## `var` at the top of the generated `main`.
 
-import std/[macros, strutils, tables]
+import std/[macros, sequtils, strutils, tables]
 
 import ./types
 import ./predicates
 import ./emit
+import ./data_refs
+import ./catalog_refs
+import ./concerns
+import ./host_system
+import ./stow_scopes
 
 const ProfileIntentVar* = "profileIntentBuilder"
 const ActivityBodyVar* = "activityBodyBuilder"
@@ -65,6 +91,17 @@ const ActivityBodyVar* = "activityBodyBuilder"
 # ---------------------------------------------------------------------
 
 proc parseActivityBody(body: NimNode; targetSeq: NimNode): NimNode
+
+proc isActivityResourcesBlock(stmt: NimNode): bool =
+  ## `resources: <body>` -- the GM9 activity-scoped resources block.
+  stmt.kind == nnkCall and stmt.len == 2 and stmt[0].kind == nnkIdent and
+    $stmt[0] == "resources" and stmt[1].kind == nnkStmtList
+
+proc isActivityStowBlock(stmt: NimNode): bool =
+  ## `stow: <body>` -- the GM11 block naming the `stow/` packages that
+  ## belong to the activity (`repro_profile/stow_scopes`).
+  stmt.kind == nnkCall and stmt.len == 2 and stmt[0].kind == nnkIdent and
+    $stmt[0] == StowBlockKeyword and stmt[1].kind == nnkStmtList
 
 proc parseActivityStmt(stmt: NimNode; targetSeq: NimNode): NimNode =
   ## A single statement inside an activity body. The valid shapes are:
@@ -119,6 +156,19 @@ proc parseActivityStmt(stmt: NimNode; targetSeq: NimNode): NimNode =
     result.add newEmptyNode()
     result.add inner
   of nnkCall, nnkCommand:
+    # GM9: `resources:` belongs at the top of an activity body, where
+    # `parseActivityCall` handles it. Here it would be under a `when` of the
+    # body (or otherwise misplaced): refuse it rather than read it as a
+    # helper call. Guard the resources themselves inside the block instead.
+    if isActivityResourcesBlock(stmt):
+      error("an activity's `resources:` block must sit directly in the " &
+        "activity body, not under a `when`; put the `when <predicate>:` " &
+        "inside the `resources:` block", stmt)
+    # GM11: the same for a `stow:` block.
+    if isActivityStowBlock(stmt):
+      error("an activity's `stow:` block must sit directly in the " &
+        "activity body, not under a `when`; put the `when <predicate>:` " &
+        "inside the `stow:` block", stmt)
     # M69: recognize the `package(<id>[, "<version>"])` call form and
     # emit a typed `aekPackageRef` with the version literal pinned.
     # The bare-arg call `package(<id>)` records `pkgVersion = ""`. The
@@ -237,6 +287,224 @@ proc isCallTo(stmt: NimNode; name: string): bool =
   stmt.kind in {nnkCall, nnkCommand} and
     stmt.len >= 1 and stmt[0].kind == nnkIdent and $stmt[0] == name
 
+# ---------------------------------------------------------------------
+# `when` chains inside `resources:` and `config:`.
+#
+# A `when` there is either a RUNTIME guard (`when linux():`,
+# `when macos() or windows():`) or a Nim COMPILE-TIME branch
+# (`when defined(windows):`). The macro sees untyped AST, so it cannot tell
+# the two apart itself; it emits both lowerings behind a `when` on the
+# conditions' TYPES and lets the compiler pick:
+#
+#   * every condition a `PredicateExpr` -> runtime guards. Each branch's
+#     body runs on every host and its entries carry the branch's predicate
+#     (`guarded(...)`); an `elif` / `else` branch carries the negation of
+#     every earlier condition, so exactly one branch applies on any host.
+#     The planner evaluates the guards against the target host, and an
+#     export carries them as data.
+#   * every condition a `bool` -> the ordinary Nim `when`, rewritten in
+#     place. The unreached branches are elided by the compiler, so the
+#     intent depends on the platform that compiled it; `repro home export`
+#     detects that (the platform probe) and refuses to describe another
+#     platform with it.
+#   * a mix -> a compile error: a chain cannot be half compile-time.
+# ---------------------------------------------------------------------
+
+type
+  WhenBranch = tuple[cond: NimNode, body: NimNode]
+    ## One branch of a `when` chain; `cond` is nil for `else`.
+
+proc whenBranches(stmt: NimNode; section: string): seq[WhenBranch] =
+  for branch in stmt:
+    case branch.kind
+    of nnkElifBranch, nnkElifExpr:
+      result.add (cond: branch[0], body: branch[1])
+    of nnkElse, nnkElseExpr:
+      result.add (cond: NimNode(nil), body: branch[0])
+    else:
+      error(section & ": unsupported `when` branch shape " & $branch.kind,
+        branch)
+
+proc conditionsAre(branches: seq[WhenBranch]; typeName: string): NimNode =
+  ## `typeof(c1) is <typeName> and typeof(c2) is <typeName> ...` over the
+  ## chain's conditions. `typeof` does not evaluate its argument.
+  result = nil
+  for b in branches:
+    if b.cond.isNil:
+      continue
+    let test = infix(newCall(ident"typeof", copyNimTree(b.cond)), "is",
+      ident(typeName))
+    result = if result.isNil: test else: infix(result, "and", test)
+  if result.isNil:
+    result = ident"false"
+
+proc lowerWhenChain(stmt: NimNode; section: string; target: NimNode;
+                    rewrite: proc (body: NimNode): NimNode;
+                    runtimeRewrite: proc (body: NimNode): NimNode = nil):
+    NimNode =
+  ## Lower a `when` chain inside `section` whose entries land in `target`
+  ## (`profileVar.resources` / `profileVar.configOverrides`). `rewrite`
+  ## rewrites one branch body the way the section rewrites its statements;
+  ## `runtimeRewrite`, when given, replaces it for the runtime-guard
+  ## lowering (the resources section uses it to refuse action edges, which
+  ## carry no guard, under a runtime predicate).
+  let runtimeBody = if runtimeRewrite.isNil: rewrite else: runtimeRewrite
+  let branches = whenBranches(stmt, section)
+  # Runtime lowering: one `guarded` block per branch, each with the
+  # branch's condition conjoined with the negation of every earlier one.
+  let runtime = newStmtList()
+  var earlier: seq[NimNode] = @[]
+  for b in branches:
+    var effective: NimNode
+    var condSym: NimNode = nil
+    if b.cond.isNil:
+      effective = newCall(ident"predicate", newStrLitNode(""))
+    else:
+      condSym = genSym(nskLet, "guardCond")
+      runtime.add newLetStmt(condSym, copyNimTree(b.cond))
+      effective = condSym
+    for prior in earlier:
+      effective = newCall(ident"conjoinGuard", effective,
+        newCall(ident"combineNot", prior))
+    if not condSym.isNil:
+      earlier.add condSym
+    # Each lowering gets its own copy of the body: the two trees must not
+    # share nodes, since the compiler annotates the one it type-checks.
+    runtime.add newCall(ident"guarded", target, effective,
+      runtimeBody(copyNimTree(b.body)))
+  let runtimeBlock = newNimNode(nnkBlockStmt).add(newEmptyNode(), runtime)
+  # Compile-time lowering: the same `when`, bodies rewritten in place.
+  let compileTime = newNimNode(nnkWhenStmt)
+  for b in branches:
+    if b.cond.isNil:
+      compileTime.add newNimNode(nnkElse).add(rewrite(copyNimTree(b.body)))
+    else:
+      compileTime.add newNimNode(nnkElifBranch).add(copyNimTree(b.cond),
+        rewrite(copyNimTree(b.body)))
+  let mixed = section & ": a `when` chain mixes runtime predicates " &
+    "(`linux()`, `host() == \"x\"`, ...) with compile-time conditions " &
+    "(`defined(...)`); use one kind per chain"
+  result = newNimNode(nnkWhenStmt)
+  result.add newNimNode(nnkElifBranch).add(
+    conditionsAre(branches, "PredicateExpr"), runtimeBlock)
+  result.add newNimNode(nnkElifBranch).add(
+    conditionsAre(branches, "bool"), compileTime)
+  result.add newNimNode(nnkElse).add(newStmtList(
+    newNimNode(nnkPragma).add(newColonExpr(ident"error",
+      newStrLitNode(mixed)))))
+
+proc rewriteConfigAssignments(pkgName: string; body: NimNode;
+                              profileVar: NimNode): NimNode
+
+proc rewriteConfigAssignment(pkgName: string; assignment: NimNode;
+                             profileVar: NimNode): NimNode =
+  ## One statement inside a `<pkg>:` sub-block of `config:`: a
+  ## `key = value` assignment, or a `when` chain of assignments.
+  case assignment.kind
+  of nnkWhenStmt:
+    let target = newDotExpr(profileVar, ident"configOverrides")
+    return lowerWhenChain(assignment, "config", target,
+      proc (b: NimNode): NimNode =
+        rewriteConfigAssignments(pkgName, b, profileVar))
+  of nnkCommentStmt, nnkDiscardStmt:
+    return newEmptyNode()
+  else:
+    discard
+  if assignment.kind != nnkAsgn or assignment.len != 2:
+    error("config entry must contain `key = value` assignments (optionally " &
+          "inside `when <predicate>:`)", assignment)
+  var keyName: string
+  case assignment[0].kind
+  of nnkIdent: keyName = $assignment[0]
+  of nnkStrLit: keyName = assignment[0].strVal
+  else:
+    error("config key must be an identifier or string literal",
+          assignment[0])
+  let valueExpr = assignment[1]
+  let pkgLit = newStrLitNode(pkgName)
+  let keyLit = newStrLitNode(keyName)
+  result = quote do:
+    block:
+      when `valueExpr` is string:
+        `profileVar`.configOverrides.add ConfigOverride(
+          pkg: `pkgLit`, key: `keyLit`,
+          value: ConfigValue(kind: cvkString, s: `valueExpr`))
+      elif `valueExpr` is int:
+        `profileVar`.configOverrides.add ConfigOverride(
+          pkg: `pkgLit`, key: `keyLit`,
+          value: ConfigValue(kind: cvkInt, i: `valueExpr`))
+      elif `valueExpr` is bool:
+        `profileVar`.configOverrides.add ConfigOverride(
+          pkg: `pkgLit`, key: `keyLit`,
+          value: ConfigValue(kind: cvkBool, b: `valueExpr`))
+      else:
+        `profileVar`.configOverrides.add ConfigOverride(
+          pkg: `pkgLit`, key: `keyLit`,
+          value: ConfigValue(kind: cvkExpr, expr: $`valueExpr`))
+
+proc rewriteConfigAssignments(pkgName: string; body: NimNode;
+                              profileVar: NimNode): NimNode =
+  result = newStmtList()
+  let stmts = if body.kind == nnkStmtList: toSeq(body.children) else: @[body]
+  for assignment in stmts:
+    let rewritten = rewriteConfigAssignment(pkgName, assignment, profileVar)
+    if rewritten.kind != nnkEmpty:
+      result.add rewritten
+
+proc rewriteConfigBody(body: NimNode; profileVar: NimNode): NimNode
+
+proc rewriteConfigStmt(entry: NimNode; profileVar: NimNode): NimNode =
+  ## One statement directly inside `config:`: a `<pkg>: <assignments>`
+  ## block, a helper call contributing overrides, a `when` chain of either,
+  ## or a `for` loop over them.
+  case entry.kind
+  of nnkWhenStmt:
+    let target = newDotExpr(profileVar, ident"configOverrides")
+    return lowerWhenChain(entry, "config", target,
+      proc (b: NimNode): NimNode = rewriteConfigBody(b, profileVar))
+  of nnkForStmt:
+    result = copyNimTree(entry)
+    result[^1] = rewriteConfigBody(entry[^1], profileVar)
+    return
+  of nnkCommentStmt, nnkDiscardStmt:
+    return newEmptyNode()
+  else:
+    discard
+  # Helper-call shape: `helper(arg = ..., arg = ...)` — no trailing
+  # block. The `nnkStmtList` second-child shape is what distinguishes
+  # the per-pkg form from the helper-call form.
+  if entry.kind in {nnkCall, nnkCommand} and
+     (entry.len < 2 or entry[^1].kind != nnkStmtList):
+    var newCall = newNimNode(nnkCall)
+    newCall.add entry[0]
+    var dotExpr = newNimNode(nnkDotExpr)
+    dotExpr.add profileVar
+    dotExpr.add newIdentNode("configOverrides")
+    newCall.add dotExpr
+    for i in 1 ..< entry.len:
+      newCall.add entry[i]
+    return newCall
+  if entry.kind != nnkCall or entry.len != 2 or
+     entry[1].kind != nnkStmtList:
+    error("config entry must be of the form `<pkg>: <key = value, ...>`",
+          entry)
+  var pkgName: string
+  case entry[0].kind
+  of nnkIdent: pkgName = $entry[0]
+  of nnkStrLit: pkgName = entry[0].strVal
+  else:
+    error("config package name must be an identifier or string literal",
+          entry[0])
+  result = rewriteConfigAssignments(pkgName, entry[1], profileVar)
+
+proc rewriteConfigBody(body: NimNode; profileVar: NimNode): NimNode =
+  result = newStmtList()
+  let stmts = if body.kind == nnkStmtList: toSeq(body.children) else: @[body]
+  for entry in stmts:
+    let rewritten = rewriteConfigStmt(entry, profileVar)
+    if rewritten.kind != nnkEmpty:
+      result.add rewritten
+
 proc parseConfigSection(body: NimNode; profileVar: NimNode): NimNode =
   ## `config:` body is a list of `<pkg>: <subblock>` entries where the
   ## subblock contains `key = value` assignments, OR a helper-call
@@ -246,73 +514,99 @@ proc parseConfigSection(body: NimNode; profileVar: NimNode): NimNode =
   ## matching the resource-constructor convention — so the helper's
   ## body can append `ConfigOverride` records directly to the in-scope
   ## list.
-  result = newNimNode(nnkStmtList)
+  ##
+  ## GM3: a `when <predicate>:` chain may wrap package blocks / helper
+  ## calls, or assignments inside a package block; the overrides it
+  ## declares carry the predicate as their `guard` (see `lowerWhenChain`).
+  ## A `for` loop over entries is accepted too.
   if body.kind != nnkStmtList:
     error("config: expects an indented block of per-package overrides",
           body)
-  for entry in body:
-    # Helper-call shape: `helper(arg = ..., arg = ...)` — no trailing
-    # block. The `nnkStmtList` second-child shape is what distinguishes
-    # the per-pkg form from the helper-call form.
-    if entry.kind in {nnkCall, nnkCommand} and
-       (entry.len < 2 or entry[^1].kind != nnkStmtList):
-      var newCall = newNimNode(nnkCall)
-      newCall.add entry[0]
-      var dotExpr = newNimNode(nnkDotExpr)
-      dotExpr.add profileVar
-      dotExpr.add newIdentNode("configOverrides")
-      newCall.add dotExpr
-      for i in 1 ..< entry.len:
-        newCall.add entry[i]
-      result.add newCall
-      continue
-    if entry.kind != nnkCall or entry.len != 2 or
-       entry[1].kind != nnkStmtList:
-      error("config entry must be of the form `<pkg>: <key = value, ...>`",
-            entry)
-    var pkgName: string
-    case entry[0].kind
-    of nnkIdent: pkgName = $entry[0]
-    of nnkStrLit: pkgName = entry[0].strVal
+  result = rewriteConfigBody(body, profileVar)
+
+proc hostsNameList(listSrc: NimNode; what: string): seq[string] =
+  ## A `[a, b]` list of identifiers / string literals, as written after a
+  ## host name or after `activities:` / `applies:`. `what` names the list in
+  ## the diagnostics.
+  var listNode: NimNode
+  case listSrc.kind
+  of nnkStmtList:
+    if listSrc.len != 1:
+      error("hosts " & what & " must be a single bracket list", listSrc)
+    listNode = listSrc[0]
+  else:
+    listNode = listSrc
+  if listNode.kind notin {nnkBracket, nnkPrefix}:
+    error("hosts " & what & " must be a `[name1, name2]` bracket list",
+          listNode)
+  let items = if listNode.kind == nnkPrefix and listNode.len == 2 and
+                   listNode[1].kind == nnkBracket: listNode[1]
+              else: listNode
+  if items.kind != nnkBracket:
+    error("hosts " & what & " must be a `[name1, name2]` bracket list",
+          listNode)
+  for item in items:
+    case item.kind
+    of nnkIdent: result.add $item
+    of nnkStrLit: result.add item.strVal
     else:
-      error("config package name must be an identifier or string literal",
-            entry[0])
-    for assignment in entry[1]:
-      if assignment.kind != nnkAsgn or assignment.len != 2:
-        error("config entry must contain `key = value` assignments",
-              assignment)
-      var keyName: string
-      case assignment[0].kind
-      of nnkIdent: keyName = $assignment[0]
-      of nnkStrLit: keyName = assignment[0].strVal
-      else:
-        error("config key must be an identifier or string literal",
-              assignment[0])
-      let valueExpr = assignment[1]
-      let pkgLit = newStrLitNode(pkgName)
-      let keyLit = newStrLitNode(keyName)
-      result.add quote do:
-        block:
-          when `valueExpr` is string:
-            `profileVar`.configOverrides.add ConfigOverride(
-              pkg: `pkgLit`, key: `keyLit`,
-              value: ConfigValue(kind: cvkString, s: `valueExpr`))
-          elif `valueExpr` is int:
-            `profileVar`.configOverrides.add ConfigOverride(
-              pkg: `pkgLit`, key: `keyLit`,
-              value: ConfigValue(kind: cvkInt, i: `valueExpr`))
-          elif `valueExpr` is bool:
-            `profileVar`.configOverrides.add ConfigOverride(
-              pkg: `pkgLit`, key: `keyLit`,
-              value: ConfigValue(kind: cvkBool, b: `valueExpr`))
-          else:
-            `profileVar`.configOverrides.add ConfigOverride(
-              pkg: `pkgLit`, key: `keyLit`,
-              value: ConfigValue(kind: cvkExpr, expr: $`valueExpr`))
+      error("hosts " & what & " entry must be an identifier or string " &
+            "literal", item)
+
+proc isHostsBlockForm(value: NimNode): bool =
+  ## Whether a host entry's value is the block form (`activities:` /
+  ## `applies:` lines) rather than the one-line `[activities]` list.
+  value.kind == nnkStmtList and value.len > 0 and
+    value[0].kind in {nnkCall, nnkCommand} and value[0].len == 2 and
+    value[0][0].kind == nnkIdent
+
+proc parseHostSystemValue(value: NimNode; hostName: string): string =
+  ## The value of a block-form host entry's `system:` key: `managedElsewhere`
+  ## (no pointer, returns "") or `managedElsewhere("<pointer>")` (returns the
+  ## pointer). Anything else is a compile error naming the host.
+  var v = value
+  if v.kind == nnkStmtList and v.len == 1:
+    v = v[0]
+  let expected = "`system: " & ManagedElsewhereKeyword & "` or `system: " &
+    ManagedElsewhereKeyword & "(\"<managing repository>\")`"
+  if v.kind == nnkIdent and $v == ManagedElsewhereKeyword:
+    return ""
+  if v.kind in {nnkCall, nnkCommand} and v.len == 2 and
+      v[0].kind == nnkIdent and $v[0] == ManagedElsewhereKeyword:
+    # A plain string literal only: the text parser behind `repro home list`
+    # / `add` (`repro_home_intent/parser`) reads the same entry, and it reads
+    # "..." strings.
+    if v[1].kind != nnkStrLit:
+      error("hosts entry \"" & hostName & "\": the " &
+            ManagedElsewhereKeyword & " pointer must be a string literal " &
+            "naming what manages the system (expected " & expected & ")", v[1])
+    let problem = systemPointerProblem(v[1].strVal)
+    if problem.len > 0:
+      error("hosts entry \"" & hostName & "\": system: " & problem, v[1])
+    return v[1].strVal
+  error("hosts entry \"" & hostName & "\": unknown `system:` value " &
+        "`" & v.repr & "` (expected " & expected & ")", v)
 
 proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
-  ## `hosts:` body is a list of `"hostname": [activity1, activity2]`
-  ## entries.
+  ## `hosts:` body is a list of host entries, each either
+  ##
+  ##   "hostname": [activity1, activity2]
+  ##
+  ## or the block form, which can also say which concerns Reprobuild applies
+  ## on the host (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped
+  ## apply):
+  ##
+  ##   "hostname":
+  ##     activities: [activity1, activity2]   # omitted: `default` only
+  ##     applies: [applications]              # omitted: every concern
+  ##     system: managedElsewhere("org/infra") # omitted: managed here
+  ##
+  ## `system:` (`repro_profile/host_system`) says the host's system scope is
+  ## managed elsewhere, optionally naming what manages it.
+  ##
+  ## An unknown key, a repeated key, an unknown concern, a concern named
+  ## twice and a malformed `system:` value are compile errors naming the
+  ## host.
   result = newNimNode(nnkStmtList)
   if body.kind != nnkStmtList:
     error("hosts: expects an indented block of host -> activity-list " &
@@ -327,29 +621,42 @@ proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
     else:
       error("hosts entry key must be a string literal or identifier",
             entry[0])
-    let listSrc = entry[1]
-    var activitySeq: NimNode
-    case listSrc.kind
-    of nnkStmtList:
-      if listSrc.len != 1:
-        error("hosts entry body must be a single bracket list", listSrc)
-      activitySeq = listSrc[0]
-    else:
-      activitySeq = listSrc
-    if activitySeq.kind notin {nnkBracket, nnkPrefix}:
-      error("hosts entry value must be a `[activity1, activity2]` " &
-            "bracket list", activitySeq)
     var actNames: seq[string] = @[]
-    let actNode = if activitySeq.kind == nnkPrefix and activitySeq.len == 2 and
-                       activitySeq[1].kind == nnkBracket: activitySeq[1]
-                  else: activitySeq
-    for item in actNode:
-      case item.kind
-      of nnkIdent: actNames.add $item
-      of nnkStrLit: actNames.add item.strVal
-      else:
-        error("hosts activity list entry must be an identifier or " &
-              "string literal", item)
+    var applies: seq[string] = @[]
+    var hasApplies = false
+    var systemElsewhere = false
+    var systemPointer = ""
+    let value = entry[1]
+    if isHostsBlockForm(value):
+      var seenKeys: seq[string] = @[]
+      for item in value:
+        if item.kind notin {nnkCall, nnkCommand} or item.len != 2 or
+            item[0].kind != nnkIdent:
+          error("hosts entry \"" & hostName & "\": expected " &
+                "`activities: [...]`, `applies: [...]` or `system: ...`", item)
+        let key = $item[0]
+        if key in seenKeys:
+          error("hosts entry \"" & hostName & "\": `" & key &
+                ":` is given twice", item)
+        seenKeys.add key
+        case key
+        of "activities":
+          actNames = hostsNameList(item[1], "entry `activities:`")
+        of "applies":
+          hasApplies = true
+          applies = hostsNameList(item[1], "entry `applies:`")
+          let problem = concernListProblem(applies)
+          if problem.len > 0:
+            error("hosts entry \"" & hostName & "\": applies: " & problem,
+                  item)
+        of HostSystemKey:
+          systemElsewhere = true
+          systemPointer = parseHostSystemValue(item[1], hostName)
+        else:
+          error("hosts entry \"" & hostName & "\": unknown key `" & key &
+                ":` (expected `activities:`, `applies:` or `system:`)", item)
+    else:
+      actNames = hostsNameList(value, "entry value")
     let hostLit = newStrLitNode(hostName)
     var addCalls = newNimNode(nnkStmtList)
     let tmpSym = genSym(nskVar, "hostActs")
@@ -361,6 +668,20 @@ proc parseHostsSection(body: NimNode; profileVar: NimNode): NimNode =
         `tmpSym`.add `aLit`
     addCalls.add quote do:
       `profileVar`.hosts[`hostLit`] = `tmpSym`
+    if hasApplies:
+      let appliesSym = genSym(nskVar, "hostApplies")
+      addCalls.add quote do:
+        var `appliesSym`: seq[string] = @[]
+      for c in applies:
+        let cLit = newStrLitNode(c)
+        addCalls.add quote do:
+          `appliesSym`.add `cLit`
+      addCalls.add quote do:
+        `profileVar`.hostApplies[`hostLit`] = `appliesSym`
+    if systemElsewhere:
+      let pointerLit = newStrLitNode(systemPointer)
+      addCalls.add quote do:
+        `profileVar`.systemManagedElsewhere[`hostLit`] = `pointerLit`
     let blk = newNimNode(nnkBlockStmt)
     blk.add newEmptyNode()
     blk.add addCalls
@@ -518,34 +839,41 @@ proc rewriteResourcesStmt(stmt: NimNode; profileVar: NimNode): NimNode =
     else:
       result = rewriteResourceCall(stmt, profileVar)
   of nnkWhenStmt:
-    # Nim compile-time `when defined(...):` guard. The branches
-    # contain resource-constructor calls; we recurse and rewrite each
-    # branch's body in place so the standard Nim compile-time
-    # selection still elides the unreached branches.
-    result = newNimNode(nnkWhenStmt)
-    for branch in stmt:
-      case branch.kind
-      of nnkElifBranch, nnkElifExpr:
-        let cond = branch[0]
-        let inner = rewriteResourcesBody(branch[1], profileVar)
-        let newBranch = newNimNode(branch.kind)
-        newBranch.add cond
-        newBranch.add inner
-        result.add newBranch
-      of nnkElse, nnkElseExpr:
-        let inner = rewriteResourcesBody(branch[0], profileVar)
-        let newBranch = newNimNode(branch.kind)
-        newBranch.add inner
-        result.add newBranch
-      else:
-        error("resources: unsupported `when` branch shape " &
-              $branch.kind, branch)
+    # A runtime predicate guard (`when linux():`) or a Nim compile-time
+    # `when defined(...):` branch; `lowerWhenChain` emits both lowerings
+    # and the conditions' types pick one.
+    let target = newDotExpr(profileVar, ident"resources")
+    result = lowerWhenChain(stmt, "resources", target,
+      proc (b: NimNode): NimNode = rewriteResourcesBody(b, profileVar),
+      proc (b: NimNode): NimNode =
+        # Action edges (`expandArchive.build`, `inlineExecCall`) land in
+        # `buildActions`, which has no guard: under a runtime predicate
+        # they would run on every host. Refuse rather than drop the guard.
+        let before = genSym(nskLet, "buildActionsBefore")
+        let inner = rewriteResourcesBody(b, profileVar)
+        let msg = newStrLitNode("resources: an action edge " &
+          "(`expandArchive.build`, `inlineExecCall`) cannot sit under a " &
+          "runtime `when <predicate>:`; action edges carry no guard. " &
+          "Declare it outside the guard or under a compile-time " &
+          "`when defined(...)`.")
+        result = quote do:
+          let `before` = `profileVar`.buildActions.len
+          `inner`
+          if `profileVar`.buildActions.len != `before`:
+            raise newException(ValueError, `msg`))
+  of nnkForStmt:
+    # A loop over data that declares resources (`for app in apps:
+    # fsUserFile(...)`): rewrite the loop body like any other resources
+    # body. The loop runs when the profile binary runs, on every platform
+    # alike; guards inside it stay data.
+    result = copyNimTree(stmt)
+    result[^1] = rewriteResourcesBody(stmt[^1], profileVar)
   of nnkCommentStmt, nnkDiscardStmt:
     result = newEmptyNode()
   else:
     error("resources: block expects constructor calls (e.g. " &
-          "`fsUserFile(...)`) optionally wrapped in `when " &
-          "defined(...)`; got " & $stmt.kind, stmt)
+          "`fsUserFile(...)`), optionally inside `when <predicate>:` / " &
+          "`when defined(...)` or a `for` loop; got " & $stmt.kind, stmt)
 
 proc rewriteResourcesBody(body: NimNode; profileVar: NimNode): NimNode =
   ## Walk a `resources:` body (or a single nested `when` branch body)
@@ -569,27 +897,32 @@ proc parseResourcesSection(body: NimNode; profileVar: NimNode): NimNode =
   ## `targetResources` final parameter. The macro rewrites each call
   ## to pass the in-scope profile's `resources` seq through.
   ##
-  ## M83 Phase F2 extension: a `when defined(<os>):` block is allowed
-  ## as a child of `resources:`. The macro rewrites each branch's
-  ## body in place so Nim's compile-time selection still elides the
-  ## unreached branches. This mirrors the legacy parser's
-  ## `when <predicate>:` shape for compile-time host gates and is the
-  ## migration target for fixtures that need OS-gated resources.
+  ## A `when` chain is allowed as a child of `resources:` (and nests).
+  ## With runtime predicates (`when linux():`, `elif macos():`, `else:`)
+  ## each resource carries its branch's predicate as `guard`, evaluated
+  ## by the planner against the target host — the idiomatic platform
+  ## selection, because the intent then describes every platform. With
+  ## compile-time conditions (`when defined(windows):`, M83 Phase F2) the
+  ## compiler elides the unreached branches; reserve that for code that
+  ## cannot compile elsewhere. See `lowerWhenChain`. A `for` loop over
+  ## constructor calls is accepted as well.
   if body.kind != nnkStmtList:
     error("resources: expects an indented block of resource " &
           "constructor calls", body)
   result = rewriteResourcesBody(body, profileVar)
 
 proc parseAdapterPreferenceSection(body: NimNode; profileVar: NimNode): NimNode =
-  ## M2.5: `adapterPreference:` body is a list of `<os>: [adapter, ...]`
+  ## M2.5: `adapterPreference:` body is a list of `<os>: [kind, ...]`
   ## entries — same syntactic shape as `hosts:`. Per-OS keys are drawn
-  ## from `{windows, linux, darwin, macos}`; chain entries are drawn
-  ## from `{builtin, scoop, nix, path}`. Unknown OS or adapter names
-  ## raise a compile-time error naming the offending token. `macos` is
-  ## an alias for `darwin` and is canonicalized to `"darwin"` so a
-  ## single resolve-time lookup suffices.
+  ## from `{windows, linux, darwin, macos}`; entries are realization kinds
+  ## drawn from `{tarball, builtin, scoop, nix, path}` (GM4b: the block is
+  ## the profile's selection policy, Provisioning-Contributions.md
+  ## §"Selection policy"; `builtin` is the former spelling of `tarball`).
+  ## Unknown OS or kind names raise a compile-time error naming the
+  ## offending token. `macos` is an alias for `darwin` and is canonicalized
+  ## to `"darwin"` so a single resolve-time lookup suffices.
   const KnownOsKeys = ["windows", "linux", "darwin", "macos"]
-  const KnownAdapters = ["builtin", "scoop", "nix", "path"]
+  const KnownAdapters = ["tarball", "builtin", "scoop", "nix", "path"]
   result = newNimNode(nnkStmtList)
   if body.kind != nnkStmtList:
     error("adapterPreference: expects an indented block of " &
@@ -661,6 +994,216 @@ proc parseAdapterPreferenceSection(body: NimNode; profileVar: NimNode): NimNode 
     blk.add inner
     result.add blk
 
+proc parseDataSection(body: NimNode; profileVar: NimNode): NimNode =
+  ## GM4: `data:` body is one string literal per line, each naming a
+  ## plan-time data file relative to the profile directory:
+  ##
+  ##   data:
+  ##     "data/apps.toml"
+  ##
+  ## The macro records REFERENCES only (`ProfileIntent.dataFiles`); it
+  ## never reads the files, and neither does the profile binary, so a data
+  ## edit cannot invalidate the profile compile. `repro home plan` /
+  ## `apply` / `export` read and expand them
+  ## (`repro_profile_compile/data_expansion`).
+  result = newNimNode(nnkStmtList)
+  if body.kind != nnkStmtList:
+    error("data: expects an indented block of data-file paths", body)
+  var seen: seq[string] = @[]
+  for entry in body:
+    case entry.kind
+    of nnkCommentStmt:
+      continue
+    of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+      let path = entry.strVal
+      let problem = dataFilePathProblem(path)
+      if problem.len > 0:
+        error("data: \"" & path & "\": " & problem, entry)
+      if path in seen:
+        error("data: \"" & path & "\" is declared twice", entry)
+      seen.add path
+      let pathLit = newStrLitNode(path)
+      result.add quote do:
+        `profileVar`.dataFiles.add `pathLit`
+    else:
+      error("data: entries must be string literals naming a data file " &
+        "relative to the profile directory (e.g. \"data/apps.toml\"); got " &
+        $entry.kind, entry)
+
+proc parseCatalogsSection(body: NimNode; profileVar: NimNode): NimNode =
+  ## `catalogs:` body is one string literal per line, each naming the Nim
+  ## module of a provisioning-contribution catalog relative to the profile
+  ## directory -- the module a recipe would `import`:
+  ##
+  ##   catalogs:
+  ##     "../reprobuild-scoop-packages/repro"
+  ##
+  ## The macro records the REFERENCES only (`ProfileIntent.catalogImports`);
+  ## the profile binary never imports or reads them. `repro home apply`
+  ## imports them into the recipe it extracts the profile's package
+  ## references from (`repro_home_apply/catalog_projection`).
+  result = newNimNode(nnkStmtList)
+  if body.kind != nnkStmtList:
+    error("catalogs: expects an indented block of catalog module paths", body)
+  var seen: seq[string] = @[]
+  for entry in body:
+    case entry.kind
+    of nnkCommentStmt:
+      continue
+    of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+      let path = entry.strVal
+      let problem = catalogImportPathProblem(path)
+      if problem.len > 0:
+        error("catalogs: \"" & path & "\": " & problem, entry)
+      if path in seen:
+        error("catalogs: \"" & path & "\" is declared twice", entry)
+      seen.add path
+      let pathLit = newStrLitNode(path)
+      result.add quote do:
+        `profileVar`.catalogImports.add `pathLit`
+    else:
+      error("catalogs: entries must be string literals naming a catalog " &
+        "module relative to the profile directory (e.g. " &
+        "\"../reprobuild-scoop-packages/repro\"); got " & $entry.kind, entry)
+
+proc findActionEdgeCall(n: NimNode): NimNode =
+  ## The first action-edge call (`isProfileActionEdgeCall`) anywhere in `n`,
+  ## or nil.
+  if isProfileActionEdgeCall(n):
+    return n
+  for child in n:
+    let found = findActionEdgeCall(child)
+    if not found.isNil:
+      return found
+  nil
+
+proc parseActivityResources(blk: NimNode; actName: string;
+                            profileVar: NimNode): NimNode =
+  ## GM9: a `resources:` block inside `activity <name>:`.
+  ##
+  ##   activity desktop_core:
+  ##     hyprland
+  ##     resources:
+  ##       hyprlandConfig()          # a helper module's resource template
+  ##       when linux():
+  ##         fsUserFile(hostFile = "~/.config/foo", content = "...")
+  ##
+  ## The body is exactly a profile-level `resources:` body (constructor
+  ## calls, helper templates, runtime `when` chains, compile-time
+  ## `when defined(...)`, `for` loops) and is lowered by the same rewriter;
+  ## every resource it declares then belongs to the activity
+  ## (`ResourceIntent.activity`, `applyActivity`), so the planner plans it
+  ## only on a host that selects the activity -- and, under a guard, only
+  ## where the guard also holds.
+  ##
+  ## Action edges (`expandArchive.build`, `inlineExecCall`) are refused: they
+  ## land in `buildActions`, which has no activity, so inside an activity
+  ## they would run on every host.
+  let edge = findActionEdgeCall(blk[1])
+  if not edge.isNil:
+    error("activity `" & actName & "`: an action edge (`expandArchive." &
+      "build`, `inlineExecCall`) cannot sit in an activity's `resources:` " &
+      "block; action edges carry no activity. Declare it in the " &
+      "profile-level `resources:` block.", edge)
+  let start = genSym(nskLet, "activityResourcesStart")
+  let actionsBefore = genSym(nskLet, "activityActionsBefore")
+  let lowered = parseResourcesSection(blk[1], profileVar)
+  let nameLit = newStrLitNode(actName)
+  let msg = newStrLitNode("activity `" & actName & "`: an action edge " &
+    "cannot sit in an activity's `resources:` block; action edges carry " &
+    "no activity")
+  result = quote do:
+    block:
+      let `start` = `profileVar`.resources.len
+      let `actionsBefore` = `profileVar`.buildActions.len
+      `lowered`
+      # A helper template could still add an action edge the AST check
+      # above cannot see; refuse it rather than run it on every host.
+      if `profileVar`.buildActions.len != `actionsBefore`:
+        raise newException(ValueError, `msg`)
+      applyActivity(`profileVar`.resources, `start`, `nameLit`)
+
+proc parseActivityStowEntries(body: NimNode; actName: string;
+                              profileVar, guardSym, guardAst: NimNode;
+                              seen: var seq[(string, string)]): NimNode =
+  ## The entries of a `stow:` block (or of a `when` inside one): string
+  ## literals naming `stow/` packages, and single-branch `when <pred>:`
+  ## blocks whose predicate conjoins into the guard of the entries under
+  ## it. `guardSym` is the in-scope `PredicateExpr` of the enclosing guard
+  ## (the empty expression at the top of the block); `guardAst` is that
+  ## guard's source, used only to recognise a repeated claim at compile
+  ## time.
+  result = newNimNode(nnkStmtList)
+  let stmts = if body.kind == nnkStmtList: toSeq(body.children) else: @[body]
+  let nameLit = newStrLitNode(actName)
+  for stmt in stmts:
+    case stmt.kind
+    of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+      let pkg = stmt.strVal
+      let problem = stowPackageNameProblem(pkg)
+      if problem.len > 0:
+        error("activity `" & actName & "`: stow: " & problem, stmt)
+      let key = (pkg, repr(guardAst))
+      if key in seen:
+        error("activity `" & actName & "` claims stow package `" & pkg &
+          "` twice", stmt)
+      seen.add key
+      let pkgLit = newStrLitNode(pkg)
+      result.add quote do:
+        `profileVar`.stowScopes.add StowScope(package: `pkgLit`,
+          activity: `nameLit`, guard: `guardSym`)
+    of nnkWhenStmt:
+      if stmt.len != 1 or stmt[0].kind != nnkElifBranch:
+        error("activity `" & actName & "`: a `when` in a `stow:` block " &
+          "must have exactly one branch (no `elif` / `else`)", stmt)
+      let predExpr = stmt[0][0]
+      let innerGuard = genSym(nskLet, "stowGuard")
+      let inner = newNimNode(nnkStmtList)
+      # A runtime predicate only: `when defined(...)` (a bool) fails to type
+      # as a `PredicateExpr` here, since a claim must describe every host
+      # whatever platform compiled the profile.
+      inner.add quote do:
+        let `innerGuard`: PredicateExpr = conjoinGuard(`guardSym`,
+          `predExpr`)
+      let innerAst = newStmtList(guardAst.copyNimTree, predExpr.copyNimTree)
+      inner.add parseActivityStowEntries(stmt[0][1], actName, profileVar,
+        innerGuard, innerAst, seen)
+      let blk = newNimNode(nnkBlockStmt)
+      blk.add newEmptyNode()
+      blk.add inner
+      result.add blk
+    of nnkCommentStmt, nnkDiscardStmt:
+      discard
+    else:
+      error("activity `" & actName & "`: a `stow:` block lists `stow/` " &
+        "package names as string literals (e.g. \"kitty\" for " &
+        "stow/kitty/), optionally under `when <predicate>:`; got " &
+        $stmt.kind, stmt)
+
+proc parseActivityStow(blk: NimNode; actName: string;
+                       profileVar: NimNode;
+                       seen: var seq[(string, string)]): NimNode =
+  ## GM11: a `stow:` block inside `activity <name>:` -- the `stow/`
+  ## packages that belong to the activity (`repro_profile/stow_scopes`).
+  ##
+  ##   activity desktop_core:
+  ##     stow:
+  ##       "kitty"
+  ##       when macos():
+  ##         "ghostty"
+  ##
+  ## Each entry becomes a `StowScope` claim; the planner materializes a
+  ## claimed package only on a host where one of its claims holds.
+  let top = genSym(nskLet, "stowGuard")
+  let inner = newNimNode(nnkStmtList)
+  inner.add quote do:
+    let `top` = PredicateExpr(expr: "")
+  inner.add parseActivityStowEntries(blk[1], actName, profileVar, top,
+    newStmtList(), seen)
+  result = newNimNode(nnkBlockStmt)
+  result.add newEmptyNode()
+  result.add inner
+
 proc parseActivityCall(call: NimNode; profileVar: NimNode): NimNode =
   ## A top-level `activity name: body` form. Emit an
   ## ActivityIntent into __profileIntent.activities.
@@ -675,13 +1218,32 @@ proc parseActivityCall(call: NimNode; profileVar: NimNode): NimNode =
   let body = call[2]
   let bodySym = genSym(nskVar, "actBody")
   let nameLit = newStrLitNode(actName)
+  # GM9: `resources:` blocks directly in the activity body declare resources
+  # that belong to this activity; everything else is the package body.
+  var elements = newNimNode(nnkStmtList)
+  var resourceBlocks: seq[NimNode]
+  var stowBlocks: seq[NimNode]
+  let stmts = if body.kind == nnkStmtList: toSeq(body.children) else: @[body]
+  for stmt in stmts:
+    if isActivityResourcesBlock(stmt):
+      resourceBlocks.add stmt
+    elif isActivityStowBlock(stmt):
+      # GM11: the `stow/` packages that belong to this activity.
+      stowBlocks.add stmt
+    else:
+      elements.add stmt
   let inner = newNimNode(nnkStmtList)
   inner.add quote do:
     var `bodySym`: seq[ActivityElement] = @[]
-  inner.add parseActivityBody(body, bodySym)
+  inner.add parseActivityBody(elements, bodySym)
   inner.add quote do:
     `profileVar`.activities.add ActivityIntent(name: `nameLit`,
       body: `bodySym`)
+  for blk in resourceBlocks:
+    inner.add parseActivityResources(blk, actName, profileVar)
+  var stowSeen: seq[(string, string)]
+  for blk in stowBlocks:
+    inner.add parseActivityStow(blk, actName, profileVar, stowSeen)
   result = newNimNode(nnkBlockStmt)
   result.add newEmptyNode()
   result.add inner
@@ -703,6 +1265,8 @@ macro profile*(name: static[string]; body: untyped): untyped =
   if body.kind != nnkStmtList:
     error("profile body must be an indented block", body)
 
+  var sawData = false
+  var sawCatalogs = false
   for stmt in body:
     case stmt.kind
     of nnkCommand:
@@ -733,6 +1297,20 @@ macro profile*(name: static[string]; body: untyped): untyped =
             error("adapterPreference must be `adapterPreference: <body>`",
                   stmt)
           stmts.add parseAdapterPreferenceSection(stmt[1], profSym)
+        of "data":
+          if stmt.len < 2 or stmt[1].kind != nnkStmtList:
+            error("data must be `data: <body>`", stmt)
+          if sawData:
+            error("exactly one `data:` section per profile", stmt)
+          sawData = true
+          stmts.add parseDataSection(stmt[1], profSym)
+        of "catalogs":
+          if stmt.len < 2 or stmt[1].kind != nnkStmtList:
+            error("catalogs must be `catalogs: <body>`", stmt)
+          if sawCatalogs:
+            error("exactly one `catalogs:` section per profile", stmt)
+          sawCatalogs = true
+          stmts.add parseCatalogsSection(stmt[1], profSym)
         else:
           error("unrecognised profile body form: " & $head, stmt)
       else:
@@ -742,18 +1320,34 @@ macro profile*(name: static[string]; body: untyped): untyped =
     else:
       error("unrecognised profile body form: " & $stmt.kind, stmt)
 
-  # Trailing emit. `quit 0` inside emitProfileIntent so control
-  # never returns.
+  # The intent is built by a proc of its own so it can be evaluated twice
+  # over: natively, when the compiled profile binary runs (`main`, the
+  # normal compile), and in Nim's compile-time VM when the profile is
+  # checked for ANOTHER platform (`nim check --os:<os> --cpu:<cpu>
+  # -d:reproProfilePlatformProbe`; see `repro_profile_compile/platforms`).
+  # The probe is how `repro home export` learns whether a compile-time
+  # `when defined(...)` anywhere in the profile -- in a section or in a
+  # helper module -- changed what the profile declares: it evaluates the
+  # same proc under each platform's definitions and compares the results.
   stmts.add quote do:
-    emitProfileIntent(`profSym`)
-
-  # Wrap the whole thing in a `proc main()` so the macro doesn't
-  # pollute the user's module scope.
+    result = `profSym`
+  let buildSym = genSym(nskProc, "buildProfileIntent")
   let mainSym = ident("main")
+  let probeDefine = ident(ProfilePlatformProbeDefine)
   result = newNimNode(nnkStmtList)
   result.add quote do:
-    proc `mainSym`() =
+    proc `buildSym`(): ProfileIntent =
       `stmts`
+  # Wrap the emit in a `proc main()` so the macro doesn't pollute the
+  # user's module scope. `quit 0` inside emitProfileIntent so control
+  # never returns.
+  result.add quote do:
+    proc `mainSym`() =
+      emitProfileIntent(`buildSym`())
   result.add quote do:
     when isMainModule:
-      `mainSym`()
+      when defined(`probeDefine`):
+        static:
+          echo platformProbeRecord(emitProfileIntentJson(`buildSym`()))
+      else:
+        `mainSym`()

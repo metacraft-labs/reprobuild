@@ -61,6 +61,7 @@ import repro_standard_provider/conventions/erlang_rebar3 as erlang_rebar3_conven
 import repro_standard_provider/conventions/elixir_mix as elixir_mix_convention
 import repro_standard_provider/conventions/ocaml_dune as ocaml_dune_convention
 import repro_standard_provider/conventions/haskell_cabal as haskell_cabal_convention
+import repro_standard_provider/conventions/from_source_cabal as from_source_cabal_convention
 import repro_standard_provider/conventions/ruby_bundler as ruby_bundler_convention
 import repro_standard_provider/conventions/php_composer as php_composer_convention
 import repro_standard_provider/project_intro
@@ -579,6 +580,14 @@ when defined(reproProviderMode):
   # Library targets, multi-package cabal projects, ``cabal v2-test``
   # discovery, and Mode 3 Haskell are all explicitly DEFERRED per the
   # M55 spec.
+  # from_source_cabal BEFORE the in-tree haskell_cabal convention, for the
+  # reason from_source_cargo precedes rust: a recipe that FETCHES its source
+  # and pins its Hackage closure (``hackage-vendor.manifest``) is this one's.
+  # Its recognise rejects a root ``.cabal`` file or ``cabal.project`` --
+  # which a from-source recipe never has, since those arrive inside the
+  # fetched tarball -- so the order is defensive in either direction.
+  addDefaultConvention(
+    from_source_cabal_convention.fromSourceCabalConvention())
   addDefaultConvention(haskell_cabal_convention.haskellCabalConvention())
   # ruby_bundler (M56) — seventh managed-ecosystem Tier 2b convention.
   # Second Phase 2 language milestone, immediately after M55

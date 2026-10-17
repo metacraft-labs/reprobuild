@@ -21,6 +21,17 @@ type
     ## Step 1: could not parse `home.nim` or its predicate modules.
     profilePath*: string
 
+  EUndeclaredHost* = object of EApplyIntentLoad
+    ## The profile declares a `hosts:` registry and the selected host is not
+    ## in it. Refused rather than planned with `default` alone: a misspelt or
+    ## forgotten host would otherwise get a valid-looking, much smaller home
+    ## while the run reports success (Core-Invariants.md §Unrecognised Input
+    ## Is Rejected, Not Skipped; Gradual-Nix-To-Reprobuild-Migration.md Open
+    ## question 6). A host that should run `default` alone says so with an
+    ## entry naming only `default`.
+    host*: string
+    declaredHosts*: seq[string]
+
   EApplyConfigurableFinalize* = object of EHomeApply
     ## Step 2: configurable graph could not be resolved.
     configurableKey*: string
@@ -35,12 +46,47 @@ type
     ## raised. Distinct from realize/materialize so partial-recovery
     ## tests can tell the planning phase apart.
 
+  EApplyPackageCommandRefused* = object of EApplyPlanFailed
+    ## Step 5: a command a package reference asks for cannot be provided by
+    ## the realization it selected, or two packages would export the same
+    ## command. Raised before anything is realized or placed.
+    ## ``reason`` is ``"undeclared-binary"`` -- the profile names
+    ## ``binaries`` the selected application record does not declare
+    ## (Core-Invariants.md §Unrecognised Input Is Rejected, Not Skipped) --
+    ## or ``"command-collision"`` -- ``commandName`` is exported by
+    ## ``packageId`` and by ``otherPackageId``.
+    packageId*: string
+    commandName*: string
+    realization*: string
+      ## The selected record's lock identity (or URL when it has none).
+    reason*: string
+    otherPackageId*: string
+
   EApplyRealizeFailed* = object of EHomeApply
     ## Step 7: a package's realization through Scoop / Nix / tarball
     ## raised. Carries the package id and the underlying adapter's
     ## error message verbatim.
     packageId*: string
     adapter*: string
+
+  EApplyAppBundleFailed* = object of EHomeApply
+    ## Step 9b: placing a realized macOS application bundle in its
+    ## Applications directory failed -- the staged copy failed a trust
+    ## check (``check`` names it: "signature", "identity", "bundle-id",
+    ## "version", "team-id", "developer-id", "notarization",
+    ## "info-plist"), or the copy or rename itself failed (``check`` is
+    ## "placement"). Nothing was placed: the staged copy was removed, a
+    ## bundle already at the target is untouched, and no disk image is
+    ## attached at this step (images are detached when step 7 copies the
+    ## bundle out of them). Store-And-Installation-Layout.md § macOS
+    ## Application Bundles.
+    packageId*: string
+    resourceAddress*: string
+    bundleName*: string
+      ## ``<Name>.app``.
+    targetPath*: string
+      ## Where the bundle would have been placed.
+    check*: string
 
   EApplyMaterializeFailed* = object of EHomeApply
     ## Step 8: a generated-file write or managed-block rewrite failed.
@@ -180,6 +226,22 @@ proc raisePlanFailed*(msg: string) {.noreturn.} =
   e.stepName = "plan"
   raise e
 
+proc raisePackageCommandRefused*(packageId, commandName, realization,
+                                 reason, otherPackageId, msg: string)
+    {.noreturn.} =
+  ## Step 5 refusal of a package command (``EApplyPackageCommandRefused``).
+  var e = newException(EApplyPackageCommandRefused,
+    "repro home apply: step 5 (plan) failed for package " & packageId &
+    ", command '" & commandName & "': " & msg)
+  e.step = 5
+  e.stepName = "plan"
+  e.packageId = packageId
+  e.commandName = commandName
+  e.realization = realization
+  e.reason = reason
+  e.otherPackageId = otherPackageId
+  raise e
+
 proc raiseRealizeFailed*(packageId, adapter, msg: string) {.noreturn.} =
   var e = newException(EApplyRealizeFailed,
     "repro home apply: step 7 (realize) failed for package " & packageId &
@@ -188,6 +250,25 @@ proc raiseRealizeFailed*(packageId, adapter, msg: string) {.noreturn.} =
   e.stepName = "realize"
   e.packageId = packageId
   e.adapter = adapter
+  raise e
+
+proc raiseAppBundleFailed*(packageId, resourceAddress, bundleName,
+                           targetPath, check, msg: string) {.noreturn.} =
+  ## Step 9b failure of one application bundle (``EApplyAppBundleFailed``).
+  let what =
+    if check == "placement": "could not be placed"
+    else: "was refused: the staged copy failed the " & check & " check"
+  var e = newException(EApplyAppBundleFailed,
+    "repro home apply: step 9b (place application) failed for package " &
+    packageId & ": " & bundleName & " " & what & "; nothing was placed at " &
+    targetPath & " and the staged copy was removed. " & msg)
+  e.step = 9
+  e.stepName = "place_app_bundle"
+  e.packageId = packageId
+  e.resourceAddress = resourceAddress
+  e.bundleName = bundleName
+  e.targetPath = targetPath
+  e.check = check
   raise e
 
 proc raiseMaterializeFailed*(absoluteOutputPath, msg: string) {.noreturn.} =

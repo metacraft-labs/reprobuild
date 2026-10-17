@@ -15,6 +15,9 @@
 ## place `repro watch --hcr`'s PRODUCTION wire is driven on Linux at all.
 
 import std/[json, monotimes, os, osproc, sequtils, strutils, tempfiles, times, unittest]
+import repro_test_support/reasoned_skip
+when defined(posix):
+  from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 
 import repro_hcr_agent
 import repro_hcr_linkgraph/elf_decompress
@@ -230,7 +233,10 @@ suite "HCR watch inference E2E":
       let sourcePath = projectRoot / "src" / "patchable.c"
       let logPath = tempRoot / "repro-watch.log"
       let artifacts = projectRoot / ".repro" / "hcr"
-      let socketPath = tempRoot / "hcr-agent.sock"
+      # Not under ``tempRoot``: under the suite TMPDIR that is 93 bytes, past
+      # the 92 Nim's ``std/net`` binds on macOS. See
+      # ``shortSocketDirAtProcessExit``.
+      let socketPath = shortSocketDirAtProcessExit("hcrw-") / "hcr-agent.sock"
       createDir(parentDir(sourcePath))
       createDir(projectRoot / "build")
       writeFile(projectRoot / "reprobuild.nim", ProjectFile)

@@ -229,7 +229,7 @@ suite "HL-7 — unrouted private repo refuses loudly":
         let report = parseFile(ws / ".repro" / "build" / "reports" / "check-report.json")
         check report["exitCode"].getInt() == 2
         let lf = lockFailure(report)
-        check lf != nil
+        check not lf.isNil
         let evidence = lf["evidence"].getStr()
         # The routing error (surfaced verbatim in the failure evidence) names the
         # offending repo, its tier, and the ``[locking] route`` / ``apply_if``

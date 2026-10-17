@@ -229,7 +229,7 @@ suite "RA-21 — pre-push refuses when lock publication fails":
       let report = readReport(fx)
       check report["exitCode"].getInt() != 0
       let pubFail = publishFailureFailure(report)
-      check pubFail != nil
+      check not pubFail.isNil
       # Recovery starts by fetching one immutable upstream tip. With the bare
       # removed, that precise prerequisite fails before any push is attempted.
       let evidence = pubFail["evidence"].getStr().toLowerAscii()

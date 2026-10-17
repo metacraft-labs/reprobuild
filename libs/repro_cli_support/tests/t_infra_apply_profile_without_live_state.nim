@@ -45,9 +45,11 @@
 ## gathering requires an io-monitor driver". It mutates nothing outside
 ## its temp cwd.
 ##
-## The third case is the guard against over-correcting: a profile that
+## The last case is the guard against over-correcting: a profile that
 ## genuinely does not compile must still fail, and must still carry a
-## non-empty diagnostic.
+## non-empty diagnostic. The case before it is the converse: a profile
+## that compiles but that the system adapter refuses (a runtime guard on a
+## system-scope resource) fails without being called a compile failure.
 
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
@@ -154,6 +156,33 @@ suite "repro infra: a profile with no live-state resources compiles":
       # whole point of a profile that declares no live state.
       check fileExists(applyCwd / OutRel)
       check readIfExists(applyCwd / OutRel) == Payload
+
+  test "a compiled profile the system adapter refuses is not reported as a compile failure":
+    # A runtime guard on a system-scope resource compiles, and the system
+    # adapter then refuses it (system scope has no host selection). The
+    # operator must be told that, not "profile compilation failed" with
+    # the migration-recipe hint, which sends them looking for a syntax
+    # error that is not there. Nothing is applied: the refusal comes
+    # before any plan.
+    writeFile(profilePath, """
+import repro_profile
+
+profile "infraGuardedSystemResource":
+  resources:
+    when linux():
+      fsSystemFile(path = "/etc/gm3-guarded.conf", content = "x",
+        address = "sysFile")
+""")
+    let run = runRepro(tmpRoot,
+      @["infra", "plan", "--profile", profilePath,
+        "--state-dir", stateDir, "--host", "guarded-system-host"])
+    checkpoint(run.output)
+    check run.exitCode == 1
+    check "profile compilation failed" notin run.output
+    check "compiled, but cannot be used as a system profile" in run.output
+    check "fs.systemFile `sysFile` is under a runtime predicate `linux`" in
+      run.output
+    check "compile-time `when defined(...)`" in run.output
 
   test "a profile that genuinely fails to compile still fails, with a reason":
     when not (defined(linux) or defined(macosx)):

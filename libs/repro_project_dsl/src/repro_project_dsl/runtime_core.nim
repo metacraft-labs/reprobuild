@@ -27,6 +27,11 @@ var targetExportRegistry: TargetExportTable = TargetExportTable()
   ## emitting the GraphFragment so ``repro graph`` / ``repro why`` and
   ## the M2 CLI resolver consume one source of truth.
 
+var certificateDeclarationRegistry: seq[CertificateExportEntry] = @[]
+  ## Test-Certificates TC-9a: the ``certificate "<name>", <handle>``
+  ## declarations of the package whose ``build:`` body is running,
+  ## resolved by ``resolveCertificateExports``.
+
 var providerStartupBodyDepth = 0
   ## Nesting depth of the STARTUP PASS over a package's ``build:`` body.
   ##
@@ -455,6 +460,11 @@ const
     byte(ord('E')), byte(ord('T'))]
     ## Named-Targets M1: tag for the project-scoped target-export table
     ## payload carried as a metadata node on the GraphFragment.
+  CertificateExportTablePayloadMagic = [byte(ord('R')), byte(ord('C')),
+    byte(ord('E')), byte(ord('T'))]
+    ## Test-Certificates TC-9a: tag for a package's certificate-export
+    ## table, carried as a metadata node beside the target-export table.
+  CertificateExportTablePayloadVersion = 1'u16
   TargetExportTablePayloadVersion = 3'u16
     ## Spec-Implementation M5: schema bump per
     ## Build-Graph-Collections.md §"Persistence and the Target-Export
@@ -966,6 +976,82 @@ proc registeredResourceTypeInterfaces*(): seq[ResourceTypeInterfaceDef]
   ## declaration order. Consumed by ``toProjectInterface``.
   resourceTypeInterfaceRegistry
 
+var activityInterfaceRegistry: seq[ActivityInterfaceDef] = @[]
+  ## Shared-Development-Services L3: module-global set of exported dev-env
+  ## activity SIGNATURES, collected for interface lifting. Shape taken
+  ## from ``resourceTypeInterfaceRegistry`` above, with one deliberate
+  ## difference: each record carries its own ``packageName``, because
+  ## activities ARE declared lexically inside a ``package`` block and the
+  ## extractor can therefore attribute them exactly rather than folding
+  ## the whole registry into whichever project is being lifted.
+  ##
+  ## Populated at MODULE INIT, outside the ``when defined(reproProviderMode)``
+  ## guard that wraps ``devEnv<Pkg>Package()``. That placement is
+  ## load-bearing and was measured: in interface mode the dev-env proc is
+  ## not even compiled, so a registration emitted inside its body would
+  ## never run and the lift would carry nothing.
+
+var serviceInterfaceRegistry: seq[ServiceInterfaceDef] = @[]
+  ## Shared-Development-Services L3: the service half of the same lift.
+  ## See ``activityInterfaceRegistry``.
+
+proc resetActivityInterfaceRegistry*() {.dynOrStatic.} =
+  activityInterfaceRegistry.setLen(0)
+
+proc registerActivityInterface*(packageName: string;
+                                def: ActivityInterfaceDef) {.dynOrStatic.} =
+  ## Append one activity signature. Emitted by the ``package`` macro's
+  ## dev-env walker at module scope, once per constructor-shaped
+  ## ``activity``. Re-registration of the same (package, name) pair
+  ## REPLACES the earlier record rather than appending a second one: a
+  ## module whose ``package`` block is expanded twice (``include``d by a
+  ## sibling shim, which is how ``usesImportCode`` consumes a workspace
+  ## producer) would otherwise lift every activity twice and move the
+  ## interface fingerprint for a reason that has nothing to do with the
+  ## producer's contract.
+  for existing in activityInterfaceRegistry.mitems:
+    if existing.packageName == packageName and existing.name == def.name:
+      existing = def
+      existing.packageName = packageName
+      return
+  var entry = def
+  entry.packageName = packageName
+  activityInterfaceRegistry.add(entry)
+
+proc registeredActivityInterfaces*(): seq[ActivityInterfaceDef]
+    {.dynOrStatic.} =
+  ## The activity signatures collected so far, in declaration order.
+  ## Consumed by ``toProjectInterface``, which filters on
+  ## ``packageName``.
+  activityInterfaceRegistry
+
+proc resetServiceInterfaceRegistry*() {.dynOrStatic.} =
+  serviceInterfaceRegistry.setLen(0)
+
+proc registerServiceInterface*(packageName: string;
+                               def: ServiceInterfaceDef) {.dynOrStatic.} =
+  ## Append one service signature. Same replace-on-duplicate rule, and
+  ## the same reason, as ``registerActivityInterface``; the identity is
+  ## (package, activity, service) because two activities may each declare
+  ## a service of the same bare name.
+  for existing in serviceInterfaceRegistry.mitems:
+    if existing.packageName == packageName and
+        existing.activityName == def.activityName and
+        existing.name == def.name:
+      existing = def
+      existing.packageName = packageName
+      return
+  var entry = def
+  entry.packageName = packageName
+  serviceInterfaceRegistry.add(entry)
+
+proc registeredServiceInterfaces*(): seq[ServiceInterfaceDef]
+    {.dynOrStatic.} =
+  ## The service signatures collected so far, in declaration order.
+  ## Consumed by ``toProjectInterface``, which filters on
+  ## ``packageName``.
+  serviceInterfaceRegistry
+
 proc resetWorkspaceDepRegistry*() {.dynOrStatic.} =
   ## Reset the Mode 3 ``depends_on`` registry. Test helpers call this
   ## between scenarios so registry entries don't leak across cases.
@@ -1178,7 +1264,11 @@ proc packageProjectRoot*(packageName: string): string {.dynOrStatic.} =
     return ""
   for pkg in registry:
     if pkg.packageName == packageName and pkg.sourceFile.len > 0:
-      return parentDir(pkg.sourceFile).replace("\\", "/")
+      # A recipe-relative provider (`recipeSourceName`) names its recipes
+      # relative to the recipe it was compiled from, which is the provider's
+      # working directory: resolve against it, so the root is the copy this
+      # provider runs beside.
+      return parentDir(absolutePath(pkg.sourceFile)).replace("\\", "/")
   ""
 
 proc currentPackageInstallMirrorRoot*(): string {.dynOrStatic.} =
@@ -1424,6 +1514,21 @@ when defined(reproProviderMode):
       directoryEnumerationInput(material, memberEntryPointId,
         memberEntryPointBodyHash, memberArgumentRoot = material))
 
+  proc providerFileInput*(path: string) {.dynOrStatic.} =
+    ## Report a file whose CONTENT shaped the graph this evaluation emits.
+    ##
+    ## An emitter that reads a committed file at emission time and bakes
+    ## what it read into an action (a script, a token, a count) has made
+    ## that file an input of the evaluation, not only of the action: the
+    ## action re-running does not help when the program it runs is the one
+    ## emitted for the old content. Recording a `gevFileRead` here is what
+    ## makes an edit to the file invalidate the cached provider graph
+    ## (Project-Provider-Graph-Protocol, "Evaluation Input Changes").
+    ##
+    ## A missing file is recorded too, with the digest `missing`, so a file
+    ## that appears later — an optional committed lock — also invalidates.
+    providerEvaluationInputRegistry.add(fileReadInput(materialProviderPath(path)))
+
   proc registeredProviderEvaluationInputs(): seq[GraphEvaluationInput] =
     providerEvaluationInputRegistry
 
@@ -1572,6 +1677,9 @@ when defined(reproProviderMode):
 
 else:
   proc providerDirectoryInput*(path: string) {.dynOrStatic.} =
+    discard path
+
+  proc providerFileInput*(path: string) {.dynOrStatic.} =
     discard path
 
   proc providerDirectoryInput*(path, memberEntryPointId,
@@ -2401,6 +2509,272 @@ proc registerRunEdgeExport*(name, owningPackage, actionId: string;
     sourceLine: sourceLine,
     runArgs: @runArgs,
     consumes: @consumes))
+
+# ---------------------------------------------------------------------------
+# Test-Certificates TC-9a — ``certificate "<name>", <handle>``.
+#
+# Test-Certificates.md §"Marking a node": a build-graph node is marked as
+# producing a NAMED certificate. The name is a target name in the same
+# namespace as ``target "<name>", <handle>``, so it is exported into the
+# target-export table, and the marking itself travels in a separate
+# certificate-export table so the engine can ask "does this plan contain a
+# certificate-producing node?" from the stored graph alone.
+#
+# The declarations are collected while the ``build:`` body runs and resolved
+# by ``resolveCertificateExports`` when the package's fragment is assembled,
+# because only then are every target and every implicit name known.
+# ---------------------------------------------------------------------------
+
+proc resetCertificateRegistry*() {.dynOrStatic.} =
+  ## Clear the per-package certificate declarations. Called by
+  ## ``buildPackageFragment`` between package evaluations.
+  certificateDeclarationRegistry.setLen(0)
+
+proc registeredCertificateDeclarations*(): seq[CertificateExportEntry]
+    {.dynOrStatic.} =
+  ## The declarations recorded so far, in declaration order, before
+  ## resolution (``owningPackage`` is still empty).
+  certificateDeclarationRegistry
+
+proc registerCertificateDeclaration*(name: string;
+                                     nodeKind: CertificateNodeKind;
+                                     node, sourceFile: string;
+                                     sourceLine: int) {.dynOrStatic.} =
+  ## Record one ``certificate "<name>", <handle>`` declaration. The
+  ## ``certificate`` templates below call this with the call site, so a
+  ## collision diagnostic can name it.
+  certificateDeclarationRegistry.add(CertificateExportEntry(
+    name: name,
+    nodeKind: nodeKind,
+    node: node,
+    sourceFile: sourceFile,
+    sourceLine: sourceLine))
+
+template certificate*(certName: string; handle: BuildActionDef) =
+  ## Mark a build edge as producing the named certificate
+  ## (Test-Certificates.md §"Marking a node"). ``certName`` becomes a target
+  ## name exactly as ``target certName, handle`` would make it, so
+  ## ``repro test <certName>`` and ``repro build <certName>`` select the edge.
+  block:
+    const reproCertificateSite = instantiationInfo(-1, fullPaths = true)
+    registerCertificateDeclaration(certName, cnkAction, handle.id,
+      reproCertificateSite.filename, reproCertificateSite.line)
+
+template certificate*(certName: string; handle: BuildTargetDef) =
+  ## Mark a build target — a ``target``, an ``aggregate`` or a ``collect``
+  ## — as producing the named certificate. The usual form names the
+  ## aggregate after the certificate:
+  ## ``certificate "unit-suite", aggregate("unit-suite", @[unit, integration])``.
+  block:
+    const reproCertificateSite = instantiationInfo(-1, fullPaths = true)
+    registerCertificateDeclaration(certName, cnkTarget, handle.name,
+      reproCertificateSite.filename, reproCertificateSite.line)
+
+const implicitCertificateName* = "test"
+  ## Operator decision D15 (Test-Certificates TC-9a): whatever a plain
+  ## ``repro test`` builds in a package — the node the selector ``test``
+  ## resolves to — is marked ``certificate "test"`` with no declaration.
+
+proc certificateDeclarationSite(file: string; line: int): string =
+  if file.len == 0:
+    "an unrecorded source location"
+  else:
+    file & ":" & $line
+
+proc implicitTestCertificate(owningPackage: string;
+                             targets: openArray[BuildTargetDef]):
+    CertificateExportEntry =
+  ## D15: the node a plain ``repro test`` builds in this package, marked
+  ## ``certificate "test"``; an empty ``name`` when the package has none.
+  ##
+  ## ``repro test`` is ``repro build test``, and nothing synthesises a
+  ## ``test`` selection from test edges: a project with no ``test`` name
+  ## gets the ordinary unknown-target error. So the marking follows the
+  ## selector ``test`` through the order ``lowerProviderSnapshot``
+  ## (``resolveSelectorToActionId`` in ``repro_cli_support``) resolves it:
+  ## an edge whose action id is ``test``, then a build target named
+  ## ``test`` (``target``, ``aggregate`` or ``collect``), then a row of the
+  ## target-export table named ``test`` — an edge whose implicit name is
+  ## ``test``, for instance. Keep the two orders in step.
+  for action in buildActionRegistry:
+    if action.id == implicitCertificateName:
+      return CertificateExportEntry(name: implicitCertificateName,
+        owningPackage: owningPackage, nodeKind: cnkAction, node: action.id,
+        implicit: true)
+  for target in targets:
+    if target.name == implicitCertificateName:
+      return CertificateExportEntry(name: implicitCertificateName,
+        owningPackage: owningPackage, nodeKind: cnkTarget, node: target.name,
+        implicit: true, sourceFile: target.sourceFile,
+        sourceLine: target.sourceLine)
+  for row in targetExportRegistry.entries:
+    if row.name != implicitCertificateName or
+        row.owningPackage != owningPackage:
+      continue
+    var isTarget = false
+    for target in targets:
+      if target.name == row.actionId:
+        isTarget = true
+        break
+    return CertificateExportEntry(name: implicitCertificateName,
+      owningPackage: owningPackage,
+      nodeKind: (if isTarget: cnkTarget else: cnkAction),
+      node: row.actionId, implicit: true, sourceFile: row.sourceFile,
+      sourceLine: row.sourceLine)
+
+proc resolveCertificateExports*(owningPackage: string;
+                                targets: var seq[BuildTargetDef]):
+    CertificateExportTable {.dynOrStatic.} =
+  ## Resolve this package's certificate declarations into its
+  ## certificate-export table, and export each certificate name into the
+  ## target-export table. Called by ``buildPackageFragment`` after the
+  ## ``build:`` body ran and the explicit target rows were registered.
+  ##
+  ## * A name that already selects the marked node needs no new target: the
+  ##   ``aggregate("unit-suite", ...)`` a ``certificate "unit-suite"`` wraps,
+  ##   or the edge an implicit or ``target`` name already points at.
+  ## * Otherwise the name is exported over the handle, appended to
+  ##   ``targets`` as ``target`` (one edge) or as a one-member ``aggregate``
+  ##   (a target), so the package's fragment emits it like any other.
+  ## * A name declared twice, or one another export already uses for a
+  ##   different node, raises naming both sites. ``test`` is the exception
+  ##   to the second rule: an explicit ``certificate "test", h`` replaces the
+  ##   implicit marking of the ``test`` target instead of colliding with it.
+  ## * With no ``certificate "test", ...`` declaration, the node the
+  ##   selector ``test`` resolves to is marked implicitly (D15; see
+  ##   ``implicitTestCertificate``).
+  ##
+  ## The compile-time check in the ``package`` macro reports the literal
+  ## cases first, at the declarations; this is the check for names and
+  ## handles that are only known when the body runs.
+  var declaredTest = false
+  for i in 0 ..< certificateDeclarationRegistry.len:
+    var entry = certificateDeclarationRegistry[i]
+    entry.owningPackage = owningPackage
+    let site = certificateDeclarationSite(entry.sourceFile, entry.sourceLine)
+    if entry.name.len == 0:
+      raise newException(ValueError,
+        "certificate declared with an empty name at " & site)
+    for j in 0 ..< i:
+      let earlier = certificateDeclarationRegistry[j]
+      if earlier.name == entry.name:
+        raise newException(ValueError,
+          "certificate name '" & entry.name & "' is declared twice in " &
+            "package '" & owningPackage & "': first at " &
+            certificateDeclarationSite(earlier.sourceFile,
+              earlier.sourceLine) & ", again at " & site)
+    if entry.name == implicitCertificateName:
+      declaredTest = true
+    var selectsNode = entry.nodeKind == cnkTarget and entry.node == entry.name
+    var hasOther = false
+    var other: TargetExportEntry
+    if not selectsNode:
+      for row in targetExportRegistry.entries:
+        if row.name != entry.name or row.owningPackage != owningPackage:
+          continue
+        if entry.nodeKind == cnkAction and row.actionId == entry.node and
+            row.kind in {tekImplicit, tekExplicit}:
+          selectsNode = true
+        elif not hasOther:
+          hasOther = true
+          other = row
+    if hasOther and not selectsNode:
+      if entry.name == implicitCertificateName:
+        # D15: the explicit handle replaces the implicit marking; the
+        # ``test`` target itself is left as declared.
+        discard
+      else:
+        raise newException(ValueError,
+          "certificate name '" & entry.name & "' declared at " & site &
+            " collides with the target '" & entry.name & "' declared at " &
+            certificateDeclarationSite(other.sourceFile, other.sourceLine) &
+            " in package '" & owningPackage & "': a certificate name is a " &
+            "target name, so it must name the same node or a new name")
+    elif not selectsNode:
+      let exported =
+        case entry.nodeKind
+        of cnkAction:
+          BuildTargetDef(name: entry.name, actions: @[entry.node],
+            kind: btkTarget, sourceFile: entry.sourceFile,
+            sourceLine: entry.sourceLine)
+        of cnkTarget:
+          BuildTargetDef(name: entry.name, targets: @[entry.node],
+            kind: btkAggregate, sourceFile: entry.sourceFile,
+            sourceLine: entry.sourceLine)
+      targets.add(exported)
+      registerExplicitTargetExport(exported, owningPackage)
+    result.entries.add(entry)
+  if not declaredTest:
+    let implicitEntry = implicitTestCertificate(owningPackage, targets)
+    if implicitEntry.name.len > 0:
+      result.entries.add(implicitEntry)
+
+# ---------------------------------------------------------------------------
+# Test-Certificates TC-9b — ``enactCertificatePolicy <policy>``.
+#
+# Test-Certificates.md §"The policy declaration": a repository adopts a shared
+# branch policy by enacting it in its ``repro.nim``. The ``package`` macro
+# lowers the statement to ``registerEnactedCertificatePolicy`` at module
+# initialisation (and checks the policy's literal requirements at compile
+# time, ``emitEnactedCertificatePolicy``). What is registered here reaches the
+# CLI two ways, both carrying ``renderCertificatePolicyEmission``'s text:
+#
+# * written to ``$REPRO_EMIT_CERTIFICATE_POLICY`` when the recipe runs as the
+#   main module of a provider, which is how ``repro lock refresh`` and the
+#   staleness checks read it without building anything;
+# * as a ``reprobuild.certificate-policy.v1`` metadata node of the package's
+#   graph fragment (``buildPackageFragment``), which is how a certifying run's
+#   lock-update node reads it from the graph it already evaluated.
+# ---------------------------------------------------------------------------
+
+var enactedCertificatePolicies: seq[tuple[packageName: string;
+                                          policy: BranchCertificatePolicy]]
+  ## Every policy enacted by a package compiled into this provider, keyed by
+  ## the enacting package.
+var emittedCertificatePolicyPackage = ""
+  ## The main-module package whose policy was written to the emission file.
+
+proc registerEnactedCertificatePolicy*(packageName: string;
+                                       policy: BranchCertificatePolicy;
+                                       mainModule: bool) {.dynOrStatic.} =
+  ## Record ``packageName``'s enacted policy and, for the provider's main
+  ## module only, write it to ``$REPRO_EMIT_CERTIFICATE_POLICY``. A recipe
+  ## imported from a sibling (``uses:``) is not the main module, so a
+  ## sibling's own policy never reaches this repository's lock.
+  ##
+  ## The write is EAGER, at registration, for the reason
+  ## ``LockFilesEmitEnvVar`` documents: an exit proc that reads module
+  ## globals runs after they are destroyed.
+  for entry in enactedCertificatePolicies:
+    if entry.packageName == packageName:
+      raise newException(ValueError, "package '" & packageName &
+        "' enacts a certificate policy twice")
+  enactedCertificatePolicies.add((packageName: packageName, policy: policy))
+  if not mainModule:
+    return
+  let path = getEnv(CertificatePolicyEmitEnvVar)
+  if path.len == 0:
+    return
+  if emittedCertificatePolicyPackage.len > 0 and
+      emittedCertificatePolicyPackage != packageName:
+    # repro.lock carries one policy per repository; two enacting packages
+    # in one recipe would make which one it records an accident of order.
+    raise newException(ValueError, "packages '" &
+      emittedCertificatePolicyPackage & "' and '" & packageName &
+      "' both enact a certificate policy in one recipe; repro.lock " &
+      "records one policy per repository, so enact it in one package")
+  emittedCertificatePolicyPackage = packageName
+  writeFile(path, renderCertificatePolicyEmission(policy, packageName))
+
+proc enactedCertificatePolicy*(packageName: string;
+                               policy: var BranchCertificatePolicy): bool
+    {.dynOrStatic.} =
+  ## The policy ``packageName`` enacts, if any.
+  for entry in enactedCertificatePolicies:
+    if entry.packageName == packageName:
+      policy = entry.policy
+      return true
+  false
 
 proc resetStateGroupRegistry*() {.dynOrStatic.} =
   ## Named-Runnable-Edges N0: test / re-evaluation seam — clear the
@@ -4150,6 +4524,68 @@ proc decodeTargetExportTablePayload*(bytes: openArray[byte]):
 
 proc targetExportTablePayload*(table: TargetExportTable): string {.dynOrStatic.} =
   fromBytes(encodeTargetExportTablePayload(table))
+
+proc encodeCertificateExportTablePayload*(table: CertificateExportTable):
+    seq[byte] {.dynOrStatic.} =
+  ## Test-Certificates TC-9a: SSZ-style frame around a package's
+  ## certificate-export table, the payload of the
+  ## ``reprobuild.certificate-export-table.v1`` metadata node. Same framing
+  ## as the target-export table (magic, u16 version, u32 length).
+  var payload: seq[byte] = @[]
+  payload.writeU32Le(uint32(table.entries.len))
+  for entry in table.entries:
+    payload.writeString(entry.name)
+    payload.writeString(entry.owningPackage)
+    payload.writeByte(byte(ord(entry.nodeKind)))
+    payload.writeString(entry.node)
+    payload.writeByte(if entry.implicit: 1'u8 else: 0'u8)
+    payload.writeString(entry.sourceFile)
+    payload.writeU32Le(uint32(max(entry.sourceLine, 0)))
+  result.add(CertificateExportTablePayloadMagic)
+  result.writeU16Le(CertificateExportTablePayloadVersion)
+  result.writeU32Le(uint32(payload.len))
+  result.add(payload)
+
+proc decodeCertificateExportTablePayload*(bytes: openArray[byte]):
+    CertificateExportTable {.dynOrStatic.} =
+  ## Decode ``encodeCertificateExportTablePayload``. Every malformed shape
+  ## raises; nothing is repaired.
+  if bytes.len < 10:
+    raisePayload("truncated certificate export table envelope")
+  for i in 0 ..< CertificateExportTablePayloadMagic.len:
+    if bytes[i] != CertificateExportTablePayloadMagic[i]:
+      raisePayload("unknown certificate export table payload magic")
+  var pos = 4
+  let version = readU16Le(bytes, pos)
+  if version != CertificateExportTablePayloadVersion:
+    raisePayload("unsupported certificate export table payload version")
+  let payloadLength = int(readU32Le(bytes, pos))
+  if pos + payloadLength != bytes.len:
+    raisePayload("certificate export table payload length mismatch")
+  let entryCount = int(readU32Le(bytes, pos))
+  result.entries = newSeq[CertificateExportEntry](entryCount)
+  for i in 0 ..< entryCount:
+    var entry: CertificateExportEntry
+    entry.name = readString(bytes, pos)
+    entry.owningPackage = readString(bytes, pos)
+    let kindByte = readByte(bytes, pos)
+    if kindByte > byte(ord(high(CertificateNodeKind))):
+      raisePayload("invalid certificate export node kind")
+    entry.nodeKind = CertificateNodeKind(kindByte)
+    entry.node = readString(bytes, pos)
+    let implicitByte = readByte(bytes, pos)
+    if implicitByte > 1'u8:
+      raisePayload("invalid certificate export implicit flag")
+    entry.implicit = implicitByte == 1'u8
+    entry.sourceFile = readString(bytes, pos)
+    entry.sourceLine = int(readU32Le(bytes, pos))
+    result.entries[i] = entry
+  if pos != bytes.len:
+    raisePayload("trailing certificate export table payload bytes")
+
+proc certificateExportTablePayload*(table: CertificateExportTable): string
+    {.dynOrStatic.} =
+  fromBytes(encodeCertificateExportTablePayload(table))
 
 proc callIdentity*(call: PublicCliCall): string {.dynOrStatic.} =
   var parts = @[call.packageName, call.executableName, call.subcommand,

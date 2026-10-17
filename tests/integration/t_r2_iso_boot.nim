@@ -24,6 +24,7 @@
 import std/[os, osproc, strutils, tables, times]
 
 import std/unittest
+import repro_test_support/reasoned_skip
 
 const HostRunsGate = defined(windows)
   ## The Hyper-V backend needs a Windows host. This used to be enforced

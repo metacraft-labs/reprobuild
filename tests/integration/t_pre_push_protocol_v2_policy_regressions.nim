@@ -24,9 +24,12 @@ when not defined(windows):
 import git_tool
 import repro_cli_support
 import repro_cli_support/push_hook_protocol
+import repro_lock
+import repro_lock/certificate_policy
 import repro_lock_store
 import repro_test_support
 import repro_workspace_manifests
+import ./every_branch_policy
 
 const
   ExternalStoreModeEnv = "REPROBUILD_TEST_POLICY_STORE_MODE"
@@ -212,13 +215,20 @@ proc writeDevelopOverride(workspace, package, path: string) =
       path.replace('\\', '/') & "\"\nstate = \"editable\"\n" &
     "created_at = \"2026-07-22T00:00:00Z\"\n")
 
-proc requiredCertificateProject(body: string): string =
-  let remote = body.find("[[remote]]")
-  if remote < 0: return body
-  body[0 ..< remote] &
-    "[certificates]\ngate_mode = \"required\"\n" &
-    "required_targets = [\"t-unit\"]\nrequired_platforms = [\"" &
-    hostOS & "/" & hostCPU & "\"]\n\n" & body[remote .. ^1]
+proc requiredCertificateLock(depRevision: string): string =
+  ## A committed ``repro.lock`` that pins the develop-set sibling ``dep`` at
+  ## its checkout (as the committed-lock gate requires) and records a
+  ## certificate policy requiring t-unit on this host for every branch
+  ## (TC-9d: the policy is the pushed content's own; one rule for every
+  ## branch, ``everyBranchSnapshot``).
+  replaceCertificatePolicySection(serializeLockedDependencies(
+    LockedDependencies(schema: "reprobuild.solved-graph-lock.v2", deps: @[
+      LockedDep(name: "dep", path: "../dep",
+        coordinates: Coordinates(kind: ckVcs, gitRef: "main",
+          revision: depRevision),
+        integrity: "git-sha1:" & depRevision, visibility: "public")])),
+    everyBranchSnapshot(pmRequired, ["t-unit"],
+    [hostOS & "/" & hostCPU], name = "app"))
 
 proc writeFailingStore(path, log: string) =
   when defined(windows):
@@ -525,13 +535,17 @@ suite "pre-push protocol v2 policy regressions":
         "backend = \"external-cli\", program = \"" &
         policyStore.replace('\\', '/') &
         "\", repos = [\"app\", \"dep\"] }")
-      let projectFile = fx.workspace / ".repro" / "manifests" /
-        "projects" / "app.toml"
-      let ordinaryProject = readFile(projectFile)
-      writeFile(projectFile, requiredCertificateProject(ordinaryProject))
+      # The outgoing commit gains a policy requiring an uncovered t-unit; the
+      # policy commit is made with --no-verify so only pre-push judges it.
+      writeFile(fx.app / "repro.lock", requiredCertificateLock(require(
+        q(gitBin) & " -C " & q(fx.dep) & " rev-parse HEAD").strip()))
+      discard require(q(gitBin) & " -C " & q(fx.app) & " add repro.lock")
+      discard require(q(gitBin) & " -C " & q(fx.app) &
+        " commit -q --no-verify -m certificate-policy")
       if fileExists(policyStoreLog): removeFile(policyStoreLog)
       let certFailure = run(q(gitBin) & " -C " & q(fx.app) &
         " push origin main")
+      checkpoint("certificate-policy push: " & certFailure.output)
       check certFailure.code != 0
       check "certificate" in certFailure.output
       check hasFailure(fx.report(), "certificate-coverage")
@@ -539,7 +553,9 @@ suite "pre-push protocol v2 policy regressions":
       if fileExists(policyStoreLog):
         check not readFile(policyStoreLog).splitLines().anyIt(
           it.startsWith("put "))
-      writeFile(projectFile, ordinaryProject)
+      # Drop the policy commit: the ordinary outgoing commit pushes again.
+      discard require(q(gitBin) & " -C " & q(fx.app) & " reset -q --hard " &
+        q(appUnpublished))
 
       let finalPush = run("env " & LegacyHookSentinelEnv & "=1 " & q(gitBin) &
         " -C " & q(fx.app) & " push origin main")
@@ -589,7 +605,8 @@ suite "pre-push protocol v2 policy regressions":
       if routedPathSelected.isSome:
         check routedPathSelected.get().key.sha == bogus
       check lockedShaFromStore(selectedStore, "app", "app", "app") == bogus
-      let resolvedForIntegrity = resolveProject(projectFile)
+      let resolvedForIntegrity = resolveProject(fx.workspace / ".repro" /
+        "manifests" / "projects" / "app.toml")
       var resolvedApp: ResolvedRepo
       for repo in resolvedForIntegrity.repos:
         if repo.name == "app": resolvedApp = repo

@@ -31,8 +31,9 @@ import std/[os, strutils, unittest]
 
 import ../src/repro_binary_cache_client/engine_publisher
 import repro_build_engine
+from repro_test_support import testCaseScratchSlug
 
-const TmpRoot = "build/test-tmp/test_auto_credentials"
+let TmpRoot = "build/test-tmp/test_auto_credentials" / testCaseScratchSlug()
 
 proc freshTmpDir(tag: string): string =
   result = TmpRoot / tag

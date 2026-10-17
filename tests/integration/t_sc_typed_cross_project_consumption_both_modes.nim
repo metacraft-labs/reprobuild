@@ -102,6 +102,15 @@
 ##     (the bare-name exe is not on PATH, no ambient prebuild can satisfy it),
 ##     proving the typed consume genuinely depends on the from-source SC splice.
 ##
+## Declared producers and tools: every consuming edge names the producers it
+## consumes plus the tools it runs in its tool-identity refs, and each producer
+## edge names the tools it runs, as the SC-2/SC-3/SC-5 fixtures do. Package-level
+## ``uses:`` is the DISCOVERY set; ADMISSION (build + splice) follows the selected
+## edge's own declaration (Cross-Repo-Source-Consumption.md §4.2b.3, since
+## 776517b31 "build: scope producer tools to consuming actions"). Without the refs
+## the producers are never built and the consume step fails, which is the
+## "under-declaring fails loudly" case of §4.2b.4, not a splice defect.
+##
 ## Skip rule: ``cc``/``sh``/``git`` missing on PATH, or ``./build/bin/repro``
 ## unbuilt, or a non-Linux host (the ``.so`` layout assumed here is Linux; kept
 ## Linux-only to stay hermetic, matching SC-3/SC-5/SC-6/SC-7).
@@ -196,6 +205,8 @@ package sctypedexe:
 
   uses:
     "sh"
+    "mkdir"
+    "chmod"
 
   executable sctypedexe:
     name: "sctypedexe"
@@ -204,7 +215,7 @@ package sctypedexe:
         flag socket is string
 
   build:
-    discard shell(
+    let buildExe = shell(
       command = "mkdir -p build/bin && " &
         "{ printf '#!/bin/sh\n'; " &
         "printf 'out=\"\"\n'; " &
@@ -215,6 +226,7 @@ package sctypedexe:
         "chmod +x build/bin/sctypedexe",
       actionId = "sctypedexe.build.sctypedexe",
       extraOutputs = @["build/bin/sctypedexe"])
+    appendRegisteredActionToolIdentityRefs(buildExe.id, ["mkdir", "chmod"])
 """
 
 # ---- The sibling LIBRARY producer repo (native-backend cdylib shape). ----
@@ -238,12 +250,15 @@ package sctypedlib:
 
   uses:
     "sh"
+    "mkdir"
+    "cc"
+    "cp"
 
   library sctypedlib:
     kind: shared
 
   build:
-    discard shell(
+    let buildLib = shell(
       command = "mkdir -p build/lib build/include && " &
         "cc -shared -fPIC -o build/lib/libsctypedlib.so greeting.c && " &
         "cp greeting.h build/include/greeting.h",
@@ -251,6 +266,7 @@ package sctypedlib:
       extraInputs = @["greeting.c", "greeting.h"],
       extraOutputs = @["build/lib/libsctypedlib.so", "build/include/greeting.h"],
       cacheable = false)
+    appendRegisteredActionToolIdentityRefs(buildLib.id, ["mkdir", "cc", "cp"])
 """
 
 # ---- The consuming C program: #include <greeting.h> (via CPATH), calls the
@@ -285,6 +301,7 @@ package consumer:
 
   uses:
     "sh"
+    "cc"
     "sctypedexe"
     "sctypedlib"
 
@@ -304,13 +321,14 @@ package consumer:
     # Consume the sibling LIBRARY (``sctypedlib`` in scope via the SC-9 import;
     # linked/loaded via the SC-3 aux channels). Depends on the typed serve edge
     # so the exe channel and lib channel are one consumer graph.
-    discard shell(
+    let consume = shell(
       command = "cc -o build/consume main.c -lsctypedlib && ./build/consume",
       actionId = "consumer.build.consume",
       deps = @[served.id],
       extraInputs = @["main.c"],
       extraOutputs = @["build/consume", "build/consumed.txt"],
       cacheable = false)
+    appendRegisteredActionToolIdentityRefs(consume.id, ["sctypedlib", "cc"])
 """
 
 proc q(value: string): string = quoteShell(value)

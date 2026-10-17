@@ -24,52 +24,42 @@
 ##      dependency's realization would invalidate the consumer. Non-vacuous: a
 ##      consumer that binds nothing does NOT gain the dependency's inputs.
 ##
-## The providers are compiled by the RP1 edge (``compileProviderBinary``) with
-## ``workDir = getCurrentDir()`` (the reprobuild repo root), mirroring
-## ``t_rp2_provider_session_invoke.nim``.
+## The five providers are build-graph fixtures, not compiled here
+## (Test-Fixtures-In-Build-Graph.md): checked-in recipes under
+## ``tests/fixtures/rp3-bind-deps/`` compiled by the
+## ``reprobuild.test_fixtures.rp3_provider_*`` edges in ``repro.nim``, which are
+## typed inputs of this test's execute edge. Compiling is not what this file
+## tests — sharing, binding and propagation across launched sessions are — and
+## a stable recipe path is what lets one compile serve every case and run.
+##
+## A provider's session-pool key is the id the engine supplies for the binary
+## it launches (``ProviderArtifactRef.providerArtifactId``; a v1 provider
+## reports an empty one). Here that id is the binary's CAS content digest: a
+## content address of exactly the artifact launched, so the same fixture keys
+## the same session and a different version keys another.
 
 import std/[os, strutils, tables, unittest]
 
-import repro_interface_artifacts
 import repro_provider_runtime
 import repro_core
 import repro_hash
+import repro_test_support
 
 import repro_project_dsl
 
-# A dependency provider whose root fragment reads its own source file (so it
-# carries a distinctive ``gevFileRead`` evaluation input the consumer edge
-# should inherit). ``$1`` distinguishes two dependency versions.
-const dependencyBodyTemplate = """
-import repro_project_dsl
-
-package rp3dep$1:
-  build:
-    discard
-"""
-
-# A consumer provider whose root ``build:`` body reaches its dependency ONLY
-# through the engine-supplied binding (``useBoundDependency "dep"``). $1
-# distinguishes two consumers; $2 toggles whether the body binds the
-# dependency (the "no-binding fails cleanly" case uses "" here but still calls
-# useBoundDependency, so it raises when unbound).
-const consumerBodyTemplate = """
-import repro_project_dsl
-
-package rp3consumer$1:
-  build:
-    useBoundDependency("dep")
-"""
-
-# A consumer that needs NO dependency (binds nothing) — the non-vacuity
-# control for observed-input propagation.
-const plainConsumerBody = """
-import repro_project_dsl
-
-package rp3plain:
-  build:
-    discard
-"""
+# The fixture recipes (``tests/fixtures/rp3-bind-deps/<name>/repro.nim``):
+#
+#   * ``dep`` / ``depv2`` — package ``rp3dep`` / ``rp3depv2``: a dependency whose
+#     root fragment reads its own source file, so it carries a distinctive
+#     ``gevFileRead`` evaluation input the consumer edge should inherit; two
+#     versions.
+#   * ``consumer-a`` / ``consumer-b`` — ``rp3consumera`` / ``rp3consumerb``: a
+#     ``build:`` body that reaches its dependency ONLY through the
+#     engine-supplied binding (``useBoundDependency("dep")``), so it raises when
+#     unbound.
+#   * ``plain`` — ``rp3plain``: needs no dependency (binds nothing); the
+#     non-vacuity control for observed-input propagation.
+const Rp3FixtureRecipes = "tests/fixtures/rp3-bind-deps"
 
 const ProviderGraphRequestTypeId = "reprobuild.provider-graph-request.v1"
 const ProviderGraphResponseTypeId = "reprobuild.provider-graph-response.v1"
@@ -123,26 +113,18 @@ proc unmarshalResponse(box: BoxedValue): ProviderGraphResponse =
 
 type BuiltProvider = tuple[binary, artifactId, projectRoot, packageName: string]
 
-proc buildProvider(tempRoot, tag, body, packageName: string): BuiltProvider =
-  let projectRoot = tempRoot / tag
-  let outDir = tempRoot / (tag & "-out")
-  createDir(extendedPath(projectRoot))
-  createDir(extendedPath(outDir))
-  let modulePath = projectRoot / "reprobuild.nim"
-  writeFile(extendedPath(modulePath), body)
-  let interfacePath = outDir / (tag & "-interface.rbsz")
-  let stubPath = outDir / (tag & "-interface.nim")
-  let artifact = extractInterfaceFromModule(modulePath, interfacePath,
-    stubPath, getCurrentDir())
-  let binPath = outDir / (tag & "-provider")
-  let compilePath = outDir / (tag & "-provider-compile.rbsz")
-  let plan = providerCompilePlan(modulePath, binPath,
-    artifact.interfaceFingerprint, getCurrentDir())
-  let compiled = compileProviderBinary(modulePath, binPath,
-    artifact.interfaceFingerprint, compilePath, getCurrentDir())
-  (binary: compiled.outputBinaryPath,
-   artifactId: toHex(plan.providerArtifactId.bytes),
-   projectRoot: projectRoot,
+proc fixtureProvider(name, packageName: string): BuiltProvider =
+  ## The graph-built provider for fixture recipe ``name``. Asserts it exists;
+  ## never compiles it.
+  ## The output path is spelled here, once, the same string the
+  ## ``rp3_provider_*`` edges in ``repro.nim`` declare (``graphArtifactPath``).
+  let binary = requireBinary(
+    graphArtifactPath(addFileExt("build/test-fixtures/rp3-bind-deps/" & name,
+      ExeExt)),
+    "reprobuild.test_fixtures.rp3_provider_" & name.replace("-", "_"))
+  (binary: binary,
+   artifactId: toHex(casDigest(toBytes(readFile(binary))).bytes),
+   projectRoot: graphArtifactPath(Rp3FixtureRecipes & "/" & name),
    packageName: packageName)
 
 proc rootRequest(p: BuiltProvider): ProviderGraphRequest =
@@ -186,15 +168,9 @@ proc resolveDependency(pool: ProviderSessionPool; dep: BuiltProvider):
 suite "RP3 bind-deps + cross-consumer session sharing":
 
   test "two consumers binding the SAME dependency share ONE launched session; a different version does not":
-    let tempRoot = getTempDir() / "rp3-share-" & $getCurrentProcessId()
-    removeDir(extendedPath(tempRoot))
-    defer: removeDir(extendedPath(tempRoot))
-
-    let dep = buildProvider(tempRoot, "dep", dependencyBodyTemplate % "", "rp3dep")
-    let consumerA = buildProvider(tempRoot, "ca",
-      consumerBodyTemplate % "a", "rp3consumera")
-    let consumerB = buildProvider(tempRoot, "cb",
-      consumerBodyTemplate % "b", "rp3consumerb")
+    let dep = fixtureProvider("dep", "rp3dep")
+    let consumerA = fixtureProvider("consumer-a", "rp3consumera")
+    let consumerB = fixtureProvider("consumer-b", "rp3consumerb")
 
     let pool = newProviderSessionPool()
     defer: pool.closeAll()
@@ -225,8 +201,7 @@ suite "RP3 bind-deps + cross-consumer session sharing":
     # NON-VACUITY: a DIFFERENT dependency version has a distinct
     # ProviderArtifactId ⇒ distinct ProviderSessionKey ⇒ a distinct launched
     # session (sharing is keyed, not unconditional).
-    let depV2 = buildProvider(tempRoot, "depv2",
-      dependencyBodyTemplate % "v2", "rp3depv2")
+    let depV2 = fixtureProvider("depv2", "rp3depv2")
     check depV2.artifactId != dep.artifactId
     let depForV2 = pool.resolveDependency(depV2)
     check depForV2.handle.session != depForA.handle.session
@@ -234,13 +209,8 @@ suite "RP3 bind-deps + cross-consumer session sharing":
     check pool.launchCount == 4  # v2 is a fresh launch
 
   test "BindDependencies is honored: a bound consumer invokes through the handle; an unbound consumer fails cleanly":
-    let tempRoot = getTempDir() / "rp3-bind-" & $getCurrentProcessId()
-    removeDir(extendedPath(tempRoot))
-    defer: removeDir(extendedPath(tempRoot))
-
-    let dep = buildProvider(tempRoot, "dep", dependencyBodyTemplate % "", "rp3dep")
-    let consumer = buildProvider(tempRoot, "ca",
-      consumerBodyTemplate % "a", "rp3consumera")
+    let dep = fixtureProvider("dep", "rp3dep")
+    let consumer = fixtureProvider("consumer-a", "rp3consumera")
 
     let pool = newProviderSessionPool()
     defer: pool.closeAll()
@@ -285,14 +255,9 @@ suite "RP3 bind-deps + cross-consumer session sharing":
     check mentionedNoBinding
 
   test "the dependency's observed inputs propagate to the consumer edge":
-    let tempRoot = getTempDir() / "rp3-inputs-" & $getCurrentProcessId()
-    removeDir(extendedPath(tempRoot))
-    defer: removeDir(extendedPath(tempRoot))
-
-    let dep = buildProvider(tempRoot, "dep", dependencyBodyTemplate % "", "rp3dep")
-    let consumer = buildProvider(tempRoot, "ca",
-      consumerBodyTemplate % "a", "rp3consumera")
-    let plain = buildProvider(tempRoot, "plain", plainConsumerBody, "rp3plain")
+    let dep = fixtureProvider("dep", "rp3dep")
+    let consumer = fixtureProvider("consumer-a", "rp3consumera")
+    let plain = fixtureProvider("plain", "rp3plain")
 
     let pool = newProviderSessionPool()
     defer: pool.closeAll()

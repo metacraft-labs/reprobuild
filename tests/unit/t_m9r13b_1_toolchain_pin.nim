@@ -62,6 +62,7 @@
 ## nix prefix discovery that does not run on the CI host.
 
 import std/[os, sequtils, strutils, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_interface_artifacts
 

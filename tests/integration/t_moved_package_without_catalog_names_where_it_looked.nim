@@ -34,6 +34,19 @@ package movedPackageDiagnosticConsumer:
     "sqlite3 >=3"
 """
 
+const DependencyConsumerSource = """
+import repro_project_dsl
+
+package movedPackageDependencyConsumer:
+  defaultToolProvisioning "tarball"
+  nativeBuildDeps:
+    "sqlite3 >=3"
+"""
+  ## The same moved package named in a dependency list. The catalog is
+  ## consulted for `nativeBuildDeps:` and `runtimeDeps:` as for `uses:`, so an
+  ## unreachable catalog must be the same named error there, not a silent loss
+  ## of the dependency's provisioning.
+
 proc nimCheck(consumer, catalogRoot: string): tuple[output: string,
     exitCode: int] =
   var parts = @[findExe("nim").quoteShell, "check", "--hints:off",
@@ -87,6 +100,26 @@ suite "a moved package with no catalog is a named compile error":
     check exitCode != 0
     check (missing & " ($" & ReprobuildPackagesRootEnv &
       "): no such directory") in output
+
+  test "a dependency list naming a moved package gets the same error":
+    let dependencyConsumer = scratch / "dependency_consumer.nim"
+    writeFile(dependencyConsumer, DependencyConsumerSource)
+    let emptyCatalog = scratch / "empty-catalog-deps"
+    createDir(emptyCatalog)
+    let (output, exitCode) = nimCheck(dependencyConsumer, emptyCatalog)
+    checkpoint(output)
+    check exitCode != 0
+    check "nativeBuildDeps: \"sqlite3 >=3\" names `sqlite3`" in output
+    check "no longer bundled with reprobuild's stdlib" in output
+    check emptyCatalog in output
+    check "Provide the catalog" in output
+
+  test "positive control: the real catalog compiles the dependency consumer":
+    let dependencyConsumer = scratch / "dependency_consumer.nim"
+    writeFile(dependencyConsumer, DependencyConsumerSource)
+    let (output, exitCode) = nimCheck(dependencyConsumer, realCatalogRoot())
+    checkpoint(output)
+    check exitCode == 0
 
   test "positive control: the real catalog compiles the same consumer":
     let (output, exitCode) = nimCheck(consumer, realCatalogRoot())

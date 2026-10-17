@@ -14,8 +14,8 @@
 ## the six contract cases the spec calls out:
 ##
 ##   1. ``test_m0_topo_sort_7zip_before_erlang`` — erlang uses
-##      ``imInstallerNsis`` which needs ``7z.exe``; 7zip must realize
-##      first.
+##      ``imInstallerNsis`` which needs ``7z.exe``; 7-Zip (the
+##      ``7zip`` package) must realize first.
 ##   2. ``test_m0_topo_sort_lessmsi_before_meson`` — meson uses
 ##      ``imInstallerMsi`` which needs ``lessmsi.exe``; lessmsi must
 ##      realize first.
@@ -50,6 +50,15 @@ from repro_core/paths import extendedPath
 import repro_test_support
 
 import repro_home_apply/plan
+import repro_home_apply/package_catalog
+
+# GM4b: the production extractor-dependency callback resolves each package
+# as the apply would. The installer-class realizations these cases rely on
+# are the packages' x86_64-windows `tarball` records, so the target is
+# Windows on every host (the selection is static metadata).
+let defaultExtractorDeps = profileExtractorDeps(
+  realizationTargetFor(pcX86_64, poWindows, mlX86_64_v1),
+  DefaultSelectionPolicy)
 
 # ---------------------------------------------------------------------------
 # Helpers

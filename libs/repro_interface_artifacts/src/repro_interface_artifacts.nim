@@ -88,17 +88,12 @@ import cbor
 import repro_core
 import repro_core/ambient_execution
 import repro_core/paths as corepaths
+import repro_core/relocation
+import repro_core/source_root
+import repro_core/c_compiler
 import repro_domain_types
 import repro_hash
 import repro_project_dsl
-
-proc sanitizeStaticExec(val: string): string =
-  var cleanLines: seq[string] = @[]
-  for line in val.splitLines:
-    let s = line.strip()
-    if s.len > 0 and not s.startsWith("io-mon:"):
-      cleanLines.add(s)
-  if cleanLines.len > 0: cleanLines[^1] else: ""
 
 # There is deliberately no build-time Nim compiler constant. The Nim that
 # compiles a recipe is the one the bootstrap provisions
@@ -110,14 +105,13 @@ proc sanitizeStaticExec(val: string): string =
 # every Windows build: ``staticExec`` runs no shell there, so ``command`` is
 # not found and the last output line is Nim's "Requested command not found".
 #
-# ``BuiltCCompilerPath`` has the same Windows defect and so is defined only
-# where its probe can work. Windows gets its recipe-compile C compiler from the
-# bootstrap or from ``REPRO_BOOTSTRAP_CC``, never from here.
-when defined(windows):
-  const BuiltCCompilerPath = ""
-else:
-  const BuiltCCompilerPath =
-    sanitizeStaticExec(staticExec("command -v cc || command -v gcc || true"))
+# ``BuiltCCompilerPath`` -- the C compiler ``repro`` was built with -- is
+# defined in ``repro_core/c_compiler`` with the rest of the C compiler
+# selection, which the profile compile shares. The names below used to be
+# defined here and are re-exported for the callers that import them from here.
+export c_compiler.CCompilerUnusableError, c_compiler.bootstrapCCompilerEnv,
+  c_compiler.bootstrapSdkRootEnv, c_compiler.bootstrapSysrootArgs,
+  c_compiler.cCompilerOverrideRemedy
 
 proc compileTimeSourceRoot(name: string): string {.compileTime.} =
   ## Preserve source-only dependency roots from the environment that built
@@ -197,9 +191,12 @@ const SeededSourceEnvironmentVar* = "REPRO_BOOTSTRAP_SOURCE_ENV"
   ## captures the user's development environment. Values are hex encoded so
   ## every valid filesystem path survives this environment-only transport.
 
-proc clearSeededSourcePackageEnvironment*() =
-  ## Remove only unchanged bootstrap additions. Explicit caller values and
-  ## overrides made since seeding remain authoritative.
+proc seededSourcePackageEnvironmentNames*(): seq[string] =
+  ## The names this process seeded that still hold the seeded value, followed
+  ## by ``SeededSourceEnvironmentVar`` itself when it is set: exactly what
+  ## ``clearSeededSourcePackageEnvironment`` removes. For a caller that has to
+  ## keep the seeds for its own later compiles and so withdraws them from a
+  ## child's environment table instead of from this process.
   for line in getEnv(SeededSourceEnvironmentVar).splitLines():
     let split = line.find('=')
     if split <= 0:
@@ -207,11 +204,18 @@ proc clearSeededSourcePackageEnvironment*() =
     let name = line[0 ..< split]
     try:
       let value = parseHexStr(line[split + 1 .. ^1])
-      if existsEnv(name) and getEnv(name) == value:
-        delEnv(name)
+      if existsEnv(name) and getEnv(name) == value and name notin result:
+        result.add(name)
     except ValueError:
       discard
-  delEnv(SeededSourceEnvironmentVar)
+  if existsEnv(SeededSourceEnvironmentVar):
+    result.add(SeededSourceEnvironmentVar)
+
+proc clearSeededSourcePackageEnvironment*() =
+  ## Remove only unchanged bootstrap additions. Explicit caller values and
+  ## overrides made since seeding remain authoritative.
+  for name in seededSourcePackageEnvironmentNames():
+    delEnv(name)
 
 proc seedSourcePackageEnvironment*(roots: openArray[(string, string)]) =
   ## Child compilers rebuild the interface-artifact module and therefore
@@ -232,75 +236,14 @@ proc seedSourcePackageEnvironment*(roots: openArray[(string, string)]) =
         previous & (if previous.len > 0: "\n" else: "") &
         envName & "=" & toHex(root))
 
-const
-  InstalledSourceRootSubdir* = "share/repro/source"
-    ## Prefix-relative home of reprobuild's OWN ``libs/`` tree in an installed
-    ## layout (release archive, .deb/.rpm, MSI). The same spelling as
-    ## ``repro_dsl_stdlib/packaging/reprobuild_dist.ReprobuildSourceRootSubdir``;
-    ## ``t_packaging_reprobuild_dist`` pins the two together.
-  InstalledSourceTreesSubdir* = "share/repro/src"
-    ## Prefix-relative parent of the per-input source-only trees
-    ## (``reprobuild_dist.ReprobuildSourceSubdir``).
-  InstalledSourcePackageTrees* = [
-    ## ``(envName, path under InstalledSourceTreesSubdir)`` for every
-    ## source-only input an installed layout may carry. The names and paths
-    ## are the ``share/repro/src`` entries of the native-package wrapper
-    ## contract (``reprobuild_dist.reprobuildToolWrapperValues``), so an
-    ## archive and a package that ship the same tree seed the same variable.
-    ("NIMCRYPTO_SRC", "nimcrypto"),
-    ("BEARSSL_SRC", "bearssl"),
-    ("STACKABLE_HOOKS_SRC", "nim-stackable-hooks/src"),
-    ("CODETRACER_TRACE_FORMAT_NIM_SRC", "codetracer-trace-format-nim"),
-    ("IO_MON_SRC", "io-mon/src"),
-    ("SHM_GSET_SRC", "nim-shm-gset/src"),
-    ("SHM_QUEUE_SRC", "nim-shm-queue/src"),
-    ("CODETRACER_PINNED_SRC", "codetracer/src"),
-    ("REPRO_CT_TEST_RUNNER_SRC", "reprobuild-ct-test-runner"),
-    ("REPRO_TEST_ADAPTERS_SRC", "reprobuild-test-adapters/src"),
-    ("RUNQUOTA_SRC", "runquota"),
-  ]
-
-proc installedLayoutSourceRoot*(prefix: string): string =
-  ## ``<prefix>/share/repro/source`` when it holds reprobuild's libs, else "".
-  ## The marker is the one ``reprobuildLibraryWorkDir`` requires of any
-  ## ``REPROBUILD_SOURCE_ROOT``.
-  if prefix.len == 0:
-    return ""
-  let root = prefix / InstalledSourceRootSubdir
-  if fileExists(extendedPath(root / "libs" / "repro_project_dsl" / "src" /
-      "repro_project_dsl.nim")):
-    return root
-  ""
-
-proc installedLayoutSourceRoots*(prefix: string): seq[(string, string)] =
-  ## The source roots an installed layout rooted at ``prefix`` actually
-  ## carries, as ``(envName, absolute dir)``. Empty unless the prefix holds
-  ## reprobuild's own libs: the per-input trees are only meaningful beside
-  ## them. Pure apart from existence checks, so it is testable on a fixture.
-  let sourceRoot = installedLayoutSourceRoot(prefix)
-  if sourceRoot.len == 0:
-    return
-  result.add(("REPROBUILD_SOURCE_ROOT", sourceRoot))
-  for (envName, rel) in InstalledSourcePackageTrees:
-    let dir = prefix / InstalledSourceTreesSubdir / rel
-    if dirExists(extendedPath(dir)):
-      result.add((envName, dir))
-
-proc installedLayoutPrefixCandidates*(appFilename, publicCliPath: string):
-    seq[string] =
-  ## Install prefixes to probe, derived from where the running image lives.
-  ## ``<prefix>/bin/<exe>`` gives ``<prefix>``. The public CLI path is a
-  ## second anchor because the portable Linux archive runs its images through
-  ## the bundled loader, where ``getAppFilename()`` names
-  ## ``<prefix>/lib/ld-linux-*.so.2`` rather than the executable (the loader's
-  ## grandparent is the same prefix, but the launcher-set path says so
-  ## explicitly).
-  for anchor in [appFilename, publicCliPath]:
-    if anchor.len == 0:
-      continue
-    let prefix = anchor.parentDir.parentDir
-    if prefix.len > 0 and prefix notin result:
-      result.add(prefix)
+# The installed layout (``share/repro/{source,src}`` beside ``bin/``) is defined
+# ONCE, in ``repro_core/source_root``, because the profile compile needs it too
+# and sits below this module (Gradual-Nix-To-Reprobuild-Migration GM1w). These
+# names are re-exported so existing importers keep resolving them here.
+export InstalledSourceRootSubdir, InstalledSourceTreesSubdir,
+  InstalledSourcePackageTrees, installedLayoutSourceRoot,
+  installedLayoutPackageTrees, installedLayoutSourceRoots,
+  installedLayoutPrefixCandidates
 
 proc ensureInstalledSourcePackageEnvironment*() =
   ## Make an unpacked release archive self-contained.
@@ -319,13 +262,12 @@ proc ensureInstalledSourcePackageEnvironment*() =
   ## captures the user's environment. Runs BEFORE the build-time roots are
   ## seeded, so the archive's own copy outranks paths that only exist on the
   ## machine that built it.
-  var appFilename = ""
-  try:
-    appFilename = getAppFilename()
-  except CatchableError:
-    discard
-  for prefix in installedLayoutPrefixCandidates(appFilename,
-      getEnv("REPRO_PUBLIC_CLI_PATH")):
+  ##
+  ## The prefixes probed are ``repro_core/source_root``'s
+  ## ``runningImagePrefixCandidates``, the same ones its resolver's
+  ## installed-layout arm consults, so the root seeded here and the root
+  ## ``resolveReprobuildSourceRoot`` returns cannot disagree.
+  for prefix in runningImagePrefixCandidates():
     let roots = installedLayoutSourceRoots(prefix)
     if roots.len > 0:
       seedSourcePackageEnvironment(roots)
@@ -432,6 +374,175 @@ type
     entrypoints*: InterfaceResourceEntrypoints
     location*: SourceLocation
 
+  InterfaceActivityParam* = object
+    ## Shared-Development-Services L3: one constructor-style typed
+    ## parameter of a lifted dev-env activity. ``nimType`` is the
+    ## author's own type expression, carried verbatim and resolved in the
+    ## CONSUMING compilation — the same contract
+    ## ``InterfaceResourceAttr.nimType`` has.
+    name*: string
+    nimType*: string
+    location*: SourceLocation
+
+  InterfaceConfigKey* = object
+    ## Shared-Development-Services L3: one ``config:`` key of a lifted
+    ## activity, which is "the ``config:`` surface with defaults so a
+    ## consumer's ``enable`` block typechecks" (L3 ``:gate:``).
+    ##
+    ## ``hasDefault`` is carried separately from ``defaultRepr`` because
+    ## ``issuer: string`` and ``issuer: string = ""`` are different
+    ## declarations and only the first makes the key REQUIRED at the
+    ## ``enable`` site.
+    name*: string
+    nimType*: string
+    defaultRepr*: string
+    hasDefault*: bool
+    description*: string
+    location*: SourceLocation
+
+  InterfaceServiceIdentityMode* = enum
+    ## Shared-Development-Services L4 (§4.2): the lifted mirror of the
+    ## DSL's ``ServiceIdentityKind``. A separate enum for the reason
+    ## ``InterfaceResourceDeterminism`` is one: this module must not
+    ## import the DSL's type graph, and the artifact's wire format is
+    ## versioned independently of it. The ordinals line up and
+    ## ``toProjectInterface`` maps ordinal-for-ordinal.
+    isimDerived  ## ``identity derived`` — a digest of the definition
+    isimStable   ## ``identity stable "<id>"`` — an author-assigned id
+
+  InterfaceServiceScope* = enum
+    ## Shared-Development-Services L4 (§4.1): the lifted mirror of the
+    ## DSL's ``ServiceScope``. ``issProject`` is ordinal 0, matching the
+    ## DSL default, so a v<22 payload decodes to it.
+    issProject
+    issWorkspace
+    issUser
+    issSystem
+
+  InterfaceService* = object
+    ## Shared-Development-Services L3 (§3): a dev-env service crossing
+    ## the interface boundary as a typed contract, alongside
+    ## ``InterfaceExecutable`` / ``InterfaceLibrary`` /
+    ## ``InterfaceResource``.
+    ##
+    ## It carries the service's SIGNATURE — its name, the activity that
+    ## declares it, and the handle type a consumer reaches it through —
+    ## and deliberately NOT its implementation. A consumer compiles
+    ## against the name; it does not compile against the ``executable``,
+    ## ``args``, ``runtimeFile`` or ``on <trigger>:`` setters L1 lowers.
+    ## That split is the whole reason the fingerprint is not a
+    ## rebuild-everything hammer: a producer changing its service's argv
+    ## re-lifts to the SAME interface digest, while renaming the service
+    ## shifts it. Both directions are measured in
+    ## ``t_l3_lift_carries_service_and_activity_signatures.nim``.
+    name*: string
+    activityName*: string
+      ## The declaring activity, or "" for a package-level service.
+    handleType*: string
+      ## The generated Nim type the service's handle is a member of.
+      ## Empty for a package-level service.
+    identityMode*: InterfaceServiceIdentityMode
+      ## Shared-Development-Services L4: the DECLARED identity mode. This
+      ## is the one part of §4 that is signature rather than
+      ## implementation, and the distinction is worth stating because the
+      ## paragraph above spends itself on the opposite point: a consumer
+      ## does not care HOW the service is built, and it must care whether
+      ## the instance it is handed is keyed by a declared id or by a
+      ## digest of somebody else's build — that is the difference between
+      ## "my state survives their edit" and "my state forks on it"
+      ## (§4.2). So renaming the service moves the fingerprint, changing
+      ## its ``args`` does not, and changing ``identity`` or ``scope``
+      ## does. All three are measured in
+      ## ``t_l4_identity_and_scope_cross_the_lift.nim``.
+    identityStableId*: string
+      ## The declared id when ``identityMode`` is ``isimStable``; empty
+      ## for ``isimDerived``.
+    scope*: InterfaceServiceScope
+      ## The DECLARED scope — the other half of §4's instance key.
+    compatibilityMajor*: uint32
+      ## Shared-Development-Services L6 (§4.3): the DECLARED MAJOR
+      ## COMPATIBILITY FIELD, from ``compatibility <n>``.
+      ##
+      ## It is the input to the one outcome of §4.3's three that is NOT
+      ## decided on the fingerprint: "| major compatibility field differs
+      ## | **Refuse.** Attaching would hand the consumer a handle whose
+      ## members it cannot use; a warning there would be a defect report
+      ## written after the damage |". Without a field for it the table's
+      ## bottom row has no input at all and the decision degenerates to
+      ## two outcomes — the design §4.3 is written to reject.
+      ##
+      ## SIGNATURE, like identity and scope and for the same reason: it
+      ## is a fact about what the consumer may DO with the handle, not
+      ## about how the producer builds it. So it is inside the
+      ## fingerprint projection, and a producer editing the service's
+      ## ``args`` still re-lifts to the same digest.
+      ##
+      ## ``0`` means undeclared and is the zero value on purpose: a v<23
+      ## payload carries no major, so it decodes to 0 and compares EQUAL
+      ## to every freshly lifted definition that declared none. Were the
+      ## default 1, the decision's only refusing outcome would fire at an
+      ## artifact-format boundary rather than at an incompatibility. The
+      ## DSL therefore refuses ``compatibility 0``.
+      ##
+      ## ``repro_resources/service_attach`` is what compares it; this
+      ## module only carries it, which is the split that keeps the
+      ## comparison out of the artifact codec.
+    contributionPoints*: seq[string]
+      ## Shared-Development-Services D-SS11 (§4.6): the CONTRIBUTION
+      ## POINTS this service converges, bare names, declaration order.
+      ##
+      ## §4.6 requires exactly this of the lift: "The owner's lifted
+      ## interface must **carry its contribution points**, so a
+      ## consumer's contribution is type-checked against a declared
+      ## point and a misspelled one is refused by name at the consumer's
+      ## compile time." Before v24 the points existed only in the
+      ## owner's own lowering and the owner's own process, which is why
+      ## L9 measured the contribution lane as intra-process: a consumer
+      ## had nothing to compile against.
+      ##
+      ## IT IS IN THE FINGERPRINT, and that is deliberate rather than
+      ## incidental. §4.3 decides attach-or-warn on the interface
+      ## fingerprint, and a running instance that no longer converges a
+      ## point its consumer contributes to has changed what that consumer
+      ## compiled against -- the clearest possible case of "the members
+      ## that differ". An empty list is a service that converges none, so
+      ## every pre-v24 row and every freshly lifted service that
+      ## declares no `converge` AGREE rather than refusing each other
+      ## over a format boundary.
+    location*: SourceLocation
+
+  InterfaceActivity* = object
+    ## Shared-Development-Services L3 (§3): a dev-env activity's lifted
+    ## signature — "the handle type and its members … and the ``config:``
+    ## surface with defaults".
+    ##
+    ## DEFERRED, BY MILESTONE. L3's gate also names "the declared
+    ## identity and scope" and "the shared collections it converges".
+    ##
+    ## L4 landed the first of those and put it on ``InterfaceService``,
+    ## NOT here. ``identity`` and ``scope`` are setters of a ``service``
+    ## block: one activity may declare several services, and §4 keys an
+    ## INSTANCE — a service — by ``(identity, scope)``. Every service
+    ## named in ``services`` below has its own row carrying them, so a
+    ## copy here would be a second place for one fact to disagree with
+    ## itself.
+    ##
+    ## "The shared collections it converges" (L8) is still absent and is
+    ## still not invented. It is added as a field here plus one more
+    ## version-gated block in ``encodeInterfacePayload`` — the additive
+    ## route ``publicLibraries`` took at v9, ``publicResources`` at v12
+    ## and L4's identity/scope at v22 — and nothing in this shape has to
+    ## change for it.
+    name*: string
+    handleType*: string
+    params*: seq[InterfaceActivityParam]
+    config*: seq[InterfaceConfigKey]
+    services*: seq[string]
+      ## Names of the services this activity declares, in declaration
+      ## order. Each is also a member of ``handleType``, and each has its
+      ## own ``InterfaceService`` row.
+    location*: SourceLocation
+
   InterfaceNixProvisioning* = object
     packageName*: string
     contributor*: string
@@ -480,6 +591,12 @@ type
       ## unpacks into the prefix. See
       ## ``TarballProvisioningDef.closureManifest``: an entry point with
       ## runtime dependencies is not one tarball.
+    detail*: TarballArchiveDetail
+      ## GM4b (v21): the archive-realization metadata — version, alternative
+      ## digests, install method, installer/pacman/bootstrap arguments, env
+      ## bindings, launcher and pre-install specs, microarchitecture floor.
+      ## See ``TarballProvisioningDef.detail``. v20 payloads decode with an
+      ## empty detail, which is a plain archive extracted as-is.
     stripComponents*: int
     packageId*: string
     lockIdentity*: string
@@ -502,6 +619,21 @@ type
     lockIdentity*: string
     location*: SourceLocation
 
+  InterfaceHomebrewProvisioning* = object
+    ## A Homebrew bridge record (``HomebrewProvisioningDef``): the cask or
+    ## formula that installs the target package outside Reprobuild. Carried
+    ## in ``InterfaceProvisioningContribution.homebrewProvisioning`` ONLY --
+    ## ``toProjectInterface`` never adds it to a tool use's realization
+    ## candidates, so no selection can pick it (reprobuild-pm spec
+    ## Provisioning-Contributions.md §"Homebrew bridge records").
+    packageName*: string
+    contributor*: string
+    kind*: string
+      ## ``"cask"`` or ``"formula"``.
+    token*: string
+    tap*: string
+    location*: SourceLocation
+
   InterfaceToolUse* = object
     rawConstraint*: string
     packageSelector*: string
@@ -522,6 +654,8 @@ type
     nixProvisioning*: seq[InterfaceNixProvisioning]
     tarballProvisioning*: seq[InterfaceTarballProvisioning]
     scoopProvisioning*: seq[InterfaceScoopProvisioning]
+    homebrewProvisioning*: seq[InterfaceHomebrewProvisioning]
+      ## Bridge records (v27); never realization candidates.
     location*: SourceLocation
 
   ProjectInterface* = object
@@ -535,6 +669,18 @@ type
       ## package exposes as typed contracts, lifted from ``resourceType``
       ## declarations. Encoded in the v12 codec AFTER ``publicLibraries``
       ## and BEFORE ``toolUses``; v<12 readers treat it as empty.
+    publicServices*: seq[InterfaceService]
+      ## Shared-Development-Services L3 (§3): dev-env services this
+      ## package exports as typed contracts, lifted from ``service
+      ## <name>:`` declarations. Encoded in the v21 codec AFTER
+      ## ``publicResources`` and BEFORE ``publicActivities``; v<21
+      ## readers treat it as empty.
+    publicActivities*: seq[InterfaceActivity]
+      ## Shared-Development-Services L3 (§3): dev-env activity
+      ## signatures, lifted from the constructor-shaped ``activity
+      ## <name>(...)`` declarations. Encoded in the v21 codec AFTER
+      ## ``publicServices`` and BEFORE ``toolUses``; v<21 readers treat
+      ## it as empty.
     toolUses*: seq[InterfaceToolUse]
     runtimeToolUses*: seq[InterfaceToolUse]
       ## Package-level runtime dependencies retained separately from the
@@ -582,6 +728,11 @@ type
       ## RP1: the v1 ``ProviderCompileActionKey`` used as the engine edge's
       ## action key. See ``computeProviderCompileActionKey``.
     workDir*: string
+    frontendRuntimeIdentity*: string
+      ## ``frontendRuntimeIdentity(workDir)`` as this plan computed it: the
+      ## digest of every reprobuild library source (~14 MB hashed when no
+      ## memo is set). Kept so a derived plan
+      ## (``recipeRelativeProviderCompilePlan``) does not hash it again.
     fingerprintInputStamps*: seq[FileStamp]
       ## Stamps of EVERY file whose content feeds ``providerFingerprint``,
       ## captured when the plan was made: the recipe's own source closure plus
@@ -705,10 +856,362 @@ type
     evidence: FileStamp
     artifact: ProjectInterfaceArtifact
 
+# ---------------------------------------------------------------------------
+# THE WIRE ORDINALS OF EVERY ENUM THIS LIBRARY WRITES, ASSERTED ABSOLUTELY.
+#
+# Nine enums have `ord(x)` written into bytes this library persists. Each
+# one's number is therefore part of a persisted comparison, and a mid-enum
+# insertion silently renumbers every later member: an artifact written
+# yesterday decodes today as a DIFFERENT value, with no error at either
+# end, for a reason unrelated to any interface having changed.
+#
+# WHY ABSOLUTE AND NOT RELATIVE, measured rather than argued. The block
+# this replaces asserted CROSS-ENUM PARITY -- `ord(issWorkspace) ==
+# ord(sscWorkspace)` and three more like it. Parity is satisfiable by the
+# very edit it exists to catch: inserting a member at the SAME index in
+# both `InterfaceServiceScope` here and `ServiceScope` in
+# `repro_project_dsl` compiles clean and runs clean, while
+# `ord(issWorkspace)` moves 1 -> 2, envelope byte 84 goes 0x01 -> 0x02,
+# all 32 fingerprint bytes change, and the decode guard -- an upper bound,
+# which pins no position -- still accepts the frame. A guard a change can
+# satisfy while making the change it guards against is worse than no
+# guard, because it reads as coverage. `ServiceScope` living in another
+# library is what makes that edit natural rather than contrived, so the
+# pins for the DSL's two enums are HERE, in the consumer that turns their
+# ordinals into bytes, where a two-library edit cannot step around them.
+#
+# WHY A `static:` AND NOT A TEST. A test has to be remembered, enrolled
+# and run; this is a compile error in the file that does the writing, and
+# the message NAMES THE MEMBER THAT MOVED. The shape is taken from
+# `repro_resources/service_attach.nim`'s `ServiceMemberKind` block, which
+# is the only absolute pin of this class that existed before -- and which
+# covers a per-service digest on a DIFFERENT wire, so it protected none of
+# the nine below.
+#
+# AN UPPER BOUND IS NOT A POSITION. Eight of the nine decoders guard with
+# `if kind > byte(ord(<last member>)): fail`. That refuses an out-of-range
+# byte and says nothing about which value a given byte means, which is the
+# property a persisted ordinal needs.
+#
+# THE CARDINALITY ASSERTIONS ARE WHAT MAKE THIS COMPLETE. Without one,
+# APPENDING a member -- the safe operation -- would be invisible here, and
+# nobody would be prompted to confirm it went at the end. Adding a value
+# to any of these enums is meant to require editing this block.
+# ---------------------------------------------------------------------------
+static:
+  # 1. `HashAlgorithm` -- declared in `repro_hash`, ANOTHER LIBRARY.
+  #    Written at the head of every `ContentDigest`, so it is on the RBSZ
+  #    envelope for both envelope kinds AND in both local cache records.
+  doAssert ord(haBlake3_256) == 0, "HashAlgorithm: haBlake3_256 moved"
+  doAssert ord(haGxHash64) == 1, "HashAlgorithm: haGxHash64 moved"
+  doAssert ord(haXxh3_64) == 2, "HashAlgorithm: haXxh3_64 moved"
+  doAssert ord(high(HashAlgorithm)) == 2,
+    "HashAlgorithm grew or shrank: ContentDigest writes ord(algorithm) " &
+    "into the interface envelope -- confirm the new value was APPENDED, " &
+    "then update this assertion"
+
+  # 2. `HashDomain` -- also `repro_hash`, also every `ContentDigest`.
+  doAssert ord(hdCasContent) == 0, "HashDomain: hdCasContent moved"
+  doAssert ord(hdActionFingerprint) == 1,
+    "HashDomain: hdActionFingerprint moved"
+  doAssert ord(hdLocalInvalidation) == 2,
+    "HashDomain: hdLocalInvalidation moved"
+  doAssert ord(hdMetadataEnvelope) == 3,
+    "HashDomain: hdMetadataEnvelope moved"
+  doAssert ord(high(HashDomain)) == 3,
+    "HashDomain grew or shrank: ContentDigest writes ord(domain) into " &
+    "the interface envelope -- confirm the new value was APPENDED, then " &
+    "update this assertion"
+
+  # 3. `InterfaceParamKind` -- this file; one byte per lifted parameter,
+  #    on the envelope and in the fingerprint payload.
+  doAssert ord(ipkPositional) == 0, "InterfaceParamKind: ipkPositional moved"
+  doAssert ord(ipkFlag) == 1, "InterfaceParamKind: ipkFlag moved"
+  doAssert ord(high(InterfaceParamKind)) == 1,
+    "InterfaceParamKind grew or shrank: confirm the new value was " &
+    "APPENDED (the param encoder writes ord(kind)), then update this " &
+    "assertion"
+
+  # 4. `LibraryKind` -- declared in `repro_project_dsl`, ANOTHER LIBRARY,
+  #    and used by `InterfaceLibrary.kind` directly rather than mirrored,
+  #    so there is not even a parity assert to lean on.
+  doAssert ord(lkStatic) == 0, "LibraryKind: lkStatic moved"
+  doAssert ord(lkShared) == 1, "LibraryKind: lkShared moved"
+  doAssert ord(lkBoth) == 2, "LibraryKind: lkBoth moved"
+  doAssert ord(lkHeaderOnly) == 3, "LibraryKind: lkHeaderOnly moved"
+  doAssert ord(high(LibraryKind)) == 3,
+    "LibraryKind grew or shrank: the interface envelope writes " &
+    "ord(lib.kind) -- confirm the new value was APPENDED, then update " &
+    "this assertion"
+
+  # 5. `InterfaceResourceDeterminism` -- this file. Its doc comment says
+  #    "Ordinals MUST stay aligned with ResourceDeterminism (rdStrong=0
+  #    ... rdVolatile=3)". Until this block that was enforced only by a
+  #    runtime `check` in `t_rp4_resource_type_macro.nim`, which is a test
+  #    rather than a guarantee.
+  doAssert ord(irdStrong) == 0,
+    "InterfaceResourceDeterminism: irdStrong moved"
+  doAssert ord(irdWeak) == 1, "InterfaceResourceDeterminism: irdWeak moved"
+  doAssert ord(irdHostBound) == 2,
+    "InterfaceResourceDeterminism: irdHostBound moved"
+  doAssert ord(irdVolatile) == 3,
+    "InterfaceResourceDeterminism: irdVolatile moved"
+  doAssert ord(high(InterfaceResourceDeterminism)) == 3,
+    "InterfaceResourceDeterminism grew or shrank: the resource encoder " &
+    "writes ord(determinism) -- confirm the new value was APPENDED, then " &
+    "update this assertion"
+
+  # 6. `InterfaceServiceIdentityMode` (this file) and the DSL's
+  #    `ServiceIdentityKind` (`repro_project_dsl`), which
+  #    `toProjectInterface` casts across BY ORDINAL. Both sides pinned
+  #    absolutely: a `stable` service lifted as `derived` is the state
+  #    Shared-Development-Services.md 4.2 says forks a developer's
+  #    database, and parity alone did not rule it out.
+  doAssert ord(isimDerived) == 0,
+    "InterfaceServiceIdentityMode: isimDerived moved"
+  doAssert ord(isimStable) == 1,
+    "InterfaceServiceIdentityMode: isimStable moved"
+  doAssert ord(high(InterfaceServiceIdentityMode)) == 1,
+    "InterfaceServiceIdentityMode grew or shrank: confirm the new value " &
+    "was APPENDED, then update this assertion"
+  doAssert ord(sikDerived) == 0,
+    "ServiceIdentityKind: sikDerived moved -- repro_project_dsl changed " &
+    "under the ordinal cast in toProjectInterface"
+  doAssert ord(sikStable) == 1,
+    "ServiceIdentityKind: sikStable moved -- repro_project_dsl changed " &
+    "under the ordinal cast in toProjectInterface"
+  doAssert ord(high(ServiceIdentityKind)) == 1,
+    "ServiceIdentityKind grew or shrank in repro_project_dsl: confirm " &
+    "the new value was APPENDED and add its mirror to " &
+    "InterfaceServiceIdentityMode, then update this assertion"
+  # The parity assertions are KEPT as well, and are now the weaker half.
+  # They catch a one-sided RENAME-and-reorder that both absolute sets
+  # would also catch, and they state the coupling in one line for a
+  # reader. They are not load-bearing on their own.
+  doAssert ord(isimDerived) == ord(sikDerived),
+    "InterfaceServiceIdentityMode/ServiceIdentityKind drift: derived"
+  doAssert ord(isimStable) == ord(sikStable),
+    "InterfaceServiceIdentityMode/ServiceIdentityKind drift: stable"
+  doAssert ord(high(InterfaceServiceIdentityMode)) ==
+      ord(high(ServiceIdentityKind)),
+    "InterfaceServiceIdentityMode/ServiceIdentityKind cardinality drift"
+
+  # 7. `InterfaceServiceScope` (this file) and the DSL's `ServiceScope`
+  #    (`repro_project_dsl`). This is the pair the same-index mutation
+  #    defeated.
+  doAssert ord(issProject) == 0, "InterfaceServiceScope: issProject moved"
+  doAssert ord(issWorkspace) == 1,
+    "InterfaceServiceScope: issWorkspace moved"
+  doAssert ord(issUser) == 2, "InterfaceServiceScope: issUser moved"
+  doAssert ord(issSystem) == 3, "InterfaceServiceScope: issSystem moved"
+  doAssert ord(high(InterfaceServiceScope)) == 3,
+    "InterfaceServiceScope grew or shrank: confirm the new value was " &
+    "APPENDED, then update this assertion"
+  doAssert ord(sscProject) == 0,
+    "ServiceScope: sscProject moved -- repro_project_dsl changed under " &
+    "the ordinal cast in toProjectInterface"
+  doAssert ord(sscWorkspace) == 1,
+    "ServiceScope: sscWorkspace moved -- repro_project_dsl changed " &
+    "under the ordinal cast in toProjectInterface"
+  doAssert ord(sscUser) == 2,
+    "ServiceScope: sscUser moved -- repro_project_dsl changed under the " &
+    "ordinal cast in toProjectInterface"
+  doAssert ord(sscSystem) == 3,
+    "ServiceScope: sscSystem moved -- repro_project_dsl changed under " &
+    "the ordinal cast in toProjectInterface"
+  doAssert ord(high(ServiceScope)) == 3,
+    "ServiceScope grew or shrank in repro_project_dsl: confirm the new " &
+    "value was APPENDED and add its mirror to InterfaceServiceScope, " &
+    "then update this assertion"
+  doAssert ord(issProject) == ord(sscProject),
+    "InterfaceServiceScope/ServiceScope drift: project"
+  doAssert ord(issWorkspace) == ord(sscWorkspace),
+    "InterfaceServiceScope/ServiceScope drift: workspace"
+  doAssert ord(issUser) == ord(sscUser),
+    "InterfaceServiceScope/ServiceScope drift: user"
+  doAssert ord(issSystem) == ord(sscSystem),
+    "InterfaceServiceScope/ServiceScope drift: system"
+  doAssert ord(high(InterfaceServiceScope)) == ord(high(ServiceScope)),
+    "InterfaceServiceScope/ServiceScope cardinality drift"
+
+  # 8. `InterfaceEnvelopeKind` -- this file, and the WEAKEST of the nine
+  #    before this block: its ordinal becomes the envelope TYPE ID
+  #    (`ord(kind) + 101`), and both decoders compare against
+  #    `ord(<member>) + 101` -- the same expression on both sides, so the
+  #    comparison is self-referential and refuses nothing. Swapping the
+  #    two members makes every artifact on disk decode as the other kind,
+  #    silently. The type ids are pinned too, because the `+ 101` offset
+  #    is itself part of the wire.
+  doAssert ord(iekProjectInterface) == 0,
+    "InterfaceEnvelopeKind: iekProjectInterface moved -- its ordinal is " &
+    "envelope type id 101 and both decoders derive their expected id " &
+    "from this same ord(), so nothing else would have failed"
+  doAssert ord(iekProviderCompile) == 1,
+    "InterfaceEnvelopeKind: iekProviderCompile moved -- its ordinal is " &
+    "envelope type id 102 and both decoders derive their expected id " &
+    "from this same ord(), so nothing else would have failed"
+  doAssert ord(high(InterfaceEnvelopeKind)) == 1,
+    "InterfaceEnvelopeKind grew or shrank: a third envelope kind needs " &
+    "a type id of its own and a decoder -- confirm, then update this " &
+    "assertion"
+  doAssert uint16(ord(iekProjectInterface) + 101) == 101'u16,
+    "project-interface envelope type id moved off 101"
+  doAssert uint16(ord(iekProviderCompile) + 101) == 102'u16,
+    "provider-compile envelope type id moved off 102"
+
+  # 9. `FileStampKind` -- this file. ON A DIFFERENT WIRE, and that is
+  #    stated rather than glossed: `writeFileStamp` is called only from
+  #    `encodeInterfaceExtractionCacheRecord` and
+  #    `encodeProviderFreshnessCacheRecord`, which carry their own magic
+  #    and no RBSZ header. A renumbering there costs a cache miss, not a
+  #    misread artifact -- a smaller blast radius than the eight above,
+  #    and pinned on the same terms because the cost of the pin is one
+  #    line and the cost of finding it the other way is a silent
+  #    tree-wide recompile.
+  doAssert ord(fskMissing) == 0, "FileStampKind: fskMissing moved"
+  doAssert ord(fskRegular) == 1, "FileStampKind: fskRegular moved"
+  doAssert ord(fskDirectory) == 2, "FileStampKind: fskDirectory moved"
+  doAssert ord(fskOther) == 3, "FileStampKind: fskOther moved"
+  doAssert ord(high(FileStampKind)) == 3,
+    "FileStampKind grew or shrank: the two local cache records write " &
+    "ord(stamp.kind) -- confirm the new value was APPENDED, then update " &
+    "this assertion"
+
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 20'u16
-    ## v20 (current): retains ``closureManifest`` on tarball provisioning —
+  EnvelopeVersion = 28'u16
+    ## v28 (current): ``TarballArchiveDetail`` also retains
+    ##                ``installerApp``, the installer application of a macOS
+    ##                ``installer-silent`` record (Store-And-Installation-
+    ##                Layout.md § Installer applications), encoded after
+    ##                ``teamId``. v27 and older payloads decode with it
+    ##                empty, which is a record that names no installer
+    ##                application. (Developed as v23 against an older tip
+    ##                and renumbered above v27 before it was published, for
+    ##                the reason the v23 note gives.)
+    ## v27: a provisioning contribution also carries its Homebrew
+    ##                bridge records (``homebrewProvisioning``: kind, token,
+    ##                tap; GM5b), encoded after its Scoop records, inside
+    ##                the v13 contribution block. v26 and older payloads
+    ##                decode with none. They are bridge records for
+    ##                consumers outside Reprobuild and are never merged
+    ##                into a tool use, so the tool-use encoding is
+    ##                unchanged. (Developed as v23 against an older tip
+    ##                and renumbered above the services lane before it was
+    ##                published, for the reason the v23 note gives.)
+    ## v26: Shared-Development-Services D-SS11 (§4.6) retains
+    ##                the CONTRIBUTION POINTS each ``publicServices`` row
+    ##                converges -- ``contributionPoints``, a counted
+    ##                string list appended after ``compatibilityMajor``
+    ##                at the row's tail. §4.6 requires the owner's lifted
+    ##                interface to carry them, because that is what makes
+    ##                a consumer's misspelled contribution a compile
+    ##                error in the CONSUMER's recipe rather than a
+    ##                contribution that reaches an instance which ignores
+    ##                it. An empty list is a service that converges none,
+    ##                which is what every pre-v26 row decodes to.
+    ## v25:           Shared-Development-Services L6 (§4.3) retains the
+    ##                DECLARED MAJOR COMPATIBILITY FIELD on each
+    ##                ``publicServices`` row — ``compatibilityMajor``, a
+    ##                u32 appended after ``scope`` at the row's tail. The
+    ##                SECOND planned use of the extension route L3 left
+    ##                behind, taken the same way v24 took it: a field
+    ##                plus one version-gated block, appended rather than
+    ##                inserted, so a v24 row keeps decoding byte for
+    ##                byte and decodes to ``0`` — the undeclared major,
+    ##                which compares equal to every definition that
+    ##                declares none. See
+    ##                ``InterfaceService.compatibilityMajor`` for why 0
+    ##                and not 1.
+    ##
+    ##                The major is SIGNATURE, so it is inside the
+    ##                fingerprint projection: a consumer must recompile
+    ##                when the generation of the interface it would
+    ##                attach to changes. §4.3's refusal is decided on
+    ##                this field BEFORE the fingerprint is compared,
+    ##                which is why the field has to be retained
+    ##                separately rather than merely folded into the
+    ##                digest.
+    ## v24:           Shared-Development-Services L4 (§4.1 / §4.2) retains
+    ##                the DECLARED INSTANCE IDENTITY AND SCOPE on each
+    ##                ``publicServices`` row — ``identityMode``
+    ##                (``derived`` | ``stable``), ``identityStableId`` and
+    ##                ``scope`` (``project`` | ``workspace`` | ``user`` |
+    ##                ``system``). This is the first PLANNED use of the
+    ##                extension route L3 left behind ("add a field plus
+    ##                one version-gated block"), and it is taken exactly
+    ##                as described: the three values are appended to the
+    ##                tail of the existing service row rather than given a
+    ##                block of their own, because the row is already
+    ##                length-free and positional. v23 payloads decode with
+    ##                ``isimDerived`` / ``""`` / ``issProject``, which are
+    ##                §4's own defaults, so a v23 artifact describes the
+    ##                same behaviour under the v24 reader.
+    ##
+    ##                Identity and scope are SIGNATURE, so they are inside
+    ##                the fingerprint projection: a consumer resolving a
+    ##                shared service has to recompile when the instance it
+    ##                would attach to stops being keyed the way it
+    ##                compiled against. A producer editing the service's
+    ##                ``args`` still re-lifts to the same digest.
+    ## v23:           Shared-Development-Services L3 (§3) adds
+    ##                ``ProjectInterface.publicServices`` and
+    ##                ``ProjectInterface.publicActivities`` — dev-env
+    ##                services and activity signatures lifted from
+    ##                ``service <name>:`` / ``activity <name>(...)``
+    ##                declarations, so a consuming recipe compiles
+    ##                against ``<dep>.<service>`` as a typed symbol.
+    ##                Encoded as a ``u32`` count + per-entry rows
+    ##                appended to the interface payload AFTER the
+    ##                ``publicResources`` block and BEFORE the
+    ##                ``toolUses`` block, services first and activities
+    ##                second, matching the source field order. v22
+    ##                readers reject v23 envelopes (the ``version >
+    ##                EnvelopeVersion`` check); v23 readers accept v<23
+    ##                by treating both seqs as empty
+    ##                (``decodeInterfacePayload`` gates the reads on
+    ##                ``version >= 23``), mirroring the v11→v12
+    ##                ``publicResources`` precedent.
+    ##
+    ##                The rows carry each export's SIGNATURE only — name,
+    ##                handle type, typed parameters, ``config:`` keys with
+    ##                their defaults — and no part of a service's
+    ##                implementation. That is what makes the fingerprint
+    ##                discriminating rather than a hammer: a producer
+    ##                editing a service's ``args`` re-lifts to the same
+    ##                digest and does not invalidate its consumers.
+    ##
+    ##                NOTE ON THE NUMBERING, AND WHY IT MOVED. This block
+    ##                and the three above it were developed on the
+    ##                shared-development-services branch at v21-v24,
+    ##                while ``agents`` INDEPENDENTLY published v21
+    ##                (``TarballArchiveDetail``) and v22 (the macOS
+    ##                application fields) — the two entries below. Both
+    ##                sides had consumed 21 and 22 for different
+    ##                features. On merging, OUR four blocks were
+    ##                renumbered UP to v23-v26 and the published side's
+    ##                two kept their meanings, because v21/v22 artifacts
+    ##                written by ``agents`` already exist in other
+    ##                workspaces and in CI caches: renumbering the
+    ##                published side would silently MISREAD them, while
+    ##                our numbers were published only on an unmerged
+    ##                branch. Had both gates fired at 21/22 an
+    ##                upstream-written envelope would have been decoded as
+    ##                also carrying our blocks, desynchronizing the byte
+    ##                stream with no error raised.
+    ##                ``tests/t_envelope_versions_do_not_collide.nim`` is
+    ##                the measurement that it does not.
+    ## v22:           ``TarballArchiveDetail`` also retains the macOS
+    ##                application fields ``appBundle``, ``bundleId`` and
+    ##                ``teamId`` (GM4c), encoded after ``cpuFeatures``. v21
+    ##                payloads decode with them empty, which is a record
+    ##                that delivers no application bundle.
+    ## v21:           retains ``detail`` (``TarballArchiveDetail``) on
+    ##                tarball provisioning — the archive-realization metadata
+    ##                the retired ``VersionedProvisioning`` catalog records
+    ##                held (GM4b). Encoded after ``os``, before ``location``.
+    ##                v20 payloads decode with an empty detail.
+    ## v20:           retains ``closureManifest`` on tarball provisioning —
     ##                the committed list of additional archives realize
     ##                unpacks into the prefix. v19 payloads decode with it
     ##                empty, which is the prior behaviour of a prefix being
@@ -781,6 +1284,57 @@ const
     "reprobuild.interfaceExtractionCache.v2"
   ProviderFreshnessCacheRecordMagic =
     "reprobuild.providerFreshnessCache.v2"
+
+proc interfaceEnvelopeVersion*(): uint16 =
+  ## The envelope version THIS BUILD writes and is the newest it reads.
+  ##
+  ## Exists so that a test which needs to be relative to the current
+  ## version has a name to be relative to. Before it, every such probe
+  ## hard-coded a byte, and the pin had to be hand-edited on every bump
+  ## -- v22 -> v23 -> v24 in one campaign, each time silently wrong
+  ## first and found by a sweep afterwards rather than by a compiler.
+  EnvelopeVersion
+
+proc firstUnknownInterfaceEnvelopeVersion*(): uint16 =
+  ## One past `interfaceEnvelopeVersion()`: the LOWEST version number
+  ## this build does not know how to read.
+  ##
+  ## This is the value a "an unknown version is refused rather than
+  ## misread" probe wants, and it is given a name of its own rather than
+  ## left as `interfaceEnvelopeVersion() + 1` at each call site so that
+  ## the probe's INTENT is in the source. A probe written against the
+  ## current version measures the opposite property -- the current
+  ## version decodes correctly, and must -- which is precisely the way
+  ## the L6 probe failed silently when the envelope moved to 24 while
+  ## the probe still poked 24.
+  ##
+  ## AN ACCESSOR RATHER THAN AN EXPORTED CONSTANT, and the hazard it
+  ## avoids is LATENT rather than present-day -- stated precisely,
+  ## because an earlier wording of this comment overstated it.
+  ## `repro_dev_env_artifacts/codec.nim` has a private const named
+  ## EXACTLY `EnvelopeVersion` too, and four modules in this tree import
+  ## both libraries (`repro_cli_support.nim`,
+  ## `t_w2_dev_env_producer_pin_binding.nim`,
+  ## `t_dss11_resolutions_reach_the_dev_env_artifact.nim` and
+  ## `tests/integration/t_dev_env_artifact.nim`). Exporting the constant
+  ## from both would make the bare name ambiguous in all four AT ANY USE
+  ## SITE -- but it breaks no build today, and that was measured:
+  ## adding `*` to both consts compiles all four modules clean, because
+  ## Nim diagnoses ambiguity at the USE site and none of the four
+  ## references the bare name. Force a use site into each and all four
+  ## fail identically with `Error: ambiguous identifier:
+  ## 'EnvelopeVersion'`. So the accessor buys a trap that is not yet
+  ## sprung, not four compile errors avoided. It is also the shape
+  ## `repro_domain_types/codec.nim` already uses for the same job
+  ## (`envelopeVersion()` / `fixedSchemaMagic()`) over its own private
+  ## envelope constants, which is the stronger reason of the two.
+  ##
+  ## `InterfaceFormatVersion` is NOT a substitute for the first half of
+  ## this pair: it is a different CONCEPT that happens to be defined as
+  ## the same number (the lift's format identity, so a bump re-keys
+  ## every lift). A probe about envelope framing should not be the thing
+  ## that breaks if those two ever stop coinciding.
+  EnvelopeVersion + 1
 
 var cachedNimCompilerPath = ""
 var processWarmInterfaceMetadata =
@@ -930,6 +1484,14 @@ proc providerCompileEdge*(inputSources: openArray[string];
     declaredOutputs: declaredOutputs,
     actionFingerprint: fingerprint)
 
+var
+  locationBase {.threadvar.}: string
+    ## Non-empty while `writeInterfaceArtifactRecipeRelative` /
+    ## `readInterfaceArtifactRebased` run: the recipe directory source
+    ## locations are named relative to.
+  locationAnchors {.threadvar.}: seq[string]
+  locationsRelative {.threadvar.}: bool
+
 proc writeLocation(outp: var seq[byte]; loc: SourceLocation;
                    forFingerprint = false) =
   ## Serialises a ``SourceLocation``. When ``forFingerprint`` is true the
@@ -945,11 +1507,23 @@ proc writeLocation(outp: var seq[byte]; loc: SourceLocation;
     outp.writeString("")
     outp.writeU32Le(0'u32)
   else:
-    outp.writeString(loc.file)
+    let file =
+      if locationBase.len > 0 and locationsRelative:
+        relocatableName(loc.file, locationBase, locationAnchors)
+      else:
+        loc.file
+    outp.writeString(file)
     outp.writeU32Le(uint32(max(loc.line, 0)))
 
 proc readLocation(bytes: openArray[byte]; pos: var int): SourceLocation =
-  SourceLocation(file: readString(bytes, pos), line: int(readU32Le(bytes, pos)))
+  let file = readString(bytes, pos)
+  SourceLocation(
+    file:
+      if locationBase.len > 0 and not locationsRelative:
+        rebasedName(file, locationBase)
+      else:
+        file,
+    line: int(readU32Le(bytes, pos)))
 
 proc writeParam(outp: var seq[byte]; param: InterfaceParam;
                 forFingerprint = false) =
@@ -1068,6 +1642,132 @@ proc readResource(bytes: openArray[byte]; pos: var int): InterfaceResource =
       nimType: readString(bytes, pos),
       location: readLocation(bytes, pos))
 
+proc writeService(outp: var seq[byte]; svc: InterfaceService;
+                  version: uint16; forFingerprint = false) =
+  ## Shared-Development-Services L3. Field order matches
+  ## ``InterfaceService``; ``readService`` reads it back in the same
+  ## order, and the payload tail guard in ``decodeInterfacePayload``
+  ## catches a mis-pairing.
+  ##
+  ## v24 (L4) appends the declared identity and scope AFTER
+  ## ``location``, which is the row's tail — the same append-not-insert
+  ## rule every earlier retained field followed (``exportedPath`` on a
+  ## library at v11, ``launcher`` on tarball provisioning at v19), so a
+  ## v23 row keeps decoding byte for byte.
+  outp.writeString(svc.name)
+  outp.writeString(svc.activityName)
+  outp.writeString(svc.handleType)
+  outp.writeLocation(svc.location, forFingerprint)
+  if version >= 24'u16:
+    outp.writeByte(byte(ord(svc.identityMode)))
+    outp.writeString(svc.identityStableId)
+    outp.writeByte(byte(ord(svc.scope)))
+  ## v25 (L6) appends the declared MAJOR COMPATIBILITY FIELD after
+  ## ``scope``, at the row's new tail — the same append-not-insert rule,
+  ## so a v24 row keeps decoding byte for byte.
+  if version >= 25'u16:
+    outp.writeU32Le(svc.compatibilityMajor)
+  ## v26 (D-SS11) appends the CONTRIBUTION POINTS after the major, at the
+  ## row's new tail -- the same append-not-insert rule, so a v25 row
+  ## keeps decoding byte for byte.
+  if version >= 26'u16:
+    outp.writeU32Le(uint32(svc.contributionPoints.len))
+    for point in svc.contributionPoints:
+      outp.writeString(point)
+
+proc readService(bytes: openArray[byte]; pos: var int;
+                 version: uint16): InterfaceService =
+  result.name = readString(bytes, pos)
+  result.activityName = readString(bytes, pos)
+  result.handleType = readString(bytes, pos)
+  result.location = readLocation(bytes, pos)
+  # v<24 rows carry no identity block. The zero values — ``isimDerived``
+  # / ``issProject`` — are §4's own defaults, so such a row decodes to
+  # the behaviour it described rather than to an invented "unset".
+  if version >= 24'u16:
+    let mode = readByte(bytes, pos)
+    if mode > byte(ord(isimStable)):
+      raiseEnvelopeError(eeMalformed,
+        "invalid interface service identity mode")
+    result.identityMode = InterfaceServiceIdentityMode(mode)
+    result.identityStableId = readString(bytes, pos)
+    let scope = readByte(bytes, pos)
+    if scope > byte(ord(issSystem)):
+      raiseEnvelopeError(eeMalformed, "invalid interface service scope")
+    result.scope = InterfaceServiceScope(scope)
+  # v<25 rows carry no major. 0 — the zero value — is §4.3's UNDECLARED
+  # major, so such a row compares equal to every definition that declares
+  # none rather than refusing it over a format boundary. There is no
+  # range check because every u32 is a legal major: the DSL refuses 0 at
+  # the DECLARATION site, and a 0 that arrives here is the legitimate
+  # "declared nothing" case a v24 artifact must still produce.
+  if version >= 25'u16:
+    result.compatibilityMajor = readU32Le(bytes, pos)
+  # v<26 rows carry no contribution points. The empty seq -- the zero
+  # value -- is "this service converges none", which is what a pre-D-SS11
+  # service really did, so such a row decodes to the behaviour it
+  # described. A consumer resolving it is then told, by name at compile
+  # time, that it converges no points at all, which is true.
+  if version >= 26'u16:
+    let pointCount = int(readU32Le(bytes, pos))
+    result.contributionPoints = newSeq[string](pointCount)
+    for i in 0 ..< pointCount:
+      result.contributionPoints[i] = readString(bytes, pos)
+
+proc writeActivity(outp: var seq[byte]; act: InterfaceActivity;
+                   forFingerprint = false) =
+  ## Shared-Development-Services L3. ``forFingerprint`` is threaded into
+  ## every ``writeLocation`` below — including the per-param and per-key
+  ## ones — so TI3 holds for this block too: moving an activity
+  ## declaration down a few lines must not shift the interface
+  ## fingerprint.
+  outp.writeString(act.name)
+  outp.writeString(act.handleType)
+  outp.writeLocation(act.location, forFingerprint)
+  outp.writeU32Le(uint32(act.params.len))
+  for param in act.params:
+    outp.writeString(param.name)
+    outp.writeString(param.nimType)
+    outp.writeLocation(param.location, forFingerprint)
+  outp.writeU32Le(uint32(act.config.len))
+  for key in act.config:
+    outp.writeString(key.name)
+    outp.writeString(key.nimType)
+    outp.writeString(key.defaultRepr)
+    outp.writeByte(if key.hasDefault: 1'u8 else: 0'u8)
+    outp.writeString(key.description)
+    outp.writeLocation(key.location, forFingerprint)
+  outp.writeU32Le(uint32(act.services.len))
+  for name in act.services:
+    outp.writeString(name)
+
+proc readActivity(bytes: openArray[byte]; pos: var int): InterfaceActivity =
+  result.name = readString(bytes, pos)
+  result.handleType = readString(bytes, pos)
+  result.location = readLocation(bytes, pos)
+  let paramCount = int(readU32Le(bytes, pos))
+  result.params = newSeq[InterfaceActivityParam](paramCount)
+  for i in 0 ..< paramCount:
+    result.params[i] = InterfaceActivityParam(
+      name: readString(bytes, pos),
+      nimType: readString(bytes, pos),
+      location: readLocation(bytes, pos))
+  let configCount = int(readU32Le(bytes, pos))
+  result.config = newSeq[InterfaceConfigKey](configCount)
+  for i in 0 ..< configCount:
+    var key = InterfaceConfigKey(
+      name: readString(bytes, pos),
+      nimType: readString(bytes, pos),
+      defaultRepr: readString(bytes, pos))
+    key.hasDefault = readByte(bytes, pos) == 1'u8
+    key.description = readString(bytes, pos)
+    key.location = readLocation(bytes, pos)
+    result.config[i] = key
+  let serviceCount = int(readU32Le(bytes, pos))
+  result.services = newSeq[string](serviceCount)
+  for i in 0 ..< serviceCount:
+    result.services[i] = readString(bytes, pos)
+
 proc writeNixProvisioning(outp: var seq[byte];
                           provisioning: InterfaceNixProvisioning;
                           version = EnvelopeVersion;
@@ -1102,6 +1802,62 @@ proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
   result.lockIdentity = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
 
+proc writeTarballArchiveDetail(outp: var seq[byte];
+                               detail: TarballArchiveDetail;
+                               version: uint16) =
+  ## GM4b (v21), GM4c (v22), installer applications (v28). Field order is
+  ## the declaration order of ``TarballArchiveDetail``;
+  ## ``readTarballArchiveDetail`` mirrors it.
+  outp.writeString(detail.version)
+  outp.writeString(detail.sha512)
+  outp.writeString(detail.sha1)
+  outp.writeString(detail.installMethod)
+  outp.writeString(detail.extractPath)
+  outp.writeStringSeq(detail.extraExecutables)
+  outp.writeStringSeq(detail.installerArgs)
+  outp.writeStringSeq(detail.pacmanPackages)
+  outp.writeStringSeq(detail.bootstrapArgv)
+  outp.writeStringSeq(detail.env)
+  outp.writeByte(if detail.nested7z: 1'u8 else: 0'u8)
+  outp.writeByte(if detail.msiAdminInstall: 1'u8 else: 0'u8)
+  outp.writeStringSeq(detail.preInstall)
+  outp.writeStringSeq(detail.preInstallUnrecognized)
+  outp.writeStringSeq(detail.launcherEmit)
+  outp.writeString(detail.cpuLevel)
+  outp.writeString(detail.cpuFeatures)
+  if version >= 22'u16:
+    outp.writeString(detail.appBundle)
+    outp.writeString(detail.bundleId)
+    outp.writeString(detail.teamId)
+  if version >= 28'u16:
+    outp.writeString(detail.installerApp)
+
+proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int;
+                              version: uint16): TarballArchiveDetail =
+  result.version = readString(bytes, pos)
+  result.sha512 = readString(bytes, pos)
+  result.sha1 = readString(bytes, pos)
+  result.installMethod = readString(bytes, pos)
+  result.extractPath = readString(bytes, pos)
+  result.extraExecutables = readStringSeq(bytes, pos)
+  result.installerArgs = readStringSeq(bytes, pos)
+  result.pacmanPackages = readStringSeq(bytes, pos)
+  result.bootstrapArgv = readStringSeq(bytes, pos)
+  result.env = readStringSeq(bytes, pos)
+  result.nested7z = readByte(bytes, pos) != 0'u8
+  result.msiAdminInstall = readByte(bytes, pos) != 0'u8
+  result.preInstall = readStringSeq(bytes, pos)
+  result.preInstallUnrecognized = readStringSeq(bytes, pos)
+  result.launcherEmit = readStringSeq(bytes, pos)
+  result.cpuLevel = readString(bytes, pos)
+  result.cpuFeatures = readString(bytes, pos)
+  if version >= 22'u16:
+    result.appBundle = readString(bytes, pos)
+    result.bundleId = readString(bytes, pos)
+    result.teamId = readString(bytes, pos)
+  if version >= 28'u16:
+    result.installerApp = readString(bytes, pos)
+
 proc writeTarballProvisioning(outp: var seq[byte];
                               provisioning: InterfaceTarballProvisioning;
                               version = EnvelopeVersion;
@@ -1129,6 +1885,8 @@ proc writeTarballProvisioning(outp: var seq[byte];
   outp.writeString(provisioning.lockIdentity)
   outp.writeString(provisioning.cpu)
   outp.writeString(provisioning.os)
+  if version >= 21'u16:
+    outp.writeTarballArchiveDetail(provisioning.detail, version)
   outp.writeLocation(provisioning.location, forFingerprint)
 
 proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
@@ -1160,6 +1918,8 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
     # any-host behaviour the single-platform v9 schema implied.
     result.cpu = readString(bytes, pos)
     result.os = readString(bytes, pos)
+  if version >= 21'u16:
+    result.detail = readTarballArchiveDetail(bytes, pos, version)
   result.location = readLocation(bytes, pos)
 
 proc writeScoopProvisioning(outp: var seq[byte];
@@ -1197,6 +1957,25 @@ proc readScoopProvisioning(bytes: openArray[byte]; pos: var int;
   result.requiresExecutionProfileChecksum = readByte(bytes, pos) != 0
   result.packageId = readString(bytes, pos)
   result.lockIdentity = readString(bytes, pos)
+  result.location = readLocation(bytes, pos)
+
+proc writeHomebrewProvisioning(outp: var seq[byte];
+                               provisioning: InterfaceHomebrewProvisioning;
+                               forFingerprint = false) =
+  outp.writeString(provisioning.packageName)
+  outp.writeString(provisioning.contributor)
+  outp.writeString(provisioning.kind)
+  outp.writeString(provisioning.token)
+  outp.writeString(provisioning.tap)
+  outp.writeLocation(provisioning.location, forFingerprint)
+
+proc readHomebrewProvisioning(bytes: openArray[byte]; pos: var int):
+    InterfaceHomebrewProvisioning =
+  result.packageName = readString(bytes, pos)
+  result.contributor = readString(bytes, pos)
+  result.kind = readString(bytes, pos)
+  result.token = readString(bytes, pos)
+  result.tap = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
 
 proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse;
@@ -1271,6 +2050,10 @@ proc writeProvisioningContribution(outp: var seq[byte];
   outp.writeU32Le(uint32(contribution.scoopProvisioning.len))
   for provisioning in contribution.scoopProvisioning:
     outp.writeScoopProvisioning(provisioning, version, forFingerprint)
+  if version >= 27'u16:
+    outp.writeU32Le(uint32(contribution.homebrewProvisioning.len))
+    for provisioning in contribution.homebrewProvisioning:
+      outp.writeHomebrewProvisioning(provisioning, forFingerprint)
 
 proc readProvisioningContribution(bytes: openArray[byte]; pos: var int;
     version: uint16): InterfaceProvisioningContribution =
@@ -1294,6 +2077,12 @@ proc readProvisioningContribution(bytes: openArray[byte]; pos: var int;
   for i in 0 ..< scoopCount:
     result.scoopProvisioning[i] =
       readScoopProvisioning(bytes, pos, version)
+  if version >= 27'u16:
+    let homebrewCount = int(readU32Le(bytes, pos))
+    result.homebrewProvisioning =
+      newSeq[InterfaceHomebrewProvisioning](homebrewCount)
+    for i in 0 ..< homebrewCount:
+      result.homebrewProvisioning[i] = readHomebrewProvisioning(bytes, pos)
 
 proc encodeInterfacePayload*(value: ProjectInterface;
                              version = EnvelopeVersion;
@@ -1342,6 +2131,21 @@ proc encodeInterfacePayload*(value: ProjectInterface;
     result.writeU32Le(uint32(value.publicResources.len))
     for res in value.publicResources:
       result.writeResource(res, forFingerprint)
+  # v23 (Shared-Development-Services L3): publicServices then
+  # publicActivities, AFTER publicResources and BEFORE toolUses, matching
+  # the ``ProjectInterface`` object literal. v<23 envelopes encode no
+  # services or activities block at all; ``decodeInterfacePayload`` gates
+  # both reads on ``version >= 23'u16`` so v22 on-disk artifacts load
+  # cleanly under the v23 reader. (This block was v21 before the merge
+  # with ``agents``, which had published v21/v22 for the tarball archive
+  # detail; see ``EnvelopeVersion``'s note on the numbering.)
+  if version >= 23'u16:
+    result.writeU32Le(uint32(value.publicServices.len))
+    for svc in value.publicServices:
+      result.writeService(svc, version, forFingerprint)
+    result.writeU32Le(uint32(value.publicActivities.len))
+    for act in value.publicActivities:
+      result.writeActivity(act, forFingerprint)
   result.writeU32Le(uint32(value.toolUses.len))
   for useDef in value.toolUses:
     result.writeToolUse(useDef, version, forFingerprint)
@@ -1382,6 +2186,17 @@ proc decodeInterfacePayload*(bytes: openArray[byte];
     result.publicResources = newSeq[InterfaceResource](resCount)
     for i in 0 ..< resCount:
       result.publicResources[i] = readResource(bytes, pos)
+  # v23 added publicServices + publicActivities between resources and
+  # toolUses. v<23 envelopes have neither block — leave both seqs empty.
+  if version >= 23'u16:
+    let svcCount = int(readU32Le(bytes, pos))
+    result.publicServices = newSeq[InterfaceService](svcCount)
+    for i in 0 ..< svcCount:
+      result.publicServices[i] = readService(bytes, pos, version)
+    let actCount = int(readU32Le(bytes, pos))
+    result.publicActivities = newSeq[InterfaceActivity](actCount)
+    for i in 0 ..< actCount:
+      result.publicActivities[i] = readActivity(bytes, pos)
   let useCount = int(readU32Le(bytes, pos))
   result.toolUses = newSeq[InterfaceToolUse](useCount)
   for i in 0 ..< useCount:
@@ -1563,6 +2378,36 @@ proc writeInterfaceArtifact*(path: string; artifact: ProjectInterfaceArtifact) =
 proc readInterfaceArtifact*(path: string): ProjectInterfaceArtifact =
   decodeProjectInterfaceArtifact(fromByteString(readFile(extendedPath(path))))
 
+proc writeInterfaceArtifactRecipeRelative*(path: string;
+    artifact: ProjectInterfaceArtifact; recipeDir: string;
+    anchors: openArray[string]) =
+  ## Write `artifact` with every source location outside `anchors` named
+  ## relative to `recipeDir` (`repro_core/relocation`). This is the form the
+  ## recipe-relative extraction edge produces, so the bytes it caches
+  ## describe whichever copy of the recipe restores them; a reader rebases
+  ## them with `readInterfaceArtifactRebased`. The interface fingerprint is
+  ## unaffected: it never contains locations.
+  locationBase = absolutePath(recipeDir)
+  locationAnchors = effectiveAnchors(locationBase, anchors)
+  locationsRelative = true
+  try:
+    writeInterfaceArtifact(path, artifact)
+  finally:
+    locationBase = ""
+    locationAnchors = @[]
+
+proc readInterfaceArtifactRebased*(path, recipeDir: string):
+    ProjectInterfaceArtifact =
+  ## Read an artifact written by `writeInterfaceArtifactRecipeRelative`,
+  ## resolving its relative source locations against `recipeDir` — the
+  ## recipe as it lies at THIS location.
+  locationBase = absolutePath(recipeDir)
+  locationsRelative = false
+  try:
+    result = readInterfaceArtifact(path)
+  finally:
+    locationBase = ""
+
 proc writeProviderCompileArtifact*(path: string;
     artifact: ProviderCompileArtifact) =
   createDir(extendedPath(parentDir(path)))
@@ -1715,6 +2560,7 @@ proc toInterfaceTarballProvisioning(packageName: string;
     nonRedistributable: provisioning.nonRedistributable,
     launcher: provisioning.launcher,
     closureManifest: provisioning.closureManifest,
+    detail: provisioning.detail,
     stripComponents: provisioning.stripComponents,
     packageId: provisioning.packageId,
     lockIdentity: provisioning.lockIdentity,
@@ -1741,6 +2587,18 @@ proc toInterfaceScoopProvisioning(packageName: string;
       provisioning.requiresExecutionProfileChecksum,
     packageId: provisioning.packageId,
     lockIdentity: provisioning.lockIdentity,
+    location: SourceLocation(file: provisioning.sourceFile,
+      line: provisioning.sourceLine))
+
+proc toInterfaceHomebrewProvisioning(packageName: string;
+    provisioning: HomebrewProvisioningDef; contributor: string):
+    InterfaceHomebrewProvisioning =
+  InterfaceHomebrewProvisioning(
+    packageName: packageName,
+    contributor: contributor,
+    kind: provisioning.kind,
+    token: provisioning.token,
+    tap: provisioning.tap,
     location: SourceLocation(file: provisioning.sourceFile,
       line: provisioning.sourceLine))
 
@@ -1804,6 +2662,9 @@ proc toInterfaceProvisioningContribution(contribution:
       contribution.targetPackage, provisioning, contribution.contributor))
   for provisioning in contribution.scoopProvisioning:
     result.scoopProvisioning.add(toInterfaceScoopProvisioning(
+      contribution.targetPackage, provisioning, contribution.contributor))
+  for provisioning in contribution.homebrewProvisioning:
+    result.homebrewProvisioning.add(toInterfaceHomebrewProvisioning(
       contribution.targetPackage, provisioning, contribution.contributor))
 
 proc toProjectInterface*(pkg: PackageDef;
@@ -1871,6 +2732,66 @@ proc toProjectInterface*(pkg: PackageDef;
         location: SourceLocation(file: attr.sourceFile,
           line: attr.sourceLine)))
     result.publicResources.add(res)
+  # Shared-Development-Services L3 (§3): fold this package's dev-env
+  # service and activity SIGNATURES into the interface.
+  #
+  # Filtered on ``packageName``, unlike the resource fold above. A
+  # ``resourceType`` is declared at module scope and cannot be attributed
+  # to a package, so the extractor hands the whole registry to whichever
+  # project is being lifted; a ``service``/``activity`` is declared
+  # lexically INSIDE a ``package`` block, the registration carries the
+  # declaring package, and attributing it exactly is both possible and
+  # necessary — a test module (or a sibling shim ``include``) that expands
+  # two ``package`` blocks must not lift one package's services onto the
+  # other's contract.
+  for svc in registeredServiceInterfaces():
+    if svc.packageName != pkg.packageName:
+      continue
+    result.publicServices.add(InterfaceService(
+      name: svc.name,
+      activityName: svc.activityName,
+      handleType: svc.handleType,
+      # L4: ordinal-for-ordinal, the way ``determinismOrd`` is mapped
+      # above. The two enum pairs are kept in step by the static asserts
+      # beside ``InterfaceServiceIdentityMode``'s declaration, so a
+      # reorder of either is a build error rather than a silently
+      # re-mapped identity.
+      identityMode: InterfaceServiceIdentityMode(ord(svc.identityKind)),
+      identityStableId: svc.identityStableId,
+      scope: InterfaceServiceScope(ord(svc.scope)),
+      # L6: carried verbatim. No enum mapping and so no drift assert —
+      # it is a number the author declared, and 0 means undeclared on
+      # both sides.
+      compatibilityMajor: svc.compatibilityMajor,
+      # D-SS11: carried verbatim, like the major. Bare names, so the
+      # consumer's spelling at the resolver and the owner's spelling at
+      # `converge` are the same string and a refusal can name it back.
+      contributionPoints: svc.contributionPoints,
+      location: SourceLocation(file: svc.sourceFile, line: svc.sourceLine)))
+  for act in registeredActivityInterfaces():
+    if act.packageName != pkg.packageName:
+      continue
+    var lifted = InterfaceActivity(
+      name: act.name,
+      handleType: act.handleType,
+      services: act.services,
+      location: SourceLocation(file: act.sourceFile, line: act.sourceLine))
+    for param in act.params:
+      lifted.params.add(InterfaceActivityParam(
+        name: param.name,
+        nimType: param.nimType,
+        location: SourceLocation(file: param.sourceFile,
+          line: param.sourceLine)))
+    for key in act.config:
+      lifted.config.add(InterfaceConfigKey(
+        name: key.name,
+        nimType: key.nimType,
+        defaultRepr: key.defaultRepr,
+        hasDefault: key.hasDefault,
+        description: key.description,
+        location: SourceLocation(file: key.sourceFile,
+          line: key.sourceLine)))
+    result.publicActivities.add(lifted)
 
   if contributions.len > 0:
     for contribution in contributions:
@@ -1920,6 +2841,12 @@ proc toProjectInterface*(pkg: PackageDef;
         useDef.nixProvisioning.add(projected.nixProvisioning)
         useDef.tarballProvisioning.add(projected.tarballProvisioning)
         useDef.scoopProvisioning.add(projected.scoopProvisioning)
+        # ``projected.homebrewProvisioning`` is deliberately NOT added: a
+        # Homebrew record is a bridge record for consumers that install
+        # through Homebrew themselves (the Nix helper library), not a way
+        # Reprobuild realizes the package. Leaving it out of the tool use is
+        # what keeps every selection policy from picking it
+        # (Provisioning-Contributions.md §"Homebrew bridge records").
 
 proc canonicalPackageInterfaceFingerprint*(pkg: PackageDef;
     packages: openArray[PackageDef] = []): string =
@@ -2165,6 +3092,9 @@ proc mergeProjectInterfaces(matches: openArray[PackageDef];
   ##   * retaining each module-global ``publicResources`` contract once,
   ##     deduplicated by ``typeId`` (each package projection sees the same
   ##     resource registry);
+  ##   * CONCATENATING ``publicServices`` and ``publicActivities`` (L3) —
+  ##     these are per-package, so no projection repeats another's, and
+  ##     §3 makes a same-named activity across two packages a union;
   ##   * deduplicating ``toolUses`` by
   ##     ``(packageSelector, executableName)`` so a constraint listed in
   ##     two ``uses:`` blocks (typical for shared toolchains like
@@ -2202,6 +3132,21 @@ proc mergeProjectInterfaces(matches: openArray[PackageDef];
         continue
       seenResourceTypeIds.add(resource.typeId)
       result.publicResources.add(resource)
+    # Shared-Development-Services L3: CONCATENATED, like executables and
+    # libraries, and deliberately not deduplicated like resources. The
+    # resource fold needs a dedup because every per-package projection
+    # re-reads one module-global registry and therefore repeats it;
+    # ``toProjectInterface`` filters services and activities on the
+    # declaring package, so N projections of N packages already yield
+    # each export exactly once and a dedup by name would instead DROP a
+    # second package's same-named activity — which §3 says is a union
+    # ("Where two packages declare the same bare activity name, the
+    # project-scoped activity is the union of their contributions"), not
+    # a collision.
+    for svc in projection.publicServices:
+      result.publicServices.add(svc)
+    for act in projection.publicActivities:
+      result.publicActivities.add(act)
     for use in projection.toolUses:
       let key = use.packageSelector & "\x1f" & use.executableName &
         "\x1f" & use.depKind
@@ -2431,6 +3376,40 @@ proc emitLiftedExtensionTypes(code: var string;
   # into a freshly-cleared registry (e.g. per-test isolation).
   code.add("\nregisterLiftedExtensions()\n\n")
 
+proc tarballArchiveDetailValueLiteral(detail: TarballArchiveDetail): string =
+  ## GM4b: the ``TarballArchiveDetail(...)`` literal for a RUNTIME detail
+  ## (values, not expression source), for the thin-interface stub. A field
+  ## left out here would silently reconstruct a different realization than
+  ## the contributor declared — the hazard the comment below describes for
+  ## the other tarball fields.
+  proc listLit(items: openArray[string]): string =
+    result = "@["
+    for i, item in items:
+      if i > 0: result.add(", ")
+      result.add(escForCode(item))
+    result.add("]")
+  "TarballArchiveDetail(version: " & escForCode(detail.version) &
+    ", sha512: " & escForCode(detail.sha512) &
+    ", sha1: " & escForCode(detail.sha1) &
+    ", installMethod: " & escForCode(detail.installMethod) &
+    ", extractPath: " & escForCode(detail.extractPath) &
+    ", extraExecutables: " & listLit(detail.extraExecutables) &
+    ", installerArgs: " & listLit(detail.installerArgs) &
+    ", pacmanPackages: " & listLit(detail.pacmanPackages) &
+    ", bootstrapArgv: " & listLit(detail.bootstrapArgv) &
+    ", env: " & listLit(detail.env) &
+    ", nested7z: " & $detail.nested7z &
+    ", msiAdminInstall: " & $detail.msiAdminInstall &
+    ", preInstall: " & listLit(detail.preInstall) &
+    ", preInstallUnrecognized: " & listLit(detail.preInstallUnrecognized) &
+    ", launcherEmit: " & listLit(detail.launcherEmit) &
+    ", cpuLevel: " & escForCode(detail.cpuLevel) &
+    ", cpuFeatures: " & escForCode(detail.cpuFeatures) &
+    ", appBundle: " & escForCode(detail.appBundle) &
+    ", bundleId: " & escForCode(detail.bundleId) &
+    ", teamId: " & escForCode(detail.teamId) &
+    ", installerApp: " & escForCode(detail.installerApp) & ")"
+
 proc emitProvisioningContributionRegistrations(code: var string;
     contributions: seq[InterfaceProvisioningContribution]) =
   for contribution in contributions:
@@ -2489,6 +3468,7 @@ proc emitProvisioningContributionRegistrations(code: var string;
         ", archiveType: " & escForCode(provisioning.archiveType) &
         ", executablePath: " & escForCode(provisioning.executablePath) &
         ", executableAlias: " & escForCode(provisioning.executableAlias) &
+        ", detail: " & tarballArchiveDetailValueLiteral(provisioning.detail) &
         ", stripComponents: " & $provisioning.stripComponents &
         ", packageId: " & escForCode(provisioning.packageId) &
         ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
@@ -2513,10 +3493,175 @@ proc emitProvisioningContributionRegistrations(code: var string;
         ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
         ", sourceFile: " & escForCode(provisioning.location.file) &
         ", sourceLine: " & $provisioning.location.line & ")")
+    code.add("], homebrewProvisioning: @[")
+    for i, provisioning in contribution.homebrewProvisioning:
+      if i > 0: code.add(", ")
+      code.add("HomebrewProvisioningDef(kind: " &
+        escForCode(provisioning.kind) &
+        ", token: " & escForCode(provisioning.token) &
+        ", tap: " & escForCode(provisioning.tap) &
+        ", sourceFile: " & escForCode(provisioning.location.file) &
+        ", sourceLine: " & $provisioning.location.line & ")")
     code.add("], sourceFile: " & escForCode(contribution.location.file) &
       ", sourceLine: " & $contribution.location.line & "))\n")
   if contributions.len > 0:
     code.add("\n")
+
+proc emitLiftedServiceSymbols(code: var string; packageName: string;
+                              services: seq[InterfaceService];
+                              activities: seq[InterfaceActivity]) =
+  ## Shared-Development-Services L3 (§3): emit this dependency's lifted
+  ## service and activity surface into the consumer stub — one handle
+  ## type per activity, a ``<Title>PackageExports`` reflection object
+  ## carrying every export, and the accessor procs that make
+  ## ``<dep>.<service>`` a typed symbol in the CONSUMING compilation.
+  ##
+  ## This is the lift's consumer half, the analog of
+  ## ``emitLiftedExtensionTypes`` for resource attrs: the type crosses the
+  ## interface boundary, not the implementation. A consumer gets the
+  ## member set and nothing that would drag the producer's executables,
+  ## argv or triggers in.
+  ##
+  ## IT MUST STAY IN STEP WITH ``l3LiftedExportSurface``
+  ## (``macros_b.nim``), which emits the same three things from the
+  ## producer's own macro expansion for the workspace-sibling import path
+  ## (``usesImportCode`` Branch C). Two emitters, one surface: a
+  ## divergence would mean a consumer compiling against a different
+  ## member set depending on how it reached the producer, and nothing
+  ## would fail. ``t_l3_lifted_symbols_compile_in_a_consumer.nim`` checks
+  ## the same consumer source against BOTH routes for exactly that
+  ## reason.
+  ##
+  ## A member whose declared TYPE cannot be regenerated here is NOT
+  ## skipped. Unlike a resource attr — where a skipped codec still leaves
+  ## a usable typed contract — a dropped handle member would make a
+  ## correct consumer reference fail with ``undeclared field``, which is
+  ## the silent-drop failure this campaign keeps finding. The author's own
+  ## type expression is emitted verbatim and resolved in the consumer's
+  ## scope; when it does not resolve there, the consumer is told so by
+  ## name.
+  ##
+  ## A member whose NAME is not a legal Nim identifier IS skipped, and
+  ## only because it cannot be spelled: L1 accepts ``service
+  ## "renamed-api":`` and §3 keeps dot access and the CLI's
+  ## ``<package>:<name>`` apart, so such a service is reachable at the CLI
+  ## and not by dot access. The producer-side emitter
+  ## (``l3Exportable`` in ``macros_b.nim``) warns at the DECLARATION
+  ## site, which is the only place that can name a line the author wrote;
+  ## here there is nothing but the artifact.
+  if services.len == 0 and activities.len == 0:
+    return
+  let typeName = titleIdent(packageName)
+  let exportsType = typeName & "Exports"
+  var typeBlock = ""
+  for act in activities:
+    if not validGeneratedIdent(act.name):
+      continue
+    typeBlock.add("  " & act.handleType & "* = object\n")
+    typeBlock.add("    ## L3: the lifted handle type for activity `" &
+      act.name & "` of\n    ## package `" & packageName &
+      "`. Field VALUES belong to a resolved instance\n" &
+      "    ## and are L7's work.\n")
+    var fieldCount = 0
+    for key in act.config:
+      if not validGeneratedIdent(key.name):
+        continue
+      typeBlock.add("    " & key.name & "*: " & key.nimType & "\n")
+      inc fieldCount
+    for svcName in act.services:
+      if not validGeneratedIdent(svcName):
+        continue
+      typeBlock.add("    " & svcName & "*: LiftedServiceHandle\n")
+      inc fieldCount
+    if fieldCount == 0:
+      typeBlock.add("    discard\n")
+  typeBlock.add("  " & exportsType & "* = object\n")
+  typeBlock.add("    ## L3: every service and activity package `" &
+    packageName & "` exports.\n")
+  var exportCount = 0
+  for act in activities:
+    if not validGeneratedIdent(act.name):
+      continue
+    typeBlock.add("    " & act.name & "*: " & act.handleType & "\n")
+    inc exportCount
+  for svc in services:
+    if svc.activityName.len == 0 and validGeneratedIdent(svc.name):
+      typeBlock.add("    " & svc.name & "*: LiftedServiceHandle\n")
+      inc exportCount
+  if exportCount == 0:
+    typeBlock.add("    discard\n")
+  code.add("type\n" & typeBlock & "\n")
+  code.add("proc liftedExports*(pkg: " & typeName & "): " & exportsType &
+    " =\n")
+  code.add("  discard pkg\n")
+  for act in activities:
+    if not validGeneratedIdent(act.name):
+      continue
+    for svcName in act.services:
+      if not validGeneratedIdent(svcName):
+        continue
+      code.add("  result." & act.name & "." & svcName &
+        " = LiftedServiceHandle(packageName: " & escForCode(packageName) &
+        ", activityName: " & escForCode(act.name) & ", serviceName: " &
+        escForCode(svcName) & ")\n")
+  for svc in services:
+    if svc.activityName.len == 0 and validGeneratedIdent(svc.name):
+      code.add("  result." & svc.name &
+        " = LiftedServiceHandle(packageName: " & escForCode(packageName) &
+        ", activityName: \"\", serviceName: " & escForCode(svc.name) &
+        ")\n")
+  code.add("\n")
+  for act in activities:
+    if not validGeneratedIdent(act.name):
+      continue
+    code.add("proc " & act.name & "*(pkg: " & typeName & "): " &
+      act.handleType & " =\n  pkg.liftedExports." & act.name & "\n")
+  for svc in services:
+    if svc.activityName.len == 0 and validGeneratedIdent(svc.name):
+      code.add("proc " & svc.name & "*(pkg: " & typeName &
+        "): LiftedServiceHandle =\n  pkg.liftedExports." & svc.name & "\n")
+  code.add("\n")
+  # Shared-Development-Services D-SS11 (§4.6): the RESOLVER's two
+  # generated consts, the stub half of what `l3LiftedExportSurface`
+  # emits from the producer's own expansion. Two emitters, one surface:
+  # a consumer reaching `infra` through a stub and a consumer reaching it
+  # through a sibling import must get the SAME resolver, or
+  # `infra.sso.shared(...)` would compile in one and not the other and
+  # nothing would fail.
+  #
+  # EMITTED FOR A SERVICE THE LIFT SAYS IS SHARED. The artifact carries
+  # no `instance:` flag of its own -- that block is implementation, not
+  # signature -- so the discriminant here is the one signature fact
+  # D-SS11 added: a service that converges contribution points. A shared
+  # service that converges NONE therefore gets no resolver const through
+  # this route and is refused by name by `sharedServiceNotResolvable`,
+  # which is a STATED LIMIT of the stub route rather than a silent drop,
+  # and it is recorded in this milestone's report. The sibling-import
+  # route reads `instance:` directly and has no such limit.
+  for svc in services:
+    if svc.contributionPoints.len == 0:
+      continue
+    if not validGeneratedIdent(svc.name):
+      continue
+    if svc.activityName.len > 0 and not validGeneratedIdent(svc.activityName):
+      continue
+    # ONE derivation, called -- not a second copy. See
+    # `sharedServiceConstBase`'s own comment for why.
+    let base = sharedServiceConstBase(packageName, svc.activityName,
+      svc.name)
+    var points: seq[string] = @[]
+    for point in svc.contributionPoints:
+      points.add(escForCode(point))
+    let pointsList = points.join(", ")
+    code.add("const " & base & "SharedPoints* = @[" & pointsList & "]\n")
+    code.add("const " & base & "SharedService* = " &
+      "SharedServiceDeclarationDef(ownerPackage: " &
+      escForCode(packageName) & ", serviceName: " & escForCode(svc.name) &
+      ", activityName: " & escForCode(svc.activityName) &
+      ", ownerRecipeDir: " &
+      escForCode(parentDir(svc.location.file)) &
+      ", contributionPoints: @[" & pointsList & "])\n")
+  code.add("\n")
 
 proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
   let pkg = artifact.projectInterface
@@ -2535,6 +3680,12 @@ proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
   code.add("  discard pkg\n")
   code.add("  " & exeTypeName & "(value: selectedExecutable(\"" &
     pkg.packageName & "\", name))\n\n")
+  # Shared-Development-Services L3 (§3): the lifted service/activity
+  # symbols. Emitted AFTER the package type + const they are accessors
+  # on, and after the resource types so a handle member typed by a lifted
+  # attrs record resolves.
+  emitLiftedServiceSymbols(code, pkg.packageName, pkg.publicServices,
+    pkg.publicActivities)
   var selectedCommands: seq[string] = @[]
   for exe in pkg.publicExecutables:
     for cmd in exe.commands:
@@ -2871,10 +4022,22 @@ proc runCommand*(command: openArray[string];
   else:
     var process: Process
     withSpawnWorkingDir:
-      process = startProcess(command[0],
-        args = command[1 .. ^1],
-        workingDir = cwd,
-        options = {poUsePath, poStdErrToStdOut})
+      # `osproc`'s posix_spawn path chdirs the PARENT into `workingDir` and
+      # restores the old directory only when the spawn succeeds: a spawn that
+      # fails (a "compiler" that is not an executable, ENOEXEC) raises with
+      # this process still in `cwd`. Callers pass scratch directories they
+      # delete afterwards (`probeCCompiler`), so every later spawn then failed
+      # with "No such file or directory" from a deleted current directory.
+      let savedDir = if cwd.len > 0: getCurrentDir() else: ""
+      try:
+        process = startProcess(command[0],
+          args = command[1 .. ^1],
+          workingDir = cwd,
+          options = {poUsePath, poStdErrToStdOut})
+      except OSError:
+        if savedDir.len > 0:
+          setCurrentDir(savedDir)
+        raise
     # N51 triage: LEFT AS `readAll` DELIBERATELY, on BOTH counts. This is the
     # `else` of the `when defined(windows)` above, so it is the POSIX arm —
     # and on POSIX `osproc`'s stream is a stdio `File` whose `fread` already
@@ -2965,65 +4128,7 @@ proc ensureExecutable(path: string) =
     setFilePermissions(extendedPath(path), {fpUserRead, fpUserWrite, fpUserExec,
       fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
-when defined(macosx):
-  # SIP prefixes, kept byte-identical to nim-stackable-hooks'
-  # ``propagation.sipProtectedPrefixes`` (the population io-mon itself uses via
-  # ``isSipProtected`` / ``rewriteSipPath``) so the engine and the monitor agree
-  # on what counts as SIP-protected. Defined locally rather than imported to
-  # keep this foundational lib free of a new dependency edge; the values MUST
-  # track the shared population.
-  const macosSipCompilerPrefixes = ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"]
-
-  proc isSipProtectedCompiler(path: string): bool =
-    for prefix in macosSipCompilerPrefixes:
-      if path.startsWith(prefix):
-        return true
-    false
-
-  proc firstNonSipCCompilerOnPath(): string =
-    ## macOS / Apple Silicon: the io-mon monitor shim
-    ## (``librepro_monitor_shim.dylib``, injected via ``DYLD_INSERT_LIBRARIES``)
-    ## cannot be carried into a SIP-protected, arm64e *system* binary. ``nim c``
-    ## shells the C back-end out to the compiler resolved here, so when that
-    ## compiler is one of the SIP binaries (``/usr/bin/cc``), the monitored
-    ## reprobuild provider / interface compile spawns an unmonitorable arm64e
-    ## child and dyld either refuses an arm64-only shim slice ("incompatible
-    ## architecture ... need arm64e") or the arm64e interpose path crashes the
-    ## child — the compile then fails with an opaque
-    ## "execution of an external program failed". A non-SIP compiler (the Nix /
-    ## Homebrew clang wrapper that ``nix develop`` puts on ``PATH``) takes the
-    ## arm64 shim slice cleanly and is fully monitorable. Prefer it, mirroring
-    ## the engine's ``resolveNonSipShell`` for the analogous ``/bin/sh`` case.
-    ## Returns "" when only SIP compilers are on ``PATH`` (e.g. a bare login
-    ## shell); the caller then falls back to the SIP compiler unchanged.
-    let pathEnv = getEnv("PATH")
-    for name in ["cc", "clang", "gcc"]:
-      for dir in pathEnv.split(PathSep):
-        if dir.len == 0:
-          continue
-        let candidate = dir / name
-        if not fileExists(extendedPath(candidate)):
-          continue
-        if isSipProtectedCompiler(candidate):
-          continue
-        return candidate
-    ""
-
-  proc preferNonSipCompiler(candidate: string): string =
-    ## When ``candidate`` is a SIP-protected compiler, substitute a non-SIP one
-    ## if PATH offers it; otherwise keep ``candidate`` (best effort).
-    if candidate.len == 0 or not isSipProtectedCompiler(candidate):
-      return candidate
-    let nonSip = firstNonSipCCompilerOnPath()
-    if nonSip.len > 0: nonSip else: candidate
-
 type
-  CCompilerUnusableError* = object of CatchableError
-    ## The C compiler selected for compiling a recipe -- its interface
-    ## extractor and its provider -- is missing or cannot compile a trivial C
-    ## translation unit. The message names the compiler, where it was selected
-    ## from, what failed, and how to point reprobuild at a different one.
-
   CCompilerProbe* = object
     compiler*: string
     usable*: bool
@@ -3032,23 +4137,16 @@ type
       ## could not run). Empty when ``usable``.
 
 const
-  bootstrapCCompilerEnv* = "REPRO_BOOTSTRAP_CC"
-    ## The one knob that names the recipe-compile C compiler. Set by
-    ## ``ensureBootstrapToolchainEnv`` to the pinned tool-store compiler, or by
-    ## the user to override it.
-  bootstrapSdkRootEnv* = "REPRO_BOOTSTRAP_SDKROOT"
-    ## macOS only: the SDK the bootstrap's Xcode Command Line Tools clang
-    ## compiles and links against. ``ensureBootstrapToolchainEnv`` sets it next
-    ## to ``REPRO_BOOTSTRAP_CC`` when it chose that clang and ``SDKROOT`` was
-    ## unset. It is passed to the compiler as ``-isysroot`` rather than exported
-    ## as ``SDKROOT``: the recipe compile's child actions inherit this process's
-    ## environment, and an ``SDKROOT`` there would redirect every package
-    ## action's compiler (a Nix clang wrapper included) to the Xcode SDK.
   cCompilerProbeSource = """
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __APPLE__
+/* Nim's std/sysrand includes this SDK framework header on Darwin. GCC can
+   compile the standard headers and still fail here, so test both. */
+#include <Security/SecRandom.h>
+#endif
 /* Nim generates C for THIS host's pointer width. A compiler for another
    target (e.g. an i386 gcc on an x86_64 host) links garbage, so refuse it
    here, where the message can say so, rather than three layers later. */
@@ -3058,14 +4156,6 @@ int repro_probe(void) { return (int)(sizeof(size_t) + strlen("ok")); }
 """
 
 var cachedCCompilerProbes = initTable[string, CCompilerProbe]()
-
-proc bootstrapSysrootArgs*(): seq[string] =
-  ## The ``-isysroot`` pair for the recipe-compile C compiler, from
-  ## ``REPRO_BOOTSTRAP_SDKROOT``. Empty off macOS and when it is unset.
-  when defined(macosx):
-    let sdk = getEnv(bootstrapSdkRootEnv)
-    if sdk.len > 0:
-      result = @["-isysroot", sdk]
 
 proc cCompilerIdentity(cc: string): string =
   ## Path plus size plus mtime: what a probe verdict is keyed on. A replaced
@@ -3080,7 +4170,12 @@ proc cCompilerIdentity(cc: string): string =
 
 proc cCompilerProbeMarkerName(identity: string): string =
   var h = 0xcbf29ce484222325'u64
-  for ch in identity.toLowerAscii():
+  # Darwin SDK paths and compiler-wrapper flags are case-sensitive inputs:
+  # -I and -i have different meanings even on a case-insensitive filesystem.
+  let markerIdentity =
+    when defined(macosx): identity
+    else: identity.toLowerAscii()
+  for ch in markerIdentity:
     h = (h xor uint64(ord(ch))) * 0x100000001b3'u64
   const hexDigits = "0123456789abcdef"
   result = newString(16)
@@ -3092,7 +4187,8 @@ proc probeCCompiler*(cc: string; cacheDir = "";
                      extraArgs: seq[string] = @[]): CCompilerProbe =
   ## Compile a trivial translation unit that includes the standard headers
   ## Nim's generated C needs, with the host's pointer width asserted, and
-  ## report whether ``cc`` can do it.
+  ## report whether ``cc`` can do it. On Darwin this includes the Security
+  ## framework header needed by Nim's std/sysrand.
   ##
   ## This is what turns "``capi.c:1: stddef.h: No such file or directory``"
   ## -- measured 2026-09-23 on a Windows host whose Machine PATH put FPC's
@@ -3101,7 +4197,7 @@ proc probeCCompiler*(cc: string; cacheDir = "";
   ##
   ## Verdicts are memoised per process, and a SUCCESS is also recorded as a
   ## marker in ``cacheDir`` (when given) keyed on the compiler's path, size
-  ## and mtime, so an activation that runs on every ``just`` recipe does not
+  ## and mtime (plus Darwin SDK and wrapper environment), so an activation that runs on every ``just`` recipe does not
   ## pay a compiler start-up each time. Failures are never cached: the fix is
   ## usually to the environment, and the next run must see it.
   ##
@@ -3109,6 +4205,15 @@ proc probeCCompiler*(cc: string; cacheDir = "";
   ## macOS bootstrap passes its ``-isysroot`` here, because that is how the
   ## recipe compile will run the compiler.
   var identity = cCompilerIdentity(cc)
+  when defined(macosx):
+    # Old success markers only tested standard headers or probed with ambient
+    # SDKROOT/DEVELOPER_DIR set. Never reuse them for the framework probe, or
+    # across changes to compiler-wrapper inputs.
+    identity.add("|darwin-framework-probe-v2")
+    for name in ["NIX_CFLAGS_COMPILE",
+                 "NIX_CFLAGS_COMPILE_FOR_BUILD", "NIX_LDFLAGS",
+                 "NIX_LDFLAGS_FOR_BUILD"]:
+      identity.add("|" & name & "=" & getEnv(name))
   for arg in extraArgs:
     identity.add("|" & arg)
   if cachedCCompilerProbes.hasKey(identity):
@@ -3125,6 +4230,15 @@ proc probeCCompiler*(cc: string; cacheDir = "";
     result.usable = true
     cachedCCompilerProbes[identity] = result
     return
+  const scrubbedProbeEnvVars = [
+    "SDKROOT", "DEVELOPER_DIR", "CPATH", "C_INCLUDE_PATH",
+    "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "INCLUDE",
+    "LIBRARY_PATH", "LIB"
+  ]
+  var savedEnv: seq[tuple[name: string; present: bool; value: string]] = @[]
+  for name in scrubbedProbeEnvVars:
+    savedEnv.add((name: name, present: existsEnv(name), value: getEnv(name)))
+    delEnv(name)
   var scratch = ""
   try:
     scratch = createTempDir("repro-cc-probe-", "")
@@ -3143,6 +4257,11 @@ proc probeCCompiler*(cc: string; cacheDir = "";
   except CatchableError, OSError:
     result.detail = "could not run it: " & getCurrentExceptionMsg()
   finally:
+    for entry in savedEnv:
+      if entry.present:
+        putEnv(entry.name, entry.value)
+      else:
+        delEnv(entry.name)
     if scratch.len > 0:
       try: removeDir(extendedPath(scratch))
       except CatchableError, OSError: discard
@@ -3154,14 +4273,6 @@ proc probeCCompiler*(cc: string; cacheDir = "";
       discard
   cachedCCompilerProbes[identity] = result
 
-proc cCompilerOverrideRemedy*(): string =
-  ## How to point reprobuild at a different recipe-compile C compiler.
-  "Set " & bootstrapCCompilerEnv & " to the absolute path of a working " &
-    (when defined(windows): "64-bit MinGW-w64 gcc.exe"
-     else: "C compiler for this host") &
-    ", or unset it to use the pinned bootstrap compiler reprobuild " &
-    "provisions into its tool store."
-
 proc cCompilerUnusableMessage*(probe: CCompilerProbe; origin: string): string =
   ## The diagnostic for a compiler that failed ``probeCCompiler``.
   var detail = probe.detail
@@ -3170,8 +4281,14 @@ proc cCompilerUnusableMessage*(probe: CCompilerProbe; origin: string): string =
     detail = detail[0 ..< maxDetail] & " [...]"
   result = "the C compiler selected for compiling the recipe cannot " &
     "compile a trivial C file that includes <stddef.h>" &
+    (when defined(macosx): " and <Security/SecRandom.h>"
+     else: "") &
     "\n  compiler: " & probe.compiler &
     "\n  selected from: " & origin &
+    (when defined(macosx): "\n  SDKROOT: " &
+      getEnv("SDKROOT", "<unset>") &
+      "\n  " & bootstrapSdkRootEnv & ": " & getEnv(bootstrapSdkRootEnv, "<unset>")
+     else: "") &
     "\n  failure: " & detail.replace("\n", "\n    ") &
     "\n  remedy: " & cCompilerOverrideRemedy()
 
@@ -3217,48 +4334,22 @@ when defined(windows):
     onPath
 
 proc hostCCompilerPath(): string =
-  # MR9 — `$REPRO_BOOTSTRAP_CC` is the bootstrap-resolved gcc absolute
-  # path published by `ensureBootstrapToolchainEnv` (tool_profiles.nim)
-  # before the interface-extract step runs. It outranks `$CC` because
-  # env.ps1 / inherited shells legitimately set `$CC` to a bare
-  # basename like ``gcc`` for use by Makefiles / autotools, and the
-  # `isAbsolute(ccEnv)` check below would discard that value and fall
-  # through to `BuiltCCompilerPath` (which, on a clean Windows host,
-  # rarely matches a usable 64-bit toolchain). Consulting the
-  # bootstrap pin first guarantees nim's `--gcc.exe:` flag points at
-  # the reprobuild-provisioned winlibs gcc instead of whatever
-  # PATH-resolution would pick (e.g. FPC's 32-bit-target gcc 2.95).
-  #
-  # A SET but unusable value is an error, not a reason to fall through: it
-  # is somebody's explicit choice of compiler, and silently compiling with a
-  # different one is how the wrong gcc went unnoticed.
-  let bootstrapCC = getEnv(bootstrapCCompilerEnv)
-  if bootstrapCC.len > 0:
-    if isAbsolute(bootstrapCC) and fileExists(extendedPath(bootstrapCC)):
-      return bootstrapCC
-    raise newException(CCompilerUnusableError,
-      bootstrapCCompilerEnv & "=" & bootstrapCC & " does not name an " &
-      "existing file by absolute path. " & cCompilerOverrideRemedy())
-  let ccEnv = getEnv("CC")
-  if ccEnv.len > 0 and isAbsolute(ccEnv):
-    when defined(macosx):
-      return preferNonSipCompiler(ccEnv)
-    else:
-      return ccEnv
-  when not defined(windows):
-    let runtimeCC = findExe("cc")
-    if runtimeCC.len > 0 and isAbsolute(runtimeCC) and
-        fileExists(extendedPath(runtimeCC)):
-      when defined(macosx):
-        return preferNonSipCompiler(runtimeCC)
-      else:
-        return runtimeCC
-  if BuiltCCompilerPath.len > 0 and fileExists(extendedPath(BuiltCCompilerPath)):
-    return BuiltCCompilerPath
+  ## The recipe compile's C compiler: the shared selection
+  ## (``c_compiler.resolveConfiguredCCompiler`` -- ``$REPRO_BOOTSTRAP_CC``,
+  ## an absolute ``$CC``, ``cc`` on PATH, the compiler ``repro`` was built
+  ## with), which the profile compile uses too. Windows, where the selection
+  ## can come back empty, adds the loud ``gcc.exe``-on-PATH last resort.
+  result = resolveConfiguredCCompiler()
   when defined(windows):
-    return pathCCompilerFallback()
-  else:
-    ""
+    if result.len == 0:
+      result = pathCCompilerFallback()
+
+const ReprobuildLibsOverrideEnvVars* = ["REPROBUILD_LIBS_DIR",
+                                       "REPROBUILD_REPO_ROOT"]
+  ## The operator overrides `reprobuildLibsRootFromEnv` reads, in precedence
+  ## order. Named once because every process boundary a recipe compile
+  ## crosses has to carry them: an isolated launch, and the dev-env cache key
+  ## that decides whether a previous extraction may be reused.
 
 proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
   ## The environment values the provider-compile edge DECLARES, so that the
@@ -3308,6 +4399,9 @@ proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
     result.add("REPRO_NIM_COMPILER=" & nim)
   if cc.len > 0 and cc.isAbsolute:
     result.add(bootstrapCCompilerEnv & "=" & cc)
+  let sdk = getEnv(bootstrapSdkRootEnv)
+  if sdk.len > 0:
+    result.add(bootstrapSdkRootEnv & "=" & sdk)
   if dirs.len > 0:
     result.add("PATH=" & dirs.join($PathSep))
   result.add("TERM=dumb")
@@ -3329,6 +4423,14 @@ proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
                SeededSourceEnvironmentVar]:
     if name notin seenRoots:
       seenRoots.add(name)
+  # And the operator's override for WHICH reprobuild libs the compile builds
+  # against (`reprobuildLibsRootFromEnv`, read by `reproLibPathFlags` INSIDE
+  # this compile). Leaving them out of an isolated launch silently reverted
+  # every recipe compile to the libs of the checkout the engine was built
+  # from, whatever the caller had asked for.
+  for name in ReprobuildLibsOverrideEnvVars:
+    if name notin seenRoots:
+      seenRoots.add(name)
   for name in seenRoots:
     if existsEnv(name):
       result.add(name & "=" & getEnv(name))
@@ -3339,32 +4441,6 @@ proc recipeCCompilerPath*(): string =
   ## makes, exposed so its refusals can be tested without running a compile.
   ## Raises ``CCompilerUnusableError`` where the compile itself would.
   hostCCompilerPath()
-
-var cachedHostCCompilerFamily = ""
-
-proc hostCCompilerFamily(cc: string): string =
-  ## Detect whether the provisioned C compiler is clang- or gcc-flavoured
-  ## so Nim's selected compiler *family* matches the actual binary.
-  ##
-  ## ``hostCCompilerFlags`` aliases BOTH ``--gcc.exe`` and ``--clang.exe``
-  ## to this single compiler but, historically, left the compiler family
-  ## at Nim's platform default (clang on macOS, gcc on Linux). When the
-  ## provisioned ``cc`` is gcc (e.g. the Nix gcc-wrapper used by path-mode
-  ## provisioning) but Nim still thinks it is clang, Nim emits clang-only
-  ## flags such as ``-ferror-limit=3`` (from ``clang.options.always``)
-  ## and the gcc binary rejects them, breaking interface extraction.
-  ## Pinning ``--cc`` to the detected family keeps the always-on flag set
-  ## consistent with the binary on every platform.
-  if cachedHostCCompilerFamily.len > 0:
-    return cachedHostCCompilerFamily
-  cachedHostCCompilerFamily = "gcc"
-  try:
-    let (output, exitCode) = execCmdEx(quoteShell(cc) & " --version")
-    if exitCode == 0 and "clang" in output.toLowerAscii:
-      cachedHostCCompilerFamily = "clang"
-  except CatchableError, OSError:
-    discard
-  cachedHostCCompilerFamily
 
 proc hostCCompilerFlags(): seq[string] =
   # Windows: bump the linked stack size for any binary the engine
@@ -3383,28 +4459,9 @@ proc hostCCompilerFlags(): seq[string] =
   when defined(windows):
     result.add("--passL:-Wl,--stack,16777216")
 
-  let cc = hostCCompilerPath()
-  if cc.len == 0:
-    return
-  # Match Nim's compiler family to the provisioned binary so the family's
-  # always-on flags (e.g. clang's -ferror-limit) are not handed to the
-  # wrong compiler. See hostCCompilerFamily for the failure this avoids.
-  result.add("--cc:" & hostCCompilerFamily(cc))
-  result.add("--gcc.exe:" & cc)
-  result.add("--gcc.linkerexe:" & cc)
-  result.add("--clang.exe:" & cc)
-  result.add("--clang.linkerexe:" & cc)
-  # macOS: the bootstrap's Xcode clang needs the SDK named (see
-  # ``bootstrapSdkRootEnv``, which only the bootstrap sets, and only for that
-  # compiler). A compiler the caller named finds its SDK the way it always did.
-  if cc == getEnv(bootstrapCCompilerEnv):
-    let sysroot = bootstrapSysrootArgs()
-    if sysroot.len == 2:
-      let sdk =
-        if ' ' in sysroot[1]: "\"" & sysroot[1] & "\""
-        else: sysroot[1]
-      result.add("--passC:-isysroot " & sdk)
-      result.add("--passL:-isysroot " & sdk)
+  # The compiler, its family, and (macOS bootstrap clang) its SDK: the
+  # flags the profile compile passes too (``c_compiler.nimCCompilerFlags``).
+  result.add(nimCCompilerFlags(hostCCompilerPath()))
 
 proc walkLibSrcPathsInto(libsRoot: string; sink: var seq[string]) =
   ## Walks ``<libsRoot>/<name>/src`` and appends every existing entry to
@@ -3425,10 +4482,10 @@ proc reprobuildLibsRootFromEnv(): string =
   ## "where reprobuild's libs/ live". Set by the engine when invoking
   ## an out-of-tree provider compile; mirrors ``$REPROBUILD_REPO_ROOT``
   ## except it points at the libs dir directly. Empty when not set.
-  let direct = getEnv("REPROBUILD_LIBS_DIR")
+  let direct = getEnv(ReprobuildLibsOverrideEnvVars[0])
   if direct.len > 0:
     return direct
-  let repoRoot = getEnv("REPROBUILD_REPO_ROOT")
+  let repoRoot = getEnv(ReprobuildLibsOverrideEnvVars[1])
   if repoRoot.len > 0:
     return repoRoot / "libs"
   ""
@@ -4416,6 +5473,11 @@ proc interfaceExtractionContext(modulePath: string;
   for extra in extraPaths:
     if extra.len > 0:
       libPathFlags.add("--path:" & normalizedStampPath(extra))
+  # The selected catalog decides which module a catalog `uses:` imports
+  # (`catalogSelectionIdentity`); the recipe text does not change with it.
+  let catalogSelection = catalogSelectionIdentity(modulePath)
+  if catalogSelection.len > 0:
+    libPathFlags.add(catalogSelection)
   InterfaceExtractionContext(
     modulePath: normalizedStampPath(modulePath),
     workDir: normalizedStampPath(workDir),
@@ -4439,6 +5501,11 @@ proc interfaceExtractionCacheContext(modulePath: string;
   for extra in extraPaths:
     if extra.len > 0:
       libPathFlags.add("--path:" & normalizedStampPath(extra))
+  # The selected catalog decides which module a catalog `uses:` imports
+  # (`catalogSelectionIdentity`); the recipe text does not change with it.
+  let catalogSelection = catalogSelectionIdentity(modulePath)
+  if catalogSelection.len > 0:
+    libPathFlags.add(catalogSelection)
   InterfaceExtractionContext(
     modulePath: normalizedStampPath(modulePath),
     workDir: normalizedStampPath(workDir),
@@ -4552,12 +5619,35 @@ proc cachedInterfaceArtifactByMetadata(artifactPath, stubPath: string;
     return none(ProjectInterfaceArtifact)
   processWarmInterfaceStats.metadataRevalidatedReproLibs +=
     cached.reproLibStamps.len
-  if cached.reproLibStamps != restampRecordedInputs(cached.reproLibStamps):
+  # Inside a ``beginReproLibSourcesScope`` (a dev-env computation) the library
+  # stamps were already taken once for this computation, by the fingerprint
+  # memo and the provider freshness check. Compare against THAT list rather
+  # than stat-ing every recorded path a second time: it is the same stamp
+  # check, it is free here, and because it is a fresh walk it also notices a
+  # library source that was added or removed, which re-stamping only the
+  # recorded paths cannot. Outside a scope nothing has walked the tree yet, so
+  # re-stamping the recorded paths stays the cheaper question.
+  let currentLibStamps =
+    if reproLibScopeDepth > 0: reproLibStampsForCache(context.workDir)
+    else: restampRecordedInputs(cached.reproLibStamps)
+  if cached.reproLibStamps != currentLibStamps:
     return none(ProjectInterfaceArtifact)
   try:
-    let artifact = readInterfaceArtifactWithWarm(artifactPath)
-    if artifact.interfaceFingerprint != cached.inputFingerprint:
+    # The record describes the artifact on disk only if the extraction that
+    # wrote the record also wrote the artifact. Both sidecars are written
+    # together, after the artifact, under the same INPUT fingerprint, so the
+    # ``.inputs`` sidecar is what ties the three together. This used to
+    # compare ``artifact.interfaceFingerprint`` instead, but that is the
+    # SEMANTIC digest of the extracted interface (an output), which never
+    # equals the input fingerprint: every metadata lookup missed and fell
+    # through to re-hashing the whole source closure, sibling sources
+    # included, so an unrelated file created beside the recipe re-extracted
+    # the interface and rebuilt the provider.
+    let cachePath = interfaceExtractionCachePath(artifactPath)
+    if readFile(extendedPath(cachePath)).strip() !=
+        toHex(cached.inputFingerprint.bytes):
       return none(ProjectInterfaceArtifact)
+    let artifact = readInterfaceArtifactWithWarm(artifactPath)
     if not lookup.warmHitAccounted:
       inc processWarmInterfaceStats.metadataWarmHits
     return some(artifact)
@@ -4700,44 +5790,136 @@ proc nixLibFile(prefix, libraryName: string): string =
   ""
 
 proc soMatchesHostArch(libFile: string): bool =
-  ## Guard ``nixPrefix``'s ``/nix/store`` glob against picking a
-  ## wrong-architecture build. The fleet's shared store holds BOTH x86-64 and
-  ## aarch64 copies of libraries like xxHash under indistinguishable
-  ## ``*-xxHash-*`` store-path names, so a bare glob can return the aarch64
-  ## ``libxxhash.so`` on an x86-64 runner — the extract-runner link then fails
-  ## with ``ld: … libxxhash.so is incompatible with elf64-x86-64``. Reject an
-  ## ELF whose machine differs from the build host. A non-ELF file (macOS
-  ## Mach-O ``.dylib``), a static archive (``.a``), or an unreadable/short file
-  ## is treated as a match — let the platform/linker decide.
+  ## Guard the ``/nix/store`` globs (``nixPrefix``, ``nixLibDirIn``) and the
+  ## other fallback candidates against picking a library this host's loader
+  ## cannot map. A store is not single-architecture: the fleet's shared store
+  ## holds x86-64, aarch64 AND i686 copies of libraries like xxHash and
+  ## OpenSSL under store-path names that differ only in their hash, so a bare
+  ## glob can return any of them. Observed failures: the aarch64
+  ## ``libxxhash.so`` on an x86-64 runner (``ld: … libxxhash.so is
+  ## incompatible with elf64-x86-64``), and a 32-bit OpenSSL baked into a
+  ## 64-bit helper's RPATH (``libcrypto.so.3: wrong ELF class: ELFCLASS32``,
+  ## reprobuild-pm issue 2026-10-03 "source interface extraction cannot load
+  ## OpenSSL").
+  ##
+  ## "Host" is the architecture this binary was compiled for, which is also
+  ## the target of every helper it compiles for itself: those compiles pass no
+  ## ``--cpu``. A file is rejected when its header names something the host
+  ## loader cannot map:
+  ##
+  ## * an ELF whose class (``EI_CLASS``, byte 4: 32/64-bit), data encoding
+  ##   (``EI_DATA``, byte 5) or ``e_machine`` (bytes 18–19) differs from the
+  ##   host — the class check is not redundant with the machine check: the
+  ##   x32 and aarch64-ILP32 ABIs are ``ELFCLASS32`` objects carrying the
+  ##   64-bit family's ``EM_X86_64`` / ``EM_AARCH64``; or any ELF on macOS,
+  ##   whose dyld cannot load one;
+  ## * a thin Mach-O of the wrong word size or ``cputype``, a universal
+  ##   (fat) Mach-O with no slice for the host ``cputype``, or any Mach-O on a
+  ##   non-Darwin host.
+  ##
+  ## Header layouts: the System V gABI ELF header
+  ## (https://www.sco.com/developers/gabi/latest/ch4.eheader.html) and
+  ## ``<mach-o/loader.h>`` / ``<mach-o/fat.h>`` / ``<mach/machine.h>``.
+  ##
+  ## Anything the header does not identify — a static archive (``.a``), a
+  ## linker script (glibc's ``libc.so`` is one), an unreadable or short file,
+  ## or a host machine absent from the tables below — is treated as a match:
+  ## the linker or loader decides, as it did before this guard existed.
+  # The size of the largest prefix this reads: a fat header plus the slice
+  # table of any realistic universal binary (each ``fat_arch`` is 20 bytes).
+  const HeaderBytes = 512
   var f: File
   if not open(f, extendedPath(libFile)):
     return true
   defer: close(f)
-  var hdr: array[20, byte]
-  if readBytes(f, hdr, 0, 20) < 20:
+  var hdr: array[HeaderBytes, byte]
+  let got = readBytes(f, hdr, 0, HeaderBytes)
+  if got < 8:
     return true
-  if not (hdr[0] == 0x7F'u8 and hdr[1] == byte('E') and
-          hdr[2] == byte('L') and hdr[3] == byte('F')):
-    return true                       # not ELF -> not our concern
-  if hdr[5] != 1'u8:                   # EI_DATA: only handle little-endian
-    return true
-  let eMachine = uint16(hdr[18]) or (uint16(hdr[19]) shl 8)
+  proc le32(at: int): uint32 =
+    uint32(hdr[at]) or (uint32(hdr[at + 1]) shl 8) or
+      (uint32(hdr[at + 2]) shl 16) or (uint32(hdr[at + 3]) shl 24)
+  proc be32(at: int): uint32 =
+    (uint32(hdr[at]) shl 24) or (uint32(hdr[at + 1]) shl 16) or
+      (uint32(hdr[at + 2]) shl 8) or uint32(hdr[at + 3])
   const
+    EM_386 = 0x03'u16
     EM_X86_64 = 0x3E'u16
     EM_AARCH64 = 0xB7'u16
-  let hostMachine =
-    when hostCPU == "amd64": EM_X86_64
-    elif hostCPU == "arm64": EM_AARCH64
-    else: 0'u16
-  if hostMachine == 0'u16:
-    return true                       # unknown host arch -> don't reject
-  eMachine == hostMachine
+    CPU_TYPE_X86_64 = 0x01000007'u32
+    CPU_TYPE_ARM64 = 0x0100000C'u32
+    hostIs64 = sizeof(pointer) == 8
+    hostMachine =
+      when hostCPU == "amd64": EM_X86_64
+      elif hostCPU == "arm64": EM_AARCH64
+      elif hostCPU == "i386": EM_386
+      else: 0'u16
+    hostCpuType =
+      when hostCPU == "amd64": CPU_TYPE_X86_64
+      elif hostCPU == "arm64": CPU_TYPE_ARM64
+      else: 0'u32
+
+  if hdr[0] == 0x7F'u8 and hdr[1] == byte('E') and
+     hdr[2] == byte('L') and hdr[3] == byte('F'):
+    when defined(macosx):
+      return false                    # dyld cannot load an ELF at all
+    else:
+      if got < 20:
+        return true
+      # EI_CLASS: 1 = ELFCLASS32, 2 = ELFCLASS64.
+      if hdr[4] != (if hostIs64: 2'u8 else: 1'u8):
+        return false
+      # EI_DATA: 1 = little-endian, 2 = big-endian.
+      if hdr[5] != (if cpuEndian == littleEndian: 1'u8 else: 2'u8):
+        return false
+      if hostMachine == 0'u16:
+        return true                   # unknown host machine -> class only
+      let eMachine =
+        if cpuEndian == littleEndian:
+          uint16(hdr[18]) or (uint16(hdr[19]) shl 8)
+        else:
+          (uint16(hdr[18]) shl 8) or uint16(hdr[19])
+      return eMachine == hostMachine
+
+  # Mach-O magics as they appear in the file's first four bytes.
+  let thin64 = hdr[0] == 0xCF'u8 and hdr[1] == 0xFA'u8 and
+    hdr[2] == 0xED'u8 and hdr[3] == 0xFE'u8      # MH_MAGIC_64, little-endian
+  let thin32 = hdr[0] == 0xCE'u8 and hdr[1] == 0xFA'u8 and
+    hdr[2] == 0xED'u8 and hdr[3] == 0xFE'u8      # MH_MAGIC, little-endian
+  let fat = hdr[0] == 0xCA'u8 and hdr[1] == 0xFE'u8 and
+    hdr[2] == 0xBA'u8 and hdr[3] == 0xBE'u8      # FAT_MAGIC, big-endian
+  if not (thin64 or thin32 or fat):
+    return true                       # not an object header we classify
+  when not defined(macosx):
+    return false                      # no non-Darwin loader maps a Mach-O
+  else:
+    if thin32:
+      return not hostIs64
+    if thin64:
+      return hostCpuType == 0'u32 or le32(4) == hostCpuType
+    # FAT_MAGIC is also the Java class-file magic; there bytes 4..7 are a
+    # class-file version (>= 45), never a plausible slice count. Leave such a
+    # file, and a slice table longer than the bytes read, to the loader.
+    let slices = int(be32(4))
+    if slices <= 0 or slices > 32 or 8 + slices * 20 > got:
+      return true
+    if hostCpuType == 0'u32:
+      return true
+    for i in 0 ..< slices:
+      if be32(8 + i * 20) == hostCpuType:
+        return true
+    false
 
 proc nixPrefix(namePattern, header: string;
                libraryNames: openArray[string]): string =
   if not dirExists(extendedPath("/nix/store")):
     return ""
   let needle = namePattern.replace("*", "")
+  # Visit candidates in sorted order, as `config.nims`'s `nixPrefix` does
+  # (it sorts its `find` output) and as `nixLibDirIn` does: an unsorted
+  # `walkDir` makes the chosen prefix depend on directory order, so the
+  # helper and the source build could pick different store builds.
+  var prefixes: seq[string] = @[]
   # TODO(win-longpath): walk results escape; needs review
   for kind, path in walkDir("/nix/store"):
     if kind != pcDir:
@@ -4745,6 +5927,9 @@ proc nixPrefix(namePattern, header: string;
     let tail = splitPath(path).tail
     if needle.len > 0 and tail.find(needle) < 0:
       continue
+    prefixes.add(path)
+  prefixes.sort()
+  for path in prefixes:
     if not fileExists(extendedPath(path / header)):
       continue
     for libraryName in libraryNames:
@@ -4766,51 +5951,96 @@ const InterfaceLibSubdirs = [
   ## a `-L` search must probe (plain `lib`, `lib64`, Debian-multiarch triples)
   ## so a bare prefix like `/usr` resolves regardless of host layout.
 
+proc holdsLibrary(libDir, dylibName: string; hostArchOnly: bool): bool =
+  ## Whether `libDir/dylibName` exists and — when `hostArchOnly` — is a file
+  ## this host's loader can map (see `soMatchesHostArch`).
+  let path = libDir / dylibName
+  fileExists(extendedPath(path)) and
+    (not hostArchOnly or soMatchesHostArch(path))
+
 proc firstExistingPrefixLibDir(prefix: string;
-                               dylibNames: openArray[string]): string =
+                               dylibNames: openArray[string];
+                               hostArchOnly = false): string =
   ## Mirror of `config.nims`'s `firstExistingPrefixLibDir`: return the
   ## absolute libdir under `prefix` that holds one of `dylibNames`, or "".
   for libSub in InterfaceLibSubdirs:
     let candidate = prefix / libSub
     for dylibName in dylibNames:
-      if fileExists(extendedPath(candidate / dylibName)):
+      if holdsLibrary(candidate, dylibName, hostArchOnly):
         return candidate
   ""
 
 proc firstExistingLibDir(candidates: openArray[string];
-                         dylibNames: openArray[string]): string =
+                         dylibNames: openArray[string];
+                         hostArchOnly = false): string =
   ## Mirror of `config.nims`'s `firstExistingLibDir`: probe each candidate
   ## directly (it may already be a libdir like `/usr/lib64`) and then walk
   ## the standard lib subdirectories so a candidate like `/usr` resolves on
   ## `/usr/lib`, `/usr/lib64`, or a Debian-multiarch host.
+  ##
+  ## `hostArchOnly` is for candidates nobody chose for this build — a
+  ## conventional prefix, a store glob — where the directory's existence says
+  ## nothing about its architecture. An explicitly named prefix is taken as
+  ## given: a caller who names one owns that choice.
   for candidate in candidates:
     let path = candidate.strip()
     if path.len == 0:
       continue
     for dylibName in dylibNames:
-      if fileExists(extendedPath(path / dylibName)):
+      if holdsLibrary(path, dylibName, hostArchOnly):
         return path
-    let resolved = firstExistingPrefixLibDir(path, dylibNames)
+    let resolved = firstExistingPrefixLibDir(path, dylibNames, hostArchOnly)
     if resolved.len > 0:
       return resolved
   ""
 
-proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
-  ## Mirror of `config.nims`'s `nixLibDir`: scan `/nix/store` for a store
-  ## path matching `namePattern` whose libdir holds one of `dylibNames`.
-  if not dirExists(extendedPath("/nix/store")):
+proc nixLdflagsLibDir(dylibNames: openArray[string]): string =
+  ## Mirror of `config.nims`'s `nixLdflagsLibDir`: the first `-L<dir>` in
+  ## `NIX_LDFLAGS` (the active Nix dev shell's own link inputs) that carries
+  ## one of `dylibNames`. Unlike a store glob this is the shell's deliberate
+  ## choice for its target, so it needs no architecture filter.
+  for token in getEnv("NIX_LDFLAGS").splitWhitespace():
+    if token.startsWith("-L") and token.len > 2:
+      let dir = token[2 .. ^1]
+      for dylibName in dylibNames:
+        if fileExists(extendedPath(dir / dylibName)):
+          return dir
+  ""
+
+proc nixLibDirIn*(storeRoot, namePattern: string;
+                  dylibNames: openArray[string]): string =
+  ## Mirror of `config.nims`'s `nixLibDir`: scan `storeRoot` for a store
+  ## path matching `namePattern` whose libdir holds one of `dylibNames` built
+  ## for the host target.
+  ##
+  ## Candidates are visited in sorted order — `config.nims` sorts its `find`
+  ## output, and an unsorted `walkDir` would make the choice depend on
+  ## directory order — and each is filtered by `soMatchesHostArch`. Without
+  ## the filter "the first sorted match" is an arbitrary architecture on a
+  ## mixed store: CI's first `*-openssl-*` was a 32-bit build, baked into a
+  ## 64-bit helper's RPATH. `storeRoot` is a parameter so the selection can be
+  ## tested against a store-shaped directory; production passes `/nix/store`
+  ## through `nixLibDir`.
+  if not dirExists(extendedPath(storeRoot)):
     return ""
   let needle = namePattern.replace("*", "")
-  for kind, path in walkDir("/nix/store"):
+  var prefixes: seq[string] = @[]
+  for kind, path in walkDir(storeRoot):
     if kind != pcDir:
       continue
     let tail = splitPath(path).tail
     if needle.len > 0 and tail.find(needle) < 0:
       continue
-    let libDir = firstExistingLibDir([path], dylibNames)
+    prefixes.add(path)
+  prefixes.sort()
+  for path in prefixes:
+    let libDir = firstExistingLibDir([path], dylibNames, hostArchOnly = true)
     if libDir.len > 0:
       return libDir
   ""
+
+proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
+  nixLibDirIn("/nix/store", namePattern, dylibNames)
 
 proc addExternalPackagePath(flags: var seq[string]; workDir, envName: string;
                             candidates: openArray[string]; marker: string) =
@@ -5014,6 +6244,17 @@ proc stageHostDynlibsBesideBinary*(destDir: string): seq[string]
     # by `runtimeRpathCompilerFlags`, so there is nothing to stage.
     discard
 
+proc isHostSystemLibDir(dir: string): bool =
+  ## Mirror of `config.nims`'s `isHostSystemLibDir`: a directory of the HOST
+  ## distribution (`/usr/lib`, `/lib64`, a Debian multiarch triple, ...), as
+  ## opposed to a Nix store path or a prefix the caller named. Such a
+  ## directory is used for `-L` but never baked into RPATH: RPATH outranks the
+  ## loader's own defaults, so a Nix-linked binary would find the host's libc
+  ## there first and die before reading the recipe.
+  let d = dir.strip()
+  d == "/usr" or d.startsWith("/usr/") or d == "/lib" or
+    d.startsWith("/lib/") or d == "/lib64" or d.startsWith("/lib64/")
+
 proc externalHashFlags(workDir = ""): seq[string] =
   # Windows: there is no homebrew/nix prefix that ships libblake3 or libxxhash.
   # The reprobuild repo vendors portable C sources for both inside the
@@ -5113,6 +6354,43 @@ proc externalHashFlags(workDir = ""): seq[string] =
     result.add(runtimeRpathCompilerFlags(@[libDir], hostRuntimeLinkTarget()))
     result.add("--passL:-lxxhash")
 
+  # OpenSSL: a recipe may load it at module init (`std/net` under `-d:ssl`,
+  # or a direct `loadLib`) even when the host recipe declares no ssl link
+  # flags, and Nim's OpenSSL wrapper `dlopen`s it rather than linking it. The
+  # helpers run in a scrubbed environment and a source-built repro has no
+  # installed wrapper publishing `REPROBUILD_RUNTIME_LIBRARY_PATH`, so without
+  # a baked search path the helper died with `could not load: libcrypto…` —
+  # Distribution-And-Packaging §5 requires the runtime closure to include
+  # OpenSSL. Only the RPATH is added: there is nothing to link, and `-lssl`
+  # stays the business of the edges that declare `-d:ssl`.
+  #
+  # Resolution mirrors `config.nims`'s OpenSSL block, in its order: an
+  # explicit OPENSSL_LIBDIR / OPENSSL_PREFIX (the flake dev shell sets the
+  # former to its own target OpenSSL); the dev shell's own `-L` link inputs;
+  # the Homebrew prefixes; and last the store glob. The last two are
+  # filtered by target architecture — `/usr/local` on Apple Silicon is
+  # commonly an x86-64 Homebrew, and the store holds every architecture the
+  # host has ever built for.
+  let opensslNames = ["libssl.dylib", "libssl.3.dylib", "libssl.so", "libssl.so.3"]
+  let opensslLibDir = block:
+    var dir = firstExistingLibDir(
+      [getEnv("OPENSSL_LIBDIR"), getEnv("OPENSSL_PREFIX")], opensslNames)
+    if dir.len == 0:
+      dir = nixLdflagsLibDir(opensslNames)
+    if dir.len == 0:
+      dir = firstExistingLibDir(
+        ["/opt/homebrew/opt/openssl@3", "/opt/homebrew/opt/openssl",
+         "/usr/local/opt/openssl@3", "/usr/local/opt/openssl"],
+        opensslNames, hostArchOnly = true)
+    if dir.len == 0:
+      dir = nixLibDir("*-openssl-*", opensslNames)
+    dir
+  # A host distribution directory is not written into RPATH, for the reason
+  # given at the SQLite block below: the host loader already searches it, and
+  # an RPATH entry for it would let a Nix-linked helper load the host's libc.
+  if opensslLibDir.len > 0 and not isHostSystemLibDir(opensslLibDir):
+    result.add(runtimeRpathCompilerFlags(@[opensslLibDir], hostRuntimeLinkTarget()))
+
   # repro's own ASP solver (repro_solver) dlopens libclingo at module-init
   # time through a ``{.dynlib.}`` const. When repro runs as a CLI against an
   # arbitrary project, the extract_runner links repro's DSL (which pulls in
@@ -5152,7 +6430,8 @@ proc externalHashFlags(workDir = ""): seq[string] =
   # config.nims's `when not defined(windows) and not defined(macosx)`).
   #
   # Resolution order and the RPATH rule match `config.nims` exactly: an
-  # explicit SQLITE_LIBDIR/SQLITE_PREFIX, then a Nix store SQLite whenever a
+  # explicit SQLITE_LIBDIR/SQLITE_PREFIX, then a Nix store SQLite built for
+  # the host target (`nixLibDir` filters the glob by architecture) whenever a
   # Nix toolchain is present, and the distribution's directories only on a
   # host with no Nix at all. A HOST directory is used for `-L` but never
   # written into RPATH: this edge runs with an allowlisted environment, so
@@ -5181,10 +6460,7 @@ proc externalHashFlags(workDir = ""): seq[string] =
           sqliteNames)
     if sqliteLibDir.len > 0:
       result.add("--passL:-L" & sqliteLibDir)
-      let d = sqliteLibDir.strip()
-      let hostDir = d == "/usr" or d.startsWith("/usr/") or d == "/lib" or
-        d.startsWith("/lib/") or d == "/lib64" or d.startsWith("/lib64/")
-      if not hostDir:
+      if not isHostSystemLibDir(sqliteLibDir):
         result.add("--passL:-Wl,-rpath," & sqliteLibDir)
 
 proc consumerCompilePathFlags*(workDir = getCurrentDir()): seq[string] =
@@ -5245,6 +6521,7 @@ const
   ProviderCompileEnvironmentPassthrough* = [
     "REPRO_NIM_COMPILER",
     "REPRO_BOOTSTRAP_CC",
+    "REPRO_BOOTSTRAP_SDKROOT",
     "CC",
     "REPRO_PROVIDER_NIMCACHE_MODE",
     ProviderParallelBuildEnv,
@@ -5298,7 +6575,8 @@ const
 
 proc positionKeyedNimcacheKey*(declaredCache, producingProject,
                                workDir: string;
-                               hostFlags, libFlags: openArray[string]): string =
+                               hostFlags, libFlags: openArray[string];
+                               compileFlags: openArray[string] = []): string =
   ## POSITION-KEYED nimcache identity: producing project x declared cache x
   ## variant (Tool-Owned-Caches.md, "Identity").
   ##
@@ -5352,10 +6630,19 @@ proc positionKeyedNimcacheKey*(declaredCache, producingProject,
   ##   lives elsewhere: ``interfaceExtractionContext`` still folds
   ##   ``reproLibSourceFingerprint`` into ``interfaceExtractionFingerprint``.
   ##
-  ## WHAT REMAINS: the toolchain and library set. A nimcache holds objects
-  ## produced by one Nim + one host C compiler against one ``--path`` set;
-  ## mixing them in one directory is unsound independently of position.
-  ## These are flag strings, not content, so they are stable across edits.
+  ## WHAT REMAINS: the toolchain, the library set and the COMPILE
+  ## CONFIGURATION. A nimcache holds objects produced by one Nim + one host
+  ## C compiler against one ``--path`` set under one set of ``--define``s and
+  ## code-generation options; mixing them in one directory is unsound
+  ## independently of position. ``compileFlags`` carries every compile option
+  ## of the command (see ``nimcacheKeyedCompileFlags``: the whole flag list
+  ## minus the location-only ``--out:`` / ``--nimcache:`` and the module
+  ## argument). Without it one recipe compiled as a plain provider and as a
+  ## ``-d:useNimRtl -d:reproNimRtlShared`` library shared one directory, and
+  ## Nim reused C generated under the other configuration (clang: "incomplete
+  ## definition of type 'Exception'" in ``@pjson.nim.c``). These are flag
+  ## strings, not content, so they are stable across edits and identical for
+  ## identical configurations.
   ##
   ## SCOPE (Compiles-Are-Normal-Edges.md): this selects a SCRATCH DIRECTORY
   ## for Nim's own incremental cache. It is NOT the cache key of any
@@ -5372,7 +6659,29 @@ proc positionKeyedNimcacheKey*(declaredCache, producingProject,
     parts.add(f)
   for f in libFlags:
     parts.add(f)
+  if compileFlags.len > 0:
+    # Domain-separated so a compile flag is never read as a library flag.
+    parts.add("compile-flags")
+    for f in compileFlags:
+      parts.add(f)
   fnvHex64(parts)
+
+proc nimcacheKeyedCompileFlags*(command: openArray[string];
+                                moduleArg: string): seq[string] =
+  ## The options of a ``nim c`` command that select the C it generates:
+  ## everything after the compiler and its subcommand, minus the
+  ## location-only ``--out:`` / ``--nimcache:`` and the module argument
+  ## (which ``positionKeyedNimcacheKey`` already keys as the producing
+  ## project). ``--parallelBuild:`` and ``--listCmd`` only schedule or echo
+  ## the C compiles, so they stay out: an environment tuning knob must not
+  ## cost a cold cache.
+  for i in 2 ..< command.len:
+    let arg = command[i]
+    if arg.startsWith("--out:") or arg.startsWith("--nimcache:") or
+        arg.startsWith("--parallelBuild:") or arg == "--listCmd" or
+        arg == moduleArg:
+      continue
+    result.add(arg)
 
 proc providerNimcacheMode(): string =
   let mode = getEnv("REPRO_PROVIDER_NIMCACHE_MODE")
@@ -5702,7 +7011,9 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
                                  resourceModule = "";
                                  extraPaths: openArray[string] = [];
                                  consumerRoot = "";
-                                 useExtractionCache = true):
+                                 useExtractionCache = true;
+                                 recipeRelative = false;
+                                 relocationAnchors: openArray[string] = []):
     ProjectInterfaceArtifact =
   ## ``useExtractionCache`` controls the built-in warm short-circuit. It is
   ## ``false`` for exactly one caller: the child of the extraction EDGE.
@@ -5751,6 +7062,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     inputFingerprint = interfaceExtractionFingerprint(fingerprintContext)
 
   let moduleDir = parentDir(modulePath)
+  let absoluteModuleDir = parentDir(absolutePath(modulePath))
   # Windows: the extract_runner.nim path is passed verbatim to a child
   # `nim c` invocation, and nim opens it via the non-extended Win32 API,
   # so paths longer than MAX_PATH (260 chars) cause `Error: cannot open
@@ -5805,6 +7117,14 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     let absoluteResourceModule =
       absolutePath(resourceModule).replace('\\', '/')
     resourceImport = "import \"" & absoluteResourceModule & "\"\n"
+  # The runner of a recipe-relative extraction (`extractInterfaceEdge`)
+  # lives OUTSIDE the recipe's tree, under the action-cache root; it imports
+  # the recipe by absolute path (scratch only — the edge's key and record
+  # name the recipe relative to its own directory). Nim reads the
+  # `config.nims` / `nim.cfg` chain of the MAIN module's directory — the
+  # runner's — not the recipe's; see
+  # Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
+  # compiles" for what that means for a recipe's configuration.
   let runnerSource =
     "import std/os\n" &
     "import repro_interface_artifacts\n" &
@@ -5813,7 +7133,14 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     resourceImport &
     "import \"" & absoluteModulePath & "\"\n\n" &
     "let artifact = artifactFromRegisteredDsl(paramStr(3))\n" &
-    "writeInterfaceArtifact(paramStr(1), artifact)\n" &
+    (if recipeRelative:
+       # Source locations travel relative to the recipe.
+       "var anchors: seq[string] = @[]\n" &
+       "for i in 5 .. paramCount(): anchors.add(paramStr(i))\n" &
+       "writeInterfaceArtifactRecipeRelative(paramStr(1), artifact, " &
+       "paramStr(4), anchors)\n"
+     else:
+       "writeInterfaceArtifact(paramStr(1), artifact)\n") &
     "writeNimInterfaceStub(paramStr(2), artifact)\n"
   # CONTENT-KEYED, and therefore stable across invocations.
   #
@@ -5917,7 +7244,12 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     if consumerRoot.len > 0: absolutePath(consumerRoot) else: getCurrentDir()
   let interfaceDefines = @[
     "--define:reproInterfaceMode",
-    "--define:reproBin=" & getAppFilename(),
+    # The path that re-enters this engine, NOT `getAppFilename()`: under the
+    # portable Linux launcher that names the glibc loader, so the macro's
+    # `staticExec("<loader> internal resolve-package …")` failed, its empty
+    # output read as "unresolved", and every `dslDeps:` import was dropped
+    # without a diagnostic (`publicCliImagePath` in repro_core/source_root).
+    "--define:reproBin=" & publicCliImagePath(),
     # NOT workDir. On the cross-repo producer path workDir comes from
     # `reprobuildLibraryWorkDir()`, which resolves through
     # `currentSourcePath()` and therefore names REPROBUILD's own root -- so
@@ -5927,23 +7259,14 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     "--define:reproConsumerRoot=" & effectiveConsumerRoot,
   ] & (if getEnv("REPRO_DSLDEPS_DEBUG").len > 0:
          @["--define:reproDslDepsDebug"] else: @[])
-  let nimcache =
-    if providerNimcacheMode() == "per-binary":
-      tempRoot / "nimcache"
-    else:
-      when defined(windows):
-        tempParent / "nimcache-interface" /
-          positionKeyedNimcacheKey(InterfaceCacheName, modulePath, workDir,
-            hostFlags, libFlags)
-      else:
-        buildScratchRoot(workDir, scratchDir) / "nimcache-interface" /
-          positionKeyedNimcacheKey(InterfaceCacheName, modulePath, workDir,
-            hostFlags, libFlags)
+  # The `--nimcache:` argument is filled in once the command is complete: its
+  # position key folds in every compile option (defines, producer paths), so
+  # two configurations of one recipe never share generated C.
   var command = boundedNimCompileCommand()
   command.add(interfaceDefines)
   command.add(@[
     "--path:" & moduleDir,
-    "--nimcache:" & nimcache,
+    "--nimcache:",
     "--out:" & runnerBin,
     runnerPath
   ])
@@ -5978,11 +7301,37 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # (index 2), never after `runnerPath`, or nim treats it as a second input file.
   if getEnv("REPRO_INTERFACE_LIST_CMD").len > 0:
     command.insert(@["--listCmd"], 2)
+  block:
+    let nimcache =
+      if providerNimcacheMode() == "per-binary":
+        tempRoot / "nimcache"
+      else:
+        let key = positionKeyedNimcacheKey(InterfaceCacheName, modulePath,
+          workDir, hostFlags, libFlags,
+          nimcacheKeyedCompileFlags(command, runnerPath))
+        when defined(windows):
+          tempParent / "nimcache-interface" / key
+        else:
+          buildScratchRoot(workDir, scratchDir) / "nimcache-interface" / key
+    for i in 0 ..< command.len:
+      if command[i] == "--nimcache:":
+        command[i] = "--nimcache:" & nimcache
+        break
   # `workDir` is the reprobuild library lookup/fingerprint root. Installed Nix
   # packages deliberately point it at their immutable source closure, so it is
   # not a valid compiler working directory: Nim writes relative linker response
   # files (for example `extract_runner_linkerArgs.txt`) into its process CWD.
   # Keep response files and binaries in the extraction's private directory.
+  #
+  # This holds for a recipe-relative extraction too, whose EDGE runs in the
+  # recipe directory: Nim writes `<runner>_linkerArgs.txt` into its cwd for a
+  # long link line and deletes it again, and that transient entry in the
+  # recipe's root changes the root's mtime — which an editable develop
+  # override folds into its consumers' action keys
+  # (`computeOverrideContentIdentity`). Measured: every consumer action
+  # missed on the second build. The compiler's private cwd is under the
+  # edge's scratch, so its reads stay absolute and the edge's record names
+  # them relative to the recipe.
   let compileExecution = runInterfaceCompilerCommand(command, cwd = tempRoot)
   let runnerExe = compiledExecutablePath(runnerBin)
   if not fileExists(extendedPath(runnerExe)):
@@ -6009,17 +7358,24 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # lives in a temp tree with no DLLs of its own. See the proc's docstring.
   stageHostDynlibsBesideBinary(parentDir(runnerExe))
   ensureExecutable(runnerExe)
-  let execution = runCommand(@[
+  var runnerArgs = @[
     runnerExe,
     absolutePath(artifactPath),
     absolutePath(stubPath),
-    absoluteModulePath
-  ], cwd = tempRoot)
+    absoluteModulePath]
+  if recipeRelative:
+    runnerArgs.add(absoluteModuleDir)
+    for anchor in relocationAnchors:
+      runnerArgs.add(anchor)
+  let execution = runCommand(runnerArgs, cwd = tempRoot)
   if not fileExists(extendedPath(artifactPath)):
     raise newException(IOError,
       "interface extraction did not write artifact: " & artifactPath &
         "\n" & execution.output)
-  result = readInterfaceArtifactWithWarm(artifactPath)
+  result =
+    if recipeRelative: readInterfaceArtifactRebased(artifactPath,
+      absoluteModuleDir)
+    else: readInterfaceArtifactWithWarm(artifactPath)
   writeFile(extendedPath(interfaceExtractionCachePath(artifactPath)), toHex(
       inputFingerprint.bytes))
   writeInterfaceExtractionCacheRecord(artifactPath, fingerprintContext,
@@ -6027,11 +7383,16 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
 
 proc providerFingerprintFor*(inputSources: openArray[string];
                              interfaceFingerprint: ContentDigest;
-                             workDir = getCurrentDir()): ContentDigest =
+                             workDir = getCurrentDir();
+                             libFingerprint = ""): ContentDigest =
+  ## ``libFingerprint``: ``reproLibSourceFingerprint(workDir)`` when the
+  ## caller already has it.
   var payload: seq[byte] = @[]
   payload.writeString("reprobuild.providerSources.v2")
   payload.writeDigest(interfaceFingerprint)
-  payload.writeString(reproLibSourceFingerprint(workDir))
+  payload.writeString(
+    if libFingerprint.len > 0: libFingerprint
+    else: reproLibSourceFingerprint(workDir))
   for path in inputSources:
     payload.writeString(path)
     let content = toBytes(readFile(extendedPath(path)))
@@ -6132,7 +7493,8 @@ proc commonSourceRoot(paths: openArray[string]): string =
       prefix = up
   prefix
 
-proc projectSourceSemanticIdentity*(inputSources: openArray[string]):
+proc projectSourceSemanticIdentity*(inputSources: openArray[string];
+                                    sourceNames: openArray[string] = []):
     ContentDigest =
   ## The semantic identity of the project's own provider source closure:
   ## the ordered (root-relative path, content) set of the ``.nim`` sources
@@ -6143,15 +7505,22 @@ proc projectSourceSemanticIdentity*(inputSources: openArray[string]):
   ## ``ProviderArtifactId`` (the RP1 sharing property). In v1 this is the
   ## whole source closure; RP6 will split the private-impl portion out so
   ## it does not re-key downstream.
+  ##
+  ## ``sourceNames``, when given (one per source), are the names the
+  ## identity uses instead: a recipe-relative provider compile passes each
+  ## source as it names it relative to the recipe (``relocatableName``), so
+  ## a closure reaching ``../shared`` does not fold the name of the recipe's
+  ## own directory into the identity.
   var normalized: seq[string] = @[]
   for path in inputSources:
     normalized.add(normalizedStampPath(path))
   let root = commonSourceRoot(normalized)
   var payload: seq[byte] = @[]
   payload.writeString("reprobuild.projectSourceSemanticIdentity.v1")
-  for path in normalized:
+  for i, path in normalized:
     let relPath =
-      if root.len > 0 and path == root: extractFilename(path)
+      if sourceNames.len == normalized.len: sourceNames[i]
+      elif root.len > 0 and path == root: extractFilename(path)
       elif root.len > 0 and path.startsWith(root & "/"):
         path[root.len + 1 .. ^1]
       else: extractFilename(path)
@@ -6161,6 +7530,305 @@ proc projectSourceSemanticIdentity*(inputSources: openArray[string]):
     payload.add(content)
   blake3DomainDigest(payload, hdActionFingerprint)
 
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services §4.3's STALE-LIFT PRECONDITION — the recorded
+# provenance of a lifted interface artifact.
+#
+# §4.3 (the block added 2026-10-11): "Before comparing, establish that the
+# owner's artifact corresponds to the owner's current definition. If it cannot
+# be established -- the artifact is older than the definition, or its
+# provenance is unknown -- the decision REFUSES and says the lift is stale,
+# naming what to re-run. It does not fall through to 'fingerprint equal'."
+#
+# WHAT IS RECORDED, AND WHY IT IS THIS AND NOT ONE OF THE THINGS ALREADY HERE.
+#
+# The recorded value is `projectSourceSemanticIdentity` over the recipe's own
+# import closure: the ordered (root-relative path, content) set. It is a PURE
+# FUNCTION OF THE OWNER'S DEFINITION -- no absolute path, no `workDir`, no
+# compiler identity, no reprobuild library fingerprint -- which is the one
+# property the check needs, because the side that RE-ESTABLISHES it is a
+# DIFFERENT PROCESS ON A DIFFERENT HOST CONFIGURATION (a consumer's `repro
+# up`, reading an artifact the owner's `repro dev-env` wrote).
+#
+# Three records in this file were candidates and each loses on exactly that
+# property:
+#
+#   * `<artifact>.inputs` / `interfaceExtractionFingerprint` folds in the
+#     absolute `modulePath`, the `workDir` (a read-only `/nix/store` path for
+#     an installed engine), `nimCompilerPath()`, `libPathFlags` and
+#     `reproLibSourceFingerprint`. A consumer recomputing it gets a different
+#     digest for ENGINE reasons alone, so every fresh artifact would refuse as
+#     stale.
+#   * `<artifact>.liftkey` / `interfaceLiftActionKey` has the same defect
+#     (`nimCompilerIdentity`, `frontendRuntimeIdentity(workDir)`,
+#     `InterfaceFormatVersion`) and is additionally written ONLY by
+#     `liftInterfaceArtifact` -- the TI2 typed-contract path -- never by the
+#     extraction edge that writes `.repro/dev-env/<segment>/` and
+#     `.repro/build/<target>/`, which are the two directories the consumer's
+#     resolver actually enumerates.
+#   * `<artifact>.inputs.meta`'s `sourceStamps` ARE definition-only, but they
+#     are mtime+size stamps rather than content, so a `git checkout` that
+#     rewrites mtimes without changing content reports a FALSE stale and a
+#     `cp -p` restore reports a FALSE fresh. They are also a private type with
+#     a private decoder, and -- measured at `8b39340a0` in this checkout --
+#     `.repro/dev-env/default/` carries NEITHER `.inputs` NOR `.inputs.meta`
+#     while `.repro/build/repro/` carries both, because the relocatable
+#     extraction edge writes its outputs under the action-cache root and only
+#     the ARTIFACT and the STUB are copied to the caller's path.
+#
+# So the stamp is written beside the caller's artifact copy, by whichever
+# process publishes those bytes.
+#
+# IT IS WRITTEN ONLY WHERE THE BYTES ARE PRODUCED OR REPUBLISHED FROM THOSE
+# SOURCES, AND THERE IS DELIBERATELY NO `ensure...` VARIANT. A proc that
+# stamped an artifact it merely FOUND on disk would compute the identity of
+# the CURRENT sources and record it against an OLD artifact -- which is
+# precisely the silent attach §4.3 exists to prevent, performed by the
+# freshness check itself. If a reader wants such a proc, the answer is no.
+# ---------------------------------------------------------------------------
+
+const
+  InterfaceProvenanceSchemaId* = "reprobuild.interface-provenance.v1"
+    ## First line of the sidecar, verbatim. A sidecar whose first line is
+    ## anything else is UNKNOWN provenance, never "assume current": a
+    ## schema change is a re-lift, and reading an unknown layout
+    ## optimistically is how a stale record gets treated as a fresh one.
+
+type
+  InterfaceArtifactProvenance* = object
+    ## What a lifted interface artifact was lifted FROM, as recorded
+    ## beside it.
+    recipeFileName*: string
+      ## The recipe's BASENAME (`repro.nim` / `reprobuild.nim`), not its
+      ## path. A path would make the record false in every other
+      ## worktree of the same project, and the consumer resolves the
+      ## recipe from the owner's directory anyway.
+    resourceModule*: string
+      ## The separate resource module's path RELATIVE TO THE RECIPE'S
+      ## DIRECTORY, or "" when the recipe declared none. Relative and not
+      ## a basename, because the TI2 producer shape puts it in a
+      ## subdirectory (`<root>/repro/resources.nim`) and a basename would
+      ## not resolve. Carried because it CHANGES THE CLOSURE: a
+      ## re-establishment that ignored it would walk a different source
+      ## set than the lift did and report a difference that is an
+      ## artefact of the walk.
+    extraPaths*: seq[string]
+      ## The extra `--path` search roots, recipe-relative, same reason.
+    includeSiblingSources*: bool
+      ## Which `discoverNimSources` census produced the closure. Same
+      ## reason again, and it is the one of the four that is a BOOL --
+      ## so a default-constructed record silently claims `false`, which
+      ## is why `readInterfaceArtifactProvenance` refuses a sidecar that
+      ## does not state it.
+    closureIdentity*: string
+      ## Lowercase hex of `projectSourceSemanticIdentity` over that
+      ## closure. THE comparand.
+    sourceDigests*: seq[tuple[path, digest: string]]
+      ## Per-source (root-relative path, content digest). Diagnostics
+      ## only -- the comparand above is the single value that decides --
+      ## and they exist so a refusal can NAME the source that moved
+      ## instead of saying only that something did.
+
+proc interfaceArtifactProvenancePath*(artifactPath: string): string =
+  ## The sidecar's path. Named `.provenance` rather than reusing one of
+  ## the freshness sidecars because it answers a different question: the
+  ## others decide whether the ENGINE should re-run the lift, this one
+  ## decides whether a THIRD PARTY may compare against the result.
+  artifactPath & ".provenance"
+
+proc recipeClosureSourceDigests*(modulePath: string;
+                                 resourceModule = "";
+                                 extraPaths: openArray[string] = [];
+                                 includeSiblingSources = false):
+    tuple[identity: string; sources: seq[tuple[path, digest: string]]] =
+  ## The owner's definition, as a single comparand plus the per-source
+  ## detail a diagnostic needs.
+  ##
+  ## The closure is RE-DISCOVERED rather than read from a recorded list,
+  ## and that is the point: adding an import adds a file, so a check that
+  ## re-hashed only the files the record names could not see a definition
+  ## grow. The recorded list is compared against this one for NAMING, not
+  ## for membership.
+  var sources: seq[string] = @[]
+  for src in discoverNimSources(modulePath, extraPaths, includeSiblingSources):
+    let normalized = normalizedStampPath(src)
+    if normalized notin sources:
+      sources.add(normalized)
+  if resourceModule.len > 0:
+    for src in discoverNimSources(resourceModule, extraPaths,
+                                  includeSiblingSources):
+      let normalized = normalizedStampPath(src)
+      if normalized notin sources:
+        sources.add(normalized)
+  result.identity =
+    toHex(projectSourceSemanticIdentity(sources).bytes).toLowerAscii()
+  let root = commonSourceRoot(sources)
+  for path in sources:
+    let relPath =
+      if root.len > 0 and path == root: extractFilename(path)
+      elif root.len > 0 and path.startsWith(root & "/"):
+        path[root.len + 1 .. ^1]
+      else: extractFilename(path)
+    let content =
+      if fileExists(extendedPath(path)): readFile(extendedPath(path))
+      else: ""
+    result.sources.add((path: relPath,
+      digest: toHex(blake3DomainDigest(toBytes(content),
+        hdActionFingerprint).bytes).toLowerAscii()))
+
+proc renderInterfaceArtifactProvenance*(value: InterfaceArtifactProvenance):
+    string =
+  ## The sidecar's bytes. A line-oriented text format rather than JSON so
+  ## this module takes no new import, and strictly keyed so an unknown
+  ## line is a refusal rather than a field quietly ignored.
+  var lines = @[InterfaceProvenanceSchemaId,
+    "recipe " & value.recipeFileName,
+    "resource-module " & (if value.resourceModule.len == 0: "-"
+                          else: value.resourceModule),
+    "sibling-sources " & (if value.includeSiblingSources: "1" else: "0"),
+    "closure-identity " & value.closureIdentity]
+  for extra in value.extraPaths:
+    lines.add("extra-path " & extra)
+  for src in value.sourceDigests:
+    lines.add("source " & src.digest & " " & src.path)
+  lines.join("\n") & "\n"
+
+proc parseInterfaceArtifactProvenance*(text: string):
+    Option[InterfaceArtifactProvenance] =
+  ## `none` means UNKNOWN PROVENANCE, in every failure mode: a wrong
+  ## schema line, a missing required key, an unknown key, a malformed
+  ## `source` row. There is no partial success, because a partially
+  ## understood record is one whose comparand might have come from a
+  ## different scheme.
+  var value = InterfaceArtifactProvenance()
+  var sawRecipe = false
+  var sawResourceModule = false
+  var sawSibling = false
+  var sawIdentity = false
+  var first = true
+  for rawLine in text.splitLines():
+    let line = rawLine.strip()
+    if first:
+      first = false
+      if line != InterfaceProvenanceSchemaId:
+        return none(InterfaceArtifactProvenance)
+      continue
+    if line.len == 0:
+      continue
+    let sep = line.find(' ')
+    if sep <= 0:
+      return none(InterfaceArtifactProvenance)
+    let key = line[0 ..< sep]
+    let rest = line[sep + 1 .. ^1].strip()
+    case key
+    of "recipe":
+      if sawRecipe or rest.len == 0: return none(InterfaceArtifactProvenance)
+      value.recipeFileName = rest
+      sawRecipe = true
+    of "resource-module":
+      if sawResourceModule: return none(InterfaceArtifactProvenance)
+      value.resourceModule = (if rest == "-": "" else: rest)
+      sawResourceModule = true
+    of "sibling-sources":
+      if sawSibling or rest notin ["0", "1"]:
+        return none(InterfaceArtifactProvenance)
+      value.includeSiblingSources = rest == "1"
+      sawSibling = true
+    of "closure-identity":
+      if sawIdentity or rest.len == 0: return none(InterfaceArtifactProvenance)
+      value.closureIdentity = rest
+      sawIdentity = true
+    of "extra-path":
+      if rest.len == 0: return none(InterfaceArtifactProvenance)
+      value.extraPaths.add(rest)
+    of "source":
+      let gap = rest.find(' ')
+      if gap <= 0: return none(InterfaceArtifactProvenance)
+      value.sourceDigests.add((path: rest[gap + 1 .. ^1].strip(),
+        digest: rest[0 ..< gap]))
+    else:
+      # An unknown key is UNKNOWN PROVENANCE, not a field to skip. A
+      # writer that added a key this reader does not understand may well
+      # have changed what `closure-identity` means.
+      return none(InterfaceArtifactProvenance)
+  if not (sawRecipe and sawResourceModule and sawSibling and sawIdentity):
+    return none(InterfaceArtifactProvenance)
+  some(value)
+
+proc readInterfaceArtifactProvenance*(artifactPath: string):
+    Option[InterfaceArtifactProvenance] =
+  ## The recorded provenance of the artifact at `artifactPath`, or `none`
+  ## when there is none to read. ABSENT AND UNREADABLE ARE THE SAME
+  ## ANSWER and it is `none`: both are "cannot be established", which
+  ## §4.3 makes a refusal.
+  let path = interfaceArtifactProvenancePath(artifactPath)
+  if not fileExists(extendedPath(path)):
+    return none(InterfaceArtifactProvenance)
+  try:
+    parseInterfaceArtifactProvenance(readFile(extendedPath(path)))
+  except CatchableError:
+    none(InterfaceArtifactProvenance)
+
+proc writeInterfaceArtifactProvenance*(artifactPath, modulePath: string;
+                                       resourceModule = "";
+                                       extraPaths: openArray[string] = [];
+                                       includeSiblingSources = false) =
+  ## Record what the artifact just published at `artifactPath` was lifted
+  ## from. Call this ONLY from a site that produced or republished those
+  ## bytes from `modulePath`'s closure -- see this section's header for
+  ## why there is no `ensure` variant.
+  ##
+  ## A failure to write is swallowed, exactly as
+  ## `writeInterfaceExtractionCacheRecord` swallows its own: the artifact
+  ## is still correct, and the consequence of a missing sidecar is a
+  ## REFUSAL naming the re-lift rather than a silent attach. That is the
+  ## safe direction, and it is the reason this write is allowed to be
+  ## best-effort at all.
+  try:
+    # RECORDED RELATIVE TO THE RECIPE'S OWN DIRECTORY, not as a basename.
+    #
+    # A basename was the first spelling and it is wrong for the shape
+    # this repository actually uses: the TI2 separate-resource-module
+    # producer puts its module at `<root>/repro/resources.nim`, whose
+    # basename resolves to `<root>/resources.nim` -- a file that does
+    # not exist, so every such producer would answer "provenance
+    # unknown" and refuse. Relative keeps the record true in any
+    # worktree AND resolvable by the reader.
+    #
+    # A path that is NOT under the recipe's directory falls back to its
+    # basename, which the reader will not find and will answer UNKNOWN
+    # PROVENANCE for -- a refusal naming the re-lift. That is the safe
+    # direction and it is a LIMIT, not a design: an out-of-tree resource
+    # module or extra path is not re-establishable from the owner's
+    # directory alone, and inventing an absolute path here would make
+    # the record false in every other checkout.
+    let recipeDir = parentDir(normalizedStampPath(modulePath))
+    proc recipeRelative(path: string): string =
+      let normalized = normalizedStampPath(path)
+      if recipeDir.len > 0 and normalized.startsWith(recipeDir & "/"):
+        normalized[recipeDir.len + 1 .. ^1]
+      else:
+        extractFilename(normalized)
+    var extras: seq[string] = @[]
+    for extra in extraPaths:
+      if extra.len > 0:
+        extras.add(recipeRelative(extra))
+    let closure = recipeClosureSourceDigests(modulePath, resourceModule,
+      extraPaths, includeSiblingSources)
+    writeFile(extendedPath(interfaceArtifactProvenancePath(artifactPath)),
+      renderInterfaceArtifactProvenance(InterfaceArtifactProvenance(
+        recipeFileName: extractFilename(normalizedStampPath(modulePath)),
+        resourceModule:
+          if resourceModule.len == 0: ""
+          else: recipeRelative(resourceModule),
+        extraPaths: extras,
+        includeSiblingSources: includeSiblingSources,
+        closureIdentity: closure.identity,
+        sourceDigests: closure.sources)))
+  except CatchableError:
+    discard
+
 proc computeProviderArtifactId*(
     inputSources: openArray[string];
     interfaceFingerprint: ContentDigest;
@@ -6169,8 +7837,12 @@ proc computeProviderArtifactId*(
     providerImplementationImports: openArray[string] = [];
     publicDependencyInterfaceFingerprints: openArray[string] = [];
     providerCompileOptions: openArray[string] = [];
-    workDir = getCurrentDir()): ContentDigest =
+    workDir = getCurrentDir();
+    sourceNames: openArray[string] = [];
+    frontendIdentity = ""): ContentDigest =
   ## The v1 ``ProviderArtifactId`` (Provider-Runtime-Protocol-v1.md §1).
+  ## ``frontendIdentity``: ``frontendRuntimeIdentity(workDir)`` when the
+  ## caller already has it.
   ##
   ## ``publicDependencyInterfaceFingerprints`` is the SHARING key: two
   ## consumers whose lock resolves the same dependency version pass the
@@ -6179,8 +7851,10 @@ proc computeProviderArtifactId*(
   var payload: seq[byte] = @[]
   payload.writeString("reprobuild.providerArtifactId.v1")
   payload.writeU32Le(ProviderProtocolVersionV1)
-  payload.writeString(frontendRuntimeIdentity(workDir))
-  payload.writeDigest(projectSourceSemanticIdentity(inputSources))
+  payload.writeString(
+    if frontendIdentity.len > 0: frontendIdentity
+    else: frontendRuntimeIdentity(workDir))
+  payload.writeDigest(projectSourceSemanticIdentity(inputSources, sourceNames))
   # The interface fingerprint is the project's own public-signature
   # identity; carried so an interface-only change re-keys the artifact.
   payload.writeDigest(interfaceFingerprint)
@@ -6481,7 +8155,15 @@ proc rtlModeDefines*(mode: ReproRtlMode): seq[string] =
 
 proc providerCompileCommand*(modulePath, outputBinaryPath: string;
                              workDir = getCurrentDir();
-                             scratchDir = ""): seq[string] =
+                             scratchDir = "";
+                             extraFlags: openArray[string] = []): seq[string] =
+  # `extraFlags` are further compile options (a library build's `--app:lib`
+  # and RTL defines, a caller's `--passL`/`--define`s). They are placed
+  # before the module argument and, like every other compile option of the
+  # command, key the nimcache: a caller must pass them HERE rather than
+  # inserting them into the returned command, or two configurations would
+  # share one directory of generated C.
+  #
   # The Nim provider nimcache holds generated C/object files with long
   # `@m..@s..nim.c` names. When `outputBinaryPath` lands deep inside a
   # CMake TryCompile scratch tree, a nimcache placed next to it overflows
@@ -6526,12 +8208,8 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   # TryCompile scratch trees hit (Nim's mkdir does not use the \\?\
   # extended-length prefix).
   let nimcacheRoot = getTempDir() / "repro-nimcache-provider"
-  let nimcache =
-    if providerNimcacheMode() == "per-binary":
-      nimcacheRoot / providerNimcacheKey(outputBinaryPath)
-    else:
-      nimcacheRoot / positionKeyedNimcacheKey(ProviderCacheName, modulePath,
-        workDir, hostFlags, libFlags)
+  # The position key folds in the finished command's compile options, so the
+  # `--nimcache:` argument is filled in last (see the end of this proc).
   result = boundedNimCompileCommand()
   result.add(@[
     # Provider compiles are often nested inside latency-sensitive graph
@@ -6539,8 +8217,11 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
     # vregs ICEs and unbounded nested compiler bursts. Hosts with a validated
     # toolchain can opt into bounded concurrency through the environment.
     "--define:reproProviderMode",
-    "--path:" & parentDir(modulePath),
-    "--nimcache:" & nimcache,
+    # A recipe-relative compile names the module by its file name and runs
+    # in its directory; its search path is then that directory, `.`.
+    "--path:" & (if parentDir(modulePath).len > 0: parentDir(modulePath)
+                 else: "."),
+    "--nimcache:",
     "--out:" & outputBinaryPath,
     modulePath
   ])
@@ -6579,6 +8260,20 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
       dynamicFlags.add("--passL:-Wl,-rpath," & libDir)
     for flag in dynamicFlags:
       result.insert(flag, 2)
+  # Flags after the module argument are run arguments, so these go before it.
+  for flag in extraFlags:
+    result.insert(flag, result.len - 1)
+  let nimcache =
+    if providerNimcacheMode() == "per-binary":
+      nimcacheRoot / providerNimcacheKey(outputBinaryPath)
+    else:
+      nimcacheRoot / positionKeyedNimcacheKey(ProviderCacheName, modulePath,
+        workDir, hostFlags, libFlags,
+        nimcacheKeyedCompileFlags(result, modulePath))
+  for i in 0 ..< result.len:
+    if result[i] == "--nimcache:":
+      result[i] = "--nimcache:" & nimcache
+      break
 
 proc providerCompileConfigurationIdentity*(command: openArray[string]):
     ContentDigest =
@@ -6598,7 +8293,9 @@ proc providerCompileConfigurationIdentity*(command: openArray[string]):
 proc providerLibraryCompileCommand*(modulePath, outputBinaryPath: string;
                                     mode: ReproRtlMode;
                                     workDir = getCurrentDir();
-                                    scratchDir = ""): seq[string] =
+                                    scratchDir = "";
+                                    extraFlags: openArray[string] = []):
+    seq[string] =
   ## The provider-LIBRARY compile command (M4c). Same base as
   ## ``providerCompileCommand`` (full repro ``--path`` set + host flags +
   ## ``-d:reproProviderMode``), rendered as a shared library in the requested
@@ -6607,10 +8304,10 @@ proc providerLibraryCompileCommand*(modulePath, outputBinaryPath: string;
   ## so they land in ``providerCompileOptions`` and re-key the compile action
   ## per mode — a nimRtl-shared artifact and a standalone C-ABI artifact are
   ## DISTINCT cache entries (§4.4).
+  ## They and ``extraFlags`` also key the nimcache, so the two modes never
+  ## share a directory of generated C.
   result = providerCompileCommand(modulePath, outputBinaryPath, workDir,
-    scratchDir)
-  for flag in rtlModeDefines(mode):
-    result.insert(flag, result.len - 1)
+    scratchDir, rtlModeDefines(mode) & @extraFlags)
 
 proc providerLibraryCompileActionKey*(modulePath, outputBinaryPath: string;
                                       interfaceFingerprint: ContentDigest;
@@ -6641,11 +8338,86 @@ proc providerLibraryCompileActionKey*(modulePath, outputBinaryPath: string;
     providerCompileOptions = compileOptions, workDir = workDir)
   computeProviderCompileActionKey(providerArtifactId, sources, sources)
 
+proc recipeRelativeProviderDefines*(anchors: openArray[string]):
+    seq[string] =
+  ## The defines that make a provider compile RECIPE-RELATIVE: the DSL then
+  ## records the recipe's source sites relative to the recipe
+  ## (``repro_core/relocation.recipeSourceName``), outside ``anchors``.
+  ## Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
+  ## compiles"; Provider-Runtime-Protocol-v1.md, "Paths in responses".
+  @["--define:reproRecipeRelative",
+    "--define:reproRecipeAnchors=" & anchors.join(":")]
+
+proc recipeRelativeCompileOption*(arg, recipeDir: string): string =
+  ## A provider compile option as the recipe-relative compile keys it: the
+  ## recipe's own directory is `.` (the edge runs there).
+  if arg == "--path:" & recipeDir: "--path:." else: arg
+
+proc recipeRelativeProviderCompilePlan*(plan: ProviderCompilePlan;
+    modulePath, outputBinaryPath: string;
+    relocationAnchors: openArray[string]): ProviderCompilePlan =
+  ## ``plan`` (an ordinary provider-compile plan of ``modulePath``) as the
+  ## RECIPE-RELATIVE provider-compile edge plans it
+  ## (Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
+  ## compiles"), writing ``outputBinaryPath``. The compile is told to record
+  ## the recipe's source sites relative to the recipe
+  ## (``recipeRelativeProviderDefines``), and its two identities name what
+  ## lies beside the recipe relative to it - the sources, ``--path:.`` - so a
+  ## byte-identical copy of the recipe at another path, in another worktree or
+  ## under another work root plans the SAME ``ProviderArtifactId`` and
+  ## ``ProviderCompileActionKey``. ``relocationAnchors`` are the edge's
+  ## anchors (``effectiveAnchors``). Derived rather than re-planned: the
+  ## sources, fingerprints and library identity are the caller's.
+  let absoluteModulePath = absolutePath(modulePath)
+  let recipeDir = parentDir(absoluteModulePath)
+  let normalizedOutputPath = absolutePath(
+    normalizedProviderOutputPath(outputBinaryPath))
+  var command: seq[string] = @[]
+  for arg in plan.compilerCommand:
+    command.add(if arg.startsWith("--out:"): "--out:" & normalizedOutputPath
+                else: arg)
+  # Before the trailing module argument: flags after it are run args.
+  for flag in recipeRelativeProviderDefines(relocationAnchors):
+    command.insert(flag, command.len - 1)
+  var compileOptions: seq[string] = @[]
+  for i in 1 ..< command.len:
+    let arg = command[i]
+    if arg.startsWith("--out:") or arg.startsWith("--nimcache:") or
+        arg == normalizedOutputPath or arg == absoluteModulePath:
+      continue
+    compileOptions.add(recipeRelativeCompileOption(arg, recipeDir))
+  var sourceNames: seq[string] = @[]
+  for source in plan.inputSources:
+    sourceNames.add(relocatableName(source, recipeDir, relocationAnchors))
+  let frontend =
+    if plan.frontendRuntimeIdentity.len > 0: plan.frontendRuntimeIdentity
+    else: frontendRuntimeIdentity(plan.workDir)
+  result = plan
+  result.frontendRuntimeIdentity = frontend
+  result.outputBinaryPath = normalizedOutputPath
+  result.compilerCommand = command
+  result.providerArtifactId = computeProviderArtifactId(
+    plan.inputSources, plan.interfaceFingerprint,
+    providerCompileOptions = compileOptions, workDir = plan.workDir,
+    sourceNames = sourceNames, frontendIdentity = frontend)
+  result.providerCompileActionKey = computeProviderCompileActionKey(
+    result.providerArtifactId, sourceNames, sourceNames)
+  result.compileEdge = providerCompileEdge(plan.inputSources,
+    normalizedOutputPath, command, plan.interfaceFingerprint,
+    plan.providerFingerprint, workDir = plan.workDir,
+    knownActionFingerprint = some(result.providerCompileActionKey))
+
 proc providerCompilePlan*(modulePath, outputBinaryPath: string;
                           interfaceFingerprint: ContentDigest;
                           workDir = getCurrentDir();
                           scratchDir = "";
-                          includeSiblingSources = false): ProviderCompilePlan =
+                          includeSiblingSources = false;
+                          recipeRelative = false;
+                          relocationAnchors: openArray[string] = []):
+    ProviderCompilePlan =
+  ## ``recipeRelative``: the plan of the recipe-relative provider-compile edge
+  ## (``recipeRelativeProviderCompilePlan``); ``relocationAnchors`` are its
+  ## anchors.
   # The compiler runs in an exclusive scratch CWD, so every path that belongs
   # to the provider itself must be independent of that CWD.
   let absoluteModulePath = absolutePath(modulePath)
@@ -6653,8 +8425,10 @@ proc providerCompilePlan*(modulePath, outputBinaryPath: string;
     normalizedProviderOutputPath(outputBinaryPath))
   let sources = discoverNimSources(absoluteModulePath,
     includeSiblingSources = includeSiblingSources)
+  # Hashed once: it feeds both the provider fingerprint and the artifact id.
+  let frontend = frontendRuntimeIdentity(workDir)
   let providerFingerprint = providerFingerprintFor(sources, interfaceFingerprint,
-    workDir)
+    workDir, libFingerprint = frontend)
   let command = providerCompileCommand(absoluteModulePath,
     normalizedOutputPath, workDir, scratchDir)
   # RP1: derive the v1-named identities. The ``providerCompileOptions`` set is
@@ -6669,7 +8443,8 @@ proc providerCompilePlan*(modulePath, outputBinaryPath: string;
     compileOptions.add(arg)
   let providerArtifactId = computeProviderArtifactId(
     sources, interfaceFingerprint,
-    providerCompileOptions = compileOptions, workDir = workDir)
+    providerCompileOptions = compileOptions, workDir = workDir,
+    frontendIdentity = frontend)
   let providerCompileActionKey = computeProviderCompileActionKey(
     providerArtifactId, sources, sources)
   # The engine edge is keyed by the v1 ProviderCompileActionKey so the
@@ -6677,7 +8452,7 @@ proc providerCompilePlan*(modulePath, outputBinaryPath: string;
   let edge = providerCompileEdge(sources, normalizedOutputPath, command,
     interfaceFingerprint, providerFingerprint, workDir = workDir,
     knownActionFingerprint = some(providerCompileActionKey))
-  ProviderCompilePlan(
+  result = ProviderCompilePlan(
     inputSources: sources,
     outputBinaryPath: normalizedOutputPath,
     compilerCommand: command,
@@ -6687,12 +8462,16 @@ proc providerCompilePlan*(modulePath, outputBinaryPath: string;
     providerArtifactId: providerArtifactId,
     providerCompileActionKey: providerCompileActionKey,
     workDir: workDir,
+    frontendRuntimeIdentity: frontend,
     # Same input set ``providerFingerprintFor`` just hashed, stamped rather
     # than read: the recipe closure plus the reprobuild library sources.
     # ``reproLibStampsForCache`` is empty for an immutable-store workDir,
     # where those files cannot change and so need no snapshot.
     fingerprintInputStamps: fileStamps(sources) &
       reproLibStampsForCache(workDir))
+  if recipeRelative:
+    result = recipeRelativeProviderCompilePlan(result, absoluteModulePath,
+      normalizedOutputPath, relocationAnchors)
 
 proc providerCompileArtifactFresh*(artifactPath, outputBinaryPath: string;
                                    interfaceFingerprint,
@@ -6961,7 +8740,10 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
                             artifactPath = "";
                             workDir = getCurrentDir();
                             scratchDir = "";
-                            useFreshnessCache = true): ProviderCompileArtifact =
+                            useFreshnessCache = true;
+                            recipeRelative = false;
+                            relocationAnchors: openArray[string] = []):
+    ProviderCompileArtifact =
   ## ``useFreshnessCache`` controls the built-in warm short-circuit. It is
   ## ``false`` for exactly one caller: the child of the provider-compile EDGE
   ## (``repro __repro-compile-provider``). This mirrors
@@ -6975,9 +8757,16 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
   ## from monitored evidence that DOES see those files; consulting the narrower
   ## key inside the child would veto the engine's decision and re-publish the
   ## very stale binary the edge was re-run to replace.
+  ##
+  ## ``recipeRelative`` (the child of the recipe-relative edge): compile with
+  ## ``recipeRelativeProviderDefines`` and write an artifact that names the
+  ## recipe's files relative to the recipe, with no freshness sidecar — the
+  ## caller's own artifact and sidecar are written by the CLI from ITS plan
+  ## (``publishRecipeRelativeProviderCompile``).
   let plan = providerCompilePlan(modulePath, outputBinaryPath,
     interfaceFingerprint, workDir, scratchDir,
-    includeSiblingSources = useFreshnessCache)
+    includeSiblingSources = useFreshnessCache,
+    recipeRelative = recipeRelative, relocationAnchors = relocationAnchors)
   if useFreshnessCache and artifactPath.len > 0 and
       providerCompileArtifactFresh(artifactPath,
         plan.outputBinaryPath, interfaceFingerprint, plan.providerFingerprint,
@@ -7026,8 +8815,166 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
     outputBinaryFingerprint: casDigest(toBytes(readFile(
         extendedPath(plan.outputBinaryPath)))),
     executionResult: execution)
+  if recipeRelative:
+    let recipeDir = parentDir(absolutePath(modulePath))
+    let absoluteModulePath = absolutePath(modulePath)
+    let anchors = @relocationAnchors
+    for source in result.inputSources.mitems:
+      source = relocatableName(source, recipeDir, anchors)
+    for input in result.compileEdge.declaredInputs.mitems:
+      input = relocatableName(input, recipeDir, anchors)
+    result.compilerCommand = result.compilerCommand.mapIt(
+      if it == absoluteModulePath: extractFilename(it)
+      else: recipeRelativeCompileOption(it, recipeDir))
+    if artifactPath.len > 0:
+      writeProviderCompileArtifact(artifactPath, result)
+    return
   if artifactPath.len > 0:
     writeProviderCompileArtifact(artifactPath, result)
+    writeProviderFreshnessCacheRecord(artifactPath, modulePath, workDir, result)
+
+proc encodeInterfaceFingerprintArg*(digest: ContentDigest): string =
+  ## The interface fingerprint as the recipe-relative provider-compile edge
+  ## passes it on its argv (``--interface-fingerprint``). The caller's
+  ## interface ARTIFACT is not an input of that edge: it lives in the work
+  ## root's metadata directory and names source locations at the caller's
+  ## location, so its path and bytes would bind the edge to one location.
+  $ord(digest.algorithm) & "." & $ord(digest.domain) & "." &
+    toHex(digest.bytes).toLowerAscii
+
+proc decodeInterfaceFingerprintArg*(text: string): ContentDigest =
+  let parts = text.split('.')
+  if parts.len != 3 or parts[2].len != 64:
+    raise newException(ValueError, "malformed interface fingerprint: " & text)
+  result.algorithm = HashAlgorithm(parseInt(parts[0]))
+  result.domain = HashDomain(parseInt(parts[1]))
+  for i in 0 ..< 32:
+    result.bytes[i] = byte(parseHexInt(parts[2][2 * i .. 2 * i + 1]))
+
+const RelocatableProviderVerdict* = "relocatable"
+  ## The whole content (plus a newline) of a recipe-relative provider
+  ## compile's verdict file when its binary does not embed the recipe's
+  ## location. Anything else names the location-bound string it found.
+
+proc recipeRelativeProviderVerdictPath*(edgeArtifactPath: string): string =
+  ## Where the recipe-relative provider-compile edge records whether its
+  ## binary may be served to another location of the recipe. A declared
+  ## output of the edge, beside its artifact, so a cache hit restores the
+  ## verdict together with the binary it describes.
+  parentDir(edgeArtifactPath) / "relocation-verdict"
+
+proc isComponentByte(c: char): bool =
+  ## A byte that continues a path component. Deliberately not `@`: Nim
+  ## stores a string literal behind a capacity word whose last byte is `@`
+  ## (the literal flag), so every literal in a binary is preceded by one.
+  c in {'a'..'z', 'A'..'Z', '0'..'9', '.', '_', '-', '+', '~'}
+
+proc isEmbeddedPathByte(c: char): bool =
+  c == '/' or isComponentByte(c)
+
+proc providerLocationEmbedding*(binaryBytes, recipeDir: string): string =
+  ## The first string in a compiled provider that names the directory it was
+  ## compiled in, or "" when it names none.
+  ##
+  ## WHY THIS IS CHECKED. A recipe-relative provider compile is shared by
+  ## every copy of a byte-identical recipe (`recipeCompileOutputDir`), which
+  ## is only sound if the binary does not depend on where it was compiled.
+  ## The DSL names its own source sites relative to the recipe, but Nim
+  ## makes `currentSourcePath()` and `instantiationInfo(fullPaths = true)`
+  ## absolute, and a recipe may bake them into the graph it evaluates:
+  ## CodeTracer's recipe computes `projectRootPath = parentDir(
+  ## currentSourcePath())` in a `const` and puts `projectRootPath / "libs/..."`
+  ## on every `nim js` command line. Served at another location, that
+  ## binary evaluated to the OTHER copy's absolute paths, so the copy's
+  ## actions compiled against the other copy's tree, and the shared binary
+  ## changed under it whenever another copy recompiled it — an action key
+  ## that moved between two builds of an unchanged tree.
+  ##
+  ## WHAT IS EXEMPT. A string `<recipeDir>/<file>.nim` (or `.nims`) naming a
+  ## source file that exists in the recipe directory: every provider carries
+  ## its main module's absolute path as compiler line information. Any other
+  ## spelling — the directory itself, a path under it that is not a source
+  ## file — is a location the provider can act on, and binds it.
+  if recipeDir.len == 0:
+    return ""
+  let dir = recipeDir.strip(leading = false, chars = {'/'})
+  if dir.len == 0:
+    return ""
+  var start = 0
+  while true:
+    let at = binaryBytes.find(dir, start)
+    if at < 0:
+      return ""
+    start = at + 1
+    # Only a whole path component: `/a/proj` must not match `/a/projX`, nor
+    # `/x/a/proj` (a longer path that merely ends in the same components).
+    if at > 0 and isComponentByte(binaryBytes[at - 1]):
+      continue
+    var stop = at + dir.len
+    if stop < binaryBytes.len and binaryBytes[stop] != '/' and
+        isEmbeddedPathByte(binaryBytes[stop]):
+      continue
+    while stop < binaryBytes.len and isEmbeddedPathByte(binaryBytes[stop]):
+      inc stop
+    let embedded = binaryBytes[at ..< stop]
+    if embedded.len > dir.len + 1:
+      let rel = embedded[dir.len + 1 .. ^1]
+      if (rel.endsWith(".nim") or rel.endsWith(".nims")) and
+          fileExists(extendedPath(dir / rel)):
+        continue
+    return embedded
+
+proc publishRecipeRelativeProviderCompile*(plan: ProviderCompilePlan;
+    edgeArtifactPath, artifactPath, modulePath: string;
+    workDir = getCurrentDir()): ProviderCompileArtifact =
+  ## The caller's side of a recipe-relative provider compile: the edge wrote
+  ## its binary and a recipe-relative artifact under the action-cache root
+  ## (shared by every copy of the recipe); the caller's binary
+  ## (``plan.outputBinaryPath``), artifact and freshness sidecar are composed
+  ## here from the CALLER's plan, which names this copy's files. Each file
+  ## is rewritten only when its bytes change, so a served edge leaves the
+  ## caller's files - and every key on their mtimes - untouched.
+  let edge = readProviderCompileArtifact(edgeArtifactPath)
+  let edgeBinary = normalizedProviderOutputPath(edge.outputBinaryPath)
+  let binary = normalizedProviderOutputPath(plan.outputBinaryPath)
+  var current = false
+  if fileExists(extendedPath(binary)):
+    try:
+      current = casDigest(toBytes(readFile(extendedPath(binary)))) ==
+        edge.outputBinaryFingerprint
+    except CatchableError:
+      current = false
+  if not current:
+    createDir(extendedPath(parentDir(binary)))
+    let staged = binary & ".tmp." & $getCurrentProcessId()
+    copyFile(extendedPath(edgeBinary), extendedPath(staged))
+    setFilePermissions(extendedPath(staged),
+      getFilePermissions(extendedPath(edgeBinary)))
+    moveFile(extendedPath(staged), extendedPath(binary))
+    discard stageHostDynlibsBesideBinary(parentDir(binary))
+  result = ProviderCompileArtifact(
+    inputSources: plan.inputSources,
+    outputBinaryPath: plan.outputBinaryPath,
+    compilerCommand: plan.compilerCommand,
+    compileEdge: plan.compileEdge,
+    interfaceFingerprint: plan.interfaceFingerprint,
+    providerFingerprint: plan.providerFingerprint,
+    outputBinaryFingerprint: edge.outputBinaryFingerprint,
+    executionResult: edge.executionResult)
+  let encoded = toByteString(encodeProviderCompileArtifact(result))
+  var unchanged = false
+  if fileExists(extendedPath(artifactPath)):
+    try:
+      unchanged = readFile(extendedPath(artifactPath)) == encoded
+    except CatchableError:
+      unchanged = false
+  if not unchanged:
+    createDir(extendedPath(parentDir(artifactPath)))
+    let staged = artifactPath & ".tmp." & $getCurrentProcessId()
+    writeFile(extendedPath(staged), encoded)
+    moveFile(extendedPath(staged), extendedPath(artifactPath))
+  if not unchanged or
+      not fileExists(extendedPath(providerFreshnessCachePath(artifactPath))):
     writeProviderFreshnessCacheRecord(artifactPath, modulePath, workDir, result)
 
 # ---------------------------------------------------------------------
@@ -7209,3 +9156,14 @@ proc liftInterfaceArtifact*(plan: InterfaceLiftPlan): ProjectInterfaceArtifact =
       toHex(plan.interfaceLiftActionKey.bytes))
   except CatchableError:
     discard
+  # Shared-Development-Services §4.3's stale-lift precondition. Recorded
+  # HERE, where the bytes were just produced from this plan's module, and
+  # NOT in the `interfaceArtifactFresh` short-circuit above: that branch
+  # returns an artifact it merely found, and stamping it would record the
+  # CURRENT closure against an artifact of unknown age. `extraPaths` is
+  # passed so the recorded closure is the one the lift actually walked;
+  # `includeSiblingSources` is left at its default, and the sidecar
+  # records which census it used so the re-establishment walks the same
+  # one.
+  writeInterfaceArtifactProvenance(plan.artifactPath, plan.modulePath,
+    resourceModule = plan.resourceModule, extraPaths = plan.extraPaths)

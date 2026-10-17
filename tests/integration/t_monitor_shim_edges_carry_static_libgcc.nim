@@ -61,6 +61,7 @@
 ## positive assertion can survive.
 
 import std/[json, os, osproc, sequtils, strtabs, strutils, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_dsl_stdlib/monitor_shim_artifacts
 import repro_test_support

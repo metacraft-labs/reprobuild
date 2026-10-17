@@ -11,11 +11,12 @@
 ## The guard is still required, but it is no longer the only thing standing
 ## between an unguarded `uses:` and a wrong answer. Since PMC-1 the package
 ## itself declares `platforms [windows]`, and resolution consults that BEFORE
-## the adapter chain: an unguarded `uses: "chocolatey"` on Linux now fails
-## naming the reason ("chocolatey is declared for windows only; this host is
-## linux") instead of exhausting the chain and advising remediations —
+## any realization kind: an unguarded reference to "chocolatey" on Linux now
+## fails naming the reason ("chocolatey is declared for windows only; this
+## host is linux") instead of reporting every kind exhausted and advising
+## remediations —
 ## catalogue it, put it on PATH — that are impossible for a Windows package
-## manager. It also no longer reaches the `cakPath` adapter, so a Linux host
+## manager. It also no longer reaches the host's PATH, so a Linux host
 ## carrying some unrelated `chocolatey` binary can no longer resolve to it.
 ##
 ## The guard remains because availability and conditionality are different

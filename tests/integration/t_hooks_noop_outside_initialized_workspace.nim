@@ -58,6 +58,14 @@
 ## hooks, and asserts its companion: a report is still written for a
 ## genuine workspace.
 ##
+## AND A STORE THAT ALREADY HAS A ``.repro/`` IS STILL A STORE. Part 4's store
+## has no ``.repro/``; the field store had one, left by an older engine that
+## filed its hook reports into ``.repro/workspace/``. The sixth case pins the
+## rule that keeps it a store — membership beside a top-level ``locks/``, with
+## no settings or state file, is the record store — through real commits
+## (including one ending a conflicting cherry-pick), the real pre-push gate, a
+## real push, and real publication into the store.
+##
 ## This suite is falsifiable + hermetic:
 ##   * Falsifiable — it asserts the EXACT no-op contract (exit 0, the
 ##     "not a workspace" diagnostic on stderr, no lock file written, and no
@@ -84,9 +92,14 @@
 ## M19).
 
 import std/[algorithm, json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 import repro_workspace_manifests
+from repro_core/workspace_root import workspaceMarkerIn, discoverWorkspaceRoot,
+  WorkspaceRootMarker
+from git_tool import ensureGitToolResolvable, tpmPathOnly
+from repro_cli_support import publishWorkspaceLock, LockPublishOutcome
 
 # ---- helpers --------------------------------------------------------------
 
@@ -615,7 +628,8 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
       check dirExists(store.path / "projects")
       check dirExists(store.path / "repos")
       check dirExists(store.path / "locks")
-      check not fileExists(store.path / ".repro" / "workspace.toml")
+      check not fileExists(store.path / ".repro" / "workspace-state.toml") and
+        not fileExists(store.path / ".repro" / "workspace.toml")
       check not fileExists(store.path / "repro.lock")
 
       # Real managed hooks, installed by the real installer into the store
@@ -742,7 +756,8 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
         "includes = [\n  \"repos/lib-a.toml\",\n  \"repos/lib-b.toml\",\n]\n")
       writeFile(root / "repos" / "lib-a.toml", libAFragmentToml)
       writeFile(root / "repos" / "lib-b.toml", libBFragmentToml)
-      check not fileExists(root / ".repro" / "workspace.toml")
+      check not fileExists(root / ".repro" / "workspace-state.toml") and
+        not fileExists(root / ".repro" / "workspace.toml")
 
       let inited = runShell(shellCommand(@[
         fx.reproBin, "workspace", "init", "lib-a",
@@ -758,7 +773,7 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
       check dirExists(root / "lib-b" / ".git")
 
       # THE MARKER. Falsifiable: the previous engine leaves this absent.
-      check fileExists(root / ".repro" / "workspace.toml")
+      check fileExists(root / ".repro" / "workspace-state.toml")
       check readWorkspaceProjects(root) == @["lib-a"]
       check isInitializedWorkspace(root)
       check hasResolvedManifestCheckout(root)
@@ -850,7 +865,8 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
       # behaviour had somewhere to file), the root is NOT a workspace by the
       # canonical marker, and the tree is clean.
       check dirExists(plain / ".repro")
-      check not fileExists(plain / ".repro" / "workspace.toml")
+      check not fileExists(plain / ".repro" / "workspace-state.toml") and
+        not fileExists(plain / ".repro" / "workspace.toml")
       check not fileExists(plain / "repro.lock")
       check not isInitializedWorkspace(plain)
       check not hasResolvedManifestCheckout(plain)
@@ -916,3 +932,209 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
       check realReport["workspaceRoot"].getStr() == fx.workspaceRoot
       check fileExists(fx.workspaceRoot / ".repro" / "build" / "reports" /
         "post-commit-lock.log")
+
+  test "t_a_record_store_that_acquired_a_repro_dir_is_still_not_a_workspace":
+    ## THE FIELD STATE PART 4 DOES NOT HAVE: A RECORD STORE WITH A ``.repro/``.
+    ##
+    ## Part 4 proves the hooks stand down in a record store and manufacture no
+    ## ``.repro/`` there. That leaves the store whose ``.repro/`` came from
+    ## somewhere else — and the field store had one. An older engine filed
+    ## ``.repro/workspace/post-commit-{lock.log,report.json}`` into it;
+    ## deleting those two files, the documented unblock, leaves
+    ## ``.repro/workspace/`` behind, and any ``repro`` verb an operator runs
+    ## inside the store can create the directory too. With a ``.repro/`` beside
+    ## its top-level ``projects/*.toml``, ``hasResolvedManifestCheckout`` used
+    ## to read the store as a metadata-less workspace (its own doc and the
+    ## ``DISCLOSED LIMIT`` note in ``workspace_branch.nim`` admitted as much).
+    ## Every commit there then filed ``.repro/build/reports/*`` into the
+    ## store's working tree, the lock publisher refused the store as "dirty
+    ## outside locks/", and its own next publish commit fired the hook that
+    ## regenerated the dirt: the self-sustaining wedge.
+    ##
+    ## The rule this pins: membership beside a top-level ``locks/``, with no
+    ## settings or state file in the root, is a record store whatever else
+    ## sits beside it (Workspace-Manifests.md §"Metadata and records are
+    ## separate repositories").
+    ##
+    ## TWO STRAY SHAPES, because git sees them differently and both are real:
+    ##   * ``.repro/workspace/`` left EMPTY — what deleting the two files
+    ##     leaves. Git shows no empty directory, so the tree is clean and the
+    ##     only trace is on disk.
+    ##   * ``.repro/`` IGNORED (``.git/info/exclude``) and still holding a
+    ##     leftover report — an operator who hid the dirt instead of deleting
+    ##     it. Also clean to git, and also a ``.repro/`` on disk.
+    ##
+    ## FALSIFIABLE against the engine before this rule (``608d9110``): the
+    ## real commit through the real hooks leaves
+    ## ``?? .repro/build/reports/post-commit-report.json`` (and its log) in the
+    ## porcelain, the pre-push gate does not say "not a workspace", and the
+    ## publish below refuses as ``lpoRefusedDirty``.
+    ##
+    ## NO MOCKS: real git repos and a real bare origin, managed hooks installed
+    ## by the real ``repro hooks ensure --vcs``, real commits (one of them the
+    ## ``cherry-pick --continue`` that ends a real conflicting cherry-pick), a
+    ## real ``git push`` through the installed pre-push hook, and the real
+    ## ``publishWorkspaceLock`` into the store's real upstream.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case needs real repos, real managed " &
+        "hooks, real commits and a real push")
+    else:
+      putEnv("REPROBUILD_REPRO", reproBinary())
+      let fx = setupFixture(gitBin, "stray-shell")
+      defer: removeDir(fx.scratch)
+      let identity = ensureGitToolResolvable(tpmPathOnly, gitBin.parentDir)
+
+      for variant in ["empty-workspace-dir", "ignored-leftover-report"]:
+        checkpoint("variant: " & variant)
+        let store = seedManifestsRecordStore(gitBin, fx, "store-" & variant)
+        discard requireGit(q(gitBin) & " -C " & q(store.path) &
+          " branch --set-upstream-to=origin/main main")
+
+        # ---- the stray ``.repro/`` ----------------------------------------
+        createDir(store.path / ".repro" / "workspace")
+        var shellBefore = @[".repro" / "workspace"]
+        if variant == "ignored-leftover-report":
+          writeFile(store.path / ".git" / "info" / "exclude", ".repro/\n")
+          writeFile(store.path / ".repro" / "workspace" /
+            "post-commit-report.json", "{\"outcome\": \"skipped\"}\n")
+          shellBefore.add(".repro" / "workspace" / "post-commit-report.json")
+
+        # The trap is real, asserted rather than assumed: a ``.repro/`` IS on
+        # disk beside resolvable membership and a top-level ``locks/``, no
+        # workspace marker of the root's own, and git calls the tree clean.
+        check dirExists(store.path / ".repro")
+        check dirExists(store.path / "locks")
+        check fileExists(store.path / "projects" / "lib-a.toml")
+        check not fileExists(store.path / ".repro" / "workspace-state.toml") and
+          not fileExists(store.path / ".repro" / "workspace.toml")
+        check not fileExists(store.path / "repro-workspace.toml") and
+          not fileExists(store.path / ".repro-workspace.toml")
+        check not fileExists(store.path / "repro.lock")
+        check porcelain(gitBin, store.path) == ""
+        check reproShellListing(store.path) == shellBefore
+
+        # THE CLASSIFICATION. Falsifiable in-process: the old predicate
+        # answered true here on the strength of the shell alone.
+        check not hasResolvedManifestCheckout(store.path)
+        check not isInitializedWorkspace(store.path)
+        check workspaceMarkerIn(store.path) == WorkspaceRootMarker.wrmNone
+        check discoverWorkspaceRoot(store.path).root != store.path
+
+        # Real managed hooks, by the real installer, into the store itself.
+        let ensureStore = invokeEnsureAt(fx, store.path)
+        if ensureStore.code != 0:
+          checkpoint("ensure(store) output: " & ensureStore.output)
+        check ensureStore.code == 0
+        for hookName in ["pre-commit", "pre-push", "post-commit",
+                         "post-merge", "post-checkout"]:
+          check fileExists(store.path / ".git" / "hooks" / hookName)
+        check porcelain(gitBin, store.path) == ""
+
+        # ---- (a) a REAL commit through the REAL hooks ---------------------
+        writeFile(store.path / "NOTES.md", "base\n")
+        discard requireGit(q(gitBin) & " -C " & q(store.path) &
+          " add NOTES.md")
+        let committed = runShell(shellCommand(
+          @[gitBin, "-C", store.path, "commit", "-m", "notes"],
+          @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
+        checkpoint("commit(store) output: " & committed.output)
+        check committed.code == 0
+        # THE PROPERTY. Before the rule this porcelain carried the hook's
+        # report and log as untracked files.
+        check porcelain(gitBin, store.path) == ""
+        check not dirExists(store.path / ".repro" / "build")
+        check reproShellListing(store.path) == shellBefore
+
+        # Not silent: the dispatched body names the verdict where git relays
+        # it.
+        let pcStore = invokeDispatchPostCommit(fx, store.path)
+        check pcStore.code == 0
+        check pcStore.output.contains("skipped-no-workspace")
+        check pcStore.output.contains("not a workspace")
+        check reproShellListing(store.path) == shellBefore
+
+        # ---- (b) the same store CAUGHT MID-OPERATION ----------------------
+        # A genuinely conflicting cherry-pick — the rebase-shaped repair that
+        # fired post-commit in the field. The marker check is asked first, so
+        # the verdict is about the workspace, and nothing is filed.
+        discard requireGit(q(gitBin) & " -C " & q(store.path) &
+          " checkout -q -b side")
+        writeFile(store.path / "NOTES.md", "side\n")
+        discard requireGit(q(gitBin) & " -C " & q(store.path) &
+          " commit -q -am \"side edit\"")
+        discard requireGit(q(gitBin) & " -C " & q(store.path) &
+          " checkout -q main")
+        writeFile(store.path / "NOTES.md", "main\n")
+        discard requireGit(q(gitBin) & " -C " & q(store.path) &
+          " commit -q -am \"main edit\"")
+        let pick = runCmd(q(gitBin) & " -C " & q(store.path) &
+          " cherry-pick side")
+        check pick.code != 0
+        check fileExists(store.path / ".git" / "CHERRY_PICK_HEAD")
+        let pcMid = invokeDispatchPostCommit(fx, store.path)
+        check pcMid.code == 0
+        check pcMid.output.contains("skipped-no-workspace")
+        check not pcMid.output.contains("a git operation is in progress")
+        check reproShellListing(store.path) == shellBefore
+        # Resolve and CONTINUE: a real commit made while the sequencer is
+        # active, through the real installed hooks.
+        writeFile(store.path / "NOTES.md", "resolved\n")
+        discard requireGit(q(gitBin) & " -C " & q(store.path) &
+          " add NOTES.md")
+        let continued = runShell(shellCommand(
+          @[gitBin, "-C", store.path, "-c", "core.editor=true",
+            "cherry-pick", "--continue"],
+          @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
+        checkpoint("cherry-pick --continue output: " & continued.output)
+        check continued.code == 0
+        check porcelain(gitBin, store.path) == ""
+        check not dirExists(store.path / ".repro" / "build")
+        check reproShellListing(store.path) == shellBefore
+
+        # ---- (c) the pre-push gate, and a real push through it ------------
+        let storeHead = requireGit(q(gitBin) & " -C " & q(store.path) &
+          " rev-parse HEAD").strip()
+        let storeRefs = fx.scratch / ("refs-" & variant & ".txt")
+        writeRefsFile(storeRefs, "refs/heads/main", storeHead)
+        let ppStore = invokeCheckPrePushByWalk(fx,
+          currentRepo = store.path, refsFile = storeRefs)
+        if ppStore.code != 0:
+          checkpoint("check(store) output: " & ppStore.output)
+        check ppStore.code == 0
+        check ppStore.output.contains("not a workspace")
+        let pushRes = runShell(shellCommand(
+          @[gitBin, "-C", store.path, "push", "origin", "main"],
+          @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
+        if pushRes.code != 0:
+          checkpoint("git push(store) output: " & pushRes.output)
+        check pushRes.code == 0
+        check requireGit(q(gitBin) & " -C " & q(store.origin) &
+          " rev-parse refs/heads/main").strip() == storeHead
+        check porcelain(gitBin, store.path) == ""
+
+        # ---- (d) publication INTO the store is not wedged -----------------
+        # The real publisher, the one the workspace's pre-push gate routes a
+        # record through. Its commit fires the store's own post-commit hook;
+        # before the rule, that hook's report was the dirt the NEXT publish
+        # refused on — so publish twice and require both to land.
+        for i, sha in ["a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+                       "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"]:
+          let dir = store.path / "locks" / "lib-a" / "lib-a"
+          createDir(dir)
+          writeFile(dir / (sha & ".toml"),
+            "schema = \"reprobuild.workspace.lock.v1\"\n\n" &
+            "[lock]\nproject = \"lib-a\"\n" &
+            "created_at = \"2026-10-14T00:00:00Z\"\n\n" &
+            "[[repo]]\nname = \"lib-a\"\npath = \"lib-a\"\n" &
+            "remote = \"origin\"\nrevision = \"" & sha & "\"\n")
+          let pub = publishWorkspaceLock(identity, store.path)
+          checkpoint("publish #" & $i & " diagnostic: " & pub.diagnostic)
+          check pub.outcome == LockPublishOutcome.lpoPublished
+          check requireGit(q(gitBin) & " -C " & q(store.origin) &
+            " ls-tree -r --name-only refs/heads/main").contains(
+              "locks/lib-a/lib-a/" & sha & ".toml")
+          check porcelain(gitBin, store.path) == ""
+          check not dirExists(store.path / ".repro" / "build")
+        check reproShellListing(store.path) == shellBefore
+        check not isInitializedWorkspace(store.path)

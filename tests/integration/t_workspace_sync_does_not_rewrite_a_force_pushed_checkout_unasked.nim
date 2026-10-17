@@ -54,6 +54,7 @@
 ## Skip rule: ``git`` missing on PATH (the convention this suite follows).
 
 import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 

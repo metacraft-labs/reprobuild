@@ -32,6 +32,8 @@
 ##      skips. This proves the real engine decides through the subprocess seam.
 
 import std/[unittest, os, strutils, times]
+import repro_test_support/reasoned_skip
+from repro_test_support import testCaseScratchSlug
 
 # Imported EXACTLY as ``repro_cli_support`` imports it. The adapter exposes
 # ``watchTestEdgeDecision`` / ``recordWatchTestEdge`` / ``defaultCachePath`` +
@@ -44,9 +46,14 @@ import ct_incremental_adapter
 # is asserted standalone (no codetracer, no real engine).
 # ---------------------------------------------------------------------------
 
-let fakeCt = getTempDir() / "repro_watch_fake_ct.sh"
+# Private to the process running ONE case: every case's `setup` rewrites the
+# script, and with one shared path a case truncated it while a sibling case
+# was executing it (`Text file busy`, or an empty script that prints nothing).
+let fakeCt = absolutePath("build/test-tmp/repro_watch_fake_ct" /
+  testCaseScratchSlug() / "fake_ct.sh")
 
 proc installFakeCt() =
+  createDir(fakeCt.parentDir)
   writeFile(fakeCt,
     "#!/bin/sh\nprintf '%s\\n' \"$CT_FAKE_OUT\"\nexit ${CT_FAKE_CODE:-0}\n")
   inclFilePermissions(fakeCt, {fpUserExec, fpGroupExec, fpOthersExec})

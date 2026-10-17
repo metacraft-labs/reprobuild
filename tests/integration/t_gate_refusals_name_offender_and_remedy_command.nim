@@ -384,7 +384,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       var failure: JsonNode = nil
       for f in report["failures"]:
         if f["property"].getStr() == "dirty": failure = f
-      check failure != nil
+      check not failure.isNil
       check failure["repo"].getStr() == "lib-a"
       assertNamesOffenderAndRemedy(failure["remediation"].getStr(), "lib-a")
 
@@ -411,7 +411,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       var failure: JsonNode = nil
       for f in report["failures"]:
         if f["property"].getStr() == "unpublished": failure = f
-      check failure != nil
+      check not failure.isNil
       check failure["repo"].getStr() == "lib-a"
       assertNamesOffenderAndRemedy(failure["remediation"].getStr(), "lib-a")
 
@@ -433,7 +433,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       var failure: JsonNode = nil
       for f in report["failures"]:
         if f["property"].getStr() == "lock-publish-failure": failure = f
-      check failure != nil
+      check not failure.isNil
       # The offender here is the workspace lock / manifest repo; the remedy
       # is the concrete ``repro push`` command.
       check failure["remediation"].getStr().contains("repro push")
@@ -452,7 +452,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       var entry: JsonNode = nil
       for e in report["repos"]:
         if e["path"].getStr() == "lib-a": entry = e
-      check entry != nil
+      check not entry.isNil
       check entry["executionStatus"].getStr() == "refused"
       assertNamesOffenderAndRemedy(entry["refusalReason"].getStr(), "lib-a")
 
@@ -475,7 +475,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       var entry: JsonNode = nil
       for e in report["repos"]:
         if e["path"].getStr() == "lib-a": entry = e
-      check entry != nil
+      check not entry.isNil
       check entry["executionStatus"].getStr() == "refused"
       assertNamesOffenderAndRemedy(entry["refusalReason"].getStr(), "lib-a")
 
@@ -501,7 +501,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       var entry: JsonNode = nil
       for e in report["repos"]:
         if e["path"].getStr() == "lib-b": entry = e
-      check entry != nil
+      check not entry.isNil
       check entry["executionStatus"].getStr() == "clone_failed"
       assertNamesOffenderAndRemedy(
         entry["executionDiagnostic"].getStr(), "lib-b")
@@ -551,7 +551,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       var entry: JsonNode = nil
       for e in rep["repos"]:
         if e["path"].getStr() == "lib-a": entry = e
-      check entry != nil
+      check not entry.isNil
       check entry["outcome"].getStr() == "confirm_refused"
       # RA-28: the per-repo refusal diagnostic must NAME the offender (lib-a,
       # whose dirty working tree would be switched and whose WIP would be
@@ -764,7 +764,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       var entry: JsonNode = nil
       for e in rep["repos"]:
         if e["path"].getStr() == "lib-a": entry = e
-      check entry != nil
+      check not entry.isNil
       check entry["outcome"].getStr() == "branch_missing_refused"
       # Offender: the missing branch name. Remedy: a repro command to create it.
       assertNamesOffenderAndRemedy(

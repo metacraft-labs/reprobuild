@@ -65,7 +65,9 @@ import std/[os, unittest]
 import repro_daemon_core/runtime
 
 proc tempTree(): string =
-  result = getTempDir() / "repro-n21-image-path"
+  # Per process: every case runs as its own process, concurrently, and the
+  # teardown of one would otherwise delete the files another is asserting on.
+  result = getTempDir() / ("repro-n21-image-path-" & $getCurrentProcessId())
   createDir(result)
 
 suite "the daemon's reported image path is checked before it is printed":

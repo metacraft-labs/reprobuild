@@ -30,7 +30,7 @@
 ## fetched 2026-09-20. Each carries two PEM certificates: the signing key
 ## for that generation, then the root. The three `Kds*CrlDerHex`
 ## constants are the verbatim bodies of the sibling `/crl` endpoints,
-## fetched 2026-10-03 — a refresh, because the lists first pinned in the
+## fetched 2026-10-02 — a refresh, because the lists first pinned in the
 ## 2026-09-20 session stated a next-update of 2026-10-04 and the service
 ## had since reissued all three. Each refreshed list verifies under the
 ## root pinned beside it (OpenSSL 3, independently of the code under
@@ -159,14 +159,42 @@
 ##     list that is both signed by a pinned root and names the serial of
 ##     the intermediate beside it, and making that pair means holding
 ##     the vendor's private key.
-##   * The vendor's revocation lists expire. All three pinned lists state
-##     a this-update of 2026-09-22 and a next-update of 2026-11-09, so
-##     every case that consults one fixes its own clock — inside that
-##     window and inside every certificate's — rather than reading the
-##     host's. A gate that read the real time would begin failing on a
-##     date nobody chose. Refreshing a list therefore means moving those
-##     clocks too: a refreshed list whose this-update is later than a
-##     gate's clock leaves that gate testing nothing.
+##   * The vendor's revocation lists expire. The three pinned here were
+##     re-fetched on 2026-10-02 and state a this-update of 2026-09-22 and
+##     a next-update of 2026-11-09; the ones they replaced stopped being
+##     current on 2026-10-04. Every case that consults one fixes its own
+##     clock rather than reading the host's, because a gate that read the
+##     real time would begin failing on a date nobody chose.
+##
+## ## The clock rule
+##
+## A refreshed list does not merely have a later end — it has a later
+## BEGINNING, and that is the half a refresh gets wrong. The lists above
+## came into force on 2026-09-22, three weeks after the instant the gates
+## that judge them used to pin, and a list that is not yet in force is
+## set aside: refresh the bytes alone and four gates start reporting "no
+## revocation data" with nothing in their own diffs to explain it. So the
+## bytes and the clocks move in one commit, always.
+##
+## The clock is then DERIVED rather than chosen, by one sentence:
+##
+##   **a gate's `Now` is the first UTC midnight at which every artifact
+##   that gate judges is simultaneously in force** — the next midnight at
+##   or after the latest `notBefore` among them.
+##
+## It is the earliest defensible instant rather than one far enough
+## forward to pass, which matters because "far enough forward" is how a
+## clock ends up past something else's expiry; it is re-derivable by
+## anybody holding the corpus, from dates read out of the artifacts
+## themselves; and it moves when and only when a refresh moves the
+## material. `t_attestation_fixture_lifecycle` computes it per gate from
+## the ledger and requires equality, so a clock edited by hand to make
+## something pass is red.
+##
+## Midnight rather than the `notBefore` instant itself so the constant is
+## a date a reader can hold in their head, and because a gate pinned to
+## the exact second a vendor signed something reads like a value chosen
+## to clear a boundary by nothing.
 
 const
   # ---- Milan: https://kdsintf.amd.com/vcek/v1/Milan/cert_chain

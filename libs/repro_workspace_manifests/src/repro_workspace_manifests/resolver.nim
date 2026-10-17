@@ -111,6 +111,22 @@ type
     projectRemote*: string ## Key into the project manifest's `[[remote]]` table (e.g. "metacraft-labs", "github")
     fetchUrl*: string      ## Full constructed fetch URL
 
+  ResolvedPreviousIdentity* = object
+    ## One prior identity of a repo, with every field RESOLVED to the
+    ## effective value an omitted field inherits from `[repo]`
+    ## (Declared-Repository-Renames.md §2).
+    ##
+    ## `fetchUrl` is the point of resolving these here rather than carrying
+    ## the raw `PreviousRepoIdentity` through: a fragment's fetch URL is
+    ## COMPOSED from a prefix plus `name`/`url_suffix`, so declaring the prior
+    ## NAME is what lets the tool reconstruct the prior URL — and the prior URL
+    ## is the primary evidence the relocation identity check reads (§3.3a).
+    ## Composition needs the `url-prefixes/` table, which only exists inside
+    ## resolution.
+    name*: string     ## effective prior repo name
+    path*: string     ## effective prior checkout path, workspace-relative
+    fetchUrl*: string ## effective prior fetch URL, derived not declared
+
   ResolvedRepo* = object
     ## Post-resolution facts for a single repo.
     ##
@@ -189,14 +205,20 @@ type
     # gate uses these to compute the pushed repo's transitive dependency
     # closure (Workspace-And-Develop-Mode.md §"VCS Hook Integration").
     depends*: seq[string]
+    previously*: seq[ResolvedPreviousIdentity]
+      ## Declared-Repository-Renames.md §2 — the identities this repo was
+      ## previously declared under, most recent first, resolved from
+      ## `[extensions] previously`. Empty for the overwhelming majority of
+      ## fragments, and INERT whenever a checkout already sits at `path`, so
+      ## the key is safe to leave in a fragment forever.
 
   CertificateGateMode* = enum
-    ## TC-3 / TC-6 / RA-32 — the resolved `[certificates] gate_mode`.
-    ## `cgmOff` is the DEFAULT (and the value for a project that declares no
-    ## `[certificates]` table at all): the pre-push gate runs exactly as it
-    ## did before test certificates existed, so a newcomer's first push is
-    ## never cert-walled. `cgmAdvisory` records the coverage result in the
-    ## gate report (a warning when uncovered) but NEVER blocks the push.
+    ## A gate's mode, as a certificate policy rule's `gate_mode` /
+    ## `commit_gate` resolves for it (TC-9c). `cgmOff` is the DEFAULT (and
+    ## the value where no policy rule applies): the pre-push gate runs
+    ## exactly as it did before test certificates existed. `cgmAdvisory`
+    ## records the coverage result in the gate report (a warning when
+    ## uncovered) but NEVER blocks the push.
     ## `cgmRequired` refuses the push unless the submitted certificates cover
     ## the pushed commit for the required targets on each required platform.
     cgmOff = "off"
@@ -204,7 +226,7 @@ type
     cgmRequired = "required"
 
   CertificateCiTrust* = enum
-    ## TC-4 — the resolved `[certificates] ci_trust`, the project's EXPLICIT
+    ## TC-4 — the policy's `ci_trust`, the EXPLICIT
     ## decision about whether CI fast-tracks certified work. `cctAdvisory` is
     ## the DEFAULT (and the value for a project that declares no `ci_trust`):
     ## CI re-runs every required target authoritatively but surfaces a valid
@@ -217,22 +239,18 @@ type
     cctAdvisory = "advisory"
     cctSkip = "skip"
 
-  CertificatePolicy* = object
-    ## The resolved test-certificate gating policy for a project. The DEFAULT
-    ## (every field zero / `cgmOff`) is what a project with no `[certificates]`
-    ## table resolves to, so the policy is a strict no-op until a project opts
-    ## in. `requiredTargets` are the targets a certificate set must cover;
-    ## `requiredPlatforms` are the platforms each of which must be covered
-    ## (the union of submitted certificates is checked per platform).
-    gateMode*: CertificateGateMode
-    requiredTargets*: seq[string]
-    requiredPlatforms*: seq[string]
-    ciTrust*: CertificateCiTrust
-      ## TC-4 — whether CI skips certified targets (`cctSkip`) or re-runs them
-      ## while surfacing the certificate as advisory (`cctAdvisory`, the
-      ## default). Independent of `gateMode`: a project can require coverage on
-      ## push yet still re-run in CI (advisory), or run advisory pushes yet
-      ## fast-track CI (skip). Defaults to `cctAdvisory` (no trust by omission).
+  CertificateUntrackedInputs* = enum
+    ## The policy's `untracked_inputs`: what issuance does
+    ## about untracked, non-ignored files in the tested repository. They are
+    ## not part of the content a certificate names, so a test that read one
+    ## ran against something the certificate does not identify
+    ## (test-certificates Standard §3.2).
+    cuiReadSet = "read-set"
+      ## The DEFAULT. Withhold only when a read set captured from the run
+      ## shows that it read an untracked file. Without a read set, issue and
+      ## report `untracked = true`.
+    cuiStrict = "strict"
+      ## Withhold whenever any untracked, non-ignored file exists.
 
   ResolvedProject* = object
     ## A flat view of one `projects/<project>.toml` after include
@@ -242,10 +260,11 @@ type
     trunk*: string
     repos*: seq[ResolvedRepo]
     projectFile*: string
-    certificatePolicy*: CertificatePolicy
-      ## TC-3 / TC-6 / RA-32 — resolved from the project manifest's
-      ## `[certificates]` table; defaults to `cgmOff` (no enforcement) when
-      ## the table is absent or omits `gate_mode`.
+    # Test-Certificates TC-9d: no certificate policy is resolved here any
+    # more. The policy is the `[certificate_policy]` snapshot in the
+    # `repro.lock` of the content a gate judges, and a project manifest that
+    # still carries the old `[certificates]` table does not resolve
+    # (`refuseLegacyCertificatesTable`).
 
 const
   defaultRepoVcs* = "git"
@@ -294,48 +313,133 @@ proc conflictingFields*(existing, candidate: ResolvedRepo): seq[string] =
   if existing.vcs != candidate.vcs:
     result.add("vcs (" & existing.vcs & " vs " & candidate.vcs & ")")
 
-# ---- TC-3 / TC-6 / RA-32 certificate policy resolution --------------------
+proc validatePreviousIdentities*(repos: openArray[ResolvedRepo];
+                                 ownerFile, ownerSchema: string) =
+  ## Declared-Repository-Renames.md §2.3, rules 2-4 — the three validator
+  ## rules that need the WHOLE resolved set and so cannot be answered by
+  ## `readRepoFragment` from one file.
+  ##
+  ## Rule 2 is the dangerous one and the reason this is an error rather than a
+  ## notice. A forge FREES the old name when a repository is renamed and lets
+  ## anyone create a new repository there; if a fragment then legitimately
+  ## declares that path, a stale prior claim from another fragment would
+  ## authorise `sync` to MOVE a directory that belongs to someone else. A live
+  ## claim always wins and the prior claim is an error, not a silent loss.
+  ##
+  ## Rule 3 is the same reasoning for the half of identity that keys lock
+  ## records and `--only` selectors. Rule 4 refuses two fragments claiming one
+  ## ancestor, because whichever `sync` reached first would win by accident.
+  ##
+  ## The per-repo `previous_path_claimed_by_live_repo` refusal in `sync` is the
+  ## belt to this proc's braces: a manifest can reach a checkout through a
+  ## layer composition or an older writer that never passed through here, and
+  ## the consequence of getting it wrong is a moved directory.
+  if repos.len == 0:
+    return
+  var liveByPath = initTable[string, string]()
+  var liveByName = initTable[string, string]()
+  for repo in repos:
+    if repo.path notin liveByPath:
+      liveByPath[repo.path] = repo.name
+    if repo.name notin liveByName:
+      liveByName[repo.name] = repo.path
+  var claimedPrior = initTable[string, string]()
+  for repo in repos:
+    for index, prior in repo.previously:
+      let keyPath = "extensions.previously[" & $index & "]"
+      if prior.path in liveByPath and prior.path != repo.path:
+        raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
+          "repo '" & repo.name & "' declares previous checkout path '" &
+            prior.path & "', but repo '" & liveByPath[prior.path] &
+            "' declares that path RIGHT NOW. A live claim wins: drop the " &
+            "prior claim, or the next sync would move a directory that " &
+            "belongs to another repo")
+      if prior.name in liveByName and prior.name != repo.name:
+        raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
+          "repo '" & repo.name & "' declares previous name '" & prior.name &
+            "', but a live repo is declared under that name right now (at '" &
+            liveByName[prior.name] & "'). A live claim wins: drop the prior " &
+            "claim")
+      let priorKey = prior.name & "\t" & prior.path
+      if priorKey in claimedPrior and claimedPrior[priorKey] != repo.name:
+        raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
+          "repos '" & claimedPrior[priorKey] & "' and '" & repo.name &
+            "' both declare the previous identity (name='" & prior.name &
+            "', path='" & prior.path &
+            "'); two repos cannot share one ancestor, and whichever sync " &
+            "reached first would win by accident")
+      claimedPrior[priorKey] = repo.name
 
-proc resolveCertificatePolicy*(body: CertificatesBody;
-                               projectFile: string): CertificatePolicy =
-  ## Resolve a manifest `[certificates]` table into a `CertificatePolicy`.
-  ## The DEFAULT — an absent table, or one that omits `gate_mode` — is
-  ## `cgmOff`: a project that never opts in is never cert-gated (the RA-32
-  ## default-off / advisory-first onboarding guarantee). A `gate_mode` value
-  ## outside {off, advisory, required} is a structural error: a typo must
-  ## fail LOUD rather than silently fall back to `off` (which would mask an
-  ## intended `required`).
-  result.gateMode = cgmOff
-  if body.gate_mode.isSome:
-    let raw = body.gate_mode.get().strip()
-    case raw
-    of "", "off": result.gateMode = cgmOff
-    of "advisory": result.gateMode = cgmAdvisory
-    of "required": result.gateMode = cgmRequired
-    else:
-      raiseManifestError(projectFile, "certificates.gate_mode",
-        schemaProjectManifestV1, schemaProjectManifestV1,
-        "invalid `certificates.gate_mode` value '" & raw &
-          "' (expected: off | advisory | required)")
-  result.requiredTargets = body.required_targets
-  result.requiredPlatforms = body.required_platforms
-  # TC-4 — resolve the CI-trust decision. The DEFAULT — an absent / omitted
-  # `ci_trust` — is `cctAdvisory`: CI never fast-tracks on trust unless the
-  # project explicitly opts in, so a forged certificate can never cause a skip
-  # in a project that did not ask for it. As with `gate_mode`, an out-of-range
-  # value is a structural error (a typo must fail LOUD, never silently grant
-  # the higher-trust `skip`).
-  result.ciTrust = cctAdvisory
-  if body.ci_trust.isSome:
-    let raw = body.ci_trust.get().strip()
-    case raw
-    of "", "advisory": result.ciTrust = cctAdvisory
-    of "skip": result.ciTrust = cctSkip
-    else:
-      raiseManifestError(projectFile, "certificates.ci_trust",
-        schemaProjectManifestV1, schemaProjectManifestV1,
-        "invalid `certificates.ci_trust` value '" & raw &
-          "' (expected: advisory | skip)")
+# ---- the retired `[certificates]` table ------------------------------------
+#
+# Test-Certificates TC-9d (operator decision D18): a test-certificate
+# requirement is a certificate policy — declared with `certificatePolicy`
+# (`repro_certificates`), enacted by a repository's `repro.nim` with
+# `enactCertificatePolicy`, and recorded by `repro lock refresh` as the
+# `[certificate_policy]` snapshot in that repository's `repro.lock`, which is
+# what every gate reads. The per-project `[certificates]` table of
+# `projects/<project>.toml` is not read anywhere. A manifest that still
+# carries one is refused, never ignored: ignoring it would silently turn a
+# `required` into `off`.
+
+const LegacyCertificatesKeyPath* = "certificates"
+  ## The ``keyPath`` of the error a manifest carrying ``[certificates]``
+  ## raises, so a caller that must not fail on it (the pre-commit gate) can
+  ## still recognise it and say so out loud.
+
+const LegacyCertificatesRemedy* =
+  "remove the [certificates] table; declare the requirement as a " &
+  "certificate policy (`certificatePolicy` from the repro_certificates " &
+  "module), enact it in each repository's repro.nim with " &
+  "`enactCertificatePolicy`, and run `repro lock refresh` to record it in " &
+  "that repository's repro.lock (see the repro_certificates module " &
+  "documentation)"
+  ## What to do instead, in the terms of the policy design.
+
+proc carriesLegacyCertificatesTable*(project: ProjectManifest;
+                                     projectFile: string): bool =
+  ## Whether ``projectFile`` (already decoded as ``project``) carries a
+  ## ``[certificates]`` table. A set field is enough; an EMPTY table is found
+  ## by its header, so even a table that sets nothing is reported rather
+  ## than tolerated.
+  let c = project.certificates
+  if c.gate_mode.isSome or c.ci_trust.isSome or c.untracked_inputs.isSome or
+      c.required_targets.len > 0 or c.required_platforms.len > 0:
+    return true
+  try:
+    for raw in readFile(projectFile).splitLines():
+      let line = raw.strip()
+      if line.startsWith("[") and not line.startsWith("[["):
+        # The header ends at its first `]`: a trailing comment
+        # (`[certificates] # ...`) and a quoted key (`["certificates"]`)
+        # name the same table.
+        let close = line.find(']')
+        if close < 0: continue
+        let header = line[1 ..< close].strip().replace("\"", "")
+        if header == "certificates" or header.startsWith("certificates."):
+          return true
+  except IOError:
+    discard
+  false
+
+proc legacyCertificatesTableMessage*(projectFile: string): string =
+  ## The diagnostic for a manifest that carries ``[certificates]``.
+  "the [certificates] table in " & projectFile & " is not supported: " &
+    "test-certificate requirements come from a certificate policy that each " &
+    "repository enacts and records in its repro.lock, which is what every " &
+    "gate reads. It is refused rather than ignored, because ignoring it " &
+    "would silently turn its gate_mode into off. Remedy: " &
+    LegacyCertificatesRemedy
+
+proc refuseLegacyCertificatesTable*(project: ProjectManifest;
+                                    projectFile: string) =
+  ## Raise ``WorkspaceManifestParseError`` (key path
+  ## ``LegacyCertificatesKeyPath``) when the project manifest carries a
+  ## ``[certificates]`` table.
+  if carriesLegacyCertificatesTable(project, projectFile):
+    raiseManifestError(projectFile, LegacyCertificatesKeyPath,
+      schemaProjectManifestV1, schemaProjectManifestV1,
+      legacyCertificatesTableMessage(projectFile))
 
 # ---- RA-18 subset tags -----------------------------------------------------
 #
@@ -975,8 +1079,9 @@ proc resolveFragment(ctx: FragmentContext; fragmentAbs: string;
   # legal `git clone --branch` argument. Overwriting instead meant a fragment
   # carrying both silently discarded its SHA: the pin was recorded in the
   # manifest but bound nothing, which reads as protected while floating.
-  let fragmentBranch =
-    if fragment.repo.branch.isSome: fragment.repo.branch.get() else: ""
+  # The mainline, whichever schema declared it (`mainline` in repo.v2,
+  # `branch` in repo.v1 — `readRepoFragment` maps one onto the other).
+  let fragmentBranch = fragment.repo.mainlineBranch.get("")
   let fragmentRevision =
     if fragment.repo.revision.isSome: fragment.repo.revision.get() else: ""
   result.branch = fragmentBranch
@@ -1019,6 +1124,48 @@ proc resolveFragment(ctx: FragmentContext; fragmentAbs: string;
 
   # RA-21 — carry the develop-set dependency edges through verbatim.
   result.depends = fragment.repo.depends
+
+  # Declared-Repository-Renames.md §2 — resolve each declared prior identity
+  # to its EFFECTIVE (name, path, fetchUrl) triple. An omitted field inherits
+  # from `[repo]`, so a pure path move resolves to today's name and URL with
+  # yesterday's directory.
+  #
+  # The URL is composed through the SAME two paths the live URL above takes,
+  # because a prior identity is a declaration of what the live one used to be
+  # and must compose the same way or the reconstruction is a guess:
+  #
+  #   * a prior identity that names `url_prefix` resolves it against
+  #     `url-prefixes/` and composes its own suffix — the org/host-change
+  #     case, which is the only reason that field exists;
+  #   * otherwise the repo's own prefix (membership-model path) or the
+  #     project's `[[remote]]` entry (legacy `remote` path) composes the
+  #     prior NAME / `url_suffix`.
+  for prior in previousIdentities(fragmentAbs, fragment.extensions):
+    var resolvedPrior = ResolvedPreviousIdentity(
+      name: if prior.name.len > 0: prior.name else: result.name,
+      path: if prior.path.len > 0: prior.path else: result.path)
+    let priorSuffix =
+      if prior.url_suffix.len > 0: prior.url_suffix
+      elif prior.name.len > 0: prior.name
+      else: defaultSuffix
+    if prior.url_prefix.len > 0:
+      let priorPrefix = resolveUrlPrefix(ctx, ownerFile, ownerSchema, keyPath,
+        reference, prior.url_prefix)
+      resolvedPrior.fetchUrl = composePrefixedUrl(priorPrefix, priorSuffix)
+    elif repoUrlPrefix.len > 0:
+      let livePrefix = resolveUrlPrefix(ctx, ownerFile, ownerSchema, keyPath,
+        reference, repoUrlPrefix)
+      resolvedPrior.fetchUrl = composePrefixedUrl(livePrefix, priorSuffix)
+    elif result.projectRemote in ctx.remotes:
+      resolvedPrior.fetchUrl =
+        getFetchUrl(ctx.remotes[result.projectRemote], resolvedPrior.name)
+    else:
+      # No way to compose a prior URL. Not an error: the relocation identity
+      # check accepts a candidate on the CURRENT URL too (and on content
+      # identity), so an unreconstructible prior URL narrows the evidence it
+      # can read rather than invalidating the declaration.
+      resolvedPrior.fetchUrl = ""
+    result.previously.add(resolvedPrior)
 
 # ---- Workspace-Membership-Model.md: membership expansion -------------------
 
@@ -1134,9 +1281,10 @@ proc resolveProject*(projectFile: string): ResolvedProject =
     result.defaultRevision = project.project.default_revision.get()
   if project.project.trunk.isSome:
     result.trunk = project.project.trunk.get()
-  # TC-3 / TC-6 / RA-32 — resolve the certificate gating policy (default off).
-  result.certificatePolicy =
-    resolveCertificatePolicy(project.certificates, absProject)
+  # Test-Certificates TC-9d — the `[certificates]` table is no longer read.
+  # Ignoring it would turn a `required` into `off` without a word, so a
+  # manifest that still carries it does not load.
+  refuseLegacyCertificatesTable(project, absProject)
 
   # Build remote name -> fetch URL lookup. The M5 reader already enforces
   # non-empty `name` and `fetch` on each remote entry, so we can index
@@ -1220,6 +1368,9 @@ proc resolveProject*(projectFile: string): ResolvedProject =
       project.member_sets, project.member_repos, @[], acc)
     result.repos = acc.repos
 
+  validatePreviousIdentities(result.repos, absProject,
+    schemaProjectManifestV1)
+
 proc resolveRepoSet*(setFile: string): ResolvedProject =
   ## Resolve a `repo-sets/<set>.toml` into the SAME `ResolvedProject` a project
   ## resolves to.
@@ -1254,6 +1405,8 @@ proc resolveRepoSet*(setFile: string): ResolvedProject =
     manifest.member_sets, manifest.member_repos,
     @[manifest.`repo-set`.name], acc)
   result.repos = acc.repos
+
+  validatePreviousIdentities(result.repos, absSet, schemaRepoSetV1)
 
 # ---- string-based entry point --------------------------------------------
 
@@ -1501,6 +1654,9 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
           "', path='" & r.path & "', remote='" & r.projectRemote &
           "') triple")
     finalSeen[triple] = i
+
+  validatePreviousIdentities(result.repos, absVariant,
+    schemaVariantManifestV1)
 
 proc resolveVariantFromString*(content: string;
                                basePath: string): ResolvedProject =
