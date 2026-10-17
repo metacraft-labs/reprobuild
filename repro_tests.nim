@@ -13356,6 +13356,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_legacy_certificates_table_is_a_loud_error_naming_the_policy.nim",
+    binary: "build/test-bin/t_legacy_certificates_table_is_a_loud_error_naming_the_policy",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_legacy_manifest_without_team_route_warns_and_scaffolds.nim",
     binary: "build/test-bin/t_legacy_manifest_without_team_route_warns_and_scaffolds",
     defines: @[],

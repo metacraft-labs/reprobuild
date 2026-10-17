@@ -4,9 +4,12 @@
 ## unconditionally (no cert check at all).
 ##
 ## This drives the SAME real gateway bare + installed ``pre-receive`` /
-## ``post-receive`` hooks as the key test, but flips ONLY the gateway config's
-## ``gate_mode`` and asserts the receiving-side outcome per mode against a real
-## second "upstream" bare:
+## ``post-receive`` hooks as the key test, but flips ONLY the mode and asserts
+## the receiving-side outcome per mode against a real second "upstream" bare.
+## Since TC-9d the mode is the one the PUSHED commit records: its
+## ``repro.lock`` carries a ``[certificate_policy]`` with one rule for every branch
+## under that mode; the gateway
+## config carries no policy. ``off`` is the default-off state: no policy.
 ##
 ##   - off      : an uncovered push is ACCEPTED and FORWARDED (upstream gets it).
 ##   - advisory : an uncovered push is ACCEPTED and FORWARDED (upstream gets it),
@@ -71,6 +74,7 @@ import repro_cli_support
 import repro_workspace_manifests
 import repro_lock
 import repro_lock/certificate_policy
+import ./every_branch_policy
 
 proc q(value: string): string = quoteShell(value)
 
@@ -133,16 +137,38 @@ proc setupModeFixture(gitBin, slug: string): ModeFixture =
   discard requireGit(q(gitBin) & " -C " & q(result.clone) &
     " config user.name \"TC6 Tester\"")
 
-proc wire(gitBin: string; fx: ModeFixture; mode: CertificateGateMode) =
+proc wire(gitBin: string; fx: ModeFixture; bakedMode = "") =
+  ## Wire the gateway. Since TC-9d its config carries no policy: the mode is
+  ## the one the PUSHED commit's ``repro.lock`` records (``stagePolicy``).
+  ## ``bakedMode`` non-empty rewrites the config as a pre-TC-9d writer wrote
+  ## it, baking that ``gate_mode`` (and, unless ``off``, ``t-unit`` on this
+  ## platform), so a case can show the baked keys are reported and ignored.
   let cfg = GatewayConfig(
-    gateMode: mode,
-    requiredTargets: @["t-unit"],
-    requiredPlatforms: @[currentPlatformTag()],
     lockRecordsDir: "",   # no lock subtree here: the generic checks decide
     registeredKeysPath: "")  # empty registry: every cert would be untrusted
   let wired = wirePushGateway(gitBin, fx.clone, fx.gatewayBare,
     fileUrl(fx.upstreamBare), cfg)
   check wired.ok
+  if bakedMode.len > 0:
+    let path = gatewayConfigPath(fx.gatewayBare)
+    let lists =
+      if bakedMode == "off": "required_targets = []\nrequired_platforms = []\n"
+      else: "required_targets = [\"t-unit\"]\nrequired_platforms = [\"" &
+        currentPlatformTag() & "\"]\n"
+    writeFile(path, readFile(path).replace("[gateway]\n",
+      "[gateway]\ngate_mode = \"" & bakedMode & "\"\n" & lists))
+
+proc stagePolicy(gitBin: string; fx: ModeFixture; mode: CertificateGateMode) =
+  ## Stage a ``repro.lock`` whose ``[certificate_policy]`` is one rule for
+  ## every branch under ``mode``, ``t-unit`` on this platform
+  ## (``everyBranchSnapshot``), so the next commit carries
+  ## it to the gateway.
+  let snapshot = everyBranchSnapshot(toPolicyMode(mode), ["t-unit"],
+    [currentPlatformTag()], name = "modes")
+  writeFile(fx.clone / "repro.lock", replaceCertificatePolicySection(
+    serializeLockedDependencies(LockedDependencies(
+      schema: "reprobuild.solved-graph-lock.v2", deps: @[])), snapshot))
+  discard requireGit(q(gitBin) & " -C " & q(fx.clone) & " add repro.lock")
 
 proc makeNewCommit(gitBin: string; fx: ModeFixture; content: string): string =
   writeFile(fx.clone / "change.txt", content)
@@ -220,7 +246,8 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
       block:
         let fx = setupModeFixture(gitBin, "off")
         defer: removeDir(fx.scratch)
-        wire(gitBin, fx, cgmOff)
+        # No policy at all: the default-off state.
+        wire(gitBin, fx)
         let newSha = makeNewCommit(gitBin, fx, "off-mode change\n")
         discard attachUntrustedCert(gitBin, fx, newSha)
         let pushed = pushThroughGateway(gitBin, fx)
@@ -239,7 +266,8 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
       block:
         let fx = setupModeFixture(gitBin, "advisory")
         defer: removeDir(fx.scratch)
-        wire(gitBin, fx, cgmAdvisory)
+        wire(gitBin, fx)
+        stagePolicy(gitBin, fx, cgmAdvisory)
         let newSha = makeNewCommit(gitBin, fx, "advisory-mode change\n")
         discard attachUntrustedCert(gitBin, fx, newSha)
         let pushed = pushThroughGateway(gitBin, fx)
@@ -262,7 +290,8 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
         let fx = setupModeFixture(gitBin, "required")
         defer: removeDir(fx.scratch)
         let seedTip = upstreamTip(gitBin, fx.upstreamBare)
-        wire(gitBin, fx, cgmRequired)
+        wire(gitBin, fx)
+        stagePolicy(gitBin, fx, cgmRequired)
         let newSha = makeNewCommit(gitBin, fx, "required-mode change\n")
         discard attachUntrustedCert(gitBin, fx, newSha)
         let pushed = pushThroughGateway(gitBin, fx)
@@ -284,13 +313,12 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
         check "untrusted certs ignored" in pushed.output
 
   test "t_certificate_policy_modes_come_from_the_pushed_snapshot":
-    ## TC-9c reconciliation. The three arms above drive the mode through the
-    ## gateway config's BAKED ``gate_mode`` — the interim input for pushed
-    ## content that carries no policy snapshot. This case declares the policy
-    ## instead: the pushed commit's ``repro.lock`` carries a
-    ## ``[certificate_policy]`` whose rule for ``main`` sets the mode, and the
-    ## config is wired with the OPPOSITE baked mode, which the snapshot must
-    ## override:
+    ## TC-9c reconciliation, kept by TC-9d. The pushed commit's ``repro.lock``
+    ## carries a ``[certificate_policy]`` whose rule for ``main`` sets the
+    ## mode, and the gateway config is rewritten in the pre-TC-9d format
+    ## baking the OPPOSITE mode. Such keys are never applied: they are
+    ## reported IGNORED (and an ``off`` config, which asked for nothing, is
+    ## not reported):
     ##
     ##   * snapshot ``required``, baked ``off``  → REJECTED, by key id;
     ##   * snapshot ``advisory``, baked ``required`` → ACCEPTED + FORWARDED,
@@ -304,8 +332,8 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
     if gitBin.len == 0:
       skip("git not on PATH; this case pushes through a real gateway")
     else:
-      for (snapshotMode, bakedMode) in [(pmRequired, cgmOff),
-          (pmAdvisory, cgmRequired), (pmOff, cgmRequired)]:
+      for (snapshotMode, bakedMode) in [(pmRequired, "off"),
+          (pmAdvisory, "required"), (pmOff, "required")]:
         let fx = setupModeFixture(gitBin, "snapshot-" & $snapshotMode)
         defer: removeDir(fx.scratch)
         let seedTip = upstreamTip(gitBin, fx.upstreamBare)
@@ -328,8 +356,11 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
           pushed.output)
         check ("rule \"main\"") in pushed.output
         check ("applied gate_mode " & $snapshotMode) in pushed.output
-        if bakedMode != cgmOff:
+        if bakedMode != "off":
           check "IGNORED" in pushed.output
+        else:
+          # A pre-TC-9d `off` config asked for nothing: nothing to report.
+          check "IGNORED" notin pushed.output
         case snapshotMode
         of pmRequired:
           check pushed.code != 0

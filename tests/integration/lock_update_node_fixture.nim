@@ -47,15 +47,42 @@ const repinCauseLine* =
 
 proc setupLockUpdateFixture*(label: string; requireTest = false):
     WorkspaceCertifyFixture =
-  ## The workspace above. ``requireTest`` adds a ``required``
-  ## ``[certificates]`` policy for the target ``test`` on this platform, so
-  ## the TC-8g gate refuses any commit a certificate does not cover.
+  ## The workspace above. ``requireTest`` makes ``app`` ENACT a certificate
+  ## policy requiring ``test`` on this platform under ``required`` on every
+  ## branch, so the TC-8g gate refuses any commit a certificate does not
+  ## cover. Since TC-9d a policy can only come from the content: the
+  ## declaration below (one rule for every branch and a detached ``HEAD``,
+  ## ``test`` required on this platform) is kept in ``app``
+  ## itself (``policy/app_policy.nim``, so the snapshot names ``app`` as its
+  ## package), enacted by ``app``'s ``repro.nim`` and recorded by the real
+  ## ``repro lock refresh``; ``test`` is the implicitly marked name (D15).
   result = setupWorkspaceCertifyFixture(label, ["unit_a", "lone"],
     lockUpdateBuildLines)
   if requireTest:
-    result.cf.appendProjectToml("[certificates]\ngate_mode = \"required\"\n" &
-      "required_targets = [\"test\"]\n" &
-      "required_platforms = [\"" & currentPlatformTag() & "\"]\n")
+    let app = result.app
+    createDir(app / "policy")
+    writeFile(app / "policy" / "app_policy.nim",
+      "import repro_certificates\n\n" &
+      "const appPolicy* = certificatePolicy \"app\":\n" &
+      "  rule \"**\", detachedHead:\n" &
+      "    gateMode required\n" &
+      "    requires \"test\", platforms = [\"" & currentPlatformTag() &
+        "\"]\n")
+    let recipe = readFile(app / "repro.nim")
+    doAssert recipe.startsWith("import repro_project_dsl\n"), recipe
+    doAssert "\n  build:\n" in recipe, recipe
+    writeFile(app / "repro.nim", recipe
+      .replace("import repro_project_dsl\n",
+        "import repro_project_dsl\nimport ./policy/app_policy\n")
+      .replace("\n  build:\n", "\n  enactCertificatePolicy appPolicy\n\n" &
+        "  build:\n"))
+    let refreshed = result.reproIn(["lock", "refresh", app])
+    doAssert refreshed.code == 0, "lock refresh failed: " & refreshed.output
+    doAssert "[certificate_policy]" in readFile(app / "repro.lock"),
+      "the refreshed lock records no policy:\n" & readFile(app / "repro.lock")
+    discard result.cf.gitIn(app, "add -A")
+    discard result.cf.gitIn(app, "commit -q -m policy")
+    discard result.cf.gitIn(app, "push -q origin main")
 
 proc hookEnv(fx: WorkspaceCertifyFixture): seq[tuple[name, value: string]] =
   @[(name: "REPROBUILD_REPRO", value: fx.cf.sib.repro)]

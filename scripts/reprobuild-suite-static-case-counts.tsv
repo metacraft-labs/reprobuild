@@ -1490,6 +1490,7 @@ tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim	
 tests/integration/t_l7_repro_up_converges_on_one_shared_instance.nim	nim	5
 tests/integration/t_leaked_instance_is_reaped.nim	nim	52
 tests/integration/t_lease_reap_destroys_an_unlinked_type_over_a_session.nim	nim	1
+tests/integration/t_legacy_certificates_table_is_a_loud_error_naming_the_policy.nim	nim	1
 tests/integration/t_legacy_manifest_without_team_route_warns_and_scaffolds.nim	nim	1
 tests/integration/t_level_and_its_equivalent_feature_set_select_alike.nim	nim	1
 tests/integration/t_levelless_catalog_selection_is_unchanged.nim	nim	1

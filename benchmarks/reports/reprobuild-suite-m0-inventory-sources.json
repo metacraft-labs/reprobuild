@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2151,
+    "nimTestBinaries": 2152,
     "pureUnitConsolidationGroups": 62,
     "pureUnitTests": 661,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
-    "testEntries": 2173
+    "testEntries": 2174
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1296,7 +1296,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1169,
+      "integration": 1170,
       "platform/destructive": 132,
       "pure unit": 661,
       "unclassified": 192
@@ -1501,9 +1501,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2151,
+    "nimTestBinaryCount": 2152,
     "pythonTestFileCount": 22,
-    "testEntryCount": 2173
+    "testEntryCount": 2174
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -29805,6 +29805,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
+        "repro_lock",
         "repro_test_support",
         "repro_workspace_manifests"
       ],
@@ -29908,6 +29909,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
+        "repro_lock",
         "repro_test_support",
         "repro_workspace_manifests"
       ],
@@ -32564,7 +32566,10 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_test_support"
+        "repro_cli_support",
+        "repro_lock",
+        "repro_test_support",
+        "repro_workspace_manifests"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
@@ -34103,6 +34108,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_legacy_certificates_table_is_a_loud_error_naming_the_policy",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_legacy_certificates_table_is_a_loud_error_naming_the_policy.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_legacy_manifest_without_team_route_warns_and_scaffolds",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -34396,6 +34418,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
+        "repro_lock",
         "repro_test_support",
         "repro_workspace_manifests"
       ],
@@ -36479,7 +36502,9 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
-        "repro_test_support"
+        "repro_lock",
+        "repro_test_support",
+        "repro_workspace_manifests"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
@@ -36728,6 +36753,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
+        "repro_lock",
         "repro_lock_store",
         "repro_test_support",
         "repro_workspace_manifests"
@@ -40739,6 +40765,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
+        "repro_lock",
         "repro_test_support",
         "repro_workspace_manifests"
       ],
