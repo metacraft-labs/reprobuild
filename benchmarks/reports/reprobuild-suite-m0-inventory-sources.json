@@ -6636,9 +6636,10 @@
           "directExecutionLine": false,
           "executedVariables": [
             "cmd",
+            "mid",
             "runnerCmd"
           ],
-          "line": 159,
+          "line": 207,
           "path": "tests/integration/t_runner_cpu_progress_liveness.nim",
           "patterns": [
             "nim-c"
@@ -6651,9 +6652,10 @@
           "directExecutionLine": false,
           "executedVariables": [
             "cmd",
+            "mid",
             "runnerCmd"
           ],
-          "line": 186,
+          "line": 234,
           "path": "tests/integration/t_runner_cpu_progress_liveness.nim",
           "patterns": [
             "nim-c"
@@ -10765,7 +10767,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_core/tests/t_nix_store_references_scan.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 14,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -11078,7 +11080,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_daemon_core/tests/t_daemon_status_file_per_endpoint.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -38591,7 +38593,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_runner_cpu_progress_liveness.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -46307,7 +46309,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_source_revision.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 16,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
