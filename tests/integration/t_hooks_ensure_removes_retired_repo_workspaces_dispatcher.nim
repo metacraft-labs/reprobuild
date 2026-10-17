@@ -46,10 +46,38 @@
 ##       with both files named — and nothing is deleted by the refusal.
 ##   (h) `hooks uninstall --vcs` does not put a chained retired dispatcher
 ##       back at the standard path.
+##   (i) The retired tool's FIRST generation — the self-contained WRAPPER its
+##       `hooks/install.sh` installed for `pre-commit` and `post-commit`,
+##       which ran the user's hook from `<hook>.original` — is removed AND
+##       that `.original` is migrated to `<hook>.repro-local`, so a real
+##       commit still runs the user's hook and no longer runs the retired
+##       tool's checks. Covered at the standard path and chained at
+##       `.repro-local`. **The unfixed build removes the wrapper and leaves
+##       `.original` behind, where nothing runs it: the user's hook silently
+##       stops.** With only a DISPATCHER present, `.original` is left exactly
+##       as found and is not run ((a) asserts that): the dispatcher never ran
+##       it.
+##   (j) Migrating `.original` follows (g)'s conflict rules: a different hook
+##       already chained, or a different `<hook>.repo-workspaces-local` that a
+##       dispatcher in the same directory runs, is REFUSED naming both files,
+##       and nothing is deleted.
+##   (k) `hooks uninstall --vcs` that deletes a retired file chained at
+##       `.repro-local` RESTORES the user hook that file preserved and ran
+##       first — `.original` under a wrapper, `.repo-workspaces-local` under a
+##       dispatcher — to the canonical path, bytes and mode intact, and a real
+##       commit runs it. **The unfixed build deletes the retired file and
+##       strands the user hook where nothing runs it.** Two different
+##       preserved hooks for the one slot are REFUSED naming both files, with
+##       nothing of that hook deleted.
 ##
 ## TEST DOUBLES, and why each is justified. The retired DISPATCHER is embedded
 ## verbatim (both variants, from `repo-workspaces`' `hookDispatcherContent`),
-## because its exact text is what the recogniser is exercised against. The
+## because its exact text is what the recogniser is exercised against. So are
+## the two WRAPPERS (`hooks/pre-commit-wrapper` and `hooks/post-commit-wrapper`
+## at `repo-workspaces` `4db74ae`, its initial commit). They need no stub to be
+## observable: they locate the framework by walking up from `$PWD` to a
+## `repo-workspaces/hooks` directory, and the fixture plants one in the scratch
+## directory whose two scripts append to the retired sentinel. The
 ## retired MANAGED BODY is a stub that keeps the real header (shebang plus the
 ## `# repo-workspaces managed <hook> hook` marker line) and replaces the rest
 ## with one line appending to a sentinel file. The real body locates a
@@ -181,7 +209,120 @@ proc userHook(label, sentinel: string): string =
     quoteShell(sentinel) & "\n"
 
 const retiredMarkers = ["repo-workspaces hook dispatcher",
-  "repo-workspaces managed"]
+  "repo-workspaces managed", "repo-workspaces pre-commit wrapper",
+  "repo-workspaces post-commit wrapper"]
+
+# The first generation: `repo-workspaces` `4db74ae:hooks/<hook>-wrapper`,
+# verbatim. `hooks/install.sh` renamed an existing hook to `<hook>.original`
+# and copied the wrapper over it.
+const retiredPreCommitWrapper = """#!/usr/bin/env bash
+# repo-workspaces pre-commit wrapper
+# Chains with existing pre-commit hooks and adds dependency validation
+
+set -euo pipefail
+
+REPO_HOOKS_DIR=".git/hooks"
+
+# Run original pre-commit hook if it was preserved
+if [[ -x "$REPO_HOOKS_DIR/pre-commit.original" ]]; then
+    "$REPO_HOOKS_DIR/pre-commit.original" "$@" || exit $?
+fi
+
+# Find repo-workspaces framework hooks directory
+find_framework_hooks() {
+    # Check environment variable first
+    if [[ -n "${REPO_WORKSPACES_FRAMEWORK:-}" ]] && [[ -d "$REPO_WORKSPACES_FRAMEWORK/hooks" ]]; then
+        echo "$REPO_WORKSPACES_FRAMEWORK/hooks"
+        return 0
+    fi
+
+    local dir="$PWD"
+    while [[ "$dir" != "/" ]]; do
+        # Check in workspace parent
+        if [[ -d "$dir/../repo-workspaces/hooks" ]]; then
+            echo "$dir/../repo-workspaces/hooks"
+            return 0
+        fi
+        # Check in workspace itself
+        if [[ -d "$dir/repo-workspaces/hooks" ]]; then
+            echo "$dir/repo-workspaces/hooks"
+            return 0
+        fi
+        dir="$(dirname "$dir")"
+    done
+    return 1
+}
+
+FRAMEWORK_HOOKS=$(find_framework_hooks) || {
+    # Can't find framework hooks, skip our checks
+    exit 0
+}
+
+# Run dependency checks
+if [[ -x "$FRAMEWORK_HOOKS/check-dependencies.sh" ]]; then
+    "$FRAMEWORK_HOOKS/check-dependencies.sh" "$@" || exit $?
+fi
+
+exit 0
+"""
+
+const retiredPostCommitWrapper = """#!/usr/bin/env bash
+# repo-workspaces post-commit wrapper
+# Chains with existing post-commit hooks and creates workspace locks
+
+set -euo pipefail
+
+REPO_HOOKS_DIR=".git/hooks"
+
+# Run original post-commit hook if it was preserved
+if [[ -x "$REPO_HOOKS_DIR/post-commit.original" ]]; then
+    "$REPO_HOOKS_DIR/post-commit.original" "$@"
+    # Don't exit on failure - post-commit hooks shouldn't block
+fi
+
+# Find repo-workspaces framework hooks directory
+find_framework_hooks() {
+    # Check environment variable first
+    if [[ -n "${REPO_WORKSPACES_FRAMEWORK:-}" ]] && [[ -d "$REPO_WORKSPACES_FRAMEWORK/hooks" ]]; then
+        echo "$REPO_WORKSPACES_FRAMEWORK/hooks"
+        return 0
+    fi
+
+    local dir="$PWD"
+    while [[ "$dir" != "/" ]]; do
+        # Check in workspace parent
+        if [[ -d "$dir/../repo-workspaces/hooks" ]]; then
+            echo "$dir/../repo-workspaces/hooks"
+            return 0
+        fi
+        # Check in workspace itself
+        if [[ -d "$dir/repo-workspaces/hooks" ]]; then
+            echo "$dir/repo-workspaces/hooks"
+            return 0
+        fi
+        dir="$(dirname "$dir")"
+    done
+    return 1
+}
+
+FRAMEWORK_HOOKS=$(find_framework_hooks) || {
+    # Can't find framework hooks, skip lock creation
+    exit 0
+}
+
+# Run lock creation (best-effort, don't fail)
+if [[ -x "$FRAMEWORK_HOOKS/create-lock.sh" ]]; then
+    "$FRAMEWORK_HOOKS/create-lock.sh" "$@" || true
+fi
+
+exit 0
+"""
+
+proc retiredWrapperFor(hookName: string): string =
+  doAssert hookName in ["pre-commit", "post-commit"],
+    "the retired tool wrote wrappers only for pre-commit and post-commit"
+  if hookName == "pre-commit": retiredPreCommitWrapper
+  else: retiredPostCommitWrapper
 
 # ---------------------------------------------------------------------------
 # Fixture: a one-repo workspace (the shape `repro health` sweeps).
@@ -288,6 +429,19 @@ proc plantRetiredAtStandard(fx: Fixture; hookName: string) =
   plant(fx.slot(hookName & ".repo-workspaces-managed"),
     retiredManagedStub(hookName, fx.retiredRan))
 
+proc plantRetiredFramework(fx: Fixture) =
+  ## The `repo-workspaces/hooks` directory the wrappers walk up from `$PWD`
+  ## to find (`find_framework_hooks`: `<ancestor>/../repo-workspaces/hooks`).
+  ## Planted in the scratch directory, the parent of the workspace root, and
+  ## so found from inside the repository. Each script records that the
+  ## retired tool's own check ran.
+  let dir = fx.scratch / "repo-workspaces" / "hooks"
+  createDir(dir)
+  plant(dir / "check-dependencies.sh", "#!/bin/sh\necho pre-commit >> " &
+    quoteShell(fx.retiredRan) & "\n")
+  plant(dir / "create-lock.sh", "#!/bin/sh\necho post-commit >> " &
+    quoteShell(fx.retiredRan) & "\n")
+
 proc jsonDocument(output: string): JsonNode =
   ## The one JSON document in ``output``. stderr is merged into it, and the
   ## installer's advisories go to stderr, so the document is cut out by its
@@ -381,7 +535,11 @@ suite "hooks ensure removes the retired repo-workspaces dispatcher":
       fx.plantRetiredAtStandard("post-commit")
       let preserved = userHook("post-commit", fx.userRan)
       plant(fx.slot("post-commit.repo-workspaces-local"), preserved)
-      plant(fx.slot("post-commit.original"), "#!/bin/sh\n# old backup\n")
+      # A `.original` beside a DISPATCHER: the dispatcher never ran it (only
+      # the first release's wrapper did), so it stays as the user left it.
+      let originalRan = fx.scratch / "original-ran.txt"
+      let backup = userHook("original", originalRan)
+      plant(fx.slot("post-commit.original"), backup)
 
       # ---- (d) health BEFORE ensure ------------------------------------
       let before = fx.vcsHooksRow()
@@ -411,8 +569,11 @@ suite "hooks ensure removes the retired repo-workspaces dispatcher":
       check fileExists(fx.slot("post-commit.repro-local"))
       if fileExists(fx.slot("post-commit.repro-local")):
         check readFile(fx.slot("post-commit.repro-local")) == preserved
-      # The retired tool's `.original` is a user backup nothing runs: kept.
+      # With only a dispatcher present, `.original` ran in no chain: it is
+      # neither migrated nor deleted.
       check fileExists(fx.slot("post-commit.original"))
+      if fileExists(fx.slot("post-commit.original")):
+        check readFile(fx.slot("post-commit.original")) == backup
 
       # A real commit runs the migrated user hook through the managed
       # dispatcher, and the retired body does not run.
@@ -421,6 +582,7 @@ suite "hooks ensure removes the retired repo-workspaces dispatcher":
       check c.code == 0
       check linesOf(fx.userRan) == @["post-commit"]
       check not fileExists(fx.retiredRan)
+      check not fileExists(originalRan)
 
       # ---- (d) health AFTER ensure --------------------------------------
       let after = fx.vcsHooksRow()
@@ -575,3 +737,246 @@ suite "hooks ensure removes the retired repo-workspaces dispatcher":
       check res.code == 0
       check not fileExists(fx.slot("pre-push"))
       check not fileExists(fx.slot("pre-push.repro-local"))
+
+  test "retired wrapper at the standard path: the .original hook it ran is migrated":
+    if findExe("git").len == 0:
+      skip("git not on PATH; this case needs a real repository whose hooks " &
+        "a real commit fires")
+    else:
+      let fx = setupFixture("wrapper")
+      defer: removeDir(fx.scratch)
+
+      # (i) The layout the retired tool's `hooks/install.sh` left: the user's
+      # hooks renamed to `<hook>.original`, the wrappers copied over them.
+      fx.plantRetiredFramework()
+      var mine: seq[string]
+      for hookName in ["pre-commit", "post-commit"]:
+        let body = userHook(hookName, fx.userRan)
+        mine.add(body)
+        plant(fx.slot(hookName & ".original"), body)
+        plant(fx.slot(hookName), retiredWrapperFor(hookName))
+
+      # POSITIVE CONTROL: the fixture is the state it claims to be. A real
+      # commit through the wrappers runs the user's hooks AND the retired
+      # tool's checks, so "did not run" below is observable.
+      let c0 = fx.commit("through the retired wrappers")
+      checkpoint("control commit: " & c0.output)
+      check c0.code == 0
+      check linesOf(fx.userRan) == @["pre-commit", "post-commit"]
+      check linesOf(fx.retiredRan) == @["pre-commit", "post-commit"]
+      removeFile(fx.userRan)
+      removeFile(fx.retiredRan)
+
+      let before = fx.vcsHooksRow()
+      check before["status"].getStr() == "fail"
+      check "RETIRED" in rowText(before)
+      check "lib-a/pre-commit" in rowText(before)
+      check "lib-a/post-commit" in rowText(before)
+
+      let e1 = fx.ensureJson()
+      check e1.code == 0
+      check e1.outcomes{"pre-commit"}.getStr() == "removed-retired-dispatcher"
+      check e1.outcomes{"post-commit"}.getStr() == "removed-retired-dispatcher"
+      checkpoint("retired files left: " & $fx.retiredFilesLeft())
+      check fx.retiredFilesLeft().len == 0
+      for i, hookName in ["pre-commit", "post-commit"]:
+        checkpoint("hook: " & hookName)
+        check readFile(fx.slot(hookName)).contains("reprobuild hook dispatcher")
+        # The wrapper's preserved hook moved into Reprobuild's chain, mode
+        # and bytes intact; nothing is left at `.original`.
+        check not fileExists(fx.slot(hookName & ".original"))
+        check fileExists(fx.slot(hookName & ".repro-local"))
+        if fileExists(fx.slot(hookName & ".repro-local")):
+          check readFile(fx.slot(hookName & ".repro-local")) == mine[i]
+          check fpUserExec in getFilePermissions(
+            fx.slot(hookName & ".repro-local"))
+
+      # The user's hooks still run on a real commit; the retired checks do not.
+      let c = fx.commit("after ensure")
+      checkpoint("commit: " & c.output)
+      check c.code == 0
+      check linesOf(fx.userRan) == @["pre-commit", "post-commit"]
+      check not fileExists(fx.retiredRan)
+
+      check fx.vcsHooksRow()["status"].getStr() == "ok"
+      let snap = fx.snapshot()
+      let e2 = fx.ensureJson()
+      check e2.code == 0
+      for hook, outcome in e2.outcomes:
+        checkpoint(hook & ": " & outcome.getStr())
+        check outcome.getStr() == "already-up-to-date"
+      check fx.snapshot() == snap
+
+  test "retired wrapper already chained at .repro-local: its .original is migrated":
+    if findExe("git").len == 0:
+      skip("git not on PATH; this case needs a real repository whose hooks " &
+        "a real commit fires")
+    else:
+      let fx = setupFixture("wrapper-chained")
+      defer: removeDir(fx.scratch)
+
+      check fx.ensureJson().code == 0
+      # The state an `ensure` without the recogniser produced over a wrapper
+      # install: the wrapper chained at `.repro-local`, still running
+      # `.original` first from inside Reprobuild's dispatcher.
+      fx.plantRetiredFramework()
+      let mine = userHook("post-commit", fx.userRan)
+      plant(fx.slot("post-commit.original"), mine)
+      plant(fx.slot("post-commit.repro-local"),
+        retiredWrapperFor("post-commit"))
+      # No control commit here, unlike the standard-path case: with managed
+      # hooks installed, a commit's own hooks re-assert the hook set (the same
+      # repair as `ensure`), so it would perform the migration under test
+      # before `ensure` is called.
+
+      let e1 = fx.ensureJson()
+      check e1.code == 0
+      check e1.outcomes{"post-commit"}.getStr() == "removed-retired-dispatcher"
+      check fx.retiredFilesLeft().len == 0
+      check not fileExists(fx.slot("post-commit.original"))
+      check fileExists(fx.slot("post-commit.repro-local"))
+      if fileExists(fx.slot("post-commit.repro-local")):
+        check readFile(fx.slot("post-commit.repro-local")) == mine
+
+      let c = fx.commit("after ensure")
+      checkpoint("commit: " & c.output)
+      check c.code == 0
+      check linesOf(fx.userRan) == @["post-commit"]
+      check not fileExists(fx.retiredRan)
+
+  test "wrapper's .original vs a different chained hook: refused, nothing deleted":
+    if findExe("git").len == 0:
+      skip("git not on PATH")
+    else:
+      let fx = setupFixture("wrapper-conflict")
+      defer: removeDir(fx.scratch)
+
+      check fx.ensureJson().code == 0
+      # (j) The wrapper reinstalled at the standard path over Reprobuild's
+      # dispatcher, a user hook already chained, and the wrapper's
+      # `.original` holding a DIFFERENT one.
+      plant(fx.slot("post-commit.repro-local"),
+        userHook("chained", fx.userRan))
+      plant(fx.slot("post-commit.original"), userHook("original", fx.userRan))
+      plant(fx.slot("post-commit"), retiredWrapperFor("post-commit"))
+      let snap = fx.snapshot()
+
+      let e = fx.ensureJson()
+      check e.code != 0
+      check "post-commit.original" in e.output
+      check "post-commit.repro-local" in e.output
+      check "wrapper" in e.output
+      check fx.snapshot() == snap
+
+  test "dispatcher's preserved hook vs a different wrapper .original: refused":
+    if findExe("git").len == 0:
+      skip("git not on PATH")
+    else:
+      let fx = setupFixture("both-generations")
+      defer: removeDir(fx.scratch)
+
+      # (j) Both generations' preserved hooks qualify: the dispatcher at the
+      # standard path runs `.repo-workspaces-local`, and the wrapper an
+      # earlier `ensure` chained at `.repro-local` runs `.original`. They are
+      # different hooks headed for the one slot, so neither may win silently.
+      # The other hooks are installed first, so the snapshot below isolates
+      # post-commit.
+      check fx.ensureJson().code == 0
+      fx.plantRetiredAtStandard("post-commit")
+      plant(fx.slot("post-commit.repo-workspaces-local"),
+        userHook("rw-local", fx.userRan))
+      plant(fx.slot("post-commit.repro-local"),
+        retiredWrapperFor("post-commit"))
+      plant(fx.slot("post-commit.original"), userHook("original", fx.userRan))
+      let snap = fx.snapshot()
+
+      let e = fx.ensureJson()
+      check e.code != 0
+      check "post-commit.original" in e.output
+      check "post-commit.repo-workspaces-local" in e.output
+      check fx.snapshot() == snap
+
+  test "uninstall restores the hook a chained retired file preserved":
+    if findExe("git").len == 0:
+      skip("git not on PATH; this case needs a real repository whose hooks " &
+        "a real commit fires")
+    else:
+      let fx = setupFixture("uninstall-restore")
+      defer: removeDir(fx.scratch)
+
+      check fx.ensureJson().code == 0
+      # (k) Both retired generations chained at `.repro-local` by an `ensure`
+      # without the recogniser, each with the user hook it preserved and ran
+      # first: the wrapper for post-commit (`.original`), the dispatcher for
+      # pre-push (`.repo-workspaces-local`).
+      fx.plantRetiredFramework()
+      let postCommit = userHook("post-commit", fx.userRan)
+      plant(fx.slot("post-commit.original"), postCommit)
+      plant(fx.slot("post-commit.repro-local"),
+        retiredWrapperFor("post-commit"))
+      let prePush = userHook("pre-push", fx.userRan)
+      plant(fx.slot("pre-push.repo-workspaces-local"), prePush)
+      plant(fx.slot("pre-push.repro-local"), retiredDispatcherFor("pre-push"))
+
+      let res = fx.run([fx.reproBin, "hooks", "uninstall", "--vcs",
+        fx.repoPath], fx.repoPath)
+      checkpoint("uninstall: " & res.output)
+      check res.code == 0
+      # The retired files are gone and NOT restored ((h)) — but the user hooks
+      # they ran are back at the canonical path, bytes and mode intact. The
+      # unfixed build deletes the retired file and leaves the user hook
+      # stranded where nothing runs it.
+      check fx.retiredFilesLeft().len == 0
+      checkpoint("retired files left: " & $fx.retiredFilesLeft())
+      for (hookName, body, preservedAt) in [
+          ("post-commit", postCommit, "post-commit.original"),
+          ("pre-push", prePush, "pre-push.repo-workspaces-local")]:
+        checkpoint("hook: " & hookName)
+        check not fileExists(fx.slot(hookName & ".repro-local"))
+        check not fileExists(fx.slot(preservedAt))
+        check fileExists(fx.slot(hookName))
+        if fileExists(fx.slot(hookName)):
+          check readFile(fx.slot(hookName)) == body
+          check fpUserExec in getFilePermissions(fx.slot(hookName))
+
+      # A real commit runs the restored user hook, and nothing retired.
+      let c = fx.commit("after uninstall")
+      checkpoint("commit: " & c.output)
+      check c.code == 0
+      check linesOf(fx.userRan) == @["post-commit"]
+      check not fileExists(fx.retiredRan)
+
+  test "uninstall with two different preserved hooks: refused, nothing deleted":
+    if findExe("git").len == 0:
+      skip("git not on PATH")
+    else:
+      let fx = setupFixture("uninstall-conflict")
+      defer: removeDir(fx.scratch)
+
+      check fx.ensureJson().code == 0
+      # (k) A wrapper chained at `.repro-local`, with a `.original` it ran and
+      # a DIFFERENT `.repo-workspaces-local` beside it — the qualification
+      # `ensure` uses lets both claim the canonical slot. Neither may win
+      # silently, and the refusal comes before anything is deleted.
+      plant(fx.slot("post-commit.repro-local"),
+        retiredWrapperFor("post-commit"))
+      plant(fx.slot("post-commit.original"), userHook("original", fx.userRan))
+      plant(fx.slot("post-commit.repo-workspaces-local"),
+        userHook("rw-local", fx.userRan))
+      let snap = fx.snapshot()
+
+      let res = fx.run([fx.reproBin, "hooks", "uninstall", "--vcs",
+        fx.repoPath], fx.repoPath)
+      checkpoint("uninstall: " & res.output)
+      check res.code != 0
+      check "post-commit.original" in res.output
+      check "post-commit.repo-workspaces-local" in res.output
+      # post-commit's files are untouched. Hooks uninstalled before
+      # post-commit in the same call are gone; compare post-commit's only.
+      var after: seq[(string, string)]
+      var before: seq[(string, string)]
+      for item in fx.snapshot():
+        if item[0].startsWith("post-commit"): after.add(item)
+      for item in snap:
+        if item[0].startsWith("post-commit"): before.add(item)
+      check after == before
