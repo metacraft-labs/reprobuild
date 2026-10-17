@@ -11826,6 +11826,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_develop_all_ignores_an_unpublished_advisory_lock_ref.nim",
+    binary: "build/test-bin/t_develop_all_ignores_an_unpublished_advisory_lock_ref",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_develop_all_refuses_to_report_an_absent_checkout.nim",
     binary: "build/test-bin/t_develop_all_refuses_to_report_an_absent_checkout",
     defines: @[],

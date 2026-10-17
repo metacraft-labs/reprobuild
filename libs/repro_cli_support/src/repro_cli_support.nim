@@ -34052,11 +34052,13 @@ proc cloneNodeAtLockedRevision(workspaceRoot, absTarget: string;
   ## Clone ``node`` from its locked VCS coordinates into ``absTarget`` and
   ## reset the checkout to the EXACT locked ``revision`` SHA. Two chained
   ## ``bakWorkspaceVcs`` actions run in one engine graph:
-  ##   1. ``git clone`` (``--branch <ref>`` only when the lock carries an
-  ##      advisory branch/tag ref — a bare SHA cannot be a ``--branch`` arg);
+  ##   1. ``git clone`` AT THE LOCKED SHA (``executeClone``'s pinned-commit
+  ##      path: clone, fetch that object, ``checkout --detach``). The lock's
+  ##      advisory ``ref`` is NOT used — see the comment at the clone below;
   ##   2. ``git reset --hard <revision>`` + ``git clean -ffdx`` so the tree
   ##      lands byte-identical to a fresh checkout at the locked SHA.
-  ## The exact SHA is authoritative — there is NO branch-tip fallback.
+  ## The exact SHA is authoritative — there is NO branch-tip fallback, and no
+  ## advisory field of the record can veto a pin the remote can serve.
   let coords = node.coordinates
   if coords.kind != ckVcs or coords.url.len == 0:
     return (ok: false,
@@ -34095,12 +34097,45 @@ proc cloneNodeAtLockedRevision(workspaceRoot, absTarget: string;
     ("develop-all-clone-" & placementSeg & ".receipt")
   let resetReceiptRel = ".repro" / "workspace" / "receipts" /
     ("develop-all-reset-" & placementSeg & ".receipt")
-  # (1) clone — ``ref`` (advisory branch/tag) narrows the clone; a bare SHA is
-  # NOT passed as ``--branch`` (git refuses that). The reset step pins the SHA.
-  let cloneBranch =
-    if coords.gitRef.len > 0 and coords.gitRef != coords.revision:
-      coords.gitRef
-    else: ""
+  # (1) clone AT THE EXACT LOCKED REVISION. The lock's ``ref`` plays NO part
+  # here, deliberately.
+  #
+  # ``ref`` is ADVISORY — the record's own documentation says so, and
+  # ``committedLockRepoFacts`` writes it as a convenience ("which published
+  # branch was this commit reachable from when the lock was refreshed"). The
+  # authority is ``revision``, which the ``isExactLockedRevision`` gate just
+  # above has already proved to be exactly 40 lowercase hex. So the ref must
+  # never be able to decide whether a placement SUCCEEDS.
+  #
+  # It could. This passed ``ref`` to ``gitCloneAction`` as ``revision``, which
+  # ``executeClone`` turns into ``git clone --branch <ref>`` for any value that
+  # is not a 40-hex commit id, and git then REFUSES the clone outright when the
+  # remote does not advertise that branch (``clone-branch-missing``: "fatal:
+  # Remote branch <ref> not found in upstream origin"). An advisory hint had a
+  # hard veto over an obtainable pin.
+  #
+  # That is not hypothetical, and the ref need not even be wrong TODAY to do
+  # it. ``codetracer-native-recorder``'s committed ``repro.lock`` carries a
+  # self-record written on 2026-09-18 whose ``ref`` is ``reprolock-declare`` —
+  # the LOCAL, never-pushed branch the refresh happened to run on, captured
+  # before ``resolvePublishedRef`` existed (379e5dbdd, "record only published
+  # refs"). ``participatingRepoCommittedLocks`` folds that self-record into the
+  # workspace lock set, where it outranks the root repo's entry for the same
+  # repo, so reprobuild's CI ``repro develop --all --reset`` asked GitHub for a
+  # branch that exists nowhere and the whole graph made no progress — while the
+  # revision it names, ``0230480f``, is on ``dev`` and fetches fine. The writer
+  # is fixed, but every lock refreshed before that fix is still out there, and a
+  # consumer that can be broken by a stale advisory field is the defect.
+  #
+  # Passing the SHA instead takes ``executeClone``'s pinned-commit path: clone,
+  # fetch that object explicitly, ``checkout --detach`` it, and REMOVE the tree
+  # rather than leave one behind if it cannot land there. That path is both
+  # stricter and better diagnosed — it fails on ``clone-revision-fetch-failed``
+  # / ``clone-revision-missing`` naming the revision an operator can act on,
+  # instead of on a branch name nobody pinned. ``clone-branch-missing`` keeps
+  # its job for the case it was written for: a MANIFEST that declares a branch
+  # the remote does not carry, where the branch IS the pin and its absence is
+  # the true diagnosis.
   # ``cacheable = false``, for the same reason ``gitForceResetAction`` is: the
   # PRODUCT of this action is a WORKING TREE at ``relTarget``, and a working
   # tree is not a declared output — only the receipt is. The clone
@@ -34119,7 +34154,7 @@ proc cloneNodeAtLockedRevision(workspaceRoot, absTarget: string;
   var cloneAction = gitCloneAction(
     "workspace-develop-all-clone-" & placementSeg,
     identity, remoteUrl = coords.url, repoPath = relTarget,
-    receiptPath = cloneReceiptRel, revision = cloneBranch,
+    receiptPath = cloneReceiptRel, revision = coords.revision,
     cacheable = false)
   cloneAction.cwd = workspaceRoot
   # (2) force-reset onto the exact locked SHA (depends on the clone).
@@ -34131,23 +34166,6 @@ proc cloneNodeAtLockedRevision(workspaceRoot, absTarget: string;
   let cacheRoot = workspaceRoot / ".repro" / "workspace" / "engine-cache"
   var config = defaultBuildEngineConfig(cacheRoot)
   config.suppressTrace = true
-  let res = runBuild(graph(@[cloneAction, resetAction]), config)
-  var cloneStatus, resetStatus: ActionStatus
-  var cloneSeen, resetSeen = false
-  var diag = ""
-  for outcome in res.results:
-    if outcome.id == cloneAction.id:
-      cloneStatus = outcome.status; cloneSeen = true
-      if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
-        diag = "clone failed: status=" & $outcome.status & " reason=" &
-          outcome.reason &
-          (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: "")
-    elif outcome.id == resetAction.id:
-      resetStatus = outcome.status; resetSeen = true
-      if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
-        diag = "reset-to-locked-revision failed: status=" & $outcome.status &
-          " reason=" & outcome.reason &
-          (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: "")
   proc discardPartialCheckout() =
     ## DS-5 — a FAILED placement leaves NO checkout behind.
     ##
@@ -34173,6 +34191,50 @@ proc cloneNodeAtLockedRevision(workspaceRoot, absTarget: string;
       if dirExists(absTarget): removeDir(absTarget)
     except CatchableError:
       discard
+  # The engine RAISES rather than returning results when the graph cannot be
+  # driven to completion — "build graph made no progress; failed actions: …",
+  # which is what a failing clone or reset here produces. Letting that escape
+  # defeated every careful thing below it: the top-level
+  # ``except CatchableError`` in ``main`` printed the engine's sentence and
+  # returned 1, so ``discardPartialCheckout`` never ran (a reset failure left
+  # the clone's tree behind at the remote's default branch, the exact sticky
+  # wrong-revision tree DS-5 forbids), the per-node ``reason=`` was never
+  # translated into this node's diagnostic, and NONE of the composer's notices
+  # were printed — including the one that names the lock file whose record is
+  # the offender ("pinned by TWO files of the public tier's committed-lock
+  # medium, and they disagree"). That notice would have pointed straight at
+  # ``codetracer-native-recorder``'s own ``repro.lock`` when the advisory-ref
+  # defect fired in CI; instead the operator got an engine sentence about a
+  # branch no lock they could find named.
+  #
+  # So the raise is CAUGHT and converted into this placement's own failure. It
+  # stays just as fatal — the caller marks the node failed and the command
+  # exits non-zero — but it fails through the reporting path that cleans up and
+  # explains.
+  var res: BuildRunResult
+  try:
+    res = runBuild(graph(@[cloneAction, resetAction]), config)
+  except CatchableError as err:
+    discardPartialCheckout()
+    return (ok: false,
+      diagnostic: "placing '" & node.name & "' at its locked revision " &
+        coords.revision & " from " & coords.url & " failed: " & err.msg)
+  var cloneStatus, resetStatus: ActionStatus
+  var cloneSeen, resetSeen = false
+  var diag = ""
+  for outcome in res.results:
+    if outcome.id == cloneAction.id:
+      cloneStatus = outcome.status; cloneSeen = true
+      if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
+        diag = "clone failed: status=" & $outcome.status & " reason=" &
+          outcome.reason &
+          (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: "")
+    elif outcome.id == resetAction.id:
+      resetStatus = outcome.status; resetSeen = true
+      if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
+        diag = "reset-to-locked-revision failed: status=" & $outcome.status &
+          " reason=" & outcome.reason &
+          (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: "")
   if not cloneSeen or not resetSeen:
     discardPartialCheckout()
     return (ok: false,
