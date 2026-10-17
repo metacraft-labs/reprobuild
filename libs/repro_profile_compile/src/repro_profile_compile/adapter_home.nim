@@ -31,7 +31,7 @@
 ##
 ## Other kinds pass through unchanged.
 
-import std/[tables]
+import std/[strutils, tables]
 
 import repro_profile
 import repro_profile/concerns
@@ -230,6 +230,7 @@ proc buildResourceEntry(r: ResourceIntent; ordinal: int): IntentNode =
     resourceAddress: r.address,
     resourceHeaderLine: 0,
     resourceIntentOrdinal: ordinal,
+    resourceActivity: r.activity,
     startLine: 0, endLine: 0, indent: 0)
   for fieldName, fieldValue in r.fields.pairs:
     result.resourceAttrs.add(IntentNode(kind: nkResourceAttr,
@@ -249,7 +250,8 @@ proc resourceLabel(r: ResourceIntent): string =
   ## one, the way the planner's other diagnostics name a resource.
   r.kind & (if r.address.len > 0: " `" & r.address & "`" else: "")
 
-proc buildResourcesBlock(resources: seq[ResourceIntent]): IntentNode =
+proc buildResourcesBlock(resources: seq[ResourceIntent];
+                         declaredActivities: seq[string]): IntentNode =
   ## The home planner's resources. A resource the home planner does not
   ## apply is refused, naming it, rather than left out: leaving it out let a
   ## profile declare an `fsSystemFile(...)` that never took effect while
@@ -263,6 +265,15 @@ proc buildResourcesBlock(resources: seq[ResourceIntent]): IntentNode =
   for i, r in resources:
     case resourceScope(r.kind)
     of rsHome:
+      # GM9: an activity-scoped resource must name an activity the profile
+      # declares. One that does not would be planned on no host at all --
+      # refused, not dropped (the macro and the data reader never produce
+      # one; an envelope or export is an input like any other).
+      if r.activity.len > 0 and r.activity notin declaredActivities:
+        raise newException(ValueError,
+          "home profile resource " & resourceLabel(r) & " belongs to " &
+          "activity `" & r.activity & "`, which the profile does not " &
+          "declare (declared: " & declaredActivities.join(", ") & ")")
       result.resourcesEntries.add(guardedBy(r.guard,
         buildResourceEntry(r, i + 1)))
     of rsSystem:
@@ -298,6 +309,7 @@ proc profileIntentToHomeProfile*(p: ProfileIntent;
   ##     ResourceIntent.fields   -> nkResourceAttr children
   ##     ResourceIntent.dependsOn-> the depends_on attribute
   ##     ResourceIntent.guard    -> an nkCondBlock around the entry
+  ##     ResourceIntent.activity -> resourceActivity (GM9; must be declared)
   ##   ConfigOverride.guard      -> an nkCondBlock around the config entry
   ##   Each resource / config entry records its 1-based position in the
   ##   intent (`resourceIntentOrdinal` / `configIntentOrdinal`).
@@ -315,7 +327,10 @@ proc profileIntentToHomeProfile*(p: ProfileIntent;
   # apply pipeline's `findResourcesBlock` returns a stable shape; an
   # empty block degenerates to a no-op desired set just like an
   # empty `resources:` in legacy text.
-  root.children.add(buildResourcesBlock(p.resources))
+  var declaredActivities: seq[string]
+  for act in p.activities:
+    declaredActivities.add act.name
+  root.children.add(buildResourcesBlock(p.resources, declaredActivities))
   result = Profile(path: profilePath,
     lines: @[],
     lineEnding: "\n",

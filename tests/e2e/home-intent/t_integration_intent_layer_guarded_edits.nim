@@ -25,7 +25,7 @@
 ## starts from. The CLI and the compiled side of the same contract are
 ## gated by `tests/e2e/m83/t_e2e_home_set_writes_guarded_config.nim`.
 
-import std/[options, os, strutils, tables, unittest]
+import std/[options, os, sets, strutils, tables, unittest]
 
 import repro_home_intent
 
@@ -105,7 +105,10 @@ proc resourcesFor(path: string; ctx: HostContext): seq[string] =
   let res = findResourcesBlock(prof)
   if res.isNone:
     return
-  for entry in applicableResourceEntries(res.get.resourcesEntries, ctx):
+  # A source-text profile has no activity-scoped resources (GM9), so the
+  # selection is irrelevant here; the walker still requires one.
+  for entry in applicableResourceEntries(res.get.resourcesEntries, ctx,
+      initHashSet[string]()):
     for attr in entry.resourceAttrs:
       if attr.resourceAttrKey == "hostFile":
         result.add entry.resourceAddress & "=" & attr.resourceAttrValueSource

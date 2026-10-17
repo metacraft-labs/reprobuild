@@ -49,6 +49,9 @@
 ##   on the resources / overrides they declare when their conditions are
 ##   predicates (`when linux():`), and stay Nim compile-time branches when
 ##   they are `defined(...)` conditions (`lowerWhenChain`).
+## - A `resources:` block directly inside `activity <name>:` (GM9) declares
+##   resources that belong to that activity: the planner plans them only on
+##   hosts that select it (`parseActivityResources`).
 ## - `data:` lists plan-time data files (GM4). The macro records the
 ##   paths only; the planner reads and expands the files, so a data edit
 ##   never recompiles the profile.
@@ -82,6 +85,11 @@ const ActivityBodyVar* = "activityBodyBuilder"
 # ---------------------------------------------------------------------
 
 proc parseActivityBody(body: NimNode; targetSeq: NimNode): NimNode
+
+proc isActivityResourcesBlock(stmt: NimNode): bool =
+  ## `resources: <body>` -- the GM9 activity-scoped resources block.
+  stmt.kind == nnkCall and stmt.len == 2 and stmt[0].kind == nnkIdent and
+    $stmt[0] == "resources" and stmt[1].kind == nnkStmtList
 
 proc parseActivityStmt(stmt: NimNode; targetSeq: NimNode): NimNode =
   ## A single statement inside an activity body. The valid shapes are:
@@ -136,6 +144,14 @@ proc parseActivityStmt(stmt: NimNode; targetSeq: NimNode): NimNode =
     result.add newEmptyNode()
     result.add inner
   of nnkCall, nnkCommand:
+    # GM9: `resources:` belongs at the top of an activity body, where
+    # `parseActivityCall` handles it. Here it would be under a `when` of the
+    # body (or otherwise misplaced): refuse it rather than read it as a
+    # helper call. Guard the resources themselves inside the block instead.
+    if isActivityResourcesBlock(stmt):
+      error("an activity's `resources:` block must sit directly in the " &
+        "activity body, not under a `when`; put the `when <predicate>:` " &
+        "inside the `resources:` block", stmt)
     # M69: recognize the `package(<id>[, "<version>"])` call form and
     # emit a typed `aekPackageRef` with the version literal pinned.
     # The bare-arg call `package(<id>)` records `pkgVersion = ""`. The
@@ -992,6 +1008,63 @@ proc parseCatalogsSection(body: NimNode; profileVar: NimNode): NimNode =
         "module relative to the profile directory (e.g. " &
         "\"../reprobuild-scoop-packages/repro\"); got " & $entry.kind, entry)
 
+proc findActionEdgeCall(n: NimNode): NimNode =
+  ## The first action-edge call (`isProfileActionEdgeCall`) anywhere in `n`,
+  ## or nil.
+  if isProfileActionEdgeCall(n):
+    return n
+  for child in n:
+    let found = findActionEdgeCall(child)
+    if not found.isNil:
+      return found
+  nil
+
+proc parseActivityResources(blk: NimNode; actName: string;
+                            profileVar: NimNode): NimNode =
+  ## GM9: a `resources:` block inside `activity <name>:`.
+  ##
+  ##   activity desktop_core:
+  ##     hyprland
+  ##     resources:
+  ##       hyprlandConfig()          # a helper module's resource template
+  ##       when linux():
+  ##         fsUserFile(hostFile = "~/.config/foo", content = "...")
+  ##
+  ## The body is exactly a profile-level `resources:` body (constructor
+  ## calls, helper templates, runtime `when` chains, compile-time
+  ## `when defined(...)`, `for` loops) and is lowered by the same rewriter;
+  ## every resource it declares then belongs to the activity
+  ## (`ResourceIntent.activity`, `applyActivity`), so the planner plans it
+  ## only on a host that selects the activity -- and, under a guard, only
+  ## where the guard also holds.
+  ##
+  ## Action edges (`expandArchive.build`, `inlineExecCall`) are refused: they
+  ## land in `buildActions`, which has no activity, so inside an activity
+  ## they would run on every host.
+  let edge = findActionEdgeCall(blk[1])
+  if not edge.isNil:
+    error("activity `" & actName & "`: an action edge (`expandArchive." &
+      "build`, `inlineExecCall`) cannot sit in an activity's `resources:` " &
+      "block; action edges carry no activity. Declare it in the " &
+      "profile-level `resources:` block.", edge)
+  let start = genSym(nskLet, "activityResourcesStart")
+  let actionsBefore = genSym(nskLet, "activityActionsBefore")
+  let lowered = parseResourcesSection(blk[1], profileVar)
+  let nameLit = newStrLitNode(actName)
+  let msg = newStrLitNode("activity `" & actName & "`: an action edge " &
+    "cannot sit in an activity's `resources:` block; action edges carry " &
+    "no activity")
+  result = quote do:
+    block:
+      let `start` = `profileVar`.resources.len
+      let `actionsBefore` = `profileVar`.buildActions.len
+      `lowered`
+      # A helper template could still add an action edge the AST check
+      # above cannot see; refuse it rather than run it on every host.
+      if `profileVar`.buildActions.len != `actionsBefore`:
+        raise newException(ValueError, `msg`)
+      applyActivity(`profileVar`.resources, `start`, `nameLit`)
+
 proc parseActivityCall(call: NimNode; profileVar: NimNode): NimNode =
   ## A top-level `activity name: body` form. Emit an
   ## ActivityIntent into __profileIntent.activities.
@@ -1006,13 +1079,25 @@ proc parseActivityCall(call: NimNode; profileVar: NimNode): NimNode =
   let body = call[2]
   let bodySym = genSym(nskVar, "actBody")
   let nameLit = newStrLitNode(actName)
+  # GM9: `resources:` blocks directly in the activity body declare resources
+  # that belong to this activity; everything else is the package body.
+  var elements = newNimNode(nnkStmtList)
+  var resourceBlocks: seq[NimNode]
+  let stmts = if body.kind == nnkStmtList: toSeq(body.children) else: @[body]
+  for stmt in stmts:
+    if isActivityResourcesBlock(stmt):
+      resourceBlocks.add stmt
+    else:
+      elements.add stmt
   let inner = newNimNode(nnkStmtList)
   inner.add quote do:
     var `bodySym`: seq[ActivityElement] = @[]
-  inner.add parseActivityBody(body, bodySym)
+  inner.add parseActivityBody(elements, bodySym)
   inner.add quote do:
     `profileVar`.activities.add ActivityIntent(name: `nameLit`,
       body: `bodySym`)
+  for blk in resourceBlocks:
+    inner.add parseActivityResources(blk, actName, profileVar)
   result = newNimNode(nnkBlockStmt)
   result.add newEmptyNode()
   result.add inner

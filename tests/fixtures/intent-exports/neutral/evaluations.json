@@ -5,7 +5,8 @@
       "host": "m1",
       "activities": [
         "default",
-        "desktop"
+        "desktop",
+        "laptop"
       ],
       "packages": [
         {
@@ -38,6 +39,31 @@
       "resources": [
         {
           "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/laptop.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "laptop = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/laptop.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "laptop"
+        },
+        {
+          "kind": "fs.userFile",
           "address": "fs.userFile:~/.config/gm5/linux.conf",
           "fields": {
             "content": {
@@ -58,7 +84,8 @@
             }
           },
           "dependsOn": [],
-          "guard": "linux"
+          "guard": "linux",
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -82,7 +109,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -106,7 +134,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userVariable",
@@ -126,7 +155,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userPath",
@@ -138,7 +168,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.managedBlock",
@@ -158,7 +189,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userVariable",
@@ -178,7 +210,8 @@
             }
           },
           "dependsOn": [],
-          "guard": "host == \"m1\""
+          "guard": "host == \"m1\"",
+          "activity": null
         }
       ],
       "configOverrides": [
@@ -198,7 +231,8 @@
       "host": "m1",
       "activities": [
         "default",
-        "desktop"
+        "desktop",
+        "laptop"
       ],
       "packages": [
         {
@@ -231,6 +265,31 @@
       "resources": [
         {
           "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/laptop.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "laptop = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/laptop.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "laptop"
+        },
+        {
+          "kind": "fs.userFile",
           "address": "fs.userFile:~/.config/gm5/linux.conf",
           "fields": {
             "content": {
@@ -251,7 +310,8 @@
             }
           },
           "dependsOn": [],
-          "guard": "linux"
+          "guard": "linux",
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -275,7 +335,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -299,7 +360,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userVariable",
@@ -319,7 +381,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userPath",
@@ -331,7 +394,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.managedBlock",
@@ -351,7 +415,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userVariable",
@@ -371,7 +436,8 @@
             }
           },
           "dependsOn": [],
-          "guard": "host == \"m1\""
+          "guard": "host == \"m1\"",
+          "activity": null
         }
       ],
       "configOverrides": [
@@ -391,7 +457,8 @@
       "host": "m1",
       "activities": [
         "default",
-        "desktop"
+        "desktop",
+        "laptop"
       ],
       "packages": [
         {
@@ -416,6 +483,31 @@
         }
       ],
       "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/laptop.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "laptop = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/laptop.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "laptop"
+        },
         {
           "kind": "fs.userFile",
           "address": "fs.userFile:~/Library/Preferences/gm5.conf",
@@ -438,7 +530,8 @@
             }
           },
           "dependsOn": [],
-          "guard": "macos and not linux"
+          "guard": "macos and not linux",
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -462,7 +555,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -486,7 +580,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userVariable",
@@ -506,7 +601,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userPath",
@@ -518,7 +614,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "pkg.homebrewCask",
@@ -530,7 +627,8 @@
             }
           },
           "dependsOn": [],
-          "guard": "macos"
+          "guard": "macos",
+          "activity": null
         },
         {
           "kind": "fs.managedBlock",
@@ -550,7 +648,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userVariable",
@@ -570,7 +669,8 @@
             }
           },
           "dependsOn": [],
-          "guard": "host == \"m1\""
+          "guard": "host == \"m1\"",
+          "activity": null
         }
       ],
       "configOverrides": [
@@ -590,7 +690,8 @@
       "host": "m1",
       "activities": [
         "default",
-        "desktop"
+        "desktop",
+        "laptop"
       ],
       "packages": [
         {
@@ -623,6 +724,31 @@
       "resources": [
         {
           "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/laptop.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "laptop = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/laptop.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "laptop"
+        },
+        {
+          "kind": "fs.userFile",
           "address": "fs.userFile:~/Library/Preferences/gm5.conf",
           "fields": {
             "content": {
@@ -643,7 +769,8 @@
             }
           },
           "dependsOn": [],
-          "guard": "macos and not linux"
+          "guard": "macos and not linux",
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -667,7 +794,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -691,7 +819,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userVariable",
@@ -711,7 +840,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userPath",
@@ -723,7 +853,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "pkg.homebrewCask",
@@ -735,7 +866,8 @@
             }
           },
           "dependsOn": [],
-          "guard": "macos"
+          "guard": "macos",
+          "activity": null
         },
         {
           "kind": "fs.managedBlock",
@@ -755,7 +887,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userVariable",
@@ -775,7 +908,8 @@
             }
           },
           "dependsOn": [],
-          "guard": "host == \"m1\""
+          "guard": "host == \"m1\"",
+          "activity": null
         }
       ],
       "configOverrides": [
@@ -795,7 +929,8 @@
       "host": "m1",
       "activities": [
         "default",
-        "desktop"
+        "desktop",
+        "laptop"
       ],
       "packages": [
         {
@@ -828,6 +963,31 @@
       "resources": [
         {
           "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/laptop.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "laptop = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/laptop.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "laptop"
+        },
+        {
+          "kind": "fs.userFile",
           "address": "fs.userFile:~/.local/bin/gm5-hello",
           "fields": {
             "content": {
@@ -848,7 +1008,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -872,7 +1033,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userVariable",
@@ -892,7 +1054,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userPath",
@@ -904,7 +1067,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.managedBlock",
@@ -924,7 +1088,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userVariable",
@@ -944,7 +1109,8 @@
             }
           },
           "dependsOn": [],
-          "guard": "host == \"m1\""
+          "guard": "host == \"m1\"",
+          "activity": null
         }
       ],
       "configOverrides": [
@@ -964,7 +1130,8 @@
       "host": "m1",
       "activities": [
         "default",
-        "desktop"
+        "desktop",
+        "laptop"
       ],
       "packages": [
         {
@@ -997,6 +1164,31 @@
       "resources": [
         {
           "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/laptop.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "laptop = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/laptop.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "laptop"
+        },
+        {
+          "kind": "fs.userFile",
           "address": "fs.userFile:~/.local/bin/gm5-hello",
           "fields": {
             "content": {
@@ -1017,7 +1209,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -1041,7 +1234,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userVariable",
@@ -1061,7 +1255,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userPath",
@@ -1073,7 +1268,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.managedBlock",
@@ -1093,7 +1289,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userVariable",
@@ -1113,7 +1310,8 @@
             }
           },
           "dependsOn": [],
-          "guard": "host == \"m1\""
+          "guard": "host == \"m1\"",
+          "activity": null
         }
       ],
       "configOverrides": [
@@ -1187,6 +1385,31 @@
       "resources": [
         {
           "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/cli.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "cli = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/cli.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        },
+        {
+          "kind": "fs.userFile",
           "address": "fs.userFile:~/.config/gm5/linux.conf",
           "fields": {
             "content": {
@@ -1207,7 +1430,8 @@
             }
           },
           "dependsOn": [],
-          "guard": "linux"
+          "guard": "linux",
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -1231,7 +1455,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -1255,7 +1480,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userVariable",
@@ -1275,7 +1501,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userPath",
@@ -1287,7 +1514,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.managedBlock",
@@ -1307,7 +1535,29 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM9_CLI",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM9_CLI"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
         }
       ],
       "configOverrides": [
@@ -1379,6 +1629,31 @@
       "resources": [
         {
           "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/cli.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "cli = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/cli.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        },
+        {
+          "kind": "fs.userFile",
           "address": "fs.userFile:~/.config/gm5/linux.conf",
           "fields": {
             "content": {
@@ -1399,7 +1674,8 @@
             }
           },
           "dependsOn": [],
-          "guard": "linux"
+          "guard": "linux",
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -1423,7 +1699,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -1447,7 +1724,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userVariable",
@@ -1467,7 +1745,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userPath",
@@ -1479,7 +1758,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.managedBlock",
@@ -1499,7 +1779,29 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM9_CLI",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM9_CLI"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
         }
       ],
       "configOverrides": [
@@ -1565,6 +1867,31 @@
       "resources": [
         {
           "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/cli.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "cli = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/cli.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        },
+        {
+          "kind": "fs.userFile",
           "address": "fs.userFile:~/Library/Preferences/gm5.conf",
           "fields": {
             "content": {
@@ -1585,7 +1912,8 @@
             }
           },
           "dependsOn": [],
-          "guard": "macos and not linux"
+          "guard": "macos and not linux",
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -1609,7 +1937,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -1633,7 +1962,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userVariable",
@@ -1653,7 +1983,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userPath",
@@ -1665,7 +1996,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "pkg.homebrewCask",
@@ -1677,7 +2009,8 @@
             }
           },
           "dependsOn": [],
-          "guard": "macos"
+          "guard": "macos",
+          "activity": null
         },
         {
           "kind": "fs.managedBlock",
@@ -1697,7 +2030,29 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM9_CLI",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM9_CLI"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
         }
       ],
       "configOverrides": [
@@ -1769,6 +2124,31 @@
       "resources": [
         {
           "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/cli.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "cli = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/cli.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        },
+        {
+          "kind": "fs.userFile",
           "address": "fs.userFile:~/Library/Preferences/gm5.conf",
           "fields": {
             "content": {
@@ -1789,7 +2169,8 @@
             }
           },
           "dependsOn": [],
-          "guard": "macos and not linux"
+          "guard": "macos and not linux",
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -1813,7 +2194,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -1837,7 +2219,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userVariable",
@@ -1857,7 +2240,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userPath",
@@ -1869,7 +2253,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "pkg.homebrewCask",
@@ -1881,7 +2266,8 @@
             }
           },
           "dependsOn": [],
-          "guard": "macos"
+          "guard": "macos",
+          "activity": null
         },
         {
           "kind": "fs.managedBlock",
@@ -1901,7 +2287,29 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM9_CLI",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM9_CLI"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
         }
       ],
       "configOverrides": [
@@ -1967,6 +2375,31 @@
       "resources": [
         {
           "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/cli.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "cli = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/cli.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        },
+        {
+          "kind": "fs.userFile",
           "address": "fs.userFile:~/.local/bin/gm5-hello",
           "fields": {
             "content": {
@@ -1987,7 +2420,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -2011,7 +2445,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userVariable",
@@ -2031,7 +2466,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userPath",
@@ -2043,7 +2479,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.managedBlock",
@@ -2063,7 +2500,29 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM9_CLI",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM9_CLI"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
         }
       ],
       "configOverrides": [
@@ -2129,6 +2588,31 @@
       "resources": [
         {
           "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm9/cli.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "cli = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm9/cli.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
+        },
+        {
+          "kind": "fs.userFile",
           "address": "fs.userFile:~/.local/bin/gm5-hello",
           "fields": {
             "content": {
@@ -2149,7 +2633,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.userFile",
@@ -2173,7 +2658,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userVariable",
@@ -2193,7 +2679,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "env.userPath",
@@ -2205,7 +2692,8 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
         },
         {
           "kind": "fs.managedBlock",
@@ -2225,7 +2713,29 @@
             }
           },
           "dependsOn": [],
-          "guard": null
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM9_CLI",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM9_CLI"
+            },
+            "value": {
+              "kind": "string",
+              "value": "1"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": "cli"
         }
       ],
       "configOverrides": [

@@ -131,12 +131,41 @@ repro home export: cannot evaluate this export for aarch64-darwin: this export w
 
 A document always describes the platform that compiled it.
 
-## The document (schema version 2)
+## Resources that belong to an activity
+
+A `resources:` block inside an activity declares resources that belong to
+that activity. They are planned only on a host that selects the activity
+(`default`, plus the host's `hosts:` entry):
+
+```nim
+activity desktop_core:
+  hyprland
+  resources:
+    hyprlandConfig()          # a helper module's resource template
+    when linux():
+      fsUserFile(hostFile = "~/.config/waybar/config", content = waybarConf)
+
+hosts:
+  "workstation": [desktop_core]
+  "server": [default]          # no desktop configuration here
+```
+
+The block accepts everything a profile-level `resources:` block accepts
+(constructor calls, helper templates, runtime `when` chains, `for` loops); a
+guard inside it still applies, on top of the activity. Two placements are
+refused when the profile compiles: a `resources:` block under a `when` of the
+activity body (put the `when` inside the block), and an action edge
+(`inlineExecCall`, `expandArchive.build`), which carries no activity.
+
+In the export, each such resource carries `"activity": "<name>"`; a
+profile-level one carries `"activity": null`.
+
+## The document (schema version 3)
 
 ```jsonc
 {
   "format": "repro.home.export",
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "selection": {
     "host": "laptop",
     "hostDeclared": true,
@@ -149,7 +178,7 @@ A document always describes the platform that compiled it.
     "configOverrides": [ { "pkg": "git", "key": "…", "value": { … }, "guard": "macos" }, … ],
     "hosts": { "laptop": ["develop_software"] },
     "resources": [ { "kind": "fs.userFile", "address": "…", "fields": { … },
-                     "dependsOn": [], "guard": null }, … ],
+                     "dependsOn": [], "guard": null, "activity": null }, … ],
     "buildActions": [ … ],
     "adapterPreference": { … },
     "hostApplies": { "laptop": ["applications"] }   // only when a host declares
@@ -193,13 +222,14 @@ A document always describes the platform that compiled it.
 | Field | Meaning |
 |---|---|
 | `format` | Always `repro.home.export`. Refuse any other value. |
-| `schemaVersion` | `2`. Adding a field does not change it; changing the meaning or shape of an existing one does. Refuse versions you do not know. Version 2 added guards on resources and config overrides — a version-1 reader would apply a guarded resource everywhere — and `platforms`. |
+| `schemaVersion` | `3`. Adding a field does not change it; changing the meaning or shape of an existing one does. Refuse versions you do not know. Version 2 added guards on resources and config overrides — a version-1 reader would apply a guarded resource everywhere — and `platforms`. Version 3 added `activity` on resources — a version-2 reader would apply a resource on hosts that do not select its activity. |
 | `selection.host` | The host the document was produced for. |
 | `selection.hostDeclared` | Whether the profile's `hosts:` block has an entry for that host. A profile with a `hosts:` registry declares every host it may be applied to: exporting (or planning, applying, `repro home facts`) for a host it does not name is refused, so in a document from such a profile this is always `true`. A profile without a registry is host-agnostic: every host gets `default`, and this is `false`. |
 | `selection.activities` | The activities `repro home plan` enables on that host, in the order the profile declares them. Computed by the planner's own rule. Platform-independent. |
 | `selection.unknownActivities` | Activities the host's `hosts:` entry names that the profile never declares (they contribute nothing). |
-| `intent` | The whole evaluated profile, exactly as the planner consumes it — every activity, not only the selected ones, and every platform's guarded elements. A `when`/`if` guard inside an activity stays a `whenGuard` element carrying its predicate text. Resources are profile-wide, and home-scope only: a home profile that declares a system-scope resource (`fsSystemFile`, `systemdSystemUnit`, … — those belong in a system profile applied by `repro infra apply`) is refused, naming the resource. Rows of the profile's [data files](#data-files) are already expanded into the activities they name, so you never read the data files yourself; `intent` has no `dataFiles` key. |
+| `intent` | The whole evaluated profile, exactly as the planner consumes it — every activity, not only the selected ones, and every platform's guarded elements. A `when`/`if` guard inside an activity stays a `whenGuard` element carrying its predicate text. Resources are profile-wide unless they belong to an activity (`intent.resources[].activity`), and home-scope only: a home profile that declares a system-scope resource (`fsSystemFile`, `systemdSystemUnit`, … — those belong in a system profile applied by `repro infra apply`) is refused, naming the resource. Rows of the profile's [data files](#data-files) are already expanded into the activities they name, so you never read the data files yourself; `intent` has no `dataFiles` key. |
 | `intent.resources[].guard`, `intent.configOverrides[].guard` | The runtime predicate under which the element applies, as text in the [predicate grammar](#predicates), or `null` for "every host". Nested `when` blocks are conjoined (`arm64 and macos`); an `elif` / `else` branch carries the negation of the earlier conditions. Two resources may share an `address` when their guards never hold together. |
+| `intent.resources[].activity` | The activity the resource belongs to — it was declared in a `resources:` block inside `activity <name>:`, or by a data-file row with `activity = "<name>"` — or `null` for a profile-wide resource. A resource with an activity applies only on a host whose selection enables that activity (`default` plus the host's `hosts:` entry), and only where its `guard` also holds. It always names an activity in `intent.activities`; refuse a document where it does not. |
 | `intent.hostApplies` | Present only when some `hosts:` entry declares `applies:` (block form, below): host → the concerns Reprobuild applies on that host. A host absent from it lets Reprobuild apply every concern. |
 | `concerns` | Present only with `intent.hostApplies`: the concern names, every home-scope resource kind's concern, the concern of a `config:` override, and `packages` — for every target system, the package references (keyed `name`, or `name@version` when pinned) whose selected realization there places an application (`applications`), and those that resolve to nothing there (`unresolved`); every other reference is a plain package. It is Reprobuild's classification, made with the same selection `repro home apply` makes but without the host's `PATH` / Scoop inventory, so a consumer never restates it. `--check` compares it, so a catalog or lock change that reclassifies a package shows up. `profileBin` says, for every target system, where the launchers of the active generation are reached on a host that uses the default state directory: a `base` (`home` = `$HOME`, `xdgStateHome` = `$XDG_STATE_HOME` or `$HOME/.local/state`, `localAppData` = `%LOCALAPPDATA%`) and a `/`-separated `path` below it. |
 | `platforms` | For each target platform, whether this document describes it: `same` (the profile evaluated for that platform declares exactly this intent), `differs` (a compile-time `when defined(...)` changed it — refuse the document for that platform), or `unevaluated` (the profile could not be evaluated for that platform — treat as `differs`; the reason is in `provenance.compile.probe`). The compiling platform is always described, whatever its entry says. |
@@ -214,7 +244,7 @@ A document always describes the platform that compiled it.
 | `provenance.compile.os`, `.cpu` | The same platform in Nim's names (`linux`, `macosx`, `windows`; `amd64`, `arm64`). A `when defined(...)` in the profile was decided for this platform. |
 | `provenance.compile.defines` | Extra `-d:` symbols the profile compile passes (none today). |
 | `provenance.compile.probe` | For each `unevaluated` platform, why: the end of the compiler's diagnostic. |
-| `evaluation` | Present only with `--target`: `target`, `host`, `activities`, `packages` (`name`, `version`, `binaries`, `activity`), and the `resources` and `configOverrides` from `intent` whose guards hold — what the home planner would use for that host on that platform — plus `applies`, the concerns the host's entry declares, when it declares any; then every package also carries `concern` (`applications` or `packages`, from `concerns.packages`) and `resolved`, and -- when the host gives Reprobuild `packages` or `applications` but not `environment` -- `profileBin`, that system's row of `concerns.profileBin`, which the side that writes the shell environment puts on `PATH`. |
+| `evaluation` | Present only with `--target`: `target`, `host`, `activities`, `packages` (`name`, `version`, `binaries`, `activity`), and the `resources` and `configOverrides` from `intent` whose guards hold (a resource with an `activity` only when the host selects it) — what the home planner would use for that host on that platform — plus `applies`, the concerns the host's entry declares, when it declares any; then every package also carries `concern` (`applications` or `packages`, from `concerns.packages`) and `resolved`, and -- when the host gives Reprobuild `packages` or `applications` but not `environment` -- `profileBin`, that system's row of `concerns.profileBin`, which the side that writes the shell environment puts on `PATH`. |
 
 ### Applying some concerns of a host
 
@@ -298,10 +328,14 @@ hostFile = "~/.config/foo/foo.conf"
 content = "x = 1\n"
 ```
 
+Add `activity = "<name>"` to a resource row to make it belong to that
+activity, exactly like a call in that activity's `resources:` block
+([Resources that belong to an activity](#resources-that-belong-to-an-activity)).
+
 Editing a data file does not recompile the profile. In the export each
 package row appears as an ordinary activity element (a `whenGuard` around a
 `packageRef` when it has `when`), each resource row as an entry of
-`intent.resources` with its `when` as `guard`, and `provenance.dataFiles`
+`intent.resources` with its `when` as `guard` (and its `activity`, if any), and `provenance.dataFiles`
 records each file's digest.
 `--check` therefore fails when a row changes and only notes a comment edit
 (`provenance.dataFiles` differs, `intent` does not).
@@ -322,7 +356,7 @@ The `intent` shape is the same JSON the profile binary itself prints. Within
 it, an activity body element is either
 `{"kind":"packageRef","name":…,"version":…[,"binaries":[…]]}` or
 `{"kind":"whenGuard","predicate":"…","body":[…]}`; a resource is
-`{"kind":…,"address":…,"fields":{…},"dependsOn":[…],"guard":…}` with each
+`{"kind":…,"address":…,"fields":{…},"dependsOn":[…],"guard":…,"activity":…}` with each
 field a `{"kind":"string"|"int"|"bool"|"list"|"expr","value":…}` pair; a
 config override is `{"pkg":…,"key":…,"value":{…},"guard":…}`.
 

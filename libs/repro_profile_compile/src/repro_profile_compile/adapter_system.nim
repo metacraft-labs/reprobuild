@@ -721,6 +721,15 @@ proc profileIntentToSystemProfile*(p: ProfileIntent): SystemProfile =
         "profiles do not evaluate runtime predicates (system scope has no " &
         "host selection) -- use a compile-time `when defined(...)` for " &
         "system-scope resources")
+    # GM9: activities are a home-profile layer. A system profile has none to
+    # select, so an activity-scoped system resource would apply on every
+    # host; refuse instead of dropping the scope.
+    if r.activity.len > 0:
+      raise newException(ValueError,
+        "system-scope resource " & r.kind &
+        (if r.address.len > 0: " `" & r.address & "`" else: "") &
+        " belongs to activity `" & r.activity & "`; system profiles have " &
+        "no activities to select it with")
     result.resources.add(buildSystemResource(r))
 
 # ---------------------------------------------------------------------------

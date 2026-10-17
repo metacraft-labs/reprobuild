@@ -152,6 +152,11 @@ type
         ## 1-based position of the `ResourceIntent` this entry was
         ## adapted from in the compiled `ProfileIntent.resources`; 0 for
         ## an entry parsed from source text (see `configIntentOrdinal`).
+      resourceActivity*: string
+        ## GM9: the activity the resource belongs to (an entry adapted from
+        ## a compiled `ResourceIntent` with `activity` set); "" for a
+        ## profile-wide one. `applicableResourceEntries` keeps an entry only
+        ## when the host's selection enables this activity.
     of nkResourceAttr:
       ## A `<key> = <value>` payload line inside a resource entry.
       resourceAttrKey*: string

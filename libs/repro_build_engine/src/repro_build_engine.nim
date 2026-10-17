@@ -10068,6 +10068,252 @@ proc isMonitorSandboxToolsPath(path: string): bool =
     if allNumeric:
       return true
 
+proc isLowerHex(text: string; first, last: int): bool =
+  ## `text[first .. last]` is non-empty and lowercase hex. Lowercase only:
+  ## git writes object and pack names in lowercase and resolves them that
+  ## way, so an uppercase lookalike is not a name git would ever produce —
+  ## and recognising it would elide something that is not a by-name lookup.
+  if first < 0 or last >= text.len or first > last:
+    return false
+  for i in first .. last:
+    if text[i] notin {'0' .. '9', 'a' .. 'f'}:
+      return false
+  true
+
+proc isGitObjectName(text: string; first, last: int): bool =
+  ## A whole object id in `text[first .. last]`: 40 hex (SHA-1) or 64 hex
+  ## (SHA-256, `extensions.objectFormat = sha256`). Nothing else is a name a
+  ## git object store files anything under.
+  let width = last - first + 1
+  (width == 40 or width == 64) and text.isLowerHex(first, last)
+
+proc isChecksumNamed(name, prefix: string; suffixes: openArray[string]): bool =
+  ## `<prefix><40|64 hex><suffix>` for one of `suffixes`. The shape git uses
+  ## for every file it names after its own trailing checksum: `pack-<h>.idx`,
+  ## `graph-<h>.graph`, `multi-pack-index-<h>.midx`, ….
+  if not name.startsWith(prefix):
+    return false
+  for suffix in suffixes:
+    if name.len > prefix.len + suffix.len and name.endsWith(suffix):
+      return name.isGitObjectName(prefix.len, name.len - suffix.len - 1)
+  false
+
+proc isGitObjectStoreTail(tail: openArray[string]): bool =
+  ## Is `tail` — the segments below an `objects` directory — one of the
+  ## entries a git object store resolves BY NAME, or a derived index over
+  ## those entries? See `isGitObjectStorePath` for why each row is here and
+  ## why the rows that are absent are absent.
+  case tail.len
+  of 0:
+    # `objects/` itself. Its listing is the set of fan-out directories, i.e.
+    # which 2-hex prefixes currently hold a loose object.
+    return true
+  of 1:
+    let name = tail[0]
+    # `objects/<2 hex>`: a loose-object fan-out directory. It is CREATED by
+    # the first loose object under its prefix and REMOVED by
+    # `git prune-packed` once that prefix is packed, so even its existence
+    # churns with the store.
+    if name.len == 2 and name.isLowerHex(0, 1):
+      return true
+    return name == "pack"
+  of 2:
+    let (dir, name) = (tail[0], tail[1])
+    if dir.len == 2 and dir.isLowerHex(0, 1):
+      # A loose object: the remaining 38 (SHA-1) or 62 (SHA-256) hex of its
+      # name. `tmp_obj_*` and every other non-name in the fan-out directory
+      # fall through and stay observed.
+      return (name.len == 38 or name.len == 62) and
+        name.isLowerHex(0, name.high)
+    if dir == "pack":
+      return name == "multi-pack-index" or
+        name == "multi-pack-index.d" or
+        name.isChecksumNamed("pack-",
+          [".pack", ".idx", ".rev", ".bitmap"]) or
+        name.isChecksumNamed("multi-pack-index-", [".bitmap", ".rev"])
+    if dir == "info":
+      return name == "commit-graph" or name == "commit-graphs" or
+        name == "packs"
+    return false
+  of 3:
+    let (dir, sub, name) = (tail[0], tail[1], tail[2])
+    if dir == "pack" and sub == "multi-pack-index.d":
+      return name == "multi-pack-index-chain" or
+        name.isChecksumNamed("multi-pack-index-", [".midx", ".bitmap", ".rev"])
+    if dir == "info" and sub == "commit-graphs":
+      return name == "commit-graph-chain" or
+        name.isChecksumNamed("graph-", [".graph"])
+    return false
+  else:
+    return false
+
+proc isGitDirectory(dir: string; memo: var Table[string, bool]): bool =
+  ## Does `dir` look like a git directory to GIT? Memoized per call site,
+  ## because every object a lookup touches shares one of a handful of git
+  ## directories and the probe is three `stat`s.
+  ##
+  ## The test is a subset of git's own `is_git_directory`
+  ## (https://github.com/git/git/blob/master/setup.c): a `HEAD` file, an
+  ## `objects/` directory, and a `refs/` directory or — for a linked
+  ## worktree's private directory — a `commondir` file. Git additionally
+  ## validates `HEAD`'s content; not doing so here can only make this answer
+  ## `true` for a directory git would refuse, and git refusing it means no
+  ## git process resolved an object through it, so nothing that matters can
+  ## be elided by the difference.
+  ##
+  ## THIS CHECK IS THE SOUNDNESS GATE, NOT AN OPTIMISATION. The path shapes
+  ## in `isGitObjectStoreTail` say what a name WOULD mean in a git store;
+  ## only a git store makes it mean that. A data tree that happens to carry
+  ## `objects/ab/<38 hex>` names nothing by its content, and the paired test
+  ## asserts that such a file keeps invalidating the action that read it.
+  ## It is read at publish time, after the action ran, which is the moment
+  ## the recorded paths describe.
+  if dir.len == 0:
+    return false
+  memo.withValue(dir, cached):
+    return cached[]
+  let normalized = dir.replace('/', DirSep)
+  result =
+    try:
+      fileExists(normalized / "HEAD") and
+        dirExists(normalized / "objects") and
+        (dirExists(normalized / "refs") or
+         fileExists(normalized / "commondir"))
+    except CatchableError:
+      false
+  memo[dir] = result
+
+proc isGitObjectStorePath*(path: string;
+                           gitDirMemo: var Table[string, bool]): bool =
+  ## Is `path` an entry of a git object store that git resolves BY NAME — a
+  ## path whose observation the action cache must not key on?
+  ##
+  ## Issue `2026-09-30-flake-dev-env-invalidated-by-git-loose-object-probes`:
+  ## the dev-env introspection edge runs `nix print-dev-env`, which fetches
+  ## the flake as `git+file` and so reads and probes the repository's object
+  ## store. That store is shared by every worktree of a checkout and written
+  ## concurrently by every agent committing into it. A loose object appearing
+  ## under a name that was probed absent, git FRESHENING an existing object
+  ## (`utime` on rewrite — every `git add` of unchanged content does it), or a
+  ## repack moving objects into a pack, each moved the recorded metadata and
+  ## missed the edge — about 45 s against 13 s for a hit — although nothing
+  ## the action could observe had changed.
+  ##
+  ## ## Why this is attribution, not an exclusion list
+  ##
+  ## Dependency-Observation-Attribution.md §Class 1: "the path names its own
+  ## content". A git object's name IS the hash of its content, so a name
+  ## resolves to the same bytes whether the object is loose, packed,
+  ## freshened, repacked or reachable through an alternate. And rule 9's
+  ## second half — what decides the elided thing must be in the key — holds
+  ## for the reason the issue gives: the NAMES an action resolves are decided
+  ## by what stays observed (`HEAD`, `refs/**`, `packed-refs`, the index, the
+  ## work tree, `objects/info/alternates`) or by the action's own argv/env,
+  ## which are in the weak key by construction. Unchanged names ⇒ unchanged
+  ## bytes. That is a measured, per-shape argument written down here, which
+  ## is the difference from `devEnvIntrospectionIgnoredInputPrefixes`: it
+  ## applies to every edge, and it is checkable against this table.
+  ##
+  ## ## Why NOT through `contentAddressedRoot`
+  ##
+  ## That function means "a tool ROOT whose identity the engine MIXES INTO
+  ## THE KEY" — `keyedOnContentAddressedToolRoot` reads it for `argv[0]`, and
+  ## `toolInputRoots` for `PATH` / `NODE_PATH`. A git store has no identity
+  ## to mix (it is mutable as a whole; only its entries are immutable), and
+  ## routing it through there would make a `git` binary that happened to live
+  ## under a `.git/objects` lookalike key on a ROOT that names nothing. The
+  ## licence here is per ENTRY, with the "in the key" half carried by the
+  ## observed refs, so it is a separate predicate on purpose.
+  ##
+  ## ## Exactly what is recognised, below `<gitdir>/objects/`
+  ##
+  ## | entry | why it is a by-name lookup |
+  ## |---|---|
+  ## | `` (the directory), `<2hex>`, `<2hex>/<38\|62 hex>` | loose objects and their fan-out; the file name is the object name |
+  ## | `pack`, `pack/pack-<h>.{pack,idx,rev,bitmap}` | named after the pack's own checksum; `.idx`/`.rev`/`.bitmap` are derived from that pack |
+  ## | `pack/multi-pack-index`, `pack/multi-pack-index-<h>.{bitmap,rev}`, `pack/multi-pack-index.d/**` | an index over the packs; it changes which FILE answers a name, never the answer |
+  ## | `info/commit-graph`, `info/commit-graphs/**` | a cache of parsed commits; git's results are defined to be identical with or without it |
+  ## | `info/packs` | the dumb-protocol list of packs `git update-server-info` (run by every `git repack`) rewrites |
+  ##
+  ## The derived indexes are in because the issue's Expected says a repack
+  ## must not invalidate, and `git repack` / `git maintenance` rewrite them.
+  ##
+  ## ## What is deliberately NOT recognised, and stays observed
+  ##
+  ## * `objects/info/alternates` and `http-alternates` — they decide WHERE a
+  ##   name is looked up. Not named by content, not a lookup; the paired test
+  ##   asserts an alternates file appearing still invalidates.
+  ## * `objects/info/` itself, and everything outside `objects/` (`HEAD`,
+  ##   `refs`, `packed-refs`, `index`, `config`, `shallow`, `info/grafts`) —
+  ##   they decide WHICH names are looked up.
+  ## * `pack-<h>.keep`, `.promisor`, `.mtimes` — named after a pack, but their
+  ##   CONTENT is not determined by that name (a free-form keep reason,
+  ##   promisor ref lines, per-object mtimes), so the Class-1 premise fails.
+  ## * temporaries and quarantine (`tmp_obj_*`, `tmp_pack_*`,
+  ##   `objects/incoming-*`), uppercase or wrong-length names.
+  ## * any of the above shapes under a directory that is not a git directory
+  ##   (`isGitDirectory`).
+  ##
+  ## ## The limit of the licence — read before widening OR relying on it
+  ##
+  ## The argument covers outputs that are a function of the objects an action
+  ## looked up BY NAME. It does not cover outputs that are a function of the
+  ## store's object SET, because that set is exactly what the elided listings
+  ## and absent-probes carried:
+  ##
+  ## * abbreviated ids (`git describe`, `log --oneline`, `rev-parse --short`):
+  ##   git picks the abbreviation length from an approximate object count and
+  ##   extends it on a prefix collision, so a repack or new objects can change
+  ##   `g1234567` into `g12345678` with every ref unchanged. Bounded: the
+  ##   length only changes at count thresholds (2^13, 2^15, …) or on a
+  ##   collision of the abbreviated prefix, and the next move of a ref the
+  ##   action read re-runs it.
+  ## * whole-store queries (`cat-file --batch-all-objects`, `count-objects`,
+  ##   `fsck`, `prune --dry-run`).
+  ## * a lookup of a name that existed NOWHERE in the store (probed absent,
+  ##   answered "missing") that later arrives. A name the action read from a
+  ##   ref or the index always exists, so this needs a name from argv or from
+  ##   outside git, or a corrupt store.
+  ##
+  ## None of these is how a build or a flake fetch consumes git; all of them
+  ## are maintenance or version-stamping shapes. An edge that depends on one
+  ## of them must not rely on observation of `objects/` to invalidate it — it
+  ## should declare the dependency (a declared input is never elided) or not
+  ## be cacheable.
+  ##
+  ## Rule 3 ("every elision is counted"): there is no per-class elision
+  ## counter in the engine to join — `toolInputRoots` has none either. What
+  ## exists is `gradeKeyedInputSet`, which grades the set `cacheInputPaths`
+  ## returns, so an action whose only inputs were object-store lookups is
+  ## refused publication with `emptyKeyedInputSetDiagnostic` rather than
+  ## keyed on nothing.
+  # Every recognised shape has an `objects` segment. This is asked of every
+  # observed path of every action (tens of thousands for a flake fetch), and
+  # almost none contain the word, so reject them before allocating anything.
+  if "objects" notin path:
+    return false
+  let normalized = path.replace('\\', '/').strip(leading = false,
+    trailing = true, chars = {'/'})
+  let parts = normalized.split('/')
+  # The `objects` segment can occur more than once in a path (a git store
+  # inside a project directory called `objects`, say), so every occurrence
+  # is tried, cheapest test first; the filesystem is asked only once a tail
+  # has the shape of a store entry.
+  for i in countdown(parts.high, 1):
+    if parts[i] != "objects":
+      continue
+    if not isGitObjectStoreTail(parts.toOpenArray(i + 1, parts.high)):
+      continue
+    if isGitDirectory(parts[0 ..< i].join("/"), gitDirMemo):
+      return true
+  false
+
+proc isGitObjectStorePath*(path: string): bool =
+  ## Unmemoized convenience form of the predicate above, for callers that ask
+  ## about one path.
+  var memo = initTable[string, bool]()
+  path.isGitObjectStorePath(memo)
+
 proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[string] =
   ## The action-cache key's input path set: the paths whose content or
   ## metadata a later run compares against to decide ``cdHit`` /
@@ -10089,6 +10335,13 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   ##   directory -- see ``isMonitorSandboxToolsPath``. Like the filter
   ##   above it yields to a declaration, so an action that genuinely
   ##   declares such a path keeps it.
+  ## * the git-object-store filter drops by-name lookups in a git object
+  ##   store (loose objects, checksum-named packs and their derived
+  ##   indexes) -- see ``isGitObjectStorePath`` for the shape table, the
+  ##   soundness argument and its stated limit. Engine-wide rather than in
+  ##   any one edge's ignore list, and applied to every OBSERVED channel
+  ##   (``cacheEnumeratedDirectories`` applies it to the fourth). Like the
+  ##   filters above it yields to a declaration.
   ## * S5's self-write filter drops the action's OWN declared outputs
   ##   from the OBSERVED channels only — see ``selfWrittenOutputKeys``
   ##   for why those are provably not inputs, and for the
@@ -10106,6 +10359,11 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   let ignoredRoots = canonicalPolicyRoots(action.ignoredInputRoots())
   let selfWritten = action.selfWrittenOutputKeys()
   let ancestors = action.outputAncestorDirectoryKeys(evidence)
+  # One memo for the whole fold: every object an action looks up lives in one
+  # of a handful of git directories, so the `isGitDirectory` stats are paid
+  # once per directory rather than once per object. Local, not global, so
+  # the answer never outlives the run whose recorded paths it describes.
+  var gitDirMemo = initTable[string, bool]()
   var declaredMaterialized = initHashSet[string]()
   # Deferred-D4: side-car ``HashSet`` tracks ``result`` membership; the
   # output ``seq`` retains insertion order because the action-cache key
@@ -10124,7 +10382,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
         (path.isUnderAnyRoot(toolRoots) or
          path.isUnderCanonicalPolicyRoot(ignoredRoots) or
          path.isMonitorSandboxToolsPath() or
-         path.isCompilerWrapperScratchPath()):
+         path.isCompilerWrapperScratchPath() or
+         path.isGitObjectStorePath(gitDirMemo)):
       continue
     result.addUnique(seen, path)
   for input in evidence.monitorReads:
@@ -10136,7 +10395,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
         (path.isUnderAnyRoot(toolRoots) or
          path.isUnderCanonicalPolicyRoot(ignoredRoots) or
          path.isMonitorSandboxToolsPath() or
-         path.isCompilerWrapperScratchPath()):
+         path.isCompilerWrapperScratchPath() or
+         path.isGitObjectStorePath(gitDirMemo)):
       continue
     result.addUnique(seen, path)
   for probe in evidence.monitorProbes:
@@ -10148,7 +10408,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
         (path.isUnderAnyRoot(toolRoots) or
          path.isUnderCanonicalPolicyRoot(ignoredRoots) or
          path.isMonitorSandboxToolsPath() or
-         path.isCompilerWrapperScratchPath()):
+         path.isCompilerWrapperScratchPath() or
+         path.isGitObjectStorePath(gitDirMemo)):
       continue
     result.addUnique(seen, path)
 
@@ -10513,6 +10774,7 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
   let toolRoots = action.toolInputRoots()
   let ignoredRoots = canonicalPolicyRoots(action.enumerationIgnoredRoots())
   let selfWrittenDirs = action.selfWrittenDirectoryKeys()
+  var gitDirMemo = initTable[string, bool]()
   var declaredMaterialized = initHashSet[string]()
   for input in evidence.declaredInputs:
     declaredMaterialized.incl(
@@ -10523,8 +10785,18 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
     if declaredMaterialized.contains(path.replace('\\', '/')):
       result.addUnique(seen, path)
       continue
+    # A git object store's own directories (`objects/`, `objects/pack`,
+    # `objects/<2 hex>`, …): their MEMBERSHIP is the store's object set,
+    # which a new pack, a new loose object or `git prune-packed` moves with
+    # every name the action resolved unchanged. `cacheInputPaths` drops the
+    # same directories from the probe channel, and the two must agree — a
+    # directory handed over here that is absent there would carry membership
+    # for something the record does not hold. What giving up the membership
+    # costs, and why that is acceptable, is the "limit of the licence"
+    # section of `isGitObjectStorePath`.
     if path.isUnderAnyRoot(toolRoots) or
-        path.isUnderCanonicalPolicyRoot(ignoredRoots):
+        path.isUnderCanonicalPolicyRoot(ignoredRoots) or
+        path.isGitObjectStorePath(gitDirMemo):
       continue
     # An enumerated directory in an UNTRACKED scope — under none of the
     # roots this workspace declared, which includes every ancestor above

@@ -34,9 +34,13 @@
 ##   target;
 ## * a `[[resource]]` row is the resource its kind's constructor builds from
 ##   the row's keys (the constructor's parameters), appended to the
-##   profile-wide resources after the compiled ones in `data:` / file order,
-##   with its `when` (canonical) as the guard — it applies on a host when the
-##   guard holds, like a guarded entry of `resources:`.
+##   resources after the compiled ones in `data:` / file order, with its
+##   `when` (canonical) as the guard — it applies on a host when the guard
+##   holds, like a guarded entry of `resources:`;
+## * a `[[resource]]` row with `activity` (GM9) belongs to that activity, as
+##   a call in `activity <name>: resources:` does: it applies only on a host
+##   whose selection enables the activity (and where its guard holds). An
+##   activity no block declares is created, as for a package row.
 
 import std/[os]
 
@@ -82,9 +86,19 @@ proc mergeDataRows*(intent: var ProfileIntent; files: openArray[DataFile]) =
         target = intent.activities.high
       intent.activities[target].body.add dataRowElement(row)
     # Resource rows were built by their constructors when the file was read
-    # (`repro_profile/resource_rows`); they join the profile-wide resources
-    # after the compiled ones, in file order, guard attached.
+    # (`repro_profile/resource_rows`); they join the resources after the
+    # compiled ones, in file order, guard and activity attached. A row's
+    # activity that no block declares is created, exactly as for a package
+    # row (GM9), so `hosts:` can select it.
     for resource in file.resources:
+      if resource.activity.len > 0:
+        var declared = false
+        for activity in intent.activities:
+          if activity.name == resource.activity:
+            declared = true
+            break
+        if not declared:
+          intent.activities.add ActivityIntent(name: resource.activity)
       intent.resources.add resource
   intent.dataFiles = @[]
 
