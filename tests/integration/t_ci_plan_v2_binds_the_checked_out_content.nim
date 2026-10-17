@@ -2,8 +2,11 @@
 ## CONTENT CI checked out rather than to a commit and a lock.
 ##
 ## A committed-lock project (its ``repro.lock`` is tracked, so reprobuild's
-## lock step reads it from the content) with ``ci_trust = "skip"`` and
-## required targets ``t-unit`` and ``t-int``. Certificates are signed by the
+## lock step reads it from the content) whose published base (``origin/main``)
+## records a certificate policy with ``ci_trust = "skip"`` and required
+## targets ``t-unit`` and ``t-int`` (TC-9d: the policy lives in the content's
+## ``repro.lock``; the plan reads ``ci_trust`` from the base, so the checkout
+## under test is a commit on top of it). Certificates are signed by the
 ## registered daemon key through the real signing primitive.
 ##
 ##   1. A CLEAN checkout binds ``content = git-tree-sha1:<HEAD^{tree}>`` (as git
@@ -36,6 +39,11 @@ suite "TC-8c — the CI plan binds the checked-out content":
     let fx = setupStoreFixture(requiredPolicy(@["t-unit", "t-int"], @[host],
       ciTrust = "skip"), "ciplan", recordStore = false, committedLock = true)
     defer: removeDir(fx.scratch)
+    # The candidate: a commit on top of the published base. A checkout that
+    # IS the base would have no base to read ci_trust from (TC-9c).
+    writeFile(fx.libAPath / "candidate.txt", "the change CI checks out\n")
+    discard gitOut(fx.libAPath, "add", "candidate.txt")
+    discard gitOut(fx.libAPath, "commit", "-q", "-m", "candidate")
 
     # ---- 1. a clean checkout --------------------------------------------
     let head = gitOut(fx.libAPath, "rev-parse", "HEAD")
@@ -47,6 +55,8 @@ suite "TC-8c — the CI plan binds the checked-out content":
     check bare["commit"].getStr() == head
     check not bare.hasKey("lock_records_dir")
     check not bare.hasKey("lock")
+    check bare["ci_trust"].getStr() == "skip"
+    check bare["policy"]["source"].getStr() == "base"
     check planPlatform(bare, host)["verdict"].getStr() == "not-covered"
     check strings(planPlatform(bare, host), "run") == @["t-unit", "t-int"]
 

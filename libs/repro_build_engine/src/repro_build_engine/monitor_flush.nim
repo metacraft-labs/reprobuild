@@ -119,7 +119,7 @@
 ## both questions, which is the concrete reason the "point io-mon at /dev/null
 ## and re-encode here" variant was rejected on more than its CPU cost.
 
-import std/[os, strutils]
+import std/[monotimes, os, strutils, times]
 
 from repro_core/paths import extendedPath
 
@@ -166,6 +166,7 @@ type
     tempPath: cstring
     destPath: cstring
     failSubstring: cstring
+    releasePath: cstring
     delayMs: int
 
 static:
@@ -246,10 +247,32 @@ proc runFlushJob(job: EnginePoolJob): cstring {.nimcall, gcsafe.} =
   ## The pool task. ``job`` is the ``base`` field of a ``FlushNodeObj``, which
   ## the ``static`` assertion above pins at offset 0.
   let node = cast[FlushNode](job)
-  if node.delayMs > 0:
-    # The seam ``the scheduler starts the next edges before the file lands``
-    # measures through. Without it the publication is a single ``rename``
-    # and lands so fast that the case could pass on a machine where nothing
+  let releasePath = $node.releasePath
+  if releasePath.len > 0:
+    # The RELEASE seam: withhold this publication until ``releasePath``
+    # exists, so a test can make "the next edge observed the depfile's
+    # absence" a matter of ORDER rather than of timing. The next edge's own
+    # command observes and then creates the file, so only a scheduler that
+    # starts that edge before this publication lands can ever release it.
+    #
+    # The hold ALSO ends the moment anyone waits on this tenant — and that is
+    # what keeps the opposite engine from deadlocking without making it a
+    # race: a scheduler that waits for this publication before starting the
+    # next edge is, by definition, a waiter, so the publication lands at once
+    # and the next edge then observes it. ``runBuild``'s own end-of-build
+    # wait is a waiter too, so a hold is never left behind by a build whose
+    # next edge never ran. Both ends are decided by order. ``delayMs`` is
+    # only a hang breaker for a caller that neither releases nor waits.
+    let deadline = getMonoTime() + initDuration(milliseconds = node.delayMs)
+    while not fileExists(extendedPath(releasePath)) and
+        not enginePoolTenantHasWaiter(monitorFlushTenant) and
+        getMonoTime() < deadline:
+      sleep(5)
+  elif node.delayMs > 0:
+    # The DELAY seam: keep a publication in flight for ``delayMs``. Without
+    # it the publication is a single ``rename`` and lands so fast that a case
+    # about publications in flight (HM-5's recycled-slot, torn-reader and
+    # cacheable-ordering cases) could pass on a machine where nothing
     # overlapped at all, which would make it a test of scheduling luck.
     sleep(node.delayMs)
   let err = publishOneFlush(node)
@@ -262,6 +285,7 @@ proc releaseFlushJob(job: EnginePoolJob) {.nimcall, gcsafe.} =
   sharedFree(node.tempPath)
   sharedFree(node.destPath)
   sharedFree(node.failSubstring)
+  sharedFree(node.releasePath)
   deallocShared(node)
 
 proc enqueueMonitorFlush*(job: MonitorFlushJob) =
@@ -269,7 +293,7 @@ proc enqueueMonitorFlush*(job: MonitorFlushJob) =
   ## this is the call the scheduler makes BEFORE it collects evidence,
   ## publishes a cache entry, or launches the next edges.
   ##
-  ## The two test seams are read HERE, per job, rather than once when the
+  ## The three test seams are read HERE, per job, rather than once when the
   ## pool starts: a test process that runs several builds must not be stuck
   ## with whatever the first one happened to set.
   let delayMs =
@@ -281,6 +305,8 @@ proc enqueueMonitorFlush*(job: MonitorFlushJob) =
   node.tempPath = sharedDup(job.tempPath)
   node.destPath = sharedDup(job.destPath)
   node.failSubstring = sharedDup(getEnv("REPROBUILD_MONITOR_FLUSH_FAIL", ""))
+  node.releasePath = sharedDup(
+    getEnv("REPROBUILD_MONITOR_FLUSH_RELEASE_PATH", ""))
   node.delayMs = delayMs
   submitEnginePoolJob(monitorFlushTenant, job.actionId, addr node.base,
     runFlushJob, releaseFlushJob)

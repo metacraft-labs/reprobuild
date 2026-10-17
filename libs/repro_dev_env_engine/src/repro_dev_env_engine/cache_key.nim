@@ -379,59 +379,316 @@ proc promptWatchState*(manifestPath: string): string =
     result.add('\t')
     result.add(entryState(entry))
 
-proc unsettledPromptWatchPaths*(manifestPath: string;
-                                startedAt: float): seq[string] =
-  ## The race guard. Paths in the manifest whose mtime or ctime is not
-  ## safely earlier than ``startedAt`` (seconds since the epoch, taken
-  ## BEFORE the activation's edge ran).
+proc comparablePromptWatchPath*(path: string): string =
+  ## One spelling per location, for COMPARING a manifest path with a path the
+  ## monitor recorded elsewhere (a write, a removal). On macOS `/var`, `/tmp`
+  ## and `/etc` are symbolic links into `/private`, and one capture can
+  ## record both forms of the same location. Used only to compare; the
+  ## manifest keeps every path as recorded.
+  result = path.replace('\\', '/')
+  while result.len > 1 and result.endsWith("/"):
+    result.setLen(result.len - 1)
+  when defined(macosx):
+    for prefix in ["/var", "/tmp", "/etc"]:
+      if result == prefix or result.startsWith(prefix & "/"):
+        return "/private" & result
+
+proc changedSince(info: FileInfo; startedAt: float): bool =
+  ## Whether ``info``'s mtime or ctime is not safely earlier than
+  ## ``startedAt``, allowing for the filesystem's timestamp resolution: it is
+  ## the timestamp the filesystem RECORDED that is compared, and a coarse one
+  ## can sit before the moment the write actually happened.
+  let coarse = info.lastWriteTime.nanosecond == 0 and
+    info.creationTime.nanosecond == 0
+  let margin =
+    if coarse: CoarseTimestampMarginSeconds
+    else: FineTimestampMarginSeconds
+  max(timeSeconds(info.lastWriteTime), timeSeconds(info.creationTime)) >=
+    startedAt - margin
+
+type
+  PromptWatchBaseline* = object
+    ## The entry NAMES of each membership-tracked directory (``d`` entry) of
+    ## a prompt watch manifest, listed BEFORE an activation's edge runs (see
+    ## ``snapshotPromptWatchBaseline``). Keyed by
+    ## ``comparablePromptWatchPath``.
+    listings*: Table[string, seq[string]]
+
+proc directoryNames(dir: string; names: var seq[string]): bool =
+  ## The sorted entry names of ``dir``; false when it cannot be listed.
+  names.setLen(0)
+  try:
+    for child in walkDir(fastPathFsPath(dir), relative = true):
+      names.add(child.path)
+  except OSError:
+    return false
+  names.sort(system.cmp[string])
+  true
+
+proc snapshotPromptWatchBaseline*(manifestPath: string): PromptWatchBaseline =
+  ## List, NOW, every ``d`` entry of the manifest at ``manifestPath`` -- the
+  ## previous activation's, read before this activation's edge runs. The
+  ## race guard compares these listings with the directories after the edge
+  ## ran, which is the only way to tell a foreign removal from the edge's
+  ## own when both moved the same directory: timestamps say only THAT a
+  ## directory changed, and the edge's evidence says what IT did, not what
+  ## else happened. A manifest that cannot be read yields no listings, and
+  ## the guard is conservative for every directory it has no listing for.
+  result.listings = initTable[string, seq[string]]()
+  var entries: seq[PromptWatchEntry]
+  if manifestPath.len == 0 or
+      readPromptWatchManifest(manifestPath, entries).len > 0:
+    return
+  for entry in entries:
+    if not entry.enumerated:
+      continue
+    var names: seq[string]
+    if directoryNames(entry.path, names):
+      result.listings[comparablePromptWatchPath(entry.path)] = names
+
+proc unsettledPromptWatchPaths*(manifestPath: string; startedAt: float;
+                                ownWrites: openArray[string] = [];
+                                ownRemovals: openArray[string] = [];
+                                baseline = PromptWatchBaseline()):
+    seq[string] =
+  ## The race guard. The paths of the manifest that may have changed after
+  ## the edge observed them. ``startedAt`` is seconds since the epoch, taken
+  ## immediately BEFORE the build that ran (or cache-checked) the edge.
   ##
   ## WHY. The activation computes the key it emits from metadata it stats
   ## AFTER the edge has run, because only then does it know the observed set.
-  ## An edit that lands between the edge reading a file and that stat would
-  ## therefore be keyed as current, while the environment in the script was
-  ## built from the content before it -- and every later prompt would agree
-  ## with it. A path changed at or after the edge started is indistinguishable
-  ## from that, so the caller must emit a marker no prompt can match: the next
-  ## prompt then falls through and activates again against settled files.
+  ## A change that lands between the edge observing a path and that stat
+  ## would therefore be keyed as current, while the environment in the script
+  ## was built from the state before it -- and every later prompt would agree
+  ## with it. Whatever cannot be told apart from that makes the caller emit a
+  ## marker no prompt can match: the next prompt then falls through and
+  ## activates again against settled files.
   ##
-  ## The comparison allows for the filesystem's timestamp resolution (see
-  ## ``CoarseTimestampMarginSeconds`` / ``FineTimestampMarginSeconds``): it is
-  ## the timestamp the filesystem RECORDED that is compared, and a coarse one
-  ## can sit before the moment the write actually happened.
+  ## THREE KINDS OF CHANGE, and each has its own test:
   ##
-  ## DIRECTORIES ARE NOT CHECKED, and that is a measured trade, not an
-  ## oversight. A probed directory is keyed on its kind only, so there is
-  ## nothing to race. An enumerated one is keyed on its mtime, and the
-  ## activation itself moves that: the first activation of a project creates
-  ## `<projectRoot>/.repro` while the edge runs, and a `useFlakeDevShell()`
-  ## edge enumerates `<projectRoot>`. Checked, that made every project's
-  ## first activation unmatchable (one wasted re-activation, measured on the
-  ## `t_e2e_shell_hook_prompt_key_sees_flake_inputs` fixture). Unchecked,
-  ## the window left open is a file ADDED to an enumerated directory between
-  ## the edge listing it and this stat; an edit to any file the edge read is
-  ## still caught, because every such file is an entry of its own.
+  ##   * an EDIT, to any file or link in the manifest: its mtime or ctime is
+  ##     not safely earlier than ``startedAt``;
+  ##   * a MEMBERSHIP change of a directory whose membership is keyed (a
+  ##     ``d`` entry): an entry added to it, removed from it or renamed in it.
+  ##     Each of those moves the directory's own mtime and ctime, on POSIX
+  ##     filesystems and on NTFS alike, so a directory whose timestamps are
+  ##     safely earlier than ``startedAt`` has the membership the edge listed
+  ##     and is not even listed here. One that moved is listed, and its move
+  ##     must be explained by the edge: one of its CURRENT entries changed
+  ##     after the start and is an own change (see below), or the edge
+  ##     created or removed an entry directly in it. Anything else is
+  ##     reported -- a current entry changed after the start that the edge did
+  ##     not make (an addition), and a move no current entry accounts for (a
+  ##     removal, or an entry renamed away). The edge's own moves are why the
+  ##     directory's timestamps alone cannot be the verdict: the first
+  ##     activation of a project creates `<projectRoot>/.repro` while a
+  ##     `useFlakeDevShell()` edge enumerates `<projectRoot>`, and
+  ##     `nix print-dev-env` makes and removes a scratch directory beside
+  ##     what it reads -- either made every first activation unmatchable when
+  ##     the directory's timestamps were the test;
+  ##   * a REMOVAL of a listed path: an entry that is missing now while the
+  ##     nearest directory above it that still exists has an mtime or ctime
+  ##     not safely earlier than ``startedAt``. Removing an entry moves the
+  ##     timestamps of the directory that held it, and removing a whole
+  ##     subtree moves those of the directory that held its top, so a path
+  ##     removed after the edge observed it is caught; a path that was absent
+  ##     all along (an absent probe, which the manifest lists too and which is
+  ##     meant to be missing) sits below a directory nothing touched. That
+  ##     directory is stat'ed THROUGH a symbolic link (`/tmp` and `/etc` are
+  ##     links on macOS), because a link's own timestamps never move with its
+  ##     target's membership.
+  ##
+  ##     Not "a path the edge READ that is now missing": the evidence does not
+  ##     say whether a read found its file. Measured on a `useFlakeDevShell()`
+  ##     edge on macOS, the read channel carried `PATH` lookups that found
+  ##     nothing (`/opt/homebrew/bin/arch`, `./print-dev-env`) and a relative
+  ##     scratch name resolved against the wrong directory, so that test made
+  ##     every activation unmatchable.
+  ##
+  ## ``ownWrites`` and ``ownRemovals`` are the paths the edge itself wrote
+  ## (or created) and removed, kept APART. They come from the edge's
+  ## evidence; an edge that did not run (a cache hit) changed nothing, so the
+  ## caller passes none, and every change after ``startedAt`` is then foreign
+  ## by construction. Each side explains only its own kind of state. A
+  ## PRESENT entry that changed is explained by being an own write, or a
+  ## directory above any own change (an entry the edge created, or a
+  ## directory it wrote into or removed from) -- never by being an own
+  ## removal itself, so an entry the edge deleted and somebody else then
+  ## created again is reported. Either kind explains the move of the
+  ## directory directly holding it. An ABSENCE --
+  ## a listed path missing now, or a name gone from an enumerated directory
+  ## since the pre-edge listing -- is explained only by that exact path being
+  ## an own REMOVAL: never by the edge having written elsewhere in the same
+  ## directory (so a foreign removal beside the edge's own scratch is still
+  ## reported), and never by the edge having WRITTEN that path (so an entry
+  ## the edge relocked and somebody else then deleted is reported too).
+  ##
+  ## WHAT THE REMOVAL CHANNEL HOLDS, and why the absence rule converges. It
+  ## is `PathSetEvidence.monitorRemovals`: io-mon's `unlink`, `unlinkat`,
+  ## `rmdir` and `remove` records (`isRemovalMutation`), on Linux and macOS
+  ## alike, so an edge's ordinary deletion of a watched entry is explained.
+  ## A RENAME is not a removal there: io-mon records its destination as a
+  ## write and its source as a read (Linux) or not at all (macOS), so an edge
+  ## renaming a pre-existing watched entry away -- or deleting one through a
+  ## call io-mon does not classify, which includes every deletion on Windows,
+  ## where io-mon records `DeleteFileW` and a `MoveFileExW` source as writes
+  ## -- leaves an absence nothing explains, and it is reported. That costs
+  ## one extra activation, never a loop: the entry is gone by then, so the
+  ## next activation either hits the cache
+  ## (no own changes, and nothing moves after its start) or runs an edge
+  ## that cannot remove the entry again, and the next pre-edge listing no
+  ## longer holds its name. Either way its guard sees no absence. Reading a
+  ## write as a removal instead would close that extra activation by
+  ## missing a change, which no rule here may do.
+  ##
+  ## WHEN THE EDGE'S OWN CHANGES EXPLAIN A MOVE. Timestamps say THAT a
+  ## directory's membership moved, not how often, so the edge having created
+  ## or removed something in an enumerated directory cannot by itself rule
+  ## out a foreign removal from the same directory. ``baseline`` decides
+  ## that case: the directory's entry names listed BEFORE the edge ran
+  ## (``snapshotPromptWatchBaseline``). Every name gone since must itself be
+  ## an own removal, and every new one an own write or a directory above an
+  ## own change; otherwise it is reported. A directory with no baseline
+  ## listing is reported in that case, since nothing can verify it: one extra
+  ## activation the first time, after which the listing exists.
+  ##
+  ## Every rule errs the same way -- an absent probe below a directory that
+  ## changed for an unrelated reason, a foreign file created and removed
+  ## again inside an enumerated directory, or an own rename-away as above,
+  ## costs one extra activation, never a missed change.
+  ##
+  ## A probed directory (a ``p`` entry that is a directory) is keyed on its
+  ## kind only, and nothing about it is tested here: its appearance or
+  ## disappearance is a kind change, which no edit to its contents is.
   ##
   ## A manifest that cannot be read is reported as unsettled itself.
   var entries: seq[PromptWatchEntry]
   if manifestPath.len == 0 or
       readPromptWatchManifest(manifestPath, entries).len > 0:
     return @[manifestPath]
+  # ``ownRemoved``: the own removals themselves, the only explanation of an
+  # absence. ``own``: the only explanation of a PRESENT entry -- every own
+  # write, and every directory above any own change (an entry the edge
+  # created, or a directory it wrote into or removed from). An own removal
+  # is not in it itself: the entry the edge removed being there now is
+  # somebody else's re-creation. ``ownHolders``: the directories directly
+  # holding an own change, whose membership moves the edge explains.
+  # Invariant the early break below relies on: an entry in ``own`` has every
+  # directory above it in ``own`` too.
+  var own = initTable[string, bool]()
+  var ownRemoved = initTable[string, bool]()
+  var ownHolders = initTable[string, bool]()
+  proc addOwnChange(path: string; written: bool) =
+    var cursor = comparablePromptWatchPath(path)
+    if written:
+      own[cursor] = true
+    else:
+      ownRemoved[cursor] = true
+    let holder = parentDir(cursor)
+    if holder.len > 0 and holder != cursor:
+      ownHolders[holder] = true
+    while true:
+      let parent = parentDir(cursor)
+      if parent.len == 0 or parent == cursor or own.hasKey(parent):
+        break
+      own[parent] = true
+      cursor = parent
+  for path in ownWrites:
+    addOwnChange(path, written = true)
+  for path in ownRemovals:
+    addOwnChange(path, written = false)
+
+  proc nearestExistingAncestorChanged(path: string): bool =
+    ## The REMOVAL test's directory: the closest one above ``path`` that
+    ## exists now, stat'ed through a link. Reaching the top with nothing
+    ## found is reported too: there is nothing left to say it was quiet.
+    var cursor = path
+    while true:
+      let parent = parentDir(cursor)
+      if parent.len == 0 or parent == cursor:
+        return true
+      try:
+        let info = getFileInfo(fastPathFsPath(parent), followSymlink = true)
+        return info.changedSince(startedAt)
+      except OSError:
+        cursor = parent
+
   for entry in entries:
+    let comparable = comparablePromptWatchPath(entry.path)
     var info: FileInfo
     try:
       info = getFileInfo(fastPathFsPath(entry.path), followSymlink = false)
     except OSError:
+      # Missing now. A REMOVAL when the directory that held it changed after
+      # the start and the edge did not remove the entry itself -- writing it
+      # is no explanation of its absence.
+      if not ownRemoved.hasKey(comparable) and
+          nearestExistingAncestorChanged(entry.path):
+        result.add(entry.path)
       continue
-    if info.kind == pcDir:
+    if info.kind != pcDir:
+      if info.changedSince(startedAt):
+        result.add(entry.path)
       continue
-    let coarse = info.lastWriteTime.nanosecond == 0 and
-      info.creationTime.nanosecond == 0
-    let margin =
-      if coarse: CoarseTimestampMarginSeconds
-      else: FineTimestampMarginSeconds
-    let latest = max(timeSeconds(info.lastWriteTime),
-      timeSeconds(info.creationTime))
-    if latest >= startedAt - margin:
+    if not entry.enumerated or not info.changedSince(startedAt):
+      continue  # a probed directory, or a membership nothing has moved
+    # The membership moved. Explained when the edge created or removed an
+    # entry directly in it, or when a current entry that changed is its own
+    # write (or a directory above an own change).
+    var explained = ownHolders.hasKey(comparable)
+    var foreign = false
+    try:
+      for child in walkDir(fastPathFsPath(entry.path), relative = true):
+        let childPath = entry.path / child.path
+        var childInfo: FileInfo
+        try:
+          childInfo = getFileInfo(fastPathFsPath(childPath),
+            followSymlink = false)
+        except OSError:
+          continue  # gone again since the listing; the move still counts
+        if not childInfo.changedSince(startedAt):
+          continue
+        if own.hasKey(comparablePromptWatchPath(childPath)):
+          explained = true
+        else:
+          foreign = true  # an ADDITION the edge did not make
+          break
+    except OSError:
+      foreign = true  # cannot be listed now: its membership is unknown
+    if foreign or not explained:
+      result.add(entry.path)
+      continue
+    # Explained by the edge's own changes, which says nothing about whether
+    # SOMEBODY ELSE also removed an entry from the same directory meanwhile.
+    # The pre-edge listing decides: every name that disappeared must itself
+    # be an own removal (``ownRemoved``), and every name that appeared an own
+    # write or a directory above an own change (``own``). Without a
+    # listing (the first activation in this output directory, or a
+    # directory the previous manifest did not track) that cannot be
+    # verified, so the directory is reported: one extra activation, which
+    # then has the listing.
+    let comparableDir = comparable
+    if not baseline.listings.hasKey(comparableDir):
+      result.add(entry.path)
+      continue
+    var current: seq[string]
+    if not directoryNames(entry.path, current):
+      result.add(entry.path)
+      continue
+    let before = baseline.listings[comparableDir]
+    var unexplained = false
+    for name in before:
+      if current.binarySearch(name) < 0 and
+          not ownRemoved.hasKey(comparablePromptWatchPath(entry.path / name)):
+        unexplained = true  # a REMOVAL the edge did not make
+        break
+    if not unexplained:
+      for name in current:
+        if before.binarySearch(name) < 0 and
+            not own.hasKey(comparablePromptWatchPath(entry.path / name)):
+          unexplained = true  # an addition that kept an old timestamp
+          break
+    if unexplained:
       result.add(entry.path)
 
 proc computeDevEnvEdgeCacheKey*(projectRoot, activity, lockSliceId,

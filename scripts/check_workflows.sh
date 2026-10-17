@@ -211,63 +211,77 @@ sibling_repo_branch_pins() {
 }
 
 # -----------------------------------------------------------------------------
-# HOW REFS ARE LOOKED UP, AND WHY IT TAKES TWO ATTEMPTS
+# HOW REFS ARE LOOKED UP, AND WHY IT TAKES THREE ATTEMPTS
 #
 # This gate failed on EVERY CI run from the day it landed -- identically on
-# `dev` and on every `agents-to-dev-*` promotion branch -- while passing on
-# every laptop. It always reported the same thing, "cannot reach github.com",
-# and that reading was wrong: the runner's network was fine and the lookup did
-# not time out. It failed in about 400ms, and it failed on PURPOSE, because of
-# a credential the runner injects and this script never knew about.
+# `dev`, on `agents`, and on every `agents-to-dev-*` promotion branch, on four
+# different runner classes -- while passing on every laptop. It always reported
+# the same thing, "cannot reach github.com", and that reading was wrong twice
+# over: the runner's network is fine, and the lookup did not time out. It failed
+# in about 400ms, deterministically, with an HTTP 400.
 #
-# `ci.yml` mints a GitHub App installation token and hands it to every job as
+# THE CAUSE. Two different things each install a github.com `extraHeader` in a
+# CI job here, and neither knows about the other:
 #
-#     GIT_CONFIG_COUNT=1
-#     GIT_CONFIG_KEY_0=http.https://github.com/metacraft-labs/.extraHeader
-#     GIT_CONFIG_VALUE_0=AUTHORIZATION: basic <token>
+#   * `actions/checkout@v4` persists `http.https://github.com/.extraheader`
+#     into THIS repo's .git/config, carrying the workflow GITHUB_TOKEN;
+#   * `setup-dev-env` exports
+#     `http.https://github.com/metacraft-labs/.extraHeader` through
+#     GIT_CONFIG_*, carrying a GitHub App installation token.
 #
-# so every `git ls-remote https://github.com/metacraft-labs/...` in this file
-# sends that token whether it wants to or not. The token is SCOPED: `ci.yml`
-# lists the repositories it covers, and GitHub refuses a request for a repo
-# outside that list EVEN WHEN THE REPO IS PUBLIC. It does not degrade the
-# request to an anonymous one. git then asks for a username, `GIT_TERMINAL_PROMPT=0`
-# turns that into `fatal: could not read Username for 'https://github.com'`,
-# and the lookup is over in under half a second.
+# Both URL patterns match any `https://github.com/metacraft-labs/...` request.
+# `http.extraHeader` is a MULTI-VALUED list, not a single setting, so git sends
+# BOTH and github refuses the request:
 #
-# `reprobuild` and `nixos-modules` -- the two repos THIS SCRIPT probes to
-# decide whether github is reachable and whether its resolvers still work --
-# are not in that list. Neither is the `metacraft-github-actions=dev` entry.
-# So in CI the network probe could never succeed, the gate took the offline
-# branch, `$CI` was set, and it refused. Every promotion since then either
-# blocked on it or was waved through on evidence substituted from a laptop.
+#     remote: Duplicate header: "Authorization"
+#     fatal: unable to access '...': The requested URL returned error: 400
 #
-# The lesson is not "trust the network less". It is that a lookup here has TWO
-# credential states available and needs both, because neither one can resolve
-# every entry:
+# Every lookup in this gate ran from the repo root with both sources live, so
+# every lookup got that 400 -- including the one probe that decides whether
+# github is reachable at all. The gate concluded "offline", saw `$CI`, and
+# refused. Promotions then either blocked on it or were waved through on
+# evidence substituted from a laptop, where no second header exists.
 #
-#   ambient    -- whatever credential the environment already supplies: the
-#                 injected installation token in CI, a credential helper on a
-#                 laptop. REQUIRED for the private siblings. With no
-#                 credential at all, `codetracer-native-recorder=dev` and
-#                 `repo-workspaces=dev` cannot be resolved by anyone.
-#   anonymous  -- no header, no helper, no repo-local config. REQUIRED in CI
-#                 for every repo outside the token's closure, which includes
-#                 both of this gate's own probe anchors.
+# A SECOND, SEPARATE PROBLEM, found while fixing the first. The installation
+# token is SCOPED: ci.yml lists the repositories it covers, and github refuses
+# a request for a repo outside that list EVEN WHEN THE REPO IS PUBLIC, with a
+# 404, rather than degrading it to an anonymous request. `reprobuild` and
+# `nixos-modules` -- the two repos THIS SCRIPT probes to decide reachability and
+# to check its own resolvers -- are not on that list, and neither is the
+# `metacraft-github-actions=dev` entry. So even with one header those three
+# could not be read with the ambient credential.
 #
-# Ambient is tried first so a private sibling is resolved by the credential
-# that can actually see it, and anonymous second so a public repo the ambient
-# token is not entitled to still resolves. Each round is retried with backoff,
-# so a network that is merely slow or flaky resolves rather than failing --
-# and a lookup that still cannot be answered is reported as UNRESOLVABLE, never
-# as "this pin names a dead ref". The old code could not tell those apart: it
-# sent every lookup's stderr to /dev/null and turned any non-zero exit into
-# "the ref does not exist", so a credential problem arrived as a false
-# accusation against a pin that was fine.
+# Hence three arms, because no single credential state can resolve every entry:
+#
+#   ambient        -- whatever the environment already supplies, untouched.
+#                     This is the arm that works on a laptop, where there is
+#                     exactly one credential and nothing to collide with.
+#   single-header  -- every config source neutralised, then exactly ONE
+#                     discovered Authorization header re-added. This is the arm
+#                     that works in CI, and the only one that can read the
+#                     PRIVATE siblings (`codetracer-native-recorder`,
+#                     `repo-workspaces`), which no anonymous request can see.
+#   anonymous      -- no header, no helper, no repo-local config. Required in CI
+#                     for every PUBLIC repo outside the token's closure,
+#                     including both of this gate's own probe anchors.
+#
+# Each round is retried with backoff, so a network that is merely slow or flaky
+# resolves rather than failing. A lookup that still cannot be answered is
+# reported as UNRESOLVABLE, never as "this pin names a dead ref": the old
+# resolver turned any non-zero exit into "the ref does not exist", so a
+# credential problem would have arrived as a false accusation against a pin
+# that was fine.
+#
+# And the reason is PRINTED. The old code sent every lookup's stderr to
+# /dev/null, which is the single thing that made this cost five days: the
+# message that identified the cause -- `Duplicate header: "Authorization"` --
+# was produced on every run and thrown away, leaving only a sentence about the
+# network that was not true.
 #
 # What is deliberately NOT done here: skipping in CI. A lookup that cannot be
 # answered still fails this gate when `$CI` is set, for exactly the reason the
-# original comment gives. The fix is to make the lookup succeed when it can,
-# not to accept not knowing.
+# original comment gave. The fix is to make the lookup succeed when it can, not
+# to accept not knowing.
 # -----------------------------------------------------------------------------
 
 # Scratch space: one directory for the parser fixture and one neutral cwd for
@@ -346,7 +360,79 @@ sibling_ls_remote_anon() {
     -c credential.helper= ls-remote "$@" 2>"${sibling_scratch}/err"
 }
 
-# Runs `git ls-remote "$@"` through both arms, with retries, and prints the
+# Discovers EXACTLY ONE `Authorization` extraHeader to speak with, and prints
+# it. Empty output means no header could be found, which is the normal state on
+# a laptop.
+#
+# Preference order matters. The env-injected header is the GitHub App
+# INSTALLATION token that ci.yml mints for cross-repo sibling access; the
+# repo-local one `actions/checkout` persists is the workflow GITHUB_TOKEN, which
+# can see this repository and nothing else. For resolving siblings the former is
+# the only useful one, so it wins.
+sibling_auth_header() {
+  local n="${GIT_CONFIG_COUNT:-0}" i=0 k v
+  while [ "${i}" -lt "${n}" ]; do
+    eval "k=\${GIT_CONFIG_KEY_${i}:-}"
+    eval "v=\${GIT_CONFIG_VALUE_${i}:-}"
+    case "$(printf '%s' "${k}" | tr '[:upper:]' '[:lower:]')" in
+      http.*extraheader)
+        if [ -n "${v}" ]; then
+          printf '%s' "${v}"
+          return 0
+        fi
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  # Fall back to whatever `actions/checkout` persisted into this repo's config.
+  git config --local --get-regexp '^http\..*\.extraheader$' 2>/dev/null |
+    head -1 | cut -d' ' -f2- || true
+}
+
+# One attempt carrying exactly ONE Authorization header.
+#
+# THIS IS THE ARM THAT FIXES CI, and the reason it has to exist is worth
+# stating plainly, because the obvious reading of the old failure was wrong.
+#
+# Two different things each install an extraHeader for github.com in a CI job:
+#
+#   * `actions/checkout@v4` persists
+#     `http.https://github.com/.extraheader` into THIS repo's .git/config,
+#     carrying the workflow GITHUB_TOKEN;
+#   * `setup-dev-env` exports
+#     `http.https://github.com/metacraft-labs/.extraHeader` through
+#     GIT_CONFIG_*, carrying the installation token.
+#
+# Both URL patterns match any `https://github.com/metacraft-labs/...` request,
+# and `http.extraHeader` is a MULTI-VALUED list rather than a single setting --
+# so git sends BOTH, and github rejects the request outright:
+#
+#     remote: Duplicate header: "Authorization"
+#     fatal: unable to access '...': The requested URL returned error: 400
+#
+# That is what every sibling-pin lookup in this gate was actually hitting. Not
+# a slow network, not a timeout: a 400, in about 400ms, on every lookup, on
+# every runner class, deterministically, since the day the gate landed.
+#
+# Neutralising every config source and re-adding one discovered header is the
+# repair. It is deliberately not "turn off the repo-local one": this script does
+# not own `actions/checkout`'s configuration and must not rewrite the
+# repository's config as a side effect of linting it.
+sibling_ls_remote_single_header() {
+  local hdr
+  hdr="$(sibling_auth_header)"
+  [ -n "${hdr}" ] || return 1
+  env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG \
+    -u GIT_DIR -u GIT_WORK_TREE \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    GIT_TERMINAL_PROMPT=0 \
+    "${sibling_timeout[@]}" \
+    git -C "${sibling_neutral_dir}" "${sibling_http_opts[@]}" \
+    -c credential.helper= -c "http.extraHeader=${hdr}" \
+    ls-remote "$@" 2>"${sibling_scratch}/err"
+}
+
+# Runs `git ls-remote "$@"` through every arm, with retries, and prints the
 # output of whichever answered.
 #
 #   0 -- github ANSWERED. stdout is the answer, and empty stdout is a real
@@ -365,6 +451,15 @@ sibling_ls_remote() {
       return 0
     fi
     why="ambient: $(tr '\n' ' ' <"${sibling_scratch}/err")"
+
+    rc=0
+    out="$(sibling_ls_remote_single_header "$@")" || rc=$?
+    if [ "${rc}" -eq 0 ]; then
+      printf 'single-header' >"${sibling_arm_file}"
+      printf '%s' "${out}"
+      return 0
+    fi
+    why="${why} | single-header: $(tr '\n' ' ' <"${sibling_scratch}/err")"
 
     rc=0
     out="$(sibling_ls_remote_anon "$@")" || rc=$?
@@ -488,9 +583,10 @@ if [ "${probe_state}" -ne 0 ]; then
     echo "      unresolvable ref reaches the mainline." >&2
     echo "      Both credential arms were tried, ${sibling_lookup_rounds} times each. git said:" >&2
     printf '        %s\n' "${probe_why}" >&2
-    echo "      If that mentions a username prompt or a 404 on a PUBLIC repo," >&2
-    echo "      the ambient token is scoped and the anonymous arm is also" >&2
-    echo "      failing -- check egress, not the pins." >&2
+    echo "      If that mentions a duplicate Authorization header, two things" >&2
+    echo "      are each setting one for github.com and git is sending both." >&2
+    echo "      If it mentions a 404 on a PUBLIC repo, the ambient token is" >&2
+    echo "      scoped and the anonymous arm is failing too -- check egress." >&2
     exit 1
   fi
   echo "SKIP: github.com unreachable; sibling-repo pins not resolved (offline)."
@@ -572,6 +668,13 @@ else
   abandoned_violations=""
   unresolvable=""
   checked=0
+  # Which arm answered, per entry. Reported at the end so a run SAYS which
+  # credential state actually resolved what. Without this the gate could pass
+  # on one arm while another silently rotted -- and the arm that rots is the
+  # one no local run exercises.
+  arm_ambient=0
+  arm_single=0
+  arm_anon=0
   while read -r name ref; do
     [ -n "${name}" ] || continue
     checked=$((checked + 1))
@@ -590,6 +693,11 @@ else
       sibling_violations="${sibling_violations}${name}=${ref}"$'\n'
       continue
     fi
+    case "$(sibling_arm)" in
+      ambient) arm_ambient=$((arm_ambient + 1)) ;;
+      single-header) arm_single=$((arm_single + 1)) ;;
+      anonymous) arm_anon=$((arm_anon + 1)) ;;
+    esac
     # The ref exists -- but `main` on a repo that has moved its default to
     # something else is the ABANDONED half of the rename, and existence alone
     # cannot see it. This is the regime the original incident ran in: between
@@ -681,4 +789,5 @@ else
   fi
   echo "ok: ${resolved_count} of ${checked} explicit sibling-repo pin(s) resolve on the remote" \
     "(${unresolvable_count} unresolvable here)"
+  echo "    answered by: ambient=${arm_ambient} single-header=${arm_single} anonymous=${arm_anon}"
 fi

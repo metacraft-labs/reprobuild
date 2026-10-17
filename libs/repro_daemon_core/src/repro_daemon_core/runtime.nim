@@ -805,11 +805,30 @@ proc lockMetadata(config: UserDaemonConfig; token: string): string =
     "protocol=" & $UserDaemonProtocolMajor & "." &
       $UserDaemonProtocolMinor & "\n"
 
+when defined(posix):
+  var heldDaemonLockFd: cint = -1
+    ## The descriptor this process holds the user-daemon lock through, or -1.
+    ## Recorded so a forked build worker can close its inherited copy: the
+    ## worker is not the daemon and must not keep the daemon's lock alive
+    ## after the daemon is gone.
+
 proc acquireUserDaemonLock(config: UserDaemonConfig): UserDaemonLock =
   when defined(posix):
     createDir(config.stateDir)
     let lockPath = config.stateDir / UserDaemonLockFileName
-    let fd = posix.open(lockPath.cstring, O_RDWR or O_CREAT, Mode(0o600))
+    # CLOSE-ON-EXEC. An flock is held by the open file description, so
+    # every process that inherits this descriptor holds the daemon lock
+    # until IT exits -- not until the daemon does. Without the flag every
+    # program the daemon or a build worker execs (the auto-started
+    # runquotad, a compiler, a service an action leaves running) carried
+    # it. When the daemon was killed under such a survivor, the orphan kept
+    # the lock, every later `repro build` was refused a replacement daemon
+    # ("user daemon lock is held by a live repro-daemon") and fell back to
+    # direct mode for as long as the orphan lived. A forked build worker
+    # still inherits it (fork does not honour the flag); the worker closes
+    # its copy instead, see `spawnDetachedDaemonWorker`.
+    let fd = posix.open(lockPath.cstring, O_RDWR or O_CREAT or posix.O_CLOEXEC,
+      Mode(0o600))
     if fd < 0:
       raise newException(UserDaemonRuntimeError,
         "failed to open user-daemon lockfile " & lockPath & ", errno=" &
@@ -835,6 +854,7 @@ proc acquireUserDaemonLock(config: UserDaemonConfig): UserDaemonLock =
     let token = $getCurrentProcessId() & "-" & $nowTime.toUnix & "-" &
       $nowTime.nanosecond
     writeFile(lockPath, lockMetadata(config, token))
+    heldDaemonLockFd = fd
     UserDaemonLock(held: true, lockPath: lockPath, token: token, fd: fd)
   elif defined(windows):
     # LockFileEx on a 1-byte range serves the same role as POSIX flock:
@@ -898,6 +918,8 @@ proc releaseUserDaemonLock(lock: var UserDaemonLock) =
     except CatchableError:
       discard
     if lock.fd >= 0:
+      if heldDaemonLockFd == lock.fd:
+        heldDaemonLockFd = -1
       discard posix.close(lock.fd)
       lock.fd = -1
   elif defined(windows):
@@ -2038,6 +2060,13 @@ when defined(posix):
       let secondPid = fork()
       if secondPid == 0:
         signal(SIGCHLD, SIG_DFL)
+        # The worker is not the daemon: drop its inherited copy of the daemon
+        # lock so a worker that outlives a killed daemon cannot keep a
+        # replacement from starting (see `acquireUserDaemonLock`). The
+        # daemon's own descriptor still holds the lock.
+        if heldDaemonLockFd >= 0:
+          discard posix.close(heldDaemonLockFd)
+          heldDaemonLockFd = -1
         logLine(config.logPath,
           label & " started session=" & sessionId & " pid=" &
             $getCurrentProcessId())

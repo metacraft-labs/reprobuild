@@ -27,7 +27,7 @@
 ## WHICH ARMS ARE THE MUTATION GUARDS, and what each one would catch:
 ##
 ##   (A) DIFFERENCE. An unwired workspace and a wired one — identical in every
-##       other respect, both at ``gate_mode = off`` — produce different
+##       other respect, both with no policy (off) — produce different
 ##       ``push-gateway`` details. Catches: any constant; any implementation
 ##       that reads the policy but never looks at a remote.
 ##   (B) The counts are the OBSERVATION, each with its population: the unwired
@@ -35,19 +35,25 @@
 ##       the reason; the wired one reports ``1 wired`` / ``0 not-wired``.
 ##       Catches an implementation that reports a difference without reporting
 ##       which way round it is (e.g. one keyed on a hash of the workspace path).
-##   (C) CONTRADICTION ⇒ ``fail``. ``gate_mode`` non-``off`` over an ungoverned
-##       repo is §7.6.6's "`required` on an `unwired` repo … visible as the
+##   (C) CONTRADICTION ⇒ ``fail``. A repo whose OWN policy (TC-9d: the
+##       ``[certificate_policy]`` its checked-out ``repro.lock`` records) gates
+##       its push at non-``off``, while its push is ungoverned, is §7.6.6's "`required` on an `unwired` repo … visible as the
 ##       contradiction it is", and the deliverable requires the row to be
 ##       CAPABLE of ``fail``. Its own control is the SAME workspace after
 ##       wiring, which must return to ``ok``: without that control, "fail"
 ##       could come from the ``advisory`` policy alone rather than from the
 ##       missing wiring.
-##   (D) ``certificate-policy`` reports the RESOLVED values — gate_mode,
-##       ci_trust, required_targets, required_platforms, the project and the
-##       file they were resolved from — and two workspaces with different
-##       ``[certificates]`` tables produce different details. Catches the
-##       retired constant, and catches a row that resolves the policy but
-##       prints only a verdict word.
+##   (D) ``certificate-policy`` reports the RESOLVED policy — per repo, the
+##       policy its checked-out ``repro.lock`` records, the checked-out
+##       branch, the rule matching it, the mode, every required name with its
+##       platforms and the policy's ``ci_trust``; a repo whose
+##       ``repro.lock`` records no policy is named as having none — and
+##       two workspaces with different policies produce different details.
+##       Catches the retired constant, and catches a row that resolves the
+##       policy but prints only a verdict word. A manifest that still carries
+##       a ``[certificates]`` table fails the ``manifest`` row, its remedy
+##       naming the policy design (``certificatePolicy`` /
+##       ``enactCertificatePolicy``) (TC-9d, D18).
 ##   (E) FOREIGN (§7.3). A pushurl this tool did not set is counted and named
 ##       as ``foreign``, never as ``wired``, and ``health`` does not overwrite
 ##       it. Catches a reporting row that repairs.
@@ -58,7 +64,7 @@
 ##       for first, which §7.6.3 names as the thing that would clobber the
 ##       developer the rule exists to protect.
 ##   (G) §7.4's THREE OPT-OUT SCOPES — per repo, per machine, per workspace —
-##       each named with its scope, at ``gate_mode = required`` where silence
+##       each named with its scope, under a ``required`` policy where silence
 ##       would be most expensive, against a no-opt-out control in the same
 ##       fixture. §7.4: *"An opt-out suppresses wiring, never reporting …
 ##       Silence about a disabled safety mechanism is how the mechanism is
@@ -66,8 +72,8 @@
 ##       and catches one that goes quiet the moment an operator opts out.
 ##
 ## THE POLICY IS HELD CONSTANT ACROSS (A) AND (B), which is the control that
-## makes the difference attributable. Both fixtures declare NO ``[certificates]``
-## table, so both resolve to ``gate_mode = off``; the only thing that differs is
+## makes the difference attributable. Neither fixture's repo records a
+## certificate policy, so both are default-off; the only thing that differs is
 ## whether ``remote.origin.pushurl`` names this workspace's gateway. (D) then
 ## varies the policy and holds the wiring constant, so each half of the pair has
 ## one arm in which it is the only moving part.
@@ -93,6 +99,11 @@ import std/[json, os, osproc, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
 import repro_test_support
+import repro_cli_support
+import repro_lock
+import repro_lock/certificate_policy
+import repro_workspace_manifests
+import ./every_branch_policy
 
 proc q(value: string): string = quoteShell(value)
 
@@ -150,7 +161,18 @@ const retiredGatewayConstant =
 const retiredPolicyConstant = "certificates: advisory/off (pushes not gated)"
   ## The exact string the ``certificate-policy`` row shipped (spec §1.6c).
 
-proc seedOrigin(gitBin, originPath, seedPath: string) =
+proc policyLockFor(mode: PolicyMode; targets, platforms: seq[string];
+                   ciTrust = pctAdvisory): string =
+  ## A committed ``repro.lock`` (pinning nothing) whose ``[certificate_policy]``
+  ## has one rule for every branch (``everyBranchPolicy``): since TC-9d the
+  ## only place a repo's policy lives.
+  replaceCertificatePolicySection(
+    serializeLockedDependencies(LockedDependencies(
+      schema: "reprobuild.solved-graph-lock.v2", deps: @[])),
+    everyBranchSnapshot(mode, targets, platforms, ciTrust = ciTrust,
+      name = "lib-a"))
+
+proc seedOrigin(gitBin, originPath, seedPath: string; policyLock = "") =
   discard requireGit(q(gitBin) & " init --bare -b main " & q(originPath))
   discard requireGit(q(gitBin) & " init -b main " & q(seedPath))
   discard requireGit(q(gitBin) & " -C " & q(seedPath) &
@@ -158,7 +180,9 @@ proc seedOrigin(gitBin, originPath, seedPath: string) =
   discard requireGit(q(gitBin) & " -C " & q(seedPath) &
     " config user.name \"PG16 Tester\"")
   writeFile(seedPath / "README.md", "PG-16 fixture\n")
-  discard requireGit(q(gitBin) & " -C " & q(seedPath) & " add README.md")
+  if policyLock.len > 0:
+    writeFile(seedPath / "repro.lock", policyLock)
+  discard requireGit(q(gitBin) & " -C " & q(seedPath) & " add -A")
   discard requireGit(q(gitBin) & " -C " & q(seedPath) & " commit -m fixture")
   discard requireGit(q(gitBin) & " -C " & q(seedPath) & " remote add origin " &
     q(originPath))
@@ -172,19 +196,20 @@ type
     cacheRoot: string      ## the CLONES root; the gateways tree lands beside it
     reproBin: string
 
-proc setupFixture(gitBin, slug, certificatesTable: string): Fixture =
+proc setupFixture(gitBin, slug, policyLock: string;
+                  manifestExtra = ""): Fixture =
   ## One workspace, one participating repo, one local bare origin, and a cache
   ## root INSIDE the fixture.
   ##
-  ## ``certificatesTable`` is appended to ``projects/lib-a.toml`` verbatim.
-  ## Passing "" is not the same as passing a table with ``gate_mode = "off"``
-  ## and the difference is deliberate: an ABSENT ``[certificates]`` table is
-  ## RA-32's default-off state, which is what the unwired/wired pair must hold
-  ## constant, while an explicit table is what arm (D) varies.
+  ## ``policyLock`` is committed as lib-a's ``repro.lock`` (TC-9d: a repo's
+  ## certificate policy lives in its own content). "" is RA-32's default-off
+  ## state, no policy at all, which is what the unwired/wired pair must hold
+  ## constant, while an explicit policy is what arm (D) varies.
+  ## ``manifestExtra`` is appended to ``projects/lib-a.toml`` verbatim.
   result.scratch = createTempDir("repro-pg16-gateway-" & slug & "-", "")
   result.reproBin = reproBinary()
   let origin = result.scratch / "origin-lib-a.git"
-  seedOrigin(gitBin, origin, result.scratch / "seed-lib-a")
+  seedOrigin(gitBin, origin, result.scratch / "seed-lib-a", policyLock)
   result.workspaceRoot = result.scratch / "workspace"
   result.cacheRoot = result.scratch / "cache" / "clones"
   createDir(result.workspaceRoot)
@@ -194,7 +219,7 @@ proc setupFixture(gitBin, slug, certificatesTable: string): Fixture =
   createDir(result.cacheRoot)
   writeFile(result.workspaceRoot / "projects" / "lib-a.toml",
     projectTomlHeader.replace("LIB_A_URL", fileUrl(origin)) &
-      certificatesTable)
+      manifestExtra)
   writeFile(result.workspaceRoot / "repos" / "lib-a.toml", libAFragmentToml)
   result.repoPath = result.workspaceRoot / "lib-a"
   discard requireGit(q(gitBin) & " clone " & q(fileUrl(origin)) & " " &
@@ -303,11 +328,12 @@ suite "PG-16 — health's push-gateway check reports observed state":
       let wDetail = w.gateway["detail"].getStr()
 
       # CONTROL — the policy half is held CONSTANT across the pair. Neither
-      # fixture declares a `[certificates]` table, so both resolve to
-      # `gate_mode = off`, and any difference below is attributable to the
-      # wiring and to nothing else.
-      check "gate_mode = off" in u.policy["detail"].getStr()
-      check "gate_mode = off" in w.policy["detail"].getStr()
+      # repo records a certificate policy (TC-9d: a repo's policy is its own
+      # repro.lock's), so both are default-off, and any difference below is
+      # attributable to the wiring and to nothing else.
+      check "RA-32 default-off state" in u.policy["detail"].getStr()
+      check "RA-32 default-off state" in w.policy["detail"].getStr()
+      check u.policy["detail"].getStr() == w.policy["detail"].getStr()
       check u.gateway["status"].getStr() == "ok"
       check w.gateway["status"].getStr() == "ok"
 
@@ -325,11 +351,14 @@ suite "PG-16 — health's push-gateway check reports observed state":
       check "remote.origin.pushurl is unset" notin wDetail
       # The `gate_mode` that would apply is reported beside the counts (§7.6.6),
       # on BOTH sides, so the row is readable without a second command.
-      check "gate_mode that would apply to a push now: off" in uDetail
-      check "gate_mode that would apply to a push now: off" in wDetail
+      const noGatingPolicy = "no participating repo's checked-out " &
+        "repro.lock records a certificate policy that gates a push of its " &
+        "current branch"
+      check noGatingPolicy in uDetail
+      check noGatingPolicy in wDetail
 
       # §7.6.6's summary sentence, and the ONE number here that is derived
-      # rather than observed. A WIRED repo under `gate_mode = off` is gated by
+      # rather than observed. A WIRED repo with no policy (off) is gated by
       # NOTHING — the gateway is attached and no policy stands behind it — so
       # the answer is 0 of 1 on BOTH sides. Reporting the wired count here
       # instead would print "would gate 1 of 1" for a workspace that refuses
@@ -337,7 +366,7 @@ suite "PG-16 — health's push-gateway check reports observed state":
       # the §1.6c defect at one remove.
       check "policy would gate 0 of 1 participating repo(s)" in uDetail
       check "policy would gate 0 of 1 participating repo(s)" in wDetail
-      check "gate_mode is off: nothing is refused anywhere" in wDetail
+      check "no policy gates a push: nothing is refused anywhere" in wDetail
 
       # The retired constant is gone. Asserted against a CONTROL substring
       # that IS present in the same string (§1.6's qualifier rule), so an
@@ -378,12 +407,8 @@ suite "PG-16 — health's push-gateway check reports observed state":
       skip("git not on PATH; this case needs a real workspace holding a real " &
         "git repo whose push path can be left unwired")
     else:
-      let fx = setupFixture(gitBin, "governed", """
-[certificates]
-gate_mode = "advisory"
-required_targets = ["t-unit"]
-required_platforms = ["linux/amd64"]
-""")
+      let fx = setupFixture(gitBin, "governed", policyLockFor(pmAdvisory,
+        @["t-unit"], @["linux/amd64"]))
       defer: removeDir(fx.scratch)
       checkpoint("binary under test: " & fx.reproBin)
       check pushurlOf(gitBin, fx).len == 0
@@ -409,7 +434,7 @@ required_platforms = ["linux/amd64"]
       check "all advisory" in beforeDetail
 
       # THE CONTROL, and the reason this arm is not satisfiable by a row wired
-      # to `fail` whenever a `[certificates]` table exists: wire the SAME
+      # to `fail` whenever a certificate policy exists: wire the SAME
       # workspace and the SAME policy, and the row must come back to `ok`.
       let migrated = migrate(fx)
       checkpoint("gateway migrate: exit=" & $migrated.code & "\n" &
@@ -423,10 +448,16 @@ required_platforms = ["linux/amd64"]
       check "gateway 1 wired" in afterDetail
       check "judged by nothing" notin afterDetail
       check afterDetail != beforeDetail
-      # The policy did NOT move — same table, same resolved values — which is
-      # what makes the status change attributable to the wiring.
-      check "gate_mode = advisory" in before.policy["detail"].getStr()
-      check "gate_mode = advisory" in after.policy["detail"].getStr()
+      # The policy did NOT move — same repro.lock, same rule — which is what
+      # makes the status change attributable to the wiring.
+      check "advisory, requires t-unit (linux/amd64)" in
+        before.policy["detail"].getStr()
+      check before.policy["detail"].getStr() ==
+        after.policy["detail"].getStr()
+      # The gateway row names the repo whose own policy gates it, with the
+      # mode that policy applies to its checked-out branch.
+      check "per repo's own certificate policy: lib-a (advisory" in
+        beforeDetail
 
       # Principle 2 — the finding reaches the aggregate verdict rather than
       # being a cosmetic row. Both numbers are taken from THIS fixture, on the
@@ -437,7 +468,8 @@ required_platforms = ["linux/amd64"]
 
   test "t_health_certificate_policy_reports_the_resolved_values":
     ## Arm (D). Two workspaces, identical in their WIRING (both unwired),
-    ## differing only in `[certificates]`. The policy row must differ.
+    ## differing only in the policy lib-a's repro.lock records. The policy
+    ## row must differ.
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip("git not on PATH; this case needs two real workspaces for the " &
@@ -445,13 +477,9 @@ required_platforms = ["linux/amd64"]
     else:
       let plain = setupFixture(gitBin, "policy-default", "")
       defer: removeDir(plain.scratch)
-      let enforcing = setupFixture(gitBin, "policy-required", """
-[certificates]
-gate_mode = "required"
-required_targets = ["t-unit", "t-integration"]
-required_platforms = ["linux/amd64"]
-ci_trust = "skip"
-""")
+      let enforcing = setupFixture(gitBin, "policy-required", policyLockFor(
+        pmRequired, @["t-unit", "t-integration"], @["linux/amd64"],
+        ciTrust = pctSkip))
       defer: removeDir(enforcing.scratch)
       checkpoint("binary under test: " & plain.reproBin)
 
@@ -463,22 +491,32 @@ ci_trust = "skip"
       # THE MUTATION GUARD: against the shipped constant these are equal.
       check pDetail != eDetail
 
-      # RA-32's default-off, read from the manifest rather than assumed.
-      check "gate_mode = off" in pDetail
-      check "ci_trust = advisory" in pDetail
-      check "required_targets = []" in pDetail
+      # RA-32's default-off, read from each repo's repro.lock rather than
+      # assumed (TC-9d: there is no project-wide policy to read any more).
+      check "RA-32 default-off state" in pDetail
+      check "read from each repo's repro.lock" in pDetail
+      # No snapshot: the row says there is no policy, and names the repo.
+      check "no participating repo's checked-out repro.lock records a " &
+        "certificate policy" in pDetail
+      check "no certificate policy recorded in the repro.lock of: lib-a" in
+        pDetail
+      check "ci_trust" notin pDetail
 
-      # Every resolved field, and WHERE it was resolved from — a row that
-      # printed only a verdict word would satisfy the inequality above.
-      check "gate_mode = required" in eDetail
-      check "ci_trust = skip" in eDetail
-      check "required_targets = [t-unit, t-integration]" in eDetail
-      check "required_platforms = [linux/amd64]" in eDetail
-      check "project 'lib-a'" in eDetail
-      check (enforcing.workspaceRoot / "projects" / "lib-a.toml") in eDetail
+      # What the policy IS, and WHOSE it is — a row that printed only a
+      # verdict word would satisfy the inequality above. The row names the
+      # repo, the policy, the rule that matched its checked-out branch, the
+      # mode, every required name with its platforms, the checked-out branch
+      # it was matched for, and the policy's ci_trust (operator decision
+      # 2026-10-17).
+      check "certificate policy 'lib-a'" in eDetail
+      check "matched by \"**\"" in eDetail
+      check "required, requires t-unit (linux/amd64), " &
+        "t-integration (linux/amd64)" in eDetail
+      check "lib-a (branch 'main': " in eDetail
+      check "; ci_trust skip)" in eDetail
 
       # The retired constant, each absence paired with a control presence.
-      check "project 'lib-a'" in pDetail
+      check "certificate policy" in pDetail
       check retiredPolicyConstant notin pDetail
       check retiredPolicyConstant notin eDetail
 
@@ -488,6 +526,31 @@ ci_trust = "skip"
       # the gateway row, which is the row that fails on it.
       check "push-gateway row" in eDetail
       check e.gateway["status"].getStr() == "fail"
+
+      # TC-9d: a project manifest that still carries the retired
+      # `[certificates]` table does not resolve. The manifest row fails, names
+      # the file and the table, and its remedy is the policy design
+      # (D18), not `workspace sync` (which would meet the same refusal).
+      let legacy = setupFixture(gitBin, "policy-legacy-table", "",
+        manifestExtra = "\n[certificates]\ngate_mode = \"required\"\n" &
+          "required_targets = [\"t-unit\"]\n" &
+          "required_platforms = [\"linux/amd64\"]\n")
+      defer: removeDir(legacy.scratch)
+      let legacyRun = invokeHealth(legacy)
+      checkpoint("legacy table: health exit=" & $legacyRun.code & "\n" &
+        legacyRun.output)
+      let manifestRow = findCheck(parseJson(legacyRun.output), "manifest")
+      doAssert not manifestRow.isNil, "health emitted no manifest row"
+      check manifestRow["status"].getStr() == "fail"
+      check "[certificates]" in manifestRow["detail"].getStr()
+      check (legacy.workspaceRoot / "projects" / "lib-a.toml") in
+        manifestRow["detail"].getStr()
+      let remedy = manifestRow["remedy"].getStr()
+      check "certificatePolicy" in remedy
+      check "enactCertificatePolicy" in remedy
+      check "repro lock refresh" in remedy
+      check "migrate-policy" notin remedy
+      check "workspace sync" notin manifestRow["remedy"].getStr()
 
   test "t_health_push_gateway_splits_stale_gateway_from_foreign_by_provenance":
     ## §7.3's two "not the expected gateway" verdicts, and §7.6.3's rule about
@@ -584,12 +647,8 @@ ci_trust = "skip"
       skip("git not on PATH; this case needs a real repository whose per-repo " &
         "opt-out marker can be written into its git config")
     else:
-      let fx = setupFixture(gitBin, "optouts", """
-[certificates]
-gate_mode = "required"
-required_targets = ["t-unit"]
-required_platforms = ["linux/amd64"]
-""")
+      let fx = setupFixture(gitBin, "optouts", policyLockFor(pmRequired,
+        @["t-unit"], @["linux/amd64"]))
       defer: removeDir(fx.scratch)
       checkpoint("binary under test: " & fx.reproBin)
       check pushurlOf(gitBin, fx).len == 0

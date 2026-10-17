@@ -86,6 +86,11 @@ let
         text = "#!/bin/sh\necho hello\n";
         executable = true;
       };
+      # GM9: declared in `activity cli: resources:`; home-pc selects `cli`.
+      ".config/gm9/cli.conf" = {
+        text = "cli = 1\n";
+        executable = false;
+      };
     }
     // (
       if isDarwin then
@@ -530,6 +535,11 @@ let
     files = filesOk;
     secret-not-placed = !(all.home.file ? ".ssh/gm5-secret");
     session-variables = all.home.sessionVariables.GM5_EDITOR or null == "nvim";
+    # GM9: an activity-scoped resource of an activity home-pc does not select
+    # (`laptop`, m1 only) never reaches its Home Manager configuration; the
+    # data row scoped to `cli` (which it selects) does.
+    activity-scoped-file-absent = !(all.home.file ? ".config/gm9/laptop.conf");
+    activity-scoped-variable = all.home.sessionVariables.GM9_CLI or null == "1";
     session-path =
       all.home.sessionPath == [
         "~/.local/bin"

@@ -5,7 +5,9 @@ import repro_core
 import repro_dev_env_engine/cache_key as devEnvCacheKey
 export devEnvCacheKey.PromptWatchEntry, devEnvCacheKey.promptWatchManifestPathFor,
   devEnvCacheKey.writePromptWatchManifest,
-  devEnvCacheKey.unsettledPromptWatchPaths
+  devEnvCacheKey.unsettledPromptWatchPaths,
+  devEnvCacheKey.PromptWatchBaseline,
+  devEnvCacheKey.snapshotPromptWatchBaseline, devEnvCacheKey.PromptWatchFileName
 import repro_hash
 import repro_interface_artifacts
 import repro_runquota
@@ -98,6 +100,19 @@ type
       ## at process start instead -- before the provider compile -- made a
       ## project whose files were written just before `repro` was launched
       ## look unsettled on its first activation, every time.
+    promptWatchOwnWrites*: seq[string]
+      ## Absolute paths the introspection edge itself wrote or created, when
+      ## it ran (`evidence.monitorWrites`). The race guard treats a current
+      ## entry these explain -- one the edge created, or a directory it wrote
+      ## into -- as the edge's own doing rather than a change it might have
+      ## missed. Empty for a cache hit: nothing ran, so nothing is explained.
+    promptWatchOwnRemovals*: seq[string]
+      ## Absolute paths the introspection edge itself removed, when it ran
+      ## (`evidence.monitorRemovals`). Kept apart from the writes because only
+      ## a removal explains an ABSENCE, and only a write a PRESENT entry: an
+      ## entry the edge wrote and somebody else then deleted, or one it
+      ## removed and somebody else then created again, must still be reported
+      ## (``cache_key.unsettledPromptWatchPaths``). Empty for a cache hit.
 
 proc raiseDevEnvEdge(message: string) {.noreturn.} =
   raise newException(DevEnvEdgeError, message)
@@ -947,6 +962,16 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
     result.introspectionAction, active.projectRoot, active.outDir,
     trackedFilesystemRootPaths(devEnvConfig.filesystemRoots),
     result.promptWatchComplete)
+  if result.introspectionAction.launched:
+    # The race guard's own-changes list (see the field). Only from an edge
+    # that RAN: a hit's evidence is the record replayed, and wrote nothing.
+    let evidence = result.introspectionAction.evidence
+    proc absolute(path: string): string =
+      if path.isAbsolute: path else: active.workDir / path
+    for path in evidence.monitorWrites:
+      result.promptWatchOwnWrites.add(absolute(path))
+    for path in evidence.monitorRemovals:
+      result.promptWatchOwnRemovals.add(absolute(path))
   result.shellRenderAction = result.devEnvResult.actionById(
     "__repro_dev_env_shell_render")
   result.stats.providerIntrospectionLaunched =

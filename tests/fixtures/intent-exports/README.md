@@ -37,7 +37,14 @@ Cases:
 
 - `neutral` — runtime predicates only (activity guards, host guards, guarded
   resources and config, a data file with package and resource rows): every
-  platform `same`.
+  platform `same`. Since GM9 it also has activity-scoped resources (a
+  `resources:` block in `activity cli:` and `activity laptop:`, and a data
+  resource row with `activity = "cli"`), so each host's evaluation holds only
+  the scoped resources of the activities it selects.
+  Since GM10 `m1`'s entry says `system: managedElsewhere("example-org/infra")`,
+  so the export carries `intent.systemManagedElsewhere` and every evaluation
+  `system` (`elsewhere` for m1, `here` for home-pc); `lib-tests` also checks
+  `reprobuild.lib.hostSystemManagement` against them.
 - `compile-time` — a `when defined(macosx)` in `resources:`: exported on
   Linux, the darwin targets are `differs` and must be refused; the Linux and
   Windows targets are evaluated.

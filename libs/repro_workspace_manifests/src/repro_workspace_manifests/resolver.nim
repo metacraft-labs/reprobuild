@@ -213,12 +213,12 @@ type
       ## the key is safe to leave in a fragment forever.
 
   CertificateGateMode* = enum
-    ## TC-3 / TC-6 / RA-32 — the resolved `[certificates] gate_mode`.
-    ## `cgmOff` is the DEFAULT (and the value for a project that declares no
-    ## `[certificates]` table at all): the pre-push gate runs exactly as it
-    ## did before test certificates existed, so a newcomer's first push is
-    ## never cert-walled. `cgmAdvisory` records the coverage result in the
-    ## gate report (a warning when uncovered) but NEVER blocks the push.
+    ## A gate's mode, as a certificate policy rule's `gate_mode` /
+    ## `commit_gate` resolves for it (TC-9c). `cgmOff` is the DEFAULT (and
+    ## the value where no policy rule applies): the pre-push gate runs
+    ## exactly as it did before test certificates existed. `cgmAdvisory`
+    ## records the coverage result in the gate report (a warning when
+    ## uncovered) but NEVER blocks the push.
     ## `cgmRequired` refuses the push unless the submitted certificates cover
     ## the pushed commit for the required targets on each required platform.
     cgmOff = "off"
@@ -226,7 +226,7 @@ type
     cgmRequired = "required"
 
   CertificateCiTrust* = enum
-    ## TC-4 — the resolved `[certificates] ci_trust`, the project's EXPLICIT
+    ## TC-4 — the policy's `ci_trust`, the EXPLICIT
     ## decision about whether CI fast-tracks certified work. `cctAdvisory` is
     ## the DEFAULT (and the value for a project that declares no `ci_trust`):
     ## CI re-runs every required target authoritatively but surfaces a valid
@@ -240,7 +240,7 @@ type
     cctSkip = "skip"
 
   CertificateUntrackedInputs* = enum
-    ## The resolved `[certificates] untracked_inputs`: what issuance does
+    ## The policy's `untracked_inputs`: what issuance does
     ## about untracked, non-ignored files in the tested repository. They are
     ## not part of the content a certificate names, so a test that read one
     ## ran against something the certificate does not identify
@@ -252,25 +252,6 @@ type
     cuiStrict = "strict"
       ## Withhold whenever any untracked, non-ignored file exists.
 
-  CertificatePolicy* = object
-    ## The resolved test-certificate gating policy for a project. The DEFAULT
-    ## (every field zero / `cgmOff`) is what a project with no `[certificates]`
-    ## table resolves to, so the policy is a strict no-op until a project opts
-    ## in. `requiredTargets` are the targets a certificate set must cover;
-    ## `requiredPlatforms` are the platforms each of which must be covered
-    ## (the union of submitted certificates is checked per platform).
-    gateMode*: CertificateGateMode
-    requiredTargets*: seq[string]
-    requiredPlatforms*: seq[string]
-    ciTrust*: CertificateCiTrust
-      ## TC-4 — whether CI skips certified targets (`cctSkip`) or re-runs them
-      ## while surfacing the certificate as advisory (`cctAdvisory`, the
-      ## default). Independent of `gateMode`: a project can require coverage on
-      ## push yet still re-run in CI (advisory), or run advisory pushes yet
-      ## fast-track CI (skip). Defaults to `cctAdvisory` (no trust by omission).
-    untrackedInputs*: CertificateUntrackedInputs
-      ## What issuance does about untracked files. Defaults to `cuiReadSet`.
-
   ResolvedProject* = object
     ## A flat view of one `projects/<project>.toml` after include
     ## expansion and default application.
@@ -279,10 +260,11 @@ type
     trunk*: string
     repos*: seq[ResolvedRepo]
     projectFile*: string
-    certificatePolicy*: CertificatePolicy
-      ## TC-3 / TC-6 / RA-32 — resolved from the project manifest's
-      ## `[certificates]` table; defaults to `cgmOff` (no enforcement) when
-      ## the table is absent or omits `gate_mode`.
+    # Test-Certificates TC-9d: no certificate policy is resolved here any
+    # more. The policy is the `[certificate_policy]` snapshot in the
+    # `repro.lock` of the content a gate judges, and a project manifest that
+    # still carries the old `[certificates]` table does not resolve
+    # (`refuseLegacyCertificatesTable`).
 
 const
   defaultRepoVcs* = "git"
@@ -388,71 +370,76 @@ proc validatePreviousIdentities*(repos: openArray[ResolvedRepo];
             "reached first would win by accident")
       claimedPrior[priorKey] = repo.name
 
-# ---- TC-3 / TC-6 / RA-32 certificate policy resolution --------------------
+# ---- the retired `[certificates]` table ------------------------------------
+#
+# Test-Certificates TC-9d (operator decision D18): a test-certificate
+# requirement is a certificate policy — declared with `certificatePolicy`
+# (`repro_certificates`), enacted by a repository's `repro.nim` with
+# `enactCertificatePolicy`, and recorded by `repro lock refresh` as the
+# `[certificate_policy]` snapshot in that repository's `repro.lock`, which is
+# what every gate reads. The per-project `[certificates]` table of
+# `projects/<project>.toml` is not read anywhere. A manifest that still
+# carries one is refused, never ignored: ignoring it would silently turn a
+# `required` into `off`.
 
-proc resolveCertificatePolicy*(body: CertificatesBody;
-                               projectFile: string): CertificatePolicy =
-  ## Resolve a manifest `[certificates]` table into a `CertificatePolicy`.
-  ## The DEFAULT — an absent table, or one that omits `gate_mode` — is
-  ## `cgmOff`: a project that never opts in is never cert-gated (the RA-32
-  ## default-off / advisory-first onboarding guarantee). A `gate_mode` value
-  ## outside {off, advisory, required} is a structural error: a typo must
-  ## fail LOUD rather than silently fall back to `off` (which would mask an
-  ## intended `required`).
-  result.gateMode = cgmOff
-  if body.gate_mode.isSome:
-    let raw = body.gate_mode.get().strip()
-    case raw
-    of "", "off": result.gateMode = cgmOff
-    of "advisory": result.gateMode = cgmAdvisory
-    of "required": result.gateMode = cgmRequired
-    else:
-      raiseManifestError(projectFile, "certificates.gate_mode",
-        schemaProjectManifestV1, schemaProjectManifestV1,
-        "invalid `certificates.gate_mode` value '" & raw &
-          "' (expected: off | advisory | required)")
-  result.requiredTargets = body.required_targets
-  result.requiredPlatforms = body.required_platforms
-  # Agents-Push-Gate.md §4.2: ``"*"`` (any one platform) is a requirement of
-  # its own kind. Mixed with concrete platforms it has no single meaning, so
-  # it is refused rather than guessed at.
-  if "*" in result.requiredPlatforms and result.requiredPlatforms.len != 1:
-    raiseManifestError(projectFile, "certificates.required_platforms",
+const LegacyCertificatesKeyPath* = "certificates"
+  ## The ``keyPath`` of the error a manifest carrying ``[certificates]``
+  ## raises, so a caller that must not fail on it (the pre-commit gate) can
+  ## still recognise it and say so out loud.
+
+const LegacyCertificatesRemedy* =
+  "remove the [certificates] table; declare the requirement as a " &
+  "certificate policy (`certificatePolicy` from the repro_certificates " &
+  "module), enact it in each repository's repro.nim with " &
+  "`enactCertificatePolicy`, and run `repro lock refresh` to record it in " &
+  "that repository's repro.lock (see the repro_certificates module " &
+  "documentation)"
+  ## What to do instead, in the terms of the policy design.
+
+proc carriesLegacyCertificatesTable*(project: ProjectManifest;
+                                     projectFile: string): bool =
+  ## Whether ``projectFile`` (already decoded as ``project``) carries a
+  ## ``[certificates]`` table. A set field is enough; an EMPTY table is found
+  ## by its header, so even a table that sets nothing is reported rather
+  ## than tolerated.
+  let c = project.certificates
+  if c.gate_mode.isSome or c.ci_trust.isSome or c.untracked_inputs.isSome or
+      c.required_targets.len > 0 or c.required_platforms.len > 0:
+    return true
+  try:
+    for raw in readFile(projectFile).splitLines():
+      let line = raw.strip()
+      if line.startsWith("[") and not line.startsWith("[["):
+        # The header ends at its first `]`: a trailing comment
+        # (`[certificates] # ...`) and a quoted key (`["certificates"]`)
+        # name the same table.
+        let close = line.find(']')
+        if close < 0: continue
+        let header = line[1 ..< close].strip().replace("\"", "")
+        if header == "certificates" or header.startsWith("certificates."):
+          return true
+  except IOError:
+    discard
+  false
+
+proc legacyCertificatesTableMessage*(projectFile: string): string =
+  ## The diagnostic for a manifest that carries ``[certificates]``.
+  "the [certificates] table in " & projectFile & " is not supported: " &
+    "test-certificate requirements come from a certificate policy that each " &
+    "repository enacts and records in its repro.lock, which is what every " &
+    "gate reads. It is refused rather than ignored, because ignoring it " &
+    "would silently turn its gate_mode into off. Remedy: " &
+    LegacyCertificatesRemedy
+
+proc refuseLegacyCertificatesTable*(project: ProjectManifest;
+                                    projectFile: string) =
+  ## Raise ``WorkspaceManifestParseError`` (key path
+  ## ``LegacyCertificatesKeyPath``) when the project manifest carries a
+  ## ``[certificates]`` table.
+  if carriesLegacyCertificatesTable(project, projectFile):
+    raiseManifestError(projectFile, LegacyCertificatesKeyPath,
       schemaProjectManifestV1, schemaProjectManifestV1,
-      "`certificates.required_platforms` may contain \"*\" (any one " &
-        "platform) only on its own; it was combined with " &
-        $result.requiredPlatforms)
-  # TC-4 — resolve the CI-trust decision. The DEFAULT — an absent / omitted
-  # `ci_trust` — is `cctAdvisory`: CI never fast-tracks on trust unless the
-  # project explicitly opts in, so a forged certificate can never cause a skip
-  # in a project that did not ask for it. As with `gate_mode`, an out-of-range
-  # value is a structural error (a typo must fail LOUD, never silently grant
-  # the higher-trust `skip`).
-  result.ciTrust = cctAdvisory
-  if body.ci_trust.isSome:
-    let raw = body.ci_trust.get().strip()
-    case raw
-    of "", "advisory": result.ciTrust = cctAdvisory
-    of "skip": result.ciTrust = cctSkip
-    else:
-      raiseManifestError(projectFile, "certificates.ci_trust",
-        schemaProjectManifestV1, schemaProjectManifestV1,
-        "invalid `certificates.ci_trust` value '" & raw &
-          "' (expected: advisory | skip)")
-  # The untracked-inputs mode. An unknown value is an error, never the
-  # default: a misspelt "strict" that silently became "read-set" would issue
-  # certificates the project asked to withhold.
-  result.untrackedInputs = cuiReadSet
-  if body.untracked_inputs.isSome:
-    let raw = body.untracked_inputs.get().strip()
-    case raw
-    of "read-set": result.untrackedInputs = cuiReadSet
-    of "strict": result.untrackedInputs = cuiStrict
-    else:
-      raiseManifestError(projectFile, "certificates.untracked_inputs",
-        schemaProjectManifestV1, schemaProjectManifestV1,
-        "invalid `certificates.untracked_inputs` value '" & raw &
-          "' (expected: read-set | strict)")
+      legacyCertificatesTableMessage(projectFile))
 
 # ---- RA-18 subset tags -----------------------------------------------------
 #
@@ -1294,9 +1281,10 @@ proc resolveProject*(projectFile: string): ResolvedProject =
     result.defaultRevision = project.project.default_revision.get()
   if project.project.trunk.isSome:
     result.trunk = project.project.trunk.get()
-  # TC-3 / TC-6 / RA-32 — resolve the certificate gating policy (default off).
-  result.certificatePolicy =
-    resolveCertificatePolicy(project.certificates, absProject)
+  # Test-Certificates TC-9d — the `[certificates]` table is no longer read.
+  # Ignoring it would turn a `required` into `off` without a word, so a
+  # manifest that still carries it does not load.
+  refuseLegacyCertificatesTable(project, absProject)
 
   # Build remote name -> fetch URL lookup. The M5 reader already enforces
   # non-empty `name` and `fetch` on each remote entry, so we can index

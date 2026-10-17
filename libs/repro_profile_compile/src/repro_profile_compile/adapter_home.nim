@@ -31,7 +31,7 @@
 ##
 ## Other kinds pass through unchanged.
 
-import std/[tables]
+import std/[strutils, tables]
 
 import repro_profile
 import repro_profile/concerns
@@ -185,7 +185,8 @@ proc buildConfigBlock(overrides: seq[ConfigOverride]): IntentNode =
           startLine: 0, endLine: 0, indent: 0)))
     result.configPackages.add(pkgNode)
 
-proc buildHostsBlock(hosts, hostApplies: Table[string, seq[string]]):
+proc buildHostsBlock(hosts, hostApplies: Table[string, seq[string]];
+                     systemManagedElsewhere: Table[string, string]):
     IntentNode =
   ## One `nkHostsEntry` per host. A host in `hostApplies` declares the
   ## concerns Reprobuild applies there (Gradual-Nix-To-Reprobuild-Migration.md
@@ -193,6 +194,10 @@ proc buildHostsBlock(hosts, hostApplies: Table[string, seq[string]]):
   ## reaches here by another route (a hand-edited export) is checked again,
   ## and a declaration for a host `hosts:` does not list is refused rather
   ## than attached to nothing.
+  ##
+  ## GM10: a host in `systemManagedElsewhere` has its system scope managed
+  ## elsewhere; the same checks apply (the host must be listed, the pointer
+  ## must be one non-blank line or absent).
   result = IntentNode(kind: nkHostsBlock,
     hostsHeaderLine: 0,
     startLine: 0, endLine: 0, indent: 0)
@@ -204,6 +209,15 @@ proc buildHostsBlock(hosts, hostApplies: Table[string, seq[string]]):
     if problem.len > 0:
       raise newException(ValueError, "hosts entry \"" & hostName &
         "\": applies: " & problem)
+  for hostName, pointer in systemManagedElsewhere.pairs:
+    if not hosts.hasKey(hostName):
+      raise newException(ValueError, "systemManagedElsewhere names host `" &
+        hostName & "`, which the profile's `hosts:` does not list")
+    if pointer.len > 0:
+      let problem = systemPointerProblem(pointer)
+      if problem.len > 0:
+        raise newException(ValueError, "hosts entry \"" & hostName &
+          "\": system: " & problem)
   for hostName, acts in hosts.pairs:
     result.hostsEntries.add(IntentNode(kind: nkHostsEntry,
       hostName: hostName,
@@ -211,6 +225,8 @@ proc buildHostsBlock(hosts, hostApplies: Table[string, seq[string]]):
       hostEntryLine: 0,
       hostAppliesDeclared: hostApplies.hasKey(hostName),
       hostApplies: hostApplies.getOrDefault(hostName),
+      hostSystemManagedElsewhere: systemManagedElsewhere.hasKey(hostName),
+      hostSystemManagedBy: systemManagedElsewhere.getOrDefault(hostName),
       startLine: 0, endLine: 0, indent: 0))
 
 proc mapHomeFieldName(resourceKind, fieldName: string): string =
@@ -230,6 +246,7 @@ proc buildResourceEntry(r: ResourceIntent; ordinal: int): IntentNode =
     resourceAddress: r.address,
     resourceHeaderLine: 0,
     resourceIntentOrdinal: ordinal,
+    resourceActivity: r.activity,
     startLine: 0, endLine: 0, indent: 0)
   for fieldName, fieldValue in r.fields.pairs:
     result.resourceAttrs.add(IntentNode(kind: nkResourceAttr,
@@ -249,7 +266,8 @@ proc resourceLabel(r: ResourceIntent): string =
   ## one, the way the planner's other diagnostics name a resource.
   r.kind & (if r.address.len > 0: " `" & r.address & "`" else: "")
 
-proc buildResourcesBlock(resources: seq[ResourceIntent]): IntentNode =
+proc buildResourcesBlock(resources: seq[ResourceIntent];
+                         declaredActivities: seq[string]): IntentNode =
   ## The home planner's resources. A resource the home planner does not
   ## apply is refused, naming it, rather than left out: leaving it out let a
   ## profile declare an `fsSystemFile(...)` that never took effect while
@@ -263,6 +281,15 @@ proc buildResourcesBlock(resources: seq[ResourceIntent]): IntentNode =
   for i, r in resources:
     case resourceScope(r.kind)
     of rsHome:
+      # GM9: an activity-scoped resource must name an activity the profile
+      # declares. One that does not would be planned on no host at all --
+      # refused, not dropped (the macro and the data reader never produce
+      # one; an envelope or export is an input like any other).
+      if r.activity.len > 0 and r.activity notin declaredActivities:
+        raise newException(ValueError,
+          "home profile resource " & resourceLabel(r) & " belongs to " &
+          "activity `" & r.activity & "`, which the profile does not " &
+          "declare (declared: " & declaredActivities.join(", ") & ")")
       result.resourcesEntries.add(guardedBy(r.guard,
         buildResourceEntry(r, i + 1)))
     of rsSystem:
@@ -298,6 +325,7 @@ proc profileIntentToHomeProfile*(p: ProfileIntent;
   ##     ResourceIntent.fields   -> nkResourceAttr children
   ##     ResourceIntent.dependsOn-> the depends_on attribute
   ##     ResourceIntent.guard    -> an nkCondBlock around the entry
+  ##     ResourceIntent.activity -> resourceActivity (GM9; must be declared)
   ##   ConfigOverride.guard      -> an nkCondBlock around the config entry
   ##   Each resource / config entry records its 1-based position in the
   ##   intent (`resourceIntentOrdinal` / `configIntentOrdinal`).
@@ -309,13 +337,18 @@ proc profileIntentToHomeProfile*(p: ProfileIntent;
     root.children.add(buildActivity(act))
   if p.configOverrides.len > 0:
     root.children.add(buildConfigBlock(p.configOverrides))
-  if p.hosts.len > 0 or p.hostApplies.len > 0:
-    root.children.add(buildHostsBlock(p.hosts, p.hostApplies))
+  if p.hosts.len > 0 or p.hostApplies.len > 0 or
+      p.systemManagedElsewhere.len > 0:
+    root.children.add(buildHostsBlock(p.hosts, p.hostApplies,
+      p.systemManagedElsewhere))
   # The resources block is always present (even if empty) so the
   # apply pipeline's `findResourcesBlock` returns a stable shape; an
   # empty block degenerates to a no-op desired set just like an
   # empty `resources:` in legacy text.
-  root.children.add(buildResourcesBlock(p.resources))
+  var declaredActivities: seq[string]
+  for act in p.activities:
+    declaredActivities.add act.name
+  root.children.add(buildResourcesBlock(p.resources, declaredActivities))
   result = Profile(path: profilePath,
     lines: @[],
     lineEnding: "\n",

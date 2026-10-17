@@ -138,7 +138,29 @@ proc encodeResource(r: ResourceIntent): string =
     if i > 0:
       result.add ","
     result.add encodeAddress(dep)
-  result.add "],\"guard\":" & encodeGuard(r.guard) & "}"
+  # `activity` (GM9) is always emitted, `null` for a profile-wide resource,
+  # for the reason `guard` is: a consumer must never read an absent key as
+  # "every host".
+  result.add "],\"guard\":" & encodeGuard(r.guard) &
+    ",\"activity\":" &
+    (if r.activity.len == 0: "null" else: encodeStr(r.activity)) & "}"
+
+proc encodeSystemManagedElsewhere(t: Table[string, string]): string =
+  ## `{"<host>": {"managedBy": "<pointer>" | null}, ...}`, hosts sorted so
+  ## the bytes are stable.
+  var keys: seq[string] = @[]
+  for k in t.keys:
+    keys.add k
+  keys.sort(cmp[string])
+  result = "{"
+  for i, k in keys:
+    if i > 0:
+      result.add ","
+    result.add encodeStr(k)
+    result.add ":{\"managedBy\":"
+    result.add(if t[k].len > 0: encodeStr(t[k]) else: "null")
+    result.add "}"
+  result.add "}"
 
 proc encodeHosts(h: Table[string, seq[string]]): string =
   var keys: seq[string] = @[]
@@ -273,6 +295,13 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
   # (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply).
   if p.hostApplies.len > 0:
     result.add ",\"hostApplies\":" & encodeHosts(p.hostApplies)
+  # GM10: the hosts whose system scope is managed elsewhere, only when some
+  # host says so, so the key set of a profile without the attribute is
+  # unchanged. Each value is an object so the attribute can grow without a
+  # change of shape; `managedBy` is null when the entry names no manager.
+  if p.systemManagedElsewhere.len > 0:
+    result.add ",\"systemManagedElsewhere\":" &
+      encodeSystemManagedElsewhere(p.systemManagedElsewhere)
   result.add "}"
 
 # ---------------------------------------------------------------------
@@ -364,6 +393,14 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
     var ri = ResourceIntent(kind: r["kind"].getStr(),
       address: r["address"].getStr(),
       guard: parseGuard(r.getOrDefault("guard")))
+    # GM9: `null` / absent (an intent written before activity-scoped
+    # resources) -> profile-wide. Anything but a string or null is refused.
+    let activity = r.getOrDefault("activity")
+    if not activity.isNil and activity.kind != JNull:
+      if activity.kind != JString:
+        raise newException(ValueError, "resource `" & ri.address &
+          "`: `activity` must be a string or null, got " & $activity.kind)
+      ri.activity = activity.getStr()
     for fk, fv in r["fields"]:
       ri.fields[fk] = parseFieldValue(fv)
     for dep in r["dependsOn"]:
@@ -420,6 +457,20 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
       for it in v:
         concerns.add it.getStr()
       result.hostApplies[k] = concerns
+  # GM10: optional; absent when no host's system is managed elsewhere. A
+  # malformed entry is refused, never read as "managed here".
+  if root.hasKey("systemManagedElsewhere"):
+    let sme = root["systemManagedElsewhere"]
+    if sme.kind != JObject:
+      raise newException(ValueError,
+        "systemManagedElsewhere must be an object (host -> {managedBy})")
+    for host, v in sme:
+      if v.kind != JObject or not v.hasKey("managedBy") or
+          v["managedBy"].kind notin {JString, JNull}:
+        raise newException(ValueError, "systemManagedElsewhere." & host &
+          " must be an object with `managedBy` (a string or null)")
+      result.systemManagedElsewhere[host] =
+        if v["managedBy"].kind == JString: v["managedBy"].getStr() else: ""
 
 # ---------------------------------------------------------------------
 # M9.R.20: SystemIntent encode / decode.

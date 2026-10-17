@@ -1,6 +1,6 @@
 {
   "format": "repro.home.export",
-  "schemaVersion": 2,
+  "schemaVersion": 4,
   "selection": {
     "host": "m1",
     "hostDeclared": true,
@@ -99,7 +99,8 @@
           }
         },
         "dependsOn": [],
-        "guard": null
+        "guard": null,
+        "activity": null
       },
       {
         "kind": "env.userVariable",
@@ -119,7 +120,8 @@
           }
         },
         "dependsOn": [],
-        "guard": null
+        "guard": null,
+        "activity": null
       },
       {
         "kind": "fs.managedBlock",
@@ -139,7 +141,8 @@
           }
         },
         "dependsOn": [],
-        "guard": null
+        "guard": null,
+        "activity": null
       }
     ],
     "buildActions": [],
@@ -273,7 +276,7 @@
   "provenance": {
     "repro": {
       "version": "0.2.6",
-      "sourceRevision": "8c08316b32f66afb6cd30c98cf29fc227cf11a80-dirty"
+      "sourceRevision": "c0a2b186e658a931beaf96fe78287c344c7202fd-dirty"
     },
     "hostSource": "env",
     "profile": {
@@ -288,9 +291,9 @@
     },
     "dataFiles": [],
     "compile": {
-      "target": "aarch64-darwin",
-      "os": "macosx",
-      "cpu": "arm64",
+      "target": "x86_64-linux",
+      "os": "linux",
+      "cpu": "amd64",
       "defines": [],
       "probe": {}
     }

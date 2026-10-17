@@ -4284,6 +4284,13 @@ const BundledStdlibSelectors* = [
   "create-dmg",
   "curl",
   "dpkg",
+  # macOS splits debug info out of the Mach-O image in a SECOND pass that the
+  # compiler driver shells out to by bare name, so an edge compiling with
+  # ``-g`` on darwin runs ``dsymutil`` after the link and has to be able to
+  # name it. It is not in the clang-wrapper's ``bin``; see
+  # ``repro_dsl_stdlib/packages/dsymutil.nim`` for why it is a selector of its
+  # own rather than a widening of ``clang``.
+  "dsymutil",
   "electron",
   "emcc",
   "esbuild",

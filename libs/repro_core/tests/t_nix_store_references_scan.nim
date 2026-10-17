@@ -387,3 +387,30 @@ suite "nix-gc-roots manifests":
     discard recordOutputRoots(ledger, "inherited", "inherited", [output],
       storeDir = store)
     check ledgerMissingStorePaths(ledger, "inherited").missing.len == 0
+
+  test "a name overrun by an adjacent name character resolves to the existing entry":
+    ## A store path serialized without a terminator is followed by whatever
+    ## byte comes next. In a provider's `provider-compile.rbsz` the bytes
+    ## after `…-source` were `9` and `=`, so the maximal name run named
+    ## `…-source9` and `…-source=`, paths that exist nowhere. The ledger then
+    ## recorded them as absent and judged a shared recipe-compile output to
+    ## have LOST them. The reference is identified by its hash, so the
+    ## longest existing prefix under that hash is the reference.
+    let dir = createTempDir("repro-store-scan-", "")
+    defer: removeDir(dir)
+    let store = dir / "store"
+    createDir(store / (H1 & "-source"))
+    let real = store & "/" & H1 & "-source"
+    writeFile(dir / "artifact.bin", "\x01" & real & "9\x00" & real & "=\x02")
+    check scanStoreReferences([dir / "artifact.bin"], store) == @[real]
+    # An existing maximal spelling wins over a shorter existing one.
+    createDir(store / (H2 & "-lib"))
+    createDir(store / (H2 & "-lib2"))
+    let longer = store & "/" & H2 & "-lib2"
+    writeFile(dir / "both.bin", "\x00" & longer & "\x00")
+    check scanStoreReferences([dir / "both.bin"], store) == @[longer]
+    # When no prefix exists the scanned spelling is kept: an output may name
+    # a path that never existed here, and that is the caller's question.
+    let absent = store & "/" & H3 & "-gone"
+    writeFile(dir / "absent.bin", "\x00" & absent & "\x00")
+    check scanStoreReferences([dir / "absent.bin"], store) == @[absent]

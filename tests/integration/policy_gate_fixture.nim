@@ -38,13 +38,6 @@ proc snapshotOf(rules: openArray[PolicyRule];
     name: "team-default", package: "certpolicy", ciTrust: ciTrust,
     untrackedInputs: puiReadSet, rules: @rules))
 
-proc policyLock(snapshot: string): string =
-  ## A committed ``repro.lock`` that pins nothing and carries ``snapshot``
-  ## ("" for none), laid out as the lock writer lays it out.
-  let lock = serializeLockedDependencies(LockedDependencies(
-    schema: "reprobuild.solved-graph-lock.v2", deps: @[]))
-  replaceCertificatePolicySection(lock, snapshot)
-
 proc commitPolicy(fx: StoreFixture; snapshot: string;
                   message = "certificate policy"): string =
   ## Write ``snapshot`` into lib-a's ``repro.lock`` and commit it with

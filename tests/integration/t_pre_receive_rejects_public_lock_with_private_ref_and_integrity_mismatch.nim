@@ -135,9 +135,6 @@ proc seedAndWire(gitBin: string): Fixture =
 
   # Wire the gateway: cert gate OFF, but the lock gate still runs.
   let cfg = GatewayConfig(
-    gateMode: cgmOff,
-    requiredTargets: @[],
-    requiredPlatforms: @[],
     lockRecordsDir: "",
     registeredKeysPath: "")
   let wired = wirePushGateway(gitBin, result.workPath, result.gatewayBare,

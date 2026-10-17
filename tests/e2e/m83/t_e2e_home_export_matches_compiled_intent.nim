@@ -38,7 +38,9 @@
 ## exports the same `intent` key set (no `dataFiles` key — the rows are
 ## already expanded), and that its package and resource rows have the
 ## existing element and resource shapes.
-## Those are compatible additions, so `schemaVersion` stays 2.
+## Those are compatible additions, so `schemaVersion` stayed 2. GM9 made it
+## 3: every resource carries `activity` (the activity it belongs to, `null`
+## for a profile-wide one), a change of meaning for a version-2 reader.
 ##
 ## Vacuity guards: the intent has four activities, a config override, two
 ## hosts entries and one resource; every selected activity contributes at
@@ -182,7 +184,7 @@ suite "repro home export: compiled intent":
       "export after plan, compile edge")
     check alphaRun.nimSpawns - alphaRun.nimCompileSpawns == ProbeSpawns
     check alpha["format"].getStr == "repro.home.export"
-    check alpha["schemaVersion"].getInt == 2
+    check alpha["schemaVersion"].getInt == 4
     check alpha["intent"] == plannerJson
     # The intent round-trips through the one ProfileIntent decoder.
     check emitProfileIntentJson(parseProfileIntentJson($alpha["intent"])) ==
@@ -233,8 +235,9 @@ suite "repro home export: compiled intent":
       check override["guard"].kind == JNull
     for resource in alpha["intent"]["resources"]:
       check keysOf(resource) ==
-        @["address", "dependsOn", "fields", "guard", "kind"]
+        @["activity", "address", "dependsOn", "fields", "guard", "kind"]
       check resource["guard"].kind == JNull
+      check resource["activity"].kind == JNull   # profile-wide (GM9)
       for _, field in resource["fields"]:
         check keysOf(field) == @["kind", "value"]
 
@@ -389,7 +392,7 @@ content = "x\n"
 """)
     let (run, doc) = sb.exportFor(["--host", "alpha"])
     require run.exitCode == 0
-    check doc["schemaVersion"].getInt == 2
+    check doc["schemaVersion"].getInt == 4
     check keysOf(doc["intent"]) == sorted(@["name", "activities",
       "configOverrides", "hosts", "resources", "buildActions",
       "adapterPreference"])
@@ -402,8 +405,9 @@ content = "x\n"
     require doc["intent"]["resources"].len == 1
     let resource = doc["intent"]["resources"][0]
     check keysOf(resource) ==
-      @["address", "dependsOn", "fields", "guard", "kind"]
+      @["activity", "address", "dependsOn", "fields", "guard", "kind"]
     check resource["guard"].getStr == "linux"
+    check resource["activity"].kind == JNull
     for _, field in resource["fields"]:
       check keysOf(field) == @["kind", "value"]
     var shapes: seq[string]

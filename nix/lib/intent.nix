@@ -5,7 +5,7 @@
 # The document is Reprobuild's: `repro home export` compiles the profile,
 # expands its data files and probes every target platform (reprobuild-pm spec
 # Gradual-Nix-To-Reprobuild-Migration.md §Exporting evaluated intent to Nix,
-# schema in §Export schema, version 2; public reference
+# schema in §Export schema (version 4 since GM10); public reference
 # docs/user-guide/home-export.md). Nix only reads it. Two consumption modes
 # (§Consumption modes), one consumer code path:
 #
@@ -42,7 +42,11 @@
 #     extractor edges with ties broken by name, which only the resolver can
 #     compute -- consumers should not depend on order);
 #   * resources and config overrides: those whose `guard` holds, in intent
-#     order;
+#     order; a resource that belongs to an activity (`activity`, GM9) only
+#     when the host's enabled activities include it
+#     (`applicableResourceEntries`). A resource naming an activity the
+#     intent does not declare is refused, as the planner refuses it
+#     (`profileIntentToHomeProfile`).
 #   * applies: the concerns the host's `hosts:` entry declares Reprobuild
 #     applies (`intent.hostApplies`, Gradual-Nix-To-Reprobuild-Migration.md
 #     §Concern-scoped apply), absent when it declares none. A declaration
@@ -67,6 +71,15 @@
 #     `PATH` (`profileBinPath`; Gradual-Nix-To-Reprobuild-Migration.md
 #     §Concern-scoped apply, "The profile's commands"). Absent otherwise. A
 #     document without that row is refused for such a host.
+#   * system: who manages the host's system scope (GM10;
+#     Gradual-Nix-To-Reprobuild-Migration.md §Hosts, feature 2) --
+#     `{ managed = "elsewhere"; managedBy = <pointer> | null; }` when the
+#     host's `hosts:` entry says `system: managedElsewhere[(...)]`
+#     (`intent.systemManagedElsewhere`), `{ managed = "here"; managedBy =
+#     null; }` otherwise. Always present (`systemManagementOf`, also
+#     exposed as `reprobuild.lib.hostSystemManagement`, which needs no
+#     target system). A malformed entry, or one for a host the registry does
+#     not declare, is refused, never read as "here".
 #
 # Resource scope: the home planner refuses a home profile that declares a
 # resource it does not apply (a system-scope kind such as `fs.systemFile`),
@@ -92,7 +105,7 @@ let
     ;
 
   format = "repro.home.export";
-  knownSchemaVersions = [ 2 ];
+  knownSchemaVersions = [ 4 ];
 
   # Every condition under which a consumer must not use the document for
   # `system`, as a message, or null. Shared by both modes.
@@ -129,6 +142,78 @@ let
   hostRefusalReason = doc: host: hostSelection.undeclaredHostReason (doc.intent.hosts or { }) host;
 
   holdsFor = facts: guard: predicate.holds facts guard;
+
+  # Who manages `host`'s system scope, from a validated document's intent
+  # (`systemManagedElsewhere`, export schema 4; `repro_profile/host_system`
+  # `systemManagementFor` on the Reprobuild side). Callers check the host
+  # first (`hostRefusalReason`).
+  systemManagementOf =
+    doc: host:
+    let
+      table = doc.intent.systemManagedElsewhere or { };
+      hosts = doc.intent.hosts or { };
+      bad = builtins.filter (
+        h:
+        let
+          v = table.${h};
+        in
+        !(builtins.isAttrs v)
+        || !(v ? managedBy)
+        || !(v.managedBy == null || (builtins.isString v.managedBy && v.managedBy != ""))
+      ) (builtins.attrNames table);
+      undeclared = builtins.filter (h: !(hosts ? ${h})) (builtins.attrNames table);
+      entry = table.${host} or null;
+    in
+    if !(builtins.isAttrs table) then
+      throw "reprobuild.lib: the document's intent.systemManagedElsewhere is not an object (host -> { managedBy })"
+    else if bad != [ ] then
+      throw "reprobuild.lib: intent.systemManagedElsewhere entries ${toJSON bad} are malformed: each must be { managedBy = <non-empty string> | null; }"
+    else if undeclared != [ ] then
+      throw "reprobuild.lib: intent.systemManagedElsewhere names host(s) ${toJSON undeclared}, which the profile's hosts: registry does not declare"
+    else if entry == null then
+      {
+        managed = "here";
+        managedBy = null;
+      }
+    else
+      {
+        managed = "elsewhere";
+        inherit (entry) managedBy;
+      };
+
+  # `reprobuild.lib.hostSystemManagement { host, snapshot ? null, document ? null }`
+  # -> `{ host, managed, managedBy }`: who manages `host`'s system scope,
+  # without evaluating any target system (a system switch asks this before it
+  # knows or cares which packages the host gets). Refuses a document of
+  # another format or schema version and a host the registry does not
+  # declare, as `readIntent` does.
+  hostSystemManagement =
+    {
+      host,
+      snapshot ? null,
+      document ? null,
+    }:
+    let
+      doc =
+        if document != null then
+          document
+        else if snapshot != null then
+          fromJSON (readFile snapshot)
+        else
+          throw "reprobuild.lib.hostSystemManagement: pass `snapshot` (a committed export) or `document`";
+      formatReason =
+        if (doc.format or null) != format then
+          "the document's format is ${toJSON (doc.format or null)}, not \"${format}\""
+        else if !(elem (doc.schemaVersion or null) knownSchemaVersions) then
+          "the document's schemaVersion is ${toJSON (doc.schemaVersion or null)}; this library reads ${toJSON knownSchemaVersions} -- regenerate the export with the repro this reprobuild flake pins, or update the flake"
+        else
+          null;
+      reason = if formatReason != null then formatReason else hostRefusalReason doc host;
+    in
+    if reason != null then
+      throw "reprobuild.lib.hostSystemManagement: cannot read host ${host}: ${reason}"
+    else
+      { inherit host; } // systemManagementOf doc host;
 
   # The packages an activity body contributes on `facts`
   # (`collectPackagesFromBody`). A guard's body holds package references only;
@@ -235,6 +320,20 @@ let
           concern = if elem (packageKey p) classification.applications then "applications" else "packages";
           resolved = !(elem (packageKey p) classification.unresolved);
         };
+      # GM9: an activity-scoped resource applies only where its activity is
+      # enabled; `null` (or absent) is profile-wide. An activity the intent
+      # does not declare is refused, never read as profile-wide.
+      resourceInSelection =
+        r:
+        let
+          activity = r.activity or null;
+        in
+        if activity == null then
+          true
+        else if !(elem activity declared) then
+          throw "reprobuild.lib.readIntent: resource `${toString (r.address or "")}` belongs to activity `${toString activity}`, which the profile does not declare (declared: ${builtins.concatStringsSep ", " declared})"
+        else
+          elem activity enabled;
     in
     if reason != null then
       throw "reprobuild.lib.readIntent: cannot evaluate this export for ${system}: ${reason}"
@@ -248,8 +347,11 @@ let
         host = selectedHost;
         inherit activities;
         packages = if applies == null then packages else map withConcern packages;
-        resources = filter (r: holdsFor facts (r.guard or null)) (intent.resources or [ ]);
+        resources = filter (r: resourceInSelection r && holdsFor facts (r.guard or null)) (
+          intent.resources or [ ]
+        );
         configOverrides = filter (o: holdsFor facts (o.guard or null)) (intent.configOverrides or [ ]);
+        system = systemManagementOf doc selectedHost;
       }
       // (if applies == null then { } else { inherit applies; })
       // (if needsProfileBin then { inherit profileBin; } else { });
@@ -331,6 +433,7 @@ in
     exportDerivation
     format
     knownSchemaVersions
+    hostSystemManagement
     ;
 
   # reprobuild.lib.readIntent { host, system, snapshot ? null, profileDir ? null,

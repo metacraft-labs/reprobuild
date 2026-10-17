@@ -191,9 +191,12 @@ const SeededSourceEnvironmentVar* = "REPRO_BOOTSTRAP_SOURCE_ENV"
   ## captures the user's development environment. Values are hex encoded so
   ## every valid filesystem path survives this environment-only transport.
 
-proc clearSeededSourcePackageEnvironment*() =
-  ## Remove only unchanged bootstrap additions. Explicit caller values and
-  ## overrides made since seeding remain authoritative.
+proc seededSourcePackageEnvironmentNames*(): seq[string] =
+  ## The names this process seeded that still hold the seeded value, followed
+  ## by ``SeededSourceEnvironmentVar`` itself when it is set: exactly what
+  ## ``clearSeededSourcePackageEnvironment`` removes. For a caller that has to
+  ## keep the seeds for its own later compiles and so withdraws them from a
+  ## child's environment table instead of from this process.
   for line in getEnv(SeededSourceEnvironmentVar).splitLines():
     let split = line.find('=')
     if split <= 0:
@@ -201,11 +204,18 @@ proc clearSeededSourcePackageEnvironment*() =
     let name = line[0 ..< split]
     try:
       let value = parseHexStr(line[split + 1 .. ^1])
-      if existsEnv(name) and getEnv(name) == value:
-        delEnv(name)
+      if existsEnv(name) and getEnv(name) == value and name notin result:
+        result.add(name)
     except ValueError:
       discard
-  delEnv(SeededSourceEnvironmentVar)
+  if existsEnv(SeededSourceEnvironmentVar):
+    result.add(SeededSourceEnvironmentVar)
+
+proc clearSeededSourcePackageEnvironment*() =
+  ## Remove only unchanged bootstrap additions. Explicit caller values and
+  ## overrides made since seeding remain authoritative.
+  for name in seededSourcePackageEnvironmentNames():
+    delEnv(name)
 
 proc seedSourcePackageEnvironment*(roots: openArray[(string, string)]) =
   ## Child compilers rebuild the interface-artifact module and therefore

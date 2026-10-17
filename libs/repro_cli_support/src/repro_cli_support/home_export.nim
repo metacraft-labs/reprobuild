@@ -44,18 +44,32 @@ import repro_home_resources/concerns
 from repro_project_dsl/reprobuild_packages_catalog import
   reachableReprobuildPackagesRoots, ReprobuildPackagesRootEnv
 from repro_profile/types import ProfileIntent
+from repro_profile/host_system import systemManagementFor
 from repro_profile/emit import emitProfileIntentJson, parseProfileIntentJson
 
 const
   HomeExportFormat* = "repro.home.export"
     ## Value of the document's `format` field. Identifies the document kind
     ## so a consumer handed some other JSON file fails loudly.
-  HomeExportSchemaVersion* = 2
+  HomeExportSchemaVersion* = 4
     ## Value of the document's `schemaVersion` field. Version 2 (GM3): the
     ## intent's resources and config overrides carry a `guard`, and the
     ## `platforms` map says which platforms the document describes. A
     ## version-1 reader would apply a guarded resource on every platform, so
-    ## this is a new version, not a compatible addition.
+    ## this is a new version, not a compatible addition. Version 3 (GM9):
+    ## each intent resource carries `activity` (the activity it belongs to,
+    ## `null` for profile-wide), and the evaluation keeps an activity-scoped
+    ## resource only for a host that selects the activity. A version-2
+    ## reader would apply such a resource on every host -- a change of
+    ## meaning, so again a new version.
+    ## Version 4 (GM10): the intent carries `systemManagedElsewhere` (the
+    ## hosts whose system scope something else manages, with the pointer
+    ## to it) and the evaluation carries `system`. In a version-3 document
+    ## the absence of the map cannot be told from "every host is managed
+    ## here", so a reader that acts on the attribute (a system switch
+    ## deciding whether to take over a host) would take over every host an
+    ## older export describes. A new version makes such a reader refuse the
+    ## old document instead.
   HomeExportComparedFields* = ["format", "schemaVersion", "selection",
     "intent", "concerns", "platforms"]
     ## The top-level fields `--check` compares. `provenance` is deliberately
@@ -641,8 +655,9 @@ proc evaluateHomeExport*(doc: JsonNode; system: string; host = ""):
   ## the activities `enabledActivitiesFor` enables, the packages `buildPlan`
   ## plans under the target's predicate facts, and the resources and config
   ## overrides whose guards hold there (`applicableResourceEntries` /
-  ## `applicableConfigEntries`, the walkers the planner applies). Resources
-  ## are the home-scope ones the home planner plans.
+  ## `applicableConfigEntries`, the walkers the planner applies) -- an
+  ## activity-scoped resource (GM9) only when the host's selection enables
+  ## its activity. Resources are the home-scope ones the home planner plans.
   ##
   ## Returns the `evaluation` object (`docs/user-guide/home-export.md`).
   ## Raises `HomeExportRefused` when the document cannot describe `system`
@@ -683,8 +698,11 @@ proc evaluateHomeExport*(doc: JsonNode; system: string; host = ""):
   var resources = newJArray()
   let resourcesBlock = findResourcesBlock(profile)
   if resourcesBlock.isSome:
+    # GM9: the host's activities decide the activity-scoped resources, by
+    # the rule `buildPlan` (above) and the apply pipeline use.
     for entry in applicableResourceEntries(
-        resourcesBlock.get.resourcesEntries, ctx):
+        resourcesBlock.get.resourcesEntries, ctx,
+        enabledActivitiesFor(profile, selectedHost)):
       resources.add doc["intent"]["resources"][
         entry.resourceIntentOrdinal - 1]
   # The planner groups overrides by package; report them in the intent's
@@ -707,6 +725,15 @@ proc evaluateHomeExport*(doc: JsonNode; system: string; host = ""):
     "packages": packages,
     "resources": resources,
     "configOverrides": overrides}
+  # GM10: who manages the host's system scope, from the registry entry
+  # (`systemManagementFor`); always present, so a reader never mistakes an
+  # absent key for "managed here".
+  let management = systemManagementFor(intent, selectedHost)
+  result["system"] = %*{
+    "managed": (if management.managedElsewhere: "elsewhere" else: "here"),
+    "managedBy": (if management.managedElsewhere and
+                     management.managedBy.len > 0: %management.managedBy
+                  else: newJNull())}
   # GM7: the concerns the host's entry declares Reprobuild applies, by the
   # planner's rule; absent when it declares none (every concern).
   let applied = appliedConcernsFor(profile, selectedHost)

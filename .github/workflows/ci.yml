@@ -140,21 +140,51 @@ jobs:
       # This copy is a convenience, not the gate: it shares this job's fate,
       # and this workflow supersedes its own branch runs. The gate that
       # always reaches a verdict is `suite-case-counts.yml`.
+      #
+      # FIRST, BUT NOT IN FRONT. These artifacts are bookkeeping: they go
+      # stale whenever anyone lands a test without regenerating them, so this
+      # step can be red through no fault of the change under test. When it
+      # was the only guard on the steps below, a stale baseline SKIPPED them:
+      # for five `dev` commits no content lint ran at all (reprobuild-pm issue
+      # 2026-10-01). So every audit after it carries `!cancelled()` and runs
+      # regardless of this step's outcome; the job still ends red because
+      # this step failed. `steps.suite_baseline.outcome != 'skipped'` keeps
+      # them from running when the dev env itself never came up, where each
+      # would only fail again for the same unrelated reason.
+      #
+      # The base revision lets the refusal say which stale entries this
+      # change introduced and which it inherited (see the script header). A
+      # pull request's checkout is the merge commit, so its base is the base
+      # branch tip; a push's is the previous tip, all zeros for a new branch.
+      # The fetch is best effort: without the commit there is no attribution,
+      # and the verdict is the same either way.
       - name: Suite case-count baseline and inventory entry set
-        run: dev-exec bash scripts/check_suite_case_counts.sh
+        id: suite_baseline
+        env:
+          ATTRIBUTION_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base=""
+          if [ -n "${ATTRIBUTION_BASE}" ] && [ -n "${ATTRIBUTION_BASE//0/}" ] &&
+             git fetch --no-tags --depth=1 origin "${ATTRIBUTION_BASE}"; then
+            base="${ATTRIBUTION_BASE}"
+          fi
+          dev-exec env "SUITE_CASE_COUNTS_BASE=${base}" bash scripts/check_suite_case_counts.sh
       # The vacuous-case gate, for the same reason and at the same point:
       # a source scan that answers in seconds, so it is asked before the
       # multi-minute `nim check` sweep and its failure annotation names
       # this step rather than a lint log. `just lint` runs it too.
       - name: No test case asserts only `check true`
+        if: ${{ !cancelled() && steps.suite_baseline.outcome != 'skipped' }}
         run: dev-exec python3 scripts/check_vacuous_test_cases.py
       # Graph-Owned-Test-Artifacts M3, same class of gate: a source scan that
       # refuses a new test compiling a helper program at execution time. Named
       # as its own step so the failure annotation says what is wrong instead of
       # pointing at a lint log.
       - name: No test body compiles a helper program
+        if: ${{ !cancelled() && steps.suite_baseline.outcome != 'skipped' }}
         run: dev-exec python3 scripts/check_test_body_helper_compilation.py
       - name: just lint
+        if: ${{ !cancelled() && steps.suite_baseline.outcome != 'skipped' }}
         run: dev-exec just lint
       - name: Upload logs
         if: always()

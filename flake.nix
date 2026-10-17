@@ -539,7 +539,18 @@
       # ``addPathIfDir`` form skips it). Its ``repro.lock``
       # still names trace-format d8cd2ed5, so ``ct-trace-format-src`` stays
       # (``checks.<system>.ct-trace-format-pin-coherence`` confirms it).
-      url = "github:metacraft-labs/codetracer/2097ae648aa03198727c402b5bfbede548d068a9";
+      #
+      # At f1745b89e (2026-10-17, the published `agents` tip; 2097ae648 is an
+      # ancestor) ``src/ct_test/``, ``src/ct_incremental_adapter.nim``,
+      # ``config.nims`` and ``src/Tuprules.tup`` are unchanged. ``repro.nim``
+      # does change: it declares ``dsymutil`` for the macOS debug-info pass,
+      # the sub-tool ``nim c`` shells out to by bare name after the link, so
+      # the hermetic native edge needs it declared the way ``clang`` is. That
+      # declaration resolves against the ``dsymutil`` selector this very
+      # revision of reprobuild adds. Its ``repro.lock`` names trace-format
+      # b4794ba6, so ``ct-trace-format-src`` moves with it in the same step
+      # (``checks.<system>.ct-trace-format-pin-coherence`` confirms the pair).
+      url = "github:metacraft-labs/codetracer/f1745b89e93179eca20778943bbafae91ebb6dfd";
       flake = false;
     };
 
@@ -653,7 +664,11 @@
       # 23d5af70f's ``repro.lock`` names (5b32588b is an ancestor; extends the
       # partial-interning-table refusal to every container writer and reads a
       # MaxRootEntries of 0 as the auto-filled root in every reader).
-      url = "github:metacraft-labs/codetracer-trace-format-nim/d8cd2ed542b9cdd990eef8a1cda5c89b539f8d4e";
+      # Moved with ``codetracer-src`` to b4794ba6, the revision CodeTracer
+      # f1745b89e's ``repro.lock`` names (d8cd2ed5 is an ancestor; fails the
+      # writer when a write fails in the final flush or close, and retries the
+      # managed finalize with a timeout sized to the upload).
+      url = "github:metacraft-labs/codetracer-trace-format-nim/b4794ba69fa7ccb0b568de7c582a576994c63e5b";
       flake = false;
     };
     nim-stew-src = {

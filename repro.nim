@@ -353,7 +353,8 @@ const
                  "t_e2e_nix_reads_intent_like_export",
                  "t_e2e_profile_compile_clang_first_run_published",
                  "t_e2e_profile_compile_ignores_ancestor_membership",
-                 "t_e2e_home_facts_from_isolated_plan"]:
+                 "t_e2e_home_facts_from_isolated_plan",
+                 "t_e2e_activity_scoped_resource_follows_host_selection"]:
       rows.add TestGraphArtifacts(source: "tests/e2e/m83/" & name & ".nim",
         artifacts: @[profileCompileNimSpy])
     # The clang first-run gate's positive control compiles through a "clang"
@@ -2186,9 +2187,11 @@ package reprobuild:
     # `extraInputs` (which orders it after the probe and mixes the file's
     # content digest into its key) and actually imports it (repro_core, under
     # `-d:reproGeneratedSourceRevision`), so its monitored read set covers it
-    # too. A build at an unchanged revision rewrites identical bytes and the
-    # engine stays a cache hit; a new commit, or the tree turning dirty or
-    # clean, changes the bytes and rebuilds the engine -- and with it re-runs
+    # too. At an unchanged revision the script leaves the module untouched --
+    # not merely byte-identical: the engine edge revalidates its inputs by
+    # timestamp, so a rewrite of the same bytes would rebuild it on every
+    # build -- and the engine stays a cache hit; a new commit, or the tree
+    # turning dirty or clean, rewrites the module and rebuilds the engine -- and with it re-runs
     # every test execute edge that declares the engine as an input.
     const sourceRevisionModuleDir = "build/generated/source-revision"
     const sourceRevisionModule =
