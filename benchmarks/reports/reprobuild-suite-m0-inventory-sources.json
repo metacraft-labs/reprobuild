@@ -9894,7 +9894,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_dss72_provenance_reaches_the_point_of_use.nim",
       "sourceSuiteCount": 4,
-      "staticCaseCount": 16,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
