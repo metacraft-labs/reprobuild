@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 62,
     "pureUnitTests": 660,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
-    "testEntries": 2195
+    "testEntries": 2197
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1297,7 +1297,7 @@
       "integration": 1183,
       "platform/destructive": 132,
       "pure unit": 660,
-      "unclassified": 201
+      "unclassified": 203
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1500,8 +1500,8 @@
       }
     ],
     "nimTestBinaryCount": 2170,
-    "pythonTestFileCount": 25,
-    "testEntryCount": 2195
+    "pythonTestFileCount": 27,
+    "testEntryCount": 2197
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -46361,6 +46361,36 @@
       "source": "tests/unit/test_ci_reconcile_lock_credentials.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 24,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `__future__`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_ci_suite_coverage.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 19,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `__future__`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_ci_test_budget.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 26,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
