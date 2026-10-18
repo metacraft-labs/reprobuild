@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2186,
+    "nimTestBinaries": 2187,
     "pureUnitConsolidationGroups": 62,
     "pureUnitTests": 660,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
-    "testEntries": 2213
+    "testEntries": 2214
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1297,7 +1297,7 @@
       "integration": 1195,
       "platform/destructive": 133,
       "pure unit": 660,
-      "unclassified": 206
+      "unclassified": 207
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1499,9 +1499,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2186,
+    "nimTestBinaryCount": 2187,
     "pythonTestFileCount": 27,
-    "testEntryCount": 2213
+    "testEntryCount": 2214
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8651,6 +8651,24 @@
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": false,
       "source": "libs/repro_build_engine/tests/t_named_pipe_evidence.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_nim_producer_stdlib_collisions",
+      "class": "unclassified",
+      "classificationReason": "imports `greetlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_nim_producer_stdlib_collisions.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,

@@ -666,6 +666,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_nim_producer_stdlib_collisions.nim",
+    binary: "build/test-bin/t_nim_producer_stdlib_collisions",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim",
     binary: "build/test-bin/t_nix_daemon_search_roots",
     defines: @[],

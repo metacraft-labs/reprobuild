@@ -593,8 +593,8 @@ type EngineSourceFile = object
 ## row here.
 const SpawnPrimitives: array[45, tuple[name: string; expected: int;
                                        why: string]] = [
-  ("startProcess", 3,
-    "post-build converter, the L2 RunQuota helper, the nix daemon"),
+  ("startProcess", 4,
+    "post-build converter, L2 RunQuota helper, nix daemon, config-free Nim metadata"),
   # In-Process-Monitor-Hosting HM-4. ``startMonitor`` is a REAL spawn — it is
   # io-mon's only spawn site for a monitored tree — so the engine hosting the
   # monitor is a launch path in its own right and is pinned like any other.

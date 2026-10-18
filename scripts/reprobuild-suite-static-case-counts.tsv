@@ -80,6 +80,7 @@ libs/repro_build_engine/tests/t_monitor_capture_at_long_path.nim	nim	1
 libs/repro_build_engine/tests/t_monitor_scratch_is_not_a_cache_input.nim	nim	3
 libs/repro_build_engine/tests/t_monitor_shim_resolver_memo_keys_its_inputs.nim	nim	4
 libs/repro_build_engine/tests/t_named_pipe_evidence.nim	nim	3
+libs/repro_build_engine/tests/t_nim_producer_stdlib_collisions.nim	nim	3
 libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim	nim	15
 libs/repro_build_engine/tests/t_nix_gc_roots_cover_working_tree_outputs.nim	nim	3
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
