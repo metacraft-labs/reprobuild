@@ -272,7 +272,12 @@
         # certainty, so the engine keys the scan on the matching entries.
       # macOS and Windows now fail incomplete when descendant quiescence
       # cannot be established; keep the host and its capture tests in sync.
-      url = "github:metacraft-labs/io-mon/45773f642f0facc6ed95daa972c2678a964cfb0c";
+      # Bumped to 091fa26 (2026-10-18), io-mon's `agents` tip; 45773f6 is an
+      # ancestor. The macOS shim records a relative path anchored on the
+      # directory it resolved against when the call was made, so a tool that
+      # chdir()s (`git -C <repo>`) is no longer keyed on phantom paths under
+      # the action's cwd.
+      url = "github:metacraft-labs/io-mon/091fa26ce03d9dd1ca8cfa6a1d9d46624dc50491";
       flake = false;
     };
     nim-shm-gset-src = {
