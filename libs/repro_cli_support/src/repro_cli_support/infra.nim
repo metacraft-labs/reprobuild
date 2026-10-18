@@ -30,6 +30,7 @@ import repro_cli_support/home as cli_home
 import repro_cli_support/disk as cli_disk
 import repro_cli_support/infra_install_root
 import repro_cli_support/infra_host_registry
+from repro_home_intent/host_identity import selectHost, EHostIdentity
 from repro_core/source_root import publicCliImagePath
 
 # ---------------------------------------------------------------------------
@@ -231,6 +232,9 @@ type
     stateDir: string
     profilePath: string
     host: string
+    hostGiven: bool
+      ## `--host` was passed (even as `--host=`), so an empty value is
+      ## refused rather than read as "no flag" (`selectHost`).
     homeProfileDir: string
       ## `--home-profile-dir`: the home profile whose `hosts:` registry says
       ## who manages each host's system (GM10, `infra_host_registry`).
@@ -259,11 +263,48 @@ type
       ## under M82 Phase C the two are aliases at plan time so the
       ## same flag works across `repro infra plan` and rollback.
 
-proc hostIdentity(explicit: string): string =
-  if explicit.len > 0:
-    return explicit
-  let h = getEnv("COMPUTERNAME")
-  if h.len > 0: h else: "localhost"
+proc resolveInfraHost(flags: InfraCliFlags; command: string;
+                      host: var string): bool =
+  ## The host identity of one `repro infra` / `repro system` command, from
+  ## the ONE resolver `repro home` uses (`host_identity.selectHost`:
+  ## `$REPRO_HOST`, else `--host`, else the lower-cased OS hostname; a
+  ## `--host` that `$REPRO_HOST` contradicts, or an empty `--host`, is
+  ## refused). The same name keys the host registry (GM10) and is recorded in
+  ## the plan and the generation, so the registry line and the `host` line of
+  ## a report cannot disagree. False (after a diagnostic naming the command)
+  ## when the host cannot be resolved; callers exit 2, as `repro home` does.
+  try:
+    host = selectHost(flags.host, flags.hostGiven).name
+    true
+  except EHostIdentity as err:
+    stderr.writeLine(command & ": " & err.msg)
+    false
+
+proc recordedHostNote(stateDir, host: string): string =
+  ## A note for the report when the CURRENT generation recorded a different
+  ## host identity than this run resolves, or "" when it did not (or there is
+  ## no readable current generation). The recorded identity is provenance,
+  ## never a lookup key -- every generation stays listed and stays a rollback
+  ## target whatever host it recorded -- so a change of identity (the
+  ## pre-unification `localhost` / upper-case `%COMPUTERNAME%`, a renamed
+  ## machine) is reported rather than refused (CLI/infra/README.md §Host
+  ## identity).
+  var current, recorded: string
+  try:
+    current = readCurrentGenerationId(stateDir)
+    if current.len == 0:
+      return ""
+    recorded = readGenerationEnvelope(
+      pointerPath(stateDir, current)).hostIdentity
+  except CatchableError:
+    # An unreadable current generation is reported by the commands that
+    # need it (history, rollback); a note is not the place to fail.
+    return ""
+  if recorded == host:
+    return ""
+  "the current generation " & current & " recorded host '" & recorded &
+    "'; this run is host '" & host & "' (earlier generations stay listed " &
+    "and remain rollback targets)"
 
 proc resolveProfilePath(flags: InfraCliFlags; stateDir: string): string =
   if flags.profilePath.len > 0:
@@ -290,9 +331,12 @@ proc parseInfraFlags(args: openArray[string]):
     elif a == "--home-profile-dir": result.flags.homeProfileDir = valueOf()
     elif a.startsWith("--home-profile-dir="):
       result.flags.homeProfileDir = a["--home-profile-dir=".len .. ^1]
-    elif a == "--host": result.flags.host = valueOf()
+    elif a == "--host":
+      result.flags.host = valueOf()
+      result.flags.hostGiven = true
     elif a.startsWith("--host="):
       result.flags.host = a["--host=".len .. ^1]
+      result.flags.hostGiven = true
     elif a == "--plan": result.flags.planId = valueOf()
     elif a.startsWith("--plan="):
       result.flags.planId = a["--plan=".len .. ^1]
@@ -333,17 +377,19 @@ proc parseInfraFlags(args: openArray[string]):
 # GM10: the host registry gate.
 # ---------------------------------------------------------------------------
 
-proc gateHostSystemManagement(flags: InfraCliFlags; profilePath, stateDir,
-                              command: string;
+proc gateHostSystemManagement(flags: InfraCliFlags; host, profilePath,
+                              stateDir, command: string;
                               verdict: var HostRegistryVerdict): bool =
   ## Read the host registry (`infra_host_registry`) and refuse a host whose
   ## system is managed elsewhere. Runs BEFORE the system profile is
   ## compiled and before any plan, lock or generation is written, so a
   ## refused host leaves the state directory as it was. Returns false (after
-  ## printing why) when the command must stop.
+  ## printing why) when the command must stop. `host` is the command's
+  ## resolved identity (`resolveInfraHost`), the name the plan and the
+  ## generation record too.
   try:
     let registry = resolveHostRegistryPath(flags.homeProfileDir, profilePath)
-    verdict = readHostRegistry(registry, registryHost(flags.host), stateDir)
+    verdict = readHostRegistry(registry, host, stateDir)
   except EHostRegistry as e:
     stderr.writeLine(command & ": " & e.msg)
     stderr.writeLine("  Who manages this host's system is unknown, so " &
@@ -368,8 +414,11 @@ proc runInfraPlan(args: openArray[string]): int =
   if not fileExists(profilePath):
     stderr.writeLine("repro infra plan: no system profile at " & profilePath)
     return 1
+  var host: string
+  if not resolveInfraHost(flags, "repro infra plan", host):
+    return 2
   var registry: HostRegistryVerdict
-  if not gateHostSystemManagement(flags, profilePath, stateDir,
+  if not gateHostSystemManagement(flags, host, profilePath, stateDir,
       "repro infra plan", registry):
     return 1
   let originalText = readFile(profilePath)
@@ -380,7 +429,6 @@ proc runInfraPlan(args: openArray[string]): int =
       "repro infra plan", profileText,
       planCommand = "repro infra plan"):
     return 1
-  let host = hostIdentity(flags.host)
   ensureSystemStateDir(stateDir)
   # M82 Phase C: pass the state dir so the planner can read the
   # previously-applied generation's recorded `postWriteDigest` per
@@ -396,6 +444,9 @@ proc runInfraPlan(args: openArray[string]): int =
   echo "  profile : " & profilePath
   echo "  host    : " & host
   echo "  registry: " & describeRegistry(registry)
+  let hostNote = recordedHostNote(stateDir, host)
+  if hostNote.len > 0:
+    echo "  note    : " & hostNote
   echo "  plan-id : " & env.planId
   var changeCount = 0
   for op in env.operations:
@@ -479,8 +530,11 @@ proc runInfraApply(args: openArray[string]): int =
     stderr.writeLine("repro infra apply: no system profile at " &
       profilePath)
     return 1
+  var host: string
+  if not resolveInfraHost(flags, "repro infra apply", host):
+    return 2
   var registry: HostRegistryVerdict
-  if not gateHostSystemManagement(flags, profilePath, stateDir,
+  if not gateHostSystemManagement(flags, host, profilePath, stateDir,
       "repro infra apply", registry):
     return 1
   let originalText = readFile(profilePath)
@@ -493,7 +547,6 @@ proc runInfraApply(args: openArray[string]): int =
       planCommand = "repro infra plan",
       outBuildActions = addr profileBuildActions):
     return 1
-  let host = hostIdentity(flags.host)
 
   var planId = flags.planId
   if planId.len == 0 and positional.len > 0:
@@ -525,6 +578,9 @@ proc runInfraApply(args: openArray[string]): int =
   # leaves ``buildActions`` empty and the dispatcher is never consulted.
   attachBuildActionDispatcher(opts, profileBuildActions, stateDir)
 
+  # Read BEFORE the apply commits a generation: afterwards the current
+  # generation is this run's own.
+  let hostNote = recordedHostNote(stateDir, host)
   var applyResult: ApplyResult
   try:
     applyResult = runInfraApply(profileText, opts)
@@ -542,7 +598,10 @@ proc runInfraApply(args: openArray[string]): int =
 
   echo "repro infra apply"
   echo "  plan-id      : " & applyResult.planId
+  echo "  host         : " & host
   echo "  registry     : " & describeRegistry(registry)
+  if hostNote.len > 0:
+    echo "  note         : " & hostNote
   echo "  generation   : " & applyResult.generationId
   echo "  applied      : " & $applyResult.appliedCount
   echo "  no-op        : " & $applyResult.noOpCount
@@ -781,8 +840,11 @@ proc runSystemSync(args: openArray[string]): int =
     stderr.writeLine("repro system sync: no system profile at " &
       profilePath)
     return 1
+  var host: string
+  if not resolveInfraHost(flags, "repro system sync", host):
+    return 2
   var registry: HostRegistryVerdict
-  if not gateHostSystemManagement(flags, profilePath, stateDir,
+  if not gateHostSystemManagement(flags, host, profilePath, stateDir,
       "repro system sync", registry):
     return 1
   let originalText = readFile(profilePath)
@@ -795,7 +857,6 @@ proc runSystemSync(args: openArray[string]): int =
       planCommand = "repro infra plan",
       outBuildActions = addr profileBuildActions):
     return 1
-  let host = hostIdentity(flags.host)
   if not takeInfraApplyLock(stateDir, "repro system sync", flags):
     return 1
   defer: releaseApplyLock(stateDir)
@@ -825,6 +886,7 @@ proc runSystemSync(args: openArray[string]): int =
   # populate ``opts.buildActions`` so a profile that mixes live-state
   # and action-edge resources dispatches both halves correctly.
   attachBuildActionDispatcher(opts, profileBuildActions, stateDir)
+  let hostNote = recordedHostNote(stateDir, host)
   var applyResult: ApplyResult
   try:
     applyResult = runInfraApply(profileText, opts)
@@ -832,6 +894,10 @@ proc runSystemSync(args: openArray[string]): int =
     stderr.writeLine("repro system sync: " & e.msg)
     return 1
   echo "repro system sync"
+  echo "  host         : " & host
+  echo "  registry     : " & describeRegistry(registry)
+  if hostNote.len > 0:
+    echo "  note         : " & hostNote
   echo "  generation   : " & applyResult.generationId
   echo "  applied      : " & $applyResult.appliedCount
   echo "  no-op        : " & $applyResult.noOpCount
@@ -873,7 +939,8 @@ proc runSystemHistory(args: openArray[string]): int =
     let marker = if rec.isActive: "* " else: "  "
     echo "  " & marker & rec.generationId & "  [" & ts & "]  " &
       "applied=" & $rec.envelope.appliedCount &
-      " no-op=" & $rec.envelope.noOpCount
+      " no-op=" & $rec.envelope.noOpCount &
+      " host=" & rec.envelope.hostIdentity
   if generations.len == 0:
     echo "  (no system generations — run `repro system sync` first)"
   return 0
@@ -896,17 +963,21 @@ proc runSystemRollbackCmd(args: openArray[string]): int =
   # the system profile path even when that file does not exist: the rollback
   # reads the generation's copy, but the configuration it belongs to is the
   # directory `--profile` (or the state dir's default) names.
+  var host: string
+  if not resolveInfraHost(flags, "repro system rollback", host):
+    return 2
   var registry: HostRegistryVerdict
-  if not gateHostSystemManagement(flags,
+  if not gateHostSystemManagement(flags, host,
       systemProfilePathOrCreate(flags, stateDir), stateDir,
       "repro system rollback", registry):
     return 1
+  let hostNote = recordedHostNote(stateDir, host)
   if not takeInfraApplyLock(stateDir, "repro system rollback", flags):
     return 1
   defer: releaseApplyLock(stateDir)
   var opts: SystemRollbackOptions
   opts.stateDir = stateDir
-  opts.hostIdentity = hostIdentity(flags.host)
+  opts.hostIdentity = host
   opts.reproExe = reproExePath()
   opts.targetGenerationId = targetId
   opts.acceptFeatureDestroy = flags.acceptFeatureDestroy
@@ -936,6 +1007,9 @@ proc runSystemRollbackCmd(args: openArray[string]): int =
     stderr.writeLine("repro system rollback: " & e.msg)
     return 1
   echo "repro system rollback"
+  echo "  host            : " & host
+  if hostNote.len > 0:
+    echo "  note            : " & hostNote
   echo "  from generation : " & outcome.fromGenerationId
   echo "  to generation   : " & outcome.toGenerationId
   echo "  new generation  : " & outcome.apply.generationId

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2168,
+    "nimTestBinaries": 2170,
     "pureUnitConsolidationGroups": 62,
     "pureUnitTests": 660,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
-    "testEntries": 2192
+    "testEntries": 2194
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1294,10 +1294,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1182,
+      "integration": 1183,
       "platform/destructive": 132,
       "pure unit": 660,
-      "unclassified": 199
+      "unclassified": 200
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1499,9 +1499,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2168,
+    "nimTestBinaryCount": 2170,
     "pythonTestFileCount": 24,
-    "testEntryCount": 2192
+    "testEntryCount": 2194
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -13484,6 +13484,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_host_identity_resolver",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_home_intent"
+      ],
+      "owner": "libs/repro_home_intent",
+      "requiresReproBinary": false,
+      "source": "libs/repro_home_intent/tests/t_host_identity_resolver.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_smoke_home_intent",
       "class": "platform/destructive",
       "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
@@ -24607,6 +24624,24 @@
       "source": "tests/e2e/gm10/t_e2e_infra_apply_refuses_externally_managed_host.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_infra_host_identity_matches_home",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_profile",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/gm10/t_e2e_infra_host_identity_matches_home.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

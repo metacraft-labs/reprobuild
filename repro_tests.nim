@@ -2988,6 +2988,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_home_intent/tests/t_host_identity_resolver.nim",
+    binary: "build/test-bin/t_host_identity_resolver",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_home_intent/tests/t_smoke_home_intent.nim",
     binary: "build/test-bin/t_smoke_home_intent",
     defines: @[],
@@ -8543,6 +8552,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/e2e/gm10/t_e2e_infra_apply_refuses_externally_managed_host.nim",
     binary: "build/test-bin/t_e2e_infra_apply_refuses_externally_managed_host",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/e2e/gm10/t_e2e_infra_host_identity_matches_home.nim",
+    binary: "build/test-bin/t_e2e_infra_host_identity_matches_home",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

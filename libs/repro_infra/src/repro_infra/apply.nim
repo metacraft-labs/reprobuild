@@ -472,6 +472,13 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   var env: PlanEnvelope
   if opts.planId.len > 0:
     env = readPlanFile(planPath(opts.stateDir, opts.planId))
+    # The plan is one host's: its id and the generation this apply commits
+    # derive from the host identity, so applying another host's plan -- or
+    # one recorded under the pre-unification identity rule -- would commit a
+    # generation whose plan names a different host. Refused before anything
+    # is touched; a fresh plan is cheap.
+    if env.hostIdentity != opts.hostIdentity:
+      raisePlanHostMismatch(opts.planId, env.hostIdentity, opts.hostIdentity)
     # Stale-detection: the live world must still be consistent with
     # the plan's recorded observations.
     let stale = detectStaleResources(env.operations, profileText)
