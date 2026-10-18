@@ -17865,6 +17865,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_action_depfile_policy.nim",
+    binary: "build/test-bin/t_action_depfile_policy",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_action_index_platform_arm.nim",
     binary: "build/test-bin/t_action_index_platform_arm",
     defines: @[],
