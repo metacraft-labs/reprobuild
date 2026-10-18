@@ -140,7 +140,16 @@ suite "#498: the fixture really does declare the two orders":
     # service body, the two orders stop being comparable and every
     # "identical artifact" case below becomes a tautology about two
     # different recipes.
+    #
+    # THE ACTIVITY REGISTRY IS FILLED BY LOWERING, not at module init:
+    # `activity` declarations register from inside the dev-env body. The
+    # runner executes every case in its own process (`--run
+    # "<suite>::<test>"`), so this case cannot lean on the case above
+    # having lowered both packages -- run alone, it would read an empty
+    # registry and report drift that is not there. Lower both here.
     proc activityBody(package, activity: string): string =
+      if registeredActivities(package).len == 0:
+        discard devEnvFor(package)
       for act in registeredActivities(package):
         if act.activityName == activity:
           return act.bodyRepr
