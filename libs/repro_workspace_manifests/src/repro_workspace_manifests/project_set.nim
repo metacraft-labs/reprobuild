@@ -104,11 +104,12 @@ proc resolveWorkspaceProjectByName*(workspaceRoot, name: string;
 # `resolver.nim` when repo-set expansion gained the same dedup-by-path rule:
 # one refusal, one set of evidence, whichever route reached the second
 # declaration. Re-exported here so every existing caller is unaffected.
-export WorkspaceProjectSetConflictError, conflictingFields
+export WorkspaceProjectSetConflictError, conflictingFields,
+  conflictingFieldIds
 
 proc raiseProjectSetConflict(workspaceRoot, path: string;
                              owningProject, otherProject: string;
-                             differences: seq[string]) {.noreturn.} =
+                             differences, fieldIds: seq[string]) {.noreturn.} =
   let inner = "projects '" & owningProject & "' and '" & otherProject &
     "' declare checkout path '" & path & "' with different " &
     differences.join(", ") &
@@ -121,6 +122,9 @@ proc raiseProjectSetConflict(workspaceRoot, path: string;
   e.expectedSchema = schemaWorkspaceStateV1
   e.observedSchema = schemaWorkspaceStateV1
   e.innerMessage = inner
+  e.checkoutPath = path
+  e.sources = @[owningProject, otherProject]
+  e.fields = fieldIds
   e.msg = "[" & e.path & "] at key 'workspace.projects': " & inner
   raise e
 
@@ -148,11 +152,12 @@ proc unionProjectSet*(workspaceRoot: string; primary: ResolvedProject;
     let other = resolveWorkspaceProjectByName(workspaceRoot, name)
     for repo in other.repos:
       if repo.path in byPath:
-        let differences = conflictingFields(result.repos[byPath[repo.path]], repo)
+        let existing = result.repos[byPath[repo.path]]
+        let differences = conflictingFields(existing, repo)
         if differences.len > 0:
           raiseProjectSetConflict(workspaceRoot, repo.path,
             declaredBy.getOrDefault(repo.path, primary.projectName), name,
-            differences)
+            differences, conflictingFieldIds(existing, repo))
         # Identical declaration — the common case for shared infrastructure
         # repos every project includes. One checkout, one entry.
       else:

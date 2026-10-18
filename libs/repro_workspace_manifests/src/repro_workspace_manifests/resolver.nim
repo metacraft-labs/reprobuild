@@ -295,23 +295,59 @@ type
     ## cannot be resolved at all), whereas an unresolvable or
     ## not-yet-materialized manifest may simply be a workspace whose manifest
     ## checkout has not landed yet.
+    ##
+    ## The structured fields below carry the same evidence the message
+    ## spells out, so a caller that reports the refusal AS DATA
+    ## (`repro workspace sets resolve --json`) does not have to parse prose.
+    ## Both raise sites populate them; the message text is unchanged.
+    checkoutPath*: string
+      ## The workspace-relative checkout path the two sources disagree about.
+    sources*: seq[string]
+      ## The two sources, in order: the one whose declaration was kept
+      ## (first-seen) and the one that contradicted it. Project / repo-set
+      ## names, as the message names them.
+    fields*: seq[string]
+      ## The identifiers of the differing facts — the stable keys of
+      ## `conflictingFieldIds`, in comparison order.
 
-proc conflictingFields*(existing, candidate: ResolvedRepo): seq[string] =
+proc conflictingFieldIds*(existing, candidate: ResolvedRepo): seq[string] =
   ## The load-bearing facts of a checkout: what would be cloned, from where,
   ## at which revision, with which VCS. Two sources may reach these through
   ## differently-NAMED remotes (`origin` vs `metacraft-labs` pointing at the
   ## same fetch base) without disagreeing about anything real, so the remote
   ## KEY is deliberately not compared — the resolved fetch URL is.
+  ##
+  ## Returns the short, stable identifier of each differing fact (`name`,
+  ## `fetchUrl`, `revision`, `vcs` — the `ResolvedRepo` field names, which
+  ## are also the keys a resolve report uses). `conflictingFields` renders
+  ## the same comparison for a human, so the two can never disagree about
+  ## WHICH facts differ.
   if existing.name != candidate.name:
-    result.add("name (" & existing.name & " vs " & candidate.name & ")")
+    result.add("name")
   if existing.fetchUrl != candidate.fetchUrl:
-    result.add("fetch url (" & existing.fetchUrl & " vs " &
-      candidate.fetchUrl & ")")
+    result.add("fetchUrl")
   if existing.revision != candidate.revision:
-    result.add("revision (" & existing.revision & " vs " &
-      candidate.revision & ")")
+    result.add("revision")
   if existing.vcs != candidate.vcs:
-    result.add("vcs (" & existing.vcs & " vs " & candidate.vcs & ")")
+    result.add("vcs")
+
+proc conflictingFields*(existing, candidate: ResolvedRepo): seq[string] =
+  ## `conflictingFieldIds`, rendered for a diagnostic: each differing fact
+  ## with both values ("revision (main vs v2)").
+  for id in conflictingFieldIds(existing, candidate):
+    case id
+    of "name":
+      result.add("name (" & existing.name & " vs " & candidate.name & ")")
+    of "fetchUrl":
+      result.add("fetch url (" & existing.fetchUrl & " vs " &
+        candidate.fetchUrl & ")")
+    of "revision":
+      result.add("revision (" & existing.revision & " vs " &
+        candidate.revision & ")")
+    of "vcs":
+      result.add("vcs (" & existing.vcs & " vs " & candidate.vcs & ")")
+    else:
+      discard
 
 proc validatePreviousIdentities*(repos: openArray[ResolvedRepo];
                                  ownerFile, ownerSchema: string) =
@@ -1179,7 +1215,7 @@ type
 
 proc raiseMemberConflict(ownerFile, ownerSchema, keyPath, checkoutPath,
                          owningSource, otherSource: string;
-                         differences: seq[string]) {.noreturn.} =
+                         differences, fieldIds: seq[string]) {.noreturn.} =
   ## The dedup refusal. Nothing shadows anything here: identical declarations
   ## merge silently (the common case — two sets both pulling in
   ## `metacraft-dev-guidelines`), and a genuine disagreement is a decision the
@@ -1196,6 +1232,9 @@ proc raiseMemberConflict(ownerFile, ownerSchema, keyPath, checkoutPath,
   e.expectedSchema = ownerSchema
   e.observedSchema = ownerSchema
   e.innerMessage = inner
+  e.checkoutPath = checkoutPath
+  e.sources = @[owningSource, otherSource]
+  e.fields = fieldIds
   e.msg = "[" & e.path & "] at key '" & keyPath & "': " & inner
   raise e
 
@@ -1255,11 +1294,12 @@ proc expandMembers(ctx: FragmentContext; manifestRoot: string;
     let owner =
       if chain.len > 0: chain[^1] else: ownerFile.splitFile.name
     if resolved.path in acc.byPath:
-      let differences =
-        conflictingFields(acc.repos[acc.byPath[resolved.path]], resolved)
+      let existing = acc.repos[acc.byPath[resolved.path]]
+      let differences = conflictingFields(existing, resolved)
       if differences.len > 0:
         raiseMemberConflict(ownerFile, ownerSchema, keyPath, resolved.path,
-          acc.declaredBy.getOrDefault(resolved.path, owner), owner, differences)
+          acc.declaredBy.getOrDefault(resolved.path, owner), owner, differences,
+          conflictingFieldIds(existing, resolved))
       # Identical declaration — one checkout, one entry.
       continue
     acc.byPath[resolved.path] = acc.repos.len

@@ -534,6 +534,7 @@ libs/repro_project_dsl/tests/dsl_port/t_dsl_lifted_exports_refuse_nim_magics.nim
 libs/repro_project_dsl/tests/dsl_port/t_dsl_lifted_service_reference_is_typed.nim	nim	8
 libs/repro_project_dsl/tests/dsl_port/t_dsl_output_ref.nim	nim	6
 libs/repro_project_dsl/tests/dsl_port/t_dsl_package_empty.nim	nim	4
+libs/repro_project_dsl/tests/dsl_port/t_dsl_package_level_heads_refuse_extra_arguments.nim	nim	14
 libs/repro_project_dsl/tests/dsl_port/t_dsl_package_name_starting_with_digit.nim	nim	6
 libs/repro_project_dsl/tests/dsl_port/t_dsl_provisioning_expression_setters.nim	nim	13
 libs/repro_project_dsl/tests/dsl_port/t_dsl_provisioning_literal_unchanged.nim	nim	17
@@ -1960,6 +1961,7 @@ tests/integration/t_workspace_remove_prompts_on_dirty_and_refuses_in_non_tty.nim
 tests/integration/t_workspace_resolution_names_the_manifest_data_it_found.nim	nim	1
 tests/integration/t_workspace_root_discovered_from_settings_file.nim	nim	1
 tests/integration/t_workspace_routes_repo_sets_to_distinct_backends.nim	nim	2
+tests/integration/t_workspace_sets_resolve_reports_closure.nim	nim	6
 tests/integration/t_workspace_shared_clones_list_and_rewire.nim	nim	2
 tests/integration/t_workspace_status_shows_active_branch_and_drift.nim	nim	9
 tests/integration/t_workspace_switch_switches_all_repos.nim	nim	6
