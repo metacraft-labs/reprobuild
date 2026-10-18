@@ -47,6 +47,8 @@
 #      populated bundle this gate needs (`libct_interpose`, the licence FFI,
 #      ...). `just build-ct-mcr` is the recipe that does, and it is what the
 #      recorder's CI runs.
+#      With `CT_CODETRACER_NATIVE_RECORDER_PREBUILT=1` the build is skipped and
+#      the checkout's existing bundle is staged (see below).
 #   4. Copies the bundle — the files `build-ct-mcr` places next to `ct_cli`,
 #      plus the recorder's signed test licence — into
 #      `build/test-fixtures/hcr-ct-mcr/`. `ct_cli` resolves every companion
@@ -130,55 +132,74 @@ if [[ ! -f "${sibling}/${HXS2_MARKER}" ]]; then
     "Update the checkout."
 fi
 
-if ! command -v nix >/dev/null 2>&1; then
-  die "nix is not on PATH. The recorder bundle is built in the recorder's own" \
-    "flake dev shell (nix develop ${sibling}); there is no other pinned" \
-    "environment for it."
+# A PREBUILT BUNDLE (`CT_CODETRACER_NATIVE_RECORDER_PREBUILT=1`). A caller that
+# has just built the recorder checkout it names -- the recorder's own gate,
+# which builds the tree it tests and then runs this gate's recipe from that
+# tree -- can ask for its bundle to be staged as it is instead of built a
+# second time: the build below runs in a cleared environment, so it is not
+# incremental over the caller's and costs most of a full recorder build. The
+# bundle files must all exist; a missing one is an error, as after a build.
+prebuilt=0
+if [[ "${CT_CODETRACER_NATIVE_RECORDER_PREBUILT:-}" == "1" ]]; then
+  prebuilt=1
+  echo "build_hcr_ct_mcr_fixture: staging the prebuilt recorder bundle in" \
+    "${sibling} (CT_CODETRACER_NATIVE_RECORDER_PREBUILT=1; not rebuilt)"
+else
+  if ! command -v nix >/dev/null 2>&1; then
+    die "nix is not on PATH. The recorder bundle is built in the recorder's own" \
+      "flake dev shell (nix develop ${sibling}); there is no other pinned" \
+      "environment for it."
+  fi
+
+  echo "build_hcr_ct_mcr_fixture: building the recorder bundle in ${sibling}" \
+    "(just build-ct-mcr, in its own flake dev shell)"
+
+  # `--ignore-environment` with an explicit keep-list: the recorder's build sees
+  # its own shell and the handful of variables that identify the user and reach
+  # the network, nothing else. The `GIT_CONFIG_{COUNT,KEY_n,VALUE_n}` family is
+  # kept because that is how CI hands git its scoped credentials for the private
+  # repositories nimble and cargo fetch (the recipe's `lldb-sys` fork among
+  # them); it carries no build input.
+  #
+  # The caller's PATH is APPENDED to the recorder shell's, never prepended: the
+  # recorder's toolchain always wins, and the caller's directories only supply
+  # host programs that shell does not carry. The one that matters is a git
+  # credential helper (a workstation's `credential.helper = !gh auth
+  # git-credential`): without it every private fetch fails with "failed to
+  # authenticate", which is how a fully pure shell failed here.
+  #
+  # `cd` inside the shell, because the recorder's shellHook resolves its root
+  # from `$PWD`.
+  keep=(HOME USER LOGNAME TERM TMPDIR XDG_CONFIG_HOME SSL_CERT_FILE
+    NIX_SSL_CERT_FILE CARGO_NET_GIT_FETCH_WITH_CLI)
+  while IFS='=' read -r name _; do
+    [[ "${name}" =~ ^GIT_CONFIG_(COUNT|KEY_[0-9]+|VALUE_[0-9]+)$ ]] && keep+=("${name}")
+  done < <(env)
+  keep_args=()
+  for name in "${keep[@]}"; do
+    keep_args+=(--keep "${name}")
+  done
+  # The inner script is single-quoted on purpose: `$PATH`, `$1` and `$2` are
+  # expanded by the bash INSIDE the recorder's shell.
+  # shellcheck disable=SC2016
+  nix develop "${sibling}" \
+    --no-update-lock-file \
+    --ignore-environment \
+    "${keep_args[@]}" \
+    --command bash -euo pipefail -c 'export PATH="${PATH}:$2"; cd "$1" && just build-ct-mcr' \
+    build-ct-mcr "${sibling}" "${PATH}" ||
+    die "\`just build-ct-mcr\` failed in ${sibling} (output above)."
 fi
-
-echo "build_hcr_ct_mcr_fixture: building the recorder bundle in ${sibling}" \
-  "(just build-ct-mcr, in its own flake dev shell)"
-
-# `--ignore-environment` with an explicit keep-list: the recorder's build sees
-# its own shell and the handful of variables that identify the user and reach
-# the network, nothing else. The `GIT_CONFIG_{COUNT,KEY_n,VALUE_n}` family is
-# kept because that is how CI hands git its scoped credentials for the private
-# repositories nimble and cargo fetch (the recipe's `lldb-sys` fork among
-# them); it carries no build input.
-#
-# The caller's PATH is APPENDED to the recorder shell's, never prepended: the
-# recorder's toolchain always wins, and the caller's directories only supply
-# host programs that shell does not carry. The one that matters is a git
-# credential helper (a workstation's `credential.helper = !gh auth
-# git-credential`): without it every private fetch fails with "failed to
-# authenticate", which is how a fully pure shell failed here.
-#
-# `cd` inside the shell, because the recorder's shellHook resolves its root
-# from `$PWD`.
-keep=(HOME USER LOGNAME TERM TMPDIR XDG_CONFIG_HOME SSL_CERT_FILE
-  NIX_SSL_CERT_FILE CARGO_NET_GIT_FETCH_WITH_CLI)
-while IFS='=' read -r name _; do
-  [[ "${name}" =~ ^GIT_CONFIG_(COUNT|KEY_[0-9]+|VALUE_[0-9]+)$ ]] && keep+=("${name}")
-done < <(env)
-keep_args=()
-for name in "${keep[@]}"; do
-  keep_args+=(--keep "${name}")
-done
-# The inner script is single-quoted on purpose: `$PATH`, `$1` and `$2` are
-# expanded by the bash INSIDE the recorder's shell.
-# shellcheck disable=SC2016
-nix develop "${sibling}" \
-  --no-update-lock-file \
-  --ignore-environment \
-  "${keep_args[@]}" \
-  --command bash -euo pipefail -c 'export PATH="${PATH}:$2"; cd "$1" && just build-ct-mcr' \
-  build-ct-mcr "${sibling}" "${PATH}" ||
-  die "\`just build-ct-mcr\` failed in ${sibling} (output above)."
 
 mkdir -p "${OUT_DIR}"
 for rel in "${BUNDLE[@]}"; do
   src="${sibling}/${rel}"
   if [[ ! -f "${src}" ]]; then
+    if [[ "${prebuilt}" == 1 ]]; then
+      die "CT_CODETRACER_NATIVE_RECORDER_PREBUILT=1, but the prebuilt bundle" \
+        "has no ${src}. Build the recorder (\`just build-ct-mcr\` in" \
+        "${sibling}) before staging its bundle, or unset the variable."
+    fi
     die "\`just build-ct-mcr\` succeeded but did not produce ${src}." \
       "The bundle this gate replays with is incomplete; see the recipe in" \
       "${sibling}/Justfile."

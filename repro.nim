@@ -2060,6 +2060,8 @@ package reprobuild:
       let sourceRevisionTest = source == "tests/unit/test_source_revision.py"
       let ciLockCredentialsTest =
         source == "tests/unit/test_ci_reconcile_lock_credentials.py"
+      let hcrFixtureEdgeTest =
+        source == "tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py"
       let pyExecute = pythonUnittest.run(
         source = source,
         actionId = pyActionId,
@@ -2078,6 +2080,9 @@ package reprobuild:
           # contract cases read.
           @["scripts/ci_lock_source_credentials.py",
             ".github/workflows/ci.yml"]
+        elif hcrFixtureEdgeTest:
+          # The fixture script its prebuilt-bundle cases run.
+          @["scripts/build_hcr_ct_mcr_fixture.sh"]
         else: @[])
       when not defined(windows):
         if hookScopeTest:
@@ -2096,6 +2101,11 @@ package reprobuild:
       # for the loopback-forge cases.
       if ciLockCredentialsTest:
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["git"])
+      # The prebuilt-bundle cases run the fixture script, which uses what the
+      # bundle edge declares for it (`git` only for its closing message).
+      if hcrFixtureEdgeTest:
+        appendRegisteredActionToolIdentityRefs(pyExecute.id,
+          ["bash", "git", "mkdir", "cp"])
       if hookScopeTest:
         discard target("test-dev-shell-hook-scope", pyExecute)
       if nixCacheTest:
