@@ -112,6 +112,7 @@ export helper.runProfilePlatformProbeHelper
 
 # Phase D adapters: ProfileIntent -> apply-pipeline IRs.
 export adapter_home.profileIntentToHomeProfile
+export adapter_home.buildActivityElement
 export adapter_system.profileIntentToSystemProfile
 export adapter_system.renderSystemProfileToText
 

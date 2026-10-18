@@ -1010,6 +1010,7 @@ tests/e2e/home-apply/t_e2e_stow_suppression_and_warnings.nim	nim	2
 tests/e2e/home-generations/t_integration_activation_manifest_dedup_in_cas.nim	nim	3
 tests/e2e/home-generations/t_integration_apply_lock_serializes.nim	nim	2
 tests/e2e/home-generations/t_integration_pointer_envelope_and_history_enumeration.nim	nim	6
+tests/e2e/home-intent/t_e2e_inspector_composed_profiles.nim	nim	3
 tests/e2e/home-intent/t_e2e_repro_home_intent_commands.nim	nim	18
 tests/e2e/home-intent/t_integration_intent_layer_config_section.nim	nim	7
 tests/e2e/home-intent/t_integration_intent_layer_guarded_edits.nim	nim	9

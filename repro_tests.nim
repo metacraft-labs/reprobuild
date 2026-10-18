@@ -9036,6 +9036,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/home-intent/t_e2e_inspector_composed_profiles.nim",
+    binary: "build/test-bin/t_e2e_inspector_composed_profiles",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/home-intent/t_e2e_repro_home_intent_commands.nim",
     binary: "build/test-bin/t_e2e_repro_home_intent_commands",
     defines: @[],

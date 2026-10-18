@@ -22,6 +22,16 @@ type
     nkResourcesBlock   ## the `resources:` block (M78)
     nkResourceEntry    ## `<kind> <address>:` resource declaration (M78)
     nkResourceAttr     ## `<key> = <value>` line inside a resource entry
+    nkOpaque           ## a construct the inspector steps over without
+                       ## reading it (`inspectProfile` only): a helper call,
+                       ## or an activity's `stow:` / `resources:` block
+
+  OpaqueKind* = enum
+    okHelperCall          ## `helper(args...)` -- one statement, possibly
+                          ## spanning lines -- whose elements, resources or
+                          ## overrides only the compiled profile knows
+    okActivityStowBlock   ## `stow:` directly in an activity body (GM11)
+    okActivityResources   ## `resources:` directly in an activity body (GM9)
 
   CondKeyword* = enum
     ckWhen, ckIf
@@ -138,6 +148,11 @@ type
       hostActivitiesLine*: int
         ## Block form: the 1-based line of `activities:`, or 0 when the
         ## entry has none.
+      hostListEndLine*: int
+        ## The 1-based line holding the activity list's closing `]`: the
+        ## line the list starts on (`hostEntryLine`, or `hostActivitiesLine`
+        ## in block form) unless the list spans lines. 0 when the entry has
+        ## no activity list (block form without `activities:`).
     of nkResourcesBlock:
       ## The single `resources:` block. Direct children are
       ## `nkResourceEntry` declarations and `nkCondBlock` predicate
@@ -169,6 +184,17 @@ type
       resourceAttrKey*: string
       resourceAttrValueSource*: string  ## raw RHS bytes, no leading `=`
       resourceAttrLine*: int
+    of nkOpaque:
+      ## A construct `inspectProfile` steps over: its extent
+      ## (`startLine` .. `endLine`) is known, its contents are not read and
+      ## never edited. Only the compiled profile knows what it contributes
+      ## (Home-Profile-Intent-Layer.md §Structural Edit Contract, "Constructs
+      ## the inspector steps over"). `loadProfile` never produces one: it
+      ## refuses the construct instead.
+      opaqueKind*: OpaqueKind
+      opaqueConstruct*: string
+        ## How a diagnostic names it: "helper call `secretsAndCrypto()`",
+        ## "`stow:` block".
 
   StowScopeEntry* = object
     ## GM11: one activity's claim of a `stow/` package (`repro_profile`'s

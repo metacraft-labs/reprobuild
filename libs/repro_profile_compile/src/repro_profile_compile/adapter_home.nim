@@ -100,7 +100,9 @@ proc mapResourceKind(kind: string): string =
   of "windows.registryValueHKCU": "windows.registryValue"
   else: kind
 
-proc buildActivityElement(elem: ActivityElement): IntentNode =
+proc buildActivityElement*(elem: ActivityElement): IntentNode =
+  ## The IR node of one activity-body element (exported for `repro home
+  ## list` / `why`, which adapt each data row on its own to keep its file).
   case elem.kind
   of aekPackageRef:
     result = IntentNode(kind: nkPackageRef,

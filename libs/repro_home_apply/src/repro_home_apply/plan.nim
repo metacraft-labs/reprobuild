@@ -248,30 +248,98 @@ proc evaluateHostPredicate*(predicateAst: PredNode; host: string): bool =
   ctx.host = host
   evaluateHostPredicate(predicateAst, ctx)
 
-proc collectPackagesFromBody(body: seq[IntentNode]; activity: string;
-                            ctx: HostContext;
-                            outSeq: var seq[PlannedPackage]) =
-  ## Walk one activity's body, emitting one `PlannedPackage` per
-  ## reachable `nkPackageRef` after evaluating any enclosing predicate.
+type
+  OriginState* = enum
+    ## Why one package reference of an activity body is, or is not, planned
+    ## on a host -- the planner's rule, stated per reference so `repro home
+    ## list` / `why` report exactly what `buildPlan` does.
+    osPlanned            ## the activity is selected and its guard (if any)
+                         ## holds: `buildPlan` plans it
+    osActivityNotSelected
+                         ## the host's selection does not enable the activity
+    osGuardFalse         ## the activity is selected; its `when` does not hold
+                         ## for the host facts
+    osNestedGuard        ## under a `when` nested in a `when`: the planner
+                         ## reads one guard level and does not plan it
+
+  PackageOrigin* = object
+    ## One package reference of an activity body and its `OriginState`.
+    packageId*: string
+    fromActivity*: string
+    predicateText*: string   ## the enclosing guard ("" for none); nested
+                             ## guards as `(outer) and (inner)`
+    requestedVersion*: string
+    binaries*: seq[string]
+    state*: OriginState
+
+proc nestedOrigins(body: seq[IntentNode]; activity, outer: string;
+                   selected: bool; into: var seq[PackageOrigin]) =
   for child in body:
     case child.kind
     of nkPackageRef:
-      outSeq.add(PlannedPackage(packageId: child.packageName,
-        fromActivity: activity, predicateText: "",
+      into.add PackageOrigin(packageId: child.packageName,
+        fromActivity: activity, predicateText: outer,
         requestedVersion: child.packageVersion,
-        binaries: child.packageBinaries))
+        binaries: child.packageBinaries,
+        state: (if selected: osNestedGuard else: osActivityNotSelected))
     of nkCondBlock:
-      if not evaluateHostPredicate(child.predicateAst, ctx):
-        continue
-      for pkgRef in child.condChildren:
-        if pkgRef.kind != nkPackageRef:
-          continue
-        outSeq.add(PlannedPackage(packageId: pkgRef.packageName,
-          fromActivity: activity, predicateText: child.predicateSource,
-          requestedVersion: pkgRef.packageVersion,
-          binaries: pkgRef.packageBinaries))
+      nestedOrigins(child.condChildren, activity,
+        outer & " and (" & child.predicateSource & ")", selected, into)
     else:
       discard
+
+proc packageOriginsFromBody*(body: seq[IntentNode]; activity: string;
+                             selected: bool;
+                             ctx: HostContext): seq[PackageOrigin] =
+  ## Every package reference of one activity body with its state on the
+  ## host `ctx` describes; `selected` is whether the host's selection
+  ## (`enabledActivitiesFor`) enables the activity. THE package rule:
+  ## `buildPlan` plans exactly the `osPlanned` origins, and `repro home
+  ## list` / `why` report all of them, so neither can disagree with the
+  ## other. A guard is evaluated only for a selected activity (an unselected
+  ## one is never evaluated by the planner either). Elements other than
+  ## package references and guard blocks are not package references and are
+  ## skipped, as the planner skips them.
+  for child in body:
+    case child.kind
+    of nkPackageRef:
+      result.add PackageOrigin(packageId: child.packageName,
+        fromActivity: activity, predicateText: "",
+        requestedVersion: child.packageVersion,
+        binaries: child.packageBinaries,
+        state: (if selected: osPlanned else: osActivityNotSelected))
+    of nkCondBlock:
+      let holds = selected and evaluateHostPredicate(child.predicateAst, ctx)
+      for inner in child.condChildren:
+        case inner.kind
+        of nkPackageRef:
+          result.add PackageOrigin(packageId: inner.packageName,
+            fromActivity: activity, predicateText: child.predicateSource,
+            requestedVersion: inner.packageVersion,
+            binaries: inner.packageBinaries,
+            state: (if not selected: osActivityNotSelected
+                    elif holds: osPlanned
+                    else: osGuardFalse))
+        of nkCondBlock:
+          nestedOrigins(inner.condChildren, activity,
+            "(" & child.predicateSource & ") and (" &
+              inner.predicateSource & ")", selected, result)
+        else:
+          discard
+    else:
+      discard
+
+proc collectPackagesFromBody(body: seq[IntentNode]; activity: string;
+                            ctx: HostContext;
+                            outSeq: var seq[PlannedPackage]) =
+  ## Walk one (selected) activity's body, emitting one `PlannedPackage` per
+  ## planned reference (`packageOriginsFromBody`).
+  for o in packageOriginsFromBody(body, activity, true, ctx):
+    if o.state == osPlanned:
+      outSeq.add(PlannedPackage(packageId: o.packageId,
+        fromActivity: activity, predicateText: o.predicateText,
+        requestedVersion: o.requestedVersion,
+        binaries: o.binaries))
 
 # ---------------------------------------------------------------------------
 # Public entry point
