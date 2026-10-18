@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2188,
+    "nimTestBinaries": 2190,
     "pureUnitConsolidationGroups": 62,
-    "pureUnitTests": 660,
+    "pureUnitTests": 661,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
-    "testEntries": 2215
+    "testEntries": 2217
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1294,9 +1294,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1196,
+      "integration": 1197,
       "platform/destructive": 133,
-      "pure unit": 660,
+      "pure unit": 661,
       "unclassified": 207
     },
     "graphOwnedTestArtifacts": [
@@ -1499,9 +1499,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2188,
+    "nimTestBinaryCount": 2190,
     "pythonTestFileCount": 27,
-    "testEntryCount": 2215
+    "testEntryCount": 2217
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9894,7 +9894,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_dss72_provenance_reaches_the_point_of_use.nim",
       "sourceSuiteCount": 4,
-      "staticCaseCount": 16,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -18777,7 +18777,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_resources/tests/t_l6_attach_decision_has_three_outcomes.nim",
       "sourceSuiteCount": 10,
-      "staticCaseCount": 40,
+      "staticCaseCount": 42,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -30300,6 +30300,24 @@
       "source": "tests/integration/t_certificate_name_collision_is_a_compile_error.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_certificate_note_read_keeps_git_stderr_apart",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_certificate_note_read_keeps_git_stderr_apart.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -43032,6 +43050,24 @@
       "source": "tests/unit/t_action_compatibility_key.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_action_depfile_policy",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_action_depfile_policy.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

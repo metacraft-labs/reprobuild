@@ -11421,6 +11421,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_certificate_note_read_keeps_git_stderr_apart.nim",
+    binary: "build/test-bin/t_certificate_note_read_keeps_git_stderr_apart",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_certificate_policy_required_advisory_off_modes.nim",
     binary: "build/test-bin/t_certificate_policy_required_advisory_off_modes",
     defines: @[],
@@ -17867,6 +17876,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_action_compatibility_key.nim",
     binary: "build/test-bin/t_action_compatibility_key",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_action_depfile_policy.nim",
+    binary: "build/test-bin/t_action_depfile_policy",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

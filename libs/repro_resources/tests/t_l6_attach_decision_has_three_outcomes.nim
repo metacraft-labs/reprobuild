@@ -295,6 +295,42 @@ suite "L6 §4.3 row 1 — equal fingerprints attach SILENTLY":
 
 suite "L6 §4.3 row 2 — a differing interface within one major WARNS":
 
+  test "a const extraction warns about declaration text, not resolved values":
+    check @["console.example", "app.example"] ==
+      @[extractedRelyingParty, "app.example"]
+    let running = runningFrom("l6AttLiteralDefault")
+    let requested = snapshotOf("l6AttConstDefault")
+    check running.interfaceSnapshot.fingerprint != requested.fingerprint
+    let decision = attachDecision(running, requested, freshLiftForThisSuite())
+    checkpoint(decision.diagnostic)
+    check decision.outcome == saoAttachWithWarning
+    check decision.differences.len == 1
+    let diff = differenceNamed(decision, smkConfigKey, "relyingParties")
+    require diff.isSome
+    check diff.get.change == smcChanged
+    # Pin the lifted expressions to the expressions evaluated above, so fixture
+    # drift cannot turn this into a real value change while keeping it green.
+    check diff.get.runningSignature ==
+      "seq[string] = @[\"console.example\", \"app.example\"]"
+    check diff.get.requestedSignature ==
+      "seq[string] = @[extractedRelyingParty, \"app.example\"]"
+    check decision.diagnostic.contains("interface declaration text differs")
+    check decision.diagnostic.contains("resolved values may be identical")
+    check decision.diagnostic.contains("registration reconciliation report")
+    check decision.diagnostic.contains("registrations only")
+
+  test "a changed default value still warns with the same uncertainty":
+    let decision = attachDecision(runningFrom("l6AttLiteralDefault"),
+      snapshotOf("l6AttChangedDefault"), freshLiftForThisSuite())
+    checkpoint(decision.diagnostic)
+    check decision.outcome == saoAttachWithWarning
+    let diff = differenceNamed(decision, smkConfigKey, "relyingParties")
+    require diff.isSome
+    check diff.get.change == smcChanged
+    check diff.get.requestedSignature.contains("different.example")
+    check decision.diagnostic.contains("resolved values may be identical")
+    check decision.diagnostic.contains("--replace")
+
   test "an ADDED config key warns, and the warning names it":
     let decision = attachDecision(runningFrom("l6AttBase"),
       snapshotOf("l6AttAddedKey"), freshLiftForThisSuite())

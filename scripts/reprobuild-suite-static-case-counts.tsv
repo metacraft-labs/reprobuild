@@ -143,7 +143,7 @@ libs/repro_cli_support/tests/t_data_file_row_selection_fixtures.nim	nim	3
 libs/repro_cli_support/tests/t_develop_override_records_the_identity_it_replaced.nim	nim	18
 libs/repro_cli_support/tests/t_dss10_early_attribute_read_refuses_by_name.nim	nim	8
 libs/repro_cli_support/tests/t_dss72_external_registrar_protocol.nim	nim	20
-libs/repro_cli_support/tests/t_dss72_provenance_reaches_the_point_of_use.nim	nim	16
+libs/repro_cli_support/tests/t_dss72_provenance_reaches_the_point_of_use.nim	nim	19
 libs/repro_cli_support/tests/t_dss73_the_instance_attribute_reaches_the_argv.nim	nim	21
 libs/repro_cli_support/tests/t_dss73_the_registrar_answer_reports_the_instance.nim	nim	15
 libs/repro_cli_support/tests/t_e2e_watch_via_adapter.nim	nim	8
@@ -631,7 +631,7 @@ libs/repro_resources/tests/t_l2_lease_edge.nim	nim	13
 libs/repro_resources/tests/t_l3_reaper.nim	nim	21
 libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim	nim	45
 libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim	nim	16
-libs/repro_resources/tests/t_l6_attach_decision_has_three_outcomes.nim	nim	40
+libs/repro_resources/tests/t_l6_attach_decision_has_three_outcomes.nim	nim	42
 libs/repro_resources/tests/t_l6_attach_refuses_a_stale_lift.nim	nim	14
 libs/repro_resources/tests/t_l7_instance_registry_converges_in_any_order.nim	nim	35
 libs/repro_resources/tests/t_l8_registrations_mint_once_and_reach_argv.nim	nim	10
@@ -1275,6 +1275,7 @@ tests/integration/t_cert_gate_defaults_off_and_advisory_does_not_block.nim	nim	1
 tests/integration/t_certificate_declaration_exports_a_selectable_name.nim	nim	1
 tests/integration/t_certificate_matches_by_content_never_by_base.nim	nim	1
 tests/integration/t_certificate_name_collision_is_a_compile_error.nim	nim	4
+tests/integration/t_certificate_note_read_keeps_git_stderr_apart.nim	nim	1
 tests/integration/t_certificate_policy_required_advisory_off_modes.nim	nim	3
 tests/integration/t_certificate_round_trips_against_the_canonical_form.nim	nim	1
 tests/integration/t_certificate_signature_verifies_against_registered_key.nim	nim	1
@@ -1994,6 +1995,7 @@ tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim	nim	4
 tests/integration/test_nix_daemon_cache.py	python	1
 tests/test_dev_env_m9_policy.py	python	4
 tests/unit/t_action_compatibility_key.nim	nim	4
+tests/unit/t_action_depfile_policy.nim	nim	7
 tests/unit/t_action_index_platform_arm.nim	nim	3
 tests/unit/t_bearssl_probe_marker_is_the_imported_module.nim	nim	5
 tests/unit/t_bootstrap_nim_monitoring.nim	nim	3
