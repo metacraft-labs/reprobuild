@@ -86,6 +86,18 @@ type
     readinessUrl*: string
     readinessTimeoutMs*: int
     resources*: seq[tuple[kind, path: string]]
+    consumedActionIds*: seq[string]
+      ## Shared-Development-Services F1 (§4.8 / D-SS15), SECOND HALF:
+      ## the ids of the build actions whose outputs this service NAMES,
+      ## carried from `DevEnvServiceSummary.consumedActionIds`.
+      ##
+      ## This is the ORDERING EDGE, and it is the edge that already
+      ## exists rather than a new one: `args <output>.path` and
+      ## `runtimeFile <output>` record the producing action's id on the
+      ## service record, so the dev session reads an IDENTIFIER MATCH.
+      ## `devSessionStartPlan` folds these into the SAME topological
+      ## walk `dependsOn` goes through, so an action and a service are
+      ## two kinds of node in one order rather than two orderings.
 
   SharedServiceInstanceDeclaration* = object
     ## Shared-Development-Services L7 (§4.5): the dev-session service
@@ -1483,6 +1495,11 @@ proc serviceSpecFromSummary*(projectRoot: string;
       "than treated as absent, because treating it as absent would " &
       "silently fall through to the typed `service` block's facts and " &
       "supervise something the author did not write.")
+  # F1 (§4.8), second half: the ordering edge, carried verbatim. No
+  # normalisation and no path resolution -- these are ACTION IDS, not
+  # paths, which is the whole point of reading consumption from the
+  # typed edge rather than from argv text.
+  result.consumedActionIds = service.consumedActionIds
   result.command = metadata{"command"}.stringArray()
   if result.command.len == 0:
     # Shared-Development-Services L8: fall back to the TYPED `service`
@@ -1770,6 +1787,265 @@ proc serviceStartOrder(services: openArray[ServiceSpec]): seq[ServiceSpec] =
   var permanent: seq[string] = @[]
   for i in 0 ..< services.len:
     visitService(i, services, temporary, permanent, result)
+
+# ───────────────────────────────────────────────────────────────────────
+# Shared-Development-Services F1 (§4.8 / D-SS15), SECOND HALF —
+# THE DEV SESSION BUILDS THE REPORTED ACTIONS, ORDERED BEFORE THE
+# SERVICES THAT CONSUME THEIR OUTPUTS.
+#
+# WHAT WAS STILL ABSENT, in §4.8's own words: "Reporting an action is
+# not running it. Nothing in this change makes the dev session BUILD the
+# reported edges, so F1's clause is not met by it -- what is closed is
+# F1's stated blocker ... and the remaining half is for the dev session
+# to order the reported actions before the services it launches."
+#
+# So F1's measurement still reproduced after the actions channel landed:
+# `repro up` reported the session up, the path reached the service's
+# argv, and the FILE was never written. An action carried and not run is
+# the same missing file with better bookkeeping.
+#
+# THE ORDER IS THE EXISTING ONE, NOT A NEW ONE. §7.1 settled that the
+# readiness edge is "the `dependsOn` that already exists" and that "a
+# service node's completion is its declared readiness"; the same
+# principle decides this. `serviceStartOrder` already walks `dependsOn`
+# as a DAG over service nodes, so an action becomes a NODE IN THAT WALK
+# rather than a second sequencing concept: `devSessionStartPlan` folds
+# `ServiceSpec.consumedActionIds` into the same depth-first visit, and
+# the plan it returns is ONE topological order over both kinds of node.
+# A test can therefore assert the ordering as an index comparison on the
+# plan -- the action's step comes before its consumer's -- instead of
+# inferring it from process timing.
+#
+# CONSUMPTION IS AN IDENTIFIER MATCH, read from the typed edge. That is
+# §4.8's rule for the orphan diagnostic and it is the same rule here,
+# from the same derivation (`typedServiceConsumedActionIds` in
+# `repro_project_dsl/runtime_provider.nim`), because a diagnostic that
+# refuses an unconsumed action and an ordering that builds a consumed
+# one must not be able to disagree about what consumption is.
+# ───────────────────────────────────────────────────────────────────────
+
+type
+  DevSessionStartStepKind* = enum
+    dsskAction
+      ## A build action the `devEnv:` body registered. It is BUILT.
+    dsskService
+      ## A service the session starts. It is not started by the action
+      ## pass -- its presence in the plan is what makes the ORDERING
+      ## claim readable, and its position is what the ordering is.
+
+  DevSessionStartStep* = object
+    ## One node of the session's start order. Two kinds in ONE list,
+    ## deliberately: a plan that held actions and services in separate
+    ## lists would state the order nowhere, which is how "ordered
+    ## before" becomes an assertion about nothing.
+    kind*: DevSessionStartStepKind
+    action*: DevEnvActionSummary
+      ## `dsskAction` only.
+    consumers*: seq[string]
+      ## `dsskAction` only: the names of the services whose
+      ## `consumedActionIds` name this action, in plan order. Carried so
+      ## a failure can say WHICH SERVICE will not start because of it --
+      ## "an action failed" names the wrong half of the problem.
+    service*: ServiceSpec
+      ## `dsskService` only.
+
+  DevSessionActionRunner* =
+      proc (action: DevEnvActionSummary; projectRoot: string): string
+    ## Build ONE dev-env action. Returns `""` on success and a reason
+    ## otherwise.
+    ##
+    ## A CALLBACK FOR THE REASON `DevSessionProducerOpsResolver` IS ONE,
+    ## plus a layering reason of its own. Lowering a `gnkAction` node
+    ## into an engine `BuildAction` is `repro_cli_support.nim`'s
+    ## `lowerGraphAction` -- the ONE lowering the build lane itself goes
+    ## through -- and that module IMPORTS this one. Re-implementing the
+    ## lowering here would be a second reading of the same payload, with
+    ## its own notion of which argument carries the text and which
+    ## carries the output path; two readings of one record is the defect
+    ## shape this document keeps finding. So this module owns the ORDER
+    ## and the caller owns HOW an action node becomes a run edge.
+
+proc devSessionStartPlan*(actions: openArray[DevEnvActionSummary];
+                          services: openArray[ServiceSpec]):
+    seq[DevSessionStartStep] =
+  ## ONE topological order over the actions a `devEnv:` body registered
+  ## and the services the session starts, with every action placed
+  ## BEFORE every service that names it.
+  ##
+  ## EVERY REPORTED ACTION IS IN THE PLAN, including one no SELECTED
+  ## activity's service consumes. That direction is §4.8's own, stated
+  ## there for the orphan check: the actions registry holds what every
+  ## activity body of the package registered, while `services` is gated
+  ## on `--activity`, so dropping an unclaimed action would make what
+  ## the session builds a function of the selection. An action nothing
+  ## in the PACKAGE consumes is already refused at evaluation by the
+  ## `PRODUCED AND NEVER CONSUMED` diagnostic, so the set reaching here
+  ## is consumed by something.
+  # COPIED INTO LOCALS BEFORE THE NESTED VISITS, because an `openArray`
+  # cannot be captured by a closure without violating memory safety and
+  # the walk below is two mutually recursive nested procs. The copy is
+  # also what lets the signature stay an `openArray`, so a caller with a
+  # `seq` and a caller with an array both reach it without a conversion
+  # at the call site.
+  let actionList = @actions
+  let specList = @services
+  var actionAt = initTable[string, int]()
+  for i, action in actionList:
+    if action.actionId in actionAt:
+      raise newException(ValueError,
+        "two dev-env actions share the id `" & action.actionId &
+        "`, so an ordering edge onto it would be ambiguous: a service " &
+        "naming it could not say which of the two has to be built " &
+        "first. Refused rather than resolved by position.")
+    actionAt[action.actionId] = i
+
+  # Which services name each action, in the order the services were
+  # given. Built once, read by the plan and by the failure message.
+  var consumersOf = initTable[string, seq[string]]()
+  for spec in specList:
+    for id in spec.consumedActionIds:
+      if id notin actionAt:
+        raise newException(ValueError,
+          "service `" & spec.name & "` names the output of dev-env " &
+          "action `" & id & "`, which this dev-env artifact does not " &
+          "carry (" & $actionList.len & " action(s): " &
+          actionList.mapIt(it.actionId).join(", ") & "). The service's " &
+          "argv therefore holds a path nothing in this session will " &
+          "write -- which is exactly the failure " &
+          "Shared-Development-Services F1 measured -- so the session " &
+          "is refused rather than started against a missing file.")
+      if id notin consumersOf:
+        consumersOf[id] = @[]
+      if spec.name notin consumersOf[id]:
+        consumersOf[id].add(spec.name)
+
+  # The action-to-action edges, read off the SAME payload the build lane
+  # reads. An action may declare `deps` on other actions (a rendered
+  # file assembled from another rendered file); only deps that are
+  # themselves actions of this dev-env are orderable here, and a dep on
+  # anything else belongs to the build lane rather than to this session.
+  var actionDeps = newSeq[seq[string]](actionList.len)
+  for i, action in actionList:
+    let payload =
+      try:
+        decodeBuildActionPayload(toBytes(action.payload))
+      except CatchableError as err:
+        raise newException(ValueError,
+          "dev-env action `" & action.actionId & "` carries a payload " &
+          "this build cannot decode (" & err.msg & "). Refused rather " &
+          "than skipped: an action whose payload cannot be read is an " &
+          "action whose output nothing will produce, and a service " &
+          "names that output.")
+    for dep in payload.deps:
+      if dep in actionAt and dep != action.actionId:
+        actionDeps[i].add(dep)
+
+  var temporary: seq[string] = @[]
+  var permanent: seq[string] = @[]
+  var plan: seq[DevSessionStartStep] = @[]
+
+  proc visitAction(index: int)
+  proc visitSpec(index: int)
+
+  proc visitAction(index: int) =
+    let key = "action:" & actionList[index].actionId
+    if permanent.find(key) >= 0:
+      return
+    if temporary.find(key) >= 0:
+      raise newException(ValueError,
+        "cycle in dev-env action dependencies at " &
+        actionList[index].actionId)
+    temporary.add(key)
+    for dep in actionDeps[index]:
+      visitAction(actionAt[dep])
+    discard temporary.pop()
+    permanent.add(key)
+    plan.add(DevSessionStartStep(kind: dsskAction,
+      action: actionList[index],
+      consumers: consumersOf.getOrDefault(actionList[index].actionId, @[])))
+
+  proc visitSpec(index: int) =
+    let key = "service:" & specList[index].name
+    if permanent.find(key) >= 0:
+      return
+    if temporary.find(key) >= 0:
+      raise newException(ValueError,
+        "cycle in dev service dependencies at " & specList[index].name)
+    temporary.add(key)
+    # THE ACTIONS FIRST, inside the same visit `dependsOn` goes through.
+    # Putting them here rather than in a pass of their own is what makes
+    # this one order instead of two: a service that depends on another
+    # service which consumes an action gets that action ahead of BOTH,
+    # with no second rule to state it.
+    for id in specList[index].consumedActionIds:
+      visitAction(actionAt[id])
+    for dep in specList[index].dependsOn:
+      let depIndex = specList.serviceIndex(dep)
+      if depIndex < 0:
+        raise newException(ValueError,
+          "service " & specList[index].name &
+          " depends on unknown service " & dep)
+      visitSpec(depIndex)
+    discard temporary.pop()
+    permanent.add(key)
+    plan.add(DevSessionStartStep(kind: dsskService,
+      service: specList[index]))
+
+  for i in 0 ..< specList.len:
+    visitSpec(i)
+  # Any action no listed service claimed, appended after the claimed
+  # ones in declaration order. See the docstring: the set the session
+  # builds must not be a function of `--activity`.
+  for i in 0 ..< actionList.len:
+    visitAction(i)
+  plan
+
+proc buildDevEnvActions*(actions: openArray[DevEnvActionSummary];
+                         services: openArray[ServiceSpec];
+                         projectRoot: string;
+                         run: DevSessionActionRunner):
+    tuple[built: seq[string]; failure: string] =
+  ## Build every action in `devSessionStartPlan` order. Returns the ids
+  ## built, in that order, and `""` for `failure` when all of them
+  ## succeeded.
+  ##
+  ## A FAILURE NAMES THE CONSUMING SERVICE, not only the action, and the
+  ## caller stops the session on it. §4.8's whole complaint about F1's
+  ## original defect is that the session came UP with the file missing;
+  ## an action that fails and a session that starts anyway is the same
+  ## outcome reached one step later. The services are started by the
+  ## supervisor (and the shared instances by the daemon) only after this
+  ## returns with no failure, which is the ordering stated as control
+  ## flow rather than as a hope about timing.
+  if run == nil:
+    return (built: @[], failure:
+      "no dev-env action runner was supplied, so the " &
+      $actions.len & " action(s) this dev-env registered would be " &
+      "reported and never built -- which is the half of " &
+      "Shared-Development-Services F1 that this call exists to close. " &
+      "Refused rather than skipped.")
+  var plan: seq[DevSessionStartStep]
+  try:
+    plan = devSessionStartPlan(actions, services)
+  except CatchableError as err:
+    return (built: @[], failure: err.msg)
+  var builtIds: seq[string] = @[]
+  for step in plan:
+    if step.kind != dsskAction:
+      continue
+    let reason = run(step.action, projectRoot)
+    if reason.len > 0:
+      let who =
+        if step.consumers.len == 0: "no service of the selected activity"
+        else: "service(s) " & step.consumers.join(", ")
+      return (built: builtIds, failure:
+        "dev-env action `" & step.action.actionId & "` FAILED to " &
+        "build: " & reason & ". " & who.capitalizeAscii() &
+        " name(s) its output on the command line, so the session is " &
+        "refused rather than started against a file that was not " &
+        "written (Shared-Development-Services §4.8 / D-SS15).")
+    builtIds.add(step.action.actionId)
+  (built: builtIds, failure: "")
 
 proc serviceSpecsFromArtifact(artifact: DevEnvArtifact;
                               minted = initTable[string, MintedAttribute]();

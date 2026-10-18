@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2107,
+    "nimTestBinaries": 2109,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 650,
     "staticallyDetectedRuntimeCompilerFlowTests": 120,
-    "testEntries": 2128
+    "testEntries": 2130
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1279,7 +1279,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1141,
+      "integration": 1143,
       "platform/destructive": 129,
       "pure unit": 650,
       "unclassified": 189
@@ -1484,9 +1484,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2107,
+    "nimTestBinaryCount": 2109,
     "pythonTestFileCount": 21,
-    "testEntryCount": 2128
+    "testEntryCount": 2130
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9773,6 +9773,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_dssf1_the_dev_session_builds_its_actions_in_order",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_dev_env_artifacts",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cli_support/tests/t_dssf1_the_dev_session_builds_its_actions_in_order.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 11,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_watch_via_adapter",
       "class": "unclassified",
       "classificationReason": "mutates the process environment",
@@ -17544,8 +17563,8 @@
       "owner": "libs/repro_project_dsl",
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/t_dssf1_dev_env_actions_reach_the_caller.nim",
-      "sourceSuiteCount": 5,
-      "staticCaseCount": 11,
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31050,6 +31069,23 @@
       "source": "tests/integration/t_dss73_the_issuer_url_reaches_a_consuming_services_argv.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dssf1_repro_up_builds_the_rendered_config",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_dssf1_repro_up_builds_the_rendered_config.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

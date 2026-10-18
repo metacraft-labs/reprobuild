@@ -278,6 +278,36 @@ type
       ## per-invocation selection (§6.4) rather than declared. The typed
       ## `instance:` block refuses an `environment` setting by name for
       ## exactly that reason.
+    # ---------------------------------------------------------------
+    # Shared-Development-Services F1 (§4.8 / D-SS15) — WHICH ACTIONS
+    # THIS SERVICE CONSUMES, which is the half F1's blocker-closing
+    # revision left open: "Nothing in this change makes the dev session
+    # BUILD the reported edges ... the remaining half is for the dev
+    # session to order the reported actions before the services it
+    # launches."
+    #
+    # The dev session cannot order what it cannot see. `DevEnvResult`
+    # now carries the actions, but the SERVICE channel carried no edge
+    # back to them, so the supervisor held two unrelated lists: some
+    # actions and some services. This field is the edge.
+    #
+    # READ FROM THE TYPED EDGE, NOT FROM A PATH STRING, for the reason
+    # §4.8 already gives for the orphan check it mirrors: `args
+    # <output>.path` and `runtimeFile <output>` both record the
+    # producing action's id (`ServiceArgDef.producerActionId` /
+    # `ServiceRuntimeFileDef.producerActionId`), so "consumes" is an
+    # identifier match and a renamed output cannot satisfy it by
+    # accident. The orphan check and this field therefore read ONE
+    # derivation of consumption from ONE place; a second derivation
+    # over argv text could disagree with the diagnostic about the same
+    # recipe, which is this document's dominant defect shape.
+    #
+    # EMPTY MEANS "CONSUMES NOTHING", which is the ground state and is
+    # what every pre-F1 recipe reports.
+    consumedActionIds*: seq[string]
+      ## The `BuildActionDef.id` of each action whose output this
+      ## service names, in first-mention order (`args` before
+      ## `runtimeFile`, each in declaration order), deduplicated.
 
   DevEnvDiagnostic* = object
     severity*: DevEnvDiagnosticSeverity

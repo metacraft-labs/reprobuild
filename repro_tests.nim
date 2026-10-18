@@ -1242,6 +1242,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_dssf1_the_dev_session_builds_its_actions_in_order.nim",
+    binary: "build/test-bin/t_dssf1_the_dev_session_builds_its_actions_in_order",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_e2e_watch_via_adapter.nim",
     binary: "build/test-bin/t_e2e_watch_via_adapter",
     defines: @[],
@@ -11873,6 +11882,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_dss73_the_issuer_url_reaches_a_consuming_services_argv.nim",
     binary: "build/test-bin/t_dss73_the_issuer_url_reaches_a_consuming_services_argv",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_dssf1_repro_up_builds_the_rendered_config.nim",
+    binary: "build/test-bin/t_dssf1_repro_up_builds_the_rendered_config",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

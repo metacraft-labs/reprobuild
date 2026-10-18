@@ -3,10 +3,18 @@ import repro_provider_runtime/types
 
 const
   ProviderGraphMagic = [byte(ord('R')), byte(ord('B')), byte(ord('P')), byte(ord('G'))]
-  ProviderGraphVersion = 2'u16  # version-literal-ok: this IS the
+  ProviderGraphVersion = 3'u16  # version-literal-ok: this IS the
                                 # provider-graph envelope version
                                 # definition, not a literal standing in
                                 # for one.
+    ## MOVED 2 -> 3 BY Shared-Development-Services F1's SECOND half
+    ## (§4.8 / D-SS15), which appended
+    ## `DevEnvServiceMetadata.consumedActionIds` -- the edge from a
+    ## service to the actions whose outputs it names, without which the
+    ## dev session can carry the actions and still not know which
+    ## service to order them before. Same positional-payload reasoning
+    ## as the 1 -> 2 move below, one record deeper.
+    ##
     ## MOVED 1 -> 2 BY Shared-Development-Services F1, which appended
     ## `DevEnvResult.actions` -- so the dev-env half of a provider
     ## RESPONSE grew a field, and this module's payloads are positional:
@@ -424,6 +432,14 @@ proc writeDevEnvService(outp: var seq[byte]; value: DevEnvServiceMetadata) =
   outp.writeByte(if value.instanceDeclared: 1'u8 else: 0'u8)
   outp.writeU64Le(cast[uint64](value.instanceLeaseTtlSeconds))
   outp.writeString(value.instanceEnvironment)
+  # Shared-Development-Services F1 (§4.8): appended at the END, for the
+  # reason L8's and L9's blocks were, and `ProviderGraphVersion` moves
+  # 2 -> 3 with it: this record is read positionally inside a response
+  # payload, so a v2 response decoded as a v3 one would read past its
+  # end rather than be refused. See D-SS15a for why one version governs
+  # all three envelopes and why a stale provider-graph SNAPSHOT is
+  # discarded and recomputed rather than raised.
+  outp.writeStringSeq(value.consumedActionIds)
 
 proc readDevEnvService(bytes: openArray[byte]; pos: var int): DevEnvServiceMetadata =
   result = DevEnvServiceMetadata(
@@ -456,6 +472,7 @@ proc readDevEnvService(bytes: openArray[byte]; pos: var int): DevEnvServiceMetad
   result.instanceDeclared = instanceFlag == 1'u8
   result.instanceLeaseTtlSeconds = cast[int64](readU64Le(bytes, pos))
   result.instanceEnvironment = readString(bytes, pos)
+  result.consumedActionIds = readStringSeq(bytes, pos)
 
 proc writeDevEnvDiagnostic(outp: var seq[byte]; value: DevEnvDiagnostic) =
   outp.writeByte(byte(ord(value.severity)))

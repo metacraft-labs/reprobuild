@@ -12,10 +12,17 @@ const
   DevEnvMagic = [byte(ord('R')), byte(ord('B')), byte(ord('D')), byte(ord('E'))]
   EnvelopeHeaderLen = 4 + 2 + 2 + 4 + 4
   EnvelopeTrailerLen = 32
-  EnvelopeVersion = 5'u16  # version-literal-ok: the envelope version
+  EnvelopeVersion = 6'u16  # version-literal-ok: the envelope version
                            # THIS BUILD writes, which is the definition
                            # the gate's annotation exists for -- not a
                            # literal standing in for one.
+    ## Shared-Development-Services F1's SECOND half: bumped 5 -> 6 with
+    ## `DevEnvArtifactSchemaVersion`, because `DevEnvServiceSummary`
+    ## grew `consumedActionIds` -- the edge the dev session orders an
+    ## action against its consuming service on. Same positional
+    ## container, same equality check, same consequence: a v5 artifact
+    ## is refused by name and re-evaluated.
+    ##
     ## Shared-Development-Services F1: bumped 4 -> 5 with
     ## `DevEnvArtifactSchemaVersion`, because the artifact container grew
     ## an `actions` list and the container is POSITIONAL -- a v4 payload
@@ -137,6 +144,11 @@ type
     instanceDeclared: bool
     instanceLeaseTtlSeconds: uint64
     instanceEnvironment: SszText
+    # Shared-Development-Services F1's second half. Appended last once
+    # more, and the envelope version AND the artifact schema version
+    # move with it, so a payload written at F1's first half is refused
+    # by name rather than read with shifted offsets.
+    consumedActionIds: SszStringList
 
   DevEnvDiagnosticSsz = object
     severity: uint8
@@ -495,7 +507,8 @@ proc toSsz(value: DevEnvServiceSummary): DevEnvServiceSummarySsz =
     stateDirectories: toSszStringList(value.stateDirectories),
     instanceDeclared: value.instanceDeclared,
     instanceLeaseTtlSeconds: cast[uint64](value.instanceLeaseTtlSeconds),
-    instanceEnvironment: toSszText(value.instanceEnvironment))
+    instanceEnvironment: toSszText(value.instanceEnvironment),
+    consumedActionIds: toSszStringList(value.consumedActionIds))
 
 proc fromSsz(value: DevEnvServiceSummarySsz): DevEnvServiceSummary =
   DevEnvServiceSummary(
@@ -521,7 +534,8 @@ proc fromSsz(value: DevEnvServiceSummarySsz): DevEnvServiceSummary =
     stateDirectories: fromSszStringList(value.stateDirectories),
     instanceDeclared: value.instanceDeclared,
     instanceLeaseTtlSeconds: cast[int64](value.instanceLeaseTtlSeconds),
-    instanceEnvironment: fromSszText(value.instanceEnvironment))
+    instanceEnvironment: fromSszText(value.instanceEnvironment),
+    consumedActionIds: fromSszStringList(value.consumedActionIds))
 
 proc toSsz(value: DevEnvDiagnostic): DevEnvDiagnosticSsz =
   DevEnvDiagnosticSsz(
@@ -858,7 +872,8 @@ proc artifactFromDevEnvResult*(devEnv: DevEnvResult): DevEnvArtifact =
       stateDirectories: service.stateDirectories,
       instanceDeclared: service.instanceDeclared,
       instanceLeaseTtlSeconds: service.instanceLeaseTtlSeconds,
-      instanceEnvironment: service.instanceEnvironment))
+      instanceEnvironment: service.instanceEnvironment,
+      consumedActionIds: service.consumedActionIds))
   result.diagnostics = devEnv.diagnostics
   result.evaluationInputs = devEnv.evaluationInputs
   result.sourceFingerprints = devEnv.sourceFingerprints

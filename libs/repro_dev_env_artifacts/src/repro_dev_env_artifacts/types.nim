@@ -66,6 +66,21 @@ type
     instanceDeclared*: bool
     instanceLeaseTtlSeconds*: int64
     instanceEnvironment*: string
+    # Shared-Development-Services F1 (§4.8 / D-SS15), SECOND HALF: the
+    # ids of the build actions whose outputs this service NAMES.
+    #
+    # WHY IT IS ON THE ARTIFACT AND NOT ONLY ON THE PROVIDER WIRE, which
+    # is D-SS11's reason repeated for the third construct in a row: a
+    # cached dev-env edge is answered FROM THE ARTIFACT without
+    # re-running the provider, so an edge that lived only on the wire
+    # would order the actions on a cold evaluation and silently never
+    # again -- F1's own missing file, moved from the first run to the
+    # second.
+    #
+    # `actions` alone is not enough to order anything. It says WHICH
+    # actions exist; this says WHICH SERVICE each one has to be built
+    # before. Without it the supervisor holds two unrelated lists.
+    consumedActionIds*: seq[string]
 
   DevEnvActionSummary* = object
     ## Shared-Development-Services F1: one build ACTION a `devEnv:` body
@@ -191,7 +206,7 @@ type
     servicesSectionStart*: int
 
 const
-  DevEnvArtifactSchemaVersion* = 5'u32  # version-literal-ok: this IS
+  DevEnvArtifactSchemaVersion* = 6'u32  # version-literal-ok: this IS
                                         # the schema version definition,
                                         # not a literal standing in for
                                         # one.
@@ -204,4 +219,10 @@ const
     ##
     ## Shared-Development-Services F1 bumped it 4 -> 5 for the same
     ## reason one more time: the container grew an `actions` list.
+    ##
+    ## And F1's SECOND half bumped it 5 -> 6: `DevEnvServiceSummary`
+    ## grew `consumedActionIds`, the edge from a service to the actions
+    ## the dev session must build before starting it. Same positional
+    ## container, same rule -- a v5 artifact is re-evaluated rather
+    ## than read with shifted offsets.
   DevEnvArtifactRequiredFeatures* = 0'u32

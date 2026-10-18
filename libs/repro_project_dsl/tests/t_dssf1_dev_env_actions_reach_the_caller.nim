@@ -224,3 +224,103 @@ suite "F1: the `--json` view shows the actions":
     let quiet = toJsonInspection(
       artifactFromDevEnvResult(devEnvFor(Dssf1QuietName)))
     check "\"actions\":[]" in quiet
+
+# ═══════════════════════════════════════════════════════════════════════
+# F1's SECOND HALF (§4.8 / D-SS15): THE CONSUMPTION EDGE.
+#
+# §4.8 closed F1's blocker and said in as many words what it left: "
+# Reporting an action is not running it. Nothing in this change makes the
+# dev session BUILD the reported edges, so F1's clause is not met by it
+# ... the remaining half is for the dev session to order the reported
+# actions before the services it launches."
+#
+# The dev session cannot order what it cannot see. `actions` says WHICH
+# actions exist; it does not say which SERVICE each one has to precede,
+# so a supervisor reading only that holds two unrelated lists. The
+# edge is `DevEnvServiceMetadata.consumedActionIds` / its artifact
+# counterpart, and these suites measure it in the same three places the
+# actions themselves are measured above -- the provider's return, the
+# provider wire and the artifact -- for the same reason D-SS11 gives: a
+# cached dev-env edge is answered from the artifact, so an edge that
+# lived only on the wire would order on a cold evaluation and silently
+# never again.
+# ═══════════════════════════════════════════════════════════════════════
+
+suite "F1 second half: the service carries the CONSUMPTION EDGE":
+
+  test "the consuming service names the action's ID, not its path":
+    let res = devEnvFor(Dssf1ConsumerName)
+    check res.services.len == 1
+    check res.services[0].consumedActionIds == @[Dssf1ConsumedActionId]
+    # And the id it names is one the SAME result reports as an action, so
+    # the two channels address one node rather than two.
+    var reported: seq[string] = @[]
+    for action in res.actions:
+      reported.add(action.stableName)
+    check Dssf1ConsumedActionId in reported
+
+  test "a service that consumes nothing carries an EMPTY edge":
+    # The control. Without it every assertion above would pass for an
+    # implementation that filled the field from the action list.
+    let res = devEnvFor(Dssf1QuietName)
+    check res.services.len == 1
+    check res.services[0].consumedActionIds.len == 0
+
+  test "the ORPHAN package's service carries an empty edge beside a reported action":
+    # The discriminator, and the one case that separates "this field
+    # records consumption" from "this field lists the actions". The
+    # orphan fixture renders a file and references it nowhere: the
+    # action IS reported and the service names NOTHING.
+    let res = devEnvFor(Dssf1OrphanName)
+    check res.actions.len == 1
+    check res.actions[0].stableName == Dssf1OrphanActionId
+    check res.services.len == 1
+    check res.services[0].consumedActionIds.len == 0
+
+  test "the edge survives the provider wire":
+    let res = devEnvFor(Dssf1ConsumerName)
+    let response = ProviderGraphResponse(kind: pskDevEnvResult, devEnv: res)
+    let decoded = decodeProviderResponse(encodeProviderResponse(response))
+    check decoded.devEnv.services.len == 1
+    check decoded.devEnv.services[0].consumedActionIds ==
+      @[Dssf1ConsumedActionId]
+    # The fields AFTER it in the record are still read correctly, which
+    # is what a positional append has to prove: an offset that shifted
+    # would corrupt the neighbours rather than the new field.
+    check decoded.devEnv.services[0].name == res.services[0].name
+    check decoded.devEnv.services[0].typedCommand ==
+      res.services[0].typedCommand
+
+  test "the edge survives the ARTIFACT hop, which is not optional":
+    let artifact = artifactFromDevEnvResult(devEnvFor(Dssf1ConsumerName))
+    check artifact.services.len == 1
+    check artifact.services[0].consumedActionIds ==
+      @[Dssf1ConsumedActionId]
+    let decoded = decodeDevEnvArtifact(encodeDevEnvArtifact(artifact))
+    check decoded.services.len == 1
+    check decoded.services[0].consumedActionIds ==
+      @[Dssf1ConsumedActionId]
+    check decoded.services[0].instanceEnvironment ==
+      artifact.services[0].instanceEnvironment
+
+  test "the edge is part of the artifact's IDENTITY":
+    # For the reason the actions themselves are: a field outside the
+    # content id lets two artifacts that order their actions differently
+    # share a cache entry, so the second recipe is served the first's
+    # ordering.
+    let artifact = artifactFromDevEnvResult(devEnvFor(Dssf1ConsumerName))
+    var stripped = artifact
+    stripped.services[0].consumedActionIds = @[]
+    let withEdge = decodeDevEnvArtifact(encodeDevEnvArtifact(artifact))
+    let withoutEdge = decodeDevEnvArtifact(encodeDevEnvArtifact(stripped))
+    check withEdge.services[0].consumedActionIds.len == 1
+    check withoutEdge.services[0].consumedActionIds.len == 0
+    check withEdge.artifactId != withoutEdge.artifactId
+
+  test "`toJsonInspection` shows the edge, and shows it EMPTY when there is none":
+    let json = toJsonInspection(
+      artifactFromDevEnvResult(devEnvFor(Dssf1ConsumerName)))
+    check "\"consumedActionIds\":[\"" & Dssf1ConsumedActionId & "\"]" in json
+    let quiet = toJsonInspection(
+      artifactFromDevEnvResult(devEnvFor(Dssf1QuietName)))
+    check "\"consumedActionIds\":[]" in quiet

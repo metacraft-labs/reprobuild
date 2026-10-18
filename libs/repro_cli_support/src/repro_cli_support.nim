@@ -14820,6 +14820,82 @@ proc devEnvProducerOpsResolver*(projectRoot: string):
   result = proc (artifact: DevEnvArtifact): seq[DevEnvShellOp] =
     devEnvProducerActivation(artifact, projectRoot)
 
+proc devEnvActionRunner*(): DevSessionActionRunner =
+  ## Shared-Development-Services F1 (§4.8 / D-SS15), SECOND HALF — the
+  ## ONE way a dev session turns a reported `gnkAction` node into a file
+  ## on disk.
+  ##
+  ## IT GOES THROUGH `lowerGraphAction`, THE BUILD LANE'S OWN LOWERING,
+  ## and that is the decision this factory is. F1's actions channel
+  ## exists so there is "one representation of an action and nothing for
+  ## a second one to drift from"; a dev-session-specific reader of the
+  ## same payload would undo exactly that — it would have its own notion
+  ## of which call argument carries the text and which carries the
+  ## output path, and the two readings could disagree about one recipe.
+  ## So the node is lowered by the same proc `repro build` lowers it
+  ## with, and only the EXECUTION is local.
+  ##
+  ## WHAT IT DOES NOT DO, STATED PLAINLY. It executes the lowered edge
+  ## through `executeBuiltinAction` rather than scheduling it through
+  ## `runBuild`, so this pass records no action-cache hit and no
+  ## command-stats row: §2's "an ordinary cached edge" claim is measured
+  ## by the build lane (`t_service_config_is_a_cached_build_output.nim`)
+  ## and is not re-measured here. The one property the session needs is
+  ## idempotence, and it has it from the executor itself — `bakWriteText`
+  ## compares the destination's bytes and writes nothing when they
+  ## already match.
+  ##
+  ## AND A NON-BUILT-IN ACTION IS REFUSED BY NAME, never skipped. A
+  ## `devEnv:` body that registers a process edge (a generator binary, a
+  ## template renderer) is asking for work this pass cannot do without
+  ## the scheduler, a lock and a sandbox; answering that with silence
+  ## would be F1's own defect with a new cause — the path on argv and no
+  ## file behind it. The refusal says which action and what to do.
+  result = proc (action: DevEnvActionSummary; projectRoot: string): string =
+    # `noScheduledAction()` rather than `BuildAction()`: Named-Lock-Files
+    # §7.2 makes `governingLockIdentity` non-optional, so the type has no
+    # default value and this is the repo's one spelling for "nothing
+    # here yet". It is overwritten on the next line or the proc returns.
+    var lowered = noScheduledAction()
+    try:
+      lowered = lowerGraphAction(
+        GraphNode(id: action.nodeId, kind: gnkAction,
+          stableName: action.actionId, payload: action.payload),
+        initTable[string, PathOnlyToolProfile](), projectRoot)
+    except CatchableError as err:
+      return "the action node could not be lowered into a build edge: " &
+        err.msg
+    if lowered.kind == bakProcess:
+      return "it is a PROCESS action (" &
+        (if lowered.argv.len > 0: lowered.argv[0] else: "<no argv>") &
+        "), and a dev session builds only the built-in file-producing " &
+        "actions (`fs.writeText`, `fs.copyFile`, `fs.ensureDir`, ...) " &
+        "that a rendering helper such as `renderConfigFile` registers. " &
+        "Run `repro build` for this edge and pass the built path, or " &
+        "render the file with a built-in helper"
+    let outcome = executeBuiltinAction(lowered)
+    if outcome.status != asSucceeded:
+      var detail = outcome.stderr.strip()
+      if detail.len == 0:
+        detail = outcome.reason.strip()
+      if detail.len == 0:
+        detail = "exit code " & $outcome.exitCode
+      return detail
+    # THE OUTPUT IS RE-READ, not assumed from a zero exit. A built-in
+    # that reported success and produced nothing is the precise shape
+    # F1 measured, so the one thing this proc owes its caller is the
+    # file's existence rather than the executor's opinion of it.
+    for output in lowered.outputs:
+      let produced =
+        if output.isAbsolute: output
+        else: (if lowered.cwd.len > 0: lowered.cwd / output
+               else: projectRoot / output)
+      if not fileExists(extendedPath(produced)) and
+         not dirExists(extendedPath(produced)):
+        return "it reported success and its declared output `" &
+          produced & "` is not there"
+    ""
+
 proc emitDevEnvDiagnostics(artifact: DevEnvArtifact): bool =
   ## Returns true when an error diagnostic was emitted.
   for diagnostic in artifact.diagnostics:
@@ -17708,8 +17784,58 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
   # the provider's return, because a cached dev-env edge is answered
   # from the artifact and a check that lived on the provider wire would
   # fire on a cold evaluation and silently never again.
-  if emitDevEnvDiagnostics(readDevEnvArtifact(edge.artifactPath)):
+  let upArtifact = readDevEnvArtifact(edge.artifactPath)
+  if emitDevEnvDiagnostics(upArtifact):
     return 1
+  # Shared-Development-Services F1 (§4.8 / D-SS15), SECOND HALF: BUILD
+  # the actions this dev-env reported, in the order that puts each one
+  # before the services that name its output.
+  #
+  # WHY HERE AND NOT IN THE SUPERVISOR. Two sets of services consume
+  # these outputs and they are started by two different processes: a
+  # session-owned service is started by the supervisor below, and a
+  # service that declares an `instance:` block is MATERIALISED BY THE
+  # DAEMON inside `convergeSharedServiceInstances` on the next line --
+  # which is the very case F1 measured (`repro up --activity sso`, the
+  # path on argv and `etc/sso/` absent). A build placed in the
+  # supervisor would therefore order the session's own services and
+  # leave the shared ones racing a file nobody had written yet. This
+  # point is BEFORE BOTH, which is the only place one pass can be.
+  #
+  # The plan is read from the artifact's FULL service set for the same
+  # reason: `serviceSpecsFromArtifact` deliberately omits the
+  # instance-declared services, so asking it would hide exactly the
+  # consumers this ordering is for.
+  #
+  # Read from the ARTIFACT, like the diagnostics above and for D-SS11's
+  # reason: a cached dev-env edge is answered from the artifact without
+  # re-running the provider, so a pass driven off the provider's return
+  # would build on a cold evaluation and silently never again.
+  #
+  # The specs handed to the plan carry the SERVICE'S NAME AND ITS
+  # CONSUMED ACTION IDS AND NOTHING ELSE, deliberately. A full
+  # `serviceSpecFromSummary` would also re-run that proc's refusals
+  # (no command declared, a readiness probe declared twice) at a new and
+  # earlier point in the flow, which would change which diagnostic a
+  # broken recipe gets first for a reason unrelated to this change. The
+  # ordering this pass owns needs the edge and the name; the supervisor
+  # keeps deriving its own start order from the full records.
+  var upActionSpecs: seq[ServiceSpec] = @[]
+  for service in upArtifact.services:
+    upActionSpecs.add(ServiceSpec(name: service.name,
+      consumedActionIds: service.consumedActionIds))
+  let upActions = buildDevEnvActions(@[], upActionSpecs,
+    upArtifact.projectRoot, devEnvActionRunner())
+  if upActions.failure.len > 0:
+    stderr.writeLine("repro " & commandName & ": " & upActions.failure)
+    return 1
+  if upActions.built.len > 0:
+    # Announced on stderr beside the dev-env announcement, because a
+    # file appearing under the project root is a side effect a developer
+    # should be able to attribute without reading this source.
+    stderr.writeLine("repro " & commandName & ": built " &
+      $upActions.built.len & " dev-env action(s) before starting " &
+      "anything: " & upActions.built.join(", "))
   # Shared-Development-Services L7 (§4.5): converge the shared service
   # instances this project declares before anything in this session is
   # started. A refusal returns here, with nothing launched.

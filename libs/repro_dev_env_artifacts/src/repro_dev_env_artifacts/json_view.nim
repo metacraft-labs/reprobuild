@@ -127,7 +127,12 @@ proc serviceJson(service: DevEnvServiceSummary): string =
     ",\"instanceDeclared\":" &
       (if service.instanceDeclared: "true" else: "false") &
     ",\"instanceLeaseTtlSeconds\":" & $service.instanceLeaseTtlSeconds &
-    ",\"instanceEnvironment\":" & q(service.instanceEnvironment) & "}"
+    ",\"instanceEnvironment\":" & q(service.instanceEnvironment) &
+    # Shared-Development-Services F1's second half, in the JSON view for
+    # L8's and L9's reason: this is the field that says which action the
+    # session builds before this service, so an operator debugging "the
+    # file the service names is not there" has to be able to read it.
+    ",\"consumedActionIds\":" & stringsJson(service.consumedActionIds) & "}"
 
 proc diagnosticJson(diagnostic: DevEnvDiagnostic): string =
   "{\"severity\":" & q($diagnostic.severity) &
