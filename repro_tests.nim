@@ -4752,6 +4752,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_package_level_heads_refuse_extra_arguments.nim",
+    binary: "build/test-bin/t_dsl_package_level_heads_refuse_extra_arguments",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_package_name_starting_with_digit.nim",
     binary: "build/test-bin/t_dsl_package_name_starting_with_digit",
     defines: @[],

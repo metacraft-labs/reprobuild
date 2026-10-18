@@ -534,6 +534,7 @@ libs/repro_project_dsl/tests/dsl_port/t_dsl_lifted_exports_refuse_nim_magics.nim
 libs/repro_project_dsl/tests/dsl_port/t_dsl_lifted_service_reference_is_typed.nim	nim	8
 libs/repro_project_dsl/tests/dsl_port/t_dsl_output_ref.nim	nim	6
 libs/repro_project_dsl/tests/dsl_port/t_dsl_package_empty.nim	nim	4
+libs/repro_project_dsl/tests/dsl_port/t_dsl_package_level_heads_refuse_extra_arguments.nim	nim	14
 libs/repro_project_dsl/tests/dsl_port/t_dsl_package_name_starting_with_digit.nim	nim	6
 libs/repro_project_dsl/tests/dsl_port/t_dsl_provisioning_expression_setters.nim	nim	13
 libs/repro_project_dsl/tests/dsl_port/t_dsl_provisioning_literal_unchanged.nim	nim	17
