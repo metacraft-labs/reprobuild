@@ -17460,6 +17460,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_workspace_metadata_resolves_at_a_git_revision.nim",
+    binary: "build/test-bin/t_workspace_metadata_resolves_at_a_git_revision",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_workspace_migrate_reconciles_local_state.nim",
     binary: "build/test-bin/t_workspace_migrate_reconciles_local_state",
     defines: @[],

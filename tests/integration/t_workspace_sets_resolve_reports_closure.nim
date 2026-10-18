@@ -43,12 +43,23 @@
 ##   6. The human form prints one tab-separated line per repo:
 ##      name, path, fetchUrl, revision.
 ##   7. A repeated name counts once.
+##   8. `--at=REV` resolves the names from the manifest repository's history
+##      rather than its working tree (reprobuild-pm issue
+##      `2026-10-09-workspace-metadata-is-readable-only-from-a-working-tree`).
+##      For this case only, the fixture workspace root is made a git
+##      repository: revision A, then revision B (beta gains a repo), then a
+##      dirty working tree. `--at=A` and `--at=B` each report that revision's
+##      closure and its full commit id as `metadataRevision`; the plain form
+##      still reads the working tree; nothing in the repository (git dir or
+##      working tree) is written. `--at` on a root that is not a git
+##      repository, or at an unknown revision, exits 1 with status `error`;
+##      a bare `--at=` is a usage error.
 ##
 ## No mocks: the real `repro` binary runs against real manifest files on the
 ## real filesystem, and the active set is written through the real state
 ## writer.
 
-import std/[algorithm, json, os, strutils, tempfiles, times, unittest]
+import std/[algorithm, json, os, osproc, strutils, tempfiles, times, unittest]
 
 import repro_test_support
 import repro_workspace_manifests
@@ -276,3 +287,87 @@ suite "workspace sets resolve — the closure of a requested set, as data":
       "shared\tshared\t" & FetchBase & "/shared\tmain",
       "beta-only\tbeta-only\t" & FetchBase & "/beta-only\tmain",
     ]
+
+proc git(dir: string; args: varargs[string]): string =
+  ## Run git in `dir` with a fixed identity; any failure fails the fixture.
+  var cmd = "git -C " & quoteShell(dir) &
+    " -c user.name=fixture -c user.email=fixture@example.invalid" &
+    " -c commit.gpgsign=false -c init.defaultBranch=main"
+  for a in args:
+    cmd.add(" " & quoteShell(a))
+  let (output, code) = execCmdEx(cmd)
+  if code != 0:
+    raise newException(OSError, cmd & " failed: " & output)
+  output.strip()
+
+suite "workspace sets resolve --at — the closure at a metadata revision":
+
+  test "t_workspace_sets_resolve_at_revision_ignores_working_tree":
+    let fx = setupFixture("at-rev")
+    defer: removeDir(fx.scratch)
+    let root = fx.workspaceRoot
+    # Before the repository exists, `--at` has no history to read.
+    let notRepo = runSplit(fx, ["ws", "projects", "resolve", "alpha",
+      "--at=HEAD", "--json"])
+    check notRepo.code == 1
+    let notRepoDoc = parseJson(notRepo.stdout)
+    check notRepoDoc["status"].getStr == "error"
+    check "not a git repository" in notRepoDoc["error"].getStr
+    check not notRepoDoc.hasKey("metadataRevision")
+
+    discard git(root, "init", "--quiet")
+    discard git(root, "add", "projects", "repos")
+    discard git(root, "commit", "--quiet", "-m", "revision A")
+    let revA = git(root, "rev-parse", "HEAD")
+    writeFile(root / "projects" / "beta.toml",
+      projectFile("beta", ["repos/shared.toml", "repos/beta-only.toml",
+                           "repos/alpha-only.toml"]))
+    discard git(root, "commit", "--quiet", "-am", "revision B")
+    let revB = git(root, "rev-parse", "HEAD")
+    # The working tree now disagrees with both revisions.
+    writeFile(root / "projects" / "beta.toml",
+      projectFile("beta", ["repos/beta-only.toml"]))
+    let gitBefore = treeSnapshot(root / ".git")
+    let treeBefore = treeSnapshot(root)
+
+    proc resolveAt(rev: string): JsonNode =
+      let res = runSplit(fx, ["ws", "projects", "resolve", "beta",
+        "--at=" & rev, "--json"])
+      if res.code != 0:
+        checkpoint("stdout: " & res.stdout & "\nstderr: " & res.stderr)
+      check res.code == 0
+      parseJson(res.stdout)
+
+    let atA = resolveAt(revA)
+    check atA["schema"].getStr == ResolveSchema
+    check atA["status"].getStr == "resolved"
+    check atA["metadataRevision"].getStr == revA
+    check repoNames(atA) == @["shared", "beta-only"]
+    let atB = resolveAt("main")
+    check atB["metadataRevision"].getStr == revB
+    check repoNames(atB) == @["shared", "beta-only", "alpha-only"]
+    # Without --at the working tree is what is read, and no revision is
+    # claimed.
+    let plain = runSplit(fx, ["ws", "projects", "resolve", "beta", "--json"])
+    check plain.code == 0
+    let plainDoc = parseJson(plain.stdout)
+    check repoNames(plainDoc) == @["beta-only"]
+    check not plainDoc.hasKey("metadataRevision")
+    # The human form reads the revision too.
+    let human = runSplit(fx, ["ws", "projects", "resolve", "beta",
+      "--at=" & revA])
+    check human.code == 0
+    check human.stdout.strip.splitLines.len == 2
+
+    let unknown = runSplit(fx, ["ws", "projects", "resolve", "beta",
+      "--at=no-such-rev", "--json"])
+    check unknown.code == 1
+    let unknownDoc = parseJson(unknown.stdout)
+    check unknownDoc["status"].getStr == "error"
+    check "no-such-rev" in unknownDoc["error"].getStr
+    let emptyAt = runSplit(fx, ["ws", "projects", "resolve", "beta", "--at="])
+    check emptyAt.code == 2
+
+    check treeSnapshot(root / ".git") == gitBefore
+    check not dirExists(root / ".git" / "worktrees")
+    check treeSnapshot(root) == treeBefore

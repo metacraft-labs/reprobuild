@@ -92021,13 +92021,15 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
   let verb = "repro workspace " & spelling
   if args.len > 0 and args[0] in ["--help", "-h", "help"]:
     echo verb & " list [--enabled|--disabled|--all] [--json]"
-    echo verb & " resolve <name>... [--json]"
+    echo verb & " resolve <name>... [--at=REV] [--json]"
     echo verb & " add <name> [--template=NAME|--no-template] [-m DESC]"
     echo verb & " remove <name> [--prune-orphan-repos]"
     echo "  list   every DEFINED repo-set, marked enabled/disabled for this " &
       "workspace."
     echo "  resolve  the repos a workspace enabling exactly <name>... would " &
       "participate in (read-only; enabled or not, checked out or not)."
+    echo "  --at=REV  resolve from the manifest repository's commit REV " &
+      "instead of its working tree (no layers; nothing is written)."
     echo "  add    define a NEW " &
       (if spelling == "sets": "repo-set (repo-sets/<name>.toml)"
        else: "project (projects/<name>.toml)") &
@@ -92116,11 +92118,21 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
     # and from `repos list --set=NAME` (one name, raw fragments, no fetch URL).
     var names: seq[string]
     var asJson = false
+    # `--at=REV`: resolve from the manifest repository's HISTORY instead of
+    # its working tree (reprobuild-pm issue 2026-10-09 "workspace metadata is
+    # readable only from a working tree"). `atRevision` stays "" without it.
+    var atRevision = ""
     for arg in rest:
       if arg == "--json":
         asJson = true
       elif arg.startsWith("--workspace-root="):
         discard # parsed by parseProjectsWorkspaceRoot above
+      elif arg.startsWith("--at="):
+        atRevision = arg["--at=".len .. ^1]
+        if atRevision.len == 0:
+          stderr.writeLine(verb & " resolve: --at= needs a revision " &
+            "(a commit id, branch or tag of the manifest repository)")
+          return 2
       elif arg.startsWith("-"):
         stderr.writeLine(verb & " resolve: unknown flag " & arg)
         return 2
@@ -92130,7 +92142,7 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
         names.add(arg)
     if names.len == 0:
       stderr.writeLine(verb & " resolve: missing <name>... (usage: " & verb &
-        " resolve <name>... [--json])")
+        " resolve <name>... [--at=REV] [--json])")
       return 2
 
     # Resolution is EXACTLY `resolveProjectSet` — the same call `enable` uses
@@ -92138,13 +92150,28 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
     # enabling those names would actually do. A conflict is a distinct outcome
     # (an operator decision, reported with its evidence as data); every other
     # failure — an unknown name, an unreadable manifest — is `error`.
+    #
+    # With `--at=REV` the same ladder and Union Rules run over ONE tree: the
+    # workspace's manifest repository (the git repository at
+    # `manifestsRoot(workspaceRoot)`) at REV, read from its objects through a
+    # git-revision source. The working tree, the index and the `[[manifest]]`
+    # layers (workspace-local state, which has no revision) are not read, and
+    # nothing is written to the repository. REV is resolved once to a commit
+    # and reported as `metadataRevision`.
     var status = "resolved"
     var resolved: ResolvedProject
     var conflict = newJNull()
     var errorNode = newJNull()
     var diagnostic = ""
+    var revisionSource: ManifestSource = nil
+    defer: revisionSource.close()
     try:
-      resolved = resolveProjectSet(workspaceRoot, names)
+      if atRevision.len > 0:
+        revisionSource = openGitRevisionSource(manifestsRoot(workspaceRoot),
+          atRevision)
+        resolved = resolveProjectSetAt(revisionSource, names)
+      else:
+        resolved = resolveProjectSet(workspaceRoot, names)
     except WorkspaceProjectSetConflictError as exc:
       status = "conflict"
       # The INNER message, not `msg`: `msg` carries a "[<file>] at key ..."
@@ -92168,10 +92195,17 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
     var primary = ""
     if status == "resolved":
       primary = resolved.projectName
-    else:
+    elif atRevision.len == 0:
       try:
         primary = resolveWorkspaceProjectByName(workspaceRoot,
           names[0]).projectName
+      except CatchableError:
+        primary = ""
+    elif not revisionSource.isNil:
+      # Only when the revision itself opened: an unreadable revision has no
+      # primary to report.
+      try:
+        primary = resolveManifestNameAt(revisionSource, names[0]).projectName
       except CatchableError:
         primary = ""
 
@@ -92194,14 +92228,21 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
                      "vcs": repo.vcs})
       # The report is printed on refusal too: a conflict is data a consumer
       # acts on, and exit 1 alone would make it parse prose from stderr.
-      echo (%*{"schema": "reprobuild.workspace-set-resolve.v1",
+      var doc = %*{"schema": "reprobuild.workspace-set-resolve.v1",
                "workspaceRoot": workspaceRoot,
                "requested": names,
                "primary": primary,
                "status": status,
                "repos": repos,
                "conflict": conflict,
-               "error": errorNode}).pretty
+               "error": errorNode}
+      # Additive, so the schema keeps its `.v1`: present exactly when the
+      # names were resolved at a revision that opened — the full commit id
+      # REV resolved to, which is what makes the report reproducible after
+      # the ref moves.
+      if not revisionSource.isNil:
+        doc["metadataRevision"] = %revisionSource.resolvedCommit
+      echo doc.pretty
       return (if status == "resolved": 0 else: 1)
     if status != "resolved":
       stderr.writeLine(verb & " resolve: " & diagnostic)
