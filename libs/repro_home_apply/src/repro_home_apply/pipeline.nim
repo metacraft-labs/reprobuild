@@ -2073,19 +2073,22 @@ proc profilePackageReferences*(profile: Profile): seq[PlannedPackage] =
       outp.add PlannedPackage(packageId: node.packageName,
         fromActivity: activity, requestedVersion: node.packageVersion,
         binaries: node.packageBinaries)
+  proc walk(outp: var seq[PlannedPackage]; body: seq[IntentNode];
+            activity: string) =
+    # Guards nest (the planner conjoins them, `plan.packageOriginsFromBody`),
+    # so a reference at any depth is one some host and platform may plan.
+    for node in body:
+      case node.kind
+      of nkPackageRef:
+        outp.add(node, activity)
+      of nkCondBlock:
+        outp.walk(node.condChildren, activity)
+      else:
+        discard
   for child in profile.root.children:
     if child.kind != nkActivity:
       continue
-    for node in child.activityChildren:
-      case node.kind
-      of nkPackageRef:
-        result.add(node, child.activityName)
-      of nkCondBlock:
-        for inner in node.condChildren:
-          if inner.kind == nkPackageRef:
-            result.add(inner, child.activityName)
-      else:
-        discard
+    result.walk(child.activityChildren, child.activityName)
 
 proc classifyPackages*(references: seq[PlannedPackage];
                        adapterPreference: OrderedTable[string, seq[string]];

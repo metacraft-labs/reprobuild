@@ -25,9 +25,13 @@ when defined(linux):
 import ./errors
 import ./host_identity
 
+# The built-in identifiers are the profile combinators' own list, so the
+# combinators cannot offer a predicate this grammar does not evaluate
+# (reprobuild-pm issue 2026-10-13-headless-predicate-template-has-no-evaluator).
+import repro_profile/predicate_names
+export predicate_names
+
 const
-  StandardPlatformIdents* = ["windows", "macos", "linux", "bsd", "wsl"]
-  StandardArchIdents* = ["x86_64", "arm64", "arm32"]
   StandardHostIdent* = "host"
 
 type

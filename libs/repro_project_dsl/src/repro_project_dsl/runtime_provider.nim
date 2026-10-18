@@ -763,6 +763,10 @@ when defined(reproProviderMode):
         dedsError)
 
     let selectedActivities = selectedActivityList(request.activity)
+    # An activity selector naming nothing this dev-env declares is an
+    # ERROR, recorded before `diagnostics:` below reads the registry (see
+    # `reportUnknownActivitySelection`).
+    reportUnknownActivitySelection(pkg.packageName, selectedActivities)
     result = DevEnvResult(
       schemaVersion: 1'u32,
       providerArtifactId: request.providerArtifactId,

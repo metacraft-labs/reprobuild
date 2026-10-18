@@ -1267,7 +1267,6 @@ proc runHomeList(args: openArray[string]): int =
         of osPlanned: "  enabled  "
         of osActivityNotSelected: "  inactive "
         of osGuardFalse: "  excluded "
-        of osNestedGuard: "  ignored  "
       let predStr =
         if o.predicateText.len == 0: "" else: "  when " & o.predicateText
       let dataStr = if l.dataFile.len > 0: "  data=" & l.dataFile else: ""
@@ -1334,9 +1333,6 @@ proc runHomeWhy(args: openArray[string]): int =
         of osGuardFalse:
           "activity enabled on host `" & host & "`, but the guard does " &
             "not hold for " & factsText(listing.ctx)
-        of osNestedGuard:
-          "NOT planned: a `when` nested in a `when` -- the planner reads " &
-            "one guard level"
       let dataStr =
         if l.dataFile.len > 0: " (row in data file " & l.dataFile & ")"
         else: ""
@@ -3008,7 +3004,14 @@ proc lookupConfigurableInProfile(prof: Profile; pkg, key: string):
   if pkg notin resolved or key notin resolved[pkg]:
     return (false, "")
   let assignment = resolved[pkg][key]
-  if assignment.overridden.len > 0:
+  if assignment.overridden.len > 0 and assignment.entry.configEntryLine == 0:
+    # A compiled profile (`config:` holds a helper call): its overrides
+    # carry no source line, only their order, so the note counts them.
+    stderr.writeLine("repro home get: note: " & pkg & "." & key &
+      " is assigned " & $(assignment.overridden.len + 1) &
+      " times on this host in the compiled profile (helper calls in " &
+      "`config:` included); the last assignment wins")
+  elif assignment.overridden.len > 0:
     let file = extractFilename(prof.path)
     var sites: seq[string]
     for entry in assignment.overridden:
@@ -3019,6 +3022,88 @@ proc lookupConfigurableInProfile(prof: Profile; pkg, key: string):
       $assignment.entry.configEntryLine & ") wins over " &
       sites.join(", "))
   (true, assignment.entry.configValueSource)
+
+proc configHelperCalls(prof: Profile): seq[IntentNode] =
+  ## The constructs in `config:` the text reader cannot see into: helper
+  ## calls (`gitIdentity(...)`), at the top level, inside a package block or
+  ## under a guard. Each may assign any key, and only the compiled profile
+  ## knows which. Constructs elsewhere -- a helper call in an activity body,
+  ## an activity's `stow:` / `resources:` block, a `const` before the header
+  ## -- assign no `config:` key and are not returned
+  ## (Home-Profile-Intent-Layer.md §Constructs the inspector steps over;
+  ## reprobuild-pm issue
+  ## 2026-10-18-home-get-refuses-a-profile-for-constructs-unrelated-to-config).
+  proc walk(nodes: seq[IntentNode]; calls: var seq[IntentNode]) =
+    for n in nodes:
+      case n.kind
+      of nkOpaque: calls.add n
+      of nkCondBlock: walk(n.condChildren, calls)
+      of nkConfigPackage: walk(n.configEntries, calls)
+      else: discard
+  for ch in prof.root.children:
+    if ch.kind == nkConfigBlock:
+      walk(ch.configPackages, result)
+
+proc refuseConfigHelperCalls(profilePath, readPath: string;
+                             calls: seq[IntentNode];
+                             pkgDotKey, reason: string) {.noreturn.} =
+  ## Raise `EUnstructured` naming every helper call in `config:` with its
+  ## line, for the one case `get` cannot answer them (`reason`). The lines
+  ## are those of the text `calls` were read from (the current generation's
+  ## snapshot); `profilePath` is the profile the user knows.
+  ## The inspector names each call at `readPath` (a temporary copy of the
+  ## snapshot), shown here as `profilePath`.
+  var named: seq[string]
+  for c in calls:
+    named.add c.opaqueConstruct.replace(readPath, profilePath)
+  raiseUnstructured(profilePath, calls[0].startLine, calls[0].indent + 1,
+    named.join(", ") & " in `config:`",
+    "`<key> = <value>` assignments there: a helper call in `config:` may " &
+    "assign `" & pkgDotKey & "`, and " & reason)
+
+proc readActiveIntentSnapshot(stateDir: string): Option[IntentSnapshot] =
+  ## The intent snapshot of the CURRENT generation, or none when there is
+  ## no current generation or its snapshot cannot be read.
+  let activeIdHex = readCurrentGenerationId(stateDir)
+  if activeIdHex.len == 0:
+    return none(IntentSnapshot)
+  let pointerFile = pointerPath(stateDir, activeIdHex)
+  if not fileExists(extendedPath(pointerFile)):
+    return none(IntentSnapshot)
+  try:
+    let env = readPointerFile(pointerFile)
+    var snapshotKey: PrefixIdBytes
+    for i in 0 ..< 32:
+      snapshotKey[i] = env.intentSnapshotDigest[i]
+    let storeRoot = resolveStoreRoot()
+    var store = openStore(storeRoot)
+    defer:
+      try: store.close() except CatchableError: discard
+    some(decodeSnapshotBytes(readCasBlob(store, snapshotKey)))
+  except CatchableError:
+    none(IntentSnapshot)
+
+proc snapshotMatchesProfileDir(snapshot: IntentSnapshot;
+                               profileDir: string): bool =
+  ## True when the snapshot's profile source files are byte for byte the
+  ## ones the apply pipeline would snapshot from `profileDir` today
+  ## (`defaultWalkProfileFiles`), i.e. the on-disk profile is the one the
+  ## current generation was applied from, as far as the snapshot records it.
+  ## Helper modules in subdirectories are not in the snapshot (reprobuild-pm
+  ## issue 2026-10-18-home-intent-snapshot-omits-imported-modules-in-
+  ## subdirectories), so an edit to one alone is not detected here.
+  var recorded: seq[IntentFileEntry]
+  for entry in snapshot.files:
+    if entry.role == ifrSource:
+      recorded.add entry
+  let onDisk = defaultWalkProfileFiles(profileDir)
+  if recorded.len != onDisk.len:
+    return false
+  for i in 0 ..< onDisk.len:
+    if recorded[i].path != onDisk[i].path or
+        recorded[i].content != onDisk[i].content:
+      return false
+  true
 
 proc unquoteValueDisplay(raw: string): string =
   ## Mirror of the pipeline's `unquoteValueSource`: strip a single
@@ -3031,8 +3116,8 @@ proc unquoteValueDisplay(raw: string): string =
     return s
   raw
 
-proc profileFromIntentSnapshot(stateDir: string; profilePath: string):
-    Option[Profile] =
+proc profileFromIntentSnapshot(stateDir: string; profilePath: string;
+                               snapshot: IntentSnapshot): Option[Profile] =
   ## Load the intent snapshot stored in CAS for the CURRENT
   ## generation and re-parse `home.nim` from those bytes. This is
   ## interpretation (B): `repro home get` reads the resolved value
@@ -3043,24 +3128,8 @@ proc profileFromIntentSnapshot(stateDir: string; profilePath: string):
   ## live. Rollback rotates `current` to a prior pointer, so
   ## subsequent `get` reads the prior generation's snapshot —
   ## exactly the spec's "rollback restores the prior value of the
-  ## configurable" semantics.
-  let activeIdHex = readCurrentGenerationId(stateDir)
-  if activeIdHex.len == 0:
-    return none(Profile)
-  let pointerFile = pointerPath(stateDir, activeIdHex)
-  if not fileExists(extendedPath(pointerFile)):
-    return none(Profile)
+  ## configurable" semantics. `snapshot` is `readActiveIntentSnapshot`'s.
   try:
-    let env = readPointerFile(pointerFile)
-    var snapshotKey: PrefixIdBytes
-    for i in 0 ..< 32:
-      snapshotKey[i] = env.intentSnapshotDigest[i]
-    let storeRoot = resolveStoreRoot()
-    var store = openStore(storeRoot)
-    defer:
-      try: store.close() except CatchableError: discard
-    let snapshotBytes = readCasBlob(store, snapshotKey)
-    let snapshot = decodeSnapshotBytes(snapshotBytes)
     let anchor = extractFilename(profilePath)
     for entry in snapshot.files:
       if entry.path == anchor or entry.path.endsWith("/" & anchor):
@@ -3068,14 +3137,15 @@ proc profileFromIntentSnapshot(stateDir: string; profilePath: string):
         for i, b in entry.content:
           content[i] = char(b)
         # Re-parse the snapshotted source via a temp file so we
-        # reuse the editor's `loadProfile`. The temp lives inside
-        # the state dir to keep test isolation tidy.
+        # reuse the inspector (`inspectProfile`, as for the on-disk
+        # profile: `runHomeGet`). The temp lives inside the state dir to
+        # keep test isolation tidy.
         let tmpDir = stateDir / "get-tmp"
         createDir(extendedPath(tmpDir))
         let tmpPath = tmpDir / anchor
         writeFile(extendedPath(tmpPath), content)
         try:
-          let prof = loadProfile(tmpPath)
+          let prof = inspectProfile(tmpPath)
           return some(prof)
         finally:
           try: removeFile(extendedPath(tmpPath)) except OSError: discard
@@ -3127,18 +3197,55 @@ proc runHomeGet(args: openArray[string]): int =
     # is the only thing to read from.
     let stateDir = resolveStateDir()
     var prof: Profile
-    let snapshotProf = profileFromIntentSnapshot(stateDir, profilePath)
+    let snapshot = readActiveIntentSnapshot(stateDir)
+    var snapshotProf = none(Profile)
+    if snapshot.isSome:
+      snapshotProf = profileFromIntentSnapshot(stateDir, profilePath,
+        snapshot.get)
     if snapshotProf.isSome:
       prof = snapshotProf.get
     else:
-      prof = loadProfile(profilePath)
+      prof = inspectProfile(profilePath)
+    # A helper call in `config:` may assign the key, and only the compiled
+    # profile knows what it assigns: answer from the compiled profile, as
+    # `list` / `why` do. The compile reads the on-disk profile and its
+    # imports, so with a current generation it answers only when the
+    # on-disk profile is the one that generation snapshotted; otherwise
+    # the recorded activation (interpretation B) cannot be compiled and
+    # `get` refuses, naming the calls (Home-Profile-Intent-Layer.md
+    # §Constructs the inspector steps over; reprobuild-pm issue
+    # 2026-10-18-home-get-refuses-a-profile-for-constructs-unrelated-to-config).
+    let helperCalls = configHelperCalls(prof)
+    if helperCalls.len > 0:
+      if snapshotProf.isSome and
+          not snapshotMatchesProfileDir(snapshot.get, profilePath.parentDir):
+        refuseConfigHelperCalls(profilePath, prof.path, helperCalls,
+          pkgDotKey,
+          "the current generation was applied from a profile that differs " &
+          "from the one on disk, so it cannot be compiled to resolve them " &
+          "(run `repro home apply`, or roll back the edit)")
+      let compiled = compileAndAdaptHomeProfile(profilePath, stateDir)
+      if compiled.profile == nil:
+        stderr.writeLine(formatCompileAdaptFailure("repro home get",
+          profilePath, compiled))
+        return 1
+      prof = compiled.profile
     let res = lookupConfigurableInProfile(prof, parts.pkg, parts.key)
     if not res.found:
       # Distinguish "package not enabled" from "key not declared" so
       # the user sees the spec's structured diagnostic.
       let ctx = currentHostContext()
       let effective = resolveEffectiveConfig(prof, ctx.host, ctx)
-      if parts.pkg notin effective.enabledPackages:
+      # A helper call in an activity body may enable the package, and the
+      # text reader cannot see which; "not enabled" is then not a claim
+      # this reader can make, and the key is reported unassigned instead.
+      var activityHelpers = false
+      for ch in prof.root.children:
+        if ch.kind == nkActivity:
+          for opaque in opaqueNodes(ch.activityChildren):
+            if opaque.opaqueKind == okHelperCall:
+              activityHelpers = true
+      if parts.pkg notin effective.enabledPackages and not activityHelpers:
         stderr.writeLine("repro home get: package `" & parts.pkg &
           "` is not enabled by any active activity; no value to read.")
         return 1
