@@ -11412,6 +11412,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_certificate_note_read_keeps_git_stderr_apart.nim",
+    binary: "build/test-bin/t_certificate_note_read_keeps_git_stderr_apart",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_certificate_policy_required_advisory_off_modes.nim",
     binary: "build/test-bin/t_certificate_policy_required_advisory_off_modes",
     defines: @[],

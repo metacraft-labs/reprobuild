@@ -40969,44 +40969,29 @@ proc gitRunPlain(identity: GitToolIdentity;
       env = scrubbedGitRepositoryEnv())
     (code: res.exitCode, output: res.output)
 
-proc gitRunPlainQuery(identity: GitToolIdentity;
-                      args: openArray[string]):
+proc gitRunSeparated(gitBin: string; args: openArray[string];
+                     env: StringTableRef; exactStdout = false):
     tuple[code: int; output: string; diagnostic: string] =
-  ## Invoke git for an answer that will be PARSED.
+  ## Invoke ``gitBin`` with ``args`` under ``env``, keeping git's stderr OUT
+  ## of ``output``. This is the body of ``gitRunPlainQuery`` (whose comment
+  ## below gives the reasons) parameterized on the binary and the
+  ## environment, so a caller that has a bare git path and its own
+  ## environment — the certificate-note reader, which must keep the
+  ## receive-pack object-store bindings — reads git's answer the same way.
   ##
-  ## ``gitRunPlain`` above merges git's stderr into its stdout
-  ## (``poStdErrToStdOut``). For a caller that only tests the exit code, or
-  ## that reads the merged text precisely BECAUSE it wants git's diagnostic,
-  ## that is the right shape and it keeps it. For a caller that parses git's
-  ## ANSWER it is not: a benign diagnostic then arrives indistinguishable
-  ## from the answer.
-  ##
-  ## Measured, not hypothetical. A repo carrying a stale split commit-graph
-  ## chain — a derived cache git writes and prunes on its own — makes every
-  ## command in it print ``warning: unable to find all commit-graph files`` on
-  ## stderr while still exiting 0 and still printing the right answer on
-  ## stdout. ``git status --porcelain`` in such a repo prints ZERO stdout
-  ## lines and that one stderr line, so every "clean is an empty porcelain
-  ## stream" probe in this file read a PRISTINE tree as dirty: the `repro
-  ## push` preflight refused with "commit or stash changes in <repo>" naming
-  ## a repo with nothing to commit, `observeWorktreeState` refused to issue a
-  ## certificate, and the post-commit lock writer skipped the workspace lock
-  ## reporting a "dirty sibling" that was clean.
-  ##
-  ## ``output`` is stdout ALONE. ``diagnostic`` is the merged, trimmed text —
-  ## what ``gitRunPlain``'s ``output`` would have held — so a caller reporting
-  ## a FAILURE still surfaces git's message, which lives on stderr.
-  ##
-  ## Both streams are drained CONCURRENTLY. Reading one to EOF and only then
-  ## the other deadlocks the moment the unread pipe fills, and git's stderr is
-  ## unbounded in principle (per-ref fetch lines, per-object lfs lines).
+  ## ``exactStdout`` makes ``output`` git's stdout BYTE FOR BYTE. Without it
+  ## the POSIX path re-assembles stdout line by line (``execCmdEx``), which
+  ## appends a newline the bytes did not end with and turns ``\r\n`` into
+  ## ``\n``; harmless for a parsed answer, wrong for a payload that must be
+  ## exactly what git stores (a certificate note blob, Transport §3.1). The
+  ## Windows path copies the pipe's bytes verbatim either way.
   when defined(windows):
     # Structured argv and a PeekNamedPipe drain, for the same reason
     # ``gitRunPlain`` uses one: Nim 2.2's ``readAll`` stops at the first short
     # pipe read on Windows, so a blocking read of either stream would also
     # truncate. Two handles now, drained in the same pass.
-    let process = startProcess(identity.binaryPath, args = @args,
-      env = scrubbedGitRepositoryEnv(), options = {poUsePath})
+    let process = startProcess(gitBin, args = @args,
+      env = env, options = {poUsePath})
     defer: process.close()
     const PollSleepMs = 2
     let handles = [Handle(process.outputHandle), Handle(process.errorHandle)]
@@ -41041,41 +41026,102 @@ proc gitRunPlainQuery(identity: GitToolIdentity;
     # through ``/bin/sh`` and the SHELL can put stderr in a file. One pipe, no
     # interleaving, no deadlock, and the same subprocess shape as
     # ``gitRunPlain``.
-    var cmd = quoteShell(identity.binaryPath)
+    var cmd = quoteShell(gitBin)
     for arg in args:
       cmd.add(" ")
       cmd.add(quoteShell(arg))
     var errPath = ""
+    var outPath = ""
     try:
-      let created = createTempFile("repro-gitq-", ".stderr")
-      created.cfile.close()
-      errPath = created.path
-    except CatchableError, Defect:
-      errPath = ""
-    if errPath.len > 0:
-      cmd.add(" 2>" & quoteShell(errPath))
-    # Without the redirect the child's stderr would be an unread pipe that can
-    # fill and hang it, so fall back to the MERGED stream instead — degraded
-    # (the caller sees diagnostics in ``output``, exactly ``gitRunPlain``'s
-    # behaviour) but never hung.
-    let options =
-      if errPath.len > 0: {poUsePath}
-      else: {poUsePath, poStdErrToStdOut}
-    let res = execCmdEx(cmd, options = options,
-      env = scrubbedGitRepositoryEnv())
-    result.code = res.exitCode
-    result.output = res.output
-    var errText = ""
-    if errPath.len > 0:
       try:
-        errText = readFile(errPath)
-      except CatchableError:
-        discard
-      try:
-        removeFile(errPath)
-      except CatchableError:
-        discard
-    result.diagnostic = (errText & res.output).strip()
+        let created = createTempFile("repro-gitq-", ".stderr")
+        created.cfile.close()
+        errPath = created.path
+      except CatchableError, Defect:
+        errPath = ""
+      if exactStdout:
+        try:
+          let created = createTempFile("repro-gitq-", ".stdout")
+          created.cfile.close()
+          outPath = created.path
+        except CatchableError, Defect:
+          outPath = ""
+        if outPath.len == 0 or errPath.len == 0:
+          # No exact capture is possible, and a line-rebuilt answer must not
+          # pass for one: report a failed run instead.
+          result.code = -1
+          result.diagnostic = "cannot create a temporary file to capture " &
+            "git's output in"
+          return
+        cmd.add(" >" & quoteShell(outPath))
+      if errPath.len > 0:
+        cmd.add(" 2>" & quoteShell(errPath))
+      # Without the redirect the child's stderr would be an unread pipe that
+      # can fill and hang it, so fall back to the MERGED stream instead —
+      # degraded (the caller sees diagnostics in ``output``, exactly
+      # ``gitRunPlain``'s behaviour) but never hung.
+      let options =
+        if errPath.len > 0: {poUsePath}
+        else: {poUsePath, poStdErrToStdOut}
+      let res = execCmdEx(cmd, options = options, env = env)
+      result.code = res.exitCode
+      result.output = res.output
+      if outPath.len > 0:
+        # The shell wrote stdout to the file; read its bytes verbatim.
+        try:
+          result.output = readFile(outPath)
+        except CatchableError as err:
+          result.code = -1
+          result.output = ""
+          result.diagnostic = "cannot read git's captured stdout: " & err.msg
+          return
+      var errText = ""
+      if errPath.len > 0:
+        try:
+          errText = readFile(errPath)
+        except CatchableError:
+          discard
+      result.diagnostic = (errText & result.output).strip()
+    finally:
+      for path in [errPath, outPath]:
+        if path.len > 0:
+          try:
+            removeFile(path)
+          except CatchableError:
+            discard
+
+proc gitRunPlainQuery(identity: GitToolIdentity;
+                      args: openArray[string]):
+    tuple[code: int; output: string; diagnostic: string] =
+  ## Invoke git for an answer that will be PARSED.
+  ##
+  ## ``gitRunPlain`` above merges git's stderr into its stdout
+  ## (``poStdErrToStdOut``). For a caller that only tests the exit code, or
+  ## that reads the merged text precisely BECAUSE it wants git's diagnostic,
+  ## that is the right shape and it keeps it. For a caller that parses git's
+  ## ANSWER it is not: a benign diagnostic then arrives indistinguishable
+  ## from the answer.
+  ##
+  ## Measured, not hypothetical. A repo carrying a stale split commit-graph
+  ## chain — a derived cache git writes and prunes on its own — makes every
+  ## command in it print ``warning: unable to find all commit-graph files`` on
+  ## stderr while still exiting 0 and still printing the right answer on
+  ## stdout. ``git status --porcelain`` in such a repo prints ZERO stdout
+  ## lines and that one stderr line, so every "clean is an empty porcelain
+  ## stream" probe in this file read a PRISTINE tree as dirty: the `repro
+  ## push` preflight refused with "commit or stash changes in <repo>" naming
+  ## a repo with nothing to commit, `observeWorktreeState` refused to issue a
+  ## certificate, and the post-commit lock writer skipped the workspace lock
+  ## reporting a "dirty sibling" that was clean.
+  ##
+  ## ``output`` is stdout ALONE. ``diagnostic`` is the merged, trimmed text —
+  ## what ``gitRunPlain``'s ``output`` would have held — so a caller reporting
+  ## a FAILURE still surfaces git's message, which lives on stderr.
+  ##
+  ## Both streams are drained CONCURRENTLY. Reading one to EOF and only then
+  ## the other deadlocks the moment the unread pipe fills, and git's stderr is
+  ## unbounded in principle (per-ref fetch lines, per-object lfs lines).
+  gitRunSeparated(identity.binaryPath, args, scrubbedGitRepositoryEnv())
 
 template withDrivenOperationContext*(body: untyped) =
   ## Invariant 15 — mark every git child spawned inside ``body`` as a step of
@@ -61307,6 +61353,32 @@ proc gitNoteRun(gitBin: string;
     env = receivedObjectStoreEnv(received))
   (code: res.exitCode, output: res.output)
 
+proc gitNoteQuery(gitBin: string;
+                  args: openArray[string];
+                  received = ReceivedObjectStore()):
+    tuple[code: int; output: string; diagnostic: string] =
+  ## ``gitNoteRun`` for a READ whose stdout is the answer: the note blob, the
+  ## notes tree listing, the resolved notes ref. ``output`` is git's stdout
+  ## ALONE; ``diagnostic`` is stderr followed by stdout, trimmed, for the
+  ## message a failed read reports. Same environment as ``gitNoteRun``
+  ## (``received`` included), same subprocess shape as ``gitRunPlainQuery``.
+  ##
+  ## Merging the streams is wrong here because the note's framing is judged
+  ## on the text read (test-certificates-spec Transport §3.1): a non-empty
+  ## piece before the first ``# --- test-certificate ---`` line is a framing
+  ## fault. Anything git prints on stderr while showing a well-formed note —
+  ## a ``safe.directory`` notice, a replace-object warning, a lazy-fetch
+  ## message in a partial clone, ``GIT_TRACE*`` output — landed exactly
+  ## there, and the gateway and the CI plan reported a carrier fault the note
+  ## did not have (reprobuild-pm issue
+  ## ``2026-10-12-note-reads-merge-git-stderr-into-the-note-text``). Transport
+  ## §3.1 defines the blob, not the output of the command that fetched it.
+  ##
+  ## ``exactStdout``: the body is exactly the blob's bytes — no newline added
+  ## to a blob that does not end in one, no ``\r\n`` folded to ``\n``.
+  gitRunSeparated(gitBin, args, receivedObjectStoreEnv(received),
+    exactStdout = true)
+
 proc certificateNoteRecord*(cert: TestCertificate): string =
   ## One record as it is written into a note (Transport §3.1): the CANONICAL
   ## PAYLOAD, followed — only when the certificate is signed — by one blank
@@ -61516,13 +61588,13 @@ proc noteBlobFromNotesCommit(gitBin, repoPath, notesCommitSha,
   ## ``commit``. A git failure at any step is ``gorUnreadable`` and says which
   ## step failed — a notes-commit the push just delivered is not allowed to
   ## read as "no certificate".
-  let ls = gitNoteRun(gitBin,
+  let ls = gitNoteQuery(gitBin,
     ["-C", repoPath, "ls-tree", "-r", notesCommitSha], received)
   if ls.code != 0:
     return GitNoteRead(status: gorUnreadable, body: "",
       diagnostic: "cannot read the notes tree of " & notesCommitSha &
         " in '" & repoPath & "' (git ls-tree exit " & $ls.code & ": " &
-        ls.output.strip() & ")")
+        ls.diagnostic & ")")
   for rawLine in ls.output.splitLines():
     let line = rawLine.strip()
     if line.len == 0: continue
@@ -61534,14 +61606,14 @@ proc noteBlobFromNotesCommit(gitBin, repoPath, notesCommitSha,
     let objSha = meta[2]
     let path = line[tabIdx + 1 .. ^1].strip()
     if path.replace("/", "") == commit:
-      let blob = gitNoteRun(gitBin,
+      let blob = gitNoteQuery(gitBin,
         ["-C", repoPath, "cat-file", "blob", objSha], received)
       if blob.code == 0:
         return GitNoteRead(status: gorPresent, body: blob.output)
       return GitNoteRead(status: gorUnreadable, body: "",
         diagnostic: "the notes tree of " & notesCommitSha & " names blob " &
           objSha & " for " & commit & " but it cannot be read (git cat-file " &
-          "exit " & $blob.code & ": " & blob.output.strip() & ")")
+          "exit " & $blob.code & ": " & blob.diagnostic & ")")
   GitNoteRead(status: gorAbsent, body: "")
 
 type
@@ -61586,20 +61658,24 @@ proc readNoteBlob*(gitBin, repoPath, annotated, notesRef: string;
   ##
   ## Folding step 3 into step 2 is the shape that told an author whose
   ## certificate was right there in the push to mint it again.
+  ##
+  ## Every step reads through ``gitNoteQuery``: the body is git's stdout
+  ## alone, and what git wrote on stderr goes only into a failure's
+  ## diagnostic, never into the note text.
   let looksLikeSha = notesRef.len in [40, 64] and
     notesRef.allCharsInSet(HexDigits)
   if looksLikeSha:
     return noteBlobFromNotesCommit(gitBin, repoPath, notesRef, annotated,
       received)
   else:
-    let exists = gitNoteRun(gitBin,
+    let exists = gitNoteQuery(gitBin,
       ["-C", repoPath, "rev-parse", "--verify", "--quiet", notesRef],
       received)
     if exists.code != 0 or exists.output.strip().len == 0:
       # STEP 1 — no such notes ref here.
       return GitNoteRead(status: gorAbsent, body: "")
     else:
-      let res = gitNoteRun(gitBin,
+      let res = gitNoteQuery(gitBin,
         ["-C", repoPath, "notes", "--ref", notesRef, "show", annotated],
         received)
       return
@@ -61613,7 +61689,7 @@ proc readNoteBlob*(gitBin, repoPath, annotated, notesRef: string;
           GitNoteRead(status: gorUnreadable, body: "",
             diagnostic: "the note attached to " & annotated & " under " &
               notesRef & " in '" & repoPath & "' cannot be read (git notes " &
-              "show exit " & $res.code & ": " & res.output.strip() & ")")
+              "show exit " & $res.code & ": " & res.diagnostic & ")")
 
 proc readNotedCertificates*(gitBin, repoPath, annotated, notesRef: string;
                             received = ReceivedObjectStore()):
@@ -61711,13 +61787,18 @@ proc commitTreeOid*(gitBin, repoPath, commit: string;
     tuple[ok: bool; tree, diagnostic: string] =
   ## ``<commit>^{tree}`` in ``repoPath`` — inside a receive quarantine when
   ## ``received`` carries its bindings.
-  let res = gitNoteRun(gitBin,
+  ##
+  ## Read through ``gitNoteQuery``, like the note itself: the oid is parsed
+  ## from stdout alone, so a warning git prints on stderr cannot turn a tree
+  ## that resolves into an unreadable note.
+  let res = gitNoteQuery(gitBin,
     ["-C", repoPath, "rev-parse", "--verify", "--quiet", commit & "^{tree}"],
     received)
   let tree = res.output.strip()
   if res.code != 0 or tree.len == 0 or not tree.allCharsInSet(HexDigits):
     return (false, "", "the tree of " & commit & " cannot be resolved in '" &
-      repoPath & "' (git rev-parse exit " & $res.code & ": " & tree & ")")
+      repoPath & "' (git rev-parse exit " & $res.code & ": " &
+      res.diagnostic & ")")
   (true, tree, "")
 
 proc readAttachedCertificatesFrom*(gitBin, repoPath, commit,
