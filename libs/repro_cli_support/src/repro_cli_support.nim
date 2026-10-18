@@ -9,6 +9,7 @@ else:
   # this module's namespace.
   from std/posix import sigaction, sigemptyset, Sigaction, SIGPIPE, SIG_IGN
 import repro_core
+import repro_cli_support/workspace_restore
 # W8-R1/R2 — the one canonicalization the deleting consumers in this file ask
 # their containment question under. Imported by MODULE rather than folded into
 # `repro_core`'s re-exports on purpose: it is wanted at four named sites here
@@ -450,6 +451,9 @@ proc renderUsage*(programName: string): string =
           programName &
       " workspace|ws {bootstrap [<dir>] | init <project|url> [<path>] | " &
       "new <path> [--branch=NAME] [--existing-branch] [--projects=A,B] | " &
+      "restore <source> <destination> --projects=A,B [--at=REV] " &
+      "(--record=PATH|PROJECT/REPO@SHA | --snapshot=NAME) " &
+      "[--record-store=SOURCE] [--record-store-at=REV] | " &
       "sync [<project>...] | pull | switch <branch> [-b] | " &
       "status [<project>] | lock [<project>] | " &
       "list | enable <project>... [--default] " &
@@ -91533,7 +91537,7 @@ proc runWorkspacePublishEvidenceCommand*(args: openArray[string]): int =
   if failed > 0: 1 else: 0
 
 const reproWorkspaceSubcommands = [
-  "init", "sync", "pull", "lock", "status", "list", "manifests",
+  "init", "restore", "sync", "pull", "lock", "status", "list", "manifests",
   "shared-clones", "forall", "bootstrap", "provision",
   # WV-2..WV-6 — membership, definition, and the two branch-family verbs.
   # `sets` is the membership model's spelling of `projects`, which is kept
@@ -93885,6 +93889,13 @@ proc runThinAppDispatch(programName: string): int =
       return runHealthCommand(healthArgs)
     except CatchableError as err:
       stderr.writeLine("repro health: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "restore":
+    try:
+      return runWorkspaceRestoreCommand(args[2 .. ^1], existingRecordStoreRoot)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace restore: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "init":
