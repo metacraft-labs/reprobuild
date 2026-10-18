@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2170,
+    "nimTestBinaries": 2171,
     "pureUnitConsolidationGroups": 62,
     "pureUnitTests": 660,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
-    "testEntries": 2195
+    "testEntries": 2196
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1294,7 +1294,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1183,
+      "integration": 1184,
       "platform/destructive": 132,
       "pure unit": 660,
       "unclassified": 201
@@ -1499,9 +1499,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2170,
+    "nimTestBinaryCount": 2171,
     "pythonTestFileCount": 25,
-    "testEntryCount": 2195
+    "testEntryCount": 2196
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9981,6 +9981,30 @@
       "source": "libs/repro_cli_support/tests/t_hcr_support_profile_follows_the_host.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_home_export_ignores_host_local_lock",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_home_apply",
+        "repro_home_intent",
+        "repro_home_resources",
+        "repro_profile",
+        "repro_profile_compile",
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cli_support/tests/t_home_export_ignores_host_local_lock.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
