@@ -18777,7 +18777,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_resources/tests/t_l6_attach_decision_has_three_outcomes.nim",
       "sourceSuiteCount": 10,
-      "staticCaseCount": 40,
+      "staticCaseCount": 42,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

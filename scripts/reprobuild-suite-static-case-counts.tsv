@@ -631,7 +631,7 @@ libs/repro_resources/tests/t_l2_lease_edge.nim	nim	13
 libs/repro_resources/tests/t_l3_reaper.nim	nim	21
 libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim	nim	45
 libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim	nim	16
-libs/repro_resources/tests/t_l6_attach_decision_has_three_outcomes.nim	nim	40
+libs/repro_resources/tests/t_l6_attach_decision_has_three_outcomes.nim	nim	42
 libs/repro_resources/tests/t_l6_attach_refuses_a_stale_lift.nim	nim	14
 libs/repro_resources/tests/t_l7_instance_registry_converges_in_any_order.nim	nim	35
 libs/repro_resources/tests/t_l8_registrations_mint_once_and_reach_argv.nim	nim	10
