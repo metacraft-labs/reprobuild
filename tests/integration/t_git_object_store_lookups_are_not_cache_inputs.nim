@@ -526,6 +526,64 @@ suite "a git object store's churn does not invalidate a by-name lookup":
       else:
         check "alternates" in r.cacheMissReason
 
+  test "`git -C` paths are not re-anchored on the action's cwd":
+    ## Issue: `reprobuild-pm/issues/2026-10-18-macos-shim-records-relative-
+    ## paths-the-engine-anchors-on-the-action-cwd.md`. `git -C <repo>`
+    ## chdir()s into the repository and then opens `.git/HEAD`,
+    ## `.git/objects/xx/...` and probes `.mailmap` and `HEAD:a.txt` by
+    ## RELATIVE path. The macOS monitor recorded those strings verbatim and
+    ## the evidence fold joined them onto the action's cwd, so the key carried
+    ## phantom inputs `<work>/.git/HEAD`, `<work>/.git/objects/...`,
+    ## `<work>/.mailmap` that git never looked at — creating any of them in
+    ## the action's cwd would have missed the cache. Every relative path has
+    ## to be anchored on the directory the process was in when it made the
+    ## call.
+    ##
+    ## The action's cwd is `work/`, and git does nothing there but name it
+    ## (its startup `getcwd`). So no path BELOW `work/` may be observed,
+    ## enumerated or folded into the key. The key is asked of the evidence
+    ## (`cacheInputPaths` / `cacheEnumeratedDirectories`), as
+    ## `checkKeyClassification` does, so the case holds where no record is
+    ## published (see the header). The positive half — the repository's own
+    ## `.git` was observed — keeps the negative half from passing on an empty
+    ## capture.
+    ##
+    ## git is the action's root process (the resolved Nix image, not SIP
+    ## protected), so neither a `/bin/sh` root nor the script route stands
+    ## between the monitor and the calls this case inspects.
+    if gitExe().len == 0:
+      skip(NoGitReason)
+    else:
+      let repoRoot = findRepoRoot()
+      let f = makeFixture("repro-git-objects-anchor-")
+      defer: removeDir(f.root)
+      let edge = action("git-objects/anchor",
+        [f.git, "-C", f.repo, "show", "HEAD:a.txt"],
+        cwd = f.workRoot,
+        inputs = [],
+        outputs = [],
+        env = f.gitEnv(),
+        cacheable = true,
+        weakFingerprint = weakFingerprintFromText("git-object-store.anchor"),
+        dependencyPolicy = automaticMonitorGatheringPolicy(),
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
+      let config = monitoredConfig(repoRoot, f.cacheRoot)
+      let r0 = runBuild(graph([edge]), config).byId(edge.id)
+      checkpoint("anchor: status=" & $r0.status & " stderr=" & r0.stderr)
+      check r0.status == asSucceeded
+      check r0.launched
+      check r0.observedUnder(f.gitDir).len > 0
+      check (f.gitDir / "HEAD") in edge.cacheInputPaths(r0.evidence)
+      let work = f.workRoot
+      let underWork = proc(path: string): bool =
+        path.replace('\\', '/').startsWith(work.replace('\\', '/') & "/")
+      let phantoms = r0.observedUnder(work) &
+        r0.evidence.monitorDirectoryEnumerations.toSeq.filter(underWork) &
+        edge.cacheInputPaths(r0.evidence).filter(underWork) &
+        edge.cacheEnumeratedDirectories(r0.evidence).filter(underWork)
+      checkpoint("paths attributed to the action's cwd: " & $phantoms)
+      check phantoms.len == 0
+
   test "control: a non-git tree shaped like an object store stays observed":
     ## The SHAPE `objects/<2 hex>/<38 hex>` licenses nothing on its own. Here
     ## it lives under a directory that is not a git directory (no `HEAD`, no
