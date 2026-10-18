@@ -61736,6 +61736,14 @@ proc certificateGate(report: var CheckReport;
   ## A commit with no snapshot has no requirement (TC-9d: the project's
   ## ``[certificates]`` table is no longer read).
   ##
+  ## There is NO ratchet here (operator decision D19 applies it at the
+  ## gateway only). The client has no reliable view of the anchor: the
+  ## remote-tracking ref may be stale, the remote's advertised tip may name
+  ## objects this clone never fetched, and a fork's remote is not the
+  ## upstream the gateway anchors on. A push that drops or narrows its own
+  ## requirement is therefore judged here by its own snapshot and refused at
+  ## the gateway, which is the enforcement point; this gate is fast feedback.
+  ##
   ## DEFAULT-OFF (RA-32): no snapshot, an unmatched branch, or a rule whose
   ## ``gate_mode`` is ``off`` is a strict NO-OP on
   ## ``failures`` and ``exitCode``; an unmatched branch is said in a notice.
@@ -62801,7 +62809,8 @@ proc gatewayLockAsContentFile(read: GatewayLockRead): ContentFile =
 
 type
   GatewayRatchetAnchor* = object
-    ## Where the ratchet's ``gate_mode`` came from for one branch.
+    ## What the ratchet read at the anchor for one branch: its ``gate_mode``
+    ## and, since operator decision D19, its requirement set.
     found*: bool
       ## An anchor commit was resolved and its lock was read.
     commit*: string
@@ -62811,6 +62820,11 @@ type
     mode*: PolicyMode
       ## The anchor snapshot's ``gate_mode`` for the branch (``off`` when the
       ## anchor carries no snapshot or no rule matches).
+    requires*: seq[PolicyRequirement]
+      ## The ``requires`` of the anchor's rule for the branch (D19). Empty
+      ## when the anchor carries no snapshot or no rule matches, and when
+      ## its snapshot is malformed: the names cannot be read then, and only
+      ## the mode is raised (to ``required``).
     detail*: string
 
 proc localRepositoryPath(url: string): string =
@@ -62832,8 +62846,9 @@ proc gatewayRatchetAnchor*(gitBin, gatewayBareDir, upstreamUrl: string;
   ## §4.2): the upstream's published ``refs/heads/<branch>`` — NOT the
   ## ``<old>`` value the hook is handed and NOT the gateway's own refs, both
   ## of which are per-workspace state a fork or a re-created gateway resets.
-  ## Its ``[certificate_policy]`` snapshot's ``gate_mode`` for the same branch
-  ## is the floor a pushed commit cannot relax.
+  ## Its ``[certificate_policy]`` snapshot's rule for the same branch is the
+  ## floor a pushed commit cannot relax: its ``gate_mode`` and, since
+  ## operator decision D19, its ``requires``.
   ##
   ## The anchor commit's objects are read from the gateway (which holds every
   ## commit it forwarded) and, failing that, from the upstream itself when it
@@ -62893,8 +62908,10 @@ proc gatewayRatchetAnchor*(gitBin, gatewayBareDir, upstreamUrl: string;
     let match = matchPolicy(snap.policy, target)
     if match.matched:
       result.mode = match.rule.gateMode
+      result.requires = match.rule.requires
       result.detail = "the anchor's " & ruleLabel(snap.policy,
-        match.ruleIndex) & " sets gate_mode " & $match.rule.gateMode
+        match.ruleIndex) & " sets gate_mode " & $match.rule.gateMode &
+        ", requires " & requirementsLabel(match.rule.requires)
     else:
       result.detail = "the anchor's policy: " & match.reason
   except CertificatePolicySnapshotError as err:
@@ -62912,11 +62929,16 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
   ##   * the requirement (TC-9c) is the ``[certificate_policy]`` snapshot in
   ##     the PUSHED commit's ``repro.lock``, read inside the receive
   ##     quarantine: the first rule matching the DESTINATION branch, its
-  ##     ``gate_mode`` and its ``requires``. ``gate_mode`` alone is ratcheted:
-  ##     the anchor's value for the branch is read too, and the stricter one
-  ##     applies, so a commit cannot relax the rule that judges it. The sets
-  ##     are not ratcheted (Push-Gateway-Wiring §4.2). A pushed commit with no
-  ##     snapshot has no requirement of its own (TC-9d). A config written
+  ##     ``gate_mode`` and its ``requires``. Both are ratcheted (operator
+  ##     decision D19): the anchor's rule for the branch is read too, the
+  ##     stricter ``gate_mode`` applies, and the requirement is the UNION of
+  ##     the anchor's names and the pushed commit's, each on the union of
+  ##     both sides' platforms (``unionRequirements``). A commit therefore
+  ##     cannot relax the rule that judges it: a push that weakens the policy
+  ##     must still satisfy the anchor's, and is the anchor for the pushes
+  ##     after it. A pushed commit with no snapshot has no requirement of its
+  ##     own (TC-9d) and is judged by the anchor's; a new branch (no anchor)
+  ##     is judged by the pushed commit's own. A config written
   ##     before TC-9d may still bake ``gate_mode`` / ``required_*``: they are
   ##     never applied, and the gateway says so once per push;
   ##   * the certificates are the notes on the pushed commit's TREE (TC-8c),
@@ -62966,19 +62988,37 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
         requirement.error & "; REFUSING (a policy the gateway cannot read " &
         "is not a policy it may wave through)"
       return
-    # The anchor can only raise the mode, and a mode gates nothing when no
-    # name is required (the sets are not ratcheted, §4.2). With no snapshot
-    # there is no policy in play, so the gateway does not query the upstream
-    # at all: `off` stays a transparent forward, as it was before the ratchet
-    # existed.
-    let anchor =
-      if requirement.source != gpsSnapshot and requirement.requires.len == 0:
-        GatewayRatchetAnchor(source: "not resolved: no policy in play")
-      else:
-        gatewayRatchetAnchor(gitBin, gatewayBareDir, cfg.upstreamUrl, target,
-          received)
+    # The ratchet (operator decision D19): the anchor is resolved for EVERY
+    # branch update, including one whose pushed tree carries no snapshot —
+    # deleting `[certificate_policy]` is exactly the push the anchor must
+    # still judge. The anchor raises the mode and adds its names; it never
+    # lowers or removes anything the pushed rule asks for.
+    let anchor = gatewayRatchetAnchor(gitBin, gatewayBareDir,
+      cfg.upstreamUrl, target, received)
     let pushedMode = toPolicyMode(requirement.mode)
     let effective = toGateMode(stricterMode(pushedMode, anchor.mode))
+    # A side whose mode is `off` requires nothing at push time, whatever its
+    # rule lists: its names are not a requirement, so they do not enter the
+    # union. That keeps a rule `off` with names inert, as it is on its own.
+    let pushedRequires =
+      if pushedMode == pmOff: newSeq[PolicyRequirement]()
+      else: requirement.requires
+    let anchorRequires =
+      if anchor.mode == pmOff: newSeq[PolicyRequirement]()
+      else: anchor.requires
+    let requires = unionRequirements(pushedRequires, anchorRequires)
+    # What the anchor holds that the pushed rule dropped or narrowed: named,
+    # because "the push asks for nothing and is refused" needs its reason.
+    var heldByAnchor: seq[PolicyRequirement]
+    for req in requires:
+      var pushedSide: seq[string]
+      var named = false
+      for p in pushedRequires:
+        if p.certificate == req.certificate:
+          named = true
+          pushedSide = p.platforms
+      if not named or pushedSide != req.platforms:
+        heldByAnchor.add(req)
     # A gateway with no policy anywhere stays silent: `off` is a documented
     # strict no-op, and the absence of output is its specification.
     if requirement.source == gpsSnapshot or effective != cgmOff:
@@ -62989,12 +63029,18 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
         "; applied gate_mode " & $effective &
         (if toPolicyMode(effective) != pushedMode:
            " (the pushed commit's " & $pushedMode & " cannot relax it)"
+         else: "") &
+        ", requires " & requirementsLabel(requires) &
+        (if effective != cgmOff and heldByAnchor.len > 0:
+           " (the anchor's " & requirementsLabel(heldByAnchor) &
+             " still applies: a commit cannot drop or narrow the " &
+             "requirement that judges it)"
          else: ""))
     if effective == cgmOff:
       continue
-    if requirement.requires.len == 0:
-      # Nothing to attest: a pushed rule that names nothing (the sets are
-      # not ratcheted, §4.2).
+    if requires.len == 0:
+      # Nothing to attest: neither the pushed rule nor the anchor's names a
+      # certificate.
       continue
     # TC-8c (Transport §3): the certificates for the pushed commit are the
     # notes on its TREE, ``<new>^{tree}``, resolved inside the receive
@@ -63043,7 +63089,7 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
     # the pushed tree, or, for a project that opted into a lock record store
     # (a configured ``lock_records_dir``), the record for the pushed commit.
     let verdict = evaluateRequirementCoverage(found, evaluated,
-      requirement.requires, keys, lockSource, couldNotLook)
+      requires, keys, lockSource, couldNotLook)
     case verdict.outcome
     of voCovered:
       # COVERED — and by WHAT. An acceptance that says nothing is

@@ -12672,6 +12672,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_gateway_ratchets_the_anchor_requirements.nim",
+    binary: "build/test-bin/t_gateway_ratchets_the_anchor_requirements",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_gateway_reads_the_policy_from_the_pushed_tree_by_destination_branch.nim",
     binary: "build/test-bin/t_gateway_reads_the_policy_from_the_pushed_tree_by_destination_branch",
     defines: @[],

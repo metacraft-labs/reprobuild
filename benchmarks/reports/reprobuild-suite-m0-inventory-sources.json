@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2178,
+    "nimTestBinaries": 2179,
     "pureUnitConsolidationGroups": 62,
     "pureUnitTests": 660,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
-    "testEntries": 2205
+    "testEntries": 2206
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1294,7 +1294,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1188,
+      "integration": 1189,
       "platform/destructive": 132,
       "pure unit": 660,
       "unclassified": 206
@@ -1499,9 +1499,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2178,
+    "nimTestBinaryCount": 2179,
     "pythonTestFileCount": 27,
-    "testEntryCount": 2205
+    "testEntryCount": 2206
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -32779,6 +32779,21 @@
       "source": "tests/integration/t_gateway_finds_certificates_by_the_pushed_tree.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_gateway_ratchets_the_anchor_requirements",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_gateway_ratchets_the_anchor_requirements.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
