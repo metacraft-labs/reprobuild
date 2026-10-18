@@ -405,6 +405,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_cache_refusal_always_names_its_reason.nim",
+    binary: "build/test-bin/t_cache_refusal_always_names_its_reason",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_child_cpu_stats_row.nim",
     binary: "build/test-bin/t_child_cpu_stats_row",
     defines: @[],
@@ -3258,6 +3267,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_consumer_compile_paths_carry_the_shm_packages.nim",
+    binary: "build/test-bin/t_consumer_compile_paths_carry_the_shm_packages",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_contribution_records.nim",
     binary: "build/test-bin/t_contribution_records",
     defines: @[],
@@ -3431,15 +3449,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_runtime_tool_uses_codec.nim",
     binary: "build/test-bin/t_runtime_tool_uses_codec",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny,
-    selfInterposes: false),
-  TestSpec(
-    source: "libs/repro_interface_artifacts/tests/t_consumer_compile_paths_carry_the_shm_packages.nim",
-    binary: "build/test-bin/t_consumer_compile_paths_carry_the_shm_packages",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

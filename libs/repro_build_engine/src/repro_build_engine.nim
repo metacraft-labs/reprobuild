@@ -153,6 +153,11 @@ import repro_build_engine/action_extension
 # the scheduler. Read its header before changing anything here that touches
 # ``depTempPath`` / ``depDestPath``.
 import repro_build_engine/monitor_flush
+# A withheld action-cache publish and the class that withheld it, as ONE value
+# whose only writer takes the class as an argument. It is a module of its own
+# because a private field is writable from anywhere in its declaring module, so
+# declared here it would seal nothing. Read its header before adding a refusal.
+import repro_build_engine/cache_refusal
 # Engine-Threadpool TP-1/TP-2: the flush above is one TENANT of the engine's
 # worker pool, not a thread of its own, and TP-2's monitor finish is the
 # second. The flush's tenancy is entirely inside ``monitor_flush``, so the
@@ -1452,7 +1457,7 @@ type
     ## It is harmless on the GUARD'S POLARITY, which is the only thing that
     ## matters here. The five terms in `applyMonitorEvidenceStatus` are
     ## joined by `and`, and the conjunction being TRUE is the REFUSAL — it
-    ## adds `zeroEvidenceDiagnostic`, sets `disableCacheHits` and
+    ## adds `zeroEvidenceDiagnostic` and refuses the publish with
     ## `cirEmptyEvidence`. An empty channel makes its term TRUE, i.e. pushes
     ## toward refusing the publish; a FILLED one makes its term FALSE and
     ## short-circuits the refusal. No term anywhere reads emptiness as
@@ -1686,33 +1691,6 @@ type
     mesUnknownScopeLoss    ## Level 2
     mesMonitorUnavailable  ## Level 3
 
-  CacheIneligibilityReason = enum
-    cirUnblessedEntropy = "unblessed-entropy"
-    cirEntropyUnobservable = "entropy-unobservable"
-    cirEntropyObservabilityUnknown = "entropy-observability-unknown"
-    cirEmptyEvidence = "empty-evidence"
-    cirMonitorLoss = "monitor-loss"
-    cirMonitorFlushFailed = "monitor-flush-failed"
-    cirMissingDependencyReport = "missing-dependency-report"
-      ## A cacheable edge declared a recognized dependency report (a
-      ## depfile) and produced none of the paths it declared, so it
-      ## contributed no evidence at all. See the aggregate guard in
-      ## ``collectEvidence``.
-    cirEmptyKeyedInputSet = "empty-keyed-input-set"
-      ## The edge DID observe something, and the engine's own subtractions
-      ## — ``toolInputRoots`` and ``ignoredInputRoots`` — removed all of it,
-      ## so the record would have been keyed on the weak fingerprint alone.
-      ## Distinct from ``cirEmptyEvidence``, which is the monitor having
-      ## seen nothing: the remedies differ (the elision, or the edge wanting
-      ## ``cacheable = false``) and so must the class. See
-      ## ``gradeKeyedInputSet`` and ``emptyKeyedInputSetDiagnostic``.
-      ##
-      ## APPEND NEW MEMBERS HERE. Nothing persists this enum — the set is a
-      ## module-private diagnostic field whose only escape is ``$reason`` in
-      ## ``traceCacheIneligibility`` — but ordinal order IS the order those
-      ## strings are joined in, which several tests pin, so an insertion
-      ## reshuffles reported text for no gain.
-
   MonitorEvidenceRequirement* = object
     ## WHAT THIS BUILD NEEDS A CAPTURE TO HAVE OBSERVED BEFORE IT WILL TRUST IT
     ## — the consumer side of DA-1i and DA-1j, in one object so a fold site
@@ -1769,31 +1747,32 @@ type
   EvidenceCollection = object
     evidence: PathSetEvidence
     publishable: bool
-    disableCacheHits: bool
-      ## Withhold this action's cache publication without failing the action.
-      ## ``CacheIneligibilityReason`` enumerates every cause — read that enum
-      ## rather than a list here, which had already gone stale (it omitted
-      ## ``cirMissingDependencyReport``). Only ``monitorStatus`` governs
-      ## session-wide loss invalidation; known-scope loss uses
+    cacheRefusal: CacheRefusal
+      ## Whether this action's cache publication is withheld WITHOUT failing
+      ## the action, and which classes withheld it — one value, not two.
+      ## ``CacheIneligibilityReason`` enumerates every cause; read that enum
+      ## rather than a list here, which had already gone stale once (it
+      ## omitted ``cirMissingDependencyReport``). Only ``monitorStatus``
+      ## governs session-wide loss invalidation; known-scope loss uses
       ## ``invalidatedPaths`` instead.
       ##
-      ## SET THIS AND ``cacheIneligibilityReasons`` TOGETHER, always. The two
-      ## are not independent: this flag decides, that set says which class
-      ## decided, and a site that sets only this one reaches an operator as
-      ## ``reasons=unspecified`` and is invisible to any per-class count.
-    cacheIneligibilityReasons: set[CacheIneligibilityReason]
-      ## Diagnostic, with ONE exception that this comment used to deny and
-      ## that a reader must not be surprised by: ``determinismProbeAdmits``
-      ## gates on ``!= {cirUnblessedEntropy}``, because a probe that compares
-      ## output bytes can answer a determinism question and cannot answer a
-      ## question about what was SEEN. That is an exact-set comparison, so it
-      ## is only as truthful as this set is COMPLETE — a site that refuses
-      ## without recording its class does not merely go uncounted, it tells
-      ## the probe that entropy was the sole refusal and buys a publish the
-      ## other refusal had already denied. ``gradeKeyedInputSet`` did exactly
-      ## that; the case is in
-      ## ``t_zero_evidence_edge_is_not_cacheable``. Nothing else reads this
-      ## set but ``traceCacheIneligibility``.
+      ## WRITE IT ONLY THROUGH ``refuseCachePublication``, which takes the
+      ## reason as an argument; read it through ``disableCacheHits`` and
+      ## ``cacheIneligibilityReasons``. This used to be a ``disableCacheHits``
+      ## flag beside a reason set, paired by a comment, and the comment failed
+      ## at ``gradeKeyedInputSet``: it refused without naming a class.
+      ##
+      ## That was not merely uncounted. ``determinismProbeAdmits`` gates on
+      ## ``cacheIneligibilityReasons != {cirUnblessedEntropy}`` — a probe
+      ## that compares output bytes can answer a determinism question and
+      ## cannot answer a question about what was SEEN — and an exact-set
+      ## comparison is only as truthful as the set is COMPLETE. A refusal
+      ## with no class told the probe that entropy was the sole refusal and
+      ## bought a publish the other refusal had already denied; the case is
+      ## in ``t_zero_evidence_edge_is_not_cacheable``. ``CacheRefusal``
+      ## derives "refused" from a non-empty reason set and keeps that set
+      ## private to its own module, so "refused with no reason" cannot be
+      ## constructed here at all — see ``cache_refusal.nim``.
       ##
       ## Never persisted — see the note on ``CacheIneligibilityReason``.
     invalidatedPaths: HashSet[string]
@@ -2440,6 +2419,31 @@ const
     dgRecognizedFormatValidatedByMonitor,
     dgPostBuildConverterValidatedByMonitor
   }
+
+# ``EvidenceCollection.cacheRefusal``'s three faces. The two readers keep the
+# names the fields had, so every reader in this file — the scheduler's publish
+# gates, ``traceCacheIneligibility``, ``determinismProbeAdmits`` — reads exactly
+# what it read before. The writer is the change: there is no other way to set
+# ``disableCacheHits``, and it cannot be called without a reason.
+
+func disableCacheHits(c: EvidenceCollection): bool {.inline.} =
+  ## True iff some class withheld this action's cache publication. Derived
+  ## from ``cacheIneligibilityReasons`` being non-empty, never stored.
+  c.cacheRefusal.refused
+
+func cacheIneligibilityReasons(c: EvidenceCollection):
+    set[CacheIneligibilityReason] {.inline.} =
+  ## Every class that withheld the publication; empty iff
+  ## ``disableCacheHits`` is false.
+  c.cacheRefusal.reasons
+
+proc refuseCachePublication(c: var EvidenceCollection;
+                            reason: CacheIneligibilityReason) {.inline.} =
+  ## Withhold this action's cache publication — the action still succeeds —
+  ## and record ``reason`` as a class that withheld it. The ONLY way to make
+  ## ``disableCacheHits`` true. Cumulative: a second refusal adds its class,
+  ## which ``determinismProbeAdmits``'s exact-set gate depends on.
+  c.cacheRefusal.refuse(reason)
 
 proc applyCachePlatformTag*(idy: CacheEntryIdentity; tag: string):
     CacheEntryIdentity =
@@ -3470,11 +3474,15 @@ proc traceCacheIneligibility(result: var BuildRunResult; actionId: string;
   ## and `test_m6_entropy_blessing`, and widening it there would move a
   ## string three suites compare byte-for-byte while adding nothing those
   ## suites are about.
+  ##
+  ## Every caller guards on `collection.disableCacheHits`, and that is true
+  ## exactly when the reason set is non-empty (`cache_refusal.nim`), so the
+  ## list below always names at least one class. There used to be an
+  ## `"unspecified"` placeholder for an empty set; it rendered a state that
+  ## can no longer be constructed, and has gone with it.
   var reasons: seq[string] = @[]
   for reason in collection.cacheIneligibilityReasons:
     reasons.add($reason)
-  if reasons.len == 0:
-    reasons.add("unspecified")
   # Keep the existing event for actual loss, not every cache refusal.
   let event =
     if cirMonitorLoss in collection.cacheIneligibilityReasons:
@@ -8021,8 +8029,7 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
       "§General Rules (ambiguous correctness failures fail " &
       "closed).")
     collection.evidence.diagnostics.add(text)
-    collection.disableCacheHits = true
-    collection.cacheIneligibilityReasons.incl(cirUnblessedEntropy)
+    collection.refuseCachePublication(cirUnblessedEntropy)
     return
   if collection.evidence.entropyObservability != entObserved:
     collection.evidence.diagnostics.add(
@@ -8037,8 +8044,7 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
       "randomness was consumed. Rule: Failure-Semantics.md " &
       "§General Rules (ambiguous correctness failures fail " &
       "closed).")
-    collection.disableCacheHits = true
-    collection.cacheIneligibilityReasons.incl(
+    collection.refuseCachePublication(
       if collection.evidence.entropyObservability == entNotObserved:
         cirEntropyUnobservable
       else:
@@ -8191,8 +8197,8 @@ proc depfileObservedNothing(col: EvidenceCollection): bool {.inline.} =
   ##
   ## WHICH POLARITY THAT IS, AND WHAT GRADES IT. The caller is the
   ## zero-evidence guard in `applyMonitorEvidenceStatus`, the only one, and
-  ## `true` there is a REFUSAL: it adds `zeroEvidenceDiagnostic`, sets
-  ## `disableCacheHits` and `cirEmptyEvidence`, so the action succeeds and
+  ## `true` there is a REFUSAL: it adds `zeroEvidenceDiagnostic` and
+  ## refuses the publish with `cirEmptyEvidence`, so the action succeeds and
   ## does not publish. `false` lets the publish through. For an UNMARKED
   ## writer this returns `true` — the refusal — which is the fail-closed
   ## answer; the absence spelling (`evcDeclarationDerivedDepfile in …`) would
@@ -8335,8 +8341,7 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
         col.depfileObservedNothing():
       col.evidence.diagnostics.add(
         zeroEvidenceDiagnostic(action.id, MonitorHasLibraryLoadFloor))
-      col.disableCacheHits = true
-      col.cacheIneligibilityReasons.incl(cirEmptyEvidence)
+      col.refuseCachePublication(cirEmptyEvidence)
   of mesKnownScopeLoss:
     # M9.R.73.2 — spec Level 1 narrow path-set invalidation per
     # ``reprobuild-specs/Monitor-Loss-Path-Invalidation.md``. The
@@ -8371,8 +8376,7 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
       "action-cache publish skipped this session per " &
       "Failure-Semantics.md §Monitoring Failures")
     if action.cacheable:
-      col.disableCacheHits = true
-      col.cacheIneligibilityReasons.incl(cirMonitorLoss)
+      col.refuseCachePublication(cirMonitorLoss)
   of mesMonitorUnavailable:
     # Unreachable from foldMonitorDepFileEvidence today (Level 3 is
     # asserted here only when the iomon path was empty), but future
@@ -8556,15 +8560,15 @@ proc gradeKeyedInputSet(action: BuildAction; col: var EvidenceCollection) =
     return
   col.evidence.diagnostics.add(
     emptyKeyedInputSetDiagnostic(action.id, observed, observed))
-  col.disableCacheHits = true
-  # The MACHINE-READABLE half of the same refusal. The diagnostic above is
-  # for a human reading one build; this is what a per-class count reads, and
-  # a refusal that records no reason is not "uncounted" but INVISIBLE — it
-  # cannot appear as a row, a zero, or a regression. Every other
-  # ``disableCacheHits`` site in this file names its class; this one did not,
-  # and reached an operator as ``reasons=unspecified`` via the defensive
-  # fallback in ``traceCacheIneligibility``.
-  col.cacheIneligibilityReasons.incl(cirEmptyKeyedInputSet)
+  # The reason is the MACHINE-READABLE half of the same refusal. The
+  # diagnostic above is for a human reading one build; the class is what a
+  # per-class count and ``determinismProbeAdmits``'s exact-set gate read, and
+  # a refusal that records no class is not "uncounted" but INVISIBLE — and,
+  # beside an entropy refusal, it reads to the probe as "entropy alone" and
+  # buys a publish. This site once set the flag and omitted the class; that
+  # can no longer be written, because the reason is an argument of the only
+  # way to refuse (``refuseCachePublication``; see ``cache_refusal.nim``).
+  col.refuseCachePublication(cirEmptyKeyedInputSet)
 
 proc scratchKey(path: string): string =
   ## Normalized for containment: forward slashes, no trailing separator,
@@ -9089,8 +9093,7 @@ proc collectEvidence(action: BuildAction; strict: bool;
         "published. Either make the command write that file or move the " &
         "edge off the depfile policy. Spec: " &
         "Compiles-Are-Normal-Edges.md.")
-      result.disableCacheHits = true
-      result.cacheIneligibilityReasons.incl(cirMissingDependencyReport)
+      result.refuseCachePublication(cirMissingDependencyReport)
   let converters = action.converterSpecsForPolicy()
   if action.dependencyPolicy.kind in ConverterPolicyKinds and converters.len == 0:
     result.evidence.diagnostics.add(
@@ -19074,7 +19077,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # "disable cache hits for the affected session" language: all subsequent
   # cache lookups are treated as ``cdMiss``. It gates LOOKUPS and nothing
   # else; the Level 2 action's own publish is withheld separately, by
-  # ``EvidenceCollection.disableCacheHits``. It was called
+  # ``EvidenceCollection.cacheRefusal`` (``disableCacheHits``). It was called
   # ``sessionCachePublishDisabled``, which named the one thing it does not
   # do. Level 1 does NOT set this bit — its narrow
   # ``sessionInvalidatedPaths`` accumulator is the whole story.
@@ -21560,8 +21563,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           if outcome.error.len == 0: continue
           monitorFlushFailures[outcome.actionId] = outcome.error
         if monitorFlushFailures.hasKey(finished.id):
-          evidence.disableCacheHits = true
-          evidence.cacheIneligibilityReasons.incl(cirMonitorFlushFailed)
+          evidence.refuseCachePublication(cirMonitorFlushFailed)
           evidence.evidence.diagnostics.add(
             "monitor depfile flush failed; action-cache publish skipped so " &
             "the next build re-executes: " & monitorFlushFailures[finished.id])

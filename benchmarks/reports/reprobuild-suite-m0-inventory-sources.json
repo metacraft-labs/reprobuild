@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2267,
+    "nimTestBinaries": 2268,
     "pureUnitConsolidationGroups": 63,
-    "pureUnitTests": 677,
+    "pureUnitTests": 678,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2298
+    "testEntries": 2299
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -23,13 +23,14 @@
       "targetOs": "soAny"
     },
     {
-      "count": 5,
+      "count": 6,
       "defines": [],
       "dependencyShape": [
         "repro_build_engine"
       ],
       "owner": "libs/repro_build_engine",
       "sources": [
+        "libs/repro_build_engine/tests/t_cache_refusal_always_names_its_reason.nim",
         "libs/repro_build_engine/tests/t_daemon_check_platform_refusal.nim",
         "libs/repro_build_engine/tests/t_monitor_scratch_is_not_a_cache_input.nim",
         "libs/repro_build_engine/tests/t_self_written_set_is_derived.nim",
@@ -1319,7 +1320,7 @@
       "graph-fixture": 17,
       "integration": 1242,
       "platform/destructive": 138,
-      "pure unit": 677,
+      "pure unit": 678,
       "unclassified": 224
     },
     "graphOwnedTestArtifacts": [
@@ -1522,9 +1523,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2267,
+    "nimTestBinaryCount": 2268,
     "pythonTestFileCount": 31,
-    "testEntryCount": 2298
+    "testEntryCount": 2299
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8210,6 +8211,23 @@
       "source": "libs/repro_build_engine/tests/t_cache_record_for_other_outputs_is_not_served.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cache_refusal_always_names_its_reason",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_cache_refusal_always_names_its_reason.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
