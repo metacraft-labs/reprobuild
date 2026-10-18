@@ -1926,6 +1926,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_deploy_agent/tests/t_deploy_agent_records_the_resolved_host.nim",
+    binary: "build/test-bin/t_deploy_agent_records_the_resolved_host",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim",
     binary: "build/test-bin/t_repro_deploy_agent_converges_from_signed_manifest",
     defines: @[],
@@ -3143,6 +3152,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_infra/tests/t_smoke_repro_infra.nim",
     binary: "build/test-bin/t_smoke_repro_infra",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_infra/tests/t_system_generations_distinct_within_one_second.nim",
+    binary: "build/test-bin/t_system_generations_distinct_within_one_second",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -8631,6 +8649,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/gm11/t_e2e_two_resources_on_one_target.nim",
+    binary: "build/test-bin/t_e2e_two_resources_on_one_target",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/gm4b/t_e2e_home_apply_realizes_nix_selection.nim",
     binary: "build/test-bin/t_e2e_home_apply_realizes_nix_selection",
     defines: @[],
@@ -9137,6 +9164,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/e2e/home-intent/t_e2e_inspector_composed_profiles.nim",
     binary: "build/test-bin/t_e2e_inspector_composed_profiles",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/e2e/home-intent/t_e2e_intent_snapshot_records_subdirectory_modules.nim",
+    binary: "build/test-bin/t_e2e_intent_snapshot_records_subdirectory_modules",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

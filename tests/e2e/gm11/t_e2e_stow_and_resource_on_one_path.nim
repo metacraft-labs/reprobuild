@@ -16,8 +16,9 @@
 ## * `repro home facts` succeeds and lists the path once, from the resource,
 ##   with the digest computed independently (`sha256sum` of the literal
 ##   bytes). Two `envUserPath` resources sharing an entry list that entry
-##   once. That is the facts-side half of the issue: entries used to be
-##   compared with their informational `origin`.
+##   once on Windows, where the driver merges them; on POSIX they write one
+##   rc block and facts refuses them as the apply does (issue
+##   2026-10-18-home-apply-applies-two-resources-for-one-path-or-variable).
 ## * `repro home apply` succeeds and reports `IStowSameAsResource`. The path
 ##   is a regular file written by the resource, while the package's other
 ##   file is linked as usual (negative control). The stow source is
@@ -62,6 +63,7 @@ from repro_core/paths import extendedPath
 import nimcrypto/sha2
 
 import repro_home_generations
+from repro_home_apply/host_facts import differingComparedFields
 
 import ../m83/profile_compile_edge_harness
 
@@ -88,8 +90,8 @@ const
 proc profileWith(resource: string; sharedPath = false): string =
   ## The fixture profile; `resource` is the `fsUserFile` line(s) for
   ## `~/.config/c1/caches.conf` ("" for none). `sharedPath` adds two
-  ## `envUserPath` resources sharing an entry (a facts-only fixture: an
-  ## apply of that pair is issue
+  ## `envUserPath` resources sharing an entry (a facts-only fixture: a
+  ## POSIX plan refuses that pair, issue
   ## 2026-10-18-home-apply-applies-two-resources-for-one-path-or-variable).
   # The stow file's bytes, read at profile compile time the way
   # zah/dotfiles' Windows `caches.conf` resource reads its stow file.
@@ -192,21 +194,42 @@ suite "A stow file and an fs.userFile resource on one path":
     check control.len == 1
     if control.len == 1:
       check control[0]["origin"].getStr == "stow stow/c1/" & ControlRel
-    # Two PATH resources sharing an entry: one fact, the first origin.
+    # Two profile PATH resources write the rc file's one PATH block, so
+    # facts refuses them exactly as the apply does (issue
+    # 2026-10-18-home-apply-applies-two-resources-for-one-path-or-variable;
+    # t_e2e_two_resources_on_one_target). On Windows the driver merges each
+    # resource's entries into the user PATH value instead, so there the pair
+    # is one fact per entry, listed once from the first origin.
     block:
       let pathSb = newFixture("c1-agree-path", AgreeingResource,
         sharedPath = true)
       defer: pathSb.dispose()
       let pathFacts = pathSb.runRepro(["home", "facts"])
       show("facts with a shared PATH entry", pathFacts)
-      require pathFacts.exitCode == 0
-      let pathDoc = parseJson(pathFacts.stdout)
-      let shared = pathDoc.entriesFor("environment", "path:~/.c1/bin")
-      check shared.len == 1
-      if shared.len == 1:
-        check shared[0]["origin"].getStr == "resource c1PathA"
-      check pathDoc.entriesFor("environment", "path:/opt/c1a").len == 1
-      check pathDoc.entriesFor("environment", "path:/opt/c1b").len == 1
+      when defined(windows):
+        require pathFacts.exitCode == 0
+        let pathDoc = parseJson(pathFacts.stdout)
+        let shared = pathDoc.entriesFor("environment", "path:~/.c1/bin")
+        check shared.len == 1
+        if shared.len == 1:
+          check shared[0]["origin"].getStr == "resource c1PathA"
+        check pathDoc.entriesFor("environment", "path:/opt/c1a").len == 1
+        check pathDoc.entriesFor("environment", "path:/opt/c1b").len == 1
+      else:
+        check pathFacts.exitCode != 0
+        check "and `c1PathB` both write `the PATH block of " in
+          pathFacts.stderr
+        # The fixture above no longer reaches the facts builder on POSIX, so
+        # the rule it exercised there -- two entries for one id that differ
+        # only in their informational `origin` are one fact -- is checked
+        # here against the builder's own comparison, which every host's
+        # facts document goes through.
+        let fromA = %*{"id": "path:~/.c1/bin", "origin": "resource c1PathA"}
+        let fromB = %*{"id": "path:~/.c1/bin", "origin": "resource c1PathB"}
+        check differingComparedFields(fromA, fromB).len == 0
+        var withMode = fromB.copy()
+        withMode["mode"] = %"0600"
+        check differingComparedFields(fromA, withMode) == @["mode"]
 
     # --- apply: the resource is the one writer ----------------------------
     let applied = sb.runRepro(["home", "apply"])

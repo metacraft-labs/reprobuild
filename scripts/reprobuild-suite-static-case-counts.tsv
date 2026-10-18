@@ -220,6 +220,7 @@ libs/repro_daemon_core/tests/t_ipc_endpoint_is_bounded_to_the_socket_address_lim
 libs/repro_daemon_core/tests/t_l4_daemon_leases.nim	nim	13
 libs/repro_daemon_core/tests/t_service_materialise_verifies_liveness.nim	nim	6
 libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	nim	3
+libs/repro_deploy_agent/tests/t_deploy_agent_records_the_resolved_host.nim	nim	3
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim	nim	2
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_manifest_v2_secrets.nim	nim	7
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_materialises_secrets.nim	nim	5
@@ -356,6 +357,7 @@ libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	nim	65
 libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.nim	nim	4
 libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	206
+libs/repro_infra/tests/t_system_generations_distinct_within_one_second.nim	nim	4
 libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim	nim	12
 libs/repro_interface_artifacts/tests/t_contribution_records.nim	nim	3
 libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim	nim	9
@@ -965,6 +967,7 @@ tests/e2e/gm10/t_e2e_infra_apply_refuses_externally_managed_host.nim	nim	1
 tests/e2e/gm10/t_e2e_infra_host_identity_matches_home.nim	nim	4
 tests/e2e/gm11/t_e2e_stow_and_resource_on_one_path.nim	nim	4
 tests/e2e/gm11/t_e2e_stow_package_follows_activity.nim	nim	2
+tests/e2e/gm11/t_e2e_two_resources_on_one_target.nim	nim	2
 tests/e2e/gm4b/t_e2e_home_apply_realizes_nix_selection.nim	nim	1
 tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim	nim	6
 tests/e2e/gm4b/t_e2e_home_profile_resolves_just_for_darwin.nim	nim	3
@@ -1022,6 +1025,7 @@ tests/e2e/home-generations/t_integration_pointer_envelope_and_history_enumeratio
 tests/e2e/home-intent/t_e2e_home_get_reads_only_config.nim	nim	2
 tests/e2e/home-intent/t_e2e_home_list_why_uncompilable_profile.nim	nim	2
 tests/e2e/home-intent/t_e2e_inspector_composed_profiles.nim	nim	3
+tests/e2e/home-intent/t_e2e_intent_snapshot_records_subdirectory_modules.nim	nim	2
 tests/e2e/home-intent/t_e2e_nested_activity_guards.nim	nim	1
 tests/e2e/home-intent/t_e2e_repro_home_intent_commands.nim	nim	18
 tests/e2e/home-intent/t_integration_intent_layer_config_section.nim	nim	7

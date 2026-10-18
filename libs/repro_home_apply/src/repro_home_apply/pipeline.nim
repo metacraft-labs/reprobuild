@@ -1227,12 +1227,47 @@ proc collectProfileResources(profilePath, homeDir: string; ctx: HostContext;
   ## absent under a non-matching predicate; an activity-scoped resource
   ## (GM9) only when `activities` enables its activity. Two resources may
   ## share an address as long as no host gets both.
+  ##
+  ## Likewise two resources a host gets may not write one real-world
+  ## object -- one file, one variable, one block, one unit -- under two
+  ## addresses (`file_facts.sharesTargetWith`). Each address is bound to
+  ## what it writes, so the apply would write the object twice (the last
+  ## declaration winning, and the next apply reporting the first
+  ## resource's drift against the second's write), and removing either
+  ## resource later would destroy what the other still declares. The pair
+  ## is refused here, at plan time and before anything is written, naming
+  ## both addresses and whatever they disagree on; `repro home facts` runs
+  ## this same planner, so facts and apply refuse the same profiles
+  ## (reprobuild-pm issue
+  ## 2026-10-18-home-apply-applies-two-resources-for-one-path-or-variable;
+  ## Home-Profile-Resource-Lifecycle.md §One Real-World Object, One
+  ## Resource). Unlike a
+  ## stow file on a resource's path (`resolveStowResourceOverlap`), an
+  ## agreeing pair is refused too: a stow file has no binding to release,
+  ## a second resource does.
+  var lineOf = initTable[string, int]()
   for node in applicableResourceEntries(nodes, ctx, activities):
     let r = resourceFromEntry(profilePath, homeDir, node)
     if r.address in into.resources:
       resourceProfileError(profilePath, node.resourceHeaderLine,
         "duplicate resource address `" & r.address &
         "` in the profile's `resources:` block")
+    for _, earlier in into.resources:
+      if earlier.sharesTargetWith(r):
+        let differing = differingTargetFields(earlier, r)
+        let both = "resources `" & earlier.address & "` (line " &
+          $lineOf.getOrDefault(earlier.address) & ") and `" & r.address &
+          "` both write `" & resourceTargetLabel(r, homeDir) & "` (" &
+          $r.kind & ")"
+        resourceProfileError(profilePath, node.resourceHeaderLine,
+          if differing.len > 0:
+            both & " and disagree on " & differing.join(" and ") &
+              "; one object has one writer: remove one of them"
+          else:
+            both & "; they agree, but each resource owns what it " &
+              "writes, so removing either would destroy the other's: " &
+              "declare it once")
+    lineOf[r.address] = node.resourceHeaderLine
     into.add(r)
 
 proc parseProfileResources*(profile: Profile; homeDir: string;
@@ -1492,7 +1527,18 @@ proc profileIntentSnapshot*(profileDir: string; profile: Profile):
   ## here puts it in the generation id and keeps it with the generation, so
   ## rollback and `repro home history` never consult the live file. The
   ## one constructor for both the plan preview and the apply.
-  result.files = defaultWalkProfileFiles(profileDir)
+  ##
+  ## The source files are the top-level `*.nim` files plus everything under
+  ## the profile directory the compile was observed reading
+  ## (`profileSourceFiles` over `Profile.compiledFrom`), so helper modules
+  ## imported from subdirectories are recorded too. A data file is recorded
+  ## once, with its data role.
+  var dataPaths = initHashSet[string]()
+  for f in profile.loadedDataFiles:
+    dataPaths.incl f.path.replace('\\', '/')
+  for e in profileSourceFiles(profileDir, profile.compiledFrom):
+    if e.path notin dataPaths:
+      result.files.add e
   for f in profile.loadedDataFiles:
     var bytes = newSeq[byte](f.content.len)
     for i, ch in f.content:
