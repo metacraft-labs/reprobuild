@@ -20359,23 +20359,56 @@ const ManagedHookRefusalDirAssignment = "REPRO_REFUSAL_RECORD_DIR="
   ## reports every installed hook as "old or partially upgraded" and `repro
   ## push` stops at hook-preflight.
 
+type ManagedHookAuthorLineForm = object
+  ## One generation of the escape-hatch author line: the literal text around
+  ## the path, and whether the path between them is shell-quoted.
+  prefix, suffix: string
+  quoted: bool
+
 const
-  # The two anchors around the FIRST such value. Kept beside the reader rather
-  # than inside it so the coupling to
-  # `vcsManagedHookBody`'s escape-hatch block is visible from both ends.
+  # The anchors around the FIRST such value, one entry per GENERATION of the
+  # line any released build has written. Kept beside the reader rather than
+  # inside it so the coupling to `vcsManagedHookBody`'s escape-hatch block is
+  # visible from both ends.
   #
-  # That block writes the line as
-  #   echo <quoteShellPosix("repro hooks: ... REPROBUILD_REPRO=" &
-  #                         quoteShellPosix(author) & " git push")> >&2
-  # and the message always contains spaces, so the outer quoting is always
-  # the single-quoted form. Change one end and the other stops finding the
-  # author: every hook written from a second path of the same build is then
-  # reported as "old or partially upgraded" and `repro push` stops at
-  # hook-preflight. Tripwire: t_repro_push_accepts_hooks_the_same_build_wrote_
-  # from_another_path (tests/integration/t_repro_push_sync_integrates_...).
-  ManagedHookAuthorEchoPrefix =
-    "      echo 'repro hooks:        REPROBUILD_REPRO="
-  ManagedHookAuthorEchoSuffix = " git push' >&2"
+  # The reader must accept every generation, not only the one this build
+  # writes. An installed body is long-lived: it changes only when a writing
+  # build's `hooks ensure` happens to run in that repository, so one workspace
+  # holds bodies of several generations at once (measured 2026-10-03: 695 of
+  # 700 bodies were the double-quoted form while this build wrote the
+  # single-quoted one). A body whose author is not found loses its writer from
+  # `health`'s "written by" and is refused at push hook-preflight. Generations:
+  #
+  #   * before 99a3f3fe3 (2026-08-27): no author line. Nothing to match; ""
+  #     is the correct answer.
+  #   * 99a3f3fe3 up to 02304993^: double-quoted message, path spliced RAW:
+  #       echo "repro hooks:        REPROBUILD_REPRO=<path> git push" >&2
+  #   * 02304993 (2026-09-23) onward, what this build writes:
+  #       echo <quoteShellPosix("repro hooks: ... REPROBUILD_REPRO=" &
+  #                             quoteShellPosix(author) & " git push")> >&2
+  #     The message always contains spaces, so its quoting is always the
+  #     single-quoted form.
+  #
+  # The list only grows: a change to how the line is written ADDS an entry
+  # and removes none. Widening it is safe because the value read only proposes
+  # a candidate that `managedHookBodyIsCurrent` re-renders byte-exactly, so a
+  # wider read can reject a body but never accept one. Change the writer
+  # without adding its form here and every hook written from a second path of
+  # the same build is reported as "old or partially upgraded". Tripwires:
+  # t_repro_push_accepts_hooks_the_same_build_wrote_from_another_path
+  # (tests/integration/t_repro_push_sync_integrates_...) and
+  # tests/integration/t_managed_hook_author_is_read_from_every_generation.nim.
+  ManagedHookAuthorLineForms = [
+    # 02304993 onward. First, because it is what this build writes.
+    ManagedHookAuthorLineForm(
+      prefix: "      echo 'repro hooks:        REPROBUILD_REPRO=",
+      suffix: " git push' >&2",
+      quoted: true),
+    # 99a3f3fe3 up to 02304993^.
+    ManagedHookAuthorLineForm(
+      prefix: "      echo \"repro hooks:        REPROBUILD_REPRO=",
+      suffix: " git push\" >&2",
+      quoted: false)]
 
 proc unquoteShellPosixWord(quoted: string): string =
   ## Inverse of `quoteShellPosix` for one word: bare as-is, or `'...'` with
@@ -20389,16 +20422,17 @@ proc unquoteShellPosixWord(quoted: string): string =
 
 proc managedHookAuthorBin*(body: string): string =
   ## The `repro` path an installed managed hook advertises in its escape
-  ## hatch, or "" when the hook carries none.
+  ## hatch, or "" when the hook carries none. Reads every generation in
+  ## `ManagedHookAuthorLineForms`.
   for line in body.splitLines():
-    if line.startsWith(ManagedHookAuthorEchoPrefix) and
-        line.endsWith(ManagedHookAuthorEchoSuffix) and
-        line.len > ManagedHookAuthorEchoPrefix.len +
-          ManagedHookAuthorEchoSuffix.len:
-      # Undo the outer (message) quoting, then the inner (path) quoting.
-      let inner = line[ManagedHookAuthorEchoPrefix.len ..
-        ^(ManagedHookAuthorEchoSuffix.len + 1)].replace("'\"'\"'", "'")
-      return unquoteShellPosixWord(inner)
+    for form in ManagedHookAuthorLineForms:
+      if line.startsWith(form.prefix) and line.endsWith(form.suffix) and
+          line.len > form.prefix.len + form.suffix.len:
+        let inner = line[form.prefix.len .. ^(form.suffix.len + 1)]
+        if not form.quoted:
+          return inner
+        # Undo the outer (message) quoting, then the inner (path) quoting.
+        return unquoteShellPosixWord(inner.replace("'\"'\"'", "'"))
   ""
 
 proc managedHookRefusalRecordDirAdvertised*(body: string): string =
@@ -50175,7 +50209,8 @@ type EffectivePrePushHookKind = enum
   ephReproIncompatible
   ephThirdParty
 
-# `ManagedHookAuthorEchoPrefix` / `unquoteShellPosixWord` /
+# The author-line anchors (now `ManagedHookAuthorLineForms`, then
+# `ManagedHookAuthorEchoPrefix`) / `unquoteShellPosixWord` /
 # `managedHookAuthorBin` used to live here. They moved up beside
 # `managedHookContract` (PG-14) because `hooks ensure` now needs to name the
 # build that wrote an installed body, and that happens long before this point
