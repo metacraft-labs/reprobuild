@@ -300,6 +300,16 @@ Reprobuild wraps all development workflows under one CLI.
 - `repro workspace status` — audit git status and alignment across all
   workspace repos.
 
+Workspace cloning uses a shared object pool by default. Pass
+`--clone-objects=none` (or `dissociate`) to create self-contained checkouts
+without writing to a clone pool, or `--clone-objects=private=./clone-pool` to
+use a private pool that must outlive its checkouts. The option applies to
+`workspace init`, `sync` (including `--mainline`), `workspace pull`,
+`workspace enable`, and `branch` / `workspace new`. Relative private paths
+resolve from your current directory. `shared` preserves the default, including
+`REPRO_WORKSPACE_CLONES`; a private pool overrides that environment variable
+for this invocation. Existing checkouts keep their current object storage.
+
 ### Local Infrastructure
 
 - `repro infra plan` / `repro infra apply` — plan or apply declarative local

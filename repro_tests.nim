@@ -17064,6 +17064,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_workspace_clone_object_policy.nim",
+    binary: "build/test-bin/t_workspace_clone_object_policy",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_workspace_definition_projects_repos.nim",
     binary: "build/test-bin/t_workspace_definition_projects_repos",
     defines: @[],

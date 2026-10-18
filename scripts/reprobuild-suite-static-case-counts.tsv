@@ -1716,7 +1716,7 @@ tests/integration/t_rename_orphan_is_reported.nim	nim	2
 tests/integration/t_rename_refusals.nim	nim	6
 tests/integration/t_rename_refuses_nested_declared_checkout.nim	nim	2
 tests/integration/t_rename_refuses_unrelated_directory_at_previous_path.nim	nim	2
-tests/integration/t_rename_relocates_instead_of_cloning.nim	nim	5
+tests/integration/t_rename_relocates_instead_of_cloning.nim	nim	6
 tests/integration/t_rename_relocation_failure_is_clean.nim	nim	1
 tests/integration/t_rename_renamed_and_rewritten_repo_relocates.nim	nim	1
 tests/integration/t_report_classifies_at_ahead_and_behind.nim	nim	1
@@ -1902,6 +1902,7 @@ tests/integration/t_workspace_bootstrap_reads_host_repo_config_no_hardcoded_defa
 tests/integration/t_workspace_bootstrap_scaffolds_host_files.nim	nim	3
 tests/integration/t_workspace_branch_create_records_metadata.nim	nim	2
 tests/integration/t_workspace_clone_auto_trusts_per_repo_envrc.nim	nim	1
+tests/integration/t_workspace_clone_object_policy.nim	nim	6
 tests/integration/t_workspace_definition_projects_repos.nim	nim	5
 tests/integration/t_workspace_develop_clones_and_registers_override.nim	nim	5
 tests/integration/t_workspace_develop_overrides_round_trip.nim	nim	7

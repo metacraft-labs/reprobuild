@@ -461,6 +461,7 @@ proc renderUsage*(programName: string): string =
       "provision | publish-evidence | " &
       "migrate-locks [--dry-run|--apply]} " &
       "[--workspace-root=PATH]\n\n" &
+      "clone objects: --clone-objects=shared|private=<dir>|none (dissociate alias)\n" &
       "workspace reports: the workspace verbs (init, sync, pull, lock, " &
       "status, list, manifests, shared-clones, forall, develop, hooks " &
       "ensure, check, push, branch, switch) write a JSON report file " &
@@ -37460,6 +37461,28 @@ proc installUserDaemonWatchExecutor() =
         discard
       restoreDaemonRequestEnvironment(previousEnv))
 
+proc parseCloneObjects(raw: string): string =
+  ## Validate before any workspace mutation and capture the invocation cwd for
+  ## private roots. Never export this setting into child process environments.
+  case raw
+  of "shared": "shared"
+  of "none", "dissociate": "none"
+  else:
+    if raw.startsWith("private=") and raw.len > "private=".len:
+      "private=" & absolutePath(raw["private=".len .. ^1])
+    else:
+      raise newException(ValueError,
+        "--clone-objects expects shared, private=<non-empty directory>, none or dissociate")
+
+proc cloneObjectsLabel(policy: string): string =
+  if policy.len == 0: "shared" else: policy
+
+proc cloneObjectsRoot(policy, workspaceRoot: string): string =
+  ## An empty root is the no-pool sentinel; callers must not refresh it.
+  if policy == "none": ""
+  elif policy.startsWith("private="): policy["private=".len .. ^1]
+  else: defaultCacheRoot(workspaceRoot)
+
 # ---- M9: `repro workspace init` -------------------------------------------
 #
 # Drive the M6 single-project resolver (or M7 variant composer, or M8
@@ -37476,14 +37499,16 @@ type
     ## RA-18 — one copyfile/linkfile dest materialized at the workspace
     ## root after a repo's checkout succeeds. Emitted by both
     ## ``executeWorkspaceInit`` and ``executeWorkspaceSync``.
-    repo*: string        ## repo ``path`` that declared the directive
-    kind*: string        ## "copyfile" | "linkfile"
-    src*: string         ## repo-relative source
-    dest*: string        ## workspace-root-relative destination
-    status*: string      ## "materialized" | "failed"
-    diagnostic*: string  ## empty on success
+    repo*: string ## repo ``path`` that declared the directive
+    kind*: string ## "copyfile" | "linkfile"
+    src*: string ## repo-relative source
+    dest*: string ## workspace-root-relative destination
+    status*: string ## "materialized" | "failed"
+    diagnostic*: string ## empty on success
 
   WorkspaceInitClonedEntry* = object
+    cloneObjects*: string
+    clonePoolRoot*: string
     name*: string
     path*: string
     remote*: string
@@ -37547,6 +37572,8 @@ type
     project*: string
     workspaceRoot*: string
     cloned*: seq[WorkspaceInitClonedEntry]
+    manifestClones*: seq[WorkspaceInitClonedEntry]
+    rootClone*: WorkspaceInitClonedEntry
     upToDate*: seq[WorkspaceInitUpToDateEntry]
     divergences*: seq[WorkspaceInitDivergenceEntry]
     skippedLayers*: seq[WorkspaceInitSkippedLayerEntry]
@@ -37571,11 +37598,24 @@ proc toJsonNode*(report: WorkspaceInitReport): JsonNode =
   for entry in report.cloned:
     var obj = newJObject()
     obj["name"] = %entry.name
+    obj["cloneObjects"] = %entry.cloneObjects
+    obj["clonePoolRoot"] = %entry.clonePoolRoot
     obj["path"] = %entry.path
     obj["remote"] = %entry.remote
     obj["revision"] = %entry.revision
     cloned.add(obj)
   result["cloned"] = cloned
+  var manifestClones = newJArray()
+  for entry in report.manifestClones:
+    manifestClones.add(%*{"name": entry.name, "path": entry.path,
+      "remote": entry.remote, "revision": entry.revision,
+      "cloneObjects": entry.cloneObjects, "clonePoolRoot": entry.clonePoolRoot})
+  result["manifestClones"] = manifestClones
+  if report.rootClone.path.len > 0:
+    let entry = report.rootClone
+    result["rootClone"] = %*{"name": entry.name, "path": entry.path,
+      "remote": entry.remote, "revision": entry.revision,
+      "cloneObjects": entry.cloneObjects, "clonePoolRoot": entry.clonePoolRoot}
   var upToDate = newJArray()
   for entry in report.upToDate:
     var obj = newJObject()
@@ -37661,6 +37701,7 @@ proc renderInitTextLines*(report: WorkspaceInitReport): seq[string] =
 
 type
   WorkspaceInitArgs = object
+    cloneObjects: string
     projectName: string
     workspaceRoot: string
     toolProvisioning: ToolProvisioningMode
@@ -37946,6 +37987,9 @@ proc parseWorkspaceInitArgs(args: openArray[string]): WorkspaceInitArgs =
     let arg = args[i]
     if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
       result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--clone-objects" or arg.startsWith("--clone-objects="):
+      result.cloneObjects = parseCloneObjects(valueFromFlag(args, i,
+          "--clone-objects"))
     elif arg == "--tool-provisioning" or
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
@@ -38617,7 +38661,11 @@ proc existingRecordStoreRoot*(workspaceRoot: string): string =
       return candidate
   ""
 
-proc bootstrapManifestCache(args: WorkspaceInitArgs) =
+proc gitRunPlain(identity: GitToolIdentity;
+                 args: openArray[string]): tuple[code: int; output: string]
+
+proc bootstrapManifestCache(args: WorkspaceInitArgs): seq[
+    WorkspaceInitClonedEntry] =
   ## RA-11 bootstrap manifest cache. When ``--manifest-url`` is given and
   ## the workspace has no manifest checkout yet, clone the
   ## manifest repo into the tool-managed bootstrap cache
@@ -38641,7 +38689,43 @@ proc bootstrapManifestCache(args: WorkspaceInitArgs) =
   let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
   createDir(args.workspaceRoot / ".repro")
 
-  let cacheRoot = defaultManifestCacheRoot(private = false)
+  let policyRoot = cloneObjectsRoot(args.cloneObjects, args.workspaceRoot)
+  proc clonedEntry(url, path: string): WorkspaceInitClonedEntry =
+    WorkspaceInitClonedEntry(name: path, path: path, remote: url,
+      revision: args.manifestBranch,
+      cloneObjects: cloneObjectsLabel(args.cloneObjects),
+          clonePoolRoot: policyRoot)
+
+  if args.cloneObjects == "none":
+    # Bootstrap manifests are normally symlinked to a host cache. A portable
+    # workspace instead owns these checkouts inside its destination too.
+    for (url, path) in [(args.manifestUrl, ".repro/manifests"),
+        (args.privateManifestUrl, ".repro/manifests-private")]:
+      if url.len == 0: continue
+      let target = args.workspaceRoot / path
+      if dirExists(target): continue
+      # Do not publish an unverified checkout at the trusted manifest path:
+      # a retry would otherwise accept its projects/ before verification.
+      let staging = createTempDir("manifest-clone-", "", target.parentDir)
+      defer:
+        if dirExists(staging): removeDir(staging)
+      var argv = @["clone", "--no-local"]
+      if args.manifestBranch.len > 0: argv.add(@["--branch",
+          args.manifestBranch])
+      argv.add(@[url, staging])
+      let cloned = gitRunPlain(identity, argv)
+      if cloned.code != 0:
+        raise newException(ValueError, "could not bootstrap manifest repo '" &
+          url & "': " & cloned.output)
+      if path == ".repro/manifests" and isVerificationActive(args.verifySpec):
+        verifyManifestProvenance(identity.binaryPath, staging, args.verifySpec)
+      moveDir(staging, target)
+      result.add(clonedEntry(url, path))
+    return
+
+  let cacheRoot =
+    if args.cloneObjects.startsWith("private="): policyRoot / "manifests"
+    else: defaultManifestCacheRoot(private = false)
   let cached = ensureManifestCache(identity.binaryPath, cacheRoot,
     args.manifestUrl, args.manifestBranch)
   if not cached.ok:
@@ -38674,10 +38758,14 @@ proc bootstrapManifestCache(args: WorkspaceInitArgs) =
   except OSError, IOError:
     copyDir(cached.sharedBarePath, manifestsDir)
 
+  result.add(clonedEntry(args.manifestUrl, ".repro/manifests"))
+
   if args.privateManifestUrl.len > 0:
     let privateDir = args.workspaceRoot / ".repro" / "manifests-private"
     if not dirExists(privateDir):
-      let privateCacheRoot = defaultManifestCacheRoot(private = true)
+      let privateCacheRoot =
+        if args.cloneObjects.startsWith("private="): policyRoot / "manifests-private"
+        else: defaultManifestCacheRoot(private = true)
       let privCached = ensureManifestCache(identity.binaryPath,
         privateCacheRoot, args.privateManifestUrl, args.manifestBranch)
       if not privCached.ok:
@@ -38689,6 +38777,8 @@ proc bootstrapManifestCache(args: WorkspaceInitArgs) =
         createSymlink(privCached.sharedBarePath, privateDir)
       except OSError, IOError:
         copyDir(privCached.sharedBarePath, privateDir)
+      result.add(clonedEntry(args.privateManifestUrl,
+          ".repro/manifests-private"))
 
 proc normalizeMaterializeRel(raw: string): string =
   ## A copyfile/linkfile path is authored with forward slashes (the
@@ -39004,9 +39094,6 @@ proc refreshWorkspaceProjectsIndexBestEffort(workspaceRoot, verb: string) =
     stderr.writeLine(verb & ": could not generate workspace-projects.md: " &
       err.msg)
 
-proc gitRunPlain(identity: GitToolIdentity;
-                 args: openArray[string]): tuple[code: int; output: string]
-
 type
   RemoteAgreement* = enum
     ## Why (or why not) the checkout in front of us is recognizably the repo a
@@ -39312,11 +39399,12 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # RA-11: bootstrap the manifest repo into the tool-managed cache when
   # a manifest URL resolved and no manifest checkout exists yet, so
   # ``init`` works OUTSIDE an existing workspace.
-  bootstrapManifestCache(args)
+  let manifestClones = bootstrapManifestCache(args)
   let resolution = resolveWorkspaceInitProject(args)
   let resolved = resolution.project
   var report: WorkspaceInitReport
   report.project = resolved.projectName
+  report.manifestClones = manifestClones
   report.workspaceRoot = args.workspaceRoot
   report.skippedLayers = resolution.skippedLayers
   var cloneFailures = 0
@@ -39334,10 +39422,10 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # without racing a fetch into the same bare. Every step is best-effort:
   # if a shared bare can't be populated, the affected clone simply runs
   # standalone (no ``--reference``) and the accelerator is a no-op for it.
-  let cacheRoot = defaultCacheRoot(args.workspaceRoot)
+  let cacheRoot = cloneObjectsRoot(args.cloneObjects, args.workspaceRoot)
   var sharedBareByUrl = initTable[string, string]()
   proc sharedReferenceFor(fetchUrl: string): string =
-    if fetchUrl.len == 0:
+    if cacheRoot.len == 0 or fetchUrl.len == 0:
       return ""
     if sharedBareByUrl.hasKey(fetchUrl):
       return sharedBareByUrl[fetchUrl]
@@ -39389,6 +39477,8 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
     cloneActions.add(action)
     cloneEntries.add(WorkspaceInitClonedEntry(
       name: repo.name, path: repo.path,
+      cloneObjects: cloneObjectsLabel(args.cloneObjects),
+          clonePoolRoot: cacheRoot,
       remote: initCloneUrl, revision: repo.revision))
 
   if cloneActions.len > 0:
@@ -39523,7 +39613,8 @@ proc writeWorkspaceInitReport(report: WorkspaceInitReport;
   createDir(parentDir(destination))
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
-proc runWorkspaceInitCommand*(args: openArray[string]): int =
+proc runWorkspaceInitCommand*(args: openArray[string];
+    rootClone = WorkspaceInitClonedEntry()): int =
   ## ``repro workspace init <project-or-variant> [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]
   ## [--write-report[=PATH]]``.
@@ -39537,7 +39628,8 @@ proc runWorkspaceInitCommand*(args: openArray[string]): int =
   ##         from exit-1 ("init blew up") so scripts can tell the two
   ##         apart.
   let parsed = parseWorkspaceInitArgs(args)
-  let outcome = executeWorkspaceInit(parsed)
+  var outcome = executeWorkspaceInit(parsed)
+  outcome.report.rootClone = rootClone
   writeWorkspaceInitReport(outcome.report,
     reportDestination(parsed.report, outcome.report.workspaceRoot, "init"))
   stageFailureReport(parsed.report, outcome.report.workspaceRoot, "init",
@@ -39566,6 +39658,7 @@ proc runWorkspaceInitCommand*(args: openArray[string]): int =
 
 type
   ColdStartInitArgs = object
+    cloneObjects: string
     ## Parsed argv for the RA-31 cold-start ``init <url> [local-path]`` form.
     url: string                          ## the <url> argument (form 1/2/3)
     localPath: string                    ## optional explicit destination dir
@@ -39586,6 +39679,10 @@ proc parseColdStartInitArgs(args: openArray[string]): ColdStartInitArgs =
     let arg = args[i]
     if arg == "--print-resolved-url":
       result.printResolvedUrl = true
+    elif arg == "--clone-objects" or arg.startsWith("--clone-objects="):
+      let policy = parseCloneObjects(valueFromFlag(args, i, "--clone-objects"))
+      result.cloneObjects = policy
+      result.passthrough.add("--clone-objects=" & policy)
     elif arg == "--tool-provisioning" or
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
@@ -39664,7 +39761,7 @@ proc pathIsCwdOrAncestor*(candidate, fromDir: string): bool =
   false
 
 proc cloneOrgRootRepo(identity: GitToolIdentity;
-                      url, destination: string):
+                      url, destination: string; independentObjects = false):
     tuple[ok: bool; diagnostic: string] =
   ## Clone the org root workspace repo at ``url`` into ``destination`` (a
   ## fresh named directory). Best-effort; returns a structured failure so
@@ -39683,12 +39780,22 @@ proc cloneOrgRootRepo(identity: GitToolIdentity;
   ##
   ## A repo with no submodules is unaffected — the flag is a no-op there.
   var cmd = quoteShell(identity.binaryPath) &
-    " clone --recurse-submodules " & quoteShell(url) &
+    " clone " & (if independentObjects: "--no-local " else: "") &
+    "--recurse-submodules " & quoteShell(url) &
     " " & quoteShell(destination)
   let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
     env = scrubbedGitRepositoryEnv())
   if res.exitCode != 0:
     return (ok: false, diagnostic: res.output.strip())
+  if independentObjects:
+    # Git does not propagate the parent's --no-local into submodule clones.
+    # A local submodule source can borrow too. Copy borrowed objects before
+    # dropping its alternate, and preserve it on repack failure.
+    const ownSubmoduleObjects = """if test -f "$(git rev-parse --git-path objects/info/alternates)"; then git repack -a -d && rm -- "$(git rev-parse --git-path objects/info/alternates)"; fi"""
+    let owned = gitRunPlain(identity, ["-C", destination, "submodule", "foreach",
+      "--quiet", "--recursive", ownSubmoduleObjects])
+    if owned.code != 0:
+      return (ok: false, diagnostic: "could not make root submodules independent: " & owned.output)
   (ok: true, diagnostic: "")
 
 proc runWorkspaceInitFromUrl*(args: openArray[string];
@@ -39749,7 +39856,8 @@ proc runWorkspaceInitFromUrl*(args: openArray[string];
 
   # (3) Clone the org ROOT workspace repo into the named directory.
   stdout.writeLine("workspace init: cloning org root repo …")
-  let cloned = cloneOrgRootRepo(identity, resolution.url, destAbs)
+  let cloned = cloneOrgRootRepo(identity, resolution.url, destAbs,
+    independentObjects = parsed.cloneObjects notin ["", "shared"])
   if not cloned.ok:
     stderr.writeLine("repro workspace init: error: could not clone org root " &
       "repo '" & resolution.url & "': " & cloned.diagnostic)
@@ -39764,7 +39872,11 @@ proc runWorkspaceInitFromUrl*(args: openArray[string];
     innerArgs.add(flag)
   stdout.writeLine("workspace init: reading bootstrap config and syncing " &
     "the workspace …")
-  let inner = runWorkspaceInitCommand(innerArgs)
+  let innerPolicy = parseWorkspaceInitArgs(innerArgs).cloneObjects
+  let inner = runWorkspaceInitCommand(innerArgs,
+    rootClone = WorkspaceInitClonedEntry(name: "<workspace-root>", path: ".",
+      remote: resolution.url, cloneObjects: cloneObjectsLabel(innerPolicy),
+      clonePoolRoot: cloneObjectsRoot(innerPolicy, destAbs)))
 
   if inner == 0:
     stdout.writeLine("workspace init: workspace ready at '" & destAbs & "'.")
@@ -39803,6 +39915,8 @@ type
     diagnostic*: string
 
   WorkspaceSyncRepoEntry* = object
+    cloneObjects*: string
+    clonePoolRoot*: string
     ## One per ``ResolvedRepo`` after sync. ``syncCase`` is the
     ## snake_case tag of the planner's decision; ``action`` is the
     ## scheduled mutating-action tag (``none`` for refuse-and-report or
@@ -40018,6 +40132,8 @@ proc toJsonNode*(report: WorkspaceSyncReport): JsonNode =
     var obj = newJObject()
     obj["name"] = %entry.name
     obj["path"] = %entry.path
+    obj["cloneObjects"] = %entry.cloneObjects
+    obj["clonePoolRoot"] = %entry.clonePoolRoot
     obj["syncCase"] = %entry.syncCase
     obj["action"] = %entry.action
     obj["expected"] = %entry.expected
@@ -40164,6 +40280,7 @@ proc renderSyncTextLines*(report: WorkspaceSyncReport;
 
 type
   WorkspaceSyncArgs = object
+    cloneObjects: string
     workspaceRoot: string
     projectName: string
     scopeProjects: seq[string]
@@ -40279,6 +40396,9 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
     let arg = args[i]
     if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
       result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--clone-objects" or arg.startsWith("--clone-objects="):
+      result.cloneObjects = parseCloneObjects(valueFromFlag(args, i,
+          "--clone-objects"))
     elif arg == "--tool-provisioning" or
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
@@ -45833,7 +45953,7 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
     var tipRepo = ""
     var tipRef = ""
     var evidenceSource = ""
-    if newCloneUrl.len > 0:
+    if cacheRoot.len > 0 and newCloneUrl.len > 0:
       if newCloneUrl notin bareForUrl:
         let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot,
           newCloneUrl)
@@ -46022,7 +46142,7 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
     #    `repro ws shared-clones rewire` is the consolidation step.
     for entry in readAlternates(destination):
       outcome.alternates.add(entry)
-    if newCloneUrl.len > 0:
+    if cacheRoot.len > 0 and newCloneUrl.len > 0:
       let bare = bareForUrl.getOrDefault(newCloneUrl)
       if bare.len > 0 and not isWiredTo(destination, bare):
         let wired = wireAlternates(destination, bare, identity.binaryPath)
@@ -46231,7 +46351,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   # the expression is cheaper than moving the whole jobs block above a phase
   # that has nothing to do with it.
   let relocations = relocateDeclaredRenames(identity, args.workspaceRoot,
-    defaultCacheRoot(args.workspaceRoot), resolved.repos,
+    cloneObjectsRoot(args.cloneObjects, args.workspaceRoot), resolved.repos,
     emitProgress = not args.json and args.progressMode != bpmQuiet)
 
   alignWorkspaceRemotes(args.workspaceRoot, resolved.repos, identity)
@@ -46264,7 +46384,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   # front per URL and made a dependency of that URL's fetches so concurrent
   # fetches read a consistent object pool without racing into the same
   # bare.
-  let cacheRoot = defaultCacheRoot(args.workspaceRoot)
+  let cacheRoot = cloneObjectsRoot(args.cloneObjects, args.workspaceRoot)
 
   # RA-14 optimized-fetch: load the locked ``path -> sha`` map once so the
   # fetch loop can skip the network round-trip for any repo already at (or
@@ -46348,7 +46468,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     var reports: seq[LeafCheckReport]
     for repo in resolved.repos:
       let repoPath = args.workspaceRoot / repo.path
-      if dirExists(repoPath / ".git"):
+      if args.cloneObjects in ["", "shared"] and dirExists(repoPath / ".git"):
         reports.add(checkLeaf(identity.binaryPath, repoPath, lcmRepair,
           cacheRoot))
     emitLeafReports(reports)
@@ -46399,7 +46519,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     # common one-remote-many-repos manifest layout, which left the cache
     # permanently unpopulated.
     let cloneUrl = cloneUrlFor(repo)
-    if cloneUrl.len > 0:
+    if cacheRoot.len > 0 and cloneUrl.len > 0:
       if not sharedBareRefreshAction.hasKey(cloneUrl):
         # RA-27 — the RA-5 shared-bare warm-up used to run HERE, serially, one
         # blocking `git fetch`/`clone --bare` per unique URL BEFORE any progress
@@ -46633,7 +46753,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   # partial-advance — the readable repos still converge).
   var sharedBareForClone = initTable[string, string]()
   proc cloneReferenceFor(fetchUrl: string): string =
-    if fetchUrl.len == 0:
+    if cacheRoot.len == 0 or fetchUrl.len == 0:
       return ""
     if sharedBareForClone.hasKey(fetchUrl):
       return sharedBareForClone[fetchUrl]
@@ -47083,6 +47203,9 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     report.repos.add(WorkspaceSyncRepoEntry(
       name: decision.name,
       path: decision.path,
+      cloneObjects: (if repoIdx in cloneRepoIdx: cloneObjectsLabel(
+          args.cloneObjects) else: ""),
+      clonePoolRoot: (if repoIdx in cloneRepoIdx: cacheRoot else: ""),
       syncCase: syncCaseTag(decision.syncCase),
       action: actionTag,
       expected: decision.expected,
@@ -47183,6 +47306,8 @@ proc emitLockCoherenceAdvisory*[T](toolProvisioning: ToolProvisioningMode;
 
 type
   MainlineSyncEntry* = object
+    cloneObjects*: string
+    clonePoolRoot*: string
     name*: string
     path*: string
     branch*: string
@@ -47217,6 +47342,8 @@ proc toJsonNode*(report: MainlineSyncReport): JsonNode =
   for e in report.repos:
     var obj = newJObject()
     obj["name"] = %e.name
+    obj["cloneObjects"] = %e.cloneObjects
+    obj["clonePoolRoot"] = %e.clonePoolRoot
     obj["path"] = %e.path
     obj["branch"] = %e.branch
     obj["mainlineBranch"] = %e.mainlineBranch
@@ -47423,14 +47550,16 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
   let decisions = planMainlineSync(resolved.repos, observations,
     args.mainlineFlavor)
 
+  let clonePoolRoot = cloneObjectsRoot(args.cloneObjects, args.workspaceRoot)
+
   # Clone phase for missing repositories:
   var sharedBareForClone = initTable[string, string]()
   proc cloneReferenceFor(fetchUrl: string): string =
-    if fetchUrl.len == 0:
+    if clonePoolRoot.len == 0 or fetchUrl.len == 0:
       return ""
     if sharedBareForClone.hasKey(fetchUrl):
       return sharedBareForClone[fetchUrl]
-    let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    let refreshed = refreshSharedBare(identity.binaryPath, clonePoolRoot, fetchUrl)
     emitLeafReports(refreshed.leafReports)
     let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
     if not refreshed.ok and refreshed.diagnostic.len > 0:
@@ -47493,6 +47622,9 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     let repoAbs = args.workspaceRoot / repo.path
     var entry = MainlineSyncEntry(
       name: decision.name, path: decision.path,
+      cloneObjects: (if decision.action == msaClone: cloneObjectsLabel(
+          args.cloneObjects) else: ""),
+      clonePoolRoot: (if decision.action == msaClone: clonePoolRoot else: ""),
       branch: decision.branch, mainlineBranch: decision.mainlineBranch,
       outcome: mainlineSyncCaseTag(decision.syncCase),
       action: mainlineSyncActionTag(decision.action),
@@ -47796,17 +47928,19 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
 
 type
   WorkspacePullRepoOutcome* = enum
-    ppoConvergedExisting   ## Existing checkout converged to the manifest
-                           ## revision on a tracking branch.
-    ppoCloned              ## Missing checkout cloned + put on a tracking
-                           ## branch at the manifest revision.
-    ppoFailed              ## A clone / fetch / branch-attach step failed.
-    ppoSkippedWorkAtRisk   ## Converging would have repointed a branch (or
-                           ## moved HEAD off one) carrying work no remote
-                           ## carries. The checkout is left EXACTLY as it was
-                           ## and the report names what stopped it.
+    ppoConvergedExisting ## Existing checkout converged to the manifest
+                         ## revision on a tracking branch.
+    ppoCloned            ## Missing checkout cloned + put on a tracking
+                         ## branch at the manifest revision.
+    ppoFailed            ## A clone / fetch / branch-attach step failed.
+    ppoSkippedWorkAtRisk ## Converging would have repointed a branch (or
+                         ## moved HEAD off one) carrying work no remote
+                         ## carries. The checkout is left EXACTLY as it was
+                         ## and the report names what stopped it.
 
   WorkspacePullRepoEntry* = object
+    cloneObjects*: string
+    clonePoolRoot*: string
     ## One per declared repo after ``pull``. ``trackingBranch`` is the
     ## local branch HEAD is attached to after convergence (empty only on
     ## failure); ``revision`` is the manifest-declared revision the repo
@@ -47866,6 +48000,8 @@ proc toJsonNode*(report: WorkspacePullReport): JsonNode =
   for entry in report.repos:
     var obj = newJObject()
     obj["name"] = %entry.name
+    obj["cloneObjects"] = %entry.cloneObjects
+    obj["clonePoolRoot"] = %entry.clonePoolRoot
     obj["path"] = %entry.path
     obj["revision"] = %entry.revision
     obj["trackingBranch"] = %entry.trackingBranch
@@ -47948,6 +48084,7 @@ proc renderPullTextLines*(report: WorkspacePullReport): seq[string] =
 
 type
   WorkspacePullArgs = object
+    cloneObjects: string
     workspaceRoot: string
     projectName: string
     toolProvisioning: ToolProvisioningMode
@@ -47969,6 +48106,9 @@ proc parseWorkspacePullArgs(args: openArray[string]): WorkspacePullArgs =
     let arg = args[i]
     if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
       result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--clone-objects" or arg.startsWith("--clone-objects="):
+      result.cloneObjects = parseCloneObjects(valueFromFlag(args, i,
+          "--clone-objects"))
     elif arg == "--tool-provisioning" or
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
@@ -48285,10 +48425,10 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
   let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
   installGitVcsExecutor()
 
-  let cacheRoot = defaultCacheRoot(args.workspaceRoot)
+  let cacheRoot = cloneObjectsRoot(args.cloneObjects, args.workspaceRoot)
   var sharedBareByUrl = initTable[string, string]()
   proc sharedReferenceFor(fetchUrl: string): string =
-    if fetchUrl.len == 0:
+    if cacheRoot.len == 0 or fetchUrl.len == 0:
       return ""
     if sharedBareByUrl.hasKey(fetchUrl):
       return sharedBareByUrl[fetchUrl]
@@ -48305,6 +48445,8 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
     var entry = WorkspacePullRepoEntry(
       name: repo.name, path: repo.path, revision: repo.revision)
     if not dirExists(absPath):
+      entry.cloneObjects = cloneObjectsLabel(args.cloneObjects)
+      entry.clonePoolRoot = cacheRoot
       # Missing checkout — clone first (so the converge step has a tree).
       let receiptDir = args.workspaceRoot / ".repro" / "workspace" / "receipts"
       createDir(receiptDir)
@@ -72435,14 +72577,16 @@ proc runWorkspaceForallCommand*(args: openArray[string]): int =
 
 type
   BranchRepoOutcome* = enum
-    broCreated         ## ``gitBranchCreate`` ran successfully.
-    broAlreadyAtHead   ## Pre-existing branch at HEAD — idempotent.
-    broDirtyRefused    ## Repo was dirty; nothing scheduled.
+    broCreated       ## ``gitBranchCreate`` ran successfully.
+    broAlreadyAtHead ## Pre-existing branch at HEAD — idempotent.
+    broDirtyRefused  ## Repo was dirty; nothing scheduled.
     broCollisionRefused
-                       ## Pre-existing branch at a different SHA.
-    broActionFailed    ## ``gitBranchCreate`` action returned non-OK.
+      ## Pre-existing branch at a different SHA.
+    broActionFailed  ## ``gitBranchCreate`` action returned non-OK.
 
   BranchRepoEntry* = object
+    cloneObjects*: string
+    clonePoolRoot*: string
     ## Per-repo line in the JSON report. ``existingSha`` carries the
     ## SHA the colliding branch pointed at (empty unless ``outcome``
     ## is ``collision_refused``); ``dirtyReason`` carries the
@@ -72525,6 +72669,8 @@ proc toJsonNode*(report: BranchReport): JsonNode =
   for entry in report.repos:
     var obj = newJObject()
     obj["name"] = %entry.name
+    obj["cloneObjects"] = %entry.cloneObjects
+    obj["clonePoolRoot"] = %entry.clonePoolRoot
     obj["path"] = %entry.path
     obj["headSha"] = %entry.headSha
     obj["outcome"] = %entry.outcome
@@ -72658,6 +72804,7 @@ type
       ## leaving the unpublished work behind in the source workspace.
 
   BranchArgs = object
+    cloneObjects: string
     workspaceRoot: string
     projectName: string
     branchName: string
@@ -72776,6 +72923,9 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
     let arg = args[i]
     if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
       result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--clone-objects" or arg.startsWith("--clone-objects="):
+      result.cloneObjects = parseCloneObjects(valueFromFlag(args, i,
+          "--clone-objects"))
     elif arg == "--tool-provisioning" or
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
@@ -75735,6 +75885,13 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   ## ``--fetch`` (the default) refreshes those mainlines first; ``--no-fetch``
   ## reads what is already on disk. Neither degrades silently — see the mainline
   ## block below.
+  var clonedPaths = initHashSet[string]()
+  defer:
+    for entry in result.repos.mitems:
+      if entry.path in clonedPaths:
+        entry.cloneObjects = cloneObjectsLabel(parsed.cloneObjects)
+        entry.clonePoolRoot = cloneObjectsRoot(parsed.cloneObjects,
+            parsed.forkPath)
   result.branch = parsed.branchName
   result.form = "fork"
   result.sourceWorkspaceRoot = parsed.workspaceRoot
@@ -76404,7 +76561,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   # ---- materialize the new workspace ------------------------------------
   # Resuming (see the destination guard) means the root clone is already there.
   if not resuming and not dirExists(parsed.forkPath / ".git"):
-    let rootClone = cloneOrgRootRepo(identity, rootOrigin, parsed.forkPath)
+    let rootClone = cloneOrgRootRepo(identity, rootOrigin, parsed.forkPath,
+      independentObjects = parsed.cloneObjects notin ["", "shared"])
     if not rootClone.ok:
       result.exitCode = 1
       result.repos.add(BranchRepoEntry(
@@ -76433,6 +76591,9 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           rootMainlineTip & "': " & co.output.strip()))
       return
 
+  if not resuming:
+    clonedPaths.incl(".")
+
   # Member repos: reuse the M9 materialization pass verbatim — it already
   # schedules the clones concurrently on the engine and is resumable, so a
   # re-run after a partial fork only clones what is still missing.
@@ -76446,7 +76607,10 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   if forkProjects.len > 1:
     initArgs.additionalProjects = forkProjects[1 .. ^1]
   initArgs.toolProvisioning = parsed.toolProvisioning
+  initArgs.cloneObjects = parsed.cloneObjects
   let initOutcome = executeWorkspaceInit(initArgs)
+  for entry in initOutcome.report.cloned:
+    clonedPaths.incl(entry.path)
   if initOutcome.cloneFailures > 0:
     # Partial materialization is LEFT IN PLACE (no rollback): re-running the
     # identical command clones only what is still missing.
@@ -84550,15 +84714,26 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
   ## Membership itself stays idempotent, while the clone phase still creates
   ## anything missing — which makes a re-run the repair path for a partially
   ## cloned workspace.
-  let workspaceRoot = parseProjectsWorkspaceRoot(args)
-  var explicit = parseMembershipProjects(args)
+  var normalizedArgs: seq[string]
+  var argIndex = 0
+  while argIndex < args.len:
+    let arg = args[argIndex]
+    if arg == "--clone-objects" or arg.startsWith("--clone-objects="):
+      let policy = parseCloneObjects(valueFromFlag(args, argIndex,
+          "--clone-objects"))
+      normalizedArgs.add("--clone-objects=" & policy)
+    else:
+      normalizedArgs.add(arg)
+    inc argIndex
+  let workspaceRoot = parseProjectsWorkspaceRoot(normalizedArgs)
+  var explicit = parseMembershipProjects(normalizedArgs)
   var useDefault = false
   var noSync = false
   # Flags the materialization phase understands are forwarded to it rather
   # than rejected here: `enable`'s real work IS a sync, so the report and the
   # JSON digest describing what happened are that sync's.
   var forwarded: seq[string]
-  for arg in args:
+  for arg in normalizedArgs:
     if arg == "--default":
       useDefault = true
     elif arg == "--no-sync":
@@ -84567,7 +84742,8 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
       discard
     elif arg == "--json" or arg == "--verbose" or arg == "--dry-run" or
         arg == "--write-report" or arg.startsWith("--write-report=") or
-        arg.startsWith("--jobs") or arg.startsWith("--tags="):
+        arg.startsWith("--jobs") or arg.startsWith("--tags=") or
+        arg.startsWith("--clone-objects="):
       forwarded.add(arg)
     elif arg.startsWith("-"):
       stderr.writeLine("repro workspace enable: unknown flag " & arg)

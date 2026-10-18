@@ -1087,7 +1087,7 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
           return SharedCloneResult(ok: false, sharedBarePath: bare,
             diagnostic: "could not create cache parent " & parent & ": " & e.msg)
       let res = runGit(gitBin,
-        ["clone", "--bare", "--quiet", fetchUrl, bare])
+        ["clone", "--bare", "--no-local", "--quiet", fetchUrl, bare])
       if res.code != 0:
         if looksLikeGitDir(bare):
           let prepared = prepareSharedBare(gitBin, bare)
@@ -1249,7 +1249,9 @@ proc cloneManifestCacheEntry(gitBin, target, manifestUrl, branch: string):
         manifestEntry: mceAbsent,
         diagnostic: "could not create manifest cache parent " & parent &
           ": " & e.msg)
-  var cloneArgs = @["clone", "--quiet"]
+  # Cache entries must own their objects even when a local manifest source
+  # borrows from a pool outside the selected cache root.
+  var cloneArgs = @["clone", "--no-local", "--quiet"]
   if branch.len > 0:
     cloneArgs.add(["--single-branch", "--branch", branch])
   cloneArgs.add([manifestUrl, target])
