@@ -1993,6 +1993,7 @@ tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim	nim	4
 tests/integration/test_nix_daemon_cache.py	python	1
 tests/test_dev_env_m9_policy.py	python	4
 tests/unit/t_action_compatibility_key.nim	nim	4
+tests/unit/t_action_depfile_policy.nim	nim	7
 tests/unit/t_action_index_platform_arm.nim	nim	3
 tests/unit/t_bearssl_probe_marker_is_the_imported_module.nim	nim	5
 tests/unit/t_bootstrap_nim_monitoring.nim	nim	3

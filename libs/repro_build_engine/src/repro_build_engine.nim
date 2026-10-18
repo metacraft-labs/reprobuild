@@ -3230,7 +3230,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              actionCachePolicy = ffpTimestamp;
              depfile = ""; monitorDepfile = "";
              dynamicDepsFile = "";
-             dependencyPolicy = automaticMonitorGatheringPolicy();
+             dependencyPolicy: DependencyGatheringPolicy |
+               Option[DependencyGatheringPolicy] = none(DependencyGatheringPolicy);
              nonDeterminism = ndpUnblessed;
              nonDeterminismJustification = "";
              isolateHostEnvironment = false;
@@ -3247,13 +3248,25 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
   ## is the point. "An action constructed without a governing lock identity is
   ## a build-time error, not a default." A default here would be the
   ## convention §7.2 explicitly refuses to rely on.
+  # An omitted policy alone enables the legacy depfile shorthand. Keep explicit
+  # monitor requests distinguishable even when they equal the default policy;
+  # otherwise a caller that asked for monitoring could publish depfile-only
+  # evidence. Accept the policy object directly for existing callers, or an
+  # Option for forwarding an optional policy without inventing a default.
+  let requestedPolicy =
+    when dependencyPolicy is DependencyGatheringPolicy: some(dependencyPolicy)
+    else: dependencyPolicy
+  if requestedPolicy.isSome and depfile.len > 0 and monitorDepfile.len == 0 and
+      requestedPolicy.get.kind == dgAutomaticMonitor:
+    raise newException(ValueError,
+      "action '" & id & "': depfile conflicts with explicit automatic-monitor " &
+      "dependencyPolicy without monitorDepfile; use monitorValidatedPolicy " &
+      "with a recognized report, or omit dependencyPolicy for depfile-only evidence")
   let effectiveDependencyPolicy =
-    if depfile.len > 0 and monitorDepfile.len == 0 and
-        dependencyPolicy.kind == dgAutomaticMonitor:
-      legacyDepfileGatheringPolicy(depfile,
-        dependencyPolicy.ignoredInputPrefixes)
+    if requestedPolicy.isNone and depfile.len > 0 and monitorDepfile.len == 0:
+      legacyDepfileGatheringPolicy(depfile, [])
     else:
-      dependencyPolicy
+      requestedPolicy.get(automaticMonitorGatheringPolicy())
   BuildAction(
     governingLockIdentity: governingLockIdentity,
     kind: bakProcess,
