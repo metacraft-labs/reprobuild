@@ -272,6 +272,8 @@ suite "M3 — archive realizer 7z SFX flatten":
       createDir(extendedPath(innerDir / "etc"))
       writeFile(extendedPath(innerDir / "bin" / "git.exe"),
         "stub-git-payload-bytes\n")
+      setFilePermissions(extendedPath(innerDir / "bin" / "git.exe"),
+        {fpUserRead, fpUserWrite, fpUserExec})
       writeFile(extendedPath(innerDir / "etc" / "gitconfig"),
         "# stub system gitconfig\n")
       let plain7z = fixtureDir / "git-plain.7z"
@@ -320,8 +322,12 @@ suite "M3 — archive realizer 7z SFX flatten":
       createDir(extendedPath(innerDir / "bin"))
       writeFile(extendedPath(innerDir / "bin" / "erl.exe"),
         "stub-erl-bytes\n")
+      setFilePermissions(extendedPath(innerDir / "bin" / "erl.exe"),
+        {fpUserRead, fpUserWrite, fpUserExec})
       writeFile(extendedPath(innerDir / "bin" / "erlc.exe"),
         "stub-erlc-bytes\n")
+      setFilePermissions(extendedPath(innerDir / "bin" / "erlc.exe"),
+        {fpUserRead, fpUserWrite, fpUserExec})
       let archivePath = fixtureDir / "otp.7z"
       let addRes = execCmdEx(
         quoteShell(hostSeven) & " a -t7z " &
@@ -360,8 +366,12 @@ suite "M3 — archive realizer 7z SFX flatten":
       createDir(extendedPath(innerDir / "bin"))
       writeFile(extendedPath(innerDir / "bin" / "ruby.exe"),
         "stub-ruby-payload\n")
+      setFilePermissions(extendedPath(innerDir / "bin" / "ruby.exe"),
+        {fpUserRead, fpUserWrite, fpUserExec})
       writeFile(extendedPath(innerDir / "bin" / "gem.cmd"),
         "@echo stub-gem\n")
+      setFilePermissions(extendedPath(innerDir / "bin" / "gem.cmd"),
+        {fpUserRead, fpUserWrite, fpUserExec})
       let plain7z = fixtureDir / "ruby-plain.7z"
       discard execCmdEx(
         quoteShell(hostSeven) & " a -t7z " &

@@ -255,7 +255,7 @@ suite "M71/GM4b e2e: Phase-2 partials resolve to their archive realizations":
       # ocaml's MSYS2 package to the home archive realizer, alire's plain
       # zip to the `uses:` provisioning edge.
       if pkg == "ocaml":
-        check res.archiveRoute == arInstaller
+        check res.archiveRoute == arExtract
         check res.archive.installMethod == imMsys2Pacman
       else:
         check res.archiveRoute == arExtract

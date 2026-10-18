@@ -11,8 +11,10 @@
 ## (reprobuild-pm/issues/
 ## 2026-09-24-no-conformance-check-runs-against-stdlib-tarball-arms.md).
 ##
-## This is the sweep that decides it, for the realizer that owns a plain
-## archive: the `uses:` provisioning edge. Per arm, through
+## This sweep checks every tarball shape through the shared provisioning
+## edge, for recipe and home consumers alike. It is the single exhaustive
+## sweep; home API equivalence is covered by local fixtures in
+## libs/repro_home_apply/tests/t_archive_conformance_shared.nim. Per arm, through
 ## ``conformTarballArm`` — which realizes with ``resolveTarballTool``, the same
 ## path `repro` uses — it requires that
 ##
@@ -54,14 +56,6 @@
 ## 2026-10-07-reprobuilds-full-suite-has-no-windows-run.md``). This file says
 ## so rather than letting a green Linux run read as a green catalog.
 ##
-## Arms the HOME ARCHIVE REALIZER owns (an ``extractPath`` flatten, an
-## installer, an MSYS2 merge, a non-SHA-256 digest) are reported here and
-## checked by ``libs/repro_home_apply/tests/
-## t_stdlib_catalog_archive_arms_realize.nim``, which applies that realizer's
-## own rule. Ownership is read structurally from
-## ``archiveInstallerFeatures``, so neither sweep decides it by parsing a
-## refusal.
-##
 ## No mocks. A network test: it fetches each arm's archive once, keyed by the
 ## pinned digest. Point ``REPRO_CONFORMANCE_STORE`` at a directory that
 ## survives between runs and the cost is paid once per pin rather than once
@@ -82,7 +76,6 @@ import std/[os, strutils, tempfiles, unittest]
 
 import repro_project_dsl
 import repro_interface_artifacts
-import repro_tool_profiles
 import repro_tool_profiles/tarball_conformance
 # The WHOLE catalog's arms, not the part some other consumer links. See that
 # module: an arm nothing imports reaches no sweep, and an offline gate
@@ -135,7 +128,6 @@ suite "stdlib catalog tarball arms realize on this host":
 
     var totalArms = 0
     var hostArms = 0
-    var homeRealizerArms = 0
     var failures: seq[string] = @[]
     var seenPackages: seq[string] = @[]
 
@@ -167,16 +159,12 @@ suite "stdlib catalog tarball arms realize on this host":
           # it (NixOS); the realizer refuses it at resolution instead.
           if verdict.detail.len > 0:
             checkpoint(label & ": " & verdict.detail)
-        of acvOwnedByHomeRealizer:
-          inc homeRealizerArms
         else:
           failures.add(label & "\n      " & $verdict.verdict & ": " &
             verdict.detail)
 
     checkpoint("arms on the interface: " & $totalArms)
     checkpoint("arms for this host: " & $hostArms)
-    checkpoint("of those, owned by the home archive realizer: " &
-      $homeRealizerArms)
     for failure in failures:
       checkpoint("NOT CONFORMANT: " & failure)
 

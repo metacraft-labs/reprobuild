@@ -1,34 +1,12 @@
 ## GM4c: how a macOS application record is selected, routed and turned into
 ## an activation — platform-neutral, so it runs on every host.
 ##
-## A `tarball` record with `installMethod = "app-bundle"` must reach the home
-## archive realizer (never the `uses:` edge, which cannot unpack a disk image
-## or place a bundle), carry its bundle / identifier / team into the
-## realizer's input, and refuse at resolution when it cannot be realized:
-## an application record for a non-macOS os, and the declared-only vendor
-## shape `pkg-install`, naming the realizer it lacks. A macOS
-## `installer-silent` record is an installer APPLICATION (§ Installer
-## applications): with `installerApp` it routes to the home archive realizer
-## carrying the installer, its arguments and the product's declarations;
-## without `installerApp` (or another field realization verifies) it is
-## refused naming the missing field. The realized record becomes one
-## `macos.appBundle` resource in `~/Applications` at the reserved address --
-## a bundle, or the folder an installer application's product lives in.
-## Store-And-Installation-Layout.md § macOS Application Bundles.
-##
-## Real selection, real projection, real records registered in this process
-## (as the `package` macro registers them); nothing is downloaded. No mocks.
-##
-## Falsifying mutations: dropping `refuseUnrealizableMacosShape` from
-## `archiveRouteFor` fails "declared-only vendor shapes are refused";
-## dropping the `installerApp` copy from `archiveRealizationOf` fails "an
-## installer application routes to the home archive realizer"; dropping its
-## field check fails "an installer application record missing a field";
-## dropping the path checks after it fails "an installer application whose
-## product or installer path the realizer would not accept";
-## removing `"dmg"` from `InstallerOnlyArchiveTypes` and the `appBundle`
-## installer feature routes an application to the `uses:` edge and fails
-## "an application routes to the home archive realizer".
+## macOS bundle and installer-application records reach the shared tarball
+## provisioning edge with their identity and installation fields intact.
+## Unsupported vendor shapes, missing verification fields and unsafe product
+## paths are refused during resolution, before downloads. The selected
+## metadata still determines the macos.appBundle activation resource.
+## Real package registration, selection and projection; no mocks or downloads.
 
 import std/[strutils, unittest]
 
@@ -113,13 +91,13 @@ proc macos(arch = "arm64"): RealizationTarget =
 
 suite "GM4c: application records — selection, route, activation":
 
-  test "an application routes to the home archive realizer with its " &
+  test "an application routes to the shared provisioning edge with its " &
       "declarations":
     for arch in ["arm64", "x86_64"]:
       let resolution = resolveProfilePackage("gm4capprecord", macos(arch),
         @[rkTarball])
       check resolution.selection.kind == rkTarball
-      check resolution.archiveRoute == arInstaller
+      check resolution.archiveRoute == arExtract
       let archive = resolution.archive
       check archive.installMethod == imAppBundle
       check archive.archiveFormat == afDmg
@@ -153,13 +131,13 @@ suite "GM4c: application records — selection, route, activation":
       check "system scope" in err.msg
       check MacosPkgInstallRefusal in err.msg
 
-  test "an installer application routes to the home archive realizer " &
+  test "an installer application routes to the shared provisioning edge " &
       "with its declarations":
     for arch in ["arm64", "x86_64"]:
       let resolution = resolveProfilePackage("gm4cinstallerapp", macos(arch),
         @[rkTarball])
       check resolution.selection.kind == rkTarball
-      check resolution.archiveRoute == arInstaller
+      check resolution.archiveRoute == arExtract
       let archive = resolution.archive
       check archive.installMethod == imInstallerSilent
       check archive.archiveFormat == afDmg

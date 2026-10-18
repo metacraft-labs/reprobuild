@@ -90,15 +90,8 @@ type
       ## "" runs the package's resolved executable (``executablePath``).
 
   EPlanCycleDetected* = object of CatchableError
-    ## M0 (Realize-Layer-Plumbing-Closures spec): the planner's
-    ## topological sort over realize ops detected a cycle in the
-    ## extractor-discovery graph. Cycles are a catalog-authoring error
-    ## (the M0 hard-coded extractor map cannot loop with the current
-    ## enum-keyed mapping — discovery of a cycle therefore means a
-    ## future schema-driven ``requires_for_realize:`` field has been
-    ## mis-authored, OR a test deliberately injected one). The
-    ## exception carries the cycle participants so the operator can
-    ## name the offending catalog packages directly.
+    ## The exported topological-sort utility found a cycle in its caller's
+    ## dependency graph. Carries the packages that could not be ordered.
     cycleParticipants*: seq[string]
 
   ConfigContribution* = object
@@ -344,97 +337,35 @@ proc collectPackagesFromBody(body: seq[IntentNode]; activity: string;
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# M0 (Realize-Layer-Plumbing-Closures spec) — topological sort over realize ops
+# Deterministic package ordering and the legacy topological-sort utility
 # ---------------------------------------------------------------------------
 #
-# Why topological?
-#
-# Pre-M0 the planner sorted ``PlannedPackage`` entries alphabetically by
-# ``packageId``. That is latent-buggy when a home profile bundles BOTH
-# an extractor catalog package and a consumer that needs the extractor
-# pre-realized (the M3 bundling-posture decision from the
-# Realize-Closure-And-Catalog-Expansion predecessor campaign): the
-# alphabetical order may schedule the consumer first, which then fails
-# closed because its extractor's prefix does not yet exist on disk.
-#
-# Concrete example surfaced by the predecessor campaign's M11 LIVE
-# smoke: a profile containing both ``package(7zip)`` and
-# ``package(lessmsi)`` alphabetically sorts the 7-Zip package
-# before ``lessmsi``, but
-# ``packages/pkg_7zip.nim`` uses ``imInstallerMsi`` which needs
-# ``lessmsi.exe`` pre-realized OR on PATH. The smoke side-stepped the
-# bug by using a single-package profile; M0 closes it for real.
-#
-# Algorithm: Kahn's topological sort over the discovery graph. For each
-# package, ``extractorDependencies`` (in ``./package_catalog.nim``)
-# returns the set of catalog-package names that must precede it. If a
-# dep packageId is NOT in the plan (the operator didn't bundle the
-# extractor; PATH discovery satisfies it), the edge is silently
-# dropped — the dep is satisfied externally. Among multiple ready
-# packages (no remaining unfulfilled deps), ties break alphabetically.
-# This preserves byte-identical output for plans with no extractor
-# edges (the M71 reference profile is the load-bearing stability case).
-#
-# Cycle detection: if any packages remain after Kahn's outer loop
-# exhausts the ready queue, the residue is the cycle (or cycles). The
-# planner raises ``EPlanCycleDetected`` naming the participants — the
-# spec calls cycles a catalog-authoring error so failing closed is
-# the right behaviour.
+# Installer helpers are dependencies of the common provisioning edge. They
+# do not depend on a separately listed home package, its order, or ambient
+# discovery. Home packages therefore use alphabetical order. The exported
+# Kahn utility remains available to callers supplying their own dependency
+# graph, with alphabetical ties and an explicit cycle diagnostic.
 
 type
   ExtractorDepsCallback* =
     proc (p: PlannedPackage): seq[string] {.closure.}
-    ## M0 test seam: callers (production AND the M0 hermetic test gate)
-    ## supply a callback computing each package's extractor deps. The
-    ## production callback (``profileExtractorDeps``) resolves the package
-    ## as the apply will; the test gate can inject a synthetic dep map to
-    ## exercise the cycle-detection arm.
+    ## A caller-supplied dependency graph for the exported sort utility.
 
 proc profileExtractorDeps*(target: RealizationTarget; policy: SelectionPolicy):
     ExtractorDepsCallback =
-  ## Production extractor-dep resolver (GM4b): resolve the reference with
-  ## the profile's selection policy for ``target`` — statically, with no
-  ## host inventory — and, when the selection is an archive the home archive
-  ## realizer installs, delegate to ``extractorDependencies``.
-  ##
-  ## Static on purpose. With the inventory, a policy that puts ``path``
-  ## first could select a PATH executable and need no extractor; without
-  ## it the same reference may select the archive and add an edge. A
-  ## spurious edge only enforces an ordering that is harmless when the
-  ## consumer no longer needs it, while a missed edge would let a consumer
-  ## realize before its extractor. A package that does not resolve gets no
-  ## edge: the realize step reports it with the real diagnostic.
-  result = proc (p: PlannedPackage): seq[string] =
-    try:
-      let resolution = resolveProfilePackage(p.packageId, target, policy,
-        requestedVersion = p.requestedVersion, binaries = p.binaries)
-      if resolution.selection.kind == rkTarball and
-          resolution.archiveRoute == arInstaller:
-        return extractorDependencies(p.packageId, resolution.archive)
-    except CatchableError:
-      discard
-    @[]
+  ## Compatibility callback: home packages have no cross-package extractor
+  ## dependencies. Each tarball's provisioning graph realizes its own helpers.
+  ## Target/policy remain arguments for callers of the historical API.
+  result = proc (p: PlannedPackage): seq[string] = @[]
 
 proc topologicallySortPackages*(packages: seq[PlannedPackage];
                                 depsOf: ExtractorDepsCallback):
     seq[PlannedPackage] =
-  ## M0: Kahn's algorithm over the extractor-discovery graph.
-  ##
-  ## Stability: among packages with no remaining unfulfilled deps,
-  ## ties break by alphabetical ``packageId`` — so a plan with no
-  ## discovery edges (the M71 reference profile is the canonical
-  ## case) sorts byte-identically to the pre-M0 alphabetical order.
-  ##
-  ## Edges to packageIds NOT in the input ``packages`` set are
-  ## silently dropped (the dep is satisfied externally — PATH, Scoop,
-  ## or simply already-installed). The spec calls this out
-  ## explicitly: "If a dep packageId is NOT in the plan ... the dep
-  ## is satisfied externally (PATH) and not modeled as a graph edge".
-  ##
-  ## Raises ``EPlanCycleDetected`` when a cycle is detected — that
-  ## means a catalog-authoring error (or a test deliberately injected
-  ## a cycle). The exception's ``cycleParticipants`` lists the
-  ## packageIds the algorithm could not schedule.
+  ## Kahn's algorithm over the caller's package dependency graph.
+  ## Ready packages tie alphabetically; dependencies outside the input set
+  ## are ignored. Raises EPlanCycleDetected with the unordered participants
+  ## if no remaining package can be emitted. Production helper provisioning
+  ## uses its own action graph, independently of this compatibility utility.
 
   # Index of packageId → (input order, package). Input order is used
   # only as a defensive secondary tiebreak; the primary tiebreak is
@@ -554,28 +485,20 @@ proc buildPlan*(profile: Profile; profileDir: string;
       continue
     seen.incl p.packageId
     deduped.add p
-  # M0 (Realize-Layer-Plumbing-Closures spec): replace the pre-M0
-  # alphabetical sort with a topological sort over the
-  # extractor-discovery graph. Stability for plans with no extractor
-  # edges (the M71 reference profile) is preserved by breaking ties
-  # alphabetically inside Kahn's algorithm. See the long comment block
-  # above ``topologicallySortPackages`` for the WHY.
-  let extractorTarget =
+  # Preserve plan-time validation of the target's selection policy. A target
+  # the resolver cannot name is still diagnosed by package realization.
+  let policyTarget =
     try:
       some(profileRealizationTarget(ctx.platform, ctx.arch, isHost = false))
     except ValueError:
       none(RealizationTarget)
-  result.packages =
-    if extractorTarget.isSome:
-      topologicallySortPackages(deduped, profileExtractorDeps(
-        extractorTarget.get,
-        selectionPolicyFor(profile.adapterPreference,
-          extractorTarget.get.os).policy))
-    else:
-      # A platform the resolver cannot name resolves nothing, so no
-      # extractor edge exists; the realize step reports the platform.
-      topologicallySortPackages(deduped,
-        proc (p: PlannedPackage): seq[string] = @[])
+  if policyTarget.isSome:
+    discard selectionPolicyFor(profile.adapterPreference, policyTarget.get.os)
+  # Helpers belong to each package's provisioning graph, so package ordering
+  # needs no profile-level dependency projection.
+  result.packages = deduped
+  result.packages.sort(proc(a, b: PlannedPackage): int =
+    cmp(a.packageId, b.packageId))
   # Phase A: every package contributes one launcher with the same name.
   for p in result.packages:
     result.launchers.add(PlannedLauncher(commandName: p.packageId,
