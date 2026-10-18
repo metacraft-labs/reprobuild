@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Pinned verbatim payload from CodeTracer commit
-# 222a4a0099115066ba331817e94a3ac9f2293290, config.nims.
-# Source: https://github.com/metacraft-labs/codetracer/blob/222a4a0099115066ba331817e94a3ac9f2293290/config.nims
+# f1745b89e93179eca20778943bbafae91ebb6dfd, config.nims.
+# Source: https://github.com/metacraft-labs/codetracer/blob/f1745b89e93179eca20778943bbafae91ebb6dfd/config.nims
 #
 # Keep every byte after this provenance header identical to the public source.
 import std/[os, strutils]
@@ -34,6 +34,7 @@ addPathIfDir(repoRoot / "libs/nim-serialization")
 addPathIfDir(repoRoot / "libs/nim-prompt")
 addPathIfDir(repoRoot / "libs/nim-stew")
 addPathIfDir(repoRoot / "libs/nim-unicodedb/src")
+addPathIfDir(repoRoot / "libs/nim-regex/src")
 addPathIfDir(repoRoot / "libs/poly")
 addPathIfDir(repoRoot / "libs/quicktest")
 addPathIfDir(repoRoot / "libs/chronos")

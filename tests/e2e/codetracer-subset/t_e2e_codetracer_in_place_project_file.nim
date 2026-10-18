@@ -9,16 +9,16 @@ import repro_test_support
 
 const
   CodeTracerProjectContractCommit =
-    "222a4a0099115066ba331817e94a3ac9f2293290"
+    "f1745b89e93179eca20778943bbafae91ebb6dfd"
   PinnedCodeTracerProjectFile =
-    "tests/fixtures/codetracer-subset/repro-222a4a00.nim"
+    "tests/fixtures/codetracer-subset/repro-f1745b89.nim"
   PinnedCodeTracerConfigFile =
-    "tests/fixtures/codetracer-subset/config-222a4a00.nims"
+    "tests/fixtures/codetracer-subset/config-f1745b89.nims"
   PinnedCodeTracerFixtureHeaderLines = 6
   PinnedCodeTracerProjectPayloadSha256 =
-    "ccf12e902fdd57ae789434591256683a46b3d35e19ba81df0d7b28cc0c0f6582"
+    "3561c345dd330cc80cf749e7496f8d0a6e8e21c9dd1734442dac5511e31c14f8"
   PinnedCodeTracerConfigPayloadSha256 =
-    "5a619728256fbebfaa8fffde8280293e93a2600daac684375193a4413b69c3dd"
+    "469f008a005d9d0d6b274fca8f8422b9f96bc78156567e269b35b0f3ce625a80"
   # `reprobuild-provision` used to live in THIS repo, at
   # `.github/actions/reprobuild-provision/action.yml`. It was moved to the
   # shared-actions repo because GitHub materialises a composite action by
@@ -2695,7 +2695,7 @@ when defined(macosx) or defined(linux):
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
       check first.contains("selectedTarget: frontend")
-      # The pinned recipe's `frontend` aggregate (CodeTracer 222a4a00) is the
+      # The pinned recipe's `frontend` aggregate (CodeTracer f1745b89) is the
       # 14 `frontendActions` plus the `frontend-styles` target's 6:
       #   frontend-ui-js, frontend-public-ui-js, frontend-index-js,
       #   frontend-src-index-js, frontend-server-index-js,
@@ -2934,7 +2934,7 @@ when defined(macosx) or defined(linux):
       check first.contains("providerCompile:")
       check first.contains("providerGraphSnapshot:")
       # THE ACTION COUNT FOLLOWS THE PINNED RECIPE, so it is derived from
-      # `PinnedCodeTracerProjectFile` (CodeTracer 222a4a00) rather than from
+      # `PinnedCodeTracerProjectFile` (CodeTracer f1745b89) rather than from
       # the last value that passed. `repro build <projectRoot>` names a
       # target, so the recipe's `defaultBuildAction` is NOT consulted, and
       # the unselected lowering (`lowerProviderSnapshot` with no selector)

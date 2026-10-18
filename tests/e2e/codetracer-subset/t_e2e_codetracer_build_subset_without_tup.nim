@@ -24,13 +24,20 @@ const
   # exclusion ``| $(NIM_SIDE_OUTPUTS_IGNORE)``, which tells tup to accept the
   # writes into that cache. Every other fingerprinted definition is
   # byte-identical, so ``!trace_object_file`` keeps its hash.
-  NimJsSemanticsHash = "c78271220ebdc225"
-  NimJsWithoutOldCaseObjectsHash = "600a5090da25c07b"
+  #
+  # Refreshed at f1745b89 (the ``codetracer-src`` pin; 222a4a00 is an
+  # ancestor): CodeTracer 905e31111 vendored ``libs/nim-regex`` and added
+  # ``--path:$(ROOT)/libs/nim-regex/src`` to ``NIM_REPO_PATH_FLAGS``, which
+  # ``!nim_js`` expands. ``cf5abd87a80ad4de`` is also what the live sibling's
+  # ``src/Tuprules.tup`` hashed to when the stale pin reported the drift.
+  # ``!trace_object_file`` is unchanged, so its hash is too.
+  NimJsSemanticsHash = "cf5abd87a80ad4de"
+  NimJsWithoutOldCaseObjectsHash = "75caac0be4d67d5c"
   TraceObjectFileSemanticsHash = "3d1a52e3befe61cf"
   CodeTracerTupSemanticsCommit =
-    "222a4a0099115066ba331817e94a3ac9f2293290"
+    "f1745b89e93179eca20778943bbafae91ebb6dfd"
   PinnedTupSemanticsFixture =
-    "tests/fixtures/codetracer-subset/Tuprules-222a4a00.tup"
+    "tests/fixtures/codetracer-subset/Tuprules-f1745b89.tup"
 
 type
   TupRules = object
