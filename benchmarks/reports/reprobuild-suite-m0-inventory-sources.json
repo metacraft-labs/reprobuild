@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2170,
+    "nimTestBinaries": 2173,
     "pureUnitConsolidationGroups": 62,
     "pureUnitTests": 660,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
-    "testEntries": 2195
+    "testEntries": 2198
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1294,10 +1294,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1183,
+      "integration": 1184,
       "platform/destructive": 132,
       "pure unit": 660,
-      "unclassified": 201
+      "unclassified": 203
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1499,9 +1499,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2170,
+    "nimTestBinaryCount": 2173,
     "pythonTestFileCount": 25,
-    "testEntryCount": 2195
+    "testEntryCount": 2198
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -11155,6 +11155,25 @@
       "source": "libs/repro_daemon_core/tests/t_daemon_writer_identity.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 21,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_ipc_endpoint_is_bounded_to_the_socket_address_limit",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_daemon_core",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_daemon_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_daemon_core/tests/t_ipc_endpoint_is_bounded_to_the_socket_address_limit.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25469,6 +25488,23 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_repro_watch_refuses_an_over_long_hcr_agent_socket",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/hcr-watch/t_repro_watch_refuses_an_over_long_hcr_agent_socket.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
@@ -43067,6 +43103,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_default_daemon_endpoints_fit_the_socket_address_limit",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_daemon_core",
+        "repro_store_daemon",
+        "repro_test_support"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_default_daemon_endpoints_fit_the_socket_address_limit.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_dev_env_cache_key_frame",
       "class": "unclassified",
       "classificationReason": "mutates the process environment",
@@ -43462,13 +43517,14 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_hcr_agent",
-        "repro_hcr_test"
+        "repro_hcr_test",
+        "repro_test_support"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_hcr_agent_ipc.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -1872,6 +1872,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_daemon_core/tests/t_ipc_endpoint_is_bounded_to_the_socket_address_limit.nim",
+    binary: "build/test-bin/t_ipc_endpoint_is_bounded_to_the_socket_address_limit",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_daemon_core/tests/t_l4_daemon_leases.nim",
     binary: "build/test-bin/t_l4_daemon_leases",
     defines: @[],
@@ -8966,6 +8975,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim",
     binary: "build/test-bin/t_e2e_repro_watch_hcr_one_target_agent_inject_failure",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/e2e/hcr-watch/t_repro_watch_refuses_an_over_long_hcr_agent_socket.nim",
+    binary: "build/test-bin/t_repro_watch_refuses_an_over_long_hcr_agent_socket",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -17885,6 +17903,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_declared_package_deps_from_recipe.nim",
     binary: "build/test-bin/t_declared_package_deps_from_recipe",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_default_daemon_endpoints_fit_the_socket_address_limit.nim",
+    binary: "build/test-bin/t_default_daemon_endpoints_fit_the_socket_address_limit",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

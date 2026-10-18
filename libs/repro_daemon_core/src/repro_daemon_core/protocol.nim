@@ -376,7 +376,37 @@ when defined(macosx):
       buf.setLen(buf.high)
     buf
 
+proc userDaemonEndpointLeaf(): string =
+  ## The default endpoint's file name inside ``userDaemonRuntimeDir``.
+  "repro-daemon-" & $currentUid() & ".sock"
+
+proc boundedTempRuntimeDir(tempRoot: string): string =
+  ## ``<tempRoot>/repro-<uid>``, unless the default endpoint inside it could
+  ## not be published there -- then ``/tmp/repro-<uid>``.
+  ##
+  ## ``tempRoot`` is ``getTempDir()``, i.e. ``$TMPDIR``, and nothing bounds
+  ## its length: the suite's ``~/.cache/reprobuild-test-tmp/<slot>``, a
+  ## ``nix-shell`` session directory or a deep CI workspace can leave an
+  ## endpoint ``std/net`` refuses to bind (107 bytes on Linux, 91 on macOS;
+  ## ``repro_core/paths.unixSocketPathMaxLen``), or one with no room beside it
+  ## for ``bindIpcListener``'s staging name. ``ipcEndpointFits`` checks both.
+  ## The fallback is the shape this default already has whenever
+  ## ``TMPDIR=/tmp``, so it introduces no new location -- and it is the rule
+  ## ``repro_core/paths.runquotaEndpointPath`` applies to its own sockets.
+  ## Every process of this user under the same ``TMPDIR`` takes the same
+  ## branch, so client and daemon still agree on the endpoint.
+  result = tempRoot / ("repro-" & $currentUid())
+  when defined(posix):
+    if not ipcEndpointFits(result / userDaemonEndpointLeaf()):
+      result = "/tmp" / ("repro-" & $currentUid())
+
 proc userDaemonRuntimeDir*(): string =
+  ## Where the user daemon's default endpoint lives. ``REPRO_DAEMON_RUNTIME_DIR``
+  ## is taken verbatim, as is ``XDG_RUNTIME_DIR``'s ``repro`` subdirectory
+  ## (the session manager's short ``/run/user/<uid>``); only the
+  ## ``getTempDir()`` fallbacks are bounded (``boundedTempRuntimeDir``). An
+  ## over-long explicit choice is reported by ``bindIpcListener``, naming the
+  ## limit, rather than silently moved.
   let explicit = getEnv("REPRO_DAEMON_RUNTIME_DIR")
   if explicit.len > 0:
     return explicit
@@ -391,12 +421,12 @@ proc userDaemonRuntimeDir*(): string =
     # repro-daemon instances bind to. Fall back to getTempDir() only
     # if confstr is unavailable on this host.
     let darwinTmp = darwinUserTempDir()
-    let base = if darwinTmp.len > 0: darwinTmp else: getTempDir()
-    base / ("repro-" & $currentUid())
+    if darwinTmp.len > 0: darwinTmp / ("repro-" & $currentUid())
+    else: boundedTempRuntimeDir(getTempDir())
   else:
     let xdg = getEnv("XDG_RUNTIME_DIR")
     if xdg.len > 0: xdg / "repro"
-    else: getTempDir() / ("repro-" & $currentUid())
+    else: boundedTempRuntimeDir(getTempDir())
 
 proc userDaemonStateDir*(): string =
   let explicit = getEnv("REPRO_DAEMON_STATE_DIR")
@@ -420,7 +450,7 @@ proc defaultUserDaemonEndpoint*(): string =
   when defined(windows):
     "\\\\.\\pipe\\repro-daemon-current-user"
   else:
-    userDaemonRuntimeDir() / ("repro-daemon-" & $currentUid() & ".sock")
+    userDaemonRuntimeDir() / userDaemonEndpointLeaf()
 
 proc defaultUserDaemonLogPath*(): string =
   userDaemonStateDir() / "logs" / "repro-daemon.log"

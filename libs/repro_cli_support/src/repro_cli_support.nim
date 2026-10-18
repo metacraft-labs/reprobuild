@@ -31980,6 +31980,28 @@ proc initHcrWatchSession(config: HcrWatchConfig; projectRoot = ""): HcrWatchSess
     if resolvedConfig.artifacts.len > 0 and not resolvedConfig.artifacts.isAbsolute:
       resolvedConfig.artifacts = resolveProjectPath(projectRoot, resolvedConfig.artifacts)
   resolvedConfig.validateHcrWatchConfig()
+  when defined(posix):
+    # A RELATIVE socket that resolves long is hashed into ``/tmp`` above,
+    # but a path the user spelled ABSOLUTE is theirs and is not moved. It
+    # still has to fit what ``std/net`` binds -- 107 bytes on Linux, 91 on
+    # macOS (``repro_core/paths.unixSocketPathMaxLen``) -- and past that
+    # ``bindUnix`` fails with a bare ``socket path too long`` naming neither
+    # the path nor the flag. Refuse here instead, naming both. The legacy
+    # ``--hcr-agent-socket`` session and every ``--hcr-target`` session are
+    # initialised through this proc, so both are covered; the message names
+    # whichever flag supplied the path.
+    if resolvedConfig.hcrWatchEnabled and resolvedConfig.socketPath.len > 0 and
+        not unixSocketPathFits(resolvedConfig.socketPath):
+      let flag =
+        if resolvedConfig.targetName.len > 0:
+          "--hcr-target=" & resolvedConfig.targetName & " socket"
+        else:
+          "--hcr-agent-socket"
+      raise newException(ValueError,
+        flag & " path " & resolvedConfig.socketPath & " is " &
+          $resolvedConfig.socketPath.len & " bytes, longer than the " &
+          $unixSocketPathMaxLen() & "-byte Unix-socket path limit on this " &
+          "platform; pass a shorter path")
   result.enabled = resolvedConfig.hcrWatchEnabled
   result.config = resolvedConfig
   if result.enabled:

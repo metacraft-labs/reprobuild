@@ -1416,6 +1416,15 @@ e2e_repro_watch_hcr_one_target_agent_inject_failure:
         tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim \
         2>&1 | tee test-logs/e2e_repro_watch_hcr_one_target_agent_inject_failure.log
 
+e2e_repro_watch_refuses_an_over_long_hcr_agent_socket:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_repro_watch_refuses_an_over_long_hcr_agent_socket \
+        --out:build/test-bin/e2e_repro_watch_refuses_an_over_long_hcr_agent_socket \
+        tests/e2e/hcr-watch/t_repro_watch_refuses_an_over_long_hcr_agent_socket.nim \
+        2>&1 | tee test-logs/e2e_repro_watch_refuses_an_over_long_hcr_agent_socket.log
+
 # The one gate in the family with a genuinely mixed body: a structural case
 # that runs on every host and an engine case that is macOS-arm64 only. The lane
 # manifest declares it `run:1+skip:1` on Linux and Windows, which is the only
