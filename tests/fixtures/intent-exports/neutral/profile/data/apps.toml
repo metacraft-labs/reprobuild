@@ -15,3 +15,10 @@ kind = "env.userVariable"
 when = "host == \"m1\""
 name = "GM5_M1"
 value = "yes"
+
+# GM9: a resource row that belongs to an activity (home-pc selects `cli`).
+[[resource]]
+kind = "env.userVariable"
+activity = "cli"
+name = "GM9_CLI"
+value = "1"

@@ -567,21 +567,52 @@ proc clientIdFromArgv(project: string): string =
     "no `--client-id` on the argv of " & project & ": " & $argv)
 
 suite "L9 F5 — two sessions read one instance's minted identifier":
-  var c = prepareCase()
-  var daemon = c.startDaemon()
-  defer:
-    for project in [c.issuerConsumer, c.devConsumer]:
-      discard c.runRepro(project, @["down", "--activity=" & ConsumerActivity])
-    for project in [c.issuerOwner, c.devOwner]:
-      discard c.runRepro(project, @["down", "--activity=" & Activity])
-    c.closeDaemon(daemon)
-    # REAP BEFORE THE TREE IS REMOVED and AFTER the daemon is closed: the
-    # daemon's own argv names this case's `tempRoot`, so an earlier sweep
-    # would kill it out from under the graceful `repro down` calls.
-    c.reapCaseProcesses()
-    try: removeDir(c.tempRoot) except OSError, IOError: discard
+  # Prepared on the first case's `setup`, NOT in the suite body. The suite
+  # body runs at registration, in every process this binary starts --
+  # including `--list` / `--list-json`, which only enumerates and is run
+  # from a scratch working directory. Preparing here made enumeration
+  # resolve `<cwd>/build/bin/repro` (raising from any other directory, so
+  # no case was listed) and start a daemon just to print case names. The
+  # runner executes each case in its own process, so a case still prepares
+  # the fixture and starts the daemon exactly once, and the deferred
+  # cleanup below still runs in that process -- only if a case prepared.
+  var prepared = false
+  var c: F5Case
+  var daemon: owned(Process)
 
-  test "the instance is not running: the resolver refuses by name":
+  setup:
+    if not prepared:
+      c = prepareCase()
+      prepared = true
+      daemon = c.startDaemon()
+
+  defer:
+    if prepared:
+      for project in [c.issuerConsumer, c.devConsumer]:
+        discard c.runRepro(project,
+          @["down", "--activity=" & ConsumerActivity])
+      for project in [c.issuerOwner, c.devOwner]:
+        discard c.runRepro(project, @["down", "--activity=" & Activity])
+      c.closeDaemon(daemon)
+      # REAP BEFORE THE TREE IS REMOVED and AFTER the daemon is closed: the
+      # daemon's own argv names this case's `tempRoot`, so an earlier sweep
+      # would kill it out from under the graceful `repro down` calls.
+      c.reapCaseProcesses()
+      try: removeDir(c.tempRoot) except OSError, IOError: discard
+
+  # ONE PROCESS PER CASE. The suite runner executes every case in a process
+  # of its own (`--run "<suite>::<case>"`), and each such process prepares a
+  # FRESH fixture and daemon in `setup` above. The cases below are one
+  # scenario told in steps, and a later step asserts on state an earlier
+  # step created -- so each step is a template, and a case first REPLAYS the
+  # earlier steps its state depends on, assertions and all, then runs its
+  # own. Run alone, a case therefore measures exactly what it measured as
+  # part of the sequence; a prerequisite step that fails fails the dependent
+  # case too, at that step's own assertion, rather than letting it pass or
+  # fail on a fixture it never built.
+
+  template resolverRefusesWithoutInstance() =
+    # The steps of case "the instance is not running: the resolver refuses by name".
     # The owner's interface is LIFTED and no instance is materialised.
     # `repro shell --print-env=json` re-derives the owner's dev-env --
     # and so writes its project-interface artifact -- WITHOUT converging
@@ -610,7 +641,8 @@ suite "L9 F5 — two sessions read one instance's minted identifier":
     # And the read step was never reached, so it said nothing.
     check not refused.output.contains("minted attribute")
 
-  test "two separate sessions read one instance's minted id, same bytes":
+  template twoSessionsReadSameMintedId() =
+    # The steps of case "two separate sessions read one instance's minted id, same bytes".
     # STEP 1 -- the OWNER's session. One process, with the issuer's
     # registrar program installed. It converges the instance, the
     # registrar answers out of the descriptor the running service wrote,
@@ -666,7 +698,8 @@ suite "L9 F5 — two sessions read one instance's minted identifier":
       sessionDirOf(c.issuerOwner, Activity)
     check mintedRowsOf(c.issuerOwner, Activity).len == 1
 
-  test "the §7.2 stamp survives the crossing: a development id is refused":
+  template developmentStampSurvivesCrossing() =
+    # The steps of case "the §7.2 stamp survives the crossing: a development id is refused".
     # A SECOND instance, converged with NO registrar, so every row it
     # mints is stamped `development` by the CLI's own default registrar.
     let devOwnerUp = c.runRepro(c.devOwner, @["up", "--activity=" & Activity])
@@ -720,7 +753,8 @@ suite "L9 F5 — two sessions read one instance's minted identifier":
     check rows.len == 1
     check rows[0]{"provenance"}.getStr("") == $rprDevelopment
 
-  test "`repro down` removes the crossed rows a pure consumer read":
+  template downRemovesCrossedRows() =
+    # The steps of case "`repro down` removes the crossed rows a pure consumer read".
     # A NEAR-MISS OF THIS CHANGE'S OWN, found by probing it, and in the exact
     # class L9's review found in `infra`: `cleanup()` removed the readiness
     # marker and not the descriptor, so a product read a dead issuer's client
@@ -750,3 +784,16 @@ suite "L9 F5 — two sessions read one instance's minted identifier":
     check mintedRowsOf(c.issuerConsumer, ConsumerActivity).len == 0
     check not fileExists(sessionDirOf(c.issuerConsumer, ConsumerActivity) /
       "shared-instance-registrations.json")
+
+  test "the instance is not running: the resolver refuses by name":
+    resolverRefusesWithoutInstance()
+
+  test "two separate sessions read one instance's minted id, same bytes":
+    twoSessionsReadSameMintedId()
+
+  test "the §7.2 stamp survives the crossing: a development id is refused":
+    developmentStampSurvivesCrossing()
+
+  test "`repro down` removes the crossed rows a pure consumer read":
+    twoSessionsReadSameMintedId()
+    downRemovesCrossedRows()

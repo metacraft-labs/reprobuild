@@ -4,7 +4,10 @@
 ## named array — have their own tests. This file covers the shapes those tests
 ## do not: empty and missing arrays, inline versus one-per-line arrays, a key
 ## of the same name in another table, idempotence, arrays of tables in both
-## TOML spellings, files without a final newline, malformed input, and the
+## TOML spellings, files without a final newline, the end of an EDITED file
+## (exactly one final terminator, because the manifest repo's
+## `end-of-file-fixer` pre-commit hook rewrites anything else and that rewrite
+## aborts the commit a `repro ws` verb then makes), malformed input, and the
 ## typed renderers (each round-trips through the strict reader, and the ones
 ## that replaced string-built stubs produce the bytes those stubs produced).
 ##
@@ -140,6 +143,76 @@ suite "manifest editor edge cases":
       check d.setKey("", "member_sets", tomlStrings(["s"]))) ==
       "member_repos = [\"a\"]\nmember_sets = [\"s\"]\n"
 
+  test "an edit that replaces an unterminated last line terminates it":
+    # The array closes the file, so the edit rewrites the very line that had
+    # no terminator. Keeping "its" terminator would keep the defect.
+    let src = "member_repos = [\"a\"]"
+    check edited(src, proc (d: var ManifestDoc) =
+      check d.addArrayMember("", "member_repos", "b")) ==
+      "member_repos = [\"a\", \"b\"]\n"
+
+  test "an edited file ending in blank lines ends in exactly one newline":
+    for tail in ["\n\n", "\n\n\n"]:
+      let src = "member_repos = [\n  \"a\",\n]" & tail
+      check edited(src, proc (d: var ManifestDoc) =
+        check d.addArrayMember("", "member_repos", "b")) ==
+        "member_repos = [\n  \"a\",\n  \"b\",\n]\n"
+
+  test "a [[remote]] added to a file ending in a blank line ends it once":
+    # The shape `repos add` met in a real `projects/agent-harbor.toml`: the
+    # last remote block closes the file with "\n\n" and the new block goes
+    # after it.
+    let src = "member_repos = [\n]\n\n[project]\nname = \"p\"\n\n" &
+      "[[remote]]\nname = \"origin\"\nfetch = \"https://a\"\n\n"
+    var doc = manifestDocFromText(src)
+    check doc.ensureArrayTableEntry("remote",
+      @[tomlField("name", tomlStr("upstream")),
+        tomlField("fetch", tomlStr("https://b"))])
+    check doc.manifestDocText == "member_repos = [\n]\n\n[project]\n" &
+      "name = \"p\"\n\n[[remote]]\nname = \"origin\"\n" &
+      "fetch = \"https://a\"\n\n[[remote]]\nname = \"upstream\"\n" &
+      "fetch = \"https://b\"\n"
+
+  test "a CRLF file keeps CRLF at its end after an edit":
+    check edited("member_repos = [\r\n  \"a\",\r\n]\r\n\r\n",
+      proc (d: var ManifestDoc) =
+        check d.addArrayMember("", "member_repos", "b")) ==
+      "member_repos = [\r\n  \"a\",\r\n  \"b\",\r\n]\r\n"
+    check edited("member_repos = [\"a\"]\r\nx = 1",
+      proc (d: var ManifestDoc) =
+        check d.addArrayMember("", "member_repos", "b")) ==
+      "member_repos = [\"a\", \"b\"]\r\nx = 1\r\n"
+
+  test "an unchanged document keeps its end byte for byte":
+    # The end is normalised only in text an edit changed: a file a verb read
+    # but did not edit is reproduced as it was, and an empty one stays empty.
+    for src in ["member_repos = [\"a\"]", "member_repos = [\"a\"]\n\n\n", ""]:
+      var doc = manifestDocFromText(src)
+      if src.len > 0:
+        check not doc.addArrayMember("", "member_repos", "a")
+      check not doc.changed
+      check doc.manifestDocText == src
+
+  test "a trailing line of spaces is content, not a blank line to strip":
+    # `end-of-file-fixer` removes only EMPTY trailing lines; a line holding
+    # whitespace ends in a newline and satisfies it.
+    check edited("member_repos = [\"a\"]\n  \n", proc (d: var ManifestDoc) =
+      check d.addArrayMember("", "member_repos", "b")) ==
+      "member_repos = [\"a\", \"b\"]\n  \n"
+
+  test "a file-level edit writes a file ending in exactly one newline":
+    let dir = createTempDir("repro-editor-eof-", "")
+    defer: removeDir(dir)
+    for (name, src) in [("unterminated.toml", "member_repos = [\"a\"]"),
+        ("blank-tail.toml", "member_repos = [\n  \"a\",\n]\n\n")]:
+      let path = dir / name
+      writeFile(path, src)
+      check addArrayMemberInFile(path, "", "member_repos", "b")
+      let got = readFile(path)
+      checkpoint(name & ": " & got.escape)
+      check got.endsWith("\n")
+      check not got.endsWith("\n\n")
+
   test "replacing a value keeps a trailing comment and the key spelling":
     let src = "[repo]\n\"name\"   =   'r'   # literal string\n"
     check edited(src, proc (d: var ManifestDoc) =
@@ -156,7 +229,7 @@ suite "manifest editor edge cases":
   test "a [[remote]] entry is added once, after the last remote block":
     let src = "member_repos = [\n]\n\n[project]\nname = \"p\"\n\n" &
       "[[remote]]\nname = \"origin\"\nfetch = \"https://a\"\n\n" &
-      "[certificates]\ngate_mode = \"off\"\n"
+      "[extensions]\nnote = \"after the remotes\"\n"
     var doc = manifestDocFromText(src)
     let fields = @[tomlField("name", tomlStr("upstream")),
                    tomlField("fetch", tomlStr("https://b"))]

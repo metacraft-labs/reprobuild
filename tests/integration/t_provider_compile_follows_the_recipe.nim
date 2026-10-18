@@ -18,7 +18,10 @@
 ##   * CORRECT AT B: the project-root fallback for a package the provider
 ##     does not own names B's directory, and B's provider-graph snapshot
 ##     records B's recipe as its evaluation input, not A's;
-##   * NOT OVER-SHARED: an edit to B's recipe compiles again.
+##   * NOT OVER-SHARED: an edit to B's recipe compiles again;
+##   * NOT SHARED WHEN LOCATION-BOUND: a recipe whose provider bakes in its
+##     own absolute location (`currentSourcePath()`) is compiled at each
+##     copy, so each copy evaluates its own paths and keeps its cache hits.
 ##
 ## MOCK POLICY - none. The real `build/bin/repro` drives real compiles; the
 ## only stand-in is a shell wrapper around the real `nim` that counts
@@ -42,6 +45,19 @@ package relocprobe:
   build:
     fs.writeText(actionId = "write-root", output = "out/root.txt",
       text = packageProjectRoot("relocother") & "\n")
+"""
+
+const BakedRecipe = """
+import std/os
+import repro_project_dsl
+import other
+
+const recipeRoot = parentDir(currentSourcePath())
+
+package relocprobe:
+  build:
+    fs.writeText(actionId = "write-baked-root", output = "out/root.txt",
+      text = recipeRoot & "\n")
 """
 
 const ProviderLinePrefix = "providerCompileAction: __repro_provider_compile"
@@ -160,3 +176,56 @@ suite "the provider compile follows the recipe":
       checkpoint("B edited: " & providerLine(edited.output))
       check compileCount(compileLog) > compiledAtA
       check readFile(projectB / "out" / "root.txt").strip() == projectB
+
+  test "a recipe that bakes in its own location is compiled at each location":
+    # `currentSourcePath()` is absolute in a recipe-relative compile too, and
+    # a recipe may evaluate it (CodeTracer: `projectRootPath =
+    # parentDir(currentSourcePath())` in a `const`, joined onto every
+    # `--path` of its `nim js` edges). Served to another copy, such a binary
+    # evaluates the copy that COMPILED it. Measured at 5276f7284 with this
+    # shape of recipe and one shared action-cache root: A, then B (which
+    # recompiled the shared binary), then A again wrote B's directory into
+    # A's output and re-ran A's action - the key moved between two builds of
+    # an unchanged tree, and the output named the wrong project.
+    let repoRoot = getCurrentDir()
+    let reproBin = repoRoot / "build" / "bin" / addFileExt("repro", ExeExt)
+    let nim = findExe("nim")
+    if not fileExists(reproBin) or nim.len == 0:
+      checkpoint("missing " & reproBin & " or nim; run `just build` first")
+      fail()
+    else:
+      let tempRoot = "/tmp/rb-provbaked-" & $getCurrentProcessId()
+      removeDir(tempRoot)
+      createDir(tempRoot)
+      defer: removeDir(tempRoot)
+      let compileLog = tempRoot / "provider-compiles"
+      let witness = tempRoot / "witness-nim"
+      writeFile(witness, "#!/bin/sh\n" &
+        "case \"$*\" in\n" &
+        "  *--define:reproProviderMode*) echo provider >> " &
+          quoteShell(compileLog) & " ;;\n" &
+        "esac\nexec " & quoteShell(nim) & " \"$@\"\n")
+      setFilePermissions(witness, {fpUserRead, fpUserWrite, fpUserExec})
+      let actionCacheRoot = tempRoot / "action-cache"
+      let storeRoot = tempRoot / "store"
+      createDir(actionCacheRoot)
+      let projectA = tempRoot / "a" / "project"
+      let projectB = tempRoot / "b" / "project"
+      writeProject(projectA, BakedRecipe)
+      writeProject(projectB, BakedRecipe)
+
+      for (label, project) in [("A", projectA), ("B", projectB),
+                               ("A again", projectA)]:
+        let res = build(reproBin, witness, project, actionCacheRoot,
+          storeRoot)
+        if res.exitCode != 0:
+          checkpoint(res.output)
+        require res.exitCode == 0
+        checkpoint(label & ": " & providerLine(res.output))
+        # CORRECT AT EACH COPY: the baked location is this copy's own.
+        check readFile(project / "out" / "root.txt").strip() == project
+        if label == "A again":
+          # STABLE: nothing changed at A, so its edge is not re-run.
+          check "action: write-baked-root status=asUpToDate" in res.output
+      # B could not be served A's binary: it compiled its own.
+      check compileCount(compileLog) >= 2

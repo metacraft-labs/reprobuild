@@ -30,9 +30,16 @@
 ##   4. nothing is withheld and no unpublished warning is printed — a refresh
 ##      that recorded the pin AND warned about it would be telling the operator
 ##      to fix something it had already filed;
-##   5. `narHash`, `lastModified` and `revCount` are dropped from the moved
-##      node, which is the existing NF-2 contract this case must not silently
-##      lose.
+##   5. the moved node carries a NEW `narHash`, `lastModified` and `revCount`
+##      — the ones nix reports for the pushed revision, not the seed's left
+##      behind and not none at all. A pushed revision is exactly the one nix
+##      can fetch, so it is exactly the one whose node must not come out
+##      weaker (reprobuild-pm issue 2026-09-27). The values themselves are
+##      checked against an independent `nix flake lock` by
+##      `t_a_refreshed_flake_pin_carries_what_nix_would_write`.
+##
+## Recording needs nix (it computes those fields), so the case SKIPS LOUDLY
+## without it (`nf2RecordingPrerequisites`).
 ##
 ## ## Mutation
 ##
@@ -44,7 +51,7 @@
 ## Test-double policy: NO mocks, doubles or fakes. See the headers of
 ## `nf2_flake_lock_fixture.nim` and `nf3_override_state_fixture.nim`.
 
-import std/[os, strutils, unittest]
+import std/[json, os, strutils, unittest]
 
 import nf3_override_state_fixture
 
@@ -52,7 +59,7 @@ suite "NF-2: a pushed sibling is still recorded":
 
   test "t_a_pushed_sibling_is_still_recorded":
     const caseName = "t_a_pushed_sibling_is_still_recorded"
-    if not nf2Prerequisites(caseName):
+    if not nf2RecordingPrerequisites(caseName):
       skip()
     else:
       let fx = setupNf2Fixture("pushed-still-recorded")
@@ -103,7 +110,10 @@ suite "NF-2: a pushed sibling is still recorded":
       check logLine.contains("flake-lock refreshed")
       check not logLine.contains("WITHHELD")
 
-      # ---- (5) the unverifiable fields were dropped ---------------------
-      check not gammaAfter.contains("narHash")
-      check not gammaAfter.contains("lastModified")
-      check not gammaAfter.contains("revCount")
+      # ---- (5) the derived fields describe the NEW revision -------------
+      let gammaLocked = parseJson(after)["nodes"]["gamma-src"]["locked"]
+      let gammaLockedBefore = parseJson(before)["nodes"]["gamma-src"]["locked"]
+      for field in ["narHash", "lastModified", "revCount"]:
+        check gammaLocked.hasKey(field)
+      check gammaLocked{"narHash"}.getStr().startsWith("sha256-")
+      check gammaLocked{"narHash"} != gammaLockedBefore{"narHash"}

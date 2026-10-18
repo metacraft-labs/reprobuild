@@ -895,8 +895,33 @@ proc emitLockFileDesignations(pkg: PackageDef; site: NimNode): NimNode =
       newLit(entry.line)))
   discard site
 
+const
+  reproBin* {.strdefine.} = ""
+    ## Absolute path to the engine binary, handed in by the recipe compile.
+    ## Empty outside that compile (a plain `nim c` of a recipe), which is
+    ## exactly when the `dslDeps:` import emission must stay silent.
+  reproConsumerRoot* {.strdefine.} = ""
+    ## The consumer repo the recipe belongs to. The macro cannot derive it:
+    ## it expands in the extraction scratch directory, so `getProjectPath()`
+    ## points there rather than at the project.
+
+proc recipeIsUnderConsumerRoot(recipeFile: string): bool =
+  ## Whether ``recipeFile`` lies inside ``reproConsumerRoot``, the project the
+  ## interface compile is extracting. That compile's main module is a
+  ## generated runner that IMPORTS the recipe, so ``isMainModule`` is false in
+  ## the recipe there and cannot tell the project's own recipe from a sibling
+  ## producer's; the consumer root can. Empty outside an interface compile.
+  ## The comparison is textual (``normalizedPath``) because the VM has no
+  ## ``realpath``: a spelling mismatch reads as "not under", which only costs
+  ## the cross-repo sentence's accuracy, never a pin.
+  if reproConsumerRoot.len == 0 or recipeFile.len == 0: return false
+  let root = normalizedPath(reproConsumerRoot).replace('\\', '/')
+  let file = normalizedPath(recipeFile).replace('\\', '/')
+  file.startsWith(root.strip(leading = false, chars = {'/'}) & "/")
+
 proc emitVariantDeclarations(variants: seq[VariantDecl];
-                              pkg: PackageDef): NimNode =
+                              pkg: PackageDef;
+                              recipeFile = ""): NimNode =
   ## Spec-Implementation M1/M2d: lower the parsed ``VariantDecl`` list
   ## into Nim source code. Emits a single ``import`` of the
   ## configurables umbrella (when variants OR solver-bound dependencies
@@ -988,6 +1013,29 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
   # `nativeBuildDeps:` and `buildDeps:` is asking for exactly the two
   # instances NLF-PROP-4 asserts. Collapsing them here would silently answer
   # "one".
+  #
+  # Each edge also carries WHERE it was declared
+  # (`variants.SolverDeclarationSite`), so a lock-conflict diagnostic can say
+  # the declaring package is a cross-repo producer rather than one of the
+  # consuming project's own (`Locking-And-Solver.md` §"Targeted re-pin").
+  # `isMainModule` is resolved by the compiler in the module this expansion
+  # lands in — the recipe being evaluated is the provider's main module, and a
+  # sibling recipe reaching it is imported. An INTERFACE compile is the
+  # exception: its main module is a generated runner that imports the recipe,
+  # so there the recipe is recognised by lying under `reproConsumerRoot`
+  # instead (without this every own-package conflict a build reports from
+  # interface extraction was called a cross-repo producer's). Whether any
+  # other module is another project's recipe or a library module is decided
+  # here from the file name: every project recipe is `repro.nim` or
+  # `reprobuild.nim`, while a bundled package lives at
+  # `repro_dsl_stdlib/packages/<name>.nim`.
+  let recipeName = extractFilename(recipeFile)
+  let importedSite =
+    if recipeIsUnderConsumerRoot(recipeFile): "sdsRootRecipe"
+    elif recipeName in ["repro.nim", "reprobuild.nim"]: "sdsSiblingRecipe"
+    else: "sdsLibraryModule"
+  let siteExpr = "(when isMainModule: sdsRootRecipe else: " & importedSite &
+    ")"
   var emitted: seq[string] = @[]
   for (uses, kind) in [(pkg.toolUses, DepKindTarget),
                        (pkg.nativeBuildDeps, DepKindNative),
@@ -1005,7 +1053,8 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
         escForCode(useDef.rawConstraint) &
         ", gateVariant = " & escForCode(useDef.gateVariant) &
         ", gateValue = " & escForCode(useDef.gateValue) &
-        ", depKind = " & escForCode(kind) & ")\n"))
+        ", depKind = " & escForCode(kind) &
+        ", declarationSite = " & siteExpr & ")\n"))
   # ``finalizeVariantsAtModuleInit`` rather than ``finalizeVariants``: this
   # call sits at MODULE SCOPE, and the imports emitted above it mean one runs
   # per recipe in the transitive closure, over a registry that only grows. The
@@ -6745,6 +6794,13 @@ proc l3CheckExportNames(packageName: string;
   ## clash rather than letting Nim report a redefinition in generated
   ## code.
   ##
+  ## THE SIXTH RESERVATION IS NOT HERE: an export named after something
+  ## `system` itself declares -- a MAGIC with an `untyped` parameter, or
+  ## a compiler-context symbol no expression may name -- is refused by
+  ## `l3MagicShadowGuards`, which emits the check into the recipe instead
+  ## of deciding it here, because deciding it needs a question only the
+  ## compiler can answer. Its header says why.
+  ##
   ## Each accessor is a top-level `proc <name>*(pkg: <Title>Package)`, so
   ## an export whose name is already a module-level VALUE in this recipe
   ## — the package const itself (`const infra* = InfraPackage()`) or an
@@ -6854,6 +6910,121 @@ proc sharedServiceConstBase*(packageName, activityName,
   if activityName.len > 0:
     result.add(titleCase(activityName))
   result.add(titleCase(serviceName))
+
+proc l3MagicShadowGuards(packageName: string;
+                         activities: seq[L3ActivityExport];
+                         services: seq[L3ServiceExport]): NimNode =
+  ## The sixth reservation, and the only one `l3CheckExportNames` cannot
+  ## carry: one
+  ##
+  ##   when declared(system.<name>):
+  ##     when compiles(liftedMagicShadowProbe(system.<name>)):
+  ##       liftedMagicShadowRefusal(system.<name>, <anchor>, …)
+  ##     else:
+  ##       liftedCompilerContextShadowRefusal(<anchor>, …)
+  ##
+  ## per module-scope accessor the lift is about to emit, so that an
+  ## export named after a Nim MAGIC is refused at the author's own
+  ## declaration instead of breaking the magic for the whole module.
+  ##
+  ## WHY THE INNER `when compiles(…)` IS NOT OPTIONAL. The refusal macro
+  ## takes the shadowed symbol through a `typed` parameter, so reaching
+  ## it SEMS `system.<name>` as an ordinary value — and `system` holds
+  ## one name that cannot be sem'd that way at all. Measured at
+  ## `a567a3e1` with nim 2.3.1 across all 632 exported names a source
+  ## scrape of `lib/system.nim` and `lib/system/*.nim` yields,
+  ## `liftedMagicShadowRefusal(system.<name>, …)` compiles for 631 of
+  ## them and fails for exactly one, `nimvm`, with
+  ## `Error: illegal context for 'nimvm' magic` — `let nimvm*
+  ## {.magic: "Nimvm", compileTime.}: bool` is only legal as a `when`
+  ## condition. Without the inner probe `service nimvm:` stopped the
+  ## build with that compiler-internal line, which names neither the
+  ## export nor anything the author wrote: precisely the failure mode
+  ## this reservation exists to END, reintroduced by the reservation
+  ## itself. `nimvm` is a real hazard and is still refused — a
+  ## module-scope `proc nimvm*` makes `when nimvm:` report
+  ## `ambiguous identifier: 'nimvm'` (measured) — but by
+  ## `liftedCompilerContextShadowRefusal`, which names the export.
+  ## Nothing here is keyed on the name `nimvm`: the `else` branch fires
+  ## for whatever unnameable `system` symbol a given nim has.
+  ##
+  ## WHY IT IS DEFERRED INTO EMITTED CODE RATHER THAN DECIDED HERE. The
+  ## other five reservations compare two strings this module already
+  ## holds. This one has to ask the COMPILER a question about a name the
+  ## author chose -- "is `<name>` one of `system`'s magics?" -- and a
+  ## macro cannot ask it. Measured at `a567a3e1` with nim 2.3.1:
+  ## `{.experimental: "dynamicBindSym".}` plus `bindSym(name)` does not
+  ## answer *no* for a name that does not exist, it fails the compilation
+  ## with `Error: undeclared identifier`, so a macro cannot probe an
+  ## arbitrary name string. `when declared(...)` can, but only in CODE.
+  ## So the question is emitted and the answer is read by
+  ## `liftedMagicShadowRefusal`, which runs as part of compiling the
+  ## recipe.
+  ##
+  ## THE GUARD IS `system.`-QUALIFIED ON PURPOSE. A bare `when
+  ## declared(<name>)` fires for ANY symbol of that name in the recipe's
+  ## scope -- the author's own `var`, an import from a third-party
+  ## module, an overload set the refusal macro would then have to accept
+  ## through its `typed` parameter and say nothing about. The hazard
+  ## domain is exactly the names `system` itself declares, so the guard
+  ## names `system` and the refusal macro never sees a user or
+  ## third-party symbol at all. Measured: `declared(system.declared)` is
+  ## true and `getImpl` on `system.declared` still carries the
+  ## `magic: "Declared"` pragma, while `declared(system.standalone)` and
+  ## `declared(system.strip)` are both false.
+  ##
+  ## WHICH NAMES ARE GUARDED: exactly the ones `l3CheckExportNames`'
+  ## `claim` covers -- `l3Exportable` activities and PACKAGE-LEVEL
+  ## services. An activity-nested service and a `config:` key become
+  ## FIELDS of a lifted handle object, not module-scope procs, so they
+  ## shadow nothing; measured at `a567a3e1` and after this change, a
+  ## nested `service declared:` together with a `config:` key named
+  ## `compiles` compiles exit 0 and must keep doing so. (The two are
+  ## given DIFFERENT magic names because one activity's nested service
+  ## and `config:` key sharing a name is already refused by
+  ## `l3CheckExportNames` as the same handle member.)
+  ##
+  ## Built as AST and not as text because the `anchor` node has to carry
+  ## the AUTHOR's line info: a guard parsed from a string would anchor
+  ## the refusal on generated code, which is the whole failure mode this
+  ## reservation exists to end.
+  var guards = newStmtList()
+  proc guard(name, kind: string; anchor: NimNode) =
+    # Distinct node instances for every position -- the outer condition,
+    # the probe, each refusal's first argument and each anchor. One
+    # shared node reused across positions is how a later `copyLineInfo`
+    # on one of them silently moves the others.
+    proc systemQualified(): NimNode =
+      let nameIdent = ident(name)
+      nameIdent.copyLineInfo(anchor)
+      result = newDotExpr(ident("system"), nameIdent)
+      result.copyLineInfo(anchor)
+    proc anchored(node: NimNode): NimNode =
+      node.copyLineInfo(anchor)
+      node
+    let refusal = anchored(newCall(ident("liftedMagicShadowRefusal"),
+      systemQualified(), anchored(ident(name)), newLit(kind), newLit(name),
+      newLit(packageName)))
+    let contextRefusal = anchored(newCall(
+      ident("liftedCompilerContextShadowRefusal"),
+      anchored(ident(name)), newLit(kind), newLit(name),
+      newLit(packageName)))
+    let probe = anchored(newCall(ident("compiles"),
+      anchored(newCall(ident("liftedMagicShadowProbe"),
+        systemQualified()))))
+    let inner = nnkWhenStmt.newTree(
+      nnkElifBranch.newTree(probe, newStmtList(refusal)),
+      nnkElse.newTree(newStmtList(contextRefusal)))
+    let condition = anchored(newCall(ident("declared"), systemQualified()))
+    guards.add(nnkWhenStmt.newTree(
+      nnkElifBranch.newTree(condition, newStmtList(inner))))
+  for act in activities:
+    if l3Exportable(act.name):
+      guard(act.name, "activity", act.anchor)
+  for svc in services:
+    if svc.activityName.len == 0 and l3Exportable(svc.name):
+      guard(svc.name, "service", svc.anchor)
+  guards
 
 proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
   ## The whole L3 emission for one package, or an empty statement list
@@ -7091,7 +7262,26 @@ proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
       ", contributionPoints: @[" & points & "])\n")
   if resolverCode.len > 0:
     code.add(resolverCode)
-  result = parseStmt(code)
+  let emitted = parseStmt(code)
+  emitted.copyLineInfo(pkgBody)
+  # The magic-shadow guards go FIRST, before the `type` section and
+  # before the accessors, so the refusal is the first thing the compiler
+  # reaches for this package: once `proc declared*` has been sem'd the
+  # magic is already shadowed, and a guard placed after it would be
+  # reading the accessor rather than `system`'s routine.
+  result = l3MagicShadowGuards(pkg.packageName, collected.activities,
+    collected.services)
+  result.add(emitted)
+  # THE NODE THIS PROC RETURNS keeps `pkgBody`'s line info, as it did
+  # when it was `parseStmt(code)` itself. Nim propagates a node's line
+  # info to children that have none, and `parseStmt` numbers its output
+  # against the generated STRING, so the outer node is what keeps a
+  # diagnostic about generated code pointing at the package block. Not
+  # dropped on the grounds that nothing visibly reads it: that it is
+  # read by nothing is exactly what cannot be shown from here, and the
+  # emitted half's behaviour is meant to be unchanged by this commit.
+  # The guards are unaffected -- every node of theirs that a diagnostic
+  # can land on already carries the author's own line info.
   result.copyLineInfo(pkgBody)
 
 
@@ -7114,6 +7304,209 @@ proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
 # refusal could not improve on it and would have to re-implement overload
 # resolution to fire at the right times.
 # ---------------------------------------------------------------------------
+
+proc l3MagicWithUntypedParam(sym: NimNode): string {.compileTime.} =
+  ## The MAGIC NAME of `sym` when `sym` is a routine `system` declared
+  ## with a `{.magic: "…".}` pragma AND at least one `untyped`
+  ## parameter; the empty string otherwise.
+  ##
+  ## THIS IS THE WHOLE RESERVED-NAME RULE, AND IT IS DERIVED FROM THE
+  ## COMPILER RATHER THAN HAND-KEPT. The issue that asked for this
+  ## reservation
+  ## (`2026-10-09-lift-does-not-reserve-nim-magics-so-an-export-breaks-
+  ## unittest.md`) filed it instead of fixing it because "a macro cannot
+  ## enumerate Nim's magics ... so the check needs a hand-kept list",
+  ## and a hand-kept list "will be wrong the first time someone hits one
+  ## that is not on it". It does not need one: `getImpl` on a magic
+  ## symbol returns its `ProcDef` WITH the `magic:` pragma intact —
+  ## measured for `system.declared`, whose `getImpl().pragma` is
+  ## `Pragma(ExprColonExpr(Ident "magic", StrLit "Declared"),
+  ## Ident "noSideEffect", Ident "compileTime")`.
+  ##
+  ## WHY `untyped` IS THE DISCRIMINATOR AND NOT "IS A MAGIC". Measured
+  ## with nim 2.3.1 (`nim-fork-2.3.1-codetracer`) across ALL 81
+  ## identifier-named magic routines a source scrape of
+  ## `lib/system.nim` and `lib/system/*.nim` yields: shadowing each with
+  ## a top-level `proc <name>*` and then exercising a battery of magics
+  ## breaks FIVE — `declared`, `declaredInScope`, `compiles`, `defined`
+  ## and `runnableExamples`. The other seventy-six (`add`, `len`,
+  ## `high`, `low`, `min`, `max`, `new`, `move`, `default`, `repr`,
+  ## `echo`, `sizeof`, `ord`, …) all still compile, so "refuse every
+  ## magic" would be grossly over-broad and would refuse plausible
+  ## export names.
+  ##
+  ## HOW MANY BREAK DEPENDS ON WHAT THE BATTERY EXERCISES, WHICH IS WHY
+  ## THE RULE IS NOT "THE NAMES MEASURED TO BREAK". `compiles` and
+  ## `declaredInScope` survive a shadow until the battery passes them
+  ## an argument that does NOT resolve (`compiles(1 + 1)` is fine,
+  ## `compiles(zzNoSuchSymbol)` is not), and `runnableExamples` survives
+  ## until a doc-comment example block appears. Any list trimmed to the
+  ## breakers measured on one day is a list that grows the next time
+  ## somebody writes a different recipe.
+  ##
+  ## The `untyped` parameter is what separates them, and STRUCTURALLY
+  ## rather than by coincidence: a routine with an `untyped`
+  ## parameter can never take part in ordinary overload resolution
+  ## against a typed candidate, because its argument is never
+  ## semantically analysed — the compiler has to intercept the call BY
+  ## NAME, and a same-named accessor defeats that. Filtering `system`'s
+  ## magics by it yields exactly eight names in nim 2.3.1: `compiles`
+  ## (Compiles), `declared` (Declared), `declaredInScope`
+  ## (DeclaredInScope), `defined` (Defined), `iterToProc` (Plugin),
+  ## `procCall` (ProcCall), `runnableExamples` (RunnableExamples),
+  ## `typeof` (TypeOf) — a superset of the five measured breakers.
+  ##
+  ## `typeof`, `procCall` and `iterToProc` WERE MEASURED NOT TO BREAK
+  ## the uses tried, and are reserved anyway. That is deliberate:
+  ## the value of this rule is that it is derived from the compiler and
+  ## not trimmed by hand, so a future nim that adds or removes an
+  ## untyped-parameter magic is covered without an edit here. None of
+  ## the three is a plausible export name.
+  ##
+  ## BOTH CONDITIONS ARE REQUIRED. `system.assert` has an `untyped`
+  ## parameter and no `magic:` pragma (measured), and shadowing it is
+  ## legal; `system.default` has `magic: "Default"` and no `untyped`
+  ## parameter (measured), and shadowing it is legal too.
+  if sym.kind != nnkSym:
+    return ""
+  if sym.symKind notin {nskProc, nskFunc, nskTemplate, nskMacro,
+                        nskIterator, nskConverter, nskMethod}:
+    return ""
+  let impl = sym.getImpl()
+  if impl == nil or impl.kind notin RoutineNodes:
+    return ""
+  var magicName = ""
+  if impl.pragma.kind == nnkPragma:
+    for prag in impl.pragma:
+      if prag.kind == nnkExprColonExpr and prag.len == 2 and
+         prag[0].kind in {nnkIdent, nnkSym} and
+         prag[0].strVal.normalize == "magic" and
+         prag[1].kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+        magicName = prag[1].strVal
+  if magicName.len == 0:
+    return ""
+  if impl.params.kind != nnkFormalParams:
+    return ""
+  var namesUntyped = false
+  # A WALK of the parameter's type node rather than a kind test, so that
+  # `x: untyped` and `x: varargs[untyped]` are both caught —
+  # `runnableExamples` is declared the second way.
+  proc walkType(node: NimNode) =
+    if node.kind in {nnkIdent, nnkSym} and node.strVal == "untyped":
+      namesUntyped = true
+    for child in node:
+      walkType(child)
+  for i in 1 ..< impl.params.len:
+    let idd = impl.params[i]
+    if idd.kind == nnkIdentDefs and idd.len >= 3:
+      walkType(idd[idd.len - 2])
+  if namesUntyped: magicName else: ""
+
+macro liftedMagicShadowProbe*(shadowed: typed): untyped =
+  ## Expand to nothing, having forced `shadowed` through a `typed`
+  ## parameter.
+  ##
+  ## Exists only so that the guard `l3MagicShadowGuards` emits can ask
+  ## `compiles(liftedMagicShadowProbe(system.<name>))` whether
+  ## `system.<name>` can be named as an ordinary value AT ALL, before
+  ## handing it to `liftedMagicShadowRefusal`'s own `typed` parameter.
+  ## `compiles` around the refusal itself would not do: the refusal
+  ## ERRORS by design for a reserved name, so `compiles` would answer
+  ## *false* for exactly the names that must be refused. The probe never
+  ## errors, so a *false* from it means one thing only — the symbol is
+  ## not nameable as a value.
+  ##
+  ## Measured at `a567a3e1` with nim 2.3.1 over all 632 exported names a
+  ## source scrape of `lib/system.nim` and `lib/system/*.nim` yields:
+  ## true for 631, false for `nimvm` alone. True for every one of the
+  ## eight reserved names, for overload sets (`system.add`,
+  ## `system.len`), for types (`system.int`, `system.seq`,
+  ## `system.Exception`), for iterators (`system.items`) and for
+  ## zero-parameter routines (`system.locals`).
+  discard shadowed
+  result = newStmtList()
+
+macro liftedCompilerContextShadowRefusal*(anchor: untyped;
+                                          kind, exportName,
+                                          packageName: static string):
+    untyped =
+  ## Refuse one export whose name `system` declares as a symbol the
+  ## compiler will not let any code name as a value.
+  ##
+  ## Reached only from the `else` of the inner
+  ## `when compiles(liftedMagicShadowProbe(system.<name>))` that
+  ## `l3MagicShadowGuards` emits, so by the time this runs two things
+  ## are established: `system` declares `<name>`, and no expression may
+  ## mention it outside the one context the compiler reserves for it.
+  ## In nim 2.3.1 that is `nimvm` and nothing else (measured over 632
+  ## exported `system` names), but nothing here is keyed on the name:
+  ## the branch fires for whatever such symbol a given nim has.
+  ##
+  ## Refusing rather than passing: a module-scope `proc <name>*` beside
+  ## such a symbol was measured to make `when nimvm:` fail with
+  ## `ambiguous identifier: 'nimvm'`, which is the same
+  ## names-no-author-line hazard as the magic case. `anchor` is
+  ## `untyped` purely for line info.
+  error("`" & kind & " " & exportName & "`: `" & exportName &
+    "` is RESERVED -- `system` declares it as a COMPILER-CONTEXT symbol " &
+    "that no expression may name as a value; the compiler accepts it " &
+    "only in the one position it reserves for it, which is why the lift " &
+    "cannot even inspect it the way it inspects an ordinary magic. The " &
+    "lift emits one top-level `proc " & exportName & "*` per export of " &
+    "package `" & packageName & "`, and that accessor would make every " &
+    "use of `system." & exportName & "` in this module report " &
+    "`ambiguous identifier: '" & exportName & "'` -- a diagnostic that " &
+    "names neither this export nor any line the author wrote. Rename " &
+    "the " & kind & ".", anchor)
+
+macro liftedMagicShadowRefusal*(shadowed: typed; anchor: untyped;
+                                kind, exportName,
+                                packageName: static string): untyped =
+  ## Refuse one export whose name would shadow a Nim MAGIC, naming the
+  ## magic.
+  ##
+  ## Same contract as `liftedExportRefusal` and `liftedMemberRefusal`:
+  ## reached only from a `when declared(system.<name>):` guard
+  ## `l3MagicShadowGuards` emits, and `anchor` is `untyped` purely for
+  ## line info so the diagnostic lands on the recipe's own line. Unlike
+  ## those two it does NOT always error — the guard only establishes that
+  ## `system` declares SOMETHING of that name, and most such names
+  ## (`add`, `len`, `default`, `new`, `name`, `repr`, …) are perfectly
+  ## good export names. `l3MagicWithUntypedParam` is what decides, and
+  ## when it decides no the macro expands to nothing.
+  ##
+  ## `shadowed` arrives as an `nnkSym` for a name `system` declares once
+  ## and as an `nnkClosedSymChoice` for an overload set (measured:
+  ## `system.declared` is the first, `system.add` and `system.len` the
+  ## second), so both are walked.
+  var candidates: seq[NimNode] = @[]
+  if shadowed.kind in {nnkClosedSymChoice, nnkOpenSymChoice}:
+    for child in shadowed:
+      candidates.add(child)
+  else:
+    candidates.add(shadowed)
+  for candidate in candidates:
+    let magicName = l3MagicWithUntypedParam(candidate)
+    if magicName.len == 0:
+      continue
+    error("`" & kind & " " & exportName & "`: `" & exportName &
+      "` is RESERVED -- `system` declares it as the MAGIC `" & magicName &
+      "`, a routine with an `untyped` parameter. The lift emits one " &
+      "top-level `proc " & exportName & "*` per export of package `" &
+      packageName & "`, and that accessor shadows `system." & exportName &
+      "` for the WHOLE module. A magic with an `untyped` parameter can " &
+      "never take part in ordinary overload resolution, because its " &
+      "argument is never semantically analysed -- the compiler has to " &
+      "intercept the call BY NAME, and a same-named accessor defeats " &
+      "that. What the author gets instead, at the next USE of the magic " &
+      "anywhere in the module, is `cannot generate code for: m" &
+      magicName & "` or an `undeclared identifier` naming the magic's " &
+      "un-sem'd argument -- and that diagnostic names neither this " &
+      "export, nor the magic, nor any line the author wrote. " &
+      "`unittest`'s `check` expands to `declared(...)`, so one such " &
+      "export can disable every case in a test module. Rename the " &
+      kind & ".", anchor)
+  result = newStmtList()
 
 macro liftedExportRefusal*(ty: typedesc; anchor: untyped;
                            packageName, packageValue,
@@ -9411,16 +9804,6 @@ macro provisioningFor*(target: untyped; body: untyped): untyped =
     provisioningContributionLiteral(contribution) & ")")
 
 
-const
-  reproBin* {.strdefine.} = ""
-    ## Absolute path to the engine binary, handed in by the recipe compile.
-    ## Empty outside that compile (a plain `nim c` of a recipe), which is
-    ## exactly when the import emission below must stay silent.
-  reproConsumerRoot* {.strdefine.} = ""
-    ## The consumer repo the recipe belongs to. The macro cannot derive it:
-    ## it expands in the extraction scratch directory, so `getProjectPath()`
-    ## points there rather than at the project.
-
 proc collectDslDeps(sectionStmts: NimNode): seq[string] =
   ## Package names listed in a top-level ``dslDeps:`` block, in declaration
   ## order, deduplicated.
@@ -9704,7 +10087,8 @@ macro packageImpl*(name: untyped;
   # ``declareVariant`` template lives in
   # ``repro_dsl_stdlib/configurables/variants.nim``; the import below
   # is gated so packages without variants don't pull the stdlib in.
-  let variantsEmission = emitVariantDeclarations(pkg.variants, pkg)
+  let variantsEmission = emitVariantDeclarations(pkg.variants, pkg,
+    recipeFile = name.lineInfoObj.filename)
   # ── Named-Lock-Files NLF-M7: §4.9's compile error, §4.3's registration ──
   let lockFileEmission = emitLockFileDesignations(pkg, name)
   # ── Test-Certificates TC-9b: `enactCertificatePolicy` ─────────────

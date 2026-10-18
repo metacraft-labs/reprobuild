@@ -1585,11 +1585,13 @@ proc validateMacosAppRecord(node: NimNode) =
   var methodNode, appBundleNode, bundleIdNode, teamIdNode, versionNode,
     archiveNode, exeNode, sha256Node, installerAppNode: NimNode = nil
   var installerArgCount = 0
+  var extraExecutableNodes: seq[NimNode] = @[]
   for i in 1 ..< node.len:
     let arg = node[i]
     if arg.kind != nnkExprEqExpr:
       continue
     case identText(arg[0]).normalize
+    of "extraexecutable": extraExecutableNodes.add arg[1]
     of "installmethod": methodNode = arg[1]
     of "appbundle": appBundleNode = arg[1]
     of "bundleid": bundleIdNode = arg[1]
@@ -1672,6 +1674,24 @@ proc validateMacosAppRecord(node: NimNode) =
         error("an app-bundle tarball's executablePath is relative to the " &
           "realized prefix, which holds the bundle at its root: it must " &
           "start with '" & leaf & "/'; got '" & exeText & "'", node)
+    if appBundleNode.isStrLit:
+      # The commands an application exports (Store-And-Installation-
+      # Layout.md § macOS Application Bundles, "Command line") are paths
+      # inside its bundle, relative to the prefix like executablePath.
+      let leaf = bundleText.replace('\\', '/').split('/')[^1]
+      for extraNode in extraExecutableNodes:
+        if not extraNode.isStrLit:
+          continue
+        let extraText = litText(extraNode)
+        var inside = extraText.startsWith(leaf & "/")
+        for part in extraText.replace('\\', '/').split('/'):
+          if part.len == 0 or part == "." or part == "..":
+            inside = false
+        if not inside:
+          error("an app-bundle tarball's extraExecutable names a command " &
+            "inside the bundle, relative to the realized prefix: it must " &
+            "start with '" & leaf & "/' and contain no '.' or '..' " &
+            "component; got '" & extraText & "'", node)
   if installerApp:
     let archiveText = litText(archiveNode)
     if archiveNode.isNil or (archiveNode.isStrLit and
@@ -4264,6 +4284,13 @@ const BundledStdlibSelectors* = [
   "create-dmg",
   "curl",
   "dpkg",
+  # macOS splits debug info out of the Mach-O image in a SECOND pass that the
+  # compiler driver shells out to by bare name, so an edge compiling with
+  # ``-g`` on darwin runs ``dsymutil`` after the link and has to be able to
+  # name it. It is not in the clang-wrapper's ``bin``; see
+  # ``repro_dsl_stdlib/packages/dsymutil.nim`` for why it is a selector of its
+  # own rather than a widening of ``clang``.
+  "dsymutil",
   "electron",
   "emcc",
   "esbuild",

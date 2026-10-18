@@ -17,15 +17,24 @@ SMOKE_SCRIPT = ROOT / "scripts" / "release" / "smoke_release_dev_exec.sh"
 
 
 def _clean_path_without_timeout(work_dir: Path) -> str:
-    """Return a PATH string guaranteed not to include `timeout` or `gtimeout`."""
+    """Return a PATH string guaranteed not to include `timeout` or `gtimeout`.
+
+    The smoke script needs ordinary utilities (`mktemp`, `rm`, ...), so the
+    PATH must offer everything a normal shell PATH does except the two
+    timeout commands. On NixOS the FHS directories hold almost nothing (no
+    `mktemp`), so the candidates are this process's PATH directories as well
+    as the FHS ones, shadowed into one directory without `timeout`.
+    """
     system_paths = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-    candidate = os.pathsep.join(system_paths)
-    if shutil.which("timeout", path=candidate) is None and shutil.which("gtimeout", path=candidate) is None:
-        return candidate
+    inherited = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    directories = []
+    for directory in inherited + system_paths:
+        if directory not in directories:
+            directories.append(directory)
 
     shadow = work_dir / "bin_without_timeout"
     shadow.mkdir(parents=True, exist_ok=True)
-    for directory in system_paths:
+    for directory in directories:
         if not os.path.isdir(directory):
             continue
         for entry in os.listdir(directory):

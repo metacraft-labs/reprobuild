@@ -21,8 +21,8 @@
 ##   4. on a detached ``HEAD`` with no ``detachedHead`` rule the commit goes
 ##      through, and the gate says "detached HEAD: no branch rule applies".
 ##
-## The project declares NO ``[certificates]`` table: every refusal here comes
-## from the snapshot. The generated dispatcher carries the certificate phase
+## Every refusal here comes from the snapshot, the only policy input since
+## TC-9d. The generated dispatcher carries the certificate phase
 ## only because the lock carries a policy (checked first).
 ##
 ## Falsifiability: read the rule for the wrong branch (ignore the branch, or

@@ -25,6 +25,11 @@
 ##   3. generatedFiles      u32 LE count + count*GeneratedFile records
 ##   4. managedBlocks       u32 LE count + count*ManagedBlock records
 ##   5. resourceBindings    u32 LE count + count*ResourceBinding records
+##   6. ownedConcerns       (schema 3 only) u32 LE count + count*string --
+##                          the concerns the generation applied
+##                          (Gradual-Nix-To-Reprobuild-Migration.md
+##                          §Concern-scoped apply). A schema-2 manifest
+##                          owns every concern.
 ##
 ## Each record is a sequence of length-prefixed strings and fixed-size
 ## fields documented inline below. The "ResourceBinding" record is
@@ -48,6 +53,12 @@ const
     ## M68 writer. Adds resourceKind, pre/post-write digests, the
     ## typed payloadKind, and payloadBytes (bounded to 64KB per
     ## resource).
+  ManifestSchemaVersionV3*: uint16 = 3
+    ## GM7 writer, used only for a generation whose host declares the
+    ## concerns Reprobuild applies (`hosts.<host>.applies`): V2 plus the
+    ## trailing `ownedConcerns` section. A generation without a declaration
+    ## is still written as V2, so its bytes (and the CAS dedup of gate 2)
+    ## are unchanged.
   ManifestSchemaVersion*: uint16 = ManifestSchemaVersionV2
     ## Current writer version. The decoder accepts both V1 (treats
     ## resourceBindings as the reserved tuple) and V2 (full M68
@@ -160,6 +171,15 @@ type
     generatedFiles*: seq[GeneratedFile]
     managedBlocks*: seq[ManagedBlock]
     resourceBindings*: seq[ResourceBinding]
+    concernsDeclared*: bool
+      ## The generation applied only the concerns in `ownedConcerns` (its
+      ## host declared `applies:`). False: it applied every concern. The
+      ## encoder writes schema 3 exactly when this is true.
+    ownedConcerns*: seq[string]
+      ## The concern names the generation applied, in canonical order
+      ## (`repro_profile/concerns`). Meaningful only when
+      ## `concernsDeclared`; may be empty (a host where Reprobuild applies
+      ## nothing).
 
 # ---------------------------------------------------------------------------
 # Encoder helpers
@@ -243,6 +263,10 @@ proc encodeBody(manifest: ActivationManifest): seq[byte] =
   result.writeU32Le(uint32(manifest.resourceBindings.len))
   for rec in manifest.resourceBindings:
     result.writeResourceBinding(rec)
+  if manifest.concernsDeclared:
+    result.writeU32Le(uint32(manifest.ownedConcerns.len))
+    for c in manifest.ownedConcerns:
+      result.writeString(c)
 
 proc encodeManifest*(manifest: ActivationManifest): seq[byte] =
   ## Serialize the manifest to bytes with the envelope shape documented
@@ -255,7 +279,8 @@ proc encodeManifest*(manifest: ActivationManifest): seq[byte] =
     ManifestHeaderSize + body.len + ManifestTrailerSize)
   for ch in ManifestMagic:
     result.add(byte(ord(ch)))
-  result.writeU16Le(ManifestSchemaVersion)
+  result.writeU16Le(if manifest.concernsDeclared: ManifestSchemaVersionV3
+                    else: ManifestSchemaVersion)
   result.writeU32Le(bodyLen)
   result.writeBytes(body)
   let checksum = blake3.digest(result)
@@ -315,7 +340,8 @@ proc decodeManifestBytes*(bytes: openArray[byte];
   var pos = 4
   let version = readU16Le(bytes, pos)
   if version != ManifestSchemaVersionV1 and
-     version != ManifestSchemaVersionV2:
+     version != ManifestSchemaVersionV2 and
+     version != ManifestSchemaVersionV3:
     raiseManifestCorrupt(filePath, "schemaVersion",
       "unsupported manifest schema version " & $version)
   let bodyLen = int(readU32Le(bytes, pos))
@@ -420,6 +446,14 @@ proc decodeManifestBytes*(bytes: openArray[byte];
           "payload size " & $rec.payloadBytes.len & " exceeds " &
           $ManifestResourcePayloadMaxBytes & "-byte cap")
     result.resourceBindings[i] = rec
+  if version >= ManifestSchemaVersionV3:
+    result.concernsDeclared = true
+    let ocCount = int(readU32Le(bytes, pos))
+    if ocCount > 64:
+      raiseManifestCorrupt(filePath, "ownedConcerns",
+        "implausible concern count " & $ocCount)
+    for i in 0 ..< ocCount:
+      result.ownedConcerns.add readString(bytes, pos)
   if pos != bodyEnd:
     raiseManifestCorrupt(filePath, "body",
       "trailing " & $(bodyEnd - pos) & " bytes after audited record set")

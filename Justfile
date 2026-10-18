@@ -522,39 +522,7 @@ lint:
     # silently. Runs here rather than in the suite for the same reason as the
     # gate itself: it compiles nothing.
     bash ./scripts/check_shell_command_strings.sh --self-test 2>&1 | tee -a test-logs/lint.log
-    # The suite case-count gate. Deliberately here and not only in the test
-    # suite: it reads the sources and needs nothing compiled, so it is the
-    # one coverage check that can answer before a six-hour build phase.
-    python3 ./scripts/reprobuild_suite_inventory.py --check-static-case-counts 2>&1 | tee -a test-logs/lint.log
-    # The suite ENTRY-SET gate, its sibling. Same mechanism, same cost class,
-    # same reason for being here rather than in the suite: it is a source
-    # scan. It holds the build-free half of the tracked inventory --
-    # benchmarks/reports/reprobuild-suite-m0-inventory.json -- to the tree it
-    # claims to describe. That document went stale six times while the TSV
-    # above stayed current at every commit, and every one of the six was an
-    # entry-set change this line refuses. It says nothing about the
-    # catalog-derived half, which needs the build; see the flag's help text.
-    python3 ./scripts/reprobuild_suite_inventory.py --check-inventory 2>&1 | tee -a test-logs/lint.log
-    # The UNDECLARED-SOURCE gate, and the reason it is a third line rather
-    # than a third assertion inside either of the two above: both of those
-    # derive the set they compare from repro_tests.nim, so a test file that
-    # was never enrolled is outside both by construction -- not reported as
-    # missing, not reported at all -- and nothing builds or runs it either.
-    # Measured at 6b3f6099: two such files (18 passing cases between them)
-    # while every gate over the suite was green. This one walks the TREE.
-    python3 ./scripts/reprobuild_suite_inventory.py --check-declared-sources 2>&1 | tee -a test-logs/lint.log
-    # The SHAPE-PARITY gate, which is what stops the line above from being a
-    # trap. That gate's rule and the edge generator's are one rule with two
-    # implementations, in two languages; where they disagree, one of two
-    # things is true, and both are bad: either the gate reports an orphan that
-    # `nim r scripts/generate_test_edges.nim` cannot enrol -- a gate demanding
-    # a fix the contributor cannot perform -- or a test is built and run that
-    # the gate never audits. They agreed on the tree as it stood and on
-    # nothing else. This compares them over a synthetic corpus of path SHAPES,
-    # so the disagreement surfaces when the RULE is edited rather than when
-    # the first file of a new shape lands on it.
-    python3 ./scripts/reprobuild_suite_inventory.py --check-shape-parity 2>&1 | tee -a test-logs/lint.log
-    # The vacuous-case gate, sibling to the case-count gate above and for the
+    # The vacuous-case gate, sibling to the case-count gate below and for the
     # same reason: a source scan, no compiler, answers in seconds. It refuses
     # a test case whose only assertion is `check true` -- a shape that reports
     # [OK] and increments the pass count, so running the suite can never
@@ -589,8 +557,8 @@ lint:
     # two are told apart, and scripts/test-body-helper-compilation-dispositions.tsv
     # for the reviewed baseline.
     python3 ./scripts/check_test_body_helper_compilation.py 2>&1 | tee -a test-logs/lint.log
-    # HX-S-10: the HCR lane manifest against the tree. Same class as the three
-    # inventory gates above -- a source scan, no compiler, seconds -- and here
+    # HX-S-10: the HCR lane manifest against the tree. Same class as the
+    # inventory gates at the end of this recipe -- a source scan, no compiler, seconds -- and here
     # for the same reason. What it refuses is an HCR gate added to ONE
     # platform's lane: every gate source in the tree must carry a row declaring
     # what all THREE platforms do with it. The census it holds the manifest to
@@ -615,6 +583,13 @@ lint:
     # ignore a real defect, so each shape is probed with an instance that
     # must be caught and each allowance with one that must not be.
     python3 ./scripts/check_version_literals.py --self-test 2>&1 | tee -a test-logs/lint.log
+    # package.nix's version literal against reprobuild.nimble. The flake check
+    # nixpkgs-package-version-sync runs the same script, but `agents` has no CI
+    # and nobody runs the whole flake check per commit: twice a version moved
+    # in reprobuild.nimble alone (a bump, then a merge bringing a release in)
+    # and the literal sat stale until a full flake check happened to look
+    # (reprobuild-pm issue 2026-10-17). Reads two files, under a second.
+    bash ./scripts/check_package_nix_version.sh 2>&1 | tee -a test-logs/lint.log
     # Every attestation mutation row must still be able to NAME ITS SITE in
     # the tree. Same class as its neighbours -- a source scan, no compiler,
     # under a second -- and here because of what it catches, which nothing
@@ -629,6 +604,48 @@ lint:
     python3 ./tools/attestation-mutations/fixture_lifecycle_mutations.py --verify-rows 2>&1 | tee -a test-logs/lint.log
     python3 ./tools/attestation-mutations/cvm_emulator_mutations.py --verify-rows 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_workflows.sh 2>&1 | tee -a test-logs/lint.log
+    # The four suite-description gates, LAST, and that position is the point.
+    # They hold tracked bookkeeping -- the case-count baseline, the inventory
+    # entry set, the edge table -- to the tree, and bookkeeping goes stale
+    # whenever anyone lands a test without regenerating it: the check can be
+    # red through no fault of the change being linted. This recipe runs under
+    # `bash -e`, so while they ran early a stale baseline aborted every audit
+    # after them, and for five `dev` commits none of the audits that grade the
+    # change itself ran at all (reprobuild-pm issue 2026-10-01). Behind
+    # everything else they still fail the recipe; they no longer silence it.
+    #
+    # The suite case-count gate. Deliberately here and not only in the test
+    # suite: it reads the sources and needs nothing compiled, so it is the
+    # one coverage check that can answer before a six-hour build phase.
+    python3 ./scripts/reprobuild_suite_inventory.py --check-static-case-counts 2>&1 | tee -a test-logs/lint.log
+    # The suite ENTRY-SET gate, its sibling. Same mechanism, same cost class,
+    # same reason for being here rather than in the suite: it is a source
+    # scan. It holds the build-free half of the tracked inventory --
+    # benchmarks/reports/reprobuild-suite-m0-inventory.json -- to the tree it
+    # claims to describe. That document went stale six times while the TSV
+    # above stayed current at every commit, and every one of the six was an
+    # entry-set change this line refuses. It says nothing about the
+    # catalog-derived half, which needs the build; see the flag's help text.
+    python3 ./scripts/reprobuild_suite_inventory.py --check-inventory 2>&1 | tee -a test-logs/lint.log
+    # The UNDECLARED-SOURCE gate, and the reason it is a third line rather
+    # than a third assertion inside either of the two above: both of those
+    # derive the set they compare from repro_tests.nim, so a test file that
+    # was never enrolled is outside both by construction -- not reported as
+    # missing, not reported at all -- and nothing builds or runs it either.
+    # Measured at 6b3f6099: two such files (18 passing cases between them)
+    # while every gate over the suite was green. This one walks the TREE.
+    python3 ./scripts/reprobuild_suite_inventory.py --check-declared-sources 2>&1 | tee -a test-logs/lint.log
+    # The SHAPE-PARITY gate, which is what stops the line above from being a
+    # trap. That gate's rule and the edge generator's are one rule with two
+    # implementations, in two languages; where they disagree, one of two
+    # things is true, and both are bad: either the gate reports an orphan that
+    # `nim r scripts/generate_test_edges.nim` cannot enrol -- a gate demanding
+    # a fix the contributor cannot perform -- or a test is built and run that
+    # the gate never audits. They agreed on the tree as it stood and on
+    # nothing else. This compares them over a synthetic corpus of path SHAPES,
+    # so the disagreement surfaces when the RULE is edited rather than when
+    # the first file of a new shape lands on it.
+    python3 ./scripts/reprobuild_suite_inventory.py --check-shape-parity 2>&1 | tee -a test-logs/lint.log
 
 format:
     bash ./scripts/format_sources.sh

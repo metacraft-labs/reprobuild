@@ -464,6 +464,12 @@ type
       ## Populated for `rakDriftBlocked` / `rakUpdate` (when
       ## `--reconcile-drift` clobbered a drift).
     driftObservedHex*: string
+    deferred*: bool
+      ## A no-op that stands in for an update / replace / destroy the live
+      ## object's use (`ResourceState.busy`) deferred to a later apply.
+    keptVendorUpdate*: bool
+      ## A no-op that keeps a newer vendor update of a placed application
+      ## (`ResourceState.vendorUpdate`).
 
   ObservedState* = object
     ## What the driver saw in the real world when refreshing the
@@ -502,6 +508,21 @@ type
     observed*: ObservedState
     recorded*: RecordedBinding
     hasRecorded*: bool
+    vendorUpdate*: bool
+      ## `macos.appBundle`: the observed bundle is its vendor's own update
+      ## of the recorded one (`isAcceptedVendorUpdate`), not drift
+      ## (Store-And-Installation-Layout.md § macOS Application Bundles,
+      ## "Vendor updates").
+    desiredSupersedesObserved*: bool
+      ## With `vendorUpdate`: the desired bundle is newer than the observed
+      ## one, so the apply replaces the vendor update with it. Otherwise the
+      ## newer observed build is kept (never downgraded).
+    busy*: string
+      ## Non-empty: the live object is in use and must not be replaced or
+      ## removed now -- for `macos.appBundle`, the ids of the processes
+      ## running from the placed bundle ("Running applications"). An update,
+      ## replace or destroy is deferred (planned as a no-op that keeps the
+      ## record); the next apply does it.
 
   DesiredSet* = object
     ## A collection of resources the apply pipeline plans to

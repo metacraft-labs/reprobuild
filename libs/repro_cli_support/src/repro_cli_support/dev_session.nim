@@ -6,6 +6,7 @@ import repro_core
 import repro_dev_env_activation
 import repro_dev_env_artifacts
 import repro_dev_env_engine
+from repro_interface_artifacts import seededSourcePackageEnvironmentNames
 import repro_provider_runtime
 import repro_project_dsl                 # ServiceIdentityDef / ServiceScope
 import repro_resources/service_identity  # the (identity, scope, environment) key
@@ -2715,6 +2716,22 @@ proc waitForReadiness(spec: ServiceSpec) =
   raise newException(IOError,
     "service readiness timed out for " & spec.name)
 
+proc selfSeededSourceRootUnsetOps(): seq[DevEnvShellOp] =
+  ## Unset ops for the source roots this engine seeded for its OWN compiles
+  ## (``REPROBUILD_SOURCE_ROOT`` from the monitor-shim resolution, the built
+  ## ``*_SRC`` roots), so a service or task does not inherit them, as
+  ## ``repro exec``'s command does not (Distribution-And-Packaging §5;
+  ## reprobuild-pm issue 2026-09-30, exec leaks the engine's own source root).
+  ##
+  ## Withdrawn from the child's activation rather than from this process,
+  ## unlike ``repro exec``: the supervisor keeps recomputing the dev env on
+  ## every watch cycle (``computeFreshArtifact``), and those compiles still
+  ## need the seeds. Passed as ``preOps``, which apply BEFORE the dev env's
+  ## own ops, so a name the dev env sets itself keeps the dev env's value
+  ## even when that value happens to equal the seed.
+  for name in seededSourcePackageEnvironmentNames():
+    result.add(DevEnvShellOp(kind: deskUnsetEnv, name: name))
+
 proc producerOps(state: SessionState;
                  artifact: DevEnvArtifact): seq[DevEnvShellOp] =
   ## W2 — see ``DevSessionProducerOpsResolver``. Every activation the
@@ -2739,7 +2756,8 @@ proc startService(state: var SessionState;
   state.emitEvent("service.starting", service = spec.name)
   let activation = activatedEnvironment(artifact, artifactPath,
     defaultWorkingDirectory = spec.cwd,
-    extraOps = state.producerOps(artifact))
+    extraOps = state.producerOps(artifact),
+    preOps = selfSeededSourceRootUnsetOps())
   var childArgs: seq[string] = @[]
   for i in 1 ..< spec.command.len:
     childArgs.add(spec.command[i])
@@ -2869,7 +2887,8 @@ proc runTaskCommand(state: var SessionState;
   state.emitEvent("watch.task.started", detail = task.name, cycle = cycle)
   let activation = activatedEnvironment(artifact, artifactPath,
     defaultWorkingDirectory = artifact.projectRoot,
-    extraOps = state.producerOps(artifact))
+    extraOps = state.producerOps(artifact),
+    preOps = selfSeededSourceRootUnsetOps())
   let command =
     when defined(windows):
       @["cmd", "/c", task.command]

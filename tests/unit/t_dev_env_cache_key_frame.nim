@@ -32,7 +32,7 @@ import blake3
 const
   FrameMagic = "reprobuild.hash.v1\0"
   Tag = "action-fingerprint"
-  CacheKeySchemaLiteral = "reprobuild.dev-env.cache-key.v1"
+  CacheKeySchemaLiteral = "reprobuild.dev-env.cache-key.v2"
 
 proc textBytes(text: string): seq[byte] =
   result = newSeq[byte](text.len)
@@ -151,7 +151,13 @@ suite "dev-env cache key frame":
           # Keyed since c71f33495: the extracted interface depends on which
           # reprobuild libs the recipe is compiled against.
           envPart("REPROBUILD_LIBS_DIR"),
-          envPart("REPROBUILD_REPO_ROOT")
+          envPart("REPROBUILD_REPO_ROOT"),
+          # Keyed since cache-key v2: the observed inputs of the activation
+          # being compared against (`issues/2026-09-28-dev-env-prompt-key-
+          # ignores-flake-inputs.md`). With no watch manifest the part is a
+          # fixed token; `t_dev_env_prompt_watch_key.nim` pins what a real
+          # manifest contributes.
+          "promptWatch=<none>"
         ]
         check computeDevEnvEdgeCacheKey(root, activity, lockSliceId,
           overrides) == expectedKey(parts.join("\n"))

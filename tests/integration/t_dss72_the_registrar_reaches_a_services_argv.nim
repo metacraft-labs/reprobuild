@@ -478,20 +478,52 @@ proc isLowerHex(value: string): bool =
       return false
 
 suite "§7.2 / F4 — the registrar's identifier reaches a consuming service's argv":
-  var c = prepareCase()
-  var daemon = c.startDaemon()
-  defer:
-    discard c.runRepro(c.offlineProject, @["down", "--activity=" & Activity])
-    discard c.runRepro(c.issuerProject, @["down", "--activity=" & Activity])
-    c.closeDaemon(daemon)
-    # REAP AFTER `closeDaemon` -- the daemon's own argv names this case's
-    # tempRoot, so the sweep would otherwise kill it out from under the
-    # graceful `repro down` calls above -- and BEFORE the tree is removed,
-    # because the path is the identity witness.
-    c.reapCaseProcesses()
-    try: removeDir(c.tempRoot) except OSError, IOError: discard
+  # Prepared on the first case's `setup`, NOT in the suite body. The suite
+  # body runs at registration, in every process this binary starts --
+  # including `--list` / `--list-json`, which only enumerates and is run
+  # from a scratch working directory. Preparing here made enumeration
+  # resolve `<cwd>/build/bin/repro` (raising from any other directory, so
+  # no case was listed) and start a daemon just to print case names. The
+  # runner executes each case in its own process, so a case still prepares
+  # the fixture and starts the daemon exactly once, and the deferred
+  # cleanup below still runs in that process -- only if a case prepared.
+  var prepared = false
+  var c: Dss72Case
+  var daemon: owned(Process)
 
-  test "A: with NO issuer configured the stack comes up on a MARKED development id":
+  setup:
+    if not prepared:
+      c = prepareCase()
+      prepared = true
+      daemon = c.startDaemon()
+
+  defer:
+    if prepared:
+      discard c.runRepro(c.offlineProject,
+        @["down", "--activity=" & Activity])
+      discard c.runRepro(c.issuerProject,
+        @["down", "--activity=" & Activity])
+      c.closeDaemon(daemon)
+      # REAP AFTER `closeDaemon` -- the daemon's own argv names this case's
+      # tempRoot, so the sweep would otherwise kill it out from under the
+      # graceful `repro down` calls above -- and BEFORE the tree is removed,
+      # because the path is the identity witness.
+      c.reapCaseProcesses()
+      try: removeDir(c.tempRoot) except OSError, IOError: discard
+
+  # ONE PROCESS PER CASE. The suite runner executes every case in a process
+  # of its own (`--run "<suite>::<case>"`), and each such process prepares a
+  # FRESH fixture and daemon in `setup` above. The cases below are one
+  # scenario told in steps, and a later step asserts on state an earlier
+  # step created -- so each step is a template, and a case first REPLAYS the
+  # earlier steps its state depends on, assertions and all, then runs its
+  # own. Run alone, a case therefore measures exactly what it measured as
+  # part of the sequence; a prerequisite step that fails fails the dependent
+  # case too, at that step's own assertion, rather than letting it pass or
+  # fail on a fixture it never built.
+
+  template offlineStackGetsMarkedDevelopmentId() =
+    # The steps of case "A: with NO issuer configured the stack comes up on a MARKED development id".
     # THE OFFLINE CONTROL. §7.2 keeps the development registrar as the
     # default, so this must still work -- and it must no longer be silent.
     let up = c.runRepro(c.offlineProject, @["up", "--activity=" & Activity])
@@ -531,7 +563,8 @@ suite "§7.2 / F4 — the registrar's identifier reaches a consuming service's a
     # ...and `repro up` said so on its own output too.
     check up.output.contains(DevelopmentRegistrarName)
 
-  test "B: with the owning project's registrar declared, the ISSUER's id lands on argv":
+  template issuerIdLandsOnArgv() =
+    # The steps of case "B: with the owning project's registrar declared, the ISSUER's id lands on argv".
     # F4's clause. The consuming service writes `@issuer-minted:`, which
     # a development identifier cannot satisfy, so a passing case here is
     # a case in which the value really did come from the registrar the
@@ -575,7 +608,8 @@ suite "§7.2 / F4 — the registrar's identifier reaches a consuming service's a
     check asked{"schemaId"}.getStr("") == ServiceRegistrarRequestSchemaId
     check asked{"members"}[0].getStr("") == Member
 
-  test "C: the issuer changing a client id under a recorded one is REFUSED":
+  template changedIssuerIdIsRefused() =
+    # The steps of case "C: the issuer changing a client id under a recorded one is REFUSED".
     # THE NEAR-MISS THIS CASE EXISTS FOR, AND IT ONLY EXISTS BECAUSE OF THE
     # FIX. L8 makes a registration byte-stable: a member that already has
     # one keeps it and the registrar is not asked again for it. §7.2 makes
@@ -611,7 +645,8 @@ suite "§7.2 / F4 — the registrar's identifier reaches a consuming service's a
     # the STORE record, not this file, that still holds it.
     check mintedRowFor(c.issuerProject, Member) == nil
 
-  test "C2: putting the issuer back makes the next converge succeed again":
+  template restoredIssuerConvergesAgain() =
+    # The steps of case "C2: putting the issuer back makes the next converge succeed again".
     # The refusal must be recoverable by fixing the issuer, not a dead end
     # that needs the store deleted. With the descriptor back to what the
     # store recorded, the same command converges.
@@ -627,3 +662,18 @@ suite "§7.2 / F4 — the registrar's identifier reaches a consuming service's a
     check row != nil
     check row{"mintedId"}.getStr("") == IssuerClientId
     check row{"provenance"}.getStr("") == $rprIssuer
+
+  test "A: with NO issuer configured the stack comes up on a MARKED development id":
+    offlineStackGetsMarkedDevelopmentId()
+
+  test "B: with the owning project's registrar declared, the ISSUER's id lands on argv":
+    issuerIdLandsOnArgv()
+
+  test "C: the issuer changing a client id under a recorded one is REFUSED":
+    issuerIdLandsOnArgv()
+    changedIssuerIdIsRefused()
+
+  test "C2: putting the issuer back makes the next converge succeed again":
+    issuerIdLandsOnArgv()
+    changedIssuerIdIsRefused()
+    restoredIssuerConvergesAgain()

@@ -138,7 +138,29 @@ proc encodeResource(r: ResourceIntent): string =
     if i > 0:
       result.add ","
     result.add encodeAddress(dep)
-  result.add "],\"guard\":" & encodeGuard(r.guard) & "}"
+  # `activity` (GM9) is always emitted, `null` for a profile-wide resource,
+  # for the reason `guard` is: a consumer must never read an absent key as
+  # "every host".
+  result.add "],\"guard\":" & encodeGuard(r.guard) &
+    ",\"activity\":" &
+    (if r.activity.len == 0: "null" else: encodeStr(r.activity)) & "}"
+
+proc encodeSystemManagedElsewhere(t: Table[string, string]): string =
+  ## `{"<host>": {"managedBy": "<pointer>" | null}, ...}`, hosts sorted so
+  ## the bytes are stable.
+  var keys: seq[string] = @[]
+  for k in t.keys:
+    keys.add k
+  keys.sort(cmp[string])
+  result = "{"
+  for i, k in keys:
+    if i > 0:
+      result.add ","
+    result.add encodeStr(k)
+    result.add ":{\"managedBy\":"
+    result.add(if t[k].len > 0: encodeStr(t[k]) else: "null")
+    result.add "}"
+  result.add "}"
 
 proc encodeHosts(h: Table[string, seq[string]]): string =
   var keys: seq[string] = @[]
@@ -267,6 +289,32 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
   # unchanged.
   if p.catalogImports.len > 0:
     result.add ",\"catalogImports\":" & encodeStringArray(p.catalogImports)
+  # The concerns Reprobuild applies per host (`applies:` in a block-form
+  # `hosts:` entry), only when some host declares them, so the key set of a
+  # profile without a declaration is unchanged
+  # (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply).
+  if p.hostApplies.len > 0:
+    result.add ",\"hostApplies\":" & encodeHosts(p.hostApplies)
+  # GM10: the hosts whose system scope is managed elsewhere, only when some
+  # host says so, so the key set of a profile without the attribute is
+  # unchanged. Each value is an object so the attribute can grow without a
+  # change of shape; `managedBy` is null when the entry names no manager.
+  if p.systemManagedElsewhere.len > 0:
+    result.add ",\"systemManagedElsewhere\":" &
+      encodeSystemManagedElsewhere(p.systemManagedElsewhere)
+  # GM11: the activities' stow claims, only when some activity has a
+  # `stow:` block, so the key set of a profile without one is unchanged.
+  # In declaration order; `guard` always emitted (null: none), as for
+  # resources.
+  if p.stowScopes.len > 0:
+    result.add ",\"stowScopes\":["
+    for i, s in p.stowScopes:
+      if i > 0:
+        result.add ","
+      result.add "{\"package\":" & encodeStr(s.package) &
+        ",\"activity\":" & encodeStr(s.activity) &
+        ",\"guard\":" & encodeGuard(s.guard) & "}"
+    result.add "]"
   result.add "}"
 
 # ---------------------------------------------------------------------
@@ -358,6 +406,14 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
     var ri = ResourceIntent(kind: r["kind"].getStr(),
       address: r["address"].getStr(),
       guard: parseGuard(r.getOrDefault("guard")))
+    # GM9: `null` / absent (an intent written before activity-scoped
+    # resources) -> profile-wide. Anything but a string or null is refused.
+    let activity = r.getOrDefault("activity")
+    if not activity.isNil and activity.kind != JNull:
+      if activity.kind != JString:
+        raise newException(ValueError, "resource `" & ri.address &
+          "`: `activity` must be a string or null, got " & $activity.kind)
+      ri.activity = activity.getStr()
     for fk, fv in r["fields"]:
       ri.fields[fk] = parseFieldValue(fv)
     for dep in r["dependsOn"]:
@@ -407,6 +463,46 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
   if root.hasKey("catalogImports"):
     for it in root["catalogImports"]:
       result.catalogImports.add it.getStr()
+  # Optional; absent when no host declares the concerns Reprobuild applies.
+  if root.hasKey("hostApplies"):
+    for k, v in root["hostApplies"]:
+      var concerns: seq[string] = @[]
+      for it in v:
+        concerns.add it.getStr()
+      result.hostApplies[k] = concerns
+  # GM10: optional; absent when no host's system is managed elsewhere. A
+  # malformed entry is refused, never read as "managed here".
+  if root.hasKey("systemManagedElsewhere"):
+    let sme = root["systemManagedElsewhere"]
+    if sme.kind != JObject:
+      raise newException(ValueError,
+        "systemManagedElsewhere must be an object (host -> {managedBy})")
+    for host, v in sme:
+      if v.kind != JObject or not v.hasKey("managedBy") or
+          v["managedBy"].kind notin {JString, JNull}:
+        raise newException(ValueError, "systemManagedElsewhere." & host &
+          " must be an object with `managedBy` (a string or null)")
+      result.systemManagedElsewhere[host] =
+        if v["managedBy"].kind == JString: v["managedBy"].getStr() else: ""
+  # GM11: optional; absent when no activity claims a stow package. A
+  # malformed claim is refused, never dropped (dropping it would put the
+  # package on every host).
+  if root.hasKey("stowScopes"):
+    let ss = root["stowScopes"]
+    if ss.kind != JArray:
+      raise newException(ValueError,
+        "stowScopes must be an array of {package, activity, guard}")
+    for i in 0 ..< ss.len:
+      let c = ss[i]
+      if c.kind != JObject or
+          not c.hasKey("package") or c["package"].kind != JString or
+          not c.hasKey("activity") or c["activity"].kind != JString or
+          not c.hasKey("guard") or c["guard"].kind notin {JString, JNull}:
+        raise newException(ValueError, "stowScopes[" & $i &
+          "] must be an object with `package` and `activity` (strings) " &
+          "and `guard` (a string or null)")
+      result.stowScopes.add StowScope(package: c["package"].getStr(),
+        activity: c["activity"].getStr(), guard: parseGuard(c["guard"]))
 
 # ---------------------------------------------------------------------
 # M9.R.20: SystemIntent encode / decode.

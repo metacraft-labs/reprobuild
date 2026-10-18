@@ -230,6 +230,22 @@ proc applyGuard*(target: var seq[ResourceIntent]; start: int;
   for i in start ..< target.len:
     target[i].guard = conjoinGuard(pred, target[i].guard)
 
+proc applyActivity*(target: var seq[ResourceIntent]; start: int;
+                    activity: string) =
+  ## GM9: scope every resource appended since `start` to `activity` -- what
+  ## a `resources:` block inside `activity <name>:` does to the resources it
+  ## declares. A resource already scoped to a DIFFERENT activity is refused:
+  ## a resource belongs to one activity, and silently re-scoping it would
+  ## move it to hosts its author did not select.
+  for i in start ..< target.len:
+    let current = target[i].activity
+    if current.len > 0 and current != activity:
+      raise newException(ValueError, "resource " & target[i].kind &
+        (if target[i].address.len > 0: " `" & target[i].address & "`"
+         else: "") & " is declared in activity `" & activity &
+        "` but already belongs to activity `" & current & "`")
+    target[i].activity = activity
+
 proc applyGuard*(target: var seq[ConfigOverride]; start: int;
                  pred: PredicateExpr) =
   ## Conjoin `pred` into the guard of every override appended since `start`.

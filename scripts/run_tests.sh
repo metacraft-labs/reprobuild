@@ -34,8 +34,15 @@ fi
 #
 # Keyed on a checksum of the absolute checkout path rather than its basename:
 # the slot has to stay SHORT because a unix socket bound under TMPDIR must fit
-# sun_path's 108 bytes, and two worktrees can share a basename anyway. The
-# result is 49 characters against the old 47, so this does not move that limit.
+# sun_path — 104 bytes on macOS, 108 on Linux, the terminating NUL included,
+# and only 92 on macOS where Nim's std/net binds or dials the path — and two
+# worktrees can share a basename anyway. The result is ~50 characters against
+# the old 47. That leaves a fixture only ~40 bytes for its own nesting and
+# socket name on macOS, which is NOT enough for every fixture (the engine
+# RunQuota fixtures measured 105), so the slot length is not what keeps a
+# socket bindable: a fixture binding a RunQuota endpoint under its own scratch
+# root must take it from repro_test_support.runquotaRendezvousDir, which moves
+# the endpoint to a short private directory when the root would overflow.
 # The `rm -rf` is kept — every run still starts from empty scratch — but now
 # only ever deletes the scratch of the checkout that owns it.
 test_tmp_slot="$(printf '%s' "${repo_root}" | cksum | cut -d' ' -f1)"
@@ -559,6 +566,22 @@ if [[ "$(uname -s)" == "Linux" && "$(uname -m)" =~ ^(x86_64|amd64)$ ]]; then
       "${cross_repo_fixtures_status}" >&2
   fi
 fi
+# The Nix package of THIS tree (`nix build .#default`), which the
+# installed-package gates (tests/e2e/m83/t_e2e_nix_package_compiles_profile*)
+# run. Built once here instead of once per case: the build runs in the nix
+# daemon, outside every case's process group, and concurrent cases waiting on
+# it printed nothing until the runner killed them on its idle timeout. A
+# separate collection for the cross-repo one's reason -- it can fail for
+# reasons that say nothing about the rest of the suite -- with its failure
+# re-raised at the end. Linux and macOS, where repro.nim declares it.
+package_fixtures_status=0
+if [[ "$(uname -s)" == "Linux" || "$(uname -s)" == "Darwin" ]]; then
+  repro_build_collection ".#test-package-fixtures" || package_fixtures_status=$?
+  if (( package_fixtures_status != 0 )); then
+    printf '::error:: .#test-package-fixtures failed (exit %d); running the suite, failure re-raised at the end\n' \
+      "${package_fixtures_status}" >&2
+  fi
+fi
 # A failed test COMPILE is a failed test, not a reason to run nothing. This
 # used to `exit 1` here, so one broken compile cancelled every other case: one
 # 22-hour run and one 7-hour run each produced no test results at all for a
@@ -849,5 +872,10 @@ if (( cross_repo_fixtures_status != 0 )); then
   printf '\n.#test-cross-repo-fixtures failed (exit %d); see its build report above\n' \
     "${cross_repo_fixtures_status}" >&2
   (( suite_status != 0 )) || suite_status="${cross_repo_fixtures_status}"
+fi
+if (( package_fixtures_status != 0 )); then
+  printf '\n.#test-package-fixtures failed (exit %d); see its build report above\n' \
+    "${package_fixtures_status}" >&2
+  (( suite_status != 0 )) || suite_status="${package_fixtures_status}"
 fi
 exit "${suite_status}"

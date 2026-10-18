@@ -413,6 +413,183 @@ proc verifyAppBundleTeam*(bundlePath, teamId: string;
   verifyTeamSignature(bundlePath, result, teamId, policy)
 
 # ---------------------------------------------------------------------------
+# Vendor updates and running applications
+# ---------------------------------------------------------------------------
+#
+# Store-And-Installation-Layout.md § macOS Application Bundles, "Vendor
+# updates" and "Running applications". An application that updates itself
+# (Sparkle, Squirrel / Electron updaters) replaces the placed bundle with a
+# newer build its vendor signed; the apply recognises that instead of
+# calling it drift, and never replaces the bundle of an application that is
+# running.
+
+proc parseAppBundleIdentityBytes*(bytes: openArray[byte];
+                                  identity: var AppBundleIdentity): bool =
+  ## Parse the identity bytes of a BUNDLE (``appBundleCanonicalBytes``).
+  ## False for anything else -- a folder identity, the not-a-bundle marker,
+  ## an unknown format -- so only a placed bundle can ever be recognised as
+  ## a vendor update. ``adhoc`` and ``authority`` are not part of the bytes
+  ## and stay empty.
+  var text = newString(bytes.len)
+  for i, b in bytes:
+    text[i] = char(b)
+  let lines = text.splitLines()
+  if lines.len == 0 or lines[0] != AppBundleIdentityFormat:
+    return false
+  var seen = 0
+  for line in lines[1 .. ^1]:
+    if line.len == 0:
+      continue
+    let eq = line.find('=')
+    if eq <= 0:
+      return false
+    let value = line[eq + 1 .. ^1]
+    case line[0 ..< eq]
+    of "bundleId": identity.bundleId = value
+    of "shortVersion": identity.shortVersion = value
+    of "bundleVersion": identity.bundleVersion = value
+    of "teamId": identity.teamId = value
+    of "cdhash": identity.cdhash = value
+    else: return false
+    inc seen
+  seen == 5
+
+proc compareVersionStrings*(a, b: string): int =
+  ## Compare two bundle version strings: runs of digits numerically, every
+  ## other character by its code, component by component (``1.142.0`` >
+  ## ``1.141.0``, ``2.42304.0`` > ``2.37337.1``, ``26.1007.41230`` >
+  ## ``26.623.141536``). A string that is a prefix of the other is older
+  ## (``1.2`` < ``1.2.1``). Returns -1, 0 or 1.
+  var i, j = 0
+  while i < a.len and j < b.len:
+    if a[i].isDigit and b[j].isDigit:
+      var ia = i
+      while ia < a.len and a[ia] == '0': inc ia
+      var ib = j
+      while ib < b.len and b[ib] == '0': inc ib
+      var ea = ia
+      while ea < a.len and a[ea].isDigit: inc ea
+      var eb = ib
+      while eb < b.len and b[eb].isDigit: inc eb
+      # Fewer significant digits is the smaller number; equal lengths
+      # compare lexically.
+      if ea - ia != eb - ib:
+        return (if ea - ia < eb - ib: -1 else: 1)
+      let c = cmp(a[ia ..< ea], b[ib ..< eb])
+      if c != 0:
+        return (if c < 0: -1 else: 1)
+      i = ea
+      j = eb
+    else:
+      if a[i] != b[j]:
+        return (if a[i] < b[j]: -1 else: 1)
+      inc i
+      inc j
+  if i < a.len: 1
+  elif j < b.len: -1
+  else: 0
+
+proc compareBundleVersions*(a, b: AppBundleIdentity): int =
+  ## Order two builds of one application: ``CFBundleShortVersionString``
+  ## first, ``CFBundleVersion`` to break a tie.
+  result = compareVersionStrings(a.shortVersion, b.shortVersion)
+  if result == 0:
+    result = compareVersionStrings(a.bundleVersion, b.bundleVersion)
+
+proc vendorUpdateCandidate*(recorded, observed: openArray[byte]): bool =
+  ## The cheap half of ``isAcceptedVendorUpdate``, reading identity bytes
+  ## only: both are bundles, the same application (``CFBundleIdentifier``)
+  ## signed by the same team, and the observed build is NEWER than the
+  ## recorded one. A downgrade, another application, another team, an
+  ## unsigned copy or a folder is never a candidate.
+  var r, o: AppBundleIdentity
+  if not parseAppBundleIdentityBytes(recorded, r) or
+      not parseAppBundleIdentityBytes(observed, o):
+    return false
+  r.bundleId.len > 0 and o.bundleId == r.bundleId and
+    isValidTeamId(r.teamId) and o.teamId == r.teamId and
+    o.cdhash.len > 0 and compareBundleVersions(o, r) > 0
+
+proc isAcceptedVendorUpdate*(recorded, observed: openArray[byte];
+                             bundlePath: string;
+                             policy: AppTrustPolicy = {}): bool =
+  ## Whether the bundle at ``bundlePath``, whose identity bytes are
+  ## ``observed``, is its vendor's own update of the bundle a generation
+  ## recorded (``recorded``): a ``vendorUpdateCandidate`` that passes trust
+  ## checks 2, 4 and 5 against the recorded team -- an intact signature, the
+  ## team's Developer ID, notarized -- the checks that admitted the
+  ## recorded bundle. Check 1's identifier is part of the candidate test;
+  ## its version is by construction not the declared one. ``policy``
+  ## relaxes checks 4 and 5 exactly as for ``verifyAppBundle`` (tests only).
+  if not vendorUpdateCandidate(recorded, observed):
+    return false
+  var r: AppBundleIdentity
+  discard parseAppBundleIdentityBytes(recorded, r)
+  try:
+    let live = verifyAppBundleTeam(bundlePath, r.teamId, policy)
+    # The bytes were read before the checks ran; the bundle verified must
+    # be the one observed, not one an updater swapped in since.
+    appBundleCanonicalBytes(live) == @observed
+  except EAppBundleRefused:
+    false
+
+proc describeIdentityVersion*(bytes: openArray[byte]): string =
+  ## ``<shortVersion> (<bundleVersion>)`` of a bundle's identity bytes, or
+  ## "" for anything that is not a bundle identity. For messages.
+  var identity: AppBundleIdentity
+  if not parseAppBundleIdentityBytes(bytes, identity):
+    return ""
+  if identity.bundleVersion.len > 0 and
+      identity.bundleVersion != identity.shortVersion:
+    identity.shortVersion & " (" & identity.bundleVersion & ")"
+  else:
+    identity.shortVersion
+
+when defined(macosx):
+  proc procListAllPids(buffer: pointer; bufferSize: cint): cint
+    {.importc: "proc_listallpids", header: "<libproc.h>".}
+  proc procPidPath(pid: cint; buffer: pointer; bufferSize: uint32): cint
+    {.importc: "proc_pidpath", header: "<libproc.h>".}
+
+proc processesRunningFrom*(itemPath: string): seq[int] =
+  ## The ids of the processes whose executable lies inside ``itemPath`` (a
+  ## placed bundle or folder): the application and every helper it started
+  ## from its own bundle. Read through libproc (``proc_listallpids``,
+  ## ``proc_pidpath``), which reports the executable's resolved path; a
+  ## process of another user whose path cannot be read is not reported.
+  ## Empty off macOS.
+  when defined(macosx):
+    let resolved =
+      try: expandFilename(itemPath)
+      except OSError: itemPath
+    let prefix = resolved & "/"
+    var capacity = 4096
+    var pids: seq[cint]
+    while true:
+      pids.setLen(capacity)
+      let n = procListAllPids(addr pids[0], cint(capacity * sizeof(cint)))
+      if n <= 0:
+        return
+      if n < capacity:
+        pids.setLen(n)
+        break
+      capacity *= 2
+    const ProcPidPathInfoMaxSize = 4 * 1024
+    var buf = newString(ProcPidPathInfoMaxSize)
+    for pid in pids:
+      if pid <= 0:
+        continue
+      let len = procPidPath(pid, addr buf[0], uint32(ProcPidPathInfoMaxSize))
+      if len <= 0:
+        continue
+      let path = buf[0 ..< len]
+      if path.startsWith(prefix):
+        result.add int(pid)
+    result.sort()
+  else:
+    discard itemPath
+
+# ---------------------------------------------------------------------------
 # Placement
 # ---------------------------------------------------------------------------
 

@@ -7,9 +7,9 @@
 ##
 ## A real gateway bare (its installed hooks driving the built ``repro``) in
 ## front of a real upstream bare. Every push uses ``--no-verify``, so only the
-## receiving side decides. The gateway config is wired with a BAKED policy
-## (``required``, ``t-unit`` on this platform) that the snapshot must
-## override. The snapshot: rule "agents" requires ``pre-commit`` on any
+## receiving side decides. The gateway config is then rewritten in the
+## pre-TC-9d format, still BAKING a policy (``required``, ``t-unit`` on this
+## platform): since TC-9d such keys are never applied, only reported. The snapshot: rule "agents" requires ``pre-commit`` on any
 ## platform under ``required``; nothing else matches.
 ##
 ##   1. One commit C, carrying no certificate, pushed to ``feature/x``: no
@@ -25,7 +25,7 @@
 ##      cannot relax it. Certified, it is accepted; the NEXT uncovered push is
 ##      judged at ``off`` and accepted.
 ##
-## Falsifiability: judge by the baked config → 1 is refused; judge every ref
+## Falsifiability: apply the baked keys of an old config → 1 is refused; judge every ref
 ## by the first ref's branch, or ignore the destination → 1 and 2 agree;
 ## read the anchor from the pushed commit instead of the upstream → 3's
 ## relaxing push is accepted.
@@ -38,17 +38,22 @@ import std/[os, osproc, strutils, unittest]
 include policy_gate_fixture
 
 proc wirePolicyGateway(fx: StoreFixture) =
-  ## The gateway, wired with a baked policy the snapshot must override, the
-  ## committed-lock source (no record store), and the fixture's keys.
+  ## The gateway, wired with the committed-lock source (no record store) and
+  ## the fixture's keys; then its config is rewritten as a pre-TC-9d writer
+  ## wrote it, baking a `required` policy the gateway must ignore.
   let cfg = GatewayConfig(
-    gateMode: cgmRequired,
-    requiredTargets: @["t-unit"],
-    requiredPlatforms: @[currentPlatformTag()],
     lockRecordsDir: "",
     registeredKeysPath: registeredKeyStorePath(fx.workspaceRoot))
   let wired = wirePushGateway("git", fx.libAPath, fx.gatewayBare,
     fileUrl(fx.upstreamBare), cfg)
   doAssert wired.ok, wired.diagnostic
+  let path = gatewayConfigPath(fx.gatewayBare)
+  writeFile(path, readFile(path).replace("[gateway]\n",
+    "[gateway]\ngate_mode = \"required\"\n" &
+    "required_targets = [\"t-unit\"]\n" &
+    "required_platforms = [\"" & currentPlatformTag() & "\"]\n"))
+  doAssert parseGatewayConfig(readFile(path)).ignoredPolicyKeys ==
+    @["gate_mode", "required_targets", "required_platforms"]
 
 proc upstreamRef(fx: StoreFixture; branch: string): string =
   let res = execCmdEx(quoteShellCommand(@["git", "-C", fx.upstreamBare,

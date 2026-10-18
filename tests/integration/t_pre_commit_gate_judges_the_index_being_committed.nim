@@ -2,9 +2,10 @@
 ## (test-certificates Standard §5.1, Content-Id §5), through the hooks
 ## ``repro hooks ensure --vcs`` installs and real ``git commit`` invocations.
 ##
-## Under ``gate_mode = required`` (the ``[certificates]`` table has no
-## ``commit_gate`` key, so the commit gate takes ``gate_mode``, operator
-## decision D7), with a registered-signed certificate published to the local
+## Under ``gate_mode = required`` (the policy in lib-a's committed
+## ``repro.lock`` is one rule for every branch, ``everyBranchSnapshot``, which
+## sets no ``commit_gate``, so the commit gate takes ``gate_mode``, operator decision
+## D7; TC-9d), with a registered-signed certificate published to the local
 ## store for the content named in each case:
 ##
 ##   1. A fully staged, certified change commits; the gate's log line says it

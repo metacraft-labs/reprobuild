@@ -33,10 +33,12 @@
 ## disk forever, so re-reading the record keeps agreeing that the session is
 ## active and the tally keeps blocking the dev self-restart -- for the whole
 ## life of the daemon process, because the startup sweep
-## (`reclaimAbandonedSessions`) runs once. Measured: 16,788 consecutive
-## deferrals from one daemon. `activeSessionTallyFor` therefore reconciles
-## against writer liveness too, and the case below drives it with a real
-## forked process that really dies.
+## (`reclaimAbandonedSessions`) runs once. The historical 16,788-deferral
+## flood also included pre-field records with no identity; probing dead
+## writers alone cannot settle those. The legacy cases below age real files
+## to exercise startup and query expiry after seven days of inactivity,
+## with recent/future/invalid timestamps and live/unknown writer controls.
+## Writer-liveness cases use a real forked process that really dies.
 ##
 ## THE RESTART CASE IS THE ONE THAT MATTERS MOST. A tally that counted only
 ## the sessions its own process observed would read LOW after a dev
@@ -207,7 +209,7 @@ suite "daemon active-session tally equals a from-disk recount":
     check activeSessionTallyFor(config) == 4
     check countActiveSessionRecordsFromDisk(config) == 4
 
-suite "abandoned sessions are reclaimed, and only provably dead ones":
+suite "identified abandoned sessions require proof of writer death":
   test "a non-terminal record with a dead writer becomes abandoned":
     let root = createTempDir("repro-reclaim-", "")
     defer: removeDir(root)
@@ -292,10 +294,9 @@ suite "abandoned sessions are reclaimed, and only provably dead ones":
     check countActiveSessionRecordsFromDisk(config) == 1
     check readFile(path) == original
 
-  test "a record with no writer is left alone, not reclaimed":
-    # Every record written before this field existed. Treating an
-    # unestablishable identity as live is the safe direction, and it means
-    # the fix is not retroactive -- stated here so nobody "fixes" that.
+  test "a recently written record with no writer is left alone":
+    # The recent filesystem write protects this legacy record even though
+    # its start time is old. Neither age alone suffices.
     let root = createTempDir("repro-reclaim-", "")
     defer: removeDir(root)
     let config = tempConfig(root)
@@ -586,3 +587,132 @@ suite "which identity governs is encoded in the state":
       check countActiveSessionRecordsFromDisk(config) == 0
       check AbandonedSessionState in
         readFile(root / "sessions" / "killed-worker.session")
+
+
+suite "legacy sessions without writer identity expire after inactivity":
+  test "the startup sweep reclaims the historical writerless population":
+    let root = createTempDir("repro-legacy-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    createDir(root / "sessions")
+    let path = root / "sessions" / "legacy.session"
+    # This is the actual pre-field format, written outside this process's
+    # bookkeeping as a previous daemon generation would leave it. Neither
+    # identity probing nor a worker's terminal write can ever settle it.
+    writeFile(path, "sessionId=legacy\nmode=build\nstate=running\n" &
+      "startedAtUnix=1781559479\nendedAtUnix=0\nexitCode=-1\n")
+    setLastModificationTime(path, fromUnix(1781559479))
+    check countActiveSessionRecordsFromDisk(config) == 1
+    resetTallyAsIfRestarted(config)
+    check activeSessionTallyFor(config) == 0
+    check countActiveSessionRecordsFromDisk(config) == 0
+    let body = readFile(path)
+    check "state=abandoned" in body
+    check "startedAtUnix=1781559479" in body
+    check "exitCode=-1" in body
+    check "endedAtUnix=0" notin body
+    check "no writer identity or activity for seven days" in body
+    check reclaimAbandonedSessions(config) == 0
+
+  test "query reconciliation reclaims a writerless record after inactivity":
+    let root = createTempDir("repro-legacy-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    var legacy = session("legacy", "running")
+    legacy.message = "daemon-hosted build running"
+    writeSessionRecord(config, legacy)
+    # The recent mtime protects the record during priming. Then age its real
+    # file without touching the process-local tally, exactly as prolonged
+    # inactivity does to a long-running daemon.
+    check activeSessionTallyFor(config) == 1
+    let path = root / "sessions" / "legacy.session"
+    setLastModificationTime(path, fromUnix(legacy.startedAtUnix))
+    check activeSessionTallyFor(config) == 0
+    check countActiveSessionRecordsFromDisk(config) == 0
+    let body = readFile(path)
+    check "state=abandoned" in body
+    check "message=daemon-hosted build running" in body
+    check activeSessionTallyFor(config) == 0
+    resetTallyAsIfRestarted(config)
+    check activeSessionTallyFor(config) == 0
+
+  test "timestamps and writer identities constrain both reclamation paths":
+    let root = createTempDir("repro-legacy-controls-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    check activeSessionTallyFor(config) == 0
+    let now = getTime().toUnix
+    const week = 7 * 24 * 60 * 60
+    # Each control is aged independently at the real filesystem boundary.
+    # An exact boundary must qualify, while a recent timestamp on either
+    # side, a future timestamp, or invalid start time must protect it.
+    let cases = [
+      ("boundary", now - week, now - week, "", true),
+      ("recent-start", now - week + 60, now - week - 60, "", false),
+      ("recent-mtime", now - week - 60, now - week + 60, "", false),
+      ("future-start", now + 3600, now - week - 60, "", false),
+      ("future-mtime", now - week - 60, now + 3600, "", false),
+      ("zero-start", 0'i64, now - week - 60, "", false),
+      ("negative-start", -1'i64, now - week - 60, "", false),
+      ("zero-mtime", now - week - 60, 0'i64, "", false),
+      ("overflow-start", high(int64), now - week - 60, "", false),
+      ("malformed-writer", now - week - 60, now - week - 60, "garbled", false),
+      ("live-writer", now - week - 60, now - week - 60,
+        encodeWriterIdentity(currentWriterIdentity()), false)]
+    for (id, started, modified, writer, expires) in cases:
+      var record = session(id, "running")
+      record.startedAtUnix = started
+      record.writer = writer
+      writeSessionRecord(config, record)
+      let path = root / "sessions" / (id & ".session")
+      setLastModificationTime(path, fromUnix(modified))
+      let before = readFile(path)
+      discard activeSessionTallyFor(config)
+      if expires:
+        check "state=abandoned" in readFile(path)
+      else:
+        check readFile(path) == before
+      discard reclaimAbandonedSessions(config)
+      if not expires:
+        check readFile(path) == before
+    check activeSessionTallyFor(config) == cases.len - 1
+    check countActiveSessionRecordsFromDisk(config) == cases.len - 1
+
+  test "a failed legacy rewrite stays active and retries after repair":
+    let root = createTempDir("repro-legacy-write-failure-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    let legacy = session("legacy", "running")
+    writeSessionRecord(config, legacy)
+    check activeSessionTallyFor(config) == 1
+    let path = root / "sessions" / "legacy.session"
+    setLastModificationTime(path, fromUnix(legacy.startedAtUnix))
+    let before = readFile(path)
+    # A real directory at the atomic writer's temporary pathname forces a
+    # filesystem write failure on every platform, even for a root test run.
+    # No fake filesystem or injected write stub hides the persistence path.
+    let obstruction = path & ".tmp." & $getCurrentProcessId()
+    createDir(obstruction)
+    check reclaimAbandonedSessions(config) == 0
+    check activeSessionTallyFor(config) == 1
+    check readFile(path) == before
+    removeDir(obstruction)
+    check activeSessionTallyFor(config) == 0
+    check countActiveSessionRecordsFromDisk(config) == 0
+    check "state=abandoned" in readFile(path)
+
+  test "an invalid or missing start date cannot expire a legacy record":
+    let root = createTempDir("repro-legacy-invalid-date-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    createDir(root / "sessions")
+    for id, startLine in ["startedAtUnix=invalid\n", ""]:
+      let name = "invalid" & $id
+      let path = root / "sessions" / (name & ".session")
+      let body = "sessionId=" & name & "\nstate=running\n" & startLine
+      writeFile(path, body)
+      setLastModificationTime(path, fromUnix(1_700_000_000))
+      check reclaimAbandonedSessions(config) == 0
+      check readFile(path) == body
+    check activeSessionTallyFor(config) == 2
+    check countActiveSessionRecordsFromDisk(config) == 2

@@ -74,7 +74,8 @@
 ##
 ## On a host with no Nix store directory every operation here is a no-op.
 
-import std/[algorithm, os, osproc, sets, strtabs, strutils, tables, times]
+import std/[algorithm, monotimes, os, osproc, sets, strtabs, strutils, tables,
+            times]
 when defined(posix):
   import std/posix
 
@@ -102,6 +103,15 @@ const
   LedgerIndexName* = "index.txt"
     ## The ledger's one-file summary of every manifest; see `NixLedgerIndex`.
   IndexHeader = "# reprobuild nix-gc-roots index v1"
+  LedgerClockProbeName* = "clock-probe"
+    ## A file in the ledger directory (beside `actions/`, not in it) that
+    ## `pruneStaleRoots` rewrites to read the filesystem's clock; see
+    ## `settledActionsStamp`.
+  LedgerClockSettleBudgetMs = 50
+    ## How long `pruneStaleRoots` waits for the filesystem clock to pass the
+    ## `actions/` stamp before giving up on writing an index this time.
+  LedgerClockSettlePollMs = 2
+    ## Sleep between two readings of the probe and the stamp.
 
 type
   NixStoreRootError* = object of CatchableError
@@ -307,6 +317,20 @@ proc scanPath(s: var StoreRefScanner; path: string) =
   elif isRegularFile(path):
     s.scanFile(path)
 
+proc resolveScannedStorePath(path, storeDir: string): string =
+  ## `path` as scanned (`<storeDir>/<hash>-<maximal name run>`), or, when that
+  ## spelling does not exist, the longest existing `<storeDir>/<hash>-<prefix
+  ## of the name>`. See `scanStoreReferences` for why the name's end is a
+  ## guess. One `lstat` for a path that exists, which is the common case.
+  if storePathExists(path):
+    return path
+  let nameStart = storeDir.len + 1 + NixStoreHashLen + 1
+  for nameEnd in countdown(path.len - 1, nameStart + 1):
+    let candidate = path[0 ..< nameEnd]
+    if storePathExists(candidate):
+      return candidate
+  path
+
 proc scanStoreReferences*(paths: openArray[string];
                           storeDir = nixStoreDir()): seq[string] =
   ## The distinct top-level store paths (`<storeDir>/<hash>-<name>`, cut at
@@ -316,11 +340,29 @@ proc scanStoreReferences*(paths: openArray[string];
   ## Existence of the FOUND paths is not checked here: an output may name a
   ## store path that never existed on this host (a log quoting another
   ## machine's path), and only the caller knows what that means for it.
+  ##
+  ## WITH ONE EXCEPTION, the name's END. The text gives no reliable end for a
+  ## name: a store path serialized without a terminator (a length-prefixed
+  ## string in a binary artifact, such as a provider's `.rbsz`) is followed
+  ## by whatever byte comes next, and when that byte is a name character the
+  ## maximal run overshoots: `…-source` followed by a length byte `'9'`
+  ## scans as `…-source9`, which exists nowhere. Nix itself identifies a
+  ## reference by its HASH alone (`RefScanSink`), so the hash is the fact
+  ## and the name is the guess. When the maximal spelling is absent, the
+  ## longest PREFIX of its name that is an existing store entry under the
+  ## same hash is the reference. Only when no prefix exists is the maximal
+  ## spelling kept, as before. Without this the false spelling was recorded
+  ## as absent, and an output scanned with no ledger manifest (a shared
+  ## recipe-compile output reached from another copy of the recipe) was
+  ## judged to have LOST a store path and re-executed on every copy.
   var s = StoreRefScanner(prefix: storeDir & "/", storeDir: storeDir,
     found: initHashSet[string]())
   for path in paths:
     s.scanPath(path)
+  var resolved = initHashSet[string]()
   for p in s.found:
+    resolved.incl(resolveScannedStorePath(p, storeDir))
+  for p in resolved:
     result.add(p)
   result.sort()
 
@@ -707,17 +749,100 @@ proc ensureLedgerRoots*(ledgerDir, key: string; nixStore = "";
     return
   addRoots(ledgerPoolDir(ledgerDir), read.manifest.refs, nixStore, storeDir)
 
-proc directoryStamp(dir: string): string =
-  ## The directory's modification time (nanoseconds) and identity. Creating,
-  ## renaming or removing an entry moves it — and writing a manifest is a
-  ## rename into `actions/` — so an equal stamp means "the same set of
-  ## manifest files as when the stamp was taken". "" when unreadable.
+proc readDirectoryStamp(dir: string):
+    tuple[mtime: times.Time; stamp: string] =
+  ## The directory's modification time, and the stamp `directoryStamp`
+  ## returns for it. `stamp` is "" (and `mtime` meaningless) when the
+  ## directory cannot be read.
   try:
     let info = getFileInfo(extendedPath(dir), followSymlink = false)
-    $info.lastWriteTime.toUnix & "." & $info.lastWriteTime.nanosecond & "/" &
+    result.mtime = info.lastWriteTime
+    result.stamp = $info.lastWriteTime.toUnix & "." &
+      $info.lastWriteTime.nanosecond & "/" &
       $info.id.device & ":" & $info.id.file
   except OSError:
-    ""
+    result.stamp = ""
+
+proc directoryStamp(dir: string): string =
+  ## The directory's modification time (nanoseconds) and identity. Creating,
+  ## renaming or removing an entry moves the mtime — and writing a manifest
+  ## is a rename into `actions/` — PROVIDED the filesystem's clock has moved
+  ## since the stamp was taken.
+  ##
+  ## That proviso is not free. The time a filesystem stamps an entry change
+  ## with is its own clock's, at its own granularity: on Linux it is
+  ## `current_time()`, which reads the kernel's coarse-grained clock (one
+  ## jiffy, 1–10 ms; https://docs.kernel.org/filesystems/multigrain-ts.html
+  ## describes why and what the newer multigrain timestamps do and do not
+  ## change), so two renames in one tick leave the mtime byte-identical
+  ## (reprobuild-pm issue 2026-10-16: the index test failed 5 of 10 runs on
+  ## x86_64 Linux). An equal stamp therefore means "the same set of manifest
+  ## files" only for a stamp the clock has since passed; `pruneStaleRoots`
+  ## records no other kind (`settledActionsStamp`). "" when unreadable.
+  readDirectoryStamp(dir).stamp
+
+proc probeFilesystemClock(ledgerDir: string):
+    tuple[ok: bool; now: times.Time] =
+  ## A reading of the clock the filesystem under `ledgerDir` stamps changes
+  ## with: write `LedgerClockProbeName` and read back the mtime the
+  ## filesystem gave it. The time is never set from user space — truncating
+  ## and writing bytes is what makes the kernel / filesystem assign it, from
+  ## the same clock (and at the same granularity) it uses for the directory
+  ## entries of `actions/` beside it. `ok` is false when the probe cannot be
+  ## written or read; never raises.
+  ##
+  ## The probe lives in the ledger directory, NOT in `actions/`, so writing
+  ## it does not move the stamp it is compared with. It is left in place:
+  ## one tiny file, rewritten by every prune.
+  let probe = ledgerDir / LedgerClockProbeName
+  try:
+    writeFile(extendedPath(probe), "reprobuild nix-gc-roots clock probe\n")
+    result.now = getFileInfo(extendedPath(probe),
+      followSymlink = false).lastWriteTime
+    result.ok = true
+  except CatchableError:
+    result.ok = false
+
+proc settledActionsStamp(ledgerDir: string): string =
+  ## The `actions/` stamp, but only once the filesystem's own clock has
+  ## provably moved past its mtime; "" when that cannot be shown within
+  ## `LedgerClockSettleBudgetMs`.
+  ##
+  ## The proof is an ordering of two readings: the probe's mtime P is taken
+  ## FIRST, the stamp S second, and S is accepted only when mtime(S) < P.
+  ##
+  ## * Any write into `actions/` after S was read is stamped from the same
+  ##   clock, which had already reached P before S was read; so it gets an
+  ##   mtime >= P > mtime(S) and moves the stamp. That is the whole
+  ##   guarantee the index needs: an equal stamp later means no write since.
+  ##   (Like any mtime scheme, it assumes the filesystem clock does not step
+  ##   backwards, e.g. by a wall-clock correction between the two writes.)
+  ## * A write into `actions/` between the probe and the stamp read would
+  ##   have given S an mtime >= P, so it cannot be mistaken for settled.
+  ##
+  ## When S is not yet behind P — the same coarse tick, a filesystem whose
+  ## directory times have one-second resolution, or a directory mtime in the
+  ## future — the probe and the stamp are re-read after a short sleep, up to
+  ## the budget. The budget covers a Linux jiffy at HZ=100 (10 ms) and a
+  ## Windows timer tick (~15.6 ms) several times over. It does not cover the
+  ## rest of a second on a one-second filesystem: there a stamp from an
+  ## earlier second settles at once, and one from the current second makes
+  ## the caller skip the index this time. The last attempt always FOLLOWS a
+  ## sleep, so a sleep that overran on a loaded host still gets its probe.
+  let actionsDir = ledgerDir / LedgerActionsDirName
+  let start = getMonoTime()
+  while true:
+    let clock = probeFilesystemClock(ledgerDir)
+    if not clock.ok:
+      return ""  # no reading of the clock: nothing can be proven
+    let current = readDirectoryStamp(actionsDir)
+    if current.stamp.len == 0:
+      return ""  # no stamp: nothing to wait for
+    if current.mtime < clock.now:
+      return current.stamp
+    if (getMonoTime() - start).inMilliseconds >= LedgerClockSettleBudgetMs:
+      return ""
+    sleep(LedgerClockSettlePollMs)
 
 type
   NixLedgerIndex* = object
@@ -734,10 +859,19 @@ type
     ## With an equal stamp a key ABSENT from the index has no manifest,
     ## because creating one would have moved the stamp.
     ##
-    ## The stamp is only as fine as the filesystem's directory mtime: APFS,
-    ## ext4, btrfs and XFS keep nanoseconds, which is what this relies on. On
-    ## a one-second filesystem (HFS+, ext3) a manifest replaced within the
-    ## second the index was stamped would go unnoticed until the next prune.
+    ## "Would have moved" holds only for a stamp the filesystem's clock has
+    ## already passed. A directory mtime is only as fine as the clock that
+    ## assigns it — on Linux the coarse kernel clock, one jiffy, even on
+    ## nanosecond filesystems (ext4, btrfs, XFS, tmpfs); on HFS+ or ext3, one
+    ## second — and a manifest written within the same tick as the stamp
+    ## leaves it unchanged (reprobuild-pm issue 2026-10-16). So
+    ## `pruneStaleRoots` records only a stamp whose mtime is strictly behind
+    ## a fresh reading of that same clock (`settledActionsStamp`), and writes
+    ## no index when it cannot get one. That closes the one-tick window and,
+    ## with it, the one-second-filesystem window this paragraph used to
+    ## concede: on such a filesystem an index is simply written less often.
+    ## The remaining assumption is the one every mtime scheme makes: the
+    ## filesystem clock does not step backwards.
     valid*: bool
     stamp: string           ## the `actions/` stamp it was built against
     paths: seq[string]
@@ -846,14 +980,25 @@ proc pruneStaleRoots*(ledgerDir: string; storeDir = nixStoreDir()):
   ##
   ## Having read every manifest anyway, it also rewrites the ledger index
   ## (`NixLedgerIndex`) — but only when the index would be exact: stamped
-  ## with the `actions/` directory as it was BEFORE the read, and only if
-  ## nothing moved that stamp during it (a manifest written concurrently, or
+  ## with the `actions/` directory as it was BEFORE the read, only with a
+  ## stamp the filesystem's clock has provably passed (so a later manifest
+  ## write cannot repeat it; `settledActionsStamp`), and only if nothing
+  ## moved that stamp during the read (a manifest written concurrently, or
   ## one this call removed). Otherwise the index is deleted and the next
   ## build reads manifests until a later prune rebuilds it.
+  ##
+  ## Establishing a settled stamp can cost a sleep of up to one clock tick
+  ## (a few ms on Linux, typically none on APFS), bounded by
+  ## `LedgerClockSettleBudgetMs`. The prune itself never waits on it: when
+  ## the stamp does not settle in time the prune still runs and only the
+  ## index is skipped.
   let pool = readRootLinks(ledgerPoolDir(ledgerDir), storeDir)
   var keep = initHashSet[string]()
   let actionsDir = ledgerDir / LedgerActionsDirName
-  let stampBefore = directoryStamp(actionsDir)
+  # Settle BEFORE the scan: the stamp the index records must describe the
+  # manifests as they were when the scan started, and the check after the
+  # scan below compares against exactly this value.
+  let stampBefore = settledActionsStamp(ledgerDir)
   var entries: seq[tuple[key: string; refs: seq[string]]] = @[]
   if dirExists(extendedPath(actionsDir)):
     for kind, path in walkDir(extendedPath(actionsDir), relative = false,
