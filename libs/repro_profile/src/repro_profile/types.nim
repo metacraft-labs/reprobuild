@@ -92,6 +92,15 @@ type
       ## this table has its system managed here (Gradual-Nix-To-Reprobuild-
       ## Migration.md §Hosts, feature 2).
     resources*: seq[ResourceIntent]
+    stowScopes*: seq[StowScope]
+      ## GM11: the `stow/` packages an activity claims (a `stow:` block in
+      ## `activity <name>:`), one record per claim. A package no record
+      ## names is materialized on every host, as before; a package some
+      ## record names is materialized only on a host where one of its
+      ## records' activity is selected and its guard holds
+      ## (`repro_profile/stow_scopes`; Home-Profile-Intent-Layer.md
+      ## §Stow-Style Dotfile Support). Empty for a profile without a
+      ## `stow:` block, which encodes exactly as before.
     buildActions*: seq[ProfileBuildAction]
       ## Windows-System-Resources Phase G. Action-edge items emitted
       ## from inside the profile's ``resources:`` block by typed-tool
@@ -305,6 +314,19 @@ type
   PredicateExpr* = object
     expr*: string         ## canonical-stringified predicate; apply-
                           ## time parser handles evaluation
+
+  StowScope* = object
+    ## GM11: one claim of a `stow/` package by an activity -- an entry of a
+    ## `stow:` block inside `activity <name>:` (`repro_profile/stow_scopes`).
+    package*: string
+      ## The package: the name of an immediate subdirectory of the
+      ## profile's `stow/` tree (one path segment).
+    activity*: string
+      ## The activity whose `stow:` block names the package.
+    guard*: PredicateExpr
+      ## The runtime predicate of the `when <pred>:` the entry sits under
+      ## inside the block; an empty `guard.expr` means none. The claim holds
+      ## on a host that selects `activity` and where the guard holds.
 
   # -------------------------------------------------------------------
   # M9.R.20: SystemIntent — user-editable ``system "<hostname>":`` form.

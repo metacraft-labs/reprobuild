@@ -10,6 +10,7 @@ export devEnvCacheKey.PromptWatchEntry, devEnvCacheKey.promptWatchManifestPathFo
   devEnvCacheKey.snapshotPromptWatchBaseline, devEnvCacheKey.PromptWatchFileName
 import repro_hash
 import repro_interface_artifacts
+import repro_local_store/pattern_scoped_enumeration
 import repro_runquota
 import repro_tool_profiles
 
@@ -622,14 +623,20 @@ proc devEnvPromptWatchEntries*(action: BuildAction;
   for dir in action.cacheEnumeratedDirectories(evidence, trackedRoots):
     membership.incl(dir)
   var watched: seq[PromptWatchEntry]
-  proc consider(path: string) =
+  proc consider(recorded: string) =
+    # A pattern-scoped enumeration (`patternScopedEnumerationPath`) is
+    # watched as its whole directory: the manifest's `d` comparison has no
+    # pattern, and watching the full membership notices every change the
+    # scoped one could, so it errs toward an extra activation, never a
+    # missed change.
+    let path = recorded.patternScopedBase()
     if path.len == 0:
       return
     for prefix in excludedPrefixes:
       if path.pathIsAtOrUnder(prefix):
         return
     watched.add(PromptWatchEntry(path: path,
-      enumerated: path in membership))
+      enumerated: recorded in membership))
   for path in action.cacheInputPaths(evidence):
     consider(path)
   # The floor, for the case the monitor saw nothing at all (no monitor on

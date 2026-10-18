@@ -67,7 +67,7 @@
 ##   comparison is raw bytes via `readFile` (which follows links, so a
 ##   wrong-link target's *resolved* content is what is compared).
 
-import std/[os, strutils]
+import std/[algorithm, os, sets, strutils]
 from repro_core/paths import extendedPath
 
 import blake3
@@ -75,6 +75,7 @@ import repro_home_generations
 
 import ./errors
 import ./plan
+import repro_home_intent
 
 const
   DisableSymlinkEnvVar* = "REPRO_TEST_STOW_DISABLE_SYMLINK"
@@ -98,6 +99,10 @@ type
     sourceAbsolutePath*: string
     homeRelativePath*: string
     targetAbsolutePath*: string       ## $HOME/<rel>
+    package*: string
+      ## GM11: the `stow/` package the file belongs to (the immediate
+      ## subdirectory of `stow/` it sits in); `selectStowEntries` keeps or
+      ## drops it by this name.
 
   AppliedStowRecord* = object
     sourceAbsolutePath*: string
@@ -132,6 +137,10 @@ type
       ## directory). These are NOT valid GNU `stow` layout — the
       ## caller emits an `IStowLooseFile` diagnostic per entry and
       ## materializes none of them. Paths are relative to `stow/`.
+    packages*: seq[string]
+      ## GM11: every package directory found (immediate subdirectories of
+      ## `stow/`), sorted, empty ones included -- what an activity's
+      ## `stow:` claim may name.
 
 proc discoverStowEntries*(profileDir, homeDir: string): StowDiscovery =
   ## Walk `<profile-dir>/stow/` following the GNU `stow` package
@@ -154,6 +163,7 @@ proc discoverStowEntries*(profileDir, homeDir: string): StowDiscovery =
     if kind notin {pcDir, pcLinkToDir}:
       continue
     let packageDir = stowRoot / pkgPath
+    result.packages.add pkgPath.replace('\\', '/')
     for filePath in walkDirRec(extendedPath(packageDir), yieldFilter = {pcFile, pcLinkToFile},
         relative = true):
       # `filePath` is the within-package relative path — the path
@@ -163,7 +173,50 @@ proc discoverStowEntries*(profileDir, homeDir: string): StowDiscovery =
       entry.sourceAbsolutePath = packageDir / filePath
       entry.homeRelativePath = withinPackage
       entry.targetAbsolutePath = homeDir / filePath
+      entry.package = pkgPath.replace('\\', '/')
       result.entries.add entry
+  result.packages.sort()
+
+proc selectStowEntries*(discovery: StowDiscovery; profile: Profile;
+                        ctx: HostContext): StowDiscovery =
+  ## GM11: the stow entries the host `ctx` gets (Home-Profile-Intent-Layer.md
+  ## §Stow-Style Dotfile Support, "Packages that belong to an activity";
+  ## `repro_profile/stow_scopes`). A package no activity claims is kept on
+  ## every host. A claimed package is kept only when one of its claims
+  ## holds: the host's selection -- `enabledActivitiesFor`, the one rule
+  ## packages and resources use -- enables the claim's activity, and the
+  ## claim's guard holds for `ctx`.
+  ##
+  ## A claim naming a package the tree does not have is refused
+  ## (`EApplyIntentLoad`, naming the package and the packages that exist):
+  ## a typo would otherwise leave the package it meant on every host.
+  ##
+  ## A profile without claims keeps everything and never computes the
+  ## selection, so it plans exactly as before (an undeclared host included).
+  result = discovery
+  if profile.isNil or profile.stowScopes.len == 0:
+    return
+  var present = initHashSet[string]()
+  for p in discovery.packages:
+    present.incl p
+  var claimed = initHashSet[string]()
+  for s in profile.stowScopes:
+    if s.package notin present:
+      raiseIntentLoad(profile.path, "activity `" & s.activity &
+        "` claims stow package `" & s.package & "`, but the profile's " &
+        "stow/ tree has no such package directory (packages: " &
+        (if discovery.packages.len == 0: "none"
+         else: discovery.packages.join(", ")) & ")")
+    claimed.incl s.package
+  let activities = enabledActivitiesFor(profile, ctx.host)
+  var enabled = initHashSet[string]()
+  for s in profile.stowScopes:
+    if s.activity in activities and evaluateHostPredicate(s.guardAst, ctx):
+      enabled.incl s.package
+  result.entries = @[]
+  for e in discovery.entries:
+    if e.package notin claimed or e.package in enabled:
+      result.entries.add e
 
 proc stowEntriesToPlanned*(entries: seq[StowEntry]): seq[PlannedGeneratedFile] =
   for e in entries:

@@ -8,7 +8,8 @@
 ##     (`$XDG_CONFIG_HOME/repro/home/` on Linux/macOS,
 ##      `%APPDATA%\repro\home\` on Windows).
 ##   - Host identity: `$REPRO_HOST` > `--host <name>` (CLI override) >
-##     lowercased OS hostname. Every `repro home` subcommand resolves it once,
+##     lowercased OS hostname. Every `repro home` subcommand, `repro infra
+##     plan` / `apply` and `repro system sync` / `rollback` resolve it once,
 ##     through `selectHost`, which also refuses a `--host` that `$REPRO_HOST`
 ##     would silently override (§Host Identity).
 
@@ -106,30 +107,69 @@ proc loadProfilePath*(): string =
 # Host identity.
 # ---------------------------------------------------------------------------
 
-proc systemHostname*(): string =
-  ## OS hostname, lowercased. On Windows uses `COMPUTERNAME` (or
-  ## `GetComputerNameW` as a fallback); on POSIX uses `gethostname()`
-  ## via `std/os.getHostname`.
+proc normalizeHostName*(raw: string): string =
+  ## The OS hostname as a host identity: surrounding whitespace removed and
+  ## ASCII lower-cased, so `WIN-CI-BARE-001` (Windows spells
+  ## `%COMPUTERNAME%` in upper case) and the `win-ci-bare-001` a `hosts:`
+  ## registry is written with are one host (Home-Profile-Intent-Layer.md
+  ## §Host Identity). Applied to the OS hostname only: `$REPRO_HOST` and
+  ## `--host` are names the user chose and are used as given.
+  raw.strip().toLowerAscii()
+
+type
+  OsHostnameSources* = object
+    ## What the OS hostname is read from, kept apart from reading it so the
+    ## per-platform rule is testable on any host (a Linux run can feed it the
+    ## Windows inputs). `currentOsHostnameSources` fills it from the process.
+    windows*: bool
+      ## Which platform's rule applies.
+    computerName*: string
+      ## `%COMPUTERNAME%` (consulted on Windows only).
+    hostnameEnv*: string
+      ## `$HOSTNAME` (consulted on POSIX only).
+    probe*: proc (): string {.closure.}
+      ## The OS call used when the variable is empty: `GetComputerNameW` on
+      ## Windows, the `hostname` command on POSIX. May be nil (no probe).
+
+proc osHostnameFrom*(s: OsHostnameSources): string =
+  ## The normalized OS hostname: the platform's variable (`%COMPUTERNAME%` on
+  ## Windows, `$HOSTNAME` on POSIX), else the platform's probe, then
+  ## `normalizeHostName`. "" when neither yields a name.
+  var raw = if s.windows: s.computerName else: s.hostnameEnv
+  if raw.strip().len == 0 and s.probe != nil:
+    raw = s.probe()
+  normalizeHostName(raw)
+
+proc probeOsHostname(): string =
+  ## The platform's hostname call, unnormalized; "" when it fails.
   when defined(windows):
-    let env = getEnv("COMPUTERNAME")
-    if env.len > 0:
-      return env.toLowerAscii()
     var size: int32 = 256
     var buf = newWideCString("", int(size))
     if getComputerNameW(buf, addr size) != 0:
-      return ($buf).toLowerAscii()
-    return ""
+      return $buf
+    ""
   else:
-    let env = getEnv("HOSTNAME")
-    if env.len > 0:
-      return env.toLowerAscii()
     try:
       let (output, exitCode) = execCmdEx("hostname")
       if exitCode == 0:
-        return output.strip().toLowerAscii()
+        return output
     except OSError:
       discard
-    result = ""
+    ""
+
+proc currentOsHostnameSources*(): OsHostnameSources =
+  ## The hostname sources of this process on this platform.
+  OsHostnameSources(
+    windows: defined(windows),
+    computerName: getEnv("COMPUTERNAME"),
+    hostnameEnv: getEnv("HOSTNAME"),
+    probe: probeOsHostname)
+
+proc systemHostname*(): string =
+  ## OS hostname, normalized (`normalizeHostName`). On Windows uses
+  ## `%COMPUTERNAME%` (or `GetComputerNameW` as a fallback); on POSIX uses
+  ## `$HOSTNAME`, else the `hostname` command.
+  osHostnameFrom(currentOsHostnameSources())
 
 proc currentHost*(): string =
   ## Resolve the current host identity per the documented precedence:
@@ -172,13 +212,14 @@ proc machineHost*(): string =
   let env = getEnv(HomeHostEnvVar)
   if env.len > 0: env else: systemHostname()
 
-proc selectHost*(hostFlag: string; flagGiven = hostFlag.len > 0):
-    HostIdentity =
-  ## Resolve the host identity for one `repro home` command and install it
-  ## as the process-wide `--host` override, so everything the command calls
-  ## afterwards (`currentHost()` in the planner, the apply pipeline, the
-  ## export and facts producers) sees the same host. `hostFlag` is the
-  ## command's `--host` value ("" when the flag was not given).
+proc resolveHostFrom*(reproHostEnv, hostFlag: string; flagGiven: bool;
+                      osHostname: proc (): string): HostIdentity =
+  ## The host-identity rule itself, over injected inputs and with no side
+  ## effect: `reproHostEnv` is `$REPRO_HOST` ("" when unset), `hostFlag` the
+  ## command's `--host` value, `flagGiven` whether `--host` was passed at
+  ## all, and `osHostname` the normalized OS hostname (consulted only when
+  ## neither of the others names a host). `selectHost` feeds it the process'
+  ## real inputs; tests feed it any platform's.
   ##
   ## Refusals (raise `EHostIdentity`):
   ## * `--host` given with an empty value;
@@ -188,17 +229,33 @@ proc selectHost*(hostFlag: string; flagGiven = hostFlag.len > 0):
   ## * no host at all (no `$REPRO_HOST`, no `--host`, no OS hostname).
   if flagGiven and hostFlag.len == 0:
     raise newException(EHostIdentity, "--host needs a non-empty name")
-  let env = getEnv(HomeHostEnvVar)
-  if env.len > 0 and hostFlag.len > 0 and env != hostFlag:
+  if reproHostEnv.len > 0 and hostFlag.len > 0 and reproHostEnv != hostFlag:
     raise newException(EHostIdentity, "--host " & hostFlag &
-      " conflicts with $" & HomeHostEnvVar & "=" & env &
+      " conflicts with $" & HomeHostEnvVar & "=" & reproHostEnv &
       " (which takes precedence); unset one of them")
-  setHostOverride(hostFlag)
-  result.name = currentHost()
-  result.source =
-    if env.len > 0: hsEnv
-    elif hostFlag.len > 0: hsFlag
-    else: hsHostname
+  if reproHostEnv.len > 0:
+    result = HostIdentity(name: reproHostEnv, source: hsEnv)
+  elif hostFlag.len > 0:
+    result = HostIdentity(name: hostFlag, source: hsFlag)
+  else:
+    result = HostIdentity(name: osHostname(), source: hsHostname)
   if result.name.len == 0:
     raise newException(EHostIdentity,
       "could not determine the host name; pass --host NAME")
+
+proc selectHost*(hostFlag: string; flagGiven = hostFlag.len > 0):
+    HostIdentity =
+  ## Resolve the host identity for one command and install it as the
+  ## process-wide `--host` override, so everything the command calls
+  ## afterwards (`currentHost()` in the planner, the apply pipeline, the
+  ## export and facts producers) sees the same host. `hostFlag` is the
+  ## command's `--host` value ("" when the flag was not given).
+  ##
+  ## This is the ONE host resolver: every `repro home` command, `repro infra
+  ## plan` / `apply`, `repro system sync` / `rollback` and the host-registry
+  ## gate in front of them call it, so one machine has one name in all of
+  ## them (Home-Profile-Intent-Layer.md §Host Identity). The rule and its
+  ## refusals are `resolveHostFrom`'s.
+  result = resolveHostFrom(getEnv(HomeHostEnvVar), hostFlag, flagGiven,
+    systemHostname)
+  setHostOverride(hostFlag)

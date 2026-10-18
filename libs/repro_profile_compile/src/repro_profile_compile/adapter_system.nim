@@ -687,6 +687,16 @@ proc profileIntentToSystemProfile*(p: ProfileIntent): SystemProfile =
       "system profiles do not import contribution catalogs (`catalogs:` " &
       "declares " & p.catalogImports.join(", ") & "); catalogs serve " &
       "package references, which only home profiles have")
+  # GM11: a `stow:` block claims `stow/` packages, which only a home apply
+  # materializes; a system profile has no stow tree to scope, so the block
+  # would look effective and do nothing (Core-Invariants.md §Unrecognised
+  # Input Is Rejected, Not Skipped).
+  if p.stowScopes.len > 0:
+    raise newException(ValueError,
+      "system profiles have no `stow/` tree: activity `" &
+      p.stowScopes[0].activity & "` claims stow package `" &
+      p.stowScopes[0].package & "`; declare `stow:` blocks in the home " &
+      "profile")
   # GM10: who manages a host's system is an attribute of the host registry,
   # which is the home profile's `hosts:` (Gradual-Nix-To-Reprobuild-
   # Migration.md §Hosts). `repro infra` reads it from there; a `system:`

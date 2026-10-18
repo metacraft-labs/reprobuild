@@ -100,7 +100,9 @@ proc mapResourceKind(kind: string): string =
   of "windows.registryValueHKCU": "windows.registryValue"
   else: kind
 
-proc buildActivityElement(elem: ActivityElement): IntentNode =
+proc buildActivityElement*(elem: ActivityElement): IntentNode =
+  ## The IR node of one activity-body element (exported for `repro home
+  ## list` / `why`, which adapt each data row on its own to keep its file).
   case elem.kind
   of aekPackageRef:
     result = IntentNode(kind: nkPackageRef,
@@ -349,6 +351,19 @@ proc profileIntentToHomeProfile*(p: ProfileIntent;
   for act in p.activities:
     declaredActivities.add act.name
   root.children.add(buildResourcesBlock(p.resources, declaredActivities))
+  # GM11: the activities' stow claims. Checked again here (the macro builds
+  # only valid ones) because an intent can arrive another way; a malformed
+  # claim is refused rather than dropped, since dropping it would put its
+  # package on every host.
+  let stowProblem = stowScopesProblem(p.stowScopes, declaredActivities)
+  if stowProblem.len > 0:
+    raise newException(ValueError, stowProblem)
+  var stowScopes: seq[StowScopeEntry]
+  for s in p.stowScopes:
+    stowScopes.add StowScopeEntry(package: s.package, activity: s.activity,
+      guardSource: s.guard.expr,
+      guardAst: (if s.guard.expr.len == 0: nil
+                 else: parsePredicate("", s.guard.expr, 0)))
   result = Profile(path: profilePath,
     lines: @[],
     lineEnding: "\n",
@@ -356,6 +371,7 @@ proc profileIntentToHomeProfile*(p: ProfileIntent;
     root: root,
     indentStep: 2,
     adapterPreference: p.adapterPreference,
+    stowScopes: stowScopes,
     catalogImports: p.catalogImports)
   ## M2.5: thread the per-OS adapter preference through the macro->text
   ## adapter so both code paths feed the same field into the apply

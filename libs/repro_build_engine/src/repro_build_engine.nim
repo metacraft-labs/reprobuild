@@ -7372,11 +7372,23 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     # Stays in `monitorProbes` (every existing consumer keeps its set) AND
     # is recorded separately, because membership, not existence, is what
     # an enumeration depends on. See `monitorDirectoryEnumerations`.
+    #
+    # A PATTERN-SCOPED scan (glob(3) matching one pattern component against
+    # the directory's entries, `io_mon.globScanPattern`) depends only on the
+    # entries that match, so it travels under the directory's
+    # pattern-scoped name and every membership digest of it covers those
+    # entries alone (`pattern_scoped_enumeration.nim`). The name stands for
+    # the directory's existence in `monitorProbes` too, so nothing else
+    # about the scan changes.
+    let pattern = globScanPattern(record.detail)
+    let enumerated =
+      if pattern.len > 0: patternScopedEnumerationPath(materialized, pattern)
+      else: materialized
     evidence.monitorProbes.observe(evidence.evidenceProvenance,
-      evcMonitorCapture, seen.monitorProbes, materialized)
+      evcMonitorCapture, seen.monitorProbes, enumerated)
     evidence.monitorDirectoryEnumerations.observe(
       evidence.evidenceProvenance, evcMonitorCapture,
-      seen.monitorDirectoryEnumerations, materialized)
+      seen.monitorDirectoryEnumerations, enumerated)
   else:
     discard
 
@@ -10794,9 +10806,15 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
     # for something the record does not hold. What giving up the membership
     # costs, and why that is acceptable, is the "limit of the licence"
     # section of `isGitObjectStorePath`.
-    if path.isUnderAnyRoot(toolRoots) or
-        path.isUnderCanonicalPolicyRoot(ignoredRoots) or
-        path.isGitObjectStorePath(gitDirMemo):
+    #
+    # Every test from here on asks WHERE the enumeration is, and a
+    # pattern-scoped one (`patternScopedEnumerationPath`) is in its
+    # directory: the scope narrows what was read there, not where. The name
+    # itself is what is kept, so the record digests the scoped membership.
+    let location = path.patternScopedBase()
+    if location.isUnderAnyRoot(toolRoots) or
+        location.isUnderCanonicalPolicyRoot(ignoredRoots) or
+        location.isGitObjectStorePath(gitDirMemo):
       continue
     # An enumerated directory in an UNTRACKED scope — under none of the
     # roots this workspace declared, which includes every ancestor above
@@ -10804,7 +10822,7 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
     # §"Validation Criteria", second mandatory exemption; the whole
     # argument is on `untrackedEnumerationScope`. A DECLARED input never
     # reaches here: it was kept by the first test above.
-    if trackedRoots.untrackedEnumerationScope(path):
+    if trackedRoots.untrackedEnumerationScope(location):
       continue
     # The action's OWN output directory: its entry list changed because this
     # action added an entry to it, so the membership digest is derived state
@@ -10813,7 +10831,7 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
     # the MEMBERSHIP channel; reads and probes of paths inside it are
     # unaffected, and the exact declared outputs stay excluded by
     # `selfWrittenOutputKeys` as before.
-    if selfWrittenDirs.contains(normalizeWriteRoot(path)):
+    if selfWrittenDirs.contains(normalizeWriteRoot(location)):
       continue
     result.addUnique(seen, path)
 proc evidenceFromRecord*(action: BuildAction;
@@ -17434,8 +17452,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## process on the machine writes into it, so its membership changes
     ## between any two runs; gemini-cli's bundle step enumerates it. Files
     ## BENEATH it stay ordinary inputs: projects and test fixtures do live
-    ## under temp, and their contents are real.
-    var key = path.replace('\\', '/')
+    ## under temp, and their contents are real. A pattern-scoped listing of
+    ## it is still a listing of it.
+    var key = path.patternScopedBase().replace('\\', '/')
     while key.len > 1 and key.endsWith("/"):
       key.setLen(key.len - 1)
     when defined(windows):
@@ -17651,6 +17670,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## false -- keep the disk's identity -- for a directory with no declared
     ## path beneath it, and for one at or inside a declared path (an
     ## output's own contents are its record's business).
+    ##
+    ## A PATTERN-SCOPED name (`patternScopedEnumerationPath`) is viewed as
+    ## its directory, keeping only the names that may match its pattern,
+    ## which is what `membershipHex` reads from disk for the same name.
+    let (base, scope) = splitPatternScopedEnumeration(dir)
+    if scope.len > 0:
+      result = graphDirView(base, selfId, ancestors, ancestorOutput)
+      result.names = result.names.namesMatchingScope(scope)
+      return
     refreshGraphPathIndex()
     let key = scratchKey(dir)
     if key notin graphPathsBeneath:
@@ -19508,7 +19536,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           let name = entry.path["env:".len .. ^1]
           let (present, value) = launchEnv(name)
           return some(envIdentity(portableRecordRoots(), present, value))
-        let path = entry.path
+        # A PATTERN-SCOPED name (`patternScopedEnumerationPath`) is answered
+        # for its directory, listing only the names that may match its
+        # pattern, which is what the recorder's `membershipHex` and
+        # `graphDirView` computed for the same name. Looked up as written, it
+        # named no produced path or manifest entry, so a scoped listing of a
+        # produced directory could never resolve.
+        let (path, scope) = splitPatternScopedEnumeration(entry.path)
         if path in producer:
           if path notin producedOutputs:
             return some(Unresolved)
@@ -19521,7 +19555,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             return some("present")
           of pikEnumeration:
             if o.directory:
-              return some(membershipHexOfNames(childNames(o.entries, "")))
+              return some(membershipHexOfNames(
+                childNames(o.entries, "").namesMatchingScope(scope)))
             return some(Unresolved)
           of pikEnvironment:
             return some(Unresolved)   # answered above
@@ -19548,7 +19583,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               return some(if at >= 0: "present" else: "absent")
             of pikEnumeration:
               if at >= 0 and o.entries[at].kind == tekDirectory:
-                return some(membershipHexOfNames(childNames(o.entries, rel)))
+                return some(membershipHexOfNames(
+                  childNames(o.entries, rel).namesMatchingScope(scope)))
               return some(Unresolved)
             of pikEnvironment:
               return some(Unresolved)   # answered above
@@ -19556,7 +19592,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # Above produced paths: the rule the recorder and the determinism
         # probe apply -- this host's undeclared entries plus what this
         # action's ancestors produce, from their records.
-        let physical = toPhysicalPath(roots, path)
+        # The scoped name itself: `graphDirView` applies its scope.
+        let physical = toPhysicalPath(roots, entry.path)
         if physical.isSome:
           let view = graphDirView(physical.get(), action.id, ancestors,
             proc (output: GraphPathEntry): AncestorOutputState =
@@ -19720,6 +19757,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     action: BuildAction
     resultPath: string
 
+  # The exception unwinding out of the scheduling loop, if any, recorded by
+  # the ``except`` clause at the end of this ``try`` as it passes through.
+  #
+  # It has to be RECORDED, not read back with ``getCurrentException()`` in the
+  # ``finally``, and the ``finally`` has to put it back before it ends. Under
+  # Nim's goto-based exceptions an exception raised inside a cleanup's own
+  # ``finally`` -- ``cancelAndWait``'s lease release after its lease finish
+  # failed, say -- is pushed on top of the one it supersedes, and when that
+  # cleanup's error is handled the current exception falls back to the
+  # SUPERSEDED one, not to ours. Propagation then resumes with whatever is
+  # current, so the build used to surface a teardown ``Broken pipe`` in place
+  # of the error that started the unwinding, even with every teardown step
+  # guarded. The same leftover makes ``getCurrentException()`` unreliable for
+  # telling "unwinding" from "ended normally".
+  var unwinding: ref Exception = nil
   try:
     while completed < buildGraph.actions.len:
       raiseIfCancelled()
@@ -21172,6 +21224,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate,
             asWouldRun, asFailed, asBlocked}:
           inc completed
+  except Exception as err:
+    # Recorded and re-raised unchanged; see ``unwinding``. ``Exception``
+    # rather than ``CatchableError`` so a ``Defect`` (``--panics:off``) keeps
+    # its place as the cause too. This widens no raises effect: ``runBuild``
+    # already calls the unannotated ``progressCallback``.
+    unwinding = err
+    raise
   finally:
     # Engine-Threadpool TP-2 — every handed-off finish comes back BEFORE the
     # teardown below touches a slot. A worker owns a ``MonitorHandle`` for the
@@ -21183,31 +21242,54 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var pendingFinishes = awaitMonitorFinishes()
     for outcome in pendingFinishes.mitems:
       applyMonitorFinishOutcome(monitorHosts, outcome)
+    # Each teardown step below is guarded on its own and its failure
+    # collected, rather than allowed to raise out of this ``finally``. Two
+    # reasons (RunQuota-Protocol-And-Client-Libraries.md, "Ownership Across a
+    # Batched Client Launch"): a step that raised used to skip every step
+    # after it -- the remaining children, the session close, the drains below
+    # -- and, when the build was already unwinding, it REPLACED the exception
+    # that started the unwinding, so the build reported a cleanup symptom
+    # (a broken pipe, ``session still owns leases``) instead of its cause.
+    # What is collected is raised, or appended to the in-flight exception, at
+    # the very end of this block.
+    var teardownFailures: seq[string]
+    var firstTeardownError: ref CatchableError = nil
     for item in running.mitems:
-      case item.processKind
-      of rpkInlineRunQuotaPending:
-        if item.queuedRunQuotaProcess.active:
-          item.queuedRunQuotaProcess.cancelQueued()
-      of rpkInlineRunQuota:
-        if item.runQuotaProcess.active and not item.runQuotaProcess.completed:
-          discard item.runQuotaProcess.cancelAndWait()
-      of rpkInlineRunQuotaFailed:
-        discard
-      of rpkMonitorHost:
-        # HM-4 — kill the monitored root, then let the handle go. Dropping it
-        # reaps the root before releasing the consumer, so no producer is ever
-        # left publishing into a released set (LF-2); killing first is what
-        # keeps that reap from blocking shutdown indefinitely.
-        abandonMonitorHost(monitorHosts, item.monitorSlot)
-      of rpkBypassProcess:
-        if item.directProcess.active and not item.directProcess.completed:
-          discard item.directProcess.cancelAndWait()
-      of rpkHelperProcess:
-        terminateRunningAction(item)
-        closeProcessOnce(item.process)
+      try:
+        case item.processKind
+        of rpkInlineRunQuotaPending:
+          if item.queuedRunQuotaProcess.active:
+            item.queuedRunQuotaProcess.cancelQueued()
+        of rpkInlineRunQuota:
+          if item.runQuotaProcess.active and not item.runQuotaProcess.completed:
+            discard item.runQuotaProcess.cancelAndWait()
+        of rpkInlineRunQuotaFailed:
+          discard
+        of rpkMonitorHost:
+          # HM-4 — kill the monitored root, then let the handle go. Dropping it
+          # reaps the root before releasing the consumer, so no producer is ever
+          # left publishing into a released set (LF-2); killing first is what
+          # keeps that reap from blocking shutdown indefinitely.
+          abandonMonitorHost(monitorHosts, item.monitorSlot)
+        of rpkBypassProcess:
+          if item.directProcess.active and not item.directProcess.completed:
+            discard item.directProcess.cancelAndWait()
+        of rpkHelperProcess:
+          terminateRunningAction(item)
+          closeProcessOnce(item.process)
+      except CatchableError as err:
+        if firstTeardownError.isNil: firstTeardownError = err
+        teardownFailures.add("stopping action " & item.id & ": " & err.msg)
     if inlineRunQuotaSessionOpen:
       emitActionExtensionRows(inlineRunQuotaSession, runResult, actionsById)
-      inlineRunQuotaSession.close()
+      # The daemon refuses to close a session that still owns leases, and
+      # that refusal is correct: it is kept verbatim in the collected text,
+      # never swallowed, so the build stays failed and says why.
+      try:
+        inlineRunQuotaSession.close()
+      except CatchableError as err:
+        if firstTeardownError.isNil: firstTeardownError = err
+        teardownFailures.add("closing the RunQuota session: " & err.msg)
     # HM-5 — the build does not end while a depfile publication is still in
     # flight. Not for correctness of the build (the evidence was folded from
     # memory and every cacheable action already waited for its own
@@ -21255,6 +21337,29 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         removeFile(extendedPath(capture))
       except CatchableError as err:
         runResult.trace("", "monitor-capture-cleanup-failed", err.msg)
+    # Only now, with every drain above done, does a teardown failure leave
+    # this block. With the build already unwinding, the exception in flight
+    # stays the one raised -- same object, same type, its message first -- and
+    # the teardown failures are appended to it as additional lifecycle
+    # failures. With nothing in flight the build was otherwise complete, and
+    # the teardown failure is itself the build's failure, as it always was.
+    if unwinding != nil:
+      if teardownFailures.len > 0:
+        unwinding.msg.add("\nbuild teardown also failed: " &
+          teardownFailures.join("; "))
+      # Make it current again, whatever a cleanup's own exception handling
+      # left there, so propagation resumes with the build's real cause.
+      if getCurrentException() != unwinding:
+        setCurrentException(unwinding)
+    elif teardownFailures.len > 0:
+      # The first failure is raised as the error object it was, so its type
+      # and its text -- the daemon's refusal verbatim, when that is what it
+      # is -- reach the caller exactly as they did before teardown was
+      # guarded; any later ones ride along in its message.
+      if teardownFailures.len > 1:
+        firstTeardownError.msg.add("\nbuild teardown also failed: " &
+          teardownFailures[1 .. ^1].join("; "))
+      raise firstTeardownError
   maintainNixLedger()
   finishStat("repro scheduler total", totalStart)
   finishChildCpuStat()

@@ -70,6 +70,12 @@ const
     ## deciding whether to take over a host) would take over every host an
     ## older export describes. A new version makes such a reader refuse the
     ## old document instead.
+    ## GM11 adds `intent.stowScopes` (the stow packages an activity's
+    ## `stow:` block claims, present only when some activity has one)
+    ## WITHOUT a new version: no export reader materializes the stow tree
+    ## (the Nix side keeps its own links), so a reader that ignores the key
+    ## applies exactly what it applied before; `--check` sees a claim edit
+    ## because the key is part of `intent`.
   HomeExportComparedFields* = ["format", "schemaVersion", "selection",
     "intent", "concerns", "platforms"]
     ## The top-level fields `--check` compares. `provenance` is deliberately

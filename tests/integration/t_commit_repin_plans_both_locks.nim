@@ -23,7 +23,11 @@
 ##     commit passes. (b) `beta` moves and is published: BOTH locks are moved
 ##     to it in the same commit. (c) `beta` moves but is NOT published: the
 ##     flake refresh withholds it, so the `repro.lock` move is held too —
-##     neither lock moves, the commit proceeds, and the hook says so. (d)
+##     neither lock moves, the commit proceeds, and the hook says so. (c')
+##     `beta` moves and is published but its origin is unreachable, so nix
+##     cannot compute the moved `flake.lock` node's `narHash`: the flake
+##     refresh withholds it and the `repro.lock` move is held too, as in (c);
+##     with the origin back, both move, the node carrying its `narHash`. (d)
 ##     `repro.nim` pins `beta ==3.0.0` exactly, under an explicit develop
 ##     override, and `beta` moves past that version's sourceRevision: neither
 ##     lock is written (the floating `flake.lock` input would have moved), the
@@ -71,8 +75,10 @@
 ## running it (it re-locks through nix) is
 ## `t_the_h3_refusals_lock_update_command_runs_and_the_commit_succeeds`. The
 ## backticked `git -C … checkout …` remedy IS run here, through
-## `runNamedCommand`. nix itself is not run, for the reason
-## `nf2_flake_lock_fixture.nim` gives.
+## `runNamedCommand`. The cases do not run nix themselves; the refresh under
+## test does, to compute a moved `flake.lock` node's `narHash`, against the
+## fixture's real `git+file://` origins (see `nf2_flake_lock_fixture.nim`),
+## so the case that moves a flake pin skips loudly without nix.
 ##
 ## Test-double policy: NO mocks, doubles or fakes. Real bare origins, real
 ## clones, real `flake.lock` / `repro.lock` documents in their on-disk shapes,
@@ -121,6 +127,11 @@ suite "HL-11 H3: one plan over both locks; constraints win":
   test "t_commit_repin_moves_both_locks_or_neither":
     if not nf3Prerequisites("t_commit_repin_moves_both_locks_or_neither"):
       skip("needs git on PATH and a built ./build/bin/repro (named above)")
+    elif findExe("nix").len == 0:
+      echo "SKIPPED (loudly): t_commit_repin_moves_both_locks_or_neither " &
+        "moves flake.lock pins, and a moved node's narHash is computed by " &
+        "nix. nix=MISSING. NOT CHECKED by this run: arms (b)-(d)."
+      skip("nix is not on PATH; a moved flake.lock node needs it (named above)")
     else:
       let fx = setupNf2Fixture("h3-both")
       defer: removeDir(fx.scratch)
@@ -192,6 +203,45 @@ suite "HL-11 H3: one plan over both locks; constraints win":
         betaThree
       check lockedRevOfNode(committedText(fx, "flake.lock"), "beta-src") ==
         betaThree
+      publishRepo(fx, fx.app)
+
+      # ---- (c') published, but nix cannot fetch it: neither lock moves. ---
+      # A moved `flake.lock` node carries the `narHash` nix computes for the
+      # new revision, so the refresh asks nix for it; with the origin moved
+      # aside (the forge unreachable) nix cannot answer and the input is
+      # withheld rather than filed without one. That withholding must hold
+      # the `repro.lock` move of the same repository too, exactly like (c).
+      let betaFetchless = moveAndPublishSibling(fx, "beta", "revision 3b")
+      let origin = fx.scratch / "origin-beta.git"
+      let away = fx.scratch / "origin-beta.unreachable"
+      moveDir(origin, away)
+      let cf = tryCommitInApp(fx, "beta moved, forge down")
+      checkpoint(cf.output)
+      checkpoint("pre-commit log:\n" & preCommitLog(fx))
+      check cf.code == 0
+      check reproLockRevisionOf(committedText(fx, "repro.lock"), "beta") ==
+        betaThree
+      check lockedRevOfNode(committedText(fx, "flake.lock"), "beta-src") ==
+        betaThree
+      check ("flake.lock NOT refreshed for input 'beta-src'") in cf.output
+      check ("was moved in NEITHER: repro.lock would move 'beta' " &
+        betaThree & " -> " & betaFetchless & ", but flake.lock leaves input " &
+        "'beta-src' at " & betaThree & " (the flake.lock refresh withheld " &
+        "it") in cf.output
+      check "REFUSED" notin cf.output
+      check "H2 (" notin cf.output
+      # With the forge back, both move together, the flake node with its
+      # derived fields.
+      moveDir(away, origin)
+      let cf2 = tryCommitInApp(fx, "forge back")
+      checkpoint(cf2.output)
+      check cf2.code == 0
+      check reproLockRevisionOf(committedText(fx, "repro.lock"), "beta") ==
+        betaFetchless
+      check lockedRevOfNode(committedText(fx, "flake.lock"), "beta-src") ==
+        betaFetchless
+      check nodeText(committedText(fx, "flake.lock"), "beta-src").contains(
+        "\"narHash\"")
       publishRepo(fx, fx.app)
 
       # ---- (d) one lock constrained away: neither written, refused. ------

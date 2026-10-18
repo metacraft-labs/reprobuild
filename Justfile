@@ -583,6 +583,13 @@ lint:
     # ignore a real defect, so each shape is probed with an instance that
     # must be caught and each allowance with one that must not be.
     python3 ./scripts/check_version_literals.py --self-test 2>&1 | tee -a test-logs/lint.log
+    # package.nix's version literal against reprobuild.nimble. The flake check
+    # nixpkgs-package-version-sync runs the same script, but `agents` has no CI
+    # and nobody runs the whole flake check per commit: twice a version moved
+    # in reprobuild.nimble alone (a bump, then a merge bringing a release in)
+    # and the literal sat stale until a full flake check happened to look
+    # (reprobuild-pm issue 2026-10-17). Reads two files, under a second.
+    bash ./scripts/check_package_nix_version.sh 2>&1 | tee -a test-logs/lint.log
     # Every attestation mutation row must still be able to NAME ITS SITE in
     # the tree. Same class as its neighbours -- a source scan, no compiler,
     # under a second -- and here because of what it catches, which nothing

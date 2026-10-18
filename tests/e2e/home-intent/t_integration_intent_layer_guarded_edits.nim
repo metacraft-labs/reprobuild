@@ -313,11 +313,29 @@ profile "lastWins":
       "      userName = \"Zahary\"\n",
       "      userName = \"Zahary\"\n      elif linux():\n        pager = \"x\"\n"))
     check "`elif` without a preceding `when <pred>:` branch" in dangling
-    let helperInConfig = refusal("helper-config", GuardedProfile.replace(
+    # A helper call in `config:` (Home-Profile-Intent-Layer.md §Constructs
+    # the inspector steps over): `set` reads `config:`, where the call may
+    # assign the very key, so it refuses naming the call; `add` edits an
+    # activity, so it steps over the call and keeps its bytes.
+    let helperProfile = GuardedProfile.replace(
       "    when linux():\n      ripgrep:",
-      "    gitPlatformConfig()\n    when linux():\n      ripgrep:"))
+      "    gitPlatformConfig()\n    when linux():\n      ripgrep:")
+    let helperPath = tmpProfile("helper-config", helperProfile)
+    var helperInConfig = ""
+    try:
+      setConfigurable(helperPath, "git.pager", "less", nil)
+      check false
+    except EUnstructured as e:
+      helperInConfig = e.seen & " | " & e.expected
+    check readFile(helperPath) == helperProfile
     check "gitPlatformConfig()" in helperInConfig
     check "`<package>:` header inside `config:`" in helperInConfig
+    addPackageReference(helperPath, "fd")
+    let added = readFile(helperPath)
+    check added != helperProfile
+    check "    gitPlatformConfig()\n    when linux():\n" in added
+    removePackageReference(helperPath, "fd")
+    check readFile(helperPath) == helperProfile
     let guardedHelper = refusal("helper-resources", GuardedProfile.replace(
       "    when linux:\n      fs.userFile platformRc:",
       "    guarded(targetResources, linux()):\n" &
