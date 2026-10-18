@@ -17577,6 +17577,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_workspace_sets_resolve_reports_closure.nim",
+    binary: "build/test-bin/t_workspace_sets_resolve_reports_closure",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_workspace_shared_clones_list_and_rewire.nim",
     binary: "build/test-bin/t_workspace_shared_clones_list_and_rewire",
     defines: @[],

@@ -91685,9 +91685,9 @@ proc validateFragmentPath(value: string): string =
 
 proc runWorkspaceSetsCommand*(args: openArray[string];
                               spelling = "sets"): int =
-  ## ``repro workspace sets list|add|remove`` — the DEFINITION axis for repo
-  ## sets. `add` / `remove` write, commit and push to the manifest repo;
-  ## `list` is read-only.
+  ## ``repro workspace sets list|resolve|add|remove`` — the DEFINITION axis
+  ## for repo sets. `add` / `remove` write, commit and push to the manifest
+  ## repo; `list` and `resolve` are read-only.
   ##
   ## Enabling a set in this workspace is `enable` / `disable`; see
   ## `reprobuild-specs/CLI/workspace.md` §"The Two Axes".
@@ -91703,10 +91703,13 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
   let verb = "repro workspace " & spelling
   if args.len > 0 and args[0] in ["--help", "-h", "help"]:
     echo verb & " list [--enabled|--disabled|--all] [--json]"
+    echo verb & " resolve <name>... [--json]"
     echo verb & " add <name> [--template=NAME|--no-template] [-m DESC]"
     echo verb & " remove <name> [--prune-orphan-repos]"
     echo "  list   every DEFINED repo-set, marked enabled/disabled for this " &
       "workspace."
+    echo "  resolve  the repos a workspace enabling exactly <name>... would " &
+      "participate in (read-only; enabled or not, checked out or not)."
     echo "  add    define a NEW " &
       (if spelling == "sets": "repo-set (repo-sets/<name>.toml)"
        else: "project (projects/<name>.toml)") &
@@ -91780,6 +91783,114 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
       if not r.defined:
         line.add("\tUNDEFINED (no manifest declares it)")
       stdout.writeLine(line)
+    return 0
+
+  if sub == "resolve":
+    # CLI/workspace.md §"`repro workspace projects`" — `resolve <name>...`
+    # prints the RESOLVED PARTICIPATING REPO SET of the named sets: the closure
+    # a workspace enabling exactly those names would participate in.
+    #
+    # It sits before the manifest-repo / git-identity checks below for the same
+    # reason `list` does: it reads manifests and nothing else. It never writes,
+    # never consults the active set, and never looks at checkouts, which is
+    # what distinguishes it from `sync <p>… --dry-run` (scoped to the ACTIVE
+    # set, so a defined but not-enabled project silently contributed nothing)
+    # and from `repos list --set=NAME` (one name, raw fragments, no fetch URL).
+    var names: seq[string]
+    var asJson = false
+    for arg in rest:
+      if arg == "--json":
+        asJson = true
+      elif arg.startsWith("--workspace-root="):
+        discard # parsed by parseProjectsWorkspaceRoot above
+      elif arg.startsWith("-"):
+        stderr.writeLine(verb & " resolve: unknown flag " & arg)
+        return 2
+      elif arg notin names:
+        # A name given twice counts once; first occurrence keeps its place,
+        # because the FIRST name is the primary and order is union order.
+        names.add(arg)
+    if names.len == 0:
+      stderr.writeLine(verb & " resolve: missing <name>... (usage: " & verb &
+        " resolve <name>... [--json])")
+      return 2
+
+    # Resolution is EXACTLY `resolveProjectSet` — the same call `enable` uses
+    # to validate a prospective set — so this report cannot drift from what
+    # enabling those names would actually do. A conflict is a distinct outcome
+    # (an operator decision, reported with its evidence as data); every other
+    # failure — an unknown name, an unreadable manifest — is `error`.
+    var status = "resolved"
+    var resolved: ResolvedProject
+    var conflict = newJNull()
+    var errorNode = newJNull()
+    var diagnostic = ""
+    try:
+      resolved = resolveProjectSet(workspaceRoot, names)
+    except WorkspaceProjectSetConflictError as exc:
+      status = "conflict"
+      # The INNER message, not `msg`: `msg` carries a "[<file>] at key ..."
+      # prefix written for `enable`, which names `.repro/workspace.toml` /
+      # `workspace.projects` — the active-set record. `resolve` never consults
+      # that record, so the prefix would misattribute the conflict. The inner
+      # message already names the path, both sources and the differing facts.
+      diagnostic = exc.innerMessage
+      conflict = %*{"path": exc.checkoutPath, "sources": exc.sources,
+                    "fields": exc.fields, "message": exc.innerMessage}
+    except CatchableError as exc:
+      status = "error"
+      diagnostic = exc.msg
+      errorNode = %exc.msg
+
+    # `primary` is the RESOLVED name of the first requested set (a variant
+    # reports its composed project name, which is what every single-project
+    # consumer keys on). When the union failed after the first name resolved,
+    # that name is still knowable, so it is reported; when the first name is
+    # itself the failure there is no primary, and "" says so.
+    var primary = ""
+    if status == "resolved":
+      primary = resolved.projectName
+    else:
+      try:
+        primary = resolveWorkspaceProjectByName(workspaceRoot,
+          names[0]).projectName
+      except CatchableError:
+        primary = ""
+
+    if status != "resolved":
+      # Nim may construct a proc's `result` IN PLACE in the caller's variable,
+      # so a raise part-way through `resolveProjectSet` can leave the repos
+      # resolved before the failure sitting in `resolved`. A refused set has
+      # no closure; report none rather than a fragment of one.
+      resolved = ResolvedProject()
+
+    if asJson:
+      var repos = newJArray()
+      for repo in resolved.repos:
+        # What the union compares (name, path, fetch URL, revision, vcs) plus
+        # the remote binding and tracked branch, so a consumer can clone and
+        # place each repo without re-implementing the resolver.
+        repos.add(%*{"name": repo.name, "path": repo.path,
+                     "remote": repo.projectRemote, "fetchUrl": repo.fetchUrl,
+                     "revision": repo.revision, "branch": repo.branch,
+                     "vcs": repo.vcs})
+      # The report is printed on refusal too: a conflict is data a consumer
+      # acts on, and exit 1 alone would make it parse prose from stderr.
+      echo (%*{"schema": "reprobuild.workspace-set-resolve.v1",
+               "workspaceRoot": workspaceRoot,
+               "requested": names,
+               "primary": primary,
+               "status": status,
+               "repos": repos,
+               "conflict": conflict,
+               "error": errorNode}).pretty
+      return (if status == "resolved": 0 else: 1)
+    if status != "resolved":
+      stderr.writeLine(verb & " resolve: " & diagnostic)
+      return 1
+    for repo in resolved.repos:
+      stdout.writeLine(repo.name & "\t" & repo.path & "\t" & repo.fetchUrl &
+        "\t" & repo.revision)
     return 0
 
   let manifestRoot = manifestRepoRootFor(workspaceRoot)
@@ -92068,7 +92179,7 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
     return res.code
   else:
     stderr.writeLine(verb & ": unknown subcommand '" & sub &
-      "' (expected: list, add, remove)")
+      "' (expected: list, resolve, add, remove)")
     return 2
 
 proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
@@ -93794,8 +93905,9 @@ proc runThinAppDispatch(programName: string): int =
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "sets":
-    # Workspace-Membership-Model.md — `repro workspace sets list|add|remove`.
-    # DEFINITION: inspect or author repo-set definitions in the manifest repo.
+    # Workspace-Membership-Model.md —
+    # `repro workspace sets list|resolve|add|remove`. DEFINITION: inspect,
+    # resolve or author repo-set definitions in the manifest repo.
     # Enabling one in this workspace is `enable`.
     try:
       let pArgs =
@@ -93807,10 +93919,10 @@ proc runThinAppDispatch(programName: string): int =
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "projects":
-    # WV-3 — `repro workspace projects list|add|remove`, the retained spelling
-    # of `sets`. Kept while the manifest repo still carries `projects/*.toml`;
-    # it differs from `sets` in exactly one respect, which directory `add`
-    # scaffolds into.
+    # WV-3 — `repro workspace projects list|resolve|add|remove`, the
+    # retained spelling of `sets`. Kept while the manifest repo still carries
+    # `projects/*.toml`; it differs from `sets` in exactly one respect, which
+    # directory `add` scaffolds into.
     try:
       let pArgs =
         if args.len > 2: args[2 .. ^1]
