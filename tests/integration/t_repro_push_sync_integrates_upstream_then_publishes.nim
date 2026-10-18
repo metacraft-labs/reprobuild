@@ -35,6 +35,16 @@
 ## It asserts nothing past that stage: on Windows this suite's source push
 ## fails for an unrelated, pre-existing reason (Part 1 records it).
 ##
+## Part 4 — the other direction of Part 3: the reader accepts EVERY generation
+## of the author line a released build wrote (double-quoted before
+## ``02304993``, single-quoted since), and that widening must reject but never
+## accept. The case rewrites only the author line of an installed pre-push
+## body into the older, double-quoted generation, naming the same build, and
+## asserts the push IS stopped at ``hook-preflight``: the author is now
+## readable, so only the byte-exact re-render stands between that body and
+## acceptance. The reader's own coverage of each generation is
+## ``t_managed_hook_author_is_read_from_every_generation.nim``.
+##
 ## Hermetic: only local ``git init`` / ``git init --bare`` repos; no network.
 ## Skip rule: ``git`` missing on PATH.
 
@@ -417,3 +427,44 @@ suite "RA-25 — repro push --sync integrates upstream then publishes":
       check "old or partially upgraded" notin res.output
       let report = readReport(fx)
       check report["stoppedStage"].getStr() != "hook-preflight"
+
+  test "t_repro_push_refuses_an_old_generation_hook_whose_author_it_can_read":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("no `git` on PATH: this suite drives real git repositories end to end, so there is nothing to exercise without it")
+    else:
+      let fx = setupFixture(gitBin, "oldgen")
+      defer: removeDir(fx.scratch)
+      # Outgoing commit first, for the reason Part 3 gives: its post-commit
+      # hook re-runs `hooks ensure` and would undo the rewrite below.
+      discard commitFile(gitBin, fx.workspaceRoot / "app", "app-local.txt",
+        "app work\n", "app local work")
+
+      # Rewrite ONLY the author line of app's pre-push body into the
+      # double-quoted generation (99a3f3fe3 .. 02304993^), naming the SAME
+      # build that wrote it. The reader now recovers that author, so the only
+      # thing standing between this body and acceptance is the byte-exact
+      # re-render — which renders the single-quoted line and must disagree.
+      let managed = fx.workspaceRoot / "app" / ".git" / "hooks" /
+        "pre-push.repro-managed"
+      var lines = readFile(managed).split('\n')
+      var rewritten = 0
+      for i in 0 ..< lines.len:
+        let at = lines[i].find("REPROBUILD_REPRO=")
+        let tail = lines[i].rfind(" git push")
+        if at >= 0 and tail > at and lines[i].strip().startsWith("echo '"):
+          let author = lines[i][at + "REPROBUILD_REPRO=".len ..< tail]
+          # A bare path, or the extraction above would carry quoting the old
+          # generation never wrote.
+          check '\'' notin author
+          lines[i] = "      echo \"repro hooks:        REPROBUILD_REPRO=" &
+            author & " git push\" >&2"
+          inc rewritten
+      check rewritten == 1
+      writeFile(managed, lines.join("\n"))
+
+      let res = invokePush(fx, [])
+      checkpoint("push with an old-generation pre-push body: " & res.output)
+      check "old or partially upgraded" in res.output
+      let report = readReport(fx)
+      check report["stoppedStage"].getStr() == "hook-preflight"

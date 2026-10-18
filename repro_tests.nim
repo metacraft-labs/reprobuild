@@ -14022,6 +14022,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_managed_hook_author_is_read_from_every_generation.nim",
+    binary: "build/test-bin/t_managed_hook_author_is_read_from_every_generation",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_managed_hook_reentry_guard_prevents_recursive_publish.nim",
     binary: "build/test-bin/t_managed_hook_reentry_guard_prevents_recursive_publish",
     defines: @[],
