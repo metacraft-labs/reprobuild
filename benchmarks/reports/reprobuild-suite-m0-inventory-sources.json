@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 62,
     "pureUnitTests": 658,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
-    "testEntries": 2179
+    "testEntries": 2180
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1296,7 +1296,7 @@
       "integration": 1172,
       "platform/destructive": 132,
       "pure unit": 658,
-      "unclassified": 198
+      "unclassified": 199
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1499,8 +1499,8 @@
       }
     ],
     "nimTestBinaryCount": 2155,
-    "pythonTestFileCount": 24,
-    "testEntryCount": 2179
+    "pythonTestFileCount": 25,
+    "testEntryCount": 2180
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -46300,6 +46300,21 @@
       "source": "tests/unit/test_publish_surface_routing.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 32,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `importlib.util`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_regenerate_suite_artifacts.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 25,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
