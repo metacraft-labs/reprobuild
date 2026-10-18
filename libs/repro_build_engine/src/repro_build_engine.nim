@@ -16522,10 +16522,15 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         # channel that says who filled it is attribution.
         var provisionerReads: seq[string] = @[]
         if resp.hasKey("dependencies"):
+          # The helper resolves symlinks in every reported path. Resolve the
+          # base too, so a cwd under /var (or any directory alias) yields
+          # the same relative inputs as its canonical spelling.
+          let reportCwd = expandFilename(
+            if action.cwd.len > 0: action.cwd else: getCurrentDir())
           for depNode in resp["dependencies"]:
             let depPath = depNode.getOrDefault("path").getStr()
             if depPath.len > 0:
-              provisionerReads.add(relativePath(depPath, action.cwd))
+              provisionerReads.add(relativePath(depPath, reportCwd))
 
         result.status = asSucceeded
         result.exitCode = 0
