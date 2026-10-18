@@ -1941,33 +1941,24 @@
             # Without it the fork would happily ship a `reprobuild-0.1.0`
             # derivation built from 0.1.3 sources.
             #
-            # The grep is COUNTED, not merely run: a `version ? "..."` line that
-            # stops matching (renamed argument, reformatted file) makes the
-            # count 0 and fails here, rather than passing vacuously on an empty
-            # match the way a bare `grep | sed` pipeline would.
+            # The comparison is scripts/check_package_nix_version.sh, the same
+            # script `just lint` runs on the tree -- one implementation, so the
+            # local gate (the only one the CI-less `agents` branch has) and
+            # this check cannot disagree. Here it is given the version this
+            # flake parsed and builds with. The script COUNTS its matches: a
+            # literal line that stops matching (renamed argument, reformatted
+            # file) fails rather than passing vacuously on an empty match.
             nixpkgs-package-version-sync =
               pkgs.runCommand "reprobuild-nixpkgs-package-version-sync"
                 {
                   packageNix = ./nix/pkgs/by-name/re/reprobuild/package.nix;
+                  checkScript = ./scripts/check_package_nix_version.sh;
                   nimbleVersion = version;
                 }
                 ''
                   set -eu
-                  matches=$(grep -c '^  version = "' "$packageNix" || true)
-                  if [ "$matches" != 1 ]; then
-                    echo "package.nix: expected exactly 1 version-default line, found $matches"
-                    exit 1
-                  fi
-                  literal=$(sed -n 's/^  version = "\(.*\)";$/\1/p' "$packageNix")
-                  if [ -z "$literal" ]; then
-                    echo "package.nix: could not extract the version literal"
-                    exit 1
-                  fi
-                  if [ "$literal" != "$nimbleVersion" ]; then
-                    echo "package.nix version literal ($literal) != reprobuild.nimble version ($nimbleVersion)"
-                    exit 1
-                  fi
-                  echo "package.nix and reprobuild.nimble agree on version $literal"
+                  bash "$checkScript" --package-nix "$packageNix" \
+                    --nimble-version "$nimbleVersion"
                   mkdir -p "$out"
                 '';
             # The sibling of the version check for the source arguments.
