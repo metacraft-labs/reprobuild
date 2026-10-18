@@ -3016,3 +3016,7 @@ e2e_hcr_linux_registration_payloads_travel_over_the_production_wire:
         --out:build/test-bin/e2e_hcr_linux_registration_payloads_travel_over_the_production_wire \
         tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.log
+
+# Exercise the actual fork parser and independent script publication guard.
+test-format:
+    bash ./tests/integration/t_format_preserves_meaning.sh
