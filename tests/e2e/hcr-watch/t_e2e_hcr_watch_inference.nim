@@ -225,7 +225,11 @@ suite "HCR watch inference E2E":
          (defined(linux) and defined(amd64)):
       let repoRoot = getCurrentDir()
       let reproBin = compileRepro(repoRoot)
-      let tempRoot = createTempDir("repro-hcr-watch-e2e", "")
+      # Canonical, because the watch reports the source paths it observed
+      # canonicalised: under the stock macOS TMPDIR (`/var/folders/...`,
+      # `/var` a symlink to `/private/var`) an as-created path compares
+      # unequal to the one in the patch request.
+      let tempRoot = expandFilename(createTempDir("repro-hcr-watch-e2e", ""))
       defer: removeDir(tempRoot)
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let pathValue = prepareGccProxy(tempRoot / "tools")
