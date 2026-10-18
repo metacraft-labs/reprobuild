@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2173,
+    "nimTestBinaries": 2174,
     "pureUnitConsolidationGroups": 62,
     "pureUnitTests": 660,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
-    "testEntries": 2198
+    "testEntries": 2199
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1294,7 +1294,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1184,
+      "integration": 1185,
       "platform/destructive": 132,
       "pure unit": 660,
       "unclassified": 203
@@ -1499,9 +1499,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2173,
+    "nimTestBinaryCount": 2174,
     "pythonTestFileCount": 25,
-    "testEntryCount": 2198
+    "testEntryCount": 2199
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2908,7 +2908,7 @@
             "socketPath",
             "sourcePath"
           ],
-          "line": 141,
+          "line": 142,
           "path": "tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim",
           "patterns": [
             "gcc"
@@ -2933,7 +2933,7 @@
             "socketPath",
             "sourcePath"
           ],
-          "line": 144,
+          "line": 145,
           "path": "tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim",
           "patterns": [
             "cc"
@@ -9586,7 +9586,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cas_store/tests/t_cas_ingest_link.nim",
       "sourceSuiteCount": 6,
-      "staticCaseCount": 24,
+      "staticCaseCount": 25,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9682,7 +9682,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cas_store/tests/t_link_capability_probe.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 19,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9981,6 +9981,30 @@
       "source": "libs/repro_cli_support/tests/t_hcr_support_profile_follows_the_host.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_home_export_ignores_host_local_lock",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_home_apply",
+        "repro_home_intent",
+        "repro_home_resources",
+        "repro_profile",
+        "repro_profile_compile",
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cli_support/tests/t_home_export_ignores_host_local_lock.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -36199,7 +36223,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_nix_daemon_provisioner.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

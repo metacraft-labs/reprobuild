@@ -21,6 +21,7 @@ when defined(posix):
 
 import repro_hcr_agent
 import repro_hcr_linkgraph/elf_decompress
+import repro_hcr_linkgraph/[macho, types]
 from repro_test_support import requireBinary, monitorShimPath
 
 const
@@ -224,7 +225,11 @@ suite "HCR watch inference E2E":
          (defined(linux) and defined(amd64)):
       let repoRoot = getCurrentDir()
       let reproBin = compileRepro(repoRoot)
-      let tempRoot = createTempDir("repro-hcr-watch-e2e", "")
+      # Canonical, because the watch reports the source paths it observed
+      # canonicalised: under the stock macOS TMPDIR (`/var/folders/...`,
+      # `/var` a symlink to `/private/var`) an as-created path compares
+      # unequal to the one in the patch request.
+      let tempRoot = expandFilename(createTempDir("repro-hcr-watch-e2e", ""))
       defer: removeDir(tempRoot)
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let pathValue = prepareGccProxy(tempRoot / "tools")
@@ -335,10 +340,11 @@ suite "HCR watch inference E2E":
       check not log.contains("--hcr-metadata")
 
       # The `hcr.prepareObject` edge ran, asserted on its ARTIFACT rather than
-      # on its log line. Action stdout is not forwarded into the watch log on
-      # Linux — measured, `repro build patchable-object` prints none of the
-      # subprocess's output — so the log assertion this used to make could only
-      # ever be host-specific. The artifact is the thing the watch session then
+      # on its log line. A succeeding action's stdout is not forwarded into the
+      # watch log on ANY host — measured on Linux first, `repro build
+      # patchable-object` prints none of the subprocess's output, and specified
+      # since as `--action-output=failed`, the default — so neither arm below
+      # asserts the log line. The artifact is the thing the watch session then
       # reads its patch bytes out of, so asserting it is the stronger claim.
       let preparedObject = projectRoot / "build" / "patchable.o"
       let rawObject = projectRoot / "build" / "patchable.raw.o"
@@ -367,7 +373,31 @@ suite "HCR watch inference E2E":
         # the passthrough assertion above from being copied onto a host where
         # it would be wrong.
         check readFile(preparedObject) != readFile(rawObject)
-        check log.contains("repro hcr prepare-object: output=build/patchable.o")
+        # 2026-10-18: this arm used to assert, as the Linux arm once did, that
+        # the watch log carried `repro hcr prepare-object: output=...`. That
+        # line is the edge's own stdout, and a SUCCEEDING action's stdout is
+        # not printed under the default `--action-output=failed`
+        # (`reprobuild-pm/spec/CLI/build.md` § "Action Output"), which is the
+        # `executeBuildTarget` path `repro watch` runs every cycle. So the
+        # assertion went red here exactly as it did on Linux, for the reason
+        # the comment above gives (reprobuild-pm issue
+        # 2026-10-17-hcr-watch-inference-macos-log-lacks-the-prepare-object-line).
+        #
+        # It is replaced by the claim the log line only ever stood for, read
+        # off the artifact: every code section of the prepared object sits in
+        # the `__HCR` segment the pass names (`hcr.prepareObject`'s default
+        # `segmentName`), which is what `-Wl,-segprot,__HCR,rwx,rwx` needs to
+        # find. The premise first — the compiler's object has code sections and
+        # none of them is in `__HCR` — so a pass that copied its input would go
+        # red on the consequence rather than on a vacuous `allIt` over nothing.
+        let rawCode = parseMachOArm64Object(rawObject).sections
+          .filterIt(it.kind == skCode)
+        let preparedCode = parseMachOArm64Object(preparedObject).sections
+          .filterIt(it.kind == skCode)
+        check rawCode.len > 0
+        check rawCode.allIt(it.segmentName != "__HCR")
+        check preparedCode.len == rawCode.len
+        check preparedCode.allIt(it.segmentName == "__HCR")
 
       # ---- AND THE SESSION SENT THE PREPARED ONE, which is a different claim
       # from "the edge wrote it".

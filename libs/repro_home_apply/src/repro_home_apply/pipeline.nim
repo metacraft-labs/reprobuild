@@ -2089,18 +2089,17 @@ proc profilePackageReferences*(profile: Profile): seq[PlannedPackage] =
 proc classifyPackages*(references: seq[PlannedPackage];
                        adapterPreference: OrderedTable[string, seq[string]];
                        platform, arch: string;
-                       lock: Option[HomeProfileLock]; relock: bool;
                        catalog: ProfileCatalog): PackageClassification =
   ## THE package classification `repro home export` publishes for one
   ## target: each reference resolved as the planner resolves it for a target
-  ## that is not the host -- the profile's policy, the lock's pins and the
-  ## catalog, without the host's `PATH` / Scoop inventory, which a document
-  ## about the profile cannot depend on -- and classified by
+  ## that is not the host, without its local lock -- the profile's policy
+  ## and catalog only. A shared document cannot depend on the host-local
+  ## `home.lock`, `PATH` or Scoop inventory. The selection is classified by
   ## `packageConcern`. `repro home apply` on a host that splits `packages`
   ## from `applications` computes it too and refuses when its own selection
   ## disagrees (`refuseClassificationDisagreement`).
   let ctx = profileResolutionContext(adapterPreference, platform, arch,
-    false, lock, relock, catalog)
+    false, catalog = catalog)
   let previews = previewPackageResolutions(references, ctx)
   for i, pp in previews:
     let key = packageClassificationKey(references[i].packageId,
@@ -2118,17 +2117,17 @@ proc refuseClassificationDisagreement(opts: ApplyOptions; plan: ApplyPlan;
                                       catalog: ProfileCatalog) =
   ## On a host whose declaration gives `packages` and `applications` to
   ## different sides, the Nix side reads which package is an application
-  ## from the export (`classifyPackages`, made without the host inventory).
+  ## from the export (`classifyPackages`, made without the host-local lock
+  ## or inventory). Actual previews still honor the local lock, so a pin
+  ## that changes a package's concern must be checked as well.
   ## A package this host's selection puts in the other concern would then be
   ## applied by neither side (or by both): refuse, naming it and the remedy.
   ## A host that keeps both concerns on one side never consults it.
   if not applied.declared or
       (hcPackages in applied.concerns) == (hcApplications in applied.concerns):
     return
-  let lock = readHomeProfileLock(homeProfileLockPath(opts.profileDir))
   let exported = classifyPackages(plan.packages, plan.adapterPreference,
-    opts.targetContext.platform, opts.targetContext.arch, lock, opts.relock,
-    catalog)
+    opts.targetContext.platform, opts.targetContext.arch, catalog)
   var problems: seq[string]
   for i, pp in previews:
     let key = packageClassificationKey(plan.packages[i].packageId,
@@ -2139,14 +2138,15 @@ proc refuseClassificationDisagreement(opts: ApplyOptions; plan: ApplyPlan;
       problems.add pp.packageId & " is `" & $here & "` by this host's " &
         "selection (" & pp.detail & ") but `" & $there & "` by the " &
         "selection `repro home export` publishes, which cannot consult this " &
-        "host's PATH or Scoop inventory"
+        "host's home.lock, PATH or Scoop inventory"
   if problems.len > 0:
     raisePlanFailed("hosts." & opts.host & ".applies gives `packages` and " &
       "`applications` to different tools, and the Nix side reads which " &
       "package is an application from `repro home export`; " &
       problems.join("; ") & ". Order `adapterPreference` so that a " &
       "host-inventory kind (path, scoop) does not precede the application's " &
-      "realization, or give both concerns to the same side")
+      "realization; inspect the current catalog and use `--relock` to " &
+      "replace a differing local pin, or give both concerns to the same side")
 
 proc concernSeed(applied: AppliedConcerns): string =
   ## The generation-id contribution of a concern declaration: the applied

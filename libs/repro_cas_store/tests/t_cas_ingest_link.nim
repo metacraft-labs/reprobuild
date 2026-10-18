@@ -421,6 +421,55 @@ suite "M2 casPutPath — mechanism selection":
       check hardlinkCount(src) == 1
       check hardlinkCount(cas.casPath(outcome.hash)) == 1
 
+  test "a cloned blob's mode does not depend on the source's mode":
+    ## ``clonefile(2)`` on APFS copies the source's mode onto the clone, so
+    ## without ``attemptReflink``'s reset a blob ingested from an
+    ## executable or a read-only build output would carry that mode, and
+    ## two blobs filed by the same store would differ by how their source
+    ## happened to be protected. The yardstick is the blob the byte-ingest
+    ## path writes for a different payload in the same store: it is
+    ## created fresh, so it is the mode every blob should have.
+    let vols = reflinkVolume()
+    if vols.len == 0:
+      checkpoint("no reflink-capable volume on this host (" &
+                 describeHost() & "); the clone-mode arm was NOT exercised")
+      check volumes.len >= 1
+    else:
+      let vol = vols[0]
+      let dir = caseDir(vol, "clone-mode")
+      var cas = openCasStore(dir / "store")
+      defer: cas.close()
+      let reference = cas.casPut(payloadOf(4096, 41))
+      let referencePerms = getFilePermissions(
+        extendedPath(cas.casPath(reference)))
+      var seed = 43
+      for (tag, srcPerms) in [
+          ("readonly", {fpUserRead}),
+          ("executable", {fpUserRead, fpUserWrite, fpUserExec,
+                          fpGroupRead, fpGroupExec,
+                          fpOthersRead, fpOthersExec})]:
+        let payload = payloadOf(4096, seed)
+        seed.inc
+        let src = dir / "src" / (tag & ".bin")
+        writeSource(src, payload)
+        # ``finally`` so a failing check cannot leave a read-only source
+        # behind for the scratch directory's removal at exit.
+        try:
+          setFilePermissions(extendedPath(src), srcPerms)
+          let outcome = cas.casPutPathDetailed(src)
+          let blobPerms = getFilePermissions(
+            extendedPath(cas.casPath(outcome.hash)))
+          checkpoint(vol.dir & " fs=" & vol.fsName & ": source " & tag &
+                     " " & $srcPerms & " -> " & $outcome.mechanism &
+                     " blob " & $blobPerms & "; byte-ingested blob " &
+                     $referencePerms)
+          check outcome.mechanism == lmReflink
+          check blobPerms == referencePerms
+          check cas.casVerify(outcome.hash)
+        finally:
+          try: setFilePermissions(extendedPath(src), {fpUserRead, fpUserWrite})
+          except CatchableError: discard
+
   test "a cloned blob is isolated from later writes to the source":
     ## The property that lets the reflink arm be on by default while the
     ## hardlink arm is off. The build tree still owns the source and will

@@ -637,7 +637,7 @@
     # destructor takes it, and VM/NimScript trace recording changes (exact I/O
     # event kinds, one value-carrying step per recorded position).
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=1e19cf261413667ef69123a3ef221e239d1f8897";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=fa22200571d36eb8c24c0aaa883940d93c71b397";
       flake = false;
     };
     nim-csources-src = {
