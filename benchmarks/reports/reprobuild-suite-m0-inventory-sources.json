@@ -3957,7 +3957,7 @@
             "repoRoot",
             "shimDylib"
           ],
-          "line": 176,
+          "line": 177,
           "path": "tests/e2e/macos-monitor/t_macos_monitor_shim_event_taxonomy.nim",
           "patterns": [
             "cc"
@@ -9250,7 +9250,8 @@
         "io_mon",
         "repro_build_engine",
         "repro_core",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": true,

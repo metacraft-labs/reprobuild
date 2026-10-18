@@ -270,7 +270,9 @@
         # ancestor. Each directory a glob(3) scan opens is recorded with the
         # pattern component matched there, when it can be named with
         # certainty, so the engine keys the scan on the matching entries.
-      url = "github:metacraft-labs/io-mon/3f8788ce721a8f2d47eff09350b7c2047e1f3628";
+      # macOS and Windows now fail incomplete when descendant quiescence
+      # cannot be established; keep the host and its capture tests in sync.
+      url = "github:metacraft-labs/io-mon/45773f642f0facc6ed95daa972c2678a964cfb0c";
       flake = false;
     };
     nim-shm-gset-src = {
