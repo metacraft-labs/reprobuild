@@ -30675,7 +30675,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_committed_lock_paths_do_not_depend_on_the_invoking_worktree.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

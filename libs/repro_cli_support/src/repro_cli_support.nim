@@ -26670,6 +26670,44 @@ proc catalogLockedDep*(catalogRoot, root: string;
     ReprobuildPackagesRootEnv & " pointing at one) and refresh again")
   none(LockedDep)
 
+proc respelledUnderInvokingAncestor(canonical, invoking: string): string =
+  ## ``canonical`` — a symlink-resolved path, as Git prints them — re-expressed
+  ## under the spelling of ``invoking``'s ancestors, so the two can be related
+  ## by ``relativePath`` without the result depending on which spelling each
+  ## side happened to arrive in.
+  ##
+  ## Walks up from ``invoking`` to the DEEPEST ancestor whose resolved form
+  ## contains ``canonical`` and splices the remainder onto that ancestor's
+  ## spelling: with ``invoking = /tmp/s/consumer/.claude/worktrees/w`` and
+  ## ``canonical = /private/tmp/s/consumer`` the answer is
+  ## ``/tmp/s/consumer``. The deepest ancestor is the one that keeps the most
+  ## of the caller's spelling. Returns ``canonical`` unchanged when no
+  ## ancestor resolves into it (it then lies outside every alias the caller
+  ## used) or when nothing can be resolved.
+  var ancestor = os.normalizedPath(absolutePath(invoking))
+  while ancestor.len > 0:
+    var resolved = ""
+    try:
+      if dirExists(extendedPath(ancestor)):
+        resolved = os.normalizedPath(expandFilename(ancestor))
+    except OSError:
+      discard
+    if resolved.len > 0:
+      if cmpPaths(resolved, canonical) == 0:
+        return ancestor
+      let rest = relativePath(canonical, resolved).replace('\\', '/')
+      # ``..`` alone or as the first component means ``canonical`` lies
+      # outside this ancestor; a child that merely starts with two dots
+      # (``..cache``) is inside it.
+      if rest.len > 0 and rest != "." and rest != ".." and
+          not rest.startsWith("../") and not rest.isAbsolute:
+        return os.normalizedPath(ancestor / rest)
+    let parent = parentDir(ancestor)
+    if parent.len == 0 or parent == ancestor:
+      break
+    ancestor = parent
+  canonical
+
 proc committedLockPathBase(projectRoot: string): string =
   ## The directory a COMMITTED lock's ``deps`` paths are relative to.
   ##
@@ -26700,6 +26738,19 @@ proc committedLockPathBase(projectRoot: string): string =
   ## project in a subdirectory keeps writing paths relative to its own
   ## directory — where its lock lives — rather than to the repository top.
   ##
+  ## THE RESULT IS SPELLED THE WAY ``projectRoot`` IS. Git prints both
+  ## ``top`` and ``main`` with every symlink resolved, while the dep locations
+  ## callers relate to the result (``relativePath(depAbs, pathBase)``) keep the
+  ## invoking spelling. Through an alias — macOS's ``/tmp`` ->
+  ## ``/private/tmp``, or any workspace reached through a symlink — mixing the
+  ## two climbed to the filesystem root and back down,
+  ## ``../../../../../tmp/<scratch>/producer``, and relating the alias-spelled
+  ## project to the resolved ``top`` lost the project's position within the
+  ## repository as well (Unified-Locking-And-Hooks.md §14.2 makes the path
+  ## writer-independent). So the position is measured canonically, and the
+  ## answer is re-expressed under the invoking spelling
+  ## (``respelledUnderInvokingAncestor``).
+  ##
   ## Degrades to ``projectRoot`` whenever the main worktree cannot be
   ## determined: no VCS tool, a directory that is not a checkout, or a layout
   ## whose worktree listing is unavailable. That is the previous behaviour,
@@ -26710,10 +26761,19 @@ proc committedLockPathBase(projectRoot: string): string =
   if top.len == 0: return normalized
   let main = gitMainWorktreeTop(normalized)
   if main.len == 0 or cmpPaths(main, top) == 0: return normalized
-  let within = relativePath(normalized, top).replace('\\', '/')
-  if within.len == 0 or within == "." or within.startsWith(".."):
-    return os.normalizedPath(main)
-  os.normalizedPath(main / within)
+  # ``top`` is canonical, so the project is measured against it canonically.
+  # When the project cannot be canonicalised the invoking spelling is the best
+  # remaining guess; it is right whenever no alias is involved.
+  let canonicalProject =
+    try: os.normalizedPath(expandFilename(normalized))
+    except OSError: normalized
+  let within = relativePath(canonicalProject, top).replace('\\', '/')
+  let canonicalBase =
+    if within.len == 0 or within == "." or within.startsWith(".."):
+      os.normalizedPath(main)
+    else:
+      os.normalizedPath(main / within)
+  respelledUnderInvokingAncestor(canonicalBase, normalized)
 
 proc lockedDepsForWorkspace*(workspaceRoot: string;
                             usesSelectors: seq[string] = @[];
@@ -26800,7 +26860,10 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     let repoRoot = gitTopLevel(recipeRoot)
     if repoRoot.len == 0:
       continue
-    let depAbs = absolutePath(repoRoot)
+    # Git answers with symlinks resolved; ``pathBase`` keeps the invoking
+    # spelling. Relate the two in ONE spelling (``committedLockPathBase``).
+    let depAbs = respelledUnderInvokingAncestor(absolutePath(repoRoot),
+      absolutePath(recipeRoot))
     if cmpPaths(depAbs, root) == 0:
       continue
     let rel = relativePath(depAbs, pathBase).replace('\\', '/')
