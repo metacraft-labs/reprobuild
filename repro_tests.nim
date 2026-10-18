@@ -19670,6 +19670,8 @@ const pythonTestPaths*: seq[string] = @[
   "tests/test_dev_env_m9_policy.py",
   "tests/unit/test_build_report_attribution.py",
   "tests/unit/test_ci_reconcile_lock_credentials.py",
+  "tests/unit/test_ci_suite_coverage.py",
+  "tests/unit/test_ci_test_budget.py",
   "tests/unit/test_cmake_generator_competitiveness_bench.py",
   "tests/unit/test_cmake_prereq_sdk.py",
   "tests/unit/test_continuous_benchmarking_policy.py",

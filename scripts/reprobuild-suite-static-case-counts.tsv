@@ -2184,6 +2184,8 @@ tests/unit/t_workspace_root_for_repo_managed_worktree.nim	nim	1
 tests/unit/t_workspace_settings_v1_decode.nim	nim	3
 tests/unit/test_build_report_attribution.py	python	20
 tests/unit/test_ci_reconcile_lock_credentials.py	python	24
+tests/unit/test_ci_suite_coverage.py	python	19
+tests/unit/test_ci_test_budget.py	python	26
 tests/unit/test_cmake_generator_competitiveness_bench.py	python	18
 tests/unit/test_cmake_prereq_sdk.py	python	11
 tests/unit/test_continuous_benchmarking_policy.py	python	7
