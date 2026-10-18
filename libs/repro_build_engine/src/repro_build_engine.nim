@@ -15191,6 +15191,41 @@ proc abandonMonitorHost(pool: var MonitorHostPool; slot: int) =
       discard
   releaseMonitorHostSlot(pool, slot)
 
+proc teardownIdentities(item: RunningAction; pool: MonitorHostPool): string =
+  ## The lease and process identities a teardown step for ``item`` is about to
+  ## resolve, as a parenthesised suffix for its failure text -- `` (lease 12,
+  ## child pid 345)`` -- or "" when the kind holds none. When the step fails,
+  ## these are what it left unresolved, and RunQuota-Protocol-And-Client-
+  ## Libraries.md, "Ownership Across a Batched Client Launch", requires the
+  ## failure to disclose them rather than only the error. Read BEFORE the step
+  ## runs: ``releaseMonitorHostSlot`` resets the record it would be read from.
+  var parts: seq[string]
+  case item.processKind
+  of rpkInlineRunQuotaPending:
+    parts.add("lease " & $item.queuedRunQuotaProcess.leaseId())
+  of rpkInlineRunQuota:
+    parts.add("lease " & $item.runQuotaProcess.leaseId())
+    let pid = item.runQuotaProcess.processId()
+    if pid > 0: parts.add("child pid " & $pid)
+  of rpkInlineRunQuotaFailed:
+    discard
+  of rpkMonitorHost:
+    let slot = item.monitorSlot
+    if slot >= 0 and slot < pool.records.len and pool.records[slot].rootPid > 0:
+      parts.add("monitored root pid " & $pool.records[slot].rootPid)
+  of rpkBypassProcess:
+    let pid = item.directProcess.processId()
+    if pid > 0: parts.add("child pid " & $pid)
+  of rpkHelperProcess:
+    if not item.process.isNil:
+      let pid = processID(item.process)
+      if pid > 0: parts.add("helper pid " & $pid)
+    when defined(posix):
+      if item.processGroupPid > 0:
+        parts.add("process group " & $item.processGroupPid)
+  if parts.len > 0:
+    result = " (" & parts.join(", ") & ")"
+
 proc startBypassRunQuotaProcess(action: BuildAction;
                                 config: BuildEngineConfig):
     ReproDirectRunningProcess =
@@ -21462,6 +21497,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var teardownFailures: seq[string]
     var firstTeardownError: ref CatchableError = nil
     for item in running.mitems:
+      let identities = teardownIdentities(item, monitorHosts)
       try:
         case item.processKind
         of rpkInlineRunQuotaPending:
@@ -21486,7 +21522,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           closeProcessOnce(item.process)
       except CatchableError as err:
         if firstTeardownError.isNil: firstTeardownError = err
-        teardownFailures.add("stopping action " & item.id & ": " & err.msg)
+        # Name what this step left unresolved -- the lease and the process
+        # it could not establish as completed or released -- not only why.
+        teardownFailures.add("stopping action " & item.id & identities &
+          ": " & err.msg)
     if inlineRunQuotaSessionOpen:
       emitActionExtensionRows(inlineRunQuotaSession, runResult, actionsById)
       # The daemon refuses to close a session that still owns leases, and
