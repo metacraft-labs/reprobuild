@@ -330,6 +330,72 @@ suite "M0 link-capability probe — the safety model":
       removeFile(extendedPath(dst))
       removeFile(extendedPath(src))
 
+  test "a reflink's mode is a fresh file's, not the source's":
+    ## Correctness must not depend on which mechanism materialized a file
+    ## (spec §"Hardlink, Reflink, and Copy Policy"). The copy arm creates
+    ## its output the way any new file is created — ``0o666`` masked by
+    ## the umask — so a clone has to come out the same. On APFS it would
+    ## not by itself: ``clonefile(2)`` copies the source's mode onto the
+    ## clone, so a read-only CAS blob used to yield a read-only build
+    ## output the step could not rewrite. ``attemptReflink`` resets it.
+    ##
+    ## The yardstick is measured, not computed: a file created in the
+    ## same directory by Nim's own ``open(fmWrite)`` — the call the copy
+    ## arm makes — under the same umask. Two source modes are tried, one
+    ## stripped of write and one carrying execute bits, so neither a
+    ## missing nor an extra bit can leak through.
+    let refsVols = volumes.filterIt(
+      (block:
+        var c: LinkCapabilityCache
+        probeLinkCapabilities(c, it.dir, it.dir).reflink))
+    if refsVols.len == 0:
+      checkpoint("no volume on this host implements reflink (" &
+                 volumes.mapIt(it.dir & "=" & it.fsName).join(", ") &
+                 "); the clone-mode arm was NOT exercised")
+      check volumes.len >= 1
+    else:
+      let vol = refsVols[0]
+      let fresh = vol.dir / "mode-fresh.bin"
+      block:
+        var f = open(extendedPath(fresh), fmWrite)
+        f.close()
+      let freshPerms = getFilePermissions(extendedPath(fresh))
+      removeFile(extendedPath(fresh))
+      check fpUserWrite in freshPerms
+      for (tag, srcPerms) in [
+          ("readonly", {fpUserRead}),
+          ("executable", {fpUserRead, fpUserWrite, fpUserExec,
+                          fpGroupRead, fpGroupExec,
+                          fpOthersRead, fpOthersExec})]:
+        let src = vol.dir / ("mode-src-" & tag & ".bin")
+        let dst = vol.dir / ("mode-dst-" & tag & ".bin")
+        writeFile(extendedPath(src), "payload-" & tag)
+        # ``finally`` so a failing check cannot leave a read-only source
+        # behind for the scratch directory's removal at exit.
+        try:
+          setFilePermissions(extendedPath(src), srcPerms)
+          let attempt = attemptReflink(src, dst)
+          check attempt.outcome == loOk
+          if attempt.outcome == loOk:
+            let dstPerms = getFilePermissions(extendedPath(dst))
+            checkpoint(vol.dir & " (" & vol.fsName & "): source " & tag &
+                       " " & $srcPerms & " -> clone " & $dstPerms &
+                       "; a fresh file gets " & $freshPerms)
+            check dstPerms == freshPerms
+            check readFile(extendedPath(dst)) == "payload-" & tag
+            # The clone is writable by its owner, and writing it leaves
+            # the source as it was.
+            writeFile(extendedPath(dst), "rewritten")
+            check readFile(extendedPath(src)) == "payload-" & tag
+            check getFilePermissions(extendedPath(src)) == srcPerms
+        finally:
+          try:
+            setFilePermissions(extendedPath(src), {fpUserRead, fpUserWrite})
+            removeFile(extendedPath(src))
+            removeFile(extendedPath(dst))
+          except CatchableError:
+            discard
+
   test "preferredMechanisms orders reflink before hardlink before copy":
     var cap = LinkCapability(probed: true, reflink: true, hardlink: true)
     check cap.preferredMechanisms() == @[lmReflink, lmHardlink, lmCopy]
