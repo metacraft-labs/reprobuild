@@ -19,15 +19,30 @@
 ## revision, and that no explicit develop override substitutes, is not
 ## compared with its checkout at all.
 ##
+## AMENDED 2026-10-18 (§16.5; reprobuild-pm issue
+## `2026-10-12-release-commit-pin-refused-by-commit-and-push-gates.md`): of
+## the flake inputs in that set, the hooks compare only those develop mode
+## actually substitutes — the ones `repro flake override-args --all` binds. A
+## sibling with no lock record is not substituted by the shell, which builds
+## its PIN, so re-pinning it recorded a revision nobody built. Case 1 used to
+## expect exactly that re-pin; it now expects the input to be named as not
+## substituted and left alone, and then gives `lib` a lock record of its own
+## and expects the re-pin — the same re-pin assertion as before, on an input
+## the shell now does substitute. Case 4 gives `spare` a lock record for the
+## same reason. `t_an_input_develop_mode_does_not_substitute_is_not_compared`
+## covers the amended rule in full (ahead, diverged, push gate).
+##
 ## Cases:
 ##   * `t_hooks_consult_only_the_repos_own_dependencies` — a manifest
 ##     workspace of five repos. `app` has NO `repro.lock` and ONE sibling
 ##     input (`lib-src` -> `lib`). The unrelated `other` commits a lock that
 ##     pins `third`, and `third` is BEHIND that pin; later it is DIVERGED, and
 ##     `other` is left dirty. `lib` carries no lock record of its own.
-##       1. a commit after `lib` moved re-pins `lib-src` to `lib`'s HEAD, and
-##          the hook records that it consulted EXACTLY `lib-src` (nothing
-##          else, and nothing pinned by recipe);
+##       1. a commit after `lib` moved leaves `lib-src` alone and names it as
+##          not substituted by develop mode (`lib` has no lock record); once
+##          `lib` publishes a lock of its own, the next commit re-pins
+##          `lib-src` to `lib`'s HEAD, and the hook records that it consulted
+##          EXACTLY `lib-src` (nothing else, and nothing pinned by recipe);
 ##       2. the push gate passes with no flake or sibling-pin refusal;
 ##       3. `third` diverged and `other` dirty change nothing for `app`;
 ##       4. `app`'s flake then pins `lib-src` BY REVISION and `lib` moves
@@ -48,8 +63,11 @@
 ##   * `t_a_same_named_input_of_another_repository_is_not_that_sibling` —
 ##     `app`'s input is called `lib-src` but fetches `spare`'s origin. It is
 ##     bound by canonical URL to `spare`: `lib` moving changes nothing, and
-##     `spare` moving re-pins the input. A name never binds an input that has
-##     a repository URL.
+##     `spare` moving is examined against `spare` — but, since the 2026-10-18
+##     amendment, not re-pinned, because develop mode does not substitute
+##     `spare` for that input; nor is anything recorded once the shell
+##     substitutes `lib` for it by name. A name never binds an input that
+##     has a repository URL in the hooks.
 ##
 ## Falsifiability (observed against the base commit this was written on):
 ## case 1 fails at step 1 — `lib` has no lock record, so the workspace-wide
@@ -57,6 +75,9 @@
 ## develop-set line was logged; case 2 fails at the push, which refused
 ## `flake_lock_stale` for `beta-src`; case 3 fails because the re-pin moved
 ## `lib`'s `repro.lock` entry to the checkout's HEAD.
+## Against reprobuild `agents` d9314ca874 (before the 2026-10-18 amendment),
+## case 1's first commit re-pins `lib-src` although the shell does not
+## substitute `lib`.
 ## The fourth case was checked against a mutant that binds an input by its
 ## suffix-stripped NAME before its URL: the commit after `lib` moved was
 ## refused, the hook named `lib-src=lib`, and `spare` moving did not re-pin
@@ -153,6 +174,26 @@ proc twoEntryLock(fx: Nf2Fixture; owner, ownerRev, sibling,
   "inputs_digest = \"own-deps-fixture\"\nvariants = []\npackages = []\n" &
   "deps = [" & dep(owner, ".", ownerRev, sibling, owner) & ", " &
     dep(sibling, "../" & sibling, siblingPin, "", sibling) & "]\n"
+
+proc recordOwnLock(fx: Nf2Fixture; name: string): string =
+  ## Give ``name`` a committed, published `repro.lock` of its own (just its
+  ## root entry) — the lock record that puts a repo into the develop set
+  ## `repro flake override-args --all` substitutes. Returns the new HEAD.
+  let dir = fx.ws / name
+  let rev = headOf(fx, dir)
+  writeFile(dir / "repro.lock",
+    "schema = \"reprobuild.solved-graph-lock.v2\"\n\n[lock]\n" &
+    "platform = \"x86_64-linux\"\noptimal = true\n" &
+    "inputs_digest = \"own-deps-fixture\"\nvariants = []\n" &
+    "packages = []\ndeps = [{ name = \"" & name & "\", path = \".\", " &
+    "coord_kind = \"vcs\", url = \"" & originUrl(fx, name) &
+    "\", ref = \"main\", revision = \"" & rev & "\", integrity = " &
+    "\"git-sha1:" & rev & "\", version = \"\", visibility = \"public\", " &
+    "participation = \"\", depends = \"\", groups = \"\" }]\n")
+  discard gitIn(fx, dir, "add -A")
+  discard gitIn(fx, dir, "commit -q -m " & q("lock " & name))
+  discard gitIn(fx, dir, "push -q origin main")
+  headOf(fx, dir)
 
 proc otherLock(fx: Nf2Fixture; otherRev, thirdPin: string): string =
   ## `other`'s committed `repro.lock`, pinning `third` at ``thirdPin``.
@@ -259,7 +300,23 @@ suite "the managed hooks consult only the repo's own dependencies":
         " merge-base --is-ancestor HEAD origin/main").code == 0
 
       # ---- 1. the one sibling input is consulted, and only it. -----------
-      let libNext = moveAndPublishSibling(fx, "lib", "revision 2")
+      # `lib` has no lock record, so the shell does not substitute it and the
+      # hook leaves its pin alone (§16.5, amended 2026-10-18).
+      let libMoved = moveAndPublishSibling(fx, "lib", "revision 2")
+      let lockBefore1 = readFile(lockPath(fx))
+      let c0 = tryCommitInApp(fx, "lib moved but is not developed")
+      checkpoint(c0.output)
+      checkpoint("pre-commit log:\n" & preCommitLog(fx))
+      check c0.code == 0
+      check lockInCommit(fx) == lockBefore1
+      check libMoved notin lockInCommit(fx)
+      check afterTimestamp(developSetLine(fx)) ==
+        "hook-develop-set consulted: (none); pinned by recipe, not " &
+        "compared: (none); not substituted by develop mode, not compared: " &
+        "lib-src=lib"
+      # `lib` publishes a lock of its own: now the shell substitutes it, and
+      # the commit re-pins it — the assertion this step always made.
+      let libNext = recordOwnLock(fx, "lib")
       let c1 = tryCommitInApp(fx, "work against the newer lib")
       checkpoint(c1.output)
       checkpoint("pre-commit log:\n" & preCommitLog(fx))
@@ -468,12 +525,46 @@ suite "the managed hooks consult only the repo's own dependencies":
       noSiblingRefusal(fx, gatePrePush(fx))
 
       # ---- 2. `spare` moves: the input follows the repository it names. --
+      # The hook binds `lib-src` to `spare` (the log names `lib-src=spare`).
+      # Before the §16.5 amendment of 2026-10-18 it then re-pinned the input
+      # to `spare`'s HEAD. It no longer does: develop mode does not
+      # substitute `spare` for this input (`repro flake override-args` binds a
+      # `git+` URL input by its stripped NAME, `lib`, which has no lock
+      # record), so the shell builds the pin and the hook leaves it there.
       let spareNext = moveAndPublishSibling(fx, "spare", "revision 2")
       let c2 = tryCommitInApp(fx, "the repository the input names moved")
       checkpoint(c2.output)
       checkpoint("pre-commit log:\n" & preCommitLog(fx))
       check c2.code == 0
-      check lockedRevIn(lockInCommit(fx), "lib-src") == spareNext
+      check lockInCommit(fx) == lockBefore
+      check spareNext notin lockInCommit(fx)
       check libNext notin lockInCommit(fx)
+      check afterTimestamp(developSetLine(fx)) ==
+        "hook-develop-set consulted: (none); pinned by recipe, not " &
+        "compared: (none); not substituted by develop mode, not compared: " &
+        "lib-src=spare"
       publishRepo(fx, fx.app)
       noSiblingRefusal(fx, gatePrePush(fx))
+
+      # ---- 3. the shell substitutes a DIFFERENT checkout: not compared. --
+      # `lib` publishes a lock of its own, so the shell now substitutes `lib`
+      # for `lib-src` (by name). The hook's member is `spare`, by URL. The
+      # hook compares only a member the shell substitutes AT ITS checkout, so
+      # neither `spare`'s nor `lib`'s revision is recorded, and the push is
+      # not refused over a checkout the comparison would have misattributed.
+      let libRecorded = recordOwnLock(fx, "lib")
+      let c3 = tryCommitInApp(fx, "the same-named lib is developed")
+      checkpoint(c3.output)
+      checkpoint("pre-commit log:\n" & preCommitLog(fx))
+      check c3.code == 0
+      check lockInCommit(fx) == lockBefore
+      check libRecorded notin lockInCommit(fx)
+      check spareNext notin lockInCommit(fx)
+      check afterTimestamp(developSetLine(fx)) ==
+        "hook-develop-set consulted: (none); pinned by recipe, not " &
+        "compared: (none); not substituted by develop mode, not compared: " &
+        "lib-src=spare"
+      publishRepo(fx, fx.app)
+      let g3 = gatePrePush(fx)
+      checkpoint("gate output:\n" & g3.output)
+      check not hasGateFailure(g3.report, "flake_lock_stale")

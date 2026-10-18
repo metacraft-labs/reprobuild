@@ -1212,6 +1212,7 @@ tests/integration/t_agent_replay_rejected.nim	nim	12
 tests/integration/t_agent_service_unit.nim	nim	8
 tests/integration/t_amend_and_rebase_are_idempotent.nim	nim	1
 tests/integration/t_an_ahead_sibling_is_still_recorded.nim	nim	1
+tests/integration/t_an_input_develop_mode_does_not_substitute_is_not_compared.nim	nim	1
 tests/integration/t_an_unfetchable_flake_revision_is_withheld.nim	nim	1
 tests/integration/t_an_unobservable_sibling_is_not_substituted.nim	nim	1
 tests/integration/t_an_unpushed_sibling_revision_is_not_recorded.nim	nim	2

@@ -10854,6 +10854,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_an_input_develop_mode_does_not_substitute_is_not_compared.nim",
+    binary: "build/test-bin/t_an_input_develop_mode_does_not_substitute_is_not_compared",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_an_unfetchable_flake_revision_is_withheld.nim",
     binary: "build/test-bin/t_an_unfetchable_flake_revision_is_withheld",
     defines: @[],

@@ -33992,6 +33992,11 @@ type
     rows: seq[DevelopListRow]
     stages: seq[DevelopSelectionStage]
     backends: seq[DevelopBackendReport]
+    emptyLockSet: bool
+      ## The run failed for the ONE reason that is also an answer: no backend
+      ## yielded a single lock record, so develop mode places nothing. The
+      ## managed hooks read that as "nothing is substituted"
+      ## (``hookSubstitutedDevelopSet``); every verb still refuses on it.
 
 proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
                            args: DevelopAllArgs): DevelopLockSet
@@ -34738,6 +34743,7 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
       "`repro workspace lock` records a routed tier's per-repo entries)."
     var r = failure(msg, notices, 1)
     r.backends = composed.backends
+    r.emptyLockSet = true
     return r
 
   # DS-4 — evidence-only repos are excluded from the develop set, but they are
@@ -53650,6 +53656,12 @@ type
     pinnedByRecipe*: seq[string]
       ## inputs `flake.nix` pins by exact revision that no override
       ## substitutes: not compared with their checkout (§16.5)
+    notSubstituted*: seq[string]
+      ## inputs bound to a sibling checkout that develop mode does not
+      ## substitute (`repro flake override-args --all` leaves them at their
+      ## pin): not compared with their checkout (§16.5, amended 2026-10-18).
+      ## Filled only on the authoritative path; the cheap pre-filter never
+      ## resolves the develop set.
     # ---- HL-11 H3: the plan, when the refresh was asked not to write ----
     #
     # The `pre-commit` hook plans BOTH locks before writing either, so that a
@@ -53781,13 +53793,21 @@ proc classifySiblingPin*(identity: GitToolIdentity;
       dir & ", so this sibling cannot be classified until it is fetched — " &
       "nothing local can say where a checkout stands relative to a revision " &
       "it does not have")
-  let counts = gitRunPlain(identity,
+  # STDOUT ALONE is the answer (``gitRunPlainQuery``). A checkout whose
+  # commit-graph chain names a layer that no longer exists — a shared bare
+  # clone it borrows from rewrote its graph — makes git print `warning: unable
+  # to find all commit-graph files` on stderr while exiting 0 with the right
+  # counts on stdout. Read merged, that line made a healthy comparison
+  # "distance UNKNOWN", and the hook, the refresh and the gate all failed
+  # closed on it with no remedy (reprobuild-pm issue
+  # `2026-10-12-release-commit-pin-refused-by-commit-and-push-gates.md`).
+  let counts = gitRunPlainQuery(identity,
     ["-C", dir, "rev-list", "--left-right", "--count",
      pinnedRev & "..." & headRev])
   if counts.code != 0:
     return (relation: sprUnknown, aheadBy: 0, behindBy: 0, detail:
       "`git rev-list --left-right --count` failed in " & dir & " (" &
-      counts.output.strip() & ")")
+      counts.diagnostic.strip() & ")")
   let fields = counts.output.strip().splitWhitespace()
   if fields.len != 2:
     return (relation: sprUnknown, aheadBy: 0, behindBy: 0, detail:
@@ -54860,6 +54880,19 @@ proc gatherConsistencyInputs(repoRoot: string; source: ConsistencySource;
 # dependency by selector name, as H1 relates it, and that dependency to a
 # flake input by canonical repository URL or checkout path. Either recipe's
 # pin exempts the repository from BOTH locks' comparisons.
+#
+# And of what is left, the FLAKE half compares only what develop mode actually
+# substitutes (amended 2026-10-18, reprobuild-pm issue
+# `2026-10-12-release-commit-pin-refused-by-commit-and-push-gates.md`): an
+# input the shell's own binding (`repro flake override-args --all`,
+# ``flakeShellBindingsOf``) does not substitute keeps its `flake.lock` pin and
+# is BUILT at that pin, so its checkout says nothing about what was built.
+# Re-pinning it at commit would record a revision nobody built, and refusing
+# the push over it named a refresh that declines (the refresh verb uses that
+# same shell binding). So such an input is neither re-pinned nor compared: a
+# workspace root, `infra` and a pm repo can each hold their own pin of one
+# `nixos-modules` checkout. ``hookSubstitutedDevelopSet`` applies the rule; an
+# explicitly overridden exact pin stays compared (§16.4).
 # ---------------------------------------------------------------------------
 
 proc manifestMembershipOf(repoRoot: string;
@@ -54899,6 +54932,10 @@ type
     ## ``observeCommittedLockSiblings``).
     flakeMembers: seq[HookFlakeMember]
     pinnedByRecipe: seq[RecipePinnedSibling]
+    notSubstituted: seq[HookFlakeMember]
+      ## Inputs bound to a sibling checkout that develop mode does NOT
+      ## substitute (``hookSubstitutedDevelopSet``): built at their pin, so
+      ## neither re-pinned nor compared. Empty until that filter ran.
     notices: seq[string]
 
 proc describeRecipePin(p: RecipePinnedSibling): string =
@@ -54909,6 +54946,11 @@ proc describeRecipePin(p: RecipePinnedSibling): string =
 proc describeHookFlakeMember(m: HookFlakeMember): string =
   ## ``flake.lock:<input>=<repo>`` — one entry of the "consulted" list.
   "flake.lock:" & m.input & "=" & m.repo
+
+proc describeNotSubstituted(m: HookFlakeMember): string =
+  ## ``<input>=<repo>`` — one entry of the pre-commit log's "not substituted
+  ## by develop mode, not compared" list.
+  m.input & "=" & m.repo
 
 proc explicitDevelopOverrideTargets(workspaceRoot, repoRoot: string):
     tuple[names: HashSet[string]; paths: HashSet[string];
@@ -55214,6 +55256,11 @@ proc hookDevelopSetOf(repoRoot, workspaceRoot: string;
   ## matched by canonical URL or checkout path: §16.5 exempts the repository,
   ## whichever recipe pins it. Only inputs with a sibling checkout are listed
   ## there: a pin of something nobody has checked out was never compared.
+  ##
+  ## This is the set of CANDIDATES. Before the hooks compare a member they
+  ## also ask whether develop mode substitutes it at all
+  ## (``hookSubstitutedDevelopSet``, amended §16.5): one the shell builds at
+  ## its pin is moved to ``notSubstituted`` and not compared.
   let flakeRoot = os.normalizedPath(absolutePath(repoRoot))
   if not fileExists(flakeRoot / "flake.nix") or
       not fileExists(flakeRoot / "flake.lock"):
@@ -55424,7 +55471,9 @@ proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies;
       path: relativePath(depAbs, pathBase).replace('\\', '/'), pinned: pinned,
       declared: declared, relation: sprUnknown)
     if not isGitCheckoutDir(depAbs): return
-    let head = gitRunPlain(identity, ["-C", depAbs, "rev-parse", "HEAD"])
+    # Parsed, so stdout alone (``gitRunPlainQuery``): a stderr warning is not
+    # part of the revision.
+    let head = gitRunPlainQuery(identity, ["-C", depAbs, "rev-parse", "HEAD"])
     if head.code != 0: return
     result.observed = head.output.strip()
     # Untracked files count: a build reads them as readily as tracked ones.
@@ -56638,8 +56687,9 @@ proc coordinateCommitRepin(repoRoot, workspaceRoot: string;
             if c.startsWith("flake.lock:" & r.input & "="): consulted = true
           if not consulted:
             why = " (the flake.lock refresh does not consult this input: " &
-              "no sibling checkout is bound to it, or flake.nix pins it by " &
-              "revision and no develop override substitutes it)"
+              "no sibling checkout is bound to it, develop mode does not " &
+              "substitute it, or flake.nix pins it by revision and no " &
+              "develop override substitutes it)"
       let flakeSaid =
         if fNew == fOld: "flake.lock leaves input '" & r.input & "' at " &
           fOld & why
@@ -57062,7 +57112,13 @@ proc applyCommitTimeLockWriters*(site: CommitTimeWriterSite;
       " hook-develop-set consulted: " &
       (if consulted.len == 0: "(none)" else: consulted.join(", ")) &
       "; pinned by recipe, not compared: " &
-      (if pinned.len == 0: "(none)" else: pinned.join(", ")))
+      (if pinned.len == 0: "(none)" else: pinned.join(", ")) &
+      # §16.5 (amended 2026-10-18): bound to a checkout, but the shell builds
+      # it at its pin. Printed only when there is one, so the line every
+      # existing reader parses is unchanged otherwise.
+      (if flake.notSubstituted.len == 0: ""
+       else: "; not substituted by develop mode, not compared: " &
+         flake.notSubstituted.join(", ")))
 
   var used, examined: seq[string]
   var allowedRegressions: seq[PinRegression]
@@ -86265,6 +86321,9 @@ type
     exceptNames: seq[string]
     notices: seq[string]   ## non-fatal; still reported, never swallowed
     refusals: seq[string]  ## fatal; ``ok`` is false when any is present
+    emptyLockSet: bool
+      ## ``ok`` is false because the workspace lock set is EMPTY
+      ## (``DevelopAllResult.emptyLockSet``): develop mode substitutes nothing.
 
 proc flakeDevelopSelectionOf(passthrough: openArray[string];
     explicitRoot: string): FlakeDevelopSelection =
@@ -86301,6 +86360,7 @@ proc flakeDevelopSelectionOf(passthrough: openArray[string];
 
   let developed = executeDevelopAll(developArgs)
   if developed.exitCode != 0:
+    result.emptyLockSet = developed.emptyLockSet
     for n in developed.notices: result.refusals.add(n)
     for o in developed.outcomes:
       if o.diagnostic.len > 0: result.refusals.add(o.diagnostic)
@@ -86496,6 +86556,15 @@ proc hookFlakeSelection(hs: HookDevelopSet;
     if hasCoordinates(p.input) and p.repo.len > 0 and
         p.repo notin result.exceptNames:
       result.exceptNames.add(p.repo)
+  # An input develop mode does not substitute is left out on purpose too, but
+  # only under a key no compared member uses: two inputs can resolve one repo
+  # (`x` and `x-sui`), and excluding the shared key would drop the one the
+  # shell DOES substitute.
+  for m in hs.notSubstituted:
+    let key = if hasCoordinates(m.input) and m.repo.len > 0: m.repo
+              else: m.bindKey
+    if key notin result.selected and key notin result.exceptNames:
+      result.exceptNames.add(key)
   for n in hs.notices: result.notices.add(n)
 
 proc flakeBindInputsToCheckouts(inputNames: openArray[string];
@@ -86669,10 +86738,11 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
         " a git checkout (`repro develop --only=" & repo &
         "` places one), or leave it on its pin.")
       continue
-    let head = gitRunPlain(identity, ["-C", dir, "rev-parse", "HEAD"])
+    # Parsed, so stdout alone; git's message, on failure, is the diagnostic.
+    let head = gitRunPlainQuery(identity, ["-C", dir, "rev-parse", "HEAD"])
     if head.code != 0 or head.output.strip().len == 0:
       report.add("NOT substituted: flake input '" & name & "' resolves to " &
-        dir & ", whose HEAD could not be read (" & head.output.strip() &
+        dir & ", whose HEAD could not be read (" & head.diagnostic.strip() &
         "), so no revision can be observed for it. It keeps its flake.lock " &
         "pin. Remedy: repair that checkout (`git -C " & dir &
         " rev-parse HEAD` shows the error).")
@@ -86836,6 +86906,140 @@ proc bulkExactFlakePins(flakeRoot, workspaceRoot: string;
       "--only=" & repo & "` substitutes it, as does an explicit " &
       "`--only=" & repo & "` here or an explicit overrideInputs entry.")
 
+type
+  FlakeShellBindings = object
+    ## What the shell's develop-mode activation substitutes for one flake:
+    ## ``repro flake override-args``'s whole answer, before it is printed.
+    ok: bool
+    refusals: seq[string]    ## fatal; ``ok`` is false when any is present
+    selection: FlakeDevelopSelection
+    flakePath: string
+    inputNames: seq[string]  ## every input `flake.nix` declares
+    suffixes: seq[string]
+    pinRule: tuple[keep: seq[string]; skipped: seq[FlakeBulkPinSkip]]
+    emitted: seq[FlakeOverrideBinding]
+    report: seq[string]      ## the notices `override-args` prints on stderr
+
+proc flakeShellBindingsOf(flakeRoot: string; passthrough: openArray[string];
+    explicitRoot: string; suffixes: seq[string];
+    identity: GitToolIdentity): FlakeShellBindings =
+  ## The substitution develop mode performs for the flake at ``flakeRoot``:
+  ## the develop set through `repro develop`'s own composer
+  ## (``flakeDevelopSelectionOf``), the flake's declared inputs, §16.4's
+  ## bulk exact-pin rule (``bulkExactFlakePins``) and NF-1's binder.
+  ##
+  ## ONE computation for the shell and for the managed hooks. `repro flake
+  ## override-args` prints exactly ``emitted``, and ``useFlakeDevShell``
+  ## substitutes what it prints; the hooks compare only the inputs it binds
+  ## (``hookSubstitutedDevelopSet``). Two derivations of "which inputs are
+  ## overridden" is how the push gate came to refuse inputs the shell had
+  ## built at their pin (reprobuild-pm issue
+  ## `2026-10-12-release-commit-pin-refused-by-commit-and-push-gates.md`).
+  result.suffixes = suffixes
+  result.selection = flakeDevelopSelectionOf(passthrough, explicitRoot)
+  if not result.selection.ok:
+    for r in result.selection.refusals: result.refusals.add(r)
+    return
+  result.report = result.selection.notices
+  let declared = flakeDeclaredInputsAt(flakeRoot)
+  result.flakePath = declared.flakePath
+  if not declared.ok:
+    for r in declared.refusals: result.refusals.add(r)
+    return
+  result.inputNames = declared.names
+  result.pinRule = bulkExactFlakePins(flakeRoot,
+    result.selection.workspaceRoot, result.inputNames, result.selection,
+    suffixes, result.report)
+  result.emitted = flakeBindInputsToCheckouts(result.pinRule.keep,
+    result.selection.checkoutOf, suffixes, identity,
+    result.selection.workspaceRoot, result.report, result.selection.onlyNames,
+    result.selection.exceptNames, flakeRoot)
+  result.ok = true
+
+proc hookSubstitutedDevelopSet(hs: HookDevelopSet;
+    flakeRoot, workspaceRoot: string; identity: GitToolIdentity):
+    tuple[ok: bool; hookSet: HookDevelopSet; refusals: seq[string]] =
+  ## §16.5, amended 2026-10-18: of the hooks' develop set ``hs`` (the repo's
+  ## own sibling inputs, ``hookDevelopSetOf``), keep the members develop mode
+  ## actually substitutes — the inputs `repro flake override-args --all`
+  ## binds (``flakeShellBindingsOf``), to the same checkout the member is
+  ## bound to — and move every other member to
+  ## ``notSubstituted``. An input the shell does not substitute is built at its
+  ## `flake.lock` pin, so its checkout is not what was built: re-pinning it
+  ## records a revision nobody built, and refusing a push over it is a refusal
+  ## no refresh can clear (Unified-Locking-And-Hooks.md §13.6, "the sibling
+  ## revisions the overrides actually used"; Nix-Flake-Coexistence.md §4,
+  ## "overridden inputs").
+  ##
+  ## A member whose exact recipe pin an EXPLICIT develop override substitutes
+  ## (``exactPinOverridden``) is kept regardless, so §16.4's commit refusal
+  ## keeps an experiment from being published by accident.
+  ##
+  ## An unresolvable develop set is NOT an answer: ``ok`` is false with the
+  ## cause, and the caller refuses, as it does for any develop set it cannot
+  ## resolve. The one failure that IS an answer is an empty workspace lock
+  ## set: develop mode then places nothing, so nothing is substituted.
+  result.hookSet = hs
+  result.hookSet.flakeMembers = @[]
+  if hs.flakeMembers.len == 0:
+    result.ok = true
+    return
+  # input -> the checkout the shell substitutes for it. A member is kept only
+  # when the shell substitutes THAT checkout: the shell binds a `git+` URL
+  # input by its suffix-stripped name, where ``hookDevelopSetOf`` binds it by
+  # canonical URL, and a member compared against a checkout the shell did not
+  # build would be the same false comparison this rule removes.
+  var bound = initTable[string, string]()
+  let shell = flakeShellBindingsOf(flakeRoot,
+    ["--all", "--workspace-root=" & workspaceRoot,
+     "--tool-provisioning=path"], workspaceRoot,
+    defaultFlakeInputStripSuffixes, identity)
+  if shell.ok:
+    for e in shell.emitted:
+      bound[e.input] = os.normalizedPath(absolutePath(e.path))
+  elif shell.selection.emptyLockSet:
+    result.hookSet.notices.add("the workspace lock set at " & workspaceRoot &
+      " is empty, so develop mode substitutes no flake input of " & flakeRoot)
+  else:
+    result.refusals = shell.refusals
+    return
+  proc sameCheckout(shellPath, memberPath: string): bool =
+    # Both sides are normalised absolute paths derived from one workspace
+    # root, so string equality is the expected answer. The identity check
+    # covers the two spellings of one directory (a symlinked workspace root,
+    # macOS's `/tmp` -> `/private/tmp`): a member the shell DOES substitute
+    # must never be dropped from the comparison over how its path is spelled,
+    # because dropping it is the direction that lets the gate pass silently.
+    if shellPath.len == 0: return false
+    if shellPath == memberPath: return true
+    try: sameFile(shellPath, memberPath)
+    except CatchableError: false
+  for m in hs.flakeMembers:
+    let shellPath = bound.getOrDefault(m.input, "")
+    if m.exactPinOverridden or sameCheckout(shellPath, m.path):
+      result.hookSet.flakeMembers.add(m)
+    else:
+      result.hookSet.notSubstituted.add(m)
+      if shellPath.len > 0:
+        # The shell DOES substitute this input, but with another checkout
+        # than the one the hooks bind it to (the shell binds a `git+` URL
+        # input by its suffix-stripped name, the hooks by repository URL).
+        # Neither checkout describes both the pin and the build, so it is
+        # not compared — and that is said, not left to look like "kept its
+        # pin".
+        result.hookSet.notices.add("flake input '" & m.input & "' is bound " &
+          "by the hooks to " & m.path & " but develop mode substitutes " &
+          shellPath & " for it, so it is not compared with either checkout")
+      # The shell's own reason (no `flake.nix`, not in the develop set, …),
+      # carried as a notice: the binder is told to leave the input out, so
+      # without this a refusal's inventory would lose the one line that says
+      # why the input kept its pin. A gate prints notices only when it refuses.
+      for line in shell.report:
+        if ("flake input '" & m.input & "'") in line and
+            line notin result.hookSet.notices:
+          result.hookSet.notices.add(line)
+  result.ok = true
+
 proc flakeLocalDirOfOverrideRef*(rf: string): string =
   ## The local directory a ``--override-input`` reference names, or "" when it
   ## names something that is not a working tree on this machine.
@@ -86947,11 +87151,12 @@ proc flakeBindingsFromAppliedArgs*(args: openArray[string];
         "your shell is building. flake.lock still pins something else and " &
         "there is no way to say whether they agree.")
       continue
-    let head = gitRunPlain(identity, ["-C", dir, "rev-parse", "HEAD"])
+    # Parsed, so stdout alone; git's message, on failure, is the diagnostic.
+    let head = gitRunPlainQuery(identity, ["-C", dir, "rev-parse", "HEAD"])
     if head.code != 0 or head.output.strip().len == 0:
       report.add("SUBSTITUTED but UNOBSERVABLE: flake input '" & input &
         "' is overridden to " & dir & ", whose HEAD could not be read (" &
-        head.output.strip() & "), so nothing can name the revision your " &
+        head.diagnostic.strip() & "), so nothing can name the revision your " &
         "shell is building. Remedy: repair that checkout (`git -C " & dir &
         " rev-parse HEAD` shows the error).")
       continue
@@ -87398,7 +87603,10 @@ proc flakeClassifyPublication(identity: GitToolIdentity;
   let target = flakePushTarget(identity, dir, headRev)
   result.remote = target.remote
   result.branch = target.branch
-  let unreachable = gitRunPlain(identity,
+  # Parsed — "any output names an unpublished commit" — so stdout alone
+  # (``gitRunPlainQuery``): a `warning: unable to find all commit-graph files`
+  # on stderr made a published revision read as unpublished.
+  let unreachable = gitRunPlainQuery(identity,
     ["-C", dir, "rev-list", "--max-count=1", headRev, "--not", "--remotes"])
   if unreachable.code != 0:
     # The probe itself failed, so publication is UNPROVEN — and unproven is not
@@ -87412,7 +87620,7 @@ proc flakeClassifyPublication(identity: GitToolIdentity;
     # paste and run unchanged from wherever the message was printed.
     result.detail = "could not be shown to exist anywhere but this checkout " &
       "— `git -C " & dir & " rev-list --max-count=1 " & headRev &
-      " --not --remotes` failed (" & unreachable.output.strip() & ")"
+      " --not --remotes` failed (" & unreachable.diagnostic.strip() & ")"
     return
   if unreachable.output.strip().len == 0:
     return
@@ -87900,37 +88108,26 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
       "emitted for a directory whose content nothing can name")
     return refuse()
 
-  # ---- the develop set, through `repro develop`'s own composer ------------
-  let selection = flakeDevelopSelectionOf(passthrough, explicitRoot)
-  if not selection.ok:
-    for r in selection.refusals: refusals.add(r)
-    return refuse()
-  var report = selection.notices
-  let checkoutOf = selection.checkoutOf
-  let selectedNames = selection.selected
-
-  # ---- the flake's declared inputs ---------------------------------------
+  # ---- the develop set, the declared inputs, §16.4's bulk exact-pin rule
+  # and the binding: ONE computation, which the managed hooks also use to
+  # decide what develop mode substitutes (``flakeShellBindingsOf``) ---------
   let flakeRoot =
     if flakeDir.len > 0: absolutePath(flakeDir) else: getCurrentDir()
-  let declared = flakeDeclaredInputsAt(flakeRoot)
-  let flakePath = declared.flakePath
-  if not declared.ok:
-    for r in declared.refusals: refusals.add(r)
-    return refuse()
-  let inputNames = declared.names
-
   let suffixes =
     if stripGiven: parseCommaList(stripSpec)
     else: defaultFlakeInputStripSuffixes
-
-  # ---- §16.4: the automatic mode leaves an exact recipe pin alone --------
-  let pinRule = bulkExactFlakePins(flakeRoot, selection.workspaceRoot,
-    inputNames, selection, suffixes, report)
-
-  # ---- bind inputs to develop-set checkouts ------------------------------
-  let emitted = flakeBindInputsToCheckouts(pinRule.keep, checkoutOf, suffixes,
-    identity, selection.workspaceRoot, report, selection.onlyNames,
-    selection.exceptNames, flakeRoot)
+  let shell = flakeShellBindingsOf(flakeRoot, passthrough, explicitRoot,
+    suffixes, identity)
+  if not shell.ok:
+    for r in shell.refusals: refusals.add(r)
+    return refuse()
+  let selection = shell.selection
+  var report = shell.report
+  let selectedNames = selection.selected
+  let flakePath = shell.flakePath
+  let inputNames = shell.inputNames
+  let pinRule = shell.pinRule
+  let emitted = shell.emitted
 
   # ---- the SAME bindings, compared against the pins (§3.2) ----------------
   let state = flakeOverrideStateReport(flakeRoot, emitted, identity)
@@ -90678,6 +90875,13 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
   ## compared with its checkout, so it is neither re-pinned nor refused; it is
   ## reported in ``pinnedByRecipe``. ``consulted`` names the inputs that were.
   ##
+  ## And of those, only the inputs develop mode actually substitutes
+  ## (``hookSubstitutedDevelopSet``, §16.5 amended 2026-10-18): an input the
+  ## shell builds at its pin is neither re-pinned nor refused, whichever way
+  ## its checkout has moved, and is reported in ``notSubstituted``. That is
+  ## decided on the authoritative path only, after the pre-filter below, which
+  ## stays a superset of it.
+  ##
   ## ## The cheap negative, and why it is not a shortcut around correctness
   ##
   ## Resolving the develop set is not free — `repro develop --list --all`
@@ -90834,7 +91038,9 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
           if locked.kind != JObject or not locked.hasKey("rev"):
             continue
           let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
-          let head = gitRunPlain(identity, ["-C", dir, "rev-parse", "HEAD"])
+          # Parsed, so stdout alone: a stderr warning is not part of HEAD.
+          let head = gitRunPlainQuery(identity,
+            ["-C", dir, "rev-parse", "HEAD"])
           if head.code != 0:
             # Unproven is not "unchanged": hand over rather than skip.
             candidateMoved = true
@@ -90848,12 +91054,32 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
       result.line = "flake-lock up-to-date: every overridable input of " &
         lockPath & " already names its sibling's HEAD; not touched"
       return
+    # §16.5 (amended 2026-10-18) — only what develop mode substitutes. The
+    # pre-filter above considered every member; an input the shell builds at
+    # its pin leaves here, so a checkout that moved without being built is
+    # neither recorded nor refused as a regression.
+    let substituted = hookSubstitutedDevelopSet(hookSet, flakeRoot,
+      workspaceRoot, ensureGitToolResolvable(tpmPathOnly, getEnv("PATH")))
+    if not substituted.ok:
+      result.line = "flake-lock refused-unresolvable-workspace: which flake " &
+        "inputs develop mode substitutes could not be resolved (" &
+        substituted.refusals.join("; ") & "), so flake.lock was left alone; " &
+        "repair the workspace (`repro workspace status --workspace-root=" &
+        workspaceRoot & "`) and commit again"
+      result.failure = result.line
+      return
+    result.consulted = @[]
+    for m in substituted.hookSet.flakeMembers:
+      result.consulted.add(describeHookFlakeMember(m))
+    for m in substituted.hookSet.notSubstituted:
+      result.notSubstituted.add(describeNotSubstituted(m))
     let outcome = executeFlakeLockRefresh(flakeRoot, workspaceRoot,
       currentRepo, @["--all"], defaultFlakeInputStripSuffixes,
       toolProvisioning, recordDowngrade = false,
       label = label, allowRegression = allowRegression,
       refuseRegressions = true, planOnly = planOnly,
-      preset = some(hookFlakeSelection(hookSet, workspaceRoot, flakeRoot)),
+      preset = some(hookFlakeSelection(substituted.hookSet, workspaceRoot,
+        flakeRoot)),
       deriveFields = deriveFields, announce = announce)
     result.line = "flake-lock " & outcome.tag & ": " & outcome.diagnostic
     result.wouldChange = outcome.wouldChange
@@ -91012,7 +91238,13 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   # own input was verified depend on lock records of repos it does not depend
   # on. An input `flake.nix` pins by exact revision, and no explicit develop
   # override substitutes, is not compared with its checkout at all: a sibling
-  # ahead of a release pin is not drift.
+  # ahead of a release pin is not drift. Nor is an input develop mode does not
+  # substitute (§16.5, amended 2026-10-18; ``hookSubstitutedDevelopSet``): the
+  # shell built it at its pin, so the pin describes the build, and the refresh
+  # this gate would name declines it ("NOT in the develop set"). Comparing it
+  # made N repos that pin one sibling at N revisions unpushable from one
+  # checkout (reprobuild-pm issue
+  # `2026-10-12-release-commit-pin-refused-by-commit-and-push-gates.md`).
   let wsRoot = flakeOverrideWorkspaceRoot(workspaceRoot)
   var memberRepos: seq[ResolvedRepo]
   var membershipFailure = ""
@@ -91027,8 +91259,14 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
         refusals: @["the workspace membership at " & wsRoot &
           " could not be resolved: " & membershipFailure])
     else:
-      hookFlakeSelection(hookDevelopSetOf(flakeRoot, wsRoot, memberRepos),
-        wsRoot, flakeRoot)
+      let substituted = hookSubstitutedDevelopSet(
+        hookDevelopSetOf(flakeRoot, wsRoot, memberRepos), flakeRoot, wsRoot,
+        identity)
+      if substituted.ok:
+        hookFlakeSelection(substituted.hookSet, wsRoot, flakeRoot)
+      else:
+        FlakeDevelopSelection(ok: false, workspaceRoot: wsRoot,
+          refusals: substituted.refusals)
   if not selection.ok:
     # No answer at all. REFUSE, naming the cause: the alternative is to publish
     # a state whose lock nobody could check, which is §3.1 with the gate's
