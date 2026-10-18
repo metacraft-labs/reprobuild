@@ -46294,7 +46294,8 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
         "' -> '" & repo.path & "' (" & identityEvidence & ")")
     result[repoIdx] = outcome
 
-proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
+proc executeWorkspaceSync(args: WorkspaceSyncArgs;
+    prospectiveProjects: seq[string] = @[]): WorkspaceSyncOutcome =
   ## End-to-end driver. (1) Refresh manifest layers so the composer
   ## reads the freshest manifest data. (2) Resolve the project / compose
   ## layers. (3) Gather an observation for every declared repo. (4) Run
@@ -46349,7 +46350,13 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       # Resolve the recorded/composed workspace, not the positional, so the
       # scope filter below can narrow the full set.
       resolveArgs.projectName = ""
-  var resolved = resolveWorkspaceSyncProject(resolveArgs)
+  # Enable previews resolve their validated prospective membership in memory;
+  # an ordinary scoped sync still filters the recorded workspace set.
+  var resolved =
+    if prospectiveProjects.len > 0:
+      resolveProjectSet(args.workspaceRoot, prospectiveProjects)
+    else:
+      resolveWorkspaceSyncProject(resolveArgs)
   report.project = resolved.projectName
   report.scopeProjects = args.scopeProjects
   report.dryRun = args.dryRun
@@ -47856,7 +47863,8 @@ execution:
   --tool-provisioning=path|nix|tarball|scoop
 """
 
-proc runWorkspaceSyncCommand*(args: openArray[string]): int =
+proc runWorkspaceSyncWithProjects(args: openArray[string];
+    prospectiveProjects: seq[string]): int =
   ## ``repro workspace sync [<project>...] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop]
   ## [--jobs N|-j N] [--jobs-network N] [--jobs-checkout N]
@@ -47925,7 +47933,7 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   # so a separate executor — see the block comment above it.
   if parsed.mainline:
     return runMainlineSyncCommand(parsed)
-  let outcome = executeWorkspaceSync(parsed)
+  let outcome = executeWorkspaceSync(parsed, prospectiveProjects)
   # RA-27: a dry run does not run any mutating step, so it does not write a
   # report artifact (there is nothing to persist about a run that did not
   # happen). The plan is rendered to the chosen surface and we exit 0.
@@ -47960,6 +47968,9 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
       outcome.report.workspaceRoot, outcome.report.project,
       outcome.report.repos)
   outcome.report.exitCode
+
+proc runWorkspaceSyncCommand*(args: openArray[string]): int =
+  runWorkspaceSyncWithProjects(args, @[])
 
 # ---- RA-11: `repro workspace pull` ----------------------------------------
 #
@@ -84842,6 +84853,7 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
   var explicit = parseMembershipProjects(normalizedArgs)
   var useDefault = false
   var noSync = false
+  var dryRun = false
   # Flags the materialization phase understands are forwarded to it rather
   # than rejected here: `enable`'s real work IS a sync, so the report and the
   # JSON digest describing what happened are that sync's.
@@ -84851,9 +84863,12 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
       useDefault = true
     elif arg == "--no-sync":
       noSync = true
+    elif arg == "--dry-run":
+      dryRun = true
+      forwarded.add(arg)
     elif arg.startsWith("--workspace-root="):
       discard
-    elif arg == "--json" or arg == "--verbose" or arg == "--dry-run" or
+    elif arg == "--json" or arg == "--verbose" or
         arg == "--write-report" or arg.startsWith("--write-report=") or
         arg.startsWith("--jobs") or arg.startsWith("--tags=") or
         arg.startsWith("--clone-objects="):
@@ -84941,6 +84956,24 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
   except CatchableError as err:
     unresolved = err.msg
 
+  var syncArgs = @(toAdd)
+  syncArgs.add("--workspace-root=" & workspaceRoot)
+  for flag in forwarded:
+    syncArgs.add(flag)
+
+  # Validation above is shared with a real enable; nothing below this preview
+  # may persist membership or refresh derived workspace files.
+  if dryRun:
+    for project in merged:
+      stdout.writeLine(project)
+    if unresolved.len > 0:
+      stderr.writeLine("repro workspace enable (dry-run): could not resolve " &
+        "the manifest yet; no materialization plan is available — " & unresolved)
+      return 0
+    if noSync or missing.len == 0:
+      return 0
+    return runWorkspaceSyncWithProjects(syncArgs, merged)
+
   writeWorkspaceProjects(workspaceRoot, merged)
   for p in readWorkspaceProjects(workspaceRoot):
     stdout.writeLine(p)
@@ -84974,10 +85007,6 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
     return 0
   stdout.writeLine("repro workspace enable: checking out " &
     $missing.len & " repo(s) introduced by " & toAdd.join(", "))
-  var syncArgs = @(toAdd)
-  syncArgs.add("--workspace-root=" & workspaceRoot)
-  for f in forwarded:
-    syncArgs.add(f)
   return runWorkspaceSyncCommand(syncArgs)
 
 # ---- Workspace-Membership-Model.md: local-state reconciliation -------------
