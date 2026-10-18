@@ -9534,6 +9534,9 @@ proc selfWrittenDirectoryKeys(action: BuildAction): HashSet[string] =
     let dir = normalizeWriteRoot(parentDir(materialPath(action.cwd, output)))
     if dir.len > 0:
       result.incl(dir)
+      # The monitor resolves symlinked project roots (including macOS's
+      # /var -> /private/var). Both spellings name the same derived listing.
+      result.incl(canonicalPolicyPath(dir))
   for root in action.declaredWriteRootPrefixes():
     result.incl(root)
 
@@ -10789,8 +10792,11 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
   var gitDirMemo = initTable[string, bool]()
   var declaredMaterialized = initHashSet[string]()
   for input in evidence.declaredInputs:
-    declaredMaterialized.incl(
-      materialPath(action.cwd, input).replace('\\', '/'))
+    let path = materialPath(action.cwd, input).replace('\\', '/')
+    declaredMaterialized.incl(path)
+    # Declaration outranks the derived output-directory rule even when the
+    # declaration and the monitor use different spellings of the directory.
+    declaredMaterialized.incl(canonicalPolicyPath(path))
   var seen = initHashSet[string]()
   for dir in evidence.monitorDirectoryEnumerations:
     let path = materialPath(action.cwd, dir)

@@ -91,7 +91,7 @@ libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim	nim	10
 libs/repro_build_engine/tests/t_portable_record_from_local_hit.nim	nim	4
 libs/repro_build_engine/tests/t_relocatable_record_follows_the_working_tree.nim	nim	7
 libs/repro_build_engine/tests/t_scratch_dirs.nim	nim	4
-libs/repro_build_engine/tests/t_self_written_set_is_derived.nim	nim	8
+libs/repro_build_engine/tests/t_self_written_set_is_derived.nim	nim	9
 libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
 libs/repro_build_engine/tests/t_untracked_ancestor_change_does_not_re_run_an_edge.nim	nim	8
 libs/repro_build_engine/tests/t_untracked_scope_membership_is_not_an_input.nim	nim	7
@@ -173,6 +173,7 @@ libs/repro_cli_support/tests/t_path_mode_dev_env_provides_realized_tools.nim	nim
 libs/repro_cli_support/tests/t_phase_g_cli_wiring.nim	nim	6
 libs/repro_cli_support/tests/t_portable_cache_roots.nim	nim	2
 libs/repro_cli_support/tests/t_provider_compile_entry_points_publish_bootstrap_toolchain.nim	nim	3
+libs/repro_cli_support/tests/t_provider_evaluation_watch_inputs.nim	nim	2
 libs/repro_cli_support/tests/t_refresh_flake_lock_text_writes_the_fields_nix_reports.nim	nim	8
 libs/repro_cli_support/tests/t_runquota_auto_spawn_defers_to_host_config.nim	nim	8
 libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim	nim	6
@@ -1160,7 +1161,7 @@ tests/e2e/sharding/t_e2e_repro_test_shard_lan_peer_cache_not_implemented.nim	nim
 tests/e2e/sharding/t_e2e_repro_test_shard_partition_total_coverage.nim	nim	1
 tests/e2e/sharding/t_e2e_repro_test_shard_workspace_integration.nim	nim	2
 tests/e2e/t_m54_verified_tarball_profile.nim	nim	1
-tests/e2e/watch/t_e2e_repro_watch.nim	nim	8
+tests/e2e/watch/t_e2e_repro_watch.nim	nim	11
 tests/e2e/watch/t_e2e_repro_watch_arms_on_cache_hit_evidence.nim	nim	2
 tests/e2e/watch/t_e2e_repro_watch_multiple_named_targets.nim	nim	2
 tests/e2e/watch/t_repro_watch_infers_tool_provisioning.nim	nim	2

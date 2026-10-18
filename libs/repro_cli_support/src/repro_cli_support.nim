@@ -6905,6 +6905,19 @@ proc writeToolIdentityCache(outDir: string; mode: ToolProvisioningMode;
   writeKeyedToolIdentity(outDir, toolIdentityCacheKey(artifact, mode),
     identity)
 
+proc providerEvaluationInputPaths*(snapshot: ProviderGraphSnapshot): seq[string] =
+  ## Filesystem inputs that shaped a provider graph, including on a cached
+  ## snapshot. An action's input list cannot represent a directory whose
+  ## enumeration determines which actions exist: watching only the previously
+  ## enumerated files misses new nested resources. Keep these paths separate
+  ## from action dependencies; the watch consumer needs them for invalidation,
+  ## without adding unrelated provider inputs to every action's cache key.
+  for fragment in snapshot.fragments:
+    for input in fragment.evaluationInputs:
+      if input.kind in {gevFileRead, gevDirectoryEnumeration} and
+          input.identity.len > 0:
+        result.add(input.identity)
+
 proc providerSnapshotInputsFresh(snapshot: ProviderGraphSnapshot): bool =
   if snapshot.fragments.len == 0:
     return false
@@ -11007,6 +11020,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       "selected action does not accept forwarded arguments: " &
         selectedActionId)
 
+  proc collectProviderInputEvidence(snapshot: ProviderGraphSnapshot) =
+    if wantEvidencePaths:
+      collectedInputEvidence.add(providerEvaluationInputPaths(snapshot))
+
   proc collectInputEvidence(buildResult: BuildRunResult) =
     if not wantEvidencePaths:
       # Nobody will read ``BuildCommandOutcome.inputEvidencePaths`` on this
@@ -11512,6 +11529,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       providerWorkingDir: result.projectRoot))
     finishStat(buildStats, statsEnabled, "repro provider graph refresh",
       providerGraphStart)
+    collectProviderInputEvidence(refresh.snapshot)
     logSummary("providerGraphSnapshot: " & refresh.persistedSnapshotPath)
     logSummary("providerInvocations: " & $refresh.invoked.len)
     var selectedActionId = parsedTarget.selectedActionId
@@ -12272,6 +12290,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         providerWorkingDir: result.projectRoot))
       finishStat(buildStats, statsEnabled, "repro provider graph refresh",
         providerGraphStart)
+      collectProviderInputEvidence(refresh.snapshot)
       logSummary("providerGraphSnapshot: " & refresh.persistedSnapshotPath)
       logSummary("providerInvocations: " & $refresh.invoked.len)
       var selectedActionId = parsedTarget.selectedActionId
@@ -12571,6 +12590,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let extensionSignature = mergeProjectExtensions(refresh.snapshot,
       projectRoot, artifact.projectInterface.packageName, effectiveMode,
       publicCliPath, workRoot)
+    # Extensions contribute graph-shaping inputs too, so collect after merge
+    # and before lowering/any cached-snapshot outcome can return.
+    collectProviderInputEvidence(refresh.snapshot)
 
     # M84: owned-effect-claim output cleanup. When the provider graph refresh
     # dropped edges that owned build outputs (a removed/renamed generated

@@ -163,6 +163,60 @@ suite "the self-written set is derived from the output declaration":
 
 suite "an output file's own directory is derived state too":
 
+  when not defined(windows):
+    test "a resolved output directory is derived through a symlinked project":
+      let tempRoot = createTempDir("repro-derived-output-alias-", "")
+      defer: removeDir(tempRoot)
+      let physical = tempRoot / "physical"
+      let linked = tempRoot / "linked"
+      createDir(physical / "build")
+      createDir(physical / "source")
+      createDir(physical / "build" / "nested")
+      writeFile(physical / "build" / "input.txt", "a genuine sibling input\n")
+      createSymlink(physical, linked)
+      let resolved = expandFilename(physical)
+      let outDir = resolved / "build"
+      let sibling = resolved / "source"
+      let nested = outDir / "nested"
+      let consumed = outDir / "input.txt"
+      let act = action("compile", ["compiler", "source"],
+        cwd = linked,
+        inputs = [],
+        outputs = ["build/artifact"],
+        cacheable = true,
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
+      var evidence: PathSetEvidence
+      evidence.declaredOutputs = act.outputs
+      evidence.monitorDirectoryEnumerations.observeAll(
+        evidence.evidenceProvenance, evcMonitorCapture,
+        [outDir, sibling, nested])
+      evidence.monitorProbes.observeAll(evidence.evidenceProvenance,
+        evcMonitorCapture, [outDir, sibling, nested])
+      evidence.monitorReads.observeAll(evidence.evidenceProvenance,
+        evcMonitorCapture, [consumed])
+
+      let inputs = act.cacheInputPaths(evidence)
+      let enumerated = act.cacheEnumeratedDirectories(evidence)
+      check not inputs.hasPath(outDir)
+      check not enumerated.hasPath(outDir)
+      check inputs.hasPath(sibling)
+      check inputs.hasPath(nested)
+      check inputs.hasPath(consumed)
+      check enumerated.hasPath(sibling)
+      check enumerated.hasPath(nested)
+
+      # A declaration still outranks the derived-directory rule in the same
+      # observed spelling. Reading a directory we also write is explicit.
+      var declared = act
+      declared.inputs = @[outDir]
+      evidence.declaredInputs = declared.inputs
+      check declared.cacheInputPaths(evidence).hasPath(outDir)
+      check declared.cacheEnumeratedDirectories(evidence).hasPath(outDir)
+      declared.inputs = @[linked / "build"]
+      evidence.declaredInputs = declared.inputs
+      check declared.cacheInputPaths(evidence).hasPath(linked / "build")
+      check declared.cacheEnumeratedDirectories(evidence).hasPath(outDir)
+
   test "the directory holding a declared output is not an enumerated input":
     ## The `__repro_interface_extract` shape: output FILES, no write root.
     ## The directory it publishes into changed membership because this action

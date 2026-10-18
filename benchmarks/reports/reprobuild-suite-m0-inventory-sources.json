@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2181,
+    "nimTestBinaries": 2182,
     "pureUnitConsolidationGroups": 62,
-    "pureUnitTests": 660,
+    "pureUnitTests": 661,
     "staticallyDetectedRuntimeCompilerFlowTests": 124,
-    "testEntries": 2208
+    "testEntries": 2209
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1296,7 +1296,7 @@
       "graph-fixture": 19,
       "integration": 1191,
       "platform/destructive": 132,
-      "pure unit": 660,
+      "pure unit": 661,
       "unclassified": 206
     },
     "graphOwnedTestArtifacts": [
@@ -1499,9 +1499,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2181,
+    "nimTestBinaryCount": 2182,
     "pythonTestFileCount": 27,
-    "testEntryCount": 2208
+    "testEntryCount": 2209
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -3997,27 +3997,116 @@
       "class": "integration",
       "matches": [
         {
-          "assignedCommandVariable": "gccPath",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
           "executedVariables": [
+            "binDir",
             "clangPath",
             "codeTracerRoot",
             "daemon",
             "daemonBin",
             "destPath",
+            "dispatchSource",
             "gccPath",
+            "hostNode",
+            "interpreter",
+            "node",
+            "output",
             "pathValue",
+            "prefetchPath",
             "projectRoot",
             "repoRoot",
+            "report",
             "reproBin",
             "script",
             "socketPath",
+            "source",
             "sourcePath",
-            "stylusPath",
-            "stylusSourcePath"
+            "stylus",
+            "stylusScript",
+            "stylusSource",
+            "tempRoot"
           ],
-          "line": 735,
+          "line": 649,
+          "path": "tests/e2e/watch/t_e2e_repro_watch.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "\"cc\", dispatchSource, \"-o\", binDir / \"nim\"]))"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "binDir",
+            "clangPath",
+            "codeTracerRoot",
+            "daemon",
+            "daemonBin",
+            "destPath",
+            "dispatchSource",
+            "gccPath",
+            "hostNode",
+            "interpreter",
+            "node",
+            "output",
+            "pathValue",
+            "prefetchPath",
+            "projectRoot",
+            "repoRoot",
+            "report",
+            "reproBin",
+            "script",
+            "socketPath",
+            "source",
+            "sourcePath",
+            "stylus",
+            "stylusScript",
+            "stylusSource",
+            "tempRoot"
+          ],
+          "line": 716,
+          "path": "tests/e2e/watch/t_e2e_repro_watch.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "discard requireSuccess(shellCommand([\"cc\", stylusSource, \"-o\", stylusScript]))"
+        },
+        {
+          "assignedCommandVariable": "gccPath",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "binDir",
+            "clangPath",
+            "codeTracerRoot",
+            "daemon",
+            "daemonBin",
+            "destPath",
+            "dispatchSource",
+            "gccPath",
+            "hostNode",
+            "interpreter",
+            "node",
+            "output",
+            "pathValue",
+            "prefetchPath",
+            "projectRoot",
+            "repoRoot",
+            "report",
+            "reproBin",
+            "script",
+            "socketPath",
+            "source",
+            "sourcePath",
+            "stylus",
+            "stylusScript",
+            "stylusSource",
+            "tempRoot"
+          ],
+          "line": 853,
           "path": "tests/e2e/watch/t_e2e_repro_watch.nim",
           "patterns": [
             "gcc"
@@ -4029,23 +4118,34 @@
           "commandVariableExecuted": true,
           "directExecutionLine": false,
           "executedVariables": [
+            "binDir",
             "clangPath",
             "codeTracerRoot",
             "daemon",
             "daemonBin",
             "destPath",
+            "dispatchSource",
             "gccPath",
+            "hostNode",
+            "interpreter",
+            "node",
+            "output",
             "pathValue",
+            "prefetchPath",
             "projectRoot",
             "repoRoot",
+            "report",
             "reproBin",
             "script",
             "socketPath",
+            "source",
             "sourcePath",
-            "stylusPath",
-            "stylusSourcePath"
+            "stylus",
+            "stylusScript",
+            "stylusSource",
+            "tempRoot"
           ],
-          "line": 736,
+          "line": 854,
           "path": "tests/e2e/watch/t_e2e_repro_watch.nim",
           "patterns": [
             "clang"
@@ -4057,56 +4157,39 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
+            "binDir",
             "clangPath",
             "codeTracerRoot",
             "daemon",
             "daemonBin",
             "destPath",
+            "dispatchSource",
             "gccPath",
+            "hostNode",
+            "interpreter",
+            "node",
+            "output",
             "pathValue",
+            "prefetchPath",
             "projectRoot",
             "repoRoot",
+            "report",
             "reproBin",
             "script",
             "socketPath",
+            "source",
             "sourcePath",
-            "stylusPath",
-            "stylusSourcePath"
+            "stylus",
+            "stylusScript",
+            "stylusSource",
+            "tempRoot"
           ],
-          "line": 738,
+          "line": 860,
           "path": "tests/e2e/watch/t_e2e_repro_watch.nim",
           "patterns": [
             "cc"
           ],
           "snippet": "discard requireSuccess(shellCommand([\"cc\", sourcePath, \"-o\", gccPath]))"
-        },
-        {
-          "assignedCommandVariable": "",
-          "commandVariableExecuted": false,
-          "directExecutionLine": true,
-          "executedVariables": [
-            "clangPath",
-            "codeTracerRoot",
-            "daemon",
-            "daemonBin",
-            "destPath",
-            "gccPath",
-            "pathValue",
-            "projectRoot",
-            "repoRoot",
-            "reproBin",
-            "script",
-            "socketPath",
-            "sourcePath",
-            "stylusPath",
-            "stylusSourcePath"
-          ],
-          "line": 744,
-          "path": "tests/e2e/watch/t_e2e_repro_watch.nim",
-          "patterns": [
-            "cc"
-          ],
-          "snippet": "discard requireSuccess(shellCommand([\"cc\", stylusSourcePath, \"-o\", stylusPath]))"
         }
       ],
       "source": "tests/e2e/watch/t_e2e_repro_watch.nim"
@@ -8885,7 +8968,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_build_engine/tests/t_self_written_set_is_derived.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -10437,6 +10520,24 @@
       "source": "libs/repro_cli_support/tests/t_provider_compile_entry_points_publish_bootstrap_toolchain.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_provider_evaluation_watch_inputs",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_provider_runtime"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_provider_evaluation_watch_inputs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -28351,7 +28452,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/watch/t_e2e_repro_watch.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 8,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

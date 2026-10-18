@@ -1503,6 +1503,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_provider_evaluation_watch_inputs.nim",
+    binary: "build/test-bin/t_provider_evaluation_watch_inputs",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_refresh_flake_lock_text_writes_the_fields_nix_reports.nim",
     binary: "build/test-bin/t_refresh_flake_lock_text_writes_the_fields_nix_reports",
     defines: @[],
