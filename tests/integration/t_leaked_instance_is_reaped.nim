@@ -685,6 +685,12 @@ suite "the liveness probe answers about real processes":
     # probe that says `olDead` to everything.
     let probe = processOwnerLiveness()
     let me = thisProcessOwner()
+    when defined(linux) or defined(macosx):
+      # These hosts have kernel identity sources. An empty token must fail
+      # here, rather than turn all the real-process measurements into skips.
+      check me.host.len > 0
+      check me.bootToken.len > 0
+      check me.startToken.len > 0
     if me.host.len == 0 or me.bootToken.len == 0 or me.startToken.len == 0:
       # This platform does not publish what the answer needs. The case
       # asserts THAT rather than a verdict it did not measure — and the
@@ -697,6 +703,8 @@ suite "the liveness probe answers about real processes":
   test "a killed process is DEAD, and a recycled number does not save it":
     let probe = processOwnerLiveness()
     let me = thisProcessOwner()
+    when defined(linux) or defined(macosx):
+      check me.startToken.len > 0
     if me.startToken.len == 0:
       check probe(me) == olUnknowable
       checkpoint("this platform publishes no process start token")
@@ -722,6 +730,18 @@ suite "the liveness probe answers about real processes":
     var elsewhere = thisProcessOwner()
     elsewhere.host = "a-host-this-process-is-not-on"
     check probe(elsewhere) == olUnknowable
+    let me = thisProcessOwner()
+    for missing in 0 .. 2:
+      var incomplete = me
+      case missing
+      of 0: incomplete.host = ""
+      of 1: incomplete.bootToken = ""
+      else: incomplete.startToken = ""
+      check probe(incomplete) == olUnknowable
+    for pid in [-1, 0]:
+      var invalid = me
+      invalid.pid = pid
+      check probe(invalid) == olUnknowable
     # …and after a reboot the owner is dead whatever its number is now.
     var beforeReboot = thisProcessOwner()
     if beforeReboot.bootToken.len == 0:
