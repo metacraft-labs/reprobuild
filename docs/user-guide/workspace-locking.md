@@ -802,6 +802,22 @@ make sense.
   and any writer failure also prints a line to stderr, which git shows
   you at the terminal. The commit still succeeds in every case.
 
+  That stderr line is easy to miss, so `repro health` reads the log for
+  you. Its `lock-writer` row sorts the outcomes above into *wrote*
+  (`published`, `written-*`), *refused* (`no-lock-dirty-siblings`,
+  `no-lock-failed`) and *no record due* (`no-manifest-record`, the
+  `skipped-*` outcomes and `inert-git-state-unknown`, which change
+  nothing), and counts the refusals since the last written record.
+  `no-manifest-record` is not a refusal: the record lives elsewhere, in
+  the in-repo `repro.lock` of a public-only workspace or in a per-repo
+  route. One refusal is a `warn`; two or more in a row are a `fail`. The
+  row lists every distinct refusal reason in that run, newest first,
+  because fixing the reason on the last line can leave an older one
+  standing. A log that exists but cannot be read is a `warn` naming the
+  error. The row reads only the last 4 MiB of the log and never changes
+  anything: after fixing the reason, run `repro workspace lock` to confirm
+  the writer succeeds.
+
   **`skipped-no-workspace` has no report file, by design.** When the hook
   decides the root is not a workspace, it writes nothing at all and says so
   on stderr instead. There is no workspace to own a `.repro/build/reports/`

@@ -38,22 +38,31 @@
 ## fails on the whole-file comparison and assert (2) names the specific node.
 ##
 ## Test-double policy: NO mocks, doubles or fakes. See the header of
-## `nf2_flake_lock_fixture.nim`.
+## `nf2_flake_lock_fixture.nim`. The two moved nodes' derived fields are the
+## new revisions' as `nix flake prefetch` reports them, so the case needs nix
+## and SKIPS LOUDLY without it (`nf2RecordingPrerequisites`).
 
 import std/[os, strutils, unittest]
 
 import nf2_flake_lock_fixture
 
-proc refreshedNodeText(name, url, rev: string): string =
+proc refreshedNodeText(name, url, rev: string;
+    fields: Nf2DerivedFields): string =
   ## What the fixture's node becomes once its pin moves: the same node with
-  ## `rev` replaced and the three fields DERIVED from the previous revision's
-  ## content removed. Written out longhand rather than computed, so this file
-  ## states the expected result independently of the implementation that
-  ## produces it.
+  ## `rev` replaced and the three fields DERIVED from the revision's content
+  ## replaced by the new revision's, at the same positions — nix writes them
+  ## in sorted key order, as the fixture does. Written out longhand rather
+  ## than computed, and the values come from `nix flake prefetch`
+  ## (`nixPrefetchedFields`) rather than from the refresh, so this file states
+  ## the expected result independently of the implementation that produces
+  ## it.
   "    \"" & name & "\": {\n" &
   "      \"locked\": {\n" &
+  "        \"lastModified\": " & $fields.lastModified & ",\n" &
+  "        \"narHash\": \"" & fields.narHash & "\",\n" &
   "        \"ref\": \"main\",\n" &
   "        \"rev\": \"" & rev & "\",\n" &
+  "        \"revCount\": " & $fields.revCount & ",\n" &
   "        \"type\": \"git\",\n" &
   "        \"url\": \"" & url & "\"\n" &
   "      },\n" &
@@ -71,7 +80,7 @@ proc revCount(text: string): int =
 suite "NF-2: only overridden nodes are rewritten":
 
   test "t_only_overridden_nodes_are_rewritten":
-    if not nf2Prerequisites("t_only_overridden_nodes_are_rewritten"):
+    if not nf2RecordingPrerequisites("t_only_overridden_nodes_are_rewritten"):
       skip()
     else:
       let fx = setupNf2Fixture("surgical")
@@ -99,12 +108,20 @@ suite "NF-2: only overridden nodes are rewritten":
       check lockInCommit(fx) == after
 
       # ---- (1) byte-for-byte: the original with exactly two substitutions --
+      let alphaFields = nixPrefetchedFields(fx, "alpha", newAlpha)
+      let betaFields = nixPrefetchedFields(fx, "beta", newBeta)
+      if not alphaFields.ok: checkpoint(alphaFields.diagnostic)
+      if not betaFields.ok: checkpoint(betaFields.diagnostic)
+      check alphaFields.ok
+      check betaFields.ok
       let expected = before
         .replace(nodeText(before, "alpha-src"),
-          refreshedNodeText("alpha-src", originUrl(fx, "alpha"), newAlpha)
+          refreshedNodeText("alpha-src", originUrl(fx, "alpha"), newAlpha,
+            alphaFields)
             .strip(leading = true, trailing = false))
         .replace(nodeText(before, "beta-src"),
-          refreshedNodeText("beta-src", originUrl(fx, "beta"), newBeta)
+          refreshedNodeText("beta-src", originUrl(fx, "beta"), newBeta,
+            betaFields)
             .strip(leading = true, trailing = false))
       if after != expected:
         checkpoint(

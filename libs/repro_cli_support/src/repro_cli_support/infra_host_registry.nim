@@ -20,13 +20,16 @@
 ## The registry is read through the normal profile-compile edge
 ## (`compileProfileToRbpi`), the same compiled intent `repro home` plans
 ## from, so the attribute has one reader.
+##
+## The host it is asked about is the command's identity as the one host
+## resolver gives it (`host_identity.selectHost`, called by `infra.nim`'s
+## `resolveInfraHost`), the same name the plan and the generation record.
 
 import std/[os, strutils]
 
 import repro_profile
 import repro_profile_intent
 import repro_profile_compile
-from repro_home_intent/host_identity import machineHost
 import repro_home_intent/host_identity as hostIdentityMod
 from repro_core/source_root import publicCliImagePath
 
@@ -59,12 +62,6 @@ proc resolveHostRegistryPath*(homeProfileDir, systemProfilePath: string):
       sibling.absolutePath != systemProfilePath.absolutePath:
     return sibling
   ""
-
-proc registryHost*(hostFlag: string): string =
-  ## The name the registry is keyed by: `--host` when given, else this
-  ## machine's identity as `repro home` resolves it (`$REPRO_HOST`, else the
-  ## lowercased OS hostname).
-  if hostFlag.len > 0: hostFlag else: machineHost()
 
 proc readHostRegistry*(registryPath, host, stateDir: string):
     HostRegistryVerdict =

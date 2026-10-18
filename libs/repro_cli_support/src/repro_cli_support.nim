@@ -205,6 +205,8 @@ import repro_cli_support/hardware as cli_hardware
 import repro_cli_support/disk as cli_disk
 import repro_cli_support/attest as cli_attest
 import repro_cli_support/mode1_loader
+import repro_cli_support/post_commit_trace
+export post_commit_trace
 from repro_cli_support/partition as repro_partition import
   ShardBuildAction, ShardTestEdge, ShardPlanRequest, ShardPlan,
   PartitionPlanReadError,
@@ -52063,61 +52065,14 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
 #     stderr so the operator sees it at the terminal. Post-commit still exits
 #     0 unconditionally: loud, never blocking. A hook that fails commits would
 #     be strictly worse than the starvation it reports.
+#
+# The outcome vocabulary itself (``PostCommitOutcome`` and
+# ``postCommitOutcomeTag``) lives in ``repro_cli_support/post_commit_trace``,
+# beside the reader that classifies the trace for `repro health`'s
+# ``lock-writer`` row: the writer and that reader must agree on every tag, so
+# they share one definition rather than two copies of the strings.
 
 type
-  PostCommitOutcome* = enum
-    pcoPublished         ## Per-repo lock TOML written (RA-1: no index) AND
-                         ## already present in the store's last-known
-                         ## upstream. The only success tag.
-    pcoWrittenPending    ## Record written to a PUBLISHABLE store but not yet
-                         ## in its upstream. The designed post-commit steady
-                         ## state — pre-push publishes it. Loud only when the
-                         ## store carries STRANDED records (below).
-    pcoWrittenLocalOnly  ## Record written, but the store is not publishable
-                         ## (not its own checkout / no upstream). This record
-                         ## will never leave this machine.
-    pcoWrittenUnknown    ## Record written; the publication probe itself
-                         ## failed. Never reported as success.
-    pcoNoManifestRecord  ## The lock writer succeeded but wrote no manifest
-                         ## record: this workspace routes per-repo records to
-                         ## their own backends, or is public-only and carries
-                         ## its lock in the in-repo ``repro.lock``. Nothing to
-                         ## publish here, and nothing claimed.
-    pcoNoLockDirty       ## At least one in-scope repo is dirty; strict M11
-                         ## refused with exit 2 and NO lock exists.
-    pcoSkippedNoWorkspace ## No ``.repo/workspace.toml`` or no resolvable
-                          ## project; common in a freshly-cloned repo
-                          ## that has not been initialised. A genuine
-                          ## "this hook does not apply here" no-op, not a
-                          ## starvation: log-only.
-    pcoNoLockFailed      ## Lock writer raised (IO error, VCS query
-                         ## failure, missing checkout, ...) and NO lock
-                         ## exists.
-    pcoSkippedMembershipRepo ## The commit landed in the MEMBERSHIP repo (the
-                          ## checkout carrying ``projects/``/``repos/``), for
-                          ## which Workspace-And-Develop-Mode.md §"Gate scope
-                          ## when the pushed repo is the membership repo"
-                          ## decides that no trigger-keyed record is due at
-                          ## all: it is not a project repo, so it has no
-                          ## declared name to encode as the ``<repo>``
-                          ## component and belongs to no tier's partition.
-                          ## Writing nothing is the SPECIFIED outcome here, so
-                          ## it is a skip and not a failure — the distinction
-                          ## this suite's invariant 4 reserves
-                          ## ``no-lock-failed`` for. A stray undeclared
-                          ## checkout keeps that tag: it has no resolvable
-                          ## anchor, which does block a record somebody would
-                          ## have looked for.
-    pcoSkippedGitOperation ## Git is mid-rebase / mid-cherry-pick / mid-am /
-                           ## mid-bisect in the repo that fired the hook. The
-                           ## commit this hook saw is one of that operation's
-                           ## intermediate commits, and writing a lock into a
-                           ## working tree its owner has not finished with is
-                           ## how a hook breaks somebody else's rebase.
-    pcoInertGitStateUnknown ## The "is an operation in flight" probe could not
-                            ## answer. The hook did nothing and SAID so — an
-                            ## unanswerable question is not the same as "no".
-
   PostCommitPublication* = enum
     ## Publication state of the record this run wrote, probed WITHOUT any
     ## network access (post-commit must not require the network, so the
@@ -52155,20 +52110,6 @@ type
       ## commit that is ALREADY published in the trigger repo. Each one is
       ## proof that a push went out without its lock: publication is broken,
       ## not merely pending. Any non-zero value is loud.
-
-proc postCommitOutcomeTag(outcome: PostCommitOutcome): string =
-  case outcome
-  of pcoPublished: "published"
-  of pcoWrittenPending: "written-pending-publish"
-  of pcoWrittenLocalOnly: "written-local-only"
-  of pcoWrittenUnknown: "written-publication-unknown"
-  of pcoNoManifestRecord: "no-manifest-record"
-  of pcoNoLockDirty: "no-lock-dirty-siblings"
-  of pcoSkippedNoWorkspace: "skipped-no-workspace"
-  of pcoNoLockFailed: "no-lock-failed"
-  of pcoSkippedMembershipRepo: "skipped-membership-repo"
-  of pcoSkippedGitOperation: "skipped-git-operation-in-progress"
-  of pcoInertGitStateUnknown: "inert-git-state-unknown"
 
 proc postCommitPublicationTag(state: PostCommitPublication): string =
   case state
@@ -53283,6 +53224,39 @@ const PinRegressionAllowEnv* = "REPRO_ALLOW_PIN_REGRESSION"
   ## environment variable rather than a flag because the hook runs inside
   ## `git commit`: nobody invokes it, so a flag would have nowhere to go.
 
+const SkipLockRefreshEnv* = "REPRO_SKIP_LOCK_REFRESH"
+  ## `REPRO_SKIP_LOCK_REFRESH=1 git commit …` — this ONE commit's managed
+  ## `pre-commit` hook leaves both commit-time lock writers alone: the
+  ## `repro.lock` sibling re-pin (§13.3) and the `flake.lock` refresh
+  ## (§13.6). Nothing is written and nothing is staged; the hook says so on
+  ## stderr, naming the locks it would have touched.
+  ##
+  ## Why it exists: without it a commit whose stated scope is "no dependency
+  ## pin change" cannot be made from a workspace checkout whose siblings have
+  ## moved — the hook re-pins every moved sibling into every commit (reprobuild-
+  ## pm issue 2026-09-27 "pre-commit hook repins flake.lock at a sibling HEAD").
+  ##
+  ## Why it is safe: it postpones a recording, it does not waive one. The
+  ## pre-push gate (`repro check --mode=pre-push`, NF-3 and §13.3) still
+  ## refuses a lock that lags its sibling checkouts, so the pins must be
+  ## recorded — by a later commit without the variable, or by `repro flake
+  ## refresh-lock` / `repro lock refresh` — before anything is pushed. It
+  ## waives no CHECK either: the recipe/lock consistency rules (§16.3 H1 /
+  ## H2) still judge the locks the commit carries.
+  ##
+  ## Set means non-empty and not `0` (`skipLockRefreshRequested`), so
+  ## `REPRO_SKIP_LOCK_REFRESH=0` in an exported environment reads as "off".
+  ## Only the pre-commit hook site honours it. The HL-10 lock-update node a
+  ## certifying `repro test` runs does NOT: that node exists to make the tested
+  ## content the committed content, and skipping it would certify a tree the
+  ## next commit is going to change.
+
+proc skipLockRefreshRequested*(value: string): bool =
+  ## ``value`` is ``getEnv(SkipLockRefreshEnv)``: set when non-empty and not
+  ## ``0`` (surrounding whitespace ignored).
+  let v = value.strip()
+  v.len > 0 and v != "0"
+
 type
   SiblingPinRelation* = enum
     ## Where a sibling checkout's HEAD stands against the revision a lock pins.
@@ -53316,7 +53290,16 @@ type
     node*: string
     oldRev*: string
     newRev*: string
-    dropped*: seq[string]  ## revision-derived fields the move removes
+    dropped*: seq[string]
+      ## Revision-derived fields the OLD node carried that nix does not report
+      ## for the new revision, removed rather than left describing the old
+      ## content. Empty in the ordinary case.
+    recomputed*: seq[string]
+      ## The derived fields (`narHash`, `lastModified`, `revCount`) written
+      ## for the new revision, as nix reported them.
+    sibling*: string
+      ## The workspace checkout the new revision was observed in ("" when the
+      ## caller did not classify rows against checkouts).
 
   FlakeDeclinedPinFact* = object
     ## One input whose pin the refresh declined to move because its lock node
@@ -53359,6 +53342,11 @@ type
     plannedRevisions*: seq[tuple[input, rev: string]]
       ## the observed revision filed for each input, the refresh's own input
     moves*: seq[FlakePlannedMove] ## what ``plannedText`` moves
+    derived*: Table[string, JsonNode]
+      ## Per input, the derived fields nix reported for its new revision
+      ## (``fetchFlakeRevisionFields``). The hook re-plans over a subset of
+      ## ``plannedRevisions`` when it holds a repository back (§16.3 H3), and
+      ## the re-plan must write the same nodes without asking nix again.
     declinedPins*: seq[FlakeDeclinedPinFact]
       ## inputs held because `flake.nix` states their revision (filled
       ## whether or not anything else moved)
@@ -53388,6 +53376,9 @@ proc flakeRefreshedDiagnostic*(moves: openArray[FlakePlannedMove];
   var moved: seq[string]
   for r in moves:
     moved.add(r.input & ": " & r.oldRev & " -> " & r.newRev &
+      (if r.recomputed.len > 0:
+         " (" & r.recomputed.join("/") & " from nix)"
+       else: "") &
       (if r.dropped.len > 0: " (dropped " & r.dropped.join("/") & ")" else: ""))
   "flake.lock refreshed from observed sibling HEADs — " & moved.join("; ") &
     (if withheld.len > 0: "; WITHHELD: " & withheld.join(" | ") else: "") &
@@ -53688,7 +53679,8 @@ proc pinRegressionAllowanceNotes*(allowance: PinRegressionAllowance;
 proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
   toolProvisioning: ToolProvisioningMode;
   allowRegression: seq[string] = @[]; planOnly = false;
-  label = "repro pre-commit"): FlakeCommitRefresh
+  label = "repro pre-commit"; deriveFields = true;
+  announce = true): FlakeCommitRefresh
   ## NF-2 — forward declaration. The implementation lives beside the rest of
   ## the flake-coexistence code far below (it needs the NF-1 override-set
   ## machinery); the commit hook that drives it is here.
@@ -53703,9 +53695,17 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
   ## ``planOnly`` classifies and plans everything and stops where it would
   ## write (``planned``, ``plannedText``): the `pre-commit` hook plans both
   ## locks together and writes them itself (§16.3 H3).
+  ##
+  ## ``deriveFields`` asks nix for each moved node's `narHash` /
+  ## `lastModified` / `revCount` (``fetchFlakeRevisionFields``); a move nix
+  ## cannot answer for is withheld. ``false`` keeps nix off the would-write
+  ## predicate: the moves are then reported (``wouldChange``, ``moves``)
+  ## but nothing is ``planned``. ``announce = false`` keeps the per-input
+  ## warnings off stderr, for a caller that only reports the plan.
 
 proc replanFlakeLockText(originalText: string;
-    revisions: seq[tuple[input, rev: string]]; flakeRoot: string):
+    revisions: seq[tuple[input, rev: string]]; flakeRoot: string;
+    derived: Table[string, JsonNode]):
     tuple[ok: bool; text: string; moves: seq[FlakePlannedMove];
           diagnostic: string]
   ## HL-11 H3 — forward declaration of the rewrite a planned refresh made,
@@ -55786,7 +55786,14 @@ proc preCommitReproLock(site: CommitTimeWriterSite;
     elif plan.changed:
       outcome.written.add(plan.lockPath)
       outcome.changes.add(plan.line)
-      stderr.writeLine(label & ": " & plan.line)
+      # From the hook, the announcement also names the one-commit opt-out:
+      # this line is where a committer learns a pin moved without being asked,
+      # so it is where they need to learn how not to.
+      stderr.writeLine(label & ": " & plan.line &
+        (if site == ctwsPreCommitHook:
+           " (set " & SkipLockRefreshEnv & "=1 on a commit to leave its " &
+             "locks alone)"
+         else: ""))
       let staged = stageRefreshedFlakeLock(repoRoot, plan.lockPath,
         useHookIndex = site == ctwsPreCommitHook)
       if staged.ok:
@@ -56051,6 +56058,22 @@ proc applyPreCommitFlakeLock(site: CommitTimeWriterSite;
     of ctwsPreCommitHook:
       line.add("; staged into this commit")
       notePreCommitRepin(workspaceRoot, repoRoot, flake.lockPath)
+      # SAID, on the terminal, one line per moved input — as loudly as the
+      # refusals and withholdings this refresh prints, and as the
+      # `repro.lock` re-pin announces itself. Before this the move reached
+      # the commit with a line in `pre-commit-lock.log` and nothing else, so
+      # a commit that staged two test files could carry an unrelated pin
+      # change nobody saw being made (reprobuild-pm issue 2026-09-27).
+      for m in flake.moves:
+        stderr.writeLine(label & ": flake.lock: input '" & m.input &
+          "' re-pinned " & m.oldRev & " -> " & m.newRev &
+          (if m.sibling.len > 0: " from the sibling checkout " & m.sibling
+           else: "") &
+          (if m.recomputed.len > 0:
+             " (" & m.recomputed.join("/") & " from nix)"
+           else: "") &
+          "; flake.lock staged into this commit (set " &
+          SkipLockRefreshEnv & "=1 on a commit to leave its locks alone)")
     of ctwsLockUpdateNode:
       stderr.writeLine(label & ": " & flake.line)
       line.add("; staged")
@@ -56315,10 +56338,16 @@ proc coordinateCommitRepin(repoRoot, workspaceRoot: string;
       else: kept.add(r)
     if heldAny:
       let replanned = replanFlakeLockText(flake.originalText, kept,
-        flake.flakeRoot)
+        flake.flakeRoot, flake.derived)
       if replanned.ok:
         flake.plannedText = replanned.text
+        # The re-plan knows nothing about checkouts; keep where each surviving
+        # move was observed, for the hook's announcement.
+        var siblingOf = initTable[string, string]()
+        for m in flake.moves: siblingOf[m.input] = m.sibling
         flake.moves = replanned.moves
+        for m in flake.moves.mitems:
+          m.sibling = siblingOf.getOrDefault(m.input, "")
       else:
         # The rewriter accepted this document a moment ago; failing now is a
         # malfunction. Write nothing rather than the unheld plan.
@@ -56421,6 +56450,11 @@ proc preCommitConsistencyOutsideWorkspace(repoRoot: string): int =
   ## nothing is refreshed, but H1 and H2 need only the recipe and the locks
   ## the commit carries, read from the index, and they apply to every repo
   ## that has the locks. Returns 1 — git refuses the commit — on a violation.
+  ##
+  ## Also the whole of the hook for a commit made with
+  ## `REPRO_SKIP_LOCK_REFRESH` (``SkipLockRefreshEnv``) inside a workspace:
+  ## nothing is re-pinned there either, and the same rules judge the same
+  ## index.
   var consistency: ConsistencyReport
   try:
     consistency = checkRecipeLockConsistency(
@@ -56446,7 +56480,8 @@ proc preCommitConsistencyOutsideWorkspace(repoRoot: string): int =
 proc planCommitTimeLockWriters*(workspaceRoot, repoRoot: string;
     toolProvisioning: ToolProvisioningMode;
     allowance: PinRegressionAllowance;
-    certificatePolicy = CertificatePolicySnapshotPlan()):
+    certificatePolicy = CertificatePolicySnapshotPlan();
+    announce = true):
     CommitTimeWritersPlan =
   ## The would-write predicate (HL-10): what ``applyCommitTimeLockWriters``
   ## would do to ``repoRoot`` now, for each writer the managed `pre-commit`
@@ -56459,6 +56494,13 @@ proc planCommitTimeLockWriters*(workspaceRoot, repoRoot: string;
   ## it may report a lock the writers then hold back. That over-estimate is
   ## safe for its one caller: it only defers taking the before-run state to
   ## the node, which takes it whether or not anything was written.
+  ##
+  ## Nor does it run nix: a moved `flake.lock` pin counts as a would-write
+  ## before nix has been asked for the new revision's `narHash`, so the
+  ## answer errs towards "yes" for an input whose fetch would then fail and
+  ## be withheld — the same safe over-estimate. ``announce = false`` keeps
+  ## the `flake.lock` refresh's per-input warnings off stderr, for a caller
+  ## that only reports the plan (the `REPRO_SKIP_LOCK_REFRESH` notice).
   let root = absolutePath(repoRoot)
   let hasReproLock = commitTimeHasReproLock(root)
   if hasReproLock:
@@ -56477,7 +56519,8 @@ proc planCommitTimeLockWriters*(workspaceRoot, repoRoot: string;
     try:
       flake = refreshFlakeLockAtCommit(workspaceRoot, root, toolProvisioning,
         allowance.names, planOnly = true,
-        label = commitTimeWriterLabel(ctwsLockUpdateNode))
+        label = commitTimeWriterLabel(ctwsLockUpdateNode),
+        deriveFields = false, announce = announce)
     except CatchableError as err:
       flake.failure = "flake-lock error: " & err.msg
     if flake.failure.len > 0:
@@ -56760,6 +56803,11 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
   ## The writers themselves are ``applyCommitTimeLockWriters``, shared with
   ## the lock-update node a certifying ``repro test`` runs before its tests
   ## (HL-10): for content certified that way this hook finds nothing to do.
+  ##
+  ## ``REPRO_SKIP_LOCK_REFRESH`` (``SkipLockRefreshEnv``) set for the commit
+  ## makes this hook run neither writer — it says so, and only the H1 / H2
+  ## consistency rules judge the commit. Only this site honours it; the
+  ## lock-update node does not.
   let parsed = parsePostCommitArgs(args)
   let timestamp = isoTimestampNow()
   # The managed hook body cd's to the repo root before dispatching, so an
@@ -56831,10 +56879,56 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
       stderr.writeLine("repro " & standDown.report)
     return 0
 
-  # (2) The writers, shared with the HL-10 lock-update node: ONE PLAN OVER
+  let allowance = parsePinRegressionAllowance(getEnv(PinRegressionAllowEnv))
+
+  # (2) The committer's one-commit opt-out (`SkipLockRefreshEnv`): neither
+  # writer runs, so nothing is written and nothing is staged. Said on stderr
+  # with the locks it would have touched — asked of the would-write predicate,
+  # which plans both writers without writing, without running nix, and (with
+  # ``announce = false``) without printing their per-input warnings, which
+  # describe a refresh that is not happening. The regression rule and the
+  # recipe-constraint rule (§16.4) are not applied either: they guard a pin
+  # being WRITTEN, and none is. The consistency rules (§16.3 H1 / H2) are
+  # not waived: they judge the locks this commit carries, read from the
+  # index exactly as for a commit made outside a workspace.
+  if skipLockRefreshRequested(getEnv(SkipLockRefreshEnv)):
+    var would: seq[string]
+    var regressions: seq[string]
+    try:
+      let plan = planCommitTimeLockWriters(workspaceRoot, repoRoot,
+        parsed.toolProvisioning, allowance, announce = false)
+      for path in plan.wouldWrite:
+        let name = extractFilename(path)
+        if name notin would: would.add(name)
+      for r in plan.refused: regressions.add(r.lock & " " & r.sibling)
+    except CatchableError:
+      # The plan is a courtesy for the message; the skip does not depend on it.
+      discard
+    let notice = SkipLockRefreshEnv & " is set, so this commit's lock " &
+      "refresh was SKIPPED: " &
+      (if would.len > 0:
+         would.join(" and ") & " would have been re-pinned to the sibling " &
+         "checkouts and staged, and " &
+         (if would.len > 1: "were" else: "was") & " left exactly as committed"
+       else: "no lock needed re-pinning") &
+      (if regressions.len > 0:
+         " (the refresh would have REFUSED this commit over a backward pin: " &
+         regressions.join(", ") & ")"
+       else: "") &
+      ". Nothing was written or staged. The pre-push gate refuses a lock " &
+      "that lags its sibling checkouts, so record the pins before pushing — " &
+      "with a later commit made without " & SkipLockRefreshEnv &
+      ", or `repro flake refresh-lock` / `repro lock refresh`."
+    stderr.writeLine("repro pre-commit: " & notice)
+    appendPreCommitLog(workspaceRoot, timestamp &
+      (if hasFlake: " flake-lock" else: "") &
+      (if hasReproLock: " repro-lock" else: "") &
+      " skipped-by-request: " & notice)
+    return preCommitConsistencyOutsideWorkspace(repoRoot)
+
+  # (3) The writers, shared with the HL-10 lock-update node: ONE PLAN OVER
   # BOTH LOCKS (§16.3 H3), reconciled, checked for consistency (H1 / H2),
   # and written only when nothing refuses (``applyCommitTimeLockWriters``).
-  let allowance = parsePinRegressionAllowance(getEnv(PinRegressionAllowEnv))
   var outcome = applyCommitTimeLockWriters(ctwsPreCommitHook, workspaceRoot,
     repoRoot, parsed.toolProvisioning, timestamp, allowance)
   if not commitTimeWritersRefused(outcome):
@@ -69063,6 +69157,13 @@ type
     fullDetail*: string
     remedy*: string
     fixKind*: HealthFixKind
+    data*: JsonNode
+      ## Structured facts a row carries beside its prose, emitted as ``data``
+      ## under ``--json`` when set; nil for a row that has none. The
+      ## ``lock-writer`` row is the first user: CLI/health.md requires its
+      ## ``--json`` to carry the run length, the timestamps and the full
+      ## reason list, which an agent should not have to scrape from a
+      ## sentence.
 
   HealthArgs = object
     workspaceRoot: string
@@ -69495,6 +69596,35 @@ proc formatFindingList(items: openArray[string]; verbose: bool;
     let shown = items[0 ..< maxShown]
     let elided = items.len - maxShown
     shown.join(", ") & " (+" & $elided & " more)"
+
+proc lockWriterOutcomeCheck(workspaceRoot, self: string): HealthCheck =
+  ## The ``lock-writer`` row of ``repro health`` (CLI/health.md, **Lock
+  ## writer**): reads the tail of ``post-commit-lock.log`` and reports the
+  ## run of refusals since the newest written record.
+  ##
+  ## Every decision is ``evaluateLockWriterTrace``'s, in
+  ## ``repro_cli_support/post_commit_trace``, which is pure and unit-tested;
+  ## this proc only reads the file and maps the verdict onto a row.
+  ##
+  ## Never ``--fix``-able: the row only reads, and each refusal's remedy is a
+  ## change the operator makes (commit or stash a sibling, restore a
+  ## checkout), not one a doctor may make for them.
+  let path = postCommitLogPath(workspaceRoot)
+  let tail = readPostCommitTraceTail(path)
+  let row = evaluateLockWriterTrace(tail.text, getTime(), path,
+    tracePresent = tail.present, tailOnly = tail.tailOnly,
+    reproCommand = self, readError = tail.error)
+  HealthCheck(
+    name: "lock-writer",
+    status:
+      case row.verdict
+      of lwvOk: hsOk
+      of lwvWarn: hsWarn
+      of lwvFail: hsFail,
+    detail: row.detail,
+    remedy: row.remedy,
+    fixKind: hfNone,
+    data: row.data)
 
 type
   CheckedOutPushPolicy* = object
@@ -70365,6 +70495,15 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     disagreement between shells, which is PG-14's.)
   checks.add(hookInterpreterSkewCheck(parsed.workspaceRoot))
 
+  # 8d. The post-commit lock writer's OUTCOME (CLI/health.md, **Lock writer**).
+  #
+  #     8b and 8c answer "is the hook installed" and "can the resolved `repro`
+  #     service it"; both stayed ``ok`` through eighteen days in which the
+  #     writer refused on every commit, because neither looks at what a run
+  #     DID. The writer never fails a commit and says so in one stderr line,
+  #     so the only durable record is its trace, and this row is what reads it.
+  checks.add(lockWriterOutcomeCheck(parsed.workspaceRoot, self))
+
   # 9. Push gateway — PG-16. OBSERVED state, per §7.6.6, replacing a constant.
   #
   #    What this used to be, verbatim, and why it had to go (spec §1.6c): an
@@ -71024,6 +71163,8 @@ proc toJsonNode*(check: HealthCheck): JsonNode =
     result["digest"] = %check.detail
   result["remedy"] = %check.remedy
   result["fixable"] = %(check.fixKind != hfNone)
+  if not check.data.isNil:
+    result["data"] = check.data
 
 proc healthChecksToJson*(checks: seq[HealthCheck]): JsonNode =
   result = newJObject()
@@ -86510,12 +86651,12 @@ proc flakeLockPinnedRevisions*(lockText: string):
   ## revision and the ones that cannot.
   ##
   ## Note what is NOT consulted: `narHash`, `lastModified` and `revCount`.
-  ## NF-2's refresh DELETES those three from any node whose `rev` it moved (a
-  ## stale `narHash` makes nix 2.32.8 silently evaluate the OLD tree, and a
-  ## correct one cannot be computed for an unpushed sibling revision), so a
-  ## verifier that required them would call every lock NF-2 wrote corrupt.
-  ## `rev` is a content hash of the tree git hands nix, so it is the whole of
-  ## the pin this report needs.
+  ## NF-2's refresh now writes them from nix for every node whose `rev` it
+  ## moves, but earlier versions DELETED them, and those `rev`-only nodes are
+  ## in committed history and in checkouts today; a hand-written lock may lack
+  ## them too. A verifier that required them would call every such lock
+  ## corrupt. `rev` is a content hash of the tree git hands nix, so it is the
+  ## whole of the pin this report needs.
   result.pins = initTable[string, tuple[node, rev: string]]()
   result.unpinned = initTable[string, tuple[node, reason: string]]()
   var doc: JsonNode
@@ -87420,66 +87561,64 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
 #
 #   * the SOLVER re-run (`nix flake update <input>`) decides WHICH VERSION is
 #     selected. Expensive, semantic, and it stays an explicit operation — it
-#     must never become a side effect of committing. Nothing below runs it, or
-#     any other nix evaluation;
+#     must never become a side effect of committing. Nothing below runs it;
 #   * SIBLING PINNING records WHAT IS CHECKED OUT. Cheap — one `git rev-parse
 #     HEAD` per overridden sibling — and it belongs on the commit path.
 #
-# Only the second is here.
+# Only the second is here. Recording a pin does need nix once per input whose
+# revision MOVED — to report the new revision's derived fields, below — but
+# that is a fetch of one known revision, not a solve: nothing is selected.
 #
-# ## Why the derived fields are DELETED rather than left alone or recomputed
+# ## Why the derived fields are RECOMPUTED rather than left alone or deleted
 #
 # A `locked` node for a git/github input carries `rev` plus fields DERIVED from
 # the revision's content: `narHash`, `lastModified`, `revCount`. Three
-# treatments are possible and all three were measured on this host with nix
+# treatments are possible, and all three were measured on this host with nix
 # 2.32.8, against local git revisions differing in one file's content.
 #
 # (i) LEAVE THEM — rejected. `rev` rewritten, `narHash` left at the previous
 #     revision's value: `nix eval .#x` returned the OLD file's content while
 #     `flake.lock` named the NEW revision. No warning, no error. That is §5's
 #     inert knob in its purest form — a pin that reads correct and builds
-#     something else — so a refresh doing this would have REPLACED one silent
-#     lie with another.
+#     something else.
 #
-# (ii) RECOMPUTE THEM — rejected, and not merely on cost. Computing a correct
-#     `narHash` for a revision means nix must FETCH that revision from the
-#     input's declared URL. Re-pinning one input to a known revision is not a
-#     solver re-run, so this would not have violated the "never run the solver
-#     on the commit path" rule; what rules it out is that the fetch cannot
-#     succeed at the moment this hook runs. Measured:
+# (ii) DELETE THEM — what this refresh did until reprobuild-pm issue
+#     2026-09-27 ("pre-commit hook repins flake.lock at a sibling HEAD and
+#     drops narHash"). nix treats a `rev`-only node as fully locked and
+#     resolves the new content, and it does not re-add the fields on a later
+#     evaluation (measured: `nix eval`, `nix flake metadata` and four further
+#     evaluations left the file byte- and mtime-identical). But the node is
+#     WEAKER than the one it replaced: it no longer records the content hash
+#     that makes the fetch verifiable, and it is not what `nix flake update`
+#     writes for the same revision.
 #
-#       * warm (nix has the revision): `nix flake metadata --offline --json
-#         '<url>?rev=<sha>'` costs ~120 ms per input, against a ~65 ms floor
-#         for starting nix at all;
-#       * cold (a revision nix has never seen, fetchable): ~135-180 ms;
-#       * UNPUSHED (the revision exists only in the sibling's local checkout,
-#         while the flake input's URL is that sibling's ORIGIN): the fetch
-#         FAILS — `error: Failed to fetch git repository … fatal: git
-#         upload-pack`.
+#     It was chosen because recomputing had looked impossible at the moment
+#     the hook runs: the fetch nix needs FAILS for a revision that exists only
+#     in the sibling's local checkout (`error: Failed to fetch git repository
+#     … fatal: git upload-pack`), and that was the normal case — commit in a
+#     sibling, then commit here, before pushing either. That premise is gone.
+#     NF-2 no longer records an unpushed revision at all (`flakeRowIsRecordable`,
+#     `flakeAnnotatePublication`; pinned by
+#     `t_an_unpushed_sibling_revision_is_not_recorded`), so every revision this
+#     refresh records is published, and fetchable by construction.
 #
-#     The third case is the normal state on a commit hook: a developer commits
-#     in a sibling and then commits here, before either is pushed. Recomputing
-#     would therefore fail exactly when the refresh matters most, and its
-#     failure mode is per-commit latency plus no hash anyway.
+# (iii) RECOMPUTE THEM — chosen. For each input whose pin moves, nix is asked
+#     for the new revision's fields (`fetchFlakeRevisionFields`: one pure
+#     `builtins.fetchTree` over the node's own locked attributes, ~0.15 s cold
+#     and ~0.1 s warm per moved input), and exactly the fields nix reports are
+#     written — replaced in place, or inserted at the sorted position nix's own
+#     writer uses — so the node is the one `nix flake lock` would write.
+#     `t_a_refreshed_flake_pin_carries_what_nix_would_write` checks the values
+#     against an independent `nix flake lock`, and
+#     `t_a_refreshed_lock_does_not_churn_under_nix` that a later lock-writing
+#     evaluation leaves the result alone.
 #
-# (iii) DELETE THEM — chosen. `rev` rewritten and `narHash` / `lastModified` /
-#     `revCount` removed: nix treats the node as fully locked (a node carrying
-#     a `rev` needs no re-solve) and resolves the NEW content.
-#
-#     The obvious objection to (iii) is churn — if nix RE-ADDS the fields on
-#     the next evaluation, `flake.lock` changes underfoot after every refresh,
-#     `direnv`'s `watch_file` re-fires, and "most commits do not touch the
-#     lock" is defeated one evaluation later. Measured directly, with lock
-#     writing ALLOWED (no `--no-write-lock-file`), on a clean tree carrying a
-#     refreshed lock: `nix eval`, `nix flake metadata` and four further
-#     evaluations each left `flake.lock` BYTE- and MTIME-identical and
-#     `git status` empty, while evaluating to the new revision's content.
-#     nix does not re-add them. The objection does not hold, and
-#     `t_a_refreshed_lock_does_not_churn_under_nix` pins it.
-#
-# So the refresh drops exactly the fields it cannot honestly recompute, and
-# the integrity they carried is not silently downgraded: it is DEFERRED to the
-# `rev`, which is itself a content hash of the tree git will hand nix.
+#     Where nix cannot answer — not installed, the forge unreachable, offline —
+#     the input is WITHHELD, never filed weaker: the lock is left byte-
+#     identical for it, the commit proceeds, the skip is said on stderr with
+#     nix's error and the remedy (`repro flake refresh-lock`), and NF-3's
+#     pre-push gate refuses the lagging lock, so nothing escapes
+#     (`t_an_unfetchable_flake_revision_is_withheld`).
 #
 # ## …and why some `rev`s are not moved at all
 #
@@ -87578,15 +87717,12 @@ const
     ## either prefix finds every line that path can emit.
   flakeLockRevisionDerivedKeys = ["narHash", "lastModified", "revCount"]
     ## Fields of a `locked` node that describe the CONTENT of the revision
-    ## named by `rev`. They cannot be recomputed without fetching the revision
-    ## — which fails for a sibling commit that is not pushed yet — so a
-    ## revision move deletes them.
-    ##
-    ## Measured, because the natural guess is wrong in both directions: nix
-    ## does NOT reject a `locked` node that lacks them (it is locked by `rev`),
-    ## and nix does NOT re-add them on a later evaluation (the file stays byte-
-    ## and mtime-identical). See the block comment above for the full three-way
-    ## measurement and `t_a_refreshed_lock_does_not_churn_under_nix`.
+    ## named by `rev`. A revision move rewrites them from what nix reports for
+    ## the new revision (`fetchFlakeRevisionFields`), and withholds the move
+    ## when nix cannot report them — never leaving the old values under the new
+    ## `rev` (nix would build the OLD tree) and never deleting them (the node
+    ## would lose the hash that makes its fetch verifiable). See the block
+    ## comment above for the three treatments and their measurements.
 
 type
   JsonMemberSpan = object
@@ -87686,16 +87822,34 @@ proc jsonMemberIndex(members: openArray[JsonMemberSpan]; key: string): int =
 
 proc rewriteJsonObjectText(text: string; objStart, objEnd: int;
     members: openArray[JsonMemberSpan]; dropKeys: openArray[string];
-    replacements: Table[string, string]): string =
+    replacements: Table[string, string];
+    insertions: openArray[tuple[key, valueText: string]] = []): string =
   ## Rebuild ONE JSON object's text from its own members: drop the named keys,
-  ## substitute the named members' value text, and preserve everything else —
-  ## member order, indentation and the exact separator the document uses.
+  ## substitute the named members' value text, insert new members, and
+  ## preserve everything else — member order, indentation and the exact
+  ## separator the document uses.
   ##
   ## Rebuilding the object as a whole (rather than splicing each member
   ## independently) is deliberate: deleting a member that happens to be last
   ## and one that is not last produces OVERLAPPING deletion ranges, and an
   ## overlapping splice corrupts the file. Composing the survivors cannot
   ## overlap by construction.
+  ##
+  ## ## Where an inserted member goes
+  ##
+  ## nix's lock writer emits every object with its keys SORTED (it serialises
+  ## through nlohmann::json's default `std::map`-backed object — the order
+  ## every lock `nix flake lock` writes shows), so a member nix would have
+  ## written is inserted where nix would have put it: before the first
+  ## surviving member whose key sorts after it, or last. Against an object
+  ## that is sorted already, which every nix-written one is, the result is
+  ## exactly the object nix would write. Against one that is not, it is still
+  ## a deterministic position, and no existing member moves. An insertion whose
+  ## key is already a member is a replacement, and is treated as one.
+  ##
+  ## The new member's spelling borrows the document's own: the text between
+  ## a key's closing quote and its value (`": "` in nix's files) is taken from
+  ## the first existing member.
   if members.len == 0: return text[objStart ..< objEnd]
   let prefix = text[(objStart + 1) ..< members[0].keyStart]
   let suffix = text[members[^1].valueEnd ..< objEnd]
@@ -87705,28 +87859,76 @@ proc rewriteJsonObjectText(text: string; objStart, objEnd: int;
   let separator =
     if members.len >= 2: text[members[0].valueEnd ..< members[1].keyStart]
     else: ","
+  # `m.key` is the raw text between the key's quotes, so the key token is
+  # exactly `m.key.len + 2` bytes long and what follows it up to the value is
+  # the document's colon spelling.
+  let firstKeyEnd = members[0].keyStart + members[0].key.len + 2
+  let colon = text[firstKeyEnd ..< members[0].valueStart]
+  var replaced = replacements
+  var toInsert: seq[tuple[key, valueText: string]]
+  for ins in insertions:
+    if jsonMemberIndex(members, ins.key) >= 0 and ins.key notin dropKeys:
+      replaced[ins.key] = ins.valueText
+    else:
+      toInsert.add(ins)
+  toInsert.sort(proc (a, b: tuple[key, valueText: string]): int =
+    cmp(a.key, b.key))
   var parts: seq[string]
+  var next = 0
   for m in members:
     if m.key in dropKeys: continue
+    while next < toInsert.len and toInsert[next].key < m.key:
+      parts.add("\"" & toInsert[next].key & "\"" & colon &
+        toInsert[next].valueText)
+      inc next
     let valueText =
-      if replacements.hasKey(m.key): replacements[m.key]
+      if replaced.hasKey(m.key): replaced[m.key]
       else: text[m.valueStart ..< m.valueEnd]
     parts.add(text[m.keyStart ..< m.valueStart] & valueText)
+  while next < toInsert.len:
+    parts.add("\"" & toInsert[next].key & "\"" & colon &
+      toInsert[next].valueText)
+    inc next
   "{" & prefix & parts.join(separator) & suffix
 
 type
   FlakeLockRewrite* = object
-    ## One input whose pin this refresh moved.
+    ## One input whose pin this refresh moved (or, in
+    ## ``FlakeLockRefresh.pending``, is about to move once nix has reported
+    ## the new revision's derived fields).
     input*: string
     node*: string
     oldRev*: string
     newRev*: string
+    sibling*: string
+      ## The workspace checkout the new revision was observed in. Filled by
+      ## the caller that classified the rows (``executeFlakeLockRefresh``);
+      ## the pure text rewrite does not know about checkouts.
+    recomputed*: seq[string]
+      ## The derived fields (`narHash`, `lastModified`, `revCount`) written
+      ## for the new revision, as nix reported them.
     dropped*: seq[string]
+      ## Derived fields the OLD node carried that nix does not report for the
+      ## new revision (a `revCount` on a node that became shallow, say), and
+      ## which were therefore removed rather than left describing the old
+      ## content. Empty in the ordinary case.
+    fetchAttrs*: JsonNode
+      ## ``pending`` only: the node's `locked` attributes with `rev` set to
+      ## the new revision and the derived fields (and `dir`, which
+      ## `builtins.fetchTree` rejects) removed — exactly what nix is asked to
+      ## fetch. nil on a completed rewrite.
 
   FlakeLockRefresh* = object
     changed*: bool          ## did any pin actually move?
     text*: string           ## the refreshed document (== the input when not changed)
     rewrites*: seq[FlakeLockRewrite]
+    pending*: seq[FlakeLockRewrite]
+      ## Inputs whose pin WOULD move, but for which the caller supplied no
+      ## derived fields (`narHash` / `lastModified` / `revCount` of the new
+      ## revision). They are NOT rewritten: a node naming the new `rev` without
+      ## them would be weaker than the one it replaces. Each carries
+      ## ``fetchAttrs``, the attribute set to ask nix about; the caller asks,
+      ## and calls again with the answers (``executeFlakeLockRefresh``).
     notices*: seq[string]   ## inputs this refresh could NOT pin, and why
     declined*: seq[string]
       ## One sentence per input whose pin this refresh REFUSED to move because
@@ -87772,12 +87974,26 @@ proc flakeDeclinedPinNotice(input, node, declaredRev, observedRev,
 
 proc refreshFlakeLockText*(lockText: string;
     revisions: openArray[tuple[input, rev: string]];
-    flakeRoot = ""): FlakeLockRefresh =
+    flakeRoot = "";
+    derived = initTable[string, JsonNode]()): FlakeLockRefresh =
   ## Rewrite the `locked` node of each named input to the given revision,
   ## leaving EVERY other byte of the document untouched. An input whose pin
   ## already names that revision produces no rewrite at all — that is what
   ## makes `commit --amend` and a rebase replay byte-identical rather than
   ## churning the lock.
+  ##
+  ## ``derived`` carries, per INPUT name, the fields nix reports for the new
+  ## revision's content — a JSON object holding `narHash` and whichever of
+  ## `lastModified` / `revCount` nix reports for that input (see
+  ## ``fetchFlakeRevisionFields``). An input whose pin would move is rewritten
+  ## ONLY when ``derived`` has its entry: the node's derived fields are then
+  ## replaced, inserted (at nix's sorted position) or — for one the old node
+  ## carried and nix no longer reports — removed, so the node reads exactly as
+  ## `nix flake lock` would write it. Without an entry the input is returned
+  ## in ``pending`` with the attributes to fetch, and the document is not
+  ## touched for it.
+  ##
+  ## Pure: no process is run and no file is read. Fetching is the caller's.
   result.text = lockText
   var doc: JsonNode
   try:
@@ -87923,16 +88139,48 @@ proc refreshFlakeLockText*(lockText: string;
             node: nodeKey, declaredRev: declaredRev, observedRev: entry.rev))
           continue
 
-    var dropped: seq[string]
-    for key in flakeLockRevisionDerivedKeys:
-      if jsonMemberIndex(fields, key) >= 0: dropped.add(key)
+    let oldRev = oldRevText.strip(chars = {'"'})
+    let fieldsFromNix = derived.getOrDefault(entry.input, nil)
+    if fieldsFromNix.isNil or fieldsFromNix.kind != JObject or
+        not fieldsFromNix.hasKey("narHash"):
+      # No content hash for the new revision yet. Moving `rev` without one
+      # would file a node WEAKER than the one it replaces — the defect of
+      # reprobuild-pm issue 2026-09-27 — so the pin stays where it is and the
+      # caller is told exactly what to ask nix.
+      var attrs = newJObject()
+      let lockedNode = nodes{nodeKey}{"locked"}
+      if not lockedNode.isNil and lockedNode.kind == JObject:
+        for key, value in lockedNode.pairs:
+          # `dir` names a subdirectory of the fetched tree that holds the
+          # flake; it is not a property of the tree, and `builtins.fetchTree`
+          # rejects it as an unknown attribute.
+          if key in flakeLockRevisionDerivedKeys or key == "dir": continue
+          attrs[key] = value
+      attrs["rev"] = %entry.rev
+      result.pending.add(FlakeLockRewrite(input: entry.input, node: nodeKey,
+        oldRev: oldRev, newRev: entry.rev, fetchAttrs: attrs))
+      continue
+
+    var dropped, recomputed: seq[string]
     var replacements = initTable[string, string]()
+    var insertions: seq[tuple[key, valueText: string]]
     replacements["rev"] = newRevText
+    for key in flakeLockRevisionDerivedKeys:
+      let present = jsonMemberIndex(fields, key) >= 0
+      if fieldsFromNix.hasKey(key):
+        recomputed.add(key)
+        if present: replacements[key] = $fieldsFromNix[key]
+        else: insertions.add((key: key, valueText: $fieldsFromNix[key]))
+      elif present:
+        # The old node carried a field nix does not report for the new
+        # revision. Keeping it would describe the OLD content under the new
+        # `rev`; nix itself would not write it, so neither does this.
+        dropped.add(key)
     edits.add((start: lockedStart, stop: lockedEnd,
       replacement: rewriteJsonObjectText(lockText, lockedStart, lockedEnd,
-        fields, dropped, replacements)))
+        fields, dropped, replacements, insertions)))
     result.rewrites.add(FlakeLockRewrite(input: entry.input, node: nodeKey,
-      oldRev: oldRevText.strip(chars = {'"'}), newRev: entry.rev,
+      oldRev: oldRev, newRev: entry.rev, recomputed: recomputed,
       dropped: dropped))
   if edits.len == 0:
     return
@@ -87948,19 +88196,221 @@ proc flakePlannedMoves(rewrites: openArray[FlakeLockRewrite]):
     seq[FlakePlannedMove] =
   for r in rewrites:
     result.add(FlakePlannedMove(input: r.input, node: r.node,
-      oldRev: r.oldRev, newRev: r.newRev, dropped: r.dropped))
+      oldRev: r.oldRev, newRev: r.newRev, dropped: r.dropped,
+      recomputed: r.recomputed, sibling: r.sibling))
 
 proc replanFlakeLockText(originalText: string;
-    revisions: seq[tuple[input, rev: string]]; flakeRoot: string):
+    revisions: seq[tuple[input, rev: string]]; flakeRoot: string;
+    derived: Table[string, JsonNode]):
     tuple[ok: bool; text: string; moves: seq[FlakePlannedMove];
           diagnostic: string] =
   ## The same rewrite ``refreshFlakeLockText`` made for a planned refresh,
   ## over fewer revisions. The hook calls it when it holds a repository back
   ## in both locks (§16.3 H3), so the document it writes is produced by the
-  ## one rewriter and nothing is spliced by hand.
-  let r = refreshFlakeLockText(originalText, revisions, flakeRoot)
+  ## one rewriter and nothing is spliced by hand. ``derived`` is the planned
+  ## refresh's own (``FlakeCommitRefresh.derived``): every surviving move
+  ## already has its fields, so nix is not asked again.
+  let r = refreshFlakeLockText(originalText, revisions, flakeRoot, derived)
   if r.failed: return (false, originalText, @[], r.diagnostic)
+  if r.pending.len > 0:
+    # Only a revision the plan itself filed reaches here, and the plan filed
+    # one only with its fields; a pending input is a malfunction, and writing
+    # around it would file part of a plan nobody reconciled.
+    var names: seq[string]
+    for p in r.pending: names.add(p.input)
+    return (false, originalText, @[], "no derived fields for " &
+      names.join(", "))
   (true, r.text, flakePlannedMoves(r.rewrites), "")
+
+# ---------------------------------------------------------------------------
+# Asking nix for a revision's derived fields
+#
+# One `nix eval` per moved input:
+#
+#     nix --extra-experimental-features 'nix-command flakes' eval --json --expr \
+#       'builtins.intersectAttrs { narHash = null; lastModified = null;
+#          revCount = null; } (builtins.fetchTree (builtins.fromJSON "<attrs>"))'
+#
+# where <attrs> is the node's own `locked` object with `rev` moved (see
+# `FlakeLockRewrite.fetchAttrs`). Each choice was measured on this host with
+# nix 2.32.8, against a real `git+file://` origin:
+#
+#   * `builtins.fetchTree` over the LOCKED ATTRIBUTES, rather than a flake-ref
+#     URL rebuilt from them, because the attributes are what the lock already
+#     holds for every input type (git, github, gitlab, …) and no URL syntax has
+#     to be reinvented per type;
+#   * PURE evaluation (no `--impure`): an attribute set carrying `rev` is a
+#     locked input, which pure mode fetches without complaint;
+#   * the attributes EMBEDDED as a JSON string literal, because `nix eval`
+#     does not auto-call an `--expr` with `--argstr` (it printed "cannot
+#     convert a function to JSON"), and reading a file or an environment
+#     variable would need `--impure`;
+#   * `shallow = false` added for a `git` node that does not say: `fetchTree`
+#     DEFAULTS git to shallow (references/nix src/libexpr/primops/
+#     fetchTree.cc: "fetchTree should fetch git repos with shallow = true by
+#     default"), and a shallow fetch reports no `revCount` — while flake input
+#     resolution, which wrote the lock, defaults to `shallow = false` and does.
+#     With it, the three fields equalled what `nix flake lock` wrote for the
+#     same revision, byte for byte; without it `revCount` was missing.
+#
+# Cost: 0.15 s cold (a revision nix had never fetched), 0.07–0.11 s warm, per
+# input — paid only on a commit whose sibling pin actually moves. A fetch that
+# fails (origin gone, offline) failed in 0.08 s with nix's own error.
+#
+# The environment is the caller's minus git's repository-local bindings: the
+# hook runs INSIDE `git commit`, which exports `GIT_DIR` / `GIT_INDEX_FILE`
+# for the repository being committed, and nix's git fetcher would otherwise
+# read them as describing the input it fetches.
+# ---------------------------------------------------------------------------
+
+type
+  FlakeRevisionFields* = object
+    ok*: bool
+    fields*: JsonNode
+      ## `narHash`, plus `lastModified` / `revCount` when nix reports them.
+    error*: string  ## why not, in nix's words where nix gave any
+
+proc nixStringLiteral(text: string): string =
+  ## ``text`` as a Nix double-quoted string literal. `$` is escaped
+  ## unconditionally so no `${` can open an interpolation.
+  result = "\""
+  for c in text:
+    case c
+    of '\\': result.add("\\\\")
+    of '"': result.add("\\\"")
+    of '$': result.add("\\$")
+    of '\n': result.add("\\n")
+    of '\r': result.add("\\r")
+    of '\t': result.add("\\t")
+    else: result.add(c)
+  result.add('"')
+
+proc flakeRevisionFetchExpr*(attrs: JsonNode): string =
+  ## The expression ``fetchFlakeRevisionFields`` evaluates, exposed so a case
+  ## can show what is asked.
+  var asked = attrs.copy()
+  if asked{"type"}.getStr() == "git" and not asked.hasKey("shallow"):
+    asked["shallow"] = %false
+  "builtins.intersectAttrs { narHash = null; lastModified = null; " &
+    "revCount = null; } (builtins.fetchTree (builtins.fromJSON " &
+    nixStringLiteral($asked) & "))"
+
+proc nixErrorSummary(stderrText: string; code: int): string =
+  ## nix's own reason, in one line: its last `error:` line (the innermost
+  ## cause — the frames above it are the evaluation trace), else the last
+  ## non-empty line. Backticks are rewritten because every message this lands
+  ## in reserves them for runnable commands.
+  for line in stderrText.splitLines():
+    let at = line.find("error:")
+    if at >= 0: result = line[at .. ^1].strip()
+  if result.len == 0:
+    for line in stderrText.splitLines():
+      if line.strip().len > 0: result = line.strip()
+  if result.len == 0:
+    result = "nix exited " & $code & " without saying why"
+  result = result.replace('`', '\'')
+
+proc fetchFlakeRevisionFields*(nixExe: string;
+    attrs: JsonNode): FlakeRevisionFields =
+  ## Ask ``nixExe`` for the derived fields of the revision ``attrs`` names.
+  ## Never raises; a failure comes back in ``error``.
+  var env = scrubbedGitRepositoryEnv()
+  # Loader controls of a provisioned profile must not reach a host tool that
+  # was not built against them (the reason `hostNixEnvironment` drops them
+  # for `nix-store`).
+  for key in ["LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT",
+              "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
+              "DYLD_INSERT_LIBRARIES"]:
+    if env.hasKey(key): env.del(key)
+  var errPath = ""
+  try:
+    let created = createTempFile("repro-nix-fetch-", ".stderr")
+    created.cfile.close()
+    errPath = created.path
+  except CatchableError:
+    result.error = "no temporary file for nix's stderr could be created"
+    return
+  defer:
+    try: removeFile(errPath)
+    except CatchableError: discard
+  # stdout carries the answer and nothing else; stderr (progress lines,
+  # warnings, the error trace) goes to a file, so a warning cannot land
+  # inside the JSON and an unread pipe cannot fill and hang nix.
+  let cmd = quoteShell(nixExe) &
+    " --extra-experimental-features " & quoteShell("nix-command flakes") &
+    " eval --json --expr " & quoteShell(flakeRevisionFetchExpr(attrs)) &
+    " 2>" & quoteShell(errPath)
+  var res: tuple[output: string, exitCode: int]
+  try:
+    res = uncontrolledExecCmdEx(cmd, options = {poUsePath}, env = env)
+  except CatchableError as err:
+    result.error = "nix could not be run (" & err.msg & ")"
+    return
+  if res.exitCode != 0:
+    var errText = ""
+    try: errText = readFile(errPath)
+    except CatchableError: discard
+    result.error = nixErrorSummary(errText, res.exitCode)
+    return
+  var answer: JsonNode
+  try:
+    answer = parseJson(res.output)
+  except CatchableError as err:
+    result.error = "nix printed something that is not JSON (" & err.msg & ")"
+    return
+  if answer.kind != JObject or answer{"narHash"}.isNil or
+      answer["narHash"].kind != JString or answer["narHash"].getStr().len == 0:
+    result.error = "nix reported no narHash for the revision"
+    return
+  for key in ["lastModified", "revCount"]:
+    if answer.hasKey(key) and answer[key].kind != JInt:
+      result.error = "nix reported a non-integer " & key
+      return
+  result.ok = true
+  result.fields = answer
+
+proc fetchPendingDerivedFields(pending: openArray[FlakeLockRewrite]):
+    tuple[derived: Table[string, JsonNode];
+          failed: seq[tuple[rewrite: FlakeLockRewrite; error: string]]] =
+  ## Ask nix for the derived fields of every pending move
+  ## (``FlakeLockRefresh.pending``): the answers keyed by input, ready to hand
+  ## back to ``refreshFlakeLockText``, and the moves nix could not answer for
+  ## with its reason. Shared by the refresh and `repro lock update`, so the
+  ## two write the same node for the same revision. Never raises.
+  result.derived = initTable[string, JsonNode]()
+  var nixExe = ""
+  var nixMissing = ""
+  if pending.len > 0:
+    try:
+      nixExe = resolveNixExe()
+    except CatchableError:
+      nixMissing = "there is no 'nix' on PATH (nor in REPRO_FOREIGN_ENV_NIX)"
+  for p in pending:
+    let fetched =
+      if nixMissing.len > 0: FlakeRevisionFields(error: nixMissing)
+      else: fetchFlakeRevisionFields(nixExe, p.fetchAttrs)
+    if fetched.ok:
+      result.derived[p.input] = fetched.fields
+    else:
+      result.failed.add((rewrite: p, error: fetched.error))
+
+proc flakeUnfetchableNotice(rewrite: FlakeLockRewrite; sibling, error,
+    flakeRoot, workspaceRoot: string): string =
+  ## The announcement for ONE input whose new revision nix could not report
+  ## the derived fields of. Same shape, and same channel, as every other §3.2
+  ## withholding (`flakeWithheldNotice`).
+  "flake.lock NOT refreshed for input '" & rewrite.input & "': its sibling " &
+    (if sibling.len > 0: sibling & " " else: "") &
+    "is at " & rewrite.newRev & " and the pin names " & rewrite.oldRev &
+    ", but nix could not fetch " & rewrite.newRev & " to compute the " &
+    "narHash, lastModified and revCount nix records with it: " & error &
+    ". Writing the new rev without them would replace a node nix can " &
+    "verify with one it cannot, so the pin was LEFT ALONE. This is a " &
+    "warning, not an error: nothing was written for this input and no " &
+    "operation was refused, but the pre-push gate refuses this lock until " &
+    "it names the sibling's revision. Once nix can fetch the revision " &
+    "(the remote reachable, the network up), from " & flakeRoot & " run: `" &
+    flakeRefreshLockCommand(flakeRoot, workspaceRoot) & "`."
 
 type
   FlakeLockRefreshOutcome* = object
@@ -87974,6 +88424,9 @@ type
       ## The would-write predicate of the commit-time writers (HL-10) reads
       ## it; ``changed`` stays false because nothing was written.
     rewrites*: seq[FlakeLockRewrite]
+    derived*: Table[string, JsonNode]
+      ## Per input, the derived fields nix reported for its new revision (see
+      ## ``FlakeCommitRefresh.derived``, which carries them to a re-plan).
     notices*: seq[string]
     blockedBy*: seq[string] ## dirty siblings that suppressed the refresh
     withheld*: seq[string]
@@ -88169,10 +88622,24 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     allowRegression: seq[string] = @[];
     refuseRegressions = false;
     planOnly = false;
-    preset = none(FlakeDevelopSelection)): FlakeLockRefreshOutcome =
+    preset = none(FlakeDevelopSelection);
+    deriveFields = true;
+    announce = true): FlakeLockRefreshOutcome =
   ## The whole NF-2 refresh, from "which inputs are overridden" to "the bytes
   ## on disk". Shared verbatim by the operator verb and the commit hook so the
   ## two cannot diverge.
+  ##
+  ## A pin that moves gets the new revision's `narHash` / `lastModified` /
+  ## `revCount` from nix (``fetchFlakeRevisionFields``), and an input nix
+  ## cannot answer for is WITHHELD like every other §3.2 skip — so a planned
+  ## refresh, which the hook writes as planned, already carries them.
+  ## ``deriveFields = false`` keeps nix (and the network) off a call that only
+  ## asks what WOULD move — the HL-10 would-write predicate, the
+  ## `REPRO_SKIP_LOCK_REFRESH` notice: the moves are reported in
+  ## ``rewrites`` with ``wouldChange``, and nothing is ``planned``.
+  ##
+  ## ``announce = false`` keeps the withheld/declined warnings off stderr
+  ## (they still reach ``withheld``), for a caller that only reports a plan.
   ##
   ## A pin never moves backward on its own (Nix-Flake-Coexistence.md §4,
   ## "Regressions"): a row that is behind its pin, has diverged from it, or
@@ -88412,8 +88879,9 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
   # channel and not that file — and a skip nobody can see is indistinguishable
   # from a refresh that silently did nothing, which is the failure this whole
   # milestone is about.
-  for w in result.withheld:
-    stderr.writeLine(label & ": WARNING: " & w)
+  if announce:
+    for w in result.withheld:
+      stderr.writeLine(label & ": WARNING: " & w)
 
   if result.refused.len > 0:
     # §3.2 "Rule, at commit": the commit is refused, so NOTHING is written —
@@ -88432,7 +88900,36 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     result.exitCode = flakeRefreshWithheldExit
     return
 
-  let refreshed = refreshFlakeLockText(lockText, revisions, flakeRoot)
+  # Which checkout each input's revision was observed in, so a move can be
+  # announced with where it came from.
+  var siblingOf = initTable[string, string]()
+  for row in state.rows: siblingOf[row.input] = row.path
+  var refreshed = refreshFlakeLockText(lockText, revisions, flakeRoot)
+  if not refreshed.failed and refreshed.pending.len > 0 and deriveFields:
+    # (4) Every pin that moves gets the new revision's derived fields from
+    # nix — `narHash`, `lastModified`, `revCount`, exactly as `nix flake lock`
+    # writes them. That was not always possible: the refresh used to DELETE
+    # them, because the fetch fails for a revision that exists only in the
+    # sibling's local checkout. (3b) above no longer records such a revision,
+    # so everything that reaches this point is published and fetchable, and
+    # the reason for the weaker node is gone. Where the fetch still fails —
+    # nix absent, the forge unreachable, offline — the input is WITHHELD
+    # rather than filed weaker: the same shape as every other skip (so the
+    # commit hook holds the repository in both locks, §16.3 H3), and NF-3's
+    # pre-push gate refuses the lagging lock, so nothing escapes.
+    let fetched = fetchPendingDerivedFields(refreshed.pending)
+    for f in fetched.failed:
+      let notice = flakeUnfetchableNotice(f.rewrite,
+        siblingOf.getOrDefault(f.rewrite.input, ""), f.error, flakeRoot,
+        workspaceRoot)
+      result.withheld.add(notice)
+      if f.rewrite.input notin result.withheldInputs:
+        result.withheldInputs.add(f.rewrite.input)
+      if announce:
+        stderr.writeLine(label & ": WARNING: " & notice)
+    result.derived = fetched.derived
+    refreshed = refreshFlakeLockText(lockText, revisions, flakeRoot,
+      fetched.derived)
   for n in refreshed.notices: result.notices.add(n)
   if refreshed.failed:
     result.tag = "refused-unreadable-lock"
@@ -88448,8 +88945,11 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
   # sibling's git state the classifier reads.
   for d in refreshed.declined:
     result.withheld.add(d)
-    stderr.writeLine(label & ": WARNING: " & d)
+    if announce:
+      stderr.writeLine(label & ": WARNING: " & d)
   result.rewrites = refreshed.rewrites
+  for r in result.rewrites.mitems:
+    r.sibling = siblingOf.getOrDefault(r.input, "")
   # HL-11 H3: the facts the commit hook needs to relate a declined pin to the
   # `flake.nix` constraint that excludes the observed revision, kept on every
   # outcome below (a declined pin is a reason to refuse the COMMIT, §16.4,
@@ -88464,6 +88964,27 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
   for d in refreshed.declinedPins:
     if d.input notin result.withheldInputs: result.withheldInputs.add(d.input)
   result.originalText = lockText
+  if not deriveFields and refreshed.pending.len > 0:
+    # Only the would-write question was asked (``deriveFields = false``), so
+    # nix was not asked for the new revisions' derived fields and nothing can
+    # be planned: the inputs whose pin would move are reported as they stand.
+    # A move nix could not have answered for would have been withheld
+    # instead, so this errs towards "yes" — the safe direction for both
+    # callers (see ``planCommitTimeLockWriters``).
+    for p in refreshed.pending:
+      var move = p
+      move.fetchAttrs = nil
+      move.sibling = siblingOf.getOrDefault(p.input, "")
+      result.rewrites.add(move)
+    result.wouldChange = true
+    result.tag = "would-move"
+    var wouldMove: seq[string]
+    for r in result.rewrites:
+      wouldMove.add(r.input & ": " & r.oldRev & " -> " & r.newRev)
+    result.diagnostic = "flake.lock would be refreshed (not planned: nix " &
+      "was not asked for the derived fields) — " & wouldMove.join("; ") &
+      "; dirt-scope: " & result.dirtyScope.join(",")
+    return
   if not refreshed.changed:
     # §13.3: "most commits do not move a sibling, so most commits do not touch
     # the lock". The file is not opened for writing at all — not even to write
@@ -89282,7 +89803,23 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
       if flakeLockPath notin result.written:
         result.written.add(flakeLockPath)
     if floating.len > 0:
-      let moved = refreshFlakeLockText(flakeLockText, floating, root)
+      var moved = refreshFlakeLockText(flakeLockText, floating, root)
+      if not moved.failed and moved.pending.len > 0:
+        # The moved nodes carry what nix reports for the target — the same
+        # `narHash` / `lastModified` / `revCount` the commit-time refresh
+        # writes (``fetchPendingDerivedFields``). A target nix cannot fetch
+        # is not filed as a weaker node; the whole update is undone.
+        let fetched = fetchPendingDerivedFields(moved.pending)
+        if fetched.failed.len > 0:
+          var why: seq[string]
+          for f in fetched.failed:
+            why.add("input '" & f.rewrite.input & "': " & f.error)
+          undoAll(LockUpdateExitFailed, "nix could not fetch " & target &
+            " to compute the narHash it records with it (" &
+            why.join("; ") & "). If " & target & " is not yet pushed to " &
+            "the input's url, push it first")
+        moved = refreshFlakeLockText(flakeLockText, floating, root,
+          fetched.derived)
       if moved.failed or moved.declined.len > 0 or
           moved.rewrites.len != floating.len:
         undoAll(LockUpdateExitFailed, flakeLockPath & " could not be moved " &
@@ -89296,9 +89833,12 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
       for m in moved.rewrites:
         result.report.add("flake.lock input '" & m.input & "': " & m.oldRev &
           " -> " & m.newRev & " (follows a branch; " &
-          (if m.dropped.len > 0: m.dropped.join("/") & " dropped, as the " &
-             "commit-time refresh does"
-           else: "no derived fields to drop") & ")")
+          (if m.recomputed.len > 0:
+             m.recomputed.join("/") & " from nix, as the commit-time " &
+             "refresh writes them"
+           else: "no derived fields from nix") &
+          (if m.dropped.len > 0: "; " & m.dropped.join("/") & " dropped"
+           else: "") & ")")
     if reproOfRepo.len > 0:
       var originalDepsLine = ""
       for line in inputs.reproLock.text.splitLines():
@@ -89454,7 +89994,10 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
   ## [--workspace-root=PATH] [--current-repo=PATH] [--json]``.
   ##
   ## Rewrites the `locked` node of each flake input an override substituted to
-  ## that sibling's current `HEAD`, and touches nothing else.
+  ## that sibling's current `HEAD`, and touches nothing else. The moved node's
+  ## `narHash` / `lastModified` / `revCount` are the ones nix reports for the
+  ## new revision; an input nix cannot fetch is withheld (status 3), and this
+  ## verb is the remedy once it can.
   ##
   ## An explicit ``--only=<names>`` selection is the exception (HL-11 M4,
   ## Unified-Locking-And-Hooks.md §16.4): each input it names is handed to
@@ -89606,7 +90149,8 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
     var rewrites = newJArray()
     for r in outcome.rewrites:
       rewrites.add(%*{"input": r.input, "node": r.node, "oldRev": r.oldRev,
-                      "newRev": r.newRev, "dropped": %r.dropped})
+                      "newRev": r.newRev, "sibling": r.sibling,
+                      "recomputed": %r.recomputed, "dropped": %r.dropped})
     var notices = newJArray()
     for n in outcome.notices: notices.add(%n)
     var blocked = newJArray()
@@ -89655,7 +90199,8 @@ proc flakeCommitFailure(outcome: FlakeLockRefreshOutcome): string =
 proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     toolProvisioning: ToolProvisioningMode;
     allowRegression: seq[string] = @[]; planOnly = false;
-    label = "repro pre-commit"): FlakeCommitRefresh =
+    label = "repro pre-commit"; deriveFields = true;
+    announce = true): FlakeCommitRefresh =
   ## The commit-path entry point, driven by the managed `pre-commit` hook
   ## (§13.1: an in-tree lock is written "as part of forming the revision").
   ## Returns one log line, whether the file was rewritten, and the lock's path
@@ -89852,7 +90397,8 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
       toolProvisioning, recordDowngrade = false,
       label = label, allowRegression = allowRegression,
       refuseRegressions = true, planOnly = planOnly,
-      preset = some(hookFlakeSelection(hookSet, workspaceRoot, flakeRoot)))
+      preset = some(hookFlakeSelection(hookSet, workspaceRoot, flakeRoot)),
+      deriveFields = deriveFields, announce = announce)
     result.line = "flake-lock " & outcome.tag & ": " & outcome.diagnostic
     result.wouldChange = outcome.wouldChange
     result.failure = flakeCommitFailure(outcome)
@@ -89867,6 +90413,7 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     result.plannedText = outcome.plannedText
     result.plannedRevisions = outcome.plannedRevisions
     result.moves = flakePlannedMoves(outcome.rewrites)
+    result.derived = outcome.derived
     result.declinedPins = outcome.declinedPins
     result.withheldInputs = outcome.withheldInputs
     result.withheld = outcome.withheld

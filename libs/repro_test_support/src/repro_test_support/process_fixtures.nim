@@ -74,6 +74,7 @@ import std/os
 
 when defined(posix):
   import std/posix
+  from std/sysrand import urandom
 
 from repro_core/paths import extendedPath
 
@@ -216,3 +217,46 @@ when defined(posix):
     if pid <= 0:
       return
     register(Release(kind: rkTerminate, pid: pid))
+
+when defined(posix):
+  proc shortSocketDirAtProcessExit*(tag: string): string =
+    ## A fresh owner-only (mode 0700) directory DIRECTLY under
+    ## ``/tmp``, for the Unix-domain sockets a test binds or hands to a
+    ## process it starts, removed when this process exits.
+    ##
+    ## WHY NOT UNDER THE TEST'S OWN SCRATCH TREE. A socket address must fit
+    ## ``sockaddr_un.sun_path`` with its NUL: 108 bytes on Linux, 104 on
+    ## macOS — and only 92 where Nim's ``std/net`` binds or dials it, since
+    ## ``std/posix`` declares a shorter array on macOS. A scratch tree under
+    ## the suite TMPDIR (``~/.cache/reprobuild-test-tmp/<slot>``, ~50 bytes)
+    ## or under the checkout's ``build/`` has used most of that before the
+    ## test's own nesting and file name, and the bind then fails with
+    ## ``socket path too long`` having asserted nothing. Fixture IPC paths
+    ## must fit independently of the checkout and TMPDIR length (reprobuild
+    ## ``6210412a``). The result here is ``/tmp/<tag><12 hex>``: keep ``tag``
+    ## short (a few bytes) so the caller's socket name has the rest.
+    ##
+    ## It is ``mkdtemp``'s contract, written out: an unpredictable name
+    ## (12 hex digits from the OS CSPRNG), created by ``mkdir(2)`` with mode
+    ## 0700 — which the umask can only narrow — and a fresh name on
+    ## ``EEXIST``, so the directory is owner-only from the instant it exists
+    ## and is never one somebody else made. (Not ``mkdtemp`` itself: Nim's
+    ## binding names ``<stdlib.h>``, where Darwin does not declare it under
+    ## the feature set these binaries compile with.) RunQuota endpoints do NOT
+    ## use this — they have their own trust-checked rendezvous,
+    ## ``runquotaRendezvousDir``.
+    const Hex = "0123456789abcdef"
+    for _ in 0 ..< 64:
+      var suffix = ""
+      for b in urandom(6):
+        suffix.add Hex[int(b) shr 4]
+        suffix.add Hex[int(b) and 0xf]
+      let candidate = "/tmp" / (tag & suffix)
+      if posix.mkdir(candidate.cstring, Mode(0o700)) == 0:
+        # Ours, by construction: we just created it.
+        releaseDirAtProcessExit(candidate)
+        return candidate
+      if errno != EEXIST:
+        raiseOSError(osLastError(), "mkdir " & candidate)
+    raise newException(OSError,
+      "could not create a fresh /tmp/" & tag & "* directory in 64 attempts")

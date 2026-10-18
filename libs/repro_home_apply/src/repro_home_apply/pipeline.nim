@@ -2324,7 +2324,10 @@ proc planDesiredState*(rawOpts: ApplyOptions): PlannedDesiredState =
     result.plan.configContributions)
   for s in synthetic:
     result.plan.generatedFiles.add(s)
-  result.stowDiscovery = discoverStowEntries(opts.profileDir, opts.homeDir)
+  # GM11: only the stow packages this host gets (activity-scoped claims).
+  result.stowDiscovery = selectStowEntries(
+    discoverStowEntries(opts.profileDir, opts.homeDir), result.profile,
+    opts.targetContext)
   if result.stowDiscovery.entries.len > 0:
     for sp in stowEntriesToPlanned(result.stowDiscovery.entries):
       result.plan.generatedFiles.add(sp)
@@ -2825,7 +2828,10 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       applyPlan.configContributions)
     for s in synthetic:
       applyPlan.generatedFiles.add(s)
-    let stowDiscovery = discoverStowEntries(opts.profileDir, opts.homeDir)
+    # GM11: only the stow packages this host gets (activity-scoped claims).
+    let stowDiscovery = selectStowEntries(
+      discoverStowEntries(opts.profileDir, opts.homeDir), profile,
+      opts.targetContext)
     let stowEntries = stowDiscovery.entries
     if stowEntries.len > 0:
       let stowPlanned = stowEntriesToPlanned(stowEntries)

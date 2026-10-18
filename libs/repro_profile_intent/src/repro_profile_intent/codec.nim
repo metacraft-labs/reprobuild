@@ -71,6 +71,13 @@ const
     ## Optional; omitted when no host says so, so a profile without the
     ## attribute encodes exactly as before. Envelope schema 9.
   KeyManagedBy    = "managedBy"
+  KeyStowScopes   = "stowScopes"
+    ## GM11: the activities' stow claims (`ProfileIntent.stowScopes`): an
+    ## array of maps with `"package"` and `"activity"` (text) and, under a
+    ## guard, `"guard"` (text). Optional; omitted when no activity claims a
+    ## stow package, so a profile without a `stow:` block encodes exactly as
+    ## before. Envelope schema 10.
+  KeyPackage      = "package"
   KeyArgv         = "argv"
   KeyCwd          = "cwd"
   KeyDeps         = "deps"
@@ -325,6 +332,17 @@ proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
       hostEntries.add entry(host, cborMap(inner))
     hostEntries.sort(proc(a, b: DynamicMapEntry): int = cmp(a.key, b.key))
     entries.add entry(KeySystemManagedElsewhere, cborMap(hostEntries))
+  if p.stowScopes.len > 0:
+    # Declaration order is kept (an array): it is the order diagnostics
+    # name the claims in.
+    var claims: seq[DynamicValue] = @[]
+    for s in p.stowScopes:
+      var fields = @[entry(KeyPackage, cborText(s.package)),
+                     entry(KeyActivity, cborText(s.activity))]
+      if s.guard.expr.len > 0:
+        fields.add entry(KeyGuard, cborText(s.guard.expr))
+      claims.add cborMap(fields)
+    entries.add entry(KeyStowScopes, cborArray(claims))
   cborMap(entries)
 
 proc encodeProfileIntentToBytes*(p: ProfileIntent): seq[byte] =
@@ -620,6 +638,22 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
         KeyManagedBy, pointerFound)
       result.systemManagedElsewhere[e.key] =
         if pointerFound: expectText(pointerNode, KeyManagedBy) else: ""
+  # GM11: the stow claims are OPTIONAL on the wire (absent when no activity
+  # claims a stow package). A malformed claim is refused as corrupt.
+  var ssFound = false
+  let ssNode = lookupOpt(entries, KeyStowScopes, ssFound)
+  if ssFound:
+    for it in expectArray(ssNode, KeyStowScopes):
+      let claim = expectMap(it, KeyStowScopes)
+      var guardFound = false
+      let guardNode = lookupOpt(claim, KeyGuard, guardFound)
+      result.stowScopes.add StowScope(
+        package: expectText(lookup(claim, KeyPackage, KeyStowScopes),
+          KeyPackage),
+        activity: expectText(lookup(claim, KeyActivity, KeyStowScopes),
+          KeyActivity),
+        guard: PredicateExpr(expr:
+          if guardFound: expectText(guardNode, KeyGuard) else: ""))
 
 # ---------------------------------------------------------------------------
 # Convenience wrappers — wrap/unwrap the envelope around the CBOR body.

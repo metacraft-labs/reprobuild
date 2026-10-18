@@ -573,7 +573,7 @@ proc runHomeAddDataRow(pkg, version, activity: string;
       return 2
   try:
     let profilePath = loadProfilePath()
-    let prof = loadProfile(profilePath)
+    let prof = inspectProfile(profilePath)
     if dataFile notin prof.dataFileRefs:
       stderr.writeLine("repro home add: " & dataFile & " is not declared " &
         "in the `data:` section of " & profilePath &
@@ -693,7 +693,7 @@ proc runHomeAdd(args: openArray[string]): int =
         let profilePath = loadProfilePath()
         projectCatalogPackages([pkg], profilePath,
           resolveStateDir() / "catalog-projection",
-          loadProfile(profilePath).catalogImports)
+          inspectProfile(profilePath).catalogImports)
       except CatchableError:
         ProfileCatalog()
     let latest = unpinnedHostVersion(pkg, catalog)
@@ -760,7 +760,7 @@ proc runHomeRemoveDataRows(pkg, version, activity: string;
     return 2
   try:
     let profilePath = loadProfilePath()
-    let prof = loadProfile(profilePath)
+    let prof = inspectProfile(profilePath)
     if dataFile notin prof.dataFileRefs:
       stderr.writeLine("repro home remove: " & dataFile & " is not " &
         "declared in the `data:` section of " & profilePath)
@@ -849,6 +849,7 @@ proc runHomeRemove(args: openArray[string]): int =
       (if activityGiven: activitySpec else: ""), pred, dataFile, noApply)
   try:
     let profilePath = loadProfilePath()
+    var removedCount = 0
     # Default semantics (no flags): remove every occurrence across all
     # activities and both predicate keywords.
     if not activityGiven and not pred.given:
@@ -860,7 +861,7 @@ proc runHomeRemove(args: openArray[string]): int =
         ref1.kind == nkPackageRef and ref1.packageName == pkg and
           (version.len == 0 or ref1.packageVersion == version)
       while true:
-        let prof = loadProfile(profilePath)
+        let prof = inspectProfile(profilePath)
         var removedAny = false
         for actName in activityNames(prof):
           let actOpt = findActivity(prof, actName)
@@ -872,6 +873,7 @@ proc runHomeRemove(args: openArray[string]): int =
               removePackageReference(profilePath, pkg, activity = actName,
                 version = version)
               removedAny = true
+              inc removedCount
               break
           if removedAny: break
           # Then from conditional blocks.
@@ -883,6 +885,7 @@ proc runHomeRemove(args: openArray[string]): int =
                     activity = actName, predicate = ch.predicateSource,
                     version = version)
                   removedAny = true
+                  inc removedCount
                   break
               if removedAny: break
           if removedAny: break
@@ -892,12 +895,42 @@ proc runHomeRemove(args: openArray[string]): int =
       # Scoped removal: --activity and/or --when/--if applied.
       let targetActivity =
         if activityGiven: activitySpec else: "default"
-      if pred.given:
-        removePackageReference(profilePath, pkg, activity = targetActivity,
-          predicate = pred.text, version = version)
-      else:
-        removePackageReference(profilePath, pkg, activity = targetActivity,
-          version = version)
+      let removed =
+        if pred.given:
+          removePackageReference(profilePath, pkg, activity = targetActivity,
+            predicate = pred.text, version = version)
+        else:
+          removePackageReference(profilePath, pkg, activity = targetActivity,
+            version = version)
+      if removed: inc removedCount
+    if removedCount == 0:
+      # No package line to remove. When the activities searched compose
+      # helper calls, the package may be one they contribute, which only
+      # the module defining the helper can change: say so, naming each call,
+      # instead of reporting success (Home-Profile-Intent-Layer.md
+      # §Structural Edit Contract).
+      let prof = inspectProfile(profilePath)
+      var calls: seq[string]
+      for ch in prof.root.children:
+        if ch.kind != nkActivity: continue
+        if activityGiven or pred.given:
+          let scope = if activityGiven: activitySpec else: "default"
+          if ch.activityName != scope: continue
+        for opaque in opaqueNodes(ch.activityChildren):
+          if opaque.opaqueKind == okHelperCall:
+            calls.add "activity " & ch.activityName & ": " &
+              opaque.opaqueConstruct
+      if calls.len > 0:
+        stderr.writeLine("repro home remove: `" & pkg & "` has no package " &
+          "line in " & profilePath & " to remove; the activities searched " &
+          "compose helper calls whose packages a text edit cannot see or " &
+          "change:")
+        for c in calls:
+          stderr.writeLine("  " & c)
+        stderr.writeLine("  hint: if one of them contributes `" & pkg &
+          "`, remove it in the module that defines the helper; `repro home " &
+          "why " & pkg & "` names the activity it comes from")
+        return 1
   except ENoProfile as e:
     printNoProfile(e); return 1
   except EUnknownPredicate as e:
@@ -914,18 +947,6 @@ proc runHomeRemove(args: openArray[string]): int =
 # ---------------------------------------------------------------------------
 # `repro home enable` / `disable`.
 # ---------------------------------------------------------------------------
-
-proc currentHostActivities(prof: Profile; host: string): seq[string] =
-  ## Existing activity list for `host` in `hosts:`; empty seq if the
-  ## host has no entry yet.
-  let hostsOpt = findHostsBlock(prof)
-  if hostsOpt.isNone:
-    return @[]
-  let hosts = hostsOpt.get
-  for entry in hosts.hostsEntries:
-    if entry.hostName == host:
-      return entry.hostActivities
-  @[]
 
 type
   RemoteApplyFlags = object
@@ -1093,12 +1114,12 @@ proc runHomeEnable(args: openArray[string]): int =
   if refuseDefaultGuard("enable", parsed.activity):
     return 1
   try:
-    let profilePath = loadProfilePath()
-    let prof = loadProfile(profilePath)
-    var acts = currentHostActivities(prof, parsed.host)
-    if parsed.activity notin acts:
-      acts.add parsed.activity
-    setHostActivities(profilePath, parsed.host, acts)
+    # Only the host's `hosts:` entry is edited, read with the inspector
+    # that steps over helper calls and activity `stow:` / `resources:`
+    # blocks (none of which is in `hosts:`); every other line keeps its
+    # bytes (Home-Profile-Intent-Layer.md §CLI Edit Semantics).
+    discard editHostActivity(loadProfilePath(), parsed.host,
+      parsed.activity, enable = true)
   except ENoProfile as e:
     printNoProfile(e); return 1
   except EUnstructured as e:
@@ -1127,14 +1148,9 @@ proc runHomeDisable(args: openArray[string]): int =
   if refuseDefaultGuard("disable", parsed.activity):
     return 1
   try:
-    let profilePath = loadProfilePath()
-    let prof = loadProfile(profilePath)
-    var acts = currentHostActivities(prof, parsed.host)
-    var newActs: seq[string]
-    for a in acts:
-      if a != parsed.activity:
-        newActs.add a
-    setHostActivities(profilePath, parsed.host, newActs)
+    # As for `enable`: only the host's `hosts:` entry is edited.
+    discard editHostActivity(loadProfilePath(), parsed.host,
+      parsed.activity, enable = false)
   except ENoProfile as e:
     printNoProfile(e); return 1
   except EUnstructured as e:
@@ -1151,53 +1167,71 @@ proc runHomeDisable(args: openArray[string]): int =
   return runApplyInline("disable")
 
 # ---------------------------------------------------------------------------
-# `repro home list`.
+# `repro home list` / `repro home why`.
+#
+# Both report what the planner does, so they read the profile the way the
+# planner does: compiled (the compile-then-adapt path, Profile-Compilation-
+# Model.md, phase F3), never as text. A helper call's packages, a
+# `guarded(...)` element and a data row are therefore listed like any other
+# package reference, and each reference's state is the planner's own rule
+# (`packageOriginsFromBody`, `enabledActivitiesFor`) evaluated for the host
+# (CLI/home/list.md, CLI/home/why.md).
 # ---------------------------------------------------------------------------
 
 type
-  PackageOrigin = object
-    activity: string
-    predicate: string     ## "" if directly in the activity body
-    keyword: CondKeyword
+  ListedOrigin = object
+    origin: PackageOrigin
     dataFile: string      ## GM4: the data file the row is in; "" for home.nim
 
-proc collectPackageOrigins(prof: Profile;
-                          host: string): OrderedTable[string, seq[PackageOrigin]] =
-  ## Walk every activity (regardless of host enablement) and gather
-  ## every package reference with provenance. The CLI's `list` and
-  ## `why` commands consume this view.
-  result = initOrderedTable[string, seq[PackageOrigin]]()
+  CompiledListing = object
+    origins: seq[ListedOrigin]
+    ctx: HostContext
+
+proc compiledListing(commandName, profilePath, host: string;
+                     listing: var CompiledListing): bool =
+  ## Compile the profile and collect every package reference with its state
+  ## on `host`. The data rows are adapted one by one, exactly as
+  ## `mergeDataRows` turns them into activity-body elements, so each keeps
+  ## the file it came from. Returns false after printing the diagnostic when
+  ## the profile does not compile or a data file is refused. Raises
+  ## `EUndeclaredHost` for a host the registry does not declare.
+  let stateDir = resolveStateDir()
+  var prof: Profile
+  var dataFiles: seq[DataFile]
+  var failure = CompileAdaptOutcome()
+  try:
+    let artifact = compileProfileToRbpi(profilePath,
+      defaultProfileCompileOptionsFor(profilePath, stateDir))
+    let intent = decodeRbpi(artifact.rbpiBytes)
+    dataFiles = expandProfileData(intent, profilePath).dataFiles
+    prof = profileIntentToHomeProfile(intent, profilePath)
+  except ProfileCompileError as err:
+    failure.compileError = err.msg
+  except EDataFile as err:
+    failure.dataError = err.msg
+  if failure.compileError.len > 0 or failure.dataError.len > 0:
+    stderr.writeLine(formatCompileAdaptFailure(commandName, profilePath,
+      failure))
+    return false
+  listing.ctx = currentHostContext()
+  listing.ctx.host = host
+  let active = enabledActivitiesFor(prof, host)
   for ch in prof.root.children:
     if ch.kind != nkActivity: continue
-    let actName = ch.activityName
-    for body in ch.activityChildren:
-      case body.kind
-      of nkPackageRef:
-        let origin = PackageOrigin(activity: actName, predicate: "",
-          keyword: ckWhen)
-        if body.packageName notin result:
-          result[body.packageName] = @[]
-        result[body.packageName].add origin
-      of nkCondBlock:
-        for pkgRef in body.condChildren:
-          if pkgRef.kind != nkPackageRef: continue
-          let origin = PackageOrigin(activity: actName,
-            predicate: body.predicateSource, keyword: body.keyword)
-          if pkgRef.packageName notin result:
-            result[pkgRef.packageName] = @[]
-          result[pkgRef.packageName].add origin
-      else: discard
-  # GM4: rows of the plan-time data files the profile declares. `list` and
-  # `why` read the profile as text, so they read the data files through the
-  # same reader the planner uses (`readDataFile`): a row the planner would
-  # refuse makes them fail too, instead of being left out of the listing.
-  for reference in prof.dataFileRefs:
-    let file = readDataFile(prof.path, prof.path.parentDir, reference)
+    for o in packageOriginsFromBody(ch.activityChildren, ch.activityName,
+        ch.activityName in active, listing.ctx):
+      listing.origins.add ListedOrigin(origin: o)
+  for file in dataFiles:
     for row in file.rows:
-      if row.name notin result:
-        result[row.name] = @[]
-      result[row.name].add PackageOrigin(activity: row.activity,
-        predicate: row.whenPredicate, keyword: ckWhen, dataFile: reference)
+      let node = buildActivityElement(dataRowElement(row))
+      for o in packageOriginsFromBody(@[node], row.activity,
+          row.activity in active, listing.ctx):
+        listing.origins.add ListedOrigin(origin: o, dataFile: file.path)
+  true
+
+proc factsText(ctx: HostContext): string =
+  "platform=" & ctx.platform & " arch=" & ctx.arch &
+    (if ctx.isWsl: " wsl" else: "")
 
 proc runHomeList(args: openArray[string]): int =
   var hostOverride = ""
@@ -1220,40 +1254,34 @@ proc runHomeList(args: openArray[string]): int =
     return 2
   try:
     let profilePath = loadProfilePath()
-    let prof = loadProfile(profilePath)
     let host = identity.name
-    let origins = collectPackageOrigins(prof, host)
-    let active = enabledActivitiesFor(prof, host)
+    var listing: CompiledListing
+    if not compiledListing("repro home list", profilePath, host, listing):
+      return 1
     echo "repro home list: profile=" & profilePath & " host=" & host
-    for pkg, sources in origins:
-      var anyActive = false
-      for s in sources:
-        if s.activity in active:
-          anyActive = true; break
-      let prefix = if anyActive: "  enabled  " else: "  inactive "
-      for s in sources:
-        let predStr =
-          if s.predicate.len == 0: ""
-          else:
-            let kw = if s.keyword == ckWhen: "when " else: "if "
-            "  " & kw & s.predicate
-        let dataStr = if s.dataFile.len > 0: "  data=" & s.dataFile else: ""
-        echo prefix & pkg & "  activity=" & s.activity & predStr & dataStr
+    echo "  guards evaluated for " & factsText(listing.ctx)
+    for l in listing.origins:
+      let o = l.origin
+      let prefix =
+        case o.state
+        of osPlanned: "  enabled  "
+        of osActivityNotSelected: "  inactive "
+        of osGuardFalse: "  excluded "
+        of osNestedGuard: "  ignored  "
+      let predStr =
+        if o.predicateText.len == 0: "" else: "  when " & o.predicateText
+      let dataStr = if l.dataFile.len > 0: "  data=" & l.dataFile else: ""
+      echo prefix & o.packageId & "  activity=" & o.fromActivity & predStr &
+        dataStr
     return 0
   except ENoProfile as e:
     printNoProfile(e); return 1
-  except EUnstructured as e:
-    printUnstructured(e); return 1
   except EDataFile as e:
     stderr.writeLine("repro home list: " & e.msg)
     return 1
   except CatchableError as e:
     stderr.writeLine("repro home list: error: " & e.msg)
     return 1
-
-# ---------------------------------------------------------------------------
-# `repro home why <package>`.
-# ---------------------------------------------------------------------------
 
 proc runHomeWhy(args: openArray[string]): int =
   if args.len == 0:
@@ -1285,41 +1313,46 @@ proc runHomeWhy(args: openArray[string]): int =
     return 2
   try:
     let profilePath = loadProfilePath()
-    let prof = loadProfile(profilePath)
     let host = identity.name
-    let origins = collectPackageOrigins(prof, host)
-    let active = enabledActivitiesFor(prof, host)
-    if pkg notin origins:
+    var listing: CompiledListing
+    if not compiledListing("repro home why", profilePath, host, listing):
+      return 1
+    var planned = 0
+    var found = 0
+    for l in listing.origins:
+      let o = l.origin
+      if o.packageId != pkg: continue
+      inc found
+      let predStr =
+        if o.predicateText.len == 0: "" else: " under when " & o.predicateText
+      let state =
+        case o.state
+        of osPlanned: "ENABLED on host `" & host & "`"
+        of osActivityNotSelected:
+          "NOT enabled on host `" & host &
+            "` (not in hosts: entry, not `default`)"
+        of osGuardFalse:
+          "activity enabled on host `" & host & "`, but the guard does " &
+            "not hold for " & factsText(listing.ctx)
+        of osNestedGuard:
+          "NOT planned: a `when` nested in a `when` -- the planner reads " &
+            "one guard level"
+      let dataStr =
+        if l.dataFile.len > 0: " (row in data file " & l.dataFile & ")"
+        else: ""
+      echo "repro home why: package `" & pkg & "` <- activity `" &
+        o.fromActivity & "`" & predStr & dataStr & " [" & state & "]"
+      if o.state == osPlanned: inc planned
+    if found == 0:
       echo "repro home why: package `" & pkg &
         "` is NOT declared in any activity of profile " & profilePath
       return 0
-    var hitActive = 0
-    for s in origins[pkg]:
-      let activityActive = s.activity in active
-      let predStr =
-        if s.predicate.len == 0: ""
-        else:
-          let kw = if s.keyword == ckWhen: "when " else: "if "
-          " under " & kw & s.predicate
-      let activityState =
-        if activityActive: "ENABLED on host `" & host & "`"
-        else: "NOT enabled on host `" & host &
-          "` (not in hosts: entry, not `default`)"
-      let dataStr =
-        if s.dataFile.len > 0: " (row in data file " & s.dataFile & ")"
-        else: ""
-      echo "repro home why: package `" & pkg & "` <- activity `" &
-        s.activity & "`" & predStr & dataStr & " [" & activityState & "]"
-      if activityActive: inc hitActive
-    if hitActive == 0:
+    if planned == 0:
       echo "repro home why: `" & pkg & "` is declared but NOT active on `" &
-        host & "` — none of its source activities is in the host's " &
-        "activity list."
+        host & "` — no reference to it is planned for this host."
     return 0
   except ENoProfile as e:
     printNoProfile(e); return 1
-  except EUnstructured as e:
-    printUnstructured(e); return 1
   except EDataFile as e:
     stderr.writeLine("repro home why: " & e.msg)
     return 1

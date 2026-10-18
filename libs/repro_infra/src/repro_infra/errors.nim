@@ -42,6 +42,17 @@ type
     planId*: string
     drifted*: seq[string]
 
+  EPlanHostMismatch* = object of EInfra
+    ## `repro infra apply <plan-id>` was given a plan produced for a
+    ## DIFFERENT host identity than the apply resolves -- a plan made with
+    ## `--host` for another host, or one recorded under the identity rule
+    ## before `repro infra` shared `repro home`'s (`localhost`, the
+    ## upper-case `%COMPUTERNAME%`). Raised BEFORE any mutation; the remedy
+    ## is to re-plan as this host.
+    planId*: string
+    planHost*: string
+    applyHost*: string
+
   EPlanCorrupt* = object of EInfra
     ## An `RBIP` plan envelope failed magic / version / length /
     ## checksum validation.
@@ -87,6 +98,17 @@ proc raisePlanStale*(planId: string; drifted: seq[string]) {.noreturn.} =
     "`repro infra plan`.")
   e.planId = planId
   e.drifted = drifted
+  raise e
+
+proc raisePlanHostMismatch*(planId, planHost, applyHost: string) {.noreturn.} =
+  var e = newException(EPlanHostMismatch,
+    "repro infra: plan '" & planId & "' was made for host '" & planHost &
+    "', but this apply is host '" & applyHost & "'; nothing was " &
+    "applied. Re-run `repro infra plan` as this host and apply that plan " &
+    "(or pass --host " & planHost & " if the plan's host is the one meant).")
+  e.planId = planId
+  e.planHost = planHost
+  e.applyHost = applyHost
   raise e
 
 proc raisePlanCorrupt*(field: string; msg: string) {.noreturn.} =

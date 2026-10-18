@@ -302,6 +302,19 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
   if p.systemManagedElsewhere.len > 0:
     result.add ",\"systemManagedElsewhere\":" &
       encodeSystemManagedElsewhere(p.systemManagedElsewhere)
+  # GM11: the activities' stow claims, only when some activity has a
+  # `stow:` block, so the key set of a profile without one is unchanged.
+  # In declaration order; `guard` always emitted (null: none), as for
+  # resources.
+  if p.stowScopes.len > 0:
+    result.add ",\"stowScopes\":["
+    for i, s in p.stowScopes:
+      if i > 0:
+        result.add ","
+      result.add "{\"package\":" & encodeStr(s.package) &
+        ",\"activity\":" & encodeStr(s.activity) &
+        ",\"guard\":" & encodeGuard(s.guard) & "}"
+    result.add "]"
   result.add "}"
 
 # ---------------------------------------------------------------------
@@ -471,6 +484,25 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
           " must be an object with `managedBy` (a string or null)")
       result.systemManagedElsewhere[host] =
         if v["managedBy"].kind == JString: v["managedBy"].getStr() else: ""
+  # GM11: optional; absent when no activity claims a stow package. A
+  # malformed claim is refused, never dropped (dropping it would put the
+  # package on every host).
+  if root.hasKey("stowScopes"):
+    let ss = root["stowScopes"]
+    if ss.kind != JArray:
+      raise newException(ValueError,
+        "stowScopes must be an array of {package, activity, guard}")
+    for i in 0 ..< ss.len:
+      let c = ss[i]
+      if c.kind != JObject or
+          not c.hasKey("package") or c["package"].kind != JString or
+          not c.hasKey("activity") or c["activity"].kind != JString or
+          not c.hasKey("guard") or c["guard"].kind notin {JString, JNull}:
+        raise newException(ValueError, "stowScopes[" & $i &
+          "] must be an object with `package` and `activity` (strings) " &
+          "and `guard` (a string or null)")
+      result.stowScopes.add StowScope(package: c["package"].getStr(),
+        activity: c["activity"].getStr(), guard: parseGuard(c["guard"]))
 
 # ---------------------------------------------------------------------
 # M9.R.20: SystemIntent encode / decode.

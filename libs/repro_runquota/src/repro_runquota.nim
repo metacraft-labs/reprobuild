@@ -1509,9 +1509,12 @@ proc startGrantedWithRunQuota(session: ReproRunQuotaSession;
   if not session.active:
     raise newException(ReproRunQuotaError, "runquota session is not active")
   var lease = lease
+  var child: LaunchedProcess
+  var launched = false
   try:
     lease.markStarting()
-    var child = launchProcess(launchSpec(command))
+    child = launchProcess(launchSpec(command))
+    launched = true
     lease.markRunning(
       childProcessId = child.info.processId,
       processGroupId = child.info.processGroupId,
@@ -1521,12 +1524,47 @@ proc startGrantedWithRunQuota(session: ReproRunQuotaSession;
       child: child,
       active: true,
       completed: false)
-  except CatchableError:
-    if lease.active and lease.state == leaseClientStarting:
-      lease.finish(outcome = launchFailed())
-    if lease.active:
-      lease.release()
-    raise
+  except CatchableError as err:
+    # Until this proc returns it is the only owner of the lease and, once
+    # ``launchProcess`` succeeded, of the child: nobody else holds a handle to
+    # either. So it resolves both before unwinding -- the child cancelled and
+    # reaped (a ``markRunning`` that failed after the launch would otherwise
+    # orphan it), the lease finished and released -- and each step is guarded
+    # on its own so a failing one neither skips the next nor replaces the
+    # launch failure the caller has to see (RunQuota-Protocol-And-Client-
+    # Libraries.md, "Ownership Across a Batched Client Launch").
+    var cleanupFailures: seq[string]
+    var unresolved: seq[string]
+    var outcome = launchFailed()
+    if launched:
+      try:
+        let completion = child.cancelAndWait()
+        outcome = finishOutcome(completion, child)
+        child.close()
+      except CatchableError as cleanupErr:
+        cleanupFailures.add("cancelling child pid " &
+          $child.info.processId & ": " & cleanupErr.msg)
+        unresolved.add("child pid " & $child.info.processId)
+    try:
+      if lease.active and lease.state == leaseClientStarting:
+        lease.finish(outcome = outcome)
+    except CatchableError as cleanupErr:
+      cleanupFailures.add("finishing lease " & $lease.id.value & ": " &
+        cleanupErr.msg)
+    try:
+      if lease.active:
+        lease.release()
+    except CatchableError as cleanupErr:
+      cleanupFailures.add("releasing lease " & $lease.id.value & ": " &
+        cleanupErr.msg)
+      unresolved.add("lease " & $lease.id.value)
+    if cleanupFailures.len == 0:
+      raise err
+    var message = err.msg & "; cleanup after the failed launch also failed: " &
+      cleanupFailures.join("; ")
+    if unresolved.len > 0:
+      message.add("; unresolved: " & unresolved.join(", "))
+    raise newException(ReproRunQuotaError, message, err)
 
 proc startWithRunQuota*(session: ReproRunQuotaSession;
                         request: ReproResourceRequest;
@@ -1621,6 +1659,90 @@ proc maxOfferBatchSize*(session: ReproRunQuotaSession): int =
   else:
     int(limit)
 
+# Defined beside the scheduler-facing process API further down; the batch
+# rollback below resolves what it owns through these same procs rather than
+# through a second, private copy of the cancel/release logic.
+proc cancelQueued*(queued: var ReproRunQuotaQueuedProcess)
+proc cancelAndWait*(running: var ReproRunQuotaRunningProcess):
+    ReproRunQuotaExecution
+
+proc rollbackBatchOwnership(offers: var seq[ReproRunQuotaOffer];
+                            unstarted: var Table[uint64, OfferedLease]):
+    string =
+  ## Resolve every decision a failing ``offerWithRunQuotaBatch`` still owns,
+  ## in the order RunQuota-Protocol-And-Client-Libraries.md, "Ownership Across
+  ## a Batched Client Launch" gives: cancel the queued requests, release the
+  ## granted (or queued) leases nothing was started for, then cancel and wait
+  ## for each child actually launched -- through its own process handle, so
+  ## the child is reaped and not merely forgotten -- which finishes and
+  ## releases its lease.
+  ##
+  ## Returns the text to append to the initiating error: what was rolled back
+  ## (so a staged action failed only by association says so), every cleanup
+  ## step that failed, and the lease ids and child pids that could not be
+  ## resolved. Each step is guarded on its own: one failing release must not
+  ## leave the children after it running. Never raises.
+  var cleanupFailures: seq[string]
+  var unresolvedLeases: seq[string]
+  var unresolvedPids: seq[string]
+  var cancelledQueued = 0
+  var releasedUnstarted = 0
+  var drainedPids: seq[string]
+  for offer in offers.mitems:
+    if offer.kind == rqokQueued and offer.queued.active:
+      let leaseId = $offer.queued.lease.id.value
+      try:
+        offer.queued.cancelQueued()
+        inc cancelledQueued
+      except CatchableError as err:
+        cleanupFailures.add("cancelling queued lease " & leaseId & ": " &
+          err.msg)
+        unresolvedLeases.add(leaseId)
+  for decision in unstarted.mvalues:
+    if not decision.lease.active:
+      continue
+    let leaseId = $decision.lease.id.value
+    try:
+      decision.lease.release()
+      inc releasedUnstarted
+    except CatchableError as err:
+      cleanupFailures.add("releasing unstarted lease " & leaseId & ": " &
+        err.msg)
+      unresolvedLeases.add(leaseId)
+  unstarted.clear()
+  for offer in offers.mitems:
+    if offer.kind == rqokStarted and offer.running.active and
+        not offer.running.completed:
+      let leaseId = $offer.running.lease.id.value
+      let pid = $offer.running.child.info.processId
+      try:
+        discard offer.running.cancelAndWait()
+        drainedPids.add(pid)
+      except CatchableError as err:
+        # Whether the child was reaped before the lease traffic failed is not
+        # observable from here, so both identities are disclosed.
+        cleanupFailures.add("cancelling child pid " & pid & " (lease " &
+          leaseId & "): " & err.msg)
+        unresolvedLeases.add(leaseId)
+        unresolvedPids.add(pid)
+  var rolledBack: seq[string]
+  if drainedPids.len > 0:
+    rolledBack.add("cancelled and reaped " & $drainedPids.len &
+      " started child(ren) (pid " & drainedPids.join(", ") & ")")
+  if cancelledQueued > 0:
+    rolledBack.add("cancelled " & $cancelledQueued & " queued lease(s)")
+  if releasedUnstarted > 0:
+    rolledBack.add("released " & $releasedUnstarted &
+      " lease(s) granted to candidates that were never started")
+  if rolledBack.len > 0:
+    result.add("; batch launch rolled back: " & rolledBack.join(", "))
+  if cleanupFailures.len > 0:
+    result.add("; rollback failed: " & cleanupFailures.join("; "))
+  if unresolvedLeases.len > 0 or unresolvedPids.len > 0:
+    result.add("; unresolved after rollback: leases [" &
+      unresolvedLeases.join(", ") & "], child pids [" &
+      unresolvedPids.join(", ") & "]")
+
 proc offerWithRunQuotaBatch*(session: ReproRunQuotaSession;
                              requests: openArray[ReproResourceRequest];
                              commands: openArray[ReproCommandSpec]):
@@ -1635,6 +1757,12 @@ proc offerWithRunQuotaBatch*(session: ReproRunQuotaSession;
   ## scheduler waited on every offer response before issuing the next
   ## one — the dominant contributor to the runquota=on vs runquota=off
   ## ratio gap at parallel=32.
+  ##
+  ## All or nothing for ownership: when it raises, nothing it accepted is
+  ## left behind. Children it started have been cancelled and reaped, queued
+  ## and never-started leases released, and the error carries the initiating
+  ## failure first, then what was rolled back and anything that could not be
+  ## (``rollbackBatchOwnership``).
   if requests.len != commands.len:
     raise newException(ReproRunQuotaError,
       "runquota batch offer: requests and commands have different lengths")
@@ -1645,6 +1773,15 @@ proc offerWithRunQuotaBatch*(session: ReproRunQuotaSession;
     return
   let batchLimit = max(1, session.maxOfferBatchSize())
   var processed = 0
+  # Decisions the daemon has returned for the current chunk that have not yet
+  # been turned into an entry of ``result``. Each one is taken OUT of this
+  # table before it is acted on, so at any moment every accepted lease is
+  # owned by exactly one place: this table (granted or queued, nothing
+  # started), ``result`` (a running child or a queued handle), or the callee
+  # that is starting it, which resolves its own lease if it fails. That
+  # invariant is what lets the rollback below account for every decision
+  # without releasing anything twice.
+  var unstarted = initTable[uint64, OfferedLease]()
   try:
     while processed < requests.len:
       let chunk = min(batchLimit, requests.len - processed)
@@ -1656,16 +1793,15 @@ proc offerWithRunQuotaBatch*(session: ReproRunQuotaSession;
         candidateIds[i] = cid
         candidates[i] = toCandidate(cid, requests[processed + i].toRunQuotaRequest())
       let decisions = session.session.offerCandidates(candidates)
-      var decisionByCid = initTable[uint64, OfferedLease]()
       for decision in decisions:
-        decisionByCid[decision.clientCandidateId] = decision
+        unstarted[decision.clientCandidateId] = decision
       for i in 0 ..< chunk:
         let cid = candidateIds[i]
         let inputIndex = processed + i
-        if not decisionByCid.hasKey(cid):
+        var decision: OfferedLease
+        if not unstarted.pop(cid, decision):
           raise newException(ReproRunQuotaError,
             "runquota did not return a decision for offered candidate " & $cid)
-        let decision = decisionByCid[cid]
         if decision.lease.active and not decision.queued:
           result[inputIndex] = ReproRunQuotaOffer(
             kind: rqokStarted,
@@ -1700,10 +1836,17 @@ proc offerWithRunQuotaBatch*(session: ReproRunQuotaSession;
             requests[inputIndex], commands[inputIndex], deniedRetryAttempts,
             deniedRetryBackoff, firstDeniedMs)
       processed += chunk
-  except ReproRunQuotaDeadlockError:
-    raise
   except CatchableError as err:
-    raise newException(ReproRunQuotaError, err.msg)
+    # The partial ``result`` never reaches the caller, so nothing else can
+    # resolve what it holds: roll the batch back before unwinding, and keep
+    # the initiating error's text and kind (a static-capacity deadlock stays a
+    # deadlock -- the scheduler reports it as a build-level outcome). The
+    # initiating exception itself rides along as ``parent``.
+    let rollback = rollbackBatchOwnership(result, unstarted)
+    let message = err.msg & rollback
+    if err of ReproRunQuotaDeadlockError:
+      raise newException(ReproRunQuotaDeadlockError, message, err)
+    raise newException(ReproRunQuotaError, message, err)
 
 proc pollRunQuotaGrants*(session: ReproRunQuotaSession):
     seq[ReproRunQuotaGrant] =
