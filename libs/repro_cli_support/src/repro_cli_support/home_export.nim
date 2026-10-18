@@ -295,8 +295,8 @@ proc packageClassificationDocument*(intent: ProfileIntent;
   ## host inventory, over every reference of the profile
   ## (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply, "The
   ## per-package split comes from Reprobuild"). `intent` is the expanded
-  ## intent; the lock is the one beside the profile; catalog projections are
-  ## staged under `stateDir`.
+  ## intent; catalog projections are staged under `stateDir`. The host-local
+  ## lock is not read: one host's selections must not change a shared export.
   ##
   ## Raises `ValueError` when a reference is defined nowhere this process can
   ## see and no `reprobuild-packages` catalog is reachable: the catalog might
@@ -310,12 +310,11 @@ proc packageClassificationDocument*(intent: ProfileIntent;
       names.add r.packageId
   let catalog = projectCatalogPackages(names, profilePath,
     stateDir / "catalog-projection", profile.catalogImports)
-  let lock = readHomeProfileLock(homeProfileLockPath(profilePath.parentDir))
   var unknown: seq[string]
   result = newJObject()
   for t in ProfileTargetPlatforms:
     let c = classifyPackages(references, profile.adapterPreference,
-      t.platform, t.arch, lock, false, catalog)
+      t.platform, t.arch, catalog)
     result[t.system] = %*{"applications": sortedNames(c.applications),
       "unresolved": sortedNames(c.unresolved)}
     for key in c.unknownDefinitions:

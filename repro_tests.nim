@@ -1287,6 +1287,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_home_export_ignores_host_local_lock.nim",
+    binary: "build/test-bin/t_home_export_ignores_host_local_lock",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_image_identity_is_declared_not_filename.nim",
     binary: "build/test-bin/t_image_identity_is_declared_not_filename",
     defines: @[],
