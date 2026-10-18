@@ -2,7 +2,7 @@
 ## no mocks. Forge URLs in the workspace lock identify repositories without
 ## contacting a forge: all commands run against already-present local trees.
 ## Different input and node names prevent accidental name-based success.
-import std/[json, os, strutils, unittest]
+import std/[json, os, strutils, tables, unittest]
 import nf3_override_state_fixture
 
 suite "flake input original coordinates":
@@ -223,3 +223,225 @@ suite "flake input original coordinates":
     let customHost = invoke("override-args")
     checkpoint(customHost.output)
     check "--override-input gamma-src" in customHost.output
+
+  test "git url originals bind by repository url, never by input name":
+    # reprobuild-pm issue
+    # `2026-10-18-flake-override-binder-binds-a-git-url-input-by-name.md`:
+    # nix writes a `git+…` input's `original` as `{"type": "git", "url": …}`,
+    # with no owner/repo. The binder used to read coordinates only from
+    # github/gitlab/sourcehut originals, so such an input fell back to its
+    # suffix-stripped NAME and the shell could substitute a same-named repo
+    # at a different URL. Each input below is NAMED after one workspace repo
+    # and FETCHES another (or none), so a name-based binding cannot pass.
+    # Falsifiability: against reprobuild `agents` 9b4b298c64 `alpha-src` was
+    # bound to `alpha`, `beta-src` to `beta`, `gamma-src` to `gamma` and
+    # `delta-src` to `delta`, all by name.
+    let binary = getEnv("REPRO_COORDINATE_TEST_BINARY", reproBinaryPath())
+    doAssert fileExists(binary), "build repro before running this regression"
+    doAssert findExe("git").len > 0
+    var fx = setupNf2Fixture("git-url-coordinates")
+    fx.repro = absolutePath(binary)
+    defer: removeDir(fx.scratch)
+    isolateNf2Config(fx)
+    defer: releaseNf2Config()
+    removePreCommitDispatch(fx)
+    writeFile(fx.app / "flake.nix", "{ inputs = { " &
+      "alpha-src.url = \"git+" & originUrl(fx, "beta") & "?ref=main\"; " &
+      "beta-src.url = \"git+" & originUrl(fx, "gamma") & "?ref=main\"; " &
+      "gamma-src.url = \"git+https://example.invalid/elsewhere/gamma?ref=main\"; " &
+      "delta-src.url = \"git+https://example.invalid/elsewhere/delta\"; " &
+      "}; outputs = _: {}; }\n")
+    var lock = parseJson(nf2FlakeLockText(fx, fx.seedSha[1], fx.seedSha[2],
+      fx.seedSha[2]))
+    let nodes = lock["nodes"]
+    # alpha-src fetches beta, beta-src fetches gamma: nix's own shape, a plain
+    # fetch URL in `url` (no `git+`).
+    nodes["alpha-src"]["original"] = %*{"type": "git", "ref": "main",
+      "url": originUrl(fx, "beta")}
+    nodes["alpha-src"]["locked"]["url"] = %originUrl(fx, "beta")
+    nodes["beta-src"]["original"] = %*{"type": "git", "ref": "main",
+      "url": originUrl(fx, "gamma")}
+    nodes["beta-src"]["locked"]["url"] = %originUrl(fx, "gamma")
+    # gamma-src names a repository no workspace repo is: never bound by name.
+    nodes["gamma-src"]["original"] = %*{"type": "git", "ref": "main",
+      "url": "https://example.invalid/elsewhere/gamma"}
+    # delta-src's original is malformed (no url): it fails closed, it is not
+    # bound by its name to `delta`.
+    nodes["delta-src"] = %*{"original": {"type": "git"},
+      "locked": {"type": "git", "rev": fx.seedSha[3],
+        "url": "https://example.invalid/elsewhere/delta"}}
+    nodes["root"]["inputs"] = %*{"alpha-src": "alpha-src",
+      "beta-src": "beta-src", "gamma-src": "gamma-src",
+      "delta-src": "delta-src"}
+    writeFile(lockPath(fx), $lock)
+    let args = run(q(fx.repro) & " flake override-args --all --json " &
+      "--tool-provisioning=path --workspace-root=" & q(fx.ws) & " 2>" &
+      q(fx.scratch / "override-args.err"), cwd = fx.app)
+    let stderrText = readFile(fx.scratch / "override-args.err")
+    checkpoint(args.output & "\nstderr:\n" & stderrText)
+    check args.code == 0
+    var boundTo = initTable[string, string]()
+    for o in parseJson(args.output)["overrides"]:
+      boundTo[o["input"].getStr()] = o["repo"].getStr()
+    check boundTo.getOrDefault("alpha-src") == "beta"
+    check boundTo.getOrDefault("beta-src") == "gamma"
+    check "gamma-src" notin boundTo
+    check "delta-src" notin boundTo
+    check "no workspace repository matches original coordinates" in stderrText
+    check "original git repository url is missing or malformed" in stderrText
+
+  test "the commit pre-filter hands over when the binder pairs an input with another checkout":
+    # The managed `pre-commit` refresh answers "nothing moved" from a cheap
+    # scan that compares each member of the hooks' develop set with ITS
+    # checkout, which ``hookDevelopSetOf`` binds by the URL `flake.nix`
+    # declares. The binder the authoritative path runs binds by the lock's
+    # `original` instead. Here the two disagree about `zeta-src` (its
+    # `flake.nix` URL names `alpha`, its stale lock `original` names `beta`),
+    # and `beta` is a member through `alpha-src`, so the binder pairs
+    # `zeta-src` with `beta`'s checkout, which the scan never compares it with.
+    # Every member's checkout is at its own pin, so the scan alone answers
+    # `up-to-date` although the shell substitutes `beta` for `zeta-src` at a
+    # revision the lock does not name. The pre-filter must stay a superset of
+    # the authoritative path and hand over.
+    # Falsifiability: with the pre-filter that only scanned members (the
+    # first version of the fix for
+    # `2026-10-18-flake-override-binder-binds-a-git-url-input-by-name.md`),
+    # the commit logged `flake-lock up-to-date`.
+    let binary = getEnv("REPRO_COORDINATE_TEST_BINARY", reproBinaryPath())
+    doAssert fileExists(binary), "build repro before running this regression"
+    doAssert findExe("git").len > 0
+    var fx = setupNf2Fixture("prefilter-superset")
+    fx.repro = absolutePath(binary)
+    defer: removeDir(fx.scratch)
+    isolateNf2Config(fx)
+    defer: releaseNf2Config()
+    removePreCommitDispatch(fx)
+    let alphaHead = headOf(fx, siblingDir(fx, "alpha"))
+    let betaHead = headOf(fx, siblingDir(fx, "beta"))
+    doAssert alphaHead != betaHead
+    writeFile(fx.app / "flake.nix", "{ inputs = { " &
+      "alpha-src.url = \"git+" & originUrl(fx, "beta") & "?ref=main\"; " &
+      "zeta-src.url = \"git+" & originUrl(fx, "alpha") & "?ref=main\"; " &
+      "}; outputs = _: {}; }\n")
+    var lock = parseJson(nf2FlakeLockText(fx, betaHead, betaHead, betaHead))
+    let nodes = lock["nodes"]
+    nodes["alpha-src"]["original"] = %*{"type": "git", "ref": "main",
+      "url": originUrl(fx, "beta")}
+    nodes["alpha-src"]["locked"]["url"] = %originUrl(fx, "beta")
+    # `zeta-src` is pinned at `alpha`'s HEAD (what the hooks compare it with),
+    # but its `original` still names `beta` (what the binder binds it by).
+    nodes["zeta-src"] = %*{"original": {"type": "git", "ref": "main",
+        "url": originUrl(fx, "beta")},
+      "locked": {"type": "git", "ref": "main", "rev": alphaHead,
+        "url": originUrl(fx, "alpha")}}
+    nodes["root"]["inputs"] = %*{"alpha-src": "alpha-src",
+      "zeta-src": "zeta-src"}
+    writeFile(lockPath(fx), $lock)
+    commitLockAndPublish(fx, "zeta-src carries a stale original")
+    # What the shell substitutes: `beta` for both inputs.
+    let bound = flakeArgs(fx, "--all --json", cwd = fx.app)
+    checkpoint("override-args stderr:\n" & bound.stderr)
+    check bound.code == 0
+    var boundTo = initTable[string, string]()
+    for o in parseJson(bound.stdout)["overrides"]:
+      boundTo[o["input"].getStr()] = o["repo"].getStr()
+    check boundTo.getOrDefault("alpha-src") == "beta"
+    check boundTo.getOrDefault("zeta-src") == "beta"
+    let c = tryCommitInApp(fx, "the binder pairs zeta-src with beta")
+    checkpoint(c.output)
+    checkpoint("pre-commit log:\n" & preCommitLog(fx))
+    let line = lastFlakeLogLine(fx)
+    check line.len > 0
+    check "flake-lock up-to-date" notin line
+
+  test "an input that fetches a fork's upstream is not bound to the fork":
+    # A fork declares its upstream as a second remote (`noir` declares
+    # `noir-lang/noir`). An input whose `original` fetches that UPSTREAM must
+    # not have the fork's working tree substituted for it: the shell would
+    # build the fork, and the commit-time re-pin would record a fork revision
+    # in a lock node that fetches from upstream. The binder therefore matches
+    # a repo's fetch URL and checkout, never its other remotes, while the
+    # managed hooks (``hookDevelopSetOf``) do bind by every remote; the hooks
+    # then leave the input alone because the shell does not substitute it.
+    # Falsifiability: the first version of the fix for
+    # `2026-10-18-flake-override-binder-binds-a-git-url-input-by-name.md`
+    # matched every declared remote and bound `up-src` to `alpha`.
+    let binary = getEnv("REPRO_COORDINATE_TEST_BINARY", reproBinaryPath())
+    doAssert fileExists(binary), "build repro before running this regression"
+    doAssert findExe("git").len > 0
+    var fx = setupNf2Fixture("fork-upstream")
+    fx.repro = absolutePath(binary)
+    defer: removeDir(fx.scratch)
+    isolateNf2Config(fx)
+    defer: releaseNf2Config()
+    removePreCommitDispatch(fx)
+    const upstreamUrl = "https://example.invalid/upstream-owner/alpha.git"
+    # A manifest in which `alpha` carries a second remote, `upstream`.
+    let manifests = fx.ws / ".repro" / "manifests"
+    createDir(manifests / "projects")
+    createDir(manifests / "repos")
+    var remotes = "\n[[remote]]\nname = \"alpha-upstream\"\nfetch = \"" &
+      upstreamUrl & "\"\n"
+    var includes: seq[string]
+    for name in Nf2Repos:
+      remotes.add("\n[[remote]]\nname = \"" & name & "\"\nfetch = \"" &
+        originUrl(fx, name) & "\"\n")
+      includes.add("\"repos/" & name & ".toml\"")
+      let extra =
+        if name == "alpha":
+          "remotes = [{ name = \"origin\", remote = \"alpha\" }, " &
+            "{ name = \"upstream\", remote = \"alpha-upstream\" }]\n"
+        else: ""
+      writeFile(manifests / "repos" / (name & ".toml"),
+        "schema = \"reprobuild.workspace.repo.v1\"\n[repo]\nname = \"" & name &
+        "\"\npath = \"" & name & "\"\nremote = \"" & name &
+        "\"\nrevision = \"main\"\n" & extra)
+    writeFile(manifests / "projects" / "nf2.toml",
+      "schema = \"reprobuild.workspace.project.v1\"\n" &
+      "includes = [" & includes.join(", ") & "]\n" &
+      "[project]\nname = \"nf2\"\ndefault_revision = \"main\"\n" &
+      "trunk = \"main\"\n" & remotes)
+    let alphaHead = headOf(fx, siblingDir(fx, "alpha"))
+    let betaHead = headOf(fx, siblingDir(fx, "beta"))
+    writeFile(fx.app / "flake.nix", "{ inputs = { " &
+      "up-src.url = \"git+" & upstreamUrl & "?ref=main\"; " &
+      "beta-src.url = \"git+" & originUrl(fx, "beta") & "?ref=main\"; " &
+      "}; outputs = _: {}; }\n")
+    var lock = parseJson(nf2FlakeLockText(fx, alphaHead, betaHead, betaHead))
+    let nodes = lock["nodes"]
+    nodes["up-src"] = %*{"original": {"type": "git", "ref": "main",
+        "url": upstreamUrl},
+      "locked": {"type": "git", "ref": "main", "rev": alphaHead,
+        "url": upstreamUrl}}
+    nodes["root"]["inputs"] = %*{"up-src": "up-src", "beta-src": "beta-src"}
+    writeFile(lockPath(fx), $lock)
+    commitLockAndPublish(fx, "up-src fetches alpha's upstream")
+    let bound = flakeArgs(fx, "--all --json", cwd = fx.app)
+    checkpoint("override-args stderr:\n" & bound.stderr)
+    check bound.code == 0
+    var boundTo = initTable[string, string]()
+    for o in parseJson(bound.stdout)["overrides"]:
+      boundTo[o["input"].getStr()] = o["repo"].getStr()
+    # Positive control for the manifest: `beta-src` is bound by fetch URL.
+    check boundTo.getOrDefault("beta-src") == "beta"
+    check "up-src" notin boundTo
+    check ("NOT substituted: flake input 'up-src': no workspace repository " &
+      "matches original coordinates") in bound.stderr
+    # `alpha` moves. The hooks DO bind `up-src` to `alpha` through its
+    # upstream remote (the control that the remote was resolved), and since
+    # the shell does not substitute it, nothing is recorded.
+    let moved = moveSibling(fx, "alpha", "alpha moves past the upstream pin")
+    publishSibling(fx, "alpha")
+    let c = tryCommitInApp(fx, "alpha moved")
+    checkpoint(c.output)
+    checkpoint("pre-commit log:\n" & preCommitLog(fx))
+    check c.code == 0
+    check moved notin lockInCommit(fx)
+    # Not even attempted: a re-pin of `up-src` to `alpha`'s revision would
+    # name a fork commit in a node that fetches from upstream.
+    check "'up-src'" notin lastFlakeLogLine(fx)
+    var hookLine = ""
+    for line in preCommitLog(fx).splitLines():
+      if " hook-develop-set " in line: hookLine = line
+    check "not substituted by develop mode, not compared: up-src=alpha" in
+      hookLine
