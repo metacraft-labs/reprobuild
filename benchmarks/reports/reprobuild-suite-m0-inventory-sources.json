@@ -2908,7 +2908,7 @@
             "socketPath",
             "sourcePath"
           ],
-          "line": 141,
+          "line": 142,
           "path": "tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim",
           "patterns": [
             "gcc"
@@ -2933,7 +2933,7 @@
             "socketPath",
             "sourcePath"
           ],
-          "line": 144,
+          "line": 145,
           "path": "tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim",
           "patterns": [
             "cc"
