@@ -42,12 +42,20 @@ type
 
 proc mkRunInfraApplyHook*(stateDir: string;
                           cacheRoot: string;
-                          hostIdentity = "reprobuild-deploy-agent";
+                          hostIdentity: string;
                           reproExe = "";
                           profileResolver: ProfileResolver = nil): ApplyHook =
   ## Build the production apply hook. Each converged manifest is applied
   ## via ``runInfraApply`` with the M4 ``mkBuildActionDispatcher`` closure
   ## injected — the SAME closure ``repro infra apply`` uses.
+  ##
+  ## ``hostIdentity`` is required and must be non-empty: it is recorded in
+  ## every generation the hook commits and is an input to the generation
+  ## id. It has no default because the only right value is the one the
+  ## shared resolver (``host_identity.selectHost``) gives, which the CLI
+  ## resolves; a literal default (it used to be ``reprobuild-deploy-agent``)
+  ## is an invented identity (reprobuild-pm issue
+  ## 2026-10-18-deploy-agent-invents-a-host-identity-instead-of-resolving-one).
   ##
   ## ``cacheRoot`` is the apply-scoped engine/action cache root (the M4
   ## substitute scratch lives under ``cacheRoot/binary-cache-substitute``).
@@ -70,6 +78,9 @@ proc mkRunInfraApplyHook*(stateDir: string;
   ## The resolver is optional so the hermetic gates — which inject canonical
   ## text directly and must not drag in a compiler — keep working unchanged;
   ## production passes one. A nil resolver preserves the old behaviour exactly.
+  if hostIdentity.len == 0:
+    raise newException(ValueError,
+      "mkRunInfraApplyHook: hostIdentity must name the host")
   let capturedStateDir = stateDir
   let capturedCacheRoot = cacheRoot
   let capturedHost = hostIdentity

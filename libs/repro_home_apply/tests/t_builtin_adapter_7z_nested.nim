@@ -166,8 +166,12 @@ suite "M3 — archive realizer nested 7z":
       createDir(extendedPath(binutilsDir / "bin"))
       writeFile(extendedPath(binutilsDir / "bin" / "as.exe"),
         "stub-as-bytes\n")
+      setFilePermissions(extendedPath(binutilsDir / "bin" / "as.exe"),
+        {fpUserRead, fpUserWrite, fpUserExec})
       writeFile(extendedPath(binutilsDir / "bin" / "ld.exe"),
         "stub-ld-bytes\n")
+      setFilePermissions(extendedPath(binutilsDir / "bin" / "ld.exe"),
+        {fpUserRead, fpUserWrite, fpUserExec})
       let binutils7z = stagingDir / "binutils-stub.7z"
       discard execCmdEx(
         quoteShell(hostSeven) & " a -t7z " &
@@ -182,10 +186,16 @@ suite "M3 — archive realizer nested 7z":
       createDir(extendedPath(gccDir / "bin"))
       writeFile(extendedPath(gccDir / "bin" / "gcc.exe"),
         "stub-gcc-bytes\n")
+      setFilePermissions(extendedPath(gccDir / "bin" / "gcc.exe"),
+        {fpUserRead, fpUserWrite, fpUserExec})
       writeFile(extendedPath(gccDir / "bin" / "g++.exe"),
         "stub-gxx-bytes\n")
+      setFilePermissions(extendedPath(gccDir / "bin" / "g++.exe"),
+        {fpUserRead, fpUserWrite, fpUserExec})
       writeFile(extendedPath(gccDir / "bin" / "gfortran.exe"),
         "stub-gfortran-bytes\n")
+      setFilePermissions(extendedPath(gccDir / "bin" / "gfortran.exe"),
+        {fpUserRead, fpUserWrite, fpUserExec})
       let gcc7z = stagingDir / "mingw-w64+gcc-stub.7z"
       discard execCmdEx(
         quoteShell(hostSeven) & " a -t7z " &

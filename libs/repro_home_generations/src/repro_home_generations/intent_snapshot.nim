@@ -122,6 +122,66 @@ proc defaultWalkProfileFiles*(profileDir: string): seq[IntentFileEntry] =
     result.add(IntentFileEntry(path: normalizePath(rel),
       content: bytesOf(content)))
 
+proc observedProfileFiles*(profileDir: string; observed: openArray[string]):
+    seq[string] =
+  ## The profile-relative paths (forward slashes, sorted, unique) of the
+  ## files among `observed` -- the absolute paths the profile compile edge
+  ## was seen reading -- that lie under `profileDir` at any depth and still
+  ## exist as regular files. `profileDir` is matched both as given and
+  ## through its resolved real path, since the monitor reports the path the
+  ## compiler opened. A read of something that is gone (the helper's
+  ## temporary `config.nims`) or is a directory is not a source file.
+  var roots = @[absolutePath(profileDir)]
+  try:
+    let real = expandFilename(profileDir)
+    if real notin roots:
+      roots.add real
+  except OSError:
+    discard
+  for raw in observed:
+    if not raw.isAbsolute:
+      continue
+    for root in roots:
+      if not raw.startsWith(root & DirSep):
+        continue
+      let rel = normalizePath(raw.relativePath(root))
+      if rel notin result and fileExists(extendedPath(raw)) and
+          not dirExists(extendedPath(raw)):
+        result.add rel
+      break
+  result.sort()
+
+proc profileSourceFiles*(profileDir: string; compiledFrom: openArray[string]):
+    seq[IntentFileEntry] =
+  ## The source files of a generation's intent snapshot: every `*.nim`
+  ## directly under `profileDir` (`defaultWalkProfileFiles`) plus every
+  ## file under `profileDir` the profile compile was observed reading
+  ## (`compiledFrom`; `observedProfileFiles`) -- helper modules the profile
+  ## imports from subdirectories, and files it reads at compile time.
+  ## Sorted by path. The directory walk alone omitted the subdirectory
+  ## modules, so the snapshot of such a profile could not be compiled on
+  ## its own and an edit to one of them went unrecorded (reprobuild-pm
+  ## issue 2026-10-18-home-intent-snapshot-omits-imported-modules-in-
+  ## subdirectories; Home-Profile-Generations-And-State.md §Intent
+  ## Snapshot). A profile whose compile reads nothing but its top-level
+  ## `*.nim` files gets exactly the walk's entries, so its snapshot bytes
+  ## and generation ids do not change; with no observation (`compiledFrom`
+  ## empty) the snapshot is the walk.
+  result = defaultWalkProfileFiles(profileDir)
+  var have: seq[string]
+  for e in result:
+    have.add e.path
+  var added = false
+  for rel in observedProfileFiles(profileDir, compiledFrom):
+    if rel in have:
+      continue
+    have.add rel
+    added = true
+    result.add(IntentFileEntry(path: rel,
+      content: bytesOf(readFile(extendedPath(profileDir / rel)))))
+  if added:
+    result.sort(proc(a, b: IntentFileEntry): int = cmp(a.path, b.path))
+
 # ---------------------------------------------------------------------------
 # Encoding.
 # ---------------------------------------------------------------------------

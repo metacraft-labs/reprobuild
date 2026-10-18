@@ -78,6 +78,7 @@ type
     lfkStaleRemoteRef      ## refs/remotes/* whose commit exists nowhere (A)
     lfkLocalTipMissing     ## a local ref's own commit exists nowhere (B)
     lfkLocalHistoryMissing ## a local branch's commits are intact, a parent is gone (B)
+    lfkRefetchChainMissing ## partial-pool leaf lacked its lazy-refetch chain
     lfkOldGit              ## git < 2.42: the pool keeps every object (§3.6)
 
   LeafFinding* = object
@@ -1841,6 +1842,31 @@ proc gitDirOf(gitBin, leaf: string): tuple[gitDir, commonDir: string] =
     return ("", "")
   (lines[0], lines[1])
 
+proc leafPoolConfigRows(pool: string): seq[(string, string)] =
+  @[("remote." & LeafPoolRemoteName & ".url", poolFileUrl(pool)),
+    ("remote." & LeafPoolRemoteName & ".promisor", "true"),
+    ("remote." & LeafPoolRemoteName & ".uploadpack", LeafPoolUploadPack),
+    ("remote." & LeafPoolRemoteName & ".skipFetchAll", "true")]
+
+proc needsLeafRefetchChain(gitBin, leaf, pool: string): bool =
+  ## Ref-tip presence cannot detect missing blobs below present commits.
+  ## Inspect the actual chain before on-touch configuration repairs it.
+  let extension = runGit(gitBin, ["-C", pool, "config", "--get",
+    "extensions.partialClone"])
+  let promisors = runGit(gitBin, ["-C", pool, "config", "--bool",
+    "--get-regexp", "^remote\\..*\\.promisor$"])
+  var partial = extension.code == 0 and extension.output.strip().len > 0
+  if promisors.code == 0:
+    for line in promisors.output.splitLines():
+      if line.strip().endsWith(" true"): partial = true
+  if not partial: return false
+  for (key, value) in leafPoolConfigRows(pool):
+    let current = runGit(gitBin, ["-C", leaf, "config", "--local",
+      "--get-all", key])
+    if current.code != 0 or current.output.strip() != value: return true
+  runGit(gitBin, ["-C", leaf, "config", "--local", "--get-all",
+    "remote." & LeafPoolRemoteName & ".fetch"]).code == 0
+
 proc ensureLeafPoolConfig*(gitBin, leaf, pool: string): string =
   ## Install §3.4 and §3.5 into ``leaf``'s config. Returns "" on success,
   ## otherwise the diagnostic. Idempotent.
@@ -1856,14 +1882,9 @@ proc ensureLeafPoolConfig*(gitBin, leaf, pool: string): string =
   ## with it. ``remote.repro-pool.promisor=true`` on its own is enough for
   ## git 2.54 to fetch a missing object on demand through the pool (the read
   ## healed leaf and pool), and leaves the repository format alone.
-  let rows = [
-    ("remote." & LeafPoolRemoteName & ".url", poolFileUrl(pool)),
-    ("remote." & LeafPoolRemoteName & ".promisor", "true"),
-    ("remote." & LeafPoolRemoteName & ".uploadpack", LeafPoolUploadPack),
-    ("remote." & LeafPoolRemoteName & ".skipFetchAll", "true")]
   var failedKeys: seq[string]
-  for (key, value) in rows:
-    let current = runGit(gitBin, ["-C", leaf, "config", "--local", "--get", key])
+  for (key, value) in leafPoolConfigRows(pool):
+    let current = runGit(gitBin, ["-C", leaf, "config", "--local", "--get-all", key])
     if current.code == 0 and current.output.strip() == value:
       continue
     if runGit(gitBin, ["-C", leaf, "config", "--local", "--replace-all", key,
@@ -1874,8 +1895,9 @@ proc ensureLeafPoolConfig*(gitBin, leaf, pool: string): string =
   let fetchKey = "remote." & LeafPoolRemoteName & ".fetch"
   if runGit(gitBin, ["-C", leaf, "config", "--local", "--get-all",
       fetchKey]).code == 0:
-    discard runGit(gitBin, ["-C", leaf, "config", "--local", "--unset-all",
-      fetchKey])
+    if runGit(gitBin, ["-C", leaf, "config", "--local", "--unset-all",
+        fetchKey]).code != 0:
+      failedKeys.add(fetchKey)
   var hidden = false
   let hide = runGit(gitBin, ["-C", leaf, "config", "--local", "--get-all",
     "fetch.hideRefs"])
@@ -2248,12 +2270,22 @@ proc checkLeaf*(gitBin, leaf: string; mode: LeafCheckMode;
       result.diagnostic = "not a git checkout: " & leaf
       return
 
-    # §4.3 self-registration.
+    let missingChain = needsLeafRefetchChain(gitBin, leaf, thePool)
+    # §4.3 self-registration precedes presence probes even when every ref
+    # tip exists: missing blobs are healed on subsequent reads, not by an
+    # expensive eager walk of every tree.
     result.registered = registerBorrower(thePool, leaf)
     let configured = ensureLeafPoolConfig(gitBin, leaf, thePool)
     result.configured = configured.len == 0
     if configured.len > 0:
       result.diagnostic = configured
+    if missingChain:
+      result.findings.add(LeafFinding(kind: lfkRefetchChainMissing,
+        message: "repro: " & displayPath(leaf) &
+          ": missing or incorrect refetch chain to partial shared clone " &
+          displayPath(thePool) & ". " &
+          (if result.configured: "Installed on touch; missing blobs can now be fetched on read."
+           else: configured & ". Repair with: repro health --fix")))
 
     # §3.6: report an old git once per pool.
     if not gitSupportsRetentionHook(gitBin):

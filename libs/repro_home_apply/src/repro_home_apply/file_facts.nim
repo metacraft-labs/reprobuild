@@ -200,3 +200,78 @@ proc resolveStowResourceOverlap*(files: seq[PlannedGeneratedFile];
     if e.targetAbsolutePath in takenOver:
       continue
     result.stowEntries.add e
+
+# ---------------------------------------------------------------------------
+# Two resources, one real-world object.
+# ---------------------------------------------------------------------------
+
+proc sharesTargetWith*(a, b: Resource): bool =
+  ## True when `a` and `b` (two resources of one plan, at different
+  ## addresses) would both write one real-world object: their
+  ## `realWorldIdentity` is equal. One exception: on Windows every
+  ## `env.userPath` resource has the identity `HKCU\Environment\Path`, but
+  ## there the driver MERGES each resource's entries into the value (each
+  ## binding removes only its own contribution), so several of them do not
+  ## overwrite one another. On POSIX a profile-declared `env.userPath` owns
+  ## the rc file's one PATH block, so two of them do.
+  if a.kind != b.kind:
+    return false
+  when defined(windows):
+    if a.kind == rkEnvUserPath:
+      return false
+  realWorldIdentity(a) == realWorldIdentity(b)
+
+proc resourceTargetLabel*(r: Resource; homeDir: string): string =
+  ## How the object a resource writes is named to the reader: the host-facts
+  ## id where one exists (`~/<rel>`, `var:<NAME>`, `block:<file>#<id>`, ...),
+  ## the real-world identity otherwise.
+  case r.kind
+  of rkFsUserFile: homeRelativeId(r.userFileHostPath, homeDir)
+  of rkEnvUserVariable: "var:" & r.envVarName
+  of rkEnvUserPath:
+    "the PATH block of " & homeRelativeId(r.pathHostFilePath, homeDir)
+  of rkFsManagedBlock:
+    "block:" & homeRelativeId(r.hostFilePath, homeDir) & "#" &
+      r.managedBlockId
+  of rkShellIntegration:
+    "block:" & homeRelativeId(r.shellHostFilePath, homeDir) & "#" &
+      r.shellBlockId
+  else: realWorldIdentity(r)
+
+proc differingTargetFields*(a, b: Resource): seq[string] =
+  ## What two resources sharing one target disagree on, rendered for the
+  ## refusal ("" fields when they agree). The fields are the host-facts
+  ## compared fields where the kind has a facts entry (`mode` and `digest`
+  ## for a file, `value` for a variable, `entries` for a PATH block,
+  ## `digest` for a block), else the canonical desired content
+  ## (`digestOfResource`, what the apply records and compares).
+  doAssert a.kind == b.kind
+  case a.kind
+  of rkFsUserFile:
+    if a.userFileMode != b.userFileMode:
+      result.add "mode (" & a.userFileMode & " vs " & b.userFileMode & ")"
+    let da = userFileDigest(a)
+    let db = userFileDigest(b)
+    # A command's bytes are unknown before apply: never "the same bytes".
+    if da != db or da.len == 0:
+      result.add "digest (" & showDigest(da) & " vs " & showDigest(db) & ")"
+  of rkEnvUserVariable:
+    let va = decodeRegistryStringValue(a.envVarPayload)
+    let vb = decodeRegistryStringValue(b.envVarPayload)
+    if va != vb:
+      result.add "value (" & escape(va) & " vs " & escape(vb) & ")"
+  of rkEnvUserPath:
+    if a.pathEntries != b.pathEntries:
+      result.add "entries (" & a.pathEntries.join(", ") & " vs " &
+        b.pathEntries.join(", ") & ")"
+  of rkFsManagedBlock:
+    if a.managedBlockContent != b.managedBlockContent:
+      result.add "digest (" & sha256Digest(a.managedBlockContent) & " vs " &
+        sha256Digest(b.managedBlockContent) & ")"
+  of rkShellIntegration:
+    if a.shellBlockContent != b.shellBlockContent:
+      result.add "digest (" & sha256Digest(a.shellBlockContent) & " vs " &
+        sha256Digest(b.shellBlockContent) & ")"
+  else:
+    if digestOfResource(a) != digestOfResource(b):
+      result.add "desired content"

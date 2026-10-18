@@ -20,11 +20,10 @@
 ##   5. Zip extraction with extract_path flatten — requires a host
 ##      zip tool (unzip or PowerShell). Skipped on
 ##      hosts without one.
-##   6. Installer mode: mocked via `REPRO_TEST_BUILTIN_INSTALLER_MOCK`
-##      so the test does not exec a real installer; asserts the argv
-##      composition (NSIS-style `/S /D=<dir>`).
+##   6. An installer without its primary executable is refused before execution;
+##      real native installer invocation is covered by t_one_tarball_realizer.
 ##   7. The realized prefix's receipt records the archive realizer
-##      (`BuiltinAdapterName`) and populated digest/url fields.
+##      (`tarball`) and populated digest/url fields.
 ##
 ## GM4b: resolutions are synthetic `tarball` records selected by
 ## `selectRealization` and projected by `archiveRealizationOf` (see the
@@ -340,17 +339,21 @@ suite "M64 — home archive realizer":
     createDir(extendedPath(innerDir / "lib"))
     writeFile(extendedPath(innerDir / "bin" / "tool.cmd"),
       "@echo hello from tool\n")
+    setFilePermissions(extendedPath(innerDir / "bin" / "tool.cmd"),
+      {fpUserRead, fpUserWrite, fpUserExec})
     writeFile(extendedPath(innerDir / "lib" / "runtime.txt"),
       "runtime-marker\n")
 
     # Produce the zip. Prefer `zip` (POSIX) then PowerShell.
-    let zipPath = fixtureDir / "tool-1.0.0.zip"
+    let zipPath = absolutePath(fixtureDir / "tool-1.0.0.zip")
     let posixZip = findExe("zip")
     var zipped = false
     if posixZip.len > 0:
       let cmd = quoteShell(posixZip) & " -q -r " & quoteShell(zipPath) &
         " " & quoteShell("tool-1.0.0")
       let res = execCmdEx(cmd, workingDir = stagingDir)
+      checkpoint res.output
+      require res.exitCode == 0
       zipped = res.exitCode == 0
     if not zipped:
       when defined(windows):
@@ -364,6 +367,8 @@ suite "M64 — home archive realizer":
           let cmd = quoteShell(pwsh) &
             " -NoProfile -ExecutionPolicy Bypass -Command " & quoteShell(ps)
           let res = execCmdEx(cmd)
+          checkpoint res.output
+          require res.exitCode == 0
           zipped = res.exitCode == 0
     if not zipped:
       echo "  [skip] no zip producer on PATH; skipping afZip test"
@@ -415,6 +420,8 @@ suite "M64 — home archive realizer":
       createDir(extendedPath(innerDir / "lib"))
       writeFile(extendedPath(innerDir / "bin" / "tool.cmd"),
         "@echo hello from 7z tool\n")
+      setFilePermissions(extendedPath(innerDir / "bin" / "tool.cmd"),
+        {fpUserRead, fpUserWrite, fpUserExec})
       writeFile(extendedPath(innerDir / "lib" / "runtime.txt"),
         "seven-zip-runtime-marker\n")
 
@@ -447,74 +454,32 @@ suite "M64 — home archive realizer":
       check readFile(extendedPath(lib)).contains("seven-zip-runtime-marker")
       check outR.archiveFormat == afSevenZip
 
-  test "realizeBuiltinPackage: installer mode captures argv via mock":
-    # Mock the installer invocation so the test is hermetic. The
-    # adapter writes the recorded argv into `$REPRO_TEST_BUILTIN_INSTALLER_MOCK`
-    # and synthesizes the install_dir on disk; we assert the argv
-    # composition + that the staged tree contains the declared bin.
-    let fixtureDir = FixtureRoot / "installer-mock"
-    let storeDir = fixtureDir / "store"
-    let payloadDir = fixtureDir / "payload"
+  test "an installer with no primary executable is refused before execution":
+    # A canonical tarball always names its exported primary. The retired
+    # home loop accepted a cleared binRelpath and skipped validation; the
+    # compatibility API must enforce the common edge's invariant instead.
+    # The real installer/argv path is covered without a mock by
+    # t_one_tarball_realizer's native silent-installer fixture.
+    let fixtureDir = FixtureRoot / "installer-no-primary"
     resetDir(fixtureDir)
-    resetDir(storeDir)
-    resetDir(payloadDir)
-    # The fake "installer" is a stub file — the mock dispatch never
-    # executes it, only records the argv that would have run.
-    let installerPath = payloadDir / "fake-installer.exe"
-    let installerSha = writePayloadFile(installerPath,
-      "fake-installer-bytes")
-    let url = fileToUrl(absolutePath(installerPath))
-    # The bin_relpath must point at a file the mock places under the
-    # install dir. We use a tiny post-install hook: after the mock
-    # writes the argv, the test creates the expected bin so the
-    # post-extraction `bin_relpath` check passes.
-    #
-    # We do this by registering a custom mock that ALSO writes the bin
-    # — but the adapter's mock path only ensures destDir exists. So
-    # we use a two-step approach: realize INSIDE a wrapper that
-    # post-populates the staging directory before validation runs.
-    #
-    # Simpler: declare an empty `bin_relpath` so the validation loop
-    # is a no-op. The schema requires at least one entry for
-    # imExtract; for imInstallerSilent the schema requires
-    # installer_args, not bin_relpath, so an empty bin_relpath is
-    # valid. We still set executableName via packageId.
-    let argvCapture = fixtureDir / "argv.txt"
-    putEnv(BuiltinTestInstallerMockEnvVar, argvCapture)
-    defer: delEnv(BuiltinTestInstallerMockEnvVar)
-
-    var res = selectArchive("tool-with-installer", [hostRecord(url,
-      "installer-nsis", "tool.exe", sha256 = installerSha,
-      installMethod = "installer-silent", installerArgs = @["/S"])])
-    # The mock installer lays down no files, so this case realizes with
-    # no exported executable (what an installer-only record with an empty
-    # `bin_relpath` meant before GM4b); a `tarball` record always names
-    # one, so the projection's list is cleared here.
-    res.binRelpath = @[]
-
-    var store = openStore(storeDir)
+    let installerPath = fixtureDir / "installer.exe"
+    let digest = writePayloadFile(installerPath, "must never execute")
+    var resolution = selectArchive("installer-no-primary", [hostRecord(
+      fileToUrl(absolutePath(installerPath)), "installer-nsis", "tool.exe",
+      sha256 = digest, installMethod = "installer-silent",
+      installerArgs = @["/S"])])
+    resolution.binRelpath = @[]
+    var store = openStore(fixtureDir / "store")
     defer: store.close()
-
-    let outR = realizeBuiltinPackage(store, res)
-    check (not outR.cacheHit)
-    check outR.installerArgvUsed.len >= 3  # installer + /S + /D=<dir>
-    check outR.installerArgvUsed[0] == absolutePath(installerPath) or
-      outR.installerArgvUsed[0].endsWith("fake-installer.exe") or
-      outR.installerArgvUsed[0].contains("artifact.")
-        # The download is staged into a CAS-tmp dir; the adapter
-        # invokes the staged copy, not the source. We accept any of
-        # these for robustness.
-    check outR.installerArgvUsed.contains("/S")
-    var sawDFlag = false
-    for a in outR.installerArgvUsed:
-      if a.startsWith("/D="):
-        sawDFlag = true
-    check sawDFlag
-    # The capture file recorded the argv.
-    check fileExists(extendedPath(argvCapture))
-    let argvFile = readFile(extendedPath(argvCapture))
-    check argvFile.contains("/S")
-    check argvFile.contains("/D=")
+    try:
+      discard realizeBuiltinPackage(store, resolution)
+      check false
+    except ValueError as err:
+      check "incomplete tarball metadata" in err.msg
+    var published = false
+    for path in walkDirs(fixtureDir / "store" / "prefixes" / "*" / "*"):
+      published = true
+    check not published
 
   test "archive realizer: realized prefix carries the dispatch fields":
     # End-to-end from a selected record: the realizer's outcome carries
@@ -545,15 +510,15 @@ suite "M64 — home archive realizer":
     check outR.archiveFormat == afRaw
     check outR.resolvedExecutablePath ==
       outR.prefixAbsolutePath / "bin" / "tool"
-    # The realized prefix's receipt records adapter == BuiltinAdapterName.
+    # The realized prefix's receipt records the common tarball owner.
     let receiptPath = outR.prefixAbsolutePath / ".repro-receipt"
     check fileExists(extendedPath(receiptPath))
     let receipt = readReceiptFile(receiptPath)
-    check receipt.adapter == BuiltinAdapterName
+    check receipt.adapter == "tarball"
     check receipt.packageName == "dispatch-tool"
     check receipt.version == "4.0.0"
     check receipt.provenanceUrl == url
-    check receipt.provenanceChecksum == "sha256:" & sha
+    check receipt.provenanceChecksum == sha
 
   # ===========================================================================
   # M1 (Realize-Closure spec) — sha1 weak-hash realize path.

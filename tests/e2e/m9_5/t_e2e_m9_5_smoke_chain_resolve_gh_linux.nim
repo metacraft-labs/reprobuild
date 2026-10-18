@@ -44,7 +44,7 @@ suite "M9.5/GM4b smoke: Linux archives resolve":
     # Crystal's Linux tarball nests; extractPath flattens it, which the home
     # archive realizer performs.
     check res.selection.tarball.detail.extractPath == "crystal-1.20.2-1"
-    check res.archiveRoute == arInstaller
+    check res.archiveRoute == arExtract
     check res.archive.extractPath == "crystal-1.20.2-1"
 
   test "ghc resolves to its Linux archive (Phase-2 fixture)":

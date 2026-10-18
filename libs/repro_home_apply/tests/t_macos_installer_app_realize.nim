@@ -167,7 +167,8 @@ when defined(macosx):
       check isMacosInstallerApp(archive)
       let realized = realizeBuiltinPackage(store, archive, Relaxed)
       let prefix = realized.prefixAbsolutePath
-      # The prefix holds the placed item (the folder) and the receipt only.
+      # The published prefix holds the placed item and the common edge receipts.
+      # Installer output is checked before these metadata files are emitted.
       check realized.appBundlePath == prefix / Item
       check realized.appBundleMainPath == MainName & ".app"
       check dirExists(prefix / Item / (MainName & ".app"))
@@ -175,7 +176,8 @@ when defined(macosx):
       check dirExists(prefix / Item / ".support" / (Item & " Update.app"))
       check fileExists(prefix / Item / "readme.txt")
       for entry in entries(prefix):
-        check entry in [Item, ".repro-receipt"]
+        check entry in [Item, ".repro-receipt", ".repro-installation.json",
+          ".reprobuild-tarball-receipt.json"]
       check realized.resolvedExecutablePath ==
         prefix / Item / (MainName & ".app") / "Contents" / "MacOS" / MainName
       # The recorded identity is the folder identity.

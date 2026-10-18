@@ -23,7 +23,7 @@
 ##   to `GetComputerNameW`'s answer, normalized the same way.
 ## * `posix_ignores_computername`: negative control for the old `repro infra`
 ##   rule, which took `%COMPUTERNAME%` on every platform: on POSIX only
-##   `$HOSTNAME` (else the `hostname` command) counts.
+##   `$HOSTNAME` (else gethostname(2)) counts.
 ## * `posix_hostname_command_output_is_trimmed`: the command's trailing
 ##   newline is not part of the name.
 ## * `no_hostname_is_no_identity`: no variable and no OS answer give "", and

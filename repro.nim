@@ -432,6 +432,11 @@ const
         path: "build/bin/repro-peer-cache-admin",
         actionId: "reprobuild.apps.repro-peer-cache-admin")]),
     TestGraphArtifacts(
+      source: "tests/integration/t_installer_tarball_shared_cache.nim",
+      artifacts: @[TestGraphArtifact(
+        path: "build/bin/repro-binary-cache",
+        actionId: "reprobuild.apps.repro-binary-cache")]),
+    TestGraphArtifacts(
       source: "tests/integration/t_rp3_bind_deps_and_sharing.nim",
       artifacts: @[
         TestGraphArtifact(path: rp3FixtureProviderRoot & "/dep",

@@ -66,7 +66,7 @@
 ## broker, so there they are skipped with that reason and eli-pc runs them
 ## (GM10 Verification `eli_pc_infra_host_identity`).
 
-import std/[os, strutils, times, unittest]
+import std/[os, strutils, unittest]
 
 import repro_test_support/reasoned_skip
 
@@ -166,16 +166,6 @@ proc field(output, label: string): string =
         return rest[1 .. ^1].strip()
   ""
 
-proc nextSecond() =
-  ## Wait until the wall clock enters a new second. System generation ids
-  ## derive from a whole-second timestamp, so two commits by one host within a
-  ## second share an id and the second overwrites the first (reprobuild-pm
-  ## issue 2026-10-18-system-generation-ids-collide-within-one-second). This
-  ## gate counts generations, so it keeps its commits a second apart.
-  let start = epochTime().int64
-  while epochTime().int64 == start:
-    sleep(50)
-
 proc stateFingerprint(stateDir: string): seq[string] =
   treeFingerprint(stateDir, [stateDir / "profile-cache"])
 
@@ -209,12 +199,10 @@ suite "GM10: repro infra and repro home resolve one host identity":
       check apply.stdout.field("host") == HereHost
       check ("(host " & HereHost & ": system managed here)") in apply.stdout
       apply.noLegacyIdentity()
-      nextSecond()
       let sync = f.infra(["system", "sync"], hostname = Hostname)
       check sync.exitCode == 0
       check sync.stdout.field("host") == HereHost
       sync.noLegacyIdentity()
-      nextSecond()
       let rollback = f.infra(["system", "rollback",
         apply.stdout.field("generation")], hostname = Hostname)
       check rollback.exitCode == 0
@@ -333,7 +321,6 @@ suite "GM10: repro infra and repro home resolve one host identity":
       check gensAfter.stdout.field("generations") ==
         gensBefore.stdout.field("generations")
       # Negative control: applied as the host it was made for, it proceeds.
-      nextSecond()
       let accepted = f.infra(["infra", "apply", "--plan", legacyPlanId,
         "--host", "localhost"])
       check accepted.exitCode == 0
@@ -341,7 +328,6 @@ suite "GM10: repro infra and repro home resolve one host identity":
       let sync = f.infra(["system", "sync"], hostname = Hostname)
       check sync.exitCode == 0
       check "recorded host 'localhost'" in sync.stdout.field("note")
-      nextSecond()
       let rollback = f.infra(["system", "rollback", legacyGen],
         hostname = Hostname)
       check rollback.exitCode == 0

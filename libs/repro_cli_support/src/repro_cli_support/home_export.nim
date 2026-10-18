@@ -39,6 +39,7 @@ import blake3
 import repro_core
 import repro_home_intent
 import repro_home_apply
+from repro_home_generations/intent_snapshot import observedProfileFiles
 import repro_profile_compile
 import repro_home_resources/concerns
 from repro_project_dsl/reprobuild_packages_catalog import
@@ -162,29 +163,12 @@ proc profileInputs*(profileDir: string; observed: openArray[string]):
   ## that still exist as regular files, with their content digests, sorted by
   ## path. A read of something that is gone (the helper's temporary
   ## `config.nims`) or is a directory is not an input a reader could check.
-  var roots = @[absolutePath(profileDir)]
-  try:
-    let real = expandFilename(profileDir)
-    if real notin roots:
-      roots.add real
-  except OSError:
-    discard
-  var seen = initHashSet[string]()
-  for raw in observed:
-    if not raw.isAbsolute:
-      continue
-    for root in roots:
-      if not raw.startsWith(root & DirSep):
-        continue
-      let rel = raw.relativePath(root).replace('\\', '/')
-      if rel in seen:
-        break
-      if not fileExists(extendedPath(raw)) or dirExists(extendedPath(raw)):
-        break
-      seen.incl rel
-      result.add ProfileInput(path: rel, blake3: fileBlake3Hex(raw))
-      break
-  result.sort(proc(a, b: ProfileInput): int = cmp(a.path, b.path))
+  ## The selection is the one a home generation's intent snapshot records
+  ## (`repro_home_generations.observedProfileFiles`), so the export's
+  ## `provenance.profile.inputs` and the snapshot name the same files.
+  for rel in observedProfileFiles(profileDir, observed):
+    result.add ProfileInput(path: rel,
+      blake3: fileBlake3Hex(profileDir / rel))
 
 proc profileDigest*(inputs: openArray[ProfileInput]): string =
   ## BLAKE3 over `<path>\t<blake3>\n` for each input in path order; `""`

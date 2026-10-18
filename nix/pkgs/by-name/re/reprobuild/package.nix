@@ -159,8 +159,8 @@
   runquotaSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "runquota";
-    rev = "01e37c119a168c98da7a37dbdc6214e230ea7e9a";
-    hash = "sha256-vcYDB+M8tcYdsepQ/W0oL6m5Au0Ir7by4HSkf3VyQoM=";
+    rev = "416274abe4cda8ec9aef7dca9165cfb8c25a1846";
+    hash = "sha256-A0+DQquMegirVLTJxokjn2Yxs9LWNef9RLUORFwXCUU=";
   },
 }:
 let
@@ -223,8 +223,8 @@ stdenv.mkDerivation (finalAttrs: {
   src = fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "reprobuild";
-    rev = "650d33bc0e30c07112a2cd3c988c4f63b11fe6c6";
-    hash = "sha256-uWg0T90+F0ZHfu8/YyoC8dKNXQaLtgd0hHMz2n852c8=";
+    rev = "1f51077433102dc20df1d5a795e9644a08060101";
+    hash = "sha256-Hj/msOaQYzrxH0ETCQ1xmqOUZbJMljCVUswxBs3iLM0=";
   };
 
   strictDeps = true;

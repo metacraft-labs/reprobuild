@@ -71467,6 +71467,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     var leaves = 0
     var stale: seq[string]
     var broken: seq[string]
+    var chains: seq[string]
+    var diagnostics: seq[string]
     for repo in ctx.resolved.repos:
       let abs = parsed.workspaceRoot / repo.path
       if not dirExists(abs / ".git"):
@@ -71477,15 +71479,20 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         continue
       inc leaves
       ctx.leafReports.add(lr)
+      if lr.diagnostic.len > 0:
+        diagnostics.add(repo.path & ": " & lr.diagnostic)
       for f in lr.findings:
         case f.kind
+        of lfkRefetchChainMissing:
+          chains.add(repo.path)
         of lfkStaleRemoteRef:
           stale.add(repo.path & " " & f.refName)
         of lfkLocalTipMissing, lfkLocalHistoryMissing:
           broken.add(repo.path & " " & f.refName)
         else:
           discard
-    if stale.len == 0 and broken.len == 0:
+    if stale.len == 0 and broken.len == 0 and chains.len == 0 and
+        diagnostics.len == 0:
       checks.add(HealthCheck(
         name: "shared-clone-leaves",
         status: hsOk,
@@ -71494,6 +71501,12 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         remedy: "", fixKind: hfNone))
     else:
       var detail: seq[string]
+      if chains.len > 0:
+        detail.add($chains.len & " checkout(s) lacked a working refetch chain " &
+          "to a partial shared clone: " & chains.join(", "))
+      if diagnostics.len > 0:
+        detail.add(diagnostics.join("; "))
+      let canRepair = stale.len > 0 or chains.len > 0 or diagnostics.len > 0
       if stale.len > 0:
         detail.add($stale.len & " stale remote-tracking ref(s) whose " &
           "commit no longer exists upstream or in the shared clone: " &
@@ -71507,9 +71520,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         status: hsWarn,
         detail: detail.join("; "),
         remedy:
-          if stale.len > 0: self & " health --fix"
+          if canRepair: self & " health --fix"
           else: "follow the per-ref fix in the messages printed below",
-        fixKind: if stale.len > 0: hfSharedCloneLeaves else: hfNone))
+        fixKind: if canRepair: hfSharedCloneLeaves else: hfNone))
 
   # Test-Certificates TC-9b: `certificate_policy_snapshot_stale`. A row only
   # when some participating repository carries a snapshot or names a policy,
@@ -71762,8 +71775,8 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
       if not ctx.gitOk:
         result.add("fix: cannot repair shared-clone leaves (no usable git tool)")
         continue
-      result.add("fix: removing stale remote-tracking refs from checkouts " &
-        "that borrow from shared clones")
+      result.add("fix: repairing refetch chains and stale remote-tracking refs " &
+        "in checkouts that borrow from shared clones")
       for lr in ctx.leafReports:
         let repaired = checkLeaf(ctx.gitIdentity.binaryPath, lr.leaf,
           lcmRepair, pool = lr.pool)

@@ -290,11 +290,20 @@ proc compileAndAdaptHomeProfile*(profilePath: string;
   ## after the compile edge (`expandedHomeProfile`), so a data edit
   ## re-plans without recompiling. A data-file failure sets `dataError`.
   result = CompileAdaptOutcome()
-  let opts = defaultProfileCompileOptionsFor(profilePath, stateDir)
+  var opts = defaultProfileCompileOptionsFor(profilePath, stateDir)
+  # The files the compile read, on a cache hit too: the apply records the
+  # ones under the profile directory in the generation's intent snapshot,
+  # helper modules in subdirectories included (`Profile.compiledFrom`;
+  # reprobuild-pm issue
+  # 2026-10-18-home-intent-snapshot-omits-imported-modules-in-subdirectories).
+  # The hit is served from the same record either way; only the record's
+  # read set is reported back.
+  opts.reportObservedInputs = true
   try:
     let artifact = compileProfileToRbpi(profilePath, opts)
     let intent = decodeRbpi(artifact.rbpiBytes)
     result.profile = expandedHomeProfile(intent, profilePath)
+    result.profile.compiledFrom = artifact.observedInputs
   except ProfileCompileError as err:
     result.compileError = err.msg
   except EDataFile as err:
@@ -3085,23 +3094,30 @@ proc readActiveIntentSnapshot(stateDir: string): Option[IntentSnapshot] =
 
 proc snapshotMatchesProfileDir(snapshot: IntentSnapshot;
                                profileDir: string): bool =
-  ## True when the snapshot's profile source files are byte for byte the
-  ## ones the apply pipeline would snapshot from `profileDir` today
-  ## (`defaultWalkProfileFiles`), i.e. the on-disk profile is the one the
-  ## current generation was applied from, as far as the snapshot records it.
-  ## Helper modules in subdirectories are not in the snapshot (reprobuild-pm
-  ## issue 2026-10-18-home-intent-snapshot-omits-imported-modules-in-
-  ## subdirectories), so an edit to one alone is not detected here.
-  var recorded: seq[IntentFileEntry]
+  ## True when the on-disk profile is the one the current generation was
+  ## applied from, as far as the snapshot records it: every source file the
+  ## snapshot holds -- the top-level `*.nim` files and every file the
+  ## compile read under the profile directory, helper modules in
+  ## subdirectories included (`profileSourceFiles`) -- is on disk with the
+  ## same bytes, and no top-level `*.nim` file was added since. A new
+  ## import is an edit of a recorded file, so it is caught too, without a
+  ## compile.
+  var recorded = initTable[string, seq[byte]]()
   for entry in snapshot.files:
     if entry.role == ifrSource:
-      recorded.add entry
-  let onDisk = defaultWalkProfileFiles(profileDir)
-  if recorded.len != onDisk.len:
-    return false
-  for i in 0 ..< onDisk.len:
-    if recorded[i].path != onDisk[i].path or
-        recorded[i].content != onDisk[i].content:
+      recorded[entry.path] = entry.content
+  for path, content in recorded:
+    let onDisk = profileDir / path
+    if not fileExists(extendedPath(onDisk)):
+      return false
+    let raw = readFile(extendedPath(onDisk))
+    if raw.len != content.len:
+      return false
+    for i, ch in raw:
+      if byte(ord(ch)) != content[i]:
+        return false
+  for entry in defaultWalkProfileFiles(profileDir):
+    if entry.path notin recorded:
       return false
   true
 

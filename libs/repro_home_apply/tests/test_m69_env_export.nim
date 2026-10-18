@@ -3,9 +3,9 @@
 ##
 ## The realizers populate `RealizedRecord.envBindings` with the
 ## (substituted) per-tool `env` entries a package's `tarball`
-## realization declares (GM4b: formerly the catalog record's `env:`
-## block; the home archive realizer and the extract route substitute
-## `${prefix}` the same way). The M69 apply pipeline (step 5) must turn
+## realization declares, substituting `${prefix}` in the home activation
+## projection of the shared tarball edge's result. The M69 apply pipeline
+## (step 5) must turn
 ## those entries into `env.userVariable` resource records keyed by
 ## a stable, per-package address. This test exercises the
 ## synthesizer (`planEnvBindings`) directly so we can assert the
@@ -59,7 +59,7 @@ proc syntheticRealizedFromCatalog(packageId: string): RealizedRecord =
   ## produce for an x86_64-windows target, without downloading anything:
   ## resolve it (the real selection), then substitute `${prefix}` in the
   ## selected realization's `env` with a synthetic prefix — the substitution
-  ## both realizers perform (`builtin_adapter.substituteEnv`).
+  ## shared tarball realization performs (`builtin_adapter.substituteEnv`).
   let r = resolveProfilePackage(packageId,
     realizationTargetFor(pcX86_64, poWindows, mlX86_64_v1),
     DefaultSelectionPolicy)
@@ -69,8 +69,7 @@ proc syntheticRealizedFromCatalog(packageId: string): RealizedRecord =
   let prefix = "C:\\store\\prefixes\\AB\\" & packageId & "-" &
     r.selection.version
   result.packageId = packageId
-  result.adapter =
-    if r.archiveRoute == arInstaller: akBuiltin else: akTarball
+  result.adapter = akTarball
   result.prefixAbsolutePath = prefix
   result.resolvedExecutablePath = prefix / record.executablePath
   result.resolvedVersion = r.selection.version
