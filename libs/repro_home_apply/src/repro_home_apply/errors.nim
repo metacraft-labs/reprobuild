@@ -184,6 +184,10 @@ type
     sdIStowLooseFile = "IStowLooseFile"
     sdWStowOverridesShadowed = "WStowOverridesShadowed"
     sdWStowAmbiguousSuppression = "WStowAmbiguousSuppression"
+    sdIStowSameAsResource = "IStowSameAsResource"
+      ## A stow file is not materialized because an `fs.userFile`
+      ## resource writes the same file (same mode and digest) to its path
+      ## (Home-Profile-Intent-Layer.md §Stow-Style Dotfile Support).
 
   StowDiagnostic* = object
     ## A single structured diagnostic emitted by the planner/materializer.

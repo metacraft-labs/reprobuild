@@ -45,6 +45,7 @@ import ./current_rotation
 import ./partial_recovery
 import ./stow
 import ./suppression
+import ./file_facts
 
 const
   KillStepEnvVar* = "REPRO_TEST_APPLY_KILL_AFTER_STEP"
@@ -2336,6 +2337,13 @@ proc planDesiredState*(rawOpts: ApplyOptions): PlannedDesiredState =
   result.plan.generatedFiles = suppressed.files
   result.desiredResources = composeDesiredResources(result.profile,
     opts.homeDir, opts.targetContext)
+  # A stow file and an `fs.userFile` on one path: one writer when they
+  # agree, refused when they do not (`resolveStowResourceOverlap`).
+  let overlap = resolveStowResourceOverlap(result.plan.generatedFiles,
+    result.stowDiscovery.entries, result.desiredResources, opts.profileDir,
+    opts.homeDir)
+  result.plan.generatedFiles = overlap.files
+  result.stowDiscovery.entries = overlap.stowEntries
   result.applied = appliedConcernsFor(result.profile, opts.host)
 
 proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
@@ -2832,7 +2840,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
     let stowDiscovery = selectStowEntries(
       discoverStowEntries(opts.profileDir, opts.homeDir), profile,
       opts.targetContext)
-    let stowEntries = stowDiscovery.entries
+    var stowEntries = stowDiscovery.entries
     if stowEntries.len > 0:
       let stowPlanned = stowEntriesToPlanned(stowEntries)
       for sp in stowPlanned:
@@ -2858,6 +2866,19 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       applyPlan.configContributions)
     applyPlan.generatedFiles = suppressed.files
     for d in suppressed.diagnostics:
+      applyPlan.diagnostics.add(d)
+    # A stow file and an `fs.userFile` resource naming one path: the
+    # resource is the one writer when the two agree on mode and digest, and
+    # the apply is refused here -- before the commit marker, so before
+    # anything is written -- when they do not (Home-Profile-Intent-Layer.md
+    # §Stow-Style Dotfile Support; `planDesiredState` applies the same rule
+    # for `--plan` and `repro home facts`).
+    let overlap = resolveStowResourceOverlap(applyPlan.generatedFiles,
+      stowEntries, composeDesiredResources(profile, opts.homeDir,
+        opts.targetContext), opts.profileDir, opts.homeDir)
+    applyPlan.generatedFiles = overlap.files
+    stowEntries = overlap.stowEntries
+    for d in overlap.diagnostics:
       applyPlan.diagnostics.add(d)
     if opts.recordOnlyGeneratedFiles:
       if stowEntries.len > 0:
@@ -3055,6 +3076,19 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
           srpReconcileDrift
         else:
           srpFailClosed
+      # A removed `fs.userFile` that agreed with a stow file hands its path
+      # back: remove the file it wrote (only while its bytes are what it
+      # recorded writing) so the stow file is linked again, and release its
+      # binding in step 9b instead of destroying it (`file_facts`).
+      let stowIds = stowTargetIds(materializedStowEntries, opts.homeDir)
+      if prevManifest.isSome and stowIds.len > 0:
+        let handoverDesired = composeDesiredResources(profile, opts.homeDir,
+          opts.targetContext)
+        for rb in prevManifest.get.resourceBindings:
+          if rb.resourceKind.len == 0: continue
+          let recorded = toRecorded(rb)
+          if handedToStow(recorded, handoverDesired, stowIds, opts.homeDir):
+            discard removeUnchangedUserFile(recorded)
       for entry in materializedStowEntries:
         let rec = materializeStowEntry(opts.profileDir, opts.homeDir, entry,
           stowReconcile)
@@ -3334,8 +3368,16 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               # released: not planned (so never destroyed or drift-checked)
               # and not recorded by the new generation.
               if concernOfBinding(rb, prevApps) notin owned: continue
+              # A removed `fs.userFile` whose path a stow file of this
+              # generation now links is released too: the stow step has
+              # already put its link there, and destroying the binding would
+              # delete that link (`file_facts.handedToStow`).
+              let recorded = toRecorded(rb)
+              if handedToStow(recorded, desiredResources, stowIds,
+                  opts.homeDir):
+                continue
               # Skip destroyed records (postWriteDigest is zero).
-              recordedBindings[rb.resourceAddress] = toRecorded(rb)
+              recordedBindings[rb.resourceAddress] = recorded
           except CatchableError:
             discard
       var reconcilePolicy = rpFailClosed

@@ -8595,6 +8595,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/gm11/t_e2e_stow_and_resource_on_one_path.nim",
+    binary: "build/test-bin/t_e2e_stow_and_resource_on_one_path",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/gm11/t_e2e_stow_package_follows_activity.nim",
     binary: "build/test-bin/t_e2e_stow_package_follows_activity",
     defines: @[],
