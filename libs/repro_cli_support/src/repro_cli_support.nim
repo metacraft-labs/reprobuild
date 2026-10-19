@@ -4955,10 +4955,7 @@ proc verifyLockPinnedProducerSource(dep: LockedDep;
         quoteShell(dep.name) & " --to=" &
         quoteShell(if head.code == 0: actual else: revision) & "` in " &
         quoteShell(consumerRoot) & "."
-       else: " Restore a producer Git checkout at " & quoteShell(sourceRoot) & ".") &
-      " For intentional editable source, run " &
-      "`repro develop --only=" & quoteShell(dep.name) & " --workspace-root=" &
-      quoteShell(consumerRoot) & "`.")
+       else: " Restore a producer Git checkout at " & quoteShell(sourceRoot) & "."))
   if not ownsRepository:
     refuse("Cannot verify the producer repository root: " & top.output & ".")
   if revision.len == 0 or head.code != 0 or pinned.code != 0:
