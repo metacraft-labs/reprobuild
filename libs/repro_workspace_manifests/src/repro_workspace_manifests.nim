@@ -6,13 +6,16 @@
 # at b5b387e6fb2a7cc75d54a269b07cc6218361bd46 (v0.2.18) — see
 # `repro_workspace_manifests/reader.nim` for the comment carrying the SHA.
 
-import repro_workspace_manifests/[types, diagnostics, reader, resolver,
+import repro_workspace_manifests/[types, diagnostics, reader, manifest_source,
+  resolver,
   compose, sync_planner, manifest_refresh, lock_writer, workspace_branch,
-  develop_overrides, override_resolution, provenance, project_set]
+  develop_overrides, override_resolution, provenance, project_set,
+  manifest_editor, settings]
 
 export types
 export diagnostics
 export reader
+export manifest_source
 export resolver
 export compose
 export sync_planner
@@ -23,3 +26,5 @@ export develop_overrides
 export override_resolution
 export provenance
 export project_set
+export manifest_editor
+export settings

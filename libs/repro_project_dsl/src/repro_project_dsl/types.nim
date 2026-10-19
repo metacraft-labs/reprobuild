@@ -253,6 +253,524 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  ActivityParamInterfaceDef* = object
+    ## Shared-Development-Services L3: one constructor-style typed
+    ## parameter of an exported dev-env activity, as DECLARED. ``nimType``
+    ## is the parameter's type expression written verbatim — the lift
+    ## carries the author's spelling, not a resolved symbol, because the
+    ## consuming compilation resolves it in its own scope exactly as the
+    ## ``InterfaceResourceAttr.nimType`` of a lifted resource attribute is
+    ## resolved there.
+    name*: string
+    nimType*: string
+    sourceFile*: string
+    sourceLine*: int
+
+  ActivityConfigInterfaceDef* = object
+    ## Shared-Development-Services L3: one ``config:`` key of an exported
+    ## dev-env activity — "the ``config:`` surface with defaults so a
+    ## consumer's ``enable`` block typechecks" (L3 ``:gate:``).
+    ##
+    ## ``hasDefault`` is a FIELD rather than ``defaultRepr.len > 0`` for
+    ## the reason L2's ``DslActivityConfigDef`` gives: ``issuer: string``
+    ## and ``issuer: string = ""`` would otherwise be the same record and
+    ## the second would read as required.
+    name*: string
+    nimType*: string
+    defaultRepr*: string
+    hasDefault*: bool
+    description*: string
+    sourceFile*: string
+    sourceLine*: int
+
+  ServiceIdentityKind* = enum
+    ## Shared-Development-Services L4 (§4.2): the two identity modes, and
+    ## the choice between them "is forced by durable state".
+    ##
+    ## ``sikDerived`` is ordinal 0 on purpose. It is the DEFAULT and it is
+    ## also today's behaviour, so a record built by the legacy positional
+    ## ``registerService``, and a v1 ``RSVC`` payload that carries no
+    ## identity block at all, both decode to it without a special case.
+    sikDerived
+      ## ``identity derived`` — "a digest of the service's materialised
+      ## definition: the executable, the rendered configuration outputs,
+      ## the arguments". Two worktrees that build the same closure share
+      ## one instance. Unsafe for a service that owns durable state, which
+      ## is why the other mode exists.
+    sikStable
+      ## ``identity stable "<id>"`` — "The author assigns a stable
+      ## identifier, independent of the build. There is one instance per
+      ## ``(id, scope)``, and it survives redefinition."
+
+  ServiceScope* = enum
+    ## Shared-Development-Services L4 (§4.1): how widely one instance is
+    ## shared. ORTHOGONAL to ``ServiceIdentityKind`` -- identity answers
+    ## "are these the same instance?", scope answers "how widely is one
+    ## instance shared?", and §4 is written to prevent the two being
+    ## conflated.
+    ##
+    ## The two WIDER values extend the lease scope
+    ## ``Ephemeral-State-Leases.md`` §4.1 already resolved (``user`` vs
+    ## ``system``, routing to the user vs system daemon); that resolution
+    ## is not re-decided here. ``sscProject`` is ordinal 0 because it is
+    ## the default and "today's only behaviour", for the same
+    ## ground-state reason ``sikDerived`` is.
+    sscProject    ## one instance per project root — the default
+    sscWorkspace  ## one instance per workspace (D-SS3)
+    sscUser       ## one instance per OS user, via the user daemon
+    sscSystem     ## one instance per machine, via the system daemon
+
+  ServiceIdentityDef* = object
+    ## One ``service`` block's declared identity.
+    ##
+    ## ``stableId`` is meaningful only for ``sikStable`` and is the
+    ## empty string otherwise; the macro refuses ``identity derived
+    ## "<id>"`` rather than recording an id the resolver would ignore.
+    kind*: ServiceIdentityKind
+    stableId*: string
+      ## The author's identifier, verbatim. §4.2: "A stable identifier is
+      ## a name, not a secret, and it is chosen to be globally unique by
+      ## construction -- a reverse-DNS-style string, or a GUID. It is not
+      ## derived from a path, because a path is what distinguishes the
+      ## worktrees that are supposed to share the instance." The macro
+      ## enforces the last sentence as far as a macro can: the id must be
+      ## a STRING LITERAL, so it cannot be computed from the build or
+      ## from the invocation directory.
+
+  ServiceInterfaceDef* = object
+    ## Shared-Development-Services L3: one ``service <name>:`` crossing
+    ## the interface boundary as a typed symbol.
+    ##
+    ## This record carries the service's SIGNATURE and deliberately not
+    ## its implementation. A consumer compiles against the service's name
+    ## and the handle type it is reached through; it does not compile
+    ## against the service's ``executable``, ``args``, ``runtimeFile`` or
+    ## ``on <trigger>:`` setters, which are the producer's private
+    ## business. That split is what keeps the interface fingerprint from
+    ## being a rebuild-everything hammer: changing a service's argv
+    ## re-lifts to the same digest and does not invalidate consumers,
+    ## while renaming the service does. Measured both ways in
+    ## ``t_l3_lift_carries_service_and_activity_signatures.nim``.
+    ##
+    ## ``activityName`` is the activity whose body declared it, or "" for
+    ## a package-level service.
+    packageName*: string
+      ## The declaring package. Set by ``registerServiceInterface``, so a
+      ## caller constructing the record never has to repeat it.
+    name*: string
+    activityName*: string
+    handleType*: string
+      ## The generated Nim type a consumer reaches this service's handle
+      ## through — ``<Title><Activity>Handle`` for a service inside an
+      ## activity. Empty for a package-level service, which no handle
+      ## type carries yet.
+    identityKind*: ServiceIdentityKind
+      ## Shared-Development-Services L4: the DECLARED identity mode. L3's
+      ## gate names "the declared identity and scope" as part of what the
+      ## lift carries and deferred it here, because the DSL had no such
+      ## surface until L4 added one.
+      ##
+      ## It belongs to the SIGNATURE and not to the implementation, which
+      ## is the test ``ServiceInterfaceDef``'s own doc comment sets: a
+      ## consumer resolving a shared service has to know whether it is
+      ## being handed an instance keyed by a declared id or one keyed by
+      ## a digest of somebody else's build, because that is the
+      ## difference between "my state survives" and "my state forks".
+      ## Changing it therefore MUST move the interface fingerprint, and a
+      ## change to ``args`` still must not.
+    identityStableId*: string
+      ## The declared id for ``sikStable``; empty for ``sikDerived``.
+    scope*: ServiceScope
+      ## The DECLARED scope. Also signature, for the same reason: it is
+      ## half of the instance key a consumer resolves against.
+    compatibilityMajor*: uint32
+      ## Shared-Development-Services L6 (§4.3): the DECLARED MAJOR
+      ## COMPATIBILITY FIELD, from ``compatibility <n>``.
+      ##
+      ## It is the input to the ONE outcome of §4.3's three that is not
+      ## decided on the fingerprint: "| major compatibility field differs
+      ## | **Refuse.** Attaching would hand the consumer a handle whose
+      ## members it cannot use; a warning there would be a defect report
+      ## written after the damage |". Without a field for it the table's
+      ## bottom row has no input and the decision collapses to two
+      ## outcomes, which is the design §4.3 exists to reject.
+      ##
+      ## ``0`` means UNDECLARED, and it is the zero value on purpose:
+      ## every artifact written before the envelope carried this field
+      ## decodes to 0, so a cached pre-v23 artifact and a freshly lifted
+      ## definition that declared nothing AGREE rather than refusing each
+      ## other over a format boundary. The DSL consequently refuses
+      ## ``compatibility 0`` — declaring it would be unobservable.
+      ##
+      ## IT IS NOT ON ``DslServiceDef`` AND THAT IS DELIBERATE. §4.4 and
+      ## §6.5 key an instance by ``(identity, scope, environment)``; the
+      ## major is not in that key, nothing about MATERIALISING a service
+      ## reads it, and the lowered ``gnkService`` payload exists to
+      ## materialise. Copying it there would be a second place for one
+      ## fact to disagree with itself — the same argument L4 made for
+      ## keeping identity off ``ActivityInterfaceDef``. The lift reads it
+      ## from the body AST through the shared ``identity``/``scope``
+      ## walker, so there is exactly one reading.
+    contributionPoints*: seq[string]
+      ## Shared-Development-Services D-SS11 (§4.6): the CONTRIBUTION
+      ## POINTS this service converges, as the bare names the author
+      ## wrote in ``converge <point>, <point>``, in declaration order.
+      ##
+      ## §4.6 requires this of the lift and not of anything else: "The
+      ## owner's lifted interface must **carry its contribution points**,
+      ## so a consumer's contribution is type-checked against a declared
+      ## point and a misspelled one is refused by name at the consumer's
+      ## compile time." Before this field the points existed only in the
+      ## owner's own lowering (``DslServiceDef.convergePoints``) and in
+      ## the owner's own process, so a consumer had nothing to compile
+      ## against -- which is exactly L9's F2 measurement.
+      ##
+      ## THE BARE NAME, NOT THE RESOLVED KEY. The resolved key is
+      ## ``<package>.<activity>.<name>`` and is derived by
+      ## ``resolveServiceConvergePoint`` from facts the OWNER knows; the
+      ## bare name is what a consumer writes at the resolver
+      ## (``infra.sso.shared(relyingParties = append("x"))``). Carrying
+      ## the bare name keeps the consumer's spelling and the owner's
+      ## declaration the same string, so a refusal can name it back
+      ## verbatim.
+      ##
+      ## IT IS SIGNATURE, so it belongs in the fingerprint: a service
+      ## that drops a point a consumer contributes to has changed what
+      ## that consumer compiled against. ``serviceInterfaceMembers``
+      ## emits one ``smkContributionPoint`` member per entry for exactly
+      ## that reason.
+    sourceFile*: string
+    sourceLine*: int
+
+  ActivityInterfaceDef* = object
+    ## Shared-Development-Services L3: one exported dev-env activity's
+    ## lifted signature — "the handle type and its members … and the
+    ## ``config:`` surface with defaults" (L3 ``:gate:``).
+    ##
+    ## WHAT IS NOT HERE, AND WHICH MILESTONE ADDS IT. L3's gate also names
+    ## "the declared identity and scope" (L4) and "the shared collections
+    ## it converges" (L8).
+    ##
+    ## L4 HAS LANDED, AND IT PUT IDENTITY AND SCOPE ON THE SERVICE RECORD
+    ## RATHER THAN ON THIS ONE. ``identity`` and ``scope`` are setters of
+    ## a ``service`` block, not of an ``activity``: one activity may
+    ## declare several services and §4 keys an INSTANCE, which is a
+    ## service, by ``(identity, scope)``. Every service this activity
+    ## declares already has its own ``ServiceInterfaceDef`` row carrying
+    ## them (``identityKind`` / ``identityStableId`` / ``scope``), so a
+    ## copy here would be a second place for the same fact to disagree
+    ## with itself. ``services`` below names the rows.
+    ##
+    ## ``the shared collections it converges`` (L8) is still absent and is
+    ## still not invented: it is ADDED as a field here, reaching the wire
+    ## through one more version-gated block in
+    ## ``encodeInterfacePayload`` — the same additive route
+    ## ``publicLibraries`` took at envelope v9, ``publicResources`` at
+    ## v12 and L4's identity/scope at v22. Nothing in the shape has to be
+    ## rewritten for it.
+    packageName*: string
+      ## The declaring package. Set by ``registerActivityInterface``.
+    name*: string
+    handleType*: string
+      ## The generated handle type's name, ``<Title><Activity>Handle``.
+      ## Recorded rather than recomputed so a consumer reading the
+      ## artifact does not have to reimplement the producer's naming rule.
+    params*: seq[ActivityParamInterfaceDef]
+    config*: seq[ActivityConfigInterfaceDef]
+    services*: seq[string]
+      ## Names of the services this activity's body declares, in
+      ## declaration order. Each is also a member of the handle type.
+    sourceFile*: string
+    sourceLine*: int
+
+  EnvironmentPrecedence* = enum
+    ## Shared-Development-Services L5 (§6.1), D-SS6's second half: WHERE
+    ## an environment's binding sits in the precedence order each
+    ## configurable already declares.
+    ##
+    ## This is a MIRROR of `Configurable-System.md`'s
+    ## ``ContributionPriority`` (``prDefault`` < ``prSet`` <
+    ## ``prOverride`` < ``prForce``), declared here for the same reason
+    ## ``InterfaceServiceScope`` mirrors ``ServiceScope``: the ladder's
+    ## own type lives in ``repro_dsl_stdlib/configurables/types.nim`` and
+    ## ``repro_dsl_stdlib`` DEPENDS ON this library, so importing it here
+    ## would be a cycle. The ordinals line up, and
+    ## ``t_l5_environment_binds_configurables.nim`` carries the drift
+    ## assertion -- a test can import both.
+    ##
+    ## §6.1: an environment "needs no new staging, no new merge rules and
+    ## no new precedence model -- only a name, a binding set, and a
+    ## DECLARED POSITION in the existing precedence order". This enum is
+    ## how that position is recorded rather than re-decided.
+    epDefault   ## = ``prDefault``
+    epSet       ## = ``prSet``
+    epOverride  ## = ``prOverride`` -- where an environment binds (D-SS6)
+    epForce     ## = ``prForce``
+
+  ContributionOperation* = enum
+    ## Shared-Development-Services L8 (§5), implementing
+    ## `Configurable-System.md` §"Operation is a SECOND axis, independent
+    ## of priority": "each contribution carries an **operation** as well
+    ## as a priority".
+    ##
+    ## THE TWO AXES ARE INDEPENDENT, and that independence is the whole
+    ## reason this enum exists. Priority alone makes every authoritative
+    ## contribution DESTRUCTIVE -- there is no way to say "add this, and
+    ## I have the standing to insist on it" without also saying "and
+    ## discard everything contributed below me". With the operation at
+    ## the call site there is: an ``coAppend`` at ``epOverride`` or
+    ## ``epForce`` is authoritative and leaves every lower contribution
+    ## present, while a ``coReplace`` is destructive downward at any
+    ## priority.
+    ##
+    ## ``coReplace`` IS ORDINAL 0 ON PURPOSE. Every contribution the
+    ## port recorded before this axis existed was a replace -- an
+    ## ``environment`` binding, a ``setConfigurable``, a construction
+    ## default -- so a record that carries no operation decodes to the
+    ## behaviour it already had rather than to a new one. That is the
+    ## same additive-decode argument ``compatibilityMajor`` makes for
+    ## ``0`` meaning UNDECLARED.
+    coReplace = 0
+      ## *The value is exactly this.* The only operation a scalar has,
+      ## which is why a scalar key needs no new spelling: ``:=`` /
+      ## ``setConfigurable`` / an ``environment`` binding are all
+      ## ``coReplace`` and always were.
+    coAppend = 1
+      ## *Add these to the collection.* Available only on a
+      ## CONTRIBUTION POINT -- a configurable whose type is an ordered
+      ## collection. Appending to a scalar is refused by name rather
+      ## than silently treated as a replace, because "add 4 to the
+      ## worker count" is not a thing the author can have meant.
+
+  EnvironmentBindingDef* = object
+    ## Shared-Development-Services L5 (§6): ONE binding of ONE
+    ## configurable by ONE environment. "An environment is a named set of
+    ## bindings to configurables, and nothing else", and this is one
+    ## element of that set.
+    ##
+    ## The record carries no value. It carries the author's EXPRESSION,
+    ## verbatim, because the value is produced by the emitted
+    ## ``bindEnvironmentConfigurable`` call in the author's own scope --
+    ## the same contract ``ActivityConfigInterfaceDef.defaultRepr`` has,
+    ## and for the same reason: a macro that evaluated the expression
+    ## would be re-implementing a Nim evaluator.
+    key*: string
+      ## The configurable's FULL key, ``<package>.<name>`` for a
+      ## package-level ``config:`` key and
+      ## ``<package>.<activity>.<name>`` for an activity's. The first
+      ## form is byte-identical to the key ``recordConfigDefault``
+      ## registers, which is what makes an environment a contributor into
+      ## the EXISTING table rather than a second one.
+    qualifier*: string
+      ## The declaring activity, or "" for a package-level configurable.
+    name*: string
+      ## The configurable's own name, unqualified.
+    valueRepr*: string
+      ## The bound expression as the author wrote it. Diagnostics and the
+      ## environment component of the instance key read this; nothing
+      ## evaluates it.
+    precedence*: EnvironmentPrecedence
+      ## Always ``epOverride`` today (D-SS6). A field rather than a
+      ## constant so a configurable that declares a different position
+      ## for environment contributions has somewhere to say so without a
+      ## shape change.
+    sourceFile*: string
+    sourceLine*: int
+
+  DslEnvironmentDef* = object
+    ## Shared-Development-Services L5 (§6): one ``environment <name>:``
+    ## declaration, lowered.
+    ##
+    ## It has a name and a binding set. It has no executable, no
+    ## topology, no host and no activity list, and that absence is the
+    ## design: §6.2 says an environment "is not a machine and has no
+    ## topology", and a field here that looked like one would be the
+    ## second of the two drafts §6.3 records as wrong.
+    packageName*: string
+    name*: string
+    bindings*: seq[EnvironmentBindingDef]
+    sourceFile*: string
+    sourceLine*: int
+
+  ConsumerLeaseKind* = enum
+    ## Shared-Development-Services L5, §6.6's left column: the lease
+    ## policy a CONSUMER chooses for its own consuming edge, which
+    ## ``Ephemeral-State-Leases.md`` §2.2 already allows per edge.
+    ##
+    ## A mirror of ``repro_resources/lease.nim``'s ``LeaseKind`` plus an
+    ## ``unset`` ground state, for the mirror reason
+    ## ``EnvironmentPrecedence`` gives -- ``repro_resources`` depends on
+    ## this library. ``clkUnset`` is ordinal 0 so a record that declared
+    ## nothing is distinguishable from one that declared ``keep``, which
+    ## is ``LeaseKind``'s own default and therefore NOT the same
+    ## statement.
+    clkUnset
+    clkKeep       ## ``lease keep`` -> ``lkKeep``
+    clkImmediate  ## ``lease immediate`` -> ``lkImmediate``
+    clkDelayed    ## ``lease delayed(<seconds>)`` -> ``lkDelayed``
+
+  ConsumerInstanceOverrideDef* = object
+    ## Shared-Development-Services L5 (§6.6): what a CONSUMER is allowed
+    ## to say about an instance of somebody else's service.
+    ##
+    ## §6.6's rule is one line -- "a consumer may decide what affects
+    ## only itself; the environment binds everything that defines the
+    ## instance" -- and this record is the left column of its table,
+    ## entire: the instance SCOPE (§4.1) and the consumer's OWN LEASE
+    ## POLICY. There is deliberately no field for a configurable value,
+    ## no field for a hostname, and no field for an identity: every one
+    ## of those is the right column, and the walker refuses them in the
+    ## consumer's own compilation rather than recording them here.
+    ##
+    ## NOTHING IS RESOLVED BY THIS RECORD. It takes no lease, starts
+    ## nothing, and contacts no daemon; it is the consumer's declared
+    ## intent, which L6's attach decision and L7's resolver read.
+    consumerPackage*: string
+    targetPackage*: string
+      ## The package that OWNS the service, as written.
+    targetService*: string
+    scopeDeclared*: bool
+      ## Whether ``scope`` was written. Separate from ``scope`` for L4's
+      ## reason: "the author said nothing" and "the author wrote the
+      ## default" must not be the same record, because the second is an
+      ## override of the owner's suggestion and the first is not.
+    scope*: ServiceScope
+    leaseKind*: ConsumerLeaseKind
+    leaseTtlSeconds*: int
+      ## Meaningful only for ``clkDelayed``; zero otherwise.
+    sourceFile*: string
+    sourceLine*: int
+
+  SharedServiceDeclarationDef* = object
+    ## Shared-Development-Services D-SS11 (§4.6): the DECLARATION a
+    ## resolver is spelled against, as the owner's lift carries it.
+    ##
+    ## `<package>.<service>.shared()` is "a resolver on the typed
+    ## declaration symbol", and this record is what the declaration
+    ## symbol knows about itself in a CONSUMER's compilation: who owns
+    ## it, what it is called, which activity declares it, where the
+    ## owner's recipe lives, and which contribution points it converges.
+    ## Every field comes from the owner's `service` block by way of the
+    ## interface lift; none of it is supplied by the consumer.
+    ##
+    ## IT IS NOT A HANDLE, and that is the distinction §4.6's closing
+    ## paragraph exists for: "The activity names the service; the
+    ## resolver yields a handle to an instance of it; the two are
+    ## different types and should not be spellable interchangeably."
+    ## `SharedServiceHandle` below is the other type.
+    ownerPackage*: string
+    serviceName*: string
+    activityName*: string
+      ## The activity whose body declares the service, or "" for a
+      ## package-level `service`.
+    ownerRecipeDir*: string
+      ## The directory of the recipe file that declared the service.
+      ##
+      ## This is the one field that is a PATH, and it is here because the
+      ## resolver's attach decision needs the owner's own project
+      ## interface artifact -- §4.3 compares the running instance's
+      ## interface fingerprint against the definition the consumer
+      ## resolved, and the consumer has no other way to reach it. It is
+      ## derived from the service declaration's `sourceFile`, which the
+      ## lift already carries for diagnostics, so no new fact crosses the
+      ## boundary.
+      ##
+      ## A path in a lifted record is normally wrong (§4.4: "State is
+      ## keyed by identity, never by path"), and this one is NOT part of
+      ## the instance key, is not digested into any identity, and is read
+      ## exactly once, to locate an artifact. When it is stale or absent
+      ## the resolver REFUSES by name and says which project to run
+      ## `repro dev-env` in; it never falls back to a default identity.
+    contributionPoints*: seq[string]
+      ## The points this service converges, bare names, declaration
+      ## order -- `ServiceInterfaceDef.contributionPoints` as it reaches
+      ## a consumer. The resolver macro checks the consumer's spelling
+      ## against this list AT THE CONSUMER'S COMPILE TIME, which is the
+      ## first of §4.6's two "must land together" requirements.
+
+  SharedServiceHandle*[T] = object
+    ## Shared-Development-Services D-SS11 (§4.6): what a RESOLVER
+    ## returns. "It returns a `SharedServiceHandle[T]`, a type
+    ## **distinct from the declaration's**, so the two are not spellable
+    ## interchangeably."
+    ##
+    ## `T` is the declaration's own lifted type (`LiftedServiceHandle`
+    ## for every service the lift emits today). It is a PHANTOM
+    ## parameter: nothing reads a `T`-typed field, and it is here so that
+    ## the handle's type names the declaration it came from. That is what
+    ## makes `enable stack(sso = infra.sso)` a type error while
+    ## `enable stack(sso = infra.sso.shared())` is not -- the mistake
+    ## §4.6 records an earlier revision of §9 making.
+    ##
+    ## WHAT IT DOES NOT CARRY: a value of the running service. §7's
+    ## staged configurables and computed resource attributes are read
+    ## from the instance after it converges; a handle minted at
+    ## evaluation time is an ADDRESS plus the resolution it belongs to.
+    ## Pre-filling it would make it read like an instance, which is
+    ## exactly what the lift already refuses to do for `config:`
+    ## defaults.
+    ownerPackage*: string
+    serviceName*: string
+    activityName*: string
+    consumerPackage*: string
+      ## The package whose recipe wrote the resolver. This is the
+      ## ATTRIBUTION §5 requires of every contribution, captured at the
+      ## one call site that knows it.
+    sourceFile*: string
+    sourceLine*: int
+
+  SharedContributionDef* = object
+    ## ONE contribution made AT a resolver call. §4.6: "the consumer's
+    ## contributions are **arguments of the resolver call**".
+    point*: string
+      ## The bare point name, as the consumer wrote it and as the owner
+      ## declared it. Checked against
+      ## `SharedServiceDeclarationDef.contributionPoints` at the
+      ## consumer's compile time.
+    operation*: ContributionOperation
+      ## `coAppend` only, today, and the restriction is REFUSED rather
+      ## than silently coerced: §5.1 and D-SS9 say a consumer of a shared
+      ## service "must be able to `append` a relying party freely, and
+      ## must **not** be able to `replace` the relying-party collection",
+      ## because "a consumer that could replace them would fork the
+      ## instance it is trying to join". The field is still typed as the
+      ## operation axis rather than dropped, so the record a store holds
+      ## says which operation produced it and D-SS9's resolution has
+      ## somewhere to widen into.
+    precedence*: EnvironmentPrecedence
+    members*: seq[string]
+    sourceFile*: string
+    sourceLine*: int
+
+  SharedServiceResolution* = object
+    ## One resolver call, recorded at the consumer's evaluation.
+    ##
+    ## This is the record that travels from the consumer's recipe to the
+    ## consumer's `repro up`, and it is the whole of what the
+    ## CROSS-PROCESS lane carries. Everything in it was decided by the
+    ## consumer's own compilation; nothing in it is read from a running
+    ## instance.
+    declaration*: SharedServiceDeclarationDef
+    consumerPackage*: string
+    contributions*: seq[SharedContributionDef]
+    sourceFile*: string
+    sourceLine*: int
+
+  LiftedServiceHandle* = object
+    ## Shared-Development-Services L3: the consumer-side value a lifted
+    ## activity handle's service member holds.
+    ##
+    ## It carries the service's ADDRESS and nothing else. A running
+    ## service's own members — its readiness, its url, the resource
+    ## attributes it mints — are §7's staged configurables and computed
+    ## resource attributes, and L7 is where they become reachable. Until
+    ## then a consumer can name a dependency's service as a typed symbol
+    ## and get a compile error for a misspelling, which is L3's claim and
+    ## the whole of it.
+    packageName*: string
+    activityName*: string
+    serviceName*: string
+
   PackageSourceDecl* = object
     ## One ``packageSource <package>, <provenance>`` declaration. See
     ## ``PackageDef.packageSources``.
@@ -324,10 +842,96 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  TarballArchiveDetail* = object
+    ## GM4b: the archive-realization metadata a ``tarball`` realization
+    ## carries beyond "download, verify, extract". These are the fields the
+    ## retired ``VersionedProvisioning`` catalog records held
+    ## (Provisioning-Contributions.md §"Profile Package References"); every
+    ## record moved into a ``tarball`` realization of its canonical
+    ## definition, so a realization has exactly one representation.
+    ##
+    ## Grouped in one object so the four places that serialize a tarball
+    ## record (the in-package and contribution literal emitters, the
+    ## thin-interface stub emitter and the interface-artifact codec) add one
+    ## field, not seventeen, and cannot drift on any of these.
+    ##
+    ## Every field is a string, a ``seq[string]`` or a ``bool`` on purpose:
+    ## at macro time the string fields hold the EXPRESSION SOURCE the
+    ## emitters splice (as every other ``TarballProvisioningDef`` field does),
+    ## and the structured entries (``preInstall``, ``launcherEmit``) are
+    ## encoded strings produced by ``packages_schema.preInstallAction`` /
+    ## ``launcherEmitSpec`` and decoded by the realizer.
+    ##
+    ## An all-empty detail is the plain archive every pre-GM4b ``tarball``
+    ## realization is: ``installMethod`` empty means ``extract``.
+    version*: string
+      ## Upstream version this archive realizes. Version-pinned profile
+      ## references (``package(jdk, "21.0.5")``) select on it; an unpinned
+      ## reference takes the first eligible realization in declaration
+      ## order, so a package lists its default version first.
+    sha512*: string
+      ## Alternative digests for upstreams that publish no SHA-256. Exactly
+      ## the precedence the catalog records had: sha256, then sha512, then
+      ## the weak sha1.
+    sha1*: string
+    installMethod*: string
+      ## ``extract`` (or empty), ``installer-msi``, ``installer-nsis``,
+      ## ``installer-nsis-bundle``, ``installer-inno-setup``,
+      ## ``installer-silent``, ``msys2-pacman`` or ``source-bootstrap``.
+      ## Validated against ``TarballInstallMethods`` at authoring time; a
+      ## realizer that cannot honour a method refuses the record.
+    extractPath*: string
+      ## Inner directory flattened to the prefix root after extraction.
+    extraExecutables*: seq[string]
+      ## Prefix-relative executables exported beside ``executablePath``.
+    installerArgs*: seq[string]
+    pacmanPackages*: seq[string]
+    bootstrapArgv*: seq[string]
+    env*: seq[string]
+      ## ``NAME=value`` bindings; ``${prefix}`` is substituted with the
+      ## realized prefix.
+    nested7z*: bool
+    msiAdminInstall*: bool
+    preInstall*: seq[string]
+      ## Encoded by ``packages_schema.preInstallAction``.
+    preInstallUnrecognized*: seq[string]
+    launcherEmit*: seq[string]
+      ## Encoded by ``packages_schema.launcherEmitSpec``.
+    cpuLevel*: string
+      ## Microarchitecture floor (``x86-64-v3``), empty for none.
+    cpuFeatures*: string
+      ## Extra CPU features beyond the floor, comma separated.
+    appBundle*: string
+      ## GM4c: the macOS application bundle the archive delivers -- its path
+      ## inside the archive (``Ghostty.app``; a component naming a flat
+      ## ``.pkg`` is expanded and the path continues inside it). Set with
+      ## ``installMethod = "app-bundle"`` (and on the declared-only
+      ## ``pkg-install`` shape). For a macOS ``installer-silent`` record it
+      ## is the PRODUCT bundle's path inside the realized prefix instead
+      ## (``OpenWebStart/OpenWebStart javaws.app``); its first component is
+      ## the placed item. Store-And-Installation-Layout.md § macOS
+      ## Application Bundles.
+    bundleId*: string
+      ## GM4c: the bundle's ``CFBundleIdentifier``; checked before the bundle
+      ## is published to the store and again before it is activated.
+    teamId*: string
+      ## GM4c: the Apple team identifier that signs the bundle. Required with
+      ## ``appBundle``: the realization proves the signature chains to an
+      ## Apple Developer ID certificate of this team.
+    installerApp*: string
+      ## The installer application's path inside the archive
+      ## (``OpenWebStart Installer.app``) for a macOS ``installer-silent``
+      ## record: the realizer copies it out, verifies it is signed by
+      ## ``teamId`` and runs it confined, with ``installerArgs``, into the
+      ## staging prefix. Store-And-Installation-Layout.md § Installer
+      ## applications.
+
   TarballProvisioningDef* = object
     url*: string
     mirrors*: seq[string]
     sha256*: string
+    detail*: TarballArchiveDetail
+      ## GM4b archive-realization metadata; see ``TarballArchiveDetail``.
     archiveType*: string
     executablePath*: string
     executableAlias*: string
@@ -482,6 +1086,30 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  HomebrewProvisioningDef* = object
+    ## A Homebrew cask or formula that installs the target package OUTSIDE
+    ## Reprobuild (reprobuild-pm spec Provisioning-Contributions.md
+    ## §"Homebrew bridge records"). A bridge record: it lets a consumer that
+    ## still installs through Homebrew -- the reprobuild flake's
+    ## ``reprobuild.lib.brewRealizationOf`` and the equivalence report --
+    ## translate between Homebrew tokens and canonical package names.
+    ## Reprobuild never realizes it: it is carried in the interface
+    ## artifact's ``provisioningContributions`` only and is never merged into
+    ## a tool use's realization candidates, so no selection policy can pick
+    ## it. Declared only in a ``provisioningFor`` contribution
+    ## (``brewCask "<token>"`` / ``brewFormula "<token>"``), never in a
+    ## package's own ``provisioning:`` block.
+    kind*: string
+      ## ``"cask"`` or ``"formula"``.
+    token*: string
+      ## The Homebrew token (``brew info --cask <token>``), e.g.
+      ## ``visual-studio-code`` or ``temurin@21``.
+    tap*: string
+      ## The tap that publishes the token; empty for the default taps
+      ## (``homebrew/cask`` for casks, ``homebrew/core`` for formulae).
+    sourceFile*: string
+    sourceLine*: int
+
   ProvisioningContributionDef* = object
     ## A realization supplied independently of the package that owns the
     ## public interface. ``targetInterfaceFingerprint`` pins the contribution
@@ -494,6 +1122,8 @@ type
     nixProvisioning*: seq[NixPackageProvisioningDef]
     tarballProvisioning*: seq[TarballProvisioningDef]
     scoopProvisioning*: seq[ScoopProvisioningDef]
+    homebrewProvisioning*: seq[HomebrewProvisioningDef]
+      ## Bridge records only; see ``HomebrewProvisioningDef``.
     sourceFile*: string
     sourceLine*: int
 
@@ -647,9 +1277,9 @@ type
       ## a default for those — an undeclared package resolves exactly as it
       ## did before PMC-1. PMC-1 did ship an "infer from whichever arms
       ## exist" helper here, but it had no caller and could not see the
-      ## harvested ``VersionedProvisioning`` catalogs where most of the
-      ## platform truth lives, so it was removed rather than left as a trap
-      ## for PMC-5's catalog-wide lint to fall into.
+      ## harvested archive realizations (then separate catalog records; since
+      ## GM4b ``tarball`` realizations of the package), so it was removed
+      ## rather than left as a trap for PMC-5's lint to fall into.
     platformsMessage*: string
       ## PMC-1: optional author-supplied reason, Spack's ``msg=``. Reproduced
       ## verbatim in the unavailable-package diagnostic. The whole point is
@@ -1319,6 +1949,268 @@ type
     entries*: seq[TargetExportEntry]
     ambiguities*: seq[TargetExportAmbiguity]
 
+  BuildOutputPath* = object
+    ## A path STRING that carries its producing edge.
+    ##
+    ## ``Package-Model.md``: "a ``BuildOutput.path`` reaches ``args`` as a
+    ## context-carrying string and the framework records the edge through
+    ## the typed proxy, just as Nix's string-with-context records
+    ## derivation references inside ordinary string splices". This is that
+    ## proxy: ``&`` with a plain string keeps the context, and the
+    ## ``args`` overload set distinguishes it from a bare ``string``
+    ## (which records no edge).
+    ##
+    ## The producer is carried as three FLAT fields rather than an
+    ## embedded ``BuildOutput``, because ``BuildOutput.path`` is a FIELD of
+    ## this type and a mutual embedding would be infinitely sized. It is a
+    ## field and not an accessor proc for a measured reason: a top-level
+    ## ``proc path*`` in this module puts ``path`` into the namespace of
+    ## every recipe that imports the DSL, and
+    ## ``libs/repro_project_dsl/tests/dsl_port/t_dsl_tool_provisioning_staged.nim``
+    ## asserts ``not declared(path)`` precisely to stop that — ``path`` is
+    ## a tool-provisioning vocabulary word scoped to its own expression.
+    ## Field access costs nothing in the namespace and is the spelling
+    ## ``Package-Model.md`` already uses (``cfg.path``).
+    value*: string
+    producerPackage*: string
+    producerActionId*: string
+    producerPath*: string
+      ## The producing edge's DECLARED output path, which is not the same
+      ## as ``value`` once ``&`` has been applied: ``"--config=" &
+      ## cfg.path`` has an argv token the graph cannot match on and a
+      ## producer path it can.
+
+  BuildOutput* = object
+    ## A typed handle on a file this project's build graph PRODUCES.
+    ##
+    ## Returned by the rendering helpers (``renderConfigFile``) and
+    ## consumed by a ``service`` block's ``args`` / ``runtimeFile``
+    ## setters. ``Package-Model.md`` §Collections: "`service` does not
+    ## have a `config:` setter. Configuration is the package's job:
+    ## package-level `config:` configurables plus rendering helpers
+    ## (`literalConfigFile`, `configFile`, etc.) produce a `BuildOutput`,
+    ## and the service consumes that output the same way any other build
+    ## output is consumed — either by reference on argv or via
+    ## `runtimeFile`."
+    ##
+    ## The handle carries the PRODUCING EDGE, not just a path: that is
+    ## what makes the service's reference an edge in the graph rather
+    ## than a string that happens to look like a path.
+    packageName*: string
+    actionId*: string
+      ## The id of the build action that writes ``filePath``. Empty only
+      ## for a handle built by hand (no producing edge is then recorded).
+    filePath*: string
+      ## The output path exactly as the producing action declares it, so
+      ## ``inferDeclaredActionDeps`` can match it by string equality.
+    path*: BuildOutputPath
+      ## The same path as a context-carrying string — what ``args`` and
+      ## ``runtimeFile`` take. Kept in sync by ``newBuildOutput``, which
+      ## is the only constructor recipes should use.
+
+  ServiceExecutableKind* = enum
+    ## How a ``service`` body's ``executable <expr>`` setter named its
+    ## binary. ``sxkUnset`` is the ground state for a body that has no
+    ## ``executable`` setter at all (an ``execStart``-only systemd unit).
+    sxkUnset
+    sxkArtifact
+      ## ``executable <ident>`` — an ``executable <ident>:`` artifact of
+      ## this package. The ident's TEXT is recorded; the macro never
+      ## evaluates the node, so this form works before the artifact slot
+      ## variable has a value.
+    sxkPackageExecutable
+      ## ``executable redis.executable("redis-server")`` — a typed
+      ## ``SelectedExecutable`` from a package reached through ``uses:``.
+    sxkBuildOutput
+      ## ``executable <buildOutput>`` — a binary this graph builds.
+    sxkPath
+      ## ``executable "<path>"`` — a literal path.
+
+  ServiceExecutableRef* = object
+    ## The typed executable edge of one ``service`` block.
+    kind*: ServiceExecutableKind
+    packageName*: string
+    executableName*: string
+    path*: string
+    actionId*: string
+      ## The producing action, when the executable is a build output.
+
+  ServiceArgKind* = enum
+    svakLiteral
+      ## A plain string. Records NO edge.
+    svakBuildOutput
+      ## A ``BuildOutputPath`` — the argument carries its producing edge.
+
+  ServiceArgDef* = object
+    ## One element of a ``service`` body's ``args "...", ...`` setter, in
+    ## declaration order.
+    kind*: ServiceArgKind
+    value*: string
+      ## The argv token.
+    producerPackage*: string
+    producerActionId*: string
+    producerPath*: string
+      ## The declared output path of the producing edge. Set only for
+      ## ``svakBuildOutput``.
+
+  ServiceRuntimeFileDef* = object
+    ## One ``runtimeFile <buildOutput>`` setter: a build output the
+    ## service must have alongside it at runtime even though the path
+    ## does not appear on argv.
+    path*: string
+    producerPackage*: string
+    producerActionId*: string
+
+  ServiceReadinessKind* = enum
+    ## Shared-Development-Services L9 — the ``readiness`` setter
+    ## §9.1 writes (``readiness httpGet("/debug/ready", port = port)``).
+    ##
+    ## THE THREE ARMS ARE THE THREE THE SUPERVISOR IMPLEMENTS, and that
+    ## is deliberate rather than conservative: ``readinessOk`` in
+    ## ``repro_cli_support/dev_session.nim`` switches on exactly
+    ## ``none`` / ``fileexists`` / ``httpget`` and treats anything else
+    ## as never-ready. A fourth arm here would be a word a recipe could
+    ## write, that reached the artifact, and that made the service hang
+    ## until its timeout with nothing said -- the silent-drop shape this
+    ## campaign exists to find, in its worst form (a hang, not a miss).
+    ##
+    ## ``srkUnset`` is ordinal 0 so a record that never saw the setter
+    ## -- every pre-L9 recipe -- is distinguishable from one that wrote
+    ## ``readiness none``. The distinction is load-bearing: UNSET means
+    ## "ask the ``servicePlaceholder``", and ``none`` means "this author
+    ## says there is nothing to wait for". Collapsing them would make a
+    ## typed ``readiness none`` beside a placeholder's ``fileExists``
+    ## silently discard the placeholder's probe.
+    srkUnset = 0
+    srkNone
+    srkFileExists
+    srkHttpGet
+
+  ServiceReadinessDef* = object
+    ## One ``readiness`` declaration on a ``service`` body.
+    kind*: ServiceReadinessKind
+    path*: string
+      ## ``readiness fileExists("<path>")``. Relative paths are resolved
+      ## against the project root by the supervisor, exactly as the
+      ## placeholder's ``readiness.path`` is -- one resolution, not two.
+    url*: string
+      ## ``readiness httpGet(url = "<base>")``, or the ``http://
+      ## 127.0.0.1:<port>`` base derived from ``port = <n>``.
+    timeoutMs*: int
+      ## ``timeoutMs = <n>``. Zero means UNDECLARED, so the supervisor's
+      ## own default applies; there is no second copy of that default
+      ## here to drift from it.
+
+  ServiceInstanceDef* = object
+    ## Shared-Development-Services L9 — the typed form of the
+    ## ``instance`` block that until now existed only inside a
+    ## ``servicePlaceholder``'s JSON metadata.
+    ##
+    ## WHAT IS NOT HERE: ``environment``. The JSON block accepts one,
+    ## and this block REFUSES it by name, because §6.4 makes the
+    ## selected environment a per-invocation tracked input
+    ## (``REPRO_ENVIRONMENT`` -> ``canonicalEnvironmentSelection``) and
+    ## §6.5 makes it part of the instance key. A recipe that also wrote
+    ## the name would be a second answer to "which environment is this
+    ## instance keyed under", and the two could disagree with nothing
+    ## said. The typed lane DERIVES it from the selection instead.
+    declared*: bool
+      ## Whether the body carried an ``instance:`` block at all. A
+      ## service with no block is session-owned, which is every service
+      ## that existed before L7.
+    leaseTtlSeconds*: int64
+      ## ``lease keep`` (-1, the default -- D-SS5) | ``immediate`` (0) |
+      ## ``delayed(<n>)`` (n > 0).
+    environment*: string
+      ## The environment this instance is keyed under, DERIVED from the
+      ## selection at evaluation time rather than declared. Empty when
+      ## no environment is selected, which is its own key component
+      ## (L5, D-SS8: "``repro up`` implies nothing").
+
+  ServiceTriggerKind* = enum
+    ## The ``on <trigger>:`` taxonomy of ``Package-Model.md``
+    ## §"Service Lifecycle And Reactive Triggers".
+    stkRebuild        ## ``on rebuild <ident>``
+    stkChangeOutput   ## ``on change <buildOutput>``
+    stkChangePath     ## ``on change "<path>"``
+    stkStart          ## ``on start``
+    stkStop           ## ``on stop``
+    stkCrash          ## ``on crash``
+
+  ServiceTriggerActionKind* = enum
+    ## The actions legal inside an ``on <trigger>:`` body.
+    stakHotReload
+    stakRestart
+    stakSendSignal
+    stakExec
+    stakNotify
+
+  ServiceTriggerAction* = object
+    kind*: ServiceTriggerActionKind
+    argument*: string
+      ## The action's trailing source text, verbatim and unparsed. The
+      ## signal name for ``sendSignal``, the command for ``exec``, the
+      ## endpoint for ``notify`` — and, for the two actions that take
+      ## named options rather than an argument, those options' own text:
+      ## ``restart backoff = exponential, maxRetries = 3`` records
+      ## ``backoff = exponential, maxRetries = 3`` and ``hotReload
+      ## otherwise sendSignal "SIGHUP"`` records ``otherwise sendSignal
+      ## "SIGHUP"``. Empty only when the action was written with nothing
+      ## after it (a bare ``restart`` / ``hotReload``).
+      ##
+      ## This comment used to say "empty for ``hotReload`` / ``restart``",
+      ## which measurement contradicts — see
+      ## ``t_dsl_service_typed_edges.nim``'s "supervisor options are
+      ## carried whole, not truncated" suite, whose three cases read
+      ## exactly those texts out of this field. The correction matters
+      ## beyond tidiness: L1's reason for ACCEPTING the unimplemented
+      ## ``hotReload otherwise <action>`` while REFUSING the unimplemented
+      ## ``debounce`` / ``coalesce`` modifiers is that this field can hold
+      ## the former and nothing can hold the latter.
+
+  ServiceTriggerDef* = object
+    kind*: ServiceTriggerKind
+    subject*: string
+      ## The rebuilt ident for ``stkRebuild``, the watched path for
+      ## ``stkChangeOutput`` / ``stkChangePath``, empty otherwise.
+    producerActionId*: string
+      ## The producing edge of a watched build output. ``stkChangeOutput``
+      ## only.
+    actions*: seq[ServiceTriggerAction]
+
+  CertificateNodeKind* = enum
+    ## Test-Certificates TC-9a: what a ``certificate "<name>", <handle>``
+    ## marking points at. The byte is positional in the certificate-export
+    ## table payload; append new values, never insert.
+    cnkAction  ## a single build edge (``BuildActionDef.id``)
+    cnkTarget  ## a build target: ``target``, ``aggregate`` or ``collect``
+               ## (``BuildTargetDef.name``)
+
+  CertificateExportEntry* = object
+    ## Test-Certificates TC-9a: one row of a package's certificate-export
+    ## table (Test-Certificates.md §"Marking a node"). The name is also a
+    ## row of the target-export table, so ``repro build <name>`` selects
+    ## the node; this table records that the node PRODUCES a named
+    ## certificate, which the target-export table cannot express.
+    name*: string
+      ## The certificate name. It maps onto the test-certificate standard
+      ## as a ``targets`` entry.
+    owningPackage*: string
+    nodeKind*: CertificateNodeKind
+    node*: string
+      ## ``cnkAction``: the action id. ``cnkTarget``: the build-target name.
+    implicit*: bool
+      ## True for the marking the DSL applies, with no ``certificate
+      ## "test", ...`` declaration, to the node a plain ``repro test``
+      ## builds: the one the selector ``test`` resolves to (D15).
+    sourceFile*: string
+    sourceLine*: int
+      ## The declaration site. For an implicit row, the site of the
+      ## ``test`` target or export row when one was recorded.
+
+  CertificateExportTable* = object
+    entries*: seq[CertificateExportEntry]
+
   StateGroupDef* = object
     ## Named-Runnable-Edges N0 (spec §3.3): a named resource subgraph —
     ## the leasable/reapable unit. ``members`` are the resource addresses
@@ -1331,6 +2223,20 @@ type
     members*: seq[string]
     sourceFile*: string
     sourceLine*: int
+
+const
+  SharedServiceInstanceKeepTtlSeconds* = -1'i64
+    ## Shared-Development-Services D-SS5's decision, as ONE number.
+    ##
+    ## `repro_cli_support`'s `SharedServiceInstanceDefaultTtlSeconds`
+    ## IS this constant rather than a second copy of it: L7 decided
+    ## `keep` is the default for a `stable`, state-owning service, and
+    ## two spellings of `-1` in two libraries is the drift the campaign
+    ## has already paid for once (`EnvironmentPrecedence` needed a
+    ## standing assertion to keep it aligned with
+    ## `ContributionPriority`). The typed `instance:` block lowers here
+    ## and the JSON `instance` block reads the alias, so there is one
+    ## wire spelling of `keep`.
 
 proc allToolUses*(pkg: PackageDef): seq[PackageUseDef] =
   ## Every dependency entry a TOOL-PATH consumer needs, in one seq:
@@ -1376,3 +2282,83 @@ proc exposesDevEnvIntrospection*(pkg: PackageDef): bool =
   ##   implicit case reuses the exact same derivation with an empty
   ##   "extra" dev-env body.
   pkg.hasDevEnv or pkg.allToolUses().len > 0
+
+proc sharedServiceReplaceRefusal*(): string =
+  ## §5.1's `replace` refusal, WRITTEN ONCE.
+  ##
+  ## Shared-Development-Services forbids a CONSUMER of a shared service
+  ## the destructive operation, and that one judgement is enforced at
+  ## THREE different stages, each of which has to refuse independently:
+  ##
+  ##   1. the consumer's COMPILE time, in the resolver macro
+  ##      (`macros_b.nim`), where a `replace*(...)` head at a
+  ##      `.shared(...)` argument is a compile error;
+  ##   2. EVALUATION, in `resolveSharedService`
+  ##      (`dsl_port_runtime.nim`), which is what catches a resolution
+  ##      built by a path the macro did not write;
+  ##   3. the owner's CONVERGE, in `validateServiceContributions`
+  ##      (`repro_resources/service_registry.nim`), which is what catches
+  ##      a row that reached the cross-process store some other way.
+  ##
+  ## ALL THREE STILL FIRE, and none of them is unreachable -- that was
+  ## measured, and merging the CHECKS would be wrong because they run at
+  ## three different times against three different inputs. What was
+  ## duplicated was the JUDGEMENT: the citation, the reason and the
+  ## remedy were typed out three times, in three different phrasings
+  ## ("may not `replace` what the owner declared", "may `append` freely
+  ## and may NOT `replace`", "may only `append`"), which is three copies
+  ## of one sentence free to drift apart. The sibling undeclared-point
+  ## refusal was already factored into a single helper
+  ## (`refuseUndeclaredContribution`); this is the same move for its
+  ## twin.
+  ##
+  ## NOT "ALREADY DRIFTED", AND THE DISTINCTION IS WORTH KEEPING
+  ## STRAIGHT. `git log -S` on each of the three fragments, scoped to
+  ## its own file, returns exactly ONE commit each -- the commit that
+  ## introduced all three. They were born different rather than having
+  ## diverged from a common sentence. The hazard is the same (three
+  ## copies, three futures) but the history is not a drift and should
+  ## not be cited as one.
+  ##
+  ## ONE COPY IS STILL OUTSIDE THIS HELPER, said here because a reader
+  ## otherwise concludes the set is closed.
+  ## `tests/dsl_port/t_dss11_resolver_surface_refuses_near_misses.nim`
+  ## carries the hand-typed fragment "may not `replace` what the owner
+  ## declared" as a `ResolverProbe.phrase`, and a one-word edit to the
+  ## text below reddens it while the two in-process tests stay green
+  ## (measured: 4 OK / 1 FAILED there, 26 OK / 0 and 21 OK / 0 for the
+  ## other two). It cannot simply import this proc: it matches a
+  ## substring of a COMPILER DIAGNOSTIC captured from a subprocess, not
+  ## an exception message in this process. Closing that one needs the
+  ## probe table to carry a phrase derived from here, which is a change
+  ## to that file and was not made.
+  ##
+  ## IT IS THE SHARED PART ONLY. Each site prefixes its own SUBJECT (the
+  ## key, the point, the contributing package, the call-site spelling)
+  ## and appends its own STAGE-SPECIFIC consequence, because those
+  ## genuinely differ: the macro can quote the author's own source line,
+  ## and only the converge site can say that a stored `replace` would
+  ## become the fold's base value.
+  ##
+  ## A `proc` rather than a `const`, and that is a STYLE choice, not a
+  ## necessity -- do not read the earlier claim that a `const` would not
+  ## work in the resolver macro's compile-time `error()`, because it was
+  ## measured and it is false. A `const` whose value is a `&` chain of
+  ## string literals is an ordinary compile-time value and reads
+  ## identically from a macro body executed in the VM: converted to one,
+  ## all three sites compile and all three covering tests stay green
+  ## (26 OK / 0, 21 OK / 0, and 5 OK / 0 for the out-of-process macro
+  ## probe that actually exercises `error()`). The `proc` is kept only
+  ## because the file's other derived strings are procs. Either form is
+  ## correct, and site 1 and sites 2-3 read the same bytes under both.
+  "A CONSUMER of a shared service may `append` freely and " &
+    "may not `replace` what the owner declared. " &
+    "Shared-Development-Services.md §5.1: a consumer \"must be able to " &
+    "`append` a relying party freely, and must NOT be able to " &
+    "`replace` the relying-party collection or the issuer's hostname " &
+    "... a consumer that could replace them would fork the instance it " &
+    "is trying to join\". Who may use the destructive operation is " &
+    "D-SS9 and it is still open, so this is refused rather than " &
+    "decided. Write `append`, `appendOverride` or `appendForce` -- an " &
+    "append at a high priority is authoritative and still not " &
+    "destructive."

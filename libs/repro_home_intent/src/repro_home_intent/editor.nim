@@ -7,7 +7,7 @@
 ##   removePackageReference(profilePath, package, activity = "default",
 ##                          predicate = "")
 ##   setConfigurable(profilePath, packageDotConfigurable, value,
-##                   configurableLookup)
+##                   configurableLookup, predicate = "")
 ##   setHostActivities(profilePath, host, activities)
 ##
 ## Round-trip invariant: `add(p, x)` followed by `remove(p, x)` against
@@ -25,7 +25,7 @@
 ## reorder user-authored bodies that intentionally use insertion
 ## order.
 
-import std/[options, os, strutils]
+import std/[options, os, sequtils, strutils]
 from repro_core/paths import extendedPath
 
 import ./errors
@@ -111,6 +111,10 @@ proc insertLine(p: Profile; atIdx: int; line: string) =
       for ch in node.hostsEntries: shift(ch, from1)
     of nkHostsEntry:
       if node.hostEntryLine >= from1: inc node.hostEntryLine
+      if node.hostActivitiesLine > 0 and node.hostActivitiesLine >= from1:
+        inc node.hostActivitiesLine
+      if node.hostListEndLine > 0 and node.hostListEndLine >= from1:
+        inc node.hostListEndLine
     of nkResourcesBlock:
       if node.resourcesHeaderLine >= from1: inc node.resourcesHeaderLine
       for ch in node.resourcesEntries: shift(ch, from1)
@@ -119,6 +123,8 @@ proc insertLine(p: Profile; atIdx: int; line: string) =
       for ch in node.resourceAttrs: shift(ch, from1)
     of nkResourceAttr:
       if node.resourceAttrLine >= from1: inc node.resourceAttrLine
+    of nkOpaque:
+      discard
   shift(p.root, atIdx + 1)
 
 proc deleteLine(p: Profile; atIdx: int) =
@@ -155,6 +161,8 @@ proc deleteLine(p: Profile; atIdx: int) =
       for ch in node.hostsEntries: shift(ch, from1)
     of nkHostsEntry:
       if node.hostEntryLine > from1: dec node.hostEntryLine
+      if node.hostActivitiesLine > from1: dec node.hostActivitiesLine
+      if node.hostListEndLine > from1: dec node.hostListEndLine
     of nkResourcesBlock:
       if node.resourcesHeaderLine > from1: dec node.resourcesHeaderLine
       for ch in node.resourcesEntries: shift(ch, from1)
@@ -163,6 +171,8 @@ proc deleteLine(p: Profile; atIdx: int) =
       for ch in node.resourceAttrs: shift(ch, from1)
     of nkResourceAttr:
       if node.resourceAttrLine > from1: dec node.resourceAttrLine
+    of nkOpaque:
+      discard
   shift(p.root, atIdx + 1)
 
 # ---------------------------------------------------------------------------
@@ -198,6 +208,29 @@ proc insertionIndex(p: Profile; node: IntentNode;
   if lastReal < lo:
     return bodyHeaderLine
   result = lastReal + 1
+
+proc firstBodyBlock(act: IntentNode): int =
+  ## Index in `act.activityChildren` of the activity's first `stow:` /
+  ## `resources:` block (an `inspectProfile` extent), or -1.
+  for i, ch in act.activityChildren:
+    if ch.kind == nkOpaque and
+       ch.opaqueKind in {okActivityStowBlock, okActivityResources}:
+      return i
+  -1
+
+proc activityAppendIndex(p: Profile; act: IntentNode): int =
+  ## Where a new element of `act`'s body is inserted. Package references
+  ## and `when` blocks go after the body's last such element and BEFORE the
+  ## activity's `stow:` / `resources:` blocks, so the elements stay
+  ## together and the blocks stay at the end where they were written (the
+  ## comment lines above a block keep introducing it). Without such a block
+  ## this is `insertionIndex`.
+  let k = firstBodyBlock(act)
+  if k < 0:
+    return insertionIndex(p, act, act.activityHeaderLine)
+  if k == 0:
+    return act.activityHeaderLine
+  act.activityChildren[k - 1].endLine
 
 # ---------------------------------------------------------------------------
 # Sub-block lookups.
@@ -270,7 +303,11 @@ proc createCondBlock(p: Profile; parent: IntentNode;
     of nkActivity: parent.activityHeaderLine
     of nkCondBlock: parent.condHeaderLine
     else: parent.startLine
-  let insertAt = insertionIndex(p, parent, parentHeaderLine)
+  let insertAt =
+    if parent.kind == nkActivity: activityAppendIndex(p, parent)
+    else: insertionIndex(p, parent, parentHeaderLine)
+  let blockAt =
+    if parent.kind == nkActivity: firstBodyBlock(parent) else: -1
   insertLine(p, insertAt, header)
   result = IntentNode(kind: nkCondBlock,
     startLine: insertAt + 1, endLine: insertAt + 1,
@@ -280,7 +317,10 @@ proc createCondBlock(p: Profile; parent: IntentNode;
     condHeaderLine: insertAt + 1, condChildren: @[])
   case parent.kind
   of nkActivity:
-    parent.activityChildren.add result
+    if blockAt >= 0:
+      parent.activityChildren.insert(result, blockAt)
+    else:
+      parent.activityChildren.add result
     if parent.endLine < insertAt + 1:
       parent.endLine = insertAt + 1
   of nkCondBlock:
@@ -336,6 +376,13 @@ proc profileHasMacroImport(p: Profile): bool =
       return true
   false
 
+proc needsQuotedPackageSpelling(pkg: string): bool =
+  ## A package name that cannot be written bare or backtick-quoted because
+  ## it does not start like a Nim identifier (``7zip``). It is written as a
+  ## string, the form the parser and the profile macro both accept
+  ## (Package-Model.md §"Package names").
+  pkg.len > 0 and not (pkg[0].isAlphaAscii() or pkg[0] == '_')
+
 proc renderPackageRefSpelling(p: Profile; pkg: string): string =
   ## M83 Phase F3: emit a hyphenated package name with backticks
   ## (`` `pkg-x` ``) so the resulting line is also a valid Phase A
@@ -344,6 +391,8 @@ proc renderPackageRefSpelling(p: Profile; pkg: string): string =
   ## import). Legacy text-form profiles keep the bare spelling so the
   ## structural editor's round-trip stays byte-identical against the
   ## existing home-intent test fixtures.
+  if needsQuotedPackageSpelling(pkg):
+    return "\"" & pkg & "\""
   if not profileHasMacroImport(p):
     return pkg
   for ch in pkg:
@@ -363,6 +412,14 @@ proc stripBodyDiscardPlaceholder(p: Profile; blk: IntentNode) =
   var idx = header
   while idx < endLine and idx < p.lines.len:
     let line = p.lines[idx]
+    var insideOpaque = false
+    for ch in childrenSeq(blk):
+      if ch.kind == nkOpaque and idx + 1 >= ch.startLine and
+         idx + 1 <= ch.endLine:
+        insideOpaque = true
+    if insideOpaque:
+      inc idx
+      continue
     if line.strip() == "discard":
       deleteLine(p, idx)
       return
@@ -381,7 +438,9 @@ proc renderPackageLineText(p: Profile; pkg, version: string): string =
   ## bare form so a no-version `add` continues to produce the
   ## byte-identical line the existing round-trip tests assert.
   if version.len > 0:
-    return "package(" & pkg & ", \"" & version & "\")"
+    let id =
+      if needsQuotedPackageSpelling(pkg): "\"" & pkg & "\"" else: pkg
+    return "package(" & id & ", \"" & version & "\")"
   renderPackageRefSpelling(p, pkg)
 
 proc addPackageRefInBlock(p: Profile; blk: IntentNode; pkg: string;
@@ -393,7 +452,11 @@ proc addPackageRefInBlock(p: Profile; blk: IntentNode; pkg: string;
   let bodyIndent = blk.indent + p.indentStep
   let line = indentStr(bodyIndent) & renderPackageLineText(p, pkg, version)
   let header = headerLineOf(blk)
-  let insertAt = insertionIndex(p, blk, header)
+  let insertAt =
+    if blk.kind == nkActivity: activityAppendIndex(p, blk)
+    else: insertionIndex(p, blk, header)
+  let blockAt =
+    if blk.kind == nkActivity: firstBodyBlock(blk) else: -1
   insertLine(p, insertAt, line)
   let newNode = IntentNode(kind: nkPackageRef,
     startLine: insertAt + 1, endLine: insertAt + 1, indent: bodyIndent,
@@ -401,7 +464,10 @@ proc addPackageRefInBlock(p: Profile; blk: IntentNode; pkg: string;
     packageVersion: version)
   case blk.kind
   of nkActivity:
-    blk.activityChildren.add newNode
+    if blockAt >= 0:
+      blk.activityChildren.insert(newNode, blockAt)
+    else:
+      blk.activityChildren.add newNode
   of nkCondBlock:
     blk.condChildren.add newNode
   else: discard
@@ -438,7 +504,12 @@ proc addPackageReference*(profilePath: string; package: string;
   ## the round-trip invariant requires that `add` always produce an
   ## insertable line and `remove` always strip exactly one. The CLI
   ## may layer its own dedup over this if desired.
-  let prof = loadProfile(profilePath)
+  ##
+  ## The profile is read with `inspectProfile`: helper calls and the
+  ## activity's `stow:` / `resources:` blocks are stepped over and kept
+  ## byte-for-byte; the new line goes before those blocks
+  ## (`activityAppendIndex`).
+  let prof = inspectProfile(profilePath)
   var activityNode: IntentNode
   let existing = findActivity(prof, activity)
   if existing.isSome:
@@ -502,19 +573,25 @@ proc removePackageRefFromBlock(p: Profile; blk: IntentNode;
 proc removePackageReference*(profilePath: string; package: string;
                              activity = "default";
                              predicate = "";
-                             version = "") =
+                             version = ""): bool {.discardable.} =
   ## Remove the first occurrence of `package` from the targeted scope.
   ## If the removal would leave an activity body empty, the activity
   ## block stays (avoids noisy churn — per the spec's reasoning that
   ## the user's intent is to remove the package, not the activity).
-  let prof = loadProfile(profilePath)
+  ## Returns whether a line was removed (the file is not rewritten when
+  ## none was). Read with `inspectProfile`, so helper calls and `stow:` /
+  ## `resources:` blocks are stepped over and kept byte-for-byte; a package
+  ## a helper call contributes has no line here to remove (the CLI names
+  ## those calls, `opaqueNodes`).
+  let prof = inspectProfile(profilePath)
   let activityOpt = findActivity(prof, activity)
   if activityOpt.isNone:
-    return # nothing to remove
+    return false # nothing to remove
   let activityNode = activityOpt.get
   if predicate.len == 0:
-    discard removePackageRefFromBlock(prof, activityNode, package, version)
-    writeProfile(prof)
+    result = removePackageRefFromBlock(prof, activityNode, package, version)
+    if result:
+      writeProfile(prof)
     return
   let predAst = parsePredicate(profilePath, predicate, 0)
   let canon = renderPredicate(normalizeAst(predAst))
@@ -522,8 +599,10 @@ proc removePackageReference*(profilePath: string; package: string;
     activityNode.activityChildren, canon)
   if existingCond.isNone:
     return
-  discard removePackageRefFromBlock(prof, existingCond.get, package, version)
-  writeProfile(prof)
+  result = removePackageRefFromBlock(prof, existingCond.get, package,
+    version)
+  if result:
+    writeProfile(prof)
 
 # ---------------------------------------------------------------------------
 # setConfigurable.
@@ -586,24 +665,136 @@ proc createConfigPackage(p: Profile; cfg: IntentNode;
 
 proc findConfigPackage(cfg: IntentNode; pkgName: string):
     Option[IntentNode] =
+  ## The first UNGUARDED `<pkgName>:` block of `config:`; a package block
+  ## inside a guard chain is not a target for an unguarded edit.
   for ch in cfg.configPackages:
-    if ch.configPackageName == pkgName:
+    if ch.kind == nkConfigPackage and ch.configPackageName == pkgName:
       return some(ch)
   none(IntentNode)
 
-proc findConfigEntry(pkg: IntentNode; key: string): int =
-  for i, ch in pkg.configEntries:
-    if ch.configKey == key:
+proc findConfigEntry(entries: seq[IntentNode]; key: string): int =
+  ## Index of the first `<key> = ...` line among `entries` (direct
+  ## children only: an entry inside a nested guard chain is not matched).
+  for i, ch in entries:
+    if ch.kind == nkConfigEntry and ch.configKey == key:
       return i
   -1
 
+type
+  AssignmentSite = object
+    node: IntentNode
+    guards: seq[string]   ## predicate text of every enclosing guard, outer
+                          ## first; empty when unguarded
+
+proc collectAssignments(nodes: seq[IntentNode]; pkgName, key: string;
+                        inPackage: bool; guards: seq[string];
+                        into: var seq[AssignmentSite]) =
+  ## Every assignment of `<pkgName>.<key>` under `nodes` (a `config:` body
+  ## or a package body), with the guards around it.
+  for node in nodes:
+    case node.kind
+    of nkConfigPackage:
+      if node.configPackageName == pkgName:
+        collectAssignments(node.configEntries, pkgName, key, true, guards,
+          into)
+    of nkConfigEntry:
+      if inPackage and node.configKey == key:
+        into.add AssignmentSite(node: node, guards: guards)
+    of nkCondBlock:
+      let text =
+        case node.keyword
+        of ckWhen: "when " & node.predicateSource
+        of ckIf: "if " & node.predicateSource
+        of ckElif: "elif " & node.predicateSource
+        of ckElse: "else"
+      collectAssignments(node.condChildren, pkgName, key, inPackage,
+        guards & @[text], into)
+    else: discard
+
+proc describeSite(p: Profile; site: AssignmentSite): string =
+  result = p.path & ":" & $site.node.configEntryLine
+  if site.guards.len == 0:
+    result.add " (unguarded)"
+  else:
+    result.add " (under `" & site.guards.join(":` / `") & ":`)"
+
+proc refuseOverlappingConfigAssignment(p: Profile; cfg: IntentNode;
+                                       pkgName, key: string;
+                                       added: IntentNode) =
+  ## A NEW assignment `added` may sit only after unguarded assignments of
+  ## the same key. Scalars resolve last-write-wins
+  ## (Configurable-System.md §Priorities And Contributions), so on a host
+  ## where two assignments' guards both hold the later one wins: `added`
+  ## must not be followed by another assignment (it would be shadowed),
+  ## and must not follow a guarded one (it would shadow it -- for an
+  ## unguarded `added`, on every host that guard selects). Guards are not
+  ## compared for satisfiability (Home-Profile-Intent-Layer.md §Predicate
+  ## Normalization), so any such pair is refused.
+  var sites: seq[AssignmentSite]
+  collectAssignments(cfg.configPackages, pkgName, key, false, @[], sites)
+  var conflicting: seq[string]
+  var reason = ""
+  for site in sites:
+    if site.node == added:
+      continue
+    if site.node.configEntryLine > added.configEntryLine:
+      conflicting.add describeSite(p, site)
+      if reason.len == 0:
+        reason = "a later assignment would override it wherever both apply"
+    elif site.guards.len > 0:
+      conflicting.add describeSite(p, site)
+      if reason.len == 0:
+        reason = "it would override a guarded assignment wherever both apply"
+  if conflicting.len > 0:
+    raiseOverlappingAssignment(p.path, pkgName & "." & key, reason &
+      "; name that guard with --when to edit it, or edit the profile by " &
+      "hand", conflicting)
+
+proc growEnclosingEnd(p: Profile; line: int; nodes: varargs[IntentNode]) =
+  for node in nodes:
+    if not node.isNil and node.endLine < line:
+      node.endLine = line
+  if p.root.endLine < line:
+    p.root.endLine = line
+
+proc createConfigGuard(p: Profile; pkg: IntentNode;
+                       predicateSrc: string): IntentNode =
+  ## Append a `when <canonical predicate>:` block at the end of the
+  ## package block `pkg`. Created empty; the caller adds the entry.
+  let predAst = parsePredicate(p.path, predicateSrc, 0)
+  let canon = renderPredicate(normalizeAst(predAst))
+  let guardIndent = pkg.indent + p.indentStep
+  let insertAt = insertionIndex(p, pkg, pkg.configPackageHeaderLine)
+  insertLine(p, insertAt, indentStr(guardIndent) & "when " & canon & ":")
+  result = IntentNode(kind: nkCondBlock,
+    startLine: insertAt + 1, endLine: insertAt + 1,
+    indent: guardIndent, keyword: ckWhen,
+    predicateSource: canon, predicateAst: predAst,
+    canonicalPredicate: canon, condHeaderLine: insertAt + 1,
+    condChildren: @[])
+  pkg.configEntries.add result
+
 proc setConfigurable*(profilePath: string; packageDotConfigurable: string;
                      value: string;
-                     configurableLookup: ConfigurableLookup) =
+                     configurableLookup: ConfigurableLookup;
+                     predicate = "") =
   ## Write or update `<package>.<configurable> = <value>` inside the
   ## profile's `config:` section. Creates the `config:` block and the
   ## `<package>:` sub-block on demand. Subsequent calls into the same
   ## sub-block append the new entry in insertion order.
+  ##
+  ## `predicate` (a runtime predicate expression, e.g. `windows` or
+  ## `linux and arm64`) guards the assignment: it lands in the package
+  ## block's `when <pred>:` block whose normalized predicate matches,
+  ## created (as `when <canonical predicate>:` at the end of the package
+  ## block) when there is none. Without it the unguarded assignment is
+  ## edited. Either way an existing assignment of the key at that target
+  ## is updated in place; a NEW assignment that would overlap an
+  ## assignment of the same key under a different guard is refused
+  ## (`EOverlappingAssignment`, see `refuseOverlappingConfigAssignment`).
+  ## Assignments inside guard chains the edit does not target, and
+  ## package blocks inside guard chains, are left byte-for-byte as they
+  ## are.
   ##
   ## `configurableLookup(package, configurable)` is the seam by which
   ## the caller (CLI / apply pipeline) injects knowledge of which
@@ -613,6 +804,12 @@ proc setConfigurable*(profilePath: string; packageDotConfigurable: string;
   let (pkgName, keyName) = splitPkgDotKey(packageDotConfigurable)
   if configurableLookup != nil and not configurableLookup(pkgName, keyName):
     raiseUnknownConfigurable(profilePath, pkgName, keyName)
+  # Validate the predicate before touching anything (it raises
+  # `EUnstructured` naming the offending token).
+  let canon =
+    if predicate.len > 0:
+      renderPredicate(normalizeAst(parsePredicate(profilePath, predicate, 0)))
+    else: ""
   let prof = loadProfile(profilePath)
   var cfg: IntentNode
   let cfgOpt = findConfigBlock(prof)
@@ -626,29 +823,40 @@ proc setConfigurable*(profilePath: string; packageDotConfigurable: string;
     pkg = pkgOpt.get
   else:
     pkg = createConfigPackage(prof, cfg, pkgName)
-  let entryIndent = pkg.indent + prof.indentStep
+  # The block the assignment belongs in: the package block itself, or its
+  # guard block for `predicate`.
+  var target = pkg
+  var guard: IntentNode = nil
+  if canon.len > 0:
+    let existingGuard = findCondWithCanonical(pkg.configEntries, canon)
+    guard =
+      if existingGuard.isSome: existingGuard.get
+      else: createConfigGuard(prof, pkg, predicate)
+    target = guard
+  let siblings =
+    if guard.isNil: pkg.configEntries else: guard.condChildren
+  let entryIndent = target.indent + prof.indentStep
   let rhs = renderConfigValue(value)
   let newLine = indentStr(entryIndent) & keyName & " = " & rhs
-  let existingIdx = findConfigEntry(pkg, keyName)
+  let existingIdx = findConfigEntry(siblings, keyName)
   if existingIdx >= 0:
     # Update in place. Preserve the line index.
-    let entry = pkg.configEntries[existingIdx]
+    let entry = siblings[existingIdx]
     prof.lines[entry.configEntryLine - 1] = newLine
     entry.configValueSource = rhs
   else:
-    let insertAt = insertionIndex(prof, pkg, pkg.configPackageHeaderLine)
+    let insertAt = insertionIndex(prof, target, headerLineOf(target))
     insertLine(prof, insertAt, newLine)
     let entryNode = IntentNode(kind: nkConfigEntry,
       startLine: insertAt + 1, endLine: insertAt + 1, indent: entryIndent,
       configKey: keyName, configValueSource: rhs,
       configEntryLine: insertAt + 1)
-    pkg.configEntries.add entryNode
-    if pkg.endLine < insertAt + 1:
-      pkg.endLine = insertAt + 1
-    if cfg.endLine < insertAt + 1:
-      cfg.endLine = insertAt + 1
-    if prof.root.endLine < insertAt + 1:
-      prof.root.endLine = insertAt + 1
+    if guard.isNil:
+      pkg.configEntries.add entryNode
+    else:
+      guard.condChildren.add entryNode
+    growEnclosingEnd(prof, insertAt + 1, guard, pkg, cfg)
+    refuseOverlappingConfigAssignment(prof, cfg, pkgName, keyName, entryNode)
   writeProfile(prof)
 
 # ---------------------------------------------------------------------------
@@ -682,15 +890,21 @@ proc findHostsEntry(hostsBlk: IntentNode; host: string): int =
       return i
   -1
 
-proc setHostActivities*(profilePath, host: string;
-                       activities: seq[string]) =
-  ## Create or update the `hosts:` entry for `host`. Writes
-  ## `"<host>": [<activity>, ...]` in the canonical form.
-  ## `default` is always implicitly active, so the activities list
-  ## does NOT need to include it (and SHOULD NOT — `repro home enable`
-  ## refuses to put `default` in a hosts entry per spec). We don't
-  ## enforce that here; the CLI does.
-  let prof = loadProfile(profilePath)
+proc replaceLineSpan(p: Profile; firstLine, lastLine: int;
+                     replacement: seq[string]) =
+  ## Replace the 1-based lines `firstLine .. lastLine` with `replacement`,
+  ## keeping every node's line references consistent.
+  for _ in firstLine .. lastLine:
+    deleteLine(p, firstLine - 1)
+  for k, line in replacement:
+    insertLine(p, firstLine - 1 + k, line)
+
+proc setHostActivitiesIn(prof: Profile; host: string;
+                         activities: seq[string]) =
+  ## `setHostActivities` on a profile already read: the host's activity
+  ## list -- all of its lines when it spans several -- becomes the
+  ## canonical one-line `[a, b]`; a missing entry (or `activities:` key)
+  ## is added.
   var hostsBlk: IntentNode
   let hostsOpt = findHostsBlock(prof)
   if hostsOpt.isSome:
@@ -701,9 +915,26 @@ proc setHostActivities*(profilePath, host: string;
   let line = indentStr(entryIndent) & "\"" & host & "\": " &
     renderHostList(activities)
   let existingIdx = findHostsEntry(hostsBlk, host)
-  if existingIdx >= 0:
+  if existingIdx >= 0 and hostsBlk.hostsEntries[existingIdx].hostBlockForm:
+    # Block form: rewrite (or add) the `activities:` line under the host,
+    # leaving `applies:` and the host line as they are.
     let entry = hostsBlk.hostsEntries[existingIdx]
-    prof.lines[entry.hostEntryLine - 1] = line
+    let childLine = indentStr(entryIndent + prof.indentStep) &
+      "activities: " & renderHostList(activities)
+    if entry.hostActivitiesLine > 0:
+      replaceLineSpan(prof, entry.hostActivitiesLine,
+        max(entry.hostListEndLine, entry.hostActivitiesLine), @[childLine])
+      entry.hostListEndLine = entry.hostActivitiesLine
+    else:
+      insertLine(prof, entry.hostEntryLine, childLine)
+      entry.hostActivitiesLine = entry.hostEntryLine + 1
+      entry.hostListEndLine = entry.hostActivitiesLine
+    entry.hostActivities = activities
+  elif existingIdx >= 0:
+    let entry = hostsBlk.hostsEntries[existingIdx]
+    replaceLineSpan(prof, entry.hostEntryLine,
+      max(entry.hostListEndLine, entry.hostEntryLine), @[line])
+    entry.hostListEndLine = entry.hostEntryLine
     entry.hostActivities = activities
   else:
     let insertAt = insertionIndex(prof, hostsBlk, hostsBlk.hostsHeaderLine)
@@ -711,13 +942,193 @@ proc setHostActivities*(profilePath, host: string;
     let entry = IntentNode(kind: nkHostsEntry,
       startLine: insertAt + 1, endLine: insertAt + 1, indent: entryIndent,
       hostName: host, hostActivities: activities,
-      hostEntryLine: insertAt + 1)
+      hostEntryLine: insertAt + 1, hostListEndLine: insertAt + 1)
     hostsBlk.hostsEntries.add entry
     if hostsBlk.endLine < insertAt + 1:
       hostsBlk.endLine = insertAt + 1
     if prof.root.endLine < insertAt + 1:
       prof.root.endLine = insertAt + 1
+
+proc setHostActivities*(profilePath, host: string;
+                       activities: seq[string]) =
+  ## Create or update the `hosts:` entry for `host`. Writes
+  ## `"<host>": [<activity>, ...]` in the canonical form (a list that
+  ## spanned lines becomes one line). `default` is always implicitly active,
+  ## so the activities list does NOT need to include it. We don't enforce
+  ## that here; the CLI does. `repro home enable` / `disable` use
+  ## `editHostActivity`, which keeps the entry's own layout.
+  ##
+  ## Read with `inspectHostsBlock`: the edit is of the `hosts:` block only,
+  ## so nothing elsewhere in the profile (helper calls, an activity's
+  ## `stow:` / `resources:` blocks) is read or can stop it, and all of it
+  ## keeps its bytes.
+  let prof = inspectHostsBlock(profilePath)
+  setHostActivitiesIn(prof, host, activities)
   writeProfile(prof)
+
+type
+  HostListItem = object
+    ## One activity identifier of a `[...]` list, as offsets into the
+    ## list's text: `[first, last)`.
+    name: string
+    first, last: int
+
+proc hostListItems(text: string; openIdx: int):
+    tuple[items: seq[HostListItem]; closeIdx: int] =
+  ## The identifiers of the list whose `[` is `text[openIdx]`, and the
+  ## offset of its `]` (-1 when it does not close). `#` comments run to the
+  ## end of their line.
+  result.closeIdx = -1
+  var i = openIdx + 1
+  while i < text.len:
+    let ch = text[i]
+    if ch == ']':
+      result.closeIdx = i
+      return
+    if ch == '#':
+      while i < text.len and text[i] != '\n':
+        inc i
+      continue
+    if ch.isAlphaAscii() or ch == '_' or ch.isDigit():
+      let start = i
+      while i < text.len and (text[i].isAlphaAscii() or text[i].isDigit() or
+                              text[i] == '_'):
+        inc i
+      result.items.add HostListItem(name: text[start ..< i], first: start,
+        last: i)
+      continue
+    inc i
+
+proc lineStartOf(text: string; offset: int): int =
+  ## Offset of the first character of the line holding `offset`.
+  var i = offset - 1
+  while i >= 0 and text[i] != '\n':
+    dec i
+  i + 1
+
+proc lineEndOf(text: string; offset: int): int =
+  ## Offset of the `\n` ending the line holding `offset` (or `text.len`).
+  var i = offset
+  while i < text.len and text[i] != '\n':
+    inc i
+  i
+
+const HostListWrapColumn = 80
+  ## A spanning list whose last line would grow past this column gets the
+  ## new activity on a continuation line of its own (`editHostActivity`).
+
+proc enableInList(text: string; openIdx: int; items: seq[HostListItem];
+                  closeIdx: int; activity: string): string =
+  if items.len == 0:
+    return text[0 .. openIdx] & activity & text[closeIdx .. ^1]
+  let last = items[^1]
+  let lineStart = lineStartOf(text, last.first)
+  let lineLen = lineEndOf(text, last.last) - lineStart
+  if lineStart > 0 and lineLen + 2 + activity.len > HostListWrapColumn:
+    # The list already spans lines and its last line is full: continue it
+    # on a new line at that line's indentation.
+    var indent = 0
+    while text[lineStart + indent] == ' ':
+      inc indent
+    return text[0 ..< last.last] & ",\n" & indentStr(indent) & activity &
+      text[last.last .. ^1]
+  text[0 ..< last.last] & ", " & activity & text[last.last .. ^1]
+
+proc disableInList(text: string; openIdx: int; items: seq[HostListItem];
+                   k: int): string =
+  ## `text` without `items[k]` and one separator next to it. Lines other
+  ## than the ones holding the item keep their bytes; a continuation line
+  ## the removal empties is dropped.
+  let item = items[k]
+  if items.len == 1:
+    return text[0 ..< item.first] & text[item.last .. ^1]
+  if k == items.high:
+    # The last item: drop the separator before it (`, x` -- or `,\n   x`,
+    # which joins the closing `]` onto the previous item's line).
+    return text[0 ..< items[k - 1].last] & text[item.last .. ^1]
+  # Drop the item, its comma and the blanks after it on the same line.
+  var cut = item.last
+  while cut < text.len and text[cut] == ' ':
+    inc cut
+  if cut < text.len and text[cut] == ',':
+    inc cut
+  while cut < text.len and text[cut] == ' ':
+    inc cut
+  var head = text[0 ..< item.first]
+  var tail = text[cut .. ^1]
+  if tail.len == 0 or tail[0] == '\n':
+    # The item ended its line: drop the blanks it leaves at the end, and
+    # the whole line when nothing else was on it.
+    while head.len > 0 and head[^1] == ' ':
+      head.setLen(head.len - 1)
+    if head.len > 0 and head[^1] == '\n' and tail.len > 0:
+      tail = tail[1 .. ^1]
+  head & tail
+
+proc editHostActivity*(profilePath, host, activity: string;
+                       enable: bool): bool =
+  ## Add (`enable`) or remove `activity` in `host`'s `hosts:` entry, the
+  ## edit `repro home enable` / `disable` make. Only the activity list of
+  ## that entry changes: the new identifier goes after the last one (on a
+  ## new continuation line when the list spans lines and its last line
+  ## would pass `HostListWrapColumn`), a removed one takes one separator
+  ## with it, and every other line of the profile -- the entry's other
+  ## lines included -- keeps its bytes. An entry (or block-form
+  ## `activities:` key) that does not exist yet is added in the canonical
+  ## one-line form (`setHostActivities`). Returns whether the file changed.
+  ##
+  ## Read with `inspectHostsBlock`, so only the `hosts:` block is read: a
+  ## profile that composes helpers, or whose activities hold `stow:` /
+  ## `resources:` blocks, is edited all the same.
+  let prof = inspectHostsBlock(profilePath)
+  let hostsOpt = findHostsBlock(prof)
+  let idx =
+    if hostsOpt.isSome: findHostsEntry(hostsOpt.get, host) else: -1
+  let entry =
+    if idx >= 0: hostsOpt.get.hostsEntries[idx] else: nil
+  if entry.isNil or (entry.hostBlockForm and entry.hostActivitiesLine == 0):
+    var acts =
+      if entry.isNil: newSeq[string]() else: entry.hostActivities
+    if enable:
+      acts.add activity
+    else:
+      let before = acts.len
+      acts = acts.filterIt(it != activity)
+      if not entry.isNil and acts.len == before:
+        return false
+    setHostActivitiesIn(prof, host, acts)
+    writeProfile(prof)
+    return true
+  if enable == (activity in entry.hostActivities):
+    return false
+  let firstLine =
+    if entry.hostBlockForm: entry.hostActivitiesLine else: entry.hostEntryLine
+  let lastLine = max(entry.hostListEndLine, firstLine)
+  let text = prof.lines[firstLine - 1 .. lastLine - 1].join("\n")
+  # The list opens at the first `[` after the `:` that ends the key --
+  # `"<host>":` (whose name may hold any character) or `activities:`.
+  let keyEnd =
+    if entry.hostBlockForm: text.find(':')
+    else: text.find("\":")
+  let openIdx = text.find('[', max(keyEnd, 0))
+  let (items, closeIdx) = hostListItems(text, max(openIdx, 0))
+  if openIdx < 0 or closeIdx < 0:
+    raiseUnstructured(profilePath, firstLine, 1,
+      "the activity list of hosts entry \"" & host & "\"",
+      "a `[activity, ...]` list")
+  let edited =
+    if enable:
+      enableInList(text, openIdx, items, closeIdx, activity)
+    else:
+      var k = -1
+      for i, it in items:
+        if it.name == activity:
+          k = i
+          break
+      disableInList(text, openIdx, items, k)
+  replaceLineSpan(prof, firstLine, lastLine, edited.split("\n"))
+  writeProfile(prof)
+  true
 
 # ---------------------------------------------------------------------------
 # setResource (M78).
@@ -730,7 +1141,8 @@ proc setHostActivities*(profilePath, host: string;
 # of the entry in insertion order, and an existing key is updated in
 # place. The editor writes resource entries at the profile top level
 # (not nested under a `when`/`if`); a predicate-guarded resource is
-# hand-authored.
+# hand-authored, and an edit naming an address declared only under a
+# guard is refused (`EGuardedTarget`) rather than duplicated unguarded.
 
 proc createResourcesBlock(p: Profile): IntentNode =
   let parentIndent = p.root.indent + p.indentStep
@@ -763,10 +1175,24 @@ proc createResourceEntry(p: Profile; resBlk: IntentNode;
 
 proc findResourceEntry(resBlk: IntentNode; address: string):
     Option[IntentNode] =
+  ## The unguarded `<kind> <address>:` entry directly inside `resources:`.
   for ch in resBlk.resourcesEntries:
     if ch.kind == nkResourceEntry and ch.resourceAddress == address:
       return some(ch)
   none(IntentNode)
+
+proc guardedResourceSites(p: Profile; nodes: seq[IntentNode];
+                          address: string; inGuard: bool;
+                          into: var seq[string]) =
+  ## `file:line` of every declaration of `address` inside a guard chain.
+  for node in nodes:
+    case node.kind
+    of nkResourceEntry:
+      if inGuard and node.resourceAddress == address:
+        into.add p.path & ":" & $node.resourceHeaderLine
+    of nkCondBlock:
+      guardedResourceSites(p, node.condChildren, address, true, into)
+    else: discard
 
 proc findResourceAttr(entry: IntentNode; key: string): int =
   for i, ch in entry.resourceAttrs:
@@ -793,6 +1219,17 @@ proc setResource*(profilePath, kind, address, attrKey: string;
   if entryOpt.isSome:
     entry = entryOpt.get
   else:
+    # A resource declared only under a guard is not this edit's target:
+    # adding an unguarded entry would duplicate its address on every host
+    # the guard selects, and editing the guarded one would edit only some
+    # hosts' resource. Refuse; guarded resources are hand-authored.
+    var sites: seq[string]
+    guardedResourceSites(prof, resBlk.resourcesEntries, address, false,
+      sites)
+    if sites.len > 0:
+      raiseGuardedTarget(profilePath, address,
+        "the resource is declared only under a `when <pred>:` guard; " &
+        "edit it in the profile by hand", sites)
     entry = createResourceEntry(prof, resBlk, kind, address)
   let attrIndent = entry.indent + prof.indentStep
   let rhs = renderConfigValue(value)

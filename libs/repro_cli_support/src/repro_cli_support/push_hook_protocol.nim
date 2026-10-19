@@ -634,6 +634,24 @@ proc validRefName(gitBin, repoRoot, value: string; allowHead: bool): bool =
   if not value.startsWith("refs/"): return false
   runGit(gitBin, repoRoot, ["check-ref-format", value]).code == 0
 
+proc validLocalSource(gitBin, repoRoot, value, oid: string): bool =
+  ## The pre-push ``<local-ref>`` field is the SOURCE side of the refspec as
+  ## Git saw it. Git writes a full ref name only when the source resolved to
+  ## one (``git push origin main`` -> ``refs/heads/main``). Otherwise it
+  ## writes the source text VERBATIM: ``HEAD``, a bare or abbreviated object
+  ## name (``git push origin <sha>:refs/heads/x``), or any revision
+  ## expression (``HEAD~1``, ``@``, ``main^``). Refusing those as "malformed"
+  ## refused ordinary pushes Git itself had accepted. The object id field,
+  ## not this text, is what the push sends; the text is checked only where it
+  ## claims to be a ref.
+  if value == "(delete)":
+    return isZeroOid(oid)
+  if value == "HEAD" or value.startsWith("refs/"):
+    return validRefName(gitBin, repoRoot, value, allowHead = true)
+  # A source expression always names an object, so a zero object id beside
+  # one is not something Git produces.
+  not isZeroOid(oid)
+
 proc parsePrePushRefStream*(gitBin, repoRoot, refsPath: string):
     PrePushRefStream =
   result.objectFormat = storageObjectFormat(gitBin, repoRoot)
@@ -676,8 +694,7 @@ proc parsePrePushRefStream*(gitBin, repoRoot, refsPath: string):
     if fields.len != 4:
       result.diagnostic = "pre-push refs record must contain exactly four fields"
       return
-    if not ((fields[0] == "(delete)" and isZeroOid(fields[1])) or
-        validRefName(gitBin, repoRoot, fields[0], allowHead = true)):
+    if not validLocalSource(gitBin, repoRoot, fields[0], fields[1]):
       result.diagnostic = "pre-push refs record has an invalid local ref"
       return
     if not validRefName(gitBin, repoRoot, fields[2], allowHead = false):
@@ -808,6 +825,11 @@ proc evaluateOutgoingCurrent*(gitBin, repoRoot, refsPath, hookRemoteName,
     result.diagnostic = "pushed object is not the independently observed HEAD"
     return
   if update.localRef == "HEAD":
+    discard
+  elif not update.localRef.startsWith("refs/"):
+    # A source EXPRESSION (a bare object name, ``HEAD~0``, ``@``): Git
+    # resolved it to ``localOid``, which was just shown to be HEAD. It names
+    # no other ref that could disagree with HEAD later.
     discard
   elif update.localRef.startsWith("refs/heads/"):
     let resolved = gitValue(gitBin, repoRoot,

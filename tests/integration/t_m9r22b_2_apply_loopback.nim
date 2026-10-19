@@ -19,6 +19,7 @@
 ## via ``blkid``.
 
 import std/[options, os, osproc, sequtils, strutils, tables, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_profile
 

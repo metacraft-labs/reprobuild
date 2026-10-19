@@ -61,7 +61,7 @@ suite "regression — manifests reports single-project workspace accurately":
       # Single-project (metadata-only) workspace.toml — present, but no
       # ``[[manifest]]`` layers.
       writeWorkspaceBranch(ws, project = "solo", branch = "main")
-      check fileExists(ws / ".repro" / "workspace.toml")
+      check fileExists(ws / ".repro" / "workspace-state.toml")
 
       let res = run(reproBinary & " workspace manifests --workspace-root=" & q(ws))
       if res.code != 0:

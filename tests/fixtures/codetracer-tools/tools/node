@@ -1,0 +1,13 @@
+#!/bin/sh
+# Stands in for node: answers the version probe, runs the stylus fixture for
+# the stylesheet build, and passes the one script check CodeTracer's graph
+# runs. `stylus` is the graph-built fixture compiler earlier on PATH.
+set -eu
+case "${1:-}" in
+  --version|-v) echo 'v20.0.0'; exit 0 ;;
+  node_modules/stylus/bin/stylus|*/node_modules/stylus/bin/stylus)
+    shift; exec stylus "$@" ;;
+  tests/ipc_registry_test.js|*/tests/ipc_registry_test.js)
+    echo '[OK] handlers still invoked after reconnect'; exit 0 ;;
+  *) exit 0 ;;
+esac

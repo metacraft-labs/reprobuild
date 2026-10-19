@@ -36,11 +36,41 @@
 ##   8. ``test_sync_mainline_refuses_dirty_repo_when_integrating``
 ##      A flavor was chosen but the tree is dirty: refused, uncommitted work
 ##      still present.
+##   9. ``test_sync_mainline_clones_missing_repo_and_filters_routine_output``
+##      A declared repo with no checkout is cloned onto its mainline; the text
+##      output omits routine repos unless ``--verbose``.
+##
+## ``--dry-run`` (CLI/sync.md §`--dry-run` with `--mainline`): print the plan,
+## exit 0, mutate NOTHING — no fetch (checkouts or the shared-bare cache), no
+## clone, no ff/rebase/merge, no receipts, no report even under
+## ``--write-report``. Every dry-run case below passes ``--write-report``
+## (``invokeSync`` always does) precisely so the "no report" half is tested.
+##
+##  10. ``test_sync_mainline_dry_run_previews_fast_forward_without_fetching``
+##      The checkout's remote-tracking ref is behind the origin (trunk moved
+##      twice; the checkout fetched after the first move only). The plan is a
+##      ``fast_forward`` computed against the STALE ref, and afterwards HEAD,
+##      branch and ``refs/remotes/origin/dev`` are all unchanged — the second
+##      move was not fetched — and no receipts / engine cache / report exist.
+##      The JSON carries ``dryRun: true`` and ``headAfter == headBefore``; the
+##      text says ``would fast_forward`` and ``(dry-run)``.
+##  11. ``test_sync_mainline_dry_run_does_not_clone_missing_checkout``
+##      A declared repo with no checkout: planned as ``clone``, but nothing is
+##      cloned and the shared-bare clone cache under
+##      ``.repro/workspace/engine-cache`` (where ``refreshSharedBare`` would
+##      put it on this path) is never created.
+##  12. ``test_sync_mainline_dry_run_plans_rebase_without_integrating``
+##      Diverged repo with ``--rebase``: planned ``integrated`` / ``rebase``,
+##      HEAD and tree unchanged, no rebase in progress, exit 0.
+##  13. ``test_sync_mainline_dry_run_exits_zero_on_a_refusal``
+##      Diverged repo without a flavor: the plan reports ``diverged`` (a real
+##      run exits 2, sub-case 2), but a dry run is informational and exits 0.
 ##
 ## No mocks: real git repositories, real filesystem, the real binary.
 ## Skip rule: ``git`` missing on PATH.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 
@@ -219,6 +249,41 @@ proc entryByName(report: JsonNode; name: string): JsonNode =
   newJNull()
 
 const oneRepo = @[RepoSpec(name: "prod", mainline: "dev")]
+
+proc reportPath(fx: Fixture): string =
+  fx.workspaceRoot / ".repro" / "build" / "reports" / "sync-report.json"
+
+proc stdoutJson(output: string): JsonNode =
+  ## ``runShell`` merges stderr into stdout, so the ``--json`` document is
+  ## located by its outermost braces rather than parsed whole.
+  let first = output.find('{')
+  let last = output.rfind('}')
+  if first < 0 or last < first:
+    checkpoint("no JSON document in output:\n" & output)
+    return newJNull()
+  parseJson(output[first .. last])
+
+proc gitRev(gitBin, repoPath, rev: string): string =
+  requireGit(q(gitBin) & " -C " & q(repoPath) & " rev-parse " & rev).strip()
+
+proc currentBranch(gitBin, repoPath: string): string =
+  requireGit(q(gitBin) & " -C " & q(repoPath) &
+    " branch --show-current").strip()
+
+proc fetchCheckout(gitBin, repoPath: string) =
+  ## Bring the checkout's remote-tracking refs up to date by hand, the way an
+  ## operator would before a dry run that (by contract) does not fetch.
+  discard requireGit(q(gitBin) & " -C " & q(repoPath) & " fetch origin")
+
+proc checkDryRunLeftNoState(fx: Fixture) =
+  ## The workspace-side half of the dry-run contract: no receipts (the fetch
+  ## and clone actions write them), no engine cache (the build engine's cache
+  ## root, which on the mainline path is ALSO where ``refreshSharedBare`` puts
+  ## the shared-bare clone cache), and no report despite ``--write-report``.
+  let ws = fx.workspaceRoot / ".repro" / "workspace"
+  check not dirExists(ws / "receipts")
+  check not dirExists(ws / "engine-cache")
+  check not fileExists(fx.reportPath())
 
 # ---- the suite -------------------------------------------------------------
 
@@ -485,3 +550,173 @@ suite "repro sync --mainline":
       let resVerbose = invokeSync(fx, @["--verbose"])
       check resVerbose.code == 0
       check resVerbose.output.contains("workspace sync: prod up_to_date")
+
+  test "test_sync_mainline_dry_run_previews_fast_forward_without_fetching":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a repository")
+    else:
+      let fx = setupFixture(gitBin, "dry-ff", oneRepo)
+      defer: removeDirEventually(fx.scratch)
+      cloneAll(gitBin, fx)
+      let repoPath = fx.workspaceRoot / "prod"
+      startFeatureBranch(gitBin, repoPath, "feature-x")
+      let before = headSha(gitBin, repoPath)
+      # First trunk move, fetched: the plan has something to fast-forward to.
+      let fetchedTip = advanceTrunk(gitBin, fx.seedOf("prod"), "dev",
+        "moved\n")
+      fetchCheckout(gitBin, repoPath)
+      # Second trunk move, NOT fetched: a dry run that fetched would move
+      # `origin/dev` onto it, which is exactly the mutation under test.
+      let unfetchedTip = advanceTrunk(gitBin, fx.seedOf("prod"), "dev",
+        "moved again\n")
+      check fetchedTip != unfetchedTip
+      check gitRev(gitBin, repoPath, "refs/remotes/origin/dev") == fetchedTip
+
+      let res = invokeSync(fx, @["--dry-run", "--json"])
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+
+      # Nothing moved: not HEAD, not the branch, not the remote-tracking ref.
+      check headSha(gitBin, repoPath) == before
+      check currentBranch(gitBin, repoPath) == "feature-x"
+      check gitRev(gitBin, repoPath, "refs/remotes/origin/dev") == fetchedTip
+      check isClean(gitBin, repoPath)
+      checkDryRunLeftNoState(fx)
+
+      # The plan is the report document, on stdout, marked as a dry run, and
+      # computed against the STALE ref: a fast-forward is still pending.
+      let plan = stdoutJson(res.output)
+      check plan.kind == JObject
+      if plan.kind == JObject:
+        check plan.hasKey("dryRun") and plan["dryRun"].getBool()
+        check plan["exitCode"].getInt() == 0
+        let e = entryByName(plan, "prod")
+        check e["outcome"].getStr() == "fast_forwarded"
+        check e["action"].getStr() == "fast_forward"
+        check e["headBefore"].getStr() == before
+        check e["headAfter"].getStr() == before
+
+      # The text form says what WOULD happen, and flags the summary.
+      let text = invokeSync(fx, @["--dry-run"])
+      if text.code != 0:
+        checkpoint("output: " & text.output)
+      check text.code == 0
+      check text.output.contains("would fast_forward")
+      check text.output.contains("(dry-run)")
+      check headSha(gitBin, repoPath) == before
+      check gitRev(gitBin, repoPath, "refs/remotes/origin/dev") == fetchedTip
+      checkDryRunLeftNoState(fx)
+
+  test "test_sync_mainline_dry_run_does_not_clone_missing_checkout":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a repository")
+    else:
+      let fx = setupFixture(gitBin, "dry-clone", oneRepo)
+      defer: removeDirEventually(fx.scratch)
+      # Deliberately no clone: `prod` is declared but missing.
+
+      let res = invokeSync(fx, @["--dry-run", "--json"])
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+      check not dirExists(fx.workspaceRoot / "prod")
+      checkDryRunLeftNoState(fx)
+
+      let plan = stdoutJson(res.output)
+      check plan.kind == JObject
+      if plan.kind == JObject:
+        check plan.hasKey("dryRun") and plan["dryRun"].getBool()
+        let e = entryByName(plan, "prod")
+        check e["outcome"].getStr() == "missing_checkout"
+        check e["action"].getStr() == "clone"
+        check e["headAfter"].getStr() == ""
+
+      let text = invokeSync(fx, @["--dry-run"])
+      if text.code != 0:
+        checkpoint("output: " & text.output)
+      check text.code == 0
+      check text.output.contains("would clone")
+      check text.output.contains("(dry-run)")
+      check not dirExists(fx.workspaceRoot / "prod")
+      checkDryRunLeftNoState(fx)
+
+  test "test_sync_mainline_dry_run_plans_rebase_without_integrating":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a repository")
+    else:
+      let fx = setupFixture(gitBin, "dry-rebase", oneRepo)
+      defer: removeDirEventually(fx.scratch)
+      cloneAll(gitBin, fx)
+      let repoPath = fx.workspaceRoot / "prod"
+      startFeatureBranch(gitBin, repoPath, "feature-x")
+      commitLocal(gitBin, repoPath, "mine.txt", "mine\n", "local work")
+      let before = headSha(gitBin, repoPath)
+      let trunkTip = advanceTrunk(gitBin, fx.seedOf("prod"), "dev", "moved\n")
+      # Fetched by hand, so the (non-fetching) plan sees the divergence.
+      fetchCheckout(gitBin, repoPath)
+
+      let res = invokeSync(fx, @["--dry-run", "--json", "--rebase"])
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+
+      check headSha(gitBin, repoPath) == before
+      check currentBranch(gitBin, repoPath) == "feature-x"
+      check not isAncestor(gitBin, repoPath, trunkTip, "HEAD")
+      check not rebaseInProgress(repoPath)
+      check isClean(gitBin, repoPath)
+      checkDryRunLeftNoState(fx)
+
+      let plan = stdoutJson(res.output)
+      check plan.kind == JObject
+      if plan.kind == JObject:
+        check plan.hasKey("dryRun") and plan["dryRun"].getBool()
+        check plan["flavor"].getStr() == "rebase"
+        let e = entryByName(plan, "prod")
+        check e["outcome"].getStr() == "integrated"
+        check e["action"].getStr() == "rebase"
+        check e["headAfter"].getStr() == before
+
+      let text = invokeSync(fx, @["--dry-run", "--rebase"])
+      if text.code != 0:
+        checkpoint("output: " & text.output)
+      check text.code == 0
+      check text.output.contains("would rebase")
+      check text.output.contains("(dry-run)")
+      check headSha(gitBin, repoPath) == before
+
+  test "test_sync_mainline_dry_run_exits_zero_on_a_refusal":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a repository")
+    else:
+      let fx = setupFixture(gitBin, "dry-refusal", oneRepo)
+      defer: removeDirEventually(fx.scratch)
+      cloneAll(gitBin, fx)
+      let repoPath = fx.workspaceRoot / "prod"
+      startFeatureBranch(gitBin, repoPath, "feature-x")
+      commitLocal(gitBin, repoPath, "mine.txt", "mine\n", "local work")
+      let before = headSha(gitBin, repoPath)
+      discard advanceTrunk(gitBin, fx.seedOf("prod"), "dev", "moved\n")
+      fetchCheckout(gitBin, repoPath)
+
+      let res = invokeSync(fx, @["--dry-run", "--json"])
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      # A real run exits 2 here (sub-case 2); a dry run is informational.
+      check res.code == 0
+      check headSha(gitBin, repoPath) == before
+      checkDryRunLeftNoState(fx)
+
+      let plan = stdoutJson(res.output)
+      check plan.kind == JObject
+      if plan.kind == JObject:
+        check plan["exitCode"].getInt() == 0
+        let e = entryByName(plan, "prod")
+        check e["outcome"].getStr() == "diverged"
+        check e["action"].getStr() == "none"
+        check e["diagnostic"].getStr().contains("--rebase")

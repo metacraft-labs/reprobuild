@@ -441,7 +441,7 @@ suite "DS-1: a per-repo committed lock contributes only its own self-record":
       except CatchableError as err:
         checkpoint("unparseable --json output: " & err.msg & "\n" &
           listed.output)
-      check report != nil
+      check not report.isNil
       if report != nil:
         check report["exitCode"].getInt() == 0
 

@@ -87,6 +87,44 @@ activate_msvc_dev_env() {
 
 activate_msvc_dev_env
 
+# Use the active toolchain's SDK, never an unrelated store derivation. Resolve
+# this before incremental refresh so a cached binary cannot bypass validation.
+cmake_osx_sysroot=""
+cmake_apple_framework_flags=()
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  if [[ "${SDKROOT+x}" == "x" ]]; then
+    cmake_osx_sysroot="${SDKROOT}"
+    if [[ -z "${cmake_osx_sysroot}" || ! -d "${cmake_osx_sysroot}" ]]; then
+      echo "Invalid SDKROOT '${SDKROOT}': set SDKROOT to an existing macOS SDK directory or unset it to use xcrun" >&2
+      exit 1
+    fi
+  else
+    if ! cmake_osx_sysroot="$(xcrun --sdk macosx --show-sdk-path)" ||
+        [[ -z "${cmake_osx_sysroot}" || ! -d "${cmake_osx_sysroot}" ]]; then
+      echo "Cannot resolve a macOS SDK with xcrun: activate the development environment with SDKROOT or install/select Xcode Command Line Tools" >&2
+      exit 1
+    fi
+  fi
+
+  cmake_apple_framework_dir="${cmake_osx_sysroot}/System/Library/Frameworks"
+  if [[ -d "${cmake_apple_framework_dir}" ]]; then
+    # CMake flag strings are parsed again when compiling, so quoting only the
+    # outer -D argument would lose spaces in the framework directory.
+    printf -v cmake_apple_framework_flag '%q' "-F${cmake_apple_framework_dir}"
+    cmake_apple_framework_flags=(
+      "-DCMAKE_C_FLAGS=${cmake_apple_framework_flag}"
+      "-DCMAKE_CXX_FLAGS=${cmake_apple_framework_flag}"
+      "-DCMAKE_EXE_LINKER_FLAGS=${cmake_apple_framework_flag}"
+    )
+  fi
+
+  if [[ -f "${cmake_root}/build/CMakeCache.txt" ]] &&
+      [[ "$(sed -n 's/^CMAKE_OSX_SYSROOT:[^=]*=//p' "${cmake_root}/build/CMakeCache.txt")" != "${cmake_osx_sysroot}" ]]; then
+    printf 'macOS SDK changed; reconfiguring prerequisite from scratch\n' >&2
+    rm -rf "${cmake_root}/build"
+  fi
+fi
+
 # A previously-built binary is NOT evidence that it is current. This guard used
 # to `exit 0` whenever build/bin/cmake existed, so no change to the fork's
 # sources was ever compiled again: consumers silently kept exercising a stale
@@ -133,27 +171,6 @@ if [[ "$(uname -s)" == "Darwin" || "$(uname -s)" == "Linux" ]]; then
   cmake_cc="$(command -v cc || command -v gcc || echo gcc)"
   cmake_cxx="$(command -v c++ || command -v g++ || echo g++)"
 fi
-cmake_osx_sysroot=""
-cmake_apple_framework_flags=()
-if [[ "$(uname -s)" == "Darwin" ]]; then
-  cmake_osx_sysroot="$(
-    find /nix/store -maxdepth 7 \
-      -path '*/Platforms/MacOSX.platform/Developer/SDKs/MacOSX*.sdk' \
-      -type d -print 2>/dev/null | LC_ALL=C sort | tail -n 1 || true
-  )"
-  if [[ -z "${cmake_osx_sysroot}" ]]; then
-    echo "reprobuild-cmake build requires a macOS SDK in /nix/store" >&2
-    exit 1
-  fi
-  cmake_apple_framework_dir="${cmake_osx_sysroot}/System/Library/Frameworks"
-  if [[ -d "${cmake_apple_framework_dir}" ]]; then
-    cmake_apple_framework_flags=(
-      "-DCMAKE_C_FLAGS=-F${cmake_apple_framework_dir}"
-      "-DCMAKE_CXX_FLAGS=-F${cmake_apple_framework_dir}"
-      "-DCMAKE_EXE_LINKER_FLAGS=-F${cmake_apple_framework_dir}"
-    )
-  fi
-fi
 
 iconv_header="$(
   find /nix/store -maxdepth 3 -path '*/include/iconv.h' -print -quit 2>/dev/null || true
@@ -182,8 +199,8 @@ fi
       ! grep -q "^CMAKE_GENERATOR:INTERNAL=${cmake_generator}$" build/CMakeCache.txt ||
       { [[ -n "${cmake_cc}" ]] && ! grep -q "^CMAKE_C_COMPILER:FILEPATH=${cmake_cc}$" build/CMakeCache.txt; } ||
       { [[ -n "${cmake_cxx}" ]] && ! grep -q "^CMAKE_CXX_COMPILER:FILEPATH=${cmake_cxx}$" build/CMakeCache.txt; } ||
-      { [[ -n "${cmake_osx_sysroot}" ]] && ! grep -q "^CMAKE_OSX_SYSROOT:.*=${cmake_osx_sysroot}$" build/CMakeCache.txt; } ||
-      { [[ -n "${cmake_apple_framework_dir:-}" ]] && ! grep -q "^CMAKE_CXX_FLAGS:STRING=-F${cmake_apple_framework_dir}$" build/CMakeCache.txt; } ||
+      { [[ -n "${cmake_osx_sysroot}" ]] && [[ "$(sed -n 's/^CMAKE_OSX_SYSROOT:[^=]*=//p' build/CMakeCache.txt)" != "${cmake_osx_sysroot}" ]]; } ||
+      { [[ -n "${cmake_apple_framework_flag:-}" ]] && ! grep -Fqx "CMAKE_CXX_FLAGS:STRING=${cmake_apple_framework_flag}" build/CMakeCache.txt; } ||
       ! grep -q "^ENABLE_IPV6:.*=OFF$" build/CMakeCache.txt
     }; then
     rm -rf build

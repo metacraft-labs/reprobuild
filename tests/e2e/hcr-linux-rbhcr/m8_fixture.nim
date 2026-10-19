@@ -30,12 +30,13 @@
 ## assertion from a vacuous one; that is the specific lesson NH-M2 recorded,
 ## where four gates passed under BOTH the correct and the incorrect ordering.
 
-import std/[json, monotimes, os, osproc, streams, strtabs, strutils, times]
+import std/[exitprocs, json, monotimes, os, osproc, streams, strtabs, strutils, tempfiles, times]
 
 import repro_hcr_agent
 import repro_project_dsl
 
 import "../hcr-linux-direct/elf_rel_reader"
+from repro_test_support import testScratchSlug
 
 const
   TargetSymbol* = "hcr_lx_m8_victim"
@@ -65,8 +66,32 @@ proc runOrFail*(command, cwd: string): string =
   res.output
 
 proc m8WorkDir*(repoRoot: string): string =
-  result = repoRoot / "build" / "hcr-linux-m8"
+  # Private to the process running ONE case of ONE binary: several binaries
+  # import this helper and the suite runs them (and their cases) concurrently,
+  # so a shared directory had one process relink a fixture or rewrite a patch
+  # object while another was executing or parsing it.
+  result = repoRoot / "build" / "hcr-linux-m8" / testScratchSlug()
   createDir(result)
+
+var m8SocketRoot = ""
+
+proc m8SocketDir*(): string =
+  ## Where the agent socket goes, which is NOT under ``m8WorkDir``.
+  ##
+  ## ``sun_path`` is 108 bytes. The checkout prefix plus
+  ## ``build/hcr-linux-m8/<per-case slug>`` exhausts it before the socket name
+  ## is appended -- on the CI runner the prefix alone is 57 -- and the gates
+  ## then die on "socket path too long" having asserted nothing. Build
+  ## artifacts stay in the work directory; only the socket moves here.
+  ##
+  ## One directory per process, for the reason ``m8WorkDir`` gives: several
+  ## binaries import this helper and the suite runs them concurrently.
+  if m8SocketRoot.len == 0:
+    m8SocketRoot = createTempDir("hlx-m8-", "", "/tmp")
+    let root = m8SocketRoot
+    addExitProc(proc () =
+      try: removeDir(root) except CatchableError: discard)
+  m8SocketRoot
 
 proc m8CaseDir*(repoRoot: string): string =
   repoRoot / "tests" / "e2e" / "hcr-linux-rbhcr"
@@ -102,7 +127,10 @@ proc buildTarget*(repoRoot, outputName: string;
                   defines: openArray[string] = [];
                   source = "hcr_lx_m8_target.c"): string =
   let caseDir = m8CaseDir(repoRoot)
-  let binDir = repoRoot / "build" / "test-bin"
+  # In the per-process work directory, not ``build/test-bin``: three
+  # binaries build ``hcr_lx_m8_target`` concurrently, and a shared output
+  # was relinked under a sibling that was executing it.
+  let binDir = m8WorkDir(repoRoot) / "bin"
   createDir(binDir)
   result = binDir / outputName
   let compileFlags = patchableCompileFlags(ReproHcr())
@@ -143,13 +171,37 @@ type
 ## than printing an empty result; a non-zero exit is surfaced here as a raised
 ## exception rather than as an empty `targetJson`, so no caller can mistake
 ## "the target refused to run" for "the target ran and observed nothing".
+proc describeChildFate(process: Process): string =
+  ## What became of the target, for a message raised by a FAILED socket read.
+  ##
+  ## A crashed target presents to the coordinator as an EOF on the agent
+  ## socket, and both read sites below only reach the exit code AFTER the
+  ## delivery call -- so an exception there used to discard the child's fate
+  ## entirely and leave an `IOError` about an IPC header as the whole story. A
+  ## SIGSEGV hid behind that for a day and cost a filed issue a wrong cause.
+  let output =
+    try: process.outputStream.readAll()
+    except CatchableError: ""
+  let code =
+    try: process.waitForExit()
+    except CatchableError: -1
+  try: process.close()
+  except CatchableError: discard
+  result = "; target exited " & $code
+  if code > 128:
+    result.add " (signal " & $(code - 128) & ")"
+  if output.len > 0:
+    result.add ":\n" & output
+
 proc runReload*(repoRoot, targetBin, socketName: string;
                 request: HcrPatchRequest;
                 managedTypes: openArray[string] = [];
                 schemaId = "reprobuild.hcr.hlx-m8.linux-rb-hcr-target-result.v1"):
                 M8Run =
-  let workDir = m8WorkDir(repoRoot)
-  let socketPath = workDir / socketName
+  # m8WorkDir still runs, for its directory-creation side effect; the socket
+  # itself must not live there (see m8SocketDir).
+  discard m8WorkDir(repoRoot)
+  let socketPath = m8SocketDir() / socketName
   removeFile(socketPath)
   var listener = listenHcrAgentUnixSocket(socketPath)
   defer: listener.close()
@@ -167,7 +219,11 @@ proc runReload*(repoRoot, targetBin, socketName: string;
     env = env, options = {poStdErrToStdOut})
   var connection = acceptHcrAgentConnection(listener)
   var client = initHcrCoordinatorClient(SupportProfile)
-  result.delivery = client.deliverPatchRequest(connection, request)
+  try:
+    result.delivery = client.deliverPatchRequest(connection, request)
+  except CatchableError as err:
+    connection.close()
+    raise newException(IOError, err.msg & describeChildFate(process))
   connection.close()
 
   result.targetOutput = process.outputStream.readAll()
@@ -205,8 +261,10 @@ proc runReloadTimed*(repoRoot, targetBin, socketName: string;
                      argv: openArray[string] = [];
                      schemaId = "reprobuild.hcr.hlx-m8.linux-threaded-sync-target-result.v1"):
                      M8TimedRun =
-  let workDir = m8WorkDir(repoRoot)
-  let socketPath = workDir / socketName
+  # m8WorkDir still runs, for its directory-creation side effect; the socket
+  # itself must not live there (see m8SocketDir).
+  discard m8WorkDir(repoRoot)
+  let socketPath = m8SocketDir() / socketName
   removeFile(socketPath)
   var listener = listenHcrAgentUnixSocket(socketPath)
   defer: listener.close()
@@ -221,7 +279,11 @@ proc runReloadTimed*(repoRoot, targetBin, socketName: string;
   var connection = acceptHcrAgentConnection(listener)
   var client = initHcrCoordinatorClient(SupportProfile)
   let started = getMonoTime()
-  result.run.delivery = client.deliverPatchRequest(connection, request)
+  try:
+    result.run.delivery = client.deliverPatchRequest(connection, request)
+  except CatchableError as err:
+    connection.close()
+    raise newException(IOError, err.msg & describeChildFate(process))
   result.coordinatorWaitMs =
     int(inMilliseconds(getMonoTime() - started))
   connection.close()

@@ -46,11 +46,78 @@ proc featureSet(flags: string): seq[string] =
     if item.len > 0:
       result.add(item)
 
-proc requireDaemonFeatures(features, required: openArray[string]) =
+proc missingUserDaemonFeatures*(advertisedFlags: string;
+                                required: openArray[string]): seq[string] =
+  ## The names in ``required`` that ``advertisedFlags`` (the hello-ack's
+  ## comma-separated feature list) does not carry, in the order required and
+  ## without duplicates. Names are matched whole: ``build-events`` does not
+  ## satisfy ``build``.
+  ##
+  ## ALL of them, not the first: a client refused for one feature used to
+  ## learn of the next one only after the restart that fixed the first.
+  let advertised = featureSet(advertisedFlags)
   for needed in required:
-    if features.find(needed) < 0:
-      raise newException(UserDaemonClientError,
-        "user daemon does not advertise required feature: " & needed)
+    if advertised.find(needed) < 0 and result.find(needed) < 0:
+      result.add(needed)
+
+proc imagePathText(identity: BinaryIdentity): string =
+  # An identity the handshake did not fill in (an older daemon, a platform
+  # that could not answer ``getAppFilename``) is said to be unknown rather
+  # than printed as an empty field, which reads as a blank, not a gap.
+  if identity.path.len > 0: identity.path else: "<unknown>"
+
+proc versionText(identity: BinaryIdentity): string =
+  if identity.version.len > 0: identity.version else: "<unknown>"
+
+proc unsupportedDaemonMessage*(missing: openArray[string];
+                               daemon, client: BinaryIdentity): string =
+  ## The unsupported-daemon error ``connectUserDaemon`` raises when the
+  ## daemon does not advertise a feature the request requires
+  ## (spec/Local-Daemons-And-Control-Plane.md, *Protocol Compatibility*:
+  ## "report a clear unsupported-daemon error under `require`").
+  ##
+  ## WHY IT SAYS SO MUCH (reprobuild-pm issue 2026-10-13). The case that
+  ## reaches this is almost always a daemon still running an older image
+  ## than the client -- a nix-store build serving a locally built CLI, say
+  ## -- and the two report the SAME version string, because that string is
+  ## the package version and every build between two bumps shares it. A
+  ## reader holding "does not advertise required feature: X" next to two
+  ## identical versions concludes the daemon is current and looks elsewhere.
+  ## So the message names every missing feature and what it is for, puts
+  ## the two IMAGE PATHS side by side (the field that actually
+  ## discriminates), says outright that equal versions are not evidence,
+  ## and gives the one-command remedy.
+  ##
+  ## The first line keeps the original wording -- with one missing feature
+  ## it is byte-for-byte the line this error always raised -- so anything
+  ## matching on it keeps working. Pure, so it is testable without a
+  ## socket.
+  let noun = if missing.len == 1: "feature" else: "features"
+  result = "user daemon does not advertise required " & noun & ": " &
+    missing.join(", ")
+  for name in missing:
+    result.add("\n  - " & name & ": " & userDaemonFeatureDescription(name))
+  result.add("\ndaemon image: " & imagePathText(daemon) & " (version " &
+    versionText(daemon) & ")")
+  result.add("\nclient image: " & imagePathText(client) & " (version " &
+    versionText(client) & ")")
+  result.add("\nthe same version string does not mean the same features: " &
+    "two builds of one release can differ, so compare the image paths " &
+    "above, not the versions.")
+  result.add("\nremedy: run `repro daemon restart` with this client to " &
+    "relaunch the daemon from the current image.")
+
+proc requireDaemonFeatures*(advertisedFlags: string;
+                            required: openArray[string];
+                            daemon, client: BinaryIdentity) =
+  ## Raise ``UserDaemonClientError`` carrying ``unsupportedDaemonMessage``
+  ## when ``advertisedFlags`` lacks any of ``required``; return quietly
+  ## otherwise. ``daemon`` is the identity from the hello-ack and ``client``
+  ## the one this process sent in its hello.
+  let missing = missingUserDaemonFeatures(advertisedFlags, required)
+  if missing.len > 0:
+    raise newException(UserDaemonClientError,
+      unsupportedDaemonMessage(missing, daemon, client))
 
 proc connectUserDaemon*(endpoint = defaultUserDaemonEndpoint();
                         clientName = "repro";
@@ -100,7 +167,16 @@ proc connectUserDaemon*(endpoint = defaultUserDaemonEndpoint();
     raise newException(UserDaemonClientError,
       "user daemon protocol mismatch: client major " &
       $UserDaemonProtocolMajor & ", daemon major " & $parsed.major)
-  requireDaemonFeatures(parsed.featureFlags.featureSet(), requiredFeatures)
+  # ``parsed.daemon`` is the daemon's own identity from the hello-ack; it is
+  # what lets the refusal name the image that lacks the feature. Close the
+  # connection before raising: the caller never receives it on this path,
+  # so nobody else could.
+  try:
+    requireDaemonFeatures(parsed.featureFlags, requiredFeatures,
+      parsed.daemon, client)
+  except UserDaemonClientError:
+    result.closeIpcConn()
+    raise
 
 proc queryUserDaemonStatus*(endpoint = defaultUserDaemonEndpoint()):
     UserDaemonStatus =
@@ -240,6 +316,52 @@ proc requestUserDaemonLeaseRenew*(request: DaemonLeaseRenewRequest;
     raise newException(UserDaemonClientError, parseErrorBody(frame.body))
   raise newException(UserDaemonClientError,
     "unexpected user-daemon lease-renew frame: " & $frame.kind)
+
+proc requestUserDaemonServiceConverge*(
+    request: DaemonServiceConvergeRequest;
+    endpoint = defaultUserDaemonEndpoint()):
+    DaemonServiceConvergeResponse =
+  ## Shared-Development-Services L7 (§4.5): `repro up`'s converge.
+  ##
+  ## THERE IS DELIBERATELY NO `...BestEffort` SIBLING, unlike
+  ## `renewLeaseBestEffort` one proc up. A lease renew that cannot reach
+  ## the daemon is harmless -- the reconcile's own store write is the
+  ## source of truth. A CONVERGE that cannot reach the daemon is not:
+  ## there is no registry to resolve against, so the only things a
+  ## best-effort arm could do are start a second instance or pretend one
+  ## is running. §4.5 makes the daemon the registry, so an unreachable
+  ## daemon has to be an error the caller sees and reports.
+  var socket = connectUserDaemon(endpoint, commandMode = "service-converge",
+    requiredFeatures = ["service-instance-registry"])
+  defer: socket.closeIpcConn()
+  socket.writeFrame(udkServiceConverge, serviceConvergeRequestBody(request))
+  let frame = socket.readFrame()
+  if frame.kind == udkServiceConvergeAck:
+    return parseServiceConvergeResponseBody(frame.body)
+  if frame.kind == udkError:
+    raise newException(UserDaemonClientError, parseErrorBody(frame.body))
+  raise newException(UserDaemonClientError,
+    "unexpected user-daemon service-converge frame: " & $frame.kind)
+
+proc requestUserDaemonServiceRelease*(
+    request: DaemonServiceReleaseRequest;
+    endpoint = defaultUserDaemonEndpoint()):
+    DaemonServiceReleaseResponse =
+  ## L7 (§4.5): `repro down`'s release. No best-effort sibling, for the
+  ## reason above pointing the other way: a release that silently did
+  ## nothing would leave this project counted as a holder forever, so the
+  ## instance would never be released by anyone.
+  var socket = connectUserDaemon(endpoint, commandMode = "service-release",
+    requiredFeatures = ["service-instance-registry"])
+  defer: socket.closeIpcConn()
+  socket.writeFrame(udkServiceRelease, serviceReleaseRequestBody(request))
+  let frame = socket.readFrame()
+  if frame.kind == udkServiceReleaseAck:
+    return parseServiceReleaseResponseBody(frame.body)
+  if frame.kind == udkError:
+    raise newException(UserDaemonClientError, parseErrorBody(frame.body))
+  raise newException(UserDaemonClientError,
+    "unexpected user-daemon service-release frame: " & $frame.kind)
 
 proc renewLeaseBestEffort*(request: DaemonLeaseRenewRequest;
                            endpoint = defaultUserDaemonEndpoint()):

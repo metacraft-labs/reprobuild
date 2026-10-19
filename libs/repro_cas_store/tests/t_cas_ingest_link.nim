@@ -32,6 +32,7 @@ import std/[os, sequtils, strutils, unittest]
 
 import blake3
 from repro_core/paths import extendedPath
+from repro_test_support/process_fixtures import releaseDirAtProcessExit
 
 import repro_cas_store
 
@@ -49,12 +50,13 @@ type
     reflink: bool
     hardlink: bool
 
-var scratchDirs: seq[string] = @[]
-
 proc claimScratchDir(parent: string; tag: string): string =
   if parent.len == 0 or not dirExists(extendedPath(parent)):
     return ""
   let candidate = parent / ("repro-m2-" & $getCurrentProcessId() & "-" & tag)
+  # Owned by THIS process: removed when it exits, whichever cases it ran.
+  # Registered before the directory exists, so it is never on disk unowned.
+  releaseDirAtProcessExit(candidate)
   try:
     createDir(extendedPath(candidate))
     let witness = candidate / "witness"
@@ -62,7 +64,6 @@ proc claimScratchDir(parent: string; tag: string): string =
     removeFile(extendedPath(witness))
   except CatchableError, Defect:
     return ""
-  scratchDirs.add(candidate)
   candidate
 
 proc candidateParents(): seq[string] =
@@ -96,7 +97,23 @@ proc discoverVolumes(): seq[ProbeVolume] =
                            pairKey: filesystemPairKey(dir, dir),
                            reflink: cap.reflink, hardlink: cap.hardlink))
 
-let volumes = discoverVolumes()
+## Discovery is LAZY: it runs on first use, from inside a case, never at
+## module scope. The runner runs every case in its own process and probes
+## the binary with ``--list-json`` besides; discovery at module scope made
+## each of those processes claim a scratch directory on every volume, and
+## only the final "teardown" case removed any — its own process's.
+var discoveredVolumes: seq[ProbeVolume] = @[]
+var volumesDiscovered = false
+
+proc hostVolumes(): seq[ProbeVolume] =
+  if not volumesDiscovered:
+    volumesDiscovered = true
+    discoveredVolumes = discoverVolumes()
+  discoveredVolumes
+
+template volumes(): untyped =
+  ## Every discovered volume; discovers on first use.
+  hostVolumes()
 
 proc describeHost(): string =
   volumes.mapIt(it.dir & "(" & it.fsName & " reflink=" & $it.reflink &
@@ -403,6 +420,55 @@ suite "M2 casPutPath — mechanism selection":
       # no guard rail at all: nothing is shared that a write could reach.
       check hardlinkCount(src) == 1
       check hardlinkCount(cas.casPath(outcome.hash)) == 1
+
+  test "a cloned blob's mode does not depend on the source's mode":
+    ## ``clonefile(2)`` on APFS copies the source's mode onto the clone, so
+    ## without ``attemptReflink``'s reset a blob ingested from an
+    ## executable or a read-only build output would carry that mode, and
+    ## two blobs filed by the same store would differ by how their source
+    ## happened to be protected. The yardstick is the blob the byte-ingest
+    ## path writes for a different payload in the same store: it is
+    ## created fresh, so it is the mode every blob should have.
+    let vols = reflinkVolume()
+    if vols.len == 0:
+      checkpoint("no reflink-capable volume on this host (" &
+                 describeHost() & "); the clone-mode arm was NOT exercised")
+      check volumes.len >= 1
+    else:
+      let vol = vols[0]
+      let dir = caseDir(vol, "clone-mode")
+      var cas = openCasStore(dir / "store")
+      defer: cas.close()
+      let reference = cas.casPut(payloadOf(4096, 41))
+      let referencePerms = getFilePermissions(
+        extendedPath(cas.casPath(reference)))
+      var seed = 43
+      for (tag, srcPerms) in [
+          ("readonly", {fpUserRead}),
+          ("executable", {fpUserRead, fpUserWrite, fpUserExec,
+                          fpGroupRead, fpGroupExec,
+                          fpOthersRead, fpOthersExec})]:
+        let payload = payloadOf(4096, seed)
+        seed.inc
+        let src = dir / "src" / (tag & ".bin")
+        writeSource(src, payload)
+        # ``finally`` so a failing check cannot leave a read-only source
+        # behind for the scratch directory's removal at exit.
+        try:
+          setFilePermissions(extendedPath(src), srcPerms)
+          let outcome = cas.casPutPathDetailed(src)
+          let blobPerms = getFilePermissions(
+            extendedPath(cas.casPath(outcome.hash)))
+          checkpoint(vol.dir & " fs=" & vol.fsName & ": source " & tag &
+                     " " & $srcPerms & " -> " & $outcome.mechanism &
+                     " blob " & $blobPerms & "; byte-ingested blob " &
+                     $referencePerms)
+          check outcome.mechanism == lmReflink
+          check blobPerms == referencePerms
+          check cas.casVerify(outcome.hash)
+        finally:
+          try: setFilePermissions(extendedPath(src), {fpUserRead, fpUserWrite})
+          except CatchableError: discard
 
   test "a cloned blob is isolated from later writes to the source":
     ## The property that lets the reflink arm be on by default while the
@@ -831,14 +897,11 @@ suite "M2 casPutPath — edges":
 
 # ---------------------------------------------------------------------------
 
-suite "M2 casPutPath — teardown":
-  # Deliberately a test rather than an ``addExitProc``: under ORC the
-  # exit-proc closure runs after this module's globals are destroyed.
-  test "every scratch directory this suite created is removed":
-    clearIngestHook()
-    for d in scratchDirs:
-      try:
-        removeDir(extendedPath(d))
-      except CatchableError, Defect:
-        discard
-      check not dirExists(extendedPath(d))
+# There is deliberately no "teardown" suite. This file used to end with a
+# case that removed every scratch directory, and the runner runs each case
+# in its own process: that case removed only what ITS OWN process had
+# claimed, while every other case process and the ``--list-json`` probe left
+# a directory per volume behind. Release now belongs to the process that
+# claimed the directory (``claimScratchDir``), and the guarantee is checked
+# the way the runner runs this file by
+# ``tests/integration/t_when_each_case_runs_alone_no_fixture_outlives_its_process``.

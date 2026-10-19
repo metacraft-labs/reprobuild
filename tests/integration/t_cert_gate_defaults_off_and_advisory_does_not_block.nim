@@ -1,15 +1,17 @@
 ## RA-32 — certificate gating is OPT-IN: default ``off`` is a strict no-op,
 ## and ``advisory`` records coverage WITHOUT ever blocking the push.
 ##
-## Certificate ENFORCEMENT is opt-in (Test-Certificates.md §"Per-project
-## configuration"): issuance is always on, but pushes are gated only when a
-## project sets ``gate_mode = "required"``. The DEFAULT is ``off`` and
+## Certificate ENFORCEMENT is opt-in: issuance is always on, but pushes are
+## gated only where the pushed content's certificate policy (the
+## ``[certificate_policy]`` snapshot in its committed ``repro.lock``; TC-9d
+## retired the project's ``[certificates]`` table) sets ``gate_mode =
+## "required"`` for the pushed branch. The DEFAULT is ``off`` and
 ## ``advisory`` records-without-blocking, so a team can run advisory while
 ## people learn the workflow and tighten to required later. This prevents the
 ## "first push hits a hard certificate wall" onboarding failure.
 ##
-##   (a) DEFAULT (no `[certificates]` policy at all) → the pre-push gate
-##       behaves EXACTLY as it did before certificates existed: it PASSES
+##   (a) DEFAULT (no certificate policy in the pushed content at all) → the
+##       pre-push gate behaves EXACTLY as it did before certificates existed: it PASSES
 ##       (exit 0) on an otherwise-clean + published + locked state even with
 ##       ZERO certificates attached, and records NO certificate notice.
 ##   (b) ``advisory`` with NO covering cert → the gate still PASSES (exit 0)
@@ -29,6 +31,9 @@ import std/[json, os, osproc, strutils, tempfiles, unittest]
 import repro_test_support
 import repro_cli_support
 import repro_workspace_manifests
+import repro_lock
+import repro_lock/certificate_policy
+import ./every_branch_policy
 
 # TC-5: issuance signs the cert; the advisory "coverage OK" case (c) needs the
 # issued cert to be signed by a registered key. These helpers provide it.
@@ -57,8 +62,15 @@ proc reproBinary(): string =
   requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
+proc policyLockText(snapshot: string): string =
+  ## A committed ``repro.lock`` that pins nothing and records ``snapshot``
+  ## (the bytes the lock writer lays out for that policy).
+  replaceCertificatePolicySection(serializeLockedDependencies(
+    LockedDependencies(schema: "reprobuild.solved-graph-lock.v2", deps: @[])),
+    snapshot)
+
 proc seedGitOrigin(gitBin, originPath, workPath: string;
-                   branch = "main"): string =
+                   policySnapshot = ""; branch = "main"): string =
   discard requireGit(q(gitBin) & " init --bare -b " & branch & " " &
     q(originPath))
   discard requireGit(q(gitBin) & " init -b " & branch & " " & q(workPath))
@@ -67,7 +79,11 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.name \"RA32 Tester\"")
   writeFile(workPath / "README.md", "RA-32 fixture\n")
-  discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
+  # TC-9d: the policy is the pushed content's own, recorded in its
+  # committed repro.lock; none at all is the default-off case.
+  if policySnapshot.len > 0:
+    writeFile(workPath / "repro.lock", policyLockText(policySnapshot))
+  discard requireGit(q(gitBin) & " -C " & q(workPath) & " add -A")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " commit -m fixture")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " remote add origin " & q(originPath))
@@ -83,13 +99,12 @@ proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.name \"RA32 Tester\"")
 
-proc projectToml(libAUrl, certificatesTable: string): string =
+proc projectToml(libAUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
   "default_revision = \"main\"\n" &
   "trunk = \"main\"\n\n" &
-  certificatesTable &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n]\n"
 
@@ -113,17 +128,18 @@ type
     libASha: string
     daemonKey: string
 
-proc writeProjectManifest(fx: Fixture; certificatesTable: string) =
+proc writeProjectManifest(fx: Fixture) =
   let manifestsRoot = fx.workspaceRoot
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
-    projectToml(fileUrl(fx.libAOrigin), certificatesTable))
+    projectToml(fileUrl(fx.libAOrigin)))
 
-proc setupFixture(gitBin, slug, certificatesTable: string): Fixture =
+proc setupFixture(gitBin, slug, policySnapshot: string): Fixture =
   result.scratch = createTempDir("repro-ra32-" & slug & "-", "")
+  discard isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.libAOrigin = result.scratch / "origin-lib-a.git"
   result.libASha = seedGitOrigin(gitBin, result.libAOrigin,
-    result.scratch / "seed-lib-a")
+    result.scratch / "seed-lib-a", policySnapshot)
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
@@ -134,7 +150,7 @@ proc setupFixture(gitBin, slug, certificatesTable: string): Fixture =
   result.workspaceRoot = workspaceRoot
   seedManifestLockStore(gitBin, workspaceRoot)
   result.libAPath = workspaceRoot / "lib-a"
-  writeProjectManifest(result, certificatesTable)
+  writeProjectManifest(result)
   cloneInto(gitBin, result.libAOrigin, result.libAPath)
   writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
   # TC-5: provide + register a daemon signing key so issued certs are signed
@@ -220,12 +236,11 @@ proc issueAndAttachCert(fx: Fixture; gitBin: string) =
   if issued.code != 0:
     checkpoint("repro test output: " & issued.output)
   check issued.code == 0
-  let certFile = defaultCertificatePath(
-    fx.workspaceRoot, fx.libASha, currentPlatformTag())
-  check fileExists(certFile)
-  let cert = readCertificateFile(certFile)
-  let att = attachCertificate(gitBin, fx.libAPath, fx.libASha, cert)
-  check att.ok
+  # TC-8c: issuance delivered it to the local store, which is where the
+  # client gate looks; no note is needed.
+  let content = treeContentId(gitBin, fx.libAPath, fx.libASha)
+  check storedCertificateFiles(getEnv("TEST_CERTIFICATES_DIR"),
+    content).len == 1
 
 suite "RA-32 — certificate gate defaults off; advisory never blocks":
 
@@ -234,7 +249,7 @@ suite "RA-32 — certificate gate defaults off; advisory never blocks":
     if gitBin.len == 0 or findExe("ssh-keygen").len == 0:
       skip()
     else:
-      # ---- (a) DEFAULT: NO `[certificates]` policy at all → no cert check -
+      # ---- (a) DEFAULT: NO certificate policy at all → no cert check -
       # An otherwise-clean + published + locked single-repo workspace with
       # ZERO certificates attached must PASS, and the report must carry NO
       # certificate notice (the cert stage is a strict no-op when off).
@@ -256,11 +271,8 @@ suite "RA-32 — certificate gate defaults off; advisory never blocks":
       check not noticeMentioning(offReport, "certificate")
 
       # ---- (b) ADVISORY + NO covering cert → PASS but RECORD the miss ----
-      let advisoryPolicy =
-        "[certificates]\n" &
-        "gate_mode = \"advisory\"\n" &
-        "required_targets = [\"t-unit\"]\n" &
-        "required_platforms = [\"" & currentPlatformTag() & "\"]\n\n"
+      let advisoryPolicy = everyBranchSnapshot(pmAdvisory, ["t-unit"],
+    [currentPlatformTag()], name = "lib-a")
       let fxAdv = setupFixture(gitBin, "advisory", advisoryPolicy)
       defer: removeDir(fxAdv.scratch)
       seedLock(fxAdv)

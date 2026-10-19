@@ -25,7 +25,7 @@
 ## ``beta-only`` absent in assertions 1 and 3 — which is exactly the bug this
 ## milestone fixes.
 
-import std/[os, osproc, strutils, tempfiles, unittest]
+import std/[algorithm, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
 import repro_workspace_manifests
@@ -174,3 +174,105 @@ suite "PS-3/WV-2 — enable materializes what it records":
       check repaired.code in [0, 2]
       check activeSet(fx) == @["alpha", "beta"]
       check dirExists(fx.workspaceRoot / "beta-only" / ".git")
+
+
+proc workspaceFiles(fx: Fixture): seq[tuple[path, contents: string]] =
+  # Include git metadata as well: preview must not fetch or refresh ignores.
+  for path in walkDirRec(fx.workspaceRoot):
+    result.add((relativePath(path, fx.workspaceRoot), readFile(path)))
+  result.sort(proc(a, b: tuple[path, contents: string]): int = cmp(a.path, b.path))
+
+suite "workspace enable dry-run":
+  test "preview preserves workspace bytes and plans the prospective membership":
+    let gitBin = findExe("git")
+    require gitBin.len > 0
+    let fx = setupFixture(gitBin, "dry-run")
+    defer: removeDir(fx.scratch)
+    discard requireGit(q(gitBin) & " init -b main " & q(fx.workspaceRoot))
+    for existingIndex in [false, true]:
+      if existingIndex:
+        writeFile(fx.workspaceRoot / "workspace-projects.md", "preserved index\n")
+      let before = workspaceFiles(fx)
+      let preview = enableProjects(fx, ["beta", "--dry-run", "--write-report"])
+      checkpoint(preview.output)
+      check preview.code == 0
+      check "alpha\n" in preview.output
+      check "beta\n" in preview.output
+      check "[clone] beta-only" in preview.output
+      check "[update] alpha-only" notin preview.output
+      check workspaceFiles(fx) == before
+      check activeSet(fx) == @["alpha"]
+      check not dirExists(fx.workspaceRoot / "beta-only")
+    let applied = enableProjects(fx, ["beta", "--jobs=1"])
+    checkpoint(applied.output)
+    check applied.code == 0
+    check activeSet(fx) == @["alpha", "beta"]
+    check dirExists(fx.workspaceRoot / "beta-only" / ".git")
+
+  test "no-sync preview preserves membership and generated files":
+    let gitBin = findExe("git")
+    require gitBin.len > 0
+    let fx = setupFixture(gitBin, "dry-nosync")
+    defer: removeDir(fx.scratch)
+    let before = workspaceFiles(fx)
+    let preview = enableProjects(fx, ["beta", "--no-sync", "--dry-run"])
+    checkpoint(preview.output)
+    check preview.code == 0
+    check "beta" in preview.output
+    check "[clone]" notin preview.output
+    check workspaceFiles(fx) == before
+    let hadDefault = existsEnv("REPRO_DEFAULT_PROJECTS")
+    let savedDefault = getEnv("REPRO_DEFAULT_PROJECTS")
+    putEnv("REPRO_DEFAULT_PROJECTS", "beta")
+    defer:
+      if hadDefault: putEnv("REPRO_DEFAULT_PROJECTS", savedDefault)
+      else: delEnv("REPRO_DEFAULT_PROJECTS")
+    let defaultPreview = enableProjects(fx, ["--default", "--dry-run"])
+    checkpoint(defaultPreview.output)
+    check defaultPreview.code == 0
+    check "[clone] beta-only" in defaultPreview.output
+    check workspaceFiles(fx) == before
+
+  test "preview refuses undefined names and conflicting prospective sets":
+    let gitBin = findExe("git")
+    require gitBin.len > 0
+    let fx = setupFixture(gitBin, "dry-refusal")
+    defer: removeDir(fx.scratch)
+    let beforeUndefined = workspaceFiles(fx)
+    let undefined = enableProjects(fx, ["unknown", "--dry-run"])
+    check undefined.code == 2
+    check "no such project: unknown" in undefined.output
+    check workspaceFiles(fx) == beforeUndefined
+    let fragment = fx.workspaceRoot / "repos" / "beta-only.toml"
+    writeFile(fragment, readFile(fragment).replace("path = \"beta-only\"",
+      "path = \"alpha-only\""))
+    let beforeConflict = workspaceFiles(fx)
+    let conflict = enableProjects(fx, ["beta", "--dry-run"])
+    checkpoint(conflict.output)
+    check conflict.code == 1
+    check "refusing to record" in conflict.output
+    check "alpha-only" in conflict.output
+    check workspaceFiles(fx) == beforeConflict
+
+
+  test "preview does not create initial membership or bootstrap metadata":
+    let gitBin = findExe("git")
+    require gitBin.len > 0
+    let fx = setupFixture(gitBin, "dry-initial")
+    defer: removeDir(fx.scratch)
+    removeFile(workspaceStatePath(fx.workspaceRoot))
+    let before = workspaceFiles(fx)
+    let preview = enableProjects(fx, ["beta", "--dry-run"])
+    checkpoint(preview.output)
+    check preview.code == 0
+    check "[clone] beta-only" in preview.output
+    check workspaceFiles(fx) == before
+    removeDir(fx.workspaceRoot / "projects")
+    removeDir(fx.workspaceRoot / "repos")
+    let beforeBootstrap = workspaceFiles(fx)
+    let bootstrap = enableProjects(fx, ["beta", "--dry-run"])
+    checkpoint(bootstrap.output)
+    check bootstrap.code == 0
+    check "could not resolve" in bootstrap.output
+    check "recorded membership" notin bootstrap.output
+    check workspaceFiles(fx) == beforeBootstrap

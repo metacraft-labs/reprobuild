@@ -11,7 +11,7 @@
 ## the SCRIPT chose to run. `84b3a087` refused to bless the shell for that
 ## reason. This is the mechanism that makes the refusal cost nothing:
 ## `mrNonDeterministic.osPid` is resolved against the capture's own
-## `mrProcessExec` records, and the resolved image is looked up in
+## `mrProcessExec` and successful `mrProcessSpawn` records, and the resolved image is looked up in
 ## `repro_core/entropy_blessings.EntropyBlessedTools`.
 ##
 ## # The case that proves it is sound, and not just convenient
@@ -37,7 +37,7 @@ import std/[os, strutils, tempfiles, unittest]
 import repro_build_engine
 import repro_core
 import repro_local_store
-import io_mon/[capabilities, types, writer]
+import io_mon/[capabilities, types, writer, reader]
 
 const
   BlessedImage = "mktemp"
@@ -64,6 +64,15 @@ proc execRecord(pid: uint64; imagePath: string; failed = false):
     result.detail = "execstatus=failed errno=2"
     result.result = -2
 
+proc spawnRecord(parent, child: uint64; imagePath: string;
+                 status: int64 = 0): MonitorRecord =
+  ## Canonical posix_spawn shape: the emitting PID is the PARENT, not the
+  ## child that executes the image. Explicit fixtures isolate attribution
+  ## from monitor collection; publication runs through the real engine/store.
+  MonitorRecord(kind: mrProcessSpawn, observationKind: moExecute,
+    osPid: parent, childOsPid: child, path: imagePath, result: status,
+    detail: "posix_spawn")
+
 proc entropyReadFrom(pid: uint64; source = "getrandom"): MonitorRecord =
   ## The Linux shape: that shim filters at the hook and emits a record only
   ## for the program's own use, so the detail carries no `caller=` token.
@@ -75,7 +84,10 @@ proc observingProfileRecords(): seq[MonitorRecord] =
   profileRecords(defaultHooksMonitorProfile())
 
 proc writeRmdf(path: string; records: seq[MonitorRecord]) =
-  let raw = encodeCanonical(records)
+  var ordered = records
+  for index in 0..<ordered.len:
+    ordered[index].seq = uint64(index + 1)
+  let raw = encodeCanonical(ordered)
   var text = newString(raw.len)
   if raw.len > 0:
     copyMem(addr text[0], unsafeAddr raw[0], raw.len)
@@ -150,6 +162,131 @@ suite "M6 an entropy record is graded against the image that emitted it":
       defaultBuildEngineConfig(scenario.cacheRoot))
     check run.results[0].status == asSucceeded
     check scenario.published(act)
+
+  test "spawn-only blessed child publishes without blessing its parent":
+    let scenario = setupScenario("spawn-blessed")
+    defer: removeDir(scenario.root)
+    writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+      fileRead(scenario.sourcePath),
+      execRecord(909, scenario.image(UnblessedImage)),
+      spawnRecord(909, 1001, scenario.image(BlessedImage)),
+      entropyReadFrom(1001)])
+    let act = scenarioAction(scenario)
+    let run = runBuild(graph([act]), defaultBuildEngineConfig(scenario.cacheRoot))
+    check run.results[0].status == asSucceeded
+    check scenario.published(act)
+
+  test "spawn attribution never blesses the parent or an unblessed child":
+    for drawFromParent in [false, true]:
+      let scenario = setupScenario("spawn-unblessed")
+      defer: removeDir(scenario.root)
+      writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+        fileRead(scenario.sourcePath),
+        execRecord(909, scenario.image(
+          if drawFromParent: UnblessedImage else: BlessedImage)),
+        spawnRecord(909, 1001, scenario.image(
+          if drawFromParent: BlessedImage else: UnblessedImage)),
+        entropyReadFrom(if drawFromParent: 909'u64 else: 1001'u64)])
+      let act = scenarioAction(scenario)
+      let run = runBuild(graph([act]), defaultBuildEngineConfig(scenario.cacheRoot))
+      check run.results[0].status == asSucceeded
+      check not scenario.published(act)
+
+  test "failed, unresolved, fork-only and zero-child spawns cannot excuse entropy":
+    for mode in 0..3:
+      let scenario = setupScenario("spawn-invalid-" & $mode)
+      defer: removeDir(scenario.root)
+      let record = case mode
+        of 0: spawnRecord(909, 1001, scenario.image(BlessedImage), 2)
+        of 1: spawnRecord(909, 1001, BlessedImage)
+        of 2: spawnRecord(909, 1001, "")
+        else: spawnRecord(909, 0, scenario.image(BlessedImage))
+      writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+        fileRead(scenario.sourcePath), record, entropyReadFrom(record.childOsPid)])
+      let act = scenarioAction(scenario)
+      let run = runBuild(graph([act]), defaultBuildEngineConfig(scenario.cacheRoot))
+      check run.results[0].status == asSucceeded
+      check not scenario.published(act)
+
+  test "exec after spawn changes only subsequent attribution and failed exec preserves it":
+    for failed in [false, true]:
+      let scenario = setupScenario("spawn-exec-" & $failed)
+      defer: removeDir(scenario.root)
+      writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+        fileRead(scenario.sourcePath),
+        spawnRecord(909, 1001, scenario.image(BlessedImage)),
+        execRecord(1001, scenario.image(UnblessedImage), failed),
+        entropyReadFrom(1001)])
+      let act = scenarioAction(scenario)
+      let run = runBuild(graph([act]), defaultBuildEngineConfig(scenario.cacheRoot))
+      check run.results[0].status == asSucceeded
+      check scenario.published(act) == failed
+
+  test "spawn metadata attributes a child even when parent PID sorts later":
+    let scenario = setupScenario("spawn-parent-later")
+    defer: removeDir(scenario.root)
+    writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+      fileRead(scenario.sourcePath),
+      spawnRecord(9009, 1001, scenario.image(BlessedImage)),
+      entropyReadFrom(1001)])
+    let act = scenarioAction(scenario)
+    let run = runBuild(graph([act]), defaultBuildEngineConfig(scenario.cacheRoot))
+    check run.results[0].status == asSucceeded
+    check scenario.published(act)
+
+  test "conflicting spawn images fail closed unless an exec identifies the emitter":
+    for explicitExec in [false, true]:
+      let scenario = setupScenario("spawn-conflicting-" & $explicitExec)
+      defer: removeDir(scenario.root)
+      var records = observingProfileRecords() & @[
+        fileRead(scenario.sourcePath),
+        spawnRecord(909, 1001, scenario.image(BlessedImage)),
+        spawnRecord(909, 1001, scenario.image(UnblessedImage))]
+      if explicitExec: records.add execRecord(1001, scenario.image(BlessedImage))
+      records.add entropyReadFrom(1001)
+      writeRmdf(scenario.rmdfPath, records)
+      let act = scenarioAction(scenario)
+      let run = runBuild(graph([act]), defaultBuildEngineConfig(scenario.cacheRoot))
+      check run.results[0].status == asSucceeded
+      check scenario.published(act) == explicitExec
+
+  test "a future blessed exec cannot excuse an earlier unblessed draw":
+    let scenario = setupScenario("spawn-future-exec")
+    defer: removeDir(scenario.root)
+    writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+      fileRead(scenario.sourcePath),
+      spawnRecord(909, 1001, scenario.image(UnblessedImage)),
+      entropyReadFrom(1001),
+      execRecord(1001, scenario.image(BlessedImage)),
+      entropyReadFrom(1001)])
+    let act = scenarioAction(scenario)
+    let run = runBuild(graph([act]), defaultBuildEngineConfig(scenario.cacheRoot))
+    check run.results[0].status == asSucceeded
+    check not scenario.published(act)
+
+  test "hosted and depfile folds agree on initial spawn images and later execs":
+    let scenario = setupScenario("spawn-hosted-parity")
+    defer: removeDir(scenario.root)
+    writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+      fileRead(scenario.sourcePath),
+      spawnRecord(9009, 1001, scenario.image(UnblessedImage)),
+      entropyReadFrom(1001),
+      execRecord(1001, scenario.image(BlessedImage)),
+      entropyReadFrom(1001)])
+    var hosted, disk: PathSetEvidence
+    var hostedSeen, diskSeen: EvidenceSeenSets
+    let capture = readMonitorDepFile(scenario.rmdfPath)
+    check foldMonitorRecordsEvidence(capture.records, scenario.workRoot,
+      hosted, hostedSeen) == mesComplete
+    check foldMonitorDepFileEvidence(scenario.rmdfPath, scenario.workRoot,
+      disk, diskSeen) == mesComplete
+    check hosted.entropyObservations.len == 2
+    check disk.entropyObservations.len == 2
+    if hosted.entropyObservations.len == 2 and disk.entropyObservations.len == 2:
+      check hosted.entropyObservations[0].image == scenario.image(UnblessedImage)
+      check hosted.entropyObservations[1].image == scenario.image(BlessedImage)
+      check disk.entropyObservations[0].image == hosted.entropyObservations[0].image
+      check disk.entropyObservations[1].image == hosted.entropyObservations[1].image
 
   test "ONE unblessed emitter in the same capture withholds the entry":
     ## THE ACCEPTANCE CASE. Both records are `getrandom`, both unattributed by

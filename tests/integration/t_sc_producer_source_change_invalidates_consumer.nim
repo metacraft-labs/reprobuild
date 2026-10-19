@@ -1,9 +1,25 @@
 ## Cross-Repo-Source-Consumption SC-4 — source-content fingerprint folding +
-## invalidation. A change to a develop-overridden sibling PRODUCER's SOURCE
-## shifts the CONSUMER action's weak fingerprint (so the consumer rebuilds);
-## an action consuming NO cross-repo producer keeps its cache key byte-for-byte;
-## in lock-pinned mode a refreshed producer pin shifts the consumer key and an
-## unchanged pin does not.
+## invalidation, scoped to what the consumer reads.
+##
+## For a consumer action whose reads NOTHING observes (a recognised-format /
+## depfile policy): a change to a develop-overridden sibling PRODUCER's SOURCE
+## shifts its weak fingerprint (so it rebuilds); in lock-pinned mode a
+## refreshed producer pin shifts the key and an unchanged pin does not.
+## Assertions (1)-(4) below.
+##
+## For a MONITORED consumer action (or a built-in one), the owner's 2026-10-12
+## decision recorded in §4.3: the producer's source identity is NOT folded —
+## its reads under the producer root key it, so a sibling edit or a lock
+## refresh leaves its weak fingerprint where it was and only an action that
+## read the changed files misses. What it is handed without reading — the
+## producer's realized directories (``--path:`` roots, ``bin``/lib dirs) — is
+## folded instead, so a directory that appears or moves still misses it.
+## Assertions (5)-(7). Before that decision this test asserted (1)-(4) for the
+## monitored action, which is what made a ``repro lock refresh`` of one Nim
+## library miss every test compile in reprobuild.
+##
+## In every case an action consuming NO cross-repo producer keeps its cache key
+## byte-for-byte.
 ##
 ## Spec: ``Cross-Repo-Source-Consumption.md`` §4.3 (source invalidation).
 ## Milestone: ``Cross-Repo-Source-Consumption.milestones.org`` §SC-4.
@@ -53,13 +69,26 @@
 ##      the source identity); a REFRESHED pin (new revision/integrity) shifts it
 ##      to a DIFFERENT digest, while re-folding the SAME pin reproduces the SAME
 ##      digest (an unchanged pin does not move the key).
+##   5. Monitored consumer, scoped rule: the fold shifts its fingerprint off the
+##      un-folded baseline (the producer's realized directories are on its
+##      command line), and the shifted key is the SAME for the develop binding
+##      before and after the sibling source edit of (3), and for lock pins A and
+##      B of (4) — neither a source edit nor a lock refresh moves it.
+##   6. Monitored consumer, channel: a different realized directory for the
+##      producer (a fetched producer at a new revision-keyed path) DOES move
+##      its key — the directory is the only thing that tells the new content
+##      from the old, which is still on disk unchanged.
+##   7. A built-in action naming the producer reads only its declared inputs,
+##      so it follows the monitored rule.
 ##
 ## Falsifiability (reproduced by the implementation agent): commenting out the
 ## ``foldProducerSourceIdentities(scheduledActions)`` call at the CLI splice seam
 ## (``repro_cli_support``), or clearing ``producerSourceBindings`` before the
 ## fold, collapses assertions (1)/(3)/(4) to the assertion-(0) no-op — the
 ## consumer fingerprint no longer shifts on a producer source change, so a stale
-## consumer would be served from cache. Reverting restores the shift.
+## consumer would be served from cache. Reverting restores the shift. Folding
+## the source identity into every action again (the pre-2026-10-12 rule) fails
+## (5); dropping the channel fold fails (5)'s first check and (6).
 ##
 ## Hermetic: the consumer workspace + the sibling checkout live in a fresh
 ## tempdir; nothing touches $HOME and no network / git / repro binary is needed.
@@ -67,6 +96,7 @@
 import std/[options, os, times, unittest]
 
 import repro_cli_support
+import repro_core
 import repro_hash
 import repro_lock
 import repro_workspace_manifests
@@ -80,14 +110,19 @@ const
   siblingIntegrityA = "git-sha1:0123456789abcdef0123456789abcdef01234567"
   siblingIntegrityB = "git-sha1:89abcdef0123456789abcdef0123456789abcdef"
 
-proc mkAction(id: string; refs: seq[string]): BuildAction =
+proc mkAction(id: string; refs: seq[string];
+              policy = dgRecognizedFormat;
+              kind = bakProcess): BuildAction =
   ## A minimal ``BuildAction`` with a deterministic non-empty weak fingerprint
   ## and the given tool-identity refs — the shape the CLI hands the SC-4 fold.
+  ## The default is an action whose reads nothing observes (a depfile policy),
+  ## the case that still carries the producer's source identity.
   BuildAction(
     governingLockIdentity: lockIdentityOutsideSolvedGraph(),
-    kind: bakProcess,
+    kind: kind,
     id: id,
     cacheable: true,
+    dependencyPolicy: DependencyGatheringPolicy(kind: policy),
     toolIdentityRefs: refs,
     weakFingerprint: weakFingerprintFromText("sc4-fixture-" & id))
 
@@ -228,5 +263,58 @@ suite "SC-4: producer source change invalidates consumer":
     let lockKeyB = foldLock(lockBindingB.lockedDep)
     check lockKeyB != lockKeyA1
 
-    # Reset the shared sink so no state leaks to other tests in the same binary.
+    # ---- (5)-(7) the scoped rule (§4.3, owner decision 2026-10-12): a
+    # MONITORED consumer is keyed on what it reads, so the producer's source
+    # identity is not folded into it — only the realized directories it is
+    # handed. Same producer, same bindings as (1)-(4).
+    let monitoredOrig = mkAction("consumer.monitored", @["sh", producerName],
+      policy = dgAutomaticMonitor)
+    let monitoredControl = mkAction("consumer.monitored-control", @["sh"],
+      policy = dgAutomaticMonitor)
+    let builtinOrig = mkAction("consumer.builtin", @[producerName],
+      kind = bakStamp)
+    check monitoredOrig.readsAreKeyed
+    check builtinOrig.readsAreKeyed
+    check not consumerOrig.readsAreKeyed
+
+    proc foldScoped(binding: ResolvedPackageBinding;
+                    nimSrc: string): tuple[monitored, builtin: ContentDigest] =
+      producerSourceBindings.clear()
+      producerSourceBindings[producerName] = binding
+      producerMaterializedAuxPaths.clear()
+      producerMaterializedAuxPaths[producerName] =
+        ProducerAuxPaths(nimPathDirs: @[nimSrc])
+      var acts = @[monitoredOrig, monitoredControl, builtinOrig]
+      foldProducerSourceIdentities(acts)
+      check acts[1].weakFingerprint == monitoredControl.weakFingerprint
+      (monitored: acts[0].weakFingerprint, builtin: acts[2].weakFingerprint)
+
+    let siblingSrc = siblingCheckout / "src"
+    let scopedDev = foldScoped(devBinding.overrideBinding, siblingSrc)
+    # (5) the producer's directories ARE on its command line: the key moves off
+    # the un-folded baseline...
+    check scopedDev.monitored != monitoredOrig.weakFingerprint
+    # ...but not with the producer's source identity: the sibling edit of (3),
+    # and lock pins A and B of (4), all give the SAME key.
+    let scopedDevEdited = foldScoped(devBinding2.overrideBinding, siblingSrc)
+    let scopedLockA = foldScoped(
+      lockPinnedSourceBinding(producerName, lockBindingA.lockedDep), siblingSrc)
+    let scopedLockB = foldScoped(
+      lockPinnedSourceBinding(producerName, lockBindingB.lockedDep), siblingSrc)
+    check scopedDevEdited.monitored == scopedDev.monitored
+    check scopedLockA.monitored == scopedDev.monitored
+    check scopedLockB.monitored == scopedDev.monitored
+    # (6) a different realized directory — a fetched producer's revision-keyed
+    # checkout — moves the key.
+    let scopedMoved = foldScoped(
+      lockPinnedSourceBinding(producerName, lockBindingB.lockedDep),
+      scratch / "fetched" / siblingRevB / "src")
+    check scopedMoved.monitored != scopedLockB.monitored
+    # (7) a built-in action follows the monitored rule.
+    check scopedDev.builtin != builtinOrig.weakFingerprint
+    check scopedLockB.builtin == scopedDev.builtin
+    check scopedMoved.builtin != scopedDev.builtin
+
+    # Reset the shared sinks so no state leaks to other tests in the same binary.
     producerSourceBindings.clear()
+    producerMaterializedAuxPaths.clear()

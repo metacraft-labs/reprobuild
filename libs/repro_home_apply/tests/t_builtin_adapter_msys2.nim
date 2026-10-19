@@ -1,5 +1,5 @@
 ## M6 (Realize-Closure-And-Catalog-Expansion spec) hermetic tests for
-## the cakBuiltin ``imMsys2Pacman`` realize hook + the ``afTarZst``
+## the home archive realizer's ``imMsys2Pacman`` realize hook + the ``afTarZst``
 ## extractor discovery.
 ##
 ## The fixture ``tests/fixtures/m6/mingw-w64-x86_64-fake-tool-...-any.pkg.tar.zst``
@@ -45,11 +45,14 @@ from repro_core/paths import extendedPath
 
 import repro_local_store
 import repro_dsl_stdlib/packages_schema
+import repro_interface_artifacts
 
 import repro_home_apply/package_catalog
 import repro_home_apply/builtin_adapter
+from repro_test_support import testCaseScratchSlug
 
-const FixtureRoot = "build/test-tmp/t-builtin-adapter-msys2"
+let FixtureRoot = "build/test-tmp/t-builtin-adapter-msys2" /
+  testCaseScratchSlug()
 const M6FixtureArchive = "libs/repro_home_apply/tests/fixtures/m6/" &
   "mingw-w64-x86_64-fake-tool-1.0.0-1-any.pkg.tar.zst"
 
@@ -72,7 +75,8 @@ proc fileToUrl(absPath: string): string =
 # W16 — shared machinery for the destination-path cases
 # ---------------------------------------------------------------------------
 
-const W16Root = "build/test-tmp/t-builtin-adapter-msys2-w16"
+let W16Root = "build/test-tmp/t-builtin-adapter-msys2-w16/" &
+  testCaseScratchSlug()
   ## Deliberately RELATIVE and forward-slash-only, and deliberately NOT
   ## ``createTempDir``.
   ##
@@ -257,7 +261,61 @@ if w16ChildSpec.len > 0:
   flushFile(stdout)
   quit(0)
 
-suite "M6 — cakBuiltin imMsys2Pacman realize hook + afTarZst":
+# ---------------------------------------------------------------------------
+# GM4b: an archive realization is a `tarball` record of a package definition
+# (Provisioning-Contributions.md §"Profile Package References"). A test
+# realization is a synthetic record for this host, SELECTED by the same
+# `selectRealization` a profile reference goes through and projected by
+# `archiveRealizationOf` into the archive realizer's input — so the realizer
+# is driven exactly as `repro home apply` drives it.
+# ---------------------------------------------------------------------------
+
+proc hostRecord(url, archiveType, executablePath: string;
+                extraExecutables: seq[string] = @[];
+                sha256 = ""; sha1 = ""; version = "1.0.0";
+                installMethod = ""; extractPath = "";
+                installerArgs: seq[string] = @[];
+                pacmanPackages: seq[string] = @[];
+                env: seq[string] = @[]; nested7z = false;
+                msiAdminInstall = false;
+                preInstall: seq[string] = @[];
+                preInstallUnrecognized: seq[string] = @[];
+                launcherEmit: seq[string] = @[];
+                anyCpu = false): InterfaceTarballProvisioning =
+  ## A synthetic `tarball` record for this host's (cpu, os); ``anyCpu``
+  ## leaves the cpu open, as a record for every CPU family does.
+  let host = hostRealizationTarget()
+  result = InterfaceTarballProvisioning(url: url, sha256: sha256,
+    archiveType: archiveType, executablePath: executablePath,
+    cpu: (if anyCpu: "" else: $host.platform.family), os: $host.os)
+  result.detail.version = version
+  result.detail.sha1 = sha1
+  result.detail.installMethod = installMethod
+  result.detail.extractPath = extractPath
+  result.detail.extraExecutables = extraExecutables
+  result.detail.installerArgs = installerArgs
+  result.detail.pacmanPackages = pacmanPackages
+  result.detail.env = env
+  result.detail.nested7z = nested7z
+  result.detail.msiAdminInstall = msiAdminInstall
+  result.detail.preInstall = preInstall
+  result.detail.preInstallUnrecognized = preInstallUnrecognized
+  result.detail.launcherEmit = launcherEmit
+
+proc selectArchive(packageId: string;
+                   records: openArray[InterfaceTarballProvisioning];
+                   version = ""): ArchiveRealization =
+  ## Select among ``records`` for this host (policy ``[tarball]``) and
+  ## project the selection into the archive realizer's input.
+  var useDef = InterfaceToolUse(rawConstraint: packageId,
+    packageSelector: packageId, executableName: packageId)
+  useDef.tarballProvisioning = @records
+  let selection = selectRealization(useDef, SelectionRequest(
+    packageName: packageId, target: hostRealizationTarget(),
+    policy: @[rkTarball], version: version, definitionKnown: true))
+  archiveRealizationOf(packageId, selection.tarball)
+
+suite "M6 — archive realizer imMsys2Pacman realize hook + afTarZst":
 
   test "test_m6_extractor_discovery_returns_usable_extractor":
     ## Discovery picks one of the three strategies on the host. We do
@@ -292,27 +350,17 @@ suite "M6 — cakBuiltin imMsys2Pacman realize hook + afTarZst":
       let sha = fileShaHex(archiveAbs, "sha256")
       var store = openStore(storeDir)
       defer: store.close()
-      let vp = initVersionedProvisioning(
-        version = "1.0.0-1",
-        archive_format = afTarZst,
-        install_method = imMsys2Pacman,
-        bin_relpath = @["bin/fake-tool.exe"],
-        platforms = @[
-          initPlatformBinary(
-            cpu = detectHostCpu(), os = detectHostOs(),
-            url = fileToUrl(archiveAbs),
-            sha256 = sha,
-            extract_path = "mingw64")
-        ],
-        pacman_packages = @["mingw-w64-x86_64-fake-tool"])
-      let res = resolveBuiltinPackage("fake-tool", @[vp])
-      check res.found
-      check res.resolution.archiveFormat == afTarZst
-      check res.resolution.installMethod == imMsys2Pacman
+      let res = selectArchive("fake-tool", [hostRecord(
+        fileToUrl(archiveAbs), "tar.zst", "bin/fake-tool.exe",
+        sha256 = sha, version = "1.0.0-1", installMethod = "msys2-pacman",
+        extractPath = "mingw64",
+        pacmanPackages = @["mingw-w64-x86_64-fake-tool"])])
+      check res.archiveFormat == afTarZst
+      check res.installMethod == imMsys2Pacman
       var skipFlatten = false
       var outR: RealizeBuiltinResult
       try:
-        outR = realizeBuiltinPackage(store, res.resolution)
+        outR = realizeBuiltinPackage(store, res)
       except EBuiltinZstdUnavailable:
         echo "  [skip] no zstd extractor available on host"
         skipFlatten = true
@@ -344,31 +392,21 @@ suite "M6 — cakBuiltin imMsys2Pacman realize hook + afTarZst":
       let sha = fileShaHex(archiveAbs, "sha256")
       var store = openStore(storeDir)
       defer: store.close()
-      let vp = initVersionedProvisioning(
-        version = "1.0.0-1",
-        archive_format = afTarZst,
-        install_method = imMsys2Pacman,
-        bin_relpath = @["bin/fake-tool.exe"],
-        platforms = @[
-          initPlatformBinary(
-            cpu = detectHostCpu(), os = detectHostOs(),
-            url = fileToUrl(archiveAbs),
-            sha256 = sha,
-            extract_path = "mingw64")
-        ],
-        pacman_packages = @["mingw-w64-x86_64-fake-tool"])
-      let res = resolveBuiltinPackage("fake-tool", @[vp])
-      check res.found
+      let res = selectArchive("fake-tool", [hostRecord(
+        fileToUrl(archiveAbs), "tar.zst", "bin/fake-tool.exe",
+        sha256 = sha, version = "1.0.0-1", installMethod = "msys2-pacman",
+        extractPath = "mingw64",
+        pacmanPackages = @["mingw-w64-x86_64-fake-tool"])])
       var skipCache = false
       var first: RealizeBuiltinResult
       try:
-        first = realizeBuiltinPackage(store, res.resolution)
+        first = realizeBuiltinPackage(store, res)
       except EBuiltinZstdUnavailable:
         echo "  [skip] no zstd extractor on host"
         skipCache = true
       if not skipCache:
         check (not first.cacheHit)
-        let second = realizeBuiltinPackage(store, res.resolution)
+        let second = realizeBuiltinPackage(store, res)
         check second.cacheHit
         check second.prefixAbsolutePath == first.prefixAbsolutePath
 

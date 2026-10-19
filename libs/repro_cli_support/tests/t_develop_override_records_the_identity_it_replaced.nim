@@ -70,13 +70,14 @@
 ## for the monitored helper edges the verb reaches; it is a collaborator here,
 ## not the entry point.
 
-import std/[exitprocs, json, os, posix, strutils, tables, unittest]
+import std/[json, os, posix, strutils, tables, unittest]
 
 import repro_cli_support
 import repro_core/cli_images
 import repro_dsl_stdlib/configurables/variants
 import repro_lock
 import repro_test_support
+import repro_test_support/process_fixtures
 
 const
   DevelopedPackage = "libfoo"
@@ -92,50 +93,30 @@ package appAlpha:
   discard
 """
 
-  SiblingRecipe = """
-import repro_project_dsl
-
-package libfoo:
-  config:
-    ## Enable TLS support.
-    enableTls: variant bool = true
-    ## Which optimisation profile the library is built with.
-    profile: variant string = "release"
-
-  build:
-    discard
-"""
-    ## A develop sibling that declares variants. The `build:` block is not
-    ## decoration: `buildCode` emits the provider's `runPackageProvider` entry
-    ## point only for a recipe that has one, so a recipe without it compiles to
-    ## a binary that runs its module init and exits without ever answering the
-    ## protocol. A develop sibling is a project you build, so this is what one
-    ## looks like — and `a recipe with no build: block is asked through its
-    ## initialiser` below
-    ## pins the other case as the known limitation it is.
-
-  SiblingRecipeWithoutVariants = """
-import repro_project_dsl
-
-package libfoo:
-  build:
-    discard
-"""
-    ## The same buildable shape, declaring no variants — so a case asserting
-    ## that nothing was recorded is asserting that the sibling HAS nothing,
-    ## not that it could not be asked.
-
-  SiblingRecipeVariantsButNoBuild = """
-import repro_project_dsl
-
-package libfoo:
-  config:
-    ## Enable TLS support.
-    enableTls: variant bool = true
-"""
-    ## Declares a variant and cannot answer the provider protocol. Once the
-    ## known limitation; since 0e7146a92 the probe runs such a recipe's
-    ## initialiser directly, which is where the declarations are emitted.
+  SiblingCheckouts = "tests/fixtures/develop-override-records"
+    ## The develop siblings are CHECKED-IN checkouts at stable paths, one per
+    ## recipe shape (see that directory's README):
+    ##
+    ##   * ``plain``              — buildable, declares no variants, no
+    ##     ``VERSION``; a case asserting that nothing was recorded is asserting
+    ##     that the sibling HAS nothing, not that it could not be asked;
+    ##   * ``plain-with-version`` — the same recipe plus a ``VERSION`` file,
+    ##     the CONSUMER's second source;
+    ##   * ``variants``           — declares ``enableTls`` and ``profile``. Its
+    ##     ``build:`` block is not decoration: ``buildCode`` emits the
+    ##     provider's ``runPackageProvider`` entry point only for a recipe that
+    ##     has one;
+    ##   * ``variants-no-build``  — declares a variant and cannot answer the
+    ##     provider protocol; since 0e7146a92 the probe runs such a recipe's
+    ##     initialiser directly.
+    ##
+    ## Stable, because the probe reaches the sibling's declarations through
+    ## the engine's interface-extraction and provider-compile edges, whose
+    ## action-cache entries are keyed by the recipe's location. A fresh copy
+    ## per process made every case compile the sibling from scratch; one
+    ## checkout per shape lets the engine's own cache serve every case after
+    ## the first. Nothing here writes into them — ``repro develop`` writes only
+    ## into the consumer — and the consumer stays per process.
 
 let NoPackages: seq[LockedPackage] = @[]
   ## A consumer with no committed lock at all — the case the engine must not
@@ -153,6 +134,11 @@ proc scratchRoot(label: string): string =
   ## `t_lock_list_without_a_build_block` gives for the same choice.
   result = repoRoot() / "build" /
     ("nlf-devrec-" & label & "-" & $getCurrentProcessId())
+  # Removed when THIS process exits, and registered before it is created. An
+  # ``addExitProc`` closure used to walk ``builtScenarios`` at exit, but under
+  # ORC that table is destroyed before exit procs run, so the walk read freed
+  # memory. See ``repro_test_support/process_fixtures``.
+  releaseDirAtProcessExit(result)
   removeDir(result)
   createDir(result)
 
@@ -173,16 +159,13 @@ proc writeConsumer(root: string; lockedPackages: openArray[LockedPackage]) =
       ld.packages.add(p)
     writeFile(root / "repro.lock", serializeLockedDependencies(ld))
 
-proc writeSibling(root, recipe: string; versionFile = ""): string =
-  ## A real develop checkout: a recipe the provider probe can compile, and
-  ## optionally the `VERSION` file that is the CONSUMER's second source. The
-  ## two cases that assert on a recorded version deliberately do NOT write one,
-  ## so a passing assertion cannot have come from the fallback.
-  result = root / DevelopedPackage
-  createDir(result)
-  writeFile(result / "repro.nim", recipe)
-  if versionFile.len > 0:
-    writeFile(result / "VERSION", versionFile & "\n")
+proc siblingCheckout(shape: string): string =
+  ## The checked-in develop checkout for ``shape`` (see ``SiblingCheckouts``).
+  ## Absolute, because it is what the override document records and what the
+  ## cases compare ``path`` against.
+  result = repoRoot() / SiblingCheckouts / shape / DevelopedPackage
+  doAssert fileExists(result / "repro.nim"),
+    "develop sibling fixture missing: " & result
 
 proc developInto(consumerRoot, checkout: string;
                  dependency = DevelopedPackage): string =
@@ -308,14 +291,13 @@ proc solvedVersionOf(package: string): seq[string] =
 
 type
   Scenario = object
-    root: string          ## the scratch tree holding consumer and sibling
+    root: string          ## the per-process scratch tree holding the consumer
     checkout: string      ## the develop checkout the override points at
     metadataPath: string  ## the document the verb reported writing
 
 var builtScenarios: Table[string, Scenario]
-  ## Label -> the scenario built for it, populated lazily by `scenario`. Also
-  ## the exit proc's work list, so a scenario no case asked for leaves no
-  ## scratch tree to remove.
+  ## Label -> the scenario built for it, populated lazily by `scenario`, so a
+  ## scenario no case asked for creates no scratch tree.
 
 proc nameTheRealCliForTheEngine() =
   ## Tell the engine which `repro` image to spawn for its monitored helper
@@ -363,17 +345,70 @@ proc nameTheRealCliForTheEngine() =
     requireBinary(repoRoot() / "build" / "bin" / reprobuildEngineExeName(),
       "reprobuild.apps.reprobuild"))
 
+proc testActionCacheRoot(): string =
+  ## The action-cache root this file's engine runs use when nobody chose one:
+  ## under the checkout's own ``build/``, never the per-user default
+  ## (``~/.cache/repro/action-cache`` on Linux) that every session on the host
+  ## shares.
+  ##
+  ## STABLE across processes, unlike ``scratchRoot``: the runner executes each
+  ## case as its own process, and the sibling checkouts sit at fixed paths (see
+  ## ``SiblingCheckouts``) so that the engine's cache serves every case after
+  ## the first. A per-process root would make every case compile the sibling's
+  ## provider from scratch again. Sharing the root between this file's own
+  ## concurrent cases is what an action-cache root is built for; sharing it
+  ## with unrelated sessions, and leaving records in the user's cache, is what
+  ## this avoids.
+  repoRoot() / "build" / "nlf-devrec-action-cache"
+
+proc scopeTheEngineToThisFilesActionCache() =
+  ## Point the engine at ``testActionCacheRoot`` through
+  ## ``REPROBUILD_ACTION_CACHE_ROOT`` — the variable ``resolveActionCacheRoot``
+  ## reads first, and the one the helper processes the engine spawns inherit —
+  ## the same way this file names its own overrides file and its own CLI.
+  ##
+  ## A root the caller already chose is kept, as ``nameTheRealCliForTheEngine``
+  ## keeps a chosen CLI. ``scripts/run_tests.sh`` exports one per run and
+  ## empties it first, so under the suite this file's cases still share their
+  ## provider compiles through it and start from the clean cache that script
+  ## promises every test. Overriding it would only swap that for a root that
+  ## persists between runs. What must not happen is the engine's FALLBACK, and
+  ## setting the variable here is what rules it out.
+  if getEnv("REPROBUILD_ACTION_CACHE_ROOT").len > 0:
+    return
+  createDir(testActionCacheRoot())
+  putEnv("REPROBUILD_ACTION_CACHE_ROOT", testActionCacheRoot())
+
+proc fallbackActionCacheRoot(): string =
+  ## The root the engine falls back to when no variable names one: the
+  ## per-user cache (or the user's store, when ``REPROBUILD_STORE_ROOT`` or
+  ## ``REPRO_STORE_ROOT`` is set). Asked of the real resolver with the three
+  ## variables it reads cleared, then restored, rather than re-deriving the
+  ## platform paths here.
+  const Vars = ["REPROBUILD_ACTION_CACHE_ROOT", "REPROBUILD_STORE_ROOT",
+                "REPRO_STORE_ROOT"]
+  var saved: seq[(string, bool, string)]
+  for v in Vars:
+    saved.add((v, existsEnv(v), getEnv(v)))
+    delEnv(v)
+  try:
+    result = resolveActionCacheRoot()
+  finally:
+    for (v, wasSet, value) in saved:
+      if wasSet: putEnv(v, value)
+
 proc scenario(label: string; lockedPackages: openArray[LockedPackage];
-              recipe: string; versionFile = ""): Scenario =
+              shape: string): Scenario =
   ## Build `label`'s scenario, or return the one already built for it. Every
   ## accessor below funnels through here, so each label's real verb run
   ## happens exactly once per process no matter how many cases read it.
   if not builtScenarios.hasKey(label):
     nameTheRealCliForTheEngine()
+    scopeTheEngineToThisFilesActionCache()
     var built: Scenario
     built.root = scratchRoot(label)
     writeConsumer(built.root / "app", lockedPackages)
-    built.checkout = writeSibling(built.root, recipe, versionFile)
+    built.checkout = siblingCheckout(shape)
     built.metadataPath = developInto(built.root / "app", built.checkout)
     builtScenarios[label] = built
   builtScenarios[label]
@@ -386,37 +421,54 @@ proc lockedSibling(): Scenario =
       LockedPackage(name: DevelopedPackage, version: LockedVersion,
                     source: DevelopedPackage),
       LockedPackage(name: "zlib", version: "1.2.13", source: "zlib")],
-    SiblingRecipeWithoutVariants)
+    "plain")
 
 proc unlockedSibling(): Scenario =
   ## No committed lock and no `VERSION` file: the engine knows nothing and
   ## the consumer's chain runs to its end, which is a refusal.
-  scenario("unlocked", NoPackages, SiblingRecipeWithoutVariants)
+  scenario("unlocked", NoPackages, "plain")
 
 proc strangerLockSibling(): Scenario =
   ## A lock that names somebody else. The engine still knows nothing about
   ## THIS dependency, and the checkout's `VERSION` file is what answers.
   scenario("stranger", @[
       LockedPackage(name: "zlib", version: "1.2.13", source: "zlib")],
-    SiblingRecipeWithoutVariants, versionFile = CheckoutFileVersion)
+    "plain-with-version")
 
 proc variantSibling(): Scenario =
   ## A sibling whose recipe really declares variants.
   scenario("variants", @[
       LockedPackage(name: DevelopedPackage, version: LockedVersion,
                     source: DevelopedPackage)],
-    SiblingRecipe)
+    "variants")
 
 proc unaskableSibling(): Scenario =
   ## A sibling that declares a variant and has no protocol dispatcher.
-  scenario("unaskable", NoPackages, SiblingRecipeVariantsButNoBuild)
+  scenario("unaskable", NoPackages, "variants-no-build")
 
-addExitProc(proc () =
-  # Reads the memo rather than the accessors: calling those at exit would
-  # BUILD a scenario in order to delete it.
-  for s in builtScenarios.values:
-    try: removeDir(s.root)
-    except CatchableError: discard)
+suite "the engine's work stays out of the user's action cache":
+  ## The verb compiles the sibling's provider, and the probe keeps that
+  ## compile's artifacts, depfiles and compile locks under
+  ## ``<action-cache-root>/lock-provider-metadata``. A test that leaves the
+  ## root to the engine's fallback puts them in the per-user cache, where they
+  ## contend with every other session on the host and outlive the run.
+
+  test "the provider probe writes under a root this file scoped":
+    let built = lockedSibling()
+    check fileExists(built.metadataPath)
+    # The engine resolves the root the way production does, so this is the
+    # root every edge the verb ran was handed, and the one the helper
+    # processes it spawned inherited. It is named by the variable, and it is
+    # not the per-user fallback.
+    let root = resolveActionCacheRoot()
+    check getEnv("REPROBUILD_ACTION_CACHE_ROOT").len > 0
+    check root == getEnv("REPROBUILD_ACTION_CACHE_ROOT")
+    check root != fallbackActionCacheRoot()
+    # And the probe wrote there. This is corroboration, not the proof: the
+    # standalone root persists between runs, so an earlier run may have left
+    # the directory behind. The checks above are what fail when the
+    # scoping is missing.
+    check dirExists(root / "lock-provider-metadata" / "providers")
 
 suite "the engine records the version the override replaced":
   ## `develop_sources.nim` source 1, and the first of its two KNOWN GAPs.

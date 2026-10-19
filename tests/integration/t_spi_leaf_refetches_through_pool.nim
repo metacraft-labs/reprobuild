@@ -39,11 +39,18 @@
 ##     store path it adds is content-addressed and inert. Skipped when ``nix``
 ##     is not on PATH.
 ##
+##   - ``unmigrated_blobless_leaf_is_reported_and_healed_without_missing_tips``
+##     — every current ref, commit and tree exists but their blobs do not;
+##     fetch does not repair them, on-touch migration is reported, and a
+##     subsequent read heals both leaf and pool. Wrong chain keys must also
+##     be diagnosed, independently of object presence.
+##
 ## No mocks. Hermetic: one ``createTempDir`` root, a private
 ## ``GIT_CONFIG_GLOBAL``, ``file://`` URLs throughout (a plain path would make
 ## git hardlink instead of borrow). Skip rule: ``git`` missing on PATH.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import shared_clones
 
@@ -279,3 +286,68 @@ suite "SPI-2: leaves refetch through the pool":
       checkpoint("nix fetchGit of a leaf with the extension: " & broken.output)
       check broken.exitCode != 0
       check "partialclone" in broken.output.toLowerAscii
+
+  test "unmigrated_blobless_leaf_is_reported_and_healed_without_missing_tips":
+    let root = createTempDir("repro-spi2-unmigrated-", "")
+    defer:
+      tearDown()
+      removeDir(root)
+    let f = setUp(root)
+    # Keep every commit and tree, but no blobs: the incident's blob:none
+    # pool, with current refs intact. Repacking explicitly prevents a lazy
+    # fetch or an expiry policy from accidentally healing the fixture.
+    let objects = must(f.pool, "rev-list", "--objects", "--all",
+      "--filter=blob:none", "--no-object-names")
+    let packDir = f.pool / "objects" / "pack"
+    let packed = execCmdEx("GIT_NO_LAZY_FETCH=1 git -C " & q(f.pool) &
+      " pack-objects -q " & q(packDir / "blobless"), input = objects & "\n")
+    doAssert packed.exitCode == 0, packed.output
+    let keep = "blobless-" & packed.output.strip()
+    for kind, path in walkDir(packDir):
+      if not path.lastPathPart.startsWith(keep): removeFile(path)
+    for kind, path in walkDir(f.pool / "objects"):
+      if kind == pcDir and path.lastPathPart.len == 2: removeDir(path)
+    writeFile(packDir / (keep & ".promisor"), "")
+    discard must(f.leaf, "remote", "remove", LeafPoolRemoteName)
+    discard must(f.leaf, "config", "--unset-all", "fetch.hideRefs")
+    let blob = must(f.up, "rev-parse", "main:m2")
+    for line in must(f.leaf, "show-ref").splitLines():
+      doAssert has(f.leaf, line.splitWhitespace()[0])
+    doAssert has(f.leaf, "HEAD^{tree}")
+    doAssert not has(f.leaf, blob) and not has(f.pool, blob)
+    # Ordinary fetch succeeds yet leaves current-commit blobs missing.
+    check run(f.leaf, true, "fetch", "origin").code == 0
+    check not has(f.leaf, blob)
+    check run(f.leaf, true, "show", "HEAD:m2").code != 0
+    let report = checkLeaf(f.gitBin, f.leaf, lcmReport, root / "cache")
+    check report.configured
+    check report.hasMessages
+    check "refetch chain" in messages([report]).join("\n")
+    let read = run(f.leaf, true, "show", "HEAD:m2")
+    check read.code == 0
+    check read.output.splitLines()[^1] == "2"
+    check has(f.leaf, blob) and has(f.pool, blob)
+    check not checkLeaf(f.gitBin, f.leaf, lcmReport, root / "cache").hasMessages
+    for (key, value) in [
+        ("url", "file:///missing-pool"),
+        ("promisor", "false"),
+        ("uploadpack", "git-upload-pack"),
+        ("skipFetchAll", "false"),
+        ("fetch", "+refs/heads/*:refs/remotes/repro-pool/*")]:
+      discard must(f.leaf, "config", "remote.repro-pool." & key, value)
+      let wrong = checkLeaf(f.gitBin, f.leaf, lcmReport, root / "cache")
+      checkpoint("incorrect refetch chain key: " & key)
+      check wrong.hasMessages
+      check wrong.configured
+      check "refetch chain" in messages([wrong]).join("\n")
+      check not checkLeaf(f.gitBin, f.leaf, lcmReport, root / "cache").hasMessages
+    for key in ["url", "promisor"]:
+      let name = "remote.repro-pool." & key
+      let expected = must(f.leaf, "config", "--get", name)
+      discard must(f.leaf, "config", "--add", name, expected)
+      let duplicate = checkLeaf(f.gitBin, f.leaf, lcmReport, root / "cache")
+      checkpoint("duplicate refetch chain key: " & key)
+      check duplicate.hasMessages
+      check duplicate.configured
+      check must(f.leaf, "config", "--get-all", name) == expected
+      check not checkLeaf(f.gitBin, f.leaf, lcmReport, root / "cache").hasMessages

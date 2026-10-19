@@ -50,11 +50,18 @@
 ## * ``readConfigurable[T]`` — return either the override (when one is
 ##   pending) or the default. Raises ``EDslPortMissingKey`` when the
 ##   key was never registered; raises ``EDslPortTypeMismatch`` when the
-##   stored type does not match the requested ``T``.
+##   stored type does not match the requested ``T``; raises
+##   ``EDslPortUnsatisfiedRequired`` when the key is a REQUIRED
+##   configurable (declared with no default,
+##   ``recordConfigRequired[T]``) that nothing has satisfied — the
+##   stored row is then a SHAPE and not a value, and this is the one
+##   lane it can be reached through.
 ##
 ## * ``setConfigurable[T]`` — store an override against the key.
 ##
-## * ``resetConfigurable`` — drop any override so the default re-emerges.
+## * ``resetConfigurable`` — drop any override so the default
+##   re-emerges, or, for a REQUIRED key (one with no default), so the
+##   slot returns to UNSATISFIED and the next read raises.
 ##
 ## * ``registeredConfigKeys`` — list every ``<package>.<name>`` key for
 ##   diagnostic / inspection paths.
@@ -95,6 +102,7 @@ type
     dskFloat
     dskEnum
     dskSeqEnum
+    dskSeqString
 
   DslScalarValue* = object
     ## Discriminated record holding one configurable's payload. Stored
@@ -121,6 +129,26 @@ type
       seqEnumTypeName*: string
       seqEnumOrds*: seq[int]
       seqEnumValueNames*: seq[string]
+    of dskSeqString:
+      ## Shared-Development-Services L8 — the ORDERED COLLECTION arm,
+      ## and the only kind a CONTRIBUTION POINT may have today.
+      ##
+      ## The enum's own doc comment above predicted this one: "Future
+      ## kinds (e.g. ``seq[string]``) widen this enum WITHOUT a schema
+      ## bump". It is appended LAST so no existing ordinal moves.
+      ##
+      ## WHY ``seq[string]`` HAD NO SLOT BEFORE, which is a gap and not
+      ## a design: ``recordConfigDefault`` carried ``seq[Enum]`` and
+      ## fell through to a static error for every other element type,
+      ## and ``m2TypeReprIsSupportedScalar`` rejected ``seq[string]`` by
+      ## name. So an activity that declared ``relyingParties:
+      ## seq[string]`` got NO configurable cell -- the key was simply
+      ## not registered, and the environment walker then refused a
+      ## binding to it with a diagnostic about a type "the configurable
+      ## lane does not carry". L8 needs exactly that type, because §5's
+      ## contribution point is "a configurable whose type is a
+      ## collection".
+      seqStrVals*: seq[string]
 
   DslVersionInfo* = object
     ## One entry inside a ``versions:`` block. Matches the four named
@@ -142,6 +170,24 @@ type
     ## Raised when the type-parameter ``T`` does not match the
     ## ``DslScalarKind`` the key was registered with.
 
+  EDslPortUnsatisfiedRequired* = object of CatchableError
+    ## Raised when a REQUIRED configurable is read while nothing has
+    ## satisfied it.
+    ##
+    ## Shared-Development-Services L5 (§6). A ``config:`` key declared
+    ## WITHOUT a default is a **required configurable**: the slot
+    ## exists, and it has NO SEED. Two things may satisfy it -- an
+    ## ``environment`` binding (§6) or an argument at
+    ## ``enable <activity>(...)`` (L2) -- and until one of them does,
+    ## the cell holds the type's zero value as a SHAPE and not as a
+    ## value, so reading it has to raise rather than hand back a zero
+    ## somebody could mistake for the author's intent.
+    ##
+    ## Deliberately NOT a subtype of ``EDslPortMissingKey``: the
+    ## fallback-flavoured ``readConfigurable`` overloads catch that one
+    ## and return their fallback, which is exactly the silent
+    ## substitution this exception exists to prevent.
+
 # ---------------------------------------------------------------------------
 # Module-level registries
 # ---------------------------------------------------------------------------
@@ -156,6 +202,20 @@ var dslPortOverrides: Table[string, DslScalarValue]
   ## Override table consulted by ``readConfigurable`` BEFORE the
   ## defaults table. Each ``setConfigurable`` writes one row;
   ## ``resetConfigurable`` deletes the row.
+
+var dslPortRequired: Table[string, bool]
+  ## The REQUIRED keys: a slot exists, with NO seed. Written by
+  ## ``recordConfigRequired``; a key is satisfied once ``dslPortOverrides``
+  ## carries a row for it (an ``environment`` binding goes through
+  ## ``setConfigurable``, which writes exactly that row).
+  ##
+  ## A separate registry rather than a sentinel inside
+  ## ``DslScalarValue``: the discriminated record is what
+  ## ``setConfigurableRaw``'s KIND check compares, so a required key has
+  ## to carry a real kind in ``dslPortDefaults`` for a binding to be
+  ## accepted at all. "Which kind" and "is there a seed" are two facts,
+  ## and folding them into one field would make an unsatisfied key
+  ## unbindable.
 
 var dslPortKeyOrder: seq[string]
   ## Insertion-order key list. The two ``Table[string, ...]``
@@ -210,6 +270,15 @@ proc dslScalarSeqEnum*(typeName: string;
   DslScalarValue(kind: dskSeqEnum, seqEnumTypeName: typeName,
                  seqEnumOrds: ords, seqEnumValueNames: names)
 
+proc dslScalarSeqString*(values: seq[string]): DslScalarValue =
+  ## Shared-Development-Services L8 constructor for the ordered-collection
+  ## arm. The members are stored VERBATIM and in order; nothing sorts,
+  ## dedupes or normalises them here, because §5's merge rule for an
+  ## ordered collection is "append in contribution order" and a
+  ## constructor that reordered would make the fold's own ordering
+  ## unobservable.
+  DslScalarValue(kind: dskSeqString, seqStrVals: values)
+
 # ---------------------------------------------------------------------------
 # Public API — config: surface
 # ---------------------------------------------------------------------------
@@ -222,6 +291,7 @@ proc resetDslPortConfigState*() =
   ## the other.
   dslPortDefaults.clear()
   dslPortOverrides.clear()
+  dslPortRequired.clear()
   dslPortKeyOrder.setLen(0)
 
 proc recordConfigDefaultRaw*(key: string; default: DslScalarValue) =
@@ -279,6 +349,111 @@ proc recordConfigDefault*[T](packageName, name: string; default: T) =
     {.error: "recordConfigDefault: unsupported configurable type " &
        $T & "; M2/M9.D supports bool / int / string / float / enum / seq[enum]".}
 
+proc recordConfigRequiredRaw*(key: string; shape: DslScalarValue) =
+  ## Register a REQUIRED configurable: the slot exists and has NO seed.
+  ##
+  ## Shared-Development-Services L5 (§6) and the conflation this undoes.
+  ## "No default" used to mean "no slot": ``emitL5ActivityConfigDefaults``
+  ## skipped a key whose ``config:`` entry carried no ``= default``,
+  ## nothing was ever registered, and an ``environment`` binding to it
+  ## was refused at compile time -- which made
+  ## ``Shared-Development-Services.md``'s OWN worked examples (§6, line
+  ## 421; §9.1, line 646) illegal, because both declare
+  ## ``externalDomain: string`` with no default and bind it from an
+  ## ``environment`` block. A key with no default is not slotless; it is
+  ## REQUIRED.
+  ##
+  ## ``shape`` is the type's zero value and is stored for ONE reason: it
+  ## is what ``setConfigurableRaw``'s kind check compares an incoming
+  ## binding against, so without it no binding could be accepted. It is
+  ## never a readable value -- ``dslPortLookup`` raises
+  ## ``EDslPortUnsatisfiedRequired`` for a key in ``dslPortRequired``
+  ## that has no override row, so the zero cannot leak out as if the
+  ## author had written it.
+  if key notin dslPortDefaults:
+    dslPortKeyOrder.add(key)
+  dslPortDefaults[key] = shape
+  dslPortRequired[key] = true
+
+proc recordConfigRequired*[T](packageName, name: string) =
+  ## Generic facade -- the ``package`` macro emits one call per
+  ## ``config:`` key declared ``name: T`` with no ``= default``.
+  ##
+  ## The ``T`` set is the one ``recordConfigDefault`` carries, because
+  ## the slot set has to be decided by ONE predicate over both
+  ## authoring surfaces (``m2TypeReprIsSupportedScalar``). A key whose
+  ## type the configurable lane does not carry gets no slot at all,
+  ## required or not, and the environment walker refuses a binding to it
+  ## by name -- a DIFFERENT refusal from this one, and deliberately not
+  ## merged with it.
+  let key = packageName & "." & name
+  when T is bool:
+    recordConfigRequiredRaw(key, dslScalarBool(false))
+  elif T is SomeInteger:
+    recordConfigRequiredRaw(key, dslScalarInt(0))
+  elif T is string:
+    recordConfigRequiredRaw(key, dslScalarString(""))
+  elif T is SomeFloat:
+    recordConfigRequiredRaw(key, dslScalarFloat(0.0))
+  elif T is enum:
+    recordConfigRequiredRaw(key, dslScalarEnum(T.low.ord, $T, $T.low))
+  elif T is seq:
+    var probe: T
+    type Elem = typeof(probe[0])
+    when Elem is enum:
+      recordConfigRequiredRaw(key, dslScalarSeqEnum($Elem,
+        newSeq[(int, string)]()))
+    else:
+      {.error: "recordConfigRequired: unsupported configurable type " &
+         $T & "; M9.D seq support is restricted to seq[Enum]".}
+  else:
+    {.error: "recordConfigRequired: unsupported configurable type " &
+       $T & "; M2/M9.D supports bool / int / string / float / enum / seq[enum]".}
+
+proc configurableIsRequired*(key: string): bool =
+  ## Whether ``key`` was declared without a default -- i.e. has a slot
+  ## and no seed.
+  key in dslPortRequired
+
+proc configurableIsSatisfied*(key: string): bool =
+  ## Whether ``key`` holds a value something actually supplied.
+  ##
+  ## True for every key that is not required (its seed IS a value the
+  ## author wrote), and for a required key once a contribution has
+  ## written an override row. An ``environment`` binding is such a row,
+  ## because ``bindEnvironmentConfigurable`` delegates to
+  ## ``setConfigurable``.
+  (key notin dslPortRequired) or (key in dslPortOverrides)
+
+proc unsatisfiedRequiredConfigKeys*(): seq[string] =
+  ## Every required key nothing has satisfied, in registration order.
+  for key in dslPortKeyOrder:
+    if key in dslPortRequired and key notin dslPortOverrides:
+      result.add(key)
+
+proc configurableOverrideSnapshot*(): Table[string, DslScalarValue] =
+  ## A copy of the override table, for a caller that must apply a GROUP
+  ## of overrides all-or-nothing. `restoreConfigurableOverrides` puts it
+  ## back.
+  ##
+  ## WHY THIS IS PUBLIC AND WHO NEEDS IT. An `environment <name>:`
+  ## applies several bindings in sequence (§6), and before this existed
+  ## a binding that raised partway left the EARLIER bindings in force:
+  ## the environment was applied PARTIALLY, which is worse than either
+  ## outcome -- the author sees an error, and the process continues with
+  ## a configuration no environment declares. `applyEnvironment` now
+  ## snapshots, applies, and restores on any failure. The snapshot is
+  ## the whole override table rather than the keys the environment names
+  ## because the restore has to undo rows the FAILING call may have
+  ## written too, and because "set" and "was already set to something
+  ## else" are different states that a per-key undo would conflate.
+  dslPortOverrides
+
+proc restoreConfigurableOverrides*(snapshot: Table[string, DslScalarValue]) =
+  ## Replace the override table with `snapshot`. See
+  ## `configurableOverrideSnapshot`.
+  dslPortOverrides = snapshot
+
 proc registeredConfigKeys*(): seq[string] =
   ## Return every ``<package>.<name>`` key in insertion order. A copy
   ## so callers cannot mutate the registry.
@@ -287,11 +462,747 @@ proc registeredConfigKeys*(): seq[string] =
 proc isConfigKeyRegistered*(key: string): bool =
   key in dslPortDefaults
 
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L8 — CONTRIBUTION POINTS.
+#
+# `Shared-Development-Services.md` §5 is the authority, and its third
+# paragraph is the whole of why there is no new primitive here:
+#
+#   "This needs no new mechanism. A collection is a configurable."
+#
+# So a contribution point IS a row in the same `dslPortDefaults` /
+# `dslPortKeyOrder` registries every other `config:` key lives in. What
+# is new is (a) a collection-typed arm for it to hold (`dskSeqString`)
+# and (b) the SECOND AXIS the L5 section above said it was deferring:
+#
+#   "the CONTRIBUTION operation axis (`append` / `replace`, §5.1) is L8.
+#    An environment binding is a `replace` at `epOverride` in the terms
+#    L8 will introduce, and this code does not pre-empt the spelling."
+#
+# That prediction is honoured literally below: `setConfigurableRaw` --
+# which is the route an `environment` binding takes -- lands as a
+# `coReplace` at `epOverride`, and nothing about the environment lane
+# changed to make that true.
+#
+# WHAT THE PORT COULD NOT DO BEFORE, stated as a limitation at
+# `bindEnvironmentConfigurable`: "`epOverride` IS A RECORDED LABEL HERE,
+# NOT AN ORDERING THIS PORT CAN ENFORCE ... A later `epForce` does not
+# outrank an `epOverride` and an earlier one is not protected from it."
+# For a CONTRIBUTION POINT that is no longer true -- the fold below is
+# `Configurable-System.md` §Resolution's four steps, so the ladder is
+# enforced. It is still true for a SCALAR key, deliberately: changing
+# scalar resolution would change the resolved value of every existing
+# `config:` key in the repository, which is not L8's gate and would be a
+# silent behaviour change across 11 production NDE packages.
+# ---------------------------------------------------------------------------
+
+type
+  ConfigContribution* = object
+    ## ONE contribution to ONE configurable: the (priority, value,
+    ## provenance) triple `Configurable-System.md` specifies, plus the
+    ## OPERATION that makes the two axes independent.
+    key*: string
+      ## The configurable's full key, `<package>.<name>` or
+      ## `<package>.<activity>.<name>` -- byte-identical to the key
+      ## `recordConfigDefault` registers, which is what makes a
+      ## contribution a contributor into the EXISTING table rather than
+      ## a second one.
+    package*: string
+      ## The CONTRIBUTING package. This is the attribution §5 requires
+      ## ("every converged member can already name the package that
+      ## contributed it, and a withdrawn dependency's members can be
+      ## identified for removal").
+      ##
+      ## IT IS A FIELD AND NOT DERIVED FROM `sourceFile`, and the
+      ## distinction is load-bearing for `withdrawPackageContributions`:
+      ## a file path does not name a package (one file may lower several
+      ## packages, and a generated recipe's path names no package at
+      ## all), so a withdrawal keyed on the path would remove the wrong
+      ## rows. The empty string means "the port itself" -- a
+      ## construction default or a `setConfigurable` from code that is
+      ## not a package body.
+    precedence*: EnvironmentPrecedence
+      ## The priority axis. `EnvironmentPrecedence` is REUSED rather
+      ## than mirrored a second time: it is already declared as this
+      ## library's mirror of `Configurable-System.md`'s
+      ## `ContributionPriority`, the drift assertion that keeps the two
+      ## aligned already exists
+      ## (`tests/dsl_port/t_dsl_environment_binds_configurables.nim`,
+      ## "EnvironmentPrecedence mirrors ContributionPriority, ordinal
+      ## for ordinal"), and a third spelling of one ladder inside one
+      ## library is the drift this campaign has already paid for once.
+      ## Its NAME is environment-flavoured; its ROLE from L8 on is the
+      ## port's contribution ladder.
+    operation*: ContributionOperation
+      ## The operation axis, independent of `precedence`.
+    value*: DslScalarValue
+      ## For `coReplace`, the entire value. For `coAppend`, the members
+      ## to add -- so an append carries a `dskSeqString` holding just
+      ## its own members, never the running total.
+    sourceFile*: string
+    sourceLine*: int
+      ## The call site, for the step-4 diagnostic. An empty file is a
+      ## contribution made from code that captured no site; the
+      ## diagnostic says `<unknown site>` rather than rendering `:0`.
+
+  DiscardedContribution* = object
+    ## `Configurable-System.md` §Resolution step 4: "Every `append`
+    ## whose priority is BELOW R's is **discarded**, and each discard
+    ## MUST emit a structured diagnostic naming both sites -- the
+    ## discarded contribution and the `replace` that superseded it."
+    ##
+    ## STRUCTURED, not a string. A caller that wants the message calls
+    ## `renderDiscardedContribution`; a caller that wants to assert on
+    ## which site lost reads the fields. A pre-rendered string would
+    ## make the second impossible, and step 4's whole purpose is that
+    ## the engine "can say which contribution was dropped and which one
+    ## dropped it".
+    key*: string
+    discarded*: ConfigContribution
+    supersededBy*: ConfigContribution
+
+  ContributionFold* = object
+    ## The result of folding one contribution point: the resolved
+    ## members, who contributed each one, and what was discarded.
+    members*: seq[string]
+    memberPackages*: seq[string]
+      ## Parallel to `members`: the contributing package of each. Two
+      ## parallel seqs rather than a seq of tuples so `members` can be
+      ## handed to `dslScalarSeqString` without a rebuild.
+    discarded*: seq[DiscardedContribution]
+
+  EDslPortNotAContributionPoint* = object of CatchableError
+    ## Raised when `coAppend` is aimed at a key that is not a
+    ## contribution point. "Append 4 to the worker count" is not a thing
+    ## an author can have meant, so it is refused BY NAME rather than
+    ## silently treated as a replace -- which is the shape of defect
+    ## this campaign has found twenty-plus times.
+
+  EDslPortDuplicateForceReplace* = object of CatchableError
+    ## `Configurable-System.md` §"`prForce` is limited per operation,
+    ## not per configurable": "at most one `prForce` `replace` per
+    ## configurable, and a second is an error". SEVERAL `prForce`
+    ## APPENDS ARE NOT AN ERROR and must not raise this -- that is the
+    ## distinction the one-axis rule got wrong.
+
+  EDslPortContradictoryReplace* = object of CatchableError
+    ## §Resolution step 1: "Several `replace` contributions tied at that
+    ## priority resolve by the equal-priority rules above -- which for a
+    ## collection is an **error**, because two different 'the value is
+    ## exactly this' claims at equal authority are a genuine
+    ## contradiction rather than something to merge."
+    ##
+    ## Two claims with the SAME value are not a contradiction and do not
+    ## raise: that is a replay, not a disagreement.
+
+var dslPortContributionPoints: Table[string, bool]
+  ## Every key declared as a contribution point. A separate registry
+  ## from `dslPortDefaults` for the reason `dslPortRequired` is separate:
+  ## "which kind" and "is this a contribution point" are two facts, and
+  ## a key's kind alone cannot decide the second -- a plain
+  ## `seq[string]` scalar key would be indistinguishable from a
+  ## contribution point if the discriminant were the only evidence.
+
+var dslPortContributions: Table[string, seq[ConfigContribution]]
+  ## Every contribution to every contribution point, in contribution
+  ## order. `Configurable-System.md`'s `c.contributions` for this port.
+
+var dslPortContributionPointOrder: seq[string]
+  ## Insertion-order list of contribution-point keys, for stable
+  ## enumeration (same reason `dslPortKeyOrder` exists).
+
+proc isContributionPoint*(key: string): bool =
+  ## Whether `key` was declared as an ordered-collection contribution
+  ## point.
+  key in dslPortContributionPoints
+
+proc registeredContributionPoints*(): seq[string] =
+  ## Every contribution-point key in declaration order.
+  result = dslPortContributionPointOrder
+
+proc recordContributionPointRaw*(key: string; default: DslScalarValue;
+                                 sourceFile = ""; sourceLine = 0) =
+  ## Declare `key` as an ordered-collection contribution point whose
+  ## construction default is `default`.
+  ##
+  ## The default is recorded as a `coReplace` contribution at
+  ## `epDefault`, which is what makes §Resolution's steps 1 and 2
+  ## collapse correctly rather than needing a special case: "the base
+  ## value is R's value, or the construction default when there is no
+  ## `replace`" -- with the default itself a replace at the bottom rung,
+  ## R always exists and step 2 is just "R's value".
+  ##
+  ## IDEMPOTENT ON REPLAY. A module-init replay re-runs this; the second
+  ## call leaves the existing rows alone, exactly as
+  ## `recordConfigDefault` does. Without that, `rerunServiceDeclarators`
+  ## would double every default.
+  if default.kind != dskSeqString:
+    raise newException(EDslPortTypeMismatch,
+      "recordContributionPoint('" & key & "'): a contribution point " &
+      "must be an ordered collection (dskSeqString), not " &
+      $default.kind)
+  if key in dslPortContributionPoints:
+    return
+  if key notin dslPortDefaults:
+    dslPortKeyOrder.add(key)
+  dslPortDefaults[key] = default
+  dslPortContributionPoints[key] = true
+  dslPortContributionPointOrder.add(key)
+  dslPortContributions[key] = @[ConfigContribution(
+    key: key, package: "", precedence: epDefault, operation: coReplace,
+    value: default, sourceFile: sourceFile, sourceLine: sourceLine)]
+
+proc recordContributionPoint*[T](packageName, name: string; default: T;
+                                 sourceFile = ""; sourceLine = 0) =
+  ## Generic facade. `T` is `seq[string]` today and the static error
+  ## names the restriction rather than falling through to a scalar arm.
+  ##
+  ## A CONTRIBUTION POINT DECLARED WITHOUT A DEFAULT IS *NOT* REQUIRED,
+  ## and the `config:` lowering passes `@[]` for it. L5's rule -- "a key
+  ## with no default is REQUIRED" -- is right for a scalar and wrong
+  ## for a collection: "no relying parties have been contributed yet" is
+  ## a VALUE, not an absence, and raising `EDslPortUnsatisfiedRequired`
+  ## for it would make a contribution point unreadable until somebody
+  ## contributed, i.e. would make the owner's own `renderConfig` fail on
+  ## a workspace where no consumer is enabled.
+  when T is seq[string]:
+    recordContributionPointRaw(packageName & "." & name,
+      dslScalarSeqString(default), sourceFile, sourceLine)
+  else:
+    {.error: "recordContributionPoint: unsupported contribution-point " &
+       "type " & $T & "; L8 carries seq[string]".}
+
+proc contributionRowsEqual(a, b: ConfigContribution): bool =
+  a.key == b.key and a.package == b.package and
+    a.precedence == b.precedence and a.operation == b.operation and
+    a.sourceFile == b.sourceFile and a.sourceLine == b.sourceLine and
+    a.value.kind == b.value.kind and
+    a.value.seqStrVals == b.value.seqStrVals
+
+proc renderContributionSite*(c: ConfigContribution): string =
+  ## One contribution's site, for a diagnostic. Names the package as
+  ## well as the file, because "which package" is the fact an author
+  ## acts on and a path may not reveal it.
+  let where =
+    if c.sourceFile.len == 0: "<unknown site>"
+    else: c.sourceFile & ":" & $c.sourceLine
+  let who = if c.package.len == 0: "<the port>" else: c.package
+  who & " at " & where & " (" & $c.operation & ", " & $c.precedence & ")"
+
+proc renderDiscardedContribution*(d: DiscardedContribution): string =
+  ## §Resolution step 4's diagnostic, naming BOTH sites.
+  "contribution to `" & d.key & "` was DISCARDED: the " &
+    $d.discarded.operation & " contributed by " &
+    renderContributionSite(d.discarded) &
+    " is below the winning replace contributed by " &
+    renderContributionSite(d.supersededBy) &
+    ", so its members are not present. Raise the append to " &
+    $d.supersededBy.precedence &
+    " or stop replacing the collection."
+
+proc foldContributionRows*(key: string;
+                           rows: seq[ConfigContribution]): ContributionFold =
+  ## `Configurable-System.md` §Resolution, the four steps, in order,
+  ## over an EXPLICIT row set.
+  ##
+  ## WHY THIS IS THE ONE WITH THE ALGEBRA IN IT. D-SS11's cross-process
+  ## lane folds rows that were written by ANOTHER PROCESS and read back
+  ## from a store, so they are not in `dslPortContributions` and cannot
+  ## be. Folding them with a second implementation would mean two
+  ## answers to "which append wins" -- the drift this campaign has paid
+  ## for repeatedly -- so the registry-backed `foldContributionPoint`
+  ## below is now a one-line caller of this proc and both lanes resolve
+  ## by the same four steps.
+  ##
+  ## `key` is used only in diagnostics; the rows are the whole input.
+  # Step 1: R is the highest-priority `replace`.
+  var rIdx = -1
+  for i in 0 ..< rows.len:
+    if rows[i].operation == coReplace:
+      if rIdx < 0 or ord(rows[i].precedence) > ord(rows[rIdx].precedence):
+        rIdx = i
+  if rIdx < 0:
+    # Unreachable while `recordContributionPointRaw` seeds a default
+    # replace, and asserted rather than assumed: a contribution point
+    # with no replace at all would mean the seed row was removed, which
+    # `withdrawPackageContributions` is explicitly forbidden to do.
+    raise newException(EDslPortNotAContributionPoint,
+      "foldContributionPoint('" & key & "'): no `replace` contribution " &
+      "remains, not even the construction default -- the seed row was " &
+      "removed, which nothing is allowed to do")
+
+  # Step 1b: two DIFFERENT replaces tied at R's priority contradict.
+  for i in 0 ..< rows.len:
+    if i == rIdx: continue
+    if rows[i].operation != coReplace: continue
+    if rows[i].precedence != rows[rIdx].precedence: continue
+    if rows[i].value.seqStrVals == rows[rIdx].value.seqStrVals: continue
+    raise newException(EDslPortContradictoryReplace,
+      "two different `replace` contributions to `" & key &
+      "` at equal authority: " & renderContributionSite(rows[rIdx]) &
+      " claims " & $rows[rIdx].value.seqStrVals & " and " &
+      renderContributionSite(rows[i]) & " claims " &
+      $rows[i].value.seqStrVals & ". Two 'the value is exactly this' " &
+      "claims at one priority are a contradiction, not something to " &
+      "merge.")
+
+  # Step 2: the base value is R's.
+  result.members = rows[rIdx].value.seqStrVals
+  for _ in result.members:
+    result.memberPackages.add(rows[rIdx].package)
+
+  # Steps 3 and 4: every append at or above R's priority applies, in
+  # priority order and then contribution order; every append below R's
+  # is discarded WITH a diagnostic naming both sites.
+  for rung in ord(rows[rIdx].precedence) .. ord(high(EnvironmentPrecedence)):
+    for i in 0 ..< rows.len:
+      if rows[i].operation != coAppend: continue
+      if ord(rows[i].precedence) != rung: continue
+      for m in rows[i].value.seqStrVals:
+        result.members.add(m)
+        result.memberPackages.add(rows[i].package)
+  for i in 0 ..< rows.len:
+    if rows[i].operation != coAppend: continue
+    if ord(rows[i].precedence) >= ord(rows[rIdx].precedence): continue
+    result.discarded.add(DiscardedContribution(
+      key: key, discarded: rows[i], supersededBy: rows[rIdx]))
+
+proc foldContributionPoint*(key: string): ContributionFold =
+  ## `Configurable-System.md` §Resolution for a key this process's
+  ## registry holds. The four steps live in `foldContributionRows`; this
+  ## proc is the registry lookup and nothing else.
+  if key notin dslPortContributionPoints:
+    raise newException(EDslPortNotAContributionPoint,
+      "foldContributionPoint('" & key & "'): not a contribution point")
+  foldContributionRows(key, dslPortContributions.getOrDefault(key))
+
+proc configurableContributions*(key: string): seq[ConfigContribution] =
+  ## `Configurable-System.md`'s `c.contributions`: every contribution to
+  ## `key`, in contribution order, with its priority, operation, value
+  ## and provenance. A copy, so a caller cannot mutate the registry.
+  dslPortContributions.getOrDefault(key)
+
+proc contributionMemberAttribution*(key: string):
+                                    seq[tuple[member, package: string]] =
+  ## Every converged member paired with the package that contributed it.
+  ## §5's "Attribution" property, read off the fold.
+  let folded = foldContributionPoint(key)
+  for i in 0 ..< folded.members.len:
+    result.add((member: folded.members[i],
+                package: folded.memberPackages[i]))
+
+proc discardedContributions*(key: string): seq[DiscardedContribution] =
+  ## Every step-4 discard for `key`, recomputed from the current
+  ## contribution set. Recomputed rather than accumulated: a cached list
+  ## would still name a discard after the `replace` that caused it was
+  ## withdrawn.
+  foldContributionPoint(key).discarded
+
+proc allDiscardedContributions*(): seq[DiscardedContribution] =
+  ## Every step-4 discard across every contribution point, in
+  ## declaration order.
+  for key in dslPortContributionPointOrder:
+    for d in foldContributionPoint(key).discarded:
+      result.add(d)
+
+proc contributeConfigurableRaw*(key, package: string;
+                                precedence: EnvironmentPrecedence;
+                                operation: ContributionOperation;
+                                value: DslScalarValue;
+                                sourceFile = ""; sourceLine = 0) =
+  ## The ONE funnel every contribution goes through.
+  ##
+  ## IDEMPOTENT ON AN IDENTICAL ROW. A byte-identical contribution --
+  ## same key, package, priority, operation, value and site -- is a
+  ## replay and is dropped. This is what makes convergence idempotent
+  ## structurally rather than by a caller remembering to check:
+  ## `rerunServiceDeclarators` re-executes every service and activity
+  ## body during provider-graph emission, so every contribution in the
+  ## repository is made at least twice.
+  if key notin dslPortDefaults:
+    raise newException(EDslPortMissingKey,
+      "contributeConfigurable: no configurable registered for key '" &
+      key & "' -- declare it in a `config:` block first")
+  if operation == coAppend and key notin dslPortContributionPoints:
+    raise newException(EDslPortNotAContributionPoint,
+      "contributeConfigurable('" & key & "'): `append` is only " &
+      "available on an ordered-collection contribution point; `" & key &
+      "` is a " & $dslPortDefaults[key].kind & " scalar. A scalar's " &
+      "only operation is `replace` (Configurable-System.md " &
+      "§\"Operation is a SECOND axis\").")
+  let registered = dslPortDefaults[key]
+  if registered.kind != value.kind:
+    raise newException(EDslPortTypeMismatch,
+      "contributeConfigurable('" & key & "'): contribution kind " &
+      $value.kind & " does not match registered kind " &
+      $registered.kind)
+  let row = ConfigContribution(key: key, package: package,
+    precedence: precedence, operation: operation, value: value,
+    sourceFile: sourceFile, sourceLine: sourceLine)
+  var rows = dslPortContributions.getOrDefault(key)
+  if precedence == epForce and operation == coReplace:
+    for existing in rows:
+      if existing.precedence == epForce and existing.operation == coReplace:
+        if contributionRowsEqual(existing, row):
+          return
+        raise newException(EDslPortDuplicateForceReplace,
+          "`" & key & "` already has a `force` `replace` contributed " &
+          "by " & renderContributionSite(existing) & "; " &
+          renderContributionSite(row) & " is a second one. At most one " &
+          "`force` `replace` per configurable (Configurable-System.md " &
+          "§\"`prForce` is limited per operation\"). Several `force` " &
+          "`append` contributions are NOT a contradiction and are " &
+          "permitted.")
+  for existing in rows:
+    if contributionRowsEqual(existing, row):
+      return
+  rows.add(row)
+  dslPortContributions[key] = rows
+
+proc contributeConfigurable*[T](key, package: string;
+                                precedence: EnvironmentPrecedence;
+                                operation: ContributionOperation;
+                                value: T;
+                                sourceFile = ""; sourceLine = 0) =
+  ## Generic facade over `contributeConfigurableRaw`.
+  when T is seq[string]:
+    contributeConfigurableRaw(key, package, precedence, operation,
+      dslScalarSeqString(value), sourceFile, sourceLine)
+  elif T is string:
+    contributeConfigurableRaw(key, package, precedence, operation,
+      dslScalarString(value), sourceFile, sourceLine)
+  elif T is bool:
+    contributeConfigurableRaw(key, package, precedence, operation,
+      dslScalarBool(value), sourceFile, sourceLine)
+  elif T is SomeInteger:
+    contributeConfigurableRaw(key, package, precedence, operation,
+      dslScalarInt(int(value)), sourceFile, sourceLine)
+  else:
+    {.error: "contributeConfigurable: unsupported type " & $T.}
+
+proc withdrawPackageContributions*(package: string): int {.discardable.} =
+  ## Remove every contribution `package` made, and NOTHING else.
+  ##
+  ## §5's second attribution property: "a withdrawn dependency's members
+  ## can be identified for removal". A withdrawal that also dropped the
+  ## construction default would leave the point unresolvable, so the
+  ## seed row -- `package == ""` at `epDefault` -- is explicitly held:
+  ## `withdrawPackageContributions("")` removes no seed, and the fold's
+  ## "no replace remains" refusal is the control that says so.
+  ##
+  ## Returns the number of rows removed, so a caller can tell "withdrew
+  ## nothing" from "withdrew everything" rather than guessing.
+  for key in dslPortContributionPointOrder:
+    var kept: seq[ConfigContribution] = @[]
+    for row in dslPortContributions.getOrDefault(key):
+      if row.package == package and
+         not (row.package.len == 0 and row.precedence == epDefault and
+              row.operation == coReplace):
+        inc result
+      else:
+        kept.add(row)
+    dslPortContributions[key] = kept
+
+proc l8ContributionMembers*(v: string): seq[string] =
+  ## One member, written as a bare string at the contribution site.
+  ## Shared-Development-Services L8: both `x = "a"` and `x = @["a","b"]`
+  ## are authorable, and the two overloads are what makes the single
+  ## emitted call shape carry either without the macro having to decide
+  ## the author's type.
+  @[v]
+
+proc l8ContributionMembers*(v: seq[string]): seq[string] =
+  ## Several members, written as a seq literal at the contribution site.
+  v
+
+proc contributeMembers*(key, package: string;
+                        precedence: EnvironmentPrecedence;
+                        operation: ContributionOperation;
+                        members: seq[string];
+                        sourceFile = ""; sourceLine = 0) =
+  ## The call the `contribute:` lowering emits, one per contribution.
+  contributeConfigurableRaw(key, package, precedence, operation,
+    dslScalarSeqString(members), sourceFile, sourceLine)
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services D-SS11 (§4.6) — the RESOLVER's runtime
+# record, and the CROSS-PROCESS contribution lane's consumer end.
+#
+# §4.6 decides three things together, and this is the third: "the
+# consumer's contributions are **arguments of the resolver call**,
+# carried on the interface the owner already lifts, and applied by the
+# owner's instance when it converges."
+#
+# WHY A REGISTRY HERE AND NOT A CONTRIBUTION. `contributeMembers` is the
+# INTRA-PROCESS lane: it writes into `dslPortContributions`, which is a
+# table of this process, folded by this process's `mergeTypedServiceFacts`
+# for services this process declares. A consumer does not declare the
+# owner's service, so there is no fold here for its members to land in,
+# and writing them into `dslPortContributions` would be precisely the
+# "declared, looks wired, does nothing" defect L9's F2 measured: in the
+# consumer's process the fold would show the member and the owner's
+# instance would never see it.
+#
+# So a resolver records a RESOLUTION instead. The resolution travels on
+# the consumer's dev-env artifact to the consumer's `repro up`, which
+# attaches to the instance and deposits the contributions in the
+# instance's own identity-keyed store, where the OWNER's converge reads
+# them. Every step of that is a different process reading a file the
+# previous one wrote, which is what makes the lane cross-process rather
+# than a second name for the intra-process one.
+# ---------------------------------------------------------------------------
+
+type
+  EDslPortSharedServiceRefusal* = object of CatchableError
+    ## Every refusal of this surface. A resolver that cannot be honoured
+    ## raises; none of them returns a handle that does nothing.
+
+var dslPortSharedResolutions: seq[SharedServiceResolution]
+  ## Every resolver call this evaluation made, in call order.
+
+var dslPortResolverPackages: seq[string]
+  ## The stack of packages whose dev-env bodies are being lowered. A
+  ## STACK and not a scalar because one process lowers several packages
+  ## (a sibling `include` shim expands two `package` blocks), and a
+  ## scalar would leave the second attributing its resolvers to the
+  ## first after the first's `finally` cleared it.
+
+proc beginResolverPackage*(packageName: string) =
+  ## Enter `packageName`'s dev-env lowering. Emitted by the `package`
+  ## macro around the generated `devEnv<Pkg>Package()` body.
+  dslPortResolverPackages.add(packageName)
+
+proc endResolverPackage*() =
+  ## Leave it. Emitted in a `finally`, so a body that raises does not
+  ## leak the ambient into whatever is lowered next.
+  if dslPortResolverPackages.len > 0:
+    dslPortResolverPackages.setLen(dslPortResolverPackages.len - 1)
+
+proc currentResolverPackage*(): string =
+  ## The package a resolver call is being evaluated for, or "" outside
+  ## any dev-env lowering. `resolveSharedService` REFUSES the empty
+  ## case rather than recording an unattributed contribution.
+  if dslPortResolverPackages.len == 0: ""
+  else: dslPortResolverPackages[^1]
+
+proc resetSharedServiceResolutions*() =
+  ## Drop every recorded resolution. Called by the port's own reset
+  ## between test cases, and by nothing in a recipe.
+  dslPortSharedResolutions.setLen(0)
+  dslPortResolverPackages.setLen(0)
+
+proc registeredSharedServiceResolutions*(): seq[SharedServiceResolution] =
+  ## The resolutions recorded so far, in call order.
+  dslPortSharedResolutions
+
+proc sharedResolutionsEqual(a, b: SharedServiceResolution): bool =
+  ## Whether two resolutions are the SAME call, site included. Used only
+  ## to drop a replay; a difference in anything is a real second
+  ## resolver and is refused rather than merged.
+  if a.declaration != b.declaration: return false
+  if a.consumerPackage != b.consumerPackage: return false
+  if a.sourceFile != b.sourceFile or a.sourceLine != b.sourceLine:
+    return false
+  if a.contributions.len != b.contributions.len: return false
+  for i in 0 ..< a.contributions.len:
+    if a.contributions[i] != b.contributions[i]: return false
+  return true
+
+proc renderSharedResolutionSite(r: SharedServiceResolution): string =
+  if r.sourceFile.len == 0: "<unknown site>"
+  else: r.sourceFile & ":" & $r.sourceLine
+
+proc resolveSharedService*[T](declaration: SharedServiceDeclarationDef;
+                              consumerPackage: string;
+                              contributions: seq[SharedContributionDef];
+                              sourceFile = ""; sourceLine = 0):
+    SharedServiceHandle[T] =
+  ## THE RESOLVER. `<package>.<service>.shared(...)` lowers to this.
+  ##
+  ## It records the resolution and returns a handle. It does NOT contact
+  ## the daemon, take a lease or compare a fingerprint: evaluation
+  ## happens while the dev-env artifact is being produced, before any
+  ## instance exists to decide against. §4.6's "the resolver is where
+  ## the machinery of §4 is triggered" is honoured by the resolution
+  ## travelling to `repro up`, which resolves `(identity, scope,
+  ## environment)`, takes the lease and runs §4.3's attach decision AT
+  ## THIS CALL SITE -- the site is carried in the record so the
+  ## diagnostic lands on the consumer's own line, which is the property
+  ## §4.6 asks for ("a fingerprint mismatch warns *here*, at a named
+  ## call site in the consumer's recipe").
+  ##
+  ## FOUR REFUSALS, NONE OF THEM A DROP:
+  ##   1. a declaration with no owner package or no service name -- a
+  ##      const that was not produced by the lift;
+  ##   2. a contribution naming a point the DECLARATION does not carry
+  ##      (the resolver macro refuses this at compile time; this is the
+  ##      same check for a direct caller, because a public proc that
+  ##      trusted its arguments would make the macro's check the only
+  ##      one and a library caller's mistake silent);
+  ##   3. a `replace` operation -- §5.1 / D-SS9;
+  ##   4. a SECOND resolver for one service in one consumer package.
+  ##      Two resolvers would take two leases and deposit two
+  ##      contribution sets for one key, and the second write would have
+  ##      to either lose or duplicate the first. A byte-identical replay
+  ##      is not a second resolver and is dropped silently, because
+  ##      module init replays (`rerunServiceDeclarators`).
+  if consumerPackage.len == 0:
+    raise newException(EDslPortSharedServiceRefusal,
+      "shared(" & declaration.ownerPackage & "." &
+      declaration.serviceName & "): no CONSUMING package is in scope, " &
+      "so this resolution could not be attributed to one. A resolver " &
+      "belongs at an `enable <activity>(...)` call inside a " &
+      "`devEnv:` block of a `package` body " &
+      "(Shared-Development-Services.md §4.6: \"In the consuming " &
+      "project's own recipe, at its `enable <activity>(...)` call\"), " &
+      "which is the scope that names the contributor. An " &
+      "unattributed contribution is refused rather than recorded: §5 " &
+      "requires every converged member to name the package that " &
+      "contributed it, and a blank contributor can never be withdrawn.")
+  if declaration.ownerPackage.len == 0 or declaration.serviceName.len == 0:
+    raise newException(EDslPortSharedServiceRefusal,
+      "shared(): the declaration record names no owner package or no " &
+      "service (" & declaration.ownerPackage & "." &
+      declaration.serviceName & "). A resolver is spelled against a " &
+      "declaration the OWNER's interface lift produced; a hand-built " &
+      "one is refused rather than resolved against a default key.")
+  for c in contributions:
+    if c.point.len == 0:
+      raise newException(EDslPortSharedServiceRefusal,
+        "shared(" & declaration.ownerPackage & "." &
+        declaration.serviceName & "): a contribution names no point. " &
+        "An unnamed contribution cannot be matched against a declared " &
+        "point, so it is refused rather than carried to an instance " &
+        "that would ignore it.")
+    if c.operation != coAppend:
+      # STAGE 2 of §5.1's three refusals, and it is NOT redundant with
+      # the macro's: this runs on a `SharedServiceResolution` VALUE, so
+      # it is what refuses a resolution the resolver macro did not write.
+      # The judgement is the shared one; the subject and the stage note
+      # are local.
+      raise newException(EDslPortSharedServiceRefusal,
+        "shared(" & declaration.ownerPackage & "." &
+        declaration.serviceName & "): `" & c.point & "` is contributed " &
+        "with `" & $c.operation & "`. " & sharedServiceReplaceRefusal() &
+        " Refused at EVALUATION, where the resolution record is read " &
+        "rather than written, so a resolution the resolver macro did " &
+        "not produce is refused too.")
+    if not declaration.contributionPoints.contains(c.point):
+      raise newException(EDslPortSharedServiceRefusal,
+        "shared(" & declaration.ownerPackage & "." &
+        declaration.serviceName & "): service `" &
+        declaration.serviceName & "` of package `" &
+        declaration.ownerPackage & "` declares no contribution point " &
+        "`" & c.point & "`. It converges " &
+        (if declaration.contributionPoints.len == 0: "no points at all"
+         else: "`" & declaration.contributionPoints.join("`, `") & "`") &
+        ". Shared-Development-Services.md §4.6: a contribution to a " &
+        "point the instance does not declare is REFUSED, never dropped.")
+  let row = SharedServiceResolution(
+    declaration: declaration, consumerPackage: consumerPackage,
+    contributions: contributions,
+    sourceFile: sourceFile, sourceLine: sourceLine)
+  for existing in dslPortSharedResolutions:
+    if existing.declaration.ownerPackage != declaration.ownerPackage or
+       existing.declaration.serviceName != declaration.serviceName or
+       existing.consumerPackage != consumerPackage:
+      continue
+    if sharedResolutionsEqual(existing, row):
+      return SharedServiceHandle[T](
+        ownerPackage: declaration.ownerPackage,
+        serviceName: declaration.serviceName,
+        activityName: declaration.activityName,
+        consumerPackage: consumerPackage,
+        sourceFile: sourceFile, sourceLine: sourceLine)
+    raise newException(EDslPortSharedServiceRefusal,
+      "package `" & consumerPackage & "` resolves `" &
+      declaration.ownerPackage & "." & declaration.serviceName &
+      "` twice: " & renderSharedResolutionSite(existing) & " and " &
+      (if sourceFile.len == 0: "<unknown site>"
+       else: sourceFile & ":" & $sourceLine) &
+      ". One consumer takes ONE lease on one instance and deposits ONE " &
+      "contribution set for it, so a second resolver would have to " &
+      "either lose or duplicate the first's contributions. Resolve " &
+      "once and pass the handle to every activity that needs it.")
+  dslPortSharedResolutions.add(row)
+  SharedServiceHandle[T](
+    ownerPackage: declaration.ownerPackage,
+    serviceName: declaration.serviceName,
+    activityName: declaration.activityName,
+    consumerPackage: consumerPackage,
+    sourceFile: sourceFile, sourceLine: sourceLine)
+
+proc sharedContribution*(point: string; members: seq[string];
+                         precedence = epSet;
+                         operation = coAppend;
+                         sourceFile = ""; sourceLine = 0):
+    SharedContributionDef =
+  ## One contribution, as the resolver macro builds it.
+  SharedContributionDef(point: point, operation: operation,
+    precedence: precedence, members: members,
+    sourceFile: sourceFile, sourceLine: sourceLine)
+
+proc contributionRowsOfResolution*(r: SharedServiceResolution;
+                                   resolveKey: proc (point: string): string):
+    seq[ConfigContribution] =
+  ## Project one resolution's contributions onto the SAME row type the
+  ## intra-process lane folds (`ConfigContribution`), so the
+  ## cross-process fold is `foldContributionRows` and not a second
+  ## algebra. `resolveKey` maps a bare point name to the owner's
+  ## fully-qualified configurable key; the caller supplies it because
+  ## only the owner knows its own activity name.
+  for c in r.contributions:
+    result.add(ConfigContribution(
+      key: resolveKey(c.point), package: r.consumerPackage,
+      precedence: c.precedence, operation: c.operation,
+      value: dslScalarSeqString(c.members),
+      sourceFile: c.sourceFile, sourceLine: c.sourceLine))
+
+proc contributionSnapshot*(): Table[string, seq[ConfigContribution]] =
+  ## A copy of the contribution registry, for a caller that must apply a
+  ## GROUP of contributions all-or-nothing -- the same contract
+  ## `configurableOverrideSnapshot` has, and needed for the same reason:
+  ## `applyEnvironment` binds several configurables in sequence and one
+  ## of them may be a contribution point, so a partial apply has to be
+  ## undoable on both registries or neither.
+  dslPortContributions
+
+proc restoreContributions*(snapshot: Table[string, seq[ConfigContribution]]) =
+  ## Replace the contribution registry with `snapshot`.
+  dslPortContributions = snapshot
+
 proc dslPortLookup(key: string): DslScalarValue =
   ## Internal: consult overrides first, then defaults. Raises
   ## ``EDslPortMissingKey`` when neither table knows the key.
+  ##
+  ## A CONTRIBUTION POINT IS RESOLVED BY THE FOLD AND NOTHING ELSE
+  ## (Shared-Development-Services L8). It is checked FIRST, before the
+  ## override table, because a `setConfigurable` against such a key is
+  ## routed into the contribution registry as a `coReplace` at
+  ## `epOverride` -- so if the override row were consulted first it
+  ## would shadow the ladder the fold exists to enforce, and an
+  ## `epForce` append would silently lose to an `epOverride` replace.
+  if key in dslPortContributionPoints:
+    return dslScalarSeqString(foldContributionPoint(key).members)
   if key in dslPortOverrides:
     return dslPortOverrides[key]
+  if key in dslPortRequired:
+    # A REQUIRED key with no contribution. The row in
+    # ``dslPortDefaults`` is a SHAPE (the type's zero), kept only so
+    # ``setConfigurableRaw``'s kind check can accept a binding; it is
+    # not a value and must never be handed back as one. Returning the
+    # zero here is the whole failure Shared-Development-Services L5
+    # guards against: an empty external domain reads as a hostname
+    # nobody chose. The precise, routed diagnostic is
+    # ``requiredConfigurableValue``'s -- this is the funnel every other
+    # reader goes through, so nothing can reach the seed by a different
+    # door.
+    raise newException(EDslPortUnsatisfiedRequired,
+      "readConfigurable: `" & key & "` is a REQUIRED configurable -- " &
+      "declared in a `config:` block with no default, so its slot has " &
+      "no seed -- and nothing has satisfied it. Bind it in an " &
+      "`environment` block (Shared-Development-Services.md §6) or pass " &
+      "it at the `enable <activity>(...)` site.")
   if key in dslPortDefaults:
     return dslPortDefaults[key]
   raise newException(EDslPortMissingKey,
@@ -304,7 +1215,13 @@ proc readConfigurable*[T](key: string): T =
   ## ``setConfigurable`` has stashed one, otherwise the registered
   ## default. Raises ``EDslPortMissingKey`` when the key is unknown;
   ## raises ``EDslPortTypeMismatch`` when ``T`` does not match the
-  ## stored kind.
+  ## stored kind; raises ``EDslPortUnsatisfiedRequired`` when the key is
+  ## REQUIRED (Shared-Development-Services L5, §6: declared in a
+  ## ``config:`` block with no default) and nothing has satisfied it.
+  ## That last one is ``dslPortLookup``'s, so it is raised before any
+  ## kind check: the row behind a required key is the type's zero kept
+  ## as a SHAPE for ``setConfigurableRaw``, and handing it back would be
+  ## the silent substitution L5 exists to stop.
   let stored = dslPortLookup(key)
   when T is bool:
     if stored.kind != dskBool:
@@ -341,9 +1258,20 @@ proc readConfigurable*[T](key: string): T =
         "'): stored enum type " & stored.enumTypeName &
         " does not match requested " & $T)
     return T(stored.enumOrd)
+  elif T is seq[string]:
+    # Shared-Development-Services L8: the ordered-collection arm. For a
+    # CONTRIBUTION POINT the value `dslPortLookup` returned is already
+    # the fold's result, so this reader never sees an unresolved
+    # collection and never has to know about the ladder.
+    if stored.kind != dskSeqString:
+      raise newException(EDslPortTypeMismatch,
+        "readConfigurable[seq[string]]('" & key & "'): stored kind is " &
+        $stored.kind & ", not dskSeqString")
+    return stored.seqStrVals
   else:
     {.error: "readConfigurable: unsupported type " & $T &
-       "; M2/M9.D supports bool / int / string / float / enum / seq[enum]".}
+       "; M2/M9.D supports bool / int / string / float / enum / " &
+       "seq[enum]; L8 adds seq[string]".}
 
 proc readConfigurable*[E: enum](key: string; fallback: seq[E]): seq[E] =
   ## M9.D ``seq[Enum]`` reader with graceful fallback. Returns the
@@ -355,6 +1283,17 @@ proc readConfigurable*[E: enum](key: string; fallback: seq[E]): seq[E] =
   ## contract — the key-only overload would raise, which is the wrong
   ## shape for fixture / multi-recipe code paths that probe several
   ## possible types.
+  ##
+  ## IT DOES RAISE FOR ONE CASE, and that case is deliberate: a
+  ## REQUIRED configurable nothing has satisfied
+  ## (``EDslPortUnsatisfiedRequired``, Shared-Development-Services L5
+  ## §6). ``seq[Enum]`` is in ``recordConfigRequired``'s type set, so
+  ## this overload can meet one. The ``except`` below catches
+  ## ``EDslPortMissingKey`` ONLY, and
+  ## ``EDslPortUnsatisfiedRequired`` is deliberately not a subtype of
+  ## it, so the exception propagates rather than being answered with
+  ## ``fallback`` — answering with a fallback is exactly the silent
+  ## substitution that exception exists to prevent.
   try:
     let stored = dslPortLookup(key)
     if stored.kind != dskSeqEnum:
@@ -371,9 +1310,29 @@ proc readConfigurable*[T](key: string; fallback: T): T =
   ## M9.D fallback-flavoured reader for scalar configurables. Returns
   ## the registered value when the key exists AND the stored kind
   ## matches AND (for enums) the stored type name matches ``$T``;
-  ## otherwise returns ``fallback``. Never raises — callers use this
-  ## overload when the spec calls for graceful degradation rather than
-  ## a hard type-mismatch error.
+  ## otherwise returns ``fallback``. Callers use this overload when the
+  ## spec calls for graceful degradation rather than a hard
+  ## type-mismatch error.
+  ##
+  ## RAISES ``EDslPortUnsatisfiedRequired`` FOR EXACTLY ONE CASE: a
+  ## REQUIRED configurable -- declared in a ``config:`` block with no
+  ## default, so its slot has no seed -- that nothing has satisfied
+  ## (Shared-Development-Services L5, §6). An unknown key is still
+  ## answered with ``fallback``; the ``except`` below catches
+  ## ``EDslPortMissingKey`` ONLY, and ``EDslPortUnsatisfiedRequired``
+  ## is deliberately not a subtype of it.
+  ##
+  ## THIS COMMENT SAID "Never raises" UNTIL L5's required-configurable
+  ## work, and the exception is the point rather than an oversight:
+  ## answering a required key with a fallback would substitute a value
+  ## nobody wrote for the one the author was told to supply, which is
+  ## the failure §6 names. Asserted by a test rather than left to this
+  ## comment -- ``libs/repro_project_dsl/tests/
+  ## t_l5_environment_reaches_the_service_argv.nim``, case "the seed is
+  ## a SHAPE and not a value: reading the slot directly refuses too",
+  ## which expects the raise from THIS overload and carries the control
+  ## that the same read succeeds once the environment has satisfied the
+  ## key.
   try:
     let stored = dslPortLookup(key)
     when T is bool:
@@ -392,16 +1351,24 @@ proc readConfigurable*[T](key: string; fallback: T): T =
       if stored.kind != dskEnum: return fallback
       if stored.enumTypeName != $T: return fallback
       return T(stored.enumOrd)
+    elif T is seq[string]:
+      if stored.kind != dskSeqString: return fallback
+      return stored.seqStrVals
     else:
       {.error: "readConfigurable: unsupported type " & $T &
-         "; M2/M9.D supports bool / int / string / float / enum / seq[enum]".}
+         "; M2/M9.D supports bool / int / string / float / enum / " &
+         "seq[enum]; L8 adds seq[string]".}
   except EDslPortMissingKey:
     return fallback
 
 proc inspectConfigurable*(key: string): DslScalarValue =
   ## M9.D test-side accessor: return the raw stored ``DslScalarValue``
   ## at ``key`` (override-preferred, defaults fallback), or raise
-  ## ``EDslPortMissingKey`` when the key is unknown. Tests use this to
+  ## ``EDslPortMissingKey`` when the key is unknown -- or
+  ## ``EDslPortUnsatisfiedRequired`` when the key is REQUIRED and
+  ## nothing has satisfied it, because the row behind such a key is the
+  ## type's zero kept as a SHAPE and this accessor must not be the door
+  ## it leaks out of (Shared-Development-Services L5, §6). Tests use this to
   ## verify the captured ``enumTypeName`` / ``enumValueName`` /
   ## ``seqEnumTypeName`` round-trip the macro-emitted ``$T`` / ``$value``
   ## strings byte-for-byte.
@@ -419,6 +1386,36 @@ proc setConfigurableRaw*(key: string; value: DslScalarValue) =
     raise newException(EDslPortTypeMismatch,
       "setConfigurable('" & key & "'): override kind " & $value.kind &
       " does not match registered kind " & $registered.kind)
+  if key in dslPortContributionPoints:
+    # Shared-Development-Services L8. The L5 section below predicted
+    # exactly this: "An environment binding is a `replace` at
+    # `epOverride` in the terms L8 will introduce". `setConfigurable` is
+    # the route an `environment` binding takes, so it lands as one --
+    # and nothing in the environment lane had to change to make that
+    # true.
+    #
+    # IT OVERWRITES RATHER THAN APPENDING A ROW, which is what keeps it
+    # equivalent to the `dslPortOverrides[key] = value` it replaces:
+    # applying environment `dev` and then environment `production` to
+    # the same key must leave the second's value in force, not two
+    # contradictory `replace` claims at one priority (which the fold
+    # would correctly refuse). One row per (key, `""` package,
+    # `epOverride`, `coReplace`), overwritten in place.
+    var rows = dslPortContributions.getOrDefault(key)
+    let row = ConfigContribution(key: key, package: "",
+      precedence: epOverride, operation: coReplace, value: value,
+      sourceFile: "", sourceLine: 0)
+    var replaced = false
+    for i in 0 ..< rows.len:
+      if rows[i].package.len == 0 and rows[i].precedence == epOverride and
+         rows[i].operation == coReplace:
+        rows[i] = row
+        replaced = true
+        break
+    if not replaced:
+      rows.add(row)
+    dslPortContributions[key] = rows
+    return
   dslPortOverrides[key] = value
 
 proc setConfigurable*[T](key: string; value: T) =
@@ -442,6 +1439,11 @@ proc setConfigurable*[T](key: string; value: T) =
       for e in value:
         pairs.add((e.ord, $e))
       setConfigurableRaw(key, dslScalarSeqEnum($Elem, pairs))
+    elif Elem is string:
+      # Shared-Development-Services L8: a `replace` of an
+      # ordered-collection contribution point. This is the route an
+      # `environment` binding to such a point takes.
+      setConfigurableRaw(key, dslScalarSeqString(value))
     else:
       {.error: "setConfigurable: unsupported type " & $T &
          "; M9.D seq support is restricted to seq[Enum]".}
@@ -455,10 +1457,32 @@ proc resetConfigurable*(key: string) =
   ## pending; the key must still be registered (we surface
   ## ``EDslPortMissingKey`` for typos so test fixtures don't silently
   ## reset the wrong slot).
+  ##
+  ## FOR A REQUIRED KEY THERE IS NO DEFAULT TO RETURN TO. Clearing the
+  ## override of a key declared with no default puts it back to
+  ## UNSATISFIED, and the next read raises
+  ## ``EDslPortUnsatisfiedRequired`` rather than returning anything
+  ## (Shared-Development-Services L5, §6). That is the intended
+  ## behaviour -- the row left behind is the type's zero kept as a
+  ## SHAPE for ``setConfigurableRaw``'s kind check -- and it is how a
+  ## test fixture resets between environments.
   if key notin dslPortDefaults:
     raise newException(EDslPortMissingKey,
       "resetConfigurable: no configurable registered for key '" & key &
       "'")
+  if key in dslPortContributionPoints:
+    # Shared-Development-Services L8: drop the row `setConfigurable`
+    # owns, and ONLY that row. A reset is the inverse of a `set`, so it
+    # must not take a consumer's `coAppend` contributions with it -- that
+    # is `withdrawPackageContributions`'s job and it is keyed by package.
+    var kept: seq[ConfigContribution] = @[]
+    for row in dslPortContributions.getOrDefault(key):
+      if row.package.len == 0 and row.precedence == epOverride and
+         row.operation == coReplace:
+        continue
+      kept.add(row)
+    dslPortContributions[key] = kept
+    return
   if key in dslPortOverrides:
     dslPortOverrides.del(key)
 
@@ -1291,6 +2315,99 @@ type
       ## setters out of this string OR re-walk the partitioned section
       ## list. Same model M3/M4 use for their ``bodyRepr`` captures.
     # ---------------------------------------------------------------
+    # Shared-Development-Services L1 — the TYPED service record.
+    #
+    # ``Shared-Development-Services.md`` §1 states the defect these
+    # fields close: "A dev-env service is declared with
+    # `servicePlaceholder(name, metadata, activities)` — a name, an
+    # activity list and an **opaque metadata string** the engine
+    # interprets. There is no composition, no typed reference".
+    #
+    # ``executableRef`` / ``args`` above stay byte-identical (they are
+    # the M5 acceptance surface); the fields below carry what a string
+    # cannot: WHICH EDGE produces each path. ``servicePayload`` encodes
+    # them into the ``gnkService`` graph node and
+    # ``buildPackageFragment`` emits one ``gekDependsOn`` /
+    # ``gekConsumes`` edge per producer.
+    # ---------------------------------------------------------------
+    executableTyped*: ServiceExecutableRef
+      ## The typed ``executable <expr>`` edge. ``sxkUnset`` when the
+      ## body has no ``executable`` setter.
+    typedArgs*: seq[ServiceArgDef]
+      ## ``args`` in declaration order, each tagged literal or
+      ## build-output. The parallel ``args*: seq[string]`` field holds
+      ## the same tokens' values, so an M5-era reader is unaffected.
+    runtimeFiles*: seq[ServiceRuntimeFileDef]
+      ## ``runtimeFile <buildOutput>`` setters, in declaration order.
+    triggers*: seq[ServiceTriggerDef]
+      ## ``on <trigger>:`` blocks and the short-form atoms
+      ## (``hotReload`` / ``restartOnCrash`` / ``reloadOnChange``), in
+      ## declaration order.
+    # ---------------------------------------------------------------
+    # Shared-Development-Services L4 — INSTANCE IDENTITY AND SCOPE.
+    #
+    # ``Shared-Development-Services.md`` §4: "Two fields answer it, and
+    # they are **orthogonal**. Conflating them is the mistake this
+    # section is written to prevent. Identity answers *are these the
+    # same instance?* Scope answers *how widely is one instance
+    # shared?*"
+    #
+    # Both are ground-state-zero (``sikDerived`` / ``sscProject``), so a
+    # record that never saw the setters -- every pre-L4 recipe, and the
+    # legacy positional ``registerService`` -- carries the DEFAULT, which
+    # is also "today's only behaviour". There is no third "unset" state,
+    # deliberately: §4.1 and §4.2 both name a default, so an unset value
+    # would be a state the spec does not have.
+    # ---------------------------------------------------------------
+    identity*: ServiceIdentityDef
+      ## ``identity derived`` (the default) or ``identity stable
+      ## "<id>"``.
+    scope*: ServiceScope
+      ## ``scope project`` (the default) | ``workspace`` | ``user`` |
+      ## ``system``.
+    convergePoints*: seq[string]
+      ## Shared-Development-Services L8: the BARE names of the
+      ## contribution points this service converges when its instance
+      ## answers -- `converge relyingParties, fixtureUsers`.
+      ##
+      ## BARE, not fully qualified, and resolved later. The service
+      ## emitter is shared by the package-level walker and the dev-env
+      ## `activity` walker (L2 extracted it precisely so the two cannot
+      ## drift), and only the second knows an activity name -- so
+      ## qualifying here would mean either threading the activity name
+      ## through the shared emitter or writing a second emitter. The
+      ## resolution is `resolveServiceConvergePoint`, which searches the
+      ## package's registered contribution points and REFUSES an
+      ## ambiguous or unknown name by name.
+    # ---------------------------------------------------------------
+    # Shared-Development-Services L9 — THE SUPERVISION FACTS, which
+    # until now existed only inside a `servicePlaceholder`'s opaque
+    # JSON metadata.
+    #
+    # L8's review recorded the remainder and L9's gate carries it: "the
+    # `instance` block and `readiness` still require a
+    # `servicePlaceholder`, so `declared once` is only PARTLY
+    # unblocked." These four fields are the rest of that channel. With
+    # them a shared service is declarable in ONE place -- the typed
+    # `service` block -- and `infra/repro.nim`'s `servicePlaceholder`
+    # goes away rather than being kept beside the typed block for the
+    # two facts it alone could carry.
+    # ---------------------------------------------------------------
+    readiness*: ServiceReadinessDef
+      ## `readiness none` | `fileExists(...)` | `httpGet(...)`.
+      ## `srkUnset` when the body declared none.
+    workingDirectory*: string
+      ## `workingDirectory "<dir>"` -- the placeholder's `cwd`. Empty
+      ## when undeclared, which the supervisor reads as the project
+      ## root.
+    stateDirectories*: seq[string]
+      ## `stateDirectory "<dir>"`, repeating -- the placeholder's
+      ## `resources: [{"kind": "directory", ...}]`. In declaration
+      ## order.
+    instance*: ServiceInstanceDef
+      ## `instance:` block. `declared == false` for a session-owned
+      ## service.
+    # ---------------------------------------------------------------
     # M9.C — systemd-unit metadata extensions.
     #
     # The M9 NDE-package discovery survey flagged that systemd-unit
@@ -1344,6 +2461,39 @@ type
       ## ``group "..."`` — run-as group. Empty when the body lacked
       ## the setter.
 
+  ServiceArgTemplateItemKind* = enum
+    ## Shared-Development-Services, reprobuild issue #498 — what ONE
+    ## `args` token on a service's command line is derived FROM.
+    satkLiteral
+      ## A token whose text was known when the body ran: a string
+      ## literal, a build output's path, an interpolated expression.
+    satkContributionPoint
+      ## `args <contributionPoint>`. NOT a token but a HOLE: the
+      ## point's folded members go here, one token each, and the fold
+      ## is performed at FINALIZATION rather than when the body ran.
+
+  ServiceArgTemplateItem* = object
+    ## One slot in a service's argv template.
+    ##
+    ## WHY A TEMPLATE AND NOT A LIST OF STRINGS. #498: `args <point>`
+    ## resolved EAGERLY — Nim evaluates the argument before `args` is
+    ## called, so the point was folded while the activity's body ran and
+    ## the strings were copied into the frame, where nothing re-read
+    ## them. A contribution made by a LATER activity's body therefore
+    ## reached `registrationMembers` (folded late, by
+    ## `mergeTypedServiceFacts`) and never reached argv, and the same
+    ## artifact stated two different member sets for one point. The
+    ## template keeps the HOLE open so the fold can happen once, after
+    ## every body has run — which is the staging
+    ## `Shared-Development-Services.md` §7 already specifies
+    ## (instantiation -> resolution -> finalization -> materialization)
+    ## and which the eager fold was violating.
+    case kind*: ServiceArgTemplateItemKind
+    of satkLiteral:
+      arg*: ServiceArgDef
+    of satkContributionPoint:
+      pointKey*: string
+
   DslServiceContextFrame = object
     ## One frame on the active-service stack. Pushed by
     ## ``beginServiceContext``, popped by ``finishServiceContext``.
@@ -1367,6 +2517,44 @@ type
     restart: string
     user: string
     group: string
+    # Shared-Development-Services L1 — typed edges; see DslServiceDef.
+    executableTyped: ServiceExecutableRef
+    typedArgs: seq[ServiceArgDef]
+    runtimeFiles: seq[ServiceRuntimeFileDef]
+    triggers: seq[ServiceTriggerDef]
+    openTrigger: ServiceTriggerDef
+    triggerOpen: bool
+    # Shared-Development-Services L4 — see DslServiceDef.
+    identity: ServiceIdentityDef
+    scope: ServiceScope
+    convergePoints: seq[string]
+      ## Shared-Development-Services L8: the bare `converge <point>`
+      ## names collected by `addActiveServiceConvergePoint`.
+    argTemplate: seq[ServiceArgTemplateItem]
+      ## Shared-Development-Services #498: the argv template, parallel
+      ## to `args` / `typedArgs` except that a contribution point
+      ## occupies ONE slot here and as many tokens as it has members
+      ## there. Kept on the frame rather than derived afterwards
+      ## because only the body knows which token came from which
+      ## point.
+    identityDeclared: bool
+      ## Whether this body already ran an ``identity`` setter. The macro
+      ## refuses a second one at expansion time, so this is the runtime
+      ## half of the same guard: a body reaching the setter twice through
+      ## some other route must not have the first declaration silently
+      ## replaced.
+    scopeDeclared: bool
+    # Shared-Development-Services L9 — see DslServiceDef.
+    readiness: ServiceReadinessDef
+    workingDirectory: string
+    stateDirectories: seq[string]
+    instance: ServiceInstanceDef
+    readinessDeclared: bool
+      ## First-wins, for ``identityDeclared``'s reason: a second
+      ## ``readiness`` would decide, by statement order, whether a
+      ## consumer that ``dependsOn`` this service starts against a
+      ## seeded instance or a merely listening one.
+    workingDirectoryDeclared: bool
 
 var dslPortServiceRegistry: Table[string, seq[DslServiceDef]]
   ## Per-package service registry. Keyed by package name.
@@ -1374,11 +2562,99 @@ var dslPortServiceRegistry: Table[string, seq[DslServiceDef]]
   ## ``registeredServices`` returns a copy so callers cannot mutate
   ## the registry from outside the public API.
 
+var dslPortServiceArgTemplates:
+    Table[string, seq[seq[ServiceArgTemplateItem]]]
+  ## Shared-Development-Services #498 — the argv TEMPLATE of each row in
+  ## `dslPortServiceRegistry`, index for index.
+  ##
+  ## A PARALLEL TABLE AND NOT A FIELD ON `DslServiceDef`, which would be
+  ## the obvious shape. `DslServiceDef` crosses a positional codec
+  ## (`dslServiceDefPayload` / its reader) and reaches the interface
+  ## lift; a template is PROCESS-LOCAL scaffolding that exists between a
+  ## body running and the package's dev-env being finalised, and nothing
+  ## outside this process has any use for it. Putting it on the record
+  ## would have versioned the wire for a value no reader wants.
+  ##
+  ## Index alignment is maintained by appending here in
+  ## `registerServiceRecord` — the registry's ONE append site — so a row
+  ## registered through the positional `registerService` path gets an
+  ## empty template rather than shifting its neighbours' by one.
+
 var dslPortActiveServiceContext {.threadvar.}:
     seq[DslServiceContextFrame]
   ## Active-service stack. ``threadvar`` so test fixtures running on
   ## different threads don't cross-attribute body-setter calls. Empty
   ## when no ``service:`` block is currently open.
+
+type
+  ServiceDeclarator* = object
+    ## Shared-Development-Services L1 — one ``service <ident>:`` body,
+    ## re-runnable.
+    ##
+    ## WHY A CLOSURE AND NOT JUST THE EAGER REGISTRATION. A service's
+    ## config file is a BUILD OUTPUT, and a build output does not exist
+    ## until the ``build:`` body has run. In provider mode the ``build:``
+    ## body is deliberately NOT executed at module-init time (see the
+    ## ``when not defined(reproProviderMode)`` gate in
+    ## ``emitM4BuildActions``) — it runs inside ``buildPackageFragment``,
+    ## i.e. AFTER module init. A service body evaluated only at module
+    ## init would therefore read an unassigned handle and record an empty
+    ## path, silently.
+    ##
+    ## So the emitter registers the body here as well as running it
+    ## eagerly, and ``buildPackageFragment`` re-runs it once the build
+    ## body has produced the outputs. The eager run is retained
+    ## unchanged so every non-provider-mode reader of
+    ## ``registeredServices`` sees exactly what it saw before.
+    packageName*: string
+    serviceName*: string
+    declare*: proc () {.closure.}
+
+var dslPortServiceDeclarators: seq[ServiceDeclarator]
+  ## Declaration-ordered; one entry per ``service <ident>:`` block the
+  ## ``package`` macro expanded in this process.
+
+proc registerServiceDeclarator*(packageName, serviceName: string;
+                                declare: proc () {.closure.}) =
+  ## Record a re-runnable service body. Appended, never deduplicated: a
+  ## ``when`` arm may legitimately declare the same service name twice
+  ## and the consumer decides which arm to honour (the same rule
+  ## ``registerService`` documents).
+  dslPortServiceDeclarators.add(ServiceDeclarator(
+    packageName: packageName, serviceName: serviceName, declare: declare))
+
+proc clearRegisteredServices*(packageName: string) =
+  ## Drop every service recorded against ``packageName``, leaving other
+  ## packages alone. ``rerunServiceDeclarators`` calls this first so the
+  ## re-run replaces rather than duplicates.
+  if packageName in dslPortServiceRegistry:
+    dslPortServiceRegistry[packageName] = @[]
+  # #498: the argv templates go with the rows they describe. Leaving
+  # them would misalign the next re-run's indices by exactly the number
+  # of rows this call dropped.
+  if packageName in dslPortServiceArgTemplates:
+    dslPortServiceArgTemplates[packageName] = @[]
+
+proc rerunServiceDeclarators*(packageName: string) =
+  ## Re-evaluate ``packageName``'s service bodies against the CURRENT
+  ## build state, replacing its registry bucket. Idempotent: running it
+  ## twice with the same build state yields the same records.
+  ##
+  ## A package with no declarators (nothing declared a ``service``, or an
+  ## out-of-tree caller that only used ``registerService``) keeps its
+  ## bucket untouched — clearing it would delete rows this function
+  ## cannot reconstruct.
+  var any = false
+  for declarator in dslPortServiceDeclarators:
+    if declarator.packageName == packageName and declarator.declare != nil:
+      any = true
+      break
+  if not any:
+    return
+  clearRegisteredServices(packageName)
+  for declarator in dslPortServiceDeclarators:
+    if declarator.packageName == packageName and declarator.declare != nil:
+      declarator.declare()
 
 proc resetDslPortServiceState*() =
   ## Drop every recorded service + clear the active-context stack. Test
@@ -1387,7 +2663,30 @@ proc resetDslPortServiceState*() =
   ## artifacts, build, services) separable lets tests target one
   ## surface without disturbing the others.
   dslPortServiceRegistry.clear()
+  dslPortServiceArgTemplates.clear()
   dslPortActiveServiceContext.setLen(0)
+  dslPortServiceDeclarators.setLen(0)
+
+proc registerServiceRecord*(def: DslServiceDef;
+                            argTemplate: seq[ServiceArgTemplateItem] = @[]) =
+  ## Append one fully-built ``DslServiceDef`` against ``def.packageName``.
+  ##
+  ## Shared-Development-Services L1 split this out of ``registerService``
+  ## so the typed fields (``executableTyped`` / ``typedArgs`` /
+  ## ``runtimeFiles`` / ``triggers``) have a route in. ``registerService``
+  ## remains the M5/M9.C positional entry point and delegates here, so its
+  ## callers are unaffected and the registry has exactly one append site.
+  if def.packageName notin dslPortServiceRegistry:
+    dslPortServiceRegistry[def.packageName] = @[]
+  dslPortServiceRegistry[def.packageName].add(def)
+  # #498: one template per row, ALWAYS, so the two seqs are index for
+  # index. A caller that built its record without a template (the
+  # positional `registerService` path, an out-of-tree caller) gets an
+  # empty one, which `foldDeferredServiceArgv` reads as "this row's argv
+  # is already final".
+  if def.packageName notin dslPortServiceArgTemplates:
+    dslPortServiceArgTemplates[def.packageName] = @[]
+  dslPortServiceArgTemplates[def.packageName].add(argTemplate)
 
 proc registerService*(packageName, serviceName, executableRef: string;
                      args: seq[string]; bodyRepr: string;
@@ -1417,9 +2716,7 @@ proc registerService*(packageName, serviceName, executableRef: string;
   ## ``env`` / ``restart`` / ``user`` / ``group`` parameters all
   ## default to empty so M5 callers that only pass the five original
   ## positional parameters continue to compile unchanged.
-  if packageName notin dslPortServiceRegistry:
-    dslPortServiceRegistry[packageName] = @[]
-  dslPortServiceRegistry[packageName].add(DslServiceDef(
+  registerServiceRecord(DslServiceDef(
     packageName: packageName,
     serviceName: serviceName,
     executableRef: executableRef,
@@ -1447,6 +2744,204 @@ proc registeredServices*(packageName: string): seq[DslServiceDef] =
   if packageName in dslPortServiceRegistry:
     return dslPortServiceRegistry[packageName]
   return @[]
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L2 — the dev-env activity DECLARATION record.
+#
+# ``Package-Model.md`` §"Activity declaration shape": "Activities are
+# declared with a function-call shape. Required dependencies are
+# constructor-style typed parameters; everything that has a default lives
+# in an inner ``config:`` block."
+#
+# This registry records WHAT WAS DECLARED — the parameter names with their
+# written type expressions, and the ``config:`` keys with their written
+# type and default expressions. It deliberately does NOT record VALUES:
+# the parameters and the config keys are real Nim parameters of the
+# generated activity proc, so their values live in the Nim call and reach
+# the body (and the body's rendered configuration) by ordinary parameter
+# passing, with the compiler type-checking every one. A registry of values
+# would be a second, weaker channel for the same thing.
+#
+# The declaration record exists because L3 lifts it: "``libs/repro_
+# interface_artifacts`` carries, per exported service and activity, the
+# handle type and its members, ... and the ``config:`` surface with
+# defaults". The type and default EXPRESSIONS are what a consuming
+# project's generated symbols are built from, and they are only knowable
+# at the declaration site.
+# ---------------------------------------------------------------------------
+
+type
+  DslActivityParamDef* = object
+    ## One constructor-style typed parameter of an activity.
+    name*: string
+      ## The parameter name, as written.
+    typeRepr*: string
+      ## The parameter's type EXPRESSION, as written (``ManagedPostgres``,
+      ## ``seq[string]``, ``range[1..256]``). Source text rather than a
+      ## resolved type, because the declaration is recorded at macro
+      ## expansion time where no type is resolved yet — and because that
+      ## is exactly what L3 has to re-emit into a consumer.
+
+  DslActivityConfigDef* = object
+    ## One ``config:`` key of an activity.
+    name*: string
+    typeRepr*: string
+    defaultRepr*: string
+      ## The default EXPRESSION, as written. Empty when the key was
+      ## declared without one (``externalDomain: string``), which makes
+      ## the generated parameter REQUIRED at the ``enable`` site.
+    hasDefault*: bool
+      ## Distinguishes "no default" from "a default whose source text is
+      ## the empty string" (``name: string = ""``). Without this field the
+      ## two are the same record and the second would read as required.
+    description*: string
+      ## The doc comment immediately above the key, with its ``##``
+      ## markers stripped. ``Package-Model.md``'s worked example carries
+      ## one per key ("TCP port the API server binds. 0 disables the
+      ## network listener."), and L3 lifts it to the consumer.
+
+  DslActivityDef* = object
+    ## One ``activity <name>(<params>): <body>`` declaration.
+    packageName*: string
+    activityName*: string
+    params*: seq[DslActivityParamDef]
+      ## In declaration order, which is also the generated proc's
+      ## positional parameter order.
+    config*: seq[DslActivityConfigDef]
+      ## In declaration order, after every parameter.
+    bodyRepr*: string
+      ## The activity body's source text, ``config:`` block included.
+      ## Diagnostic surface only — symmetric with
+      ## ``DslServiceDef.bodyRepr``.
+
+var dslPortActivityRegistry: Table[string, seq[DslActivityDef]]
+  ## Per-package activity-declaration registry, keyed by package name.
+  ## Separate from ``devEnvActivityRegistry`` in ``runtime_core`` on
+  ## purpose: that one is the flat list of activity NAMES the dev-env
+  ## selector gates on (``activity "default"`` appends to it and nothing
+  ## else), and a parameterised activity appends its name there too so
+  ## selection keeps working. This registry is the richer declaration
+  ## record, and nothing in the dev-env lowering reads it.
+
+proc resetActivityRegistry*() =
+  ## Drop every recorded activity declaration. Test fixtures that
+  ## re-run a package's dev-env body call this between scenarios;
+  ## production never does.
+  dslPortActivityRegistry.clear()
+
+proc registerActivityDeclaration*(def: DslActivityDef) =
+  ## Append one declaration. Re-declaring the same name in the same
+  ## package is NOT deduplicated here — the generated proc would be a
+  ## Nim redefinition error long before this runs, so a duplicate in
+  ## this registry can only come from the dev-env body being run twice,
+  ## which is a legitimate thing for a fixture to do.
+  if def.packageName notin dslPortActivityRegistry:
+    dslPortActivityRegistry[def.packageName] = @[]
+  dslPortActivityRegistry[def.packageName].add(def)
+
+proc registeredActivities*(packageName: string): seq[DslActivityDef] =
+  ## Every activity declared by ``packageName``, in declaration order.
+  ## Empty when the package declares none; callers must NOT read the
+  ## empty return as an error.
+  if packageName in dslPortActivityRegistry:
+    return dslPortActivityRegistry[packageName]
+  return @[]
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L1 — ``BuildOutput`` and the rendering helper.
+#
+# ``Shared-Development-Services.md`` §2: "Because `service` takes no
+# `config:` block and consumes a rendered `BuildOutput` instead, a
+# service's expensive setup becomes an ordinary cached edge. This matters
+# immediately: today the identity provider's configuration and steps files
+# are written by a shell script at run time, so its first-boot schema
+# migration and instance bootstrap — tens of seconds — are an uncacheable
+# runtime side effect redone on every reset. Declared as build outputs they
+# are keyed like anything else."
+#
+# So the helper below does not write a file. It registers a build ACTION
+# that writes the file and hands back the handle, which is why a second
+# reconcile with unchanged content is a cache hit rather than a re-render:
+# the engine keys ``reprobuild.builtin.fs writeText`` on a weak fingerprint
+# computed over the encoded payload, rendered bytes included.
+# ---------------------------------------------------------------------------
+
+proc `$`*(p: BuildOutputPath): string =
+  ## Dropping to a plain string DROPS THE CONTEXT, exactly as
+  ## interpolating a Nix string-with-context into a context-free string
+  ## does. Spelled out because the loss is silent.
+  p.value
+
+proc `&`*(a: BuildOutputPath; b: string): BuildOutputPath =
+  ## Concatenation PRESERVES the producer, so ``"--config=" & cfg.path``
+  ## and ``cfg.path & ".bak"`` still record the edge. ``producerPath``
+  ## stays the FILE's own path, which is what the graph matches on.
+  result = a
+  result.value = a.value & b
+
+proc `&`*(a: string; b: BuildOutputPath): BuildOutputPath =
+  result = b
+  result.value = a & b.value
+
+proc executableAtPath*(path: string): ServiceExecutableRef =
+  ## ``executable executableAtPath("/usr/bin/zitadel")`` — a binary named by
+  ## literal path rather than by artifact or package. Separate from the
+  ## bare-string form because ``setActiveServiceExecutable(string)`` has
+  ## always meant "an artifact of this package" and changing that would
+  ## reinterpret every existing recipe.
+  ServiceExecutableRef(kind: sxkPath, path: path)
+
+proc newBuildOutput*(packageName, actionId, filePath: string): BuildOutput =
+  ## The ONE constructor for a build-output handle: it is what keeps the
+  ## ``path`` field (the context-carrying proxy ``args`` and
+  ## ``runtimeFile`` take) in sync with ``filePath`` and the producer. A
+  ## hand-written ``BuildOutput(...)`` object constructor would compile
+  ## and leave ``path`` empty.
+  BuildOutput(
+    packageName: packageName,
+    actionId: actionId,
+    filePath: filePath,
+    path: BuildOutputPath(
+      value: filePath,
+      producerPackage: packageName,
+      producerActionId: actionId,
+      producerPath: filePath))
+
+proc buildOutputOf*(packageName, actionId, filePath: string): BuildOutput =
+  ## Construct a handle for an output produced by an action this recipe
+  ## already registered under ``actionId``. The rendering helpers are the
+  ## normal route; this is the escape hatch for an edge emitted by a
+  ## typed-tool wrapper whose handle the author did not capture.
+  newBuildOutput(packageName, actionId, filePath)
+
+proc renderConfigFile*(path: string; content: string;
+                       actionId = ""; packageName = ""): BuildOutput
+                      {.discardable.} =
+  ## Render ``content`` to ``path`` as a CACHED BUILD OUTPUT and return
+  ## its handle.
+  ##
+  ## This is the ``literalConfigFile``-shaped helper ``Package-Model.md``
+  ## §Collections names: "Configuration is the package's job:
+  ## package-level ``config:`` configurables plus rendering helpers
+  ## (``literalConfigFile``, ``configFile``, etc.) produce a
+  ## ``BuildOutput``, and the service consumes that output the same way
+  ## any other build output is consumed — either by reference on argv or
+  ## via ``runtimeFile``."
+  ##
+  ## NOT to be confused with ``configFile`` further down this module:
+  ## that one is the home-manager/profile ``fs.configFile`` registry
+  ## (M8), which records a declaration an APPLY phase materialises. This
+  ## one emits a build-graph edge, which is the thing the L1 gate
+  ## measures a cache hit on.
+  ##
+  ## ``actionId`` defaults to ``fs-writeText-<sanitised path>``, which is
+  ## a function of the path alone — so the id is stable across runs and
+  ## two renders of different paths never collide.
+  var pkg = packageName
+  if pkg.len == 0:
+    pkg = currentBuildPackage()
+  let edge = ReproFs().writeText(path, content, actionId = actionId)
+  newBuildOutput(pkg, edge.id, path)
 
 # ---------------------------------------------------------------------------
 # Active-service stack: body-setter routing
@@ -1479,7 +2974,152 @@ proc beginServiceContext*(packageName, serviceName, bodyRepr: string) =
     env: @[],
     restart: "",
     user: "",
-    group: ""))
+    group: "",
+    identity: ServiceIdentityDef(kind: sikDerived, stableId: ""),
+    scope: sscProject,
+    identityDeclared: false,
+    scopeDeclared: false,
+    # Shared-Development-Services L9. `srkUnset` / "" / @[] /
+    # `declared: false` are the ground states that mean "this body said
+    # nothing", which is what keeps a pre-L9 recipe's record
+    # byte-identical to what it was.
+    readiness: ServiceReadinessDef(kind: srkUnset),
+    workingDirectory: "",
+    stateDirectories: @[],
+    instance: ServiceInstanceDef(declared: false,
+      leaseTtlSeconds: SharedServiceInstanceKeepTtlSeconds),
+    readinessDeclared: false,
+    workingDirectoryDeclared: false))
+
+proc setActiveServiceIdentity*(kind: ServiceIdentityKind;
+                               stableId = "") =
+  ## Body-setter for ``identity derived`` / ``identity stable "<id>"``
+  ## (Shared-Development-Services §4.2).
+  ##
+  ## The empty-stack case is a silent no-op, matching every other
+  ## body-setter in this module (see ``setActiveServiceExecutable``).
+  ##
+  ## A SECOND declaration is DROPPED here rather than overwriting the
+  ## first, and that is not the silent drop this campaign keeps finding:
+  ## the macro refuses a second ``identity`` setter at expansion time
+  ## with a diagnostic, so this branch is unreachable from a recipe. It
+  ## exists because the proc is public, and last-wins would make
+  ## ``identity`` the one setter whose value depends on evaluation order
+  ## -- on the field that decides whether a developer's database
+  ## survives.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  if dslPortActiveServiceContext[^1].identityDeclared:
+    return
+  dslPortActiveServiceContext[^1].identity = ServiceIdentityDef(
+    kind: kind,
+    stableId: (if kind == sikStable: stableId else: ""))
+  dslPortActiveServiceContext[^1].identityDeclared = true
+
+proc setActiveServiceScope*(scope: ServiceScope) =
+  ## Body-setter for ``scope project`` | ``workspace`` | ``user`` |
+  ## ``system`` (§4.1). Same first-wins rule, same reason, as
+  ## ``setActiveServiceIdentity``.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  if dslPortActiveServiceContext[^1].scopeDeclared:
+    return
+  dslPortActiveServiceContext[^1].scope = scope
+  dslPortActiveServiceContext[^1].scopeDeclared = true
+
+proc selectedEnvironmentName*(): string
+  ## FORWARD DECLARATION. The definition is in this file's L5 section,
+  ## several thousand lines below; `setActiveServiceInstance` needs it
+  ## HERE because the environment component of an instance key is
+  ## derived from the selection rather than declared, and this file is
+  ## `include`d into one module compiled top to bottom.
+  ##
+  ## Forward-declared rather than moved: the L5 section is where a
+  ## reader looks for environment selection, and relocating the proc to
+  ## satisfy an ordering constraint would put it where nobody looks.
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L9 — the SUPERVISION body-setters.
+#
+# These are what makes "declared once" true for the last two facts L8's
+# review left behind: `readiness`, and the `instance` block. Before them
+# a recipe that wanted a SHARED instance wrote a typed `service` block
+# for the identity and a `servicePlaceholder` for the probe, joined by
+# the service name, and `infra/repro.nim` is the production instance of
+# exactly that.
+#
+# Every one of them is FIRST-WINS with the macro refusing the second
+# occurrence at expansion time, for `setActiveServiceIdentity`'s reason:
+# last-wins would make the decision depend on statement order, and these
+# particular fields decide whether a dependent starts against a seeded
+# instance and whether a developer's identity database is reaped.
+# ---------------------------------------------------------------------------
+
+proc setActiveServiceReadiness*(readiness: ServiceReadinessDef) =
+  ## Body-setter for ``readiness none`` / ``fileExists(...)`` /
+  ## ``httpGet(...)``.
+  ##
+  ## ``srkUnset`` is REFUSED rather than recorded: it is the ground
+  ## state meaning "this body declared no readiness", so writing it
+  ## through the setter would make a declaration indistinguishable from
+  ## its absence, and the absence is what sends the supervisor to the
+  ## placeholder's probe.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  if readiness.kind == srkUnset:
+    return
+  if dslPortActiveServiceContext[^1].readinessDeclared:
+    return
+  dslPortActiveServiceContext[^1].readiness = readiness
+  dslPortActiveServiceContext[^1].readinessDeclared = true
+
+proc setActiveServiceWorkingDirectory*(dir: string) =
+  ## Body-setter for ``workingDirectory "<dir>"`` — the placeholder's
+  ## ``cwd``.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  if dslPortActiveServiceContext[^1].workingDirectoryDeclared:
+    return
+  dslPortActiveServiceContext[^1].workingDirectory = dir
+  dslPortActiveServiceContext[^1].workingDirectoryDeclared = true
+
+proc addActiveServiceStateDirectory*(dir: string) =
+  ## Body-setter for ``stateDirectory "<dir>"`` — one of the
+  ## placeholder's ``resources`` entries, which the supervisor creates
+  ## before the service starts.
+  ##
+  ## REPEATING, like ``runtimeFile``: a service may own several state
+  ## directories, and the placeholder's ``resources`` is a list. An
+  ## EMPTY path is dropped rather than recorded, because
+  ## ``createDir("")`` is a silent no-op in the supervisor and a
+  ## recorded empty entry would read as a declared directory that
+  ## nothing creates.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  if dir.len == 0:
+    return
+  dslPortActiveServiceContext[^1].stateDirectories.add(dir)
+
+proc setActiveServiceInstance*(leaseTtlSeconds: int64) =
+  ## Body-setter for the ``instance:`` block — "this service is a SHARED
+  ## instance the daemon owns", with D-SS5's lease.
+  ##
+  ## The block's mere PRESENCE is the declaration; the lease is its one
+  ## setting. `environment` is not a setting of it — see
+  ## ``ServiceInstanceDef``'s note — and the macro refuses the word by
+  ## name rather than leaving an author to discover that it parsed and
+  ## did nothing.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  if dslPortActiveServiceContext[^1].instance.declared:
+    return
+  dslPortActiveServiceContext[^1].instance = ServiceInstanceDef(
+    declared: true,
+    leaseTtlSeconds: leaseTtlSeconds,
+    # DERIVED, not declared. The selection is a tracked input (§6.4) and
+    # part of the instance key (§6.5); reading it here is the one
+    # reading, so a recipe cannot hold a second, disagreeing answer.
+    environment: selectedEnvironmentName())
 
 proc setActiveServiceExecutable*(executableRef: string) =
   ## Body-setter: select the referenced executable artifact. Mirrors
@@ -1490,6 +3130,79 @@ proc setActiveServiceExecutable*(executableRef: string) =
   if dslPortActiveServiceContext.len == 0:
     return
   dslPortActiveServiceContext[^1].executableRef = executableRef
+  # Shared-Development-Services L1: the same selection, typed. The STRING
+  # form is an artifact name of this package (that is what this proc has
+  # always meant), so it lowers to ``sxkArtifact``. A literal path goes
+  # through ``executableAtPath``, a third-party binary through the
+  # ``SelectedExecutable`` overload, and a binary this graph builds
+  # through the ``BuildOutput`` one.
+  dslPortActiveServiceContext[^1].executableTyped = ServiceExecutableRef(
+    kind: sxkArtifact,
+    packageName: dslPortActiveServiceContext[^1].packageName,
+    executableName: executableRef)
+
+proc setActiveServiceExecutable*(value: SelectedExecutable) =
+  ## Body-setter for ``executable <pkg>.executable("<name>")`` — the
+  ## third-party form ``Package-Model.md`` names ("any other expression
+  ## that evaluates to an ``Executable[name]``, such as
+  ## ``redis.executable("redis-server")`` for third-party software pulled
+  ## in via ``uses``").
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].executableRef = value.executableName
+  dslPortActiveServiceContext[^1].executableTyped = ServiceExecutableRef(
+    kind: sxkPackageExecutable,
+    packageName: value.packageName,
+    executableName: value.executableName)
+
+proc setActiveServiceExecutable*(value: ServiceExecutableRef) =
+  ## Body-setter for an explicitly constructed reference —
+  ## ``executable executableAtPath("/usr/bin/zitadel")``.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].executableRef = value.executableName
+  dslPortActiveServiceContext[^1].executableTyped = value
+
+proc setActiveServiceExecutable*(value: BuildOutput) =
+  ## Body-setter for ``executable <buildOutput>`` — a binary THIS graph
+  ## builds. The producing action id travels with it, which is what makes
+  ## the service's dependency on its own binary an edge.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].executableRef = value.filePath
+  dslPortActiveServiceContext[^1].executableTyped = ServiceExecutableRef(
+    kind: sxkBuildOutput,
+    packageName: value.packageName,
+    path: value.filePath,
+    actionId: value.actionId)
+
+proc setActiveServiceExecutable*(value: BuildOutputPath) =
+  ## ``executable <buildOutput>.path`` — same edge, reached through the
+  ## context-carrying path proxy.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].executableRef = value.producerPath
+  dslPortActiveServiceContext[^1].executableTyped = ServiceExecutableRef(
+    kind: sxkBuildOutput,
+    packageName: value.producerPackage,
+    path: value.producerPath,
+    actionId: value.producerActionId)
+
+proc setActiveServiceExecutable*[T: object](handle: T) =
+  ## ``executable <pkg>.executable("<name>")`` where ``<pkg>`` is a
+  ## package handle: the ``package`` macro emits a PER-PACKAGE wrapper
+  ## type (``macros_a.nim``'s ``exeTypeName``) whose single field is the
+  ## ``SelectedExecutable``. There is no shared base type to overload on
+  ## — the type does not exist until that package's macro expands — so
+  ## the wrapper is unwrapped structurally. Concrete overloads above win
+  ## for every type that has one, so this arm only ever sees the
+  ## generated wrappers.
+  when compiles(handle.value) and handle.value is SelectedExecutable:
+    setActiveServiceExecutable(handle.value)
+  else:
+    {.error: "a service's `executable` setter takes an executable " &
+      "artifact ident, a `<pkg>.executable(\"<name>\")` handle, a " &
+      "`BuildOutput`, or `executableAtPath(\"<path>\")`".}
 
 proc addActiveServiceArg*(value: string) =
   ## Body-setter: append one positional argument to the active frame.
@@ -1497,7 +3210,527 @@ proc addActiveServiceArg*(value: string) =
   ## argument so the variadic shape survives the macro round-trip.
   if dslPortActiveServiceContext.len == 0:
     return
+  let arg = ServiceArgDef(kind: svakLiteral, value: value)
   dslPortActiveServiceContext[^1].args.add(value)
+  dslPortActiveServiceContext[^1].typedArgs.add(arg)
+  dslPortActiveServiceContext[^1].argTemplate.add(
+    ServiceArgTemplateItem(kind: satkLiteral, arg: arg))
+
+proc addActiveServiceArg*(value: BuildOutputPath) =
+  ## Body-setter for a build output's path on argv. ``Package-Model.md``:
+  ## "When the file *is* passed on argv, no ``runtimeFile`` line is
+  ## needed: a ``BuildOutput.path`` reaches ``args`` as a
+  ## context-carrying string and the framework records the edge through
+  ## the typed proxy". This overload is that framework step — the
+  ## argument's producing edge is recorded alongside its text.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  let arg = ServiceArgDef(
+    kind: svakBuildOutput,
+    value: value.value,
+    producerPackage: value.producerPackage,
+    producerActionId: value.producerActionId,
+    producerPath: value.producerPath)
+  dslPortActiveServiceContext[^1].args.add(value.value)
+  dslPortActiveServiceContext[^1].typedArgs.add(arg)
+  dslPortActiveServiceContext[^1].argTemplate.add(
+    ServiceArgTemplateItem(kind: satkLiteral, arg: arg))
+
+proc addActiveServiceArg*(value: BuildOutput) =
+  ## ``args <buildOutput>`` — the handle itself on argv, equivalent to
+  ## ``<buildOutput>.path``.
+  addActiveServiceArg(value.path)
+
+proc addActiveServiceConvergePoint*(name: string) =
+  ## Body-setter: record one `converge <point>` of the active frame.
+  ##
+  ## IDEMPOTENT ON A REPEATED NAME. `converge relyingParties` written
+  ## twice in one body, or a body re-run by `rerunServiceDeclarators`,
+  ## records one point -- otherwise the registration pass would be asked
+  ## to reconcile the same member set twice and the second pass would be
+  ## indistinguishable from a second consumer.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  for existing in dslPortActiveServiceContext[^1].convergePoints:
+    if existing == name:
+      return
+  dslPortActiveServiceContext[^1].convergePoints.add(name)
+
+proc resolveServiceConvergePoint*(packageName, bareName: string): string =
+  ## Resolve a `converge <bareName>` to the full contribution-point key.
+  ##
+  ## Searches the package's registered contribution points for one whose
+  ## last dotted segment is `bareName`. An UNKNOWN name and an AMBIGUOUS
+  ## one are both refused, by name, naming the candidates -- the two
+  ## failure modes a suffix search has, and both silent if unchecked:
+  ## unknown would register nothing, ambiguous would register whichever
+  ## came first in a hash-ordered walk.
+  var matches: seq[string] = @[]
+  let suffix = "." & bareName
+  for key in dslPortContributionPointOrder:
+    if not key.startsWith(packageName & "."):
+      continue
+    if key.endsWith(suffix):
+      matches.add(key)
+  if matches.len == 1:
+    return matches[0]
+  var declared: seq[string] = @[]
+  for key in dslPortContributionPointOrder:
+    if key.startsWith(packageName & "."):
+      declared.add(key)
+  if matches.len == 0:
+    raise newException(EDslPortMissingKey,
+      "`converge " & bareName & "` in package `" & packageName &
+      "` names no contribution point. The ordered-collection `config:` " &
+      "keys of this package are: " &
+      (if declared.len == 0: "(none)" else: declared.join(", ")) &
+      ". A contribution point is a `config:` key whose type is " &
+      "`seq[string]`.")
+  raise newException(EDslPortMissingKey,
+    "`converge " & bareName & "` in package `" & packageName &
+    "` is AMBIGUOUS: " & matches.join(", ") & " all end in `." &
+    bareName & "`. Two activities declaring a point of the same bare " &
+    "name is legal; converging one of them by that name is not.")
+
+proc addActiveServiceArg*(values: seq[string]) =
+  ## Shared-Development-Services L8: `args <contributionPoint>` puts
+  ## EVERY folded member on argv as its own token, in fold order.
+  ##
+  ## ONE TOKEN PER MEMBER, not a joined string, and the distinction is
+  ## the gate's: §5's contribution point is a collection, and a service
+  ## that received `"a b c"` where it expected three arguments would
+  ## have been handed a different command line than the one the
+  ## contributions describe. `$seq` would also render Nim's `@["a"]`
+  ## syntax into argv, which no program parses.
+  ##
+  ## An EMPTY collection contributes NO tokens -- not an empty-string
+  ## argument. A workspace where nothing has contributed therefore runs
+  ## the owner's service with the flag and no values, which is the same
+  ## command line it ran before any consumer existed.
+  for value in values:
+    addActiveServiceArg(value)
+
+proc addActiveServiceArgPoint*(pointKey: string; eager: seq[string]) =
+  ## Shared-Development-Services, reprobuild issue #498 —
+  ## `args <contributionPoint>` as a DEFERRED slot.
+  ##
+  ## THE DECISION THIS IMPLEMENTS, AND WHY IT IS THIS ONE. §9.1.1
+  ## measured a cross-activity contribution reaching the owning
+  ## service's argv only when the contributing activity was declared
+  ## FIRST — and, with a `converge` on the owning service, one dev-env
+  ## artifact stating two different member sets for one point: the
+  ## launcher's command line without the member, the converge lane's
+  ## `registrationMembers` with it. Both arrangements exited 0.
+  ##
+  ## Two fixes were on the table. REFUSING a contribution that arrives
+  ## after the fold is NOT the one taken, for three reasons:
+  ##
+  ##   1. `t_l8_contribution_operation_is_a_second_axis.nim`'s "a second
+  ##      consumer arriving does not renumber or re-make the first's"
+  ##      reads a point, contributes to it and asserts the late member
+  ##      LANDS. A late contribution reaching the fold is an ASSERTED
+  ##      property of the configurable system, so a refusal would
+  ##      contradict an existing semantic rather than add a guard.
+  ##   2. Declaration order must not be semantically significant in a
+  ##      declarative DSL. A refusal makes the current behaviour honest;
+  ##      it does not make the recipe `Shared-Development-Services.md`
+  ##      §9.1 writes implementable.
+  ##   3. A collection IS a configurable (§5), so its final value is
+  ##      only knowable once every contributor has run. The documented
+  ##      staging — instantiation, resolution, finalization,
+  ##      materialization — already requires that; the eager fold was
+  ##      the implementation disagreeing with the staging, and this
+  ##      aligns them.
+  ##
+  ## So the point's members are NOT read here. The slot is recorded and
+  ## `foldDeferredServiceArgv` fills it after every activity body in the
+  ## package has run, which is the same moment
+  ## `mergeTypedServiceFacts` folds `registrationMembers` — one fold, at
+  ## one time, so the two views of one point cannot disagree.
+  ##
+  ## `eager` IS STILL READ, FOR ONE THING: to tell a point READ FROM ITS
+  ## SLOT from a value the author passed EXPLICITLY at the `enable`
+  ## site. The activity's `config:` key lowers to a parameter whose
+  ## DEFAULT reads the fold, so `enable sso()` yields the fold and
+  ## `enable sso(members = @["x"])` yields `@["x"]` and never evaluates
+  ## the default. Deferring the latter would let a later contribution
+  ## overwrite an explicit argument — an owner overriding its own
+  ## environment at its own enable site (§6.6) silently undone. So when
+  ## `eager` differs from the point's fold AT THIS MOMENT the tokens are
+  ## FROZEN as literals, and only the matching case defers.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  var deferred = isContributionPoint(pointKey)
+  if deferred:
+    # The fold is read HERE only to compare, never to emit: what is
+    # emitted in the deferring case is the hole.
+    deferred = foldContributionPoint(pointKey).members == eager
+  if not deferred:
+    for value in eager:
+      addActiveServiceArg(value)
+    return
+  dslPortActiveServiceContext[^1].argTemplate.add(ServiceArgTemplateItem(
+    kind: satkContributionPoint, pointKey: pointKey))
+  # The EAGER tokens are still written into `args` / `typedArgs`, so a
+  # reader that never reaches finalization (a test driving a service
+  # body directly, the package-level `service` lane) sees exactly what
+  # it saw before this change. `foldDeferredServiceArgv` REPLACES them.
+  for value in eager:
+    dslPortActiveServiceContext[^1].args.add(value)
+    dslPortActiveServiceContext[^1].typedArgs.add(ServiceArgDef(
+      kind: svakLiteral, value: value))
+
+proc addActiveServiceRuntimeFile*(value: BuildOutput) =
+  ## Body-setter for ``runtimeFile <buildOutput>`` — "declares a build
+  ## output that the service must have alongside it at runtime even
+  ## though the path does not appear on argv" (``Package-Model.md``).
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].runtimeFiles.add(ServiceRuntimeFileDef(
+    path: value.filePath,
+    producerPackage: value.packageName,
+    producerActionId: value.actionId))
+
+proc addActiveServiceRuntimeFile*(value: BuildOutputPath) =
+  ## ``runtimeFile <buildOutput>.path`` — same edge.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  dslPortActiveServiceContext[^1].runtimeFiles.add(ServiceRuntimeFileDef(
+    path: value.producerPath,
+    producerPackage: value.producerPackage,
+    producerActionId: value.producerActionId))
+
+proc beginActiveServiceTrigger*(kind: ServiceTriggerKind;
+                                subject = ""; producerActionId = "") =
+  ## Open an ``on <trigger>:`` block on the active frame. Paired with
+  ## ``finishActiveServiceTrigger`` by the emitter's try/finally.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  if dslPortActiveServiceContext[^1].triggerOpen:
+    # A nested ``on:`` is not a shape the macro emits; closing the outer
+    # one keeps its actions rather than losing them.
+    dslPortActiveServiceContext[^1].triggers.add(
+      dslPortActiveServiceContext[^1].openTrigger)
+  dslPortActiveServiceContext[^1].openTrigger = ServiceTriggerDef(
+    kind: kind, subject: subject, producerActionId: producerActionId,
+    actions: @[])
+  dslPortActiveServiceContext[^1].triggerOpen = true
+
+proc beginActiveServiceTrigger*(kind: ServiceTriggerKind;
+                                output: BuildOutput) =
+  ## ``on change <buildOutput>:`` — the watched path AND the edge that
+  ## produces it, so a lowering can order the watch after the producer.
+  beginActiveServiceTrigger(kind, output.filePath, output.actionId)
+
+proc beginActiveServiceTrigger*(kind: ServiceTriggerKind;
+                                output: BuildOutputPath) =
+  beginActiveServiceTrigger(kind, output.producerPath,
+    output.producerActionId)
+
+proc addActiveServiceTriggerAction*(kind: ServiceTriggerActionKind;
+                                    argument = "") =
+  ## Append one action to the open ``on <trigger>:`` body.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  if not dslPortActiveServiceContext[^1].triggerOpen:
+    return
+  dslPortActiveServiceContext[^1].openTrigger.actions.add(
+    ServiceTriggerAction(kind: kind, argument: argument))
+
+proc finishActiveServiceTrigger*() =
+  ## Close the open ``on <trigger>:`` block and append it to the frame.
+  if dslPortActiveServiceContext.len == 0:
+    return
+  if not dslPortActiveServiceContext[^1].triggerOpen:
+    return
+  dslPortActiveServiceContext[^1].triggers.add(
+    dslPortActiveServiceContext[^1].openTrigger)
+  dslPortActiveServiceContext[^1].triggerOpen = false
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L1 — the ``gnkService`` node payload.
+#
+# ``GraphNodeKind`` has carried ``gnkService`` since the provider protocol
+# was written and NOTHING ever emitted one; services reached the engine
+# only as the opaque ``DevEnvServiceMetadata.metadata`` JSON string that
+# ``Shared-Development-Services.md`` §1 names as the defect. This codec is
+# what makes the node emittable, and it is deliberately a TYPED record
+# rather than a JSON blob: the producing action id of every path travels
+# with it, which is what ``buildPackageFragment`` turns into graph edges.
+#
+# Envelope layout matches the build-target / build-pool payloads in
+# ``runtime_core`` byte for byte (4-byte magic, u16 version, u32 length),
+# so a stale decoder reports "unsupported ... version" rather than
+# "corrupt".
+# ---------------------------------------------------------------------------
+
+const
+  ServicePayloadMagic = [byte(ord('R')), byte(ord('S')), byte(ord('V')),
+    byte(ord('C'))]
+  ServicePayloadVersion = 2'u16
+    ## v2 (current): Shared-Development-Services L4 appends the declared
+    ## INSTANCE IDENTITY and SCOPE (§4.1 / §4.2) -- one identity-kind
+    ## byte, the stable id string, one scope byte -- after the M9.C
+    ## systemd slice, which is the payload's tail. Appended rather than
+    ## inserted for the reason ``BuildTargetKind`` gives one type section
+    ## up: every field before it is positional, so a v1 body has to keep
+    ## decoding unchanged.
+    ##
+    ## v1 bodies DO still decode: ``decodeServicePayload`` gates the new
+    ## reads on ``version >= 2`` and leaves the zero values
+    ## (``sikDerived`` / ``sscProject``), which are the §4 DEFAULTS, so a
+    ## v1 payload decodes to exactly the behaviour it described. A version
+    ## ABOVE the current one is still refused rather than misread -- that
+    ## property is what the magic+version envelope exists for, and
+    ## widening the check to a range keeps it for v3.
+
+proc servicePayloadVersion*(): uint16 =
+  ## The service-payload envelope version THIS BUILD writes, and -- the
+  ## decoder's check being a RANGE (`0 < version <= current`) -- the
+  ## highest it reads.
+  ServicePayloadVersion
+
+proc firstUnknownServicePayloadVersion*(): uint16 =
+  ## One past `servicePayloadVersion()`: the lowest version above the
+  ## range this build accepts.
+  ##
+  ## What an "a FUTURE version is refused rather than misread" probe
+  ## wants. Before this name that probe poked a literal `3`, chosen when
+  ## the current version was 2; the next bump to 3 would have turned it
+  ## into a probe that the CURRENT version is refused -- which is false,
+  ## so it would have failed loudly. That is the lucky half of the class.
+  ## The unlucky half is the same shape one version further on, where the
+  ## literal lands inside the accepted range and the probe quietly stops
+  ## testing a refusal at all.
+  ##
+  ## AN ACCESSOR AND NOT AN EXPORT OF `ServicePayloadVersion`, and not for
+  ## the ambiguity reason an earlier round gave -- that reason was measured
+  ## FALSE (Nim diagnoses a clashing imported name at the USE site, so
+  ## exporting two same-named consts compiles until something references
+  ## the bare name). The reason is that `firstUnknown...` is a DERIVED
+  ## value: exporting the const would put `+ 1` at every call site, and
+  ## `+ 1` is only correct while the accepted range is contiguous and
+  ## open-topped. Keeping the arithmetic beside the decoder that defines
+  ## the range means one place to change if it ever is not.
+  ServicePayloadVersion + 1
+
+proc writeServiceExecutable(outp: var seq[byte]; value: ServiceExecutableRef) =
+  outp.writeByte(byte(ord(value.kind)))
+  outp.writeString(value.packageName)
+  outp.writeString(value.executableName)
+  outp.writeString(value.path)
+  outp.writeString(value.actionId)
+
+proc readServiceExecutable(bytes: openArray[byte]; pos: var int):
+    ServiceExecutableRef =
+  let kindByte = readByte(bytes, pos)
+  if kindByte > byte(ord(sxkPath)):
+    raisePayload("invalid service executable kind in service payload")
+  ServiceExecutableRef(
+    kind: ServiceExecutableKind(kindByte),
+    packageName: readString(bytes, pos),
+    executableName: readString(bytes, pos),
+    path: readString(bytes, pos),
+    actionId: readString(bytes, pos))
+
+proc encodeServicePayload*(def: DslServiceDef): seq[byte] =
+  var payload: seq[byte] = @[]
+  payload.writeString(def.packageName)
+  payload.writeString(def.serviceName)
+  payload.writeServiceExecutable(def.executableTyped)
+  # ``executableRef`` and ``args`` are written explicitly rather than
+  # DERIVED from the typed fields on decode. They can legitimately
+  # diverge: a record built through the legacy positional
+  # ``registerService`` has them populated and the typed fields empty, and
+  # for ``sxkBuildOutput`` ``executableRef`` holds the output PATH while
+  # ``executableTyped.executableName`` is empty. Deriving would have made
+  # the round-trip lossy in exactly those two cases.
+  payload.writeString(def.executableRef)
+  payload.writeStringSeq(def.args)
+  payload.writeU32Le(uint32(def.typedArgs.len))
+  for arg in def.typedArgs:
+    payload.writeByte(byte(ord(arg.kind)))
+    payload.writeString(arg.value)
+    payload.writeString(arg.producerPackage)
+    payload.writeString(arg.producerActionId)
+    payload.writeString(arg.producerPath)
+  payload.writeU32Le(uint32(def.runtimeFiles.len))
+  for file in def.runtimeFiles:
+    payload.writeString(file.path)
+    payload.writeString(file.producerPackage)
+    payload.writeString(file.producerActionId)
+  payload.writeU32Le(uint32(def.triggers.len))
+  for trigger in def.triggers:
+    payload.writeByte(byte(ord(trigger.kind)))
+    payload.writeString(trigger.subject)
+    payload.writeString(trigger.producerActionId)
+    payload.writeU32Le(uint32(trigger.actions.len))
+    for action in trigger.actions:
+      payload.writeByte(byte(ord(action.kind)))
+      payload.writeString(action.argument)
+  # The M9.C systemd-unit slice, so a lowering that writes a unit file
+  # does not have to go back to the DSL registry for it.
+  payload.writeString(def.description)
+  payload.writeString(def.serviceType)
+  payload.writeString(def.execStart)
+  payload.writeStringSeq(def.wantedBy)
+  payload.writeStringSeq(def.wants)
+  payload.writeStringSeq(def.requires)
+  payload.writeStringSeq(def.before)
+  payload.writeStringSeq(def.after)
+  payload.writeU32Le(uint32(def.env.len))
+  for entry in def.env:
+    payload.writeString(entry.key)
+    payload.writeString(entry.value)
+  payload.writeString(def.restart)
+  payload.writeString(def.user)
+  payload.writeString(def.group)
+  # v2 (L4): the declared identity and scope. Written unconditionally --
+  # this encoder only ever emits the CURRENT version, and a reader of an
+  # older body is the compatibility direction (see the decoder).
+  payload.writeByte(byte(ord(def.identity.kind)))
+  payload.writeString(def.identity.stableId)
+  payload.writeByte(byte(ord(def.scope)))
+
+  result.add(ServicePayloadMagic)
+  result.writeU16Le(ServicePayloadVersion)
+  result.writeU32Le(uint32(payload.len))
+  result.add(payload)
+
+proc decodeServicePayload*(bytes: openArray[byte]): DslServiceDef =
+  if bytes.len < 10:
+    raisePayload("truncated service payload envelope")
+  for i in 0 ..< ServicePayloadMagic.len:
+    if bytes[i] != ServicePayloadMagic[i]:
+      raisePayload("unknown service payload magic")
+  var pos = 4
+  let version = readU16Le(bytes, pos)
+  if version == 0'u16 or version > ServicePayloadVersion:
+    raisePayload("unsupported service payload version")
+  let payloadLength = int(readU32Le(bytes, pos))
+  if pos + payloadLength != bytes.len:
+    raisePayload("service payload length mismatch")
+  result.packageName = readString(bytes, pos)
+  result.serviceName = readString(bytes, pos)
+  result.executableTyped = readServiceExecutable(bytes, pos)
+  result.executableRef = readString(bytes, pos)
+  result.executable = result.executableRef
+  result.args = readStringSeq(bytes, pos)
+  var count = int(readU32Le(bytes, pos))
+  for _ in 0 ..< count:
+    let kindByte = readByte(bytes, pos)
+    if kindByte > byte(ord(svakBuildOutput)):
+      raisePayload("invalid service argument kind in service payload")
+    result.typedArgs.add(ServiceArgDef(
+      kind: ServiceArgKind(kindByte),
+      value: readString(bytes, pos),
+      producerPackage: readString(bytes, pos),
+      producerActionId: readString(bytes, pos),
+      producerPath: readString(bytes, pos)))
+  count = int(readU32Le(bytes, pos))
+  for _ in 0 ..< count:
+    result.runtimeFiles.add(ServiceRuntimeFileDef(
+      path: readString(bytes, pos),
+      producerPackage: readString(bytes, pos),
+      producerActionId: readString(bytes, pos)))
+  count = int(readU32Le(bytes, pos))
+  for _ in 0 ..< count:
+    let kindByte = readByte(bytes, pos)
+    if kindByte > byte(ord(stkCrash)):
+      raisePayload("invalid service trigger kind in service payload")
+    var trigger = ServiceTriggerDef(
+      kind: ServiceTriggerKind(kindByte),
+      subject: readString(bytes, pos),
+      producerActionId: readString(bytes, pos))
+    let actionCount = int(readU32Le(bytes, pos))
+    for _ in 0 ..< actionCount:
+      let actionKindByte = readByte(bytes, pos)
+      if actionKindByte > byte(ord(stakNotify)):
+        raisePayload("invalid service trigger action kind in service payload")
+      trigger.actions.add(ServiceTriggerAction(
+        kind: ServiceTriggerActionKind(actionKindByte),
+        argument: readString(bytes, pos)))
+    result.triggers.add(trigger)
+  result.description = readString(bytes, pos)
+  result.serviceType = readString(bytes, pos)
+  result.execStart = readString(bytes, pos)
+  result.wantedBy = readStringSeq(bytes, pos)
+  result.wants = readStringSeq(bytes, pos)
+  result.requires = readStringSeq(bytes, pos)
+  result.before = readStringSeq(bytes, pos)
+  result.after = readStringSeq(bytes, pos)
+  count = int(readU32Le(bytes, pos))
+  for _ in 0 ..< count:
+    let key = readString(bytes, pos)
+    let value = readString(bytes, pos)
+    result.env.add((key: key, value: value))
+  result.restart = readString(bytes, pos)
+  result.user = readString(bytes, pos)
+  result.group = readString(bytes, pos)
+  # v2 (L4). A v1 body ends here; the identity and scope fields keep
+  # their zero values, which ARE the §4 defaults -- ``identity derived``
+  # and ``scope project`` -- so a v1 payload decodes to the behaviour it
+  # described rather than to an invented "unset".
+  if version >= 2'u16:
+    let identityKindByte = readByte(bytes, pos)
+    if identityKindByte > byte(ord(sikStable)):
+      raisePayload("invalid service identity kind in service payload")
+    result.identity = ServiceIdentityDef(
+      kind: ServiceIdentityKind(identityKindByte),
+      stableId: readString(bytes, pos))
+    let scopeByte = readByte(bytes, pos)
+    if scopeByte > byte(ord(sscSystem)):
+      raisePayload("invalid service scope in service payload")
+    result.scope = ServiceScope(scopeByte)
+  if pos != bytes.len:
+    raisePayload("trailing service payload bytes")
+
+proc servicePayload*(def: DslServiceDef): string =
+  fromBytes(encodeServicePayload(def))
+
+proc serviceProducerActionIds*(def: DslServiceDef): seq[string] =
+  ## Every build action this service depends on, deduplicated and in
+  ## declaration order: the executable's producer, then each
+  ## build-output argument's, then each runtime file's, then each watched
+  ## output's. This is the edge set ``buildPackageFragment`` emits, named
+  ## once so the emitter and any consumer agree on it.
+  proc push(ids: var seq[string]; id: string) =
+    if id.len > 0 and ids.find(id) < 0:
+      ids.add(id)
+  if def.executableTyped.actionId.len > 0:
+    result.push(def.executableTyped.actionId)
+  for arg in def.typedArgs:
+    if arg.kind == svakBuildOutput:
+      result.push(arg.producerActionId)
+  for file in def.runtimeFiles:
+    result.push(file.producerActionId)
+  for trigger in def.triggers:
+    if trigger.kind == stkChangeOutput:
+      result.push(trigger.producerActionId)
+
+proc serviceConsumedOutputs*(def: DslServiceDef):
+    seq[tuple[actionId: string; path: string]] =
+  ## Every (producing action, declared output path) pair the service
+  ## consumes — argv references, runtime files and watched outputs. One
+  ## ``gekConsumes`` edge each.
+  proc push(items: var seq[tuple[actionId: string; path: string]];
+            actionId, path: string) =
+    if actionId.len == 0 or path.len == 0:
+      return
+    for item in items:
+      if item.actionId == actionId and item.path == path:
+        return
+    items.add((actionId: actionId, path: path))
+  if def.executableTyped.kind == sxkBuildOutput:
+    result.push(def.executableTyped.actionId, def.executableTyped.path)
+  for arg in def.typedArgs:
+    if arg.kind == svakBuildOutput:
+      result.push(arg.producerActionId, arg.producerPath)
+  for file in def.runtimeFiles:
+    result.push(file.producerActionId, file.path)
+  for trigger in def.triggers:
+    if trigger.kind == stkChangeOutput:
+      result.push(trigger.producerActionId, trigger.subject)
 
 # ---------------------------------------------------------------------------
 # M9.C — systemd-unit metadata body-setters. One proc per recognised setter
@@ -1591,23 +3824,115 @@ proc finishServiceContext*() =
   ## clean.
   if dslPortActiveServiceContext.len == 0:
     return
-  let frame = dslPortActiveServiceContext[^1]
+  var frame = dslPortActiveServiceContext[^1]
   dslPortActiveServiceContext.setLen(
     dslPortActiveServiceContext.len - 1)
-  registerService(frame.packageName, frame.serviceName,
-                  frame.executableRef, frame.args, frame.bodyRepr,
-                  description = frame.description,
-                  serviceType = frame.serviceType,
-                  execStart = frame.execStart,
-                  wantedBy = frame.wantedBy,
-                  wants = frame.wants,
-                  requires = frame.requires,
-                  before = frame.before,
-                  after = frame.after,
-                  env = frame.env,
-                  restart = frame.restart,
-                  user = frame.user,
-                  group = frame.group)
+  # Shared-Development-Services L1: an ``on <trigger>:`` block left open
+  # by a malformed body is closed here rather than dropped, so its
+  # actions still reach the record and the author sees them.
+  if frame.triggerOpen:
+    frame.triggers.add(frame.openTrigger)
+    frame.triggerOpen = false
+  registerServiceRecord(DslServiceDef(
+    packageName: frame.packageName,
+    serviceName: frame.serviceName,
+    executableRef: frame.executableRef,
+    executable: frame.executableRef,
+    args: frame.args,
+    bodyRepr: frame.bodyRepr,
+    description: frame.description,
+    serviceType: frame.serviceType,
+    execStart: frame.execStart,
+    wantedBy: frame.wantedBy,
+    wants: frame.wants,
+    requires: frame.requires,
+    before: frame.before,
+    after: frame.after,
+    env: frame.env,
+    restart: frame.restart,
+    user: frame.user,
+    group: frame.group,
+    executableTyped: frame.executableTyped,
+    typedArgs: frame.typedArgs,
+    runtimeFiles: frame.runtimeFiles,
+    triggers: frame.triggers,
+    identity: frame.identity,
+    scope: frame.scope,
+    convergePoints: frame.convergePoints,
+    readiness: frame.readiness,
+    workingDirectory: frame.workingDirectory,
+    stateDirectories: frame.stateDirectories,
+    instance: frame.instance),
+    frame.argTemplate)
+
+
+proc foldDeferredServiceArgv*(packageName: string): int {.discardable.} =
+  ## Shared-Development-Services, reprobuild issue #498 — FINALIZATION:
+  ## fill every deferred `args <contributionPoint>` slot of
+  ## `packageName`'s services from the point's fold AS IT NOW STANDS.
+  ##
+  ## Called once, after every activity body in the package has run, by
+  ## `buildPackageDevEnv` (and by `buildPackageFragment` after its
+  ## service-declarator re-run, so the build lane cannot drift from the
+  ## dev-env lane on this). The same moment `mergeTypedServiceFacts`
+  ## folds `registrationMembers`, which is the point: ONE fold of one
+  ## contribution point at ONE time, so the launcher's command line and
+  ## the converge lane's member set are two READINGS of one value rather
+  ## than two values.
+  ##
+  ## Returns the number of services whose argv CHANGED. A caller that
+  ## wants to know whether anything was deferred at all can read it;
+  ## more importantly a test can, which is how "the deferral is wired"
+  ## is measurable rather than inferred from the result being correct
+  ## for some other reason.
+  ##
+  ## IDEMPOTENT. The template is the source and the row is the
+  ## derivation, so running this twice against one contribution set
+  ## rewrites the same bytes and the second call returns 0.
+  if packageName notin dslPortServiceRegistry:
+    return 0
+  if packageName notin dslPortServiceArgTemplates:
+    return 0
+  var rows = dslPortServiceRegistry[packageName]
+  let templates = dslPortServiceArgTemplates[packageName]
+  if templates.len != rows.len:
+    # NOT a silent `min(len)` walk. A misalignment here would rewrite
+    # one service's argv from another's template, which is a wrong
+    # command line that looks right.
+    raise newException(ValueError,
+      "foldDeferredServiceArgv(`" & packageName & "`): " &
+      $rows.len & " service row(s) against " & $templates.len &
+      " argv template(s). The two are maintained index for index by " &
+      "`registerServiceRecord`, so a disagreement means a row reached " &
+      "the registry by a route that did not record one.")
+  for i in 0 ..< rows.len:
+    var deferred = false
+    for item in templates[i]:
+      if item.kind == satkContributionPoint:
+        deferred = true
+        break
+    if not deferred:
+      continue
+    var args: seq[string] = @[]
+    var typedArgs: seq[ServiceArgDef] = @[]
+    for item in templates[i]:
+      case item.kind
+      of satkLiteral:
+        args.add(item.arg.value)
+        typedArgs.add(item.arg)
+      of satkContributionPoint:
+        # ONE TOKEN PER MEMBER, in fold order, and NO token for an empty
+        # collection -- the same rule `addActiveServiceArg(seq[string])`
+        # states, read from one place so the deferred and the eager
+        # paths cannot render a point differently.
+        for member in foldContributionPoint(item.pointKey).members:
+          args.add(member)
+          typedArgs.add(ServiceArgDef(kind: svakLiteral, value: member))
+    if args != rows[i].args:
+      inc result
+    rows[i].args = args
+    rows[i].typedArgs = typedArgs
+  dslPortServiceRegistry[packageName] = rows
 
 # ---------------------------------------------------------------------------
 # DSL-port M7 — user-facing service-context accessors. Symmetric with the
@@ -4626,3 +6951,478 @@ proc registeredLibraryApi*(packageName, libraryName: string): LibraryApi =
   if key in dslPortLibraryApis:
     return dslPortLibraryApis[key]
   result = LibraryApi(declared: false)
+
+# ---------------------------------------------------------------------------
+# Shared-Development-Services L5 — ENVIRONMENTS.
+#
+# `Shared-Development-Services.md` §6 is the authority, and its first
+# sentence is the whole specification of this section:
+#
+#   "An environment is a named set of bindings to configurables, and
+#    nothing else. The service or activity declares its configurables; an
+#    environment binds them; the existing late-binding machinery
+#    assembles the result."
+#
+# So what is HERE is a registry of names to binding sets, plus the one
+# proc that hands those bindings to the EXISTING override lane
+# (`setConfigurableRaw`, the table `readConfigurable` consults before the
+# registered default). There is no new staging, no new merge rule and no
+# new precedence model, which is §6.1's requirement stated as a
+# constraint on this code: `applySelectedEnvironment` calls nothing that
+# did not already exist, and an environment reaches a configurable by
+# exactly the route a `setConfigurable` from any other contributor does.
+#
+# WHAT IS DELIBERATELY NOT HERE:
+#
+#   * the ATTACH DECISION (§4.3) is L6;
+#   * the instance REGISTRY and `repro up` convergence (§4.5) are L7;
+#   * the CONTRIBUTION operation axis (`append` / `replace`, §5.1) is L8.
+#     An environment binding is a `replace` at `epOverride` in the terms
+#     L8 will introduce, and this code does not pre-empt the spelling.
+# ---------------------------------------------------------------------------
+
+const
+  ReproEnvironmentEnvVar* = "REPRO_ENVIRONMENT"
+    ## The variable that SELECTS an environment for this invocation.
+    ##
+    ## §6.4 requires that the selected environment "MUST be a tracked
+    ## solver input that participates in the graph cache key. An ambient
+    ## `getEnv` is silently ignored when a lowered graph is served from
+    ## cache, so an environment selected that way could hand a developer
+    ## a production issuer out of a warm cache."
+    ##
+    ## Reading the selection from the process environment is not what
+    ## makes a selector ambient; FAILING TO FOLD IT INTO THE KEY is. This
+    ## variable is the transport, and `canonicalEnvironmentSelection`
+    ## below is the tracked projection that
+    ## `repro_cli_support`'s `loweredGraphCacheKey` and
+    ## `providerGraphStoreRoot` both fold in -- the same two places, and
+    ## the same treatment, `REPRO_VARIANTS` already gets.
+
+var dslPortEnvironmentRegistry: Table[string, seq[DslEnvironmentDef]]
+  ## Per-package environment registry, keyed by package name. Parallel in
+  ## shape to `dslPortServiceRegistry`, and separate from it on purpose:
+  ## an environment is not a member of a service and a service is not a
+  ## member of an environment (§6.2).
+
+var dslPortEnvironmentOrder: seq[string]
+  ## `<package>\x1f<environment>` in declaration order, so enumeration is
+  ## stable regardless of hash-table bucket layout -- the reason
+  ## `dslPortKeyOrder` exists beside `dslPortDefaults`.
+
+var dslPortEnvironmentAppliers: Table[string, proc () {.closure.}]
+  ## `<package>\x1f<environment>` -> the closure that performs that
+  ## environment's bindings.
+  ##
+  ## A CLOSURE and not a value table, because a binding's value is the
+  ## author's EXPRESSION and only the author's scope can evaluate it --
+  ## the same reason L1 wraps a `service` body in a re-runnable closure
+  ## (`registerServiceDeclarator`) instead of recording its argv as
+  ## strings. `DslEnvironmentDef.bindings` carries the expression's
+  ## `repr` for diagnostics and for the key; this carries the means to
+  ## evaluate it.
+
+var dslPortConsumerOverrides: seq[ConsumerInstanceOverrideDef]
+  ## §6.6's left column, in declaration order. A flat seq rather than a
+  ## table: the key would be `(consumer, target package, target service)`
+  ## and nothing reads it by key yet -- L6 and L7 do.
+
+proc dslPortEnvironmentKey(packageName, environmentName: string): string =
+  packageName & "\x1f" & environmentName
+
+proc resetDslPortEnvironmentState*() =
+  ## Drop every registered environment and consumer override. Test
+  ## fixtures call this between scenarios so registry entries do not leak
+  ## across cases. Symmetric with `resetDslPortServiceState`.
+  dslPortEnvironmentRegistry.clear()
+  dslPortEnvironmentOrder.setLen(0)
+  dslPortEnvironmentAppliers.clear()
+  dslPortConsumerOverrides.setLen(0)
+
+proc registerEnvironment*(def: DslEnvironmentDef) =
+  ## Record one `environment <name>:` declaration.
+  ##
+  ## FIRST-WINS on a repeated `(package, name)` pair, which is the
+  ## behaviour `DslServiceContextFrame`'s identity guard has and for the
+  ## same reason: the macro already refuses a second `environment dev:`
+  ## at expansion time, so this branch is unreachable from a recipe, and
+  ## if it were reachable last-wins would make which issuer a developer
+  ## gets depend on statement order.
+  let key = dslPortEnvironmentKey(def.packageName, def.name)
+  if key in dslPortEnvironmentOrder:
+    return
+  if def.packageName notin dslPortEnvironmentRegistry:
+    dslPortEnvironmentRegistry[def.packageName] = @[]
+  dslPortEnvironmentRegistry[def.packageName].add(def)
+  dslPortEnvironmentOrder.add(key)
+
+proc registerEnvironmentApplier*(packageName, environmentName: string;
+                                 applier: proc () {.closure.}) =
+  ## Record the closure that applies `(packageName, environmentName)`'s
+  ## bindings. FIRST-WINS, for `registerEnvironment`'s reason -- the two
+  ## registries must agree on which declaration won.
+  let key = dslPortEnvironmentKey(packageName, environmentName)
+  if key in dslPortEnvironmentAppliers:
+    return
+  dslPortEnvironmentAppliers[key] = applier
+
+proc registeredEnvironments*(packageName: string): seq[DslEnvironmentDef] =
+  ## Every environment `packageName` declared, in declaration order. A
+  ## copy, so a caller cannot mutate the registry.
+  if packageName in dslPortEnvironmentRegistry:
+    return dslPortEnvironmentRegistry[packageName]
+  @[]
+
+proc registeredEnvironmentNames*(packageName: string): seq[string] =
+  for def in registeredEnvironments(packageName):
+    result.add(def.name)
+
+proc registeredEnvironment*(packageName, environmentName: string):
+    DslEnvironmentDef =
+  ## The named environment, or a zero record whose `name` is empty.
+  ##
+  ## MATCHED UNDER NIM IDENTIFIER EQUALITY (`normalize` on both sides),
+  ## because every other lane that handles an environment name already
+  ## does. `l5EnvironmentEmission` refuses a second `environment Dev:`
+  ## beside `environment dev:` with `envName.normalize in seenNames`, so
+  ## the DSL has already decided those are ONE name; and
+  ## `canonicalEnvironmentSelection` normalizes, so `REPRO_ENVIRONMENT=Dev`
+  ## and `=dev` are ONE lowered-graph cache entry. A verbatim lookup here
+  ## disagreed with both: `Dev` was refused as an environment the package
+  ## does not declare, under a cache key that says it is the same build
+  ## as `dev`. Two lanes that disagree about which selections are equal
+  ## is §6.4's hazard, so there is one rule.
+  let wanted = environmentName.normalize
+  for def in registeredEnvironments(packageName):
+    if def.name.normalize == wanted:
+      return def
+  DslEnvironmentDef()
+
+proc environmentOwnedConfigKeys*(packageName: string): seq[string] =
+  ## Every configurable key SOME environment of `packageName` binds,
+  ## de-duplicated, in first-binding order.
+  ##
+  ## This is the set §6.6's right column names -- "Bind any configurable
+  ## the environment owns" -- and it is DERIVED rather than declared: a
+  ## configurable becomes environment-owned by being bound in an
+  ## environment, so there is no second place for the ownership to
+  ## disagree with the bindings.
+  for def in registeredEnvironments(packageName):
+    for binding in def.bindings:
+      if binding.key notin result:
+        result.add(binding.key)
+
+proc environmentBindingSite*(packageName, key: string): string =
+  ## `"<environment> (<file>:<line>)"` for the FIRST environment that
+  ## binds `key`, or "" when none does. The consumer-side refusal quotes
+  ## it so the author can go and read the binding that owns the value.
+  for def in registeredEnvironments(packageName):
+    for binding in def.bindings:
+      if binding.key == key:
+        return def.name & " (" & binding.sourceFile & ":" &
+          $binding.sourceLine & ")"
+  ""
+
+proc registerConsumerInstanceOverride*(def: ConsumerInstanceOverrideDef) =
+  ## Record one `instanceOverrides <package>.<service>:` block (§6.6).
+  dslPortConsumerOverrides.add(def)
+
+proc registeredConsumerInstanceOverrides*(consumerPackage: string):
+    seq[ConsumerInstanceOverrideDef] =
+  for def in dslPortConsumerOverrides:
+    if def.consumerPackage == consumerPackage:
+      result.add(def)
+
+proc consumerInstanceOverride*(consumerPackage, targetPackage,
+                               targetService: string):
+    ConsumerInstanceOverrideDef =
+  ## The override this consumer declared for that service, or a zero
+  ## record whose `targetService` is empty.
+  for def in dslPortConsumerOverrides:
+    if def.consumerPackage == consumerPackage and
+        def.targetPackage == targetPackage and
+        def.targetService == targetService:
+      return def
+  ConsumerInstanceOverrideDef()
+
+proc bindEnvironmentConfigurable*[T](packageName, environmentName,
+                                     key: string; value: T) =
+  ## Contribute ONE environment binding into the EXISTING override lane.
+  ##
+  ## `packageName` and `environmentName` are carried for the diagnostic
+  ## and are not part of the key: §6 binds a configurable that already
+  ## exists, so the key is the one `recordConfigDefault` registered and
+  ## not a per-environment variant of it. Two environments do not hold
+  ## two values at once -- ONE is selected per invocation (§6.4), and
+  ## `applySelectedEnvironment` applies that one.
+  ##
+  ## The call delegates to `setConfigurable`, which is `prOverride` in
+  ## `Configurable-System.md`'s ladder as this port implements it: the
+  ## one table `readConfigurable` consults BEFORE the registered
+  ## default. That is D-SS6's declared position (`epOverride`), and the
+  ## reason this proc introduces no merge rule, no second table and no
+  ## new staging of its own -- §6.1's "needs no new staging, no new
+  ## merge rules and no new precedence model" is a constraint on this
+  ## body, and the body satisfies it by calling nothing that L5 added.
+  ##
+  ## `epOverride` IS A RECORDED LABEL HERE, NOT AN ORDERING THIS PORT CAN
+  ## ENFORCE, and saying so is the honest version of the paragraph above.
+  ## `setConfigurableRaw` writes `dslPortOverrides[key] = value` after a
+  ## kind check and compares no priority, and `readConfigurable` consults
+  ## that one table before the defaults table. So an environment does beat
+  ## a registered DEFAULT -- there are two tables and the override one
+  ## wins -- and against any other contributor it is LAST-WRITE-WINS,
+  ## whatever rung either claims. A later `epForce` does not outrank an
+  ## `epOverride` and an earlier one is not protected from it. D-SS6's
+  ## entry in the milestone file carries the measurement and names what a
+  ## real ladder would need (a per-rung table, nobody's milestone yet);
+  ## `EnvironmentBindingDef.precedence` is provenance for whoever builds
+  ## it.
+  ##
+  ## WHY THE UNKNOWN-KEY CASE RE-RAISES WITH §6's SENTENCE RATHER THAN
+  ## CHECKING FIRST. `setConfigurable` already refuses an unregistered
+  ## key, and its message is about `config:` blocks in general. The
+  ## author here wrote an environment binding, so the sentence that
+  ## helps is §6's own ordering rule. Catching rather than pre-checking
+  ## keeps ONE registration test (`setConfigurableRaw`'s) rather than
+  ## two that can disagree.
+  try:
+    setConfigurable(key, value)
+  except EDslPortMissingKey:
+    raise newException(EDslPortMissingKey,
+      "environment `" & environmentName & "` of package `" & packageName &
+      "` binds `" & key & "`, which no `config:` block registered. " &
+      "Shared-Development-Services.md §6: \"The service or activity " &
+      "declares its configurables; an environment binds them\" -- so the " &
+      "declaration has to exist first.")
+
+template environmentBoundValue*(key: string; declared: untyped): untyped =
+  ## The value an activity `config:` key has after the selected
+  ## environment has contributed, or the author's declared default when
+  ## it has not.
+  ##
+  ## This is what L2's generated activity entry point uses as the
+  ## PARAMETER DEFAULT for each `config:` key, and the whole of what
+  ## makes §6's own example work:
+  ##
+  ##     activity sso(pg: ManagedPostgres):
+  ##       config:
+  ##         externalDomain: string
+  ##     environment dev:
+  ##       sso.externalDomain = "login.metacraft-labs.test"
+  ##
+  ## A parameter default is evaluated at CALL time, and the `enable`
+  ## call that invokes the entry point runs long after module init --
+  ## which is where `applySelectedEnvironment` ran. So the read sees the
+  ## binding with no new staging and no explicit ordering: the existing
+  ## Nim evaluation order already puts the contribution before the read.
+  ##
+  ## An `enable` override that passes the argument EXPLICITLY still
+  ## wins, because it supplies the argument and the default is then not
+  ## evaluated at all. That is the correct precedence for a SAME-PACKAGE
+  ## `enable` (the owner overriding its own environment), and it is not
+  ## a consumer-side bind: §6.6's refusal is enforced at the binding
+  ## site, in the consumer's own compilation, and is not a function of
+  ## this read.
+  ##
+  ## THIS TEMPLATE IS FOR A KEY THAT HAS A DEFAULT. A key declared with
+  ## NO default is a REQUIRED configurable and its parameter default is
+  ## `requiredConfigurableValue` instead -- there is no `declared`
+  ## expression to fall back to, which is the whole difference.
+  ##
+  ## `when compiles(...)` rather than an unconditional read: the port's
+  ## configurable lane carries bool / int / string / float / enum /
+  ## seq[enum], and an activity may legitimately declare a `config:` key
+  ## of an object type. For such a key the declared default is used
+  ## directly, and nothing is silently lost BECAUSE THE WALKER REFUSES
+  ## THE BINDING AT THE AUTHOR'S OWN LINE -- `macros_b.nim`'s
+  ## `l5ParseEnvironmentBody` refuses a target whose type the
+  ## configurable lane does not carry, by name.
+  ##
+  ## AN EARLIER REVISION OF THIS COMMENT ALSO CLAIMED A REFUSAL FOR A
+  ## TARGET DECLARED WITH NO DEFAULT. There was one for a while, and it
+  ## is deliberately gone: such a key is REQUIRED, not slotless, and
+  ## refusing a binding to it made §6's own example illegal. The two
+  ## refusals that replaced it are
+  ## `l5RefuseUnsatisfiableRequiredKeys` (expansion) and
+  ## `requiredConfigurableValue` (resolution).
+  when compiles(readConfigurable[typeof(declared)](key, declared)):
+    readConfigurable[typeof(declared)](key, declared)
+  else:
+    declared
+
+proc selectedEnvironmentName*(): string =
+  ## The environment selected for this invocation, or "" when none is.
+  ##
+  ## "" is NOT a default environment: it means no environment was
+  ## selected, and the configurables keep their declared defaults. §6
+  ## gives an environment no ground state to fall back to, and inventing
+  ## one here would pick a hostname for an author who picked none.
+  getEnv(ReproEnvironmentEnvVar, "").strip()
+
+proc canonicalEnvironmentSelection*(): string =
+  ## The canonical form of the selected environment, for the cache keys.
+  ##
+  ## §6.4's requirement in one proc: `repro_cli_support` folds this into
+  ## `loweredGraphCacheKey` AND gives `providerGraphStoreRoot` its own
+  ## subdirectory per value, which is exactly what
+  ## `canonicalVariantAssignments` already does for `REPRO_VARIANTS`.
+  ## Trimmed and lowercased so `dev`, `Dev` and ` dev ` are one cache
+  ## entry rather than three; empty when nothing is selected, so the key
+  ## is byte-identical to the pre-L5 one for every build that selects no
+  ## environment.
+  selectedEnvironmentName().normalize
+
+proc requiredConfigurableValue*[T](packageName, key,
+                                   qualifier, name: string): T =
+  ## The value of a REQUIRED `config:` key, or the RESOLUTION-TIME
+  ## refusal (Shared-Development-Services L5, §6).
+  ##
+  ## This is what L2's generated activity entry point uses as the
+  ## PARAMETER DEFAULT for a `config:` key declared with no default, the
+  ## way `environmentBoundValue` is used for one that has a default. A
+  ## parameter default is evaluated at CALL time, so an `enable
+  ## <activity>(<name> = ...)` that passes the argument explicitly never
+  ## evaluates this at all -- which is the second of §6's two routes
+  ## doing its job without this proc being involved.
+  ##
+  ## WHY THERE ARE TWO REFUSALS AND WHAT THIS ONE MEANS. The macro
+  ## refuses, at expansion, a required key that NO declared environment
+  ## binds and NO `enable` site supplies: that one means "this can never
+  ## work", and it has to be the macro's because a check that fired only
+  ## when a particular environment was SELECTED would leave the defect
+  ## silently inert for every other build. This one means "this
+  ## configuration does not work": the key IS bindable -- some
+  ## environment of this package binds it -- and the environment
+  ## actually selected does not. The two are deliberately distinguishable
+  ## in their text.
+  ##
+  ## The message names the key, the selected environment, BOTH routes,
+  ## and the environments that do bind the key, because "bind it in an
+  ## environment" is not actionable when the author's real mistake is
+  ## having selected the wrong one of three.
+  if not configurableIsSatisfied(key):
+    let selected = selectedEnvironmentName()
+    var binders: seq[string] = @[]
+    for def in registeredEnvironments(packageName):
+      for binding in def.bindings:
+        if binding.key == key and def.name notin binders:
+          binders.add(def.name)
+    let selectionText =
+      if selected.len == 0:
+        "NO environment is selected (`" & ReproEnvironmentEnvVar &
+          "` is unset)"
+      else:
+        "the selected environment `" & selected & "` does not bind it"
+    let binderText =
+      if binders.len == 0:
+        "No environment of package `" & packageName & "` binds it."
+      else:
+        "Environments of package `" & packageName &
+          "` that DO bind it: " & binders.join(", ") & "."
+    raise newException(EDslPortUnsatisfiedRequired,
+      "required `config:` key `" & qualifier & "." & name &
+      "` of package `" & packageName & "` IS UNSATISFIED: it is " &
+      "declared without a default, which makes it REQUIRED -- the slot " &
+      "exists and has no seed -- " & selectionText & ", and the " &
+      "`enable " & qualifier & "(...)` site did not pass it. " &
+      binderText & " Shared-Development-Services.md §6: \"the service " &
+      "or activity declares its configurables; an environment binds " &
+      "them\" -- so satisfy it either by binding it in the selected " &
+      "environment (`environment <name>: " & qualifier & "." & name &
+      " = <value>`) or by passing it at the enable site (`enable " &
+      qualifier & "(" & name & " = <value>)`).")
+  when compiles(readConfigurable[T](key)):
+    readConfigurable[T](key)
+  else:
+    # `seq[<enum>]`, which has no key-only `readConfigurable` overload.
+    # The fallback can never be returned here: the satisfaction check
+    # above has already established that an override row exists.
+    readConfigurable(key, default(T))
+
+proc applyEnvironment*(packageName, environmentName: string) =
+  ## Apply ONE named environment's bindings for `packageName`.
+  ##
+  ## Separated from `applySelectedEnvironment` so the selection and the
+  ## application are two operations rather than one. L7's resolver
+  ## needs that split -- it resolves `(identity, scope, environment)`
+  ## per consuming edge and cannot re-read the process environment per
+  ## edge -- and a test needs it to exercise two environments without
+  ## two processes. Raises `EDslPortMissingKey` when the package
+  ## declares no environment by that name, naming the ones it does.
+  let def = registeredEnvironment(packageName, environmentName)
+  if def.name.len == 0:
+    let declared = registeredEnvironmentNames(packageName)
+    raise newException(EDslPortMissingKey,
+      "package `" & packageName & "` declares no environment named `" &
+      environmentName & "`; it declares " &
+      (if declared.len == 0: "none at all"
+       else: "`" & declared.join("`, `") & "`") & ".")
+  # KEYED ON `def.name`, NOT ON `environmentName`. `registeredEnvironment`
+  # above matches under Nim identifier equality while this table is
+  # keyed on the DECLARED spelling, so looking the applier up by the
+  # caller's spelling would find the environment and then no applier --
+  # and `applier == nil` is silent. The def that was found names the key
+  # that exists.
+  let applier = dslPortEnvironmentAppliers.getOrDefault(
+    dslPortEnvironmentKey(def.packageName, def.name), nil)
+  if applier == nil:
+    return
+  # ALL-OR-NOTHING, and this is a behaviour decision rather than
+  # hygiene. An environment is "a named set of bindings" (§6); a set
+  # half of which is in force is not one of the two outcomes §6
+  # describes. Before this, a binding that raised partway -- an
+  # unregistered key, a type mismatch -- left every PRECEDING binding
+  # applied and then propagated the exception, so a recipe that refused
+  # to start also carried a configuration no environment declares. The
+  # author now sees the same error and the configurables are back where
+  # the declared defaults put them.
+  #
+  # The alternative was to validate every binding before applying any.
+  # It is rejected because a binding's value is the author's EXPRESSION
+  # and validating it means evaluating it, so a "validation" pass is the
+  # apply pass with the write suppressed -- two code paths that can
+  # disagree about what is bindable, which is the defect family this
+  # milestone keeps finding. Snapshot-and-restore needs one path.
+  #
+  # SHARED-DEVELOPMENT-SERVICES L8 ADDED A SECOND REGISTRY, SO THE
+  # SNAPSHOT HAD TO GROW WITH IT. A binding to a CONTRIBUTION POINT no
+  # longer writes `dslPortOverrides`; it writes a `coReplace` row into
+  # `dslPortContributions` (see `setConfigurableRaw`). Snapshotting only
+  # the override table would therefore have restored the scalar half of
+  # a half-applied environment and LEFT the collection half in force --
+  # exactly the partial apply the paragraph above exists to prevent,
+  # re-introduced one registry over. Both are snapshotted and both are
+  # restored, in one `try`.
+  let snapshot = configurableOverrideSnapshot()
+  let contributions = contributionSnapshot()
+  try:
+    applier()
+  except CatchableError:
+    restoreConfigurableOverrides(snapshot)
+    restoreContributions(contributions)
+    raise
+
+proc applySelectedEnvironment*(packageName: string): string =
+  ## Apply the SELECTED environment's bindings for `packageName`, and
+  ## return the name applied ("" when none was).
+  ##
+  ## Raises `EDslPortMissingKey` when an environment is selected that
+  ## this package does not declare, naming the ones it does. Silence
+  ## there would be the §6.4 failure in its other form: a developer who
+  ## selected `production` and got development bindings, with nothing
+  ## said.
+  let selected = selectedEnvironmentName()
+  if selected.len == 0:
+    return ""
+  let def = registeredEnvironment(packageName, selected)
+  if def.name.len == 0:
+    let declared = registeredEnvironmentNames(packageName)
+    raise newException(EDslPortMissingKey,
+      "environment `" & selected & "` is selected (" &
+      ReproEnvironmentEnvVar & ") and package `" & packageName &
+      "` declares no environment by that name; it declares " &
+      (if declared.len == 0: "none at all"
+       else: "`" & declared.join("`, `") & "`") & ".")
+  applyEnvironment(packageName, def.name)
+  def.name

@@ -22,9 +22,24 @@ type
     nkResourcesBlock   ## the `resources:` block (M78)
     nkResourceEntry    ## `<kind> <address>:` resource declaration (M78)
     nkResourceAttr     ## `<key> = <value>` line inside a resource entry
+    nkOpaque           ## a construct the inspector steps over without
+                       ## reading it (`inspectProfile` only): a helper call,
+                       ## or an activity's `stow:` / `resources:` block
+
+  OpaqueKind* = enum
+    okHelperCall          ## `helper(args...)` -- one statement, possibly
+                          ## spanning lines -- whose elements, resources or
+                          ## overrides only the compiled profile knows
+    okActivityStowBlock   ## `stow:` directly in an activity body (GM11)
+    okActivityResources   ## `resources:` directly in an activity body (GM9)
 
   CondKeyword* = enum
     ckWhen, ckIf
+    ckElif   ## an `elif <pred>:` branch of a `when` chain in `config:` /
+             ## `resources:`; its `predicateAst` is the branch predicate
+             ## conjoined with the negation of every earlier branch's
+    ckElse   ## the `else:` branch of such a chain; its `predicateAst` is
+             ## the conjunction of the negated earlier predicates
 
   IntentNode* = ref object
     ## Each node describes one structural item the parser recognized.
@@ -47,8 +62,14 @@ type
       keyword*: CondKeyword
       predicateSource*: string       ## the raw text between the
                                      ## keyword and the trailing `:`
-      predicateAst*: PredNode
-      canonicalPredicate*: string    ## normalized canonical form
+                                     ## (empty for `else:`)
+      predicateAst*: PredNode        ## the guard the block applies: for
+                                     ## `when` / `if` the parsed predicate,
+                                     ## for `elif` / `else` the effective
+                                     ## guard of that branch (see
+                                     ## `CondKeyword`)
+      canonicalPredicate*: string    ## normalized canonical form of
+                                     ## `predicateAst`
       condHeaderLine*: int
       condChildren*: seq[IntentNode]
     of nkPackageRef:
@@ -72,14 +93,32 @@ type
     of nkConfigBlock:
       configHeaderLine*: int
       configPackages*: seq[IntentNode]
+        ## `nkConfigPackage` blocks, and -- for a `when <pred>:` chain
+        ## around package blocks (GM3) -- `nkCondBlock`s whose
+        ## `condChildren` are further package blocks / guarded blocks.
+        ## Walk it with `applicableConfigPackages`, which evaluates the
+        ## guards; never read the packages directly.
     of nkConfigPackage:
       configPackageName*: string
       configPackageHeaderLine*: int
       configEntries*: seq[IntentNode]
+        ## `nkConfigEntry` lines, and `nkCondBlock`s whose
+        ## `condChildren` are the `nkConfigEntry`s (or nested guarded
+        ## blocks) a runtime guard selects (GM3: a `when <pred>:` chain
+        ## inside the package block, parsed from source or adapted from a
+        ## compiled `ProfileIntent`). Walk it with
+        ## `applicableConfigEntries`, which evaluates the guards; never
+        ## read the entries directly.
     of nkConfigEntry:
       configKey*: string
       configValueSource*: string     ## raw RHS bytes, no leading `=`
       configEntryLine*: int
+      configIntentOrdinal*: int
+        ## 1-based position of the `ConfigOverride` this entry was
+        ## adapted from in the compiled `ProfileIntent.configOverrides`;
+        ## 0 for an entry parsed from source text. Lets a consumer of the
+        ## planner's selection (`repro home export --target`) name the
+        ## intent element the planner chose.
     of nkHostsBlock:
       hostsHeaderLine*: int
       hostsEntries*: seq[IntentNode]
@@ -87,6 +126,33 @@ type
       hostName*: string
       hostActivities*: seq[string]
       hostEntryLine*: int
+      hostAppliesDeclared*: bool
+        ## Whether the entry declares `applies: [...]` (block form). False:
+        ## Reprobuild applies every concern on the host.
+      hostApplies*: seq[string]
+        ## The declared concern names, validated
+        ## (`repro_profile/concerns.concernListProblem`); meaningful only
+        ## when `hostAppliesDeclared`. Read it through the planner's rule,
+        ## `repro_home_apply/plan.appliedConcernsFor`.
+      hostSystemManagedElsewhere*: bool
+        ## The entry says `system: managedElsewhere[(...)]` (block form;
+        ## `repro_profile/host_system`): the host's system scope is managed
+        ## by something other than this profile.
+      hostSystemManagedBy*: string
+        ## The `managedElsewhere("...")` pointer, "" when the entry names
+        ## none; meaningful only when `hostSystemManagedElsewhere`.
+      hostBlockForm*: bool
+        ## The text parser read the entry in block form (`activities:` /
+        ## `applies:` lines under the host); the structural editor rewrites
+        ## the `activities:` line rather than the host line.
+      hostActivitiesLine*: int
+        ## Block form: the 1-based line of `activities:`, or 0 when the
+        ## entry has none.
+      hostListEndLine*: int
+        ## The 1-based line holding the activity list's closing `]`: the
+        ## line the list starts on (`hostEntryLine`, or `hostActivitiesLine`
+        ## in block form) unless the list spans lines. 0 when the entry has
+        ## no activity list (block form without `activities:`).
     of nkResourcesBlock:
       ## The single `resources:` block. Direct children are
       ## `nkResourceEntry` declarations and `nkCondBlock` predicate
@@ -104,11 +170,41 @@ type
       resourceAddress*: string
       resourceHeaderLine*: int
       resourceAttrs*: seq[IntentNode]
+      resourceIntentOrdinal*: int
+        ## 1-based position of the `ResourceIntent` this entry was
+        ## adapted from in the compiled `ProfileIntent.resources`; 0 for
+        ## an entry parsed from source text (see `configIntentOrdinal`).
+      resourceActivity*: string
+        ## GM9: the activity the resource belongs to (an entry adapted from
+        ## a compiled `ResourceIntent` with `activity` set); "" for a
+        ## profile-wide one. `applicableResourceEntries` keeps an entry only
+        ## when the host's selection enables this activity.
     of nkResourceAttr:
       ## A `<key> = <value>` payload line inside a resource entry.
       resourceAttrKey*: string
       resourceAttrValueSource*: string  ## raw RHS bytes, no leading `=`
       resourceAttrLine*: int
+    of nkOpaque:
+      ## A construct `inspectProfile` steps over: its extent
+      ## (`startLine` .. `endLine`) is known, its contents are not read and
+      ## never edited. Only the compiled profile knows what it contributes
+      ## (Home-Profile-Intent-Layer.md §Structural Edit Contract, "Constructs
+      ## the inspector steps over"). `loadProfile` never produces one: it
+      ## refuses the construct instead.
+      opaqueKind*: OpaqueKind
+      opaqueConstruct*: string
+        ## How a diagnostic names it: "helper call `secretsAndCrypto()`",
+        ## "`stow:` block".
+
+  StowScopeEntry* = object
+    ## GM11: one activity's claim of a `stow/` package (`repro_profile`'s
+    ## `StowScope`, adapted for the planner). The claim holds on a host
+    ## whose selection enables `activity` and where `guardAst` holds (no
+    ## guard: `guardSource` is empty and `guardAst` nil).
+    package*: string
+    activity*: string
+    guardSource*: string
+    guardAst*: PredNode
 
   Profile* = ref object
     ## Parsed and validated profile. `lines` is the source split on
@@ -123,17 +219,56 @@ type
     root*: IntentNode                  ## the `profile <name>:` node
     indentStep*: int                   ## detected indent width (usually 2)
     adapterPreference*: OrderedTable[string, seq[string]]
-      ## M2.5: per-OS adapter preference parsed from a top-level
+      ## The profile's selection policy (GM4b), parsed from a top-level
       ## `adapterPreference:` block inside the `profile` body. Keys are
       ## canonical OS tags (`"windows"`, `"linux"`, `"darwin"`); values
-      ## are the ordered adapter chain (each entry drawn from the closed
-      ## set `{"builtin", "scoop", "nix", "path"}`). Empty table when
-      ## the block is absent — the realize / preview path then falls
-      ## back to the M65 platform default chain. A partial table (e.g.
-      ## only `"windows"` set) falls back to the M65 platform default
-      ## per missing OS at resolve time. `darwin` and `macos` are
+      ## are the ordered realization kinds (each drawn from the closed
+      ## set `{"tarball", "builtin", "scoop", "nix", "path"}`; `builtin`
+      ## is the former spelling of `tarball`). Empty table when the block
+      ## is absent — resolution then uses the default selection policy,
+      ## the same on every platform. A partial table (e.g. only
+      ## `"windows"` set) uses the default for each missing OS at resolve
+      ## time. `darwin` and `macos` are
       ## aliased at parse time to the canonical `"darwin"` key so a
       ## single lookup at resolve time suffices.
+    dataFileRefs*: seq[string]
+      ## GM4: the plan-time data files the profile's `data:` section
+      ## names, relative to the profile directory. Parsed from source by
+      ## the text inspector (`repro home add --data` refuses a file not
+      ## listed here); empty for a profile adapted from a compiled intent,
+      ## whose rows are already expanded (see `loadedDataFiles`).
+    stowScopes*: seq[StowScopeEntry]
+      ## GM11: the `stow/` packages the profile's activities claim (`stow:`
+      ## blocks), one entry per claim, in declaration order. Set by the
+      ## compile-then-adapt path; empty for a profile without a `stow:`
+      ## block (every package is then materialized on every host). The
+      ## planner reads it through `repro_home_apply/stow.selectStowEntries`.
+    catalogImports*: seq[string]
+      ## The provisioning-contribution catalogs the profile's `catalogs:`
+      ## section imports, as Nim module paths relative to the profile
+      ## directory. Set by both the text inspector and the
+      ## compile-then-adapt path; `repro home apply` imports them where it
+      ## resolves the profile's package references
+      ## (`repro_home_apply/catalog_projection`).
+    loadedDataFiles*: seq[LoadedDataFile]
+      ## GM4: the data files the planner read for this profile, with the
+      ## exact bytes it expanded. Set by the compile-then-adapt path; the
+      ## apply pipeline records them in the generation's intent snapshot so
+      ## the generation keeps the data it was planned from (rollback and
+      ## `repro home history` never re-read the live file).
+    compiledFrom*: seq[string]
+      ## The files the profile compile edge was observed reading (absolute
+      ## paths, as the monitor recorded them; `ProfileCompileArtifact.
+      ## observedInputs`). Set by the compile-then-adapt path. The apply
+      ## pipeline snapshots those under the profile directory -- helper
+      ## modules in subdirectories included -- into the generation's intent
+      ## snapshot (`intent_snapshot.profileSourceFiles`). Empty for a
+      ## profile read as text, and when the monitor reported nothing.
+
+  LoadedDataFile* = object
+    ## One plan-time data file as read: its reference and its bytes.
+    path*: string
+    content*: string
 
 proc lineCount*(p: Profile): int = p.lines.len
 

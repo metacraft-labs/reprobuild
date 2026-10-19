@@ -169,6 +169,14 @@ jobs:
       # names every action in full and times it, which turns "the leg timed out"
       # into "this action took N minutes" or "this action never finished".
       REPROBUILD_PROGRESS: simple-lines
+      # The commit the release images are built from (the checkout below is
+      # `github.sha`), embedded as `ReprobuildSourceRevision` so a shipped
+      # `repro` can name its source revision (e.g. in `repro home export`
+      # provenance). The `.#release` engine edge takes it from the
+      # `reprobuild.apps.source-revision` probe, which runs
+      # scripts/source_revision.sh when the ACTION runs and so inherits this
+      # job-level variable, which wins over the checkout's own git answer.
+      REPROBUILD_SOURCE_REVISION: ${{ github.sha }}
     strategy:
       # fail-fast stays false so ONE broken leg still lets the others report.
       # That is a diagnostics choice only -- it no longer affects what gets
@@ -178,6 +186,26 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     steps:
+      # ── Persistent runners: let checkout clean the previous run's tree ────
+      #
+      # The macOS legs run on persistent hosts (m3-mcl-*), where the work
+      # directory survives between jobs. A release run extracts the built
+      # archive to verify it, and that tree carries read-only entries; until
+      # verify_release.sh made its trees writable before removing them, a run
+      # that stopped early left one behind. actions/checkout's workspace clean
+      # then fails on it before any step of ours runs (v0.2.7 run 37906066406:
+      # "EACCES: permission denied, unlink .../reprobuild-0.2.2-darwin-aarch64/
+      # lib/python3.13/EXTERNALLY-MANAGED"), and every later job on that host
+      # fails the same way. Making the old tree owner-writable is all checkout
+      # needs; ephemeral runners start empty, so the step is limited to macOS.
+      - name: Make the previous workspace removable (persistent macOS runners)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if [ -d "$GITHUB_WORKSPACE" ]; then
+            chmod -R u+w "$GITHUB_WORKSPACE" 2>/dev/null || true
+          fi
+
       - uses: actions/checkout@v4
 
       # ── Windows: fail fast, and legibly, if the image has no Git ───────────
@@ -310,12 +338,40 @@ jobs:
       #
       # `just bootstrap` still runs scripts/build_apps.sh directly -- unmonitored,
       # and the only way to get an engine binary in the first place.
-      - name: Bootstrap and Build (POSIX)
+      - name: Bootstrap (POSIX)
         if: matrix.os-name != 'windows'
         shell: bash
         run: |
           set -euo pipefail
           dev-exec just bootstrap
+          # refresh-build-auth (next step) rewrites Nix's credentials with a
+          # Python helper, and runs outside the dev shell. The persistent macOS
+          # runners have no python3 on their own PATH (v0.2.9 run 37958588616:
+          # "python3: command not found", exit 127); hand it the dev shell's.
+          py=$(dev-exec bash -c 'command -v python3' | tail -n 1)
+          echo "REPROBUILD_BOOTSTRAP_PYTHON=${py}" >> "$GITHUB_ENV"
+
+      # The installation token minted at the top of the job lives one hour
+      # (https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app).
+      # The Linux bootstrap alone takes over two hours on the release lane, and
+      # the build below then fetches the pinned nixpkgs through Nix with that
+      # token: v0.2.8 run 37941621127 failed there with "unable to download
+      # 'https://api.github.com/repos/NixOS/nixpkgs/tarball/...': HTTP error
+      # 401". Re-mint it, and re-point Git's and Nix's job-scoped credentials
+      # at the new one, between the two phases.
+      - name: Refresh build authentication (POSIX)
+        if: matrix.os-name != 'windows'
+        uses: metacraft-labs/metacraft-github-actions/refresh-build-auth@dev
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
+      - name: Build (POSIX)
+        if: matrix.os-name != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
           dev-exec ./build/bin/repro build --tool-provisioning=path --daemon=off --no-runquota .#release
 
       - name: Bootstrap and Build (Windows)
@@ -524,17 +580,6 @@ jobs:
             Remove-Item -LiteralPath $orchestrator -Force -ErrorAction SilentlyContinue
           }
 
-      # Re-stage after `.#release`: that build rewrites build\bin, so the DLLs
-      # staged above may not survive into the packaged tree. Idempotent -- it
-      # re-copies from the runner toolchain sources (cheap) and skips the pinned
-      # downloads when a DLL is already present. This is the state the packaging
-      # step zips and scripts/verify_release.sh asserts against.
-      - name: Stage Windows runtime DLLs into the release tree
-        if: matrix.os-name == 'windows'
-        shell: pwsh
-        run: |
-          & ./windows/stage-release-dlls.ps1
-
       # Package the artifacts preserving the bin/ and lib/ structures.
       #
       # The archive name is derived here the same way `plan` derives the expected
@@ -573,39 +618,29 @@ jobs:
             echo "PKG_NAME=${pkg_name}" >> "$GITHUB_ENV"
           '
 
+      # ONE script assembles the Windows archive: it re-stages the runtime DLLs
+      # into build\bin (`.#release` rewrites build\bin, so the DLLs staged
+      # before it may not survive; stage-release-dlls.ps1 is idempotent and
+      # skips the pinned downloads when a DLL is already present), copies bin/
+      # and lib/, stages the installed-compile sources into share\repro with
+      # Git for Windows' bash (never WSL's -- v0.2.0 shipped without them and
+      # every `repro exec` from the unpacked zip died at its first compile:
+      # cannot open file: repro_interface_artifacts), and zips the tree. The
+      # GM1w gate tests/e2e/m83/t_e2e_windows_bundle_compiles_profile.nim runs
+      # the same script, so the archive it tests is the archive shipped here.
+      # The siblings resolve from the checkouts setup-dev-env cloned beside
+      # this repository (and ../nim-bearssl, cloned above).
       - name: Package release assets (Windows)
         if: matrix.os-name == 'windows'
         shell: pwsh
         run: |
-          $version = (Get-Content reprobuild.nimble | Select-String -Pattern 'version\s*=\s*"([^"]+)"').Matches.Groups[1].Value
-          $pkg_name = "reprobuild-${version}-${{ matrix.platform }}-${{ matrix.arch }}"
-
-          New-Item -ItemType Directory -Force -Path "${pkg_name}\bin"
-          New-Item -ItemType Directory -Force -Path "${pkg_name}\lib"
-          Copy-Item -Path "build\bin\*" -Destination "${pkg_name}\bin\" -Recurse
-          Copy-Item -Path "build\lib\*" -Destination "${pkg_name}\lib\" -Recurse
+          $out = @(./scripts/release/package_windows_release.ps1 -Zip `
+            -Platform "${{ matrix.platform }}" -Arch "${{ matrix.arch }}")
+          $pkg_name = Split-Path -Leaf $out[0]
+          $asset = Split-Path -Leaf $out[1]
           Add-Content -Path $env:GITHUB_ENV -Value "PKG_NAME=${pkg_name}"
-
-      # The sources an installed reprobuild compiles every project against
-      # (share\repro\source + share\repro\src). v0.2.0 shipped without them,
-      # and every `repro exec` / `dev-exec` from the unpacked zip died at its
-      # first compile: cannot open file: repro_interface_artifacts. The siblings
-      # resolve from the checkouts setup-dev-env cloned beside this repository
-      # (and ../nim-bearssl, cloned above). A `shell: bash` step rather than
-      # `bash` from pwsh, so it is Git for Windows' bash and never WSL's.
-      - name: Stage installed-compile sources (Windows)
-        if: matrix.os-name == 'windows'
-        shell: bash
-        run: bash scripts/release/stage_release_sources.sh "${PKG_NAME}"
-
-      - name: Compress release archive (Windows)
-        if: matrix.os-name == 'windows'
-        shell: pwsh
-        run: |
-          $pkg_name = $env:PKG_NAME
-          Compress-Archive -Path "${pkg_name}" -DestinationPath "${pkg_name}.zip" -Force
-          Add-Content -Path $env:GITHUB_ENV -Value "ASSET_PATH=${pkg_name}.zip"
-          Add-Content -Path $env:GITHUB_ENV -Value "ASSET_NAME=${pkg_name}.zip"
+          Add-Content -Path $env:GITHUB_ENV -Value "ASSET_PATH=${asset}"
+          Add-Content -Path $env:GITHUB_ENV -Value "ASSET_NAME=${asset}"
 
       # Smoke-tests the PACKAGED archive, not the build tree: on Windows it
       # asserts the runtime-DLL manifest and runs the binary with PATH scrubbed

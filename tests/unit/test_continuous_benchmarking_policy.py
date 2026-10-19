@@ -375,12 +375,33 @@ class ContinuousBenchmarkingPolicyTests(unittest.TestCase):
         self.assertIn(
             'runner: \'["self-hosted", "Linux", "X64", "benchmark"]\'', workflow
         )
-        # Capability-label arrays, not the retired single-name `eph-*` classes:
-        # metacraft-dev-guidelines `policies/ci-workflow-standards.md`
-        # (§ Capability-label taxonomy) is authoritative, and #248 migrated
-        # this leg from `["eph-macos-arm64"]` to the equivalent array.
-        self.assertIn(
-            'runner: \'["self-hosted", "macos", "arm64"]\'', workflow
+        # Check the active measurement job, not a label array in a comment
+        # or another job. Continuous benchmarking policy requires m3's
+        # dedicated capability labels instead of the general macOS pool.
+        benchmark_job = re.search(
+            r"^  benchmark:\n(.*?)(?=^  \S|\Z)", workflow, re.M | re.S
+        )
+        self.assertIsNotNone(benchmark_job)
+        matrix = re.search(
+            r"^      matrix:\n        include:\n(.*?)(?=^    \S)",
+            benchmark_job.group(1),
+            re.M | re.S,
+        )
+        self.assertIsNotNone(matrix)
+        macos_runners = re.findall(
+            r"^          - platform: macos\s*\n"
+            r"            runner: '([^'\n]+)'(?: *#.*)?$",
+            matrix.group(1),
+            re.M,
+        )
+        self.assertEqual(len(macos_runners), 1)
+        self.assertEqual(
+            json.loads(macos_runners[0]),
+            ["self-hosted", "darwin", "nix-darwin", "aarch64-darwin", "benchmark"],
+        )
+        self.assertRegex(
+            benchmark_job.group(1),
+            r"(?m)^    runs-on: \$\{\{ fromJSON\(matrix\.runner\) \}\} *$",
         )
         self.assertNotIn('"eph-macos-arm64"]', workflow)
         self.assertIn("metacraft-labs/runquota", workflow)
@@ -408,6 +429,7 @@ class ContinuousBenchmarkingPolicyTests(unittest.TestCase):
             "just bench_cmake_reprobuild_vs_ninja",
             "just bench_cmake_reprobuild_vs_ninja_quick",
             "just bench_cmake_reprobuild_vs_ninja_medium",
+            "just bench_cmake_cross_project_trycompile_reuse",
         ]:
             self.assertIn(target, agents)
 

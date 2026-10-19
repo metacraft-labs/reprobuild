@@ -1,4 +1,3 @@
-import std/tables
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/packages_schema
@@ -73,7 +72,8 @@ package cargo:
       packageId = "rust@1.94.0",
       cpu = "x86_64",
       os = "windows",
-      lockIdentity = "tarball:rust@1.94.0:sha256:2e65904a4340df11a1ed8a86a7cc5c08e09f65453ce822ef36159c605a97f6a5"
+      lockIdentity = "tarball:rust@1.94.0:sha256:2e65904a4340df11a1ed8a86a7cc5c08e09f65453ce822ef36159c605a97f6a5",
+      version = "1.94.0"
     # Linux x86_64: same rust standalone-distribution tarball as the
     # Windows entry — different triple. The rust-installer auto-merge
     # in the realize loop flattens cargo / rustc / rust-std into a
@@ -86,10 +86,11 @@ package cargo:
       packageId = "rust@1.94.0",
       cpu = "x86_64",
       os = "linux",
-      lockIdentity = "tarball:rust@1.94.0:linux:sha256:e8fa4185f3ef6ae32725ff638b1ecdbff28f5d651dc0b3111e2539350d03b15a"
+      lockIdentity = "tarball:rust@1.94.0:linux:sha256:e8fa4185f3ef6ae32725ff638b1ecdbff28f5d651dc0b3111e2539350d03b15a",
+      version = "1.94.0"
     # macOS aarch64: same rust standalone-distribution tarball — different
     # triple (Apple Silicon). All current GitHub-hosted macOS runners are
-    # M1/M2/M3, so aarch64 is the only macOS slice we ship. The realize
+    # M1/M2/M3, so aarch64 is the only macOS entry we ship. The realize
     # loop's rust-installer auto-merge applies the same way as on Linux
     # and Windows so `cargo` lands at `<prefix>/bin/cargo`.
     tarball url = "https://static.rust-lang.org/dist/rust-1.94.0-aarch64-apple-darwin.tar.xz",
@@ -100,7 +101,23 @@ package cargo:
       packageId = "rust@1.94.0",
       cpu = "aarch64",
       os = "macos",
-      lockIdentity = "tarball:rust@1.94.0:macos-aarch64:sha256:9e55893e014e6aa76924b4cc244a289ad56de4d89d3721fbd5c7f497b31ea33c"
+      lockIdentity = "tarball:rust@1.94.0:macos-aarch64:sha256:9e55893e014e6aa76924b4cc244a289ad56de4d89d3721fbd5c7f497b31ea33c",
+      version = "1.94.0"
+    # GM4b: archive realizations formerly held by the retired
+    # `VersionedProvisioning` catalog record (see the conflict notes
+    # in the Gradual-Nix-To-Reprobuild-Migration GM4b milestone).
+    tarball url = "https://static.rust-lang.org/dist/rust-1.94.0-x86_64-apple-darwin.tar.xz",
+      sha256 = "63fe27931d4b8da0b0069f13d4d2c04792203a5cabb4df17ff15495aaaab0ef7",
+      archiveType = "tar.xz",
+      executablePath = "cargo/bin/cargo",
+      version = "1.94.0",
+      packageId = "cargo@1.94.0",
+      extractPath = "rust-1.94.0-x86_64-apple-darwin",
+      preInstall = preInstallAction("move-item", "$dir/rust-std-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/lib", "$dir/rustc/lib/rustlib/x86_64-pc-windows-msvc/lib", false, ""),
+      preInstall = preInstallAction("move-item", "$dir/rust-std-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/lib", "$dir/rustc/lib/rustlib/x86_64-unknown-linux-gnu/lib", false, ""),
+      preInstall = preInstallAction("move-item", "$dir/rust-std-x86_64-apple-darwin/lib/rustlib/x86_64-apple-darwin/lib", "$dir/rustc/lib/rustlib/x86_64-apple-darwin/lib", false, ""),
+      cpu = "x86_64",
+      os = "macos"
 
   executable cargo:
     cli:
@@ -266,61 +283,3 @@ proc run*(self: CargoTestBinary; filter = "";
     dependencyPolicy = makeDepfilePolicy(depfiles = [
       "target/debug/deps/*.d", "target/release/deps/*.d"]),
     extraEnv = extraEnv)
-
-# M65 cakBuiltin catalog -- consumed on Windows and non-Nix Linux.
-# Same per-channel Rust toolchain archive as `rustc.nim` and
-# `rustfmt.nim` / `clippy.nim`; bin_relpath points at the `cargo/`
-# subdirectory inside the extracted archive.
-
-let cargoCatalog* = @[
-  VersionedProvisioning(
-    version: "1.94.0",
-    archive_format: afTarXz,
-    install_method: imExtract,
-    bin_relpath: @["cargo\\bin\\cargo.exe"],
-    platforms: @[
-      PlatformBinary(cpu: pcX86_64, os: poWindows,
-        url: "https://static.rust-lang.org/dist/rust-1.94.0-x86_64-pc-windows-msvc.tar.xz",
-        sha256: "2e65904a4340df11a1ed8a86a7cc5c08e09f65453ce822ef36159c605a97f6a5",
-        sha512: "",
-        extract_path: "rust-1.94.0-x86_64-pc-windows-msvc"),
-      PlatformBinary(cpu: pcX86_64, os: poLinux,
-        url: "https://static.rust-lang.org/dist/rust-1.94.0-x86_64-unknown-linux-gnu.tar.xz",
-        sha256: "e8fa4185f3ef6ae32725ff638b1ecdbff28f5d651dc0b3111e2539350d03b15a",
-        sha512: "",
-        sha1: "",
-        extract_path: "rust-1.94.0-x86_64-unknown-linux-gnu",
-        bin_relpath_override: @["cargo/bin/cargo"]),
-      PlatformBinary(cpu: pcX86_64, os: poMacos,
-        url: "https://static.rust-lang.org/dist/rust-1.94.0-x86_64-apple-darwin.tar.xz",
-        sha256: "63fe27931d4b8da0b0069f13d4d2c04792203a5cabb4df17ff15495aaaab0ef7",
-        sha512: "",
-        sha1: "",
-        extract_path: "rust-1.94.0-x86_64-apple-darwin",
-        bin_relpath_override: @["cargo/bin/cargo"])
-    ],
-    installer_args: @[],
-    pacman_packages: @[],
-    bootstrap_argv: @[],
-    env: initTable[string, string](),
-    # See ``rustc.nim`` for the rationale: merge ``rust-std-<triple>``
-    # into the rustc sysroot so any rustc.exe invoked from this prefix
-    # (e.g. via the cargo-prefix bin dir hit by PATH on
-    # this realized closure) can find libstd. The action is a no-op
-    # when the source does not exist, so we can list all three
-    # platform triples; only the matching one fires on each host.
-    pre_install_actions: @[
-      PreInstallAction(kind: piaMoveItem,
-        source: "$dir/rust-std-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/lib",
-        target: "$dir/rustc/lib/rustlib/x86_64-pc-windows-msvc/lib",
-        recurse: false, literal: ""),
-      PreInstallAction(kind: piaMoveItem,
-        source: "$dir/rust-std-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/lib",
-        target: "$dir/rustc/lib/rustlib/x86_64-unknown-linux-gnu/lib",
-        recurse: false, literal: ""),
-      PreInstallAction(kind: piaMoveItem,
-        source: "$dir/rust-std-x86_64-apple-darwin/lib/rustlib/x86_64-apple-darwin/lib",
-        target: "$dir/rustc/lib/rustlib/x86_64-apple-darwin/lib",
-        recurse: false, literal: "")
-    ])
-]

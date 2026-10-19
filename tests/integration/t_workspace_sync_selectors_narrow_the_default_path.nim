@@ -36,6 +36,7 @@
 ## Skip rule: ``git`` missing on PATH (the convention this suite follows).
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 
@@ -81,7 +82,19 @@ proc repoFragmentToml(name: string): string =
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & name & "\"\n" &
-  "revision = \"main\"\n"
+  "revision = \"main\"\n" &
+  "url_prefix = \"local\"\n" &
+  "url_suffix = \"origin-" & name & ".git\"\n" &
+  "branch = \"main\"\n"
+
+proc repoSetToml(name: string; memberRepos: openArray[string]): string =
+  result = "schema = \"reprobuild.workspace.repo-set.v1\"\n\n"
+  result.add("member_repos = [\n")
+  for m in memberRepos:
+    result.add("  \"" & m & "\",\n")
+  result.add("]\n\n")
+  result.add("[repo-set]\n")
+  result.add("name = \"" & name & "\"\n")
 
 proc projectToml(project: string; remotes: seq[(string, string)]): string =
   result =
@@ -121,6 +134,13 @@ proc setupFixture(gitBin: string): SelectorFixture =
   let workspaceRoot = scratch / "workspace"
   createDir(workspaceRoot / "projects")
   createDir(workspaceRoot / "repos")
+  createDir(workspaceRoot / "url-prefixes")
+  createDir(workspaceRoot / "repo-sets")
+  writeFile(workspaceRoot / "url-prefixes" / "local.toml",
+    "schema = \"reprobuild.workspace.url-prefix.v1\"\n\n" &
+    "[url-prefix]\n" &
+    "name = \"local\"\n" &
+    "url = \"" & fileUrl(scratch) & "\"\n")
   # ``scratch`` is read through the local, not through ``result``: the
   # nested proc has a ``result`` of its own.
   proc materialize(names: openArray[string]): seq[(string, string)] =
@@ -137,6 +157,10 @@ proc setupFixture(gitBin: string): SelectorFixture =
     projectToml("selproject", materialize(FixtureRepoNames)))
   writeFile(workspaceRoot / "projects" / "otherproject.toml",
     projectToml("otherproject", materialize(OtherProjectRepoNames)))
+  writeFile(workspaceRoot / "repo-sets" / "recorders.toml",
+    repoSetToml("recorders", ["alpha-recorder", "beta-recorder"]))
+  writeFile(workspaceRoot / "repo-sets" / "alpha-recorder.toml",
+    repoSetToml("alpha-recorder", ["alpha-recorder", "beta-recorder"]))
   result.workspaceRoot = workspaceRoot
 
 proc plannedNames(fixture: SelectorFixture;
@@ -157,7 +181,13 @@ proc plannedNames(fixture: SelectorFixture;
   if res.code == 0:
     try:
       let doc = parseJson(res.output)
-      for entry in doc["plan"]:
+      let entries =
+        if "plan" in doc: doc["plan"]
+        elif "repos" in doc: doc["repos"]
+        else:
+          checkpoint("could not read the plan out of: " & res.output)
+          newJArray()
+      for entry in entries:
         names.add(entry["name"].getStr())
     except JsonParsingError, KeyError:
       checkpoint("could not read the plan out of: " & res.output)
@@ -280,31 +310,83 @@ suite "repro workspace sync — repo selectors on the default path":
         check res.code != 0
         check res.names.len == 0
         check "is a repo, not a project" in res.output
-        check "--only=alpha-recorder" in res.output
+        check "--only=gamma-tool" in res.output
 
       # A workspace with no recorded metadata: the positional is the
       # resolution target itself.
-      assertNamesOnly(plannedNames(fixture, @[], @["alpha-recorder"]))
+      assertNamesOnly(plannedNames(fixture, @[], @["gamma-tool"]))
       # ``--mainline`` resolves from the first positional on its own path.
       assertNamesOnly(plannedNames(fixture, @["--mainline"],
-        @["alpha-recorder"]))
+        @["gamma-tool"]))
       # A workspace that records its project: the positional is a scope
       # filter over the recorded set.
       createDir(fixture.workspaceRoot / ".repro")
       writeFile(fixture.workspaceRoot / ".repro" / "workspace.toml",
         "schema = \"reprobuild.workspace.local.v1\"\n\n" &
         "[workspace]\nproject = \"selproject\"\n")
-      assertNamesOnly(plannedNames(fixture, @[], @["alpha-recorder"]))
+      assertNamesOnly(plannedNames(fixture, @[], @["gamma-tool"]))
       # The spelling the refusal recommends does what was meant.
-      let only = plannedNames(fixture, @["--only=alpha-recorder"], @[])
+      let only = plannedNames(fixture, @["--only=gamma-tool"], @[])
       check only.code == 0
-      check only.names == @["alpha-recorder"]
+      check only.names == @["gamma-tool"]
       # And a real project positional is unaffected by the new check.
       let scoped = plannedNames(fixture, @[], @["selproject"])
       check scoped.code == 0
       check scoped.names.len == FixtureRepoNames.len
       # A name that is neither still gets the unknown-project error, which
       # now also points at the repo selectors.
+      let neither = plannedNames(fixture, @[], @["no-such-thing"])
+      check neither.code != 0
+      check "is a repo" notin neither.output
+
+  test "t_workspace_sync_positional_repo_set_scopes_the_sweep":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; the fixture seeds real git remotes")
+    else:
+      let fixture = setupFixture(gitBin)
+      defer: removeDir(fixture.scratch)
+
+      # a) A workspace with no recorded metadata:
+      let unrecorded = plannedNames(fixture, @[], @["recorders"])
+      check unrecorded.code == 0
+      check unrecorded.names == @["alpha-recorder", "beta-recorder"]
+
+      # b) --mainline with repo-set positional:
+      let mainline = plannedNames(fixture, @["--mainline"], @["recorders"])
+      check mainline.code == 0
+      check mainline.names == @["alpha-recorder", "beta-recorder"]
+
+      # c) A workspace that records its project in .repro/workspace.toml:
+      createDir(fixture.workspaceRoot / ".repro")
+      writeFile(fixture.workspaceRoot / ".repro" / "workspace.toml",
+        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+        "[workspace]\nproject = \"selproject\"\n")
+
+      let recorded = plannedNames(fixture, @[], @["recorders"])
+      check recorded.code == 0
+      check recorded.names == @["alpha-recorder", "beta-recorder"]
+
+      let recordedMainline = plannedNames(fixture, @["--mainline"],
+        @["recorders"])
+      check recordedMainline.code == 0
+      check recordedMainline.names == @["alpha-recorder", "beta-recorder"]
+
+      # d) Name that is BOTH a repo-set and a repo:
+      # The repo-set wins because positionals name scopes, not repos.
+      # It does NOT refuse as a repo.
+      let collision = plannedNames(fixture, @[], @["alpha-recorder"])
+      check collision.code == 0
+      check collision.names == @["alpha-recorder", "beta-recorder"]
+
+      # e) Name that is ONLY a repo:
+      let repoOnly = plannedNames(fixture, @[], @["gamma-tool"])
+      check repoOnly.code != 0
+      check repoOnly.names.len == 0
+      check "is a repo, not a project" in repoOnly.output
+      check "--only=gamma-tool" in repoOnly.output
+
+      # f) Name that is NEITHER:
       let neither = plannedNames(fixture, @[], @["no-such-thing"])
       check neither.code != 0
       check "is a repo" notin neither.output

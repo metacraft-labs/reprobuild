@@ -1,6 +1,7 @@
 import std/[json, os, osproc, strutils, tempfiles]
 
 import std/unittest
+import repro_test_support/reasoned_skip
 
 import io_mon
 from repro_test_support import requireBinary, monitorShimPath

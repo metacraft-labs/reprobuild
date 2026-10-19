@@ -40,12 +40,21 @@ package `perl`:
     # to produce ``./perl``. M9.R.11.1 follow-up: surface ``bin/perl``
     # once the from-source convention's install glue is wired, or
     # migrate to a prebuilt Strawberry/Active Perl bundle.
+    #
+    # **sha256**: corrected 2026-10-14 against the bytes cpan serves,
+    # which agree with upstream's own published digest at
+    # ``perl-5.42.0.tar.xz.sha256.txt``. The arm had carried
+    # ``e093ef18…``, which matches nothing upstream has ever served, so
+    # it could never realize: every attempt failed the digest check with
+    # "all tarball archive URLs failed for perl". Nothing noticed,
+    # because no check had ever fetched the archive — found by the
+    # catalog conformance sweep this pin now answers to.
     tarball url = "https://www.cpan.org/src/5.0/perl-5.42.0.tar.xz",
-      sha256 = "e093ef184d7f9a1b9797e2465296f55510adb6dab8842b0c3ed53329663096dc",
+      sha256 = "73cf6cc1ea2b2b1c110a18c14bbbc73a362073003893ffcedc26d22ebdbdd0c3",
       archiveType = "tar.xz",
       stripComponents = 1,
       executablePath = "Configure",
       packageId = "perl@5.42.0",
       cpu = "any",
       os = "any",
-      lockIdentity = "tarball:perl@5.42.0:sha256:e093ef184d7f9a1b9797e2465296f55510adb6dab8842b0c3ed53329663096dc"
+      lockIdentity = "tarball:perl@5.42.0:sha256:73cf6cc1ea2b2b1c110a18c14bbbc73a362073003893ffcedc26d22ebdbdd0c3"

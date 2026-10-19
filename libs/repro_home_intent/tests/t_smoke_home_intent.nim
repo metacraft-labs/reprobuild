@@ -8,6 +8,7 @@ import std/[options, os, sets, strutils, tables, tempfiles, unittest]
 from repro_core/paths import extendedPath
 
 import repro_home_intent
+import repro_profile/[types, resources, resource_rows, emit]
 
 const SampleProfile = """
 import repro/profile
@@ -48,6 +49,47 @@ suite "Home-intent smoke":
     let act = findActivity(prof, "default")
     check act.isSome
     check act.get.activityChildren.len == 3  # neovim, tmux, when block
+
+  test "hosts block form: the GM10 system key is read and validated":
+    # The text form of what the `profile` macro accepts
+    # (`repro_profile/host_system`): `managedElsewhere`, optionally with a
+    # one-line string pointer and a trailing comment; anything else is
+    # refused with the host named.
+    let dir = createTempDir("repro-home-smoke-hosts-system-", "")
+    defer: removeDir(dir)
+    let path = dir / "home.nim"
+    proc withHosts(entries: string): string =
+      "import repro/profile\n\nprofile \"x\":\n  activity default:\n" &
+        "    neovim\n\n  hosts:\n" & entries
+    writeFile(extendedPath(path), withHosts(
+      "    \"plain\": [default]\n" &
+      "    \"infra\":\n" &
+      "      activities: [default]\n" &
+      "      system: managedElsewhere(\"example-org/\\\"infra\\\"\")  # c\n" &
+      "    \"distro\":\n" &
+      "      system: managedElsewhere # no pointer\n"))
+    let hostsOpt = findHostsBlock(loadProfile(path))
+    require hostsOpt.isSome
+    var seen: Table[string, (bool, string)]
+    for e in hostsOpt.get.hostsEntries:
+      seen[e.hostName] = (e.hostSystemManagedElsewhere, e.hostSystemManagedBy)
+    check seen["plain"] == (false, "")
+    check seen["infra"] == (true, "example-org/\"infra\"")
+    check seen["distro"] == (true, "")
+    for bad in [
+        "    \"h\":\n      system: managedSomewhere\n",
+        "    \"h\":\n      system: managedElsewhere(infra)\n",
+        "    \"h\":\n      system: managedElsewhere(\"   \")\n",
+        "    \"h\":\n      system: managedElsewhere(\"x\n",
+        "    \"h\":\n      system: managedElsewhere(\"x\") extra\n",
+        "    \"h\":\n      system: managedElsewhere\n      system: managedElsewhere\n"]:
+      writeFile(extendedPath(path), withHosts(bad))
+      try:
+        discard loadProfile(path)
+        checkpoint "accepted: " & bad
+        check false
+      except EUnstructured as e:
+        check "\"h\"" in e.msg
 
   test "rejects unrecognized top-level form":
     let bad = """
@@ -117,6 +159,64 @@ profile "x":
     removePackageReference(path, "ripgrep", activity = "default")
     let after = readFile(extendedPath(path))
     check after == original
+
+  test "a package name starting with a digit is written quoted":
+    # reprobuild-pm issue 2026-10-13-package-macro-cannot-declare-a-name-
+    # starting-with-a-digit: the 7-Zip package is named `7zip`, which is
+    # not a Nim identifier. A profile names it `"7zip"` or
+    # `package("7zip"[, "<version>"])`, and the editor writes those forms.
+    let dir = createTempDir("repro-home-smoke-digit-", "")
+    defer: removeDir(dir)
+    let path = dir / "repro-home-smoke-digit.nim"
+    writeFile(extendedPath(path), """
+import repro/profile
+
+profile "x":
+  activity default:
+    "7zip"
+    package("2fa")
+    package("3dtool", "1.2.3")
+    package("windows-terminal")
+""")
+    let act = findActivity(loadProfile(path), "default")
+    check act.isSome
+    var names: seq[string] = @[]
+    var versions: seq[string] = @[]
+    for child in act.get.activityChildren:
+      names.add child.packageName
+      versions.add child.packageVersion
+    check names == @["7zip", "2fa", "3dtool", "windows-terminal"]
+    check versions == @["", "", "1.2.3", ""]
+
+    let sample = writeSample(dir)
+    let original = readFile(extendedPath(sample))
+    addPackageReference(sample, "7zip", activity = "default")
+    addPackageReference(sample, "9pkg", activity = "default",
+      version = "26.01")
+    let added = readFile(extendedPath(sample))
+    check "\n    \"7zip\"\n" in added
+    check "\n    package(\"9pkg\", \"26.01\")\n" in added
+    var reread: seq[string] = @[]
+    for child in findActivity(loadProfile(sample), "default").get.activityChildren:
+      if child.kind == nkPackageRef:
+        reread.add child.packageName
+    check "7zip" in reread
+    check "9pkg" in reread
+    removePackageReference(sample, "9pkg", activity = "default",
+      version = "26.01")
+    removePackageReference(sample, "7zip", activity = "default")
+    check readFile(extendedPath(sample)) == original
+
+  test "a quoted package name must be non-empty and closed":
+    let dir = createTempDir("repro-home-smoke-badquote-", "")
+    defer: removeDir(dir)
+    for body in ["\"\"", "\"7zip", "package(\"\")", "package(\"7 zip\")"]:
+      let path = dir / "bad.nim"
+      writeFile(extendedPath(path), "import repro/profile\n\n" &
+        "profile \"x\":\n  activity default:\n    " & body & "\n")
+      checkpoint body
+      expect EUnstructured:
+        discard loadProfile(path)
 
   test "setConfigurable creates config + sub-block + entry":
     # Use a profile WITHOUT a config block.
@@ -522,3 +622,188 @@ profile "x":
     writeFile(extendedPath(path), src)
     expect EUnstructured:
       discard loadProfile(path)
+
+suite "GM4: plan-time data files (intent layer)":
+
+  test "the text inspector reads the data: section and refuses bad paths":
+    let dir = createTempDir("repro-home-gm4-data-", "")
+    defer: removeDir(dir)
+    let path = dir / "home.nim"
+    writeFile(extendedPath(path), """
+import repro/profile
+
+profile "gm4":
+  data:
+    "data/apps.toml"   # applications
+    "cli.toml"
+
+  activity default:
+    neovim
+""")
+    let prof = loadProfile(path)
+    check prof.dataFileRefs == @["data/apps.toml", "cli.toml"]
+    check findActivity(prof, "default").isSome
+    # An edit elsewhere leaves the data section byte-identical.
+    let before = readFile(path)
+    addPackageReference(path, "tmux")
+    check readFile(path).contains("    \"data/apps.toml\"   # applications\n")
+    check readFile(path).len > before.len
+    for bad in ["\"../apps.toml\"", "\"/etc/apps.toml\"", "\"a\\\\b.toml\"",
+                "data/apps.toml", "\"a//b.toml\""]:
+      writeFile(extendedPath(path), "import repro/profile\n\n" &
+        "profile \"gm4\":\n  data:\n    " & bad & "\n")
+      checkpoint(bad)
+      expect EUnstructured:
+        discard loadProfile(path)
+
+  test "validateBuiltinPredicate accepts the built-in grammar only":
+    for good in ["macos", "linux and arm64", "not windows",
+                 "host == \"m1\"", "host in [\"a\", \"b\"]",
+                 "(linux or bsd) and not wsl", "true", "host != \"x\""]:
+      checkpoint(good)
+      discard validateBuiltinPredicate(good)
+    for unknown in ["headless", "linux and onBattery"]:
+      checkpoint(unknown)
+      expect EUnknownPredicate:
+        discard validateBuiltinPredicate(unknown)
+    for mistyped in ["host", "\"m1\"", "linux == \"x\"", "host in \"x\"",
+                     "macos and", "[\"a\"]"]:
+      checkpoint(mistyped)
+      expect EUnstructured:
+        discard validateBuiltinPredicate(mistyped)
+
+  test "appendPackageRow keeps every existing byte and reads back":
+    let dir = createTempDir("repro-home-gm4-append-", "")
+    defer: removeDir(dir)
+    let profilePath = dir / "home.nim"
+    let original = "# header comment\n[[package]]\nname = \"jq\"\n" &
+      "activity = \"default\"   # trailing\n"
+    createDir(dir / "data")
+    writeFile(extendedPath(dir / "data" / "apps.toml"), original)
+    let row = DataPackageRow(name: "ghostty", activity: "desktop",
+      whenPredicate: "macos", binaries: @["ghostty"])
+    check appendPackageRow(profilePath, dir, "data/apps.toml", row) ==
+      aroAppended
+    let updated = readFile(dir / "data" / "apps.toml")
+    check updated.startsWith(original)
+    check updated == original & "\n" & renderPackageRow(row)
+    let rows = parseDataFileText(profilePath, "data/apps.toml", updated)
+    check rows.len == 2
+    check sameRow(rows[1], row)
+    # The same row (guard spelled differently) is already present.
+    var respelled = row
+    respelled.whenPredicate = " macos "
+    check appendPackageRow(profilePath, dir, "data/apps.toml", respelled) ==
+      aroAlreadyPresent
+    check readFile(dir / "data" / "apps.toml") == updated
+    # A row the planner would refuse is never written.
+    var bad = row
+    bad.whenPredicate = "macos and headless"
+    expect EDataFile:
+      discard appendPackageRow(profilePath, dir, "data/apps.toml", bad)
+    check readFile(dir / "data" / "apps.toml") == updated
+    # A missing (declared) file is created.
+    check appendPackageRow(profilePath, dir, "data/new.toml", row) ==
+      aroCreated
+    check readFile(dir / "data" / "new.toml") == renderPackageRow(row)
+
+  test "resource rows are built by the profile's resource constructors":
+    let text = """
+[[package]]
+name = "jq"
+activity = "default"
+
+[[resource]]
+kind = "fs.userFile"
+when = "linux and x86_64"
+hostFile = "~/.config/gm4/a.conf"
+content = "a = 1\n"
+
+[[resource]]
+kind = "launchd.userAgent"
+label = "org.gm4.agent"
+programArgs = ["/usr/bin/true"]
+keepAlive = true
+"""
+    let rows = parseDataFileRows("home.nim", "data/apps.toml", text)
+    check rows.packages.len == 1
+    check rows.resources.len == 2
+    let file = rows.resources[0]
+    # Exactly what `fsUserFile(hostFile = ..., content = ...)` declares:
+    # the constructor's defaults and auto-address.
+    var direct: seq[ResourceIntent]
+    fsUserFile(direct, hostFile = "~/.config/gm4/a.conf", content = "a = 1\n")
+    var guarded = direct[0]
+    guarded.guard = PredicateExpr(expr: canonicalize("linux and x86_64"))
+    check emitProfileIntentJson(ProfileIntent(resources: @[file])) ==
+      emitProfileIntentJson(ProfileIntent(resources: @[guarded]))
+    check file.fields["mode"].s == "0644"
+    check file.guard.expr == canonicalize("linux and x86_64")
+    let agent = rows.resources[1]
+    check agent.kind == "launchd.userAgent"
+    check agent.fields["keepAlive"].b
+    check agent.fields["runAtLoad"].b            # the constructor's default
+    check agent.guard.expr == ""
+    # Every supported kind builds its own kind from its required keys.
+    for k in ResourceRowKinds:
+      var fields: ResourceRowFields
+      for key in k.required:
+        let probe = (if key in ["programArgs", "extensions"]:
+                       listField(@["x"]) else: strField("x"))
+        fields[key] = probe
+      checkpoint(k.kind)
+      check constructResourceRow(k.kind, fields).kind == k.kind
+
+  test "resource rows outside a constructor's signature are refused":
+    proc refusal(row: string): string =
+      try:
+        discard parseDataFileRows("home.nim", "data/r.toml",
+          "[[resource]]\n" & row)
+      except EDataFile as e:
+        return e.msg
+      ""
+    check refusal("kind = \"fs.systemFile\"\npath = \"/etc/x\"\n").contains(
+      "not a resource kind a data row can declare")
+    check refusal("hostFile = \"~/x\"\n").contains("`kind`")
+    check refusal("kind = \"fs.userFile\"\ncontent = \"x\"\n").contains(
+      "`hostFile`")
+    check refusal("kind = \"fs.userFile\"\nhostFile = \"~/x\"\n" &
+      "owner = \"me\"\n").contains("unknown key")
+    check refusal("kind = \"fs.userFile\"\nhostFile = \"~/x\"\n" &
+      "executable = \"yes\"\n").contains("expected a boolean")
+    check refusal("kind = \"fs.userFile\"\nhostFile = \"~/x\"\n" &
+      "when = \"headless\"\n").contains("not a built-in predicate")
+    check refusal("kind = \"windows.registryValueHKCU\"\n").contains(
+      "not a resource kind")
+
+  test "removePackageRows removes only the matching rows' lines":
+    let dir = createTempDir("repro-home-gm4-remove-", "")
+    defer: removeDir(dir)
+    let profilePath = dir / "home.nim"
+    createDir(dir / "data")
+    let path = dir / "data" / "apps.toml"
+    let head = "# Applications.\n\n"
+    let a = "[[package]]\nname = \"jq\"\nactivity = \"default\"\n"
+    let b = "[[package]]\nname = \"fd\"   # finder\nactivity = \"cli\"\n" &
+      "when = \"linux\"\n"
+    let c = "# the macOS terminal\n[[package]]\nname = \"fd\"\n" &
+      "activity = \"desktop\"\n"
+    let r = "[[resource]]\nkind = \"fs.userFile\"\nhostFile = \"~/x\"\n"
+    let original = head & a & "\n" & b & "\n" & c & "\n" & r
+    writeFile(extendedPath(path), original)
+    # Narrowed by activity and guard: only `b` goes.
+    check removePackageRows(profilePath, dir, "data/apps.toml", "fd",
+      activity = "cli", predicate = " linux ") == 1
+    check readFile(path) == head & a & "\n" & c & "\n" & r
+    # No match: unchanged.
+    check removePackageRows(profilePath, dir, "data/apps.toml", "fd",
+      activity = "cli") == 0
+    check readFile(path) == head & a & "\n" & c & "\n" & r
+    # By name: `c` goes; its leading comment is not part of the row.
+    check removePackageRows(profilePath, dir, "data/apps.toml", "fd") == 1
+    check readFile(path) == head & a & "\n# the macOS terminal\n" & r
+    # Inline tables cannot be edited structurally.
+    writeFile(extendedPath(path),
+      "package = [{ name = \"jq\", activity = \"default\" }]\n")
+    expect EDataFile:
+      discard removePackageRows(profilePath, dir, "data/apps.toml", "jq")

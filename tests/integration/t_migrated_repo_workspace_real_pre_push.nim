@@ -289,7 +289,8 @@ suite "migrated Google Repo workspace pre-push compatibility":
     check symlinkExists(fx.projectGitDir / "hooks")
     check fileExists(fx.projectObjects / "hooks" / "pre-push")
     check fileExists(fx.projectObjects / "hooks" / "pre-push.repro-managed")
-    check not fileExists(fx.workspace / ".repro" / "workspace.toml")
+    check not fileExists(fx.workspace / ".repro" / "workspace-state.toml") and
+        not fileExists(fx.workspace / ".repro" / "workspace.toml")
 
     let firstRemoteHead = bareHead(gitBin, fx.origin)
     let outgoing = fx.commit("outgoing")
@@ -341,7 +342,7 @@ suite "migrated Google Repo workspace pre-push compatibility":
     removeFile(marker)
     let missingMarker = fx.git(["push", "metacraft-labs", "main"],
       required = false)
-    missingMarker.assertRefused("requires either `.repro/workspace.toml`")
+    missingMarker.assertRefused("requires either `.repro/workspace-state.toml`")
     check bareHead(gitBin, fx.origin) == outgoing
 
     # A byte-for-byte near miss (the producer's text without its terminating
@@ -349,7 +350,7 @@ suite "migrated Google Repo workspace pre-push compatibility":
     writeFile(marker, "reprobuild migration complete")
     let forgedMarker = fx.git(["push", "metacraft-labs", "main"],
       required = false)
-    forgedMarker.assertRefused("requires either `.repro/workspace.toml`")
+    forgedMarker.assertRefused("requires either `.repro/workspace-state.toml`")
     check bareHead(gitBin, fx.origin) == outgoing
 
     removeFile(marker)
@@ -358,7 +359,7 @@ suite "migrated Google Repo workspace pre-push compatibility":
     createSymlink(markerTarget, marker)
     let symlinkMarker = fx.git(["push", "metacraft-labs", "main"],
       required = false)
-    symlinkMarker.assertRefused("requires either `.repro/workspace.toml`")
+    symlinkMarker.assertRefused("requires either `.repro/workspace-state.toml`")
     check bareHead(gitBin, fx.origin) == outgoing
     removeFile(marker)
     fx.writeLegacyMigrationArtifacts()
@@ -367,7 +368,7 @@ suite "migrated Google Repo workspace pre-push compatibility":
     createDir(marker)
     let directoryMarker = fx.git(["push", "metacraft-labs", "main"],
       required = false)
-    directoryMarker.assertRefused("requires either `.repro/workspace.toml`")
+    directoryMarker.assertRefused("requires either `.repro/workspace-state.toml`")
     check bareHead(gitBin, fx.origin) == outgoing
     removeDir(marker)
     fx.writeLegacyMigrationArtifacts()
@@ -379,7 +380,7 @@ suite "migrated Google Repo workspace pre-push compatibility":
     createSymlink(metadataTarget, legacyMetadata)
     let symlinkMetadata = fx.git(["push", "metacraft-labs", "main"],
       required = false)
-    symlinkMetadata.assertRefused("requires either `.repro/workspace.toml`")
+    symlinkMetadata.assertRefused("requires either `.repro/workspace-state.toml`")
     check bareHead(gitBin, fx.origin) == outgoing
     removeFile(legacyMetadata)
     fx.writeLegacyMigrationArtifacts()
@@ -388,7 +389,7 @@ suite "migrated Google Repo workspace pre-push compatibility":
     createDir(legacyMetadata)
     let directoryMetadata = fx.git(["push", "metacraft-labs", "main"],
       required = false)
-    directoryMetadata.assertRefused("requires either `.repro/workspace.toml`")
+    directoryMetadata.assertRefused("requires either `.repro/workspace-state.toml`")
     check bareHead(gitBin, fx.origin) == outgoing
     removeDir(legacyMetadata)
     fx.writeLegacyMigrationArtifacts()
@@ -398,7 +399,7 @@ suite "migrated Google Repo workspace pre-push compatibility":
     let malformedLegacyMetadata =
       fx.git(["push", "metacraft-labs", "main"], required = false)
     malformedLegacyMetadata.assertRefused(
-      "requires either `.repro/workspace.toml`")
+      "requires either `.repro/workspace-state.toml`")
     check bareHead(gitBin, fx.origin) == outgoing
     fx.writeLegacyMigrationArtifacts()
 
@@ -408,7 +409,7 @@ suite "migrated Google Repo workspace pre-push compatibility":
     let nonNativeLegacyProject =
       fx.git(["push", "metacraft-labs", "main"], required = false)
     nonNativeLegacyProject.assertRefused(
-      "requires either `.repro/workspace.toml`")
+      "requires either `.repro/workspace-state.toml`")
     check bareHead(gitBin, fx.origin) == outgoing
     fx.writeLegacyMigrationArtifacts()
 
@@ -421,7 +422,7 @@ suite "migrated Google Repo workspace pre-push compatibility":
       runShell(shellCommand(@[
         fx.reproBin, "workspace", "lock",
         "--workspace-root", fx.workspace]))
-    noNativeMembership.assertRefused("requires either `.repro/workspace.toml`")
+    noNativeMembership.assertRefused("requires either `.repro/workspace-state.toml`")
     check bareHead(gitBin, fx.origin) == outgoing
     moveDir(parkedProjects, nativeProjects)
 
@@ -439,12 +440,18 @@ suite "migrated Google Repo workspace pre-push compatibility":
     writeFile(nativeProject, validNativeProject)
 
     # Native metadata always wins. A malformed native file cannot be bypassed
-    # by the otherwise-valid legacy artifact.
+    # by the otherwise-valid legacy artifact: the push is refused with the
+    # strict reader's diagnostic naming the native file and its bad schema.
+    # (It used to be refused with "requires either ... neither was present",
+    # which was wrong about a file that IS present; a present-but-malformed
+    # state file is reported as such.)
     writeFile(fx.workspace / ".repro" / "workspace.toml",
       "schema = \"not-the-native-schema\"\n")
     let nativeShadow = fx.git(["push", "metacraft-labs", "main"],
       required = false)
-    nativeShadow.assertRefused("requires either `.repro/workspace.toml`")
+    nativeShadow.assertRefused(fx.workspace / ".repro" / "workspace.toml")
+    check "schema version mismatch" in nativeShadow.output
+    check "neither was present" notin nativeShadow.output
     check bareHead(gitBin, fx.origin) == outgoing
     removeFile(fx.workspace / ".repro" / "workspace.toml")
 

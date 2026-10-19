@@ -1,4 +1,4 @@
-import std/[algorithm, json, os, osproc, sequtils, sets, streams, strtabs, strutils, tables, times, net]
+import std/[algorithm, json, options, os, osproc, sequtils, sets, streams, strtabs, strutils, tables, tempfiles, times, net, jsonutils]
 
 import blake3
 import cbor
@@ -11,16 +11,36 @@ import cbor
 import repro_core
 import repro_core/ambient_execution
 import repro_core/host_tar
+# GC roots for the store paths a Nix tool realization is recorded under.
+import repro_core/nix_store_roots
+# The tarball provisioner runs as a built-in executor on the build engine's
+# scheduler thread, possibly while the engine's worker pool is live, so its
+# extraction commands are released without ``osproc.close``'s double close of
+# the merged stdout/stderr descriptor (see ``repro_core/process_close``).
+from repro_core/process_exec import execCmdExCloseOnce
 import repro_core/paths as corepaths
+from repro_core/c_compiler import BuiltCCompilerPath
 import repro_domain_types
 import repro_dsl_stdlib/nixpkgs_pin
 import repro_hash
 import repro_interface_artifacts
+# GM4b: realization selection — the one implementation shared by a recipe's
+# `uses:` and a home profile's `package` reference.
+import repro_tool_profiles/realization_selection
+export realization_selection
+# The probe a realized prefix's declared executable has to pass, and the
+# reason it gives when it does not. Exported because the home archive
+# realizer applies the same rule to the arms it owns, and because the catalog
+# conformance sweeps assert against the verdicts rather than against message
+# text (Provisioning-Contributions.md §"Conformance And Trust").
+import repro_tool_profiles/declared_executable
+export declared_executable
 import repro_local_store
 # Binary-cache substitution for realized tool prefixes. Adding these imports
 # is what closes the gap where a package realized by URL+digest never
 # consulted the shared cache at all — see `substituteToolPrefix` below.
 import repro_binary_cache_client/cache_key
+import repro_binary_cache_client/compat_check
 import repro_binary_cache_client/types as bcClientTypes
 import repro_peer_cache/auth as peerAuth
 import repro_binary_cache_client/caches_config
@@ -33,26 +53,16 @@ import repro_project_dsl/reprobuild_packages_catalog
 # edges, registers the `"tarball"` provisioner's executor with the engine, and
 # runs the provisioning subgraph through `runBuild`.
 import repro_build_engine
-import nimcrypto/[hash, sha2]
+import repro_tool_profiles/[archive_inputs, archive_steps, archive_digest]
+import repro_dsl_stdlib/packages_schema
+import repro_dsl_stdlib/packages/[lessmsi, wix3, innounp, php, jdk]
+from repro_project_dsl import PackageDef, PackageUseDef, registeredPackages, registeredProvisioningContributions
+export archive_inputs
 # repro_local_store provides the M56 unified store. Every adapter
 # (Nix / tarball / Scoop) calls `registerInUnifiedStore` after laying
 # out its realized prefix on disk so the same SQLite-backed
 # `index.db` records every prefix the system has materialized
 # regardless of which adapter produced it.
-
-proc hostToolEnvironment(): StringTableRef =
-  ## A provisioned target profile may export libraries that are ABI-incompatible
-  ## with host bootstrap tools such as Nix. Keep those loader controls at the
-  ## action boundary instead of forwarding them into host processes.
-  result = newStringTable(modeCaseSensitive)
-  for key, value in envPairs():
-    case key
-    of "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "LD_DEBUG",
-       "LD_DEBUG_OUTPUT", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
-       "DYLD_INSERT_LIBRARIES":
-      discard
-    else:
-      result[key] = value
 
 type
   ToolProvisioningMode* = enum
@@ -144,6 +154,7 @@ type
     tarballUrl*: string
     tarballMirrors*: seq[string]
     tarballSelectedUrl*: string
+    tarballCacheHit*: bool
     tarballSha256*: string
     archiveType*: string
     stripComponents*: int
@@ -167,6 +178,13 @@ type
       ## profile's content identity and IS fingerprinted: it is what makes
       ## dropping ``pathSearchList`` from the key sound rather than a
       ## stale-serve hole.
+    provisioningReceipt*: string
+      ## The receipt of the provisioning edge that realized this tool
+      ## (Dependency-Provisioning-In-Build-Graph.md section 4.2), or "" when
+      ## no provisioning edge did. NOT fingerprinted: it is a stable path
+      ## whose CONTENT changes with the realization. Consumers declare it as
+      ## an input (section 3, step 5) through ``ToolActionIdentity`` and the
+      ## engine's ``withProvisioningReceiptInputs``.
     # M9.R.14e.1 — additional search-path channels populated by the
     # from-source resolver when the sibling recipe's install tree carries
     # the relevant artefacts. The engine threads each list onto a
@@ -250,6 +268,10 @@ type
       ## Mirror of the profile's content identity, copied through by
       ## ``actionIdentityFor`` and fingerprinted into
       ## ``actionFingerprint``.
+    provisioningReceipt*: string
+      ## Mirror of ``PathOnlyToolProfile.provisioningReceipt``. The CLI's
+      ## tool-identity projection hands it to the engine, which declares it
+      ## as an input of every action that uses this tool.
     # M9.R.14e.1 — mirror of ``PathOnlyToolProfile``'s extra search-path
     # channels. The provider-compile pass copies these fields out of the
     # resolved profile and into the per-action identity so the CLI's
@@ -292,6 +314,11 @@ type
     lockIdentity*: string
 
   TarballAcquisitionPlan* = object
+    record*: InterfaceTarballProvisioning
+      ## Complete canonical declaration, serialized with the edge plan.
+    digestAlgorithm*: string
+    digestValue*: string
+    installationToolsIdentity*: string
     packageSelector*: string
     packageId*: string
     url*: string
@@ -346,7 +373,10 @@ const
   # artifact round-trip: a field that is fingerprinted but not serialized
   # would make a cached identity re-hash to a different fingerprint on
   # every read.
-  ArtifactVersion = 8'u16
+  # v9 — ``provisioningReceipt`` on both the profile and the action
+  # identity, so a cached identity still tells the engine which provisioning
+  # edge's receipt its consumers depend on.
+  ArtifactVersion = 9'u16
   NixMaterializationMagic = [byte(ord('R')), byte(ord('B')), byte(ord('N')), byte(ord('M'))]
   NixMaterializationVersion = 3'u16
 
@@ -531,6 +561,11 @@ proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
   let deadline = epochTime() + probeTimeoutSeconds.float
   var exitCode = -1
   var timedOut = false
+  # The poll interval starts at 1 ms and doubles to 50 ms. Most probes
+  # (`--version`, the loader's `--verify`) exit within a few milliseconds,
+  # and a flat 50 ms first sleep would make each of them cost 50 ms; the
+  # cap keeps a long probe from spinning.
+  var pollMs = 1
   try:
     while true:
       let code = process.peekExitCode()
@@ -545,7 +580,8 @@ proc runProbe(executablePath: string; spec: ToolProbeSpec): ToolProbeResult =
         # Reap the now-killed parent so no zombie/handle leaks.
         discard process.waitForExit()
         break
-      sleep(50)
+      sleep(pollMs)
+      pollMs = min(pollMs * 2, 50)
   finally:
     process.close()
 
@@ -1032,62 +1068,54 @@ proc pathOnlyResolutionSignatures*(uses: openArray[InterfaceToolUse];
   for useDef in uses:
     result.add(pathOnlyResolutionSignature(useDef, pathValue, lookup))
 
-proc lockedNixpkgsRef(baseRef, narHash: string): string =
-  result = baseRef
-  if narHash.len > 0 and not result.contains("narHash="):
-    if result.contains("?"):
-      result.add("&narHash=")
-    else:
-      result.add("?narHash=")
-    result.add(narHash)
-
-proc effectiveNixSelector(selected: InterfaceNixProvisioning): string =
-  if selected.nixpkgsRef.len > 0 and selected.selector.startsWith("nixpkgs#"):
-    return lockedNixpkgsRef(selected.nixpkgsRef,
-      selected.nixpkgsNarHash) & "#" & selected.selector["nixpkgs#".len .. ^1]
-  selected.selector
-
 proc requestedProvisioningContributor(): string =
   getEnv("REPRO_PROVISIONING_CONTRIBUTOR").strip()
 
-proc contributorLabel(value: string): string =
-  if value.len > 0: value else: "canonical-package"
+proc requestedContributorPin(honor = true): Option[string] =
+  ## ``REPRO_PROVISIONING_CONTRIBUTOR`` as a selection pin. Unset (or not
+  ## honoured, for reprobuild's own bootstrap pins) lets a unique contributor
+  ## select.
+  let requested = if honor: requestedProvisioningContributor() else: ""
+  if requested.len > 0: some(requested) else: none(string)
 
-proc contributorLockIdentity(contributor, realizationIdentity: string): string =
-  if contributor.len == 0:
-    realizationIdentity
-  else:
-    "contributor:" & contributor & "\n" & realizationIdentity
-
-proc selectNixProvisioning(useDef: InterfaceToolUse):
-    InterfaceNixProvisioning =
-  let requested = requestedProvisioningContributor()
-  var contributors: seq[string] = @[]
-  # ``result.selector`` is NOT a usable "nothing chosen yet" sentinel: an entry
-  # whose selector is empty is still an ELIGIBLE entry with incomplete
-  # metadata, and treating it as unchosen reported "no nix realization" for a
-  # package that declares one. ``nixAcquisitionPlan`` owns the completeness
-  # diagnostic; selection only decides WHICH entry.
-  var chosen = false
-  for candidate in useDef.nixProvisioning:
-    if requested.len > 0 and candidate.contributor != requested:
-      continue
-    if candidate.contributor notin contributors:
-      contributors.add(candidate.contributor)
-    if not chosen:
-      result = candidate
-      chosen = true
-  if not chosen:
-    raise newException(ValueError,
-      "tool-resolution failed: provisioning contributor \"" & requested &
-      "\" has no nix realization for package \"" &
-      useDef.packageSelector & "\"")
-  if requested.len == 0 and contributors.len > 1:
-    raise newException(ValueError,
-      "tool-resolution failed: ambiguous nix provisioning for package \"" &
-      useDef.packageSelector & "\"; eligible contributors: " &
-      contributors.mapIt(contributorLabel(it)).join(", ") &
+proc selectionFailure(useDef: InterfaceToolUse; kind: RealizationKind;
+                      choice: KindChoice; pin: Option[string];
+                      target: RealizationTarget): ref ValueError =
+  ## The ``uses:`` wording of a per-kind selection failure. The decision is
+  ## ``realization_selection``'s; only the sentence is the recipe path's, and
+  ## it keeps the text recipes and their tests have always seen.
+  case choice.status
+  of kcAmbiguous:
+    newException(ValueError,
+      "tool-resolution failed: ambiguous " & $kind &
+      " provisioning for package \"" & useDef.packageSelector &
+      "\"; eligible contributors: " &
+      choice.contributors.mapIt(contributorLabel(it)).join(", ") &
       "; select one through the lock or REPRO_PROVISIONING_CONTRIBUTOR")
+  of kcContributorNotOffered:
+    newException(ValueError,
+      "tool-resolution failed: provisioning contributor \"" &
+      pin.get("") & "\" has no " & $kind & " realization for package \"" &
+      useDef.packageSelector & "\"")
+  else:
+    newException(ValueError,
+      "tool-resolution failed: package \"" & useDef.packageSelector &
+      "\" has no " & $kind & " realization for " & describeTarget(target) &
+      " requested by uses \"" & useDef.rawConstraint & "\": " & choice.detail)
+
+proc selectNixProvisioning*(useDef: InterfaceToolUse;
+                            target = hostRealizationTarget()):
+    InterfaceNixProvisioning =
+  ## The ``uses:`` nix selection — ``realization_selection.selectNixRecord``
+  ## (Provisioning-Contributions.md §"Profile Package References"), so a
+  ## recipe and a home profile select the same record. An entry whose
+  ## selector is empty is still an ELIGIBLE entry with incomplete metadata;
+  ## ``nixAcquisitionPlan`` owns the completeness diagnostic.
+  let pin = requestedContributorPin()
+  let choice = selectNixRecord(useDef.nixProvisioning, target, "", pin)
+  if choice.status != kcSelected:
+    raise selectionFailure(useDef, rkNix, choice, pin, target)
+  useDef.nixProvisioning[choice.index]
 
 proc noProvisioningAtAllHint(useDef: InterfaceToolUse): string =
   ## Appended to a "does not declare provisioning" error when the tool use
@@ -1106,14 +1134,16 @@ proc noProvisioningAtAllHint(useDef: InterfaceToolUse): string =
     " recipe was compiled without a reachable catalog.\n" &
     reprobuildPackagesRemedy()
 
-proc nixAcquisitionPlan*(useDef: InterfaceToolUse): NixAcquisitionPlan =
+proc nixAcquisitionPlan*(useDef: InterfaceToolUse;
+                         target = hostRealizationTarget()):
+    NixAcquisitionPlan =
   if useDef.nixProvisioning.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
       "\" requested by uses \"" & useDef.rawConstraint &
       "\" does not declare provisioning: nixPackage metadata" &
       noProvisioningAtAllHint(useDef))
-  let selected = selectNixProvisioning(useDef)
+  let selected = selectNixProvisioning(useDef, target)
   if selected.selector.len == 0 or selected.executablePath.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: incomplete nixPackage metadata for package \"" &
@@ -1124,13 +1154,7 @@ proc nixAcquisitionPlan*(useDef: InterfaceToolUse): NixAcquisitionPlan =
     else:
       selected.selector
   let resolvedSelector = effectiveNixSelector(selected)
-  let lockIdentity =
-    if selected.lockIdentity.len > 0:
-      selected.lockIdentity
-    elif selected.nixpkgsRef.len > 0:
-      resolvedSelector
-    else:
-      selected.selector
+  let lockIdentity = nixRealizationLockIdentity(selected)
   NixAcquisitionPlan(
     packageSelector: useDef.packageSelector,
     packageId: packageId,
@@ -1141,81 +1165,6 @@ proc nixAcquisitionPlan*(useDef: InterfaceToolUse): NixAcquisitionPlan =
     nixpkgsRev: selected.nixpkgsRev,
     nixpkgsNarHash: selected.nixpkgsNarHash,
     lockIdentity: contributorLockIdentity(selected.contributor, lockIdentity))
-
-proc unsafeRelativePath(value: string): bool =
-  let normalized = value.replace('\\', '/')
-  if normalized.len == 0 or normalized.startsWith("/"):
-    return true
-  for part in normalized.split('/'):
-    if part == "..":
-      return true
-
-proc pathContainsSymlink(root, relativePath: string): bool =
-  var current = root
-  for part in relativePath.replace('\\', '/').split('/'):
-    if part.len == 0 or part == ".":
-      continue
-    current = current / part
-    try:
-      if getFileInfo(extendedPath(current), followSymlink = false).kind in
-          {pcLinkToFile, pcLinkToDir}:
-        return true
-    except OSError:
-      discard
-
-proc executableInStorePath(storePath, declaredExecutablePath: string;
-                           rejectSymlinks = false): string =
-  if declaredExecutablePath.unsafeRelativePath:
-    return ""
-  if rejectSymlinks and pathContainsSymlink(storePath, declaredExecutablePath):
-    return ""
-  let candidate = storePath / declaredExecutablePath
-  if not fileExists(extendedPath(candidate)):
-    return ""
-  # M9.R.14d.8b — data-file declarations (e.g. wayland-protocols's
-  # ``share/pkgconfig/wayland-protocols.pc``) point at non-executable
-  # files that exist only to verify the realization completed. Detect
-  # these by extension and accept them without the +x permission
-  # requirement; the consumer threads the parent prefix into
-  # PKG_CONFIG_PATH at build time rather than spawning the file
-  # directly.
-  # M9.R.15q.5.9 — hwdata ships ``share/hwdata/pnp.ids`` (the PnP
-  # vendor-ID database). Recognise ``.ids`` as a data declaration so
-  # the executable+permission check is skipped (the file is r--r--r--
-  # in the nix store).
-  # M9.R.15q.5.10 — ``.dll`` is the Windows sibling of ``.so`` and was
-  # missing from a list that already carried the POSIX one. The case that
-  # surfaced it: electron-builder's ``nsis-resources`` archive is a flat tree
-  # of plugin DLLs with no program in it at all, so the only anchor a
-  # declaration can name is a DLL, and a DLL is not something anyone spawns.
-  # Its absence here made the package's realize depend on Windows reporting
-  # execute permission for ordinary files rather than on a stated rule.
-  # M9.R.15q.5.11 — ``.bin`` and ``.onnx`` are MODEL WEIGHTS: a Whisper
-  # ``ggml-base.bin`` or a Piper voice's ``.onnx`` is a multi-megabyte blob
-  # that a runtime memory-maps and that nothing ever spawns. They arrive
-  # through ``archiveType = "raw"``, which copies a single downloaded file
-  # into the prefix under its declared name, so the declared path IS the
-  # payload and there is no program in the package to anchor on instead.
-  # M9.R.15q.5.12 — ``.js``/``.mjs``/``.cjs`` are SCRIPTS, and a script is
-  # the case ``launcher`` exists for: the declared path is the payload an
-  # interpreter runs, never a program the OS execs, so it carries no execute
-  # bit on any host. The launcher pair realize writes beside it is what ends
-  # up being invoked.
-  let dataExts = [".pc", ".so", ".dll", ".a", ".h", ".hpp", ".cmake",
-    ".json", ".xml", ".txt", ".ids", ".bin", ".onnx",
-    ".js", ".mjs", ".cjs"]
-  let lower = declaredExecutablePath.toLowerAscii
-  var isDataDecl = false
-  for ext in dataExts:
-    if lower.endsWith(ext) or lower.contains(ext & "."):
-      isDataDecl = true
-      break
-  if isDataDecl:
-    return absolutePath(candidate)
-  if {fpUserExec, fpGroupExec, fpOthersExec}.anyIt(
-      it in getFilePermissions(extendedPath(candidate))):
-    return absolutePath(candidate)
-  return ""
 
 proc safeStoreSegment*(value, fallback: string): string =
   for ch in value:
@@ -1499,6 +1448,79 @@ proc writeCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
   writeFile(extendedPath(path),
     toByteString(encodeNixMaterializationProfile(profile)))
 
+proc nixRealizationRootDir*(storeRoot: string; useDef: InterfaceToolUse;
+                            plan: NixAcquisitionPlan): string =
+  ## Where the GC roots of a Nix tool's CURRENT realization live:
+  ## ``<storeRoot>/nix-gc-roots/<package>.<executable>-<slot digest>``.
+  ##
+  ## The directory is keyed by the tool REQUEST — host, package name and
+  ## executable — and deliberately NOT by what realizes it (selector, lock
+  ## identity, nixpkgs pin, version), which is what the materialization
+  ## cache key adds. ``rootStorePaths`` keeps a directory's roots EXACTLY the
+  ## set it was last given, so when a nixpkgs bump (or a version bump)
+  ## re-realizes the tool, the new paths are rooted and the superseded
+  ## realization's roots are dropped from the same directory, new first. A
+  ## directory per materialization key would instead keep every realization
+  ## the project ever used alive for good: nothing retires a key, and the
+  ## store would grow with every bump on exactly the hosts that collect
+  ## because they are short of disk.
+  ##
+  ## The cost of that choice: two uses of the same package and executable
+  ## realized from different pins in one project share a directory, and
+  ## each resolution re-roots its own realization at the other's expense.
+  ## Neither is served stale for it: a recorded path that is collected is
+  ## re-realized on its next use (``nixMaterializationProfileMatches``).
+  var payload: seq[byte] = @[]
+  payload.writeString("reprobuild.nix.gc-root-slot.v1")
+  payload.writeString(hostOS)
+  payload.writeString(hostCPU)
+  let selector = useDef.packageSelector
+  let at = selector.rfind('@')
+  let packageName = if at > 0: selector[0 ..< at] else: selector
+  payload.writeString(packageName)
+  payload.writeString(useDef.executableName)
+  let slot = blake3.toHex(blake3.digest(toByteString(payload)))
+  storeRoot / "nix-gc-roots" /
+    (safeStoreSegment(packageName & "." & useDef.executableName,
+      "nix-tool") & "-" & slot[0 ..< 16])
+
+proc rootNixRealization(storeRoot: string; useDef: InterfaceToolUse;
+                        plan: NixAcquisitionPlan;
+                        storePaths: openArray[string]) =
+  ## Give the store paths of one realization a GC root of their own, under
+  ## ``nixRealizationRootDir`` (``repro_core/nix_store_roots``).
+  ##
+  ## With no ``storeRoot`` there is nothing to protect: no record, no
+  ## ``nix-store-path.txt`` and no materialization cache entry is written,
+  ## so the realization lives only as long as the returned profile, inside
+  ## this process, and any build output it produces is rooted by the build
+  ## engine's own ledger.
+  ##
+  ## A failure is a WARNING, not a provisioning failure. The realization is
+  ## valid right now, and its later loss is caught rather than served:
+  ## ``nixMaterializationProfileMatches`` and the tool-identity readers check
+  ## that a recorded path exists before reusing it, and the next resolution
+  ## retries the root.
+  if storeRoot.len == 0:
+    return
+  let storeDir = nixStoreDir()
+  var paths: seq[string] = @[]
+  for path in storePaths:
+    if path.startsWith(storeDir & "/"):
+      # Only a top-level store object can be a GC root; a path inside one
+      # (`…/lib`) is rooted through the object that contains it.
+      let slash = path.find('/', storeDir.len + 1)
+      paths.add(if slash < 0: path else: path[0 ..< slash])
+  if paths.len == 0:
+    return
+  try:
+    discard rootStorePaths(nixRealizationRootDir(storeRoot, useDef, plan),
+      paths, label = "nix://" & plan.nixSelector, storeDir = storeDir)
+  except CatchableError as err:
+    stderr.writeLine("repro tools: warning: the Nix store paths of " &
+      plan.nixSelector & " are not protected from garbage collection: " &
+      err.msg)
+
 proc addUniquePath*(dst: var seq[string]; value: string)
   ## Forward declaration — defined alongside the from-source populator
   ## further down. Resolved here so ``resolveNixTool`` can reuse the
@@ -1544,6 +1566,46 @@ proc expandNixProfilePropagatedPaths*(profile: var PathOnlyToolProfile) =
     addUniquePath(profile.libraryPathList, storePath / "lib64")
   refreshProfileIdentity(profile)
 
+proc readNixReceiptPaths*(receipt: string): seq[string] =
+  ## The store paths a ``"nix"`` provisioning edge's receipt names, one per
+  ## line, the executable-bearing output first (the engine's ``"nix"``
+  ## executor writes it). Empty when the receipt is missing or unreadable.
+  try:
+    for line in readFile(extendedPath(receipt)).splitLines():
+      let path = line.strip()
+      if path.len > 0:
+        result.add(path)
+  except IOError, OSError:
+    result = @[]
+
+proc nixToolProvisionReceipt(useDef: InterfaceToolUse;
+                             storeRoot: string): string
+  ## Forward declaration -- defined with the Nix tool provisioning edge,
+  ## after the provisioning-subgraph helpers it is built from.
+
+proc realizeNixToolPaths(useDef: InterfaceToolUse;
+                         storeRoot, workspaceRoot: string;
+                         allOutputs: bool):
+    tuple[paths: seq[string]; receipt: string]
+  ## Forward declaration -- see the definition, after ``resolveTarballTool``.
+
+proc nixReceiptNamesProfile(receipt: string;
+                            profile: PathOnlyToolProfile): bool =
+  ## Whether ``receipt`` currently names the realization ``profile``
+  ## describes: the profile's selected store path is one of the receipt's
+  ## paths, and every path the receipt names is one the profile realized.
+  ## The receipt's path is shared by every pin of the same tool request, so a
+  ## materialization record of one pin can sit beside a receipt another pin
+  ## wrote; serving that record with that receipt would hand consumers an
+  ## input that names a different realization than the tool they run.
+  let named = readNixReceiptPaths(receipt)
+  if named.len == 0 or profile.selectedStorePath notin named:
+    return false
+  for path in named:
+    if path notin profile.realizedStorePaths:
+      return false
+  true
+
 when defined(windows):
   proc resolveNixTool*(useDef: InterfaceToolUse;
                        storeRoot = "";
@@ -1553,130 +1615,64 @@ else:
   proc resolveNixTool*(useDef: InterfaceToolUse;
                        storeRoot = "";
                        writerMode = "direct"): PathOnlyToolProfile =
+    ## Realize a ``nixPackage`` THROUGH ITS PROVISIONING EDGE and return its
+    ## profile (Dependency-Provisioning-In-Build-Graph.md sections 2 and 3):
+    ## a ``bakForeignProvision`` edge whose provisioner is ``"nix"``, executed
+    ## by the engine's own ``"nix"`` executor through ``reprobuild-nix-daemon``
+    ## and cached by the action cache under the tool store. The edge's receipt
+    ## becomes ``provisioningReceipt``, which every consumer of the tool
+    ## declares as an input. See ``nixToolProvisioningEdges`` for its shape.
+    ##
+    ## WITH NO ``storeRoot`` THERE IS NO RECEIPT. A receipt is a declared input
+    ## of the tool's consumers, so it has to live at a path that outlives this
+    ## resolution and is the same on the next one; the provisioning state that
+    ## holds it (receipts, action cache) lives under the tool store it
+    ## describes (``provisioningStateRoot``). A store-less resolution has no
+    ## such place, and by this resolver's contract writes nothing that
+    ## outlives the returned profile (no record, no GC root -- see
+    ## ``rootNixRealization``), so it runs the same edge once, against a
+    ## scratch receipt it then discards, and returns a profile with no
+    ## receipt. Every build the CLI drives passes a store
+    ## (``<out>/tool-store``, the producer's ``runtime-tool-store``, the store
+    ## daemon's and home-apply's store root).
     let plan = nixAcquisitionPlan(useDef)
-    let selector = plan.nixSelector
+    # The flake a ``.#…`` selector names, and what the helper reports the
+    # evaluation read (``flake.nix`` / ``flake.lock``), are relative to the
+    # working directory -- a project's own ``repro`` invocation.
+    let workspaceRoot = getCurrentDir()
     let cached = readCachedNixMaterialization(storeRoot, useDef, plan)
     if cached.hit:
-      return cached.profile
+      let receipt = nixToolProvisionReceipt(useDef, storeRoot)
+      if nixReceiptNamesProfile(receipt, cached.profile):
+        # The record is reusable only because its paths still exist (see
+        # ``nixMaterializationProfileMatches``); re-assert their root so they
+        # keep existing. Warm, this is one directory listing, one receipt
+        # read and no process.
+        rootNixRealization(storeRoot, useDef, plan,
+          cached.profile.realizedStorePaths)
+        result = cached.profile
+        # Not part of the profile fingerprint (see the field).
+        result.provisioningReceipt = receipt
+        return
+      # The receipt is missing or names another realization (another pin of
+      # the same tool request wrote it last): run the edge, which restores
+      # or re-realizes this pin's receipt.
 
-    # Connect to the in-repo Python Nix evaluation daemon and query evaluation.
-    let socketPath = "/tmp/reprobuild-nix-daemon-" & getEnv("USER", "default") & ".sock"
-    var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
-    var connected = false
-    try:
-      sock.connectUnix(socketPath)
-      connected = true
-    except CatchableError:
-      # Spawn daemon process detached
-      let envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN")
-      let localBin = getCurrentDir() / "build" / "reprobuild-nix-daemon"
-      let localTool = getCurrentDir() / "tools" / "reprobuild-nix-daemon" /
-        "reprobuild-nix-daemon"
-      let localBin2 = getCurrentDir().parentDir / "reprobuild-nix-daemon" /
-        "build" / "reprobuild-nix-daemon"
-      # When resolving toolchains for a FOREIGN build (the cwd is the foreign
-      # repo, not reprobuild), the candidates above miss the daemon that ships
-      # in reprobuild's own tree. Anchor on reprobuild's source root too —
-      # mirrors resolveMonitorShim. REPROBUILD_SOURCE_ROOT is exported by
-      # codetracer's build-once.sh; getAppFilename() covers direct builds.
-      let sourceRoot = block:
-        let env = getEnv("REPROBUILD_SOURCE_ROOT")
-        if env.len > 0: env
-        else: reprobuildSourceRootFromBinaryLocation()
-      let rootTool =
-        if sourceRoot.len > 0:
-          sourceRoot / "tools" / "reprobuild-nix-daemon" /
-            "reprobuild-nix-daemon"
-        else: ""
-      let rootBuild =
-        if sourceRoot.len > 0:
-          sourceRoot / "build" / "reprobuild-nix-daemon"
-        else: ""
-      proc executableFile(path: string): bool =
-        if path.len == 0 or not fileExists(path):
-          return false
-        when defined(posix):
-          let perms = getFilePermissions(path)
-          result = fpUserExec in perms or fpGroupExec in perms or
-            fpOthersExec in perms
-        else:
-          result = true
-      proc requireExecutableCandidate(path, label: string): bool =
-        if path.len == 0 or not fileExists(path):
-          return false
-        if not executableFile(path):
-          raise newException(OSError,
-            label & " exists but is not executable: " & path)
-        true
-      let daemonExe = if envBin.len > 0:
-                        if not requireExecutableCandidate(envBin,
-                            "REPROBUILD_NIX_DAEMON_BIN"):
-                          raise newException(OSError,
-                            "REPROBUILD_NIX_DAEMON_BIN does not exist: " &
-                            envBin)
-                        envBin
-                      elif requireExecutableCandidate(localBin,
-                          "local reprobuild-nix-daemon"):
-                        localBin
-                      elif requireExecutableCandidate(localTool,
-                          "local tools reprobuild-nix-daemon"):
-                        localTool
-                      elif requireExecutableCandidate(localBin2,
-                          "sibling reprobuild-nix-daemon"):
-                        localBin2
-                      elif requireExecutableCandidate(rootTool,
-                          "source-root tools reprobuild-nix-daemon"):
-                        rootTool
-                      elif requireExecutableCandidate(rootBuild,
-                          "source-root build reprobuild-nix-daemon"):
-                        rootBuild
-                      else:
-                        "reprobuild-nix-daemon"
-      discard startProcess(daemonExe, args = ["--idle-exit-ms=300000"], options = {})
-      for i in 0 .. 40:
-        sleep(50)
-        try:
-          sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
-          sock.connectUnix(socketPath)
-          connected = true
-          break
-        except CatchableError:
-          discard
-
-    if not connected:
-      raise newException(OSError, "Failed to connect or spawn reprobuild-nix-daemon at " & socketPath)
-
-    let req = %*{
-      "action": "resolve",
-      "selector": selector,
-      "expressionFile": plan.nixExpressionFile,
-      "workspaceRoot": getCurrentDir(),
-      "evaluateOnly": true
-    }
-    sock.send($req & "\n")
-    var respLine = ""
-    sock.readLine(respLine)
-    sock.close()
-
-    if respLine.len == 0:
-      raise newException(OSError, "Received empty response from reprobuild-nix-daemon during tool resolution")
-
-    let resp = parseJson(respLine)
-    if resp.getOrDefault("status").getStr() != "success":
-      raise newException(OSError, "Daemon resolution error: " & resp.getOrDefault("error").getStr())
-
-    let paths = resp.getOrDefault("paths")
-    if paths.len == 0:
-      raise newException(OSError, "Daemon returned no materialized paths for selector: " & selector)
-
-    var realized: seq[string] = @[]
-    for path in paths:
-      let realizedPath = path.getStr()
-      if realizedPath.len > 0:
-        realized.add(realizedPath)
-    if realized.len == 0:
-      raise newException(OSError,
-        "Daemon returned no materialized paths for selector: " & selector)
+    # ONE RESOLVER AND ONE CLIENT, THE ENGINE'S. The edge is executed by the
+    # engine's ``"nix"`` provisioner, which reaches ``reprobuild-nix-daemon``
+    # through ``requestNixDaemon``. Before the edge existed this resolver
+    # made that request itself, and before that it carried a private
+    # candidate chain for the helper that had drifted from
+    # ``resolveNixDaemonExecutable``: it preferred the checked-in ``tools/``
+    # script, whose ``#!/usr/bin/env python3`` resolves ``python3`` through
+    # the build's PATH, so under a PATH whose ``python3`` is not Python the
+    # recipe's C compiler could not be provisioned ("Failed to connect or
+    # spawn reprobuild-nix-daemon"). The engine's resolver tries the staged
+    # helper first and refuses a script whose interpreter is missing.
+    let first = realizeNixToolPaths(useDef, storeRoot, workspaceRoot,
+      allOutputs = false)
+    var realized = first.paths
+    var receipt = first.receipt
 
     var selectedStorePath = ""
     var resolved = ""
@@ -1692,28 +1688,21 @@ else:
         selectedStorePath = storePath
         resolved = storePath / plan.declaredExecutablePath
     if resolved.len == 0:
-      var nixArgs = @["nix", "build", "--no-link", "--print-out-paths"]
-      if plan.nixExpressionFile.len > 0:
-        nixArgs.add("--file")
-        nixArgs.add(plan.nixExpressionFile)
-      else:
-        let selector =
-          if '^' in plan.nixSelector: plan.nixSelector
-          else: plan.nixSelector & "^*"
-        nixArgs.add(selector)
-      let direct = uncontrolledExecCmdEx(shellCommand(nixArgs),
-        env = hostToolEnvironment())
-      if direct.exitCode != 0:
+      # The selector's default outputs do not carry the executable (it lives
+      # in a non-default output). Realize EVERY output, through the same edge
+      # -- the same receipt path, a different selector and fingerprint -- so
+      # the receipt names the realization the profile is built from. An
+      # expression file is built whole by the helper (``nix-build``), and a
+      # selector that already names its outputs (``^``) asks for them, so
+      # neither has more to realize.
+      if plan.nixExpressionFile.len > 0 or '^' in plan.nixSelector:
         raise newException(OSError,
           "tool-resolution failed: nix package realized outputs without " &
-          plan.declaredExecutablePath & "; direct nix build exited " &
-          $direct.exitCode & "\n" & direct.output)
-
-      realized.setLen(0)
-      for line in direct.output.splitLines:
-        let realizedPath = line.strip()
-        if realizedPath.startsWith("/nix/store/"):
-          realized.add(realizedPath)
+          plan.declaredExecutablePath & ": " & realized.join(", "))
+      let all = realizeNixToolPaths(useDef, storeRoot, workspaceRoot,
+        allOutputs = true)
+      realized = all.paths
+      receipt = all.receipt
       selectedStorePath = ""
       resolved = ""
       for storePath in realized:
@@ -1735,7 +1724,7 @@ else:
       installMethod: "nix",
       packageSelector: useDef.packageSelector,
       packageId: plan.packageId,
-      nixSelector: selector,
+      nixSelector: plan.nixSelector,
       declaredExecutablePath: plan.declaredExecutablePath,
       nixExpressionFile: plan.nixExpressionFile,
       realizedStorePaths: realized,
@@ -1782,6 +1771,12 @@ else:
         nixVersion, "nix", plan.lockIdentity,
         plan.declaredExecutablePath, "nix://" & plan.nixSelector,
         selectedStorePath, realized)
+      # Root BEFORE recording: the helper's ``nix build --no-link`` left no
+      # root of its own, and the record written next outlives
+      # the process by design. Without its own root the recorded path stays
+      # alive only while some dev-shell profile generation happens to name
+      # the same path (reprobuild-pm issue 2026-10-02, addendum 2026-10-03).
+      rootNixRealization(storeRoot, useDef, plan, realized)
       createDir(extendedPath(unified.absolutePath))
       writeFile(extendedPath(unified.absolutePath / "nix-store-path.txt"),
         selectedStorePath & "\n")
@@ -1792,7 +1787,13 @@ else:
         unified.absolutePath, [plan.declaredExecutablePath],
         writerMode = writerMode)
       result.realizedStorePaths.add(unified.absolutePath)
+      # Not part of the profile fingerprint (see the field). Recorded with
+      # the materialization, which is served only while the receipt still
+      # names it (``nixReceiptNamesProfile``).
+      result.provisioningReceipt = receipt
       writeCachedNixMaterialization(storeRoot, useDef, plan, result)
+    # ``receipt`` is "" for a store-less resolution (see above).
+    result.provisioningReceipt = receipt
 
     refreshProfileIdentity(result)
 
@@ -1804,29 +1805,8 @@ proc normalizedSha256(value: string): string =
     raise newException(ValueError, "invalid sha256 digest: " & value)
 
 proc fileSha256Hex*(path: string): string =
-  ## The SHA-256 hex digest of `path`, computed in-process.
-  ##
-  ## This used to shell out to whichever of sha256sum / shasum / certutil /
-  ## openssl was first on `PATH`, which made the verifier of every tarball
-  ## provisioning edge an ambient tool -- the thing
-  ## Dependency-Provisioning-In-Build-Graph.md section 4 rules out. Hashing is
-  ## not a tool the edge needs; it is arithmetic, and nimcrypto does it.
-  var f: File
-  if not open(f, extendedPath(path), fmRead):
-    raise newException(OSError,
-      "tool-resolution failed: cannot open for sha256 verification: " & path)
-  defer: close(f)
-  var ctx: sha256
-  ctx.init()
-  var buffer = newSeq[byte](1 shl 20)
-  while true:
-    let got = f.readBytes(buffer, 0, buffer.len)
-    if got <= 0:
-      break
-    ctx.update(buffer.toOpenArray(0, got - 1))
-  let digest = ctx.finish()
-  ctx.clear()
-  toLowerAscii($digest)
+  ## Shared streaming in-process archive verifier.
+  fileShaHex(path, "sha256")
 
 proc hostCpuToken(): string =
   ## Host CPU as the lowercase string DSL ``tarball cpu = "..."``
@@ -1848,63 +1828,58 @@ proc hostOsToken(): string =
   elif defined(linux): "linux"
   else: hostOS.toLowerAscii()
 
-proc matchesHostPlatform(provisioning: InterfaceTarballProvisioning): bool =
-  ## Empty cpu / os fields mean "any host", matching everything. A
-  ## non-empty value must match the host. ``darwin`` and ``macos`` are
-  ## aliases (the DSL parser accepts both spellings).
-  let cpuOk = provisioning.cpu.len == 0 or
-    provisioning.cpu.toLowerAscii() == "any" or
-    provisioning.cpu.toLowerAscii() == hostCpuToken()
-  let osNorm = provisioning.os.toLowerAscii()
-  let hostOsNorm = hostOsToken()
-  let osOk = osNorm.len == 0 or osNorm == "any" or
-    osNorm == hostOsNorm or
-    (hostOsNorm == "macos" and osNorm == "darwin") or
-    (hostOsNorm == "darwin" and osNorm == "macos")
-  cpuOk and osOk
+proc hasTargetTarballProvisioning(useDef: InterfaceToolUse;
+                                  target: RealizationTarget): bool =
+  ## Whether some tarball record's (cpu, os) coordinate applies to
+  ## ``target`` — whatever contributor or floor it carries. Coordinate
+  ## applicability is ``realization_selection``'s rule (the arm tiers of
+  ## ``packages_schema.selectArm``), so the path-mode fallback below and the
+  ## selection that follows it cannot disagree about "is there an archive for
+  ## this host".
+  selectTarballRecord(useDef.tarballProvisioning, target).status notin
+    {kcNoRecords, kcNoneForTarget}
 
 proc hasHostTarballProvisioning(useDef: InterfaceToolUse): bool =
-  for provisioning in useDef.tarballProvisioning:
-    if matchesHostPlatform(provisioning):
-      return true
-  false
+  hasTargetTarballProvisioning(useDef, hostRealizationTarget())
 
-proc selectTarballProvisioning(useDef: InterfaceToolUse;
-                               honorRequestedContributor = true):
+proc pathModeCanRealize*(useDef: InterfaceToolUse): bool =
+  ## Whether the path-mode resolver has anything to realize `useDef` from
+  ## when the caller's PATH lacks it: a release archive for this host, or (on
+  ## a Nix-capable host) a pinned Nix channel -- the fallbacks
+  ## `toolProfileFor`'s `tpmPathOnly` arm takes. A tool with neither is simply
+  ## absent in path mode, which is that mode's ordinary state.
+  hasHostTarballProvisioning(useDef) or
+    ((defined(linux) or defined(macosx)) and useDef.nixProvisioning.len > 0)
+
+proc selectTarballProvisioning*(useDef: InterfaceToolUse;
+                                honorRequestedContributor = true;
+                                target = hostRealizationTarget()):
     InterfaceTarballProvisioning =
-  ## Pick the first ``tarballProvisioning`` entry that matches the host
-  ## platform. ``cpu = ""`` / ``os = ""`` entries match every host and
-  ## act as a catch-all when no per-platform slice is supplied. Entries
-  ## are walked in declaration order so author intent is preserved
-  ## (early entries beat later catch-alls).
-  let requested =
-    if honorRequestedContributor: requestedProvisioningContributor() else: ""
-  var contributors: seq[string] = @[]
-  var candidates: seq[InterfaceTarballProvisioning] = @[]
-  for provisioning in useDef.tarballProvisioning:
-    if not matchesHostPlatform(provisioning):
-      continue
-    if requested.len > 0 and provisioning.contributor != requested:
-      continue
-    candidates.add(provisioning)
-    if provisioning.contributor notin contributors:
-      contributors.add(provisioning.contributor)
-  if requested.len == 0 and contributors.len > 1:
+  ## The ``uses:`` tarball selection — ``realization_selection.
+  ## selectTarballRecord``, the selection a home profile makes too
+  ## (Provisioning-Contributions.md §"Profile Package References"): the most
+  ## specific (cpu, os) coordinate wins, then the highest satisfied
+  ## microarchitecture floor, then declaration order — so an early entry
+  ## still beats a later catch-all of the same specificity, as before.
+  let pin = requestedContributorPin(honorRequestedContributor)
+  let choice = selectTarballRecord(useDef.tarballProvisioning, target, "",
+    pin, versionRange = requestedUsesVersionRange(useDef))
+  case choice.status
+  of kcSelected:
+    useDef.tarballProvisioning[choice.index]
+  of kcNoneForTarget:
     raise newException(ValueError,
-      "tool-resolution failed: ambiguous tarball provisioning for package \"" &
-      useDef.packageSelector & "\"; eligible contributors: " &
-      contributors.mapIt(contributorLabel(it)).join(", ") &
-      "; select one through the lock or REPRO_PROVISIONING_CONTRIBUTOR")
-  if candidates.len > 0:
-    return candidates[0]
-  raise newException(ValueError,
-    "tool-resolution failed: no tarball provisioning entry for package \"" &
-    useDef.packageSelector & "\" matches host cpu=" & hostCpuToken() &
-    " os=" & hostOsToken() & " (" & $useDef.tarballProvisioning.len &
-    " entries; see the package's `provisioning:` block)")
+      "tool-resolution failed: no tarball provisioning entry for package \"" &
+      useDef.packageSelector & "\" matches host cpu=" &
+      $target.platform.family & " os=" & $target.os & " (" &
+      $useDef.tarballProvisioning.len &
+      " entries; see the package's `provisioning:` block)")
+  else:
+    raise selectionFailure(useDef, rkTarball, choice, pin, target)
 
 proc tarballAcquisitionPlan*(useDef: InterfaceToolUse;
-                             honorRequestedContributor = true):
+                             honorRequestedContributor = true;
+                             target = hostRealizationTarget()):
     TarballAcquisitionPlan =
   if useDef.tarballProvisioning.len == 0:
     raise newException(ValueError,
@@ -1912,8 +1887,17 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse;
       "\" requested by uses \"" & useDef.rawConstraint &
       "\" does not declare provisioning: tarball metadata" &
       noProvisioningAtAllHint(useDef))
-  let selected = selectTarballProvisioning(useDef, honorRequestedContributor)
-  let sha256 = normalizedSha256(selected.sha256)
+  let selected = selectTarballProvisioning(useDef, honorRequestedContributor,
+    target)
+  # Decode every installation field before an edge can download anything.
+  let installation = archiveInstallerFeatures(selected).len > 0
+  let decoded = if installation:
+      archiveRealizationOf(useDef.packageSelector, selected)
+    else: ArchiveRealization()
+  let algorithm = if installation: decoded.digestAlgorithm else: "sha256"
+  let digest = if installation: decoded.digestValue
+    else: normalizedSha256(selected.sha256)
+  let sha256 = if algorithm == "sha256": digest else: ""
   if selected.url.len == 0 or selected.executablePath.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: incomplete tarball metadata for package \"" &
@@ -1923,6 +1907,9 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse;
       "tool-resolution failed: unsafe tarball executablePath for package \"" &
       useDef.packageSelector & "\": " & selected.executablePath)
   TarballAcquisitionPlan(
+    record: selected,
+    digestAlgorithm: algorithm,
+    digestValue: digest,
     packageSelector: useDef.packageSelector,
     packageId: if selected.packageId.len >
     0: selected.packageId else: selected.url,
@@ -1942,10 +1929,7 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse;
       else: "",
     stripComponents: selected.stripComponents,
     lockIdentity: contributorLockIdentity(selected.contributor,
-      if selected.lockIdentity.len > 0:
-        selected.lockIdentity
-      else:
-        "sha256:" & sha256))
+      tarballRealizationLockIdentity(selected)))
 
 proc systemToolEnv(): StringTableRef =
   ## A copy of the current environment with the dynamic-linker override
@@ -2009,6 +1993,7 @@ type
     ## refused by name rather than satisfied from the host.
     sevenZip*: string
     zstd*: string
+    installation*: ArchiveStageTools
 
 const
   ExtractorRoleSevenZip* = "7z"
@@ -2019,7 +2004,7 @@ proc extractorRolesFor*(archiveType: string): seq[string] =
   ## needs, beyond the irreducible host tools. This is the dependency list of
   ## a tarball provisioning edge, and the only place it is decided.
   case archiveType.toLowerAscii()
-  of "7z", "7z.exe": @[ExtractorRoleSevenZip]
+  of "7z", "7z.exe", "7z-sfx": @[ExtractorRoleSevenZip]
   of "tar.zst", "tzst", "pkg.tar.zst", "conda": @[ExtractorRoleZstd]
   else: @[]
 
@@ -2072,35 +2057,73 @@ proc downloadUrlToFile(url, destination: string) =
       raise newException(IOError, "unsupported archive URL or missing file: " & url)
     copyFile(extendedPath(url), extendedPath(destination))
 
+proc archiveDigestAlgorithm(plan: TarballAcquisitionPlan): string =
+  if plan.digestAlgorithm.len > 0: plan.digestAlgorithm else: "sha256"
+
+proc archiveDigestValue(plan: TarballAcquisitionPlan): string =
+  if plan.digestValue.len > 0: plan.digestValue else: plan.sha256
+
+proc installationIdentity(plan: TarballAcquisitionPlan): string =
+  ## Every semantic install field and helper receipt is an input to both
+  ## local and shared-cache prefix identity. Plain archives retain their key.
+  if archiveInstallerFeatures(plan.record).len > 0 or
+      plan.record.detail.extraExecutables.len > 0:
+    $jsonutils.toJson(plan.record.detail) & "\0tools:" & plan.installationToolsIdentity
+  else: ""
+
 proc verifiedDownload(plan: TarballAcquisitionPlan; storeRoot: string):
     tuple[path: string; selectedUrl: string] =
+  let algorithm = archiveDigestAlgorithm(plan)
+  let expected = archiveDigestValue(plan)
+  if algorithm == "sha1":
+    stderr.writeLine("WSha1HashAccepted: " & plan.packageSelector &
+      " is pinned by the upstream's weak SHA-1 digest")
   let downloads = storeRoot / "downloads"
   let tmpRoot = storeRoot / "tmp"
   createDir(extendedPath(downloads))
   createDir(extendedPath(tmpRoot))
-  let finalPath = downloads / (plan.sha256 & ".archive")
+  # Windows command dispatch and installer tools rely on native extensions.
+  # Keep executable/MSI suffixes when a formerly home-only record reaches
+  # this common downloader; ordinary archive cache paths stay unchanged.
+  let suffix =
+    case plan.archiveType.toLowerAscii()
+    of "installer-nsis", "7z-sfx", "7z.exe": ".exe"
+    of "installer-msi": ".msi"
+    else: ".archive"
+  let finalPath = downloads / (expected & suffix)
   if fileExists(extendedPath(finalPath)):
-    let actual = fileSha256Hex(finalPath)
-    if actual == plan.sha256:
+    let actual = fileShaHex(finalPath, algorithm)
+    if actual == expected:
       return (path: finalPath, selectedUrl: "cache")
     removeFile(extendedPath(finalPath))
 
   var diagnostics: seq[string] = @[]
+  var mismatch: ref EBuiltinDigestMismatch
   for url in @[plan.url] & plan.mirrors:
     let tmpPath = tmpRoot / ("download." & $getCurrentProcessId() & "." &
       $getTime().toUnix & "." & $diagnostics.len)
     try:
       downloadUrlToFile(url, tmpPath)
-      let actual = fileSha256Hex(tmpPath)
-      if actual != plan.sha256:
-        diagnostics.add(url & ": sha256 mismatch expected " & plan.sha256 &
+      let actual = fileShaHex(tmpPath, algorithm)
+      if actual != expected:
+        diagnostics.add(url & ": " & algorithm & " mismatch expected " & expected &
           " got " & actual)
+        # Preserve the verifier's structured failure for callers while
+        # still allowing a later mirror to supply the declared bytes.
+        mismatch = newException(EBuiltinDigestMismatch,
+          diagnostics[^1])
+        mismatch.packageId = plan.packageSelector
+        mismatch.expectedAlgorithm = algorithm
+        mismatch.expectedDigest = expected
+        mismatch.observedDigest = actual
+        mismatch.step = 7
+        mismatch.stepName = "realize"
         removeFile(extendedPath(tmpPath))
         continue
       try:
         moveFile(extendedPath(tmpPath), extendedPath(finalPath))
       except OSError:
-        if fileExists(extendedPath(finalPath)) and fileSha256Hex(finalPath) == plan.sha256:
+        if fileExists(extendedPath(finalPath)) and fileShaHex(finalPath, algorithm) == expected:
           if fileExists(extendedPath(tmpPath)):
             removeFile(extendedPath(tmpPath))
         else:
@@ -2110,9 +2133,12 @@ proc verifiedDownload(plan: TarballAcquisitionPlan; storeRoot: string):
       diagnostics.add(url & ": " & e.msg)
       if fileExists(extendedPath(tmpPath)):
         removeFile(extendedPath(tmpPath))
-  raise newException(OSError,
-    "tool-resolution failed: all tarball archive URLs failed for " &
-    plan.packageSelector & "\n" & diagnostics.join("\n"))
+  let message = "tool-resolution failed: all tarball archive URLs failed for " &
+    plan.packageSelector & "\n" & diagnostics.join("\n")
+  if not mismatch.isNil:
+    mismatch.msg = message
+    raise mismatch
+  raise newException(OSError, message)
 
 proc requireHostTar(): string =
   ## N51: the two ``tar`` call sites below named their tool as the bare
@@ -2266,7 +2292,7 @@ proc validateTarEntries(archivePath, archiveType: string) =
       @["-tjf", tarOperand(archivePath)]
     of "tar":
       @["-tf", tarOperand(archivePath)]
-    of "zip", "7z", "7z.exe", "raw", "conda", "tar.zst", "tzst",
+    of "zip", "7z", "7z.exe", "7z-sfx", "raw", "conda", "tar.zst", "tzst",
         "pkg.tar.zst", "msi":
       # Formats this pre-flight listing does not inspect. For the archive
       # types host `tar` cannot read directly, listing would need the same
@@ -2278,9 +2304,41 @@ proc validateTarEntries(archivePath, archiveType: string) =
         "tool-resolution failed: unsupported tarball archiveType " & archiveType)
   let tarExe = requireHostTar()
   requireTarDecompressor(tarExe, archivePath, archiveType)
-  let res = runTarTwice(tarExe, ["--force-local"], tailArgs,
+  # The listing below is read through ``execCmdExCloseOnce``, which merges
+  # stderr into stdout, so every line tar prints is checked as an entry name.
+  # GNU tar warns on stderr about pax keywords it does not know — notably the
+  # ``LIBARCHIVE.xattr.*`` keywords macOS ``/usr/bin/tar`` writes for every
+  # file's xattrs (``com.apple.provenance``) — and that line begins with tar's
+  # own absolute path, so the check below refused every macOS-built archive
+  # as "unsafe" (reprobuild-pm issue 2026-10-16-tar-listing-preflight-reads-
+  # tar-warnings-as-archive-entries). Two GNU-only flags keep tar's own
+  # messages out of the listing on the GNU attempt:
+  #
+  #   * ``--warning=none`` silences GNU tar's warning class
+  #     (https://www.gnu.org/software/tar/manual/html_node/warnings.html).
+  #     Warnings never change tar's exit status, and errors are not warnings,
+  #     so a truncated, unreadable or undecompressable archive still exits
+  #     non-zero and is still refused below (GNU tar 1.35: exit 2).
+  #   * ``--absolute-names`` (``-P``): ``Removing leading `/' from member
+  #     names`` is NOT in that warning class and survives ``--warning=none``.
+  #     In list mode ``-P`` only stops that message: tar prints member names
+  #     as stored either way (measured on GNU tar 1.35, an ``/etc/hosts`` and
+  #     a ``../x`` entry list identically with and without it), so an unsafe
+  #     entry still reaches the check below — and the refusal now names the
+  #     entry instead of tar's diagnostic about it.
+  #
+  # Neither flag can hide an entry: they only REMOVE diagnostic lines, and
+  # entry names are on stdout regardless, so the unsafe-entry check is not
+  # weakened. Filtering lines by a ``tar:`` prefix instead would be, because
+  # an entry may be named like that. Reading stdout apart from stderr is the
+  # more general fix, but it needs both pipes drained concurrently (a quiet
+  # stdout with a full stderr pipe deadlocks), which no exec helper here
+  # provides. bsdtar refuses both flags, falls through to the plain attempt
+  # and needs neither: libarchive reads ``LIBARCHIVE.xattr`` natively.
+  let res = runTarTwice(tarExe,
+    ["--force-local", "--warning=none", "--absolute-names"], tailArgs,
     proc(command: string): tuple[output: string, exitCode: int] =
-      execCmdEx(command))
+      execCmdExCloseOnce(command))
   if res.exitCode != 0:
     raise newException(OSError,
       "tool-resolution failed: tar listing failed for " & archivePath &
@@ -2377,7 +2435,7 @@ proc zipExtractCommand*(extractor: tuple[exe: string; kind: string];
 
 const
   # 7-Zip for the extractor dependency edge. MUST match the Windows x86_64
-  # entry of `sevenzipCatalog` in `repro_dsl_stdlib/packages/sevenzip.nim`;
+  # `tarball` of `package "7zip"` in `repro_dsl_stdlib/packages/pkg_7zip.nim`;
   # `t_sevenzip_bootstrap_matches_stdlib_catalog` checks that it does. The MSI,
   # not the `.exe` installer or a `.7z`, because `msiexec /a` unpacks it with
   # nothing but the OS: the extractor must not need an extractor.
@@ -2494,6 +2552,34 @@ proc bootstrapZstdToolUse*(): InterfaceToolUse =
   else:
     result.nixProvisioning = @[bootstrapNixExtractor("zstd", "bin/zstd")]
 
+proc launcherToolRole(spec: LauncherEmitSpec): string =
+  if spec.interpreter_package_id.len > 0: spec.interpreter_package_id
+  elif spec.kind == lekPhar: "php"
+  elif spec.kind == lekJar: "jdk"
+  else: "bash"
+
+proc installationToolRoles*(record: InterfaceTarballProvisioning): seq[string] =
+  ## Tool requirements are declared before staging and realized by dependency
+  ## edges. Store rows and the caller's PATH never select installer helpers.
+  let detail = record.detail
+  if detail.nested7z or detail.installMethod in
+      ["installer-nsis", "installer-nsis-bundle"]:
+    result.add(ExtractorRoleSevenZip)
+  if detail.installMethod in ["installer-msi", "installer-nsis-bundle"] and
+      not detail.msiAdminInstall:
+    result.add("lessmsi")
+  if detail.installMethod == "installer-nsis-bundle": result.add("wix3")
+  if detail.installMethod == "installer-inno-setup": result.add("innounp")
+  for encoded in detail.preInstall:
+    case decodePreInstallAction(encoded).kind
+    of piaExpand7z: result.add(ExtractorRoleSevenZip)
+    of piaExpandDark, piaExpandMsi:
+      if not detail.msiAdminInstall: result.add("lessmsi")
+    of piaExpandInno: result.add("innounp")
+    else: discard
+  for encoded in detail.launcherEmit:
+    result.add(launcherToolRole(decodeLauncherEmitSpec(encoded)))
+
 proc extractorToolUses*(role: string): seq[InterfaceToolUse] =
   ## The provisioned package an extractor role is realized from, as a list
   ## of pinned ALTERNATIVES tried in order by one edge.
@@ -2505,7 +2591,12 @@ proc extractorToolUses*(role: string): seq[InterfaceToolUse] =
       @[bootstrapSevenZipToolUse()]
   of ExtractorRoleZstd: @[bootstrapZstdToolUse()]
   else:
-    raise newException(ValueError, "unknown extractor role: " & role)
+    var helper = PackageDef(packageName: "archiveHelpers")
+    helper.toolUses = @[PackageUseDef(rawConstraint: role,
+      packageSelector: role, executableName: role)]
+    let projected = toProjectInterface(helper, registeredPackages(),
+      registeredProvisioningContributions())
+    @[projected.toolUses[0]]
 
 proc removeSingleTopLevelDir(destination: string) =
   ## When a zip / 7z archive ships its payload under a single top-
@@ -2716,7 +2807,7 @@ proc mergeRustInstallerComponents(destination: string) =
     try: removeFile(extendedPath(installSh))
     except OSError: discard
 
-proc extractTarballArchive(archivePath, destination, archiveType: string;
+proc extractTarballArchive*(archivePath, destination, archiveType: string;
                            stripComponents: int;
                            declaredExecutablePath = "";
                            tools = ExtractorTools()) =
@@ -2767,7 +2858,7 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
     requireTarDecompressor(tarExe, archivePath, archiveType)
     let res = runTarTwice(tarExe, ["--force-local"], tailArgs,
       proc(command: string): tuple[output: string, exitCode: int] =
-        execCmdEx(command))
+        execCmdExCloseOnce(command))
     if res.exitCode != 0:
       raise newException(OSError,
         "tool-resolution failed: tar extraction failed for " & archivePath &
@@ -2775,7 +2866,7 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
         (if res.attempts.len > 0: res.attempts else: "\n" & res.output))
     mergeRustInstallerComponents(destination)
   of "zip":
-    let res = execCmdEx(zipExtractCommand(resolveZipExtractor(),
+    let res = execCmdExCloseOnce(zipExtractCommand(resolveZipExtractor(),
       archivePath, destination))
     if res.exitCode != 0:
       raise newException(OSError,
@@ -2858,7 +2949,7 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
       let payloadTar = staging / "payload.tar"
       # A provisioned executable named by absolute path: a controlled
       # execution, so `execCmdEx`, not the ambient-execution hatch.
-      let zstdRes = execCmdEx(shellCommand(
+      let zstdRes = execCmdExCloseOnce(shellCommand(
         @[zstdExe, "-d", "-f", "-q", "-o", payloadTar, archivePath]))
       if zstdRes.exitCode != 0:
         raise newException(OSError,
@@ -2871,7 +2962,7 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
         declaredExecutablePath, tools)
     finally:
       removeDir(extendedPath(staging))
-  of "7z", "7z.exe":
+  of "7z", "7z.exe", "7z-sfx":
     # The 7-Zip is the provisioned package the provisioning edge's 7-Zip
     # dependency edge realized -- never one found on PATH.
     let sevenZipExe = tools.sevenZip
@@ -2886,7 +2977,7 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
     let command = quoteShell(sevenZipExe) & " x " &
       quoteShell("-o" & destination) & " " & quoteShell(archivePath) &
       " -y -bsp0 -bso0"
-    let res = execCmdEx(command)
+    let res = execCmdExCloseOnce(command)
     if res.exitCode != 0:
       raise newException(OSError,
         "tool-resolution failed: 7z extraction failed for " & archivePath &
@@ -2979,6 +3070,8 @@ proc writeTarballReceipt(prefix: string; plan: TarballAcquisitionPlan;
                          selectedUrl: string) =
   let receipt = %*{
     "installMethod": "tarball",
+    "digestAlgorithm": plan.digestAlgorithm,
+    "digestValue": plan.digestValue,
     "packageSelector": plan.packageSelector,
     "packageId": plan.packageId,
     "url": plan.url,
@@ -3099,6 +3192,8 @@ proc unpackClosure(plan: TarballAcquisitionPlan;
     entryPlan.url = entry.url
     entryPlan.mirrors = @[]
     entryPlan.sha256 = entry.sha256
+    entryPlan.digestAlgorithm = "sha256"
+    entryPlan.digestValue = entry.sha256
     # npm publishes every package as a `package/`-rooted gzip tarball.
     entryPlan.archiveType = "tar.gz"
     entryPlan.stripComponents = 1
@@ -3126,16 +3221,19 @@ proc toolCacheIdentity(plan: TarballAcquisitionPlan;
   ## The URL is deliberately NOT part of the key. A mirror serving identical
   ## bytes should hit the same entry — the digest is the identity, the URL is
   ## only where it was fetched from.
+  let localPlatform = detectLocalPlatform("")
   let platform = bcTypes.PlatformTriple(
-    cpu: hostCpuToken(),
-    os: hostOsToken(),
+    cpu: localPlatform.cpu,
+    os: localPlatform.os,
     abi: "",
     libcVariant: "",
     microarch: "")
   let toolchain = bcTypes.ToolchainIdentity(name: "tarball-realize")
   result = newCacheEntryIdentity(packageName, version, platform, toolchain,
     "repro-tool-profiles-v1")
-  result.addOption("sha256", normalizedSha256(plan.sha256))
+  result.addOption(archiveDigestAlgorithm(plan), archiveDigestValue(plan))
+  if installationIdentity(plan).len > 0:
+    result.addOption("installation", installationIdentity(plan))
   result.addOption("archiveType", plan.archiveType)
   result.addOption("executablePath", plan.declaredExecutablePath)
   result.addOption("executableAlias", plan.declaredExecutableAlias)
@@ -3199,6 +3297,8 @@ proc cloneSiblingRealization(plan: TarballAcquisitionPlan;
   ## field, unreadable candidate, a link the filesystem will not make, or a
   ## result whose declared executable does not resolve — each moves on. The
   ## failure mode of this optimisation is that it does nothing.
+  if installationIdentity(plan).len > 0:
+    return false
   if plan.lockIdentity.len == 0:
     # No declaration to key on. Matching on the checksum alone would clone
     # between packages whose authors never said they were the same thing.
@@ -3253,6 +3353,8 @@ proc cloneSiblingRealization(plan: TarballAcquisitionPlan;
         continue
       return true
   false
+
+proc validateExtraTarballExecutables(plan: TarballAcquisitionPlan; prefix: string)
 
 proc substituteToolPrefix(plan: TarballAcquisitionPlan;
                           packageName, version, prefix, storeRoot: string):
@@ -3310,6 +3412,10 @@ proc substituteToolPrefix(plan: TarballAcquisitionPlan;
           rejectSymlinks = true).len == 0:
         removeDir(extendedPath(staging))
         return false
+      validateExtraTarballExecutables(plan, staging)
+      if archiveInstallerFeatures(plan.record).len > 0:
+        verifyArchiveApplication(archiveRealizationOf(plan.packageSelector,
+          plan.record), staging, tarballAppTrust)
       createDir(extendedPath(prefix.parentDir))
       moveDir(extendedPath(staging), extendedPath(prefix))
     except CatchableError:
@@ -3359,6 +3465,11 @@ proc publishToolPrefix(plan: TarballAcquisitionPlan;
   ## error and must not read like one.
   if getEnv("REPRO_CACHE_DISABLE").len > 0:
     return
+  # A caller may relax application trust checks for local fixtures. Such a
+  # prefix has not met the normal publication contract, so it must never be
+  # advertised under the same cache identity as a strictly verified product.
+  if tarballAppTrust != {}:
+    return
   # The package said so. Realizing it is fine, substituting it from a cache
   # somebody else populated is fine; what must not happen is THIS machine
   # re-serving a payload its licence does not let it redistribute — and
@@ -3403,10 +3514,43 @@ proc publishToolPrefix(plan: TarballAcquisitionPlan;
       " skipped: " & err.msg)
     flushStoreDiagnostics()
 
+proc tarballPrefixLayoutParts(plan: TarballAcquisitionPlan): seq[string] =
+  ## The declared LAYOUT a realized prefix is keyed on, beyond the executable
+  ## path and the archive: everything that changes the bytes the realize step
+  ## leaves in the prefix. The cache-entry identity (`toolCacheIdentity`)
+  ## already keys on the same facts; the local prefix directory did not.
+  ##
+  ## It keyed on the archive type and strip depth only, so a package that
+  ## gained an `executableAlias` -- Windows `python3` gained `python3.exe` --
+  ## kept resolving to the prefix realized BEFORE the alias existed: the
+  ## directory existed, it held `python.exe`, and reuse checked nothing else.
+  ## `python3` then never reached PATH. The alias, the launcher and the prune
+  ## set are added only when declared, so no other package's key moves.
+  result = @[plan.archiveType, $plan.stripComponents]
+  if installationIdentity(plan).len > 0:
+    result.add("installation=" & installationIdentity(plan))
+  if plan.declaredExecutableAlias.len > 0:
+    result.add("alias=" & plan.declaredExecutableAlias)
+  if plan.declaredLauncher.len > 0:
+    result.add("launcher=" & plan.declaredLauncher)
+  if plan.declaredPrunePaths.len > 0:
+    result.add("prune=" & plan.declaredPrunePaths.join(","))
+
+proc validateExtraTarballExecutables(plan: TarballAcquisitionPlan; prefix: string) =
+  for extra in plan.record.detail.extraExecutables:
+    let probe = probeDeclaredExecutable(prefix, extra, rejectSymlinks = false)
+    if probe.verdict != deOk:
+      raise newException(OSError, "tool-resolution failed: " & probe.reason)
+    let realPrefix = expandFilename(extendedPath(prefix))
+    let realExtra = expandFilename(extendedPath(probe.resolvedPath))
+    if not realExtra.startsWith(realPrefix & DirSep):
+      raise newException(OSError, "tool-resolution failed: extraExecutable " &
+        extra & " resolves outside the realized prefix: " & realExtra)
+
 proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
                               writerMode = "direct";
                               tools = ExtractorTools()):
-    tuple[prefix: string; archivePath: string; selectedUrl: string] =
+    tuple[prefix: string; archivePath: string; selectedUrl: string; cacheHit: bool] =
   ## Materializes a tarball realization into the unified M56 layout
   ## (`<store-root>/prefixes/<package>/<version>-<hash>/`).
   let tmpRoot = storeRoot / "tmp"
@@ -3415,23 +3559,29 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
   let resolvedVersion =
     if versionFromPackageSelector(plan.packageSelector).len > 0:
       versionFromPackageSelector(plan.packageSelector)
+    elif plan.record.detail.version.len > 0:
+      plan.record.detail.version
     else:
-      plan.sha256[0 .. 15]
+      archiveDigestValue(plan)[0 .. 15]
   let unified = unifiedPrefixPath(storeRoot, packageName, resolvedVersion,
     "tarball", plan.lockIdentity, plan.declaredExecutablePath,
-    plan.url, plan.sha256, [plan.archiveType, $plan.stripComponents])
+    plan.url, archiveDigestValue(plan), tarballPrefixLayoutParts(plan))
   let prefix = unified.absolutePath
   if dirExists(extendedPath(prefix)):
-    if executableInStorePath(prefix, plan.declaredExecutablePath,
-        rejectSymlinks = true).len == 0:
+    let existing = probeDeclaredExecutable(prefix,
+      plan.declaredExecutablePath, rejectSymlinks = true)
+    if existing.verdict != deOk:
       raise newException(OSError,
-        "tool-resolution failed: existing tarball realization lacks " &
-        plan.declaredExecutablePath & ": " & prefix)
+        "tool-resolution failed: existing tarball realization " &
+        existing.reason & ": " & prefix)
+    if archiveInstallerFeatures(plan.record).len > 0:
+      verifyArchiveApplication(archiveRealizationOf(plan.packageSelector,
+        plan.record), prefix, tarballAppTrust)
     return (prefix: prefix, archivePath: "",
-        selectedUrl: selectedUrlFromReceipt(prefix))
+        selectedUrl: selectedUrlFromReceipt(prefix), cacheHit: true)
 
   let tempPrefix = tmpRoot / ("extract." & $getCurrentProcessId() & "." &
-    $getTime().toUnix & "." & plan.sha256[0 .. 15])
+    $getTime().toUnix & "." & archiveDigestValue(plan)[0 .. 15])
   if dirExists(extendedPath(tempPrefix)):
     removeDir(extendedPath(tempPrefix))
 
@@ -3463,15 +3613,33 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
   # nothing a dev env provisioned was ever cache-substitutable.
   if not cloned and substituteToolPrefix(plan, packageName, resolvedVersion,
       prefix, storeRoot):
+    if archiveInstallerFeatures(plan.record).len > 0:
+      verifyArchiveApplication(archiveRealizationOf(plan.packageSelector,
+        plan.record), prefix, tarballAppTrust)
     return (prefix: prefix, archivePath: "",
-        selectedUrl: selectedUrlFromReceipt(prefix))
+        selectedUrl: selectedUrlFromReceipt(prefix), cacheHit: true)
   let downloaded =
     if cloned: (path: "", selectedUrl: plan.url)
     else: verifiedDownload(plan, storeRoot)
   try:
     if not cloned:
-      extractTarballArchive(downloaded.path, tempPrefix, plan.archiveType,
-        plan.stripComponents, plan.declaredExecutablePath, tools)
+      if archiveInstallerFeatures(plan.record).len > 0:
+        let resolution = archiveRealizationOf(plan.packageSelector, plan.record)
+        let installed = stageArchiveInstallation(resolution, downloaded.path,
+          tempPrefix, plan.stripComponents, tools.installation,
+          proc(path, dest, kind: string; strip: int; executable: string) =
+            extractTarballArchive(path, dest, kind, strip, executable, tools),
+          tarballAppTrust, prefix,
+          proc(path: string; count: int) = flattenStripComponents(path, count))
+        var installerArgv: seq[string]
+        for arg in installed.installerArgvUsed:
+          installerArgv.add(arg.replace(tempPrefix, "${prefix}").replace(
+            downloaded.path, "${archive}"))
+        writeFile(extendedPath(tempPrefix / ".repro-installation.json"), $(%*{
+          "installerArgvUsed": installerArgv}))
+      else:
+        extractTarballArchive(downloaded.path, tempPrefix, plan.archiveType,
+          plan.stripComponents, plan.declaredExecutablePath, tools)
       # The declared closure, unpacked into the same staging prefix. After
       # the root archive because an entry lands UNDER it
       # (``node_modules/...``), and before the prune/alias/launcher steps
@@ -3509,12 +3677,12 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
         raise newException(OSError,
           "tool-resolution failed: prune path could not be removed: " &
           target)
-    let extractedExecutable = executableInStorePath(tempPrefix,
+    let extractedProbe = probeDeclaredExecutable(tempPrefix,
       plan.declaredExecutablePath, rejectSymlinks = true)
-    if extractedExecutable.len == 0:
+    if extractedProbe.verdict != deOk:
       raise newException(OSError,
-        "tool-resolution failed: extracted tarball lacks executable " &
-        plan.declaredExecutablePath)
+        "tool-resolution failed: extracted tarball " & extractedProbe.reason)
+    let extractedExecutable = extractedProbe.resolvedPath
     # Optional alias. Some upstreams ship a binary named for its target
     # triple (``codex-x86_64-pc-windows-msvc.exe``) while every consumer
     # invokes it as ``codex``; a realized prefix goes on PATH as a DIRECTORY,
@@ -3568,6 +3736,10 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
           # Preserve the execute bit the copy does not carry on POSIX.
           setFilePermissions(extendedPath(aliasPath),
             getFilePermissions(extendedPath(extractedExecutable)))
+    validateExtraTarballExecutables(plan, tempPrefix)
+    if archiveInstallerFeatures(plan.record).len > 0:
+      verifyArchiveApplication(archiveRealizationOf(plan.packageSelector,
+        plan.record), tempPrefix, tarballAppTrust)
     writeTarballReceipt(tempPrefix, plan, downloaded.selectedUrl)
     createDir(extendedPath(prefix.parentDir))
     try:
@@ -3577,11 +3749,12 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
         removeDir(extendedPath(tempPrefix))
       else:
         raise
-    if executableInStorePath(prefix, plan.declaredExecutablePath,
-        rejectSymlinks = true).len == 0:
+    let materializedProbe = probeDeclaredExecutable(prefix,
+      plan.declaredExecutablePath, rejectSymlinks = true)
+    if materializedProbe.verdict != deOk:
       raise newException(OSError,
-        "tool-resolution failed: materialized tarball lacks executable " &
-        plan.declaredExecutablePath)
+        "tool-resolution failed: materialized tarball " &
+        materializedProbe.reason)
     # Publish so the NEXT machine substitutes instead of downloading. Soft
     # fail: a developer without publish credentials still has a working
     # toolchain, they just did not contribute this one.
@@ -3592,14 +3765,15 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
     # alongside the binary receipt).
     discard registerInUnifiedStore(storeRoot, packageName,
       resolvedVersion, "tarball", plan.lockIdentity,
-      plan.declaredExecutablePath, plan.url, plan.sha256, "directory",
-      [plan.archiveType, $plan.stripComponents], prefix,
-      [plan.declaredExecutablePath], writerMode = writerMode,
+      plan.declaredExecutablePath, plan.url, archiveDigestValue(plan), "directory",
+      tarballPrefixLayoutParts(plan), prefix,
+      @[plan.declaredExecutablePath] & plan.record.detail.extraExecutables,
+      writerMode = writerMode,
       declaredExecutableAlias = plan.declaredExecutableAlias,
       declaredLauncher = plan.declaredLauncher,
       declaredPrunePaths = plan.declaredPrunePaths)
     (prefix: prefix, archivePath: downloaded.path,
-      selectedUrl: downloaded.selectedUrl)
+      selectedUrl: downloaded.selectedUrl, cacheHit: false)
   except CatchableError:
     if dirExists(extendedPath(tempPrefix)):
       removeDir(extendedPath(tempPrefix))
@@ -3608,13 +3782,35 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
 type
   TarballHostLoaderMissing* = object of OSError
     ## A tarball-realized executable names a dynamic loader (ELF
-    ## ``PT_INTERP``) that does not exist on this host, so the kernel would
-    ## refuse to start it. NixOS is the common case: a generic-Linux binary
-    ## asks for ``/lib64/ld-linux-x86-64.so.2`` and NixOS has no such file.
+    ## ``PT_INTERP``) that cannot start it on this host: the loader does not
+    ## exist, or it exists and refuses (see ``hostLoaderRefusal``). NixOS is
+    ## the common case: a generic-Linux binary asks for
+    ## ``/lib64/ld-linux-x86-64.so.2``, which NixOS either lacks or — since
+    ## 24.05 — fills with ``stub-ld``, a stub that prints a diagnostic and
+    ## exits 127 (https://nix.dev/permalink/stub-ld).
     ## A distinct type so path-mode resolution can fall through to the
     ## package's Nix channel instead of reporting the tarball failure.
+    ##
+    ## The name predates the refusing-loader case and is kept because the
+    ## type is matched by callers and named by the specification.
     loader*: string
+      ## The ``PT_INTERP`` the executable asks for.
     executable*: string
+      ## The realized executable that cannot start.
+    prefix*: string
+      ## The sealed store prefix the executable was realized into. The bytes
+      ## are realized and verified; only this host cannot run them, so a
+      ## caller judging the archive (conformance) keeps inspecting it.
+    probeOutput*: string
+      ## What the loader printed when probed; "" when it does not exist.
+
+  HostLoaderRefusal* = object
+    ## Why this host's dynamic loader cannot start an ELF executable.
+    ## ``reason`` is "" when nothing stands in the way: the file is not a
+    ## dynamically linked ELF, or its loader accepted it.
+    loader*: string
+    reason*: string
+    probeOutput*: string
 
 proc elfProgramInterpreter*(path: string): string =
   ## The ``PT_INTERP`` string of the ELF file at ``path``, or "" when the
@@ -3673,15 +3869,82 @@ proc elfProgramInterpreter*(path: string): string =
     return interp
   ""
 
-proc refuseUnrunnableTarballExecutable(useDef: InterfaceToolUse;
-                                       executable: string) =
-  ## Linux only: refuse a realized executable whose dynamic loader is absent
-  ## from this host. Starting it would fail with exit 127 inside whatever
-  ## action first runs it, far from the provisioning decision that caused
-  ## it; refusing here names the tool, the loader and the remedy.
+const LoaderCouldNotStartExitCodes = {126, 127}
+  ## Exit statuses that mean the loader refused to start anything. 127 is
+  ## what NixOS's ``stub-ld`` returns for every invocation
+  ## (https://nix.dev/permalink/stub-ld), and the shell's "command not
+  ## found"; 126 is the shell's "found but cannot execute" (no execute
+  ## permission, or an ELF for another architecture). The probe runs through
+  ## ``/bin/sh -c`` (``runProbe``), so both are what a loader the kernel
+  ## cannot run looks like. A real glibc ``ld.so --verify`` answers 0 (a
+  ## dynamic executable with an interpreter), 2 (a dynamic object without
+  ## one, such as a shared library) or 1 (static, not ELF, or not loadable)
+  ## -- the codes glibc's own ``ldd`` script branches on
+  ## (https://sourceware.org/git/?p=glibc.git;a=blob;f=elf/ldd.bash.in) --
+  ## and a loader that does not know ``--verify`` (musl's) prints its usage
+  ## and exits 1, so none of them is mistaken for a refusal.
+
+proc hostLoaderRefusal*(executable: string): HostLoaderRefusal =
+  ## Whether this host's dynamic loader can start the ELF ``executable``.
+  ##
+  ## Checking that ``PT_INTERP`` exists is not enough. NixOS 24.05 and later
+  ## put ``stub-ld`` at ``/lib64/ld-linux-x86-64.so.2``: the file the
+  ## generic-Linux binary asks for is present, and it refuses every program
+  ## with exit 127 ("NixOS cannot run dynamically linked executables
+  ## intended for generic linux environments out of the box"). So an
+  ## existing loader is asked: ``<loader> --verify <executable>`` is glibc
+  ## ld.so's "can you load this?" query (the one ``ldd`` asks before it
+  ## lists anything), which inspects the object without running it. The
+  ## loader is the one the kernel would run for this executable anyway, so
+  ## probing it executes nothing the realized tool would not. A probe that
+  ## cannot be started, that exits with one of
+  ## ``LoaderCouldNotStartExitCodes``, or that does not answer within
+  ## ``probeTimeoutSeconds`` is a refusal.
+  ##
+  ## The probe goes through ``runProbe``, the bounded launcher every tool
+  ## probe uses, not a blocking exec: a real ld.so answers ``--verify`` at
+  ## once, but ``PT_INTERP`` is whatever path the archive's author wrote,
+  ## and realization must not hang on whatever that path names.
+  ##
+  ## Linux only; elsewhere (and for a static binary, a script or a non-ELF
+  ## payload) the result carries no reason.
   when defined(linux):
-    let loader = elfProgramInterpreter(executable)
-    if loader.len == 0 or fileExists(loader):
+    result.loader = elfProgramInterpreter(executable)
+    if result.loader.len == 0:
+      return
+    if not fileExists(result.loader):
+      result.reason = "which this host does not have"
+      return
+    let probe = runProbe(result.loader, ToolProbeSpec(kind: tpkCapability,
+      name: "loader-verify", args: @["--verify", executable]))
+    result.probeOutput = probe.output
+    if probe.timedOut:
+      result.reason = "which on this host does not answer (`" &
+        result.loader & " --verify` was killed after " &
+        $probeTimeoutSeconds & "s)"
+    elif probe.exitCode == -1:
+      # ``runProbe`` reports a launch failure as -1, its error as output.
+      result.reason = "which this host cannot run (`" & result.loader &
+        " --verify` could not be started: " & probe.output.strip() & ")"
+    elif probe.exitCode in LoaderCouldNotStartExitCodes:
+      let firstLine = probe.output.strip().splitLines()
+      result.reason = "which on this host refuses to start it (`" &
+        result.loader & " --verify` exited " & $probe.exitCode &
+        (if firstLine.len > 0 and firstLine[0].len > 0:
+           ": " & firstLine[0].strip() else: "") & ")"
+  else:
+    discard executable
+
+proc refuseUnrunnableTarballExecutable(useDef: InterfaceToolUse;
+                                       executable, prefix: string) =
+  ## Linux only: refuse a realized executable that this host's dynamic
+  ## loader cannot start (``hostLoaderRefusal``). Starting it would fail
+  ## with exit 127 inside whatever action first runs it, far from the
+  ## provisioning decision that caused it; refusing here names the tool,
+  ## the loader and the remedy, and lets path mode fall through to Nix.
+  when defined(linux):
+    let refusal = hostLoaderRefusal(executable)
+    if refusal.reason.len == 0:
       return
     let name =
       if useDef.executableName.len > 0: useDef.executableName
@@ -3689,14 +3952,21 @@ proc refuseUnrunnableTarballExecutable(useDef: InterfaceToolUse;
     var err = newException(TarballHostLoaderMissing,
       "tool-resolution failed: the tarball-provisioned `" & name &
       "` (" & executable & ") is a dynamically linked generic-Linux " &
-      "binary that needs the loader " & loader & ", which this host does " &
-      "not have (NixOS and other hosts without an FHS loader cannot run " &
-      "it). Provide `" & name & "` on PATH (e.g. from the project's dev " &
-      "shell), or use Nix provisioning: --tool-provisioning=nix or " &
+      "binary that needs the loader " & refusal.loader & ", " &
+      refusal.reason & " (NixOS without nix-ld, and other hosts " &
+      "without an FHS loader, cannot run it). Provide `" & name &
+      "` on PATH (e.g. from the project's dev shell), or use Nix " &
+      "provisioning: --tool-provisioning=nix or " &
       "REPRO_TOOL_PROVISIONING=nix.")
-    err.loader = loader
+    err.loader = refusal.loader
     err.executable = executable
+    err.prefix = prefix
+    err.probeOutput = refusal.probeOutput
     raise err
+  else:
+    discard useDef
+    discard executable
+    discard prefix
 
 proc tarballProfileFor(useDef: InterfaceToolUse; plan: TarballAcquisitionPlan;
                        prefix, selectedUrl, resolved: string):
@@ -3765,7 +4035,7 @@ proc tarballProfileFor(useDef: InterfaceToolUse; plan: TarballAcquisitionPlan;
 const
   TarballProvisionerName* = "tarball"
   NixProvisionerName = "nix"
-  TarballProvisionEdgeSchema = "reprobuild.tarball-provision.v1"
+  TarballProvisionEdgeSchema = "reprobuild.tarball-provision.v2"
 
 type
   ProvisioningEdges* = object
@@ -3782,6 +4052,7 @@ type
     prefix*: string
     executable*: string
     selectedUrl*: string
+    cacheHit*: bool
 
 proc provisioningStateRoot*(storeRoot: string): string =
   ## Where the provisioning subgraph keeps its receipts and its action cache.
@@ -3791,6 +4062,9 @@ proc provisioningStateRoot*(storeRoot: string): string =
 
 proc planJson(plan: TarballAcquisitionPlan): JsonNode =
   %*{
+    "record": jsonutils.toJson(plan.record),
+    "digestAlgorithm": plan.digestAlgorithm,
+    "digestValue": plan.digestValue,
     "packageSelector": plan.packageSelector,
     "packageId": plan.packageId,
     "url": plan.url,
@@ -3814,6 +4088,9 @@ proc jsonStrings(node: JsonNode): seq[string] =
 
 proc planFromJson(node: JsonNode): TarballAcquisitionPlan =
   TarballAcquisitionPlan(
+    record: jsonutils.jsonTo(node["record"], InterfaceTarballProvisioning),
+    digestAlgorithm: node{"digestAlgorithm"}.getStr(),
+    digestValue: node{"digestValue"}.getStr(),
     packageSelector: node{"packageSelector"}.getStr(),
     packageId: node{"packageId"}.getStr(),
     url: node{"url"}.getStr(),
@@ -3960,7 +4237,8 @@ proc addTarballProvisionEdge(edges: var ProvisioningEdges;
 
   var roles: seq[string]
   for plan in plans:
-    for role in extractorRolesFor(plan.archiveType):
+    for role in extractorRolesFor(plan.archiveType) &
+        installationToolRoles(plan.record):
       if role notin roles:
         roles.add(role)
   visiting.add(id)
@@ -4012,14 +4290,44 @@ proc tarballProvisioningEdges*(useDef: InterfaceToolUse; storeRoot: string;
   result.rootId = root.id
   result.rootReceipt = root.receipt
 
+proc receiptStoreRoot(receiptPath: string): string =
+  ## The tool store a receipt belongs to: receipts live at
+  ## ``<store>/provisioning/receipts/<id>.receipt`` (``provisioningStateRoot``).
+  receiptPath.parentDir.parentDir.parentDir
+
+proc storeRelativePath(path, storeRoot: string): string =
+  ## ``path`` spelled relative to ``storeRoot`` with ``/`` separators when it
+  ## lies inside it, else unchanged. A receipt records its realization this
+  ## way so its CONTENT is the same on every host that realizes the same pin:
+  ## consumers declare the receipt as an input (Dependency-Provisioning-In-
+  ## Build-Graph.md section 3, step 5), and an absolute store path in it
+  ## would make that input differ between two hosts whose stores sit in
+  ## different places.
+  if path.len == 0 or storeRoot.len == 0:
+    return path
+  let relative = relativePath(absolutePath(path), absolutePath(storeRoot))
+  if relative.len == 0 or relative.startsWith("..") or isAbsolute(relative):
+    return path
+  relative.replace('\\', '/')
+
+proc storeResolvedPath(recorded, storeRoot: string): string =
+  ## Inverse of ``storeRelativePath``. An absolute spelling (a receipt written
+  ## before receipts were store-relative, or a path outside the store) is
+  ## returned as recorded.
+  if recorded.len == 0 or isAbsolute(recorded):
+    return recorded
+  os.normalizedPath(storeRoot / recorded)
+
 proc readTarballProvisionReceipt*(path: string): TarballProvisionReceipt =
   let node = parseJson(readFile(extendedPath(path)))
+  let storeRoot = receiptStoreRoot(absolutePath(path))
   TarballProvisionReceipt(
     packageSelector: node{"packageSelector"}.getStr(),
     planIndex: node{"planIndex"}.getInt(),
-    prefix: node{"prefix"}.getStr(),
-    executable: node{"executable"}.getStr(),
-    selectedUrl: node{"selectedUrl"}.getStr())
+    prefix: storeResolvedPath(node{"prefix"}.getStr(), storeRoot),
+    executable: storeResolvedPath(node{"executable"}.getStr(), storeRoot),
+    selectedUrl: node{"selectedUrl"}.getStr(),
+    cacheHit: node{"cacheHit"}.getBool())
 
 proc extractorExecutable(node: JsonNode): string =
   ## The executable a dependency edge's receipt names.
@@ -4029,7 +4337,9 @@ proc extractorExecutable(node: JsonNode): string =
       "tool-resolution failed: the " & node{"role"}.getStr() &
       " dependency edge left no receipt at " & receipt)
   if node{"kind"}.getStr() == NixProvisionerName:
-    result = readFile(extendedPath(receipt)).strip() /
+    # The receipt's first path is the executable-bearing output.
+    let paths = readNixReceiptPaths(receipt)
+    result = (if paths.len > 0: paths[0] else: "") /
       node{"executablePath"}.getStr()
   else:
     result = readTarballProvisionReceipt(receipt).executable
@@ -4038,11 +4348,12 @@ proc extractorExecutable(node: JsonNode): string =
       "tool-resolution failed: the " & node{"role"}.getStr() &
       " dependency edge's receipt names " & result & ", which does not exist")
 
-var lastTarballProvisionError {.threadvar.}: ref CatchableError
-  ## The exception the tarball executor turned into a failed ActionResult,
-  ## kept so `resolveTarballTool` re-raises the realizer's own error -- its
-  ## type (`ValueError`, `OSError`, ...) and message -- rather than a
-  ## flattened copy. The executor runs inline on the scheduler's thread.
+var lastProvisionError {.threadvar.}: ref CatchableError
+  ## The exception a provisioning executor (tarball, scoop) turned into a
+  ## failed ActionResult, kept so the resolver re-raises the realizer's own
+  ## error -- its type (`ValueError`, `OSError`, `EScoopBucketMissing`, ...)
+  ## and message -- rather than a flattened copy. The executor runs inline
+  ## on the scheduler's thread.
 
 proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} =
   ## The `"tarball"` provisioner's executor: realize the pinned archive into
@@ -4060,37 +4371,56 @@ proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} 
       let storeRoot = spec{"storeRoot"}.getStr()
       let writerMode = spec{"writerMode"}.getStr("direct")
       var tools = ExtractorTools()
+      var toolIdentities = ""
       for node in spec{"extractors"}:
         let exe = extractorExecutable(node)
+        toolIdentities.add(node{"role"}.getStr() & ":" &
+          storeRelativePath(exe, storeRoot) & "\n")
         case node{"role"}.getStr()
-        of ExtractorRoleSevenZip: tools.sevenZip = exe
+        of ExtractorRoleSevenZip:
+          tools.sevenZip = exe
+          tools.installation.sevenZip = exe
         of ExtractorRoleZstd: tools.zstd = exe
-        else:
-          raise newException(ValueError,
-            "unknown extractor role in " & action.id)
+        of "lessmsi": tools.installation.lessmsi = exe
+        of "wix3": tools.installation.dark = exe
+        of "innounp": tools.installation.innounp = exe
+        else: discard # declared interpreters are mapped in declaration order below
       var failures: seq[string]
       var firstError: ref CatchableError = nil
       var index = 0
       for planNode in spec{"plans"}:
-        let plan = planFromJson(planNode)
+        var plan = planFromJson(planNode)
+        plan.installationToolsIdentity = toolIdentities
+        tools.installation.interpreters = @[]
+        for encoded in plan.record.detail.launcherEmit:
+          let launcher = decodeLauncherEmitSpec(encoded)
+          let role = launcherToolRole(launcher)
+          for dependency in spec{"extractors"}:
+            if dependency{"role"}.getStr() == role:
+              tools.installation.interpreters.add(extractorExecutable(dependency))
         try:
           let materialized = materializeTarballPrefix(plan, storeRoot,
             writerMode, tools)
-          let resolved = executableInStorePath(materialized.prefix,
+          let edgeProbe = probeDeclaredExecutable(materialized.prefix,
             plan.declaredExecutablePath, rejectSymlinks = true)
-          if resolved.len == 0:
+          if edgeProbe.verdict != deOk:
             raise newException(OSError,
-              "tool-resolution failed: tarball realization lacks " &
-              plan.declaredExecutablePath)
+              "tool-resolution failed: tarball realization " &
+              edgeProbe.reason)
+          let resolved = edgeProbe.resolvedPath
           let receipt = action.outputs[0]
           createDir(extendedPath(parentDir(receipt)))
+          let receiptStore = receiptStoreRoot(absolutePath(receipt))
           writeFile(extendedPath(receipt), $(%*{
             "schema": TarballProvisionEdgeSchema,
+            "digestAlgorithm": plan.digestAlgorithm,
+            "digestValue": plan.digestValue,
             "packageSelector": plan.packageSelector,
             "planIndex": index,
-            "prefix": materialized.prefix,
-            "executable": resolved,
-            "selectedUrl": materialized.selectedUrl}) & "\n")
+            "prefix": storeRelativePath(materialized.prefix, receiptStore),
+            "executable": storeRelativePath(resolved, receiptStore),
+            "selectedUrl": materialized.selectedUrl,
+            "cacheHit": materialized.cacheHit}) & "\n")
           result.status = asSucceeded
           result.exitCode = 0
           result.evidence = PathSetEvidence(declaredInputs: action.inputs,
@@ -4107,7 +4437,7 @@ proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} 
         "tool-resolution failed: every pinned alternative of " & action.id &
         " failed:\n  " & failures.join("\n  "))
     except CatchableError as err:
-      lastTarballProvisionError = err
+      lastProvisionError = err
       result.status = asFailed
       result.exitCode = 1
       result.stderr = err.msg
@@ -4136,16 +4466,26 @@ proc provisioningEngineConfig*(storeRoot: string;
 proc runProvisioningEdges*(edges: ProvisioningEdges; storeRoot: string;
                            forceRebuild = false): BuildRunResult =
   registerTarballProvisioner()
-  lastTarballProvisionError = nil
-  runBuild(graph(edges.actions), provisioningEngineConfig(storeRoot,
-    forceRebuild))
+  lastProvisionError = nil
+  try:
+    runBuild(graph(edges.actions), provisioningEngineConfig(storeRoot,
+      forceRebuild))
+  except BuildEngineError:
+    # A failed helper can leave its consumer blocked before the engine can
+    # return results. Keep the realizer's original structured diagnostic,
+    # just as raiseProvisioningFailure does for a failed root edge.
+    if not lastProvisionError.isNil:
+      let error = lastProvisionError
+      lastProvisionError = nil
+      raise error
+    raise
 
 proc raiseProvisioningFailure(run: BuildRunResult) =
   for item in run.results:
     if item.status == asFailed:
-      if not lastTarballProvisionError.isNil:
-        let err = lastTarballProvisionError
-        lastTarballProvisionError = nil
+      if not lastProvisionError.isNil:
+        let err = lastProvisionError
+        lastProvisionError = nil
         raise err
       raise newException(OSError,
         "tool-resolution failed: provisioning edge " & item.id &
@@ -4169,6 +4509,7 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
       getCurrentDir() / ".repro" / "tool-store"
   let edges = tarballProvisioningEdges(useDef, root, writerMode)
   var receipt: TarballProvisionReceipt
+  var actionCacheHit = false
   for attempt in 0 .. 1:
     # A receipt restored or kept by the action cache can outlive the prefix
     # it names -- the store is garbage-collectable and the cache does not
@@ -4176,18 +4517,234 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
     # re-realizes whatever is missing.
     let run = runProvisioningEdges(edges, root, forceRebuild = attempt > 0)
     raiseProvisioningFailure(run)
+    for item in run.results:
+      if item.id == edges.rootId:
+        actionCacheHit = item.status in {asCacheHit, asUpToDate}
     receipt = readTarballProvisionReceipt(edges.rootReceipt)
+    # The receipt must name a prefix that carries what the package declares
+    # NOW, its alias included. An edge record from before a package gained an
+    # alias names the prefix realized without it, and accepting that
+    # receipt because the primary executable is there is how Windows
+    # `python3` stayed off PATH after `python3.exe` was declared. Re-running
+    # the edge realizes the prefix the current layout keys on. (The alias is
+    # written beside the executable; a launcher-pair alias is not a plain
+    # file of that name and is not checked here.)
     if receipt.executable.len > 0 and
-        fileExists(extendedPath(receipt.executable)):
+        fileExists(extendedPath(receipt.executable)) and
+        (plan.declaredExecutableAlias.len == 0 or
+         plan.declaredLauncher.len > 0 or
+         fileExists(extendedPath(receipt.executable.parentDir /
+           plan.declaredExecutableAlias))):
       break
     if attempt > 0:
+      # Name the reason the prefix the receipt points at does not satisfy the
+      # declaration, not merely that it does not. When the prefix is gone
+      # there is nothing to probe and the verdict is the honest "missing".
+      let receiptProbe =
+        if receipt.prefix.len > 0 and dirExists(extendedPath(receipt.prefix)):
+          probeDeclaredExecutable(receipt.prefix,
+            plan.declaredExecutablePath, rejectSymlinks = true)
+        else:
+          DeclaredExecutableProbe(verdict: deMissing,
+            declaredPath: plan.declaredExecutablePath)
       raise newException(OSError,
-        "tool-resolution failed: tarball realization lacks " &
-        plan.declaredExecutablePath & " (receipt " & edges.rootReceipt &
+        "tool-resolution failed: tarball realization " & receiptProbe.reason &
+        " (receipt " & edges.rootReceipt &
         " names " & receipt.executable & ")")
-  refuseUnrunnableTarballExecutable(useDef, receipt.executable)
-  tarballProfileFor(useDef, plan, receipt.prefix, receipt.selectedUrl,
-    receipt.executable)
+  validateExtraTarballExecutables(plan, receipt.prefix)
+  let finalProbe = probeDeclaredExecutable(receipt.prefix,
+    plan.declaredExecutablePath, rejectSymlinks = true)
+  if finalProbe.verdict != deOk:
+    raise newException(OSError, finalProbe.reason)
+  if archiveInstallerFeatures(plan.record).len > 0:
+    verifyArchiveApplication(archiveRealizationOf(plan.packageSelector,
+      plan.record), receipt.prefix, tarballAppTrust)
+  refuseUnrunnableTarballExecutable(useDef, receipt.executable,
+    receipt.prefix)
+  result = tarballProfileFor(useDef, plan, receipt.prefix,
+    receipt.selectedUrl, receipt.executable)
+  # Not part of the profile fingerprint (see the field), so set after the
+  # profile is sealed.
+  result.provisioningReceipt = edges.rootReceipt
+  result.tarballCacheHit = actionCacheHit or receipt.cacheHit
+
+# ---------------------------------------------------------------------------
+# Nix realization in tool resolution as a build-graph edge.
+#
+# Dependency-Provisioning-In-Build-Graph.md sections 2 and 3, applied to the
+# `nixPackage` realizations `resolveNixTool` performs (reprobuild-pm issue
+# 2026-10-07, "from-source and out-of-dev-env Nix realizations are not
+# provisioning edges"). The edge is a `bakForeignProvision` whose provisioner
+# (`argv[0]`) is `"nix"`, executed by the ENGINE's own `"nix"` executor -- the
+# one the dev env's `devEnvNixProvisioningActions` and the POSIX extractor
+# edges (`addNixProvisionEdge`) use -- which asks `reprobuild-nix-daemon` to
+# realize the selector and writes the receipt. Nothing here registers a
+# second Nix executor.
+#
+#   * IDENTITY: package selector, declared executable and host, not the pin
+#     (`provisionEdgeIdentity`), so a re-pin -- and the all-outputs retry --
+#     is the same edge and the same receipt path with new content;
+#   * STATIC INPUTS, in the weak fingerprint: the materialization key
+#     (`nixMaterializationCacheKey`: selector, nixpkgs pin, lock identity,
+#     expression file and its digest, executable, probes, host), the selector
+#     actually requested and the working directory a `.#…` selector is
+#     resolved against. DECLARED INPUTS, keyed by content: the expression
+#     file, when there is one, and the `flake.nix` / `flake.lock` of that
+#     directory when present -- the files the helper reads for every request
+#     (`dependencies_for`) and reports back. The report itself is kept as the
+#     edge's provisioner-reported inputs, which are attribution, not a cache
+#     key: nothing revalidates them on a hit, so the files that decide a
+#     `.#…` selector's realization are declared (section 3, step 3);
+#   * OUTPUT: the receipt, naming every realized store path, the
+#     executable-bearing output first. Store paths are content-addressed and
+#     host-independent, so the receipt reads the same on every host that
+#     realizes the same pin;
+#   * a receipt whose store paths have since been collected is re-executed
+#     rather than trusted (`realizeNixToolPaths`).
+#
+# The edge is `netFetch`: realizing a selector fetches its sources and
+# substitutes. Its destination is the logical `nix://<selector>` source the
+# pin names; what Nix itself contacts is Nix's substituter configuration.
+# ---------------------------------------------------------------------------
+
+const NixToolProvisionEdgeSchema = "reprobuild.nix-tool-provision.v1"
+
+proc nixToolProvisionEdgeId(useDef: InterfaceToolUse;
+                            plan: NixAcquisitionPlan): string =
+  ## Distinct from ``addNixProvisionEdge``'s ``nix-provision.`` ids: an
+  ## extractor edge resolves its selector from the tool store, this edge from
+  ## the project's working directory, and the two must not share a receipt.
+  let identity = provisionEdgeIdentity(NixProvisionerName,
+    useDef.packageSelector, plan.declaredExecutablePath)
+  "nix-tool-provision." & safeIdSegment(useDef.packageSelector) & "." &
+    identity[0 .. 11]
+
+proc nixToolProvisionReceipt(useDef: InterfaceToolUse;
+                             storeRoot: string): string =
+  ## The receipt path of ``useDef``'s Nix provisioning edge in ``storeRoot``,
+  ## or "" when there is no store (see ``resolveNixTool``).
+  if storeRoot.len == 0:
+    return ""
+  let plan = nixAcquisitionPlan(useDef)
+  provisioningStateRoot(absolutePath(storeRoot)) / "receipts" /
+    (nixToolProvisionEdgeId(useDef, plan) & ".receipt")
+
+proc nixToolProvisioningEdges*(useDef: InterfaceToolUse; storeRoot: string;
+                               workspaceRoot = getCurrentDir();
+                               allOutputs = false): ProvisioningEdges =
+  ## The provisioning subgraph that realizes ``useDef`` from its
+  ## ``nixPackage`` pin: one ``"nix"`` edge (the helper provisions whatever
+  ## Nix needs; there is no extractor edge). ``workspaceRoot`` is the
+  ## directory the selector is resolved against. ``allOutputs`` asks for every
+  ## output of the selector (``<selector>^*``), for a package whose
+  ## executable is not in its default outputs. Raises the plan's own errors
+  ## (no ``nixPackage`` metadata, an incomplete one) before any edge exists.
+  let plan = nixAcquisitionPlan(useDef)
+  let id = nixToolProvisionEdgeId(useDef, plan)
+  let receipt = provisioningStateRoot(storeRoot) / "receipts" /
+    (id & ".receipt")
+  let selector =
+    if allOutputs and '^' notin plan.nixSelector: plan.nixSelector & "^*"
+    else: plan.nixSelector
+  # Read by the engine's ``"nix"`` executor (``builtinText``). The selector is
+  # resolved against ``workspaceRoot``; the edge's ``cwd`` is the tool store,
+  # so the engine's run ledger -- which keys an action's GC-root manifest by
+  # its id and ``cwd`` -- keeps one manifest per tool request in this store,
+  # and a re-pin replaces it and lets the superseded realization's root go
+  # (as ``rootNixRealization`` does for its own root). A ``cwd`` per project
+  # directory would keep every directory's last realization rooted.
+  let text = $(%*{
+    "schema": NixToolProvisionEdgeSchema,
+    "workspaceRoot": workspaceRoot,
+    "expressionFile": plan.nixExpressionFile})
+  var inputs: seq[string]
+  if plan.nixExpressionFile.len > 0:
+    let expression =
+      if isAbsolute(plan.nixExpressionFile): plan.nixExpressionFile
+      else: workspaceRoot / plan.nixExpressionFile
+    # A missing file is the helper's error to report, so it is declared only
+    # when present.
+    if fileExists(extendedPath(expression)):
+      inputs.add(expression)
+  # The helper reads these for every request, and a `.#…` selector is
+  # evaluated from them; declaring them is what makes editing the flake miss
+  # the action cache instead of serving the previous receipt. Absent files
+  # are not declared (a `nixpkgs#…` selector from a directory with no flake).
+  for name in ["flake.nix", "flake.lock"]:
+    let flakeFile = workspaceRoot / name
+    if fileExists(extendedPath(flakeFile)):
+      inputs.add(flakeFile)
+  var action = builtinAction(bakForeignProvision, id,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+    cwd = storeRoot,
+    inputs = inputs,
+    outputs = [receipt],
+    commandStatsId = "repro nix tool provision edge",
+    cacheable = true,
+    weakFingerprint = weakFingerprintFromText(
+      NixToolProvisionEdgeSchema & "\0" &
+      nixMaterializationCacheKey(useDef, plan) & "\0" & selector & "\0" &
+      workspaceRoot),
+    actionCachePolicy = ffpChecksum,
+    text = text,
+    networkMode = netFetch,
+    netDestinations = ["nix://" & selector])
+  action.argv = @[NixProvisionerName, selector]
+  result.actions.add(action)
+  result.rootId = id
+  result.rootReceipt = receipt
+
+proc raiseNixProvisioningFailure(run: BuildRunResult) =
+  ## The engine's ``"nix"`` executor reports a failure as the message it
+  ## raised ("Failed to connect or spawn reprobuild-nix-daemon at …",
+  ## "Daemon resolution error: …"); it is re-raised as the ``OSError`` this
+  ## resolver has always raised, with the message unchanged.
+  for item in run.results:
+    if item.status == asFailed:
+      raise newException(OSError, item.stderr)
+  for item in run.results:
+    if item.status == asBlocked:
+      raise newException(OSError,
+        "tool-resolution failed: provisioning edge " & item.id &
+        " was blocked by " & item.blockedBy)
+
+proc realizeNixToolPaths(useDef: InterfaceToolUse;
+                         storeRoot, workspaceRoot: string;
+                         allOutputs: bool):
+    tuple[paths: seq[string]; receipt: string] =
+  ## Run ``useDef``'s Nix provisioning edge and return the store paths its
+  ## receipt names, and the receipt (``""`` with no store).
+  if storeRoot.len == 0:
+    # No tool store: execute the same edge once against a scratch receipt
+    # and discard it (see ``resolveNixTool`` for why there is no receipt).
+    let scratch = createTempDir("repro-nix-tool-", "")
+    defer: removeDir(scratch)
+    let edges = nixToolProvisioningEdges(useDef, scratch, workspaceRoot,
+      allOutputs)
+    let res = executeBuiltinAction(edges.actions[0])
+    if res.status != asSucceeded:
+      raise newException(OSError, res.stderr)
+    result.paths = readNixReceiptPaths(edges.rootReceipt)
+  else:
+    let stateStore = absolutePath(storeRoot)
+    let edges = nixToolProvisioningEdges(useDef, stateStore, workspaceRoot,
+      allOutputs)
+    result.receipt = edges.rootReceipt
+    for attempt in 0 .. 1:
+      # The action cache can keep a receipt whose store paths were collected
+      # since (``nix-store --gc``, a dropped root); the second attempt forces
+      # the edge to execute, and the helper realizes them again.
+      let run = runProvisioningEdges(edges, stateStore,
+        forceRebuild = attempt > 0)
+      raiseNixProvisioningFailure(run)
+      result.paths = readNixReceiptPaths(edges.rootReceipt)
+      if result.paths.len > 0 and
+          result.paths.allIt(dirExists(extendedPath(it))):
+        break
+  if result.paths.len == 0:
+    raise newException(OSError,
+      "Daemon returned no materialized paths for selector: " &
+      nixAcquisitionPlan(useDef).nixSelector)
 
 # ---------------------------------------------------------------------------
 # MR5 -- Bootstrap toolchain resolution for the interface-extract step.
@@ -4217,6 +4774,14 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
 # ---------------------------------------------------------------------------
 
 const
+  BootstrapNimVersion* = "2.2.10"
+    ## The Nim release every bootstrap archive below is. The URLs and
+    ## digests are measured for this release, so changing it means
+    ## re-measuring them. Package ids, lock identities and the version the
+    ## records carry (which the ``uses`` range check reads) are spelled from
+    ## it, so they cannot disagree with one another.
+  BootstrapNimPackageId = "nim@" & BootstrapNimVersion
+  BootstrapNimSourcePackageId = "nim-source@" & BootstrapNimVersion
   BootstrapNimTarballUrl =
     "https://nim-lang.org/download/nim-2.2.10_x64.zip"
   BootstrapNimTarballSha256 =
@@ -4261,7 +4826,7 @@ const
 proc bootstrapNimToolUse*(): InterfaceToolUse =
   result = InterfaceToolUse(
     rawConstraint: "nim >=2.2 <3.0",
-    packageSelector: "nim@2.2.10",
+    packageSelector: BootstrapNimPackageId,
     executableName: "nim")
   when defined(windows):
     result.tarballProvisioning = @[
@@ -4272,8 +4837,9 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
         archiveType: "zip",
         executablePath: "bin/nim.exe",
         stripComponents: 1,
-        packageId: "nim@2.2.10",
-        lockIdentity: "tarball:nim@2.2.10:sha256:" & BootstrapNimTarballSha256,
+        packageId: BootstrapNimPackageId,
+        lockIdentity: "tarball:" & BootstrapNimPackageId & ":sha256:" &
+          BootstrapNimTarballSha256,
         cpu: "x86_64",
         os: "windows")]
   elif defined(macosx):
@@ -4287,8 +4853,9 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
         archiveType: "tar.xz",
         executablePath: "bin/nim",
         stripComponents: 1,
-        packageId: "nim@2.2.10",
-        lockIdentity: "tarball:nim@2.2.10:macos-aarch64:sha256:" &
+        packageId: BootstrapNimPackageId,
+        lockIdentity: "tarball:" & BootstrapNimPackageId &
+          ":macos-aarch64:sha256:" &
           BootstrapNimTarballMacosArm64Sha256,
         cpu: "aarch64",
         os: "macos"),
@@ -4301,8 +4868,9 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
         archiveType: "tar.xz",
         executablePath: "bin/nim",
         stripComponents: 1,
-        packageId: "nim@2.2.10",
-        lockIdentity: "tarball:nim@2.2.10:macos-x86_64:sha256:" &
+        packageId: BootstrapNimPackageId,
+        lockIdentity: "tarball:" & BootstrapNimPackageId &
+          ":macos-x86_64:sha256:" &
           BootstrapNimTarballMacosX64Sha256,
         cpu: "x86_64",
         os: "macos")]
@@ -4337,9 +4905,19 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
         archiveType: "tar.xz",
         executablePath: "build.sh",
         stripComponents: 1,
-        packageId: "nim-source@2.2.10",
-        lockIdentity: "tarball:nim-source@2.2.10:sha256:" &
+        packageId: BootstrapNimSourcePackageId,
+        lockIdentity: "tarball:" & BootstrapNimSourcePackageId & ":sha256:" &
           BootstrapNimSourceTarballSha256)]
+  # Every record above is the ``BootstrapNimVersion`` release, and says so --
+  # from the constant its package ids are spelled from, so the two cannot
+  # drift apart. Acquisition holds a request to its ``uses`` range
+  # (``selectTarballRecord``'s ``versionRange``) and admits an unversioned
+  # record only for an unversioned request, so these records -- built here
+  # rather than by the ``tarball`` DSL statement, which records ``version``
+  # -- must carry it, or this host's only route refuses the bootstrap's own
+  # ``nim >=2.2 <3.0``.
+  for record in result.tarballProvisioning.mitems:
+    record.detail.version = BootstrapNimVersion
 
 proc bootstrapGccToolUse*(): InterfaceToolUse =
   result = InterfaceToolUse(
@@ -4521,7 +5099,9 @@ type
       ## The pinned nixpkgs gcc (Linux hosts that have Nix).
     bcrSystem
       ## The host's system C compiler at its fixed location
-      ## (``bootstrapSystemCCompilers``; Linux without Nix, other POSIX).
+      ## (``bootstrapSystemCCompilers``; Linux without Nix, other POSIX),
+      ## else the C compiler this ``repro`` was built with
+      ## (``BuiltCCompilerPath``) when it exists.
     bcrXcode
       ## The Xcode Command Line Tools clang, at the path ``xcrun -f clang``
       ## names, with the SDK ``xcrun --show-sdk-path`` names (macOS).
@@ -4607,7 +5187,8 @@ proc describeBootstrapNimRoute*(route: BootstrapNimRoute): string =
       (when defined(linux): ", because this host has no Nix" else: "")
 
 proc describeBootstrapCRoute*(route: BootstrapCRoute;
-                              systemCandidates: openArray[string]): string =
+                              systemCandidates: openArray[string];
+                              builtCompiler = BuiltCCompilerPath): string =
   case route
   of bcrArchive:
     let useDef = bootstrapGccToolUse()
@@ -4623,6 +5204,10 @@ proc describeBootstrapCRoute*(route: BootstrapCRoute;
   of bcrSystem:
     "the host's system C compiler (the first of " &
       systemCandidates.join(", ") & ")" &
+      (if builtCompiler.len > 0:
+         ", else the C compiler this repro was built with (" &
+           builtCompiler & ")"
+       else: "") &
       (when defined(linux): ", because this host has no Nix" else: "")
   of bcrXcode:
     "the Xcode Command Line Tools clang (`xcrun -f clang`), the " &
@@ -4663,31 +5248,52 @@ when defined(macosx):
         raise newException(OSError, "`/usr/bin/xcrun -f clang` answered " &
           cc & ", a SIP-protected path the build monitor cannot follow")
     result.cc = cc
-    if getEnv("SDKROOT").len == 0:
-      let sdk = uncontrolledExecCmdEx("/usr/bin/xcrun --show-sdk-path",
-        options = {poStdErrToStdOut})
-      let path = lastOutputLine(sdk.output)
-      if sdk.exitCode != 0 or path.len == 0 or
-          not dirExists(extendedPath(path)):
-        raise newException(OSError, "`/usr/bin/xcrun --show-sdk-path` " &
-          "exited " & $sdk.exitCode & (if path.len > 0: ": " & path else: "") &
-          ". Install the Xcode Command Line Tools with " &
-          "`xcode-select --install`, or set SDKROOT.")
-      result.sdk = path
+    if not cc.startsWith("/nix/store/"):
+      let envSdk = getEnv("SDKROOT")
+      if envSdk.len > 0 and dirExists(extendedPath(envSdk)):
+        result.sdk = envSdk
+      else:
+        let sdk = uncontrolledExecCmdEx("/usr/bin/xcrun --show-sdk-path",
+          options = {poStdErrToStdOut})
+        let path = lastOutputLine(sdk.output)
+        if sdk.exitCode != 0 or path.len == 0 or
+            not dirExists(extendedPath(path)):
+          raise newException(OSError, "`/usr/bin/xcrun --show-sdk-path` " &
+            "exited " & $sdk.exitCode & (if path.len > 0: ": " & path else: "") &
+            ". Install the Xcode Command Line Tools with " &
+            "`xcode-select --install`, or set SDKROOT.")
+        result.sdk = path
 else:
   proc resolveXcodeClang(): tuple[cc, sdk: string] =
     raise newException(OSError, "the Xcode route exists only on macOS")
 
 proc provisionBootstrapCCompiler*(storeRoot: string;
     route = bootstrapCRoute();
-    systemCandidates: seq[string] = @bootstrapSystemCCompilers):
+    systemCandidates: seq[string] = @bootstrapSystemCCompilers;
+    builtCompiler = BuiltCCompilerPath):
     BootstrapCCompiler =
   ## Provision the recipe-compile C compiler by ``route`` and probe it, or
   ## raise saying which route failed and why. Never looks at ``PATH``.
   ##
+  ## ``bcrSystem`` takes the first existing ``systemCandidates`` entry, else
+  ## ``builtCompiler`` -- by default ``BuiltCCompilerPath``, the C compiler
+  ## this ``repro`` was built with -- when that file exists. That is the arm
+  ## an installed Nix package reaches where there is neither a ``nix``
+  ## executable nor a ``/usr/bin/cc``: the Nix build sandbox, which is where
+  ## a consumer's import-from-derivation runs ``repro home export`` and where
+  ## the package's own ``packaged-runtime-compile`` check builds a recipe
+  ## cold. The package embeds that path, so its closure carries the compiler
+  ## (Gradual-Nix-To-Reprobuild-Migration GM1l chose it as the profile
+  ## compile's fallback for the same reason); the package does not have to
+  ## pin one through its wrapper, which would oblige every native package to
+  ## ship a C compiler too. It is a fixed path chosen at build time, not a
+  ## ``PATH`` search, and it comes after the system compiler so a host with
+  ## one keeps using it. A build whose compiler is gone (a portable bundle
+  ## moved off the machine that built it) fails as before.
+  ##
   ## Successful probes are cached under ``<storeRoot>/compiler-probes``, so
   ## the steady-state cost is a file-existence check.
-  let origin = describeBootstrapCRoute(route, systemCandidates)
+  let origin = describeBootstrapCRoute(route, systemCandidates, builtCompiler)
   var cc = ""
   var sdk = ""
   try:
@@ -4703,9 +5309,17 @@ proc provisionBootstrapCCompiler*(storeRoot: string;
         if fileExists(extendedPath(candidate)):
           cc = candidate
           break
+      if cc.len == 0 and builtCompiler.len > 0 and
+          fileExists(extendedPath(builtCompiler)):
+        cc = builtCompiler
       if cc.len == 0:
         raise newException(OSError, "none of " & systemCandidates.join(", ") &
-          " exists; install the system C compiler (e.g. the distribution's " &
+          " exists" &
+          (if builtCompiler.len > 0:
+             ", nor does the C compiler this repro was built with (" &
+               builtCompiler & ")"
+           else: "") &
+          "; install the system C compiler (e.g. the distribution's " &
           "gcc or build-essential package)")
     of bcrXcode:
       (cc, sdk) = resolveXcodeClang()
@@ -4835,7 +5449,7 @@ proc nimSourceToolUse*(version, url, sha256: string): InterfaceToolUse =
   ## The tarball package of Nim ``version``'s pinned source archive. Its
   ## declared executable is ``build.sh``: what the tarball edge must find in
   ## the extracted tree for the build edge to run.
-  InterfaceToolUse(
+  result = InterfaceToolUse(
     rawConstraint: "nim ==" & version,
     packageSelector: "nim-source@" & version,
     executableName: "nim",
@@ -4848,6 +5462,9 @@ proc nimSourceToolUse*(version, url, sha256: string): InterfaceToolUse =
       stripComponents: 1,
       packageId: "nim-source@" & version,
       lockIdentity: "tarball:nim-source@" & version & ":sha256:" & sha256)])
+  # The record is ``version``'s archive; without the version the range check
+  # refuses the ``nim ==<version>`` this use asks for.
+  result.tarballProvisioning[0].detail.version = version
 
 proc nimSourceBuildEdges*(version, url, sha256, storeRoot, cc,
                           sdkRoot: string): ProvisioningEdges =
@@ -4924,7 +5541,7 @@ proc executeNimSourceBuildEdge*(action: BuildAction): ActionResult {.gcsafe.} =
       result.evidence = PathSetEvidence(declaredInputs: action.inputs,
         declaredOutputs: action.outputs)
     except CatchableError as err:
-      lastTarballProvisionError = err
+      lastProvisionError = err
       result.status = asFailed
       result.exitCode = 1
       result.stderr = err.msg
@@ -4971,7 +5588,7 @@ proc provisionBootstrapNim*(storeRoot: string; route = bootstrapNimRoute();
       if cc.len == 0:
         raise newException(OSError, "there is no bootstrap C compiler to " &
           "build it with")
-      result = buildNimFromSourceThroughEdges("2.2.10",
+      result = buildNimFromSourceThroughEdges(BootstrapNimVersion,
         BootstrapNimSourceTarballUrl, BootstrapNimSourceTarballSha256,
         storeRoot, cc, "")
     if result.len == 0:
@@ -4979,7 +5596,7 @@ proc provisionBootstrapNim*(storeRoot: string; route = bootstrapNimRoute();
   except CatchableError as err:
     raise newException(BootstrapNimError,
       "could not provision the Nim compiler that compiles the recipe" &
-      "\n  package: nim 2.2.10" &
+      "\n  package: nim " & BootstrapNimVersion &
       "\n  route: " & describeBootstrapNimRoute(route) &
       "\n  tool store: " & storeRoot &
       "\n  failure: " & indentDetail(err.msg) &
@@ -5094,7 +5711,7 @@ proc pinnedNimArchiveToolUse*(version, url, sha256,
   ## bootstrap's own Windows Nim this is the same selector, URL, digest and
   ## lock identity as ``bootstrapNimToolUse``, so the two share one
   ## tool-store prefix.
-  InterfaceToolUse(
+  result = InterfaceToolUse(
     rawConstraint: "nim ==" & version,
     packageSelector: "nim@" & version,
     executableName: "nim",
@@ -5107,6 +5724,10 @@ proc pinnedNimArchiveToolUse*(version, url, sha256,
       stripComponents: 1,
       packageId: "nim@" & version,
       lockIdentity: "tarball:nim@" & version & ":sha256:" & sha256)])
+  # The record is ``version``'s archive; without the version the range check
+  # refuses the ``nim ==<version>`` this use asks for (as in
+  # ``nimSourceToolUse``).
+  result.tarballProvisioning[0].detail.version = version
 
 type
   PinnedNimRealization* = object
@@ -5244,7 +5865,8 @@ proc installedVersionSatisfies*(installedVersions: openArray[string];
   ##
   ## This is the SINGLE decision both the apply-time adapter
   ## (`resolveScoopTool`, M77) and the plan-time package classifier
-  ## (`repro_home_apply/package_catalog.resolvePackage`, M80) consult,
+  ## (`repro_home_apply/package_catalog.resolveProfilePackage`, M80/GM4b)
+  ## consult,
   ## so the dry-run plan and the real apply can never disagree on
   ## whether an installed package is a cache-hit.
   ##
@@ -5300,34 +5922,29 @@ proc resolveScoopExecutable(scoopOverride: string): string =
       return resolved
   ""
 
-proc scoopAcquisitionPlan*(useDef: InterfaceToolUse): ScoopAcquisitionPlan =
+proc selectScoopProvisioning*(useDef: InterfaceToolUse;
+                              target = hostRealizationTarget()):
+    InterfaceScoopProvisioning =
+  ## The ``uses:`` scoop selection — ``realization_selection.
+  ## selectScoopRecord``, the selection a home profile makes for the same
+  ## package (Provisioning-Contributions.md §"Profile Package References").
+  let pin = requestedContributorPin()
+  let choice = selectScoopRecord(useDef.scoopProvisioning, target, "", pin,
+    versionRange = requestedUsesVersionRange(useDef))
+  if choice.status != kcSelected:
+    raise selectionFailure(useDef, rkScoop, choice, pin, target)
+  useDef.scoopProvisioning[choice.index]
+
+proc scoopAcquisitionPlan*(useDef: InterfaceToolUse;
+                           target = hostRealizationTarget()):
+    ScoopAcquisitionPlan =
   if useDef.scoopProvisioning.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
       "\" requested by uses \"" & useDef.rawConstraint &
       "\" does not declare provisioning: scoopApp metadata" &
       noProvisioningAtAllHint(useDef))
-  let requested = requestedProvisioningContributor()
-  var contributors: seq[string] = @[]
-  var candidates: seq[InterfaceScoopProvisioning] = @[]
-  for candidate in useDef.scoopProvisioning:
-    if requested.len > 0 and candidate.contributor != requested:
-      continue
-    candidates.add(candidate)
-    if candidate.contributor notin contributors:
-      contributors.add(candidate.contributor)
-  if candidates.len == 0:
-    raise newException(ValueError,
-      "tool-resolution failed: provisioning contributor \"" & requested &
-      "\" has no scoop realization for package \"" &
-      useDef.packageSelector & "\"")
-  if requested.len == 0 and contributors.len > 1:
-    raise newException(ValueError,
-      "tool-resolution failed: ambiguous scoop provisioning for package \"" &
-      useDef.packageSelector & "\"; eligible contributors: " &
-      contributors.mapIt(contributorLabel(it)).join(", ") &
-      "; select one through the lock or REPRO_PROVISIONING_CONTRIBUTOR")
-  let selected = candidates[0]
+  let selected = selectScoopProvisioning(useDef, target)
   if selected.bucket.len == 0 or selected.app.len == 0 or
       selected.executablePath.len == 0:
     raise newException(ValueError,
@@ -5342,11 +5959,7 @@ proc scoopAcquisitionPlan*(useDef: InterfaceToolUse): ScoopAcquisitionPlan =
       selected.packageId
     else:
       selected.bucket & "/" & selected.app
-  let lockIdentity =
-    if selected.lockIdentity.len > 0:
-      selected.lockIdentity
-    else:
-      "scoop:" & selected.bucket & "/" & selected.app
+  let lockIdentity = scoopRealizationLockIdentity(selected)
   ScoopAcquisitionPlan(
     packageSelector: useDef.packageSelector,
     packageId: packageId,
@@ -5855,8 +6468,12 @@ proc determinePracticalHardening(plan: ScoopAcquisitionPlan;
   else:
     if executionProfileCaptured: phRangedAndProfileVerified else: phRanged
 
-proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
-                       scoopOverride = ""): PathOnlyToolProfile =
+proc realizeScoopTool(useDef: InterfaceToolUse; storeRoot: string;
+                      scoopOverride = ""): PathOnlyToolProfile =
+  ## The Scoop realization itself: install (or reuse) the app, junction it
+  ## into the tool store, verify it, and return its profile. Run only by the
+  ## `"scoop"` provisioning edge's executor; `resolveScoopTool` is the entry
+  ## point.
   let plan = scoopAcquisitionPlan(useDef)
   let scoopExe = resolveScoopExecutable(scoopOverride)
   if scoopExe.len == 0:
@@ -5914,7 +6531,7 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
   # M80: the installed-version cache-hit decision is the shared
   # `installedVersionSatisfies` predicate — the SAME predicate the
   # plan-time package classifier (`repro_home_apply/package_catalog.
-  # resolvePackage`) consults, so a `repro home apply --plan` dry run
+  # resolveProfilePackage`) consults, so a `repro home apply --plan` dry run
   # and the real `repro home apply` can never disagree on whether an
   # installed-but-bucket-drifted package is a cache-hit.
   let installedHit = installedVersionSatisfies(installedScoopVersions(),
@@ -6191,6 +6808,318 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
         result.probes.add(probeResult)
 
   refreshProfileIdentity(result)
+
+
+# ---------------------------------------------------------------------------
+# Scoop realization as a build-graph edge.
+#
+# Dependency-Provisioning-In-Build-Graph.md sections 2-4, applied to Scoop the
+# way the tarball section above applies them to archives. Realizing a
+# Scoop-provisioned package is a `bakForeignProvision` edge whose provisioner
+# (`argv[0]`) is `"scoop"`:
+#
+#   * IDENTITY: package selector, declared executable and host, not the pin
+#     (`provisionEdgeIdentity`), so a re-pin is the same edge and the same
+#     receipt path with new content;
+#   * STATIC INPUTS: the selected scoopApp pin, the Scoop root and the Scoop
+#     executable, in the edge's text and weak fingerprint; the bucket
+#     manifest is a declared input, keyed by content (`ffpChecksum`), so an
+#     in-place manifest edit or a bucket update re-runs the realization and
+#     its checksum checks;
+#   * OUTPUTS: a receipt naming the realization with store-relative paths
+#     (what consumers declare as an input), and the realized profile, which
+#     names host paths (the Scoop root, the version directory) and is read
+#     back on a cache hit;
+#   * a receipt whose realization has since gone (an uninstalled app, a
+#     removed prefix) is re-executed rather than trusted.
+#
+# `scoop install` reaches the network through Scoop itself. The edge is
+# `netFetch`, and its destinations are what the bucket manifest says Scoop
+# will download (`url`, top-level and per architecture) plus the logical
+# `scoop://<bucket>/<app>` source the pin names.
+# ---------------------------------------------------------------------------
+
+const
+  ScoopProvisionerName* = "scoop"
+  ScoopProvisionEdgeSchema = "reprobuild.scoop-provision.v1"
+
+proc scoopProvisioningJson(provisioning: InterfaceScoopProvisioning): JsonNode =
+  %*{
+    "packageName": provisioning.packageName,
+    "contributor": provisioning.contributor,
+    "bucket": provisioning.bucket,
+    "app": provisioning.app,
+    "version": provisioning.version,
+    "preferredVersion": provisioning.preferredVersion,
+    "manifestChecksum": provisioning.manifestChecksum,
+    "manifestUrl": provisioning.manifestUrl,
+    "executablePath": provisioning.executablePath,
+    "requiresExecutionProfileChecksum":
+      provisioning.requiresExecutionProfileChecksum,
+    "packageId": provisioning.packageId,
+    "lockIdentity": provisioning.lockIdentity,
+    "locationFile": provisioning.location.file,
+    "locationLine": provisioning.location.line}
+
+proc scoopProvisioningFromJson(node: JsonNode): InterfaceScoopProvisioning =
+  InterfaceScoopProvisioning(
+    packageName: node{"packageName"}.getStr(),
+    contributor: node{"contributor"}.getStr(),
+    bucket: node{"bucket"}.getStr(),
+    app: node{"app"}.getStr(),
+    version: node{"version"}.getStr(),
+    preferredVersion: node{"preferredVersion"}.getStr(),
+    manifestChecksum: node{"manifestChecksum"}.getStr(),
+    manifestUrl: node{"manifestUrl"}.getStr(),
+    executablePath: node{"executablePath"}.getStr(),
+    requiresExecutionProfileChecksum:
+      node{"requiresExecutionProfileChecksum"}.getBool(),
+    packageId: node{"packageId"}.getStr(),
+    lockIdentity: node{"lockIdentity"}.getStr(),
+    location: SourceLocation(file: node{"locationFile"}.getStr(),
+      line: node{"locationLine"}.getInt()))
+
+proc scoopUseJson(useDef: InterfaceToolUse): JsonNode =
+  ## The part of the tool use the Scoop realization reads.
+  var provisioning = newJArray()
+  for entry in useDef.scoopProvisioning:
+    provisioning.add(scoopProvisioningJson(entry))
+  %*{
+    "rawConstraint": useDef.rawConstraint,
+    "packageSelector": useDef.packageSelector,
+    "executableName": useDef.executableName,
+    "scoopProvisioning": provisioning}
+
+proc scoopUseFromJson(node: JsonNode): InterfaceToolUse =
+  result = InterfaceToolUse(
+    rawConstraint: node{"rawConstraint"}.getStr(),
+    packageSelector: node{"packageSelector"}.getStr(),
+    executableName: node{"executableName"}.getStr())
+  for entry in node{"scoopProvisioning"}:
+    result.scoopProvisioning.add(scoopProvisioningFromJson(entry))
+
+proc scoopManifestDownloadUrls(manifestPath: string): seq[string] =
+  ## The download URLs a Scoop manifest declares: `url` (a string or an
+  ## array) at the top level and under each `architecture` entry. A
+  ## manifest that cannot be read contributes none; the realization reports
+  ## that itself.
+  proc addUrls(node: JsonNode; urls: var seq[string]) =
+    if node == nil:
+      return
+    case node.kind
+    of JString:
+      let url = node.getStr().split('#')[0]
+      if url.len > 0 and url notin urls:
+        urls.add(url)
+    of JArray:
+      for item in node:
+        addUrls(item, urls)
+    else:
+      discard
+  try:
+    let manifest = parseJson(readFile(extendedPath(manifestPath)))
+    if manifest.kind != JObject:
+      return
+    addUrls(manifest{"url"}, result)
+    let architectures = manifest{"architecture"}
+    if architectures != nil and architectures.kind == JObject:
+      for _, entry in architectures:
+        if entry.kind == JObject:
+          addUrls(entry{"url"}, result)
+  except CatchableError:
+    discard
+
+proc scoopProvisioningStateRoot(storeRoot: string): string =
+  ## Receipts and the action cache live under the tool store, like the
+  ## tarball edge's. A caller that passed no store keeps its prefixes where
+  ## `realizeScoopTool` always put them; only the edge's state needs a root.
+  if storeRoot.len > 0: absolutePath(storeRoot)
+  else: getCurrentDir() / ".repro" / "tool-store"
+
+proc scoopProvisioningEdges*(useDef: InterfaceToolUse; storeRoot: string;
+                             scoopOverride = ""): ProvisioningEdges =
+  ## The provisioning subgraph that realizes `useDef` from its scoopApp pin:
+  ## one `"scoop"` edge (Scoop needs no extractor edge; it extracts with its
+  ## own tools). Raises the plan's own errors (no scoopApp metadata, an
+  ## ambiguous contributor) and `EScoopMissing` before any edge exists.
+  let plan = scoopAcquisitionPlan(useDef)
+  let scoopExe = resolveScoopExecutable(scoopOverride)
+  if scoopExe.len == 0:
+    raise newException(EScoopMissing,
+      "EScoopMissing: scoop is not installed or not on PATH. " &
+      "Install Scoop from https://scoop.sh/ before running --tool-provisioning=scoop.")
+  let scoopRoot = resolveScoopRoot(scoopExe)
+  let stateStore = scoopProvisioningStateRoot(storeRoot)
+  let identity = provisionEdgeIdentity(ScoopProvisionerName,
+    useDef.packageSelector, plan.declaredExecutablePath)
+  let id = "scoop-provision." & safeIdSegment(useDef.packageSelector) & "." &
+    identity[0 .. 11]
+  let receipt = provisioningStateRoot(stateStore) / "receipts" /
+    (id & ".receipt")
+  let profileOut = provisioningStateRoot(stateStore) / "receipts" /
+    (id & ".profile")
+  let planNode = %*{
+    "packageId": plan.packageId,
+    "bucket": plan.bucket,
+    "app": plan.app,
+    "version": plan.version,
+    "preferredVersion": plan.preferredVersion,
+    "manifestChecksum": plan.manifestChecksum,
+    "manifestUrl": plan.manifestUrl,
+    "declaredExecutablePath": plan.declaredExecutablePath,
+    "requiresExecutionProfileChecksum":
+      plan.requiresExecutionProfileChecksum,
+    "lockIdentity": plan.lockIdentity}
+  let text = $(%*{
+    "schema": ScoopProvisionEdgeSchema,
+    "storeRoot": storeRoot,
+    "stateStore": stateStore,
+    "scoopOverride": scoopOverride,
+    "scoopExecutable": scoopExe,
+    "scoopRoot": scoopRoot,
+    "plan": planNode,
+    "use": scoopUseJson(useDef)})
+  var inputs: seq[string]
+  var destinations = @["scoop://" & plan.bucket & "/" & plan.app]
+  if scoopRoot.len > 0:
+    let manifest = scoopRoot / "buckets" / plan.bucket / "bucket" /
+      (plan.app & ".json")
+    # A missing manifest is the realization's own error to report
+    # (`EScoopBucketMissing`), so it is declared only when present.
+    if fileExists(extendedPath(manifest)):
+      inputs.add(manifest)
+      for url in scoopManifestDownloadUrls(manifest):
+        if url notin destinations:
+          destinations.add(url)
+  var action = builtinAction(bakForeignProvision, id,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+    cwd = stateStore,
+    inputs = inputs,
+    outputs = [receipt, profileOut],
+    commandStatsId = "repro scoop provision edge",
+    cacheable = true,
+    weakFingerprint = weakFingerprintFromText(text),
+    actionCachePolicy = ffpChecksum,
+    text = text,
+    networkMode = netFetch,
+    netDestinations = destinations)
+  action.argv = @[ScoopProvisionerName, useDef.packageSelector]
+  result.actions.add(action)
+  result.rootId = id
+  result.rootReceipt = receipt
+
+proc scoopProfilePath(receipt: string): string =
+  receipt.changeFileExt("profile")
+
+proc readScoopProvisionProfile(receipt: string): PathOnlyToolProfile =
+  let bytes = readFile(extendedPath(scoopProfilePath(receipt)))
+  var raw = newSeq[byte](bytes.len)
+  for i, ch in bytes:
+    raw[i] = byte(ord(ch))
+  var pos = 0
+  result = readProfile(raw, pos, ArtifactVersion)
+  if pos != raw.len:
+    raise newException(ValueError,
+      "scoop provision edge left a malformed profile at " &
+      scoopProfilePath(receipt))
+
+proc executeScoopProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} =
+  ## The `"scoop"` provisioner's executor: realize the pinned Scoop app into
+  ## the tool store and write the receipt and the realized profile.
+  result = ActionResult(id: action.id, launched: true,
+    runQuotaBackend: "provision-scoop",
+    dependencyPolicyKind: action.dependencyPolicy.kind)
+  {.cast(gcsafe).}:
+    try:
+      let spec = parseJson(action.builtinText)
+      if spec{"schema"}.getStr() != ScoopProvisionEdgeSchema:
+        raise newException(ValueError,
+          "scoop provision edge carries an unknown schema: " & action.id)
+      let useDef = scoopUseFromJson(spec{"use"})
+      let profile = realizeScoopTool(useDef, spec{"storeRoot"}.getStr(),
+        spec{"scoopOverride"}.getStr())
+      let receipt = action.outputs[0]
+      let stateStore = spec{"stateStore"}.getStr()
+      createDir(extendedPath(parentDir(receipt)))
+      var encoded: seq[byte]
+      encoded.writeProfile(profile)
+      var encodedText = newString(encoded.len)
+      for i, b in encoded:
+        encodedText[i] = char(b)
+      writeFile(extendedPath(action.outputs[1]), encodedText)
+      # What a consumer declares: the realization, without the host's Scoop
+      # root or version directory, so it reads the same on every host that
+      # realizes the same pin.
+      writeFile(extendedPath(receipt), $(%*{
+        "schema": ScoopProvisionEdgeSchema,
+        "packageSelector": profile.packageSelector,
+        "bucket": profile.scoopBucket,
+        "app": profile.scoopApp,
+        "resolvedVersion": profile.scoopResolvedVersion,
+        "manifestChecksum": profile.scoopManifestChecksum,
+        "executionProfileChecksum": profile.scoopExecutionProfileChecksum,
+        "practicalHardening":
+          practicalHardeningName(profile.practicalHardening),
+        "lockIdentity": profile.lockIdentity,
+        "prefix": storeRelativePath(profile.selectedStorePath, stateStore),
+        "executable":
+          storeRelativePath(profile.resolvedExecutablePath, stateStore)}) &
+        "\n")
+      result.status = asSucceeded
+      result.exitCode = 0
+      result.evidence = PathSetEvidence(declaredInputs: action.inputs,
+        declaredOutputs: action.outputs)
+    except CatchableError as err:
+      lastProvisionError = err
+      result.status = asFailed
+      result.exitCode = 1
+      result.stderr = err.msg
+
+proc registerScoopProvisioner*() =
+  ## Install the `"scoop"` executor on this thread. `resolveScoopTool` calls
+  ## it before every provisioning run.
+  registerForeignProvisionExecutor(ScoopProvisionerName,
+    executeScoopProvisionEdge)
+
+registerScoopProvisioner()
+
+proc scoopRealizationPresent(profile: PathOnlyToolProfile): bool =
+  ## Whether what a (possibly cached) receipt describes is still on disk:
+  ## the prefix's junction, the Scoop version directory it targets, and the
+  ## executable, when the app exposes one.
+  if profile.selectedStorePath.len == 0 or
+      not dirExists(extendedPath(profile.selectedStorePath / "bin")):
+    return false
+  if profile.scoopJunctionTarget.len > 0 and
+      not dirExists(extendedPath(profile.scoopJunctionTarget)):
+    return false
+  profile.resolvedExecutablePath.len == 0 or
+    fileExists(extendedPath(profile.resolvedExecutablePath))
+
+proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
+                       scoopOverride = ""): PathOnlyToolProfile =
+  ## Realize a Scoop-provisioned package THROUGH ITS PROVISIONING EDGE and
+  ## return its profile. See the section comment above for the edge's shape.
+  let edges = scoopProvisioningEdges(useDef, storeRoot, scoopOverride)
+  let stateStore = scoopProvisioningStateRoot(storeRoot)
+  registerScoopProvisioner()
+  for attempt in 0 .. 1:
+    # The action cache can keep a receipt whose realization was since
+    # removed (`scoop uninstall`, a collected prefix); the second attempt
+    # forces the edge to execute, which realizes it again.
+    let run = runProvisioningEdges(edges, stateStore,
+      forceRebuild = attempt > 0)
+    raiseProvisioningFailure(run)
+    result = readScoopProvisionProfile(edges.rootReceipt)
+    if scoopRealizationPresent(result):
+      break
+    if attempt > 0:
+      raise newException(EScoopInstallFailed,
+        "EScoopInstallFailed: the scoop provisioning edge " & edges.rootId &
+        " realized " & result.selectedStorePath &
+        ", which is not present after realization")
+  # Not part of the profile fingerprint (see the field).
+  result.provisioningReceipt = edges.rootReceipt
 
 proc verifyScoopExecutionProfile*(prefix: string) =
   ## Reads the receipt at `prefix` and recomputes the execution profile
@@ -7644,6 +8573,54 @@ proc tryResolveStdlibProvisioning*(useDef: InterfaceToolUse;
     return true
   false
 
+proc tarballModeFallsThroughToFromSource*(useDef: InterfaceToolUse): bool =
+  ## Under ``--tool-provisioning=tarball``, whether this tool use is realized
+  ## by its package's from-source recipe instead of a tarball: exactly when
+  ## the package declares no tarball for the host
+  ## (Dependency-Provisioning-In-Build-Graph.md 4.3). It is decided by the
+  ## ABSENCE of a host tarball, never by the failure of one, so a download
+  ## that fails cannot silently become a source build. A use with no
+  ## executable name has no recipe to find and keeps the tarball diagnostic.
+  useDef.executableName.len > 0 and not hasHostTarballProvisioning(useDef)
+
+proc noHostTarballSentence(useDef: InterfaceToolUse): string =
+  "package \"" & useDef.packageSelector & "\" has no tarball realization " &
+    "for this host (cpu=" & hostCpuToken() & " os=" & hostOsToken() & "; " &
+    $useDef.tarballProvisioning.len & " tarball entries declared)"
+
+proc resolveTarballModeFromSource(useDef: InterfaceToolUse):
+    PathOnlyToolProfile =
+  ## The tarball-mode fall-through (Dependency-Provisioning-In-Build-Graph.md
+  ## 4.3): the package's from-source recipe, found where
+  ## ``--tool-provisioning=from-source`` looks for it. A built recipe is
+  ## used as from-source mode uses it. An unbuilt one is built by
+  ## ``repro build``'s auto-recurse pass before the consuming graph is
+  ## resolved, so reaching it unbuilt here means a caller that does not
+  ## build recipes (dev-env activation) or a build that failed; the error
+  ## names the command that builds it.
+  let outcome = tryResolveFromSourceTool(useDef)
+  case outcome.kind
+  of rrResolved:
+    result = outcome.profile
+  of rrNeedsBuild:
+    if absolutePath(outcome.recipeDir) in fromSourceDryRunPlannedRecipes:
+      return dryRunPlannedFromSourceProfile(useDef, outcome.recipeDir,
+        outcome.expectedArtifact)
+    raise newException(OSError,
+      "tool-resolution failed: " & noHostTarballSentence(useDef) &
+      ", so tarball provisioning falls through to its from-source recipe " &
+      "at " & outcome.recipeDir & ", which has not produced " &
+      outcome.expectedArtifact & " yet. `repro build` of a project that " &
+      "uses it builds the recipe first; to build it directly, run `repro " &
+      "build " & outcome.recipeDir & "`.")
+  of rrSiblingMissing:
+    raise newException(OSError,
+      "tool-resolution failed: " & noHostTarballSentence(useDef) &
+      ", and no from-source recipe to fall through to exists at " &
+      outcome.attemptedRecipeManifest & ". Declare a tarball for this " &
+      "host in the package's `provisioning:` block, or add a source recipe " &
+      "at that path (REPRO_FROM_SOURCE_ROOT selects another recipe root).")
+
 proc mkAuxChannelProducerProfile(useDef: InterfaceToolUse;
                                  dirs: ProducerAuxDirs):
     PathOnlyToolProfile =
@@ -7753,7 +8730,12 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
   of tpmNix:
     result = resolveNixTool(useDef, storeRoot)
   of tpmTarball:
-    result = resolveTarballTool(useDef, storeRoot)
+    if not tarballModeFallsThroughToFromSource(useDef):
+      # A host tarball is the realization and is never bypassed: its own
+      # failure is the result (Dependency-Provisioning-In-Build-Graph.md 4.3).
+      result = resolveTarballTool(useDef, storeRoot)
+    else:
+      result = resolveTarballModeFromSource(useDef)
   of tpmScoop:
     result = resolveScoopTool(useDef, storeRoot)
   of tpmFromSource:
@@ -7867,6 +8849,7 @@ proc actionIdentityFor(useDef: InterfaceToolUse;
     # from being blind to the tool's bytes once ``pathSearchList`` left
     # the payload.
     resolvedExecutableDigest: profile.resolvedExecutableDigest,
+    provisioningReceipt: profile.provisioningReceipt,
     probes: profile.probes,
     adapterStrength: profile.adapterStrength,
     cachePortability: profile.cachePortability,
@@ -8089,6 +9072,8 @@ proc writeProfile(outp: var seq[byte]; profile: PathOnlyToolProfile) =
   # v8 — the resolved executable's content digest. Emitted after the v7
   # search-path block, same trailing-extension discipline.
   outp.writeString(profile.resolvedExecutableDigest)
+  # v9 — the provisioning edge's receipt. Same trailing-extension discipline.
+  outp.writeString(profile.provisioningReceipt)
   outp.writeDigest(profile.profileFingerprint)
 
 proc readProfile(bytes: openArray[byte]; pos: var int;
@@ -8155,6 +9140,8 @@ proc readProfile(bytes: openArray[byte]; pos: var int;
     result.libraryPathList = readStringSeq(bytes, pos)
   if version >= 8'u16:
     result.resolvedExecutableDigest = readString(bytes, pos)
+  if version >= 9'u16:
+    result.provisioningReceipt = readString(bytes, pos)
   # A v < 8 artifact leaves the digest empty. Its stored
   # ``profileFingerprint`` was computed under the v6 profile scheme and
   # will not equal ``profileFingerprintFor(result)``, so every freshness
@@ -8209,6 +9196,8 @@ proc writeActionIdentity(outp: var seq[byte]; identity: ToolActionIdentity) =
   outp.writeStringSeq(identity.libraryPathList)
   # v8 — content digest of the resolved executable (see ``writeProfile``).
   outp.writeString(identity.resolvedExecutableDigest)
+  # v9 — the provisioning edge's receipt (see ``writeProfile``).
+  outp.writeString(identity.provisioningReceipt)
 
 proc readActionIdentity(bytes: openArray[byte];
     pos: var int; version: uint16): ToolActionIdentity =
@@ -8280,6 +9269,8 @@ proc readActionIdentity(bytes: openArray[byte];
     result.libraryPathList = readStringSeq(bytes, pos)
   if version >= 8'u16:
     result.resolvedExecutableDigest = readString(bytes, pos)
+  if version >= 9'u16:
+    result.provisioningReceipt = readString(bytes, pos)
 
 proc encodePathOnlyBuildIdentity*(identity: PathOnlyBuildIdentity): seq[byte] =
   var payload: seq[byte] = @[]
@@ -8367,6 +9358,7 @@ proc jsonProfile(profile: PathOnlyToolProfile): JsonNode =
     "pathSearchList": profile.pathSearchList,
     "resolvedExecutablePath": profile.resolvedExecutablePath,
     "resolvedExecutableDigest": profile.resolvedExecutableDigest,
+    "provisioningReceipt": profile.provisioningReceipt,
     "probes": probes,
     "adapterStrength": strengthName(profile.adapterStrength),
     "cachePortability": portabilityName(profile.cachePortability),
@@ -8416,6 +9408,7 @@ proc jsonAction(identity: ToolActionIdentity): JsonNode =
     "pathSearchList": identity.pathSearchList,
     "resolvedExecutablePath": identity.resolvedExecutablePath,
     "resolvedExecutableDigest": identity.resolvedExecutableDigest,
+    "provisioningReceipt": identity.provisioningReceipt,
     "probes": probes,
     "adapterStrength": strengthName(identity.adapterStrength),
     "cachePortability": portabilityName(identity.cachePortability),

@@ -27,6 +27,7 @@
 ## destination itself. Both are pinned here.
 
 import std/[os, osproc, streams, strtabs, strutils, times, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_dsl_stdlib/packages/expand_archive
 

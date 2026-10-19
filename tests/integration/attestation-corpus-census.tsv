@@ -32,7 +32,7 @@
 #
 # path	kind	refresh	note
 snp_vectors.nim	mixed	see-ledger	vendor chains and revocation lists, two genuine parts' reports and endorsements, and a minted impostor chain; every member has a ledger row
-tdx_vectors.nim	mixed	see-ledger	the vendor root, its signing certificate, three revocation lists, eight collateral documents, three genuine quotes and a minted impostor family; every member has a ledger row
+tdx_vectors.nim	mixed	see-ledger	the vendor root, its signing certificate, three revocation lists, eight collateral documents — five current and three kept at an issue date years past, so the reader is shown to be reading the FORMAT and not one vintage — three genuine quotes and a minted impostor family; every member has a ledger row
 nitro_vectors.nim	mixed	see-ledger	the enclave vendor's root, five genuine documents from four republishers, and five readings derived here; every member has a ledger row
 snp_digest_vectors.nim	refreshed-collateral	on-upstream-move	an upstream project's test suite and two firmware tails, pinned by commit AND digest, with the vectors parsed rather than transcribed
 snp_digest_corpus.nim	no-corpus	-	the parser over the corpus beside it; it carries no bytes of its own

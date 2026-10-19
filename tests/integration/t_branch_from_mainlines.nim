@@ -41,6 +41,27 @@
 ##   6. ``test_wv7_fetch_requires_from_mainlines`` — ``--fetch`` / ``--no-fetch``
 ##      on their own would be a flag that silently does nothing, so they are a
 ##      usage error without ``--from-mainlines``.
+##   7. ``test_wv7_from_mainlines_adopts_renamed_mainline_member_path`` — a
+##      repository renamed in the mainline manifest adopts its new target
+##      mainline path in the forked workspace rather than requiring the source
+##      checkout's old path, and uncommitted edits under ``--include-changes``
+##      are transferred to the renamed path.
+##   8. ``test_wv7_concurrent_forks_serialize_shared_cache_and_source_fetches`` —
+##      concurrent ``repro branch --from-mainlines`` runs sharing one source
+##      workspace and one ``REPRO_WORKSPACE_CLONES`` directory serialize their
+##      shared-cache creation/refresh and source-checkout tracking-ref fetches
+##      without ``cannot lock ref`` or ``shared-clone cache miss`` races.
+##   9. ``test_wv7_root_mainline_ignores_separate_record_store_branch`` — an
+##      old-style ``.repro-workspace.toml`` (``bootstrap.v1``) whose
+##      ``[manifest] url`` names a SEPARATE record-store repository on
+##      ``latest``. That branch is the store's, not the root's: the root is cut
+##      from its own ``origin/HEAD`` (``main``) and the run succeeds instead of
+##      refusing ``mainline_unresolved mainline=latest``.
+##  10. ``test_wv7_legacy_manifest_branch_is_root_mainline_when_store_is_root``
+##      — the positive control for 9: when ``[manifest] url`` names the root
+##      repository itself (spelled differently from its ``origin``), its
+##      ``branch`` IS the root's mainline, and the root is cut from it rather
+##      than from ``origin/HEAD``.
 ##
 ## Real components (NO mocks): the real ``git`` binary, real bare repos on the
 ## real filesystem, and the real engine-built ``build/bin/repro`` spawned as a
@@ -61,12 +82,20 @@
 ##     ``source_head_unpublished`` instead of forking.
 ##   - If either flag guard regressed, cases 5 and 6 would materialize a
 ##     workspace or exit 0.
+##   - If ``[manifest] branch`` were taken as the root's mainline regardless
+##     of which repository ``[manifest] url`` names, case 9 would refuse
+##     ``mainline_unresolved mainline=latest`` (the root has no ``latest``).
+##     If it were never taken (always ``origin/HEAD``), or the URL comparison
+##     were by string rather than repository identity, case 10 would cut the
+##     root from ``main`` instead of ``latest``.
 ##
 ## Skip rule: ``git`` missing on PATH (same convention as M9–M16 / WV-6).
 
-import std/[json, options, os, osproc, strutils, tempfiles, unittest]
+import std/[json, options, os, osproc, strtabs, strutils, tempfiles, unittest]
 
+from repro_core/process_streams import drainStream
 import repro_test_support
+import repro_test_support/reasoned_skip
 import repro_workspace_manifests
 
 proc q(value: string): string = quoteShell(value)
@@ -264,6 +293,37 @@ proc entryByPath(report: JsonNode; path: string): JsonNode =
       return entry
   newJNull()
 
+proc legacyBootstrapToml(manifestUrl, manifestBranch: string): string =
+  ## An OLD-STYLE ``.repro-workspace.toml`` (``bootstrap.v1``), the shape the
+  ## agent-harbor workspace carried when the issue was observed: ``[manifest]``
+  ## names a record store and its branch, and nothing else is declared.
+  "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
+  "[manifest]\n" &
+  "url = \"" & manifestUrl & "\"\n" &
+  "branch = \"" & manifestBranch & "\"\n" &
+  "publish_locks = false\n"
+
+proc publishRootSettings(gitBin: string; fx: Wv7Fixture;
+                         content: string): string =
+  ## Commit ``.repro-workspace.toml`` in the source workspace's root repo and
+  ## push it to the root's ``main`` (its ``origin/HEAD``), the way a real
+  ## workspace carries the file. Returns the new ``main`` tip, which is what a
+  ## fork cut from ``origin/HEAD`` must land on.
+  writeFile(fx.workspaceRoot / ".repro-workspace.toml", content)
+  discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+    " add .repro-workspace.toml")
+  discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+    " commit -m 'add bootstrap config'")
+  discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+    " push origin main")
+  result = headSha(gitBin, fx.workspaceRoot)
+
+proc rootOriginHead(gitBin: string; fx: Wv7Fixture): string =
+  ## The root clone's ``origin/HEAD`` target, e.g. ``origin/main``; "" if unset.
+  let res = runCmd(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+    " symbolic-ref --short -q refs/remotes/origin/HEAD")
+  if res.code != 0: "" else: res.output.strip()
+
 suite "WV-7 — repro branch --from-mainlines":
 
   test "test_wv7_from_mainlines_cuts_from_mainline_not_source_head":
@@ -455,3 +515,315 @@ suite "WV-7 — repro branch --from-mainlines":
       check res.code != 0
       check not dirExists(forkPath)
       check res.output.contains("--from-mainlines")
+
+  test "test_wv7_from_mainlines_adopts_renamed_mainline_member_path":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a real git working tree")
+    else:
+      let fx = setupFixture(gitBin, "rename")
+      defer: removeDirEventually(fx.scratch)
+
+      # In the root bare repo, commit a rename of lib-a to lib-renamed on main.
+      let workPath = fx.scratch / "rename-work"
+      removeDir(workPath)
+      discard requireGit(q(gitBin) & " clone --branch main " &
+        q(fileUrl(fx.rootBare)) & " " & q(workPath))
+      gitConfig(gitBin, workPath)
+
+      # Update project toml to include repos/lib-renamed.toml instead of repos/lib-a.toml
+      let projContent = readFile(workPath / "projects" / "wv7.toml")
+      writeFile(workPath / "projects" / "wv7.toml",
+        projContent.replace("\"repos/lib-a.toml\"", "\"repos/lib-renamed.toml\""))
+
+      # Remove repos/lib-a.toml and add repos/lib-renamed.toml with [extensions] previously
+      removeFile(workPath / "repos" / "lib-a.toml")
+      writeFile(workPath / "repos" / "lib-renamed.toml",
+        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "[repo]\n" &
+        "name = \"lib-renamed\"\n" &
+        "path = \"lib-renamed\"\n" &
+        "remote = \"lib-a-origin\"\n" &
+        "revision = \"dev\"\n" &
+        "branch = \"dev\"\n\n" &
+        "[extensions]\n" &
+        "previously = [{ name = \"lib-a\", path = \"lib-a\" }]\n")
+
+      discard requireGit(q(gitBin) & " -C " & q(workPath) & " add -A")
+      discard requireGit(q(gitBin) & " -C " & q(workPath) &
+        " commit -m 'rename lib-a to lib-renamed'")
+      discard requireGit(q(gitBin) & " -C " & q(workPath) & " push origin main")
+
+      # Source workspace still has the old lib-a checkout and manifest
+      check dirExists(fx.workspaceRoot / "lib-a")
+      check fileExists(fx.workspaceRoot / "repos" / "lib-a.toml")
+      check not fileExists(fx.workspaceRoot / "repos" / "lib-renamed.toml")
+
+      # First: repro branch <forkPath> --from-mainlines
+      let forkPath = fx.scratch / "fork-renamed"
+      let res = invokeFork(fx, "feature-renamed", forkPath, @["--from-mainlines"])
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+
+      # lib-renamed was cloned and branched at mainline tip, lib-a is absent
+      check dirExists(forkPath / "lib-renamed" / ".git")
+      check not dirExists(forkPath / "lib-a")
+      check currentBranch(gitBin, forkPath / "lib-renamed") == "feature-renamed"
+      check headSha(gitBin, forkPath / "lib-renamed") == fx.libAMainline
+      check readWorkspaceFeatureStarted(forkPath)
+
+      let report = readReport(forkPath)
+      check report["exitCode"].getInt() == 0
+      let entry = entryByPath(report, "lib-renamed")
+      check entry != newJNull()
+      check entry["outcome"].getStr() == "branched_from_mainline"
+      check entry["baselineSource"].getStr() == "mainline_head"
+      check entry["mainlineBranch"].getStr() == "dev"
+      check entryByPath(report, "lib-a") == newJNull()
+
+      # Second: also test --include-changes with the rename
+      # Make an uncommitted edit in lib-a in the source workspace
+      writeFile(fx.workspaceRoot / "lib-a" / "DIRTY.md", "uncommitted edit\n")
+
+      let forkChangesPath = fx.scratch / "fork-with-changes"
+      let resChanges = invokeFork(fx, "feature-changes", forkChangesPath,
+        @["--from-mainlines", "--include-changes"])
+      if resChanges.code != 0:
+        checkpoint("output: " & resChanges.output)
+      check resChanges.code == 0
+      check fileExists(forkChangesPath / "lib-renamed" / "DIRTY.md")
+      check readFile(forkChangesPath / "lib-renamed" / "DIRTY.md") == "uncommitted edit\n"
+      check readWorkspaceFeatureStarted(forkChangesPath)
+
+      let reportChanges = readReport(forkChangesPath)
+      check reportChanges["exitCode"].getInt() == 0
+      let entryChanges = entryByPath(reportChanges, "lib-renamed")
+      check entryChanges != newJNull()
+      check entryChanges["outcome"].getStr() == "branched_with_changes"
+
+  test "test_wv7_concurrent_forks_serialize_shared_cache_and_source_fetches":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a real git working tree")
+    else:
+      let fx = setupFixture(gitBin, "concurrent")
+      defer: removeDirEventually(fx.scratch)
+
+      # Seed extra branches in lib-a and lib-b and fetch them once into the
+      # source checkouts so subsequent upstream advances cause multi-ref
+      # updates in both the shared source checkouts and the shared bare cache.
+      for (originPath, checkoutName, mainline) in [
+          (fx.libAOrigin, "lib-a", "dev"),
+          (fx.libBOrigin, "lib-b", "latest")]:
+        let seedBranchesWork = fx.scratch / ("seed-branches-" & checkoutName)
+        discard requireGit(q(gitBin) & " clone --branch " & mainline & " " &
+          q(fileUrl(originPath)) & " " & q(seedBranchesWork))
+        gitConfig(gitBin, seedBranchesWork)
+        for i in 1 .. 16:
+          discard requireGit(q(gitBin) & " -C " & q(seedBranchesWork) &
+            " branch b-" & $i)
+        discard requireGit(q(gitBin) & " -C " & q(seedBranchesWork) &
+          " push origin --all --quiet")
+        discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / checkoutName) &
+          " fetch origin --quiet")
+
+      proc advanceOriginAllBranches(originPath, slug, mainline, tag: string): string =
+        let workPath = fx.scratch / ("advance-" & slug & "-" & tag)
+        removeDir(workPath)
+        discard requireGit(q(gitBin) & " clone --branch " & mainline & " " &
+          q(fileUrl(originPath)) & " " & q(workPath))
+        gitConfig(gitBin, workPath)
+        writeFile(workPath / ("ADV-" & tag & ".md"), tag & "\n")
+        discard requireGit(q(gitBin) & " -C " & q(workPath) & " add -A")
+        discard requireGit(q(gitBin) & " -C " & q(workPath) &
+          " commit -m " & q("advance " & tag))
+        for i in 1 .. 16:
+          discard requireGit(q(gitBin) & " -C " & q(workPath) &
+            " branch -f b-" & $i & " HEAD")
+        discard requireGit(q(gitBin) & " -C " & q(workPath) &
+          " push origin --all --quiet")
+        requireGit(q(gitBin) & " -C " & q(workPath) &
+          " rev-parse HEAD").strip()
+
+      proc runShellBatch(cmds: openArray[CmdSpec]): seq[CmdResult] =
+        var procs = newSeq[Process](cmds.len)
+        for i, cmd in cmds:
+          var envTable = newStringTable()
+          for k, v in envPairs(): envTable[k] = v
+          for entry in cmd.env: envTable[entry.name] = entry.value
+          procs[i] = startProcess(cmd.args[0],
+            workingDir = getCurrentDir(),
+            args = cmd.args[1..^1],
+            env = envTable,
+            options = {poStdErrToStdOut, poUsePath})
+        result = newSeq[CmdResult](cmds.len)
+        for i, p in procs:
+          let output = drainStream(p.outputStream)
+          let code = p.waitForExit()
+          p.close()
+          result[i] = (code: code, output: output)
+
+      let sharedCacheDir = fx.scratch / "shared-clones-cache"
+      let env = @[("REPRO_WORKSPACE_CLONES", sharedCacheDir)]
+
+      # Wave 1: cold shared bare cache + advanced upstream mainlines.
+      let wave1TipA = advanceOriginAllBranches(fx.libAOrigin, "lib-a", "dev", "w1")
+      let wave1TipB = advanceOriginAllBranches(fx.libBOrigin, "lib-b", "latest", "w1")
+
+      const WorkerCount = 4
+      var wave1Cmds: seq[CmdSpec]
+      for w in 0 ..< WorkerCount:
+        let forkPath = fx.scratch / ("fork-cold-" & $w)
+        let branchName = "feat-cold-" & $w
+        wave1Cmds.add(shellCommand(@[
+          fx.reproBin, "branch", "--write-report", forkPath,
+          "--branch=" & branchName,
+          "--workspace-root=" & fx.workspaceRoot,
+          "--from-mainlines"
+        ], env))
+      let wave1Results = runShellBatch(wave1Cmds)
+      for w in 0 ..< WorkerCount:
+        let res = wave1Results[w]
+        if res.code != 0 or res.output.contains("shared-clone cache miss") or
+            res.output.contains("cannot lock ref") or
+            res.output.contains("incorrect old value provided") or
+            res.output.contains("BUG:"):
+          checkpoint("wave1 worker " & $w & " exit=" & $res.code &
+            " output:\n" & res.output)
+        check res.code == 0
+        check not res.output.contains("shared-clone cache miss")
+        check not res.output.contains("mainline_fetch_failed")
+        check not res.output.contains("cannot lock ref")
+        check not res.output.contains("incorrect old value provided")
+        check not res.output.contains("BUG:")
+        let forkPath = fx.scratch / ("fork-cold-" & $w)
+        check dirExists(forkPath / "lib-a")
+        check dirExists(forkPath / "lib-b")
+        if dirExists(forkPath / "lib-a") and dirExists(forkPath / "lib-b"):
+          check headSha(gitBin, forkPath / "lib-a") == wave1TipA
+          check headSha(gitBin, forkPath / "lib-b") == wave1TipB
+        check fileExists(forkPath / "lib-a" / ".git" / "objects" / "info" /
+          "alternates")
+        check fileExists(forkPath / "lib-b" / ".git" / "objects" / "info" /
+          "alternates")
+
+      # Wave 2: warm shared bare cache + another upstream mainline advance.
+      let wave2TipA = advanceOriginAllBranches(fx.libAOrigin, "lib-a", "dev", "w2")
+      let wave2TipB = advanceOriginAllBranches(fx.libBOrigin, "lib-b", "latest", "w2")
+
+      var wave2Cmds: seq[CmdSpec]
+      for w in 0 ..< WorkerCount:
+        let forkPath = fx.scratch / ("fork-warm-" & $w)
+        let branchName = "feat-warm-" & $w
+        wave2Cmds.add(shellCommand(@[
+          fx.reproBin, "branch", "--write-report", forkPath,
+          "--branch=" & branchName,
+          "--workspace-root=" & fx.workspaceRoot,
+          "--from-mainlines"
+        ], env))
+      let wave2Results = runShellBatch(wave2Cmds)
+      for w in 0 ..< WorkerCount:
+        let res = wave2Results[w]
+        if res.code != 0 or res.output.contains("shared-clone cache miss") or
+            res.output.contains("cannot lock ref") or
+            res.output.contains("incorrect old value provided") or
+            res.output.contains("BUG:"):
+          checkpoint("wave2 worker " & $w & " exit=" & $res.code &
+            " output:\n" & res.output)
+        check res.code == 0
+        check not res.output.contains("shared-clone cache miss")
+        check not res.output.contains("mainline_fetch_failed")
+        check not res.output.contains("cannot lock ref")
+        check not res.output.contains("incorrect old value provided")
+        check not res.output.contains("BUG:")
+        let forkPath = fx.scratch / ("fork-warm-" & $w)
+        check dirExists(forkPath / "lib-a")
+        check dirExists(forkPath / "lib-b")
+        if dirExists(forkPath / "lib-a") and dirExists(forkPath / "lib-b"):
+          check headSha(gitBin, forkPath / "lib-a") == wave2TipA
+          check headSha(gitBin, forkPath / "lib-b") == wave2TipB
+        check fileExists(forkPath / "lib-a" / ".git" / "objects" / "info" /
+          "alternates")
+        check fileExists(forkPath / "lib-b" / ".git" / "objects" / "info" /
+          "alternates")
+
+  test "test_wv7_root_mainline_ignores_separate_record_store_branch":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case needs real repositories")
+    else:
+      let fx = setupFixture(gitBin, "store-branch")
+      defer: removeDirEventually(fx.scratch)
+
+      # A SEPARATE record-store repository whose only branch is `latest`. The
+      # old `.repro-workspace.toml` names it in `[manifest]`; its branch is the
+      # store's, and says nothing about the root repo's mainline.
+      let storeBare = fx.scratch / "origin-records.git"
+      discard seedGitOrigin(gitBin, storeBare, fx.scratch / "seed-records",
+        branch = "latest")
+      let rootTip = publishRootSettings(gitBin, fx,
+        legacyBootstrapToml(fileUrl(storeBare), "latest"))
+
+      # Preconditions that make the case discriminating: the root's real
+      # mainline is its `origin/HEAD` (`main`), and the root's remote has no
+      # `latest` at all, so reading `[manifest] branch` cannot resolve.
+      check rootOriginHead(gitBin, fx) == "origin/main"
+      check runCmd(q(gitBin) & " -C " & q(fx.rootBare) &
+        " rev-parse --verify -q refs/heads/latest").code != 0
+
+      let forkPath = fx.scratch / "store-branch-fork"
+      let res = invokeFork(fx, "feature-s", forkPath, @["--from-mainlines"])
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+      check not res.output.contains("mainline_unresolved")
+
+      # Inspect the fork only if it was made: ``headSha`` quits the whole test
+      # binary on a missing repo, which would hide the next case's verdict.
+      if res.code == 0:
+        check currentBranch(gitBin, forkPath) == "feature-s"
+        check headSha(gitBin, forkPath) == rootTip
+        let rootEntry = entryByPath(readReport(forkPath), ".")
+        check rootEntry["baselineSource"].getStr() == "mainline_head"
+        check rootEntry["mainlineBranch"].getStr() == "main"
+
+  test "test_wv7_legacy_manifest_branch_is_root_mainline_when_store_is_root":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case needs real repositories")
+    else:
+      # Positive control for the case above: when `[manifest] url` names the
+      # ROOT repository itself (a workspace with no separate store), its
+      # `branch` IS the root's mainline. The URL is deliberately spelled
+      # differently from the clone's `origin` (no `.git`, trailing `/`), so
+      # the comparison has to be by repository identity, not by string.
+      let fx = setupFixture(gitBin, "store-is-root")
+      defer: removeDirEventually(fx.scratch)
+
+      check fx.rootBare.endsWith(".git")
+      let rootSpelling = fileUrl(fx.rootBare[0 ..< fx.rootBare.len - 4]) & "/"
+      check rootSpelling != fileUrl(fx.rootBare)
+      discard publishRootSettings(gitBin, fx,
+        legacyBootstrapToml(rootSpelling, "latest"))
+
+      # Give the root a `latest` that differs from `main` (its `origin/HEAD`),
+      # so landing on it can only mean `[manifest] branch` was honoured.
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+        " push origin main:latest")
+      let latestTip = pushMainlineCommit(gitBin, fx.rootBare, fx.scratch,
+        "root-latest", "latest")
+      check rootOriginHead(gitBin, fx) == "origin/main"
+      check latestTip != headSha(gitBin, fx.workspaceRoot)
+
+      let forkPath = fx.scratch / "store-is-root-fork"
+      let res = invokeFork(fx, "feature-r", forkPath, @["--from-mainlines"])
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+
+      if res.code == 0:
+        check currentBranch(gitBin, forkPath) == "feature-r"
+        check headSha(gitBin, forkPath) == latestTip
+        let rootEntry = entryByPath(readReport(forkPath), ".")
+        check rootEntry["mainlineBranch"].getStr() == "latest"

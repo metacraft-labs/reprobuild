@@ -196,6 +196,45 @@ proc setupFixture(gitBin, slug: string): M17Fixture =
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-b.toml", libBFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-c.toml", libCFragmentToml)
+  # PG-15 — THE WORKSPACE SHELL IS PART OF THE FIXTURE, not a detail.
+  #
+  # Without `.repro/workspace.toml` this root is not an initialized workspace
+  # by the project's own canonical predicate (`isInitializedWorkspace`: the
+  # `.repro/` shell must exist), even though its flat `projects/*.toml`
+  # resolves and `ensure` enumerates all three repos from it. The generated
+  # hook body now bakes in WHERE a contract refusal may file its record, and
+  # that destination is `commitHookReportDir`'s answer for this root — "" while
+  # there is no shell, the report directory once there is.
+  #
+  # So in a fixture with no shell the FIRST `ensure --write-report` created
+  # `.repro/build/reports/` for its own report, which made the root an
+  # initialized workspace, which legitimately changed the canonical hook body.
+  # The command under test was mutating the input to its own idempotence. It
+  # broke TWO cases in this file, both from that one cause:
+  #
+  #   * `test_m17_hooks_ensure_is_idempotent_across_three_runs` — run 2
+  #     reported `refreshed-drifted` instead of `already-up-to-date` (15
+  #     entries: 3 repos x 5 hooks), and the run-2 and run-3 byte comparisons
+  #     against the run-1 snapshot failed. Run 3's OUTCOMES were already
+  #     `already-up-to-date`, so the system converged — which is not what this
+  #     case asserts, and not what an operator should have to discover.
+  #   * `test_m17_hooks_ensure_refreshes_drifted_hook` — its closing
+  #     `readFile(managedPath) == originalManaged` compares against a body
+  #     captured after the FIRST ensure, i.e. against the pre-shell
+  #     destination, so the legitimate re-anchor made the restored body differ
+  #     from the "original" one.
+  #
+  # Writing the marker here keeps both assertions about `ensure` rather than
+  # about a workspace that becomes one halfway through, and matches every
+  # workspace `repro workspace init` produces. The self-healing behaviour the
+  # old fixture accidentally exercised is deliberate and stays: a destination
+  # that changes IS drift, and `ensure` re-anchors it. It is now guarded on
+  # purpose rather than by accident — arm (I) of
+  # `t_a_contract_refusal_is_distinguishable_from_a_successful_dispatch` drives
+  # `installed` -> `refreshed-drifted` -> `already-up-to-date` over a workspace
+  # whose shell appears between runs, and asserts the DIRECTION (nowhere ->
+  # the report directory) and the convergence, not merely that something moved.
+  writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
   result.workspaceRoot = workspaceRoot
 
 proc cloneAll(gitBin: string; fx: M17Fixture) =

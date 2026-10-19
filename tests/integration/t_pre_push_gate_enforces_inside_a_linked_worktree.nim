@@ -30,6 +30,7 @@
 ## origin (so publication checks stay offline), and the built `repro` binary.
 
 import std/[os, osproc, strutils, unittest]
+import repro_test_support/reasoned_skip
 
 const SourceRoot = currentSourcePath().parentDir.parentDir.parentDir
 const ReproBinary = SourceRoot / "build" / "bin" / addFileExt("repro", ExeExt)

@@ -12,9 +12,10 @@
 ## `tests/t_smoke_repro_profile.nim` pin the exact output (e.g.
 ## `windows and arm64` -> `arm64 and windows`).
 
-import std/algorithm
+import std/[algorithm, macros]
 
 import ./types
+import ./predicate_names
 
 type
   PredicateValue* = object
@@ -121,15 +122,27 @@ proc canonicalOr(parts: seq[string]): string =
 # Standard set - one template per built-in predicate.
 # ---------------------------------------------------------------------
 
-template windows*(): PredicateExpr = PredicateExpr(expr: "windows")
-template macos*(): PredicateExpr = PredicateExpr(expr: "macos")
-template linux*(): PredicateExpr = PredicateExpr(expr: "linux")
-template bsd*(): PredicateExpr = PredicateExpr(expr: "bsd")
-template wsl*(): PredicateExpr = PredicateExpr(expr: "wsl")
-template x86_64*(): PredicateExpr = PredicateExpr(expr: "x86_64")
-template arm64*(): PredicateExpr = PredicateExpr(expr: "arm64")
-template arm32*(): PredicateExpr = PredicateExpr(expr: "arm32")
-template headless*(): PredicateExpr = PredicateExpr(expr: "headless")
+#
+# Generated from `predicate_names`, the list the predicate grammar
+# (`repro_home_intent/predicate`) evaluates, so there is no combinator
+# without an evaluator: `windows()`, `macos()`, `linux()`, `bsd()`,
+# `wsl()`, `x86_64()`, `arm64()`, `arm32()`. A `headless()` template used
+# to sit here with no evaluator behind it (reprobuild-pm issue
+# 2026-10-13-headless-predicate-template-has-no-evaluator); a profile that
+# writes it now fails to compile, naming the identifier.
+
+macro declareStandardPredicates(): untyped =
+  result = newStmtList()
+  for name in @StandardPlatformIdents & @StandardArchIdents:
+    result.add nnkTemplateDef.newTree(
+      nnkPostfix.newTree(ident"*", ident(name)),
+      newEmptyNode(), newEmptyNode(),
+      nnkFormalParams.newTree(ident"PredicateExpr"),
+      newEmptyNode(), newEmptyNode(),
+      newStmtList(nnkObjConstr.newTree(ident"PredicateExpr",
+        nnkExprColonExpr.newTree(ident"expr", newLit(name)))))
+
+declareStandardPredicates()
 
 template host*(): PredicateValue =
   ## `host == "name"` / `host in ["a", "b"]` syntax sugar.
@@ -185,3 +198,89 @@ proc `in`*(a: PredicateValue, b: openArray[string]): PredicateExpr =
 
 proc predicate*(s: string): PredicateExpr =
   PredicateExpr(expr: s)
+
+# ---------------------------------------------------------------------
+# Guards: a runtime predicate attached to intent elements.
+#
+# An activity body carries its guards as a tree (`aekWhenGuard` around a
+# list of elements). Resources and config overrides are flat lists, so each
+# one carries its own `guard`. Both are evaluated by the planner against the
+# target host, never by the compile, which is what lets one compiled profile
+# describe every platform (Gradual-Nix-To-Reprobuild-Migration.md §Platform-
+# neutral intent). The `profile` macro lowers a runtime `when <pred>:` inside
+# `resources:` / `config:` onto `guarded(...)`; helper modules call the same
+# helpers directly.
+# ---------------------------------------------------------------------
+
+proc conjoinGuard*(outer, inner: PredicateExpr): PredicateExpr =
+  ## `outer and inner`, where an empty expression means "always". Nested
+  ## guards conjoin, so a resource inside `when linux():` inside
+  ## `when arm64():` carries `arm64 and linux`.
+  if inner.expr.len == 0:
+    outer
+  elif outer.expr.len == 0:
+    inner
+  else:
+    combineAnd(outer, inner)
+
+proc guarded*(pred: PredicateExpr;
+              elements: openArray[ActivityElement]): ActivityElement =
+  ## An activity-body element that enables `elements` only on hosts where
+  ## `pred` holds — the helper-proc spelling of `when <pred>:` in an activity
+  ## body:
+  ##
+  ## ```nim
+  ## proc secrets*(): seq[ActivityElement] =
+  ##   @[package "age",
+  ##     guarded(linux(), [package "bitwarden", package "pinentry"])]
+  ## ```
+  ActivityElement(kind: aekWhenGuard, predicate: pred,
+    guardedBody: @elements)
+
+proc applyGuard*(target: var seq[ResourceIntent]; start: int;
+                 pred: PredicateExpr) =
+  ## Conjoin `pred` into the guard of every resource appended since `start`.
+  for i in start ..< target.len:
+    target[i].guard = conjoinGuard(pred, target[i].guard)
+
+proc applyActivity*(target: var seq[ResourceIntent]; start: int;
+                    activity: string) =
+  ## GM9: scope every resource appended since `start` to `activity` -- what
+  ## a `resources:` block inside `activity <name>:` does to the resources it
+  ## declares. A resource already scoped to a DIFFERENT activity is refused:
+  ## a resource belongs to one activity, and silently re-scoping it would
+  ## move it to hosts its author did not select.
+  for i in start ..< target.len:
+    let current = target[i].activity
+    if current.len > 0 and current != activity:
+      raise newException(ValueError, "resource " & target[i].kind &
+        (if target[i].address.len > 0: " `" & target[i].address & "`"
+         else: "") & " is declared in activity `" & activity &
+        "` but already belongs to activity `" & current & "`")
+    target[i].activity = activity
+
+proc applyGuard*(target: var seq[ConfigOverride]; start: int;
+                 pred: PredicateExpr) =
+  ## Conjoin `pred` into the guard of every override appended since `start`.
+  for i in start ..< target.len:
+    target[i].guard = conjoinGuard(pred, target[i].guard)
+
+template guarded*[T: ResourceIntent | ConfigOverride](
+    target: var seq[T]; pred: PredicateExpr; body: untyped) =
+  ## Guard every resource (or config override) `body` appends to `target`
+  ## by `pred`. This is the helper-template spelling of a runtime
+  ## `when <pred>:` inside `resources:` / `config:`:
+  ##
+  ## ```nim
+  ## template zshResources*(targetResources: var seq[ResourceIntent]) =
+  ##   guarded(targetResources, linux() or macos()):
+  ##     shellIntegration(targetResources, hostFile = "~/.zshrc", ...)
+  ## ```
+  ##
+  ## The body runs on every host (it only DECLARES intent); what the guard
+  ## changes is where the planner applies the result.
+  block:
+    let guardStart = target.len
+    let guardPred = pred
+    body
+    applyGuard(target, guardStart, guardPred)

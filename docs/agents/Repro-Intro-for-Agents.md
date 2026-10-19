@@ -4,7 +4,7 @@ Reprobuild is a unified build, dependency, environment, and workspace tool.
 
 ## Architecture & Grepable Keywords
 
-Reprobuild models the workspace as a directed acyclic graph (DAG) of type-checked actions defined in the **`repro.nim`** DSL. Sibling repositories declared in **`repro-workspace.toml`** are routed dynamically using **`repro develop`** (develop-mode). Build hermeticity is enforced using the **`librepro_monitor_shim`** user-space filesystem interceptor, and execution is cached locally through a per-edge disk store fronted by a host-wide **shared-memory grow-only index** that every engine inserts into directly. Package toolchains are concretized using a **`clingo`** solver, and background services are orchestrated using **`servicePlaceholder`** declarations.
+Reprobuild models the workspace as a directed acyclic graph (DAG) of type-checked actions defined in the **`repro.nim`** DSL. Sibling repositories declared as **`repos/*.toml`** fragments in the workspace root (whose policy lives in **`repro-workspace.toml`**) are routed dynamically using **`repro develop`** (develop-mode). Build hermeticity is enforced using the **`librepro_monitor_shim`** user-space filesystem interceptor, and execution is cached locally through a per-edge disk store fronted by a host-wide **shared-memory grow-only index** that every engine inserts into directly. Package toolchains are concretized using a **`clingo`** solver, and background services are orchestrated using **`servicePlaceholder`** declarations.
 
 ## `repro` Is Two Binaries
 
@@ -49,6 +49,21 @@ waiver actually gets made); and "fixes" that improve a monitor evidence
 grade without improving the evidence. Each trap is cited to the guard
 that stops it.
 
+## When A Commit Or Push Is Refused Over A Pinned Revision
+
+Do not add an exact revision to a recipe (`rev=` or a `/<sha>` URL in
+`flake.nix`, an exact `uses:` version in `repro.nim`) to get past a refusal.
+A recipe pin is a reviewed statement about which revision is acceptable, not
+a way to silence a hook. If the newer revision is the intended upgrade, run
+`repro lock update <dependency> [--to <rev>]`: it moves both locks and
+rewrites an exact pin wherever one already exists. If the newer revision was
+a temporary experiment, drop the develop override with
+`repro develop --drop=<dependency>` (or check the sibling out at the pinned
+revision). Each refusal prints the exact commands, with the right roots. A
+sibling that you develop side by side should be tracked through the lock,
+and `repro check` and `repro health` list any exact pin of one, with the
+reason written beside it or `no reason stated`.
+
 ## Working In A Reprobuild Repo
 
 - **[Idiomatic Reprobuild](../user-guide/idiomatic-reprobuild.md)**: how to use it *well*, and the mistakes that look exactly like correct use. §10 covers the most expensive one — building a prerequisite in a shell script instead of declaring an edge, which costs invalidation and evidence ownership, not just caching.
@@ -59,5 +74,5 @@ that stops it.
 - **[Build Systems (Bazel, Buck2, BuildXL, Tup)](Replaces/How-Repro-Replaces-Build-Systems-Like-Bazel-Buck2-BuildXL-and-Tup.md)**: Models the workspace as a type-checked DAG. Enforces hermetic builds using a user-space filesystem monitor shim (`librepro_monitor_shim`) and uses a shared-memory action cache daemon for sub-millisecond cache checks.
 - **[Environment & Service Managers (Nix, direnv, devenv, Process Compose, Spack, Conan)](Replaces/How-Repro-Replaces-Environment-and-Service-Managers-Like-Nix-Direnv-Devenv-and-Process-Compose.md)**: Automatically overlays locked environment configurations upon directory entry and uses a `clingo` solver to concretize version constraints. Orchestrates project background services (databases, daemons, queues) natively.
 - **[Task Runners (Just, Make)](Replaces/How-Repro-Replaces-Task-Runners-Like-Just-and-Make.md)**: Defines named task scripts within the package DSL that run directly inside the activated dev-env.
-- **[Workspace Managers (repo, Git submodules)](Replaces/How-Repro-Replaces-Workspace-Managers-Like-Repo-and-Git-Submodules.md)**: Integrates multi-repository workspace checkout rules (`repro-workspace.toml`) with the build graph.
+- **[Workspace Managers (repo, Git submodules)](Replaces/How-Repro-Replaces-Workspace-Managers-Like-Repo-and-Git-Submodules.md)**: Integrates multi-repository workspace checkout rules (`repos/*.toml`, `repo-sets/*.toml` and the `repro-workspace.toml` settings) with the build graph.
 - **[Local Infrastructure Provisioners (Terraform)](Replaces/How-Repro-Replaces-Local-Infrastructure-Provisioners-Like-Terraform.md)**: Declaratively configures local developer machine state (dotfiles, system packages, services) with generation-based rolling updates and rollbacks.

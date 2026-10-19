@@ -21,6 +21,11 @@
 ##
 ## The gate drives the real `repro` binary (the same one users will run).
 ## Per spec, the only allowed mock is the fixture profile directory.
+##
+## `why` and `list` (cases 11, 11b, 13) read the compiled profile, as `repro
+## home plan` does (CLI/home/list.md), so they use `cli_seed_compiled.nim`,
+## the seed with the `repro_profile` import the profile compile needs; the
+## editing cases keep the legacy text seed.
 
 import std/[os, osproc, streams, strtabs, strutils, unittest]
 
@@ -81,6 +86,9 @@ proc runRepro(profileDir: string; host: string;
         envTable.delete(i)
         return
   setVar("REPRO_HOME_PROFILE_DIR", profileDir)
+  # `list` / `why` compile the profile (CLI/home/list.md): keep the compile
+  # cache in a state directory of this test, not the user's.
+  setVar("REPRO_HOME_STATE_DIR", profileDir & "-state")
   setVar("REPRO_HOST", host)
   if catalog == "*":
     dropVar("REPRO_HOME_PACKAGE_CATALOG")
@@ -309,7 +317,7 @@ suite "M61 repro home intent commands":
 
   test "11. `repro home why fd` traces activity, predicate, host assignment":
     let dir = tmpDir("why-fd")
-    let path = copyFixture("cli_seed.nim", dir)
+    let path = copyFixture("cli_seed_compiled.nim", dir)
     discard runRepro(dir, "dev-laptop", ["add", "fd", "--no-apply"])
     discard runRepro(dir, "dev-laptop",
       ["add", "fd", "--when", "windows", "--no-apply"])
@@ -323,7 +331,7 @@ suite "M61 repro home intent commands":
 
   test "11b. `repro home why` on a not-declared package says so":
     let dir = tmpDir("why-missing")
-    let path = copyFixture("cli_seed.nim", dir)
+    let path = copyFixture("cli_seed_compiled.nim", dir)
     let (code, output, _) = runRepro(dir, "dev-laptop",
       ["why", "no-such-package"])
     check code == 0
@@ -346,7 +354,7 @@ suite "M61 repro home intent commands":
 
   test "13. `repro home list` reports enabled vs inactive packages":
     let dir = tmpDir("list")
-    let path = copyFixture("cli_seed.nim", dir)
+    let path = copyFixture("cli_seed_compiled.nim", dir)
     let (code, output, _) = runRepro(dir, "dev-laptop", ["list"])
     check code == 0
     # Fixture default: neovim, tmux. Fixture photography: exiftool.

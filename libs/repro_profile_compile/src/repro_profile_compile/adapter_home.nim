@@ -31,10 +31,12 @@
 ##
 ## Other kinds pass through unchanged.
 
-import std/[tables]
+import std/[strutils, tables]
 
 import repro_profile
+import repro_profile/concerns
 import repro_home_intent
+import ./resource_scope
 
 proc predicateExprToCondBlock(expr: string): IntentNode
 
@@ -98,7 +100,9 @@ proc mapResourceKind(kind: string): string =
   of "windows.registryValueHKCU": "windows.registryValue"
   else: kind
 
-proc buildActivityElement(elem: ActivityElement): IntentNode =
+proc buildActivityElement*(elem: ActivityElement): IntentNode =
+  ## The IR node of one activity-body element (exported for `repro home
+  ## list` / `why`, which adapt each data row on its own to keep its file).
   case elem.kind
   of aekPackageRef:
     result = IntentNode(kind: nkPackageRef,
@@ -131,24 +135,34 @@ proc buildActivity(act: ActivityIntent): IntentNode =
   for elem in act.body:
     result.activityChildren.add(buildActivityElement(elem))
 
+proc guardedBy(guard: PredicateExpr; node: IntentNode): IntentNode =
+  ## `node` itself when `guard` is empty, else an `nkCondBlock` holding it
+  ## -- the IR shape the planner's guard walkers
+  ## (`applicableResourceEntries` / `applicableConfigEntries`) evaluate,
+  ## the same shape an activity body's `when` takes.
+  if guard.expr.len == 0:
+    return node
+  result = predicateExprToCondBlock(guard.expr)
+  result.condChildren.add node
+
 proc buildConfigBlock(overrides: seq[ConfigOverride]): IntentNode =
   result = IntentNode(kind: nkConfigBlock,
     configHeaderLine: 0,
     startLine: 0, endLine: 0, indent: 0)
   # Group overrides by package, preserving first-occurrence order.
   var pkgOrder: seq[string]
-  var byPkg: Table[string, seq[ConfigOverride]]
-  for ov in overrides:
+  var byPkg: Table[string, seq[(int, ConfigOverride)]]
+  for i, ov in overrides:
     if ov.pkg notin byPkg:
       pkgOrder.add(ov.pkg)
       byPkg[ov.pkg] = @[]
-    byPkg[ov.pkg].add(ov)
+    byPkg[ov.pkg].add((i, ov))
   for pkgName in pkgOrder:
     var pkgNode = IntentNode(kind: nkConfigPackage,
       configPackageName: pkgName,
       configPackageHeaderLine: 0,
       startLine: 0, endLine: 0, indent: 0)
-    for ov in byPkg[pkgName]:
+    for (index, ov) in byPkg[pkgName]:
       let valueSource =
         case ov.value.kind
         of cvkString:
@@ -164,22 +178,57 @@ proc buildConfigBlock(overrides: seq[ConfigOverride]): IntentNode =
         of cvkInt: $ov.value.i
         of cvkBool: (if ov.value.b: "true" else: "false")
         of cvkExpr: ov.value.expr
-      pkgNode.configEntries.add(IntentNode(kind: nkConfigEntry,
-        configKey: ov.key,
-        configValueSource: valueSource,
-        configEntryLine: 0,
-        startLine: 0, endLine: 0, indent: 0))
+      pkgNode.configEntries.add(guardedBy(ov.guard,
+        IntentNode(kind: nkConfigEntry,
+          configKey: ov.key,
+          configValueSource: valueSource,
+          configEntryLine: 0,
+          configIntentOrdinal: index + 1,
+          startLine: 0, endLine: 0, indent: 0)))
     result.configPackages.add(pkgNode)
 
-proc buildHostsBlock(hosts: Table[string, seq[string]]): IntentNode =
+proc buildHostsBlock(hosts, hostApplies: Table[string, seq[string]];
+                     systemManagedElsewhere: Table[string, string]):
+    IntentNode =
+  ## One `nkHostsEntry` per host. A host in `hostApplies` declares the
+  ## concerns Reprobuild applies there (Gradual-Nix-To-Reprobuild-Migration.md
+  ## §Concern-scoped apply). The macro validates the names; an intent that
+  ## reaches here by another route (a hand-edited export) is checked again,
+  ## and a declaration for a host `hosts:` does not list is refused rather
+  ## than attached to nothing.
+  ##
+  ## GM10: a host in `systemManagedElsewhere` has its system scope managed
+  ## elsewhere; the same checks apply (the host must be listed, the pointer
+  ## must be one non-blank line or absent).
   result = IntentNode(kind: nkHostsBlock,
     hostsHeaderLine: 0,
     startLine: 0, endLine: 0, indent: 0)
+  for hostName, concerns in hostApplies.pairs:
+    if not hosts.hasKey(hostName):
+      raise newException(ValueError, "hostApplies names host `" & hostName &
+        "`, which the profile's `hosts:` does not list")
+    let problem = concernListProblem(concerns)
+    if problem.len > 0:
+      raise newException(ValueError, "hosts entry \"" & hostName &
+        "\": applies: " & problem)
+  for hostName, pointer in systemManagedElsewhere.pairs:
+    if not hosts.hasKey(hostName):
+      raise newException(ValueError, "systemManagedElsewhere names host `" &
+        hostName & "`, which the profile's `hosts:` does not list")
+    if pointer.len > 0:
+      let problem = systemPointerProblem(pointer)
+      if problem.len > 0:
+        raise newException(ValueError, "hosts entry \"" & hostName &
+          "\": system: " & problem)
   for hostName, acts in hosts.pairs:
     result.hostsEntries.add(IntentNode(kind: nkHostsEntry,
       hostName: hostName,
       hostActivities: acts,
       hostEntryLine: 0,
+      hostAppliesDeclared: hostApplies.hasKey(hostName),
+      hostApplies: hostApplies.getOrDefault(hostName),
+      hostSystemManagedElsewhere: systemManagedElsewhere.hasKey(hostName),
+      hostSystemManagedBy: systemManagedElsewhere.getOrDefault(hostName),
       startLine: 0, endLine: 0, indent: 0))
 
 proc mapHomeFieldName(resourceKind, fieldName: string): string =
@@ -193,11 +242,13 @@ proc mapHomeFieldName(resourceKind, fieldName: string): string =
     return "valueKind"
   fieldName
 
-proc buildResourceEntry(r: ResourceIntent): IntentNode =
+proc buildResourceEntry(r: ResourceIntent; ordinal: int): IntentNode =
   result = IntentNode(kind: nkResourceEntry,
     resourceKind: mapResourceKind(r.kind),
     resourceAddress: r.address,
     resourceHeaderLine: 0,
+    resourceIntentOrdinal: ordinal,
+    resourceActivity: r.activity,
     startLine: 0, endLine: 0, indent: 0)
   for fieldName, fieldValue in r.fields.pairs:
     result.resourceAttrs.add(IntentNode(kind: nkResourceAttr,
@@ -212,40 +263,47 @@ proc buildResourceEntry(r: ResourceIntent): IntentNode =
       resourceAttrLine: 0,
       startLine: 0, endLine: 0, indent: 0))
 
-proc isHomeScopeResource(kind: string): bool =
-  ## Home-scope resource kinds. The system-scope kinds (capability,
-  ## optionalFeature, service, vsInstaller, systemDefault, systemdSystemUnit,
-  ## launchdSystemDaemon, fsSystemFile, envSystemVariable, passwdUser,
-  ## windows.registryValueHKLM) are filtered out of the home adapter's
-  ## resources block and surface in the system adapter instead.
-  ##
-  ## M83 step 4b: `systemd.userUnit` + `launchd.userAgent` are POSIX
-  ## per-user services — home-scope, NOT system-scope. They live
-  ## under `~/.config/systemd/user/` / `~/Library/LaunchAgents/`
-  ## respectively and are reconciled by `systemctl --user` /
-  ## `launchctl bootstrap gui/<uid>` unelevated. The system-scope
-  ## peers `systemd.systemUnit` + `launchd.systemDaemon` (under
-  ## `/etc/systemd/system/` / `/Library/LaunchDaemons/`) are
-  ## elevated and live in `adapter_system.nim`.
-  case kind
-  of "env.userPath", "env.userVariable", "fs.managedBlock",
-     "shell.integration", "windows.registryValueHKCU",
-     "windows.startup", "fs.userFile", "vscode.extension",
-     "systemd.userUnit", "launchd.userAgent",
-     "linux.dconfKey", "linux.kdeConfigKey",
-     "pkg.homebrewFormula", "pkg.homebrewCask":
-    true
-  else:
-    false
+proc resourceLabel(r: ResourceIntent): string =
+  ## `fs.systemFile `/etc/x.conf`` -- the kind, and the address when it has
+  ## one, the way the planner's other diagnostics name a resource.
+  r.kind & (if r.address.len > 0: " `" & r.address & "`" else: "")
 
-proc buildResourcesBlock(resources: seq[ResourceIntent]): IntentNode =
+proc buildResourcesBlock(resources: seq[ResourceIntent];
+                         declaredActivities: seq[string]): IntentNode =
+  ## The home planner's resources. A resource the home planner does not
+  ## apply is refused, naming it, rather than left out: leaving it out let a
+  ## profile declare an `fsSystemFile(...)` that never took effect while
+  ## `repro home apply` / `repro home export` reported success
+  ## (Core-Invariants.md §Unrecognised Input Is Rejected, Not Skipped).
+  ## A guard does not change this: the declaration is misplaced on every
+  ## host, including the ones where the guard is false.
   result = IntentNode(kind: nkResourcesBlock,
     resourcesHeaderLine: 0,
     startLine: 0, endLine: 0, indent: 0)
-  for r in resources:
-    if not isHomeScopeResource(r.kind):
-      continue
-    result.resourcesEntries.add(buildResourceEntry(r))
+  for i, r in resources:
+    case resourceScope(r.kind)
+    of rsHome:
+      # GM9: an activity-scoped resource must name an activity the profile
+      # declares. One that does not would be planned on no host at all --
+      # refused, not dropped (the macro and the data reader never produce
+      # one; an envelope or export is an input like any other).
+      if r.activity.len > 0 and r.activity notin declaredActivities:
+        raise newException(ValueError,
+          "home profile resource " & resourceLabel(r) & " belongs to " &
+          "activity `" & r.activity & "`, which the profile does not " &
+          "declare (declared: " & declaredActivities.join(", ") & ")")
+      result.resourcesEntries.add(guardedBy(r.guard,
+        buildResourceEntry(r, i + 1)))
+    of rsSystem:
+      raise newException(ValueError,
+        "home profile resource " & resourceLabel(r) & " is system-scope: " &
+        "the home planner (`repro home apply`) does not apply it. Declare " &
+        "it in a system profile (`system.nim`, applied by `repro infra " &
+        "apply`), or use the home-scope counterpart if there is one")
+    of rsUnknown:
+      raise newException(ValueError,
+        "home profile resource " & resourceLabel(r) & " has a kind that " &
+        "neither the home nor the system planner applies")
 
 proc profileIntentToHomeProfile*(p: ProfileIntent;
                                  profilePath: string): Profile =
@@ -264,9 +322,15 @@ proc profileIntentToHomeProfile*(p: ProfileIntent;
   ##     ActivityElement of aekWhenGuard  -> nkCondBlock with predicate AST
   ##   ProfileIntent.configOverrides -> nkConfigBlock with per-pkg sub-blocks
   ##   ProfileIntent.hosts       -> nkHostsBlock with "<host>": [activities]
-  ##   ProfileIntent.resources   -> nkResourcesBlock with home-scope kinds
+  ##   ProfileIntent.resources   -> nkResourcesBlock (home-scope kinds;
+  ##     any other kind is refused, see `buildResourcesBlock`)
   ##     ResourceIntent.fields   -> nkResourceAttr children
   ##     ResourceIntent.dependsOn-> the depends_on attribute
+  ##     ResourceIntent.guard    -> an nkCondBlock around the entry
+  ##     ResourceIntent.activity -> resourceActivity (GM9; must be declared)
+  ##   ConfigOverride.guard      -> an nkCondBlock around the config entry
+  ##   Each resource / config entry records its 1-based position in the
+  ##   intent (`resourceIntentOrdinal` / `configIntentOrdinal`).
   let root = IntentNode(kind: nkProfileRoot,
     name: p.name,
     headerLine: 0,
@@ -275,20 +339,40 @@ proc profileIntentToHomeProfile*(p: ProfileIntent;
     root.children.add(buildActivity(act))
   if p.configOverrides.len > 0:
     root.children.add(buildConfigBlock(p.configOverrides))
-  if p.hosts.len > 0:
-    root.children.add(buildHostsBlock(p.hosts))
+  if p.hosts.len > 0 or p.hostApplies.len > 0 or
+      p.systemManagedElsewhere.len > 0:
+    root.children.add(buildHostsBlock(p.hosts, p.hostApplies,
+      p.systemManagedElsewhere))
   # The resources block is always present (even if empty) so the
   # apply pipeline's `findResourcesBlock` returns a stable shape; an
   # empty block degenerates to a no-op desired set just like an
   # empty `resources:` in legacy text.
-  root.children.add(buildResourcesBlock(p.resources))
+  var declaredActivities: seq[string]
+  for act in p.activities:
+    declaredActivities.add act.name
+  root.children.add(buildResourcesBlock(p.resources, declaredActivities))
+  # GM11: the activities' stow claims. Checked again here (the macro builds
+  # only valid ones) because an intent can arrive another way; a malformed
+  # claim is refused rather than dropped, since dropping it would put its
+  # package on every host.
+  let stowProblem = stowScopesProblem(p.stowScopes, declaredActivities)
+  if stowProblem.len > 0:
+    raise newException(ValueError, stowProblem)
+  var stowScopes: seq[StowScopeEntry]
+  for s in p.stowScopes:
+    stowScopes.add StowScopeEntry(package: s.package, activity: s.activity,
+      guardSource: s.guard.expr,
+      guardAst: (if s.guard.expr.len == 0: nil
+                 else: parsePredicate("", s.guard.expr, 0)))
   result = Profile(path: profilePath,
     lines: @[],
     lineEnding: "\n",
     hasTrailingNewline: true,
     root: root,
     indentStep: 2,
-    adapterPreference: p.adapterPreference)
+    adapterPreference: p.adapterPreference,
+    stowScopes: stowScopes,
+    catalogImports: p.catalogImports)
   ## M2.5: thread the per-OS adapter preference through the macro->text
   ## adapter so both code paths feed the same field into the apply
   ## pipeline downstream.

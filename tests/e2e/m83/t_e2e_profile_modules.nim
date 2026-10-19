@@ -35,6 +35,7 @@ import repro_home_apply
 import repro_local_store
 import repro_profile
 import repro_profile_intent
+import repro_build_engine
 import repro_profile_compile
 
 const ProjectRoot = currentSourcePath().parentDir().parentDir().
@@ -72,6 +73,31 @@ proc compileOpts(stateDir: string): ProfileCompileOptions =
     stateDir: stateDir,
     publicCliPath: reproBinary(),
     repoRoot: ProjectRoot)
+
+proc observedUnder(observed: openArray[string]; dir: string): seq[string] =
+  ## The observed reads that lie under `dir`, relative to it with `/`
+  ## separators. io-mon records the path the kernel resolved, which on macOS
+  ## is the canonical one. `createTempDir` hands out a path under `$TMPDIR`,
+  ## which on macOS lies behind a symlink: `/var/folders/...` normally, or
+  ## `/tmp/nix-shell.*` inside `nix develop`, while the monitor records
+  ## `/private/var/folders/...` or `/private/tmp/...`. Matching only the
+  ## spelling the test created finds none of the module files, so both the
+  ## lexical and the resolved spelling of `dir` are accepted. This is the
+  ## same rule `profileInputs` (`repro home export`) applies to this record.
+  ## The separator in the prefix keeps out a sibling such as `<dir>-other`
+  ## and the bare `dir`.
+  var roots = @[absolutePath(dir)]
+  try:
+    let real = expandFilename(dir)
+    if real notin roots:
+      roots.add real
+  except OSError:
+    discard
+  for s in observed:
+    for root in roots:
+      if s.startsWith(root & DirSep):
+        result.add(s.relativePath(root).replace('\\', '/'))
+        break
 
 proc collectPackageNames(intent: ProfileIntent;
                          activityName: string): seq[string] =
@@ -163,11 +189,12 @@ suite "M83 Phase F1: canonical profile-modules example":
       compileOpts(stateDir))
     check artifact.rbpiBytes.len > 0
     check artifact.digestHex.len == 64
-    # All three source files must be in the discovered set — the
-    # source-discovery walk transitively reached both sibling modules.
-    var rels: seq[string]
-    for s in artifact.inputSources:
-      rels.add(s.relativePath(profileSrcDir).replace('\\', '/'))
+    # A cold compile executes the edge, and all three source files are in
+    # the dependency record io-mon observed `nim` read — not in a list a
+    # text walk produced. This is what the action cache keys on.
+    check artifact.edgeLaunched
+    let rels = observedUnder(artifact.observedInputs, profileSrcDir)
+    checkpoint("observed under profile dir: " & rels.join(", "))
     check "home.nim" in rels
     check "modules/git_dev_environment.nim" in rels
     check "modules/dev_shell.nim" in rels
@@ -292,11 +319,11 @@ suite "M83 Phase F1: canonical profile-modules example":
     check compiledJson == inlinedJson
 
   test "touching a sibling module invalidates the compile cache":
-    # Anchor that the digest covers the full source closure: editing
-    # ONLY a sibling module (without changing home.nim) must produce
-    # a fresh artifact path. This is the load-bearing guarantee that
-    # users can author modules and reprobuild will recompile when
-    # they change them.
+    # Editing ONLY a sibling module (without changing home.nim) must
+    # re-execute the edge. This is the load-bearing guarantee that users
+    # can author modules and reprobuild will recompile when they change
+    # them — and it now holds because the module is in the edge's
+    # monitored read set, not because a text walk listed it.
     let stateDir = createTempDir("repro-m83-f1-touch-", "")
     defer:
       try: removeDir(stateDir) except OSError: discard
@@ -307,16 +334,22 @@ suite "M83 Phase F1: canonical profile-modules example":
 
     let first = compileProfileToRbpi(profileSrcDir / "home.nim",
       compileOpts(stateDir))
+    check first.edgeLaunched
 
     let modulePath = profileSrcDir / "modules" / "dev_shell.nim"
     var contents = readFile(extendedPath(modulePath))
-    contents.add("\n## touch-comment to perturb the digest\n")
+    contents.add("\n## touch-comment to perturb the module\n")
     writeFile(extendedPath(modulePath), contents)
 
     let second = compileProfileToRbpi(profileSrcDir / "home.nim",
       compileOpts(stateDir))
-    check second.digestHex != first.digestHex
-    check second.rbpiPath != first.rbpiPath
+    checkpoint("cacheDecision=" & $second.cacheDecision &
+      " missReason=" & second.cacheMissReason)
+    check second.edgeLaunched
+    # A comment does not change the intent, and the edge publishes to one
+    # stable, per-profile location: the output name is not a cache key.
+    check second.digestHex == first.digestHex
+    check second.rbpiPath == first.rbpiPath
 
   test "re-compiling the same source set hits the cache":
     let stateDir = createTempDir("repro-m83-f1-hit-", "")
@@ -331,6 +364,69 @@ suite "M83 Phase F1: canonical profile-modules example":
       compileOpts(stateDir))
     let second = compileProfileToRbpi(profileSrcDir / "home.nim",
       compileOpts(stateDir))
+    checkpoint("second: cacheDecision=" & $second.cacheDecision &
+      " missReason=" & second.cacheMissReason &
+      " publishSkip=" & first.cachePublishSkipReason)
+    check first.edgeLaunched
+    # The answer comes from the engine's action cache, not from a
+    # structural probe in front of it.
+    check not second.edgeLaunched
+    check second.cacheDecision == cdHit
     check second.digestHex == first.digestHex
     check second.rbpiPath == first.rbpiPath
     check second.rbpiBytes == first.rbpiBytes
+
+  test "editing a leaf of a transitive module chain re-runs the edge":
+    # home.nim -> modules/outer.nim -> modules/inner.nim. The leaf is two
+    # imports away from the root; editing it (and only it) must re-execute
+    # the edge and change the intent, and an unchanged closure must not.
+    let stateDir = createTempDir("repro-m83-f1-leaf-", "")
+    defer:
+      try: removeDir(stateDir) except OSError: discard
+    let dir = createTempDir("repro-m83-f1-leaf-src-", "")
+    defer:
+      try: removeDir(dir) except OSError: discard
+    createDir(extendedPath(dir / "modules"))
+    writeFile(extendedPath(dir / "home.nim"), """
+import repro_profile
+import ./modules/outer
+
+profile "leafChain":
+  activity default:
+    outerBundle()
+""")
+    writeFile(extendedPath(dir / "modules" / "outer.nim"), """
+import repro_profile
+import ./inner
+
+proc outerBundle*(): seq[ActivityElement] =
+  result = innerBundle()
+  result.add package("outer-pkg")
+""")
+    let leaf = dir / "modules" / "inner.nim"
+    proc writeLeaf(pkg: string) =
+      writeFile(extendedPath(leaf), "import repro_profile\n\n" &
+        "proc innerBundle*(): seq[ActivityElement] =\n" &
+        "  @[package \"" & pkg & "\"]\n")
+    writeLeaf("inner-one")
+
+    let first = compileProfileToRbpi(dir / "home.nim", compileOpts(stateDir))
+    check first.edgeLaunched
+    let rels = observedUnder(first.observedInputs, dir)
+    checkpoint("observed under profile dir: " & rels.join(", "))
+    check "home.nim" in rels
+    check "modules/outer.nim" in rels
+    check "modules/inner.nim" in rels
+    check collectPackageNames(decodeRbpi(first.rbpiBytes), "default") ==
+      @["inner-one", "outer-pkg"]
+
+    let unchanged = compileProfileToRbpi(dir / "home.nim",
+      compileOpts(stateDir))
+    check not unchanged.edgeLaunched
+    check unchanged.rbpiBytes == first.rbpiBytes
+
+    writeLeaf("inner-two")
+    let second = compileProfileToRbpi(dir / "home.nim", compileOpts(stateDir))
+    check second.edgeLaunched
+    check collectPackageNames(decodeRbpi(second.rbpiBytes), "default") ==
+      @["inner-two", "outer-pkg"]

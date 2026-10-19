@@ -76,7 +76,8 @@ import repro_test_support
 
 const ReuseDecisions = {cdHit, cdHybridCutoff}
 
-const TmpDir = "build/test-tmp/t_enumerated_directory_evidence_producers"
+let TmpDir = "build/test-tmp/t_enumerated_directory_evidence_producers" /
+  testCaseScratchSlug()
 const RepoRootMarker = "repro.nim"
 
 proc findRepoRoot(): string =

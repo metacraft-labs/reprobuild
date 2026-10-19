@@ -133,7 +133,6 @@ suite "profile-compile Nim path closure":
       "the profile must live outside the repo or config.nims masks the bug"
 
     let rbpiPath = stateDir / "gate.rbpi"
-    let manifestPath = stateDir / "gate.source.txt"
     let nimcacheDir = stateDir / "nimcache"
 
     # Build the argv through the production BuildAction constructor rather
@@ -141,10 +140,9 @@ suite "profile-compile Nim path closure":
     # the build engine really emits. argv[0] is the `repro` binary and
     # argv[1] the subcommand; the helper body parses everything after.
     let action = profileCompileBuildAction(
-      profileRoot, rbpiPath, manifestPath, nimcacheDir,
+      profileRoot, rbpiPath, nimcacheDir,
       publicCliPath = "repro", workDir = profileDir,
       repoRoot = reprobuildRepoRoot(),
-      inputSources = @[profileRoot],
       weak = weakFingerprintFromText("nim-path-closure-gate"))
     check action.argv[1] == "__repro-compile-profile"
 
@@ -152,7 +150,6 @@ suite "profile-compile Nim path closure":
     check exitCode == 0
 
     check fileExists(extendedPath(rbpiPath))
-    check fileExists(extendedPath(manifestPath))
 
     let raw = readFile(extendedPath(rbpiPath))
     var bytes = newSeq[byte](raw.len)

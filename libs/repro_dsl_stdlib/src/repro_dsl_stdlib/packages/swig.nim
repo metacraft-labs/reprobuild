@@ -24,12 +24,24 @@ package `swig`:
     # placeholder): the swig source tarball (github archive shape)
     # ships ``autogen.sh`` at the root with +x. See ``packages/
     # texinfo.nim`` for the broader rationale.
+    #
+    # **sha256**: corrected 2026-10-14 against the bytes GitHub serves
+    # for that tag (stable over two fetches). The arm had carried
+    # ``8ec8bcde…`` and so could never realize — every attempt failed
+    # the digest check with "all tarball archive URLs failed for swig",
+    # and nothing noticed because no check had fetched the archive.
+    # A GitHub ``/archive/refs/tags/`` tarball is generated on demand
+    # and is not guaranteed byte-stable across upstream tooling
+    # changes, so this pin is one the catalog conformance sweep has to
+    # keep honest. The URL stays: the SourceForge dist tarball is a
+    # different tree (``40162a70…``) with no ``autogen.sh``, which is
+    # the file this arm declares.
     tarball url = "https://github.com/swig/swig/archive/refs/tags/v4.4.1.tar.gz",
-      sha256 = "8ec8bcdeff6c8349f99147c3002a9d3404b656e2d2cb1bfea5ed8b45c3b82a17",
+      sha256 = "8bf32042beb7ee1eeb5c71aa15a62513d964893f84234f2cd77e4a8e2ed41e87",
       archiveType = "tar.gz",
       stripComponents = 1,
       executablePath = "autogen.sh",
       packageId = "swig@4.4.1",
       cpu = "any",
       os = "any",
-      lockIdentity = "tarball:swig@4.4.1:sha256:8ec8bcdeff6c8349f99147c3002a9d3404b656e2d2cb1bfea5ed8b45c3b82a17"
+      lockIdentity = "tarball:swig@4.4.1:sha256:8bf32042beb7ee1eeb5c71aa15a62513d964893f84234f2cd77e4a8e2ed41e87"

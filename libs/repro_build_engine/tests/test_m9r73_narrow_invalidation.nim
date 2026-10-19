@@ -30,8 +30,10 @@ import std/[os, sets, strutils, unittest]
 
 import repro_build_engine
 import io_mon/[types, writer]
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/test_m9r73_narrow_invalidation"
+let TmpDir = "build/test-tmp/test_m9r73_narrow_invalidation" /
+  testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpDir):
@@ -71,7 +73,7 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
       threadId: 8484,
       detail: "process killed with an un-flushed read batch (kill-before-flush)")
     let encoded = encodeCanonical(@[killLoss])
-    writeFile(rmdfPath, cast[string](encoded))
+    writeFile(rmdfPath, encoded)
 
     var evidence: PathSetEvidence
     var seen: EvidenceSeenSets
@@ -93,7 +95,7 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
       threadId: 0,
       detail: "unmonitored subtree/peer (un-injectable spawn child)")
     let encoded = encodeCanonical(@[subtreeLoss])
-    writeFile(rmdfPath, cast[string](encoded))
+    writeFile(rmdfPath, encoded)
 
     var evidence: PathSetEvidence
     var seen: EvidenceSeenSets
@@ -121,7 +123,7 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
       detail: "process killed with an un-flushed read batch (kill-before-flush)")
 
     let encoded = encodeCanonical(@[realRead1, realRead2, killLoss])
-    writeFile(rmdfPath, cast[string](encoded))
+    writeFile(rmdfPath, encoded)
 
     var evidence: PathSetEvidence
     var seen: EvidenceSeenSets
@@ -149,7 +151,7 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
       detail: "unmonitored subtree/peer (SETEXEC into hardened image)")
 
     let encoded = encodeCanonical(@[killLoss, subtreeLoss])
-    writeFile(rmdfPath, cast[string](encoded))
+    writeFile(rmdfPath, encoded)
 
     var evidence: PathSetEvidence
     var seen: EvidenceSeenSets
@@ -166,7 +168,7 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
     let read1 = MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
       osPid: 1, threadId: 1, path: "/x.h", detail: "")
     let encoded = encodeCanonical(@[read1])
-    writeFile(rmdfPath, cast[string](encoded))
+    writeFile(rmdfPath, encoded)
 
     var evidence: PathSetEvidence
     var seen: EvidenceSeenSets
@@ -191,7 +193,7 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
       MonitorRecord(kind: mrPathProbe, observationKind: moPathProbe,
         osPid: 1, threadId: 1, path: "/run/systemd/userdb/io.systemd.Machine"),
     ]
-    writeFile(rmdfPath, cast[string](encodeCanonical(records)))
+    writeFile(rmdfPath, encodeCanonical(records))
 
     var evidence: PathSetEvidence
     var seen: EvidenceSeenSets
@@ -241,7 +243,7 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
       MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
         osPid: 1, threadId: 1, path: "/run/user/by-name/state.db"),
     ]
-    writeFile(rmdfPath, cast[string](encodeCanonical(records)))
+    writeFile(rmdfPath, encodeCanonical(records))
 
     var evidence: PathSetEvidence
     var seen: EvidenceSeenSets

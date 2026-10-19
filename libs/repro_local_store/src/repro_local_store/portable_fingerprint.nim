@@ -32,9 +32,10 @@
 ## Pure over strings and the filesystem: the engine adapts its own action and
 ## evidence types to these procs, which keeps this module testable alone.
 
-import std/[algorithm, os, strutils]
+import std/[algorithm, options, os, strutils]
 
 from repro_core/paths import extendedPath
+import ./pattern_scoped_enumeration
 
 import blake3
 
@@ -125,8 +126,10 @@ type
 const
   WeakDomain = "reprobuild.portable.weak.v2"
   StrongDomain = "reprobuild.portable.strong.v1"
-  ProbePresent = "present"
-  ProbeAbsent = "absent"
+  ProbePresent* = "present"
+    ## The identity of a PROBE whose target exists.
+  ProbeAbsent* = "absent"
+    ## The identity of a PROBE whose target does not exist.
 
 proc normalizeForCompare(path: string): string =
   ## Separator-normalized, and case-folded on Windows where the filesystem is
@@ -335,18 +338,34 @@ proc readIdentity*(path: string): string =
   else:
     ReadOfAbsent
 
+func namesMatchingScope*(names: openArray[string];
+                         pattern: string): seq[string] =
+  ## The membership names (each suffixed `/` for a directory, as
+  ## `membershipHexOfNames` takes them) whose entry may match `pattern`, or
+  ## all of them for an empty pattern. One filter for the listing read from
+  ## disk and for the one a graph view predicts, so the two agree.
+  for name in names:
+    let bare =
+      if name.len > 1 and name.endsWith("/"): name[0 ..< name.len - 1]
+      else: name
+    if pattern.len == 0 or globComponentMatches(pattern, bare):
+      result.add(name)
+
 proc membershipHex*(dir: string): string =
   ## Membership digest of a directory: the sorted child names, each suffixed
   ## `/` for a directory. Names only — an enumeration observes WHICH entries
   ## exist, not their content (reads of those entries are separate inputs).
+  ## A PATTERN-SCOPED name (`patternScopedEnumerationPath`) digests only the
+  ## entries of its directory that may match its pattern.
+  let (base, pattern) = splitPatternScopedEnumeration(dir)
   var names: seq[string] = @[]
   try:
-    for kind, entry in walkDir(extendedPath(dir), relative = true):
+    for kind, entry in walkDir(extendedPath(base), relative = true):
       names.add(entry.replace('\\', '/') &
         (if kind in {pcDir, pcLinkToDir}: "/" else: ""))
   except CatchableError:
     return ""
-  membershipHexOfNames(names)
+  membershipHexOfNames(names.namesMatchingScope(pattern))
 
 proc frame(text: string): string =
   ## Length-prefixed so field boundaries cannot be forged by content.
@@ -417,6 +436,15 @@ proc portableStrongFingerprint*(weakHex: string;
     payload.add(frame(input.digest))
   blake3.digest(payload).toHex()
 
+type
+  PhysicalIdentity* = proc (physical: string;
+                            kind: PortableInputKind): Option[string] {.closure.}
+    ## Supplies the identity of an observed access to a physical path in
+    ## place of the one read from disk; `none` keeps the disk's. The engine
+    ## uses it for directories above build-graph outputs, whose listing on
+    ## disk depends on which OTHER actions have run here (the graph view the
+    ## lookup side computes too).
+
 proc computePortableFingerprint*(roots: openArray[LogicalRoot];
                                  argv: openArray[string]; cwd: string;
                                  env: openArray[(string, string)];
@@ -424,11 +452,14 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
                                  reads, probes, enumerations:
                                    openArray[string];
                                  staticFields: openArray[string] = [];
-                                 observedEnv: openArray[ObservedEnv] = []):
+                                 observedEnv: openArray[ObservedEnv] = [];
+                                 identify: PhysicalIdentity = nil):
     PortableFingerprint =
   ## Everything at once. Deduplicates each observation class by logical path
   ## (the monitor reports repeats), drops untracked accesses, and marks the
   ## action not portable at the first access under no known root.
+  ## `identify`, when given, overrides the on-disk identity of a tracked
+  ## access (see `PhysicalIdentity`).
   result.portable = true
   result.weakHex = portableWeakFingerprint(roots, argv, cwd, env,
     declaredInputs, staticFields)
@@ -440,8 +471,11 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
     ## A directory that CONTAINS a root. Probing it answers "present" on
     ## every host where the root exists at all — a shell resolving a path
     ## component by component does exactly that — so the probe says nothing
-    ## about the build, only about where this host keeps it.
-    let key = normalizeForCompare(physical)
+    ## about the build, only about where this host keeps it. A
+    ## PATTERN-SCOPED listing (`patternScopedEnumerationPath`) is in its
+    ## directory: Nim's compiler globs `*.nimble` in every directory above a
+    ## module, and that scan of an ancestor says no more than a full one.
+    let key = normalizeForCompare(physical.patternScopedBase())
     for rootKey in rootKeys:
       if rootKey.len > key.len and rootKey.startsWith(key) and
           (key.endsWith("/") or rootKey[key.len] == '/'):
@@ -482,8 +516,11 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
       let key = $ord(inputKind) & "|" & render(logical)
       if key notin seen:
         seen.add(key)
+        let given =
+          if identify != nil: identify(physical, inputKind)
+          else: none(string)
         result.inputs.add(PortableInput(kind: inputKind, path: render(logical),
-          digest: identity))
+          digest: (if given.isSome: given.get() else: identity)))
   for path in reads:
     consider(path, pikRead, readIdentity(path))
   for path in probes:

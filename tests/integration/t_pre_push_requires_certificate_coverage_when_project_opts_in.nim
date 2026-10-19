@@ -1,20 +1,22 @@
 ## TC-3 — the pre-push gate REQUIRES certificate coverage when the project
 ## opts in (gate mode ``required``).
 ##
-## When a project's `[certificates]` policy sets ``gate_mode = "required"``
-## with ``required_targets`` / ``required_platforms``, the RA-21 pre-push gate
-## refuses the push unless the certificates ATTACHED to the pushed commit
-## (the TC-2 git-notes carrier) COVER (the TC-1 ``verifyCoverage`` verifier)
-## the pushed commit, against the current clean lock, for every required
-## target on EACH required platform. Coverage UNIONS multiple certificates:
-## a {linux, macos} × {t-unit} requirement is satisfied by a linux cert + a
-## macos cert TOGETHER.
+## When the pushed commit's certificate policy (the ``[certificate_policy]``
+## snapshot in its committed ``repro.lock``; TC-9d retired the project's
+## ``[certificates]`` table) sets ``gate_mode = "required"`` with
+## required targets on required platforms, the RA-21 pre-push gate
+## refuses the push unless the certificates the LOCAL CERTIFICATE STORE holds
+## for the pushed commit's content (TC-8c: both roots, under the content id of
+## its tree — never notes) COVER the pushed commit, with reprobuild's lock
+## step passing, for every required target on EACH required platform.
+## Coverage UNIONS multiple certificates: a {linux, macos} × {t-unit}
+## requirement is satisfied by a linux cert + a macos cert TOGETHER.
 ##
 ##   (a) NO covering cert attached → the gate REFUSES (exit 2) with a
 ##       ``certificate-coverage`` failure naming the missing coverage and the
 ##       ``repro certify`` remedy.
-##   (b) A covering cert (issued via the TC-1 path, attached via TC-2) →
-##       the gate PASSES (exit 0).
+##   (b) A covering cert (issued via the TC-1 path, which delivers it to the
+##       local store) → the gate PASSES (exit 0).
 ##   (c) A multi-platform requirement satisfied by the UNION of two certs
 ##       (one per platform) → passes; dropping one platform's cert → refuses
 ##       and names exactly that platform.
@@ -33,6 +35,9 @@ import std/[json, os, osproc, strutils, tempfiles, unittest]
 import repro_test_support
 import repro_cli_support
 import repro_workspace_manifests
+import repro_lock
+import repro_lock/certificate_policy
+import ./every_branch_policy
 
 # TC-5 reconciliation: the gate now requires a VALID REGISTERED SIGNATURE, not
 # just coverage. The covering cert must be daemon-signed (ed25519) by a key
@@ -63,8 +68,20 @@ proc reproBinary(): string =
   requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
+proc everyBranchRequired(platforms: seq[string]): string =
+  ## One rule for every branch, ``required``, requiring t-unit on
+  ## ``platforms``, rendered by the production renderer.
+  everyBranchSnapshot(pmRequired, ["t-unit"],
+    platforms, name = "lib-a")
+
+proc policyLockText(snapshot: string): string =
+  ## A committed ``repro.lock`` that pins nothing and records ``snapshot``.
+  replaceCertificatePolicySection(serializeLockedDependencies(
+    LockedDependencies(schema: "reprobuild.solved-graph-lock.v2", deps: @[])),
+    snapshot)
+
 proc seedGitOrigin(gitBin, originPath, workPath: string;
-                   branch = "main"): string =
+                   policySnapshot: string; branch = "main"): string =
   discard requireGit(q(gitBin) & " init --bare -b " & branch & " " &
     q(originPath))
   discard requireGit(q(gitBin) & " init -b " & branch & " " & q(workPath))
@@ -73,7 +90,8 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.name \"TC3 Tester\"")
   writeFile(workPath / "README.md", "TC-3 fixture\n")
-  discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
+  writeFile(workPath / "repro.lock", policyLockText(policySnapshot))
+  discard requireGit(q(gitBin) & " -C " & q(workPath) & " add -A")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " commit -m fixture")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " remote add origin " & q(originPath))
@@ -89,13 +107,12 @@ proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.name \"TC3 Tester\"")
 
-proc projectToml(libAUrl, certificatesTable: string): string =
+proc projectToml(libAUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
   "default_revision = \"main\"\n" &
   "trunk = \"main\"\n\n" &
-  certificatesTable &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n]\n"
 
@@ -118,18 +135,20 @@ type
     libAPath: string
     libASha: string
     daemonKey: string   ## ed25519 private key the daemon signs issuance with
+    certStore: string   ## the scratch local certificate store (user root)
 
-proc writeProjectManifest(fx: Fixture; certificatesTable: string) =
+proc writeProjectManifest(fx: Fixture) =
   let manifestsRoot = fx.workspaceRoot
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
-    projectToml(fileUrl(fx.libAOrigin), certificatesTable))
+    projectToml(fileUrl(fx.libAOrigin)))
 
-proc setupFixture(gitBin, slug, certificatesTable: string): Fixture =
+proc setupFixture(gitBin, slug, policySnapshot: string): Fixture =
   result.scratch = createTempDir("repro-tc3-" & slug & "-", "")
+  result.certStore = isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.libAOrigin = result.scratch / "origin-lib-a.git"
   result.libASha = seedGitOrigin(gitBin, result.libAOrigin,
-    result.scratch / "seed-lib-a")
+    result.scratch / "seed-lib-a", policySnapshot)
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
@@ -140,7 +159,7 @@ proc setupFixture(gitBin, slug, certificatesTable: string): Fixture =
   result.workspaceRoot = workspaceRoot
   seedManifestLockStore(gitBin, workspaceRoot)
   result.libAPath = workspaceRoot / "lib-a"
-  writeProjectManifest(result, certificatesTable)
+  writeProjectManifest(result)
   cloneInto(gitBin, result.libAOrigin, result.libAPath)
   writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
   # TC-5: generate the daemon signing key and register its public half so the
@@ -221,11 +240,11 @@ proc issueAndReadCert(fx: Fixture): TestCertificate =
   if issued.code != 0:
     checkpoint("repro test output: " & issued.output)
   check issued.code == 0
-  let certFile = defaultCertificatePath(
-    fx.workspaceRoot, fx.libASha, currentPlatformTag())
-  check fileExists(certFile)
-  result = readCertificateFile(certFile)
-  check result.vcs.commit == fx.libASha
+  let content = treeContentId("git", fx.libAPath, fx.libASha)
+  result = issuedCertificate(fx.certStore, content, currentPlatformTag()).cert
+  # TC-8b: the record names the tested CONTENT and, informationally, HEAD.
+  check result.vcs.base == fx.libASha
+  check result.vcs.content == content
   check "t-unit" in result.targets
 
 const otherPlatform = "linux/tc3-second"
@@ -238,11 +257,7 @@ suite "TC-3 — pre-push requires certificate coverage when project opts in":
       skip()
     else:
       # ---- (a) required + NO covering cert → REFUSE ----------------------
-      let policySingle =
-        "[certificates]\n" &
-        "gate_mode = \"required\"\n" &
-        "required_targets = [\"t-unit\"]\n" &
-        "required_platforms = [\"" & currentPlatformTag() & "\"]\n\n"
+      let policySingle = everyBranchRequired(@[currentPlatformTag()])
       let fx = setupFixture(gitBin, "required", policySingle)
       defer: removeDir(fx.scratch)
       seedLock(fx)
@@ -266,11 +281,10 @@ suite "TC-3 — pre-push requires certificate coverage when project opts in":
       check sawCertFailure
       check remedyNamesCertify
 
-      # ---- (b) required + a covering cert attached → PASS ----------------
-      # Issue a genuine cert (TC-1) and attach it to the pushed commit (TC-2).
-      let cert = issueAndReadCert(fx)
-      let att = attachCertificate(gitBin, fx.libAPath, fx.libASha, cert)
-      check att.ok
+      # ---- (b) required + a covering cert in the local store → PASS -----
+      # Issue a genuine cert (TC-1); issuance delivers it to the local store,
+      # where the client gate looks (TC-8c). No note is attached.
+      discard issueAndReadCert(fx)
 
       let passed = invokeCheckPrePush(fx, refsFile)
       checkpoint("(b) output: " & passed.output)
@@ -285,16 +299,28 @@ suite "TC-3 — pre-push requires certificate coverage when project opts in":
 
       # ---- (c) MULTI-PLATFORM required, satisfied by the UNION of two ----
       # certs (one per platform); dropping one platform's cert → refuse and
-      # name that platform.
-      let policyMulti =
-        "[certificates]\n" &
-        "gate_mode = \"required\"\n" &
-        "required_targets = [\"t-unit\"]\n" &
-        "required_platforms = [\"" & currentPlatformTag() & "\", \"" &
-          otherPlatform & "\"]\n\n"
-      writeProjectManifest(fx, policyMulti)
+      # name that platform. The stricter policy is a new commit (the policy is
+      # part of the content), published, with its host-platform certificate
+      # issued through the real path.
+      writeFile(fx.libAPath / "repro.lock", policyLockText(
+        everyBranchRequired(@[currentPlatformTag(), otherPlatform])))
+      discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+        " commit -q --no-verify -am multi-platform-policy")
+      discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+        " push -q --no-verify origin main")
+      let multiSha = requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+        " rev-parse HEAD").strip()
+      seedLock(fx)
+      writeRefsFile(refsFile, multiSha)
+      let multiFixture = fx.scratch / "fixture-multi.json"
+      writeTestFixtureJson(multiFixture, "t-unit", "exit 0")
+      let multiIssued = issueRealCert(fx, multiFixture)
+      checkpoint("(c) issuance: " & multiIssued.output)
+      check multiIssued.code == 0
+      let multiCert = issuedCertificate(fx.certStore,
+        treeContentId("git", fx.libAPath, multiSha), currentPlatformTag()).cert
 
-      # Only the host-platform cert is attached so far → the SECOND platform
+      # Only the host-platform cert exists so far → the SECOND platform
       # is uncovered. The gate must refuse and NAME the missing platform.
       let missingOne = invokeCheckPrePush(fx, refsFile)
       checkpoint("(c) missing-platform output: " & missingOne.output)
@@ -316,13 +342,14 @@ suite "TC-3 — pre-push requires certificate coverage when project opts in":
       # re-sign with the same daemon key — modelling "run `repro certify` on a
       # worker for the other platform". A naive copy of cert 1's signature would
       # NOT verify (different payload) and the gate would correctly drop it.
-      var cert2 = cert
+      var cert2 = multiCert
       cert2.platform = otherPlatform
       cert2.targets = @["t-unit"]
       cert2.signature = TestCertificateSignature()  # clear cert 1's signature
       signCertificateOnIssuance(cert2, tc3KeyId, fx.daemonKey)
-      let att2 = attachCertificate(gitBin, fx.libAPath, fx.libASha, cert2)
-      check att2.ok
+      let delivered = publishCertificateToLocalStore(cert2, fx.libAPath)
+      check delivered.error == ""
+      check delivered.written
 
       let unionPass = invokeCheckPrePush(fx, refsFile)
       checkpoint("(c) union output: " & unionPass.output)
@@ -333,3 +360,56 @@ suite "TC-3 — pre-push requires certificate coverage when project opts in":
       check unionReport["exitCode"].getInt() == 0
       for f in unionReport["failures"]:
         check f["property"].getStr() != "certificate-coverage"
+
+      # ---- (d) TC-9c: the same requirement declared as a POLICY ----------
+      # The pushed commit's `repro.lock` carries a `[certificate_policy]`
+      # whose rule for `main` (a branch rule, not the every-branch catch-all)
+      # requires t-unit on both platforms: the snapshot is read from the
+      # pushed commit, under the rule for the destination.
+      let snapshot = renderCertificatePolicySnapshot(BranchCertificatePolicy(
+        name: "tc3-policy", package: "certpolicy",
+        rules: @[PolicyRule(branches: @["main"], gateMode: pmRequired,
+          commitGate: pmRequired, requires: @[PolicyRequirement(
+            certificate: "t-unit",
+            platforms: @[currentPlatformTag(), otherPlatform])])]))
+      writeFile(fx.libAPath / "repro.lock", replaceCertificatePolicySection(
+        serializeLockedDependencies(LockedDependencies(
+          schema: "reprobuild.solved-graph-lock.v2", deps: @[])), snapshot))
+      discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+        " add repro.lock")
+      discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+        " commit -q --no-verify -m policy")
+      discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+        " push -q --no-verify origin main")
+      let policySha = requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+        " rev-parse HEAD").strip()
+      seedLock(fx)
+      writeRefsFile(refsFile, policySha)
+      let policyRefused = invokeCheckPrePush(fx, refsFile)
+      checkpoint("(d) uncovered output: " & policyRefused.output)
+      check policyRefused.code == 2
+      var policyEvidence = ""
+      for f in readReport(fx)["failures"]:
+        if f["property"].getStr() == "certificate-coverage":
+          policyEvidence = f["evidence"].getStr() & " " &
+            f["remediation"].getStr()
+      check "rule \"main\"" in policyEvidence
+      check otherPlatform in policyEvidence
+      check ("run 'repro certify t-unit' on a " & otherPlatform & " host") in
+        policyEvidence
+      # Both platforms' certificates for the policy commit's content: passes.
+      let policyFixture = fx.scratch / "fixture-policy.json"
+      writeTestFixtureJson(policyFixture, "t-unit", "exit 0")
+      let policyIssued = issueRealCert(fx, policyFixture)
+      checkpoint("(d) issuance: " & policyIssued.output)
+      check policyIssued.code == 0
+      let policyContent = treeContentId("git", fx.libAPath, policySha)
+      var policyCert2 = issuedCertificate(fx.certStore, policyContent,
+        currentPlatformTag()).cert
+      policyCert2.platform = otherPlatform
+      policyCert2.signature = TestCertificateSignature()
+      signCertificateOnIssuance(policyCert2, tc3KeyId, fx.daemonKey)
+      check publishCertificateToLocalStore(policyCert2, fx.libAPath).written
+      let policyPassed = invokeCheckPrePush(fx, refsFile)
+      checkpoint("(d) covered output: " & policyPassed.output)
+      check policyPassed.code == 0

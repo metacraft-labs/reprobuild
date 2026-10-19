@@ -314,6 +314,63 @@ function Get-BashExe {
   return $bashCommand.Source
 }
 
+# `bash` that can run this repository's POSIX scripts on the HOST.
+#
+# Windows makes "the bash on PATH" a real trap: `C:\Windows\System32\bash.exe`
+# (the WSL launcher, also surfaced via the WindowsApps alias) is on PATH by
+# DEFAULT and shadows Git Bash. On a host with no WSL distro installed it does
+# not fail as "bash is missing" -- it prints a WSL advertisement, exits
+# non-zero, and the caller dies with a message about distributions that has
+# nothing to do with reprobuild. Git ships the bash we want, so it is resolved
+# from git's own installation. `env.ps1` uses these to put that bash on PATH;
+# `scripts/release/package_windows_release.ps1` uses them to run the release
+# source staging with it.
+function Get-CommandSourceOrEmpty {
+  param([string]$Name)
+  $cmd = Get-Command $Name -ErrorAction SilentlyContinue
+  if ($null -eq $cmd) { return "" }
+  if ($cmd.CommandType -eq "Alias") { return $cmd.Definition }
+  return $cmd.Source
+}
+
+function Test-UsableBash {
+  param([string]$Path)
+  if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+  if (-not (Test-Path -LiteralPath $Path)) { return $false }
+  # The WSL launcher lives in System32 / WindowsApps and is never the bash we
+  # want here, even when a distro IS installed: the build must run against the
+  # host filesystem with the host toolchain on PATH, not inside a Linux VM.
+  $dir = Split-Path -Parent $Path
+  if ($dir -match '\\(System32|SysWOW64|WindowsApps)$') { return $false }
+  return $true
+}
+
+function Resolve-GitBashDir {
+  # `git.exe` lives in `<root>\cmd` (or `<root>\bin`); bash sits in
+  # `<root>\bin\bash.exe` for every supported layout (Git for Windows,
+  # scoop, winget).
+  $git = Get-Command git -ErrorAction SilentlyContinue
+  if ($null -eq $git) { return "" }
+  $gitExe = if ($git.CommandType -eq "Alias") { $git.Definition } else { $git.Source }
+  if ([string]::IsNullOrWhiteSpace($gitExe)) { return "" }
+  $root = Split-Path -Parent (Split-Path -Parent $gitExe)
+  foreach ($candidate in @((Join-Path $root "bin"), (Join-Path $root "usr\bin"))) {
+    if (Test-Path -LiteralPath (Join-Path $candidate "bash.exe")) {
+      return $candidate
+    }
+  }
+  return ""
+}
+
+function Resolve-UsableBashExe {
+  # The bash on PATH when it is usable, otherwise git's own; "" when neither.
+  $current = Get-CommandSourceOrEmpty 'bash'
+  if (Test-UsableBash $current) { return $current }
+  $gitBashDir = Resolve-GitBashDir
+  if ($gitBashDir) { return (Join-Path $gitBashDir "bash.exe") }
+  return ""
+}
+
 function ConvertTo-BashPath {
   param([Parameter(Mandatory = $true)][string]$WindowsPath)
 

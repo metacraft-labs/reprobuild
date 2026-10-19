@@ -104,7 +104,26 @@ suite "integration_repro_core_binary_roundtrip":
       formatVersion: 1,
       metadata: cborNull()))
     var encoded = encodeEnvelope(value)
-    encoded[4] = 2
+    # THE FIRST UNKNOWN VERSION, NAMED RATHER THAN HARD-CODED. This read
+    # `encoded[4] = 2` while `repro_domain_types`' envelope version is
+    # 1 -- so the literal WAS the first unknown version, and it would
+    # have become the CURRENT one on the first bump, silently turning
+    # this case into "the current version decodes", which it does and
+    # must. Exactly the defect that moved three times in the
+    # Shared-Development-Services campaign on the interface envelope.
+    #
+    # NO NEW ACCESSOR WAS NEEDED HERE: `repro_domain_types/codec.nim`
+    # has exported `envelopeVersion()` all along (beside
+    # `fixedSchemaMagic()`), and this probe simply did not use it. That
+    # is why the fix is one line in a test rather than a library change.
+    let firstUnknown = envelopeVersion() + 1
+    # The control that makes the refusal below discriminate: the CURRENT
+    # version, at the same offset, decodes. Without it a probe that
+    # poked the wrong byte would still raise and the case would pass
+    # while measuring nothing about the version gate.
+    encoded[4] = byte(envelopeVersion() and 0xff'u16)
+    discard decodeEnvelope(encoded)
+    encoded[4] = byte(firstUnknown and 0xff'u16)
     expect EnvelopeError:
       discard decodeEnvelope(encoded)
 

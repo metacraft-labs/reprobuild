@@ -20,8 +20,20 @@
 ## this workspace today. Wrapping that command rather than re-deriving it means
 ## a project's shell does not change when activation moves to Reprobuild —
 ## which is the entire promise of the degenerate end. `--profile` is part of the
-## shape and not decoration: it is the gcroot that stops the shell's store paths
-## being garbage-collected out from under a cached artifact.
+## shape and not decoration: it is the gcroot that stops THE SHELL's store
+## paths — the closure of the `nix-shell-env` this generation captured — being
+## garbage-collected while the activation that sourced them is in use.
+##
+## It roots the shell ONLY, and only at the generation it wrote. It does not
+## root what a build run inside the shell wrote absolute store paths to: a
+## binary linked under an older generation names that generation's openssl,
+## not the one the current profile holds (reprobuild-pm issue 2026-10-02).
+## Those are rooted elsewhere, by `repro_core/nix_store_roots`: the build
+## engine roots the store paths each action's outputs name in a ledger under
+## its cache root (and re-executes an action whose recorded paths were
+## collected anyway), and `resolveNixTool` roots each tool's current
+## realization under the tool store's `nix-gc-roots/`, dropping the root of
+## the realization it supersedes.
 ##
 ## ## The override arguments
 ##
@@ -38,6 +50,7 @@ import std/[json, os, osproc, streams, strutils]
 
 import repro_core/ambient_execution
 import repro_core/paths
+import repro_core/workspace_root
 import repro_project_dsl
 
 import ./apply
@@ -280,13 +293,15 @@ proc flakeDevShellOps*(projectRoot: string; flakeRef = DefaultFlakeRef;
 proc workspaceFlakeOverrides*(projectRoot: string; flakeRef = DefaultFlakeRef):
     seq[(string, string)] =
   ## Ask NF-1 for the actual develop bindings instead of duplicating its resolver.
-  var root = absolutePath(projectRoot)
-  while not fileExists(extendedPath(root / ".repro-workspace.toml")) and
-      not fileExists(extendedPath(root / ".repro" / "workspace.toml")):
-    let parent = parentDir(root)
-    if parent == root or parent.len == 0:
-      return
-    root = parent
+  # The workspace root is found by the one walk every workspace-root lookup
+  # uses (`repro_core/workspace_root`, Workspace-Settings-Files.md §6). A
+  # root found only by the MO-2 committed lock is a single-repo workspace with
+  # no siblings to develop against, so there are no overrides to ask for and
+  # no `repro` to start.
+  let found = discoverWorkspaceRoot(projectRoot)
+  if found.marker in {wrmNone, wrmCommittedLock}:
+    return
+  let root = found.root
   var localRef = flakeRef.split('#')[0].split('?')[0]
   if localRef.startsWith("path:"):
     localRef = localRef[5 .. ^1]

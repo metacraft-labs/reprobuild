@@ -2,6 +2,7 @@ import std/[json, os, osproc, sequtils, strutils, tables, tempfiles, unittest]
 
 import repro_tool_profiles
 import repro_test_support
+import io_mon/[reader, types]
 
 const
   NimFirstFlag = "-d:asyncBackend=asyncdispatch"
@@ -17,13 +18,19 @@ const
   # ``!nim_js`` expands through ``NIM_SELECTED``. That is the only change to a
   # fingerprinted definition since 04d6aff3; ``!trace_object_file`` is
   # unchanged, so its hash is too.
-  NimJsSemanticsHash = "b8d6481bcc00d87b"
-  NimJsWithoutOldCaseObjectsHash = "85e7880da3e33f69"
+  #
+  # Refreshed at 34b96d03 (the next ``codetracer-src`` pin): ``!nim_js`` gained
+  # a per-rule ``--nimcache:/tmp/ct-nim-cache/%B_nim_js`` and the output-side
+  # exclusion ``| $(NIM_SIDE_OUTPUTS_IGNORE)``, which tells tup to accept the
+  # writes into that cache. Every other fingerprinted definition is
+  # byte-identical, so ``!trace_object_file`` keeps its hash.
+  NimJsSemanticsHash = "c78271220ebdc225"
+  NimJsWithoutOldCaseObjectsHash = "600a5090da25c07b"
   TraceObjectFileSemanticsHash = "3d1a52e3befe61cf"
   CodeTracerTupSemanticsCommit =
-    "a9ef983ed1e7d9a60b85034b596f55ea8b2164f5"
+    "222a4a0099115066ba331817e94a3ac9f2293290"
   PinnedTupSemanticsFixture =
-    "tests/fixtures/codetracer-subset/Tuprules-a9ef983e.tup"
+    "tests/fixtures/codetracer-subset/Tuprules-222a4a00.tup"
 
 type
   TupRules = object
@@ -202,7 +209,7 @@ proc expandTupVars(value: string; variables: Table[string, string]): string =
   raise newException(ValueError, "recursive Tup variable expansion: " & value)
 
 proc tupRuleParts(rules: TupRules; name: string): tuple[command: string;
-    outputs: seq[string]] =
+    outputs: seq[string]; exclusions: seq[string]] =
   if not rules.macros.hasKey(name):
     raise newException(ValueError, "missing Tup macro " & name)
   let macroBody = rules.macros[name]
@@ -217,8 +224,22 @@ proc tupRuleParts(rules: TupRules; name: string): tuple[command: string;
       raise newException(ValueError, "unterminated Tup display marker: " & name)
     command = command[markerEnd + 1 .. ^1].strip()
   let expanded = expandTupVars(command, rules.variables)
-  let outputText = macroBody[second + 2 .. ^1].strip()
-  result = (command: expanded, outputs: outputText.splitWhitespace())
+  # Tup's output section is `<outputs> [| <extra outputs and exclusions>]`.
+  # Only the part before `|` names the files the rule writes; a `^regex`
+  # after it is an EXCLUSION -- writes tup accepts and ignores, not outputs.
+  var outputText = macroBody[second + 2 .. ^1].strip()
+  var exclusions: seq[string]
+  let bar = outputText.find('|')
+  if bar >= 0:
+    for item in expandTupVars(outputText[bar + 1 .. ^1].strip(),
+        rules.variables).splitWhitespace():
+      if not item.startsWith("^"):
+        raise newException(ValueError,
+          "Tup extra output is not modeled by this test: " & item)
+      exclusions.add(item)
+    outputText = outputText[0 ..< bar].strip()
+  result = (command: expanded, outputs: outputText.splitWhitespace(),
+    exclusions: exclusions)
 
 proc tupCommandTemplate(rules: TupRules; name: string): seq[string] =
   tupRuleParts(rules, name).command.splitWhitespace()
@@ -227,7 +248,9 @@ proc tupOutputPatterns(rules: TupRules; name: string): seq[string] =
   tupRuleParts(rules, name).outputs
 
 proc replaceTupPlaceholders(token, sourcePath, outputPath: string): string =
-  token.replace("%f", sourcePath).replace("%o", outputPath)
+  # `%B` is the input's base name without its extension, as in tup.
+  token.replace("%f", sourcePath).replace("%o", outputPath).replace(
+    "%B", splitFile(sourcePath).name)
 
 proc tupCommand(rules: TupRules; name, sourcePath, outputPath: string): seq[string] =
   for token in tupCommandTemplate(rules, name):
@@ -242,12 +265,22 @@ proc stableHash64(text: string): string =
 
 proc tupSemanticsHash(rules: TupRules; name: string): string =
   let parts = tupRuleParts(rules, name)
-  stableHash64(parts.command.splitWhitespace().join("\n") &
-    "\noutputs\n" & parts.outputs.join("\n"))
+  var text = parts.command.splitWhitespace().join("\n") &
+    "\noutputs\n" & parts.outputs.join("\n")
+  # Exclusions are part of what tup accepts from the command, so they are part
+  # of its semantics; a rule without any hashes exactly as before.
+  if parts.exclusions.len > 0:
+    text.add("\nexclusions\n" & parts.exclusions.join("\n"))
+  stableHash64(text)
 
 proc assertCommittedTupSemantics(rules: TupRules) =
   check tupOutputPatterns(rules, "!nim_js") == @["%B.js"]
   check tupOutputPatterns(rules, "!trace_object_file") == @["%o"]
+  # `!nim_js` excludes its per-rule nimcache (NIM_SIDE_OUTPUTS_IGNORE);
+  # `!trace_object_file` excludes nothing.
+  check tupRuleParts(rules, "!nim_js").exclusions.len == 1
+  check tupRuleParts(rules, "!nim_js").exclusions.allIt("ct-nim-cache" in it)
+  check tupRuleParts(rules, "!trace_object_file").exclusions.len == 0
   check tupCommandTemplate(rules, "!nim_js")[0 .. 1] == @["nim", NimFirstFlag]
   check "-d:nimOldCaseObjects" in tupCommandTemplate(rules, "!nim_js")
   check tupCommandTemplate(rules, "!trace_object_file")[0 .. 3] ==
@@ -305,6 +338,15 @@ proc withMakeDepfile(command: openArray[string]; depfilePath: string): seq[strin
   result.add(depfilePath)
 
 proc copySelectedCodeTracerFiles(codeTracerRoot, projectRoot: string) =
+  # Give this independent source slice a real Nim package boundary. Nim's
+  # `getNimbleFile` searches ancestors with `*.nimble`; without the marker,
+  # macOS observes directory enumerations up through the shared temp root.
+  # Those are genuine inputs, so unrelated host activity correctly misses
+  # the cache. The fixture must bound that search rather than hide evidence.
+  writeFile(projectRoot / "codetracer_subset.nimble", "version = \"0.1.0\"\n")
+  # The oracle is part of fixture setup. Adding its directory after the cold
+  # build changes the package-root membership Nim just observed.
+  createDir(projectRoot / "oracle")
   createDir(projectRoot / "src" / "frontend" / "tests")
   createDir(projectRoot / "src" / "frontend" / "index")
   createDir(projectRoot / "src" / "frontend" / "lib")
@@ -465,6 +507,34 @@ proc jsonStringSet(node: JsonNode): seq[string] =
   for item in node.getElems():
     result.add(item.getStr())
 
+proc assertNimPackageBoundary(projectRoot, tempRoot: string) =
+  ## Nim discovers its package with an ancestor `*.nimble` search. The
+  ## subset must retain its own directory evidence while stopping that search
+  ## before the fixture's parent and the host's shared temporary directory.
+  let capture = projectRoot / ".repro" / "build" / "reprobuild" /
+    "build-engine-cache" / "monitor-depfiles" /
+    "nim-js-ipc-registry-test.iomon"
+  require fileExists(capture)
+  var directories: seq[string]
+  for record in streamMonitorDepFileRecords(capture):
+    if record.kind == mrDirectoryEnumerate:
+      # Capture paths may name ephemeral monitor directories already removed
+      # by teardown. Normalize their spelling without requiring they exist.
+      var directory = normalizedPath(absolutePath(record.path, projectRoot)).
+        replace('\\', '/')
+      while directory.len > 1 and directory.endsWith("/"):
+        directory.setLen(directory.len - 1)
+      if directory notin directories:
+        directories.add(directory)
+  checkpoint("directory enumerations recorded in " & capture & ":\n  " &
+    directories.join("\n  "))
+  check projectRoot in directories or expandFilename(projectRoot) in directories
+  check tempRoot notin directories
+  check expandFilename(tempRoot) notin directories
+  let tempDir = getTempDir().strip(leading = false, chars = {'/', '\\'})
+  check tempDir notin directories
+  check expandFilename(tempDir) notin directories
+
 suite "e2e_codetracer_build_subset_without_tup":
   # The CodeTracer integration build exercises the full POSIX
   # toolchain (nix + sh + runquotad) end-to-end against a sibling
@@ -563,6 +633,7 @@ suite "e2e_codetracer_build_subset_without_tup":
       check not identity.profiles.anyIt(it.executableName == "sh")
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
+      assertNimPackageBoundary(projectRoot, tempRoot)
       assertAction(firstReport, "generate-config-header", "asSucceeded", true)
       assertAction(firstReport, "nim-js-ipc-registry-test", "asSucceeded", true)
       assertAction(firstReport, "c-sudoku-object-tup", "asSucceeded", true)
@@ -594,6 +665,9 @@ suite "e2e_codetracer_build_subset_without_tup":
       check mainSymbol("build/c/main.with-header.o", projectRoot) ==
         mainSymbol("oracle/main.o", projectRoot)
 
+      # An unrelated sibling belongs to fixture setup, not the Nim package.
+      # Its appearance must not invalidate an unchanged subset build.
+      writeFile(tempRoot / "unrelated-sibling.txt", "unrelated fixture work\n")
       let second = build(reproBin, target, repoRoot, pathValue)
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
       assertActionCacheEffective(secondReport, "generate-config-header")
@@ -601,6 +675,24 @@ suite "e2e_codetracer_build_subset_without_tup":
       assertActionCacheEffective(secondReport, "c-sudoku-object-tup")
       assertActionCacheEffective(secondReport,
         "c-sudoku-object-with-generated-header")
+
+      let nimSource = projectRoot / "src" / "frontend" / "index" /
+        "ipc_registry.nim"
+      writeFile(nimSource, readFile(nimSource) &
+        "\necho \"reprobuild selected Nim source edit\"\n")
+      let nimChanged = build(reproBin, target, repoRoot, pathValue)
+      let nimChangedReport = parseFile(valueAfter(nimChanged, "buildReport:"))
+      assertActionCacheEffective(nimChangedReport, "generate-config-header")
+      assertAction(nimChangedReport, "nim-js-ipc-registry-test", "asSucceeded", true)
+      assertActionCacheEffective(nimChangedReport, "c-sudoku-object-tup")
+      assertActionCacheEffective(nimChangedReport,
+        "c-sudoku-object-with-generated-header")
+      directOracle(projectRoot, "oracle/ipc_registry_test.js",
+        nimJsOracleCommand, pathValue)
+      check runNode("tests/ipc_registry_test.js", projectRoot, pathValue) ==
+        runNode("oracle/ipc_registry_test.js", projectRoot, pathValue)
+      check runNode("tests/ipc_registry_test.js", projectRoot, pathValue).
+        contains("reprobuild selected Nim source edit")
 
       writeFile(projectRoot / "src" / "c" / "main.c",
         readFile(projectRoot / "src" / "c" / "main.c") &

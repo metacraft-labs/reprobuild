@@ -9,13 +9,15 @@
 ## Scenarios:
 ##
 ##   - Cache miss: invokes Nim (via the helper subprocess), produces a
-##     valid RBPI envelope at `<state-dir>/profile-cache/<digest>.rbpi`,
+##     valid RBPI envelope at `<state-dir>/profile-cache/<profile-key>.rbpi`,
 ##     the bytes round-trip through `decodeRbpi`.
-##   - Cache hit: a second invocation with no source change returns
-##     the same bytes via the structural fast-path and does NOT
-##     rewrite the cache file (mtime is preserved).
-##   - Cache miss on touch: touching the profile source (changing the
-##     digest) produces a new cache entry; the artifact path changes.
+##   - Cache hit: a second invocation with no source change is answered
+##     by the engine's ACTION CACHE (the edge is not launched) and does
+##     NOT rewrite the published file (mtime is preserved). There is no
+##     structural fast path in front of the edge any more.
+##   - Re-run on touch: touching the profile source re-executes the edge
+##     and republishes to the SAME per-profile path — the output name is
+##     declared identity, not a content key.
 ##   - `forceRebuild`: setting the option forces the helper to re-run.
 ##   - Compile failure: a deliberately broken fixture surfaces the Nim
 ##     diagnostic and `compileProfileToRbpi` raises
@@ -30,6 +32,7 @@
 import std/[os, osproc, strtabs, strutils, tempfiles, times, unittest]
 from repro_core/paths import extendedPath
 
+import repro_build_engine
 import repro_profile
 import repro_profile_intent
 import repro_profile_compile
@@ -108,16 +111,22 @@ suite "M83 Phase C: compileProfileToRbpi via build-graph edge":
       "home.nim")
 
     let first = compileProfileToRbpi(profilePath, compileOpts(stateDir))
+    check first.edgeLaunched
     let mtime1 = getLastModificationTime(first.rbpiPath)
 
     sleep(1100)  # NTFS / ext4 timestamp granularity.
     let second = compileProfileToRbpi(profilePath, compileOpts(stateDir))
+    checkpoint("cacheDecision=" & $second.cacheDecision & " missReason=" &
+      second.cacheMissReason & " firstPublishSkip=" &
+      first.cachePublishSkipReason)
+    check not second.edgeLaunched
+    check second.cacheDecision == cdHit
     check second.rbpiBytes == first.rbpiBytes
     check second.rbpiPath == first.rbpiPath
     let mtime2 = getLastModificationTime(second.rbpiPath)
     check mtime2 == mtime1
 
-  test "touching the source triggers a new digest + a fresh artifact":
+  test "touching the source re-runs the edge into the same artifact path":
     let stateDir = makeStateDir("touch-miss")
     let profileSrcDir = createTempDir("repro-profile-src-", "")
     defer: removeDir(profileSrcDir)
@@ -130,13 +139,16 @@ suite "M83 Phase C: compileProfileToRbpi via build-graph edge":
     writeFile(extendedPath(profilePath), contents)
 
     let second = compileProfileToRbpi(profilePath, compileOpts(stateDir))
-    check second.digestHex != first.digestHex
-    check second.rbpiPath != first.rbpiPath
+    check second.edgeLaunched
+    # A trailing comment does not change the intent, so the envelope bytes
+    # (and their digest) are unchanged; what matters is that the edge ran.
+    check second.digestHex == first.digestHex
+    check second.rbpiPath == first.rbpiPath
     var rbpiFiles: seq[string]
     for kind, p in walkDir(stateDir / "profile-cache"):
       if kind == pcFile and p.endsWith(".rbpi"):
         rbpiFiles.add p
-    check rbpiFiles.len == 2
+    check rbpiFiles.len == 1
 
   test "forceRebuild re-invokes the helper":
     let stateDir = makeStateDir("force-rebuild")
@@ -150,6 +162,7 @@ suite "M83 Phase C: compileProfileToRbpi via build-graph edge":
     var forceOpts = compileOpts(stateDir)
     forceOpts.forceRebuild = true
     let second = compileProfileToRbpi(profilePath, forceOpts)
+    check second.edgeLaunched
     check second.rbpiBytes == first.rbpiBytes
     let mtime2 = getLastModificationTime(second.rbpiPath)
     check mtime2 > mtime1
@@ -193,7 +206,6 @@ suite "M83 Phase C: __repro-compile-profile helper subcommand":
     let profilePath = copyFixtureInto("home_basic.nim", profileSrcDir,
       "home.nim")
     let rbpiPath = stateDir / "out.rbpi"
-    let manifestPath = stateDir / "out.source.txt"
     let nimcacheDir = stateDir / "nimcache"
     createDir(extendedPath(stateDir))
 
@@ -204,7 +216,6 @@ suite "M83 Phase C: __repro-compile-profile helper subcommand":
         "__repro-compile-profile",
         "--profile", profilePath,
         "--rbpi", rbpiPath,
-        "--manifest", manifestPath,
         "--nimcache", nimcacheDir,
         "--repo-root", ProjectRoot
       ],
@@ -214,7 +225,6 @@ suite "M83 Phase C: __repro-compile-profile helper subcommand":
     p.close()
     check exitCode == 0
     check fileExists(extendedPath(rbpiPath))
-    check fileExists(extendedPath(manifestPath))
 
     let raw = readFile(extendedPath(rbpiPath))
     var bytes = newSeq[byte](raw.len)

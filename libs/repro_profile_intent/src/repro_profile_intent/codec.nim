@@ -49,6 +49,35 @@ const
     ## (cached before this codec extension) has no entry and decodes
     ## with an empty ``buildActions`` seq, so existing profile-compile
     ## fixtures survive the codec bump without a re-encode.
+  KeyDataFiles    = "dataFiles"
+    ## GM4: the plan-time data-file references a profile's `data:` section
+    ## declares (`ProfileIntent.dataFiles`). Optional; omitted when empty,
+    ## so a profile without data files encodes exactly as before. Envelope
+    ## schema 5.
+  KeyCatalogImports = "catalogImports"
+    ## The contribution-catalog modules a profile's `catalogs:` section
+    ## imports (`ProfileIntent.catalogImports`). Optional; omitted when
+    ## empty, so a profile without the section encodes exactly as before.
+    ## Envelope schema 6.
+  KeyHostApplies  = "hostApplies"
+    ## The concerns Reprobuild applies per host (`ProfileIntent.hostApplies`,
+    ## a block-form `hosts:` entry's `applies:`). Optional; omitted when no
+    ## host declares, so a profile without a declaration encodes exactly as
+    ## before. Envelope schema 7.
+  KeySystemManagedElsewhere = "systemManagedElsewhere"
+    ## GM10: the hosts whose system scope is managed elsewhere
+    ## (`ProfileIntent.systemManagedElsewhere`): a map host -> map, the inner
+    ## map carrying `"managedBy"` (text) only when the entry names a manager.
+    ## Optional; omitted when no host says so, so a profile without the
+    ## attribute encodes exactly as before. Envelope schema 9.
+  KeyManagedBy    = "managedBy"
+  KeyStowScopes   = "stowScopes"
+    ## GM11: the activities' stow claims (`ProfileIntent.stowScopes`): an
+    ## array of maps with `"package"` and `"activity"` (text) and, under a
+    ## guard, `"guard"` (text). Optional; omitted when no activity claims a
+    ## stow package, so a profile without a `stow:` block encodes exactly as
+    ## before. Envelope schema 10.
+  KeyPackage      = "package"
   KeyArgv         = "argv"
   KeyCwd          = "cwd"
   KeyDeps         = "deps"
@@ -70,6 +99,14 @@ const
     ## M69: the literal version pin from `package(<id>, "<version>")`.
     ## Optional; omitted from the CBOR map when empty so existing
     ## pre-M69 RBPI artifacts round-trip unchanged.
+  KeyGuard        = "guard"
+    ## GM3: the runtime predicate a ResourceIntent / ConfigOverride
+    ## applies under (`ResourceIntent.guard`). Optional; omitted when the
+    ## element applies on every host. Envelope schema 4.
+  KeyActivity     = "activity"
+    ## GM9: the activity a ResourceIntent belongs to
+    ## (`ResourceIntent.activity`). Optional; omitted for a profile-wide
+    ## resource. Envelope schema 8.
   KeyBinaries     = "binaries"
     ## 2026-06-09: the explicit binary names a package installs, used
     ## by the path-based catalog adapter when the package name
@@ -183,9 +220,12 @@ proc encodeActivity(a: ActivityIntent): DynamicValue =
             entry(KeyBody, encodeActivityElementSeq(a.body))])
 
 proc encodeConfigOverride(c: ConfigOverride): DynamicValue =
-  cborMap(@[entry(KeyPkg, cborText(c.pkg)),
-            entry(KeyKey, cborText(c.key)),
-            entry(KeyValue, encodeConfigValue(c.value))])
+  var fields = @[entry(KeyPkg, cborText(c.pkg)),
+                 entry(KeyKey, cborText(c.key)),
+                 entry(KeyValue, encodeConfigValue(c.value))]
+  if c.guard.expr.len > 0:
+    fields.add entry(KeyGuard, cborText(c.guard.expr))
+  cborMap(fields)
 
 proc encodeResource(r: ResourceIntent): DynamicValue =
   var fieldEntries: seq[DynamicMapEntry] = @[]
@@ -197,10 +237,15 @@ proc encodeResource(r: ResourceIntent): DynamicValue =
   var deps: seq[DynamicValue] = @[]
   for d in r.dependsOn:
     deps.add encodeResourceAddress(d)
-  cborMap(@[entry(KeyKind, cborText(r.kind)),
-            entry(KeyAddress, cborText(r.address)),
-            entry(KeyFields, cborMap(fieldEntries)),
-            entry(KeyDependsOn, cborArray(deps))])
+  var fields = @[entry(KeyKind, cborText(r.kind)),
+                 entry(KeyAddress, cborText(r.address)),
+                 entry(KeyFields, cborMap(fieldEntries)),
+                 entry(KeyDependsOn, cborArray(deps))]
+  if r.guard.expr.len > 0:
+    fields.add entry(KeyGuard, cborText(r.guard.expr))
+  if r.activity.len > 0:
+    fields.add entry(KeyActivity, cborText(r.activity))
+  cborMap(fields)
 
 proc encodeHosts(h: Table[string, seq[string]]): DynamicValue =
   var hostEntries: seq[DynamicMapEntry] = @[]
@@ -264,14 +309,41 @@ proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
   var bas: seq[DynamicValue] = @[]
   for b in p.buildActions:
     bas.add encodeBuildAction(b)
-  cborMap(@[entry(KeyName, cborText(p.name)),
+  var entries = @[entry(KeyName, cborText(p.name)),
             entry(KeyActivities, cborArray(acts)),
             entry(KeyConfigOverrides, cborArray(cfgs)),
             entry(KeyHosts, encodeHosts(p.hosts)),
             entry(KeyResources, cborArray(ress)),
             entry(KeyBuildActions, cborArray(bas)),
             entry(KeyAdapterPreference,
-              encodeAdapterPreference(p.adapterPreference))])
+              encodeAdapterPreference(p.adapterPreference))]
+  if p.dataFiles.len > 0:
+    entries.add entry(KeyDataFiles, encodeStringArray(p.dataFiles))
+  if p.catalogImports.len > 0:
+    entries.add entry(KeyCatalogImports, encodeStringArray(p.catalogImports))
+  if p.hostApplies.len > 0:
+    entries.add entry(KeyHostApplies, encodeHosts(p.hostApplies))
+  if p.systemManagedElsewhere.len > 0:
+    var hostEntries: seq[DynamicMapEntry] = @[]
+    for host, pointer in p.systemManagedElsewhere:
+      var inner: seq[DynamicMapEntry] = @[]
+      if pointer.len > 0:
+        inner.add entry(KeyManagedBy, cborText(pointer))
+      hostEntries.add entry(host, cborMap(inner))
+    hostEntries.sort(proc(a, b: DynamicMapEntry): int = cmp(a.key, b.key))
+    entries.add entry(KeySystemManagedElsewhere, cborMap(hostEntries))
+  if p.stowScopes.len > 0:
+    # Declaration order is kept (an array): it is the order diagnostics
+    # name the claims in.
+    var claims: seq[DynamicValue] = @[]
+    for s in p.stowScopes:
+      var fields = @[entry(KeyPackage, cborText(s.package)),
+                     entry(KeyActivity, cborText(s.activity))]
+      if s.guard.expr.len > 0:
+        fields.add entry(KeyGuard, cborText(s.guard.expr))
+      claims.add cborMap(fields)
+    entries.add entry(KeyStowScopes, cborArray(claims))
+  cborMap(entries)
 
 proc encodeProfileIntentToBytes*(p: ProfileIntent): seq[byte] =
   ## CBOR-encode the `ProfileIntent`. Deterministic: same input bytes
@@ -408,12 +480,19 @@ proc decodeActivity(v: DynamicValue): ActivityIntent =
   result.body = decodeActivityElementSeq(expectArray(
     lookup(entries, KeyBody, "ActivityIntent"), KeyBody))
 
+proc decodeGuard(entries: seq[DynamicMapEntry]): PredicateExpr =
+  var found = false
+  let v = lookupOpt(entries, KeyGuard, found)
+  if found:
+    result.expr = expectText(v, KeyGuard)
+
 proc decodeConfigOverride(v: DynamicValue): ConfigOverride =
   let entries = expectMap(v, "ConfigOverride")
   ConfigOverride(
     pkg: expectText(lookup(entries, KeyPkg, "ConfigOverride"), KeyPkg),
     key: expectText(lookup(entries, KeyKey, "ConfigOverride"), KeyKey),
-    value: decodeConfigValue(lookup(entries, KeyValue, "ConfigOverride")))
+    value: decodeConfigValue(lookup(entries, KeyValue, "ConfigOverride")),
+    guard: decodeGuard(entries))
 
 proc decodeResource(v: DynamicValue): ResourceIntent =
   let entries = expectMap(v, "ResourceIntent")
@@ -428,6 +507,11 @@ proc decodeResource(v: DynamicValue): ResourceIntent =
   for d in expectArray(
       lookup(entries, KeyDependsOn, "ResourceIntent"), KeyDependsOn):
     result.dependsOn.add decodeResourceAddress(d)
+  result.guard = decodeGuard(entries)
+  var activityFound = false
+  let activity = lookupOpt(entries, KeyActivity, activityFound)
+  if activityFound:
+    result.activity = expectText(activity, KeyActivity)
 
 proc decodeHosts(v: DynamicValue): Table[string, seq[string]] =
   let entries = expectMap(v, "hosts")
@@ -523,6 +607,53 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
     result.adapterPreference = decodeAdapterPreference(apNode)
   else:
     result.adapterPreference = initOrderedTable[string, seq[string]]()
+  # GM4: data-file references are OPTIONAL on the wire (absent when the
+  # profile declares none).
+  var dfFound = false
+  let dfNode = lookupOpt(entries, KeyDataFiles, dfFound)
+  if dfFound:
+    for it in expectArray(dfNode, KeyDataFiles):
+      result.dataFiles.add expectText(it, KeyDataFiles)
+  # Contribution-catalog imports are OPTIONAL on the wire (absent when the
+  # profile declares none).
+  var ciFound = false
+  let ciNode = lookupOpt(entries, KeyCatalogImports, ciFound)
+  if ciFound:
+    for it in expectArray(ciNode, KeyCatalogImports):
+      result.catalogImports.add expectText(it, KeyCatalogImports)
+  # The per-host concern declaration is OPTIONAL on the wire (absent when
+  # no host declares one).
+  var haFound = false
+  let haNode = lookupOpt(entries, KeyHostApplies, haFound)
+  if haFound:
+    result.hostApplies = decodeHosts(haNode)
+  # GM10: the system-management attribute is OPTIONAL on the wire (absent
+  # when no host's system is managed elsewhere).
+  var smeFound = false
+  let smeNode = lookupOpt(entries, KeySystemManagedElsewhere, smeFound)
+  if smeFound:
+    for e in expectMap(smeNode, KeySystemManagedElsewhere):
+      var pointerFound = false
+      let pointerNode = lookupOpt(expectMap(e.value, KeySystemManagedElsewhere),
+        KeyManagedBy, pointerFound)
+      result.systemManagedElsewhere[e.key] =
+        if pointerFound: expectText(pointerNode, KeyManagedBy) else: ""
+  # GM11: the stow claims are OPTIONAL on the wire (absent when no activity
+  # claims a stow package). A malformed claim is refused as corrupt.
+  var ssFound = false
+  let ssNode = lookupOpt(entries, KeyStowScopes, ssFound)
+  if ssFound:
+    for it in expectArray(ssNode, KeyStowScopes):
+      let claim = expectMap(it, KeyStowScopes)
+      var guardFound = false
+      let guardNode = lookupOpt(claim, KeyGuard, guardFound)
+      result.stowScopes.add StowScope(
+        package: expectText(lookup(claim, KeyPackage, KeyStowScopes),
+          KeyPackage),
+        activity: expectText(lookup(claim, KeyActivity, KeyStowScopes),
+          KeyActivity),
+        guard: PredicateExpr(expr:
+          if guardFound: expectText(guardNode, KeyGuard) else: ""))
 
 # ---------------------------------------------------------------------------
 # Convenience wrappers — wrap/unwrap the envelope around the CBOR body.

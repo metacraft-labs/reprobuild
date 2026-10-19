@@ -66,6 +66,8 @@ import std/[algorithm, strutils, tables]
 import repro_solver
 import repro_multihash
 import repro_lock/identity
+import repro_lock/toml_subset
+import repro_lock/certificate_policy
 
 export UnifiedSolution
 export SelectionStatus
@@ -246,6 +248,18 @@ type
     variants*: seq[LockedVariant]
     packages*: seq[LockedPackage]
     deps*: seq[LockedDep]
+    certificatePolicySection*: string
+      ## Test-Certificates TC-9b: the ``[certificate_policy]`` snapshot,
+      ## VERBATIM as the lock carries it (``""`` when it carries none).
+      ##
+      ## Kept as text, not parsed here, on purpose. Only the writers that
+      ## evaluate the provider (``repro lock refresh`` and the certifying
+      ## run's lock-update node) may change it; every other writer -- the
+      ## commit-time re-pin above all -- must carry it through byte for byte,
+      ## hand edits included. The strict reader in
+      ## ``repro_lock/certificate_policy`` is what the gates judge it with, so
+      ## a malformed snapshot does not make the lock unreadable to a build; it
+      ## makes the GATES refuse.
 
 const
   LockedArchiveBinary* = "binary"
@@ -444,40 +458,6 @@ proc sameSolution*(a, b: UnifiedSolution): bool =
   true
 
 # ---------------------------------------------------------------------------
-# TOML escaping (basic-string subset)
-# ---------------------------------------------------------------------------
-
-proc tomlEscape(s: string): string =
-  result = newStringOfCap(s.len + 2)
-  for ch in s:
-    case ch
-    of '\\': result.add("\\\\")
-    of '"': result.add("\\\"")
-    of '\n': result.add("\\n")
-    of '\r': result.add("\\r")
-    of '\t': result.add("\\t")
-    else: result.add(ch)
-
-proc tomlUnescape(raw: string): string =
-  result = newStringOfCap(raw.len)
-  var i = 0
-  while i < raw.len:
-    let ch = raw[i]
-    if ch == '\\' and i + 1 < raw.len:
-      let nxt = raw[i + 1]
-      case nxt
-      of '\\': result.add('\\')
-      of '"': result.add('"')
-      of 'n': result.add('\n')
-      of 'r': result.add('\r')
-      of 't': result.add('\t')
-      else: result.add(nxt)
-      i += 2
-    else:
-      result.add(ch)
-      inc i
-
-# ---------------------------------------------------------------------------
 # Serialize
 # ---------------------------------------------------------------------------
 
@@ -490,50 +470,6 @@ proc tomlUnescape(raw: string): string =
 # Parse
 # ---------------------------------------------------------------------------
 
-proc parseScalarString(rhs: string): string =
-  let s = rhs.strip()
-  if s.len >= 2 and s[0] == '"' and s[^1] == '"':
-    tomlUnescape(s[1 ..< s.high])
-  else:
-    s
-
-iterator inlineTables(rhs: string): Table[string, string] =
-  ## Yield each ``{ k = "v", ... }`` inline table from an inline-table
-  ## array right-hand side as a key→value map. Tolerant of whitespace;
-  ## the writer always emits the canonical comma-space form.
-  var s = rhs.strip()
-  if s.len >= 2 and s[0] == '[' and s[^1] == ']':
-    s = s[1 ..< s.high]
-  var i = 0
-  while i < s.len:
-    while i < s.len and s[i] != '{': inc i
-    if i >= s.len: break
-    inc i  # past '{'
-    var fields = initTable[string, string]()
-    # Parse ``key = "value"`` pairs until the closing '}'.
-    while i < s.len and s[i] != '}':
-      while i < s.len and s[i] in {' ', '\t', ','}: inc i
-      if i >= s.len or s[i] == '}': break
-      # key
-      var keyBuf = ""
-      while i < s.len and s[i] notin {'=', ' ', '\t'}:
-        keyBuf.add(s[i]); inc i
-      while i < s.len and s[i] in {' ', '\t', '='}: inc i
-      # value (quoted string only — the writer never emits bare values
-      # inside the inline tables).
-      if i < s.len and s[i] == '"':
-        inc i
-        var valBuf = ""
-        while i < s.len and s[i] != '"':
-          if s[i] == '\\' and i + 1 < s.len:
-            valBuf.add(s[i]); valBuf.add(s[i + 1]); i += 2
-          else:
-            valBuf.add(s[i]); inc i
-        inc i  # past closing quote
-        if keyBuf.len > 0:
-          fields[keyBuf] = tomlUnescape(valBuf)
-    if i < s.len and s[i] == '}': inc i  # past '}'
-    yield fields
 
 proc parseSolvedGraphLock*(content: string): SolvedGraphLock =
   ## Parse a committed solved-graph lock. Round-trips
@@ -544,7 +480,9 @@ proc parseSolvedGraphLock*(content: string): SolvedGraphLock =
   ## are ignored (forward-compatible within the v2 schema).
   result = SolvedGraphLock(schema: "", variants: @[], packages: @[])
   var sawSchema = false
-  for rawLine in content.splitLines():
+  # The policy snapshot's keys (``schema``, ``name``, ...) are not lock keys,
+  # so only the lines outside it are read.
+  for rawLine in splitCertificatePolicySection(content).lockPart.splitLines():
     let line = rawLine.strip()
     if line.len == 0 or line.startsWith("#"):
       continue
@@ -886,6 +824,13 @@ proc serializeLockedDependencies*(ld: LockedDependencies): string =
     if i > 0: result.add(", ")
     result.add(serializeDepInline(d))
   result.add("]\n")
+  # TC-9b: the certificate-policy snapshot, last and verbatim. Absent from
+  # every lock that enacts no policy, so those re-serialize byte-identically.
+  if ld.certificatePolicySection.len > 0:
+    result.add("\n")
+    result.add(ld.certificatePolicySection)
+    if not ld.certificatePolicySection.endsWith("\n"):
+      result.add("\n")
 
 proc serializeSolvedGraphLock*(lock: SolvedGraphLock): string =
   ## Render a ``SolvedGraphLock`` to a canonical committed-lock document.
@@ -919,8 +864,10 @@ proc parseLockedDependencies*(content: string): LockedDependencies =
   ## ``parseSolvedGraphLock``'s grammar; the ``deps`` array is the v2 addition.
   let solved = parseSolvedGraphLock(content)  # validates schema + solved part
   result = lockedDepsFromSolved(solved)
+  let split = splitCertificatePolicySection(content)
+  result.certificatePolicySection = split.policySection
   # Pull the v2 ``deps`` array (empty when the lock carries no deps).
-  for rawLine in content.splitLines():
+  for rawLine in split.lockPart.splitLines():
     let line = rawLine.strip()
     if line.len == 0 or line.startsWith("#") or line.startsWith("["):
       continue

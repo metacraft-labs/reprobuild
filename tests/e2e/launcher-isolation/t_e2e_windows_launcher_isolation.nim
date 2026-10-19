@@ -25,6 +25,7 @@
 import std/[os, osproc, sequtils, strutils, tempfiles]
 
 import std/unittest
+import repro_test_support/reasoned_skip
 
 import repro_launch_plan
 import repro_local_store

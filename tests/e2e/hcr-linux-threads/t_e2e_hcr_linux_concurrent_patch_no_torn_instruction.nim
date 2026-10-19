@@ -33,15 +33,31 @@
 ##                   overwrites. This is the number the statistical claim rests
 ##                   on, and it is measured rather than assumed.
 ##
+## CONDITIONS. The negative controls' ">= 50%" is a statistical claim, and it
+## was calibrated on a host that was not saturated: at load 150-215 on 32 CPUs
+## it stopped holding while `tier2` stayed clean in every run (reprobuild-pm
+## `issues/2026-09-26-hcr-concurrent-patch-gate-verdict-depends-on-host-load.md`).
+## So every fixture process is classified by the host load read just before it
+## starts, the calibrated checks are judged over the runs started inside
+## `m4_verdict.MaxLoadPerCpu`, and a host that never gets inside it produces
+## "conditions not met" — an explained skip, plus a `HCR-CONDITIONS-NOT-MET:`
+## line the HCR lane reports as NO VERDICT — never a failure and never a pass.
+## What would be a regression on any host is asserted over EVERY run, whatever
+## the load: `m4_verdict` says which check is which. A §6.3 quiescence timeout
+## is retried by the fixture as the defined outcome it is, counted, and checked
+## to have written nothing.
+##
 ## `allowed_mocks: none`. Real pthreads, real `tgkill`, real `futex`, real
 ## signal delivery, real `mprotect`, and the production
 ## `repro_hcr_lx_apply_direct_patch_at` reached through the probe shim that
 ## re-exports it. The patch bodies come out of a real `ET_REL` object.
 
 import std/[json, options, os, osproc, streams, strtabs, strutils, unittest]
+import repro_test_support/reasoned_skip
 
 when defined(linux) and defined(amd64):
   import m4_fixture
+  import m4_verdict
   import repro_hcr_agent
 
   const
@@ -62,6 +78,9 @@ when defined(linux) and defined(amd64):
   suite "e2e_hcr_linux_concurrent_patch_no_torn_instruction":
     test "tier-2 publication survives concurrent execution; tier-1 does not":
       var asserted = 0
+      # Set by every failed `ck`. A `skip` overwrites the case's status, so the
+      # conditions-not-met skip below is taken only when this is still false.
+      var anyFailed = false
       template ck(message: string; condition: untyped) =
         ## Counted `check`, per trap 4c: the count at the end of the test is
         ## asserted against a number a RUN produced, so a silent early return or
@@ -69,6 +88,7 @@ when defined(linux) and defined(amd64):
         inc asserted
         if not (condition):
           checkpoint(message)
+          anyFailed = true
         check condition
 
       let repoRoot = getCurrentDir()
@@ -93,201 +113,140 @@ when defined(linux) and defined(amd64):
       # standing inside the eight bytes a publication would overwrite. Without
       # this number the rest of the gate is an anecdote: "no tear was observed"
       # means nothing unless the window was actually occupied.
+      #
+      # The host condition is read BEFORE each process starts (see
+      # `m4_verdict.MaxLoadPerCpu`); a sample started outside it is retried,
+      # and EVERY attempt is kept: the unconditional checks judge them all.
       # ---------------------------------------------------------------------
-      let sample = runFixture(threadsBin, [
-        "sample", hexA, hexB, $Workers, $SampleRounds, $ChaosThreads])
-      ck "the sampling arm exited cleanly", sample.exitCode == 0
-      ck "the sampling arm produced a result", sample.payload != nil
-      let s = sample.payload
-      ck "every sampling round reached quiescence",
-        s["quiesceRounds"].getInt() == SampleRounds
-      ck "no sampling round failed to quiesce",
-        s["quiesceFailures"].getInt() == 0
-      # Complete-dump rule: the observation count must equal rounds x slots, not
-      # merely be positive. A truncated sample would satisfy every threshold
-      # below it.
-      ck "the parked-observation dump is complete",
-        s["parkedObservations"].getInt() ==
-          SampleRounds * (Workers + ChaosThreads)
-      ck "threads really were caught inside the publication window",
-        s["parkedPcInWindow"].getInt() > 0
-      ck "threads really were caught inside the sled",
-        s["parkedPcInSled"].getInt() >= s["parkedPcInWindow"].getInt()
-      ck "all twelve workers ran", s["distinctWorkerTids"].getInt() == Workers
-      ck "the signal storm delivered", s["chaosSignalsDelivered"].getInt() > 0
-      ck "the host has SYNC_CORE", s["membarrierSyncCore"].getBool()
-      ck "the host permits a RW|EXEC transient",
-        s["textRwxTransition"].getBool()
-
-      let inWindow = s["parkedPcInWindow"].getInt()
-      let observations = s["parkedObservations"].getInt()
-      checkpoint("in-window PC rate: " & $inWindow & " / " & $observations)
+      var samples: seq[SampleRun]
+      for attempt in 0 ..< AttemptsPerRun:
+        let load = hostLoadPerCpu()
+        let r = runFixture(threadsBin, [
+          "sample", hexA, hexB, $Workers, $SampleRounds, $ChaosThreads])
+        samples.add(SampleRun(exitCode: r.exitCode, payload: r.payload,
+                              loadPerCpu: load))
+        if inConditions(load):
+          break
+      let sample = samples[^1]
+      let s = if sample.payload != nil: sample.payload else: newJObject()
 
       # ---------------------------------------------------------------------
       # 2. THE FIVE ARMS.
       # ---------------------------------------------------------------------
-      # Arm tallies. `crashes` counts ONLY the fault we are looking for; a run
-      # that exits non-zero any other way lands in `strayExits` and is asserted
-      # to be empty. Merging the two — which this harness used to do — lets a
-      # build failure, an OOM or a fixture `HCR-M4-FATAL` masquerade as the
-      # hazard, which is trap 1 exactly: it makes the arms that MUST crash
-      # satisfiable by something that is not a crash.
-      type ArmResult = object
-        crashes, runs, anomalies, publications, adjust, nested: int
-        strayExits: seq[int]
-        inWindowFaults, outOfWindowFaults, missingWindow: int
-        faultOffsets: seq[int]
-        faultSignals: seq[int]
-
       proc runArm(mode: string): ArmResult =
-        for i in 0 ..< Runs:
+        collectArm(mode, Runs, proc (): ArmRun =
+          let load = hostLoadPerCpu()
           let r = runFixture(threadsBin, [
             mode, hexA, hexB, $Workers, $Publications, $ChaosThreads])
-          result.runs += 1
-          if r.exitCode != 0:
-            if r.crashed:
-              # Exit code CrashExitCode AND an `HCR-M4-CRASH` record. Both, not
-              # either: a die-before-output wearing the right code is
-              # indistinguishable from a fault unless the record is there too.
-              result.crashes += 1
-              if r.windowAddress == 0'u64:
-                result.missingWindow += 1
-              else:
-                let offset = int(r.faultPc.int64 - r.windowAddress.int64)
-                result.faultOffsets.add(offset)
-                result.faultSignals.add(r.faultSignal)
-                # THE REASON, not just the fact. Design §6.1 point 4 is
-                # specifically a thread resuming at a byte offset INSIDE the
-                # eight bytes the publication overwrites. A crash anywhere else
-                # is a different bug and must not be allowed to satisfy an arm
-                # whose whole job is to demonstrate this one.
-                if offset >= 0 and offset < 8:
-                  result.inWindowFaults += 1
-                else:
-                  result.outOfWindowFaults += 1
-                  checkpoint(mode & " run " & $i & " faulted at window+" &
-                    $offset & ", outside the 8-byte window, signal " &
-                    $r.faultSignal)
-            else:
-              result.strayExits.add(r.exitCode)
-              checkpoint(mode & " run " & $i & " exited " & $r.exitCode &
-                " without an rc-" & $CrashExitCode & " crash record: " &
-                r.stderrText)
-          if r.payload != nil:
-            result.anomalies += r.payload["anomalies"].getInt()
-            result.publications += r.payload["publicationsApplied"].getInt()
-            result.adjust += r.payload["quiesceAdjustCount"].getInt()
-            result.nested += r.payload["quiesceNestedAdjustCount"].getInt()
+          ArmRun(exitCode: r.exitCode, crashed: r.crashed,
+                 windowAddress: r.windowAddress, faultPc: r.faultPc,
+                 faultSignal: r.faultSignal, stderrText: r.stderrText,
+                 payload: r.payload, loadPerCpu: load))
 
       let tier2 = runArm("tier2")
       let tier1 = runArm("tier1")
       let noAdjust = runArm("tier2-noadjust")
       let torn = runArm("torn")
 
-      checkpoint("tier2 crashes " & $tier2.crashes & "/" & $tier2.runs &
-        "; tier1 " & $tier1.crashes & "/" & $tier1.runs &
-        "; tier2-noadjust " & $noAdjust.crashes & "/" & $noAdjust.runs &
-        "; torn " & $torn.crashes & "/" & $torn.runs)
+      for arm in [tier2, tier1, noAdjust, torn]:
+        checkpoint(arm.mode & " crashes " & $arm.measured.crashes & "/" &
+          $arm.measured.runs & " inside the conditions, " & $arm.all.crashes &
+          "/" & $arm.all.runs & " overall (highest load/CPU " &
+          formatFloat(arm.maxLoadPerCpu, ffDecimal, 2) & "); fault offsets " &
+          $arm.all.faultOffsets & " signals " & $arm.all.faultSignals &
+          "; quiescence aborts " & $arm.all.quiesceAborts & ", abandoned " &
+          $arm.all.quiesceAbandoned)
+        for note in arm.all.notes:
+          checkpoint(arm.mode & " " & note)
 
-      # -- every failing run failed the way we claim it did -------------------
-      # Asserted BEFORE the counts, because a count of crashes is only evidence
-      # about §6.1 point 4 if each one is that fault. Three separate properties,
-      # each of which the harness previously only asserted in prose:
-      #   1. no arm exited non-zero by any route other than the fault handler;
-      #   2. every fault announced its window, so the offset is knowable;
-      #   3. every fault's PC lies strictly inside the eight published bytes.
-      for (name, arm) in {"tier1": tier1, "tier2-noadjust": noAdjust,
-                          "torn": torn, "tier2": tier2}:
-        ck name & ": no run exited non-zero without an rc-" &
-          $CrashExitCode & " crash record",
-          arm.strayExits.len == 0
-        ck name & ": every faulting run announced its publication window",
-          arm.missingWindow == 0
-        ck name & ": every fault landed INSIDE the 8-byte window",
-          arm.outOfWindowFaults == 0
-        ck name & ": in-window faults account for every crash",
-          arm.inWindowFaults == arm.crashes
-
-      checkpoint("tier1 fault offsets " & $tier1.faultOffsets &
-        " signals " & $tier1.faultSignals)
-      checkpoint("tier2-noadjust fault offsets " & $noAdjust.faultOffsets &
-        " signals " & $noAdjust.faultSignals)
-      checkpoint("torn fault offsets " & $torn.faultOffsets &
-        " signals " & $torn.faultSignals)
-
-      # -- the positive control, asserted FIRST ------------------------------
-      # If a non-atomic publication of the same word does not kill the process,
-      # nothing below discriminates and the green arms are vacuous.
-      ck "EVERY non-atomic publication was detected (positive control)",
-        torn.crashes == torn.runs
-
-      # -- tier 1 is unsafe, and this gate says so out loud ------------------
-      ck "tier-1 publication fails under concurrent execution",
-        tier1.crashes > 0
-      ck "tier-1 fails often, not marginally",
-        tier1.crashes * 2 >= tier1.runs
-
-      # -- the IP adjustment is load-bearing ---------------------------------
-      ck "removing the §6.2 step 6 IP adjustment restores the failure",
-        noAdjust.crashes > 0
-      ck "the adjustment's removal fails often, not marginally",
-        noAdjust.crashes * 2 >= noAdjust.runs
-
-      # -- the shippable configuration ---------------------------------------
-      ck "no tier-2 run faulted", tier2.crashes == 0
-      ck "no tier-2 run observed a third return value", tier2.anomalies == 0
-      ck "every tier-2 run published everything it was asked to",
-        tier2.publications == Runs * Publications
-      # The mechanism ENGAGED. A quiescence that adjusted nothing across 24 runs
-      # would pass the two checks above for free, which is this campaign's
-      # dominant failure mode.
-      ck "the IP adjustment engaged at least once", tier2.adjust > 0
-      ck "the nested-signal-frame adjustment engaged at least once",
-        tier2.nested > 0
+      let verdict = gateVerdict(samples, tier2, tier1, noAdjust, torn,
+        runs = Runs, publications = Publications, sampleRounds = SampleRounds,
+        slots = Workers + ChaosThreads, workers = Workers)
 
       # Evidence, written unconditionally so a reviewer re-reading this
-      # milestone has the measured rates rather than the assertions' verdict.
-      # `checkpoint` output is only flushed on failure, so a green run would
-      # otherwise leave no numbers behind at all.
+      # milestone has the measured rates and the conditions they were measured
+      # under rather than the assertions' verdict. `checkpoint` output is only
+      # flushed on failure, so a green run would otherwise leave no numbers.
+      proc armEvidence(arm: ArmResult): JsonNode =
+        %*{"crashes": arm.measured.crashes, "runs": arm.measured.runs,
+           "allCrashes": arm.all.crashes, "allRuns": arm.all.runs,
+           "maxLoadPerCpu": arm.maxLoadPerCpu,
+           "anomalies": arm.all.anomalies,
+           "publications": arm.measured.publications,
+           "ipAdjustments": arm.all.adjust,
+           "nestedIpAdjustments": arm.all.nested,
+           "quiesceAborts": arm.all.quiesceAborts,
+           "quiesceBlockedAborts": arm.all.quiesceBlockedAborts,
+           "quiesceAbandoned": arm.all.quiesceAbandoned,
+           "faultOffsets": arm.all.faultOffsets,
+           "faultSignals": arm.all.faultSignals,
+           "strayExits": arm.all.strayExits}
+      let inWindow = s{"parkedPcInWindow"}.getInt()
+      let observations = s{"parkedObservations"}.getInt()
       let logDir = repoRoot / "test-logs"
       createDir(logDir)
       writeFile(logDir / "e2e_hcr_linux_concurrent_patch_no_torn_instruction.json",
         pretty(%*{
-          "schemaId": "reprobuild.hcr.hlx-m4.concurrency-evidence.v1",
+          "schemaId": "reprobuild.hcr.hlx-m4.concurrency-evidence.v2",
           "workers": Workers,
           "publicationsPerRun": Publications,
           "chaosThreads": ChaosThreads,
           "runsPerArm": Runs,
           "sampleRounds": SampleRounds,
-          "parkedObservations": s["parkedObservations"].getInt(),
+          "maxLoadPerCpu": MaxLoadPerCpu,
+          "conditionsMet": verdict.conditionsMet,
+          "conditionsReason": verdict.conditionsReason,
+          "sampleLoadPerCpu": sample.loadPerCpu,
+          "sampleAttempts": samples.len,
+          "parkedObservations": observations,
           "parkedPcInWindow": inWindow,
-          "parkedPcInSled": s["parkedPcInSled"].getInt(),
-          "inWindowRate": float(inWindow) / float(observations),
-          "chaosSignalsDelivered": s["chaosSignalsDelivered"].getInt(),
+          "parkedPcInSled": s{"parkedPcInSled"}.getInt(),
+          "inWindowRate":
+            if observations > 0: float(inWindow) / float(observations) else: 0.0,
+          "chaosSignalsDelivered": s{"chaosSignalsDelivered"}.getInt(),
           "arms": {
-            "tier2": {"crashes": tier2.crashes, "runs": tier2.runs,
-                      "anomalies": tier2.anomalies,
-                      "publications": tier2.publications,
-                      "ipAdjustments": tier2.adjust,
-                      "nestedIpAdjustments": tier2.nested},
-            "tier1": {"crashes": tier1.crashes, "runs": tier1.runs,
-                      "faultOffsets": tier1.faultOffsets,
-                      "faultSignals": tier1.faultSignals,
-                      "strayExits": tier1.strayExits},
-            "tier2-noadjust": {"crashes": noAdjust.crashes,
-                               "runs": noAdjust.runs,
-                               "faultOffsets": noAdjust.faultOffsets,
-                               "faultSignals": noAdjust.faultSignals,
-                               "strayExits": noAdjust.strayExits},
-            "torn": {"crashes": torn.crashes, "runs": torn.runs,
-                     "faultOffsets": torn.faultOffsets,
-                     "faultSignals": torn.faultSignals,
-                     "strayExits": torn.strayExits}
+            "tier2": armEvidence(tier2),
+            "tier1": armEvidence(tier1),
+            "tier2-noadjust": armEvidence(noAdjust),
+            "torn": armEvidence(torn)
           },
           "sampleResult": s
         }))
 
-      expectCount(asserted, 42)
+      # ---------------------------------------------------------------------
+      # 3. THE VERDICT.
+      #
+      # What would be a regression on any host is asserted ALWAYS, over every
+      # run. The negative controls' rates and the completeness checks are
+      # calibrated statistics, asserted only when every arm collected its runs
+      # inside the conditions; otherwise the case is reported as not having
+      # met them — counted by the suite apart from a failure — and says which
+      # arm and which readings. See `m4_verdict` for which check is which.
+      # ---------------------------------------------------------------------
+      ck "the verdict is the full check list",
+        verdict.checks.len == GateCheckCount
+      for c in verdict.checks:
+        if not c.conditional:
+          ck c.message, c.ok
+      if verdict.conditionsMet:
+        for c in verdict.checks:
+          if c.conditional:
+            ck c.message, c.ok
+        expectCount(asserted, 6 + GateCheckCount)
+      else:
+        expectCount(asserted, 6 + GateUnconditionalCheckCount)
+        # `skip` overwrites the case's status, so it must never follow ANY
+        # failed check: that would turn a regression into a "conditions not
+        # met". The count check above is included in that.
+        if not anyFailed and asserted == 6 + GateUnconditionalCheckCount:
+          let reason = "conditions not met (HLX-M4 calibrated at load/CPU <= " &
+            $MaxLoadPerCpu & "): " & verdict.conditionsReason
+          # The line the HCR lane keys on to report NO VERDICT rather than a
+          # refusal (`scripts/lib/hcr_lane_verdict.sh`).
+          echo "HCR-CONDITIONS-NOT-MET: " &
+            "e2e_hcr_linux_concurrent_patch_no_torn_instruction: " & reason
+          skip(reason)
+
 
     test "the AGENT chooses tier 2 over the wire for a multithreaded target":
       ## The in-process arms above prove the publication is safe under

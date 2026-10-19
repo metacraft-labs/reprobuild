@@ -25,7 +25,7 @@ import ./errors
 
 const
   RbpiMagic*         = "RBPI"           ## 4-byte ASCII envelope magic.
-  RbpiSchemaVersion* = 3'u16            ## Current envelope schema version.
+  RbpiSchemaVersion* = 10'u16           ## Current envelope schema version.
     ##
     ## Version history:
     ##   1 (M83 Phase B): initial envelope; ActivityElement carries
@@ -41,14 +41,12 @@ const
     ##                     package name doesn't match the binary name
     ##                     (e.g. `ripgrep` -> `rg`); present only when
     ##                     non-empty.
-    ##     The version bump matters for the on-disk cache: profile
-    ##     compile artifacts at `<state-dir>/profile-cache/<digest>.rbpi`
-    ##     mix the schema version into the digest input (see
-    ##     `computeProfileDigest`), so a v1 cache entry's digest never
-    ##     collides with a v2 entry for the same source set; v1 files
-    ##     are also rejected by the strict reader at read time
-    ##     (`unsupported RBPI schema version`), which the cache validity
-    ##     check (`cachedArtifactIsValid`) catches as "miss → recompile".
+    ##     The version bump matters for the on-disk cache: the profile
+    ##     compile edge's weak fingerprint names the schema version
+    ##     (`profileCompileWeakFingerprint`), so an action-cache record
+    ##     written for v1 is never served for v2; v1 files are also
+    ##     rejected by the strict reader at read time
+    ##     (`unsupported RBPI schema version`).
     ##   3 (Windows-System-Resources Phase G): ProfileIntent gains a
     ##     new top-level CBOR key ``"buildActions"`` carrying the list
     ##     of profile-scope action-edge intents (typed-tool
@@ -60,6 +58,48 @@ const
     ##     cache-hit path's strict-reader rejection re-runs the macro
     ##     after this build upgrades, in case the new macro path is
     ##     reachable from a profile that compiled cleanly under v2.
+    ##   4 (GM3, platform-neutral intent): ResourceIntent and
+    ##     ConfigOverride CBOR maps gain an OPTIONAL ``"guard"`` text
+    ##     field -- the runtime predicate under which the element
+    ##     applies, present only when non-empty. Bumped because a build
+    ##     that did not know the key would decode a guarded element as
+    ##     unconditional and apply it on every host.
+    ##   5 (GM4, plan-time data files): ProfileIntent gains an OPTIONAL
+    ##     top-level ``"dataFiles"`` array of text -- the data files the
+    ##     profile's ``data:`` section names, which the planner reads and
+    ##     expands. Bumped because a build that did not know the key would
+    ##     plan the profile without the rows those files contribute.
+    ##   6 (contribution-catalog imports): ProfileIntent gains an
+    ##     OPTIONAL top-level ``"catalogImports"`` array of text -- the
+    ##     contribution-catalog modules the profile's ``catalogs:`` section
+    ##     imports. Bumped because a build that did not know the key would
+    ##     resolve the profile's packages without those catalogs'
+    ##     contributions.
+    ##   7 (GM7, concern-scoped apply): ProfileIntent gains an OPTIONAL
+    ##     top-level ``"hostApplies"`` map (host -> concern names) -- the
+    ##     concerns a block-form ``hosts:`` entry says Reprobuild applies on
+    ##     that host. Bumped because a build that did not know the key would
+    ##     apply every concern on a host that hands some of them to another
+    ##     tool.
+    ##   8 (GM9, activity-scoped resources): ResourceIntent CBOR maps gain
+    ##     an OPTIONAL ``"activity"`` text field -- the activity the
+    ##     resource belongs to, present only when non-empty. Bumped
+    ##     because a build that did not know the key would decode an
+    ##     activity-scoped resource as profile-wide and apply it on hosts
+    ##     that do not select the activity.
+    ##   9 (GM10, host system-management attribute): ProfileIntent gains an
+    ##     OPTIONAL top-level ``"systemManagedElsewhere"`` map (host -> map
+    ##     with an optional ``"managedBy"`` text) -- the hosts whose
+    ##     block-form ``hosts:`` entry says ``system: managedElsewhere[(...)]``.
+    ##     Bumped because a build that did not know the key would let
+    ##     ``repro infra apply`` take over a host whose system another
+    ##     repository manages.
+    ##  10 (GM11, activity-scoped stow packages): ProfileIntent gains an
+    ##     OPTIONAL top-level ``"stowScopes"`` array (maps with ``"package"``,
+    ##     ``"activity"`` and an optional ``"guard"``) -- the `stow/` packages
+    ##     an activity's ``stow:`` block claims. Bumped because a build that
+    ##     did not know the key would materialize a claimed package on every
+    ##     host, including the ones that do not select its activity.
     ## When you change the on-the-wire CBOR shape of ANY field that
     ## affects how a downstream consumer would interpret the envelope,
     ## bump this constant AND document the change here.

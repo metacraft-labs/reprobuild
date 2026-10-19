@@ -7,7 +7,10 @@ set -euo pipefail
 # stay shell-shaped until typed-tool resolver coverage reaches those helpers.
 mkdir -p build build/nimcache test-logs
 # Protocol evidence describes one execution, never a reusable build artifact.
-rm -rf test-logs/results test-logs/parallel-run.json
+# test-logs/suite-finished.json is the end-of-script marker written just
+# before the final exit (see write_suite_finished_marker); a previous run's
+# copy must never vouch for this one, so it goes before anything is built.
+rm -rf test-logs/results test-logs/parallel-run.json test-logs/suite-finished.json
 mkdir -p test-logs/results
 repo_root="$(pwd -P)"
 # Keep large suite scratch off /tmp and outside the checkout; some tests build
@@ -34,8 +37,15 @@ fi
 #
 # Keyed on a checksum of the absolute checkout path rather than its basename:
 # the slot has to stay SHORT because a unix socket bound under TMPDIR must fit
-# sun_path's 108 bytes, and two worktrees can share a basename anyway. The
-# result is 49 characters against the old 47, so this does not move that limit.
+# sun_path — 104 bytes on macOS, 108 on Linux, the terminating NUL included,
+# and only 92 on macOS where Nim's std/net binds or dials the path — and two
+# worktrees can share a basename anyway. The result is ~50 characters against
+# the old 47. That leaves a fixture only ~40 bytes for its own nesting and
+# socket name on macOS, which is NOT enough for every fixture (the engine
+# RunQuota fixtures measured 105), so the slot length is not what keeps a
+# socket bindable: a fixture binding a RunQuota endpoint under its own scratch
+# root must take it from repro_test_support.runquotaRendezvousDir, which moves
+# the endpoint to a short private directory when the root would overflow.
 # The `rm -rf` is kept — every run still starts from empty scratch — but now
 # only ever deletes the scratch of the checkout that owns it.
 test_tmp_slot="$(printf '%s' "${repo_root}" | cksum | cut -d' ' -f1)"
@@ -480,34 +490,138 @@ repro_build_collection() {
   # the whole body — so the failure is returned explicitly: a reset that could
   # not clear the directory stops the run now, with its own diagnostic, rather
   # than spending four hours to produce a report nobody can attribute.
-  repro_build_report_reset "${report_dir}" || return 1
-  # ``--write-report`` keeps the full record for the CI artefact. The FAILURE
-  # report below needs no flag: a failed build writes it unasked, which is the
-  # whole point of the outcome-dependent persist default.
+  #
+  # The status is REPRO_BUILD_REPORT_UNTRUSTED_STATUS, not a plain 1: the
+  # collector below never runs, so test-logs still holds an EARLIER build's
+  # archived failure report under this collection's name, and the
+  # ``.#test-builds`` caller must not hand that file to
+  # drop_failed_test_binaries.py.
+  repro_build_report_reset "${report_dir}" \
+    || return "${REPRO_BUILD_REPORT_UNTRUSTED_STATUS}"
+  # ``--write-report`` keeps the full record for the CI artefact — on EVERY
+  # outcome, which is why the collection below is not conditional. The FAILURE
+  # report needs no flag: a failed build writes it unasked, which is the whole
+  # point of the outcome-dependent persist default.
   timeout --kill-after=30s "${BUILD_TIMEOUT}" \
     "${repro_exe}" build --tool-provisioning=path --daemon=off --no-runquota \
     --write-report "${collection}" \
     || build_status=$?
-  if (( build_status != 0 )); then
-    if (( build_status == 124 )); then
-      # Say what this is, because it has already been misread once: a 2026-09-12
-      # run cut here at 989/1538 was reported as twenty-four failed compiles,
-      # and two days went into binaries that were sitting on disk, built by the
-      # very run whose failures they were said to be.
-      printf 'Timed out building %s after %s -- the build did NOT fail, it ran out of wall clock.\n' \
-        "${collection}" "${BUILD_TIMEOUT}" >&2
-      printf 'No action failed. Raise REPROBUILD_BUILD_TIMEOUT (a cold .#test-builds on a contended\n' >&2
-      printf 'host has been measured past 7h) or re-run with REPROBUILD_TEST_WARM_REUSE=1.\n' >&2
-    fi
-    repro_collect_build_reports "${report_dir}" "${collection}" "test-logs"
-    return "${build_status}"
+  if (( build_status == 124 )); then
+    # Say what this is, because it has already been misread once: a 2026-09-12
+    # run cut here at 989/1538 was reported as twenty-four failed compiles,
+    # and two days went into binaries that were sitting on disk, built by the
+    # very run whose failures they were said to be.
+    printf 'Timed out building %s after %s -- the build did NOT fail, it ran out of wall clock.\n' \
+      "${collection}" "${BUILD_TIMEOUT}" >&2
+    printf 'No action failed. Raise REPROBUILD_BUILD_TIMEOUT (a cold .#test-builds on a contended\n' >&2
+    printf 'host has been measured past 7h) or re-run with REPROBUILD_TEST_WARM_REUSE=1.\n' >&2
   fi
+  # Collect on EVERY outcome, success included, and keep this call out of any
+  # conditional (tests/unit/test_build_report_attribution.py checks where it
+  # sits). It used to sit under ``if (( build_status != 0 ))``, so a
+  # successful build archived nothing, the next run's reset deleted the
+  # report it had written, and the archive an EARLIER build left under
+  # ``test-logs/build-report-<slug>.json`` kept the current name. Measured:
+  # a 3,074,899,124-byte ``build-report-__test_builds.json`` dated 2026-09-12
+  # was read on 2026-09-23 as the report of that day's successful
+  # ``.#test-builds`` runs (reprobuild-pm
+  # issues/2026-09-24-successful-build-report-never-archived.md). The
+  # collector now removes the collection's earlier archives before it
+  # archives this build's, so the name holds this build's report or nothing.
+  #
+  # Its status is non-zero only when an earlier archive could not be removed
+  # or a copy failed, both already announced on stderr. On a SUCCESS it is
+  # not propagated: failing a build that succeeded over a log-directory copy
+  # would stop the suite for something the build did not do. On a FAILURE it
+  # is, as REPRO_BUILD_REPORT_UNTRUSTED_STATUS, because the archived failure
+  # report is then not known to be this build's -- an earlier one may have
+  # survived under its name -- and the ``.#test-builds`` caller would
+  # otherwise delete the binaries THAT build failed to produce. (A timeout
+  # keeps its 124, which already stops that caller.) The cost is disk: the
+  # success report of a cold ``.#test-builds`` is gigabytes, and it is now
+  # copied on every run rather than only on failed ones.
+  local collect_status=0
+  repro_collect_build_reports "${report_dir}" "${collection}" "test-logs" \
+    "${build_status}" || collect_status=$?
+  if (( build_status != 0 && build_status != 124 && collect_status != 0 )); then
+    return "${REPRO_BUILD_REPORT_UNTRUSTED_STATUS}"
+  fi
+  return "${build_status}"
 }
 repro_build_collection ".#apps" || exit 1
 repro_build_collection ".#test-helpers" || exit 1
 # M2: build canonical test fixtures, including the io-monitor shim.
 repro_build_collection ".#test-fixtures" || exit 1
-repro_build_collection ".#test-builds" || exit 1
+# Fixtures built from SIBLING checkouts: today only the `ct-mcr` recorder
+# bundle that e2e_hcr_linux_replay_of_patched_recording records and replays
+# with (Linux x86-64 only, the one platform repro.nim declares the collection
+# on). They are a separate collection because they can fail for reasons that
+# say nothing about this tree -- a sibling that is not checked out, a private
+# dependency the host cannot fetch -- and that must not stop every other case
+# from running. Each test that needs one depends on its edge and fails on its
+# own when it is missing, naming that edge; the collection's failure is
+# re-raised at the end like the other phases'.
+cross_repo_fixtures_status=0
+if [[ "$(uname -s)" == "Linux" && "$(uname -m)" =~ ^(x86_64|amd64)$ ]]; then
+  repro_build_collection ".#test-cross-repo-fixtures" || cross_repo_fixtures_status=$?
+  if (( cross_repo_fixtures_status != 0 )); then
+    printf '::error:: .#test-cross-repo-fixtures failed (exit %d); running the suite, failure re-raised at the end\n' \
+      "${cross_repo_fixtures_status}" >&2
+  fi
+fi
+# The Nix package of THIS tree (`nix build .#default`), which the
+# installed-package gates (tests/e2e/m83/t_e2e_nix_package_compiles_profile*)
+# run. Built once here instead of once per case: the build runs in the nix
+# daemon, outside every case's process group, and concurrent cases waiting on
+# it printed nothing until the runner killed them on its idle timeout. A
+# separate collection for the cross-repo one's reason -- it can fail for
+# reasons that say nothing about the rest of the suite -- with its failure
+# re-raised at the end. Linux and macOS, where repro.nim declares it.
+package_fixtures_status=0
+if [[ "$(uname -s)" == "Linux" || "$(uname -s)" == "Darwin" ]]; then
+  repro_build_collection ".#test-package-fixtures" || package_fixtures_status=$?
+  if (( package_fixtures_status != 0 )); then
+    printf '::error:: .#test-package-fixtures failed (exit %d); running the suite, failure re-raised at the end\n' \
+      "${package_fixtures_status}" >&2
+  fi
+fi
+# A failed test COMPILE is a failed test, not a reason to run nothing. This
+# used to `exit 1` here, so one broken compile cancelled every other case: one
+# 22-hour run and one 7-hour run each produced no test results at all for a
+# single failed action out of ~1 800. Now the failed actions' binaries are
+# deleted (a copy an earlier warm run left would otherwise run as if this
+# revision had built it), the rest of the suite runs, and the failure is
+# re-raised at the end like the other phases'. When the script cannot tell
+# which binaries are stale -- a timeout, no report attributed to this build,
+# blocked actions -- it stops, as before.
+#
+# The failure report read below is the ARCHIVED copy in test-logs, and it is
+# this build's or absent: repro_build_collection's collector removes the
+# collection's earlier archives before archiving. Before it did, a failed
+# build with no attributable report of its own (killed with a status other
+# than 124, or dead before planning) left an EARLIER run's archive under this
+# name, and the binaries of that run's failures -- not this one's -- were the
+# ones deleted. Absent, drop_failed_test_binaries.py finds no usable report
+# and the run stops, which is the "cannot tell" arm described above. When the
+# earlier archive could NOT be removed (or the out-dir reset failed, so the
+# collector never ran), repro_build_collection returns
+# REPRO_BUILD_REPORT_UNTRUSTED_STATUS and the run stops without reading it.
+test_builds_status=0
+repro_build_collection ".#test-builds" || test_builds_status=$?
+if (( test_builds_status != 0 )); then
+  # 124: timed out. REPRO_BUILD_REPORT_UNTRUSTED_STATUS: the archived failure
+  # report may be an earlier build's. Neither may be read for which binaries
+  # to delete.
+  if (( test_builds_status == 124 \
+        || test_builds_status == REPRO_BUILD_REPORT_UNTRUSTED_STATUS )) \
+      || ! python3 scripts/drop_failed_test_binaries.py \
+      "test-logs/build-failure-report-$(repro_build_report_slug ".#test-builds").json" \
+      build/test-bin; then
+    exit 1
+  fi
+  printf '::error:: .#test-builds failed (exit %d); running every test that built, failure re-raised at the end\n' \
+    "${test_builds_status}" >&2
+fi
 
 REPROBUILD_BIN_ABS="$(cd build/bin && pwd)"
 export PATH="${REPROBUILD_BIN_ABS}:${PATH}"
@@ -710,7 +824,12 @@ fi
 # guarantee comes from `.#test-builds` having succeeded, not from the Python
 # phase's position relative to the Nim one. Nothing between the two deletes a
 # test binary.
-export REPROBUILD_SUITE_INVENTORY_REQUIRE_BUILT_TREE=1
+# Only when the build really did succeed: after a failed compile the missing
+# binary is already reported (above, and re-raised below), and the inventory
+# must not turn that one failure into one refusal per inventory case.
+if (( test_builds_status == 0 )); then
+  export REPROBUILD_SUITE_INVENTORY_REQUIRE_BUILT_TREE=1
+fi
 # Hand the inventory the catalog the runner just published. Absent, stale or
 # unreadable, this is a no-op and the inventory probes as before.
 export REPROBUILD_SUITE_INVENTORY_RUN_CATALOG="${run_catalog}"
@@ -747,4 +866,56 @@ if (( nim_phase_status != 0 )); then
   printf '\nNim test phase exited %d\n' "${nim_phase_status}" >&2
   suite_status="${nim_phase_status}"
 fi
+if (( test_builds_status != 0 )); then
+  printf '\n.#test-builds failed (exit %d); see the NOT BUILT lines above\n' \
+    "${test_builds_status}" >&2
+  (( suite_status != 0 )) || suite_status="${test_builds_status}"
+fi
+if (( cross_repo_fixtures_status != 0 )); then
+  printf '\n.#test-cross-repo-fixtures failed (exit %d); see its build report above\n' \
+    "${cross_repo_fixtures_status}" >&2
+  (( suite_status != 0 )) || suite_status="${cross_repo_fixtures_status}"
+fi
+if (( package_fixtures_status != 0 )); then
+  printf '\n.#test-package-fixtures failed (exit %d); see its build report above\n' \
+    "${package_fixtures_status}" >&2
+  (( suite_status != 0 )) || suite_status="${package_fixtures_status}"
+fi
+
+# The end-of-script marker: written only here, after the Python phase and the
+# re-raise above, so its presence means this script reached its end. The
+# runner's test-logs/parallel-run.json says the Nim cases reached a verdict,
+# but not that the Python modules after them ran; CI's "Declare suite
+# coverage" step (scripts/ci_suite_coverage.py --finished-marker) needs both
+# before it calls a run a verdict on the code. Removed at the top of this
+# script so a stale copy cannot count. Written to a temporary name and
+# renamed, so a reader never sees half a document. Failing to write it is
+# reported and does not change the exit status: the status is the gate, the
+# marker is only evidence that the status is final.
+json_string() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '"%s"' "${s}"
+}
+write_suite_finished_marker() {
+  local marker="test-logs/suite-finished.json"
+  local modules="" module
+  for module in "${python_failed_modules[@]+"${python_failed_modules[@]}"}"; do
+    modules+="${modules:+, }$(json_string "${module}")"
+  done
+  {
+    printf '{\n'
+    printf '  "schema": "reprobuild.suite-finished.v1",\n'
+    printf '  "test_builds_status": %d,\n' "${test_builds_status}"
+    printf '  "cross_repo_fixtures_status": %d,\n' "${cross_repo_fixtures_status}"
+    printf '  "package_fixtures_status": %d,\n' "${package_fixtures_status}"
+    printf '  "nim_phase_status": %d,\n' "${nim_phase_status}"
+    printf '  "python_failed_modules": [%s],\n' "${modules}"
+    printf '  "suite_status": %d\n' "${suite_status}"
+    printf '}\n'
+  } > "${marker}.tmp" && mv -f "${marker}.tmp" "${marker}"
+}
+write_suite_finished_marker \
+  || printf '::warning:: could not write test-logs/suite-finished.json\n' >&2
 exit "${suite_status}"

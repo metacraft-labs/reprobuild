@@ -48,6 +48,8 @@ const
     "gperf", "libtool", "libtoolize", "m4", "make", "mpc", "mpfr",
     "rsync", "texinfo",
   ]
+  FormerMsys2CatalogPackages = ["autoconf", "automake", "libtool",
+    "libtoolize"]
   StubsWithScoop = [
     "perl", "m4", "bison", "bc", "file", "swig",
   ]
@@ -84,15 +86,32 @@ suite "DSL-port M9.R.11 — stub provisioning widening":
       require diagnostic.contains("does not declare provisioning: tarball metadata")
       check diagnostic.contains("bison >=3.0")
 
+      # Since eb88a3bd2 a tarball-mode tool use with no host tarball falls
+      # through to its from-source recipe
+      # (Dependency-Provisioning-In-Build-Graph.md 4.3), so the refusal is
+      # no longer the planning gate's: with neither a tarball nor a recipe
+      # it is rule 3's, naming the host and the recipe path probed. The
+      # recipe root is pinned to an empty scratch tree so the outcome does
+      # not depend on which catalog checkout happens to sit beside this one.
       let scratch = createTempDir("repro-bison-no-tarball-", "")
       defer: removeDir(scratch)
       let storeRoot = scratch / "tool-store"
+      let recipes = scratch / "recipes"
+      createDir(recipes)
+      let savedRoot = getEnv(FromSourceRootEnvVar)
+      putEnv(FromSourceRootEnvVar, recipes)
+      defer:
+        if savedRoot.len > 0: putEnv(FromSourceRootEnvVar, savedRoot)
+        else: delEnv(FromSourceRootEnvVar)
       try:
         discard toolBuildIdentity(artifactFor(iface), tpmTarball,
           pathValue = "", storeRoot = storeRoot)
         check false
-      except ValueError as exc:
-        check exc.msg == diagnostic
+      except OSError as exc:
+        checkpoint exc.msg
+        check exc.msg.contains("package \"bison\" has no tarball " &
+          "realization for this host")
+        check exc.msg.contains(recipes / "bison" / "repro.nim")
       check not dirExists(storeRoot)
 
   when defined(posix):
@@ -125,6 +144,18 @@ suite "DSL-port M9.R.11 — stub provisioning widening":
         check pkg.nixProvisioning.len >= 1
         if name == "make":
           check pkg.tarballProvisioning.len == 1
+        elif name in FormerMsys2CatalogPackages:
+          # GM4b moved the MSYS2 catalog record of these four into the
+          # package as its one Windows `tarball` realization. It is a
+          # prebuilt MSYS2 package merged by the home archive realizer —
+          # binaries, not a source archive — so it is the only tarball
+          # record these packages may carry.
+          require pkg.tarballProvisioning.len == 1
+          let channel = pkg.tarballProvisioning[0]
+          check channel.detail.installMethod == "msys2-pacman"
+          check channel.os == "windows"
+          check channel.url.startsWith("https://repo.msys2.org/")
+          check channel.executablePath.startsWith("bin/")
         else:
           check pkg.tarballProvisioning.len == 0
         for channel in pkg.tarballProvisioning:

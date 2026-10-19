@@ -7,13 +7,24 @@
 ## arm builds the direct execute-edge selector and verifies that the
 ## scheduler RUNS both ``reprobuild.apps.repro`` and the execute edge.
 ##
-## "Runs" is the whole claim, and it needs a cold cache to mean anything, so
-## the arm brings its own: the build is scoped to a per-case
-## ``--action-cache-root``. Without that the outcome depends on what else
-## touched the run-wide cache first — ``scripts/run_tests.sh`` builds
-## ``.#apps`` before any test starts, which would leave
-## ``reprobuild.apps.repro`` a cache hit and ``launched = false`` here, and the
-## case would fail saying nothing about the wiring it exists to check.
+## "Runs" is the whole claim, and it needs the two edges to be invalid to mean
+## anything: ``scripts/run_tests.sh`` builds ``.#apps`` before any test starts,
+## which leaves ``reprobuild.apps.repro`` a cache hit and ``launched = false``
+## in the run-wide cache, and the case would fail saying nothing about the
+## wiring it exists to check. The arm therefore invalidates exactly those two
+## edges with the engine's selective rebuild — ``--hard-rebuild --only`` with
+## one pattern per edge (``Edge-Determinism-And-Soft-Rebuild.md`` §4.3/§4.5)
+## — and shares the run-wide root for everything else.
+##
+## It used to bring a private, empty ``--action-cache-root`` instead. That made
+## the two edges cold, and with them the recipe compile and interface
+## extraction of ``repro.nim``, the engine binary and every other edge in the
+## closure: ~15 minutes per run spent re-establishing facts the case does not
+## assert. The engine binary (``reprobuild.apps.reprobuild``) is deliberately
+## NOT forced. A plain ``--only reprobuild.apps.repro`` would force it — that
+## spelling is a substring match, and the engine's id, like most of the apps',
+## contains it — so the app edge is named by the anchored glob
+## ``reprobuild.apps.rep?o``, which matches that one id and nothing else.
 ##
 ## ``reprobuild.apps.repro`` IS CACHEABLE, and the report must say so. This arm
 ## used to assert ``cdNotCacheable`` for it, from a period when every compile
@@ -21,10 +32,10 @@
 ## reversed on 2026-08-19 — see the HISTORY note in ``repro.nim`` and
 ## ``reprobuild-specs/Compiles-Are-Normal-Edges.md`` — and ``nim.c`` defaults
 ## ``cacheable = true`` with no override on this edge, so ``cdNotCacheable``
-## became unreachable by construction. Against a cache root created by this
-## case, an edge that succeeded AND launched is a cache MISS, which is what the
-## arm asserts now. Re-running the same case against the SAME root instead
-## reports ``cdHit`` and no launch — that is the control that shows the
+## became unreachable by construction. A cacheable edge the rebuild verb
+## invalidated, and that succeeded AND launched, is a cache MISS, which is
+## what the arm asserts. The same build without the verb, against the same
+## root, reports ``cdHit`` and no launch — that is the control that shows the
 ## assertion is reading the engine's real decision rather than a constant.
 
 import std/[json, os, osproc, strtabs, strutils, tempfiles, unittest]
@@ -34,6 +45,12 @@ const RepoMarker = "repro.nim"
 const TargetTest = "t_show_conventions_cli"
 const TargetSource = "libs/repro_core/tests/t_show_conventions_cli.nim"
 const ExecuteActionId = "reprobuild.test_execute." & TargetTest
+const ReproAppActionId = "reprobuild.apps.repro"
+const ReproAppForcePattern = "reprobuild.apps.rep?o"
+  ## ``ReproAppActionId`` as an ANCHORED glob. ``--only`` treats a pattern
+  ## without ``*``/``?`` as a substring, and ``reprobuild.apps.repro`` is a
+  ## substring of the engine's id (``reprobuild.apps.reprobuild``) and of most
+  ## other apps' ids; this spelling matches exactly the one edge.
 
 proc findRepoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -99,28 +116,32 @@ proc specSlice(reproTestsText, source: string): string =
   let limit = min(reproTestsText.len, pos + 400)
   reproTestsText[pos ..< limit]
 
-proc runBuildTarget(reproBin, repoRoot, selector, cacheRoot,
+proc runBuildTarget(reproBin, repoRoot, selector: string;
+                    forcePatterns: openArray[string];
                     reportPath: string): tuple[output: string; exitCode: int] =
-  ## THE REPORT NEEDED THE SAME SCOPING THE CACHE ROOT GOT. A bare
-  ## ``--write-report`` lands on ``<outDir>/build-report.json``, and ``outDir``
-  ## collapses to ONE directory for every selector this suite drives:
-  ## ``outputDirForTarget`` (``libs/repro_cli_support/src/
-  ## repro_cli_support.nim:1103``) takes ``outputName`` from
-  ## ``resolveProjectFile(".")`` = ``splitFile("repro.nim").name`` = ``repro``
-  ## (same file, 726-729), and ``scripts/run_tests.sh`` sets no
-  ## ``REPROBUILD_WORK_ROOT``. Scoping the cache root without scoping the
-  ## report left half the isolation this case's header argues for.
-  let args = @[
+  ## THE REPORT IS SCOPED TO THE CASE. A bare ``--write-report`` lands on
+  ## ``<outDir>/build-report.json``, and ``outDir`` collapses to ONE directory
+  ## for every selector this suite drives: ``outputDirForTarget``
+  ## (``libs/repro_cli_support/src/repro_cli_support.nim``) takes
+  ## ``outputName`` from ``resolveProjectFile(".")`` =
+  ## ``splitFile("repro.nim").name`` = ``repro``, and ``scripts/run_tests.sh``
+  ## sets no ``REPROBUILD_WORK_ROOT``.
+  ##
+  ## NO ``--action-cache-root``: the build uses the run-wide root, and the
+  ## edges this case asserts about are forced; see the module header.
+  var args = @[
     reproBin.quoteShell,
     "build",
     selector,
     "--tool-provisioning=path",
     "--daemon=off",
-    "--action-cache-root=" & cacheRoot.quoteShell,
+    "--hard-rebuild"]
+  for pattern in forcePatterns:
+    args.add("--only=" & pattern.quoteShell)
+  args.add(@[
     "--write-report=" & reportPath.quoteShell,
     "--log=actions",
-    "--progress=quiet",
-  ]
+    "--progress=quiet"])
   runWithRunquotaOnPath(args.join(" "), repoRoot)
 
 suite "Bootstrap-And-Self-Build B3: repro binary input wiring":
@@ -163,14 +184,12 @@ suite "Bootstrap-And-Self-Build B3: repro binary input wiring":
     check fileExists(runquotad)
 
     if fileExists(reproBin) and fileExists(runquotad):
-      let cacheRoot = createTempDir("repro-b3-invalidation-cache-", "")
-      defer: removeDir(cacheRoot)
       let reportDir = createTempDir("repro-b3-invalidation-report-", "")
       defer: removeDir(reportDir)
       let reportPath = reportDir / "build-report.json"
       let selector = ".#" & ExecuteActionId
       let (output, exitCode) = runBuildTarget(reproBin, repoRoot, selector,
-                                              cacheRoot, reportPath)
+        [ReproAppForcePattern, ExecuteActionId], reportPath)
       checkpoint("exit=" & $exitCode)
       if exitCode != 0:
         checkpoint(output)
@@ -188,13 +207,13 @@ suite "Bootstrap-And-Self-Build B3: repro binary input wiring":
         var reproAppAction, executeAction: JsonNode = nil
         for action in actions:
           let id = action{"id"}.getStr()
-          if id == "reprobuild.apps.repro":
+          if id == ReproAppActionId:
             reproAppAction = action
           elif id == ExecuteActionId:
             executeAction = action
 
-        check reproAppAction != nil
-        check executeAction != nil
+        check not reproAppAction.isNil
+        check not executeAction.isNil
 
         if reproAppAction != nil:
           checkpoint("reprobuild.apps.repro status=" &

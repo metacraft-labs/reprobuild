@@ -27,7 +27,9 @@ import std/[strutils, unittest]
 
 import repro_cli_support
 
-const fixtureCommit = "a858633c1f4d7bb4b7c2e2b6a1c0d9e8f7a6b5c4"
+const
+  fixtureCommit = "a858633c1f4d7bb4b7c2e2b6a1c0d9e8f7a6b5c4"
+  fixtureContent = "git-tree-sha1:9f8e7d6c5b4a3928170695e4d3c2b1a099887766"
 
 proc cert(framework: string; targets: seq[string]): TestCertificate =
   TestCertificate(
@@ -39,8 +41,8 @@ proc cert(framework: string; targets: seq[string]): TestCertificate =
     result: tcrPassed,
     issuedAt: "2026-06-23T10:14:33Z",
     issuer: "repro-test@build-host-7",
-    vcs: TestCertificateVcs(repo: "example", commit: fixtureCommit,
-      clean: true, untracked: false),
+    vcs: TestCertificateVcs(repo: "example", content: fixtureContent,
+      untracked: false, base: fixtureCommit),
     commands: @[TestCertificateCommand(argv: @["repro", "test"])])
 
 proc found(name: string; c: TestCertificate): FoundCertificate =
@@ -48,7 +50,9 @@ proc found(name: string; c: TestCertificate): FoundCertificate =
     read: CertificateReadResult(status: crsOk, cert: c,
       schemaSeen: c.schema))
 
-let state = VerificationState(repo: "example", commit: fixtureCommit)
+# TC-8b: the state under evaluation, described by its content id.
+let state = stateWithKnownContent([KnownContentId(algorithm: "git-tree-sha1",
+  id: fixtureContent)], repo = "example")
 
 proc requirement(): VerificationRequirement =
   VerificationRequirement(
@@ -116,7 +120,7 @@ suite "TC-7 — framework identification and filtering":
 
     # --- 5. the shared relevance predicate refuses a foreign framework ----
     let platformReq = CoverageRequirement(
-      framework: reprobuildFrameworkId, repo: "example", commit: fixtureCommit,
+      framework: reprobuildFrameworkId, state: state,
       platform: "linux/amd64", requiredTargets: @["t-unit"])
     check certificateMatches(mine, platformReq)
     check not certificateMatches(foreign, platformReq)

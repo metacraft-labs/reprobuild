@@ -87,6 +87,7 @@
 ## tier. Skip: `git` missing or `repro` unbuilt.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 import repro_workspace_manifests
@@ -276,7 +277,7 @@ suite "a repo's own committed lock outranks the workspace root repo's lock":
       except CatchableError as err:
         checkpoint("unparseable --json output: " & err.msg & "\n" &
           listed.output)
-      check report != nil
+      check not report.isNil
       if report != nil:
         check report["exitCode"].getInt() == 0
         check report["errors"].len == 0

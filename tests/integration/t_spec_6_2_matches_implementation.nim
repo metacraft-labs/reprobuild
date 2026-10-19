@@ -97,7 +97,7 @@ import repro_profile
 const RepoRoot = currentSourcePath.parentDir.parentDir.parentDir
 
 const
-  SpecRelPath = ".." / "reprobuild-specs" / "ReproOS-Remote-Attestation.md"
+  SpecDocRel = "spec" / "ReproOS-Remote-Attestation.md"
   SectionHeading = "### 6.2 Activity module"
   FenceLanguage = "nim"
 
@@ -237,8 +237,20 @@ proc configFieldNames(): seq[string] =
     result.add name
 
 let thisDir = currentSourcePath().parentDir
-let specPath = findUpFile(thisDir, SpecRelPath)
-let specDir = findUpDir(thisDir, ".." / "reprobuild-specs")
+# The specification checkout carries TWO names: it was renamed from
+# `reprobuild-specs` to `reprobuild-pm`. This resolved only the old one, so
+# `specDir` came back empty in a workspace that holds the renamed checkout and
+# every case below took its `skip()` branch -- the suite reported success while
+# reading nothing. An unreachable name is not an absent checkout. Both names
+# are accepted, newest first, since a workspace may still hold either.
+var specDir = findUpDir(thisDir, ".." / "reprobuild-pm")
+var specsName = "reprobuild-pm"
+if specDir.len == 0:
+  specDir = findUpDir(thisDir, ".." / "reprobuild-specs")
+  specsName = "reprobuild-specs"
+let specPath =
+  if specDir.len == 0: ""
+  else: findUpFile(thisDir, ".." / specsName / SpecDocRel)
 
 suite "the reference snippet and the shipped activity agree":
 

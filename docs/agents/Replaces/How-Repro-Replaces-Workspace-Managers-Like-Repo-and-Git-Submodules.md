@@ -10,7 +10,7 @@ Reprobuild replaces multi-repo wrappers (like Google's `repo` tool or Git submod
 
 | VCS Manager Concept | Reprobuild Equivalent | How Repro Solves It |
 |---|---|---|
-| **Manifest File** (`default.xml`) | `repro-workspace.toml` | Declares sibling git repositories, clone locations, and track branches. |
+| **Manifest File** (`default.xml`) | `repos/*.toml` fragments (+ `repro-workspace.toml` settings) | Fragments declare sibling git repositories, clone locations, and mainline branches; the settings file holds workspace-wide policy. |
 | **`repo sync` / submodules** | `repro workspace sync` | Clones and fast-forwards sibling checkouts to match the manifest configuration. |
 | **Branch Status** (`repo status`) | `repro workspace status` | Audits uncommitted changes and commit hash alignments across all checkouts. |
 | **Workspace Init** | `repro workspace init` | Bootstraps a clean workspace on a new host. |

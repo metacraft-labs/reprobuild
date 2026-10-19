@@ -26,6 +26,13 @@ suite "repro capabilities":
           hasPriming = true
       check hasPriming
 
+  test "build-action-output is advertised for generators to probe":
+    # The CMake Reprobuild generator passes `repro build --action-output=all`
+    # to a try_compile build only when this feature is listed; an older
+    # `repro` would reject the flag and fail every try_compile.
+    let features = capabilitiesJson()["interfaces"]["provider"]["features"]
+    check features.getElems().anyIt(it.getStr() == "build-action-output")
+
   test "JSON rendering round-trips":
     let caps = parseJson(renderCapabilitiesJson())
 

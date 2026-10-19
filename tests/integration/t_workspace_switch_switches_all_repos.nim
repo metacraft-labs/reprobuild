@@ -513,7 +513,7 @@ suite "M15/WV-5 — repro switch <branch> switches all repos":
       # The on-disk workspace.toml carries the new value under
       # ``[workspace].branch`` (still a metadata-only file — we did
       # not promote it to composer mode).
-      let tomlPath = fx.workspaceRoot / ".repro" / "workspace.toml"
+      let tomlPath = fx.workspaceRoot / ".repro" / "workspace-state.toml"
       let parsed = readWorkspaceLocal(tomlPath)
       check parsed.workspace.project == "lib-a"
       check parsed.workspace.branch.isSome

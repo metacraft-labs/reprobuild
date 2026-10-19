@@ -75,6 +75,9 @@ import types
 import diagnostics
 import reader
 import resolver
+import provenance
+import settings
+import workspace_branch
 import repro_build_engine
 import git_tool
 import git_actions
@@ -113,6 +116,21 @@ type
     ## fatal — those are operator-controlled and a missing local path is
     ## almost certainly a typo, not an access-control event.
     skipInaccessibleLayers*: bool
+    layersMayOmitProject*: bool
+      ## When ``true``, a layer that does not declare the requested project
+      ## (no ``projects/<p>.toml``) contributes nothing instead of failing
+      ## the composition — the additive reading of "manifests compose
+      ## additively" (Workspace-And-Develop-Mode.md §"Layering Rules") that a
+      ## caller LOOKING A NAME UP needs: the RA-27 sync scope asks "which
+      ## repos does project <p> have across this workspace's layers", and a
+      ## layer that does not know <p> simply has none. Off by default, and
+      ## then the rule is per layer (``ManifestLayer.from_settings``):
+      ## settings-file layers are additive per project
+      ## (Workspace-Settings-Files.md §4), layers listed in the legacy state
+      ## file keep the M8 contract (Workspace-Management.milestones.org M8,
+      ## ``test_m8_layer_missing_project_raises``) that a layer lacking the
+      ## project fails the composition, naming the layer. Either way a name NO
+      ## layer declares raises with ``noLayerDeclaresProjectTag``.
 
   SkippedLayer* = object
     ## One per layer dropped because of an unreachable remote when
@@ -135,6 +153,11 @@ type
     skippedLayers*: seq[SkippedLayer]
 
 const
+  noLayerDeclaresProjectTag* = "no-manifest-layer-declares-project:"
+    ## Stable marker prepended to the ``innerMessage`` of the diagnostic the
+    ## composer raises when NO layer declares the requested project. Callers
+    ## that look a name up (the sync scope filter) tell "unknown name" from a
+    ## genuine composition failure by it, rather than by message wording.
   manifestLayerUnreachableTag* = "manifest-layer-unreachable:"
     ## Stable marker prepended to the ``innerMessage`` of every
     ## structured diagnostic raised when a URL-backed manifest layer
@@ -156,7 +179,7 @@ proc visibilityFromString(layerLabel, raw: string): WorkspaceVisibility =
   of "private", "personal": wvPersonal
   else:
     raiseManifestError(layerLabel, "manifest[].visibility",
-      schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+      schemaWorkspaceStateV1, schemaWorkspaceStateV1,
       "unknown visibility tier '" & raw &
         "' (expected one of: public, org, team, private, personal)")
 
@@ -254,8 +277,13 @@ proc acquireUrlLayer(
 
   let url = entry.url.get()
   let tier = visibilityTierLabel(visibility)
+  # A settings-file layer may pin `revision` (Workspace-Settings-Files.md §3):
+  # it is cloned AT the pin (`git clone --branch` takes a tag or a branch) and
+  # `verifyLayerPin` then requires HEAD to resolve to it.
   let revision =
-    if entry.branch.isSome and entry.branch.get().len > 0:
+    if entry.revision.isSome and entry.revision.get().len > 0:
+      entry.revision.get()
+    elif entry.branch.isSome and entry.branch.get().len > 0:
       entry.branch.get()
     else: ""
 
@@ -265,7 +293,7 @@ proc acquireUrlLayer(
     except CatchableError as err:
       raiseManifestError(workspaceTomlPath,
         "manifest[" & $layerIdx & "].url",
-        schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+        schemaWorkspaceStateV1, schemaWorkspaceStateV1,
         manifestLayerUnreachableTag &
           " cannot resolve git tool to acquire manifest layer (visibility=" &
           tier & ") '" & url & "': " & err.msg)
@@ -289,7 +317,7 @@ proc acquireUrlLayer(
       else: ActionResult(status: asFailed, reason: "no-result")
     raiseManifestError(workspaceTomlPath,
       "manifest[" & $layerIdx & "].url",
-      schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+      schemaWorkspaceStateV1, schemaWorkspaceStateV1,
       manifestLayerUnreachableTag &
         " failed to clone manifest layer (visibility=" & tier &
         ") '" & url &
@@ -299,12 +327,38 @@ proc acquireUrlLayer(
   if not dirExists(target):
     raiseManifestError(workspaceTomlPath,
       "manifest[" & $layerIdx & "].url",
-      schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+      schemaWorkspaceStateV1, schemaWorkspaceStateV1,
       manifestLayerUnreachableTag &
         " manifest layer (visibility=" & tier & ") '" & url &
         "' clone reported success but the working tree does not exist at " &
         target)
   target
+
+proc verifyLayerPin(workspaceTomlPath: string; layerIdx: int;
+                    entry: ManifestLayer; layerRoot: string) =
+  ## Fail closed when a pinned layer's checkout is not at its pin — the RA-17
+  ## pinned-revision check (`provenance.nim`), applied per layer. A no-op for
+  ## an unpinned layer.
+  if entry.revision.isNone or entry.revision.get().len == 0:
+    return
+  let identity =
+    try:
+      ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+    except CatchableError as err:
+      raiseManifestError(workspaceTomlPath,
+        "manifest[" & $layerIdx & "].revision",
+        schemaWorkspaceStateV1, schemaWorkspaceStateV1,
+        "cannot resolve git to verify the pin of manifest layer '" &
+          layerLabel(entry) & "': " & err.msg)
+  try:
+    verifyManifestProvenance(identity.binaryPath, layerRoot,
+      pinnedRevisionSpec(entry.revision.get()))
+  except ManifestProvenanceError as err:
+    raiseManifestError(workspaceTomlPath,
+      "manifest[" & $layerIdx & "].revision",
+      schemaWorkspaceStateV1, schemaWorkspaceStateV1,
+      "manifest layer '" & layerLabel(entry) & "' is not at its pinned " &
+        "revision: " & err.msg)
 
 proc acquireLocalPathLayer(
     workspaceRoot, workspaceTomlPath: string;
@@ -322,7 +376,7 @@ proc acquireLocalPathLayer(
   if not dirExists(resolved):
     raiseManifestError(workspaceTomlPath,
       "manifest[" & $layerIdx & "].local_path",
-      schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+      schemaWorkspaceStateV1, schemaWorkspaceStateV1,
       "manifest layer local_path '" & raw &
         "' does not exist on disk (resolved to '" & resolved & "')")
   resolved
@@ -374,18 +428,18 @@ proc composeManifestLayersWithOptions*(
   ## diagnostic — there is no useful project to return.
   if not isAbsolute(workspaceRoot):
     raiseManifestError(workspaceTomlPath, "workspaceRoot",
-      schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+      schemaWorkspaceStateV1, schemaWorkspaceStateV1,
       "composeManifestLayers requires an absolute workspaceRoot, got '" &
         workspaceRoot & "'")
 
   let projectName = workspaceLocal.workspace.project
   if projectName.len == 0:
     raiseManifestError(workspaceTomlPath, "workspace.project",
-      schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+      schemaWorkspaceStateV1, schemaWorkspaceStateV1,
       "workspace.project is empty; composeManifestLayers cannot select a project")
   if workspaceLocal.manifest.len == 0:
     raiseManifestError(workspaceTomlPath, "manifest",
-      schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+      schemaWorkspaceStateV1, schemaWorkspaceStateV1,
       "workspace declares no manifest layers")
 
   var composed: ResolvedProject
@@ -394,6 +448,7 @@ proc composeManifestLayersWithOptions*(
   var lastSkipDiagnostic = ""
   var firstLayerSeen = false
   var mergedAnyLayer = false
+  var lookedFor: seq[string]
 
   for layerIdx, entry in workspaceLocal.manifest:
     let hasUrl = entry.url.isSome and entry.url.get().len > 0
@@ -401,12 +456,12 @@ proc composeManifestLayersWithOptions*(
     if not hasUrl and not hasLocal:
       raiseManifestError(workspaceTomlPath,
         "manifest[" & $layerIdx & "]",
-        schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+        schemaWorkspaceStateV1, schemaWorkspaceStateV1,
         "manifest layer needs either `url` or `local_path` (both empty)")
     if hasUrl and hasLocal:
       raiseManifestError(workspaceTomlPath,
         "manifest[" & $layerIdx & "]",
-        schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+        schemaWorkspaceStateV1, schemaWorkspaceStateV1,
         "manifest layer declares BOTH `url` and `local_path`; choose one")
 
     let provenance = layerLabel(entry)
@@ -437,15 +492,31 @@ proc composeManifestLayersWithOptions*(
       else:
         layerRoot = acquireUrlLayer(workspaceRoot, workspaceTomlPath,
           layerIdx, entry, visibility)
+      verifyLayerPin(workspaceTomlPath, layerIdx, entry, layerRoot)
     else:
       layerRoot = acquireLocalPathLayer(workspaceRoot, workspaceTomlPath,
         layerIdx, entry)
 
+    # A layer lacking the project, decided PER LAYER by its origin:
+    #   * a settings-file layer (``from_settings``: built from
+    #     ``repro-workspace.toml`` / ``repro-workspace.local.toml``, and the
+    #     implicit root base layer ``withSettingsLayers`` adds) contributes
+    #     nothing to the project — Workspace-Settings-Files.md §4 "Layers are
+    #     additive per project": such a layer applies to the whole workspace
+    #     and typically extends only some projects;
+    #   * a layer listed in the legacy state file must declare it (M8,
+    #     ``test_m8_layer_missing_project_raises``) until those are retired —
+    #     unless the caller composes additively throughout
+    #     (``layersMayOmitProject``, the sync scope's name lookup).
+    # A name NO layer declares is an error either way (below, after the loop).
     let projectFile = layerRoot / "projects" / (projectName & ".toml")
     if not fileExists(projectFile):
+      if options.layersMayOmitProject or entry.from_settings.get(false):
+        lookedFor.add(projectFile)
+        continue
       raiseManifestError(workspaceTomlPath,
         "manifest[" & $layerIdx & "]",
-        schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+        schemaWorkspaceStateV1, schemaWorkspaceStateV1,
         "manifest layer '" & provenance &
           "' does not declare project '" & projectName &
           "' (expected file '" & projectFile & "' to exist)")
@@ -454,15 +525,20 @@ proc composeManifestLayersWithOptions*(
     try:
       layerResolved = resolveProject(projectFile)
     except WorkspaceManifestParseError as err:
-      # Re-raise with the layer's provenance prepended to the inner
-      # message so the user can tell WHICH layer's project resolution
-      # failed.
-      raiseManifestError(workspaceTomlPath,
-        "manifest[" & $layerIdx & "]",
-        schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+      # Re-raise with the layer's provenance added so the user can tell
+      # WHICH layer's project resolution failed — but still ABOUT the file
+      # that failed. The failure is in the layer's project manifest or one
+      # of its fragments, and the state file that lists the layer is
+      # usually fine (and, for a settings-file layer or the implicit root
+      # layer, is not even where the layer is declared): framing it as
+      # ``[<state file>] at key 'manifest[N]'`` named the wrong file and
+      # hid the key.
+      let failedFile = if err.path.len > 0: err.path else: workspaceTomlPath
+      raiseManifestError(failedFile, err.keyPath,
+        err.expectedSchema, err.observedSchema,
         "manifest layer '" & provenance &
           "' failed to resolve project '" & projectName & "': " &
-          err.msg)
+          err.innerMessage)
 
     # First successfully-acquired layer establishes the project-level
     # fields. With ``skipInaccessibleLayers`` the first layer in source
@@ -480,13 +556,22 @@ proc composeManifestLayersWithOptions*(
       layerResolved, composed, seen)
     mergedAnyLayer = true
 
+  if not mergedAnyLayer and lookedFor.len > 0:
+    # Every layer that could be read lacks the project: the name is unknown
+    # to this workspace (whether or not other layers were unreachable — a
+    # skipped layer is reported in its own entry, and no reachable layer
+    # declared the name either).
+    raiseManifestError(workspaceTomlPath, "manifest",
+      schemaWorkspaceStateV1, schemaWorkspaceStateV1,
+      noLayerDeclaresProjectTag & " no manifest layer declares project '" &
+        projectName & "' (looked for " & lookedFor.join(", ") & ")")
   if not mergedAnyLayer:
     # Every layer was skipped — that means access-control denied the
     # entire workspace, not "the public subset still resolves". Raise
     # the most recent skip diagnostic so the operator sees something
     # actionable rather than a silent empty composition.
     raiseManifestError(workspaceTomlPath, "manifest",
-      schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+      schemaWorkspaceStateV1, schemaWorkspaceStateV1,
       "every manifest layer was inaccessible; composition produced no " &
         "project (last diagnostic: " & lastSkipDiagnostic & ")")
 
@@ -502,7 +587,7 @@ proc composeManifestLayersWithOptions*(
     if triple in finalSeen:
       raiseManifestError(workspaceTomlPath,
         "manifest",
-        schemaWorkspaceLocalV1, schemaWorkspaceLocalV1,
+        schemaWorkspaceStateV1, schemaWorkspaceStateV1,
         "composed repo set has duplicate (name='" & repo.name &
           "', path='" & repo.path & "', remote='" & repo.projectRemote &
           "') at indices " & $finalSeen[triple] & " and " & $i)
@@ -539,27 +624,61 @@ proc composeManifestLayers*(
     workspaceLocal, workspaceRoot, workspaceTomlPath,
     ComposeOptions()).project
 
+proc composeWorkspaceLayersWithOptions*(
+    workspaceRoot: string; projectName = "";
+    options: ComposeOptions = ComposeOptions()): ComposeResult =
+  ## Compose the WORKSPACE at `workspaceRoot`: its state (or none yet) and its
+  ## settings files' layers, through the one seam that joins them
+  ## (`effectiveWorkspaceLocalWithNotes`). `projectName` selects the project
+  ## when the state records none — the case of a workspace root whose settings
+  ## declare layers before `repro workspace init` / `enable` wrote any state
+  ## (Workspace-Settings-Files.md §4). Settings layers skipped for want of a
+  ## url are carried in `skippedLayers` (index -1: they never reached a layer
+  ## position) and reported on stderr, once per process.
+  let absRoot = absolutePath(workspaceRoot)
+  let absToml = absolutePath(workspaceTomlPath(absRoot))
+  let eff = effectiveWorkspaceLocalWithNotes(absRoot, projectName)
+  reportSkippedSettingsLayers(eff.skipped)
+  result = composeManifestLayersWithOptions(eff.local, absRoot, absToml,
+    options)
+  for note in eff.skipped:
+    result.skippedLayers.add(SkippedLayer(index: -1, provenance: note.name,
+      visibility: visibilityFromString(absToml, note.visibility),
+      diagnostic: note.message))
+
+proc composeWorkspaceLayers*(workspaceRoot: string;
+                             projectName = ""): ResolvedProject =
+  ## Strict-default `composeWorkspaceLayersWithOptions`.
+  composeWorkspaceLayersWithOptions(workspaceRoot, projectName).project
+
 proc composeManifestLayersFromFile*(
     workspaceTomlPath: string): ResolvedProject =
-  ## Convenience wrapper that reads the `.repo/workspace.toml` at
-  ## `workspaceTomlPath` via M5's `readWorkspaceLocal` and then invokes
-  ## `composeManifestLayers`. The `workspaceRoot` is the parent of the
-  ## TOML file's directory (the directory holding `.repo/`).
+  ## Convenience wrapper that reads the state file at `workspaceTomlPath`
+  ## via M5's `readWorkspaceLocal`, adds the settings files' layers
+  ## (`withSettingsLayers`), and invokes `composeManifestLayers`. The
+  ## `workspaceRoot` is the parent of the file's directory (the directory
+  ## holding `.repro/`). Settings layers skipped for want of a url are
+  ## reported on stderr.
   let absToml = absolutePath(workspaceTomlPath)
-  let workspaceLocal = readWorkspaceLocal(absToml)
-  # workspace.toml lives at <workspaceRoot>/.repo/workspace.toml; strip
-  # the two trailing components to recover the workspace root.
   let workspaceRoot = parentDir(parentDir(absToml))
-  composeManifestLayers(workspaceLocal, workspaceRoot, absToml)
+  let eff = withSettingsLayers(readWorkspaceLocal(absToml), workspaceRoot)
+  reportSkippedSettingsLayers(eff.skipped)
+  composeManifestLayers(eff.local, workspaceRoot, absToml)
 
 proc composeManifestLayersFromFileWithOptions*(
     workspaceTomlPath: string;
     options: ComposeOptions = ComposeOptions()): ComposeResult =
   ## ``composeManifestLayersFromFile`` sibling that takes the M25
   ## ``ComposeOptions`` and returns the extended ``ComposeResult`` so
-  ## the caller can record any skipped layers in its structured report.
+  ## the caller can record any skipped layers in its structured report —
+  ## including settings layers skipped because neither settings file
+  ## supplies their url (index -1: they never reached a layer position).
   let absToml = absolutePath(workspaceTomlPath)
-  let workspaceLocal = readWorkspaceLocal(absToml)
   let workspaceRoot = parentDir(parentDir(absToml))
-  composeManifestLayersWithOptions(
-    workspaceLocal, workspaceRoot, absToml, options)
+  let eff = withSettingsLayers(readWorkspaceLocal(absToml), workspaceRoot)
+  result = composeManifestLayersWithOptions(
+    eff.local, workspaceRoot, absToml, options)
+  for note in eff.skipped:
+    result.skippedLayers.add(SkippedLayer(index: -1, provenance: note.name,
+      visibility: visibilityFromString(absToml, note.visibility),
+      diagnostic: note.message))

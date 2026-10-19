@@ -51,6 +51,8 @@
 
 import std/[os, osproc, posix, strutils, times, unittest]
 
+import repro_test_support/process_fixtures
+
 import repro_attest
 import repro_attest/cloud_lease
 
@@ -282,7 +284,12 @@ if childRole.len > 0:
 # ---------------------------------------------------------------------
 
 let scratch = getTempDir() / "repro-teardown-" & $getCurrentProcessId()
-createDir(scratch)
+# Removed when THIS process exits, whichever cases it ran — not by a final
+# "teardown" case, which under the runner's one-process-per-case model ran in
+# one process and left every other case process's scratch behind. Registering
+# a path that is never created is harmless. See
+# ``repro_test_support/process_fixtures``.
+releaseDirAtProcessExit(scratch)
 
 type Gear = tuple[store: CloudLeaseStore; provider: FakeProvider;
                   ledger, ready, root: string]
@@ -641,9 +648,3 @@ suite "releasing twice is free, and releasing is not optional":
     except CloudLeaseError as err:
       refused = err.condition == cllReapHasNoEffector
     check refused
-
-suite "teardown":
-
-  test "the scratch directory is removed":
-    removeDir(scratch)
-    check not dirExists(scratch)

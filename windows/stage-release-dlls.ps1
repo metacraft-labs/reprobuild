@@ -27,7 +27,9 @@
 #     clingo.dll AND sqlite3_64.dll at MODULE INIT and imports libcrypto/libssl,
 #     so those must sit in build\bin (or on PATH) for it to start at all.
 #   - After: `.#release` rewrites build\bin, so re-stage to guarantee the
-#     PACKAGED bin/ is complete. Idempotent: the second pass re-copies from the
+#     PACKAGED bin/ is complete (this pass is the first step of
+#     scripts/release/package_windows_release.ps1, which assembles the
+#     archive). Idempotent: the second pass re-copies from the
 #     runner sources (cheap) and short-circuits the pinned downloads when the DLL
 #     is already present.
 

@@ -1,4 +1,4 @@
-import std/[json, os, strutils, tables, times]
+import std/[json, options, os, strutils, tables, times]
 when defined(posix):
   # ``finishSignal`` decodes the raw wait status the process backend keeps
   # but does not interpret on its deadline branch. See the note there.
@@ -33,6 +33,12 @@ type
     memoryBytes*: uint64
     namedPool*: string
     namedPoolUnits*: uint32
+    namedPoolCapacity*: uint32
+      ## The capacity the build declares for ``namedPool`` (its
+      ## ``buildPool(name, capacity)``), sent to the daemon as a pool
+      ## declaration before the lease is requested. Zero declares nothing.
+      ## The daemon admits against it only where its host file and flags
+      ## leave the pool unsized (``declareRunQuotaPools``).
     interactive*: bool
       ## Somebody is waiting at a prompt for this lease: a dev-env activation
       ## (``repro exec``/``shell``/``run``) compiling the recipe it needs before
@@ -408,8 +414,11 @@ proc waitAfterDenial(label, statsId, diagnostic: string;
       "runquota static-capacity deadlock for '" & id & "' after " &
       $attempt & " denied offers over " & $waitedMs & "ms: " & diagnostic &
       ". The request cannot be admitted by the current daemon configuration. " &
-      "Adjust the action resource request or restart runquotad with matching " &
-      "CPU, memory, IO, and named-pool capacities. Raise " &
+      "Adjust the action resource request, or raise the host's budget with " &
+      "`runquota config set machine.memory_bytes|machine.cpu_milli|" &
+      "pools.NAME VALUE`, which reloads the running runquotad (a key a " &
+      "runquotad flag pins is not changed by it; `runquota config show` " &
+      "lists them). Raise " &
       "REPRO_RUNQUOTA_DENIAL_TIMEOUT if the authority can deny transiently.")
   sleep(backoffMs)
 
@@ -767,6 +776,7 @@ proc helperCliArgs*(request: ReproResourceRequest;
     "--mem", $request.effectiveMemory(),
     "--pool", request.namedPool,
     "--pool-units", $request.namedPoolUnits,
+    "--pool-capacity", $request.namedPoolCapacity,
     "--cwd", command.cwd,
     "--stdout-limit", $command.stdoutLimit,
     "--stderr-limit", $command.stderrLimit
@@ -1194,11 +1204,98 @@ proc isRunQuotaDaemonReachable*(): bool =
   except CatchableError:
     false
 
+type
+  RunQuotaPoolDeclaration* = object
+    ## What declaring a build's pools to the daemon came to.
+    supported*: bool
+      ## False when the daemon predates ``DeclarePools``: nothing was sent,
+      ## and it admits only the pools its host file or ``--pool`` flags size.
+    diagnostic*: string
+      ## Why the declaration did not happen, when it did not.
+    pools*: seq[DeclaredPoolWire]
+      ## Per pool: the capacity declared, the cap in force and its source
+      ## (``flag`` / ``host-file`` / ``declared``).
+
+var poolDeclarationUnsupportedReported = false
+
+proc reportPoolDeclarationUnsupported*(declaration: RunQuotaPoolDeclaration;
+                                       pools: openArray[string]) =
+  ## Say ONCE per process that the daemon could not be told this build's
+  ## pools, naming them, so a later ``lease request exceeds named-pool
+  ## budget`` refusal has its cause on the screen beside it.
+  if declaration.supported or pools.len == 0 or
+      poolDeclarationUnsupportedReported:
+    return
+  poolDeclarationUnsupportedReported = true
+  try:
+    stderr.writeLine("repro: warning: " & declaration.diagnostic &
+      "; this build uses the pools " & pools.join(", ") & ", so its leases " &
+      "in any of them that runquotad does not size will be refused. Update " &
+      "runquotad, or size them in its host file (runquota config set " &
+      "pools.NAME N).")
+  except IOError, OSError:
+    discard
+
+proc declarePoolsOn(session: var RunQuotaSession;
+                    pools: openArray[tuple[name: string; capacity: uint32]]):
+    RunQuotaPoolDeclaration =
+  var wire: seq[NamedPoolCapWire] = @[]
+  for pool in pools:
+    if pool.name.len > 0 and pool.capacity > 0'u32:
+      wire.add(NamedPoolCapWire(name: pool.name, units: pool.capacity))
+  if wire.len == 0:
+    return RunQuotaPoolDeclaration(supported: true)
+  if not session.client[].supportsPoolDeclarations():
+    return RunQuotaPoolDeclaration(supported: false,
+      diagnostic: "the running runquotad (" &
+        session.client[].daemonVersion & ", protocol minor " &
+        $session.client[].capabilities.protocolMinor & ") predates pool " &
+        "declarations")
+  let answer = session.declarePools(wire)
+  RunQuotaPoolDeclaration(supported: true, pools: answer.pools)
+
+proc declareRunQuotaPools*(session: ReproRunQuotaSession;
+                           pools: openArray[tuple[name: string;
+                                                  capacity: uint32]]):
+    RunQuotaPoolDeclaration =
+  ## Tell the daemon the named pools this build uses and the capacity the
+  ## build declares for each (its ``buildPool(name, capacity)``), before any
+  ## lease in them is requested.
+  ##
+  ## THIS IS HOW A RECIPE'S POOLS REACH RUNQUOTA, and it replaced passing them
+  ## as ``runquotad --pool`` flags when reprobuild spawned the daemon
+  ## (reprobuild-specs/RunQuota-Host-Configuration.md, "Pools a build
+  ## declares"). Flags reached only a daemon this process started, and they
+  ## pinned the pool for that daemon's whole life against the host file and
+  ## ``runquota config set``. A declaration reaches whatever daemon serves the
+  ## host -- the installed service, or one another build started -- and sits
+  ## UNDER the host file: the operator's ``[pools]`` entry wins, and it leaves
+  ## with this session.
+  ##
+  ## A REFUSAL IS RETURNED, NOT RAISED, like ``declareRunQuotaExtension``'s:
+  ## a daemon too old to take the declaration is a reason to warn, and the
+  ## leases it then refuses carry their own diagnostic.
+  if session.isNil or not session.active:
+    return RunQuotaPoolDeclaration(supported: false,
+      diagnostic: "runquota session is not active")
+  try:
+    declarePoolsOn(session.session, pools)
+  except CatchableError as err:
+    RunQuotaPoolDeclaration(supported: false, diagnostic: err.msg)
+
 proc runWithRunQuota*(request: ReproResourceRequest;
                       command: ReproCommandSpec): ReproRunQuotaExecution =
   var client = connectDefault()
   try:
     var session = client.registerSession("reprobuild action", "0.1.0")
+    # The helper path's own session: declare the one pool this lease uses,
+    # exactly as the inline path declares the build's (see
+    # ``declareRunQuotaPools``), so the lease is admissible on a daemon this
+    # build did not start.
+    if request.namedPool.len > 0:
+      let declaration = declarePoolsOn(session,
+        [(name: request.namedPool, capacity: request.namedPoolCapacity)])
+      reportPoolDeclarationUnsupported(declaration, [request.namedPool])
     var lease = session.waitForQueuedGrant(request.toRunQuotaRequest())
     result.leaseId = lease.id.value
     try:
@@ -1412,9 +1509,12 @@ proc startGrantedWithRunQuota(session: ReproRunQuotaSession;
   if not session.active:
     raise newException(ReproRunQuotaError, "runquota session is not active")
   var lease = lease
+  var child: LaunchedProcess
+  var launched = false
   try:
     lease.markStarting()
-    var child = launchProcess(launchSpec(command))
+    child = launchProcess(launchSpec(command))
+    launched = true
     lease.markRunning(
       childProcessId = child.info.processId,
       processGroupId = child.info.processGroupId,
@@ -1424,12 +1524,47 @@ proc startGrantedWithRunQuota(session: ReproRunQuotaSession;
       child: child,
       active: true,
       completed: false)
-  except CatchableError:
-    if lease.active and lease.state == leaseClientStarting:
-      lease.finish(outcome = launchFailed())
-    if lease.active:
-      lease.release()
-    raise
+  except CatchableError as err:
+    # Until this proc returns it is the only owner of the lease and, once
+    # ``launchProcess`` succeeded, of the child: nobody else holds a handle to
+    # either. So it resolves both before unwinding -- the child cancelled and
+    # reaped (a ``markRunning`` that failed after the launch would otherwise
+    # orphan it), the lease finished and released -- and each step is guarded
+    # on its own so a failing one neither skips the next nor replaces the
+    # launch failure the caller has to see (RunQuota-Protocol-And-Client-
+    # Libraries.md, "Ownership Across a Batched Client Launch").
+    var cleanupFailures: seq[string]
+    var unresolved: seq[string]
+    var outcome = launchFailed()
+    if launched:
+      try:
+        let completion = child.cancelAndWait()
+        outcome = finishOutcome(completion, child)
+        child.close()
+      except CatchableError as cleanupErr:
+        cleanupFailures.add("cancelling child pid " &
+          $child.info.processId & ": " & cleanupErr.msg)
+        unresolved.add("child pid " & $child.info.processId)
+    try:
+      if lease.active and lease.state == leaseClientStarting:
+        lease.finish(outcome = outcome)
+    except CatchableError as cleanupErr:
+      cleanupFailures.add("finishing lease " & $lease.id.value & ": " &
+        cleanupErr.msg)
+    try:
+      if lease.active:
+        lease.release()
+    except CatchableError as cleanupErr:
+      cleanupFailures.add("releasing lease " & $lease.id.value & ": " &
+        cleanupErr.msg)
+      unresolved.add("lease " & $lease.id.value)
+    if cleanupFailures.len == 0:
+      raise err
+    var message = err.msg & "; cleanup after the failed launch also failed: " &
+      cleanupFailures.join("; ")
+    if unresolved.len > 0:
+      message.add("; unresolved: " & unresolved.join(", "))
+    raise newException(ReproRunQuotaError, message, err)
 
 proc startWithRunQuota*(session: ReproRunQuotaSession;
                         request: ReproResourceRequest;
@@ -1524,6 +1659,90 @@ proc maxOfferBatchSize*(session: ReproRunQuotaSession): int =
   else:
     int(limit)
 
+# Defined beside the scheduler-facing process API further down; the batch
+# rollback below resolves what it owns through these same procs rather than
+# through a second, private copy of the cancel/release logic.
+proc cancelQueued*(queued: var ReproRunQuotaQueuedProcess)
+proc cancelAndWait*(running: var ReproRunQuotaRunningProcess):
+    ReproRunQuotaExecution
+
+proc rollbackBatchOwnership(offers: var seq[ReproRunQuotaOffer];
+                            unstarted: var Table[uint64, OfferedLease]):
+    string =
+  ## Resolve every decision a failing ``offerWithRunQuotaBatch`` still owns,
+  ## in the order RunQuota-Protocol-And-Client-Libraries.md, "Ownership Across
+  ## a Batched Client Launch" gives: cancel the queued requests, release the
+  ## granted (or queued) leases nothing was started for, then cancel and wait
+  ## for each child actually launched -- through its own process handle, so
+  ## the child is reaped and not merely forgotten -- which finishes and
+  ## releases its lease.
+  ##
+  ## Returns the text to append to the initiating error: what was rolled back
+  ## (so a staged action failed only by association says so), every cleanup
+  ## step that failed, and the lease ids and child pids that could not be
+  ## resolved. Each step is guarded on its own: one failing release must not
+  ## leave the children after it running. Never raises.
+  var cleanupFailures: seq[string]
+  var unresolvedLeases: seq[string]
+  var unresolvedPids: seq[string]
+  var cancelledQueued = 0
+  var releasedUnstarted = 0
+  var drainedPids: seq[string]
+  for offer in offers.mitems:
+    if offer.kind == rqokQueued and offer.queued.active:
+      let leaseId = $offer.queued.lease.id.value
+      try:
+        offer.queued.cancelQueued()
+        inc cancelledQueued
+      except CatchableError as err:
+        cleanupFailures.add("cancelling queued lease " & leaseId & ": " &
+          err.msg)
+        unresolvedLeases.add(leaseId)
+  for decision in unstarted.mvalues:
+    if not decision.lease.active:
+      continue
+    let leaseId = $decision.lease.id.value
+    try:
+      decision.lease.release()
+      inc releasedUnstarted
+    except CatchableError as err:
+      cleanupFailures.add("releasing unstarted lease " & leaseId & ": " &
+        err.msg)
+      unresolvedLeases.add(leaseId)
+  unstarted.clear()
+  for offer in offers.mitems:
+    if offer.kind == rqokStarted and offer.running.active and
+        not offer.running.completed:
+      let leaseId = $offer.running.lease.id.value
+      let pid = $offer.running.child.info.processId
+      try:
+        discard offer.running.cancelAndWait()
+        drainedPids.add(pid)
+      except CatchableError as err:
+        # Whether the child was reaped before the lease traffic failed is not
+        # observable from here, so both identities are disclosed.
+        cleanupFailures.add("cancelling child pid " & pid & " (lease " &
+          leaseId & "): " & err.msg)
+        unresolvedLeases.add(leaseId)
+        unresolvedPids.add(pid)
+  var rolledBack: seq[string]
+  if drainedPids.len > 0:
+    rolledBack.add("cancelled and reaped " & $drainedPids.len &
+      " started child(ren) (pid " & drainedPids.join(", ") & ")")
+  if cancelledQueued > 0:
+    rolledBack.add("cancelled " & $cancelledQueued & " queued lease(s)")
+  if releasedUnstarted > 0:
+    rolledBack.add("released " & $releasedUnstarted &
+      " lease(s) granted to candidates that were never started")
+  if rolledBack.len > 0:
+    result.add("; batch launch rolled back: " & rolledBack.join(", "))
+  if cleanupFailures.len > 0:
+    result.add("; rollback failed: " & cleanupFailures.join("; "))
+  if unresolvedLeases.len > 0 or unresolvedPids.len > 0:
+    result.add("; unresolved after rollback: leases [" &
+      unresolvedLeases.join(", ") & "], child pids [" &
+      unresolvedPids.join(", ") & "]")
+
 proc offerWithRunQuotaBatch*(session: ReproRunQuotaSession;
                              requests: openArray[ReproResourceRequest];
                              commands: openArray[ReproCommandSpec]):
@@ -1538,6 +1757,12 @@ proc offerWithRunQuotaBatch*(session: ReproRunQuotaSession;
   ## scheduler waited on every offer response before issuing the next
   ## one — the dominant contributor to the runquota=on vs runquota=off
   ## ratio gap at parallel=32.
+  ##
+  ## All or nothing for ownership: when it raises, nothing it accepted is
+  ## left behind. Children it started have been cancelled and reaped, queued
+  ## and never-started leases released, and the error carries the initiating
+  ## failure first, then what was rolled back and anything that could not be
+  ## (``rollbackBatchOwnership``).
   if requests.len != commands.len:
     raise newException(ReproRunQuotaError,
       "runquota batch offer: requests and commands have different lengths")
@@ -1548,6 +1773,15 @@ proc offerWithRunQuotaBatch*(session: ReproRunQuotaSession;
     return
   let batchLimit = max(1, session.maxOfferBatchSize())
   var processed = 0
+  # Decisions the daemon has returned for the current chunk that have not yet
+  # been turned into an entry of ``result``. Each one is taken OUT of this
+  # table before it is acted on, so at any moment every accepted lease is
+  # owned by exactly one place: this table (granted or queued, nothing
+  # started), ``result`` (a running child or a queued handle), or the callee
+  # that is starting it, which resolves its own lease if it fails. That
+  # invariant is what lets the rollback below account for every decision
+  # without releasing anything twice.
+  var unstarted = initTable[uint64, OfferedLease]()
   try:
     while processed < requests.len:
       let chunk = min(batchLimit, requests.len - processed)
@@ -1559,16 +1793,15 @@ proc offerWithRunQuotaBatch*(session: ReproRunQuotaSession;
         candidateIds[i] = cid
         candidates[i] = toCandidate(cid, requests[processed + i].toRunQuotaRequest())
       let decisions = session.session.offerCandidates(candidates)
-      var decisionByCid = initTable[uint64, OfferedLease]()
       for decision in decisions:
-        decisionByCid[decision.clientCandidateId] = decision
+        unstarted[decision.clientCandidateId] = decision
       for i in 0 ..< chunk:
         let cid = candidateIds[i]
         let inputIndex = processed + i
-        if not decisionByCid.hasKey(cid):
+        var decision: OfferedLease
+        if not unstarted.pop(cid, decision):
           raise newException(ReproRunQuotaError,
             "runquota did not return a decision for offered candidate " & $cid)
-        let decision = decisionByCid[cid]
         if decision.lease.active and not decision.queued:
           result[inputIndex] = ReproRunQuotaOffer(
             kind: rqokStarted,
@@ -1603,10 +1836,17 @@ proc offerWithRunQuotaBatch*(session: ReproRunQuotaSession;
             requests[inputIndex], commands[inputIndex], deniedRetryAttempts,
             deniedRetryBackoff, firstDeniedMs)
       processed += chunk
-  except ReproRunQuotaDeadlockError:
-    raise
   except CatchableError as err:
-    raise newException(ReproRunQuotaError, err.msg)
+    # The partial ``result`` never reaches the caller, so nothing else can
+    # resolve what it holds: roll the batch back before unwinding, and keep
+    # the initiating error's text and kind (a static-capacity deadlock stays a
+    # deadlock -- the scheduler reports it as a build-level outcome). The
+    # initiating exception itself rides along as ``parent``.
+    let rollback = rollbackBatchOwnership(result, unstarted)
+    let message = err.msg & rollback
+    if err of ReproRunQuotaDeadlockError:
+      raise newException(ReproRunQuotaDeadlockError, message, err)
+    raise newException(ReproRunQuotaError, message, err)
 
 proc pollRunQuotaGrants*(session: ReproRunQuotaSession):
     seq[ReproRunQuotaGrant] =
@@ -1673,6 +1913,22 @@ proc probeRunQuotaLiveness*(session: ReproRunQuotaSession;
     true
   except CatchableError:
     false
+
+proc runQuotaDaemonMemoryBudget*(): Option[uint64] =
+  ## The memory budget the running daemon enforces on its local machine, from
+  ## its ``topology`` inspection subject; ``none`` when no daemon answers.
+  ## Asked only to say whether ``REPROBUILD_RUNQUOTA_MEMORY_BYTES`` matches
+  ## the daemon a command found already running.
+  try:
+    var client = connectDefault()
+    defer: client.close()
+    let topology = parseJson(client.inspectionJson("topology"))
+    for machine in topology{"machines"}:
+      if machine{"id"}.getStr == DefaultMachineId:
+        return some(uint64(machine{"memory_bytes"}.getBiggestInt))
+  except CatchableError:
+    discard
+  none(uint64)
 
 proc runQuotaEndpointText*(): string =
   ## The RunQuota endpoint this process talks to, as a reader would type it:
@@ -2024,6 +2280,10 @@ proc runRunQuotaHelperCli*(args: openArray[string]): int =
     of "--pool-units":
       if i + 1 >= args.len: return 2
       request.namedPoolUnits = uint32(parseUInt(args[i + 1]))
+      i += 2
+    of "--pool-capacity":
+      if i + 1 >= args.len: return 2
+      request.namedPoolCapacity = uint32(parseUInt(args[i + 1]))
       i += 2
     of "--cwd":
       if i + 1 >= args.len: return 2

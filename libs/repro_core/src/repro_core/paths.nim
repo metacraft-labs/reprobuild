@@ -44,6 +44,31 @@ proc `$`*(path: NormalizedPath): string =
 
 from std/os import absolutePath, normalizedPath, getTempDir, `/`
 
+when defined(posix):
+  proc unixSocketPathMaxLen*(): int =
+    ## The longest Unix-domain socket path, in BYTES, that this binary can
+    ## bind or dial — the ONE statement of that limit in the tree.
+    ##
+    ## It is not the kernel's ``sun_path`` size. Every socket here goes
+    ## through Nim's ``std/net`` (``bindUnix`` / ``connectUnix``), whose
+    ## ``nativesockets.makeUnixAddr`` refuses ``path.len >=
+    ## Sockaddr_un_path_length`` with a bare ``socket path too long`` and
+    ## then copies ``path.len + 1`` bytes (the terminating NUL) into
+    ## ``sun_path``. ``std/posix`` declares ``Sockaddr_un_path_length`` as
+    ## 108 on Linux but **92 on macOS**, below the kernel's 104, so the
+    ## binding limit is the smaller of the two arrays, minus the NUL: 107 on
+    ## Linux, 91 on macOS. Taking the ``min`` keeps this right on a platform
+    ## where the two declarations disagree in the other direction.
+    ##
+    ## Bytes, not characters: a UTF-8 path counts every byte of every code
+    ## point, which is what ``string.len`` measures.
+    min(Sockaddr_un_path_length, sizeof(Sockaddr_un().sun_path)) - 1
+
+  proc unixSocketPathFits*(path: string): bool =
+    ## Whether ``path`` can be bound or dialled as a Unix-domain socket on
+    ## this platform; see ``unixSocketPathMaxLen``.
+    path.len <= unixSocketPathMaxLen()
+
 proc runquotaEndpointPath*(name: string): string =
   ## Where a locally spawned ``runquotad`` listens — and the ONE place
   ## that derivation lives, because it used to live in twenty-three.
@@ -82,10 +107,12 @@ proc runquotaEndpointPath*(name: string): string =
   else:
     result = getTempDir() / name / "runquota.sock"
     when defined(posix):
-      # sun_path includes its terminating NUL. Keep the daemon's private
-      # parent-directory checks while bounding deep temp roots and names.
-      # Hash the full requested path so distinct callers/roots stay distinct.
-      if result.len >= sizeof(Sockaddr_un().sun_path):
+      # Bounded by the limit ``std/net`` actually enforces (which counts the
+      # terminating NUL and, on macOS, is 92 rather than the kernel's 104).
+      # Keep the daemon's private parent-directory checks while bounding
+      # deep temp roots and names. Hash the full requested path so distinct
+      # callers/roots stay distinct.
+      if not unixSocketPathFits(result):
         let identity = $secureHash(os.normalizedPath(absolutePath(result)))
         result = "/tmp" / ("repro-rq-" & $getuid() & "-" & identity) /
           "runquota.sock"
