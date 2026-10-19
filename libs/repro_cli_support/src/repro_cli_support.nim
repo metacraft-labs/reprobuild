@@ -86847,6 +86847,17 @@ proc flakeOriginalRepository(reference: FlakeInputOriginal):
   ## identity. Missing owner/repo fields cannot turn a malformed hosted
   ## reference into a coordinate-free indirect/path input eligible for name
   ## fallback.
+  ##
+  ## A `git` original names its repository by `url` rather than by
+  ## owner/repo (nix writes `git+https://…`, `git+ssh://…` and `git+file://…`
+  ## inputs as `{"type": "git", "url": …}`). Its identity is
+  ## ``canonicalRepositoryUrl`` of that URL — the normalisation the managed
+  ## hooks' ``hookDevelopSetOf`` binds the same input by — so the shell and
+  ## the hooks bind a `git+` input to ONE repository. Without it the input
+  ## fell back to its suffix-stripped name and the shell could substitute a
+  ## same-named repo at a different URL (Nix-Flake-Coexistence.md §5b;
+  ## reprobuild-pm issue
+  ## `2026-10-18-flake-override-binder-binds-a-git-url-input-by-name.md`).
   if reference.diagnostic.len > 0:
     result.present = true
     result.diagnostic = reference.diagnostic
@@ -86859,6 +86870,27 @@ proc flakeOriginalRepository(reference: FlakeInputOriginal):
     result.diagnostic = "original repository fetcher type is malformed"
     return
   let kind = kindValue.getStr()
+  if kind == "git":
+    # A repository by URL. Present whatever the URL looks like: a malformed
+    # one must not turn the input into a coordinate-free one eligible for the
+    # name fallback, which is exactly the binding this branch exists to stop.
+    result.present = true
+    let urlValue = original{"url"}
+    if urlValue == nil or urlValue.kind != JString or
+        urlValue.getStr().strip().len == 0:
+      result.diagnostic = "original git repository url is missing or malformed"
+      return
+    let raw = urlValue.getStr().strip()
+    # Nix records the fetch URL itself (`file:///…`, `https://…`); a `git+`
+    # spelling is accepted too. ``canonicalRepositoryUrl`` reduces both to
+    # ``canonicalRemoteIdentity`` of the fetch URL with its query dropped.
+    let identity = canonicalRepositoryUrl(raw)
+    if identity.len == 0:
+      result.diagnostic = "original git repository url '" & raw &
+        "' names no repository"
+      return
+    result.identity = identity
+    return
   let defaultHost = case kind
     of "github": "github.com"
     of "gitlab": "gitlab.com"
@@ -86885,6 +86917,19 @@ proc flakeOriginalRepository(reference: FlakeInputOriginal):
       result.diagnostic = "original repository host is malformed"
       return
   result.identity = canonicalRemoteIdentity("https://" & host & "/" & owner & "/" & repo)
+
+proc hookMemberBindKey(originals: tuple[ok: bool;
+    inputs: Table[string, FlakeInputOriginal]];
+    input, repo, bindKey: string): string =
+  ## The key ``flakeBindInputsToCheckouts`` looks the hooks' member for
+  ## ``input`` up by: the repo its original repository coordinates identify
+  ## when the lock carries any (the binder then binds by that identity), else
+  ## its suffix-stripped name ``bindKey``. One definition, because
+  ## ``hookFlakeSelection`` keys its checkouts with it and the commit-time
+  ## pre-filter (``refreshFlakeLockAtCommit``) must reason about the same keys.
+  if originals.ok and originals.inputs.hasKey(input) and repo.len > 0 and
+      flakeOriginalRepository(originals.inputs[input]).present: repo
+  else: bindKey
 
 proc hookFlakeSelection(hs: HookDevelopSet;
     workspaceRoot, flakeRoot: string): FlakeDevelopSelection =
@@ -86916,8 +86961,7 @@ proc hookFlakeSelection(hs: HookDevelopSet;
     originals.ok and originals.inputs.hasKey(input) and
       flakeOriginalRepository(originals.inputs[input]).present
   for m in hs.flakeMembers:
-    let key = if hasCoordinates(m.input) and m.repo.len > 0: m.repo
-              else: m.bindKey
+    let key = hookMemberBindKey(originals, m.input, m.repo, m.bindKey)
     result.checkoutOf[key] = m.path
     if key notin result.selected: result.selected.add(key)
   for p in hs.pinnedByRecipe:
@@ -86932,8 +86976,7 @@ proc hookFlakeSelection(hs: HookDevelopSet;
   # (`x` and `x-sui`), and excluding the shared key would drop the one the
   # shell DOES substitute.
   for m in hs.notSubstituted:
-    let key = if hasCoordinates(m.input) and m.repo.len > 0: m.repo
-              else: m.bindKey
+    let key = hookMemberBindKey(originals, m.input, m.repo, m.bindKey)
     if key notin result.selected and key notin result.exceptNames:
       result.exceptNames.add(key)
   for n in hs.notices: result.notices.add(n)
@@ -87038,10 +87081,26 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
       if reason.len == 0 and membershipFailure.len > 0:
         reason = "workspace repository identities could not be resolved (" & membershipFailure & ")"
       if reason.len == 0:
+        # The repo's fetch URL, and its checkout as a `file://` URL (a
+        # `git+file://` input naming the checkout itself). Deliberately NOT
+        # its other declared remotes, which ``hookDevelopSetOf`` also binds
+        # by: a fork declares its upstream as a remote (`noir` declares
+        # `noir-lang/noir`), and an input that fetches the UPSTREAM must not
+        # have the fork's working tree substituted for it, nor the fork's
+        # revision recorded in a lock node that fetches from upstream. Where
+        # the hooks bind an input this does not, the hooks leave it alone
+        # (``hookSubstitutedDevelopSet`` compares only what the shell
+        # substitutes at the same checkout), so the narrower set is the safe
+        # side of the disagreement.
         for candidate in candidates:
-          if candidate.fetchUrl.len > 0 and
-              canonicalRemoteIdentity(candidate.fetchUrl) == coordinate.identity:
-            matches.add(candidate)
+          var urls = @[candidate.fetchUrl]
+          if wsRoot.len > 0 and candidate.path.len > 0 and candidate.path != ".":
+            urls.add("file://" & os.normalizedPath(absolutePath(
+              wsRoot / candidate.path)))
+          for u in urls:
+            if u.len > 0 and canonicalRepositoryUrl(u) == coordinate.identity:
+              matches.add(candidate)
+              break
         if matches.len == 0:
           reason = "no workspace repository matches original coordinates '" & coordinate.identity & "'"
         elif matches.len > 1:
@@ -87356,10 +87415,13 @@ proc hookSubstitutedDevelopSet(hs: HookDevelopSet;
     result.ok = true
     return
   # input -> the checkout the shell substitutes for it. A member is kept only
-  # when the shell substitutes THAT checkout: the shell binds a `git+` URL
-  # input by its suffix-stripped name, where ``hookDevelopSetOf`` binds it by
-  # canonical URL, and a member compared against a checkout the shell did not
-  # build would be the same false comparison this rule removes.
+  # when the shell substitutes THAT checkout: the shell binds an input by the
+  # `original` its `flake.lock` node records, ``hookDevelopSetOf`` by the URL
+  # `flake.nix` declares (falling back to the locked node), and the two can
+  # disagree — a lock not yet refreshed after a `flake.nix` URL edit, an input
+  # whose original carries no repository at all. A member compared against a
+  # checkout the shell did not build would be the same false comparison this
+  # rule removes.
   var bound = initTable[string, string]()
   let shell = flakeShellBindingsOf(flakeRoot,
     ["--all", "--workspace-root=" & workspaceRoot,
@@ -87393,8 +87455,8 @@ proc hookSubstitutedDevelopSet(hs: HookDevelopSet;
       result.hookSet.notSubstituted.add(m)
       if shellPath.len > 0:
         # The shell DOES substitute this input, but with another checkout
-        # than the one the hooks bind it to (the shell binds a `git+` URL
-        # input by its suffix-stripped name, the hooks by repository URL).
+        # than the one the hooks bind it to (see ``bound`` above for how the
+        # two bindings can disagree).
         # Neither checkout describes both the pin and the build, so it is
         # not compared — and that is said, not left to look like "kept its
         # pin".
@@ -91372,14 +91434,22 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
       result.pinnedByRecipe.add(describeRecipePin(p))
     let lockText = readFile(lockPath)
     let doc = parseJson(lockText)
-    # The cheap name scan cannot prove an aliased coordinate input unchanged.
-    # Hand coordinate-bearing references to the authoritative shared binder.
+    # The scan below walks the hooks' develop set, whose members are bound by
+    # repository IDENTITY (``hookDevelopSetOf``), so an aliased input with
+    # original coordinates is checked by its own sibling's HEAD rather than
+    # by its name. What the scan cannot judge is an input whose coordinates
+    # are present but unusable (malformed, or missing from the lock): hand
+    # those to the authoritative binder, which names them.
     var coordinateNotices: seq[string]
     let originals = flakeInputOriginals(flakeRoot, coordinateNotices)
     var candidateMoved = not originals.ok
     for name in declared.names:
-      if not originals.inputs.hasKey(name) or
-          flakeOriginalRepository(originals.inputs.getOrDefault(name)).present:
+      if not originals.inputs.hasKey(name):
+        candidateMoved = true
+        continue
+      let coordinate =
+        flakeOriginalRepository(originals.inputs.getOrDefault(name))
+      if coordinate.present and coordinate.diagnostic.len > 0:
         candidateMoved = true
     if doc.kind == JObject and doc.hasKey("nodes"):
       let rootKey =
@@ -91421,6 +91491,65 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
             break
     else:
       candidateMoved = true
+    # The scan above compares each MEMBER with its own checkout. The
+    # authoritative path compares what the binder binds, keyed by
+    # ``hookFlakeSelection``, and the two are the same pairs only while the
+    # binder and ``hookDevelopSetOf`` agree on every input. Where they can
+    # disagree (a lock whose `original` no longer matches the URL `flake.nix`
+    # declares; an input whose original carries no repository and so is bound
+    # by name to a key another member supplies), the binder can pair an input
+    # with a checkout the scan never compared it with. So the same binder is
+    # run here, over the hooks' WHOLE develop set: the authoritative path
+    # binds over a subset of it (``hookSubstitutedDevelopSet`` only drops
+    # members, and only adds exclusions), so its pairs are a subset of these
+    # — provided no two members share a key with different checkouts, where
+    # dropping one could re-point the key. That case hands over too. No
+    # develop-set composer runs here, so the pre-filter stays cheap.
+    if not candidateMoved and hookSet.flakeMembers.len > 0:
+      var keyPath = initTable[string, string]()
+      for m in hookSet.flakeMembers:
+        let key = hookMemberBindKey(originals, m.input, m.repo, m.bindKey)
+        if keyPath.getOrDefault(key, m.path) != m.path:
+          candidateMoved = true
+          break
+        keyPath[key] = m.path
+    if not candidateMoved and hookSet.flakeMembers.len > 0:
+      let selection = hookFlakeSelection(hookSet, workspaceRoot, flakeRoot)
+      var bindNotices: seq[string]
+      let lockedNodes =
+        if doc.kind == JObject and doc{"nodes"} != nil and
+            doc["nodes"].kind == JObject: doc["nodes"]
+        else: newJObject()
+      let rootInputs = block:
+        let rootKey =
+          if doc.kind == JObject and doc.hasKey("root") and
+              doc["root"].kind == JString: doc["root"].getStr()
+          else: "root"
+        let r = lockedNodes{rootKey}
+        if r != nil and r.kind == JObject and r{"inputs"} != nil and
+            r["inputs"].kind == JObject: r["inputs"]
+        else: newJObject()
+      for b in flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
+          defaultFlakeInputStripSuffixes,
+          ensureGitToolResolvable(tpmPathOnly, getEnv("PATH")),
+          selection.workspaceRoot, bindNotices, selection.onlyNames,
+          selection.exceptNames, flakeRoot):
+        # A bound input whose pin cannot be read is unproven, not unchanged.
+        let target = rootInputs{b.input}
+        let node =
+          if target != nil and target.kind == JString:
+            lockedNodes{target.getStr()}
+          else: nil
+        let locked = if node != nil and node.kind == JObject: node{"locked"}
+                     else: nil
+        let pinned =
+          if locked != nil and locked.kind == JObject and
+              locked{"rev"} != nil and locked["rev"].kind == JString:
+            locked["rev"].getStr()
+          else: ""
+        if pinned.len == 0 or pinned != b.rev:
+          candidateMoved = true
+          break
     if not candidateMoved:
       result.line = "flake-lock up-to-date: every overridable input of " &
         lockPath & " already names its sibling's HEAD; not touched"
