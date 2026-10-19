@@ -66,13 +66,19 @@
 ##      Diverged repo without a flavor: the plan reports ``diverged`` (a real
 ##      run exits 2, sub-case 2), but a dry run is informational and exits 0.
 ##
+##  14. ``test_sync_mainline_scopes_the_full_active_project_set``
+##      Metadata-only multi-project workspace: later positional repos survive
+##      selectors; sync reconciles the scoped active union without enabling
+##      inactive projects or touching other active projects.
+##
 ## No mocks: real git repositories, real filesystem, the real binary.
-## Skip rule: ``git`` missing on PATH.
+## Existing cases skip when git is absent; the scope regression requires git.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
 import repro_test_support
+import repro_workspace_manifests
 
 proc q(value: string): string = quoteShell(value)
 
@@ -720,3 +726,82 @@ suite "repro sync --mainline":
         check e["outcome"].getStr() == "diverged"
         check e["action"].getStr() == "none"
         check e["diagnostic"].getStr().contains("--rebase")
+
+  test "test_sync_mainline_scopes_the_full_active_project_set":
+    # Metadata-only workspace: positionals filter the active union, rather
+    # than replacing it with the first project. Real upstreams make omitted
+    # and accidentally widened selections visible in both reports and HEADs.
+    let gitBin = findExe("git")
+    require gitBin.len > 0
+    let fx = setupFixture(gitBin, "active-projects", @[
+      RepoSpec(name: "prod", mainline: "dev"),
+      RepoSpec(name: "specs", mainline: "latest"),
+      RepoSpec(name: "infra", mainline: "live"),
+      RepoSpec(name: "inactive", mainline: "dev")])
+    defer: removeDirEventually(fx.scratch)
+    cloneAll(gitBin, fx)
+    for i, name in ["group-a", "group-b", "group-c", "inactive-project"]:
+      var project = fx
+      project.specs = @[fx.specs[i]]
+      writeFile(fx.workspaceRoot / "projects" / (name & ".toml"),
+        projectToml(project).replace("mainline-sync-fixture", name))
+    writeWorkspaceProjects(fx.workspaceRoot,
+      @["group-a", "group-b", "group-c"])
+
+    var before, tips: seq[string]
+    for s in fx.specs:
+      before.add(headSha(gitBin, fx.workspaceRoot / s.name))
+      tips.add(advanceTrunk(gitBin, fx.seedOf(s.name), s.mainline, "moved\n"))
+      require before[^1] != tips[^1]
+
+    proc scopedSync(projects, extra: seq[string]): CmdResult =
+      var argv = @[fx.reproBin, "sync", "--mainline", "--write-report",
+        "--workspace-root=" & fx.workspaceRoot]
+      argv.add(projects)
+      argv.add(extra)
+      runShell(shellCommand(argv))
+
+    # --only names an active repo supplied by the SECOND positional project.
+    # Both orders must select the same repo, so order cannot hide truncation.
+    for projects in [@["group-a", "group-b"], @["group-b", "group-a"]]:
+      let preview = scopedSync(projects,
+        @["--only=specs", "--dry-run", "--json"])
+      checkpoint(preview.output)
+      require preview.code == 0
+      let report = parseJson(preview.output)
+      require report["repos"].len == 1
+      check report["repos"][0]["name"].getStr() == "specs"
+      for i, s in fx.specs:
+        check headSha(gitBin, fx.workspaceRoot / s.name) == before[i]
+
+    # Naming an inactive project must not enable it or widen the active set.
+    let inactive = scopedSync(@["group-a", "inactive-project"],
+      @["--dry-run", "--json"])
+    checkpoint(inactive.output)
+    require inactive.code == 0
+    let inactiveReport = parseJson(inactive.output)
+    require inactiveReport["repos"].len == 1
+    check inactiveReport["repos"][0]["name"].getStr() == "prod"
+
+    # Execute the union: the second project reconciles, while the third
+    # active project and the inactive project remain untouched.
+    let synced = scopedSync(@["group-a", "group-b"], @["--json"])
+    checkpoint(synced.output)
+    require synced.code == 0
+    let report = readReport(fx)
+    require report["repos"].len == 2
+    for i in 0 .. 1:
+      let s = fx.specs[i]
+      check entryByName(report, s.name)["mainlineBranch"].getStr() == s.mainline
+      check entryByName(report, s.name)["outcome"].getStr() == "fast_forwarded"
+      check headSha(gitBin, fx.workspaceRoot / s.name) == tips[i]
+    for i in 2 .. 3:
+      check headSha(gitBin, fx.workspaceRoot / fx.specs[i].name) == before[i]
+
+    # A single project still narrows a workspace with several active ones.
+    let single = scopedSync(@["group-c"], @["--json"])
+    checkpoint(single.output)
+    require single.code == 0
+    require readReport(fx)["repos"].len == 1
+    check headSha(gitBin, fx.workspaceRoot / "infra") == tips[2]
+    check headSha(gitBin, fx.workspaceRoot / "inactive") == before[3]

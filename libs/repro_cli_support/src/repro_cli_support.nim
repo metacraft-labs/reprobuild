@@ -41108,7 +41108,7 @@ proc refuseRepoPassedAsProject(workspaceRoot: string;
   ## Up-front form of the refusal in ``resolveNamedProjectOrVariant``, for the
   ## paths that resolve a positional BEFORE any participating set exists: a
   ## workspace with no recorded metadata (the positional is the resolution
-  ## target) and ``--mainline`` (which resolves from the first positional).
+  ## target), including ``--mainline`` in that workspace shape.
   ## Both would otherwise answer with the generic "no repo-set, project or
   ## variant named" text. A name is refused only when no project, variant or
   ## repo-set by that name exists AND a repo fragment does, so every name that
@@ -46618,6 +46618,37 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
         "' -> '" & repo.path & "' (" & identityEvidence & ")")
     result[repoIdx] = outcome
 
+proc resolveSyncBaseProject(args: WorkspaceSyncArgs;
+    prospectiveProjects: seq[string] = @[]): ResolvedProject =
+  # RA-27 scoped sync: ``repro workspace sync <projectA> <projectB>`` syncs
+  # ONLY the named projects' repos. When scope projects are given we resolve
+  # the FULL workspace set independent of the positionals — preferring a
+  # composer ``workspace.toml`` or a metadata-recorded project so that the
+  # positionals act purely as a SCOPE FILTER (not as the resolution target).
+  # That is what makes the filter load-bearing: the full set may span more
+  # repos than the named project, and the filter narrows it down. In a plain
+  # single-project workspace (no ``workspace.toml`` at all) there is nothing
+  # else to resolve, so the first scope project is the base — the union then
+  # equals that project's repos and the pre-RA-27 behavior is preserved.
+  var resolveArgs = args
+  if args.scopeProjects.len > 0:
+    let workspaceToml = workspaceTomlPath(args.workspaceRoot)
+    var haveBase = isCompositionalWorkspaceToml(args.workspaceRoot)
+    if not haveBase and fileExists(workspaceToml):
+      haveBase =
+        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project.len > 0
+    if haveBase:
+      # Resolve the recorded/composed workspace, not the positional, so the
+      # scope filter below can narrow the full set.
+      resolveArgs.projectName = ""
+  # Enable previews resolve their validated prospective membership in memory;
+  # an ordinary scoped sync still filters the recorded workspace set.
+  result =
+    if prospectiveProjects.len > 0:
+      resolveProjectSet(args.workspaceRoot, prospectiveProjects)
+    else:
+      resolveWorkspaceSyncProject(resolveArgs)
+
 proc executeWorkspaceSync(args: WorkspaceSyncArgs;
     prospectiveProjects: seq[string] = @[]): WorkspaceSyncOutcome =
   ## End-to-end driver. (1) Refresh manifest layers so the composer
@@ -46653,34 +46684,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
 
   # Step 2: resolve (or compose) the project.
   #
-  # RA-27 scoped sync: ``repro workspace sync <projectA> <projectB>`` syncs
-  # ONLY the named projects' repos. When scope projects are given we resolve
-  # the FULL workspace set independent of the positionals — preferring a
-  # composer ``workspace.toml`` or a metadata-recorded project so that the
-  # positionals act purely as a SCOPE FILTER (not as the resolution target).
-  # That is what makes the filter load-bearing: the full set may span more
-  # repos than the named project, and the filter narrows it down. In a plain
-  # single-project workspace (no ``workspace.toml`` at all) there is nothing
-  # else to resolve, so the first scope project is the base — the union then
-  # equals that project's repos and the pre-RA-27 behavior is preserved.
-  var resolveArgs = args
-  if args.scopeProjects.len > 0:
-    let workspaceToml = workspaceTomlPath(args.workspaceRoot)
-    var haveBase = isCompositionalWorkspaceToml(args.workspaceRoot)
-    if not haveBase and fileExists(workspaceToml):
-      haveBase =
-        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project.len > 0
-    if haveBase:
-      # Resolve the recorded/composed workspace, not the positional, so the
-      # scope filter below can narrow the full set.
-      resolveArgs.projectName = ""
-  # Enable previews resolve their validated prospective membership in memory;
-  # an ordinary scoped sync still filters the recorded workspace set.
-  var resolved =
-    if prospectiveProjects.len > 0:
-      resolveProjectSet(args.workspaceRoot, prospectiveProjects)
-    else:
-      resolveWorkspaceSyncProject(resolveArgs)
+  var resolved = resolveSyncBaseProject(args, prospectiveProjects)
   report.project = resolved.projectName
   report.scopeProjects = args.scopeProjects
   report.dryRun = args.dryRun
@@ -47813,10 +47817,7 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
   result.flavor = mainlineFlavorTag(args.mainlineFlavor)
   result.dryRun = args.dryRun
 
-  var resolveArgs = args
-  if args.scopeProjects.len > 0:
-    resolveArgs.projectName = args.scopeProjects[0]
-  var resolved = resolveWorkspaceSyncProject(resolveArgs)
+  var resolved = resolveSyncBaseProject(args)
   result.project = resolved.projectName
 
   resolved.repos = narrowSyncRepoSet(args, args.workspaceRoot, resolved.repos)
