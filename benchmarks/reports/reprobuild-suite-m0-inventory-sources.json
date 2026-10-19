@@ -28803,6 +28803,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_hash",
         "repro_test_support",
         "repro_workspace_manifests"
       ],

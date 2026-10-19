@@ -20029,8 +20029,8 @@ proc managedHookRefusalRecordName*(hookName: string): string =
   ##     record of the last run that worked.
   ##   * OVERWRITE the report with the refusal. Makes "the latest outcome"
   ##     correct and loses the same last-good record, for the same reason.
-  ##   * WRITE A SIBLING, which is this. The last serviced dispatch keeps its
-  ##     report; the refusal gets a dated record of its own, naming the binary
+  ##   * WRITE A SEPARATE RECORD, which is this. The last serviced dispatch
+  ##     keeps its report; the refusal gets a dated record of its own, naming the binary
   ##     that refused and how it was resolved. An operator comparing the two
   ##     timestamps can see which happened last, which is a question neither
   ##     of the other two shapes can answer at all.
@@ -20123,9 +20123,9 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   result.add("set -eu\n")
   result.add("set +x\n")
   # PG-15 — where this hook may file a contract-refusal record, and under what
-  # name. The DIRECTORY is the answer `commitHookReportDir` gave at install
-  # time, baked in; "" means "nowhere", and the refusal then says so on stderr
-  # instead of inventing a destination. Written at column zero as a plain
+  # name. The DIRECTORY is the repository namespace beneath the destination
+  # `commitHookReportDir` granted at install time, baked in; "" means "nowhere",
+  # and the refusal then says so on stderr instead of inventing a destination. Written at column zero as a plain
   # assignment so `managedHookRefusalRecordDirAdvertised` can read it back out
   # of an installed body.
   result.add("REPRO_REFUSAL_RECORD_DIR=" &
@@ -53091,13 +53091,20 @@ proc managedHookRefusalRecordDir(repoRoot: string): string =
   ## The workspace is resolved with ``enclosingWorkspaceRoot``, the SAME walk
   ## the post-commit dispatch path uses (``resolvePostCommitWorkspaceRoot``
   ## with no explicit root), so a refusal and a dispatch in one repo file
-  ## their diagnostics in one directory. Resolving it any other way would
-  ## split the two outcomes of the same hook across two places and leave the
-  ## comparison PG-15 exists to enable — which happened last? — unanswerable
-  ## again.
+  ## their diagnostics beneath the same guarded report directory. Each
+  ## repository gets its own refusal namespace so a healthy sibling cannot
+  ## erase its evidence and another refusal cannot overwrite it. Canonical
+  ## roots collapse symlink aliases while retaining distinct same-named
+  ## checkouts. This identity is supplied at install time, never in shell.
   if repoRoot.len == 0:
     return ""
-  commitHookReportDir(enclosingWorkspaceRoot(repoRoot))
+  let reportDir = commitHookReportDir(enclosingWorkspaceRoot(repoRoot))
+  if reportDir.len == 0:
+    return ""
+  let canonicalRoot = canonicalDiscoveredGitPath(repoRoot, repoRoot)
+  let repoKey = digestHex(blake3DomainDigest(canonicalRoot.bytesOf(),
+    hdMetadataEnvelope))
+  reportDir / "managed-hook-refusals" / repoKey
 
 proc postCommitReportPath(workspaceRoot: string): string =
   workspaceReportDir(workspaceRoot) / "post-commit-report.json"
