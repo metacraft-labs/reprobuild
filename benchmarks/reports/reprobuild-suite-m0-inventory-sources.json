@@ -5624,7 +5624,7 @@
             "libDir",
             "workRoot"
           ],
-          "line": 165,
+          "line": 175,
           "path": "tests/integration/t_library_load_evidence_is_recorded.nim",
           "patterns": [
             "cc"
@@ -5641,7 +5641,7 @@
             "libDir",
             "workRoot"
           ],
-          "line": 166,
+          "line": 176,
           "path": "tests/integration/t_library_load_evidence_is_recorded.nim",
           "patterns": [
             "cc"
@@ -5658,7 +5658,7 @@
             "libDir",
             "workRoot"
           ],
-          "line": 200,
+          "line": 210,
           "path": "tests/integration/t_library_load_evidence_is_recorded.nim",
           "patterns": [
             "cc"
@@ -5675,7 +5675,7 @@
             "libDir",
             "workRoot"
           ],
-          "line": 201,
+          "line": 211,
           "path": "tests/integration/t_library_load_evidence_is_recorded.nim",
           "patterns": [
             "cc"
