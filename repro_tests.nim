@@ -12819,7 +12819,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     source: "tests/integration/t_gateway_reads_the_policy_from_the_pushed_tree_by_destination_branch.nim",
     binary: "build/test-bin/t_gateway_reads_the_policy_from_the_pushed_tree_by_destination_branch",
     defines: @[],
-    requiresReproBinary: false,
+    requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny,
