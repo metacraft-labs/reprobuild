@@ -350,8 +350,8 @@ libs/repro_home_resources/tests/t_macos_app_bundle_placement.nim	nim	19
 libs/repro_home_resources/tests/t_macos_app_folder_placement.nim	nim	11
 libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim	nim	19
 libs/repro_home_resources/tests/t_registry_root_override.nim	nim	12
-libs/repro_home_resources/tests/t_resource_type_registry.nim	nim	5
-libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	163
+libs/repro_home_resources/tests/t_resource_type_registry.nim	nim	6
+libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	164
 libs/repro_home_rollback/tests/t_rollback_releases_unowned_concerns.nim	nim	3
 libs/repro_home_rollback/tests/t_smoke_home_rollback.nim	nim	2
 libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	nim	65
@@ -1061,7 +1061,7 @@ tests/e2e/local-build-engine/t_repro_build_target_matching_project_file_stem.nim
 tests/e2e/local-build-engine/t_repro_build_unknown_target_diagnostic.nim	nim	1
 tests/e2e/local-build-engine/t_repro_list_targets_lists_implicit_and_explicit.nim	nim	1
 tests/e2e/m68/t_e2e_repro_home_depends_on_topological.nim	nim	5
-tests/e2e/m68/t_e2e_repro_home_fs_user_file.nim	nim	8
+tests/e2e/m68/t_e2e_repro_home_fs_user_file.nim	nim	11
 tests/e2e/m69/t_e2e_repro_home_apply_builtin_catalog.nim	nim	4
 tests/e2e/m69/t_e2e_repro_home_env_user_path_vm.nim	nim	1
 tests/e2e/m69/t_e2e_repro_home_fs_managed_block_vm.nim	nim	1

@@ -13797,7 +13797,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_home_resources/tests/t_resource_type_registry.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13808,6 +13808,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_home_generations",
         "repro_home_resources",
         "repro_test_support"
       ],
@@ -13815,7 +13816,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_home_resources/tests/t_smoke_home_resources.nim",
       "sourceSuiteCount": 12,
-      "staticCaseCount": 163,
+      "staticCaseCount": 164,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -26631,10 +26632,10 @@
         "repro_home_resources"
       ],
       "owner": "tests/e2e",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/e2e/m68/t_e2e_repro_home_fs_user_file.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

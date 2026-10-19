@@ -9498,7 +9498,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     source: "tests/e2e/m68/t_e2e_repro_home_fs_user_file.nim",
     binary: "build/test-bin/t_e2e_repro_home_fs_user_file",
     defines: @[],
-    requiresReproBinary: false,
+    requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny,

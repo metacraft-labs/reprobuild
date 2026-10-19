@@ -45,6 +45,12 @@ type
                     ## registry); NO cross-machine substitution by default
     rdVolatile      ## inherently non-reproducible (a launched VM/container)
 
+  ResourceOwnership* = enum
+    ## The unit a driver owns. The default fails closed for an existing
+    ## unrecorded object; collection drivers explicitly opt into convergence.
+    roWholeObject
+    roSetContribution
+
   ResourceDriver* = object
     ## The native analog of a Terraform provider's Read/Plan/Apply
     ## RPCs, restricted to the leaf operations the home-scope engine
@@ -65,6 +71,7 @@ type
   ResourceTypeDef* = object
     typeId*: string                       ## stable, e.g. "fs.managedBlock"
     determinism*: ResourceDeterminism
+    ownership*: ResourceOwnership
     driver*: ResourceDriver
 
 # A plain module global (populated once at import-time module init on the main

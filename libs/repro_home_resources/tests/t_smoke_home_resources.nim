@@ -14,6 +14,7 @@ import std/[os, strutils, tables, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
 import repro_home_resources
+from repro_home_generations import digestHex
 
 suite "M68 smoke: home resource lifecycle":
 
@@ -1312,7 +1313,7 @@ vscodevim.vim@1.27.0
     check action.kind == rakCreate
     check action.resourceKind == rkVscodeExtension
 
-  test "lifecycle: first-apply with no prior generation is NOT drift":
+  test "lifecycle: first apply converges a set contribution":
     # Regression for the M83 step-3 Hyper-V harness failure: a
     # `vscode.extension` resource on a fresh VM (no prior generation
     # manifest, so no recorded binding) where the desired ID is not
@@ -1320,9 +1321,8 @@ vscodevim.vim@1.27.0
     # `present=true` with the empty-intersection canonical (digest =
     # `af1349b9f5f9…`, the empty-text BLAKE3); the desired digest is
     # over the canonical `vscodevim.vim\n`. The two differ, but with
-    # `hasRecorded=false` the diff is NOT drift — drift requires a
-    # prior record of management. The lifecycle must collapse this
-    # to `rakUpdate` so the apply executor converges instead of
+    # `hasRecorded=false` the diff is NOT drift for set contributions.
+    # The lifecycle must collapse this to `rakUpdate` so apply converges instead of
     # raising `EDrift`.
     let desired = Resource(kind: rkVscodeExtension, address: "ve:first-apply",
       lifecyclePolicy: lpDefault,
@@ -1346,26 +1346,55 @@ vscodevim.vim@1.27.0
     check action.driftExpectedHex == ""
     check action.driftObservedHex == ""
 
-  test "lifecycle: first-apply with observed != desired is update, not drift":
-    # Same pattern for `fs.managedBlock`: the host file already has
-    # content under our managed-block sentinels (e.g. a previous
-    # untracked installer wrote it) and no prior generation manifest
-    # records a binding for this address. Lifecycle must converge,
-    # not drift-block.
-    var desired = Resource(kind: rkFsManagedBlock,
-      address: "fs:first-apply",
-      hostFilePath: "/tmp/host", managedBlockId: "block",
-      managedBlockContent: "PATH=/desired")
-    var state: ResourceState
-    state.address = desired.address
-    state.desired = desired
-    state.hasDesired = true
+  test "lifecycle: user PATH contribution converges without weakening recorded drift":
+    let desired = Resource(kind: rkEnvUserPath, address: "path:initial",
+      pathEntries: @["/desired/bin"])
+    var state = ResourceState(address: desired.address, hasDesired: true,
+      desired: desired)
     state.observed.present = true
-    state.observed.digest = digestOfBytes(@[byte('o'), byte('l'), byte('d')])
-    state.hasRecorded = false  # First apply.
-    let action = decideAction(state)
-    check action.kind == rakUpdate
-    check action.kind != rakDriftBlocked
+    state.observed.digest = digestOfBytes(@[byte('x')])
+    check decideAction(state).kind == rakUpdate
+    state.hasRecorded = true
+    state.recorded.postWriteDigest = digestOfBytes(@[byte('y')])
+    check decideAction(state).kind == rakDriftBlocked
+
+  test "lifecycle: first apply blocks an unrecorded differing whole object":
+    let resources = @[
+      Resource(kind: rkFsManagedBlock, address: "block:unowned",
+        hostFilePath: "/tmp/host", managedBlockId: "block",
+        managedBlockContent: "desired"),
+      Resource(kind: rkFsUserFile, address: "file:unowned",
+        userFileHostPath: "/tmp/host", userFileContent: "desired"),
+      Resource(kind: rkEnvUserVariable, address: "env:unowned",
+        envVarName: "TEST"),
+      Resource(kind: rkMacosUserDefault, address: "default:unowned",
+        defaultsDomain: "test", defaultsKey: "key",
+        defaultsValueLiteral: "true"),
+      Resource(kind: rkLaunchdUserAgent, address: "agent:unowned",
+        launchdLabel: "test", launchdPlistContent: "desired")]
+    for desired in resources:
+      var state = ResourceState(address: desired.address,
+        desired: desired, hasDesired: true)
+      state.observed.present = true
+      state.observed.digest = digestOfBytes(@[byte('o'), byte('l'), byte('d')])
+      let action = decideAction(state)
+      check action.kind == rakDriftBlocked
+      check action.driftExpectedHex == ""
+      check action.driftObservedHex == digestHex(state.observed.digest)
+      expect EDrift:
+        raiseIfDriftBlocked(action)
+      let reconciled = decideAction(state,
+        DecisionOptions(reconcile: rpReconcileDrift))
+      check reconciled.kind == rakUpdate
+      check reconciled.driftObservedHex == action.driftObservedHex
+      # Matching unmanaged content remains a no-op; recorded ownership
+      # permits an ordinary desired-content update.
+      state.observed.digest = digestOfResource(desired)
+      check decideAction(state).kind == rakNoOp
+      state.observed.digest = digestOfBytes(@[byte('o')])
+      state.hasRecorded = true
+      state.recorded.postWriteDigest = state.observed.digest
+      check decideAction(state).kind == rakUpdate
 
   test "realWorldIdentity is the singleton vscode:extensions":
     let r = Resource(kind: rkVscodeExtension, address: "ve",

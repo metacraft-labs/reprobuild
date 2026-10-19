@@ -90,4 +90,6 @@ proc registerBuiltinResourceTypes*() =
     registerResourceType(ResourceTypeDef(
       typeId: $kind,
       determinism: rdHostBound,
+      ownership: (if kind in {rkEnvUserPath, rkVscodeExtension}:
+        roSetContribution else: roWholeObject),
       driver: driver))

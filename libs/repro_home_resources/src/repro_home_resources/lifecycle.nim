@@ -12,7 +12,8 @@
 ##      - desired present + observed absent             -> create
 ##      - desired present + observed matches desired    -> no_op (cache-hit)
 ##      - desired present + observed differs:
-##          no recorded binding (first apply)           -> update (converge)
+##          no record + whole object                    -> drift_blocked
+##          no record + set contribution                -> update (converge)
 ##          recorded postWrite == observed              -> update (safe)
 ##          recorded postWrite != observed              -> drift_blocked
 ##      - desired absent + observed present:
@@ -365,18 +366,13 @@ proc decideActionIgnoringBusy(state: ResourceState;
       result.kind = rakUpdate
       result.summary = summarize(rakUpdate, state.address, result.resourceKind)
       return
-    # First-apply (no recorded binding) is NOT drift. "Drift" is
-    # defined as the operator mutating state we PREVIOUSLY wrote.
-    # If we have no record of ever writing this resource, the
-    # observed-vs-desired diff is just the initial-convergence
-    # delta — drive an `rakUpdate` (the apply executor converges
-    # observed -> desired through the same code path as a regular
-    # update). Hit by drivers whose `observe` returns `present=true`
-    # with the empty-set hash on a system that has nothing matching
-    # the desired set yet — e.g. `vscode.extension` on a fresh
-    # install where no extensions are installed and the canonical
-    # observed = the empty intersection of (installed ∩ desired).
-    if not state.hasRecorded:
+    # A collection can observe a partial/empty contribution on first
+    # apply (e.g. installed VS Code extensions intersected with desired).
+    # Whole objects have no such exception: without a recorded write,
+    # differing existing content belongs to someone else. Let the ordinary
+    # drift policy below require explicit reconciliation before replacing it.
+    if not state.hasRecorded and
+        lookupResourceType($state.desired.kind).ownership == roSetContribution:
       result.kind = rakUpdate
       result.summary = summarize(rakUpdate, state.address, result.resourceKind)
       return
@@ -394,7 +390,7 @@ proc decideActionIgnoringBusy(state: ResourceState;
         result.summary = summarize(rakNoOp, state.address,
           result.resourceKind) & " [vendor update kept]"
       return
-    # Drift.
+    # Drift, including a differing whole object we have never managed.
     let expectedHex =
       if state.hasRecorded: digestHex(state.recorded.postWriteDigest)
       else: ""

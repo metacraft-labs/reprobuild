@@ -36,6 +36,14 @@ suite "slice 1: resource-type registry":
       inc enumCount
     check registeredResourceTypeIds().len == enumCount
 
+  test "ownership is whole-object by default and contribution only for collections":
+    check ResourceTypeDef().ownership == roWholeObject
+    for kind in ResourceKind:
+      let expected =
+        if kind in {rkEnvUserPath, rkVscodeExtension}: roSetContribution
+        else: roWholeObject
+      check lookupResourceType($kind).ownership == expected
+
   test "digestOfResource: fs.managedBlock matches the byte-level digest":
     # The managed-block driver normalizes a non-empty body to end in a
     # single trailing '\n'. A body that already ends in '\n' and one
