@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2199,
+    "nimTestBinaries": 2200,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 660,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2226
+    "testEntries": 2227
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1279,7 +1279,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 17,
-      "integration": 1210,
+      "integration": 1211,
       "platform/destructive": 134,
       "pure unit": 660,
       "unclassified": 205
@@ -1484,9 +1484,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2199,
+    "nimTestBinaryCount": 2200,
     "pythonTestFileCount": 27,
-    "testEntryCount": 2226
+    "testEntryCount": 2227
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -33349,6 +33349,23 @@
       "source": "tests/integration/t_health_reports_a_worktree_unsafe_hooks_path.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_health_reports_disjoint_local_branches",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_health_reports_disjoint_local_branches.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
