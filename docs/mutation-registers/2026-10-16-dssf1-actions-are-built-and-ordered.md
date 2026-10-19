@@ -159,3 +159,59 @@ defect this campaign records.
 * **binary** `ORDER`
 * **expected red case** `an action that cannot write its output fails, naming action and consumer`
 * **measured** red, **10 OK / 1 FAILED**.
+
+---
+
+## CORRECTION, 2026-10-18 — MA1's restore never happened
+
+**MA1's line above is wrong where it says "restored by file copy … and green
+again at 5 OK / 0 FAILED".** The mutation was still in the tree when the work
+was committed. `dfacf036b` — the commit that claimed F1's second half — carries
+
+```nim
+let upActions = buildDevEnvActions(@[], upActionSpecs,
+```
+
+which is MA1's replacement text verbatim. So the committed lane never built
+anything: `repro up` refused every session with *"service `api` names the
+output of dev-env action `fs-writeText-etc-2fdssf1-2fconsumed.yaml`, which
+this dev-env artifact does not carry (0 action(s): )"*, and all five cases of
+`tests/integration/t_dssf1_repro_up_builds_the_rendered_config.nim` were red
+from the moment they were written. Whatever produced the "green again" line
+was not a run against the tree that was committed.
+
+Fixed at the merge commit by restoring the argument. Re-measured against a
+cold store (`REPRO_STORE_ROOT` pointed at an empty directory, so the provider
+recompiled and the dev-env was re-derived rather than reused) with
+`build/bin/repro` and `build/bin/reprobuild` rebuilt by `scripts/build_apps.sh`
+from the merged tree: **5 OK / 0 FAILED**, including the cached-artifact arm.
+
+### Why the other two suites could not catch it
+
+`CHANNEL` and `ORDER` both stayed green across the whole period, and neither
+could have gone red. `ORDER` calls `buildDevEnvActions(summaries(), …)`
+directly, with its own action list; `CHANNEL` round-trips the artifact
+in-process. The defect was in neither the function nor the artifact but in
+**the one production call site that feeds the function** — and a test that
+supplies the argument itself can never observe the caller passing `@[]`.
+`UP` is the only suite in this register that exercises that call site, which
+is exactly why D-SS11 insists on it.
+
+### How it was localised, since the source read clean end to end
+
+Three temporary probes, each writing to a file rather than stderr (the
+provider is a subprocess and its stderr does not reach the test's output, so
+an absent stderr line proves nothing):
+
+| probe | site | result |
+|---|---|---|
+| registration | `buildActionRegistry.add` in `runtime_core.nim` | `registered fs-writeText-etc-2fdssf1-2fconsumed.yaml total=1` |
+| provider read | before the actions loop in `runtime_provider.nim` | `devEnvActions=1 services=1` |
+| provider wire | `encodeDevEnvResult` in `repro_provider_runtime/codec.nim` | `encodeDevEnvResult actions=1` |
+
+So the action was registered, read and written on the wire — which ruled out
+the provider, the DSL registry and the envelope versions (checked separately:
+upstream stayed at `EnvelopeVersion = 5`, this lane's 6 did not collide), and
+left only the engine side of the boundary. All three probe files were restored
+by copy against hashes recorded before the edits (`98acff22`, `17be8db6`,
+`c7e852c7`), verified byte-identical afterwards.

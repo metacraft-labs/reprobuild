@@ -17989,7 +17989,7 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
   for service in upArtifact.services:
     upActionSpecs.add(ServiceSpec(name: service.name,
       consumedActionIds: service.consumedActionIds))
-  let upActions = buildDevEnvActions(@[], upActionSpecs,
+  let upActions = buildDevEnvActions(upArtifact.actions, upActionSpecs,
     upArtifact.projectRoot, devEnvActionRunner())
   if upActions.failure.len > 0:
     stderr.writeLine("repro " & commandName & ": " & upActions.failure)
