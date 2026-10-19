@@ -2121,7 +2121,7 @@
                 fail = msg: throw "reprobuild ct-trace-format-pin-coherence: ${msg}";
                 ctLockPath = "${codetracer-src}/repro.lock";
                 ctRev = codetracer-src.rev or "<no rev: not a locked revision>";
-                # repro.lock is TOML (schema reprobuild.solved-graph-lock.v2);
+                # repro.lock is TOML (schema reprobuild.solved-graph-lock.v3, or v2);
                 # the source deps sit in the `[lock]` table's `deps` array.
                 ctLock = builtins.fromTOML (builtins.readFile ctLockPath);
                 named = builtins.filter (dep: (dep.name or null) == "codetracer-trace-format-nim") (

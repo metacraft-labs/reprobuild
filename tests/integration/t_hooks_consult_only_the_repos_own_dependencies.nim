@@ -209,7 +209,9 @@ proc otherLock(fx: Nf2Fixture; otherRev, thirdPin: string): string =
 proc setupOwnDepsFixture(label: string): Nf2Fixture =
   result.gitBin = findExe("git")
   result.repro = absolutePath(reproBinaryPath())
-  result.scratch = createTempDir("own-deps-" & label & "-", "")
+  # Git reports physical checkout paths; Darwin's /tmp aliases /private/tmp.
+  # Use that same frame without relaxing the exact diagnostic assertions.
+  result.scratch = expandFilename(createTempDir("own-deps-" & label & "-", ""))
   result.ws = result.scratch / "ws"
   result.app = result.ws / "app"
   createDir(result.ws)

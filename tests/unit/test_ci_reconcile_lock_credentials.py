@@ -42,7 +42,9 @@ The lock files are hand-written TOML fixtures rather than CodeTracer's real
 lock, because the suite must not depend on a sibling checkout being present
 and at a particular revision; they reproduce the real lock's shape (one
 ``[lock]`` table whose ``deps`` is an array of inline tables, a root entry at
-``path = "."``, ``visibility = "public"`` on a forge-private repo).
+``path = "."``, ``visibility = "public"`` on a forge-private repo). They are
+written in the still-read v2 shape; one case writes the v3 shape, whose root
+entry is ``self = "true"`` and whose records carry no path.
 
 The forge is the one stand-in. GitHub cannot be reached from a hermetic test
 and a real private repository would need a real credential, so the clone
@@ -226,6 +228,34 @@ class LockDerivationTests(ScriptCase):
         result = self.run_script("repositories", "--lock", str(lock),
                                  "--owner", OWNER)
         self.assertNotIn("codetracer", result.stdout.splitlines())
+
+    def test_v3_root_entry_is_marked_self_not_by_path(self):
+        """A v3 lock records no `path`: the root is `self = "true"`.
+
+        The engine writes `reprobuild.solved-graph-lock.v3`, whose records
+        carry no checkout path. Read with the v2 rule, no entry would be the
+        root and the checkout itself would be credentialed and cloned.
+        """
+        v3_deps = [
+            '{ name = "codetracer", self = "true", coord_kind = "vcs", '
+            'url = "https://github.com/metacraft-labs/codetracer", '
+            'ref = "agents", '
+            'revision = "0123456789abcdef0123456789abcdef01234567" }',
+            '{ name = "isonim", coord_kind = "vcs", '
+            'url = "https://github.com/metacraft-labs/isonim", '
+            'ref = "agents", '
+            'revision = "0123456789abcdef0123456789abcdef01234567" }',
+        ]
+        lock = self.base / "repro.lock"
+        lock.write_text(
+            lock_text(v3_deps).replace(
+                "reprobuild.solved-graph-lock.v2",
+                "reprobuild.solved-graph-lock.v3"),
+            encoding="utf-8")
+        result = self.run_script("repositories", "--lock", str(lock),
+                                 "--owner", OWNER)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["isonim"])
 
     def test_other_owners_are_reported_as_anonymous(self):
         """A dep the credential does not cover is named on stderr, not dropped.

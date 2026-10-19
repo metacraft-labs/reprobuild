@@ -183,7 +183,10 @@ suite "NF-1: the emitted overrides are the develop set":
       skip()
     else:
       let repro = absolutePath(reproBinary)
-      let scratch = createTempDir("nf1-develop-set-", "")
+      # Git spells local file URLs with the physical checkout path; on Darwin
+      # /tmp is a symlink to /private/tmp. Keep the exact URL assertions in
+      # that same frame rather than depending on the temp directory's alias.
+      let scratch = expandFilename(createTempDir("nf1-develop-set-", ""))
       defer: removeDir(scratch)
 
       let repos = ["alpha", "beta", "gamma", "delta", "epsilon"]
@@ -350,7 +353,12 @@ suite "NF-1: the emitted overrides are the develop set":
         "beta-src=git+file://" & (ws / "beta"),
       ]
       check "gamma" in missing.errText
-      check (ws / "gamma") in missing.errText
+      # Named at the location THIS machine derives for an absent `gamma`: the
+      # lock records no checkout path, so with no checkout beneath the
+      # workspace and no override, the placement rule's default — the
+      # one-level sibling `../gamma` of the lock's directory — is where
+      # `repro develop` would put it, and therefore what is named.
+      check (parentDir(ws) / "gamma") in missing.errText
 
       # ---- (6) the workspace is the OUTER one, not the repo the flake is in.
       #

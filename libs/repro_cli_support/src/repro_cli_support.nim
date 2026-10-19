@@ -25380,7 +25380,9 @@ proc validateLockedDeps*(deps: seq[LockedDep]; origin: string) =
   ## THREE fields, because three of them steer a delete:
   ##
   ##   * `path` — `<workspaceRoot> / path` is the checkout directory, and
-  ##     `repro develop --all --reset` removes it before re-cloning.
+  ##     `repro develop --all --reset` removes it before re-cloning. It is
+  ##     derived locally from the name (`localizeLockedDeps`), never read
+  ##     from the lock, but it is still what the delete is handed.
   ##   * `name` — `lockPinnedProducerCacheRoot(ws) / name / <revision>` is the
   ##     lock-pinned producer cache directory, and that is a `removeDir`
   ##     target too. It is asked the TRAVERSAL question only: a name is not a
@@ -25420,10 +25422,18 @@ proc validateLockedDeps*(deps: seq[LockedDep]; origin: string) =
   ## which is total, covers every caller and every plane at once, and is the
   ## one place that can be correct about it. See the note there.
   for dep in deps:
-    let pathRejection = lockedCheckoutPathRejection(dep.path)
+    # The checkout path is DERIVED, never read from the lock (a v3 record
+    # carries none, and a v2 one is not believed — `localizeLockedDeps`), so
+    # the lock's only influence on it is the dependency NAME, which the
+    # traversal question below guards. The placement rule already skips a
+    # candidate this refuses; asking it again here keeps the boundary whole
+    # for a caller that placed deps some other way.
+    let pathRejection =
+      if isSelfLockedDep(dep) or dep.path.len == 0: ""
+      else: lockedCheckoutPathRejection(dep.path)
     if pathRejection.len > 0:
       raiseLockedCheckoutPath(origin,
-        "records dependency '" & dep.name & "' at checkout path '" &
+        "places dependency '" & dep.name & "' at checkout path '" &
         dep.path & "', which " & pathRejection)
     let nameRejection = pathTraversalRejection(dep.name)
     if nameRejection.len > 0:
@@ -25447,7 +25457,15 @@ proc validateLockedDeps*(deps: seq[LockedDep]; origin: string) =
           "deleted and recreated — regenerate the lock with " &
           "`repro lock refresh`")
 
-proc parseWorkspaceLockedDeps*(content, origin: string): LockedDependencies =
+proc localizeLockedDeps*(deps: var seq[LockedDep]; lockDir: string) {.gcsafe.}
+  ## Forward declaration; defined beside ``lockedDepCheckoutPath``, the one
+  ## rule that places a locked dependency on this machine. Declared GC-safe
+  ## because the lock-plane boundary below calls it and is itself reached
+  ## from GC-safe closures (the certificate validity check), and a forward
+  ## declaration carries no inferred effects of its own.
+
+proc parseWorkspaceLockedDeps*(content, origin: string;
+    lockDir = ""): LockedDependencies =
   ## `parseLockedDependencies` plus the lock-plane boundary. THE entry point
   ## for turning committed-lock bytes into `LockedDep`s a consumer will act
   ## on. Six call sites in this module come through here; the only other place
@@ -25463,7 +25481,15 @@ proc parseWorkspaceLockedDeps*(content, origin: string): LockedDependencies =
   ## `origin` names the artifact for the diagnostic — a path for a file on
   ## disk, or a description for a blob (a pushed lock read out of a bare repo
   ## has no path).
+  ##
+  ## `lockDir` is the directory the lock belongs to. Given, every dependency
+  ## is placed where THIS machine has it (`localizeLockedDeps`); empty — a
+  ## blob with no checkout, or a reader that consumes only the self entry —
+  ## the parser's one-level sibling default stands. Either way no location
+  ## is read from the lock.
   result = parseLockedDependencies(content)
+  if lockDir.len > 0:
+    localizeLockedDeps(result.deps, lockDir)
   validateLockedDeps(result.deps, origin)
 
 proc devEnvProducerEdgesPossible*(projectRoot: string): bool =
@@ -26866,7 +26892,7 @@ proc usesProducerLockedDep(selector, root, pathBase: string;
   if srcRoot.len > 0 and dirExists(extendedPath(srcRoot)):
     let depAbs = absolutePath(srcRoot)
     let facts = committedLockRepoFacts(depAbs)
-    # Discovered from the invoking tree, RECORDED relative to the committed
+    # Discovered from the invoking tree, held relative to the committed
     # lock's frame of reference (``committedLockPathBase``).
     let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     return some(LockedDep(
@@ -26904,9 +26930,10 @@ proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
 proc lockedDepFromCheckout(name, depAbs, pathBase: string): LockedDep =
   ## A locked VCS dependency observed from the checkout at ``depAbs``: its
   ## ``HEAD`` as the revision, its canonical fetch URL, and the VCS-native
-  ## integrity of that commit. ``path`` is ``depAbs`` relative to
-  ## ``pathBase`` — ``committedLockPathBase`` of the project, never the
-  ## invoking directory; see that proc for why the two differ.
+  ## integrity of that commit. The in-memory ``path`` is ``depAbs`` relative
+  ## to ``pathBase`` — ``committedLockPathBase`` of the project, never the
+  ## invoking directory; see that proc for why the two differ. It is not
+  ## written to the lock.
   let facts = committedLockRepoFacts(depAbs)
   LockedDep(
     name: name, path: relativePath(depAbs, pathBase).replace('\\', '/'),
@@ -26971,8 +26998,10 @@ proc catalogLockedDep*(catalogRoot, root: string;
   ##
   ## A catalog inside the repository that holds the project (reprobuild's
   ## fixture catalog) is versioned with the project and yields nothing.
-  ## A recorded ``path`` is relative to ``pathBase`` (`committedLockPathBase`;
-  ## ``root`` when empty), the frame every committed lock path uses.
+  ## The returned ``path`` is relative to ``pathBase``
+  ## (`committedLockPathBase`; ``root`` when empty), the frame every in-memory
+  ## ``LockedDep.path`` uses. It is the writer's own observation and is not
+  ## written to the lock.
   let marker = readCatalogRevisionMarker(catalogRoot)
   if marker.url.len > 0 and marker.revision.len > 0:
     let markerName = repositoryNameFromUrl(marker.url)
@@ -26980,7 +27009,7 @@ proc catalogLockedDep*(catalogRoot, root: string;
       if markerName.len > 0: markerName
       else: ReprobuildPackagesRepositoryName
     return some(LockedDep(
-      name: name, path: "../" & name,
+      name: name, path: defaultLockedDepCheckoutPath(name),
       coordinates: Coordinates(kind: ckVcs, url: marker.url, gitRef: "",
         revision: marker.revision),
       integrity: gitObjectMultihash(
@@ -27005,7 +27034,7 @@ proc catalogLockedDep*(catalogRoot, root: string;
                    else: ReprobuildPackagesRepositoryName)
     let depPath =
       if depAbs.isRelativeTo(canonTargetBase / ".repro") or depAbs.isRelativeTo(absolutePath(root) / ".repro"):
-        "../" & depName
+        defaultLockedDepCheckoutPath(depName)
       else:
         relativePath(depAbs, canonTargetBase).replace('\\', '/')
     return some(LockedDep(
@@ -27070,7 +27099,15 @@ proc respelledUnderInvokingAncestor(canonical, invoking: string): string =
   canonical
 
 proc committedLockPathBase(projectRoot: string): string =
-  ## The directory a COMMITTED lock's ``deps`` paths are relative to.
+  ## The directory a COMMITTED lock's dependency checkouts are placed
+  ## relative to — the frame of every in-memory ``LockedDep.path``.
+  ##
+  ## Since ``reprobuild.solved-graph-lock.v3`` the lock records no path at all
+  ## (``lockedDepCheckoutPath`` derives each location locally, by name), so
+  ## the history below is about the v2 paths this frame was introduced for.
+  ## The frame itself still matters: the derived locations are expressed in
+  ## it, and a linked worktree must place a dependency where a refresh at the
+  ## repo root would.
   ##
   ## WHY THIS IS NOT SIMPLY THE INVOKING DIRECTORY. ``repro.lock`` is a
   ## committed artifact, so every ``path`` it carries has to mean the same
@@ -27136,6 +27173,208 @@ proc committedLockPathBase(projectRoot: string): string =
       os.normalizedPath(main / within)
   respelledUnderInvokingAncestor(canonicalBase, normalized)
 
+# ---------------------------------------------------------------------------
+# Where a LOCKED dependency is checked out on THIS machine.
+#
+# A committed lock pins a dependency's IDENTITY and never its materialization
+# (Workspace-Manifests.md §"The locked-dependency model", §"Mode-agnostic"):
+# the `reprobuild.solved-graph-lock.v3` record carries no `path`, and the
+# `path` a v2 record carried is not believed (repro_lock's on-disk format
+# notes). The location is a fact about the machine reading the lock, so it is
+# derived here, from the dependency's NAME, by ONE rule that every consumer
+# shares:
+#
+#   1. a develop override of that name (`.repro/develop-overrides.toml` of the
+#      lock's directory, then of the enclosing workspace root) — the specified
+#      home of a local materialization (§"Develop-Mode Override File");
+#   2. the enclosing workspace's DECLARED membership (`repos/*.toml`): where
+#      the manifest puts the repository of that name;
+#   3. a directory of that name that is actually present BENEATH the lock's
+#      directory: `<lock dir>/<name>` when the lock's directory is not itself
+#      a repository — a committed-lock-only workspace root, whose member repos
+#      sit under it and which has no declared membership to say so (the
+#      directory need not be a checkout: one that is not is reported as such
+#      rather than looked for elsewhere) — then the nested develop layout
+#      `<lock dir>/<deps|vendor|…>/<name>` checkout (`nestedDevelopDirs`,
+#      what `discoverNestedDevelopDeps` finds);
+#   4. the one-level sibling default `../<name>`
+#      (`defaultLockedDepCheckoutPath`, CLI/develop.md §"Checkout Placement").
+#
+# Every answer is relative to `committedLockPathBase` of the lock's directory,
+# the frame `LockedDep.path` has always been held in, so a consumer joins it
+# exactly as before. A candidate the lock-plane boundary would refuse — one
+# that folds to the lock's own directory or an ancestor of it
+# (`lockedCheckoutPathRejection`) — is skipped rather than handed out: a
+# workspace member declared at `.` is the workspace ROOT, never a dependency's
+# checkout, and several consumers delete the directory they are given.
+#
+# Issue 2026-10-14 (committed lock records a filesystem path per dependency)
+# is why this exists: a recorded `../dev/reprobuild-latest`, a directory that
+# never existed, was reported as "absent" by `repro develop` and announced as
+# a disagreement between two locks that pinned the same revision.
+# ---------------------------------------------------------------------------
+
+proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string):
+    tuple[resolved: ResolvedProject; workspaceLocal: Option[WorkspaceLocal]]
+  ## Forward declaration; defined with the membership-resolution ladder.
+
+type
+  LockedDepLocator* = object
+    ## The local facts that place one lock's dependencies, gathered once per
+    ## lock directory and asked per dependency name
+    ## (``lockedDepCheckoutPath``). The workspace membership is resolved
+    ## lazily, on the first name no develop override places, so a lock that
+    ## names no other repository costs no manifest read.
+    lockDir: string            ## the directory holding the lock, as invoked
+    pathBase: string           ## ``committedLockPathBase(lockDir)``
+    overrides: Table[string, string]
+      ## dependency name -> absolute override ``local_path``
+    membershipLoaded: bool
+    members: Table[string, string]
+      ## repository name -> absolute manifest-declared checkout
+
+proc addDevelopOverridesOf(loc: var LockedDepLocator; root: string) =
+  ## Fold ``<root>/.repro/develop-overrides.toml`` into ``loc``; an entry
+  ## already placed by an earlier file wins. An unreadable file contributes
+  ## nothing: an override is a local preference, and the strict reader of
+  ## that file is `repro develop`'s business, not every lock reader's.
+  try:
+    let doc = readDevelopOverridesFile(root)
+    if doc.isNone: return
+    for e in listOverrides(doc.get()):
+      if e.package.len == 0 or e.local_path.len == 0: continue
+      if e.package in loc.overrides: continue
+      loc.overrides[e.package] =
+        os.normalizedPath(absolutePath(e.local_path, root))
+  except CatchableError:
+    discard
+
+proc lockedDepLocator*(lockDir: string): LockedDepLocator =
+  ## The locator for the lock held in ``lockDir``, resolving the workspace
+  ## membership itself when a name needs it.
+  let dir = os.normalizedPath(absolutePath(lockDir))
+  result = LockedDepLocator(lockDir: dir,
+    pathBase: committedLockPathBase(dir),
+    overrides: initTable[string, string](),
+    members: initTable[string, string]())
+  result.addDevelopOverridesOf(dir)
+  let ws = findWorkspaceRoot(result.pathBase)
+  if ws.len > 0 and cmpPaths(os.normalizedPath(absolutePath(ws)), dir) != 0:
+    result.addDevelopOverridesOf(os.normalizedPath(absolutePath(ws)))
+
+proc lockedDepLocator*(lockDir, workspaceRoot: string;
+    members: openArray[tuple[name, path: string]]): LockedDepLocator =
+  ## The locator for the lock held in ``lockDir`` when the caller already
+  ## holds the workspace membership (``members``, paths relative to
+  ## ``workspaceRoot``) — a reader walking every participating repo's lock
+  ## then resolves the membership once, not once per lock.
+  result = lockedDepLocator(lockDir)
+  result.membershipLoaded = true
+  for m in members:
+    if m.name.len == 0 or m.path.len == 0 or m.name in result.members:
+      continue
+    result.members[m.name] =
+      os.normalizedPath(absolutePath(m.path, workspaceRoot))
+
+proc loadMembership(loc: var LockedDepLocator) =
+  ## Resolve the enclosing workspace's membership into ``loc.members``, once.
+  ##
+  ## Only a DECLARED membership counts: a manifest checkout or a compositional
+  ## ``workspace.toml``. A committed-lock-only workspace has no declaration of
+  ## its own — its membership is derived from its lock
+  ## (``committedLockDerivedProject``), which is exactly the document being
+  ## placed here — so consulting it would be circular, and would recurse
+  ## through this very proc. Any failure to resolve leaves the membership
+  ## empty, and the remaining rules decide.
+  if loc.membershipLoaded: return
+  loc.membershipLoaded = true
+  let found = findWorkspaceRoot(loc.pathBase)
+  if found.len == 0: return
+  let ws = os.normalizedPath(absolutePath(found))
+  if not hasResolvedManifestCheckout(ws) and
+      not isCompositionalWorkspaceToml(ws, ""):
+    return
+  try:
+    # The membership ladder is file I/O over the manifests, but the compiler
+    # cannot prove it GC-safe: the ladder reaches module-level `var`s (the
+    # one-time notice sets). Lock readers run inside `{.gcsafe.}` closures
+    # (the certificate validity check), always on the thread that owns those
+    # sets, so this follows the module's established `cast(gcsafe)` pattern
+    # for its I/O seams.
+    var repos: seq[ResolvedRepo]
+    {.cast(gcsafe).}:
+      repos = resolveWorkspaceProjectShared(ws, "",
+        "placing a locked dependency").resolved.repos
+    for r in repos:
+      if r.name.len == 0 or r.path.len == 0 or r.name in loc.members:
+        continue
+      loc.members[r.name] = os.normalizedPath(absolutePath(r.path, ws))
+  except CatchableError:
+    discard
+
+proc lockedDepCheckoutPath*(loc: var LockedDepLocator; name: string;
+    honourOverrides = true): string =
+  ## Where the dependency ``name`` is checked out on this machine, relative to
+  ## ``committedLockPathBase`` of the lock's directory — THE one rule (see the
+  ## block comment above). "" only for an empty name.
+  ##
+  ## ``honourOverrides = false`` skips rule 1 and answers where the
+  ## dependency sits when NO develop override substitutes it — for a caller
+  ## that already holds the override and asks about the checkout it replaces.
+  if name.len == 0: return ""
+  proc placed(loc: LockedDepLocator; abs: string): string =
+    ## ``abs`` in the lock's frame, or "" when the lock-plane boundary refuses
+    ## it (the lock's own directory, or an ancestor of it).
+    let rel = relativePath(abs, loc.pathBase).replace('\\', '/')
+    if rel.len == 0 or lockedCheckoutPathRejection(rel).len > 0: ""
+    else: rel
+  if honourOverrides and name in loc.overrides:
+    let rel = loc.placed(loc.overrides[name])
+    if rel.len > 0: return rel
+  loc.loadMembership()
+  if name in loc.members:
+    let rel = loc.placed(loc.members[name])
+    if rel.len > 0: return rel
+  # A repository's own lock never places a dependency at an arbitrary child
+  # of the repository; only a workspace root (not itself a checkout) holds
+  # its members directly beneath it.
+  if not isGitCheckoutDir(loc.lockDir) and
+      dirExists(extendedPath(loc.lockDir / name)):
+    let rel = loc.placed(loc.lockDir / name)
+    if rel.len > 0: return rel
+  for sub in nestedDevelopDirs:
+    let nested = loc.lockDir / sub / name
+    if isGitCheckoutDir(nested):
+      let rel = loc.placed(nested)
+      if rel.len > 0: return rel
+  defaultLockedDepCheckoutPath(name)
+
+proc localizeLockedDeps*(deps: var seq[LockedDep];
+    loc: var LockedDepLocator) =
+  ## Give every dependency the checkout location this machine has for it:
+  ## the self entry keeps ``SelfLockedDepPath``, a VCS dependency is placed by
+  ## ``lockedDepCheckoutPath``, and a non-VCS one (a solved package) has none.
+  ## Applied to deps PARSED from a lock, whose ``path`` is only the parser's
+  ## default; nothing a lock document says about a location is consulted.
+  for d in deps.mitems:
+    if isSelfLockedDep(d): continue
+    d.path =
+      if d.coordinates.kind == ckVcs: loc.lockedDepCheckoutPath(d.name)
+      else: ""
+
+proc localizeLockedDeps*(deps: var seq[LockedDep]; lockDir: string) {.gcsafe.} =
+  ## ``localizeLockedDeps`` for the lock held in ``lockDir``.
+  var loc = lockedDepLocator(lockDir)
+  localizeLockedDeps(deps, loc)
+
+proc parseLockedDepsAt*(content, lockDir: string): LockedDependencies =
+  ## ``parseLockedDependencies`` for the lock held in ``lockDir``, with every
+  ## dependency placed where this machine has it (``localizeLockedDeps``).
+  ## The reader for a consumer that joins ``LockedDep.path`` but does not go
+  ## through the validating ``parseWorkspaceLockedDeps`` boundary.
+  result = parseLockedDependencies(content)
+  localizeLockedDeps(result.deps, lockDir)
+
 proc lockedDepsForWorkspace*(workspaceRoot: string;
                             usesSelectors: seq[string] = @[];
                             sourceRecipeRoots: seq[string] = @[];
@@ -27144,11 +27383,21 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
   ## MO-8 — observe the workspace's participating repos and produce a
   ## ``LockedDep`` per dependency, each with checkout COORDINATES (vcs
   ## url/ref/revision) and a genuinely-computed INTEGRITY multihash. The root
-  ## repo (``path = "."``) is always recorded; any develop-mode deps
-  ## (``discoverDevelopDeps`` — NESTED deps under ``deps/…`` AND SIBLING
-  ## develop-override deps one level up) follow. ``repro lock refresh``
-  ## serializes these into the v2 committed lock so a lock-file-only workspace
-  ## — including its sibling develop deps — is fully self-describing.
+  ## repo (the self entry, ``SelfLockedDepPath``) is always recorded; any
+  ## develop-mode deps (``discoverDevelopDeps`` — NESTED deps under ``deps/…``
+  ## AND SIBLING develop-override deps one level up) follow. ``repro lock
+  ## refresh`` serializes these into the v3 committed lock so a lock-file-only
+  ## workspace — including its sibling develop deps — is fully
+  ## self-describing.
+  ##
+  ## Each returned ``path`` is where THIS run observed the checkout, for the
+  ## caller's own use; the serializer does not write it (a lock pins identity
+  ## only). Dependencies are therefore de-duplicated by NAME — the identity
+  ## the lock records, unique in ``deps`` — and, for checkouts this run
+  ## observed itself, by the observed directory, so one repository found by
+  ## two discovery routes under two spellings of its name is recorded once.
+  ## A path read back out of the existing lock is never a key: it is derived
+  ## locally (``localizeLockedDeps``), not recorded.
   ##
   ## FUP-M — ``usesSelectors`` (the recipe's declared ``uses:`` producer
   ## selectors) fold each cross-repo SOURCE sibling into ``deps`` too. Before
@@ -27159,9 +27408,9 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
   ## producer graph.
   result = @[]
   let root = absolutePath(workspaceRoot)
-  # Every ``path`` written below, and every path read back out of the existing
-  # lock, is relative to THIS directory rather than to ``root``. The two are
-  # the same everywhere except in a linked worktree; see
+  # Every ``path`` below — observed here, or derived for an entry of the
+  # existing lock — is relative to THIS directory rather than to ``root``.
+  # The two are the same everywhere except in a linked worktree; see
   # ``committedLockPathBase``.
   let pathBase = committedLockPathBase(root)
   let rootFacts = committedLockRepoFacts(root)
@@ -27181,19 +27430,27 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     # A carry-forward source only: a lock we cannot read (or that carries a
     # path no consumer may be handed) simply contributes nothing, and the
     # rewrite that follows replaces it with a well-formed document.
+    # Its entries are placed where THIS machine has them, by name, so a
+    # sibling that is checked out is found and re-observed below even when
+    # an older lock recorded a location that has since gone stale.
     try: existingDeps = parseWorkspaceLockedDeps(
-      readFile(extendedPath(existingLockP)), existingLockP).deps
+      readFile(extendedPath(existingLockP)), existingLockP, lockDir = root).deps
     except CatchableError: discard
   # Sibling deps: the develop-mode discovery set FIRST, then the recipe's
-  # ``uses:`` producer siblings folded in (deduped by path and name).
+  # ``uses:`` producer siblings folded in (deduped by name, and by the
+  # checkout directory this run observed).
   var siblingDeps: seq[LockedDep] = @[]
-  var seenPaths: seq[string] = @[]
   var seenNames: seq[string] = @[]
+  var observedCheckouts: seq[string] = @[]
+    ## Absolute checkout directories THIS run observed. Never a location read
+    ## out of a lock.
+  proc observedKey(rel: string): string =
+    os.normalizedPath(absolutePath(rel, pathBase))
   for d in nested:
     let depAbs = absolutePath(root / d.path)
     let facts = committedLockRepoFacts(depAbs)
     # ``d.path`` is relative to the INVOKING tree (that is what discovery
-    # resolves against); the lock records it relative to ``pathBase``.
+    # resolves against); the in-memory path is relative to ``pathBase``.
     let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     siblingDeps.add(LockedDep(
       name: d.name, path: rel,
@@ -27202,17 +27459,20 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
       depends: @[], tags: @[]))
-    seenPaths.add(rel)
+    observedCheckouts.add(observedKey(rel))
     seenNames.add(d.name)
   for selector in usesSelectors:
     if selector in seenNames: continue
     let depOpt = usesProducerLockedDep(selector, root, pathBase, existingDeps)
     if depOpt.isNone: continue
     let dep = depOpt.get()
-    if dep.path in seenPaths or dep.name in seenNames: continue
+    let key = observedKey(dep.path)
+    if dep.name in seenNames or key in observedCheckouts: continue
     siblingDeps.add(dep)
-    seenPaths.add(dep.path)
     seenNames.add(dep.name)
+    # Only a checkout that is present was observed; a pin carried forward
+    # for an absent one has no observation behind its derived location.
+    if isGitCheckoutDir(key): observedCheckouts.add(key)
   # A federated source catalog is itself a reproducibility input. Recipe paths
   # live below that repository, so normalize each one to its enclosing Git
   # worktree and lock the repository once rather than recording hundreds of
@@ -27228,7 +27488,7 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     if cmpPaths(depAbs, root) == 0:
       continue
     let rel = relativePath(depAbs, pathBase).replace('\\', '/')
-    if rel in seenPaths:
+    if observedKey(rel) in observedCheckouts:
       continue
     let facts = committedLockRepoFacts(depAbs)
     let bareName = extractFilename(depAbs.strip(
@@ -27247,7 +27507,7 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
       depends: @[], tags: @[]))
-    seenPaths.add(rel)
+    observedCheckouts.add(observedKey(rel))
     seenNames.add(depName)
   # The reprobuild-packages catalog the solved tool uses' definitions came
   # from. Which catalog revision defined a package decides which realizations
@@ -27256,10 +27516,11 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     let depOpt = catalogLockedDep(catalogRoot, root, existingDeps, pathBase)
     if depOpt.isNone: continue
     let dep = depOpt.get()
-    if dep.path in seenPaths or dep.name in seenNames: continue
+    let key = observedKey(dep.path)
+    if dep.name in seenNames or key in observedCheckouts: continue
     siblingDeps.add(dep)
-    seenPaths.add(dep.path)
     seenNames.add(dep.name)
+    if isGitCheckoutDir(key): observedCheckouts.add(key)
   # The develop set declared by the workspace manifest: the transitive closure
   # of this repo's ``depends`` edges — the same closure the pre-push gate holds
   # clean and published (Unified-Locking-And-Hooks.md §14). A sibling can reach
@@ -27276,15 +27537,21 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     for sib in manifest.siblings:
       let depAbs = absolutePath(manifest.workspaceRoot / sib.path)
       let rel = relativePath(depAbs, pathBase).replace('\\', '/')
-      if rel in seenPaths or sib.name in seenNames: continue
+      if sib.name in seenNames or observedKey(rel) in observedCheckouts:
+        continue
       if isGitCheckoutDir(depAbs):
         siblingDeps.add(lockedDepFromCheckout(sib.name, depAbs, pathBase))
+        observedCheckouts.add(observedKey(rel))
       else:
+        # Carried forward BY NAME: the existing lock's entry for this
+        # sibling is its identity, whatever location an older lock recorded.
         var carried = false
         for d in existingDeps:
-          if d.path != "." and d.coordinates.kind == ckVcs and
-              (d.name == sib.name or d.path == rel):
-            siblingDeps.add(d)
+          if not isSelfLockedDep(d) and d.coordinates.kind == ckVcs and
+              d.name == sib.name:
+            var kept = d
+            kept.path = rel
+            siblingDeps.add(kept)
             carried = true
             break
         if not carried:
@@ -27295,7 +27562,6 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
             "records NO revision for it; check it out (`repro sync`) and " &
             "refresh again")
           continue
-      seenPaths.add(rel)
       seenNames.add(sib.name)
   else:
     # No workspace membership to consult — a standalone clone, a CI checkout.
@@ -27304,22 +27570,30 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     # present, kept verbatim where it is not. Dropping them because the
     # siblings are not visible would silently turn a complete lock into a
     # self-only one.
+    #
+    # "Where the checkout is present" is decided at the location THIS machine
+    # has for the name (``localizeLockedDeps`` placed ``d.path``), never at a
+    # location the old lock recorded: a recorded path that had gone stale
+    # made a present sibling look absent, so its pin was carried verbatim
+    # instead of being re-observed.
     for d in existingDeps:
-      if d.path == "." or d.coordinates.kind != ckVcs: continue
-      if d.path in seenPaths or d.name in seenNames: continue
+      if isSelfLockedDep(d) or d.coordinates.kind != ckVcs: continue
+      if d.name in seenNames: continue
       let depAbs = absolutePath(pathBase / d.path)
+      let key = observedKey(d.path)
+      if key in observedCheckouts: continue
       if isGitCheckoutDir(depAbs):
         var observed = lockedDepFromCheckout(d.name, depAbs, pathBase)
         observed.path = d.path
         siblingDeps.add(observed)
+        observedCheckouts.add(key)
       else:
         siblingDeps.add(d)
-      seenPaths.add(d.path)
       seenNames.add(d.name)
   var rootDepends: seq[string] = @[]
   for d in siblingDeps: rootDepends.add(d.name)
   result.add(LockedDep(
-    name: rootName, path: ".",
+    name: rootName, path: SelfLockedDepPath,
     coordinates: Coordinates(kind: ckVcs, url: rootFacts.originUrl,
       gitRef: rootFacts.publishedRef, revision: rootFacts.headSha),
     integrity: computeDepIntegrity(root, rootFacts.headSha),
@@ -27370,13 +27644,17 @@ proc committedLockDerivedProject(workspaceRoot: string):
       LockSource(kind: lskCommittedLock, workspaceRoot: root))
     var hasRootVcsDep = false
     for d in ld.deps:
-      if d.path == "." and d.coordinates.kind == ckVcs and
+      if isSelfLockedDep(d) and d.coordinates.kind == ckVcs and
           d.coordinates.revision.len > 0:
         hasRootVcsDep = true
         break
     if not hasRootVcsDep:
       break fromLock
     var repos: seq[ResolvedRepo] = @[]
+    # The lock's entries by NAME, and by the location this machine placed
+    # each at (``populateLockedDeps`` derives it locally; the lock records
+    # none) — a discovered checkout matching either is already described.
+    var lockedNames: seq[string] = @[]
     var lockedPaths: seq[string] = @[]
     var rootIdx = -1
     var rootName = ""
@@ -27391,8 +27669,9 @@ proc committedLockDerivedProject(workspaceRoot: string):
         vcs: defaultRepoVcs, stability: defaultRepoStability,
         visibility: visibilityFromLockString(d.visibility),
         participation: d.participation, depends: d.depends, tags: d.tags))
+      lockedNames.add(d.name)
       lockedPaths.add(d.path)
-      if d.path == ".":
+      if isSelfLockedDep(d):
         rootIdx = repos.high
         rootName = d.name
         rootRef = d.coordinates.gitRef
@@ -27401,7 +27680,7 @@ proc committedLockDerivedProject(workspaceRoot: string):
     # (MO-7) and SIBLING develop-override deps one level up (MO-12).
     var extraDepends: seq[string] = @[]
     for nd in discoverDevelopDeps(root):
-      if nd.path in lockedPaths: continue
+      if nd.name in lockedNames or nd.path in lockedPaths: continue
       repos.add(nd)
       extraDepends.add(nd.name)
     if rootIdx >= 0:
@@ -33963,7 +34242,9 @@ proc executeWorkspaceDevelop(args: WorkspaceDevelopArgs):
   let priorOpt = findOverride(existingFile, args.package)
   if priorOpt.isSome:
     let prior = priorOpt.get()
-    let priorAbs = absolutePath(prior.local_path)
+    # Relative to the workspace root holding the file, not the cwd.
+    let priorAbs = absolutePath(prior.local_path,
+      absolutePath(args.workspaceRoot))
     if priorAbs == sourcePath:
       # Idempotent: same package, same path → no-op (exit 0).
       result.mode = "idempotent"
@@ -34363,9 +34644,12 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
   ## ``LockStore`` backends, which are declared far below this driver.
 
 proc isRootLockedDep(d: LockedDep): bool =
-  ## The workspace root repo is recorded with ``path == "."`` (or empty). It is
-  ## the CONSUMER, not a develop-set dependency, so ``--all`` never clones it.
-  d.path.len == 0 or d.path == "."
+  ## The workspace root repo is the lock's self entry (``isSelfLockedDep``).
+  ## It is the CONSUMER, not a develop-set dependency, so ``--all`` never
+  ## clones it. An entry with no checkout location at all (a solved package,
+  ## which the reader places nowhere) is not a develop-set node either, and
+  ## is excluded by the same test, as it always was.
+  isSelfLockedDep(d) or d.path.len == 0
 
 proc isEvidenceOnlyLockedDep(d: LockedDep): bool
   ## DS-4 (Unified-Locking-And-Hooks.md §7) — an evidence-only repo
@@ -34557,12 +34841,14 @@ proc developAllTargetPath(node: LockedDep; workspaceRoot, intoDir: string):
   ## Map a selected node to its checkout path. ``--into=<dir>`` places the
   ## checkout under that root (``<dir>/<name>``); the default is the sibling
   ## topology one level above the workspace root (``../<name>``), per
-  ## CLI/develop.md §"Checkout Placement". The lock's workspace-relative
-  ## ``path`` is honored when it already names a location (e.g. ``../sib``).
+  ## CLI/develop.md §"Checkout Placement". The node's ``path`` is honored when
+  ## it names a location — which is where THIS machine places the dependency
+  ## (``lockedDepCheckoutPath``: an override, the workspace membership, a
+  ## nested checkout, else ``../<name>``), never a location a lock recorded.
   let seg = safeDevelopPathSegment(node.name)
   if intoDir.len > 0:
     return os.normalizedPath(absolutePath(intoDir) / seg)
-  if node.path.len > 0 and node.path != ".":
+  if node.path.len > 0 and not isSelfLockedDep(node):
     return os.normalizedPath(absolutePath(workspaceRoot / node.path))
   os.normalizedPath(parentDir(absolutePath(workspaceRoot)) / seg)
 
@@ -35439,7 +35725,12 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
         let prior = findOverride(overrides, node.name)
         if prior.isSome:
           row.state = "develop"
-          row.path = os.normalizedPath(absolutePath(prior.get().local_path))
+          # An override's `local_path` may be relative, and then it is
+          # relative to the workspace root that holds the file
+          # (`resolveOverrideAbsolutePath`), never to the invoking directory:
+          # `.envrc` and the commit hooks run this from inside a repo.
+          row.path = os.normalizedPath(absolutePath(prior.get().local_path,
+            absolutePath(root)))
         elif not dirExists(extendedPath(row.path)):
           row.state = "absent"
         else:
@@ -35536,8 +35827,8 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
 
     # Reuse / adopt an existing suitable checkout over cloning a duplicate.
     let prior = findOverride(overrides, node.name)
-    if prior.isSome and os.normalizedPath(absolutePath(prior.get().local_path)) ==
-        absTarget:
+    if prior.isSome and os.normalizedPath(absolutePath(prior.get().local_path,
+        absolutePath(root))) == absTarget:
       # Already in develop mode at this exact path — idempotent no-op.
       outcome.mode = "idempotent"
       outcome.ok = true
@@ -36263,9 +36554,10 @@ proc runDevelopDropCommand(args: openArray[string]): int =
 
   # The dependency's workspace checkout, so an entry recorded under another
   # name for the same checkout is dropped too. Looked up in the workspace
-  # membership, else in the committed locks of the workspace root and of the
-  # project (a lock entry's path is relative to its lock's directory). A name
-  # neither resolves is matched by name only, which is said.
+  # membership, else for a dependency the committed locks of the workspace
+  # root and of the project name — placed where this machine has it with no
+  # override in the way (``lockedDepCheckoutPath``; a lock records no
+  # location). A name neither resolves is matched by name only, which is said.
   var notes: seq[string]
   var checkoutOf = initTable[string, string]()
   var membershipFailure = ""
@@ -36282,10 +36574,15 @@ proc runDevelopDropCommand(args: openArray[string]): int =
     if not fileExists(extendedPath(lockP)): continue
     try:
       let ld = parseWorkspaceLockedDeps(readFile(extendedPath(lockP)), lockP)
+      var loc = lockedDepLocator(base)
       for d in ld.deps:
         if d.name in names and d.name notin checkoutOf and
-            d.path.len > 0 and d.path != ".":
-          checkoutOf[d.name] = os.normalizedPath(absolutePath(d.path, base))
+            not isSelfLockedDep(d) and d.coordinates.kind == ckVcs:
+          let placed = loc.lockedDepCheckoutPath(d.name,
+            honourOverrides = false)
+          if placed.len > 0:
+            checkoutOf[d.name] =
+              os.normalizedPath(absolutePath(placed, loc.pathBase))
     except CatchableError:
       discard
   for n in names:
@@ -42166,8 +42463,14 @@ proc collectLockCoherence*(identity: GitToolIdentity;
       discard
 
   # Claim source 2: every participating repo's own committed lock. Keyed by the
-  # dep's workspace-relative path so a claim lines up with a checkout.
+  # dep's workspace-relative checkout so a claim lines up with a checkout. The
+  # lock records no location: each dep is placed BY NAME, against the very
+  # membership this report covers (``lockedDepLocator`` over ``repos``), so a
+  # lock whose writer kept a sibling elsewhere still claims the checkout of
+  # that name here — and the membership is not re-resolved once per lock.
   var repoClaims = initTable[string, seq[LockClaim]]()
+  var members: seq[tuple[name, path: string]]
+  for repo in repos: members.add((repo.name, repo.path))
   for repo in repos:
     let lockPath = committedLockPath(workspaceRoot / repo.path)
     if not fileExists(extendedPath(lockPath)):
@@ -42182,13 +42485,16 @@ proc collectLockCoherence*(identity: GitToolIdentity;
       # created from `dep.path` — the claims are keyed by it and compared —
       # so dropping an unusable lock's claims is the whole remedy needed.
       continue
+    var loc = lockedDepLocator(workspaceRoot / repo.path, workspaceRoot,
+      members)
+    localizeLockedDeps(parsed.deps, loc)
     for dep in parsed.deps:
       if dep.coordinates.kind != ckVcs: continue
       if dep.coordinates.revision.len == 0: continue
-      # ``.`` is the lock's own repo; anything else is workspace-relative to
-      # the repo holding the lock.
+      # The self entry is the lock's own repo; anything else is placed
+      # relative to the repo holding the lock.
       let key =
-        if dep.path.len == 0 or dep.path == ".": repo.path
+        if isSelfLockedDep(dep) or dep.path.len == 0: repo.path
         else: os.normalizedPath(repo.path / dep.path).replace('\\', '/')
       if key notin repoClaims:
         repoClaims[key] = @[]
@@ -42819,7 +43125,7 @@ proc lockingTierLabel*(v: WorkspaceVisibility): string =
 # Reprobuild has two locks and they are not interchangeable:
 #
 #   * the COMMITTED lock — ``repro.lock``, schema
-#     ``reprobuild.solved-graph-lock.v2``, solved from a recipe's solver inputs.
+#     ``reprobuild.solved-graph-lock.v3``, solved from a recipe's solver inputs.
 #     ``repro lock refresh`` re-pins it, and it needs those inputs: run at a
 #     workspace root that has none it answers "no solver inputs found …" and
 #     exits 1.
@@ -43947,10 +44253,13 @@ proc populateLockedDeps*(source: LockSource): LockedDependencies =
   ## multihash), so a caller cannot tell — from the populated object — which
   ## source supplied a given repo's locked entry.
   ##
-  ##   * ``lskCommittedLock`` — parse the committed ``repro.lock`` (schema v2)
-  ##     and return its content verbatim (coordinates + integrity already in the
-  ##     lock; NOT re-derived from live ``git HEAD``). A missing / unparseable /
-  ##     non-v2 lock yields an empty ``deps`` set so callers fall back cleanly.
+  ##   * ``lskCommittedLock`` — parse the committed ``repro.lock`` (schema v3,
+  ##     or the still-readable v2) and return its content verbatim (coordinates
+  ##     + integrity already in the lock; NOT re-derived from live
+  ##     ``git HEAD``), each dependency placed where this machine has it
+  ##     (``localizeLockedDeps`` — the lock records no location). A missing /
+  ##     unparseable / unsupported lock yields an empty ``deps`` set so callers
+  ##     fall back cleanly.
   ##   * ``lskManifestRepo`` / ``lskExternalStore`` — for each repo in the
   ##     source's repo-set, read its locked revision from the backend
   ##     ``LockStore`` (the manifest-repo SHA lock, or the external DB) and emit
@@ -43961,9 +44270,12 @@ proc populateLockedDeps*(source: LockSource): LockedDependencies =
   of lskCommittedLock:
     let lockP = committedLockPath(absolutePath(source.workspaceRoot))
     if not fileExists(extendedPath(lockP)):
-      return LockedDependencies(schema: SolvedGraphLockSchemaV2, deps: @[])
+      return LockedDependencies(schema: SolvedGraphLockSchemaV3, deps: @[])
     try:
-      return parseWorkspaceLockedDeps(readFile(extendedPath(lockP)), lockP)
+      # Placed where THIS machine has each dependency: the lock records
+      # identity only, and every consumer of this source joins `path`.
+      return parseWorkspaceLockedDeps(readFile(extendedPath(lockP)), lockP,
+        lockDir = absolutePath(source.workspaceRoot))
     except LockedCheckoutPathError:
       # NOT the "fall back cleanly" case. The document parsed; what it says is
       # that a dependency's checkout directory is the workspace root (or an
@@ -43973,11 +44285,26 @@ proc populateLockedDeps*(source: LockSource): LockedDependencies =
       # lock set is empty" further down. Fail loud, at the reader.
       raise
     except CatchableError:
-      return LockedDependencies(schema: SolvedGraphLockSchemaV2, deps: @[])
+      return LockedDependencies(schema: SolvedGraphLockSchemaV3, deps: @[])
   of lskManifestRepo, lskExternalStore:
-    result = LockedDependencies(schema: SolvedGraphLockSchemaV2, deps: @[])
+    result = LockedDependencies(schema: SolvedGraphLockSchemaV3, deps: @[])
     for repo in source.repos:
       result.deps.add(lockedDepFromStoreRepo(source, repo))
+
+proc committedLockEntryFor(lockLd: LockedDependencies;
+    repo: ResolvedRepo): int =
+  ## The index of the committed-lock entry that speaks for workspace repo
+  ## ``repo``, or -1. Matched by NAME first — the identity the lock records —
+  ## and only then by where THIS machine placed the entry
+  ## (``populateLockedDeps`` derives it locally; the lock records no
+  ## location), which is how the self entry meets a root repo the manifest
+  ## declares at `.` under another name. Name first, so an entry placed at a
+  ## repo's checkout never shadows the entry that names it.
+  for i, d in lockLd.deps:
+    if d.name.len > 0 and d.name == repo.name: return i
+  for i, d in lockLd.deps:
+    if d.path.len > 0 and d.path == repo.path: return i
+  -1
 
 proc resolveWorkspaceLockedDeps*(workspaceRoot, projectName: string;
     identity: GitToolIdentity): LockedDependencies =
@@ -44002,7 +44329,7 @@ proc resolveWorkspaceLockedDeps*(workspaceRoot, projectName: string;
       LockSource(kind: lskCommittedLock, workspaceRoot: root))
   let (resolved, _) = resolveWorkspaceProjectShared(
     root, projectName, "`repro` workspace resolution")
-  result = LockedDependencies(schema: SolvedGraphLockSchemaV2, deps: @[])
+  result = LockedDependencies(schema: SolvedGraphLockSchemaV3, deps: @[])
   let routing = loadLockingRouting(root)
   # The committed lock (when present) supplies the public / committed-lock repos.
   var lockLd = LockedDependencies(deps: @[])
@@ -44014,10 +44341,9 @@ proc resolveWorkspaceLockedDeps*(workspaceRoot, projectName: string;
     # All-public default: no per-repo-set routing. Every repo is covered by the
     # committed lock if it carries it, else by its resolved coordinates.
     for repo in resolved.repos:
-      var placed = false
-      for d in lockLd.deps:
-        if d.path == repo.path or d.name == repo.name:
-          result.deps.add(d); placed = true; break
+      let at = committedLockEntryFor(lockLd, repo)
+      let placed = at >= 0
+      if placed: result.deps.add(lockLd.deps[at])
       if not placed:
         result.deps.add(lockedDepFromStoreRepo(
           LockSource(kind: lskManifestRepo, workspaceRoot: root,
@@ -44034,9 +44360,9 @@ proc resolveWorkspaceLockedDeps*(workspaceRoot, projectName: string;
       # Public / committed-lock repo: prefer the committed lock's entry.
       var placed = false
       if haveLock:
-        for d in lockLd.deps:
-          if d.path == repo.path or d.name == repo.name:
-            result.deps.add(d); placed = true; break
+        let at = committedLockEntryFor(lockLd, repo)
+        if at >= 0:
+          result.deps.add(lockLd.deps[at]); placed = true
       if not placed:
         result.deps.add(lockedDepFromStoreRepo(
           LockSource(kind: lskManifestRepo, workspaceRoot: root,
@@ -44247,9 +44573,9 @@ proc participatingRepoCommittedLocks(workspaceRoot: string):
       continue
     result.carrying.add(repo.path)
     for dep in parsed.deps:
-      # The lock's OWN repo: `path == "."` / empty, exactly as
-      # ``isRootLockedDep`` and ``collectLockCoherence`` read it.
-      if not (dep.path.len == 0 or dep.path == "."): continue
+      # The lock's OWN repo: its self entry (``isSelfLockedDep``), the one
+      # record this reader takes.
+      if not isSelfLockedDep(dep): continue
       if dep.coordinates.kind != ckVcs: continue
       if dep.coordinates.revision.len == 0: continue
       var rebased = dep
@@ -44341,7 +44667,9 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
     # checkout actually is. Under the old rule the root's answer won and
     # `repro develop --list --all --workspace-root=<ws>` reported `reprobuild`
     # as `absent` at a directory nothing had ever created; `--all` would have
-    # tried to clone it there.
+    # tried to clone it there. (Since the v3 lock no recorded path is believed
+    # at all — both entries are placed locally, by name — so that half of the
+    # instance cannot recur whichever file wins.)
     #
     # DISAGREEMENT IS NEVER SILENT. CLI/develop.md §"Conflicts are refused,
     # never resolved" makes two backends disagreeing fatal precisely so a
@@ -44350,6 +44678,18 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
     # decision is announced, naming both files and both answers, because an
     # undisclosed choice between two pins is the same hazard with the volume
     # turned down.
+    #
+    # What the two files can disagree ON is IDENTITY — the pinned revision.
+    # Never on a path: a lock records none, and the locations both entries
+    # carry here were derived on this machine from the same name, so a path
+    # "disagreement" would be a statement about two writers' disks, which is
+    # exactly the false notice issue 2026-10-14 measured
+    # (`../dev/reprobuild-latest` vs `reprobuild` at ONE revision).
+    #
+    # The entries are matched by NAME, and otherwise by that locally derived
+    # location — which is what pairs a per-repo self-record, rebased onto the
+    # repo's workspace path, with a root-lock entry recorded under another
+    # spelling of the repo's name.
     var rootIndexByName = initTable[string, int]()
     var rootIndexByPath = initTable[string, int]()
     for i, d in result.lock.deps:
@@ -44367,15 +44707,14 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
         # The root repo's lock also speaks about this repo. The repo's own lock
         # wins; say so whenever the two answers actually differ.
         let prev = result.lock.deps[at]
-        if prev.coordinates.revision != d.coordinates.revision or
-            prev.path != d.path:
+        if prev.coordinates.revision != d.coordinates.revision:
           result.warnings.add("'" & (if d.name.len > 0: d.name else: d.path) &
             "' is pinned by TWO files of the public tier's committed-lock " &
             "medium, and they disagree: " & committedLockP & " (the ROOT " &
-            "repo's lock) says path '" & prev.path & "' revision '" &
+            "repo's lock) says revision '" &
             prev.coordinates.revision & "', while " &
             (root / d.path / CommittedLockFileName) & " (the repo's OWN " &
-            "lock) says path '" & d.path & "' revision '" &
+            "lock) says revision '" &
             d.coordinates.revision & "'. The repo's OWN lock is used: a repo " &
             "publishes its own coordinates and the workspace root does not " &
             "publish them for it. Remedy: drop the stale entry from " &
@@ -44384,9 +44723,10 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
             root / d.path & " if its own lock is the stale one.")
         result.lock.deps[at] = d
         inc perRepoOverrode
-        # The replacement usually carries a DIFFERENT path from the entry it
-        # replaced (that is half of what the disagreement above is about), so
-        # the path index must learn the new one. Without this the slot the
+        # The replacement can carry a DIFFERENT local path from the entry it
+        # replaced (the root lock's entry was placed by name from the root's
+        # frame, the self-record by the repo's workspace path), so the path
+        # index must learn the new one. Without this the slot the
         # record now occupies is reachable by name only, and a second root
         # consumer in the same document — `<repo>-shadow`, rebased onto the
         # same workspace path — matches neither index and is admitted as a
@@ -45038,7 +45378,7 @@ proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
   for d in ld.deps:
     if d.integrity.len == 0: continue
     let repoAbs =
-      if d.path == "." or d.path.len == 0: root
+      if isSelfLockedDep(d) or d.path.len == 0: root
       else: root / d.path
     case d.coordinates.kind
     of ckVcs:
@@ -55070,6 +55410,33 @@ proc committedLockDepsLine(ld: LockedDependencies): string =
     if line.startsWith("deps = ["): return line
   ""
 
+proc splicedCommittedLockDeps(text, originalDepsLine, depsLine: string):
+    string =
+  ## ``text`` with its ``deps = [...]`` line replaced by ``depsLine`` — the
+  ## splice every partial lock writer uses so the rest of the document (the
+  ## solve, the certificate-policy snapshot) stays byte-identical.
+  ##
+  ## ``depsLine`` is rendered by the CURRENT writer, so its records carry no
+  ## ``path``, and that is only correct under the current schema: a v2 reader
+  ## reads a VCS record with no ``path`` as the lock's own repository. So a
+  ## document still tagged ``…v2`` has its schema line moved to ``…v3`` in
+  ## the same write; the rest of a v2 document is valid v3 unchanged (the two
+  ## schemas differ only in the ``deps`` record). Match the top-level schema
+  ## assignment by key, allowing the whitespace accepted by the reader, and
+  ## leave the policy snapshot's separate schema untouched.
+  result = text.replace(originalDepsLine, depsLine)
+  var offset = 0
+  for line in result.splitLines(keepEol = true):
+    let stripped = line.strip()
+    if stripped.startsWith("["): break
+    let eq = line.find('=')
+    if eq >= 0 and line[0 ..< eq].strip() == "schema":
+      let migrated = line.replace(SolvedGraphLockSchemaV2,
+        SolvedGraphLockSchemaV3)
+      result = result[0 ..< offset] & migrated & result[offset + line.len .. ^1]
+      break
+    offset += line.len
+
 proc keptPublishedRef(depAbs: string; pinned, fresh: LockedDep): string =
   ## The ``ref`` a re-observed entry records. A pin whose revision did not
   ## move keeps the ``ref`` it already carries as long as that is still a
@@ -55183,6 +55550,11 @@ proc gatherConsistencyInputs(repoRoot: string; source: ConsistencySource;
     result.reproLock.text = reproLockOverride.get()
   result.lockPathBase =
     if result.reproLock.present: committedLockPathBase(root) else: root
+  # The check reads `repro.lock` itself; this places each dependency it
+  # parses where this machine has it, as every other reader does (the lock
+  # records no location).
+  result.localizeLockedDeps = proc (ld: var LockedDependencies) =
+    localizeLockedDeps(ld.deps, root)
   result.producerVersions = proc (depName, depAbs: string):
       tuple[found: bool; file: string; entries: seq[ReproVersionEntry]] =
     ## A producer's `versions:` entries, read from its CHECKOUT: the table
@@ -55415,7 +55787,7 @@ proc reproNimPinnedSiblings(root, workspaceRoot: string;
   let overrides = explicitDevelopOverrideTargets(workspaceRoot, root)
   let pathBase = committedLockPathBase(root)
   for d in ld.deps:
-    if d.path == "." or d.path.len == 0 or d.coordinates.kind != ckVcs:
+    if isSelfLockedDep(d) or d.path.len == 0 or d.coordinates.kind != ckVcs:
       continue
     let depAbs = os.normalizedPath(absolutePath(pathBase / d.path))
     let verdict = reproRepinVerdict(inputs, d.name, depAbs,
@@ -55482,7 +55854,7 @@ proc exactRecipePinsOf(consumer, workspaceRoot: string;
       reproNimDeclaresExactUses(root):
     try:
       for p in reproNimPinnedSiblings(root, workspaceRoot,
-          parseLockedDependencies(readFile(extendedPath(reproLockPath))),
+          parseLockedDepsAt(readFile(extendedPath(reproLockPath)), root),
           honourOverrides = false):
         result.add(ExactRecipePin(dependency: p.repo,
           identity: p.canonicalRepo, path: p.path, file: p.flakePath,
@@ -55510,9 +55882,16 @@ proc bulkOverriddenExactPin(selector, projectRoot, overridePath: string;
   let url =
     if lockedDep.coordinates.kind == ckVcs: lockedDep.coordinates.url else: ""
   var hit = exactRecipePinMatching(pins, overridePath, url)
-  if hit < 0 and lockedDep.path.len > 0 and lockedDep.path != ".":
-    hit = exactRecipePinMatching(pins,
-      absolutePath(lockedDep.path, committedLockPathBase(projectRoot)), "")
+  if hit < 0 and lockedDep.name.len > 0 and not isSelfLockedDep(lockedDep) and
+      lockedDep.coordinates.kind == ckVcs:
+    # The checkout the override replaces: where this machine places the
+    # entry when no override substitutes it (a lock records no location).
+    var loc = lockedDepLocator(projectRoot)
+    let placed = loc.lockedDepCheckoutPath(lockedDep.name,
+      honourOverrides = false)
+    if placed.len > 0:
+      hit = exactRecipePinMatching(pins, absolutePath(placed, loc.pathBase),
+        "")
   if hit < 0: return ""
   describeExactRecipePin(pins[hit], "")
 
@@ -55661,7 +56040,7 @@ proc hookDevelopSetOf(repoRoot, workspaceRoot: string;
       reproNimDeclaresExactUses(flakeRoot):
     try:
       reproPins = reproNimPinnedSiblings(flakeRoot, workspaceRoot,
-        parseLockedDependencies(readFile(extendedPath(reproLockPath))))
+        parseLockedDepsAt(readFile(extendedPath(reproLockPath)), flakeRoot))
     except CatchableError as err:
       result.notices.add("the repro.nim exact pins of " & flakeRoot &
         " could not be related to its flake inputs (" & err.msg & "); " &
@@ -55863,7 +56242,7 @@ proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies;
   var declaredNames: seq[string] = @[]
   for sib in manifest.siblings: declaredNames.add(sib.name)
   for d in ld.deps:
-    if d.path == "." or d.coordinates.kind != ckVcs or d.path.len == 0:
+    if isSelfLockedDep(d) or d.coordinates.kind != ckVcs or d.path.len == 0:
       continue
     let depAbs = absolutePath(pathBase / d.path)
     seen.add(d.name)
@@ -55933,7 +56312,12 @@ proc summarizeCommittedLockRepin(plan: var CommittedLockRepinPlan) =
   ## exactly as a plan that never moved those entries would be.
   plan.depsLine = committedLockDepsLine(plan.plannedLd)
   plan.changed = false
-  if plan.depsLine.len == 0 or plan.depsLine == plan.originalDepsLine:
+  # "Nothing moved" is decided between two renderings by the SAME writer, not
+  # against the bytes on disk: a lock written before v3 renders differently
+  # (its records carry `path`) even when not one pin changed, and a commit
+  # that changed nothing must not rewrite it.
+  if plan.depsLine.len == 0 or plan.depsLine == plan.originalDepsLine or
+      plan.depsLine == committedLockDepsLine(plan.originalLd):
     plan.depsLine = plan.originalDepsLine
     plan.line = "repro-lock up-to-date"
   else:
@@ -55974,11 +56358,11 @@ proc holdCommittedLockEntries(plan: var CommittedLockRepinPlan;
     plan.held.add(name)
     var original = -1
     for i, d in plan.originalLd.deps:
-      if d.name == name and d.path != "." and d.coordinates.kind == ckVcs:
+      if d.name == name and not isSelfLockedDep(d) and d.coordinates.kind == ckVcs:
         original = i
     var kept: seq[LockedDep]
     for d in plan.plannedLd.deps:
-      if d.name == name and d.path != ".":
+      if d.name == name and not isSelfLockedDep(d):
         if original >= 0: kept.add(plan.originalLd.deps[original])
       else:
         kept.add(d)
@@ -55986,11 +56370,11 @@ proc holdCommittedLockEntries(plan: var CommittedLockRepinPlan;
     if original < 0:
       # An added entry: the root's `depends` gained it with the entry.
       for i, d in plan.plannedLd.deps:
-        if d.path == ".":
+        if isSelfLockedDep(d):
           var depends: seq[string]
           var originallyNamed = false
           for od in plan.originalLd.deps:
-            if od.path == "." and name in od.depends: originallyNamed = true
+            if isSelfLockedDep(od) and name in od.depends: originallyNamed = true
           for n in d.depends:
             if n != name or originallyNamed: depends.add(n)
           plan.plannedLd.deps[i].depends = depends
@@ -56034,7 +56418,7 @@ proc planCommittedLockRepin(repoRoot: string;
   var ld: LockedDependencies
   try:
     result.text = readFile(extendedPath(result.lockPath))
-    ld = parseLockedDependencies(result.text)
+    ld = parseLockedDepsAt(result.text, root)
   except CatchableError as err:
     result.line = "repro-lock refused-unreadable-lock: " & err.msg
     return
@@ -56056,7 +56440,7 @@ proc planCommittedLockRepin(repoRoot: string;
   let pathBase = committedLockPathBase(root)
   var rootIdx = -1
   for i, d in ld.deps:
-    if d.path == ".": rootIdx = i
+    if isSelfLockedDep(d): rootIdx = i
   for o in obs.observations:
     if o.name notin result.examined: result.examined.add(o.name)
     if o.observed.len == 0: continue
@@ -56069,9 +56453,13 @@ proc planCommittedLockRepin(repoRoot: string;
     let fresh = lockedDepFromCheckout(o.name, depAbs, pathBase)
     var found = false
     for i in 0 ..< ld.deps.len:
-      if ld.deps[i].path == "." or ld.deps[i].coordinates.kind != ckVcs:
+      if isSelfLockedDep(ld.deps[i]) or ld.deps[i].coordinates.kind != ckVcs:
         continue
-      if ld.deps[i].name == o.name or ld.deps[i].path == o.path:
+      # By NAME, the identity the entry records. (Both paths here are local —
+      # the entry's derived, the observation's observed — but the name is
+      # what the lock says, and an observation of a manifest sibling at an
+      # entry's derived location is already skipped by the observer.)
+      if ld.deps[i].name == o.name:
         found = true
         var d = ld.deps[i]
         let pinned = d.coordinates.revision
@@ -56131,7 +56519,8 @@ proc applyCommittedLockRepin(plan: CommittedLockRepinPlan):
   if not plan.changed: return (true, plan.line)
   try:
     writeFile(extendedPath(plan.lockPath),
-      plan.text.replace(plan.originalDepsLine, plan.depsLine))
+      splicedCommittedLockDeps(plan.text, plan.originalDepsLine,
+        plan.depsLine))
   except CatchableError as err:
     return (false, "repro-lock write-failed: " & err.msg)
   (true, plan.line)
@@ -56339,7 +56728,7 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string;
   if not fileExists(extendedPath(lockPath)): return
   var ld: LockedDependencies
   try:
-    ld = parseLockedDependencies(readFile(extendedPath(lockPath)))
+    ld = parseLockedDepsAt(readFile(extendedPath(lockPath)), root)
   except CatchableError:
     # Not this stage's question: an unreadable lock is reported by the
     # committed-lock integrity stage.
@@ -56668,7 +57057,7 @@ proc plannedCertificatePolicySection(plan: CertificatePolicySnapshotPlan;
   if not plan.enacted:
     return ""
   renderCertificatePolicySectionFor(plan.emission, repoRoot,
-    parseLockedDependencies(lockText).deps)
+    parseLockedDepsAt(lockText, repoRoot).deps)
 
 proc applyCertificatePolicySnapshot(site: CommitTimeWriterSite;
     workspaceRoot, repoRoot, timestamp: string;
@@ -56918,11 +57307,11 @@ proc coordinateCommitRepin(repoRoot, workspaceRoot: string;
     let pathBase = committedLockPathBase(root)
     var plannedRev = initTable[string, string]()
     for d in reproPlan.plannedLd.deps:
-      if d.path != "." and d.coordinates.kind == ckVcs:
+      if not isSelfLockedDep(d) and d.coordinates.kind == ckVcs:
         plannedRev[d.name] = d.coordinates.revision.toLowerAscii()
     var seenNames: seq[string]
     for d in reproPlan.originalLd.deps:
-      if d.path == "." or d.path.len == 0 or d.coordinates.kind != ckVcs:
+      if isSelfLockedDep(d) or d.path.len == 0 or d.coordinates.kind != ckVcs:
         continue
       seenNames.add(d.name)
       reproSides.add(ReproSide(name: d.name,
@@ -57158,8 +57547,8 @@ proc annotateSiblingGuidance(repoRoot: string;
   if fileExists(extendedPath(lockPath)):
     try:
       let base = committedLockPathBase(root)
-      for d in parseLockedDependencies(readFile(extendedPath(lockPath))).deps:
-        if d.path.len > 0 and d.path != ".":
+      for d in parseLockedDepsAt(readFile(extendedPath(lockPath)), root).deps:
+        if d.path.len > 0 and not isSelfLockedDep(d):
           depPaths[d.name] = os.normalizedPath(absolutePath(base / d.path))
     except CatchableError:
       discard
@@ -57403,8 +57792,8 @@ proc applyCommitTimeLockWriters*(site: CommitTimeWriterSite;
   # author can legitimately want, only an internal inconsistency.
   let plannedReproLock =
     if reproPlanned and reproPlan.changed:
-      some(reproPlan.text.replace(reproPlan.originalDepsLine,
-        reproPlan.depsLine))
+      some(splicedCommittedLockDeps(reproPlan.text,
+        reproPlan.originalDepsLine, reproPlan.depsLine))
     else: none(string)
   let plannedFlakeLock =
     if flake.planned and flake.moves.len > 0: some(flake.plannedText)
@@ -83212,12 +83601,12 @@ proc declaredDevelopSet(projectDir, lockPath: string):
   var existing: seq[LockedDep]
   try:
     existing = parseWorkspaceLockedDeps(readFile(extendedPath(lockPath)),
-      lockPath).deps
+      lockPath, lockDir = absolutePath(projectDir)).deps
   except CatchableError:
     return
   let pathBase = committedLockPathBase(absolutePath(projectDir))
   for d in existing:
-    if d.path == "." or d.path.len == 0 or d.coordinates.kind != ckVcs:
+    if isSelfLockedDep(d) or d.path.len == 0 or d.coordinates.kind != ckVcs:
       continue
     result.addMember(d.name, pathBase / d.path)
 
@@ -83328,7 +83717,8 @@ proc gateRefreshedSiblingPins(projectDir, lockPath: string;
   if lockPath.len == 0 or not fileExists(extendedPath(lockPath)): return
   var existing: seq[LockedDep]
   try:
-    existing = parseLockedDependencies(readFile(extendedPath(lockPath))).deps
+    existing = parseLockedDepsAt(readFile(extendedPath(lockPath)),
+      projectDir).deps
   except CatchableError:
     # An unreadable lock has no pins to protect; the refresh replaces it.
     return
@@ -83342,14 +83732,16 @@ proc gateRefreshedSiblingPins(projectDir, lockPath: string;
   let pathBase = committedLockPathBase(projectDir)
   for i in 0 ..< deps.len:
     let d = deps[i]
-    if d.path == "." or d.coordinates.kind != ckVcs or
+    if isSelfLockedDep(d) or d.coordinates.kind != ckVcs or
         d.coordinates.revision.len == 0:
       continue
     var pinnedIdx = -1
     for j, e in existing:
-      if e.path != "." and e.coordinates.kind == ckVcs and
-          e.coordinates.revision.len > 0 and
-          (e.name == d.name or e.path == d.path):
+      # By NAME: the identity both entries carry. Not by path — the pinned
+      # entry's is derived locally, the fresh one's is where this refresh
+      # observed the checkout, and neither is part of a lock.
+      if not isSelfLockedDep(e) and e.coordinates.kind == ckVcs and
+          e.coordinates.revision.len > 0 and e.name == d.name:
         pinnedIdx = j
         break
     if pinnedIdx < 0: continue
@@ -83521,7 +83913,7 @@ proc certificatePolicyStaleness*(projectDir: string): CertificatePolicyStaleness
   var expected: string
   try:
     expected = evaluatedCertificatePolicySection(root,
-      parseLockedDependencies(text).deps)
+      parseLockedDepsAt(text, root).deps)
   except CatchableError as err:
     result.stale = true
     result.detail = "the enacted certificate policy could not be compared " &
@@ -83788,8 +84180,10 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
         "written)")
       return 2
     try:
-      committedForRepin = parseLockedDependencies(
-        readFile(extendedPath(lockP)))
+      # Placed locally: the merge recognizes a sibling the committed lock
+      # names one way and this run observes under another by its checkout.
+      committedForRepin = parseLockedDepsAt(
+        readFile(extendedPath(lockP)), parentDir(absolutePath(lockP)))
     except CatchableError as e:
       stderr.writeLine("repro lock " & verb & ": --repin cannot read the " &
         "committed lock " & lockP & " whose pins it would hold: " & e.msg &
@@ -84138,11 +84532,12 @@ proc runReproLockValidate(rest: openArray[string]): int =
   # (e) MO-8 — integrity verification. Recompute each locked dependency's
   # self-describing integrity from the on-disk checkout and compare to the
   # locked value; a malformed/unrecognized multihash or a content drift is a
-  # loud failure. Also assert the v2 model round-trips deterministically.
+  # loud failure. Also assert the lock model round-trips deterministically.
   block integrity:
     var ld: LockedDependencies
     try:
-      ld = parseWorkspaceLockedDeps(readFile(extendedPath(lockP)), lockP)
+      ld = parseWorkspaceLockedDeps(readFile(extendedPath(lockP)), lockP,
+        lockDir = absolutePath(projectDir))
     except LockedCheckoutPathError as err:
       # `repro lock validate` exists to REPORT what is wrong with a lock, so
       # this is the one reader that must not treat an unusable path as a
@@ -84150,11 +84545,12 @@ proc runReproLockValidate(rest: openArray[string]): int =
       # boundary composed (offender + remedy) carried through verbatim.
       problems.add(err.msg)
       break integrity
-    except CatchableError:
+    except CatchableError as err:
+      problems.add("cannot read locked dependencies: " & err.msg)
       break integrity
     let once = serializeLockedDependencies(ld)
     if once != serializeLockedDependencies(parseLockedDependencies(once)):
-      problems.add("lock does not round-trip deterministically (v2 model)")
+      problems.add("lock does not round-trip deterministically (v3 model)")
     for d in ld.deps:
       if not isWellFormedMultihash(d.integrity):
         problems.add("dep '" & d.name &
@@ -84163,11 +84559,11 @@ proc runReproLockValidate(rest: openArray[string]): int =
       case d.coordinates.kind
       of ckVcs:
         let depAbs =
-          if d.path == "." or d.path.len == 0: absolutePath(projectDir)
-          else: absolutePath(projectDir) / d.path
+          if isSelfLockedDep(d) or d.path.len == 0: absolutePath(projectDir)
+          else: committedLockPathBase(projectDir) / d.path
         if not dirExists(extendedPath(depAbs)):
           continue  # not checked out here — cannot recompute (not a tamper).
-        if (d.path == "." or d.path.len == 0) and
+        if (isSelfLockedDep(d) or d.path.len == 0) and
             d.integrity.startsWith("git-sha"):
           # An in-tree lock cannot contain its own commit ID. Preserve its
           # recorded root coordinates, but permit only the lock's own content
@@ -90497,7 +90893,7 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
   var haveReproLock = false
   if inputs.reproLock.present:
     try:
-      ld = parseLockedDependencies(inputs.reproLock.text)
+      ld = parseLockedDepsAt(inputs.reproLock.text, root)
       haveReproLock = true
     except CatchableError as err:
       refuseNow(LockUpdateExitFailed, reproLockPath & " could not be read as " &
@@ -90529,7 +90925,7 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
               else: flakeLockPath)))
   if haveReproLock:
     for d in ld.deps:
-      if d.path == "." or d.coordinates.kind != ckVcs: continue
+      if isSelfLockedDep(d) or d.coordinates.kind != ckVcs: continue
       candidates.add(DependencyCandidate(kind: dckReproLockDep, name: d.name,
         identity: canonicalRepositoryUrl(d.coordinates.url),
         where: reproLockPath))
@@ -90558,7 +90954,7 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
   var reproOfRepo: seq[int]
   if haveReproLock:
     for i, d in ld.deps:
-      if d.path == "." or d.coordinates.kind != ckVcs: continue
+      if isSelfLockedDep(d) or d.coordinates.kind != ckVcs: continue
       if canonicalRepositoryUrl(d.coordinates.url) == identity:
         reproOfRepo.add(i)
   if flakeOfRepo.len == 0 and reproOfRepo.len == 0:
@@ -91064,7 +91460,8 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
           undoAll(LockUpdateExitFailed, reproLockPath & " carries no " &
             "`deps = [...]` line to rewrite")
         writeFile(extendedPath(reproLockPath),
-          inputs.reproLock.text.replace(originalDepsLine, depsLine))
+          splicedCommittedLockDeps(inputs.reproLock.text, originalDepsLine,
+            depsLine))
         result.written.add(reproLockPath)
     if reproNimText != inputs.reproNim.text:
       writeFile(extendedPath(reproNimPath), reproNimText)

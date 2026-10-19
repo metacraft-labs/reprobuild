@@ -37,6 +37,7 @@
 
 import std/[os, strutils, unittest]
 import repro_test_support/reasoned_skip
+import repro_lock
 import ./committed_lock_siblings_fixture
 
 proc installPreCommit(fx: SiblingFixture) =
@@ -89,10 +90,10 @@ suite "pre-commit re-pins the committed lock's siblings":
       check c2.code == 0
       check "repro.lock" in fx.filesInHead()
       let committed = fx.git(fx.app, "show HEAD:repro.lock")
-      let libB = depEntry(committed, "../lib-b")
+      let libB = depEntry(committed, "lib-b")
       check ("revision = \"" & libBNext & "\"") in libB
       check ("integrity = \"git-sha1:" & libBNext & "\"") in libB
-      check ("revision = \"" & libCPin & "\"") in depEntry(committed, "../lib-c")
+      check ("revision = \"" & libCPin & "\"") in depEntry(committed, "lib-c")
       check linePrefixed(committed, "packages = ") == packagesBefore
       check fx.git(fx.app, "status --porcelain").strip().len == 0
 
@@ -102,7 +103,7 @@ suite "pre-commit re-pins the committed lock's siblings":
       checkpoint(c3.output)
       check c3.code == 0
       let withD = fx.git(fx.app, "show HEAD:repro.lock")
-      let libD = depEntry(withD, "../lib-d")
+      let libD = depEntry(withD, "lib-d")
       check ("revision = \"" & fx.headOf(fx.ws / "lib-d") & "\"") in libD
       check "lib-d" in depEntry(withD, ".")
 
@@ -115,4 +116,43 @@ suite "pre-commit re-pins the committed lock's siblings":
       check "lib-c" in c4.output
       check "working tree" in c4.output
       check ("revision = \"" & libCNext & "\"") in
-        depEntry(fx.git(fx.app, "show HEAD:repro.lock"), "../lib-b")
+        depEntry(fx.git(fx.app, "show HEAD:repro.lock"), "lib-b")
+
+  test "partial refresh migrates compact and CRLF v2 schema assignments":
+    if findExe("git").len == 0:
+      skip("git is not on PATH; every fixture here is a real git repository")
+    else:
+      for compactSchema in ["schema=\"reprobuild.solved-graph-lock.v2\"",
+                            "  schema  =  \"reprobuild.solved-graph-lock.v2\""]:
+        var fx = setupSiblingFixture("compact-v2-repin")
+        defer: removeDir(fx.scratch)
+        fx.refreshAndPublishLock()
+        let before = readFile(fx.app / "repro.lock")
+        let packagesBefore = linePrefixed(before, "packages = ")
+        var legacy = before.replace(
+          "schema = \"reprobuild.solved-graph-lock.v3\"", compactSchema)
+        let originalDeps = linePrefixed(legacy, "deps = ")
+        var legacyDeps = originalDeps.replace(", self = \"true\"", "")
+        for dep in parseLockedDependencies(before).deps:
+          let opening = "{ name = \"" & dep.name & "\""
+          legacyDeps = legacyDeps.replace(opening,
+            opening & ", path = \"" & dep.path & "\"")
+        legacy = legacy.replace(originalDeps, legacyDeps)
+        legacy = "# Legacy lock with noncanonical schema spacing\n" & legacy
+        if compactSchema.startsWith(" "):
+          legacy = legacy.replace("\n", "\r\n")
+        writeFile(fx.app / "repro.lock", legacy)
+        discard fx.git(fx.app, "add repro.lock")
+        discard fx.git(fx.app, "commit -m legacy-lock")
+        fx.installPreCommit()
+        let libBNext = fx.advance("lib-b")
+        let committed = fx.commitInApp("migrate-v2")
+        checkpoint(committed.output)
+        check committed.code == 0
+        let migrated = readFile(fx.app / "repro.lock")
+        check "reprobuild.solved-graph-lock.v3" in migrated
+        check "reprobuild.solved-graph-lock.v2" notin migrated
+        check "path =" notin linePrefixed(migrated, "deps = ")
+        check migrated.count("self = \"true\"") == 1
+        check ("revision = \"" & libBNext & "\"") in depEntry(migrated, "lib-b")
+        check linePrefixed(migrated, "packages = ") == packagesBefore

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2199,
+    "nimTestBinaries": 2200,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 660,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2226
+    "testEntries": 2227
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1279,10 +1279,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 17,
-      "integration": 1210,
+      "integration": 1212,
       "platform/destructive": 134,
       "pure unit": 660,
-      "unclassified": 205
+      "unclassified": 204
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1484,9 +1484,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2199,
+    "nimTestBinaryCount": 2200,
     "pythonTestFileCount": 27,
-    "testEntryCount": 2226
+    "testEntryCount": 2227
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10321,7 +10321,7 @@
     {
       "binary": "build/test-bin/t_lock_record_repo_component_is_one_path_segment",
       "class": "integration",
-      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -10330,7 +10330,7 @@
         "repro_workspace_manifests"
       ],
       "owner": "libs/repro_cli_support",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 17,
@@ -10631,8 +10631,8 @@
     },
     {
       "binary": "build/test-bin/t_w2_dev_env_producer_pin_binding",
-      "class": "unclassified",
-      "classificationReason": "mutates the process environment",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -10643,7 +10643,7 @@
         "repro_provider_runtime"
       ],
       "owner": "libs/repro_cli_support",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "libs/repro_cli_support/tests/t_w2_dev_env_producer_pin_binding.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 9,
@@ -14838,8 +14838,8 @@
       "owner": "libs/repro_lock",
       "requiresReproBinary": false,
       "source": "libs/repro_lock/tests/t_lock_writer_output_reads_back.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 9,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -30941,13 +30941,14 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_lock",
         "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_commit_repins_committed_lock_siblings.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31051,6 +31052,26 @@
       "source": "tests/integration/t_committed_lock_records_develop_set_siblings.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_committed_lock_records_no_materialization_path",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_lock",
+        "repro_test_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_committed_lock_records_no_materialization_path.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -33083,7 +33104,7 @@
       "language": "nim",
       "localDependencyShape": [],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_gate_reports_unverifiable_apart_from_uncovered.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -35309,7 +35330,7 @@
         "repro_workspace_manifests"
       ],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_lock_is_read_from_the_content_under_evaluation.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -35589,6 +35610,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_lock",
         "repro_test_support"
       ],
       "owner": "tests/integration",
@@ -35613,7 +35635,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_lock_validate_root_provenance_survives_commit.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 11,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -35647,7 +35669,7 @@
         "repro_workspace_manifests"
       ],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_db.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -37220,7 +37242,7 @@
         "repro_test_support"
       ],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_pre_commit_gate_ignores_the_record_store_lock.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -39211,7 +39233,7 @@
         "repro_resources"
       ],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_rp5a_consumer_imports_resource_contract_no_driver.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -39232,7 +39254,7 @@
         "repro_resources"
       ],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_rp5a_producer_exports_resource_contract_across_workspace.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -39274,7 +39296,7 @@
         "repro_resources"
       ],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
@@ -39522,7 +39544,7 @@
         "repro_workspace_manifests"
       ],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_sc_engine_routes_producer_selector_through_override_and_lock.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
@@ -39596,7 +39618,7 @@
         "repro_project_dsl"
       ],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_sc_producer_exports_typed_cli_contract_across_workspace.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -39618,7 +39640,7 @@
         "repro_workspace_manifests"
       ],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_sc_producer_source_change_invalidates_consumer.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -46990,7 +47012,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_ci_reconcile_lock_credentials.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 24,
+      "staticCaseCount": 25,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -416,7 +416,7 @@ and it will fail no matter how often you retry.
 
 | Artifact | What it is | Re-pin it with |
 |---|---|---|
-| Committed lock | `repro.lock` at a repo root, schema `reprobuild.solved-graph-lock.v2`, solved from a recipe's solver inputs | `repro lock refresh [<path>]` |
+| Committed lock | `repro.lock` at a repo root, schema `reprobuild.solved-graph-lock.v3` (v2 still read), solved from a recipe's solver inputs | `repro lock refresh [<path>]` |
 | Workspace lock | `locks/<project>/<repo>/<sha>.toml` inside a tier's backend (a git-checkout manifest store, an external DB, …) | `repro workspace lock [<project>] [--workspace-root=PATH]` |
 
 `repro lock refresh` needs solver inputs. Run at a workspace root that
@@ -485,7 +485,7 @@ or removes another entry. Sibling revision pins (`deps`) already in the
 lock, provisioning records and the certificate-policy snapshot are carried
 forward; a sibling the lock does not pin yet (the newly declared producer
 itself) is added at the revision the solve saw. The one
-`deps` entry it rewrites is the repo's own (`path = "."`), which records
+`deps` entry it rewrites is the repo's own (marked `self = "true"`), which records
 the tree the lock was solved from.
 
 - When another held pin **also** contradicts a declared range, the

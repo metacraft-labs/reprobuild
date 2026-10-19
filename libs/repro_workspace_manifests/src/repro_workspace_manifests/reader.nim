@@ -250,10 +250,13 @@ const workspaceRootCheckoutPath* = "."
   ## (CLI/develop.md §"Which record, for a commit-addressed backend"), it is
   ## what the develop-manageable set is defined as the union *minus*
   ## (§"Composing the lock set"), and it is the only repo that can carry the
-  ## root's own `depends` edges. Reprobuild writes this exact value into the
-  ## locks it emits (`LockedDep.path = "."`) and every consumer recognizes it
-  ## with a literal `== "."` compare — `isRootLockedDep`, the root-repo lookup
-  ## in `composeDevelopLockSet`, the integrity walk, the lock-claim keying.
+  ## root's own `depends` edges. A lock reader holds a lock's own repository
+  ## at exactly this value (`LockedDep.path = "."`, written on disk as
+  ## `self = "true"` since `reprobuild.solved-graph-lock.v3`, and as `path =
+  ## "."` before it), and every consumer recognizes it with a literal
+  ## `== "."` compare — `isSelfLockedDep` / `isRootLockedDep`, the root-repo
+  ## lookup in `composeDevelopLockSet`, the integrity walk, the lock-claim
+  ## keying.
   ##
   ## Because those compares are EXACT, the spelling is load-bearing rather
   ## than cosmetic: `./.` denotes the same directory but is not `.`, so it
@@ -427,6 +430,15 @@ proc lockedCheckoutPathRejection*(value: string): string =
   ## Why `value` is not usable as a checkout path recorded in a LOCK, or ""
   ## when it is. The lock plane's boundary — the third question, and the one
   ## that was missing.
+  ##
+  ## Since `reprobuild.solved-graph-lock.v3` a lock records no checkout path
+  ## at all, and a v2 lock's recorded path is no longer believed: the lock
+  ## plane DERIVES each dependency's location locally from its name
+  ## (`repro_cli_support`'s `lockedDepCheckoutPath`). This rule is now asked
+  ## of those derived locations — the placement skips a candidate it refuses,
+  ## and `validateLockedDeps` asks again — because the deletes below are
+  ## handed them exactly as they were handed recorded ones. The history that
+  ## follows is of recorded paths, which is how each shape was first found.
   ##
   ## ## Why the lock plane cannot reuse the manifest plane's rule
   ##
