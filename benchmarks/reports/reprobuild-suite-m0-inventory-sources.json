@@ -4636,7 +4636,7 @@
             "f",
             "workRoot"
           ],
-          "line": 200,
+          "line": 211,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -4652,7 +4652,7 @@
             "f",
             "workRoot"
           ],
-          "line": 201,
+          "line": 212,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -4668,7 +4668,7 @@
             "f",
             "workRoot"
           ],
-          "line": 258,
+          "line": 269,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -4684,7 +4684,7 @@
             "f",
             "workRoot"
           ],
-          "line": 259,
+          "line": 270,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
