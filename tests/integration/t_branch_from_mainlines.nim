@@ -51,6 +51,17 @@
 ##      workspace and one ``REPRO_WORKSPACE_CLONES`` directory serialize their
 ##      shared-cache creation/refresh and source-checkout tracking-ref fetches
 ##      without ``cannot lock ref`` or ``shared-clone cache miss`` races.
+##   9. ``test_wv7_root_mainline_ignores_separate_record_store_branch`` — an
+##      old-style ``.repro-workspace.toml`` (``bootstrap.v1``) whose
+##      ``[manifest] url`` names a SEPARATE record-store repository on
+##      ``latest``. That branch is the store's, not the root's: the root is cut
+##      from its own ``origin/HEAD`` (``main``) and the run succeeds instead of
+##      refusing ``mainline_unresolved mainline=latest``.
+##  10. ``test_wv7_legacy_manifest_branch_is_root_mainline_when_store_is_root``
+##      — the positive control for 9: when ``[manifest] url`` names the root
+##      repository itself (spelled differently from its ``origin``), its
+##      ``branch`` IS the root's mainline, and the root is cut from it rather
+##      than from ``origin/HEAD``.
 ##
 ## Real components (NO mocks): the real ``git`` binary, real bare repos on the
 ## real filesystem, and the real engine-built ``build/bin/repro`` spawned as a
@@ -71,6 +82,12 @@
 ##     ``source_head_unpublished`` instead of forking.
 ##   - If either flag guard regressed, cases 5 and 6 would materialize a
 ##     workspace or exit 0.
+##   - If ``[manifest] branch`` were taken as the root's mainline regardless
+##     of which repository ``[manifest] url`` names, case 9 would refuse
+##     ``mainline_unresolved mainline=latest`` (the root has no ``latest``).
+##     If it were never taken (always ``origin/HEAD``), or the URL comparison
+##     were by string rather than repository identity, case 10 would cut the
+##     root from ``main`` instead of ``latest``.
 ##
 ## Skip rule: ``git`` missing on PATH (same convention as M9–M16 / WV-6).
 
@@ -275,6 +292,37 @@ proc entryByPath(report: JsonNode; path: string): JsonNode =
     if entry["path"].getStr() == path:
       return entry
   newJNull()
+
+proc legacyBootstrapToml(manifestUrl, manifestBranch: string): string =
+  ## An OLD-STYLE ``.repro-workspace.toml`` (``bootstrap.v1``), the shape the
+  ## agent-harbor workspace carried when the issue was observed: ``[manifest]``
+  ## names a record store and its branch, and nothing else is declared.
+  "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
+  "[manifest]\n" &
+  "url = \"" & manifestUrl & "\"\n" &
+  "branch = \"" & manifestBranch & "\"\n" &
+  "publish_locks = false\n"
+
+proc publishRootSettings(gitBin: string; fx: Wv7Fixture;
+                         content: string): string =
+  ## Commit ``.repro-workspace.toml`` in the source workspace's root repo and
+  ## push it to the root's ``main`` (its ``origin/HEAD``), the way a real
+  ## workspace carries the file. Returns the new ``main`` tip, which is what a
+  ## fork cut from ``origin/HEAD`` must land on.
+  writeFile(fx.workspaceRoot / ".repro-workspace.toml", content)
+  discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+    " add .repro-workspace.toml")
+  discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+    " commit -m 'add bootstrap config'")
+  discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+    " push origin main")
+  result = headSha(gitBin, fx.workspaceRoot)
+
+proc rootOriginHead(gitBin: string; fx: Wv7Fixture): string =
+  ## The root clone's ``origin/HEAD`` target, e.g. ``origin/main``; "" if unset.
+  let res = runCmd(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+    " symbolic-ref --short -q refs/remotes/origin/HEAD")
+  if res.code != 0: "" else: res.output.strip()
 
 suite "WV-7 — repro branch --from-mainlines":
 
@@ -699,3 +747,83 @@ suite "WV-7 — repro branch --from-mainlines":
           "alternates")
         check fileExists(forkPath / "lib-b" / ".git" / "objects" / "info" /
           "alternates")
+
+  test "test_wv7_root_mainline_ignores_separate_record_store_branch":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case needs real repositories")
+    else:
+      let fx = setupFixture(gitBin, "store-branch")
+      defer: removeDirEventually(fx.scratch)
+
+      # A SEPARATE record-store repository whose only branch is `latest`. The
+      # old `.repro-workspace.toml` names it in `[manifest]`; its branch is the
+      # store's, and says nothing about the root repo's mainline.
+      let storeBare = fx.scratch / "origin-records.git"
+      discard seedGitOrigin(gitBin, storeBare, fx.scratch / "seed-records",
+        branch = "latest")
+      let rootTip = publishRootSettings(gitBin, fx,
+        legacyBootstrapToml(fileUrl(storeBare), "latest"))
+
+      # Preconditions that make the case discriminating: the root's real
+      # mainline is its `origin/HEAD` (`main`), and the root's remote has no
+      # `latest` at all, so reading `[manifest] branch` cannot resolve.
+      check rootOriginHead(gitBin, fx) == "origin/main"
+      check runCmd(q(gitBin) & " -C " & q(fx.rootBare) &
+        " rev-parse --verify -q refs/heads/latest").code != 0
+
+      let forkPath = fx.scratch / "store-branch-fork"
+      let res = invokeFork(fx, "feature-s", forkPath, @["--from-mainlines"])
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+      check not res.output.contains("mainline_unresolved")
+
+      # Inspect the fork only if it was made: ``headSha`` quits the whole test
+      # binary on a missing repo, which would hide the next case's verdict.
+      if res.code == 0:
+        check currentBranch(gitBin, forkPath) == "feature-s"
+        check headSha(gitBin, forkPath) == rootTip
+        let rootEntry = entryByPath(readReport(forkPath), ".")
+        check rootEntry["baselineSource"].getStr() == "mainline_head"
+        check rootEntry["mainlineBranch"].getStr() == "main"
+
+  test "test_wv7_legacy_manifest_branch_is_root_mainline_when_store_is_root":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case needs real repositories")
+    else:
+      # Positive control for the case above: when `[manifest] url` names the
+      # ROOT repository itself (a workspace with no separate store), its
+      # `branch` IS the root's mainline. The URL is deliberately spelled
+      # differently from the clone's `origin` (no `.git`, trailing `/`), so
+      # the comparison has to be by repository identity, not by string.
+      let fx = setupFixture(gitBin, "store-is-root")
+      defer: removeDirEventually(fx.scratch)
+
+      check fx.rootBare.endsWith(".git")
+      let rootSpelling = fileUrl(fx.rootBare[0 ..< fx.rootBare.len - 4]) & "/"
+      check rootSpelling != fileUrl(fx.rootBare)
+      discard publishRootSettings(gitBin, fx,
+        legacyBootstrapToml(rootSpelling, "latest"))
+
+      # Give the root a `latest` that differs from `main` (its `origin/HEAD`),
+      # so landing on it can only mean `[manifest] branch` was honoured.
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+        " push origin main:latest")
+      let latestTip = pushMainlineCommit(gitBin, fx.rootBare, fx.scratch,
+        "root-latest", "latest")
+      check rootOriginHead(gitBin, fx) == "origin/main"
+      check latestTip != headSha(gitBin, fx.workspaceRoot)
+
+      let forkPath = fx.scratch / "store-is-root-fork"
+      let res = invokeFork(fx, "feature-r", forkPath, @["--from-mainlines"])
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+
+      if res.code == 0:
+        check currentBranch(gitBin, forkPath) == "feature-r"
+        check headSha(gitBin, forkPath) == latestTip
+        let rootEntry = entryByPath(readReport(forkPath), ".")
+        check rootEntry["mainlineBranch"].getStr() == "latest"

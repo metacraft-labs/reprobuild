@@ -76573,14 +76573,32 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     # workspace whose bill of materials disagrees with its contents. Its
     # mainline is a declaration too: the settings file's ``[workspace]``
     # mainline (or its profile's; Workspace-Branch-Roles.md §3.4) — for the
-    # old ``.repro-workspace.toml``, its ``[manifest] branch`` — else the root
-    # repo's own ``origin/HEAD``.
+    # old ``.repro-workspace.toml``, its ``[manifest] branch`` when
+    # ``[manifest] url`` is absent or names the root repo itself — else the
+    # root repo's own ``origin/HEAD``.
     let bootstrapPath = findBootstrapConfigPath(parsed.workspaceRoot)
     if bootstrapPath.len > 0:
       # A settings file that exists but does not parse raises the strict
       # reader's diagnostic: falling through to ``origin/HEAD`` would cut the
       # root from a branch other than the one the file declares.
-      let declared = rootMainline(readWorkspaceSettings(bootstrapPath))
+      let settings = readWorkspaceSettings(bootstrapPath)
+      # ``[manifest]`` in an old file names the RECORD STORE. Its branch is
+      # the root's mainline only when that store is the root repo; when it is
+      # a separate repository (the split Workspace-Manifests.md requires), the
+      # branch belongs to the store and the root has none of that name.
+      # Compared by repository identity (``canonicalRemoteIdentity``), not by
+      # spelling: ``https://h/o/r.git`` and ``git@h:o/r`` are one repository.
+      # A root without an ``origin`` URL cannot be shown to BE the store, so a
+      # declared store URL then counts as separate.
+      var legacyStoreIsRoot = settings.records.url.isNone
+      if not legacyStoreIsRoot:
+        let originUrl = gitRunPlain(identity,
+          ["-C", parsed.workspaceRoot, "remote", "get-url", "origin"])
+        legacyStoreIsRoot = originUrl.code == 0 and
+          originUrl.output.strip().len > 0 and
+          canonicalRemoteIdentity(originUrl.output.strip()) ==
+            canonicalRemoteIdentity(settings.records.url.get())
+      let declared = rootMainline(settings, legacyStoreIsRoot)
       if declared.isSome:
         rootMainlineBranch = declared.get().strip()
     if rootMainlineBranch.len == 0:
@@ -76596,7 +76614,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       rootMainlineRefusal = "the workspace root '" & parsed.workspaceRoot &
         "' declares no mainline: `" & settingsFileName & "` sets no " &
         "`[workspace] mainline` (the old `.repro-workspace.toml`: no " &
-        "`[manifest] branch`) and the root repo has no `origin/HEAD` to read " &
+        "`[manifest] branch` for a record store that is the root repo itself) " &
+        "and the root repo has no `origin/HEAD` to read " &
         "one from. Set `[workspace] mainline`, or drop `--from-mainlines`"
 
   if parsed.fromMainlines and parsed.fetch:

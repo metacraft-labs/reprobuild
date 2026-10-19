@@ -125,7 +125,7 @@ suite "repro-workspace.toml settings.v1 decode":
     check s.workspace.roles.staging == roleAbsent()
     check not s.workspace.roles.stable.isDeclared
     check s.workspace.roles.custom == @[("staging-partner", roleBranch("partner"))]
-    check s.rootMainline == some("dev")
+    check s.rootMainline(legacyStoreIsRoot = false) == some("dev")
 
     check s.projects.default == @["reprobuild", "codetracer"]
     check s.projects.default_template == some("metacraft-project")
@@ -173,7 +173,8 @@ suite "repro-workspace.toml settings.v1 decode":
     # The root mainline falls to the profile when [workspace] names none.
     let viaProfile = settingsAt(dir, fullSettings.replace(
       "mainline = \"dev\"\nunstable = \"agents\"\nstaging = false\n", ""))
-    check readWorkspaceSettings(viaProfile).rootMainline == some("dev")
+    check readWorkspaceSettings(viaProfile).rootMainline(
+      legacyStoreIsRoot = false) == some("dev")
 
   test "the writer emits settings.v1 the reader reads back":
     let dir = createTempDir("repro-settings-", "")
