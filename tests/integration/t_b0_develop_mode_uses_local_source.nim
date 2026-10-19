@@ -42,6 +42,7 @@
 import std/[json, os, osproc, strtabs, strutils, unittest]
 
 import repro_test_support
+import runquota_case_fixture
 
 const RepoMarker = "repro.nim"
 
@@ -131,81 +132,77 @@ suite "Bootstrap-And-Self-Build B0: develop-mode resolves runquotad":
 
   test "repro graph records a path-mode runquotad profile":
     let reprobuildRoot = findRepoRoot()
-    let runquotaCheckout = requireRunQuotaSourceRoot(reprobuildRoot)
-    let runquotad = requireBinary(runquotaCheckout / "build" / "bin" /
-      addFileExt("runquotad", ExeExt), "runquota.apps.runquotad")
-    let reproBin = reprobuildRoot / "build" / "bin" /
-      addFileExt("repro", ExeExt)
-    if not fileExists(reproBin):
-      checkpoint("skipped — " & reproBin &
-        " is missing; run `just build` first")
-      skip()
+    let sharedBefore = sharedRunQuotaDaemonState(reprobuildRoot)
+    defer: doAssert sharedRunQuotaDaemonState(reprobuildRoot) == sharedBefore
+    let fixture = prepareRunQuotaCase(reprobuildRoot)
+    installRunQuotaCaseDaemon(fixture, reprobuildRoot)
+    let runquotaCheckout = fixture.checkout
+    let runquotad = fixture.daemon
+    let reproBin = requireBinary(reprobuildRoot / "build" / "bin" /
+      addFileExt("repro", ExeExt), "reprobuild.apps.repro")
+    # Per ``repro --help``: ``--daemon`` is a ``build``/``watch``
+    # flag, NOT a global flag and NOT a ``graph`` flag. Passing
+    # it here would dump the CLI usage and exit 2 before any
+    # graph payload is rendered. Likewise, ``--tool-provisioning``
+    # must follow the subcommand to be bound to it.
+    let args = @[
+      reproBin.quoteShell,
+      "graph",
+      "--tool-provisioning=path",
+      "--format=json",
+    ]
+    let cmd = args.join(" ")
+    checkpoint("running: " & cmd)
+    let env = fixture.env
+    env["PATH"] = runquotad.parentDir & $PathSep &
+      env.getOrDefault("PATH")
+    let (output, exitCode) =
+      execCmdEx(cmd, workingDir = reprobuildRoot, env = env)
+    checkpoint("exit=" & $exitCode)
+    if exitCode != 0:
+      checkpoint(output)
+      check exitCode == 0
     else:
-      # Per ``repro --help``: ``--daemon`` is a ``build``/``watch``
-      # flag, NOT a global flag and NOT a ``graph`` flag. Passing
-      # it here would dump the CLI usage and exit 2 before any
-      # graph payload is rendered. Likewise, ``--tool-provisioning``
-      # must follow the subcommand to be bound to it.
-      let args = @[
-        reproBin.quoteShell,
-        "graph",
-        "--tool-provisioning=path",
-        "--format=json",
-      ]
-      let cmd = args.join(" ")
-      checkpoint("running: " & cmd)
-      var env = newStringTable(modeCaseSensitive)
-      for key, value in envPairs():
-        env[key] = value
-      env["PATH"] = runquotad.parentDir & $PathSep &
-        env.getOrDefault("PATH")
-      let (output, exitCode) =
-        execCmdEx(cmd, workingDir = reprobuildRoot, env = env)
-      checkpoint("exit=" & $exitCode)
-      if exitCode != 0:
+      # JSON payload may be preceded by progress lines; find the
+      # first ``{`` character and parse from there.
+      let braceIdx = output.find('{')
+      if braceIdx < 0:
+        checkpoint("no JSON object found in graph output")
         checkpoint(output)
-        check exitCode == 0
+        check false
       else:
-        # JSON payload may be preceded by progress lines; find the
-        # first ``{`` character and parse from there.
-        let braceIdx = output.find('{')
-        if braceIdx < 0:
-          checkpoint("no JSON object found in graph output")
+        var payload: JsonNode = nil
+        var parseError = ""
+        try:
+          payload = parseJson(output[braceIdx .. ^1])
+        except JsonParsingError as err:
+          parseError = err.msg
+        if payload.isNil:
+          checkpoint("could not parse graph JSON: " & parseError)
           checkpoint(output)
           check false
         else:
-          var payload: JsonNode = nil
-          var parseError = ""
-          try:
-            payload = parseJson(output[braceIdx .. ^1])
-          except JsonParsingError as err:
-            parseError = err.msg
-          if payload.isNil:
-            checkpoint("could not parse graph JSON: " & parseError)
-            checkpoint(output)
-            check false
+          let resolved = inspectionResolvesRunquotad(payload)
+          checkpoint("tool inspection resolves runquotad: " &
+            $resolved.found)
+          checkpoint("runquotad resolved path: " & resolved.resolvedPath)
+          if resolved.found:
+            check resolved.resolvedPath.len > 0
           else:
-            let resolved = inspectionResolvesRunquotad(payload)
-            checkpoint("tool inspection resolves runquotad: " &
-              $resolved.found)
-            checkpoint("runquotad resolved path: " & resolved.resolvedPath)
-            if resolved.found:
-              check resolved.resolvedPath.len > 0
-            else:
-              # Older graph payloads exposed the bare selector directly in
-              # the graph JSON. Keep that as a compatibility fallback.
-              let sawAny = graphMentionsRunquotadAtAll(payload)
-              checkpoint("graph mentions runquotad: " & $sawAny)
-              check sawAny
+            # Older graph payloads exposed the bare selector directly in
+            # the graph JSON. Keep that as a compatibility fallback.
+            let sawAny = graphMentionsRunquotadAtAll(payload)
+            checkpoint("graph mentions runquotad: " & $sawAny)
+            check sawAny
 
-            let checkoutRoot = normalizedPath(runquotaCheckout)
-            let sawLocalSource =
-              if resolved.found:
-                let resolvedPath = normalizedPath(resolved.resolvedPath)
-                resolvedPath == checkoutRoot or
-                  resolvedPath.startsWith(checkoutRoot & $DirSep)
-              else:
-                graphMentionsRunquotad(payload, runquotaCheckout)
-            checkpoint("graph roots runquotad at workspace checkout: " &
-              $sawLocalSource)
-            check sawLocalSource
+          let checkoutRoot = normalizedPath(runquotaCheckout)
+          let sawLocalSource =
+            if resolved.found:
+              let resolvedPath = normalizedPath(resolved.resolvedPath)
+              resolvedPath == checkoutRoot or
+                resolvedPath.startsWith(checkoutRoot & $DirSep)
+            else:
+              graphMentionsRunquotad(payload, runquotaCheckout)
+          checkpoint("graph roots runquotad at workspace checkout: " &
+            $sawLocalSource)
+          check sawLocalSource

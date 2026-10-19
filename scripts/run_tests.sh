@@ -7,7 +7,10 @@ set -euo pipefail
 # stay shell-shaped until typed-tool resolver coverage reaches those helpers.
 mkdir -p build build/nimcache test-logs
 # Protocol evidence describes one execution, never a reusable build artifact.
-rm -rf test-logs/results test-logs/parallel-run.json
+# test-logs/suite-finished.json is the end-of-script marker written just
+# before the final exit (see write_suite_finished_marker); a previous run's
+# copy must never vouch for this one, so it goes before anything is built.
+rm -rf test-logs/results test-logs/parallel-run.json test-logs/suite-finished.json
 mkdir -p test-logs/results
 repo_root="$(pwd -P)"
 # Keep large suite scratch off /tmp and outside the checkout; some tests build
@@ -34,8 +37,15 @@ fi
 #
 # Keyed on a checksum of the absolute checkout path rather than its basename:
 # the slot has to stay SHORT because a unix socket bound under TMPDIR must fit
-# sun_path's 108 bytes, and two worktrees can share a basename anyway. The
-# result is 49 characters against the old 47, so this does not move that limit.
+# sun_path — 104 bytes on macOS, 108 on Linux, the terminating NUL included,
+# and only 92 on macOS where Nim's std/net binds or dials the path — and two
+# worktrees can share a basename anyway. The result is ~50 characters against
+# the old 47. That leaves a fixture only ~40 bytes for its own nesting and
+# socket name on macOS, which is NOT enough for every fixture (the engine
+# RunQuota fixtures measured 105), so the slot length is not what keeps a
+# socket bindable: a fixture binding a RunQuota endpoint under its own scratch
+# root must take it from repro_test_support.runquotaRendezvousDir, which moves
+# the endpoint to a short private directory when the root would overflow.
 # The `rm -rf` is kept — every run still starts from empty scratch — but now
 # only ever deletes the scratch of the checkout that owns it.
 test_tmp_slot="$(printf '%s' "${repo_root}" | cksum | cut -d' ' -f1)"
@@ -542,6 +552,39 @@ repro_build_collection ".#apps" || exit 1
 repro_build_collection ".#test-helpers" || exit 1
 # M2: build canonical test fixtures, including the io-monitor shim.
 repro_build_collection ".#test-fixtures" || exit 1
+# Fixtures built from SIBLING checkouts: today only the `ct-mcr` recorder
+# bundle that e2e_hcr_linux_replay_of_patched_recording records and replays
+# with (Linux x86-64 only, the one platform repro.nim declares the collection
+# on). They are a separate collection because they can fail for reasons that
+# say nothing about this tree -- a sibling that is not checked out, a private
+# dependency the host cannot fetch -- and that must not stop every other case
+# from running. Each test that needs one depends on its edge and fails on its
+# own when it is missing, naming that edge; the collection's failure is
+# re-raised at the end like the other phases'.
+cross_repo_fixtures_status=0
+if [[ "$(uname -s)" == "Linux" && "$(uname -m)" =~ ^(x86_64|amd64)$ ]]; then
+  repro_build_collection ".#test-cross-repo-fixtures" || cross_repo_fixtures_status=$?
+  if (( cross_repo_fixtures_status != 0 )); then
+    printf '::error:: .#test-cross-repo-fixtures failed (exit %d); running the suite, failure re-raised at the end\n' \
+      "${cross_repo_fixtures_status}" >&2
+  fi
+fi
+# The Nix package of THIS tree (`nix build .#default`), which the
+# installed-package gates (tests/e2e/m83/t_e2e_nix_package_compiles_profile*)
+# run. Built once here instead of once per case: the build runs in the nix
+# daemon, outside every case's process group, and concurrent cases waiting on
+# it printed nothing until the runner killed them on its idle timeout. A
+# separate collection for the cross-repo one's reason -- it can fail for
+# reasons that say nothing about the rest of the suite -- with its failure
+# re-raised at the end. Linux and macOS, where repro.nim declares it.
+package_fixtures_status=0
+if [[ "$(uname -s)" == "Linux" || "$(uname -s)" == "Darwin" ]]; then
+  repro_build_collection ".#test-package-fixtures" || package_fixtures_status=$?
+  if (( package_fixtures_status != 0 )); then
+    printf '::error:: .#test-package-fixtures failed (exit %d); running the suite, failure re-raised at the end\n' \
+      "${package_fixtures_status}" >&2
+  fi
+fi
 # A failed test COMPILE is a failed test, not a reason to run nothing. This
 # used to `exit 1` here, so one broken compile cancelled every other case: one
 # 22-hour run and one 7-hour run each produced no test results at all for a
@@ -828,4 +871,51 @@ if (( test_builds_status != 0 )); then
     "${test_builds_status}" >&2
   (( suite_status != 0 )) || suite_status="${test_builds_status}"
 fi
+if (( cross_repo_fixtures_status != 0 )); then
+  printf '\n.#test-cross-repo-fixtures failed (exit %d); see its build report above\n' \
+    "${cross_repo_fixtures_status}" >&2
+  (( suite_status != 0 )) || suite_status="${cross_repo_fixtures_status}"
+fi
+if (( package_fixtures_status != 0 )); then
+  printf '\n.#test-package-fixtures failed (exit %d); see its build report above\n' \
+    "${package_fixtures_status}" >&2
+  (( suite_status != 0 )) || suite_status="${package_fixtures_status}"
+fi
+
+# The end-of-script marker: written only here, after the Python phase and the
+# re-raise above, so its presence means this script reached its end. The
+# runner's test-logs/parallel-run.json says the Nim cases reached a verdict,
+# but not that the Python modules after them ran; CI's "Declare suite
+# coverage" step (scripts/ci_suite_coverage.py --finished-marker) needs both
+# before it calls a run a verdict on the code. Removed at the top of this
+# script so a stale copy cannot count. Written to a temporary name and
+# renamed, so a reader never sees half a document. Failing to write it is
+# reported and does not change the exit status: the status is the gate, the
+# marker is only evidence that the status is final.
+json_string() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '"%s"' "${s}"
+}
+write_suite_finished_marker() {
+  local marker="test-logs/suite-finished.json"
+  local modules="" module
+  for module in "${python_failed_modules[@]+"${python_failed_modules[@]}"}"; do
+    modules+="${modules:+, }$(json_string "${module}")"
+  done
+  {
+    printf '{\n'
+    printf '  "schema": "reprobuild.suite-finished.v1",\n'
+    printf '  "test_builds_status": %d,\n' "${test_builds_status}"
+    printf '  "cross_repo_fixtures_status": %d,\n' "${cross_repo_fixtures_status}"
+    printf '  "package_fixtures_status": %d,\n' "${package_fixtures_status}"
+    printf '  "nim_phase_status": %d,\n' "${nim_phase_status}"
+    printf '  "python_failed_modules": [%s],\n' "${modules}"
+    printf '  "suite_status": %d\n' "${suite_status}"
+    printf '}\n'
+  } > "${marker}.tmp" && mv -f "${marker}.tmp" "${marker}"
+}
+write_suite_finished_marker \
+  || printf '::warning:: could not write test-logs/suite-finished.json\n' >&2
 exit "${suite_status}"

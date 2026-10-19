@@ -95,6 +95,11 @@ type
       ## GM4c: a macOS flat installer package (xar). Expanded with
       ## ``pkgutil --expand-full`` (its scripts are never run) and copied
       ## from; realized only with ``imAppBundle``.
+    afTar = "tar"
+      ## Uncompressed tar, supported by the common provisioning extractor.
+    afConda = "conda"
+      ## Conda ZIP envelope containing the pkg-*.tar.zst payload.
+      ## Appended so existing archive-format ordinals remain stable.
 
   InstallMethod* = enum
     ## How the realize loop turns the verified artifact into a usable
@@ -127,6 +132,14 @@ type
     ##     dispatches via the discovered ``innounp.exe``.
     imExtract = "extract"
     imInstallerSilent = "installer-silent"
+      ## A Windows installer run with its silent flags (``installerArgs``),
+      ## or -- on macOS, a ``tarball`` record that names ``installerApp`` --
+      ## an installer APPLICATION: the installer is copied out of the
+      ## archive, verified against ``teamId``, run confined under
+      ## ``sandbox-exec`` into the staging prefix, and the product bundle it
+      ## produced (``appBundle``, a path in the prefix) verified before the
+      ## prefix is published. Store-And-Installation-Layout.md § Installer
+      ## applications.
     imMsys2Pacman = "msys2-pacman"
       ## M6 (Realize-Closure-And-Catalog-Expansion spec): provenance-
       ## labelled variant of ``imExtract`` for ``.pkg.tar.zst`` payloads
@@ -515,15 +528,14 @@ type
     ## wrap pattern Scoop's ``pre_install`` PowerShell idiomatically
     ## synthesizes (composer's ``& php $dir\composer.phar @args`` shim,
     ## the rare ``& java -jar $dir\<tool>.jar @args`` shim, the generic
-    ## wrapped-script shape). The interpreter binary is discovered at
-    ## realize time via the same catalog-prefix-first pattern as M3/M4
-    ## extractors (``discoverPhpExe`` / ``discoverJavaExe``); the
+    ## wrapped-script shape). The interpreter binary is supplied by an
+    ## explicit provisioning dependency, like installer extractors; the
     ## launcher file itself is generated inline via deterministic Nim
     ## string concatenation — the M56 content-addressed store's digest
     ## covers the launcher bytes.
     lekPhar = "phar"     ## ``.phar`` wrap (composer); interpreter = php
     lekJar = "jar"       ## ``.jar`` wrap (future gradle/maven); interpreter = jdk
-    lekScript = "script" ## generic wrapped-script shape (bash/python etc.)
+    lekScript = "script" ## reserved wrapped-script shape; realization refuses it
 
   LauncherEmitSpec* = object
     ## M5: one launcher to emit at realize time. The realize loop
@@ -1090,8 +1102,9 @@ proc validateVersionedProvisioningEx*(vp: VersionedProvisioning;
         " requires at least one bin_relpath entry")
   of imAppBundle, imPkgInstall:
     # GM4c: macOS application shapes are authored as `tarball` records
-    # (`appBundle` / `bundleId` / `teamId`), never harvested into this parse
-    # model; the catalog harvester has no source that produces them.
+    # (`appBundle` / `bundleId` / `teamId`, and `installerApp` for a macOS
+    # installer application), never harvested into this parse model; the
+    # catalog harvester has no source that produces them.
     result.add("install_method=" & $vp.install_method &
       " is authored as a tarball realization with appBundle / bundleId / " &
       "teamId, not as a VersionedProvisioning record")
@@ -1990,6 +2003,8 @@ proc archiveFormatIdent(af: ArchiveFormat): string =
   of afRaw: "afRaw"
   of afDmg: "afDmg"
   of afPkg: "afPkg"
+  of afTar: "afTar"
+  of afConda: "afConda"
 
 proc launcherEmitKindIdent*(lek: LauncherEmitKind): string =
   case lek
@@ -2290,8 +2305,9 @@ proc parseArchiveFormatToken*(token: string):
   ## A ``tarball archiveType`` token in the ``ArchiveFormat`` vocabulary.
   ## The ``uses:`` realizer's own spellings of the same formats (``tgz``,
   ## ``txz``, ``tbz``, ``msi``, ``7z.exe``) are accepted too, so a record
-  ## authored for either realizer reads the same.
+  ## authored with either vocabulary reads the same for both callers.
   case token.toLowerAscii()
+  of "": return (true, afTarGz) # The acquisition plan's default format.
   of "tgz": return (true, afTarGz)
   of "txz": return (true, afTarXz)
   of "tbz", "tbz2": return (true, afTarBz2)
@@ -2354,4 +2370,3 @@ proc baselineMicroarchLevel*(family: PlatformCpu): MicroarchLevel =
   case family
   of pcX86_64: mlX86_64_v1
   of pcAny, pcAArch64, pcX86: mlNone
-

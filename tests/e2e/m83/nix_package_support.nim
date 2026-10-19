@@ -67,6 +67,62 @@ proc buildNixPackage*(): string =
       result = line.strip()
   doAssert result.len > 0, "nix build printed no store path:\n" & res.output
 
+const
+  NixPackageFixture* = ProjectRoot / "build" / "test-fixtures" /
+    "nix-package" / "out-path"
+    ## Written by the build-graph edge `reprobuild.test_fixtures.nix_package`
+    ## (`scripts/build_nix_package_fixture.sh`): the store path of
+    ## `nix build <ProjectRoot>#default`. Path kept in step with
+    ## `nixPackageOutPathFixture` in `repro.nim`.
+  NixPackageFixtureEdge = "reprobuild.test_fixtures.nix_package"
+
+proc evalNixPackageOutPath(): string =
+  ## The output path `<ProjectRoot>#default` evaluates to now — what a
+  ## `nix build` of this tree would produce — without building it.
+  ## The path is read from stdout alone: `--raw` prints it with no newline,
+  ## so with stderr merged an evaluation warning could land on its line.
+  let p = startProcess("nix", workingDir = ProjectRoot,
+    args = ["eval", "--raw", ProjectRoot & "#default.outPath"],
+    options = {poUsePath})
+  let output = p.outputStream.readAll()
+  let errors = p.errorStream.readAll()
+  let code = p.waitForExit()
+  p.close()
+  result = output.strip()
+  doAssert code == 0 and result.startsWith("/nix/store/") and
+    ' ' notin result, "nix eval of the package failed (exit " & $code &
+    "):\n" & output & "\n" & errors
+
+proc nixPackageUnderTest*(): string =
+  ## The installed package of THIS tree, as a store path.
+  ##
+  ## Normally the fixture edge's (`NixPackageFixture`): the suite builds it
+  ## once, before the test phase, so the cases do not each run — and, run
+  ## concurrently, wait silently on the nix daemon for — the same build. The
+  ## recorded path is used only when it is what this tree evaluates to NOW and
+  ## is present in the store: a fixture from an earlier tree, or one whose
+  ## store path was collected, is not this tree's package. Otherwise (no
+  ## fixture: the test binary run directly, or a failed edge) the case builds
+  ## the package itself, as it always did, with the build log relayed.
+  let expected = evalNixPackageOutPath()
+  if fileExists(NixPackageFixture):
+    let recorded = readFile(NixPackageFixture).strip()
+    if recorded == expected and fileExists(recorded / "bin" / "repro"):
+      echo "nix package: using ", recorded, " from fixture edge ",
+        NixPackageFixtureEdge
+      return recorded
+    echo "nix package: fixture ", NixPackageFixture, " records ", recorded,
+      ", but this tree evaluates to ", expected,
+      (if recorded == expected: " (not in the store)" else: ""),
+      "; building it here"
+  else:
+    echo "nix package: no fixture at ", NixPackageFixture, " (edge ",
+      NixPackageFixtureEdge, "); building it here"
+  stdout.flushFile()
+  result = buildNixPackage()
+  doAssert result == expected, "nix build produced " & result &
+    ", but this tree evaluates to " & expected
+
 proc packageClosure*(storePath: string): HashSet[string] =
   ## Every store path in `storePath`'s runtime closure
   ## (`nix path-info --recursive`).

@@ -77,7 +77,30 @@ type
     activities*: seq[ActivityIntent]
     configOverrides*: seq[ConfigOverride]
     hosts*: Table[string, seq[string]]
+    hostApplies*: Table[string, seq[string]]
+      ## The concerns Reprobuild applies on a host, for every host whose
+      ## `hosts:` entry declares `applies: [...]` (block form). A host
+      ## absent from this table declares nothing: Reprobuild applies every
+      ## concern there. Values are concern names (`repro_profile/concerns`),
+      ## validated by the macro; an empty seq is a host where Reprobuild
+      ## applies nothing (Gradual-Nix-To-Reprobuild-Migration.md
+      ## §Concern-scoped apply).
+    systemManagedElsewhere*: Table[string, string]
+      ## The hosts whose `hosts:` entry says `system: managedElsewhere[(...)]`
+      ## (`repro_profile/host_system`): host -> the pointer to what manages
+      ## the host's system, "" when the entry names none. A host absent from
+      ## this table has its system managed here (Gradual-Nix-To-Reprobuild-
+      ## Migration.md §Hosts, feature 2).
     resources*: seq[ResourceIntent]
+    stowScopes*: seq[StowScope]
+      ## GM11: the `stow/` packages an activity claims (a `stow:` block in
+      ## `activity <name>:`), one record per claim. A package no record
+      ## names is materialized on every host, as before; a package some
+      ## record names is materialized only on a host where one of its
+      ## records' activity is selected and its guard holds
+      ## (`repro_profile/stow_scopes`; Home-Profile-Intent-Layer.md
+      ## §Stow-Style Dotfile Support). Empty for a profile without a
+      ## `stow:` block, which encodes exactly as before.
     buildActions*: seq[ProfileBuildAction]
       ## Windows-System-Resources Phase G. Action-edge items emitted
       ## from inside the profile's ``resources:`` block by typed-tool
@@ -277,10 +300,33 @@ type
       ## host. Two resources may share an address when their guards select
       ## different hosts; the planner rejects a duplicate only among the
       ## resources a host actually gets.
+    activity*: string
+      ## The activity this resource belongs to (GM9, activity-scoped
+      ## resources); "" means profile-wide. Set for every resource declared
+      ## in a `resources:` block inside `activity <name>:` (and for a data
+      ## file's `[[resource]]` row with an `activity` key). The planner
+      ## plans such a resource only on a host whose selection enables the
+      ## activity (`default` plus the host's `hosts:` entry), and only where
+      ## its `guard` also holds. It must name an activity the profile
+      ## declares; an unknown name is refused, never treated as
+      ## profile-wide.
 
   PredicateExpr* = object
     expr*: string         ## canonical-stringified predicate; apply-
                           ## time parser handles evaluation
+
+  StowScope* = object
+    ## GM11: one claim of a `stow/` package by an activity -- an entry of a
+    ## `stow:` block inside `activity <name>:` (`repro_profile/stow_scopes`).
+    package*: string
+      ## The package: the name of an immediate subdirectory of the
+      ## profile's `stow/` tree (one path segment).
+    activity*: string
+      ## The activity whose `stow:` block names the package.
+    guard*: PredicateExpr
+      ## The runtime predicate of the `when <pred>:` the entry sits under
+      ## inside the block; an empty `guard.expr` means none. The claim holds
+      ## on a host that selects `activity` and where the guard holds.
 
   # -------------------------------------------------------------------
   # M9.R.20: SystemIntent — user-editable ``system "<hostname>":`` form.

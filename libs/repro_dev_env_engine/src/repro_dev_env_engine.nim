@@ -1,10 +1,16 @@
-import std/[options, os, strutils]
+import std/[options, os, sets, strutils, times]
 
 import repro_build_engine
 import repro_core
 import repro_dev_env_engine/cache_key as devEnvCacheKey
+export devEnvCacheKey.PromptWatchEntry, devEnvCacheKey.promptWatchManifestPathFor,
+  devEnvCacheKey.writePromptWatchManifest,
+  devEnvCacheKey.unsettledPromptWatchPaths,
+  devEnvCacheKey.PromptWatchBaseline,
+  devEnvCacheKey.snapshotPromptWatchBaseline, devEnvCacheKey.PromptWatchFileName
 import repro_hash
 import repro_interface_artifacts
+import repro_local_store/pattern_scoped_enumeration
 import repro_runquota
 import repro_tool_profiles
 
@@ -76,6 +82,38 @@ type
     introspectionAction*: ActionResult
     shellRenderAction*: ActionResult
     stats*: DevEnvEdgeStats
+    promptWatch*: seq[PromptWatchEntry]
+      ## The paths the shell hook's prompt-time key watches for an activation
+      ## built from this edge (``devEnvPromptWatchEntries``). The full
+      ## ``dev-env export`` writes them as the prompt watch manifest.
+    promptWatchComplete*: bool
+      ## False when the introspection result carried path COUNTS instead of
+      ## paths, so ``promptWatch`` is missing observed inputs. An activation
+      ## must then emit a marker no prompt matches rather than a key that
+      ## watches only part of what it depends on.
+    introspectionStartedAt*: float
+      ## Seconds since the epoch, taken immediately BEFORE the build that
+      ## runs (or cache-checks) the introspection edge. The prompt watch race
+      ## guard (``cache_key.unsettledPromptWatchPaths``) compares watched
+      ## paths against this moment: an edit before it was already visible to
+      ## the edge, so only one at or after it can have slipped between the
+      ## edge reading a file and the activation stat'ing it. Taking the time
+      ## at process start instead -- before the provider compile -- made a
+      ## project whose files were written just before `repro` was launched
+      ## look unsettled on its first activation, every time.
+    promptWatchOwnWrites*: seq[string]
+      ## Absolute paths the introspection edge itself wrote or created, when
+      ## it ran (`evidence.monitorWrites`). The race guard treats a current
+      ## entry these explain -- one the edge created, or a directory it wrote
+      ## into -- as the edge's own doing rather than a change it might have
+      ## missed. Empty for a cache hit: nothing ran, so nothing is explained.
+    promptWatchOwnRemovals*: seq[string]
+      ## Absolute paths the introspection edge itself removed, when it ran
+      ## (`evidence.monitorRemovals`). Kept apart from the writes because only
+      ## a removal explains an ABSENCE, and only a write a PRESENT entry: an
+      ## entry the edge wrote and somebody else then deleted, or one it
+      ## removed and somebody else then created again, must still be reported
+      ## (``cache_key.unsettledPromptWatchPaths``). Empty for a cache hit.
 
 proc raiseDevEnvEdge(message: string) {.noreturn.} =
   raise newException(DevEnvEdgeError, message)
@@ -227,6 +265,29 @@ proc engineConfig(config: DevEnvEdgeConfig): BuildEngineConfig =
     runQuotaQueueTimeoutMs: devEnvRunQuotaQueueTimeoutMsDefault,
     suppressTrace: false,
     skipCacheHitEvidence: false)
+  # The root classification this activation declares, for
+  # `Incremental-Invalidation.md` §"Validation Criteria"'s second mandatory
+  # exemption: an enumerated directory in an UNTRACKED scope carries no
+  # membership digest.
+  #
+  # THIS EDGE IS THE ONE THE EXEMPTION WAS MEASURED ON. The provider compile
+  # is a `nim c`, and Nim's upward module and config search enumerates every
+  # ancestor of its working directory: 449 recorded enumerations on one
+  # activation, among them `/`, `/Users/`, `$HOME`, `$HOME/.cache/` and
+  # `/nix/` (see
+  # `issues/2026-09-24-dev-env-never-converges-on-a-fresh-project.md`, the
+  # fifth cause). So the edge's key carried the immediate membership of the
+  # filesystem root and of the user's home directory, and could not converge
+  # across processes at all — which relinked the provider binary, made it
+  # non-bit-reproducible, and left the introspection edge reporting "no cache
+  # record for weak fingerprint" downstream of it.
+  #
+  # No `repositoryRoot`: finding one is a `.git` walk (the CLI's
+  # `repositoryRootOf`), and an activation runs on every `cd`. Omitting a
+  # root leaves more directories membership-tracked, which is the safe
+  # direction.
+  result.filesystemRoots = declaredFilesystemRoots(config.projectRoot,
+    config.workDir, resolvedStoreRootOrEmpty(), outRoot = config.outDir)
   result.statsEnabled = config.statsEnabled
   result.progressCallback = config.progressCallback
   # A warm activation must stay on the no-op fast path even while it renders
@@ -303,35 +364,55 @@ proc fileFingerprintPart(path: string): string =
 # M77 — fast-path cache-key computation.
 #
 # ``computeDevEnvEdgeCacheKey`` is the public surface the shell hook's
-# per-prompt fast path calls BEFORE walking the build graph. It MUST
-# produce a key that is identical to the one the engine's normal
-# cache-hit path would use for the same ``DevEnvEdgeConfig`` — otherwise
-# the user sees flapping where the hook says "cached" but the next
-# prompt's full walk recomputes a different fingerprint.
+# per-prompt fast path calls BEFORE walking the build graph. The full
+# ``dev-env export`` emits this same key as the ``__REPRO_APPLIED`` marker,
+# and the next prompt re-derives it from disk and compares; both sides MUST
+# compute it identically for the same ``DevEnvEdgeConfig`` and watch
+# manifest — otherwise the user sees flapping where every prompt falls
+# through to the full walk. The implementation is
+# ``repro_dev_env_engine/cache_key``, which the thin client links on its own;
+# this wrapper only unpacks the config.
 #
-# The key is a deterministic hash of:
+# It is a prompt-time key ONLY. ``computeDevEnvEdge`` does not consult it:
+# it reads the project file and none of the modules that file imports, so
+# it cannot say whether an extracted interface or a compiled provider is
+# still current. Using it for that once served a stale interface after a
+# stdlib package edit; see the interface step in ``computeDevEnvEdge``.
 #
-# * an in-document schema string (``reprobuild.dev-env.cache-key.v1``)
-#   so a future change to the inputs invalidates every existing key
-#   without us having to migrate or version anything in the manifest.
+# The key is a deterministic hash of (``cache_key.nim`` holds the ordered
+# list, and ``tests/unit/t_dev_env_cache_key_frame.nim`` pins it):
+#
+# * an in-document schema string (``reprobuild.dev-env.cache-key.v2``)
+#   so a change to the inputs invalidates every existing key without us
+#   having to migrate or version anything in the manifest.
 # * the project root path
-# * the project file's content (whichever of
-#   ``reprobuild.nim`` / ``repro.nim`` exists; the canonical
-#   ``reprobuild.nim`` wins when both are present, matching the rest of
-#   the engine)
-# * the develop-overrides file content (if present)
+# * the project file's content (``repro.nim`` or the legacy
+#   ``reprobuild.nim``; when both exist the key names neither and the full
+#   CLI reports the ambiguity), or the synthesised NF-4 auto-load project
+#   file when the project has none of its own
 # * the activity selector
 # * the lock-slice id (when the caller passed one) PLUS the contents of
 #   ``<projectRoot>/.repro/dev-env.lock`` when present (so a manual edit
 #   to the lock file invalidates the fast path)
-# * the small subset of env vars the dev-env edge consumes:
-#   ``REPRO_DEVELOP_OVERRIDES_FILE``, ``REPRO_MONITOR_SHIM_LIB``,
-#   monitor CLI selection
+# * the develop-overrides file content (if present)
+# * the env vars the edge consumes that the CLI can name up front:
+#   ``REPRO_DEVELOP_OVERRIDES_FILE``, ``REPRO_TOOL_PROVISIONING``,
+#   ``REPRO_STORE_ROOT``, ``REPROBUILD_LIBS_DIR``, ``REPROBUILD_REPO_ROOT``
+# * the PROMPT WATCH MANIFEST of the activation being compared against:
+#   the ``lstat`` metadata of every path that activation's introspection
+#   edge was observed to depend on (``devEnvPromptWatchEntries`` below),
+#   plus ``flake.nix`` / ``flake.lock`` unconditionally. Without it, an
+#   edit to ``flake.nix`` or to an override sibling's working tree was
+#   answered as a no-op on every prompt after it (``reprobuild-pm``
+#   ``issues/2026-09-28-dev-env-prompt-key-ignores-flake-inputs.md``;
+#   ``Nix-Flake-Coexistence.md`` §2b requires re-entry to be decided against
+#   the OBSERVED manifest).
 #
-# The implementation deliberately walks NO build graph and spawns NO
-# subprocess. It reads at most three small files (the project file, the
-# develop-overrides file, the dev-env lock file) which the kernel page
-# cache holds hot after the first prompt. The microbench in
+# The implementation deliberately walks NO build graph, spawns NO
+# subprocess and hashes no observed file's content. It reads at most four
+# small files (the project file, the develop-overrides file, the dev-env
+# lock file, the watch manifest) and ``lstat``s each watched path, which the
+# kernel holds hot after the first prompt. The microbench in
 # ``tests/e2e/dev-env/t_e2e_shell_hook_noop_latency.nim`` asserts the
 # wall-clock budget (< 15 ms p50 on Windows, < 5 ms p50 elsewhere).
 #
@@ -347,38 +428,12 @@ proc fileFingerprintPart(path: string): string =
 # action-cache layer already makes for declared inputs vs. environment
 # tools, so consistency wins over paranoia here.
 
-const CacheKeySchema = "reprobuild.dev-env.cache-key.v1"
-
-proc canonicalProjectFilePath(projectRoot: string): string =
-  ## Mirror ``resolveProjectFile`` from ``repro_core`` without taking the
-  ## dependency: prefer ``reprobuild.nim`` over ``repro.nim``. Returns
-  ## the empty string when no project file is present (which the caller
-  ## can use to short-circuit "no cache key possible").
-  let canonical = projectRoot / "reprobuild.nim"
-  if fileExists(extendedPath(canonical)):
-    return canonical
-  let legacy = projectRoot / "repro.nim"
-  if fileExists(extendedPath(legacy)):
-    return legacy
-  ""
-
-proc lockSliceFilePart(projectRoot: string): string =
-  ## ``.repro/dev-env.lock`` content (or ``<missing>`` marker when the
-  ## file does not exist). Walked into the cache key so a user-level
-  ## edit to the lock file invalidates the fast path.
-  let lockPath = projectRoot / ".repro" / "dev-env.lock"
-  fileFingerprintPart(lockPath)
-
-proc envVarPart(name: string): string =
-  if existsEnv(name):
-    name & "=" & getEnv(name)
-  else:
-    name & "=<unset>"
-
-proc computeDevEnvEdgeCacheKey*(config: DevEnvEdgeConfig): string =
+proc computeDevEnvEdgeCacheKey*(config: DevEnvEdgeConfig;
+                                watchManifestPath = ""): string =
   ## See module-level note. Returns a 32-char lowercase hex digest.
+  ## ``watchManifestPath``: see ``cache_key.computeDevEnvEdgeCacheKey``.
   devEnvCacheKey.computeDevEnvEdgeCacheKey(config.projectRoot, config.activity,
-    config.lockSliceId, config.developOverridesPath)
+    config.lockSliceId, config.developOverridesPath, watchManifestPath)
 
 proc devEnvIntrospectionIgnoredInputPrefixes*(projectRoot: string;
     protocolRoot = ""): seq[string] =
@@ -458,6 +513,140 @@ proc devEnvIntrospectionIgnoredInputPrefixes*(projectRoot: string;
     let home = getEnv("HOME")
     if home.len > 0:
       result.add(absolutePath(home) / ".cache" / "nix")
+
+proc pathIsAtOrUnder(path, prefix: string): bool =
+  ## ``path`` is ``prefix`` or lies beneath it, on a component boundary.
+  if prefix.len == 0 or not path.startsWith(prefix):
+    return false
+  path.len == prefix.len or path[prefix.len] in {'/', '\\'} or
+    prefix[^1] in {'/', '\\'}
+
+proc spellingsOf(path: string): seq[string] =
+  ## A directory as the CALLER spells it and as the KERNEL reports it. The
+  ## monitor records resolved paths -- on macOS `/private/var/folders/...`
+  ## for a `$TMPDIR` the caller knows as `/var/folders/...` -- so a prefix
+  ## comparison against only one spelling silently misses.
+  if path.len == 0:
+    return @[]
+  result = @[absolutePath(path)]
+  try:
+    let resolved = expandFilename(path)
+    if resolved notin result:
+      result.add(resolved)
+  except OSError:
+    discard
+
+proc devEnvPromptWatchEntries*(action: BuildAction;
+                               introspection: ActionResult;
+                               projectRoot, outDir: string;
+                               trackedRoots: openArray[string];
+                               complete: var bool): seq[PromptWatchEntry] =
+  ## The paths the shell hook's prompt-time key must watch for this
+  ## activation: the introspection edge's OBSERVED inputs, plus
+  ## ``flake.nix`` / ``flake.lock`` declared unconditionally. Written by the
+  ## full ``dev-env export`` as the prompt watch manifest
+  ## (``cache_key.writePromptWatchManifest``); see the prompt watch section
+  ## of ``repro_dev_env_engine/cache_key`` for how the key folds it in, and
+  ## ``reprobuild-pm`` ``issues/2026-09-28-dev-env-prompt-key-ignores-flake-
+  ## inputs.md`` for why it exists.
+  ##
+  ## THE ENGINE'S OWN RULES DECIDE THE SET, so it is the set the action
+  ## cache keys this edge on (`Nix-Flake-Coexistence.md` §2b: re-entry is
+  ## decided against the observed manifest):
+  ##
+  ##   * the paths are ``cacheInputPaths`` -- exactly the input list a cache
+  ##     record of this execution is published with. That already drops what
+  ##     the engine has measured is not an input: the edge's ignored prefixes
+  ##     (`nix`'s cache, ``.repro/foreign-env``), the monitor's per-run
+  ##     sandbox tool directory, the action's own outputs and the
+  ##     directories it created for them;
+  ##   * an entry tracks MEMBERSHIP exactly when ``cacheEnumeratedDirectories``
+  ##     says the record fingerprints that directory's membership -- an
+  ##     enumerated directory inside a tracked root -- and existence
+  ##     otherwise.
+  ##
+  ## WHY NOT THE RAW EVIDENCE. A cache hit's evidence is the RECORD replayed
+  ## (``evidenceFromRecord``), and the record is the filtered set. Built
+  ## from raw evidence, an activation that ran the edge and a later one that
+  ## hit its record listed different paths for the same unchanged project,
+  ## so they emitted different markers -- measured, as a failure of
+  ## `t_e2e_shell_hook_cd_activate_deactivate.nim`'s cd-out/cd-back
+  ## assertion -- and the launched manifest carried the monitor's
+  ## `repro-fs-snoop-sandbox-tools-<pid>-<time>` directory, a name no
+  ## other run ever repeats. Applying the record's rules to both makes the
+  ## two the same set by construction: the replay carries the record's
+  ## inputs, and its membership-tracked directories as enumerations.
+  ##
+  ## Three further filters, applied identically to both:
+  ##
+  ##   * ``/nix/store/`` -- content-addressed and immutable: a valid store
+  ##     path's bytes never change, so its metadata carries no news. (It is
+  ##     also most of a flake's observed set.)
+  ##   * the edge's own ``outDir`` -- derived scratch the engine re-keys
+  ##     itself (the provider binary, the protocol transcript, the
+  ##     artifacts). Every activation that recompiles the provider rewrites
+  ##     it, so keeping it would trip the race guard after every such
+  ##     activation.
+  ##   * ``devEnvIntrospectionIgnoredInputPrefixes`` again, under every
+  ##     spelling of each prefix. The record does not reliably drop all of
+  ##     it: measured on a `useFlakeDevShell()` edge on macOS, the record
+  ##     kept `<projectRoot>/.repro/foreign-env/flake-profile`, the nix
+  ##     profile gcroot the edge itself rewrites on every run, so its ctime
+  ##     always postdated the edge's start and the race guard made every
+  ##     activation's marker unmatchable -- no prompt was a no-op again.
+  ##     A path filter, so it removes the same entries from a launched set
+  ##     and from a replayed one.
+  ##
+  ## If a caller ever elides a hit's evidence paths, or skips rebuilding a
+  ## hit's evidence altogether, ``complete`` is set false and the caller
+  ## must not emit a matchable key.
+  complete = not introspection.evidencePathsElided
+  # `skipCacheHitEvidence` leaves a hit with a ZERO `PathSetEvidence`, which
+  # is not elided and so reads exactly like "observed nothing": the set below
+  # would shrink to the flake floor and an override sibling's edit would be
+  # a no-op again. `engineConfig` turns the skip off for this edge today;
+  # this keeps a future change to that from failing silently. Every hit
+  # whose evidence WAS rebuilt carries `evcReplayedCacheRecord`
+  # (`evidenceFromRecord` sets it unconditionally).
+  if introspection.cacheDecision == cdHit and
+      evcReplayedCacheRecord notin introspection.evidence.evidenceProvenance:
+    complete = false
+  var excludedPrefixes = @["/nix/store/"]
+  for prefix in spellingsOf(outDir):
+    excludedPrefixes.add(prefix)
+  for ignored in devEnvIntrospectionIgnoredInputPrefixes(projectRoot):
+    for prefix in spellingsOf(ignored):
+      excludedPrefixes.add(prefix)
+
+  let evidence = introspection.evidence
+  var membership = initHashSet[string]()
+  for dir in action.cacheEnumeratedDirectories(evidence, trackedRoots):
+    membership.incl(dir)
+  var watched: seq[PromptWatchEntry]
+  proc consider(recorded: string) =
+    # A pattern-scoped enumeration (`patternScopedEnumerationPath`) is
+    # watched as its whole directory: the manifest's `d` comparison has no
+    # pattern, and watching the full membership notices every change the
+    # scoped one could, so it errs toward an extra activation, never a
+    # missed change.
+    let path = recorded.patternScopedBase()
+    if path.len == 0:
+      return
+    for prefix in excludedPrefixes:
+      if path.pathIsAtOrUnder(prefix):
+        return
+    watched.add(PromptWatchEntry(path: path,
+      enumerated: recorded in membership))
+  for path in action.cacheInputPaths(evidence):
+    consider(path)
+  # The floor, for the case the monitor saw nothing at all (no monitor on
+  # this host, or a capture that lost its records): the two files every
+  # `useFlakeDevShell()` activation reads. Declared whether or not they
+  # exist, so that one appearing is seen too.
+  if projectRoot.len > 0:
+    consider(absolutePath(projectRoot) / "flake.nix")
+    consider(absolutePath(projectRoot) / "flake.lock")
+  watched
 
 const NixDevEnvEntropyJustification* =
   "`nix` draws randomness in two places while evaluating a flake dev shell, " &
@@ -614,15 +803,9 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   if config.monitorCliPath.len == 0:
     raiseDevEnvEdge("monitorCliPath is required")
 
-  let candidateKey = devEnvCacheKey.computeDevEnvEdgeCacheKey(
-    config.projectRoot, config.activity, config.lockSliceId, config.developOverridesPath
-  )
-
   result.artifactPath = config.outDir / "dev-env.rbde"
   result.shellFragmentPath = config.outDir / "dev-env.env"
   result.shellNavigatorStatsPath = config.outDir / "dev-env.env.navigator.json"
-
-  let cacheKeyPath = config.outDir / "dev-env.rbde.cache-key"
 
   createDir(extendedPath(config.outDir))
   # This process is the activation itself (`repro exec`, the shell hook), not
@@ -644,41 +827,44 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   let stubPath = active.outDir / "project-interface.nim"
   result.interfacePath = interfacePath
 
-  var interfaceArtifact: ProjectInterfaceArtifact
-  var useCachedInterface = false
-  if fileExists(extendedPath(interfacePath)) and
-     fileExists(extendedPath(cacheKeyPath)):
-    try:
-      let cachedKey = readFile(extendedPath(cacheKeyPath)).strip()
-      if cachedKey == candidateKey:
-        interfaceArtifact = readInterfaceArtifact(interfacePath)
-        useCachedInterface = true
-    except CatchableError:
-      discard
-
-  if not useCachedInterface:
-    # ``consumerRoot`` is the recipe's OWN project root. Left implicit it
-    # would be the process cwd, which is only incidentally the same thing —
-    # and is baked into the compiled recipe, so a wrong value is silent.
-    interfaceArtifact = extractInterfaceFromModule(active.modulePath,
-      interfacePath, stubPath, workDir, compileScratchDir,
-      consumerRoot = parentDir(absolutePath(active.modulePath)))
-    # Shared-Development-Services §4.3's stale-lift precondition: record
-    # what this artifact was lifted from, beside it, so a CONSUMER of a
-    # shared service this recipe declares can establish whether it still
-    # corresponds to this recipe.
-    #
-    # Inside the `not useCachedInterface` branch ON PURPOSE. The cached
-    # branch above is gated by `devEnvCacheKey`, whose `projectFile=`
-    # part fingerprints the recipe FILE and not its import closure -- so
-    # an edit to a module the recipe imports does NOT move that key and
-    # the cached branch really can serve an interface older than the
-    # definition. Stamping there would record the current closure against
-    # that older artifact, which is the silent attach §4.3 forbids,
-    # performed by the freshness check itself. Left unstamped, the
-    # sidecar from the run that PRODUCED those bytes stays in place and
-    # the consumer's check reports the staleness.
-    writeInterfaceArtifactProvenance(interfacePath, active.modulePath)
+  # Whether the interface on disk can be reused is decided by
+  # ``extractInterfaceFromModule``'s own warm check and by nothing in front of
+  # it. That check is keyed on what the extraction actually compiles: the
+  # recipe's source closure (every module it imports, its own directory's
+  # sources included), the reprobuild library sources and their ``--path``
+  # set, the selected catalog and the compiler. A warm entry costs one stamp
+  # pass over those files, with no hashing and no compile.
+  #
+  # There used to be a second, cheaper gate here: reuse the interface whenever
+  # ``dev-env.rbde.cache-key`` equalled ``computeDevEnvEdgeCacheKey``. That is
+  # the PROMPT-TIME key, and it reads the project file and nothing it
+  # imports, so it vetoed the warm check in exactly the cases the warm check
+  # exists for. Editing a stdlib package the recipe compiles in
+  # (``repro_dsl_stdlib/packages/gh.nim``), or a module beside the project
+  # file, left every later activation replaying an interface extracted from
+  # the old source until the dev-env directory was deleted by hand
+  # (reprobuild-specs issue
+  # 2026-09-24-dev-env-reuses-interface-after-stdlib-package-change). Its file
+  # had no other reader and is no longer written.
+  #
+  # ``consumerRoot`` is the recipe's OWN project root. Left implicit it would
+  # be the process cwd, which is only incidentally the same thing — and is
+  # baked into the compiled recipe, so a wrong value is silent.
+  let interfaceArtifact = extractInterfaceFromModule(active.modulePath,
+    interfacePath, stubPath, workDir, compileScratchDir,
+    consumerRoot = parentDir(absolutePath(active.modulePath)))
+  # Shared-Development-Services §4.3's stale-lift precondition: record what
+  # this artifact was lifted from, beside it, so a CONSUMER of a shared
+  # service this recipe declares can establish whether it still corresponds
+  # to this recipe.
+  #
+  # Stamped after every call, warm or not. While the prompt-time key gated
+  # reuse, a reused interface could be older than its import closure, and
+  # stamping it would have recorded the current closure against older bytes.
+  # ``extractInterfaceFromModule`` returns an interface only after checking
+  # it against that closure (or after re-extracting it), so the closure
+  # recorded here is the one those bytes were extracted from.
+  writeInterfaceArtifactProvenance(interfacePath, active.modulePath)
   let effectiveProvisioning =
     active.effectiveToolProvisioning(interfaceArtifact)
 
@@ -775,9 +961,24 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
     actions.add(renderAction)
 
   var devEnvConfig = active.engineConfig()
+  result.introspectionStartedAt = epochTime()
   result.devEnvResult = runBuild(graph(actions & provisioningActions), devEnvConfig)
   result.introspectionAction = result.devEnvResult.actionById(
     "__repro_dev_env_introspection")
+  result.promptWatch = devEnvPromptWatchEntries(introspectionAction,
+    result.introspectionAction, active.projectRoot, active.outDir,
+    trackedFilesystemRootPaths(devEnvConfig.filesystemRoots),
+    result.promptWatchComplete)
+  if result.introspectionAction.launched:
+    # The race guard's own-changes list (see the field). Only from an edge
+    # that RAN: a hit's evidence is the record replayed, and wrote nothing.
+    let evidence = result.introspectionAction.evidence
+    proc absolute(path: string): string =
+      if path.isAbsolute: path else: active.workDir / path
+    for path in evidence.monitorWrites:
+      result.promptWatchOwnWrites.add(absolute(path))
+    for path in evidence.monitorRemovals:
+      result.promptWatchOwnRemovals.add(absolute(path))
   result.shellRenderAction = result.devEnvResult.actionById(
     "__repro_dev_env_shell_render")
   result.stats.providerIntrospectionLaunched =
@@ -804,8 +1005,3 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   if not fileExists(extendedPath(result.artifactPath)):
     raiseDevEnvEdge("dev-env edge did not write artifact: " &
       result.artifactPath)
-
-  try:
-    writeFile(extendedPath(cacheKeyPath), candidateKey & "\n")
-  except CatchableError:
-    discard

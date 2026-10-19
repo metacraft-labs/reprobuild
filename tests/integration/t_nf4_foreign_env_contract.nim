@@ -462,7 +462,12 @@ suite "nf4_foreign_env_contract":
     require direnv.len > 0
     checkpoint "using direnv at " & direnv
 
-    let root = createTempDir("repro-nf4-envrc", "")
+    # direnv evaluates `$PWD` with the kernel's spelling of the working
+    # directory, so the `PATH_add` it reports is fully resolved. Resolve the
+    # fixture root the same way: on macOS the inherited `TMPDIR` is typically
+    # under `/tmp`, a symlink to `/private/tmp`, and comparing against the
+    # unresolved spelling would fail a correctly captured prepend.
+    let root = expandFilename(createTempDir("repro-nf4-envrc", ""))
     defer: removeDir(root)
     let project = root / "project"
     createDir(project)

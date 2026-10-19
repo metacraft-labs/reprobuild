@@ -13,17 +13,9 @@
 ## ``resolveTarballTool`` — the same path `repro` uses, not a re-implementation
 ## of it — and then applies the realizer's own probe to the result.
 ##
-## It exists as a library rather than inside a test because two sweeps drive
-## it (the `uses:` provisioning edge's arms here, the home archive realizer's
-## arms through ``repro_home_apply/archive_conformance``) and because a check
-## whose logic lives in a test cannot be run from anywhere else.
-##
-## **Ownership is decided structurally, never from message text.** Each arm is
-## routed to exactly one realizer (Provisioning-Contributions.md §"Open gaps"
-## 3); ``archiveInstallerFeatures`` is that routing, so an arm the `uses:`
-## edge does not perform is reported as ``acvOwnedByHomeRealizer`` without a
-## download, rather than realized and then classified by parsing the refusal
-## it raised.
+## Recipe and home conformance callers both use this check. Every tarball
+## arm follows the same provisioning edge and the same strict primary-path
+## probe, including installer, flattening and alternative-digest records.
 
 import std/[os, strutils]
 
@@ -41,8 +33,8 @@ type
       ## Realized, and the declared executable is a regular file inside the
       ## sealed prefix.
     acvOwnedByHomeRealizer = "owned-by-home-realizer"
-      ## The arm asks for work only the home archive realizer performs, so
-      ## this sweep is not its conformance check. Nothing was downloaded.
+      ## Legacy verdict retained for callers; unified realization never
+      ## produces it.
     acvRealizeFailed = "realize-failed"
       ## Realization itself refused or failed: a stale digest, an upstream
       ## that no longer serves the URL, an extractor the host lacks. The
@@ -118,6 +110,9 @@ type
     cpu*: string
     verdict*: ArmConformanceVerdict
     detail*: string
+      ## Why the verdict is not ``acvOk``; on an ``acvOk`` verdict, a note
+      ## that this host could not start the realized executable (see
+      ## ``conformTarballArm``), or "".
     prefix*: string
     resolvedExecutablePath*: string
 
@@ -186,24 +181,28 @@ proc conformTarballArm*(useDef: InterfaceToolUse;
     url: arm.url, declaredExecutablePath: arm.executablePath,
     archiveType: arm.archiveType, os: arm.os, cpu: arm.cpu)
 
-  let homeFeatures = archiveInstallerFeatures(arm)
-  if homeFeatures.len > 0:
-    result.verdict = acvOwnedByHomeRealizer
-    result.detail = "needs " & homeFeatures.join(", ")
-    return
-
   var single = useDef
   single.tarballProvisioning = @[arm]
-  var profile: PathOnlyToolProfile
+  var hostNote = ""
   try:
-    profile = resolveTarballTool(single, storeRoot)
+    let profile = resolveTarballTool(single, storeRoot)
+    result.prefix = profile.selectedStorePath
+    result.resolvedExecutablePath = profile.resolvedExecutablePath
+  except TarballHostLoaderMissing as err:
+    # Realization succeeded and the bytes are in a sealed prefix; only THIS
+    # host's dynamic loader cannot start them (NixOS's stub-ld, or no FHS
+    # loader at all). That is a property of the host, decided by the
+    # realizer's refusal at resolution, not of the arm: a generic-Linux
+    # arm is still judged on what it extracted, so a NixOS run checks the
+    # same claims an FHS run does.
+    result.prefix = err.prefix
+    result.resolvedExecutablePath = err.executable
+    hostNote = "this host cannot start the realized executable: " &
+      err.msg.splitLines()[0]
   except CatchableError as err:
     result.verdict = acvRealizeFailed
     result.detail = err.msg.splitLines()[0]
     return
-
-  result.prefix = profile.selectedStorePath
-  result.resolvedExecutablePath = profile.resolvedExecutablePath
 
   # The realizer's own probe, re-applied to the sealed prefix. Asking the
   # prefix again rather than trusting the receipt is the point: a receipt is
@@ -236,10 +235,8 @@ proc conformTarballArm*(useDef: InterfaceToolUse;
   # ``extraExecutable`` is never that: it is reached by NAME from the prefix
   # directory once that directory is on PATH, and a link inside the prefix
   # pointing at a sibling inside the same prefix serves that name correctly.
-  # So the rule asked of it is the one ``repro_home_apply/
-  # archive_conformance`` already asks of the extras it owns — present
-  # following symlinks, resolving inside the prefix, executable — which also
-  # keeps one rule for the field across both realizers.
+  # Every caller uses this rule: present following symlinks, resolving
+  # inside the prefix, executable.
   for extra in arm.detail.extraExecutables:
     if extra.len == 0: continue
     let extraProbe = probeDeclaredExecutable(result.prefix, extra)
@@ -277,4 +274,4 @@ proc conformTarballArm*(useDef: InterfaceToolUse;
       return
 
   result.verdict = acvOk
-  result.detail = ""
+  result.detail = hostNote

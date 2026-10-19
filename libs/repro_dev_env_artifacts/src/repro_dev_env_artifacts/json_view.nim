@@ -53,6 +53,21 @@ proc taskJson(task: DevEnvTaskSummary): string =
     ",\"commandRef\":" & digestJson(task.commandRef) &
     ",\"command\":" & q(task.command) & "}"
 
+proc actionJson(action: DevEnvActionSummary): string =
+  ## Shared-Development-Services F1. `repro dev-env --json` is the only
+  ## view an operator has of what a recipe declared, and an action
+  ## invisible there is one nobody can check before `repro up` acts on
+  ## it -- which is exactly how F1's missing `etc/sso/` went unnoticed
+  ## until the service failed to start.
+  ##
+  ## The PAYLOAD BYTE COUNT rather than the payload. The payload is an
+  ## opaque versioned record; printing it would put binary into a JSON
+  ## string, and printing nothing would leave a reader unable to tell an
+  ## action that carries a command from one that does not.
+  "{\"nodeId\":" & q(action.nodeId) &
+    ",\"actionId\":" & q(action.actionId) &
+    ",\"payloadBytes\":" & $action.payload.len & "}"
+
 proc sharedResolutionJson(resolution: DevEnvSharedResolutionSummary): string =
   ## Shared-Development-Services D-SS11 (§4.6). `repro dev-env --json`
   ## is the only view an operator has of what a recipe declared, and a
@@ -112,7 +127,12 @@ proc serviceJson(service: DevEnvServiceSummary): string =
     ",\"instanceDeclared\":" &
       (if service.instanceDeclared: "true" else: "false") &
     ",\"instanceLeaseTtlSeconds\":" & $service.instanceLeaseTtlSeconds &
-    ",\"instanceEnvironment\":" & q(service.instanceEnvironment) & "}"
+    ",\"instanceEnvironment\":" & q(service.instanceEnvironment) &
+    # Shared-Development-Services F1's second half, in the JSON view for
+    # L8's and L9's reason: this is the field that says which action the
+    # session builds before this service, so an operator debugging "the
+    # file the service names is not there" has to be able to read it.
+    ",\"consumedActionIds\":" & stringsJson(service.consumedActionIds) & "}"
 
 proc diagnosticJson(diagnostic: DevEnvDiagnostic): string =
   "{\"severity\":" & q($diagnostic.severity) &
@@ -176,4 +196,5 @@ proc toJsonInspection*(artifact: DevEnvArtifact): string =
     ",\"evaluationInputs\":" & listJson(artifact.evaluationInputs, inputJson) &
     ",\"sourceFingerprints\":" & listJson(artifact.sourceFingerprints, sourceFingerprintJson) &
     ",\"evaluationEvidenceRef\":" & digestJson(artifact.evaluationEvidenceRef) &
-    ",\"providerMetadata\":" & toJson(artifact.providerMetadata) & "}"
+    ",\"providerMetadata\":" & toJson(artifact.providerMetadata) &
+    ",\"actions\":" & listJson(artifact.actions, actionJson) & "}"

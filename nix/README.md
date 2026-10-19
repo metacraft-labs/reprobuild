@@ -95,7 +95,11 @@ nix-build -E '(import <nixpkgs> {}).callPackage ./nix/pkgs/by-name/re/reprobuild
 reading `${src}/reprobuild.nimble` at eval time is
 import-from-derivation, which nixpkgs forbids. It therefore carries a
 literal default, and `nix build .#checks.<system>.nixpkgs-package-version-sync`
-fails the build if that literal and the nimble manifest disagree.
+fails the build if that literal and the nimble manifest disagree. The
+comparison is `scripts/check_package_nix_version.sh`, which `just lint`
+also runs, so a tree where they differ is refused locally too (the
+`agents` branch has no CI). `just bump-version <v>` writes both literals;
+the `src` snapshot then moves to the published bump commit (below).
 
 ## The `metacraft-labs/nixpkgs` fork
 

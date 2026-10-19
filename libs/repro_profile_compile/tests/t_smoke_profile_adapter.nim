@@ -539,6 +539,44 @@ suite "M83 Phase D: system adapter":
     check message.contains("data/apps.toml")
     check message.contains("system profiles do not read plan-time data files")
 
+  test "GM11: stow claims reach the home profile, and a system profile refuses them":
+    # The home adapter carries each claim (package, activity, guard parsed
+    # into a predicate AST) to the planner, and refuses a malformed one
+    # rather than dropping it (a dropped claim would put its package on
+    # every host). A system profile has no stow tree; a claim there would
+    # look effective and do nothing (Core-Invariants.md §Unrecognised Input
+    # Is Rejected, Not Skipped).
+    var intent = ProfileIntent(name: "home")
+    intent.activities = @[ActivityIntent(name: "default"),
+                          ActivityIntent(name: "desktop_core")]
+    intent.stowScopes = @[
+      StowScope(package: "kitty", activity: "desktop_core"),
+      StowScope(package: "rdp", activity: "default",
+        guard: PredicateExpr(expr: "windows"))]
+    let prof = profileIntentToHomeProfile(intent, "/x/home.nim")
+    check prof.stowScopes.len == 2
+    check prof.stowScopes[0].package == "kitty" and
+      prof.stowScopes[0].activity == "desktop_core" and
+      prof.stowScopes[0].guardAst.isNil
+    check prof.stowScopes[1].guardSource == "windows" and
+      not prof.stowScopes[1].guardAst.isNil
+    var undeclared = intent
+    undeclared.stowScopes.add StowScope(package: "x", activity: "nowhere")
+    expect ValueError:
+      discard profileIntentToHomeProfile(undeclared, "/x/home.nim")
+    var path = intent
+    path.stowScopes.add StowScope(package: "a/b", activity: "default")
+    expect ValueError:
+      discard profileIntentToHomeProfile(path, "/x/home.nim")
+    var message = ""
+    try:
+      discard profileIntentToSystemProfile(ProfileIntent(name: "sys",
+        stowScopes: @[StowScope(package: "kitty", activity: "desktop_core")]))
+    except ValueError as e:
+      message = e.msg
+    check message.contains("system profiles have no `stow/` tree")
+    check message.contains("kitty")
+
   test "windows.capability resource maps to srkWindowsCapability":
     var intent = ProfileIntent(name: "sys")
     intent.resources.add(resourceIntent("windows.capability", "ssh",

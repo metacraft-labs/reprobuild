@@ -1,3 +1,15 @@
+const
+  dslHeadArgumentDropRule = "An extra argument here is REFUSED rather " &
+    "than dropped: it is never semchecked, so an identifier that does not " &
+    "exist compiles clean, and an argument that is accepted and then has " &
+    "no effect is indistinguishable from support for it."
+    ## The rule every fixed-arity block HEAD in this DSL states when it
+    ## refuses an argument written beside it -- ``service <name>:``, an
+    ## activity-level ``config:``, and the package-level section heads
+    ## ``refusePackageHeadArguments`` checks. One constant rather than a
+    ## copy per walker: the copies had already drifted apart in wording,
+    ## and the sentence is the same promise in every position.
+
 type
   ForeachLift = object
     id: string
@@ -401,6 +413,93 @@ proc checkCertificateDeclarations(buildBody: NimNode) =
           "target '" & cert.name & "' declared at " &
           exported.call.lineInfo & ": a certificate name is a target " &
           "name, so it must name the same node or a new name", cert.call)
+
+proc hasComputedCertificateName(node: NimNode): bool =
+  ## Whether a ``build:`` body declares a ``certificate`` whose name is not
+  ## a string literal: its name is known only when the body runs.
+  if node.kind in {nnkCall, nnkCommand} and node.len >= 2 and
+      node[0].kind in {nnkIdent, nnkSym} and node[0].eqIdent("certificate") and
+      node[1].kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    return true
+  for child in node:
+    if hasComputedCertificateName(child):
+      return true
+
+proc emitEnactedCertificatePolicy(packageName: string; body: NimNode):
+    NimNode =
+  ## Test-Certificates TC-9b: lower ``enactCertificatePolicy <policy>``.
+  ##
+  ## * At most once per package; a second one is a compile error naming the
+  ##   first.
+  ## * The policy must be a compile-time value (``const``): it is data, and
+  ##   ``repro.lock`` records it as data.
+  ## * Every certificate a rule requires must be declared by this package
+  ##   (``certificate "<name>", <node>`` in ``build:``). The literal
+  ##   declarations are checked HERE, so a missing one fails the provider
+  ##   compile naming the rule, its branch pattern and the name. ``test``
+  ##   (which may be the implicit marking, D15) and packages that compute a
+  ##   certificate name are checked when the body runs instead
+  ##   (``buildPackageFragment``).
+  ## * At module initialisation the policy is registered for the package and,
+  ##   in the provider's main module, emitted for the lock writer.
+  result = newStmtList()
+  var enact: NimNode = nil
+  for stmt in body:
+    if stmt.kind in {nnkCall, nnkCommand} and stmt.len >= 1 and
+        stmt[0].kind in {nnkIdent, nnkSym} and
+        stmt[0].eqIdent("enactCertificatePolicy"):
+      if stmt.len != 2:
+        error("enactCertificatePolicy takes one policy: " &
+          "`enactCertificatePolicy <policy>`", stmt)
+      if not enact.isNil:
+        error("enactCertificatePolicy may appear at most once per package; " &
+          "it is already enacted at " & enact.lineInfo, stmt)
+      enact = stmt
+  if enact.isNil:
+    return
+  var policyExpr = enact[1]
+  if policyExpr.kind == nnkStmtList and policyExpr.len == 1:
+    policyExpr = policyExpr[0]
+  let buildBody = collectBuildStatements(body, packageName)
+  var certificates: seq[CertificateSourceDecl] = @[]
+  var exports: seq[ExportSourceDecl] = @[]
+  collectCertificateSourceDecls(buildBody, "", certificates, exports)
+  var declared = newTree(nnkBracket)
+  for cert in certificates:
+    declared.add(newLit(cert.name))
+  let deferred = newTree(nnkBracket, newLit(implicitCertificateName))
+  let policyConst = genSym(nskConst, "reproEnactedCertificatePolicy")
+  let checkConst = genSym(nskConst, "reproCertificatePolicyCheck")
+  let policyType = bindSym"BranchCertificatePolicy"
+  let undeclared = bindSym"undeclaredRequirement"
+  let register = bindSym"registerEnactedCertificatePolicy"
+  let relativeTo = bindSym"withDeclaredInRelativeTo"
+  let pkgLit = newLit(packageName)
+  # The recipe's own directory, so the policy's declaring file is recorded
+  # relative to it: a compiled provider is reused for every copy of an
+  # identical recipe tree, so an absolute path would name another checkout.
+  let recipeDir = newLit(enact.lineInfoObj.filename.parentDir)
+  # The const is what makes "a policy is data" enforced: a `let` policy, or
+  # one built from a runtime call, does not compile here.
+  # Two steps: the type annotation on the first is what resolves a name that
+  # is also a module (`teamPolicy` and `import .../team_policy` are one
+  # identifier to Nim) to the policy value.
+  let declaredConst = genSym(nskConst, "reproDeclaredCertificatePolicy")
+  result.add(quote do:
+    const `declaredConst`: `policyType` = `policyExpr`
+    const `policyConst`: `policyType` = `relativeTo`(`declaredConst`,
+      `recipeDir`))
+  if not hasComputedCertificateName(buildBody):
+    let errorPragma = newTree(nnkPragma,
+      newColonExpr(ident("error"), checkConst))
+    errorPragma.copyLineInfo(enact)
+    result.add(quote do:
+      const `checkConst` = `undeclared`(`policyConst`, `declared`,
+        `deferred`)
+      when `checkConst`.len > 0:
+        `errorPragma`)
+  result.add(quote do:
+    `register`(`pkgLit`, `policyConst`, isMainModule))
 
 proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   let buildBody = collectBuildStatements(body, pkg.packageName)
@@ -808,8 +907,33 @@ proc emitLockFileDesignations(pkg: PackageDef; site: NimNode): NimNode =
       newLit(entry.line)))
   discard site
 
+const
+  reproBin* {.strdefine.} = ""
+    ## Absolute path to the engine binary, handed in by the recipe compile.
+    ## Empty outside that compile (a plain `nim c` of a recipe), which is
+    ## exactly when the `dslDeps:` import emission must stay silent.
+  reproConsumerRoot* {.strdefine.} = ""
+    ## The consumer repo the recipe belongs to. The macro cannot derive it:
+    ## it expands in the extraction scratch directory, so `getProjectPath()`
+    ## points there rather than at the project.
+
+proc recipeIsUnderConsumerRoot(recipeFile: string): bool =
+  ## Whether ``recipeFile`` lies inside ``reproConsumerRoot``, the project the
+  ## interface compile is extracting. That compile's main module is a
+  ## generated runner that IMPORTS the recipe, so ``isMainModule`` is false in
+  ## the recipe there and cannot tell the project's own recipe from a sibling
+  ## producer's; the consumer root can. Empty outside an interface compile.
+  ## The comparison is textual (``normalizedPath``) because the VM has no
+  ## ``realpath``: a spelling mismatch reads as "not under", which only costs
+  ## the cross-repo sentence's accuracy, never a pin.
+  if reproConsumerRoot.len == 0 or recipeFile.len == 0: return false
+  let root = normalizedPath(reproConsumerRoot).replace('\\', '/')
+  let file = normalizedPath(recipeFile).replace('\\', '/')
+  file.startsWith(root.strip(leading = false, chars = {'/'}) & "/")
+
 proc emitVariantDeclarations(variants: seq[VariantDecl];
-                              pkg: PackageDef): NimNode =
+                              pkg: PackageDef;
+                              recipeFile = ""): NimNode =
   ## Spec-Implementation M1/M2d: lower the parsed ``VariantDecl`` list
   ## into Nim source code. Emits a single ``import`` of the
   ## configurables umbrella (when variants OR solver-bound dependencies
@@ -901,6 +1025,29 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
   # `nativeBuildDeps:` and `buildDeps:` is asking for exactly the two
   # instances NLF-PROP-4 asserts. Collapsing them here would silently answer
   # "one".
+  #
+  # Each edge also carries WHERE it was declared
+  # (`variants.SolverDeclarationSite`), so a lock-conflict diagnostic can say
+  # the declaring package is a cross-repo producer rather than one of the
+  # consuming project's own (`Locking-And-Solver.md` §"Targeted re-pin").
+  # `isMainModule` is resolved by the compiler in the module this expansion
+  # lands in — the recipe being evaluated is the provider's main module, and a
+  # sibling recipe reaching it is imported. An INTERFACE compile is the
+  # exception: its main module is a generated runner that imports the recipe,
+  # so there the recipe is recognised by lying under `reproConsumerRoot`
+  # instead (without this every own-package conflict a build reports from
+  # interface extraction was called a cross-repo producer's). Whether any
+  # other module is another project's recipe or a library module is decided
+  # here from the file name: every project recipe is `repro.nim` or
+  # `reprobuild.nim`, while a bundled package lives at
+  # `repro_dsl_stdlib/packages/<name>.nim`.
+  let recipeName = extractFilename(recipeFile)
+  let importedSite =
+    if recipeIsUnderConsumerRoot(recipeFile): "sdsRootRecipe"
+    elif recipeName in ["repro.nim", "reprobuild.nim"]: "sdsSiblingRecipe"
+    else: "sdsLibraryModule"
+  let siteExpr = "(when isMainModule: sdsRootRecipe else: " & importedSite &
+    ")"
   var emitted: seq[string] = @[]
   for (uses, kind) in [(pkg.toolUses, DepKindTarget),
                        (pkg.nativeBuildDeps, DepKindNative),
@@ -918,7 +1065,8 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
         escForCode(useDef.rawConstraint) &
         ", gateVariant = " & escForCode(useDef.gateVariant) &
         ", gateValue = " & escForCode(useDef.gateValue) &
-        ", depKind = " & escForCode(kind) & ")\n"))
+        ", depKind = " & escForCode(kind) &
+        ", declarationSite = " & siteExpr & ")\n"))
   # ``finalizeVariantsAtModuleInit`` rather than ``finalizeVariants``: this
   # call sits at MODULE SCOPE, and the imports emitted above it mean one runs
   # per recipe in the transitive closure, over a registry that only grows. The
@@ -1956,10 +2104,6 @@ const
     "`readiness <probe>`, `workingDirectory \"<dir>\"`, " &
     "`stateDirectory \"<dir>\"`, `instance:`, `converge <point>`, " &
     "the systemd-unit setters and `on <trigger>:` blocks"
-  m5ServiceHeadDropRule = "An extra argument here is REFUSED rather than " &
-    "dropped: it is never semchecked, so an identifier that does not " &
-    "exist compiles clean and an argument that is accepted and then not " &
-    "there is indistinguishable from support for it."
 
 const
   ## The trigger MODIFIERS ``Package-Model.md`` §"Service Lifecycle And
@@ -3740,7 +3884,10 @@ proc dss10RefuseRegistrationWithoutReadiness(packageName, serviceName: string;
     "REGISTRATION RESOURCE ordered on this service. " &
     dss10DegradationRule & " " & dss10ReadinessRemedy, anchor)
 
-proc m5ServiceEmission(packageName: string; stmt: NimNode): NimNode =
+proc m5ServiceEmission(packageName: string; stmt: NimNode;
+                       contributionPoints:
+                         seq[tuple[bareName, key: string]] = @[]):
+    NimNode =
   ## Lower ONE ``service <name>:`` statement to its wrap-and-register
   ## block, or return ``nil`` when ``stmt`` is not a recognised service
   ## entry.
@@ -3771,7 +3918,7 @@ proc m5ServiceEmission(packageName: string; stmt: NimNode): NimNode =
         "`service " & stmt[1].repr.strip() & ":` is neither. " &
         "Package-Model.md §Collections: a service is declared by name " &
         "and everything it carries is a setter in the body — " &
-        m5ServiceSetterSurface & ". " & m5ServiceHeadDropRule,
+        m5ServiceSetterSurface & ". " & dslHeadArgumentDropRule,
         m5ServiceStmtAnchor(extra))
   let parsed = m5ServiceEntryAst(stmt)
   if not parsed.matched:
@@ -3806,8 +3953,40 @@ proc m5ServiceEmission(packageName: string; stmt: NimNode): NimNode =
     tryBody.add(quote do:
       addActiveServiceConvergePoint(`pointLit`))
   for argExpr in parsedBody.argExprs:
-    tryBody.add(quote do:
-      addActiveServiceArg(`argExpr`))
+    # Shared-Development-Services, reprobuild issue #498: `args <point>`
+    # where `<point>` is a bare identifier naming an ordered-collection
+    # `config:` key of the ENCLOSING activity (or of the package, at
+    # package level) emits a DEFERRED slot instead of the folded
+    # tokens.
+    #
+    # WHY THE MACRO AND NOT THE RUNTIME. `addActiveServiceArg` receives
+    # a `seq[string]`; the key it came from is gone by then, and a
+    # runtime that guessed the key by matching the value against every
+    # point's current fold would be the "assertion satisfied by the
+    # wrong text" shape in executable form -- two points folding to the
+    # same members would be indistinguishable. The macro is the only
+    # place that still has the author's own identifier.
+    #
+    # The EAGER value is passed too, and `addActiveServiceArgPoint`
+    # documents what it is for: an `enable <activity>(<point> = ...)`
+    # site supplies the argument explicitly and the parameter default
+    # -- the read of the fold -- is never evaluated, so deferring such
+    # a value would let a later contribution overwrite an explicit
+    # argument.
+    var pointKey = ""
+    if argExpr.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+      let bare = identText(argExpr).normalize
+      for point in contributionPoints:
+        if point.bareName.normalize == bare:
+          pointKey = point.key
+          break
+    if pointKey.len > 0:
+      let keyLit = newLit(pointKey)
+      tryBody.add(quote do:
+        addActiveServiceArgPoint(`keyLit`, `argExpr`))
+    else:
+      tryBody.add(quote do:
+        addActiveServiceArg(`argExpr`))
   for fileExpr in parsedBody.runtimeFileExprs:
     tryBody.add(quote do:
       addActiveServiceRuntimeFile(`fileExpr`))
@@ -4004,10 +4183,27 @@ proc emitM5Services*(packageName: string;
   ## The per-entry lowering itself lives in ``m5ServiceEmission``, which
   ## L2's dev-env ``activity`` walker shares.
   result = newStmtList()
+  # Shared-Development-Services #498: the PACKAGE-LEVEL contribution
+  # points, so `args <point>` in a package-level `service` body defers
+  # exactly as it does in an activity's. Collected here rather than
+  # inside `m5ServiceEmission` because the emitter is shared with L2's
+  # dev-env walker, which has a DIFFERENT key shape
+  # (`<pkg>.<activity>.<name>` against `<pkg>.<name>`) -- one emitter,
+  # two callers, each supplying its own key.
+  var packagePoints: seq[tuple[bareName, key: string]] = @[]
+  for entry in classified:
+    if entry.ownership != soM2Config:
+      continue
+    if entry.stmt.len < 2:
+      continue
+    for cfg in collectM2ConfigEntries(entry.stmt[entry.stmt.len - 1]):
+      if m2TypeReprIsOrderedCollection(cfg.typeNode.repr):
+        packagePoints.add((bareName: cfg.name,
+          key: packageName & "." & cfg.name))
   for entry in classified:
     if entry.ownership != soM5Service:
       continue
-    let emission = m5ServiceEmission(packageName, entry.stmt)
+    let emission = m5ServiceEmission(packageName, entry.stmt, packagePoints)
     if emission == nil:
       continue
     result.add(emission)
@@ -4201,10 +4397,6 @@ const
     "that is accepted and then not there is indistinguishable from " &
     "support for it. This is the same defect the `args` setter and the " &
     "`on <trigger>:` walker had before Shared-Development-Services L1."
-  l2ActivityConfigHeadDropRule = "An extra argument here is REFUSED " &
-    "rather than dropped: it is never semchecked, so an identifier that " &
-    "does not exist compiles clean, and an argument that is accepted and " &
-    "then has no effect is indistinguishable from support for it."
 
 type
   L2ActivityParam = object
@@ -4406,7 +4598,7 @@ proc l2ParseActivityConfig(activityName: string;
       error("activity `" & activityName & "`: `config:` takes no " &
         "arguments, and `" & extra.repr.strip() & "` is written on its " &
         "head. Every key is declared INSIDE the block body. " &
-        l2ActivityConfigRule & " " & l2ActivityConfigHeadDropRule,
+        l2ActivityConfigRule & " " & dslHeadArgumentDropRule,
         l2StmtAnchor(extra))
     var pendingDoc = ""
     for entry in stmt[^1]:
@@ -4722,13 +4914,24 @@ proc l2ActivityEmission(packageName: string; stmt: NimNode): NimNode =
     formal.add(nnkIdentDefs.newTree(ident(c.name), c.typeNode.copyNimTree(),
       default))
 
+  # Shared-Development-Services #498: this activity's ordered-collection
+  # `config:` keys, fully qualified. `args <point>` inside one of this
+  # activity's `service` bodies lowers to a DEFERRED slot filled at
+  # finalization, so a contribution made by ANOTHER activity's body
+  # reaches the command line whichever order the two are declared in.
+  var activityPoints: seq[tuple[bareName, key: string]] = @[]
+  for c in config:
+    if m2TypeReprIsOrderedCollection(c.typeNode.repr):
+      activityPoints.add((bareName: c.name,
+        key: packageName & "." & parsed.activityName & "." & c.name))
+
   let procBody = newStmtList()
   procBody.add(l2MemberCheckStmts(parsed.activityName, params, parsed.body))
   for entry in parsed.body:
     if l2IsHeadNamed(entry, "config"):
       continue
     if l2IsHeadNamed(entry, "service"):
-      let emission = m5ServiceEmission(packageName, entry)
+      let emission = m5ServiceEmission(packageName, entry, activityPoints)
       if emission != nil:
         procBody.add(emission)
         continue
@@ -6595,6 +6798,13 @@ proc l3CheckExportNames(packageName: string;
   ## clash rather than letting Nim report a redefinition in generated
   ## code.
   ##
+  ## THE SIXTH RESERVATION IS NOT HERE: an export named after something
+  ## `system` itself declares -- a MAGIC with an `untyped` parameter, or
+  ## a compiler-context symbol no expression may name -- is refused by
+  ## `l3MagicShadowGuards`, which emits the check into the recipe instead
+  ## of deciding it here, because deciding it needs a question only the
+  ## compiler can answer. Its header says why.
+  ##
   ## Each accessor is a top-level `proc <name>*(pkg: <Title>Package)`, so
   ## an export whose name is already a module-level VALUE in this recipe
   ## — the package const itself (`const infra* = InfraPackage()`) or an
@@ -6704,6 +6914,121 @@ proc sharedServiceConstBase*(packageName, activityName,
   if activityName.len > 0:
     result.add(titleCase(activityName))
   result.add(titleCase(serviceName))
+
+proc l3MagicShadowGuards(packageName: string;
+                         activities: seq[L3ActivityExport];
+                         services: seq[L3ServiceExport]): NimNode =
+  ## The sixth reservation, and the only one `l3CheckExportNames` cannot
+  ## carry: one
+  ##
+  ##   when declared(system.<name>):
+  ##     when compiles(liftedMagicShadowProbe(system.<name>)):
+  ##       liftedMagicShadowRefusal(system.<name>, <anchor>, …)
+  ##     else:
+  ##       liftedCompilerContextShadowRefusal(<anchor>, …)
+  ##
+  ## per module-scope accessor the lift is about to emit, so that an
+  ## export named after a Nim MAGIC is refused at the author's own
+  ## declaration instead of breaking the magic for the whole module.
+  ##
+  ## WHY THE INNER `when compiles(…)` IS NOT OPTIONAL. The refusal macro
+  ## takes the shadowed symbol through a `typed` parameter, so reaching
+  ## it SEMS `system.<name>` as an ordinary value — and `system` holds
+  ## one name that cannot be sem'd that way at all. Measured at
+  ## `a567a3e1` with nim 2.3.1 across all 632 exported names a source
+  ## scrape of `lib/system.nim` and `lib/system/*.nim` yields,
+  ## `liftedMagicShadowRefusal(system.<name>, …)` compiles for 631 of
+  ## them and fails for exactly one, `nimvm`, with
+  ## `Error: illegal context for 'nimvm' magic` — `let nimvm*
+  ## {.magic: "Nimvm", compileTime.}: bool` is only legal as a `when`
+  ## condition. Without the inner probe `service nimvm:` stopped the
+  ## build with that compiler-internal line, which names neither the
+  ## export nor anything the author wrote: precisely the failure mode
+  ## this reservation exists to END, reintroduced by the reservation
+  ## itself. `nimvm` is a real hazard and is still refused — a
+  ## module-scope `proc nimvm*` makes `when nimvm:` report
+  ## `ambiguous identifier: 'nimvm'` (measured) — but by
+  ## `liftedCompilerContextShadowRefusal`, which names the export.
+  ## Nothing here is keyed on the name `nimvm`: the `else` branch fires
+  ## for whatever unnameable `system` symbol a given nim has.
+  ##
+  ## WHY IT IS DEFERRED INTO EMITTED CODE RATHER THAN DECIDED HERE. The
+  ## other five reservations compare two strings this module already
+  ## holds. This one has to ask the COMPILER a question about a name the
+  ## author chose -- "is `<name>` one of `system`'s magics?" -- and a
+  ## macro cannot ask it. Measured at `a567a3e1` with nim 2.3.1:
+  ## `{.experimental: "dynamicBindSym".}` plus `bindSym(name)` does not
+  ## answer *no* for a name that does not exist, it fails the compilation
+  ## with `Error: undeclared identifier`, so a macro cannot probe an
+  ## arbitrary name string. `when declared(...)` can, but only in CODE.
+  ## So the question is emitted and the answer is read by
+  ## `liftedMagicShadowRefusal`, which runs as part of compiling the
+  ## recipe.
+  ##
+  ## THE GUARD IS `system.`-QUALIFIED ON PURPOSE. A bare `when
+  ## declared(<name>)` fires for ANY symbol of that name in the recipe's
+  ## scope -- the author's own `var`, an import from a third-party
+  ## module, an overload set the refusal macro would then have to accept
+  ## through its `typed` parameter and say nothing about. The hazard
+  ## domain is exactly the names `system` itself declares, so the guard
+  ## names `system` and the refusal macro never sees a user or
+  ## third-party symbol at all. Measured: `declared(system.declared)` is
+  ## true and `getImpl` on `system.declared` still carries the
+  ## `magic: "Declared"` pragma, while `declared(system.standalone)` and
+  ## `declared(system.strip)` are both false.
+  ##
+  ## WHICH NAMES ARE GUARDED: exactly the ones `l3CheckExportNames`'
+  ## `claim` covers -- `l3Exportable` activities and PACKAGE-LEVEL
+  ## services. An activity-nested service and a `config:` key become
+  ## FIELDS of a lifted handle object, not module-scope procs, so they
+  ## shadow nothing; measured at `a567a3e1` and after this change, a
+  ## nested `service declared:` together with a `config:` key named
+  ## `compiles` compiles exit 0 and must keep doing so. (The two are
+  ## given DIFFERENT magic names because one activity's nested service
+  ## and `config:` key sharing a name is already refused by
+  ## `l3CheckExportNames` as the same handle member.)
+  ##
+  ## Built as AST and not as text because the `anchor` node has to carry
+  ## the AUTHOR's line info: a guard parsed from a string would anchor
+  ## the refusal on generated code, which is the whole failure mode this
+  ## reservation exists to end.
+  var guards = newStmtList()
+  proc guard(name, kind: string; anchor: NimNode) =
+    # Distinct node instances for every position -- the outer condition,
+    # the probe, each refusal's first argument and each anchor. One
+    # shared node reused across positions is how a later `copyLineInfo`
+    # on one of them silently moves the others.
+    proc systemQualified(): NimNode =
+      let nameIdent = ident(name)
+      nameIdent.copyLineInfo(anchor)
+      result = newDotExpr(ident("system"), nameIdent)
+      result.copyLineInfo(anchor)
+    proc anchored(node: NimNode): NimNode =
+      node.copyLineInfo(anchor)
+      node
+    let refusal = anchored(newCall(ident("liftedMagicShadowRefusal"),
+      systemQualified(), anchored(ident(name)), newLit(kind), newLit(name),
+      newLit(packageName)))
+    let contextRefusal = anchored(newCall(
+      ident("liftedCompilerContextShadowRefusal"),
+      anchored(ident(name)), newLit(kind), newLit(name),
+      newLit(packageName)))
+    let probe = anchored(newCall(ident("compiles"),
+      anchored(newCall(ident("liftedMagicShadowProbe"),
+        systemQualified()))))
+    let inner = nnkWhenStmt.newTree(
+      nnkElifBranch.newTree(probe, newStmtList(refusal)),
+      nnkElse.newTree(newStmtList(contextRefusal)))
+    let condition = anchored(newCall(ident("declared"), systemQualified()))
+    guards.add(nnkWhenStmt.newTree(
+      nnkElifBranch.newTree(condition, newStmtList(inner))))
+  for act in activities:
+    if l3Exportable(act.name):
+      guard(act.name, "activity", act.anchor)
+  for svc in services:
+    if svc.activityName.len == 0 and l3Exportable(svc.name):
+      guard(svc.name, "service", svc.anchor)
+  guards
 
 proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
   ## The whole L3 emission for one package, or an empty statement list
@@ -6941,7 +7266,26 @@ proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
       ", contributionPoints: @[" & points & "])\n")
   if resolverCode.len > 0:
     code.add(resolverCode)
-  result = parseStmt(code)
+  let emitted = parseStmt(code)
+  emitted.copyLineInfo(pkgBody)
+  # The magic-shadow guards go FIRST, before the `type` section and
+  # before the accessors, so the refusal is the first thing the compiler
+  # reaches for this package: once `proc declared*` has been sem'd the
+  # magic is already shadowed, and a guard placed after it would be
+  # reading the accessor rather than `system`'s routine.
+  result = l3MagicShadowGuards(pkg.packageName, collected.activities,
+    collected.services)
+  result.add(emitted)
+  # THE NODE THIS PROC RETURNS keeps `pkgBody`'s line info, as it did
+  # when it was `parseStmt(code)` itself. Nim propagates a node's line
+  # info to children that have none, and `parseStmt` numbers its output
+  # against the generated STRING, so the outer node is what keeps a
+  # diagnostic about generated code pointing at the package block. Not
+  # dropped on the grounds that nothing visibly reads it: that it is
+  # read by nothing is exactly what cannot be shown from here, and the
+  # emitted half's behaviour is meant to be unchanged by this commit.
+  # The guards are unaffected -- every node of theirs that a diagnostic
+  # can land on already carries the author's own line info.
   result.copyLineInfo(pkgBody)
 
 
@@ -6964,6 +7308,209 @@ proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
 # refusal could not improve on it and would have to re-implement overload
 # resolution to fire at the right times.
 # ---------------------------------------------------------------------------
+
+proc l3MagicWithUntypedParam(sym: NimNode): string {.compileTime.} =
+  ## The MAGIC NAME of `sym` when `sym` is a routine `system` declared
+  ## with a `{.magic: "…".}` pragma AND at least one `untyped`
+  ## parameter; the empty string otherwise.
+  ##
+  ## THIS IS THE WHOLE RESERVED-NAME RULE, AND IT IS DERIVED FROM THE
+  ## COMPILER RATHER THAN HAND-KEPT. The issue that asked for this
+  ## reservation
+  ## (`2026-10-09-lift-does-not-reserve-nim-magics-so-an-export-breaks-
+  ## unittest.md`) filed it instead of fixing it because "a macro cannot
+  ## enumerate Nim's magics ... so the check needs a hand-kept list",
+  ## and a hand-kept list "will be wrong the first time someone hits one
+  ## that is not on it". It does not need one: `getImpl` on a magic
+  ## symbol returns its `ProcDef` WITH the `magic:` pragma intact —
+  ## measured for `system.declared`, whose `getImpl().pragma` is
+  ## `Pragma(ExprColonExpr(Ident "magic", StrLit "Declared"),
+  ## Ident "noSideEffect", Ident "compileTime")`.
+  ##
+  ## WHY `untyped` IS THE DISCRIMINATOR AND NOT "IS A MAGIC". Measured
+  ## with nim 2.3.1 (`nim-fork-2.3.1-codetracer`) across ALL 81
+  ## identifier-named magic routines a source scrape of
+  ## `lib/system.nim` and `lib/system/*.nim` yields: shadowing each with
+  ## a top-level `proc <name>*` and then exercising a battery of magics
+  ## breaks FIVE — `declared`, `declaredInScope`, `compiles`, `defined`
+  ## and `runnableExamples`. The other seventy-six (`add`, `len`,
+  ## `high`, `low`, `min`, `max`, `new`, `move`, `default`, `repr`,
+  ## `echo`, `sizeof`, `ord`, …) all still compile, so "refuse every
+  ## magic" would be grossly over-broad and would refuse plausible
+  ## export names.
+  ##
+  ## HOW MANY BREAK DEPENDS ON WHAT THE BATTERY EXERCISES, WHICH IS WHY
+  ## THE RULE IS NOT "THE NAMES MEASURED TO BREAK". `compiles` and
+  ## `declaredInScope` survive a shadow until the battery passes them
+  ## an argument that does NOT resolve (`compiles(1 + 1)` is fine,
+  ## `compiles(zzNoSuchSymbol)` is not), and `runnableExamples` survives
+  ## until a doc-comment example block appears. Any list trimmed to the
+  ## breakers measured on one day is a list that grows the next time
+  ## somebody writes a different recipe.
+  ##
+  ## The `untyped` parameter is what separates them, and STRUCTURALLY
+  ## rather than by coincidence: a routine with an `untyped`
+  ## parameter can never take part in ordinary overload resolution
+  ## against a typed candidate, because its argument is never
+  ## semantically analysed — the compiler has to intercept the call BY
+  ## NAME, and a same-named accessor defeats that. Filtering `system`'s
+  ## magics by it yields exactly eight names in nim 2.3.1: `compiles`
+  ## (Compiles), `declared` (Declared), `declaredInScope`
+  ## (DeclaredInScope), `defined` (Defined), `iterToProc` (Plugin),
+  ## `procCall` (ProcCall), `runnableExamples` (RunnableExamples),
+  ## `typeof` (TypeOf) — a superset of the five measured breakers.
+  ##
+  ## `typeof`, `procCall` and `iterToProc` WERE MEASURED NOT TO BREAK
+  ## the uses tried, and are reserved anyway. That is deliberate:
+  ## the value of this rule is that it is derived from the compiler and
+  ## not trimmed by hand, so a future nim that adds or removes an
+  ## untyped-parameter magic is covered without an edit here. None of
+  ## the three is a plausible export name.
+  ##
+  ## BOTH CONDITIONS ARE REQUIRED. `system.assert` has an `untyped`
+  ## parameter and no `magic:` pragma (measured), and shadowing it is
+  ## legal; `system.default` has `magic: "Default"` and no `untyped`
+  ## parameter (measured), and shadowing it is legal too.
+  if sym.kind != nnkSym:
+    return ""
+  if sym.symKind notin {nskProc, nskFunc, nskTemplate, nskMacro,
+                        nskIterator, nskConverter, nskMethod}:
+    return ""
+  let impl = sym.getImpl()
+  if impl == nil or impl.kind notin RoutineNodes:
+    return ""
+  var magicName = ""
+  if impl.pragma.kind == nnkPragma:
+    for prag in impl.pragma:
+      if prag.kind == nnkExprColonExpr and prag.len == 2 and
+         prag[0].kind in {nnkIdent, nnkSym} and
+         prag[0].strVal.normalize == "magic" and
+         prag[1].kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+        magicName = prag[1].strVal
+  if magicName.len == 0:
+    return ""
+  if impl.params.kind != nnkFormalParams:
+    return ""
+  var namesUntyped = false
+  # A WALK of the parameter's type node rather than a kind test, so that
+  # `x: untyped` and `x: varargs[untyped]` are both caught —
+  # `runnableExamples` is declared the second way.
+  proc walkType(node: NimNode) =
+    if node.kind in {nnkIdent, nnkSym} and node.strVal == "untyped":
+      namesUntyped = true
+    for child in node:
+      walkType(child)
+  for i in 1 ..< impl.params.len:
+    let idd = impl.params[i]
+    if idd.kind == nnkIdentDefs and idd.len >= 3:
+      walkType(idd[idd.len - 2])
+  if namesUntyped: magicName else: ""
+
+macro liftedMagicShadowProbe*(shadowed: typed): untyped =
+  ## Expand to nothing, having forced `shadowed` through a `typed`
+  ## parameter.
+  ##
+  ## Exists only so that the guard `l3MagicShadowGuards` emits can ask
+  ## `compiles(liftedMagicShadowProbe(system.<name>))` whether
+  ## `system.<name>` can be named as an ordinary value AT ALL, before
+  ## handing it to `liftedMagicShadowRefusal`'s own `typed` parameter.
+  ## `compiles` around the refusal itself would not do: the refusal
+  ## ERRORS by design for a reserved name, so `compiles` would answer
+  ## *false* for exactly the names that must be refused. The probe never
+  ## errors, so a *false* from it means one thing only — the symbol is
+  ## not nameable as a value.
+  ##
+  ## Measured at `a567a3e1` with nim 2.3.1 over all 632 exported names a
+  ## source scrape of `lib/system.nim` and `lib/system/*.nim` yields:
+  ## true for 631, false for `nimvm` alone. True for every one of the
+  ## eight reserved names, for overload sets (`system.add`,
+  ## `system.len`), for types (`system.int`, `system.seq`,
+  ## `system.Exception`), for iterators (`system.items`) and for
+  ## zero-parameter routines (`system.locals`).
+  discard shadowed
+  result = newStmtList()
+
+macro liftedCompilerContextShadowRefusal*(anchor: untyped;
+                                          kind, exportName,
+                                          packageName: static string):
+    untyped =
+  ## Refuse one export whose name `system` declares as a symbol the
+  ## compiler will not let any code name as a value.
+  ##
+  ## Reached only from the `else` of the inner
+  ## `when compiles(liftedMagicShadowProbe(system.<name>))` that
+  ## `l3MagicShadowGuards` emits, so by the time this runs two things
+  ## are established: `system` declares `<name>`, and no expression may
+  ## mention it outside the one context the compiler reserves for it.
+  ## In nim 2.3.1 that is `nimvm` and nothing else (measured over 632
+  ## exported `system` names), but nothing here is keyed on the name:
+  ## the branch fires for whatever such symbol a given nim has.
+  ##
+  ## Refusing rather than passing: a module-scope `proc <name>*` beside
+  ## such a symbol was measured to make `when nimvm:` fail with
+  ## `ambiguous identifier: 'nimvm'`, which is the same
+  ## names-no-author-line hazard as the magic case. `anchor` is
+  ## `untyped` purely for line info.
+  error("`" & kind & " " & exportName & "`: `" & exportName &
+    "` is RESERVED -- `system` declares it as a COMPILER-CONTEXT symbol " &
+    "that no expression may name as a value; the compiler accepts it " &
+    "only in the one position it reserves for it, which is why the lift " &
+    "cannot even inspect it the way it inspects an ordinary magic. The " &
+    "lift emits one top-level `proc " & exportName & "*` per export of " &
+    "package `" & packageName & "`, and that accessor would make every " &
+    "use of `system." & exportName & "` in this module report " &
+    "`ambiguous identifier: '" & exportName & "'` -- a diagnostic that " &
+    "names neither this export nor any line the author wrote. Rename " &
+    "the " & kind & ".", anchor)
+
+macro liftedMagicShadowRefusal*(shadowed: typed; anchor: untyped;
+                                kind, exportName,
+                                packageName: static string): untyped =
+  ## Refuse one export whose name would shadow a Nim MAGIC, naming the
+  ## magic.
+  ##
+  ## Same contract as `liftedExportRefusal` and `liftedMemberRefusal`:
+  ## reached only from a `when declared(system.<name>):` guard
+  ## `l3MagicShadowGuards` emits, and `anchor` is `untyped` purely for
+  ## line info so the diagnostic lands on the recipe's own line. Unlike
+  ## those two it does NOT always error — the guard only establishes that
+  ## `system` declares SOMETHING of that name, and most such names
+  ## (`add`, `len`, `default`, `new`, `name`, `repr`, …) are perfectly
+  ## good export names. `l3MagicWithUntypedParam` is what decides, and
+  ## when it decides no the macro expands to nothing.
+  ##
+  ## `shadowed` arrives as an `nnkSym` for a name `system` declares once
+  ## and as an `nnkClosedSymChoice` for an overload set (measured:
+  ## `system.declared` is the first, `system.add` and `system.len` the
+  ## second), so both are walked.
+  var candidates: seq[NimNode] = @[]
+  if shadowed.kind in {nnkClosedSymChoice, nnkOpenSymChoice}:
+    for child in shadowed:
+      candidates.add(child)
+  else:
+    candidates.add(shadowed)
+  for candidate in candidates:
+    let magicName = l3MagicWithUntypedParam(candidate)
+    if magicName.len == 0:
+      continue
+    error("`" & kind & " " & exportName & "`: `" & exportName &
+      "` is RESERVED -- `system` declares it as the MAGIC `" & magicName &
+      "`, a routine with an `untyped` parameter. The lift emits one " &
+      "top-level `proc " & exportName & "*` per export of package `" &
+      packageName & "`, and that accessor shadows `system." & exportName &
+      "` for the WHOLE module. A magic with an `untyped` parameter can " &
+      "never take part in ordinary overload resolution, because its " &
+      "argument is never semantically analysed -- the compiler has to " &
+      "intercept the call BY NAME, and a same-named accessor defeats " &
+      "that. What the author gets instead, at the next USE of the magic " &
+      "anywhere in the module, is `cannot generate code for: m" &
+      magicName & "` or an `undeclared identifier` naming the magic's " &
+      "un-sem'd argument -- and that diagnostic names neither this " &
+      "export, nor the magic, nor any line the author wrote. " &
+      "`unittest`'s `check` expands to `declared(...)`, so one such " &
+      "export can disable every case in a test module. Rename the " &
+      kind & ".", anchor)
+  result = newStmtList()
 
 macro liftedExportRefusal*(ty: typedesc; anchor: untyped;
                            packageName, packageValue,
@@ -9261,16 +9808,6 @@ macro provisioningFor*(target: untyped; body: untyped): untyped =
     provisioningContributionLiteral(contribution) & ")")
 
 
-const
-  reproBin* {.strdefine.} = ""
-    ## Absolute path to the engine binary, handed in by the recipe compile.
-    ## Empty outside that compile (a plain `nim c` of a recipe), which is
-    ## exactly when the import emission below must stay silent.
-  reproConsumerRoot* {.strdefine.} = ""
-    ## The consumer repo the recipe belongs to. The macro cannot derive it:
-    ## it expands in the extraction scratch directory, so `getProjectPath()`
-    ## points there rather than at the project.
-
 proc collectDslDeps(sectionStmts: NimNode): seq[string] =
   ## Package names listed in a top-level ``dslDeps:`` block, in declaration
   ## order, deduplicated.
@@ -9358,6 +9895,136 @@ proc emitDeclaredPackageImports(sectionStmts: NimNode): NimNode =
             ident("as"),
             newLit(recipe),
             ident(importAliasFor(name)))))
+
+proc packageHeadBodyHint(head: string): string =
+  ## Where the thing an author wrote on a no-argument section head
+  ## actually belongs, quoted back in the refusal. ``head`` is normalized.
+  case head
+  of "config":
+    "Every configurable is declared INSIDE the block body, as " &
+      "`<name>: <Type> = <default>`."
+  of "versions": "Every version entry is declared INSIDE the block body."
+  of "build": "Every action is written INSIDE the block body."
+  of "devenv":
+    "Every `activity`, `enable` and dev-env setting is written INSIDE " &
+      "the block body."
+  else: "Everything it carries is written INSIDE the block body."
+
+proc headArgumentAnchor(extra: NimNode): NimNode =
+  ## The node a refusal of ``extra`` -- an argument written on a section
+  ## head -- reports at: the FIRST token the author wrote. Nim hangs the
+  ## line info of a call on its opening parenthesis, of ``a.b`` on the
+  ## dot and of ``a + b`` on the operator, so anchoring on ``extra``
+  ## itself points several columns to the right of the argument. Descend
+  ## through the left-hand side until the leftmost token is reached.
+  result = extra
+  while true:
+    case result.kind
+    of nnkCall, nnkCommand, nnkCallStrLit, nnkDotExpr, nnkBracketExpr,
+       nnkExprEqExpr, nnkExprColonExpr, nnkObjConstr, nnkPragmaExpr:
+      if result.len == 0: break
+      result = result[0]
+    of nnkInfix:
+      if result.len < 2: break
+      result = result[1]
+    else:
+      break
+
+proc refuseNoArgumentHead(owner: string; stmt: NimNode) =
+  ## ``stmt`` is a section whose ONLY legal children are its head and an
+  ## optional block body: ``config:``, ``versions:``, ``build:`` (at
+  ## package level and inside an artifact) and ``devEnv:``. Refuse every
+  ## child in between, anchored on that child.
+  ##
+  ## The upper bound is the body when there is one and the end of the
+  ## statement when there is not, so ``versions junk`` with no colon is
+  ## refused as well: every walker of these sections reads ``stmt[^1]``
+  ## as the body, finds it is not a ``StmtList`` and skips the section,
+  ## which drops ``junk`` exactly as silently as the block form did.
+  let spelling = identText(stmt[0])
+  let last = if stmt[^1].kind == nnkStmtList: stmt.len - 1 else: stmt.len
+  for i in 1 ..< last:
+    let extra = stmt[i]
+    error(owner & ": `" & spelling & ":` takes no arguments, and `" &
+      extra.repr.strip() & "` is written on its head. " &
+      packageHeadBodyHint(spelling.normalize) & " " &
+      dslHeadArgumentDropRule, headArgumentAnchor(extra))
+
+proc refusePackageHeadArguments(name, body: NimNode) =
+  ## Refuse an argument written beside a fixed-arity package-level
+  ## section head, before any walker reads the section.
+  ##
+  ## Seven heads accepted such an argument and dropped it (filed as
+  ## ``reprobuild-pm/issues/2026-10-08-package-level-dsl-heads-and-
+  ## bodies-silently-drop-arguments.md``): ``config``, ``executable``,
+  ## ``library``, ``files``, ``versions``, ``build`` and ``devEnv``.
+  ## Each is read by SEVERAL walkers -- ``parsePackageDef``,
+  ## ``emitM2ConfigDefaults``, ``emitM2Versions``, ``emitM3Artifacts``,
+  ## ``collectBuildStatements``, ``collectDevEnvStatements``, the M4
+  ## build emitters -- and every one of them reads the name at
+  ## ``stmt[1]`` and/or the body at ``stmt[^1]`` and never looks at the
+  ## children in between, so ``executable probeBin, junkArg:`` lowered as
+  ## ``executable probeBin:`` would and ``junkArg`` was never semchecked.
+  ## Some walkers were worse than silent: ``parseExecutable`` and
+  ## ``collectBuildStatements`` read ``stmt[2]`` as the body, so the same
+  ## spelling ALSO lost the artifact's ``name:`` and nested ``build:``.
+  ##
+  ## The check lives here, in one pre-pass at the top of ``packageImpl``,
+  ## rather than in each walker, so the refusal fires once and in source
+  ## order regardless of which walker would have reached the statement
+  ## first, and so a walker added later cannot reopen the hole by
+  ## forgetting a guard. It is an arity check and carries no design
+  ## decision, the same as the ``service`` head in ``m5ServiceEmission``
+  ## and the activity-level ``config`` head in ``l2ParseActivityConfig``.
+  ##
+  ## Deliberately NOT checked here: unrecognised statements INSIDE these
+  ## bodies. That is the other half of the same issue and needs a ruling
+  ## (a package-level ``config:`` / ``discard`` body is a deliberate
+  ## no-op in hundreds of recipes), not an arity check.
+  ##
+  ## A sweep of ``recipes/``, ``libs/``, ``examples/``, ``tests/``,
+  ## ``apps/`` and the sibling recipe repositories found no recipe that
+  ## writes anything beside these heads, so nothing legal is refused.
+  if body.kind != nnkStmtList:
+    return
+  let packageText =
+    if name.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}: name.strVal
+    else: name.repr.strip()
+  let owner = "package `" & packageText & "`"
+  for stmt in body:
+    if stmt.kind notin {nnkCall, nnkCommand} or stmt.len < 2:
+      continue
+    let head = calleeName(stmt).normalize
+    case head
+    of "config", "versions", "build", "devenv":
+      refuseNoArgumentHead(owner, stmt)
+    of "executable", "library", "files":
+      # Legal: ``<head> <name>`` (bare, no body) or ``<head> <name>:``
+      # with a block body. ``stmt[1]`` is the name; anything after it
+      # and before the body is the extra argument.
+      let spelling = identText(stmt[0])
+      let hasBody = stmt[^1].kind == nnkStmtList
+      let last = if hasBody: stmt.len - 1 else: stmt.len
+      let artifactHead = spelling & " " & stmt[1].repr.strip()
+      for i in 2 ..< last:
+        let extra = stmt[i]
+        error(owner & ": `" & spelling & " <name>:` takes one name and " &
+          "an optional block body; `" & extra.repr.strip() & "` beside " &
+          "the head of `" & artifactHead & (if hasBody: ":" else: "") &
+          "` is neither. Everything the artifact carries -- its `name:`, " &
+          "`lockFile`, `build:` and the rest -- is written INSIDE the " &
+          "block body. " & dslHeadArgumentDropRule, headArgumentAnchor(extra))
+      # The ``build:`` nested in an artifact body has the same arity and
+      # the same walkers (``collectBuildStatements`` iterates
+      # ``stmt[1]``, the M4 artifact lowering reads ``stmt[^1]``), so it
+      # had the same hole one level down.
+      if hasBody:
+        for member in stmt[^1]:
+          if member.kind in {nnkCall, nnkCommand} and member.len >= 2 and
+              calleeName(member).normalize == "build":
+            refuseNoArgumentHead(owner & ", `" & artifactHead & "`", member)
+    else:
+      discard
 
 macro package*(name: untyped; body: untyped): untyped =
   ## Top-level package declaration — STAGE 1.
@@ -9517,6 +10184,10 @@ macro packageImpl*(name: untyped;
   ##    the ``config:`` block lowers to a
   ##    ``let <name> = declareVariant[T](...)`` plus a trailing
   ##    ``finalizeVariants()`` call.
+  # Before ANY walker reads a section: an argument beside a fixed-arity
+  # head is refused here, once, rather than dropped by whichever of the
+  # several walkers below reached it first.
+  refusePackageHeadArguments(name, body)
   let (sectionStmts, preservedStmts) = partitionPackageBody(body)
   let pkg = parsePackageDef(name, body, resolvedPlatforms,
     resolvedToolProvisioning, resolvedUses)
@@ -9554,9 +10225,13 @@ macro packageImpl*(name: untyped;
   # ``declareVariant`` template lives in
   # ``repro_dsl_stdlib/configurables/variants.nim``; the import below
   # is gated so packages without variants don't pull the stdlib in.
-  let variantsEmission = emitVariantDeclarations(pkg.variants, pkg)
+  let variantsEmission = emitVariantDeclarations(pkg.variants, pkg,
+    recipeFile = name.lineInfoObj.filename)
   # ── Named-Lock-Files NLF-M7: §4.9's compile error, §4.3's registration ──
   let lockFileEmission = emitLockFileDesignations(pkg, name)
+  # ── Test-Certificates TC-9b: `enactCertificatePolicy` ─────────────
+  let certificatePolicyEmission =
+    emitEnactedCertificatePolicy(packageName, body)
   # ── M5: cross-project uses + cycle detection ─────────────────────
   var declaredUses: seq[string] = @[]
   for u in pkg.toolUses:
@@ -9625,6 +10300,9 @@ macro packageImpl*(name: untyped;
   # module scope (after the package wrapper code so the variant
   # accessor symbols are visible to ``build:`` code emitted below).
   result.add(lockFileEmission)
+  # Before `buildCode`, whose provider-mode `quit` ends module init: the
+  # policy must be registered (and emitted) first.
+  result.add(certificatePolicyEmission)
   result.add(variantsEmission)
   # ── M5: cross-project storage / const / accessors ────────────────
   # `wrapperCode` and `toolActionWrapperCode` BOTH unconditionally

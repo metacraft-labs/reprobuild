@@ -53,10 +53,11 @@
 ##     still proves is that the fix did not break the platform it does not
 ##     apply to.
 
-import std/[exitprocs, os, osproc, sequtils, strutils, unittest]
+import std/[os, osproc, sequtils, strutils, unittest]
 
 import ../src/msys2_source
 from repro_core/paths import extendedPath
+from repro_test_support/process_fixtures import releaseDirAtProcessExit
 
 let N48Root = "build/test-tmp/test-n48-msys2/" & $getCurrentProcessId()
   ## Deliberately RELATIVE and forward-slash-only, and deliberately NOT
@@ -68,9 +69,11 @@ let N48Root = "build/test-tmp/test-n48-msys2/" & $getCurrentProcessId()
   ## was still reading ("File removed before we read it"). A decimal pid adds
   ## no backslash, so the vacuity guarantee above is unchanged.
 
-addExitProc(proc () =
-  try: removeDir(extendedPath(N48Root))
-  except CatchableError: discard)
+# Removed when THIS process exits. Absolute, because a case may change the
+# working directory before then. Not an ``addExitProc`` closure: under ORC the
+# ``N48Root`` global it read is destroyed before exit procs run. See
+# ``repro_test_support/process_fixtures``.
+releaseDirAtProcessExit(absolutePath(N48Root))
 
 const N48RaisingFirstChars = {'a', 'b', 'f', 'n', 'r', 't', 'v'}
 

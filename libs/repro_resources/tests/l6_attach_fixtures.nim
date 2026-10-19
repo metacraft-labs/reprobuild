@@ -383,3 +383,39 @@ package l6AttParamOrderB:
         identity stable "com.example.l6.sso"
         scope workspace
         compatibility 2
+
+# Same resolved default before/after a const extraction, plus a real value change.
+const extractedRelyingParty* = "console.example"
+
+package l6AttLiteralDefault:
+  devEnv:
+    activity sso(pg: string):
+      config:
+        relyingParties: seq[string] = @["console.example", "app.example"]
+      service zitadel:
+        args "start-from-init"
+        identity stable "com.example.l6.sso"
+        scope workspace
+        compatibility 2
+
+package l6AttConstDefault:
+  devEnv:
+    activity sso(pg: string):
+      config:
+        relyingParties: seq[string] = @[extractedRelyingParty, "app.example"]
+      service zitadel:
+        args "start-from-init"
+        identity stable "com.example.l6.sso"
+        scope workspace
+        compatibility 2
+
+package l6AttChangedDefault:
+  devEnv:
+    activity sso(pg: string):
+      config:
+        relyingParties: seq[string] = @["different.example", "app.example"]
+      service zitadel:
+        args "start-from-init"
+        identity stable "com.example.l6.sso"
+        scope workspace
+        compatibility 2

@@ -20,7 +20,7 @@
 ##   * Pure, mock-free integration test running against the Python daemon shim
 ##     and the build engine's socket client logic.
 
-import std/[unittest, os, osproc, streams, strutils, strtabs, tables,
+import std/[unittest, os, osproc, streams, strutils, strtabs, tables, json,
   tempfiles, times]
 import repro_core
 import repro_core/dependency_gathering
@@ -468,6 +468,81 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
 
     # Clean up receipt
     removeFile(receiptFile)
+
+  when defined(posix):
+    test "reported flake inputs are relative to a symlinked action cwd":
+      let repoRoot = findRepoRoot()
+      let fixtureRoot = prepareFixtureRoot(repoRoot)
+      defer: removeDir(fixtureRoot)
+      let aliasRoot = createTempDir("repro-nix-daemon-alias-", "")
+      defer: removeDir(aliasRoot)
+      let linkedRoot = aliasRoot / "workspace"
+      createSymlink(fixtureRoot, linkedRoot)
+      defer: removeFile(linkedRoot)
+      require symlinkExists(linkedRoot)
+      require expandFilename(linkedRoot) == expandFilename(fixtureRoot)
+      require linkedRoot != expandFilename(linkedRoot)
+
+      let previousDaemonBin = getEnv("REPROBUILD_NIX_DAEMON_BIN")
+      putEnv("REPROBUILD_NIX_DAEMON_BIN", findNixDaemon(repoRoot))
+      defer: putEnv("REPROBUILD_NIX_DAEMON_BIN", previousDaemonBin)
+      let previousUser = getEnv("USER")
+      putEnv("USER", "repro-nix-provisioner-alias-" & $getCurrentProcessId())
+      defer: putEnv("USER", previousUser)
+
+      # This explicit alias reproduces /var -> /private/var on macOS even
+      # when the host's temporary directory itself has no symlink component.
+      let receipt = aliasRoot / "receipt"
+      let res = executeBuiltinAction(BuildAction(
+        governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+        kind: bakForeignProvision,
+        id: "test.foreign.nix.symlink-cwd",
+        argv: @["nix", FixtureSelector],
+        outputs: @[receipt],
+        cwd: linkedRoot,
+        dependencyPolicy: DependencyGatheringPolicy(kind: dgAutomaticMonitor)))
+      checkpoint(res.stderr)
+      require res.status == asSucceeded
+      require fileExists(receipt)
+      check fileExists(readFile(receipt).strip() / FixtureExecutable)
+      let reads = res.evidence.provisionerReportedInputs
+      checkpoint("Symlink cwd: " & linkedRoot)
+      checkpoint("Canonical cwd: " & expandFilename(linkedRoot))
+      checkpoint("Provisioner-reported dependencies: " & $reads)
+      check "flake.nix" in reads
+      check "flake.lock" in reads
+      check res.evidence.monitorReads.len == 0
+      check evcForeignProvisionerReport in res.evidence.evidenceProvenance
+      check evcMonitorCapture notin res.evidence.evidenceProvenance
+
+      # A tool's evaluation workspace can differ from the action's cwd.
+      # Keep those reads too, expressed relative to the canonical cwd.
+      let outsideRoot = prepareFixtureRoot(repoRoot)
+      defer: removeDir(outsideRoot)
+      let outsideReceipt = aliasRoot / "outside-receipt"
+      let outside = executeBuiltinAction(BuildAction(
+        governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+        kind: bakForeignProvision,
+        id: "test.foreign.nix.symlink-cwd.outside",
+        argv: @["nix", FixtureSelector],
+        outputs: @[outsideReceipt],
+        cwd: linkedRoot,
+        builtinText: $(%*{"workspaceRoot": outsideRoot}),
+        dependencyPolicy: DependencyGatheringPolicy(kind: dgAutomaticMonitor)))
+      checkpoint(outside.stderr)
+      require outside.status == asSucceeded
+      require fileExists(outsideReceipt)
+      check fileExists(readFile(outsideReceipt).strip() / FixtureExecutable)
+      let outsideReads = outside.evidence.provisionerReportedInputs
+      checkpoint("Outside dependencies: " & $outsideReads)
+      for name in ["flake.nix", "flake.lock"]:
+        let expected = relativePath(expandFilename(outsideRoot / name),
+          expandFilename(linkedRoot))
+        require expected.startsWith(".." & DirSep)
+        check expected in outsideReads
+      check outside.evidence.monitorReads.len == 0
+      check evcForeignProvisionerReport in outside.evidence.evidenceProvenance
+      check evcMonitorCapture notin outside.evidence.evidenceProvenance
 
   when defined(linux):
     test "a helper slower to start than two seconds is waited for":

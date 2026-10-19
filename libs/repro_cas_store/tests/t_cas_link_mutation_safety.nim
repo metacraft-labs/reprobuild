@@ -750,8 +750,12 @@ suite "M3 — why read-only blobs do not rescue the shared-inode arm":
   test "with the shared-inode arm off, a read-only blob leaves the output writable":
     ## The tension the spec calls "real" is a consequence OF the hardlink
     ## arm and of nothing else. A reflink and a copy each produce their own
-    ## inode, so the blob's mode does not reach the output at all — which
-    ## is measured here for every arm the shipped defaults can select.
+    ## inode, so the blob's mode CAN be kept off the output. For a copy that
+    ## is automatic: the output is created fresh. For a reflink it is not —
+    ## APFS's ``clonefile(2)`` copies the source's mode onto the clone, and
+    ## a read-only blob used to yield a read-only output here — so
+    ## ``attemptReflink`` resets the clone to a fresh file's mode. Measured
+    ## here for every arm the shipped defaults can select.
     var exercised: seq[LinkMechanism] = @[]
     let payload = payloadOf(8192, 107)
     for vol in volumes:

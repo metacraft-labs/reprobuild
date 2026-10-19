@@ -14,7 +14,7 @@
 ## a case that fails when the ahead half is lost.
 ##
 ## `t_commit_records_the_sibling_revision_the_shell_actually_used` asserts the
-## same direction in far more detail (the dropped `narHash`/`lastModified`/
+## same direction in far more detail (the recomputed `narHash`/`lastModified`/
 ## `revCount`, the untouched sibling nodes, the staging, `git commit -a`). This
 ## case is deliberately narrow: it is the guard rail on the withholding change,
 ## and it states in one place that "not recordable" did not quietly grow to mean
@@ -23,7 +23,7 @@
 ## ## What is asserted
 ##
 ##   1. an ahead sibling's pin MOVES to the sibling's `HEAD` — in the working
-##      tree and in the blob the commit carries;
+##      tree and in the blob the commit carries — with its `narHash`;
 ##   2. it moves for an ahead sibling standing beside a WITHHELD one in the
 ##      same workspace — an ahead sibling whose revision was never pushed —
 ##      because withholding is per-INPUT and a per-REFRESH implementation of it
@@ -41,7 +41,9 @@
 ## on (1) and (2): the pin still names the old revision.
 ##
 ## Test-double policy: NO mocks, doubles or fakes. See the headers of
-## `nf2_flake_lock_fixture.nim` and `nf3_override_state_fixture.nim`.
+## `nf2_flake_lock_fixture.nim` and `nf3_override_state_fixture.nim`. Recording
+## a pin asks nix for the moved node's `narHash`, so the case SKIPS LOUDLY
+## without nix (`nf2RecordingPrerequisites`).
 
 import std/[os, strutils, unittest]
 
@@ -51,7 +53,7 @@ suite "NF-2: an ahead sibling is still recorded":
 
   test "t_an_ahead_sibling_is_still_recorded":
     const caseName = "t_an_ahead_sibling_is_still_recorded"
-    if not nf2Prerequisites(caseName):
+    if not nf2RecordingPrerequisites(caseName):
       skip()
     else:
       let fx = setupNf2Fixture("ahead-still-recorded")
@@ -86,6 +88,8 @@ suite "NF-2: an ahead sibling is still recorded":
       let carried = lockInCommit(fx)
       check carried.len > 0
       check nodeText(carried, "alpha-src").contains(alphaHead)
+      # …as a whole node, content hash included, not a `rev`-only one.
+      check nodeText(carried, "alpha-src").contains("\"narHash\"")
 
       # ---- (2) …while the withheld sibling beside it kept its pin --------
       check nodeText(after, "gamma-src").contains(gammaPinned)

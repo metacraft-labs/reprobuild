@@ -55,6 +55,7 @@ export compile.resolveProfileNimCompiler
 export compile.resolveProfileCCompiler
 export compile.NimDefaultCCompilerExe
 export compile.profileCompileCFlags
+export compile.ProfileDepfileTarget
 export compile.requireReprobuildSources
 export compile.profileCompileChildEnv
 export compile.profileCompileArgv
@@ -111,6 +112,7 @@ export helper.runProfilePlatformProbeHelper
 
 # Phase D adapters: ProfileIntent -> apply-pipeline IRs.
 export adapter_home.profileIntentToHomeProfile
+export adapter_home.buildActivityElement
 export adapter_system.profileIntentToSystemProfile
 export adapter_system.renderSystemProfileToText
 

@@ -6,7 +6,7 @@
 ## git checkout), and the per-repo lock subtree the store would be read from
 ## is made UNREADABLE: ``locks`` is replaced by a regular file, so any lookup
 ## of a lock record under it fails and would be reported as unverifiable.
-## Under ``gate_mode = required``:
+## Under ``gate_mode = required`` (recorded in lib-a's committed ``repro.lock``, TC-9d):
 ##
 ##   1. a covered index commits, and nothing printed mentions "advisory",
 ##      "could-not-ask" or "unverifiable" — there is no lock half;

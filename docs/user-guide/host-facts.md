@@ -59,6 +59,16 @@ Every entry has a **logical id** both sides can produce:
 - `mode` of a linked file is `0755` when executable, else `0644` (a link shows
   its target's bits, and a store file is read-only either way). A
   `fsUserFile(mode = "0600")` reports `0600`.
+- A category holds each id once. If two producers report the same id, such as
+  two `envUserPath` resources sharing an entry, and they agree on every
+  compared field, the first entry is kept. If they differ, `repro home facts`
+  refuses, naming both origins and each differing field.
+- A stow file and an `fsUserFile` for the same path are settled by the
+  planner, the same way `repro home apply` settles them. If they agree on
+  `mode` and `digest`, the resource writes the file and the facts carry one
+  entry from it. If they disagree, the plan is refused before anything is
+  written, and the error names the path, both sources and the differing
+  fields.
 - **`unmapped`** entries are ones their producer could not give a logical id —
   a Nix package or Homebrew token that no contribution catalog claims, a Mac
   App Store app, a `homebrewCask` resource. They are listed, never compared,
@@ -66,6 +76,11 @@ Every entry has a **logical id** both sides can produce:
   change to either configuration.
 - **`uncategorized`** entries are ones no category covers (dconf keys, user
   defaults, VS Code extensions, …). They are listed and never compared.
+- **`concerns`** (Reprobuild side only, informational): `{ "declared": true,
+  "applied": ["applications"] }` when the host's `hosts:` entry declares which
+  concerns Reprobuild applies, `declared: false` and every concern otherwise.
+  The categories always describe everything Reprobuild *would* apply, so a
+  concern can be measured before the declaration hands it to Reprobuild.
 
 ## The Reprobuild side: `repro home facts`
 
@@ -133,7 +148,11 @@ Give one document of each side for the same host and system; the order does
 not matter. For every category the report lists each id as `same`,
 `only-in-nix`, `only-in-reprobuild` or `different` (naming the differing
 fields with both values), then the unmapped entries; uncategorized entries are
-listed at the end. The text form counts `same` entries (`--show-same` lists
+listed at the end. When the Reprobuild document says its host declares the
+concerns Reprobuild applies, each category line ends with the side that
+applies it there (`-- applied by reprobuild on m1`, `nix`, or for packages
+`split (applications: reprobuild, packages: nix)`), and the JSON form carries
+it as `owner`; it never changes a verdict. The text form counts `same` entries (`--show-same` lists
 them); the JSON form lists everything.
 
 Exit status: **0** — no difference outside the allowlist and no stale

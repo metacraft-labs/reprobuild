@@ -14,8 +14,9 @@
 ##      notes from the store.
 ##   3. ANY ONE PLATFORM (§4.2), BRANCH + NOTES. The certificate is noted on
 ##      the pushed tree and the branch is pushed together with the notes ref;
-##      `required_platforms = ["*"]` is met by the host's own platform and the
-##      push is forwarded.
+##      the pushed tree's policy (TC-9d: a requirement on
+##      `anyPlatform`) is met by the host's
+##      own platform and the push is forwarded.
 ##
 ## Negative control in the same fixture: a second commit with no certificate,
 ## pushed the same way (with the notes ref), is REJECTED and never reaches the
@@ -37,6 +38,9 @@ import std/[json, options, os, osproc, strutils, tempfiles, unittest]
 import repro_test_support
 import repro_cli_support
 import repro_workspace_manifests
+import repro_lock
+import repro_lock/certificate_policy
+import ./every_branch_policy
 
 include tc5_cert_signing_helpers
 
@@ -64,8 +68,11 @@ proc reproBinary(): string =
     "reprobuild.apps.repro")
 
 proc seedGitUpstream(gitBin, upstreamPath, workPath: string;
-                     branch = "main"): string =
+                     policyLock = ""; branch = "main"): string =
   ## Seed the REAL upstream bare with an initial commit, then return its SHA.
+  ## ``policyLock``, when given, is committed as the seed's ``repro.lock``:
+  ## since TC-9d the certificate policy lives there, in the content a gate
+  ## judges, and every later commit carries it to the gateway.
   discard requireGit(q(gitBin) & " init --bare -b " & branch & " " &
     q(upstreamPath))
   discard requireGit(q(gitBin) & " init -b " & branch & " " & q(workPath))
@@ -74,7 +81,9 @@ proc seedGitUpstream(gitBin, upstreamPath, workPath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.name \"TC6 Seeder\"")
   writeFile(workPath / "README.md", "TC-6 fixture\n")
-  discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
+  if policyLock.len > 0:
+    writeFile(workPath / "repro.lock", policyLock)
+  discard requireGit(q(gitBin) & " -C " & q(workPath) & " add -A")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " commit -m seed")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " remote add origin " & q(upstreamPath))
@@ -90,13 +99,14 @@ proc cloneInto(gitBin, upstreamPath, targetPath: string) =
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.name \"TC6 Tester\"")
 
-proc projectToml(libAUrl, certificatesTable: string): string =
+proc projectToml(libAUrl: string): string =
+  ## No certificate policy here: the retired `[certificates]` table would
+  ## make the manifest refuse to load (TC-9d).
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
   "default_revision = \"main\"\n" &
   "trunk = \"main\"\n\n" &
-  certificatesTable &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n]\n"
 
@@ -122,14 +132,14 @@ type
     daemonKey: string
     certStore: string      ## the scratch local certificate store (user root)
 
-proc setupFixture(gitBin, certificatesTable: string): Fixture =
+proc setupFixture(gitBin, policyLock: string): Fixture =
   result.scratch = createTempDir("repro-tc6-", "")
   result.certStore = isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.upstreamBare = result.scratch / "upstream-lib-a.git"
   result.gatewayBare = result.scratch / "gateway-lib-a.git"
   result.seedSha = seedGitUpstream(gitBin, result.upstreamBare,
-    result.scratch / "seed-lib-a")
+    result.scratch / "seed-lib-a", policyLock)
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
@@ -138,7 +148,7 @@ proc setupFixture(gitBin, certificatesTable: string): Fixture =
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
-    projectToml(fileUrl(result.upstreamBare), certificatesTable))
+    projectToml(fileUrl(result.upstreamBare)))
   result.workspaceRoot = workspaceRoot
   seedManifestLockStore(gitBin, workspaceRoot)
   result.libAPath = workspaceRoot / "lib-a"
@@ -273,20 +283,20 @@ suite "Agents push gate — certify before push, any platform, one-ref push":
     if gitBin.len == 0 or findExe("ssh-keygen").len == 0:
       skip("git or ssh-keygen not on PATH; this case signs a certificate in a repository")
     else:
-      let policy =
-        "[certificates]\n" &
-        "gate_mode = \"required\"\n" &
-        "required_targets = [\"pre-commit\"]\n" &
-        "required_platforms = [\"*\"]\n\n"
+      # The policy the pushed tree records (TC-9d): one every-branch
+      # `required` rule, `pre-commit` on any platform, committed in
+      # lib-a's repro.lock by the seed. The gateway config carries none.
+      let policy = replaceCertificatePolicySection(
+        serializeLockedDependencies(LockedDependencies(
+          schema: "reprobuild.solved-graph-lock.v2", deps: @[])),
+        everyBranchSnapshot(pmRequired, ["pre-commit"],
+    ["*"], name = "lib-a"))
       let fx = setupFixture(gitBin, policy)
       defer: removeDir(fx.scratch)
       let lockDir = lockRecordsDirFor(
         fx.workspaceRoot / ".repro" / "manifests", "lib-a", "lib-a")
       let wired = wirePushGateway(gitBin, fx.libAPath, fx.gatewayBare,
         fileUrl(fx.upstreamBare), GatewayConfig(
-          gateMode: cgmRequired,
-          requiredTargets: @["pre-commit"],
-          requiredPlatforms: @["*"],
           lockRecordsDir: lockDir,
           registeredKeysPath: registeredKeyStorePath(fx.workspaceRoot)))
       check wired.ok
@@ -343,16 +353,18 @@ suite "Agents push gate — certify before push, any platform, one-ref push":
       check upstreamHasCommit(gitBin, fx.upstreamBare, covered)
 
   test "\"*\" cannot be combined with concrete platforms":
-    let body = CertificatesBody(
-      gate_mode: some("required"),
-      required_targets: @["pre-commit"],
-      required_platforms: @["*", "linux/amd64"])
-    expect CatchableError:
-      discard resolveCertificatePolicy(body, "projects/x.toml")
-    let ok = resolveCertificatePolicy(CertificatesBody(
-      gate_mode: some("required"), required_targets: @["pre-commit"],
-      required_platforms: @["*"]), "projects/x.toml")
-    check ok.requiredPlatforms == @["*"]
+    ## The policy refuses the mix rather than guess at it: both when it is
+    ## built (the DSL validates at compile time) and when a snapshot carrying
+    ## it is read (every gate reads through the strict reader).
+    expect CertificatePolicySnapshotError:
+      discard everyBranchPolicy(pmRequired, ["pre-commit"],
+        ["*", "linux/amd64"])
+    let mixed = everyBranchSnapshot(pmRequired, ["pre-commit"], ["*"])
+      .replace("[\"*\"]", "[\"*\", \"linux/amd64\"]")
+    expect CertificatePolicySnapshotError:
+      discard parseCertificatePolicySnapshot(mixed)
+    let ok = everyBranchPolicy(pmRequired, ["pre-commit"], ["*"])
+    check ok.rules[0].requires[0].platforms == @["*"]
 
   test "\"*\" is per-platform coverage, never a cross-platform union":
     const content = "git-tree-sha1:c0ffee0000000000000000000000000000c0ffee"
@@ -369,3 +381,60 @@ suite "Agents push gate — certify before push, any platform, one-ref push":
       @["a", "b"], state).len == 0
     check uncoveredPlatforms(@[], @["*"], @["a"], state) ==
       @["any platform (missing: <no certificate>)"]
+
+  test "a policy's any-platform requirement beside a concrete one (TC-9c)":
+    ## TC-9c reconciliation of P6.c. The policy declares ``platforms`` per
+    ## ``requires``, so one rule can hold an any-platform name and a concrete
+    ## one at once — which the retired ``[certificates]`` table (one platform
+    ## list for every target) could not say. The gate's evaluator judges each
+    ## platform set on its own, through the production verifier (registered
+    ## signatures by the real ``ssh-keygen``):
+    ##
+    ##   requires pre-commit (any platform), unit-suite (linux/amd64)
+    ##
+    ##   * pre-commit on macos/arm64 + unit-suite on linux/amd64 → covered:
+    ##     the any-platform name is met by ONE platform alone, and the
+    ##     concrete name by its own platform;
+    ##   * pre-commit and unit-suite both on macos/arm64: pre-commit is met
+    ##     (any platform), but unit-suite on macos/arm64 does not stand in for
+    ##     linux/amd64 → not covered, naming unit-suite on linux/amd64.
+    if findExe("ssh-keygen").len == 0:
+      skip("ssh-keygen not on PATH; this case signs certificates")
+    else:
+      const content = "git-tree-sha1:c0ffee0000000000000000000000000000c0ffee"
+      let scratch = createTempDir("repro-tc9c-anyplatform-", "")
+      defer: removeDir(scratch)
+      let key = genEd25519Key(scratch / "keys", "tc9c-key", "tc9c-any-key")
+      writeRegistry(scratch, @[RegisteredKey(keyId: "tc9c-any-key",
+        publicKey: key.pub, status: rksActive)])
+      let keys = readRegisteredKeyStoreChecked(registeredKeyStorePath(scratch))
+      proc signed(platform: string; targets: seq[string]): FoundCertificate =
+        var cert = TestCertificate(schema: testCertificateSchemaV1,
+          framework: reprobuildFrameworkId, project: "lib-a",
+          platform: platform, targets: targets, result: tcrPassed,
+          issuedAt: "2026-10-15T00:00:00Z", issuer: "tc9c-fixture",
+          vcs: TestCertificateVcs(repo: "lib-a", content: content),
+          commands: @[TestCertificateCommand(argv: @["sh", "-c", "exit 0"])])
+        signCertificateOnIssuance(cert, "tc9c-any-key", key.priv)
+        FoundCertificate(name: platform & ":" & targets.join(","),
+          read: CertificateReadResult(status: crsOk, cert: cert))
+      let state = stateWithKnownContent(
+        [KnownContentId(algorithm: "git-tree-sha1", id: content)])
+      let requires = @[
+        PolicyRequirement(certificate: "pre-commit", platforms: @["*"]),
+        PolicyRequirement(certificate: "unit-suite",
+          platforms: @["linux/amd64"])]
+      # D8: a state that is not a commit is not looked up in a record store.
+      let lockSource = recordStoreLockSource("")
+      let covered = evaluateRequirementCoverage(
+        @[signed("macos/arm64", @["pre-commit"]),
+          signed("linux/amd64", @["unit-suite"])],
+        state, requires, keys, lockSource)
+      checkpoint(describeCoverageVerdict(covered))
+      check covered.outcome == voCovered
+      let short = evaluateRequirementCoverage(
+        @[signed("macos/arm64", @["pre-commit", "unit-suite"])],
+        state, requires, keys, lockSource)
+      checkpoint(describeCoverageVerdict(short))
+      check short.outcome == voNotCovered
+      check short.unmet == @[(name: "unit-suite", platform: "linux/amd64")]

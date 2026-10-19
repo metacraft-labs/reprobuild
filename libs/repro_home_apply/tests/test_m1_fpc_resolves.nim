@@ -10,15 +10,13 @@
 ##     upstream publishes nothing stronger);
 ##   * a profile reference resolves, for an x86_64-windows target under the
 ##     default policy, to that `tarball` realization at version 3.2.2;
-##   * the realization is routed to the home archive realizer (an Inno Setup
-##     installer and a non-SHA-256 digest are work only it performs), and its
-##     projection carries `digestAlgorithm == "sha1"` with a 40-hex digest;
-##   * a recipe's `uses:` edge refuses the same record by name rather than
-##     extracting an installer as a plain archive.
+##   * both callers project that same Inno Setup realization through the
+##     provisioning edge, retaining its SHA-1 digest and installer metadata;
+##   * its installer helper is an explicit provisioning requirement.
 ##
 ## Nothing is realized (no network). No mocks.
 
-import std/[options, strutils, unittest]
+import std/[options, unittest]
 
 import repro_dsl_stdlib/package_registry
 import repro_tool_profiles
@@ -45,7 +43,7 @@ suite "M1/GM4b — fpc end-to-end resolvable":
     check r.selection.kind == rkTarball
     check r.selection.version == "3.2.2"
     check r.selection.lockIdentity == "sha1:" & r.selection.tarball.detail.sha1
-    check r.archiveRoute == arInstaller
+    check r.archiveRoute == arExtract
     check r.archive.builtinVersion == "3.2.2"
     check r.archive.digestAlgorithm == "sha1"
     check r.archive.digestValue.len == 40
@@ -54,13 +52,13 @@ suite "M1/GM4b — fpc end-to-end resolvable":
     check r.selection.trace[0].kind == rkTarball
     check r.selection.trace[0].selected
 
-  test "a recipe's uses: edge refuses the installer record by name":
+  test "a recipe's uses: edge accepts the same installer record and digest":
     let useDef = profileToolUse("fpc").useDef
-    var refused = false
-    try:
-      discard tarballAcquisitionPlan(useDef, target = windowsX64)
-    except ValueError as err:
-      refused = true
-      check "realized by `repro home apply` only" in err.msg
-      check useDef.tarballProvisioning[0].url in err.msg
-    check refused
+    let home = resolveProfilePackage("fpc", windowsX64, DefaultSelectionPolicy)
+    let recipe = tarballAcquisitionPlan(useDef, target = windowsX64)
+    check recipe.record == home.selection.tarball
+    check recipe.digestAlgorithm == "sha1"
+    check recipe.digestValue == home.archive.digestValue
+    check recipe.url == home.archive.urlUsed
+    check recipe.record.detail.installMethod == "installer-inno-setup"
+    check "innounp" in installationToolRoles(recipe.record)

@@ -19,8 +19,8 @@
 ## * the host inventory a profile may consult: PATH everywhere, and on a
 ##   Windows host the Scoop installed-app table and bucket manifests
 ##   (``ScoopHostInventory``);
-## * the shape the home archive realizer consumes (``ArchiveRealization``)
-##   for a ``tarball`` selection that needs it.
+## * the compatibility projection of selected tarball metadata, re-exported
+##   from the shared provisioning inputs module (``ArchiveRealization``).
 ##
 ## Before GM4b this module held a per-platform adapter chain that read a
 ## second copy of the archive realizations (the ``<tool>Catalog`` records).
@@ -37,13 +37,14 @@ import repro_project_dsl
 import repro_interface_artifacts
 import repro_dsl_stdlib/packages_schema
 import repro_dsl_stdlib/package_registry
-import repro_tool_profiles/realization_selection
+import repro_tool_profiles/[realization_selection, archive_inputs]
 
 import ./catalog_projection
 
 export packages_schema
 export catalog_projection
 export realization_selection
+export archive_inputs
 export package_registry.packageAvailability
 
 # M80: the plan classifier and the apply-time Scoop adapter
@@ -63,69 +64,15 @@ const
     ## collide with `realize.nim`'s own `ScoopOverrideEnvVar*`.
 
 type
-  ArchiveRealization* = object
-    ## A selected ``tarball`` realization in the shape the home archive
-    ## realizer (``builtin_adapter.realizeBuiltinPackage``) consumes.
-    ## Built by ``archiveRealizationOf`` from the selected record — it is a
-    ## projection of that record, never a second source of truth.
-    packageId*: string
-    app*: string
-    resolvedVersion*: string         ## the record's version, when declared
-    executableName*: string
-    cacheHit*: bool                  ## set by the realizer when the CAS
-                                     ## prefix already exists
-    builtinVersion*: string          ## the record's ``detail.version``
-    builtinCpuLevel*: MicroarchLevel
-                                     ## PMC-2: the microarchitecture FLOOR the
-                                     ## selected record declared, or
-                                     ## ``mlNone``.
-    builtinCpuFeatures*: set[CpuFeature]
-                                     ## PMC-3: the extra extensions the
-                                     ## selected record declared beyond its
-                                     ## floor (the DECLARED set, not its
-                                     ## expansion).
-    resolvedTarget*: string
-                                     ## PMC-4: ``renderResolvedTarget`` of the
-                                     ## two above — the single spelling a lock
-                                     ## entry and a cache key use. ``""`` for a
-                                     ## record that declares no floor.
-    urlUsed*: string
-    digestAlgorithm*: string         ## "sha256" | "sha512" | "sha1"
-    digestValue*: string             ## hex digest (lowercase)
-    archiveFormat*: ArchiveFormat
-    installMethod*: InstallMethod
-    binRelpath*: seq[string]
-    extractPath*: string             ## inner-dir flatten
-    installerArgs*: seq[string]
-    pacmanPackages*: seq[string]
-    bootstrapArgv*: seq[string]
-    envSubstitutions*: seq[tuple[name, value: string]]
-    nested7z*: bool
-    preInstallActions*: seq[PreInstallAction]
-    preInstallUnrecognized*: seq[string]
-    msiAdminInstall*: bool
-      ## When true the realize loop uses ``msiexec /a`` instead of
-      ## ``dark.exe`` for MSI extraction (the per-record form of the global
-      ## ``CAKBUILTIN_PREFER_MSIEXEC=1``).
-    launcherEmit*: seq[LauncherEmitSpec]
-    appBundle*: string
-      ## GM4c: the ``.app`` bundle's path inside the archive, for an
-      ## ``imAppBundle`` record (Store-And-Installation-Layout.md § macOS
-      ## Application Bundles). With ``bundleId`` / ``teamId`` and the
-      ## record's version it is what the realizer verifies.
-    bundleId*: string
-    teamId*: string
-
   ArchiveRoute* = enum
-    ## Which realizer a ``tarball`` selection goes to (see
-    ## ``realization_selection.archiveInstallerFeatures``).
+    ## The tarball route uses the shared provisioning edge. The legacy
+    ## installer value is retained for lock/API compatibility.
     arExtract = "tarball"
-      ## A plain archive: the ``uses:`` provisioning edge
+      ## Any supported archive: the ``uses:`` provisioning edge
       ## (``repro_tool_profiles.resolveTarballTool``) realizes it, exactly as
       ## it does for a recipe.
     arInstaller = "builtin"
-      ## Installers, MSYS2 packages, pre-install steps, launcher emission:
-      ## the home archive realizer (``builtin_adapter``).
+      ## Legacy route, no longer selected.
 
   ScoopHostInventory* = ref object
     ## Per-apply handle on the host's Scoop: installed apps and configured
@@ -147,7 +94,7 @@ type
       ## record, so a realizer handed it cannot select something else.
     archiveRoute*: ArchiveRoute
     archive*: ArchiveRealization
-      ## Populated for a ``tarball`` selection routed to ``arInstaller``.
+      ## Populated for every selected ``tarball`` record.
     cacheHit*: bool
       ## Already present on the host: a PATH selection, or a Scoop app
       ## installed at a satisfying version.
@@ -692,47 +639,14 @@ proc detectHostTarget*(): PlatformTarget =
 
 
 # ---------------------------------------------------------------------------
-# M0 (Realize-Layer-Plumbing-Closures spec) — extractor-discovery edges
+# Historical extractor-discovery projection, retained for API compatibility
 # ---------------------------------------------------------------------------
 #
-# The home archive realizer (``builtin_adapter``) needs a small set of helper
-# executables (``7z.exe``, ``lessmsi.exe``, ``dark.exe``, ``innounp.exe``)
-# depending on the package's ``archive_format`` + ``install_method``.
-# When the operator bundles those extractors as catalog packages in the
-# SAME ``home.nim`` (the M3 bundling-posture decision from the
-# Realize-Closure-And-Catalog-Expansion predecessor campaign), the
-# realize-op order MUST honour these discovery edges — the consumer
-# cannot realize until its extractor's prefix exists.
-#
-# The mapping below is the M0 hard-coded form. A future milestone could
-# lift it to schema-driven metadata (a ``requires_for_realize:`` field on
-# the ``tarball`` realization); for M0 the small constant table is
-# the right tradeoff.
-#
-# Extractor-provider map (M0):
-#
-#   7z.exe       ← 7zip       (consumed by afSevenZip / afSevenZipSfx
-#                              archive formats and the imInstallerNsis
-#                              install method)
-#   lessmsi.exe  ← lessmsi    (consumed by imInstallerMsi)
-#   dark.exe     ← wix3       (consumed by imInstallerNsisBundle;
-#                              dark unwraps the Burn outer)
-#   lessmsi.exe  ← lessmsi    (also consumed by imInstallerNsisBundle;
-#                              extracts the inner MSIs after dark)
-#   innounp.exe  ← innounp    (consumed by imInstallerInnoSetup)
+# The old home realizer discovered these packages from already-realized
+# profile entries. Production now uses installationToolRoles and explicit
+# helper dependency edges in repro_tool_profiles. This map is only the
+# exported compatibility view of the former profile-ordering requirements.
 
-# TODO: schema-driven `requires_for_realize:` field on
-# the `tarball` realization (`TarballArchiveDetail`) would replace this
-# hard-coded map. Migration starting point: move these consts into the
-# per-package realization
-# (each affected `packages/<tool>.nim` declares its own
-# `requires_for_realize: @["7zip"]` or similar in the
-# `tarball` statement); then have `extractorDependencies`
-# below read `resolution.requiresForRealize` directly instead of
-# pattern-matching on `archive_format` / `install_method`. The case
-# statements in the proc body would collapse to a one-line passthrough.
-# See Realize-Layer-Plumbing-Closures.milestones.org M0 Outstanding
-# Tasks for the planned schema shape.
 const
   ExtractorProvider7zip*    = "7zip"
     ## The stdlib definition is ``package "7zip"`` (module
@@ -743,24 +657,10 @@ const
 
 proc extractorDependencies*(packageId: string;
                             resolution: ArchiveRealization): seq[string] =
-  ## Return the set of catalog-package names that must be realized BEFORE
-  ## ``packageId`` can be realized, derived from the resolution's
-  ## ``archive_format`` + ``install_method`` requirements.
-  ##
-  ## Hard-coded extractor-provider map (M0). Future enhancement:
-  ## schema-driven ``requires_for_realize:`` field on
-  ## the ``tarball`` realization.
-  ##
-  ## Callers pass only archives the home archive realizer will realize
-  ## (GM4b: a ``tarball`` selection routed to ``builtin_adapter``); a
-  ## selection of another kind, or a plain archive realized by the
-  ## ``uses:`` provisioning edge, has no extractor-discovery edge.
-  ##
-  ## The returned seq never contains ``packageId`` itself (self-edges are
-  ## skipped) — even though e.g. ``pkg_7zip.nim`` itself uses
-  ## ``imInstallerMsi`` which needs ``lessmsi``, that's a real edge
-  ## (7zip → lessmsi); the self-edge filter is for the degenerate
-  ## case where the mapping ever points a package at itself.
+  ## Return the historical extractor-provider names for a decoded archive.
+  ## This compatibility projection does not drive home package ordering or
+  ## provisioning. The common edge declares and realizes its own helpers.
+  ## Duplicate providers and self-edges are omitted.
   var deps: seq[string] = @[]
   # archive_format-driven edges
   case resolution.archiveFormat
@@ -1234,148 +1134,12 @@ proc narrowedTo(useDef: InterfaceToolUse; selection: RealizationSelection):
 # Archive realization inputs
 # ---------------------------------------------------------------------------
 
-const
-  MacosPkgInstallRefusal* =
-    "no system-scope realizer runs macOS installer packages yet"
-    ## The reason a ``pkg-install`` record is refused, quoted verbatim in the
-    ## refusal so tests and callers can recognise it.
-  MacosInstallerAppRefusal* =
-    "no realizer runs macOS installer applications yet"
-    ## The reason a macOS ``installer-silent`` record is refused.
-
-proc refuseUnrealizableMacosShape(packageId: string;
-                                  record: InterfaceTarballProvisioning) =
-  ## GM4c: the macOS vendor shapes a contribution may DECLARE but nothing
-  ## realizes (Store-And-Installation-Layout.md § macOS Application Bundles,
-  ## "Shapes this does not cover"). Refused at resolution, so ``--plan``
-  ## names the reason before anything is downloaded.
-  let detail = record.detail
-  let os = parsePlatformOsToken(record.os)
-  let macos = os.ok and os.os == poMacos
-  if detail.installMethod == $imPkgInstall:
-    raise newException(ValueError,
-      "the tarball realization of package '" & packageId & "' (" &
-      record.url & ") is an installer package that must be run as root " &
-      "(installMethod pkg-install): its scripts and privileged components " &
-      "are what install the product, which makes it system scope (P3). " &
-      "A home profile cannot realize it, and " & MacosPkgInstallRefusal &
-      ". Install it outside Reprobuild until one does.")
-  if detail.installMethod == $imInstallerSilent and macos:
-    raise newException(ValueError,
-      "the tarball realization of package '" & packageId & "' (" &
-      record.url & ") is a macOS installer application (installMethod " &
-      "installer-silent): its product exists only after the vendor's " &
-      "installer runs, and " & MacosInstallerAppRefusal & ". Install it " &
-      "outside Reprobuild until one does.")
-  if detail.installMethod == $imAppBundle and not macos:
-    raise newException(ValueError,
-      "the tarball realization of package '" & packageId & "' (" &
-      record.url & ") declares installMethod app-bundle for os '" &
-      record.os & "'; an application bundle is a macOS realization")
-
 proc archiveRouteFor*(packageId: string;
                       record: InterfaceTarballProvisioning): ArchiveRoute =
-  ## Route a selected ``tarball`` record to the realizer that performs
-  ## everything it asks for. A record that asks for work only one realizer
-  ## does AND work only the other does has no realizer; it is refused, as
-  ## is a declared macOS shape nothing realizes.
-  refuseUnrealizableMacosShape(packageId, record)
-  let installer = archiveInstallerFeatures(record)
-  if installer.len == 0:
-    return arExtract
-  let extractOnly = extractRealizerFeatures(record)
-  if extractOnly.len > 0:
-    raise newException(ValueError,
-      "the tarball realization of package '" & packageId & "' (" &
-      record.url & ") needs " & installer.join(", ") &
-      ", which only the home archive realizer performs, and " &
-      extractOnly.join(", ") & ", which only the `uses:` provisioning edge " &
-      "performs; no realizer can realize it")
-  arInstaller
-
-proc archiveRealizationOf*(packageId: string;
-                           record: InterfaceTarballProvisioning):
-    ArchiveRealization =
-  ## Project a selected ``tarball`` record into the home archive realizer's
-  ## input. Every field is decoded strictly: an archive format, install
-  ## method, pre-install step or launcher spec the realizer cannot read is a
-  ## refusal, not a default.
-  let detail = record.detail
-  result.packageId = packageId
-  result.app = packageId
-  result.resolvedVersion = detail.version
-  result.builtinVersion = detail.version
-  let level = parseMicroarchLevelToken(detail.cpuLevel)
-  let features = parseCpuFeatureSet(detail.cpuFeatures)
-  if not level.ok or not features.ok:
-    raise newException(ValueError, "package '" & packageId &
-      "': unreadable cpuLevel/cpuFeatures on " & record.url)
-  result.builtinCpuLevel = level.level
-  result.builtinCpuFeatures = features.features
-  result.resolvedTarget = renderResolvedTarget(level.level, features.features)
-  result.urlUsed = record.url
-  if record.sha256.len > 0:
-    result.digestAlgorithm = "sha256"
-    result.digestValue = normalizedHexDigest(record.sha256, "sha256")
-  elif detail.sha512.len > 0:
-    result.digestAlgorithm = "sha512"
-    result.digestValue = normalizedHexDigest(detail.sha512, "sha512")
-  elif detail.sha1.len > 0:
-    result.digestAlgorithm = "sha1"
-    result.digestValue = normalizedHexDigest(detail.sha1, "sha1")
-  else:
-    raise newException(ValueError, "package '" & packageId &
-      "': the tarball realization " & record.url & " names no digest")
-  let format = parseArchiveFormatToken(record.archiveType)
-  if not format.ok:
-    raise newException(ValueError, "package '" & packageId &
-      "': archive type '" & record.archiveType & "' is not one the home " &
-      "archive realizer reads")
-  result.archiveFormat = format.format
-  let installMethod = parseInstallMethodToken(detail.installMethod)
-  if not installMethod.ok:
-    raise newException(ValueError, "package '" & packageId &
-      "': unknown installMethod '" & detail.installMethod & "'")
-  result.installMethod = installMethod.installMethod
-  result.binRelpath = @[record.executablePath] & detail.extraExecutables
-  result.extractPath = detail.extractPath
-  result.installerArgs = detail.installerArgs
-  result.pacmanPackages = detail.pacmanPackages
-  result.bootstrapArgv = detail.bootstrapArgv
-  var env: seq[tuple[name, value: string]] = @[]
-  for binding in detail.env:
-    let eq = binding.find('=')
-    if eq <= 0:
-      raise newException(ValueError, "package '" & packageId &
-        "': env binding " & binding.escape() & " is not NAME=value")
-    env.add((name: binding[0 ..< eq], value: binding[eq + 1 .. ^1]))
-  # Stable order: by name, so the realize loop's output is deterministic.
-  for i in 0 ..< env.len:
-    for j in i + 1 ..< env.len:
-      if env[j].name < env[i].name:
-        swap(env[i], env[j])
-  result.envSubstitutions = env
-  result.nested7z = detail.nested7z
-  result.msiAdminInstall = detail.msiAdminInstall
-  for encoded in detail.preInstall:
-    result.preInstallActions.add(decodePreInstallAction(encoded))
-  result.preInstallUnrecognized = detail.preInstallUnrecognized
-  for encoded in detail.launcherEmit:
-    result.launcherEmit.add(decodeLauncherEmitSpec(encoded))
-  result.appBundle = detail.appBundle
-  result.bundleId = detail.bundleId
-  result.teamId = detail.teamId
-  if result.installMethod == imAppBundle and (result.appBundle.len == 0 or
-      result.bundleId.len == 0 or result.teamId.len == 0 or
-      result.builtinVersion.len == 0):
-    raise newException(ValueError, "package '" & packageId &
-      "': the app-bundle realization " & record.url & " must declare " &
-      "appBundle, bundleId, teamId and version (the bundle's " &
-      "CFBundleShortVersionString); realization verifies all four")
-  # ``executablePath`` is a TARGET-platform path (``bin\gh.exe`` for a
-  # Windows record); split on both separators so the leaf is right whichever
-  # platform the resolution runs on.
-  result.executableName = record.executablePath.split({'/', '\\'})[^1]
+  ## Every supported tarball record uses the shared provisioning edge.
+  ## Decode before returning so planning refuses unsupported metadata.
+  discard archiveRealizationOf(packageId, record)
+  arExtract
 
 # ---------------------------------------------------------------------------
 # Resolution
@@ -1433,8 +1197,7 @@ proc resolveProfilePackage*(packageId: string;
   case selection.kind
   of rkTarball:
     result.archiveRoute = archiveRouteFor(packageId, selection.tarball)
-    if result.archiveRoute == arInstaller:
-      result.archive = archiveRealizationOf(packageId, selection.tarball)
+    result.archive = archiveRealizationOf(packageId, selection.tarball)
   of rkPath:
     result.cacheHit = true
   of rkScoop:

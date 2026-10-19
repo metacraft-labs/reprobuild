@@ -21,16 +21,17 @@
 ## Content digests are SHA-256 (`sha256:<hex>`) because the Nix producer
 ## computes them with coreutils over Home Manager's `home-files` tree.
 
-import std/[algorithm, json, os, strutils, tables]
-from repro_core/paths import extendedPath
-
-import nimcrypto/sha2 as factsSha2
+import std/[algorithm, json, strutils, tables]
 
 import repro_home_intent
 import repro_home_resources
+import repro_profile/concerns
 
 import ./plan
 import ./pipeline
+import ./file_facts
+
+export file_facts.sha256Digest, file_facts.homeRelativeId
 
 const
   HostFactsFormat* = "repro.host-facts"
@@ -46,31 +47,6 @@ const
     ## itself, where an entry came from, and the package version (spec
     ## Open question 2: identity only).
 
-proc sha256Digest*(content: openArray[byte]): string =
-  ## `sha256:<lower-case hex>` of `content`.
-  var ctx: factsSha2.sha256
-  ctx.init()
-  if content.len > 0:
-    ctx.update(content)
-  "sha256:" & ($ctx.finish()).toLowerAscii()
-
-proc sha256Digest*(content: string): string =
-  var bytes = newSeq[byte](content.len)
-  for i, ch in content:
-    bytes[i] = byte(ord(ch))
-  sha256Digest(bytes)
-
-proc homeRelativeId*(path, homeDir: string): string =
-  ## `~/<rel>` for a path under `homeDir` (separators normalised to `/`),
-  ## the path itself otherwise.
-  let p = path.replace('\\', '/')
-  let h = homeDir.replace('\\', '/').strip(leading = false, chars = {'/'})
-  if p == h:
-    return "~"
-  if h.len > 0 and p.startsWith(h & "/"):
-    return "~/" & p[h.len + 1 .. ^1]
-  p
-
 proc homeRelativePathEntry*(entry, homeDir: string): string =
   ## The logical id of a PATH entry: `~/<rel>` for an entry under the home
   ## directory however it spells the home (`$HOME`, `${HOME}`, `~`, the
@@ -83,18 +59,6 @@ proc homeRelativePathEntry*(entry, homeDir: string): string =
     if entry.startsWith(spelling & "/"):
       return "~/" & entry[spelling.len + 1 .. ^1]
   homeRelativeId(entry, homeDir)
-
-proc linkedMode(path: string): string =
-  ## The mode a link to `path` is reported with: whether it is executable.
-  ## A link's permission bits are its target's, and a Nix store target is
-  ## read-only, so the facts carry only what both sides can mean by a
-  ## linked file: `0755` (executable by its owner) or `0644`.
-  try:
-    if fpUserExec in getFilePermissions(extendedPath(path)):
-      return "0755"
-  except OSError:
-    discard
-  "0644"
 
 proc entry(id, origin: string): JsonNode =
   result = newJObject()
@@ -129,32 +93,57 @@ proc initFactsBuilder(homeDir: string): FactsBuilder =
   for c in HostFactsCategories:
     result.categories[c] = initOrderedTable[string, JsonNode]()
 
+proc differingComparedFields*(a, b: JsonNode): seq[string] =
+  ## The compared fields (every field but `HostFactsInformationalFields`;
+  ## spec §Host facts, "Compared fields") on which two entries for one id
+  ## differ, in field-name order. A field one entry has and the other
+  ## lacks differs.
+  var names: seq[string]
+  for k, _ in a:
+    if k notin HostFactsInformationalFields and k notin names:
+      names.add k
+  for k, _ in b:
+    if k notin HostFactsInformationalFields and k notin names:
+      names.add k
+  names.sort()
+  for k in names:
+    if not (a.hasKey(k) and b.hasKey(k) and a[k] == b[k]):
+      result.add k
+
 proc add(b: var FactsBuilder; category: string; e: JsonNode) =
-  ## The first entry for an id wins; a later one for the same id is what
-  ## the planner itself would have overridden (stow shadowing is applied
-  ## before this point), so it is reported as a conflict rather than
-  ## dropped silently.
+  ## A category holds each id once. Two producers reporting one id describe
+  ## the same fact when they agree on every compared field: the first entry
+  ## is kept (its `origin` names one of them). When they differ on a
+  ## compared field, the host would get one of two different things, so the
+  ## document is refused, naming both origins and the differing fields. A
+  ## stow file and an `fs.userFile` on one path never reach here -- the
+  ## planner keeps one writer or refuses the pair (`file_facts`).
   let id = e["id"].getStr
   if id in b.categories[category]:
     let first = b.categories[category][id]
-    if first != e:
+    let differing = differingComparedFields(first, e)
+    if differing.len > 0:
+      var detail: seq[string]
+      for k in differing:
+        detail.add k & " " &
+          (if first.hasKey(k): $first[k] else: "(absent)") & " vs " &
+          (if e.hasKey(k): $e[k] else: "(absent)")
       raise newException(ValueError, "host facts: two " & category &
         " entries for `" & id & "` (" & first["origin"].getStr & "; " &
-        e["origin"].getStr & ") that disagree")
+        e["origin"].getStr & ") that disagree on " & detail.join(", "))
     return
   b.categories[category][id] = e
 
 proc addResource(b: var FactsBuilder; r: Resource) =
-  let origin = "resource " & r.address
+  let origin = resourceOrigin(r.address)
   case r.kind
   of rkFsUserFile:
     var e = entry(homeRelativeId(r.userFileHostPath, b.homeDir), origin)
     e["mode"] = %r.userFileMode
     # A command-generated file's bytes exist only at apply time; the digest
     # is unknown (null) and compares unequal to any real digest.
-    e["digest"] =
-      if r.userFileContentFromCommand.len > 0: newJNull()
-      else: %sha256Digest(r.userFileContent)
+    let digest = userFileDigest(r)
+    e["digest"] = if digest.len == 0: newJNull() else: %digest
     b.add("files", e)
   of rkEnvUserVariable:
     var e = entry("var:" & r.envVarName, origin)
@@ -215,8 +204,7 @@ proc hostFactsFromState*(state: PlannedDesiredState; system: string):
     let id = "~/" & g.relativeHomePath.replace('\\', '/')
     case g.sourceKind
     of pgfsStowFile:
-      var e = entry(id, "stow " &
-        g.stowSourcePath.relativePath(opts.profileDir).replace('\\', '/'))
+      var e = entry(id, stowOrigin(g.stowSourcePath, opts.profileDir))
       e["mode"] = %linkedMode(g.stowSourcePath)
       e["digest"] = %sha256Digest(g.contentBytes)
       b.add("files", e)
@@ -244,6 +232,15 @@ proc hostFactsFromState*(state: PlannedDesiredState; system: string):
   result["categories"] = cats
   result["unmapped"] = sortedArray(b.unmapped)
   result["uncategorized"] = sortedArray(b.uncategorized)
+  # GM7: informational, never compared -- which concerns Reprobuild applies
+  # on this host (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped
+  # apply). The categories above always describe EVERY concern, so a concern
+  # is measured before its declaration moves it.
+  var applied = newJArray()
+  for name in concernNames(state.applied.concerns):
+    applied.add %name
+  result["concerns"] = %*{"declared": state.applied.declared,
+    "applied": applied}
 
 proc collectHostFacts*(opts: ApplyOptions; system: string): JsonNode =
   ## Plan `opts` (`planDesiredState`) and report its host facts. The

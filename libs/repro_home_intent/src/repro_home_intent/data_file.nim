@@ -31,6 +31,7 @@
 ## [[resource]]
 ## kind = "fs.userFile"             # selects the resource constructor
 ## when = "linux"                   # built-in predicate grammar only (optional)
+## activity = "desktop_core"        # the activity it belongs to (optional, GM9)
 ## hostFile = "~/.config/foo.conf"  # the constructor's own parameters
 ## content = "bar = 1\n"
 ## ```
@@ -38,7 +39,10 @@
 ## A resource row is exactly the call `fsUserFile(hostFile = ..., content =
 ## ...)` in `resources:`, under `when <when>:` when given: it is built by
 ## calling that constructor (`repro_profile/resource_rows`), whose parameter
-## list is the row's schema. Resources are profile-wide, as in `resources:`. Which rows apply on a host is therefore the
+## list is the row's schema. A row without an `activity` key is profile-wide,
+## like an entry of the profile-level `resources:`; with `activity = "<name>"`
+## it belongs to that activity (GM9), like a call in a `resources:` block
+## inside `activity <name>:`. Which rows apply on a host is therefore the
 ## planner's ordinary rule (the host's activities, then the guard) — there
 ## is no per-file selection expression to keep in step across Reprobuild
 ## and Nix. Anything the schema does not define — another top-level key,
@@ -184,6 +188,7 @@ proc decodeResourceRow(profilePath, dataPath: string; row: int;
     raiseDataFile(profilePath, label, row, "kind",
       "expected a string, got " & $kindNode.kind)
   var guard = ""
+  var activity = ""
   var fields: ResourceRowFields
   for key, value in table[].pairs:
     case key
@@ -194,6 +199,13 @@ proc decodeResourceRow(profilePath, dataPath: string; row: int;
           "expected a string, got " & $value.kind)
       validateRowGuard(profilePath, label, row, value.stringVal)
       guard = canonicalize(value.stringVal)
+    of "activity":
+      # GM9: the row belongs to this activity, as a call inside
+      # `activity <name>: resources:` does; omitted = profile-wide.
+      activity = stringField(profilePath, label, row, key, value)
+      let problem = activityNameProblem(activity)
+      if problem.len > 0:
+        raiseDataFile(profilePath, label, row, key, problem)
     else:
       fields[key] = tomlFieldValue(profilePath, label, row, key, value)
   # Keys in a stable order so a diagnostic does not depend on hashing.
@@ -203,6 +215,7 @@ proc decodeResourceRow(profilePath, dataPath: string; row: int;
   except EResourceRow as e:
     raiseDataFile(profilePath, label, row, e.key,
       "resource row: " & e.msg)
+  result.activity = activity
 
 proc decodeRow(profilePath, dataPath: string; row: int;
                table: TomlTableRef): DataPackageRow =

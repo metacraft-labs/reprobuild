@@ -165,8 +165,7 @@ const
   ]
 
   ## These tests intentionally drive self-hosted ``repro build`` actions
-  ## against shared workspace state. The B0/D2 cases mutate the sibling
-  ## ``../runquota/build/bin/runquotad`` prerequisite; the B1/D5 cases rebuild
+  ## against shared workspace state. The B1/D5 cases rebuild
   ## or probe shared ``build/bin`` app artifacts, including the single public
   ## ``repro`` CLI; the B2/B3 cases inspect
   ## the global ``.repro/build/.../build-report.json`` emitted by those builds.
@@ -609,16 +608,20 @@ const
   ## list is not answerable until it is green; removing an entry on a red case
   ## would be exactly the weak evidence the paragraphs above refuse.
   ExclusiveStems = [
+    # Asserts no single shared-index insert takes over 50 ms of WALL time
+    # while eight producers storm one chain. Under the parallel phase's load a
+    # descheduled producer exceeds that without blocking (full suite run 35:
+    # 0.34 s), so the latency claim is measured on a quiet host. The bound is
+    # unchanged.
+    "t_action_index_backpressure_and_tombstones",
     "t_a2_5_p3_streaming_sink",
     "t_a2_5_p8_throughput_bench",
-    "t_b0_repro_build_runquota_daemon",
     "t_b1_apps_action_cache_hit",
     "t_b1_repro_build_apps_collection",
     "t_b2_helper_invalidation",
     "t_b3_test_execute_edge_cache_hit",
     "t_b3_test_invalidation_rebuilds_repro",
     "t_d1_pythonunittest_resolves_in_path_mode",
-    "t_d2_cross_project_selector_recognised",
     "t_d5_collection_member_selector",
     "t_e2e_native_shell_hooks",
     # Its arms assert how OFTEN unsafe publication tears a running thread
@@ -889,6 +892,11 @@ type
       processGroup: int
       ownerToken: string
       statusPath: string
+      anchorStartTicks: int64
+        ## The supervisor's ``/proc`` starttime (``0`` when unknown or not
+        ## Linux): the same floor the owner-token cleanup scan uses, reused
+        ## by the CPU liveness sampler to skip reading the environment of
+        ## processes that predate the case.
 
   ProcessGroupRefusal = object of CatchableError
     ## The runner reached a verdict and is REFUSING to report a passing or
@@ -2886,11 +2894,6 @@ proc spawnGroupSupervisor(binary: string; args: openArray[string];
         closeProcessOnce(process)
         raise newException(IOError,
           "test process-group supervisor did not own its expected group")
-      result = TestProcess(
-        process: process,
-        processGroup: processGroup,
-        ownerToken: paths.ownerToken,
-        statusPath: paths.statusPath)
       # The supervisor is an unreaped child here, so its PID names exactly
       # it and its starttime is the floor for every token-bearing process.
       let anchorStartTicks =
@@ -2898,6 +2901,12 @@ proc spawnGroupSupervisor(binary: string; args: openArray[string];
           max(procStartTicks(processGroup), 0'i64)
         else:
           0'i64
+      result = TestProcess(
+        process: process,
+        processGroup: processGroup,
+        ownerToken: paths.ownerToken,
+        statusPath: paths.statusPath,
+        anchorStartTicks: anchorStartTicks)
       registerActiveProcessGroup(processGroup, paths.ownerToken,
         anchorStartTicks)
     else:
@@ -2936,8 +2945,8 @@ proc spawnedProcess(binary: string; args: openArray[string];
   raise lastError
 
 const CpuUnavailable = -1.0
-  ## Sentinel returned by ``processGroupCpuSeconds`` for "this host (or
-  ## this moment) cannot tell me how much CPU the test's process group
+  ## Sentinel returned by ``sampleCaseCpuSeconds`` for "this host (or
+  ## this moment) cannot tell me how much CPU the test's process tree
   ## has consumed". It is NOT zero: zero means "measured, and the group
   ## burned nothing", which is the signature of a genuine wedge. Folding
   ## the two together would turn every non-Linux host into a host that
@@ -2958,80 +2967,201 @@ when defined(linux):
     ## is the documented-safe parse.
     ##
     ## Index 0 of the result is field 3 (``state``); so field N is at
-    ## index N - 3: pgrp (5) at 2, utime (14) at 11, stime (15) at 12,
-    ## cutime (16) at 13, cstime (17) at 14.
+    ## index N - 3: ppid (4) at 1, pgrp (5) at 2, utime (14) at 11, stime (15) at 12,
+    ## cutime (16) at 13, cstime (17) at 14, starttime (22) at 19.
     let closeParen = statText.rfind(')')
     if closeParen < 0:
       return @[]
     statText[closeParen + 1 .. ^1].splitWhitespace()
 
-  proc processGroupCpuSeconds(processGroup: int): float =
-    ## Cumulative CPU (user + system) consumed by every live process in
-    ## ``processGroup``, including the CPU of descendants those processes
-    ## have already reaped (``cutime``/``cstime``).
+  type
+    CaseCpuRecord = object
+      ## Last reading of one member of the case's process tree, keyed in
+      ## ``CaseCpuTracker.members`` by PID and validated by ``startTicks`` so
+      ## a recycled PID is never mistaken for the process it replaced.
+      startTicks: int64
+      ppid: int
+      ownTicks: int64
+        ## ``utime + stime``: CPU this process burned itself.
+      reapedTicks: int64
+        ## ``cutime + cstime``: CPU of descendants it has already waited for.
+
+    CaseCpuTracker = object
+      ## Running, monotone account of the CPU a case's WHOLE process tree has
+      ## consumed. One instance lives for the duration of one case.
+      ##
+      ## Membership is the union of two sets, decided once per (PID,
+      ## starttime) and then remembered:
+      ##
+      ##   * the case's own process group (the unit the runner spawns and
+      ##     kills), and
+      ##   * every process whose initial environment carries the case's exact
+      ##     owner-token entry — the set the owner-token cleanup already
+      ##     treats as the case. The reprobuild engine moves each build
+      ##     action into a process group of its own (``assignProcessGroup``),
+      ##     so the nim/cc work of an in-process ``repro build`` inside a case
+      ##     is outside the case's group but still carries the token.
+      ##
+      ## A group-only measure credited one such case 13.59 s for 288 s of
+      ## real user CPU in 9 minutes, and the idle deadline then killed live
+      ## cases as hung.
+      processGroup: int
+      ownerToken: string
+      notBeforeTicks: int64
+      members: Table[int, CaseCpuRecord]
+      strangers: Table[int, int64]
+        ## PID -> starttime of processes already checked and found NOT to
+        ## carry the token, so their environment is read once, not once per
+        ## sample. Rebuilt every walk, so it never outgrows the live set.
+      creditedTicks: int64
+      everMeasured: bool
+
+  proc initCaseCpuTracker(processGroup: int; ownerToken: string;
+                          notBeforeTicks: int64): CaseCpuTracker =
+    CaseCpuTracker(processGroup: processGroup, ownerToken: ownerToken,
+      notBeforeTicks: notBeforeTicks)
+
+  proc sampleCaseCpuSeconds(tracker: var CaseCpuTracker): float =
+    ## Cumulative CPU (user + system), in seconds, credited to the case's
+    ## process tree so far. Monotone by construction. ``CpuUnavailable``
+    ## until a member has been seen at least once.
     ##
-    ## This is the liveness signal the idle deadline needs and stdout
-    ## cannot provide. A test starved of CPU by fifteen sibling workers
-    ## — or by unrelated load on a shared CI runner — is *silent* while
-    ## still advancing; a deadlocked test is silent and NOT advancing.
-    ## Output alone cannot separate those two, and treating silence as a
-    ## hang is what made a 16-worker sweep kill 28 live cases at ~600 s
-    ## and fail seven tests that pass at one worker.
+    ## Counting rules — each CPU tick is credited at most once, and work
+    ## done by a process that starts and exits between two samples is not
+    ## lost:
     ##
-    ## Including ``cutime``/``cstime`` keeps the sum monotone across a
-    ## fork-heavy test: when a member is reaped its own time does not
-    ## vanish from the total, it moves into its parent's child-time
-    ## counters, and the parent is in the same group. Without that, a
-    ## test that spawns and reaps compilers would appear to *lose* CPU
-    ## between samples.
+    ##   * A member seen before is credited only the growth of its
+    ##     ``utime + stime`` and of its ``cutime + cstime`` since the last
+    ##     sample; a new member is credited its full counters.
+    ##   * When a member disappears, the kernel moves its final totals into
+    ##     the ``cutime``/``cstime`` of the parent that reaped it. The part
+    ##     already credited (its last reading, plus whatever its own vanished
+    ##     children were already credited) is subtracted from that parent's
+    ##     child-time growth, so the reaped total is not counted twice.
+    ##   * A short-lived compile the engine spawns and reaps between two
+    ##     samples was never seen at all; its whole CPU arrives through the
+    ##     engine's ``cutime`` growth, and nothing is subtracted for it.
+    ##   * CPU a vanished member burned after its last sample is lost only
+    ##     when something OUTSIDE the case reaped it (an orphan adopted by
+    ##     init). That under-counts; it can never over-count.
     ##
-    ## Membership is by process group, matching the unit the runner
-    ## already owns and kills (``TestProcess.processGroup``, established
-    ## by the wrapper's ``setpgid``). A descendant that calls ``setsid``
-    ## leaves the group and stops contributing to the signal — such a
-    ## case degrades to the old output-only behaviour rather than
-    ## misreporting, and the owner-token cleanup path still reaps it.
-    ##
-    ## Matching by PGID cannot pick up a stranger: the supervisor anchor
-    ## is deliberately kept alive (and reaped only after cleanup) so the
-    ## kernel cannot recycle this PGID while the case is running — the
-    ## same invariant ``signalProcessGroup`` relies on to make a negative
-    ## -PID signal safe.
-    if processGroup <= 0 or not dirExists("/proc"):
+    ## Cost: one ``/proc`` walk reading each ``stat`` — exactly what the
+    ## group-only sampler read — plus the environment of processes that
+    ## started after the case's supervisor and are new since the previous
+    ## walk. That is the cleanup scan's start-time filter and exact-entry
+    ## match (``environHasExactEntry``), with the negative answers cached.
+    if not dirExists("/proc"):
       return CpuUnavailable
-    var total = 0.0
-    var members = 0
+    let expected =
+      if tracker.ownerToken.len > 0: TestOwnerEnv & "=" & tracker.ownerToken
+      else: ""
+    let self = getCurrentProcessId()
+    var seen = initTable[int, CaseCpuRecord]()
+    var strangers = initTable[int, int64]()
+    var credit = 0'i64
+    var reapedGrowth = initTable[int, int64]()
+      ## Member PID -> its child-time growth this sample, before the
+      ## already-credited share of vanished children is subtracted.
     for kind, path in walkDir("/proc"):
       if kind != pcDir:
         continue
       let base = path.lastPathPart
       if base.len == 0 or base[0] notin {'0' .. '9'}:
         continue
+      var pid = 0
+      try:
+        pid = parseInt(base)
+      except ValueError:
+        continue
+      if pid == self:
+        continue
       var statText = ""
       try:
         statText = readFile(path / "stat")
       except CatchableError:
-        # The process exited between readdir and open. Not an error:
-        # its CPU is already accounted for in its parent's child-time.
+        # Exited between readdir and open; handled as a vanished member.
         continue
       let fields = procStatFields(statText)
-      if fields.len < 15:
+      if fields.len < 20:
         continue
-      var ticks = 0.0
+      var record: CaseCpuRecord
+      var pgrp = 0
       try:
-        if parseInt(fields[2]) != processGroup:
-          continue
-        for idx in 11 .. 14:
-          ticks += parseFloat(fields[idx])
+        record.ppid = parseInt(fields[1])
+        pgrp = parseInt(fields[2])
+        record.ownTicks = parseBiggestInt(fields[11]) +
+          parseBiggestInt(fields[12])
+        record.reapedTicks = parseBiggestInt(fields[13]) +
+          parseBiggestInt(fields[14])
+        record.startTicks = parseBiggestInt(fields[19])
       except ValueError:
         continue
-      total += ticks
-      inc members
-    if members == 0:
-      # No live member found. Report "unavailable" rather than 0.0 so a
+      let known = tracker.members.getOrDefault(pid,
+        CaseCpuRecord(startTicks: -1))
+      var isMember = known.startTicks == record.startTicks
+      if not isMember:
+        if tracker.strangers.getOrDefault(pid, -1'i64) == record.startTicks:
+          strangers[pid] = record.startTicks
+          continue
+        if tracker.processGroup > 0 and pgrp == tracker.processGroup:
+          isMember = true
+        elif expected.len > 0 and (tracker.notBeforeTicks <= 0 or
+            record.startTicks >= tracker.notBeforeTicks):
+          var environment = ""
+          try:
+            environment = readFile(path / "environ")
+          except CatchableError:
+            # Another user's process, or one that just exited: either way
+            # not provably ours. Cache the answer like any other stranger.
+            strangers[pid] = record.startTicks
+            continue
+          if environHasExactEntry(environment, expected):
+            isMember = true
+          else:
+            strangers[pid] = record.startTicks
+            continue
+        else:
+          # Started before the case's supervisor: cannot be its descendant,
+          # and the token did not exist yet (see ``ownedProcessIds``).
+          continue
+      seen[pid] = record
+      if known.startTicks == record.startTicks:
+        credit += max(0'i64, record.ownTicks - known.ownTicks)
+        reapedGrowth[pid] = max(0'i64, record.reapedTicks - known.reapedTicks)
+      else:
+        credit += record.ownTicks
+        reapedGrowth[pid] = record.reapedTicks
+
+    # Vanished members: what was already credited for each, including the
+    # already-credited share of its own vanished descendants (they reach the
+    # surviving ancestor's ``cutime`` through it), keyed by its parent.
+    var vanishedCredit = initTable[int, int64]()
+    proc creditedThrough(tracker: CaseCpuTracker; seen: Table[int, CaseCpuRecord];
+                         pid: int; depth: int): int64 =
+      let record = tracker.members[pid]
+      result = record.ownTicks + record.reapedTicks
+      if depth > 64:
+        return
+      for childPid, child in tracker.members:
+        if child.ppid == pid and childPid notin seen and childPid != pid:
+          result += creditedThrough(tracker, seen, childPid, depth + 1)
+    for pid, record in tracker.members:
+      if pid notin seen and (record.ppid in seen):
+        vanishedCredit.mgetOrPut(record.ppid, 0'i64) +=
+          creditedThrough(tracker, seen, pid, 0)
+    for pid, growth in reapedGrowth:
+      credit += max(0'i64, growth - vanishedCredit.getOrDefault(pid, 0'i64))
+
+    tracker.members = seen
+    tracker.strangers = strangers
+    tracker.creditedTicks += credit
+    if seen.len > 0:
+      tracker.everMeasured = true
+    if not tracker.everMeasured:
+      # No member found yet. Report "unavailable" rather than 0.0 so a
       # momentarily-empty scan cannot be mistaken for measured idleness.
       return CpuUnavailable
-    total / ClockTicksPerSec
+    tracker.creditedTicks.float / ClockTicksPerSec
 
   proc cpuLivenessAvailable(processGroup: int): bool =
     ## Cheap "is the signal usable at all" probe, kept separate from the
@@ -3051,10 +3181,22 @@ else:
     discard processGroup
     CpuUnavailable
 
+  type CaseCpuTracker = object
+    ## Without ``/proc`` the case is measured by its process group only.
+    processGroup: int
+
+  proc initCaseCpuTracker(processGroup: int; ownerToken: string;
+                          notBeforeTicks: int64): CaseCpuTracker =
+    discard ownerToken
+    discard notBeforeTicks
+    CaseCpuTracker(processGroup: processGroup)
+
+  proc sampleCaseCpuSeconds(tracker: var CaseCpuTracker): float =
+    processGroupCpuSeconds(tracker.processGroup)
+
   proc cpuLivenessAvailable(processGroup: int): bool =
     discard processGroup
     false
-
 const CpuProgressFloorSec = 0.25
   ## Absolute floor for "the group did some work". One clock tick is
   ## 10 ms on every host we run on, so 0.25 s is 25 ticks — far above
@@ -3342,8 +3484,10 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int;
   ##
   ##   1. **Output.** A polling loop drains the pipe non-blockingly every
   ##      ~``TimeoutPollIntervalMs``; any new bytes are progress.
-  ##   2. **CPU consumed by the test's process group.** Sampled from
-  ##      ``/proc`` (see ``processGroupCpuSeconds``) every
+  ##   2. **CPU consumed by the test's process tree** — its process group
+  ##      plus every process carrying its owner token, including build
+  ##      actions the engine moved into groups of their own. Sampled from
+  ##      ``/proc`` (see ``sampleCaseCpuSeconds``) every
   ##      ``cpuSampleIntervalSec``; an advance of at least
   ##      ``cpuProgressThresholdSec`` since the last recorded progress
   ##      point is progress.
@@ -3375,7 +3519,7 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int;
   ## ``TimeoutKillGraceSec`` to exit, then SIGKILL'd.
   ##
   ## On non-POSIX hosts ``drainAvailable`` is a no-op and
-  ## ``processGroupCpuSeconds`` reports ``CpuUnavailable``, so the loop
+  ## ``sampleCaseCpuSeconds`` reports ``CpuUnavailable``, so the loop
   ## degrades to the original fixed-budget behaviour — acceptable since
   ## Windows is not a supported runner host today. On macOS the output
   ## signal works and the CPU signal does not; that host keeps the
@@ -3411,7 +3555,7 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int;
   let cpuThreshold = cpuProgressThresholdSec(timeoutSec)
   let cpuInterval = cpuSampleIntervalSec(timeoutSec)
   var cpuSeen = CpuUnavailable
-    ## Highest group-CPU total observed so far (``CpuUnavailable`` until
+    ## Highest case-tree CPU total observed so far (``CpuUnavailable`` until
     ## the first sample lands). Tracked as a running maximum: a scan that
     ## races a member's exit can read low, and a transient dip must never
     ## be mistaken for regression.
@@ -3424,6 +3568,12 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int;
     ## ``cpuInterval`` in, so a case that finishes quickly never touches
     ## ``/proc`` at all.
   let cpuTracked = cpuLivenessAvailable(processGroup)
+  var cpuTracker =
+    when defined(posix):
+      initCaseCpuTracker(processGroup, testProcess.ownerToken,
+        testProcess.anchorStartTicks)
+    else:
+      initCaseCpuTracker(processGroup, "", 0'i64)
   var timedOut = false
   var timeoutDescription = ""
   var memoryExceeded = false
@@ -3526,11 +3676,11 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int;
           " bytes"
         break
     var now = epochTime()
-    # Second signal: has the process group burned CPU? A starved test is
+    # Second signal: has the case's process tree burned CPU? A starved test is
     # quiet but advancing; a deadlocked one is quiet and flat.
     if cpuTracked and (now - lastCpuSample) >= cpuInterval:
       lastCpuSample = now
-      let sample = processGroupCpuSeconds(processGroup)
+      let sample = sampleCaseCpuSeconds(cpuTracker)
       if sample != CpuUnavailable and sample > cpuSeen:
         cpuSeen = sample
         if cpuAtLastProgress == CpuUnavailable:
@@ -5100,9 +5250,9 @@ proc parseArgs(): RunnerOpts =
         echo "  --quiet             suppress per-test progress lines " &
           "(the periodic heartbeat stays)"
         echo "  --test-timeout=N    per-test idle timeout; output resets it, " &
-          "as does process-group CPU"
-        echo "                      progress (so a CPU-starved test is not " &
-          "mistaken for a hung one);"
+          "as does CPU progress"
+        echo "                      of its whole process tree (so a " &
+          "CPU-starved test is not mistaken for a hung one);"
         echo "                      hard ceiling 4xN still kills a livelock " &
           "(seconds, 0=off)"
         echo "  --no-runquota-history"

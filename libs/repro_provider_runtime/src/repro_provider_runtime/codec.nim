@@ -3,10 +3,59 @@ import repro_provider_runtime/types
 
 const
   ProviderGraphMagic = [byte(ord('R')), byte(ord('B')), byte(ord('P')), byte(ord('G'))]
-  ProviderGraphVersion = 1'u16
+  ProviderGraphVersion = 3'u16  # version-literal-ok: this IS the
+                                # provider-graph envelope version
+                                # definition, not a literal standing in
+                                # for one.
+    ## MOVED 2 -> 3 BY Shared-Development-Services F1's SECOND half
+    ## (§4.8 / D-SS15), which appended
+    ## `DevEnvServiceMetadata.consumedActionIds` -- the edge from a
+    ## service to the actions whose outputs it names, without which the
+    ## dev session can carry the actions and still not know which
+    ## service to order them before. Same positional-payload reasoning
+    ## as the 1 -> 2 move below, one record deeper.
+    ##
+    ## MOVED 1 -> 2 BY Shared-Development-Services F1, which appended
+    ## `DevEnvResult.actions` -- so the dev-env half of a provider
+    ## RESPONSE grew a field, and this module's payloads are positional:
+    ## a v1 response decoded as v2 is read past its end rather than
+    ## refused. Before the bump that skew surfaced as the loud but
+    ## unnamed `trailing provider response payload bytes`; it is now a
+    ## named `unsupported provider graph envelope version 1`.
+    ##
+    ## ONE VERSION WORD, THREE ENVELOPE TYPES (request, response,
+    ## snapshot), so this move also invalidates every on-disk
+    ## `provider-fragments.rbsz` although the SNAPSHOT payload layout did
+    ## not change. That is deliberate and it is safe only because
+    ## `loadProviderGraphSnapshot` treats an unsupported version as "this
+    ## derived cache cannot be read, recompute it" -- which landed
+    ## BEFORE this bump, for exactly that reason. Read that proc's
+    ## comment before moving this number again: without the recompute
+    ## arm, a bump here is a hard error on every existing store.
   ProviderRequestType = 1'u16
   ProviderResponseType = 2'u16
   ProviderSnapshotType = 3'u16
+
+proc providerGraphEnvelopeVersion*(): uint16 =
+  ## The provider-graph envelope version THIS BUILD writes.
+  ##
+  ## An ACCESSOR over the private const rather than an exported const,
+  ## for the reason `repro_dev_env_artifacts.devEnvEnvelopeVersion`
+  ## records: a test that pins the version needs ONE name to pin, and
+  ## every test that merely probes "a version this build does not
+  ## support" needs to stay relative to it across a bump. Exporting the
+  ## const would invite a second derivation of "everything below
+  ## current" at each call site.
+  ##
+  ## Note that ONE version word governs all THREE envelope types this
+  ## module frames -- request, response and snapshot -- so a layout
+  ## change in any one of them moves it for all three. That is why
+  ## Shared-Development-Services F1's change to the RESPONSE
+  ## (`DevEnvResult` grew an `actions` list) made every on-disk
+  ## SNAPSHOT unreadable although the snapshot payload did not move,
+  ## and why `loadProviderGraphSnapshot` has to treat an unsupported
+  ## version as "recompute this cache" rather than as an error.
+  ProviderGraphVersion
 
 proc writeByte(outp: var seq[byte]; value: byte) =
   outp.add(value)
@@ -383,6 +432,14 @@ proc writeDevEnvService(outp: var seq[byte]; value: DevEnvServiceMetadata) =
   outp.writeByte(if value.instanceDeclared: 1'u8 else: 0'u8)
   outp.writeU64Le(cast[uint64](value.instanceLeaseTtlSeconds))
   outp.writeString(value.instanceEnvironment)
+  # Shared-Development-Services F1 (§4.8): appended at the END, for the
+  # reason L8's and L9's blocks were, and `ProviderGraphVersion` moves
+  # 2 -> 3 with it: this record is read positionally inside a response
+  # payload, so a v2 response decoded as a v3 one would read past its
+  # end rather than be refused. See D-SS15a for why one version governs
+  # all three envelopes and why a stale provider-graph SNAPSHOT is
+  # discarded and recomputed rather than raised.
+  outp.writeStringSeq(value.consumedActionIds)
 
 proc readDevEnvService(bytes: openArray[byte]; pos: var int): DevEnvServiceMetadata =
   result = DevEnvServiceMetadata(
@@ -415,6 +472,7 @@ proc readDevEnvService(bytes: openArray[byte]; pos: var int): DevEnvServiceMetad
   result.instanceDeclared = instanceFlag == 1'u8
   result.instanceLeaseTtlSeconds = cast[int64](readU64Le(bytes, pos))
   result.instanceEnvironment = readString(bytes, pos)
+  result.consumedActionIds = readStringSeq(bytes, pos)
 
 proc writeDevEnvDiagnostic(outp: var seq[byte]; value: DevEnvDiagnostic) =
   outp.writeByte(byte(ord(value.severity)))
@@ -476,6 +534,12 @@ proc writeDevEnvResult(outp: var seq[byte]; value: DevEnvResult) =
   outp.writeU32Le(uint32(value.sharedResolutions.len))
   for item in value.sharedResolutions:
     outp.writeDevEnvSharedResolution(item)
+  # Shared-Development-Services F1: the actions channel, written with
+  # the SAME `writeNode` the graph fragment uses -- one node codec, not
+  # a second one for the dev-env lane.
+  outp.writeU32Le(uint32(value.actions.len))
+  for item in value.actions:
+    outp.writeNode(item)
 
 proc readDevEnvResult(bytes: openArray[byte]; pos: var int): DevEnvResult =
   result.schemaVersion = readU32Le(bytes, pos)
@@ -518,6 +582,10 @@ proc readDevEnvResult(bytes: openArray[byte]; pos: var int): DevEnvResult =
   result.sharedResolutions = newSeq[DevEnvSharedResolution](count)
   for i in 0 ..< count:
     result.sharedResolutions[i] = readDevEnvSharedResolution(bytes, pos)
+  count = int(readU32Le(bytes, pos))
+  result.actions = newSeq[GraphNode](count)
+  for i in 0 ..< count:
+    result.actions[i] = readNode(bytes, pos)
 
 proc writeStoredFragment(outp: var seq[byte]; value: StoredGraphFragment) =
   outp.writeString(value.invocationKey)

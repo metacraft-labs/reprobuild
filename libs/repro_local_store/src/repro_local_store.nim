@@ -35,6 +35,7 @@ import ./repro_local_store/sandbox_manifest
 import ./repro_local_store/optimise
 import ./repro_local_store/portable_fingerprint
 import ./repro_local_store/portable_memo
+import ./repro_local_store/pattern_scoped_enumeration
 export action_index
 export sqlite3_binding
 export store
@@ -43,6 +44,7 @@ export sandbox_manifest
 export optimise
 export portable_fingerprint
 export portable_memo
+export pattern_scoped_enumeration
 
 type
   LocalStoreError* = object of CatchableError
@@ -440,6 +442,12 @@ type
     ownedOutputs*: seq[string]
       ## The action's declared outputs, as the action spells them (resolved
       ## against `outputRoot`).
+    containerOutputs*: seq[string]
+      ## The action's CONTAINER directory outputs, as the action spells them:
+      ## directories it declares only to say they exist (`fs.ensureDir`, the
+      ## output root of `fs.preserveTree`). Revalidated for existence and kind,
+      ## never by tree digest -- see `outputStateMismatchImpl`. Empty for
+      ## every process action.
     refuseRecordWithNoInputs*: bool
       ## Treat a matched record that has NO input fingerprints and NO
       ## environment inputs as if there were no record at all.
@@ -1153,6 +1161,47 @@ when defined(windows):
     GetFileExInfoStandard = 0'i32
     FileTimeEpochDiff100Ns = 116_444_736_000_000_000'i64
 
+const LinkedDirectoryIdentityDomain = "reprobuild.linked-directory.v1"
+  ## Leads the bytes `linkedDirectoryIdentity` hashes, so the word cannot
+  ## collide with any other identity derived from the same text.
+
+proc linkedDirectoryIdentity(path: string): uint64 =
+  ## The `sizeBytes` word recorded for a symbolic link that resolves to a
+  ## directory: a digest of its `readlink` text, never 0.
+  ##
+  ## A real directory records `sizeBytes = 0` and `mtimeNs = 0` (see the end
+  ## of `fingerprintMetadata`), and `mtimeNs` is already taken on directories
+  ## by the membership digest (`membershipTrackedDirectory`). Before this word
+  ## existed a link to a directory recorded exactly what the directory did, so
+  ## two transitions were invisible to every policy:
+  ##
+  ## * a directory on a resolved path REPLACED by a link to another directory
+  ##   holding the same names. `realpath` now answers differently, and the
+  ##   files reached through the path may be different files;
+  ## * a link to a directory RETARGETED at another directory. `readlink`
+  ##   answers differently, whatever the two directories hold.
+  ##
+  ## The monitor records each component a path resolution walks through as a
+  ## probe, so with this word both transitions change a recorded input. The
+  ## target text, not the link's own mtime, is what is hashed: a retarget with
+  ## the mtime restored (`utimensat(..., AT_SYMLINK_NOFOLLOW)`) still moves it.
+  ##
+  ## 0 is reserved for "not a link", so a digest of 0 is escaped. A link that
+  ## vanished between the `lstat` and this call hashes the empty text, which
+  ## differs from the stable state's identity: the conservative direction.
+  var target = ""
+  try:
+    target = expandSymlink(extendedPath(path))
+  except OSError:
+    target = ""
+  let text = LinkedDirectoryIdentityDomain & "\0" & target
+  var payload = newSeq[byte](text.len)
+  for i, ch in text:
+    payload[i] = byte(ord(ch))
+  result = localHash(payload).value
+  if result == 0'u64:
+    result = 1'u64
+
 proc fingerprintMetadata(path: string): FileMetadata =
   let fsPath = extendedPath(path)
   when defined(posix):
@@ -1177,6 +1226,7 @@ proc fingerprintMetadata(path: string): FileMetadata =
     var stat: Stat
     if lstat(fsPath.cstring, stat) != 0:
       return FileMetadata(kind: ffkMissing)
+    var linkToDirectory = false
     result.kind =
       if S_ISREG(stat.st_mode):
         ffkRegular
@@ -1219,6 +1269,7 @@ proc fingerprintMetadata(path: string): FileMetadata =
         if posix.stat(fsPath.cstring, target) != 0:
           ffkUnresolvedSymlink
         elif S_ISDIR(target.st_mode):
+          linkToDirectory = true
           ffkDirectory
         else:
           ffkRegular
@@ -1279,6 +1330,11 @@ proc fingerprintMetadata(path: string): FileMetadata =
     # miss whenever their own output directory is touched.
     result.sizeBytes = 0
     result.mtimeNs = 0
+    when defined(posix):
+      if linkToDirectory:
+        # A link to a directory is not the directory: see
+        # `linkedDirectoryIdentity`.
+        result.sizeBytes = linkedDirectoryIdentity(path)
 
 type
   OutputWitness* = object
@@ -1557,7 +1613,8 @@ const
     ## Substituted when a real listing happens to hash to one of the two
     ## reserved values.
 
-proc directoryMembershipDigest*(root: string; entriesWalked: var int64): uint64 =
+proc directoryMembershipDigest*(root: string; entriesWalked: var int64;
+                                pattern = ""): uint64 =
   ## Order-independent digest over the IMMEDIATE children of `root` -- their
   ## names and kinds, one `readdir` sweep, no per-entry `lstat`.
   ##
@@ -1596,17 +1653,26 @@ proc directoryMembershipDigest*(root: string; entriesWalked: var int64): uint64 
   ## `outputStateMismatchImpl`); this now does too, by raising here and
   ## letting `fingerprintDirectoryMembership` substitute
   ## `DirectoryMembershipUnlistable`.
+  ##
+  ## A non-empty `pattern` digests only the entries that may match it
+  ## (`globComponentMatches`): the key of a PATTERN-SCOPED enumeration (see
+  ## `pattern_scoped_enumeration.nim`). `entriesWalked` still counts every
+  ## entry read, because that is the work done.
   var entries = 0'u64
+  var walked = 0'i64
   var scratch = newSeq[byte](0)
   for kind, path in walkDir(extendedPath(root), relative = true,
       checkDir = true):
+    inc walked
+    if pattern.len > 0 and not globComponentMatches(pattern, path):
+      continue
     inc entries
     scratch.setLen(0)
     for c in path:
       scratch.add(byte(c))
     scratch.writeU64Le(uint64(ord(kind)))
     result = result + localHash(scratch).value
-  entriesWalked = int64(entries)
+  entriesWalked = walked
   # Fold the count in so an empty directory and a missing one differ, and so
   # a pair of entries cannot cancel out.
   result = result xor (entries * 0x9E3779B97F4A7C15'u64)
@@ -1800,15 +1866,22 @@ proc fingerprintDirectoryMembership*(path: string): FileMetadata =
   ## scratch directory records it as `ffkMissing` and keeps comparing as
   ## "still missing", which is what stops per-run temporary directories from
   ## making every such edge a permanent miss.
+  ##
+  ## A PATTERN-SCOPED name (`patternScopedEnumerationPath`) is fingerprinted
+  ## as its directory, with the digest taken over the entries that may match
+  ## its pattern. Its directory is named explicitly rather than left to the
+  ## NUL to truncate: the truncated spelling keeps the `/`, and `lstat` of
+  ## `<link>/` reports the directory a link points to, not the link.
   lastMembershipWalkEntries = 0
-  result = fingerprintMetadata(path)
+  let (dir, pattern) = splitPatternScopedEnumeration(path)
+  result = fingerprintMetadata(dir)
   if result.kind != ffkDirectory:
     return
-  if path.isImmutablePackageStoreRoot():
+  if dir.isImmutablePackageStoreRoot():
     return
   try:
     var walked = 0'i64
-    result.mtimeNs = directoryMembershipDigest(path, walked)
+    result.mtimeNs = directoryMembershipDigest(dir, walked, pattern)
     lastMembershipWalkEntries = walked
   except OSError, IOError:
     # The directory exists but could not be listed. Leaving `mtimeNs` at 0
@@ -2072,9 +2145,11 @@ proc fingerprintRecordedMetadata(path: string; recorded: FileMetadata;
       (getMonoTime() - started).inNanoseconds)
 
 const UnresolvedSymlinkIdentityDomain = "reprobuild.unresolved-symlink.v1"
-  ## Leads the bytes `unresolvedSymlinkIdentity` hashes, so that identity
-  ## lives in a namespace of its own instead of colliding with a regular
-  ## file whose content happens to be the same text.
+  ## Leads the bytes `unresolvedSymlinkIdentity` hashes and versions their
+  ## layout. It does NOT keep that identity apart from a regular file: a
+  ## file can contain these exact bytes. What keeps the two apart is the
+  ## kind, which every content-keyed comparison checks beside the hash
+  ## (`sameContentIdentity`).
 
 proc unresolvedSymlinkIdentity(path: string): seq[byte] =
   ## The bytes a content-keyed policy hashes for an `ffkUnresolvedSymlink`
@@ -2116,6 +2191,42 @@ proc unresolvedSymlinkIdentity(path: string): seq[byte] =
   for i, ch in text:
     result[i] = byte(ord(ch))
 
+const LinkedFileIdentityDomain = "reprobuild.linked-file.v1"
+  ## Leads the `readlink` text `linkedFileIdentity` prepends to a linked
+  ## file's content, so a link's identity cannot collide with file bytes.
+
+proc linkedFileIdentity(path: string): seq[byte] =
+  ## Empty for a path that is not itself a symbolic link; for a link that
+  ## resolves to a regular file, its `readlink` text in a namespace of its own.
+  ##
+  ## A content-keyed policy used to hash only the bytes the link leads to, so
+  ## retargeting it at another file with the same content compared equal --
+  ## `ffpChecksum` directly, `ffpHybrid` once its metadata check fell through
+  ## to the hash. An action that READ the link (`readlink`, `realpath`; the
+  ## monitor records those as probes of the link) answered differently, and
+  ## the record kept being served. `ffpTimestamp` already sees the retarget in
+  ## the link's own size and mtime, which is what its metadata carries.
+  ##
+  ## Hashing the link text as well costs a retarget-to-identical-content
+  ## re-execution for an action that only opened through the link: the
+  ## conservative direction.
+  when defined(posix):
+    var st: Stat
+    if lstat(extendedPath(path).cstring, st) != 0 or not S_ISLNK(st.st_mode):
+      return @[]
+  else:
+    if not symlinkExists(extendedPath(path)):
+      return @[]
+  var target = ""
+  try:
+    target = expandSymlink(extendedPath(path))
+  except OSError:
+    target = ""
+  let text = LinkedFileIdentityDomain & "\0" & target & "\0"
+  result = newSeq[byte](text.len)
+  for i, ch in text:
+    result[i] = byte(ord(ch))
+
 proc fileBytesForHash(path: string; metadata: FileMetadata):
     tuple[readable: bool; payload: seq[byte]] =
   ## The bytes a content-keyed policy hashes for `path`, or `readable =
@@ -2130,7 +2241,8 @@ proc fileBytesForHash(path: string; metadata: FileMetadata):
   case metadata.kind
   of ffkRegular:
     try:
-      (readable: true, payload: bytes(readFile(extendedPath(path))))
+      (readable: true,
+       payload: linkedFileIdentity(path) & bytes(readFile(extendedPath(path))))
     except IOError, OSError:
       (readable: false, payload: newSeq[byte]())
   of ffkUnresolvedSymlink:
@@ -3011,7 +3123,8 @@ proc recordOutputsNotOwnedBy*(record: ActionResultRecord; outputRoot: string;
   ""
 
 proc outputStateMismatchImpl(record: ActionResultRecord;
-                             outputRoot: string): string =
+                             outputRoot: string;
+                             containerOutputs: openArray[string]): string =
   ## Incremental-Invalidation.md §"Minimum check set per target
   ## consultation", Step 3.3: "For an in-place local build, declared outputs
   ## must already exist **and match the recorded output metadata**."
@@ -3031,6 +3144,15 @@ proc outputStateMismatchImpl(record: ActionResultRecord;
   ## consultation would be correct and would also make the warm no-op path
   ## scale with total artifact bytes instead of artifact count. The change
   ## time is what buys tamper evidence without that: see `OutputBlob`.
+  ##
+  ## `containerOutputs` names the action's CONTAINER directory outputs
+  ## (Incremental-Invalidation.md §"Non-regular outputs", "Container
+  ## directory outputs"): directories a built-in declares only to say they
+  ## exist, whose other entries belong to other writers. They are checked for
+  ## existence and kind, never by tree digest. See the directory arm below.
+  var containers = initHashSet[string]()
+  for path in containerOutputs:
+    containers.incl(ownedOutputKey(outputRoot, path))
   for output in record.outputs:
     if output.metadata.kind == ffkMissing:
       # Nothing was recorded for this output; there is nothing to compare
@@ -3061,6 +3183,22 @@ proc outputStateMismatchImpl(record: ActionResultRecord;
 
     # -- directory ---------------------------------------------------------
     if output.metadata.kind == ffkDirectory:
+      if containers.len > 0 and
+          ownedOutputKey(outputRoot, output.path) in containers:
+        # A CONTAINER: the action's claim is "this directory exists", and the
+        # `live != output.metadata` comparison above has already established
+        # that (a directory's recorded size and mtime are zeroed, so what it
+        # compares is existence and kind). Its other entries are other
+        # actions' declared outputs or files nobody declared: CodeTracer's C
+        # compiles write `build/c/*.o` into `fs.ensureDir("build/c")`, and a
+        # copy writes `public/ui.js` into a `fs.preserveTree` root. A tree
+        # digest would measure those writers, reject the record on every
+        # warm build after they ran, and re-run a built-in that neither
+        # writes nor removes those entries, so the re-run could not restore
+        # anything. Every entry a container's action DOES produce is a
+        # declared output of its own (each `preserveTree` entry and its
+        # manifest) and is revalidated by its own arm.
+        continue
       if not output.hasTreeDigest:
         # `fingerprintMetadata` zeroes size and mtime for a directory, so
         # everything compared above was vacuous and the only thing actually
@@ -3102,14 +3240,16 @@ proc outputStateMismatchImpl(record: ActionResultRecord;
   ""
 
 proc outputStateMismatch*(record: ActionResultRecord;
-                          outputRoot: string): string =
+                          outputRoot: string;
+                          containerOutputs: openArray[string] = []): string =
   let started = getMonoTime()
-  result = outputStateMismatchImpl(record, outputRoot)
+  result = outputStateMismatchImpl(record, outputRoot, containerOutputs)
   inc outputStateCheckCalls
   outputStateCheckNanos += (getMonoTime() - started).inNanoseconds
 
 proc payloadlessOutputsInPlace(record: ActionResultRecord;
-                               outputRoot: string): bool =
+                               outputRoot: string;
+                               containerOutputs: openArray[string]): bool =
   ## Whether a record WITHOUT output payloads still describes the outputs on
   ## disk: it names at least one output, recorded every one of them as
   ## present, and each still matches (`outputStateMismatch`, Step 3.3).
@@ -3124,7 +3264,7 @@ proc payloadlessOutputsInPlace(record: ActionResultRecord;
   for output in record.outputs:
     if output.metadata.kind == ffkMissing:
       return false
-  outputStateMismatch(record, outputRoot).len == 0
+  outputStateMismatch(record, outputRoot, containerOutputs).len == 0
 
 proc restoreOutputs*(cas: LocalCas; record: ActionResultRecord;
                      outputRoot = "") =
@@ -5065,7 +5205,8 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
     # §"Minimum check set" Step 3.3). Without this the whole-build fast
     # path would keep accepting an artifact that was overwritten after
     # the build produced it.
-    let outputMismatch = outputStateMismatch(record, probe.outputRoot)
+    let outputMismatch = outputStateMismatch(record, probe.outputRoot,
+      probe.containerOutputs)
     if outputMismatch.len > 0:
       return HotMetadataScan(status: hmssOutputChanged,
         recordCount: totalRecords, checkedInputCount: checkedInputs,
@@ -5433,6 +5574,30 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
   result.observedExecution = true
   cache.writePerEdgeRecord(result)
 
+proc sameContentIdentity(recorded, current: FileFingerprint): bool =
+  ## Whether a content-keyed input still has the identity it was recorded
+  ## with: both sides carry a local hash, the hashes are equal, AND the two
+  ## are the same kind of entity.
+  ##
+  ## The kind is part of the comparison because the hashed bytes are not
+  ## unique to one kind (`fileBytesForHash`): an absent path, a directory and
+  ## a FIFO all hash the empty payload, and a dangling link hashes a marker
+  ## text that a regular file can contain verbatim. Compared by hash alone,
+  ## an absent probe that became an empty file, or a dangling link whose
+  ## target appeared holding exactly that marker, was a cache hit -- a wrong
+  ## one, since the action would now observe something else. Requiring equal
+  ## kinds makes such a collision impossible by construction, whatever the
+  ## bytes are.
+  ##
+  ## Done in the comparison rather than by folding the kind into the hash:
+  ## the hash is what the strong fingerprint and the record frame carry, and
+  ## changing it would re-key every content-keyed record in every existing
+  ## cache. The kind is already recorded beside it (`writeMetadata`), so
+  ## comparing it costs nothing and leaves the record format untouched.
+  recorded.hasLocalHash and current.hasLocalHash and
+    recorded.metadata.kind == current.metadata.kind and
+    recorded.localHash == current.localHash
+
 proc refreshedInputs(record: ActionResultRecord; changed: var bool;
                      hybridCutoff: var bool;
                      changedInputPath: var string;
@@ -5469,8 +5634,7 @@ proc refreshedInputs(record: ActionResultRecord; changed: var bool;
       of ffpChecksum:
         let current = observeFileWithMetadata(location, recorded.policy,
           currentMetadata)
-        if (not recorded.hasLocalHash) or (not current.hasLocalHash) or
-            current.localHash != recorded.localHash:
+        if not sameContentIdentity(recorded, current):
           changed = true
           changedInputPath = recorded.path
           return
@@ -5492,7 +5656,10 @@ proc refreshedInputs(record: ActionResultRecord; changed: var bool;
           changed = true
           changedInputPath = recorded.path
           return
-        if current.localHash == recorded.localHash:
+        # The cutoff serves a record whose METADATA moved, so it is exactly
+        # where a kind change arrives: it must not be cut off on a hash that
+        # merely coincides (`sameContentIdentity`).
+        if sameContentIdentity(recorded, current):
           if result.reusedRecordedInputs:
             result.inputs = newSeq[FileFingerprint](record.inputs.len)
             for prior in 0 ..< i:
@@ -5526,7 +5693,8 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
                                   allowMetadataOnlyHit = false;
                                   metadataCache: ptr FileMetadataCache = nil;
                                   envResolver: EnvResolver = nil;
-                                  outputRoot = ""):
+                                  outputRoot = "";
+                                  containerOutputs: seq[string] = @[]):
                                   ActionCacheLookup =
   if allowMetadataOnlyHit and not verifyOutputBlobs and policy in {ffpTimestamp, ffpHybrid}:
     let hot = cache.readHotRecord(weak)
@@ -5554,7 +5722,8 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
         # are the ones the record describes -- Incremental-Invalidation.md
         # §"Minimum check set" Step 3.3. Existence alone (which is all the
         # engine's `allOutputsExist` pre-check establishes) is not enough.
-        let outputMismatch = outputStateMismatch(hot.record, outputRoot)
+        let outputMismatch = outputStateMismatch(hot.record, outputRoot,
+          containerOutputs)
         if outputMismatch.len > 0:
           return ActionCacheLookup(status: aclRejectedCorruptOutput,
             record: hot.record, message: outputMismatch)
@@ -5621,7 +5790,8 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
         # from before an edge stored any) on EVERY build, outputs untouched —
         # against Incremental-Invalidation.md §"Validation Criteria": "a warm
         # re-run of an unchanged graph still executes zero actions".
-        if not payloadlessOutputsInPlace(candidate, outputRoot):
+        if not payloadlessOutputsInPlace(candidate, outputRoot,
+            containerOutputs):
           return ActionCacheLookup(status: aclMissNoOutputPayload,
             record: candidate,
             message: "cache record does not contain output payloads")
@@ -5637,7 +5807,8 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
       # workspace copies against the recorded output state instead.
       # `verifyOutputBlobs` mode is the restore mode and materializes over
       # whatever is there, so it needs no such check.
-      let outputMismatch = outputStateMismatch(candidate, outputRoot)
+      let outputMismatch = outputStateMismatch(candidate, outputRoot,
+        containerOutputs)
       if outputMismatch.len > 0:
         return ActionCacheLookup(status: aclRejectedCorruptOutput,
           record: candidate, message: outputMismatch)
@@ -5787,13 +5958,18 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
                          outputRoot = "";
                          retention = forever();
                          nowUnix: int64 = 0;
-                         buildEpoch = ""): ActionCacheLookup =
+                         buildEpoch = "";
+                         containerOutputs: openArray[string] = []):
+                         ActionCacheLookup =
+  ## `containerOutputs`: the requesting action's container directory outputs
+  ## (see `outputStateMismatchImpl`), revalidated for existence only.
   result = cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
     metadataCache = metadataCache,
     envResolver = envResolver,
-    outputRoot = outputRoot)
+    outputRoot = outputRoot,
+    containerOutputs = @containerOutputs)
   cache.applyRetention(weak, result, retention, nowUnix, buildEpoch)
 
 proc lookupActionResult*(cache: var ActionCache; cas: Store;
@@ -5805,13 +5981,18 @@ proc lookupActionResult*(cache: var ActionCache; cas: Store;
                          outputRoot = "";
                          retention = forever();
                          nowUnix: int64 = 0;
-                         buildEpoch = ""): ActionCacheLookup =
+                         buildEpoch = "";
+                         containerOutputs: openArray[string] = []):
+                         ActionCacheLookup =
+  ## `containerOutputs`: the requesting action's container directory outputs
+  ## (see `outputStateMismatchImpl`), revalidated for existence only.
   result = cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
     metadataCache = metadataCache,
     envResolver = envResolver,
-    outputRoot = outputRoot)
+    outputRoot = outputRoot,
+    containerOutputs = @containerOutputs)
   cache.applyRetention(weak, result, retention, nowUnix, buildEpoch)
 
 # ===========================================================================

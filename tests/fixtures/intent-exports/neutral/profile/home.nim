@@ -14,6 +14,10 @@ profile "gm5Neutral":
     package("cmake", "3.0.0-gm5-pin", binaries = @["cmake"])
     when linux():
       patchelf
+      # Nested guards conjoin: x86_64 Linux only (reprobuild-pm issue
+      # 2026-10-18-home-planner-drops-packages-under-nested-activity-guards).
+      when x86_64():
+        `gm5-linux-x86-tool`
     when macos() and arm64():
       `gm5-mac-arm-tool`
 
@@ -24,6 +28,15 @@ profile "gm5Neutral":
 
   activity cli:
     ripgrep
+    # GM9: resources that belong to the activity: planned (and exported in
+    # the evaluation) only for a host that selects `cli` -- home-pc, not m1.
+    resources:
+      fsUserFile(hostFile = "~/.config/gm9/cli.conf", content = "cli = 1\n")
+
+  activity laptop:
+    resources:
+      fsUserFile(hostFile = "~/.config/gm9/laptop.conf",
+        content = "laptop = 1\n")
 
   config:
     git:
@@ -33,7 +46,11 @@ profile "gm5Neutral":
         credentialHelper = "libsecret"
 
   hosts:
-    "m1": [desktop]
+    # GM10: m1's system scope is managed elsewhere; the export carries
+    # it (`intent.systemManagedElsewhere`, `evaluation.system`).
+    "m1":
+      activities: [desktop, laptop]
+      system: managedElsewhere("example-org/infra")
     "home-pc": [desktop, cli]
 
   resources:

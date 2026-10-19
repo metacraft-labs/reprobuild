@@ -35,6 +35,7 @@
 import std/[algorithm, options, os, strutils]
 
 from repro_core/paths import extendedPath
+import ./pattern_scoped_enumeration
 
 import blake3
 
@@ -337,18 +338,34 @@ proc readIdentity*(path: string): string =
   else:
     ReadOfAbsent
 
+func namesMatchingScope*(names: openArray[string];
+                         pattern: string): seq[string] =
+  ## The membership names (each suffixed `/` for a directory, as
+  ## `membershipHexOfNames` takes them) whose entry may match `pattern`, or
+  ## all of them for an empty pattern. One filter for the listing read from
+  ## disk and for the one a graph view predicts, so the two agree.
+  for name in names:
+    let bare =
+      if name.len > 1 and name.endsWith("/"): name[0 ..< name.len - 1]
+      else: name
+    if pattern.len == 0 or globComponentMatches(pattern, bare):
+      result.add(name)
+
 proc membershipHex*(dir: string): string =
   ## Membership digest of a directory: the sorted child names, each suffixed
   ## `/` for a directory. Names only — an enumeration observes WHICH entries
   ## exist, not their content (reads of those entries are separate inputs).
+  ## A PATTERN-SCOPED name (`patternScopedEnumerationPath`) digests only the
+  ## entries of its directory that may match its pattern.
+  let (base, pattern) = splitPatternScopedEnumeration(dir)
   var names: seq[string] = @[]
   try:
-    for kind, entry in walkDir(extendedPath(dir), relative = true):
+    for kind, entry in walkDir(extendedPath(base), relative = true):
       names.add(entry.replace('\\', '/') &
         (if kind in {pcDir, pcLinkToDir}: "/" else: ""))
   except CatchableError:
     return ""
-  membershipHexOfNames(names)
+  membershipHexOfNames(names.namesMatchingScope(pattern))
 
 proc frame(text: string): string =
   ## Length-prefixed so field boundaries cannot be forged by content.
@@ -454,8 +471,11 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
     ## A directory that CONTAINS a root. Probing it answers "present" on
     ## every host where the root exists at all — a shell resolving a path
     ## component by component does exactly that — so the probe says nothing
-    ## about the build, only about where this host keeps it.
-    let key = normalizeForCompare(physical)
+    ## about the build, only about where this host keeps it. A
+    ## PATTERN-SCOPED listing (`patternScopedEnumerationPath`) is in its
+    ## directory: Nim's compiler globs `*.nimble` in every directory above a
+    ## module, and that scan of an ancestor says no more than a full one.
+    let key = normalizeForCompare(physical.patternScopedBase())
     for rootKey in rootKeys:
       if rootKey.len > key.len and rootKey.startsWith(key) and
           (key.endsWith("/") or rootKey[key.len] == '/'):

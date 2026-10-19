@@ -12,12 +12,26 @@ const
   DevEnvMagic = [byte(ord('R')), byte(ord('B')), byte(ord('D')), byte(ord('E'))]
   EnvelopeHeaderLen = 4 + 2 + 2 + 4 + 4
   EnvelopeTrailerLen = 32
-  EnvelopeVersion = 4'u16
-    ## Shared-Development-Services L8: bumped with
-    ## `DevEnvArtifactSchemaVersion`, because the service record grew
-    ## eight positional SSZ fields. The decoder's check is an EQUALITY
-    ## (`if version != EnvelopeVersion: fail`), so an older payload is
-    ## refused by name.
+  EnvelopeVersion = 6'u16  # version-literal-ok: the envelope version
+                           # THIS BUILD writes, which is the definition
+                           # the gate's annotation exists for -- not a
+                           # literal standing in for one.
+    ## Shared-Development-Services F1's SECOND half: bumped 5 -> 6 with
+    ## `DevEnvArtifactSchemaVersion`, because `DevEnvServiceSummary`
+    ## grew `consumedActionIds` -- the edge the dev session orders an
+    ## action against its consuming service on. Same positional
+    ## container, same equality check, same consequence: a v5 artifact
+    ## is refused by name and re-evaluated.
+    ##
+    ## Shared-Development-Services F1: bumped 4 -> 5 with
+    ## `DevEnvArtifactSchemaVersion`, because the artifact container grew
+    ## an `actions` list and the container is POSITIONAL -- a v4 payload
+    ## decoded as v5 would not be refused by the format. L8's own bump
+    ## (1 -> 2, for eight service fields) is the precedent and the
+    ## reason the two constants move together. The decoder's check is an
+    ## EQUALITY (`if version != EnvelopeVersion: fail`), so an older
+    ## payload is refused by name and re-evaluated rather than
+    ## mis-read.
   EnvelopeTypeDevEnv = 1'u16
 
   MaxTextBytes = 16 * 1024
@@ -37,6 +51,12 @@ const
     ## one project's recipe. The same bound `MaxServices` takes, because
     ## a project cannot resolve more shared services than a workspace can
     ## declare.
+  MaxActions = 4096
+    ## Shared-Development-Services F1: one entry per build action a
+    ## `devEnv:` body registered. `MaxListItems`' bound rather than
+    ## `MaxServices`', because an action is an EDGE and a body can
+    ## declare many more edges than services -- a rendered-config file
+    ## per service, per environment, is already several.
 
 proc devEnvEnvelopeVersion*(): uint16 =
   ## The dev-env envelope version THIS BUILD writes, and -- the check
@@ -124,6 +144,11 @@ type
     instanceDeclared: bool
     instanceLeaseTtlSeconds: uint64
     instanceEnvironment: SszText
+    # Shared-Development-Services F1's second half. Appended last once
+    # more, and the envelope version AND the artifact schema version
+    # move with it, so a payload written at F1's first half is refused
+    # by name rather than read with shifted offsets.
+    consumedActionIds: SszStringList
 
   DevEnvDiagnosticSsz = object
     severity: uint8
@@ -162,6 +187,17 @@ type
     contributionMemberPoints: SszStringList
     contributionMembers: SszStringList
 
+  DevEnvActionSsz = object
+    ## Shared-Development-Services F1. `payload` is `SszEnvValue` and
+    ## not `SszText`: an action's payload carries its whole command
+    ## line, and a compile edge's argv already exceeds the 16 KiB text
+    ## bound in this repository (which is why `DevEnvShellOpSsz.value`
+    ## is the same type). Refusing a legal recipe at the codec would be
+    ## a bound nobody chose.
+    nodeId: SszText
+    actionId: SszText
+    payload: SszEnvValue
+
   DevEnvArtifactSsz* = object
     schemaVersion*: uint32
     artifactId*: Digest32
@@ -190,6 +226,7 @@ type
     evaluationEvidenceRef*: Digest32
     providerMetadata*: SszBytes
     sharedResolutions*: List[DevEnvSharedResolutionSsz, MaxSharedResolutions]
+    actions*: List[DevEnvActionSsz, MaxActions]
 
   EnvelopePayloadBounds = object
     start: int
@@ -354,6 +391,32 @@ proc fromSsz(value: DevEnvTaskSummarySsz): DevEnvTaskSummary =
     commandRef: value.commandRef,
     command: fromSszText(value.command))
 
+proc toSsz(value: DevEnvActionSummary): DevEnvActionSsz =
+  ## Shared-Development-Services F1.
+  DevEnvActionSsz(
+    nodeId: toSszText(value.nodeId),
+    actionId: toSszText(value.actionId),
+    payload: toSszEnvValue(value.payload))
+
+proc fromSsz(value: DevEnvActionSsz): DevEnvActionSummary =
+  result = DevEnvActionSummary(
+    nodeId: fromSszText(value.nodeId),
+    actionId: fromSszText(value.actionId),
+    payload: toByteString(value.payload.asSeq()))
+  # REFUSED BY NAME rather than returned with a hole. An action whose id
+  # or payload is empty is an edge nothing can build: the id is how a
+  # caller addresses it and the payload is the command. An empty one
+  # would reach `repro up` as "there is an action here" and produce no
+  # file, which is the F1 failure this channel exists to close, arriving
+  # from the cache instead of from the provider.
+  if result.actionId.len == 0:
+    fail("dev-env artifact carries an action with an EMPTY id, so " &
+      "nothing can name the edge it claims to describe")
+  if result.payload.len == 0:
+    fail("dev-env artifact action `" & result.actionId & "` carries an " &
+      "EMPTY payload, so there is no command to run; an action that " &
+      "produces nothing must not be recorded as one")
+
 proc toSsz(value: DevEnvSharedResolutionSummary):
     DevEnvSharedResolutionSsz =
   ## Shared-Development-Services D-SS11. `cast`, not a conversion, for
@@ -444,7 +507,8 @@ proc toSsz(value: DevEnvServiceSummary): DevEnvServiceSummarySsz =
     stateDirectories: toSszStringList(value.stateDirectories),
     instanceDeclared: value.instanceDeclared,
     instanceLeaseTtlSeconds: cast[uint64](value.instanceLeaseTtlSeconds),
-    instanceEnvironment: toSszText(value.instanceEnvironment))
+    instanceEnvironment: toSszText(value.instanceEnvironment),
+    consumedActionIds: toSszStringList(value.consumedActionIds))
 
 proc fromSsz(value: DevEnvServiceSummarySsz): DevEnvServiceSummary =
   DevEnvServiceSummary(
@@ -470,7 +534,8 @@ proc fromSsz(value: DevEnvServiceSummarySsz): DevEnvServiceSummary =
     stateDirectories: fromSszStringList(value.stateDirectories),
     instanceDeclared: value.instanceDeclared,
     instanceLeaseTtlSeconds: cast[int64](value.instanceLeaseTtlSeconds),
-    instanceEnvironment: fromSszText(value.instanceEnvironment))
+    instanceEnvironment: fromSszText(value.instanceEnvironment),
+    consumedActionIds: fromSszStringList(value.consumedActionIds))
 
 proc toSsz(value: DevEnvDiagnostic): DevEnvDiagnosticSsz =
   DevEnvDiagnosticSsz(
@@ -552,6 +617,10 @@ proc toSsz(artifact: DevEnvArtifact; artifactIdOverride: Digest32): DevEnvArtifa
   result.sharedResolutions =
     List[DevEnvSharedResolutionSsz, MaxSharedResolutions].init(
       artifact.sharedResolutions.mapIt(toSsz(it)))
+  # Shared-Development-Services F1: the actions channel on the artifact
+  # hop.
+  result.actions = List[DevEnvActionSsz, MaxActions].init(
+    artifact.actions.mapIt(toSsz(it)))
   result.resourcePrerequisites = List[Digest32, MaxDigests].init(
     artifact.resourcePrerequisites)
   result.diagnostics = List[DevEnvDiagnosticSsz, MaxDiagnostics].init(
@@ -586,6 +655,7 @@ proc fromSsz(wire: DevEnvArtifactSsz): DevEnvArtifact =
   result.services = wire.services.asSeq().mapIt(fromSsz(it))
   result.sharedResolutions =
     wire.sharedResolutions.asSeq().mapIt(fromSsz(it))
+  result.actions = wire.actions.asSeq().mapIt(fromSsz(it))
   result.resourcePrerequisites = wire.resourcePrerequisites.asSeq()
   result.diagnostics = wire.diagnostics.asSeq().mapIt(fromSsz(it))
   result.evaluationInputs = wire.evaluationInputs.asSeq().mapIt(fromSsz(it))
@@ -802,7 +872,8 @@ proc artifactFromDevEnvResult*(devEnv: DevEnvResult): DevEnvArtifact =
       stateDirectories: service.stateDirectories,
       instanceDeclared: service.instanceDeclared,
       instanceLeaseTtlSeconds: service.instanceLeaseTtlSeconds,
-      instanceEnvironment: service.instanceEnvironment))
+      instanceEnvironment: service.instanceEnvironment,
+      consumedActionIds: service.consumedActionIds))
   result.diagnostics = devEnv.diagnostics
   result.evaluationInputs = devEnv.evaluationInputs
   result.sourceFingerprints = devEnv.sourceFingerprints
@@ -830,6 +901,16 @@ proc artifactFromDevEnvResult*(devEnv: DevEnvResult): DevEnvArtifact =
       contributionSites: resolution.contributionSites,
       contributionMemberPoints: resolution.contributionMemberPoints,
       contributionMembers: resolution.contributionMembers))
+  # Shared-Development-Services F1: the actions channel. The node's
+  # `stableName` IS the action id (`buildPackageDevEnv` sets it from
+  # `action.id`, exactly as the build lane does), so the id is read from
+  # there rather than re-derived from the node id -- which would be a
+  # second parse of one value.
+  for action in devEnv.actions:
+    result.actions.add(DevEnvActionSummary(
+      nodeId: action.id,
+      actionId: action.stableName,
+      payload: action.payload))
   result.artifactId = computeArtifactId(result)
 
 proc produceDevEnvArtifact*(config: ProviderExecutionConfig;

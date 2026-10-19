@@ -698,6 +698,64 @@ suite "protocol v2 real-hook repro push closure":
         " merge-base --is-ancestor " & q(retained) & " " &
         q(completedBackend)).code == 0
 
+  test "ordinary backend ahead commit names offender rather than upstream record":
+    let gitBin = findExe("git")
+    doAssert gitBin.len > 0, "Git is required for backend refusal regression"
+    for shape in ["upstream-record", "no-records", "valid-prefix", "followed-by-lock",
+        "modified-metadata", "deleted-metadata"]:
+      let fx = setup(gitBin, "ordinary-ahead-" & shape)
+      defer: removeDir(fx.scratch)
+      let appSha = remoteHead(gitBin, fx.appBare)
+      let innocent = "locks/app/app/" & appSha & ".toml"
+      if shape == "upstream-record":
+        # The reported record in the field was already upstream and untouched.
+        writeLockRecord(fx.manifests, "app", "app", appSha)
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " add locks")
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " commit -m upstream-record")
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " push origin main")
+      if shape in ["modified-metadata", "deleted-metadata"]:
+        writeFile(fx.manifests / ".gitignore", "scratch\n")
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " add .gitignore")
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " commit -m upstream-metadata")
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " push origin main")
+      let coreSha = commit(fx, gitBin, fx.core, "core-ordinary-ahead")
+      if shape == "valid-prefix":
+        writeLockRecord(fx.manifests, "core", "core", coreSha)
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " add locks")
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " commit -m valid-prefix")
+      let backendBefore = remoteHead(gitBin, fx.manifestBare)
+      let sourceBefore = remoteHead(gitBin, fx.coreBare)
+      if shape == "deleted-metadata": removeFile(fx.manifests / ".gitignore")
+      else: writeFile(fx.manifests / ".gitignore", ".repro/\n")
+      discard require(q(gitBin) & " -C " & q(fx.manifests) & " add .gitignore")
+      discard require(q(gitBin) & " -C " & q(fx.manifests) & " commit -m ordinary-ignore")
+      let offender = require(q(gitBin) & " -C " & q(fx.manifests) & " rev-parse HEAD").strip()
+      if shape == "followed-by-lock":
+        writeLockRecord(fx.manifests, "core", "core", coreSha)
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " add locks")
+        discard require(q(gitBin) & " -C " & q(fx.manifests) & " commit -m later-lock-addition")
+      let localBefore = require(q(gitBin) & " -C " & q(fx.manifests) & " rev-parse HEAD").strip()
+      if shape == "upstream-record":
+        check require(q(gitBin) & " -C " & q(fx.manifests) & " log --oneline origin/main..HEAD -- " & q(innocent)).strip().len == 0
+        check run(q(gitBin) & " -C " & q(fx.manifests) & " cat-file -e " & q("origin/main:" & innocent)).code == 0
+      installHooks(fx)
+      let beforeStatus = require(q(gitBin) & " -C " & q(fx.manifests) & " status --porcelain")
+      let stopped = invokePush(fx)
+      check stopped.code != 0
+      let stoppedReport = report(fx)
+      check stoppedReport["stoppedStage"].getStr() == "lock-backend-preflight"
+      let diagnostic = stoppedReport["lockDiagnostic"].getStr()
+      checkpoint(shape & ": " & diagnostic)
+      check offender in diagnostic
+      check ".gitignore" in diagnostic
+      check "solely of additions of canonical lock records under locks/" in diagnostic
+      check innocent notin diagnostic
+      check offender in stopped.output
+      check remoteHead(gitBin, fx.manifestBare) == backendBefore
+      check remoteHead(gitBin, fx.coreBare) == sourceBefore
+      check require(q(gitBin) & " -C " & q(fx.manifests) & " rev-parse HEAD").strip() == localBefore
+      check require(q(gitBin) & " -C " & q(fx.manifests) & " status --porcelain") == beforeStatus
+
   test "three-repo backend-ahead recovery rejects every invalid prefix shape":
     let gitBin = findExe("git")
     if gitBin.len == 0: skip()

@@ -15,11 +15,12 @@
 ## Between the registrar and a consuming service's argv there is exactly one
 ## hop: `session/shared-instance-registrations.json`. A stamp that exists in
 ## memory and is dropped by that hop leaves the consumer in precisely §7.2's
-## position, and nothing upstream would notice. So no case here hands
-## `substituteMintedAttributes` a table it built by hand *as the whole
-## assertion*: the provenance cases write with the real
+## position, and nothing upstream would notice. The provenance and registry
+## cases therefore write with the real
 ## `writeSharedInstanceMinted`, read with the real
-## `readSharedInstanceMintedAttributes`, and only then substitute.
+## `readSharedInstanceMintedAttributes`, and only then substitute. The
+## caller-supplied-table compatibility case separately exercises the public
+## overloads whose callers have no registration metadata.
 ##
 ## § THE IDENTIFIER TEXT IS THE SAME FOR BOTH PROVENANCES, DELIBERATELY
 ##
@@ -52,13 +53,19 @@
 ##   * **Two services disagreeing about a member's PROVENANCE collapse the
 ##     bare key**, exactly as two disagreeing about its id already did. A
 ##     bare `@minted:member@` then refuses rather than picking one.
+##   * **Registered member names survive their URI punctuation.** The
+##     missing-member refusal lists the names written to the real record,
+##     sorted and without duplicate service-qualified aliases. Direct-table
+##     cases also exercise the public compatibility overloads; their keys
+##     are caller-supplied names, not a second registration source.
 ##
 ## § MOCK POLICY — NO MOCKS ARE USED IN THIS FILE AND NONE MAY BE ADDED.
 ##
-## Every case calls the real `writeSharedInstanceMinted`, the real
+## The cases exercise the real `writeSharedInstanceMinted`, the real
 ## `readSharedInstanceMintedAttributes`, the real
 ## `substituteMintedAttributes` and the real `serviceSpecFromSummary` over a
-## real directory on the real filesystem. `RegistrarProvenance` is the
+## real directory on the real filesystem where persistence is involved.
+## `RegistrarProvenance` is the
 ## production enum from `repro_resources/readiness_edge.nim` — the same one
 ## the resource lane stamps with, so this file cannot be measuring a second
 ## vocabulary.
@@ -113,6 +120,82 @@ proc tokenService(command: seq[string]): DevEnvServiceSummary =
     workingDirectory: ".")
 
 suite "§7.2 — the stamp survives the one hop to the point of use":
+
+  test "an unknown member refusal lists registered URI-bearing members":
+    let outDir = scratchOut("registered-uris")
+    defer: (try: removeDir(outDir) except CatchableError: discard)
+    const uriMember = "isonim-site|OIDC_APP_TYPE_WEB|" &
+      "https://app.isonim.test:8443/oidc/callback|https://app.isonim.test:8443/"
+    const otherMember = "blocktracer|https://blocktracer.test:8443/callback"
+    writeSharedInstanceMinted(outDir, @[
+      (serviceName: Svc, member: uriMember, mintedId: SharedIdText,
+       provenance: rprIssuer),
+      (serviceName: OtherSvc, member: otherMember, mintedId: "b-1",
+       provenance: rprIssuer),
+      (serviceName: OtherSvc, member: uriMember, mintedId: SharedIdText,
+       provenance: rprIssuer)])
+    # Prove that registration and resolution work before asking about a typo.
+    check substituted(outDir, @[IssuerMintedAttributeTokenPrefix &
+      uriMember & MintedAttributeTokenSuffix]) == @[SharedIdText]
+    for prefix in [MintedAttributeTokenPrefix, IssuerMintedAttributeTokenPrefix]:
+      var message = ""
+      var answered = @[Sentinel]
+      let misspelled = uriMember.replace(":8443/", ":8444/")
+      try:
+        answered = substituted(outDir, @[prefix & misspelled &
+          MintedAttributeTokenSuffix])
+      except ValueError as err:
+        message = err.msg
+      checkpoint(message)
+      check answered == @[Sentinel]
+      check message.contains("IS NOT COMPUTED")
+      check message.contains(misspelled)
+      check message.contains("Registered members: " & otherMember & ", " &
+        uriMember & ". Leaving the token")
+      check not message.contains("Registered members: (none)")
+    mergeSharedInstanceMinted(outDir, @[
+      (serviceName: Svc, member: "plain-member", mintedId: "p-1",
+       provenance: rprIssuer)])
+    var mixedMessage = ""
+    try:
+      discard substituted(outDir, @[IssuerToken])
+    except ValueError as err:
+      mixedMessage = err.msg
+    check mixedMessage.contains("Registered members: " & otherMember & ", " &
+      uriMember & ", plain-member. Leaving the token")
+
+  test "an empty registry reports no registered members":
+    let outDir = scratchOut("registered-empty")
+    defer: (try: removeDir(outDir) except CatchableError: discard)
+    var message = ""
+    try:
+      discard substituted(outDir, @[IssuerToken])
+    except ValueError as err:
+      message = err.msg
+    check message.contains("Registered members: (none).")
+
+  test "caller supplied tables retain colon-bearing member names":
+    const member = "https://manual.test:8443/callback"
+    var stamped = initTable[string, MintedAttribute]()
+    stamped[member] = MintedAttribute(value: SharedIdText,
+      provenance: rprIssuer)
+    var blind = initTable[string, string]()
+    blind[member] = SharedIdText
+    check substituteMintedAttributes(Svc, @[IssuerMintedAttributeTokenPrefix &
+      member & MintedAttributeTokenSuffix], stamped) == @[SharedIdText]
+    check substituteMintedAttributes(Svc, @[MintedAttributeTokenPrefix &
+      member & MintedAttributeTokenSuffix], blind) == @[SharedIdText]
+    var stampedMessage, blindMessage: string
+    try:
+      discard substituteMintedAttributes(Svc, @[Token], stamped)
+    except ValueError as err:
+      stampedMessage = err.msg
+    try:
+      discard substituteMintedAttributes(Svc, @[Token], blind)
+    except ValueError as err:
+      blindMessage = err.msg
+    check stampedMessage.contains("Registered members: " & member & ".")
+    check blindMessage.contains("Registered members: " & member & ".")
 
   test "a development row resolves through `@minted:` and is MARKED":
     let outDir = scratchOut("devrow")

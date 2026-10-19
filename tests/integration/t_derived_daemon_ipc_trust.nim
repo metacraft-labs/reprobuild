@@ -390,14 +390,21 @@ proc makeFixture(): Fixture =
     daemonPath: binDir / "ipctrust_daemon",
     clientPath: binDir / "ipctrust_client",
     logDir: logDir)
-  # `sockaddr_un.sun_path` is 108 bytes and a long `TMPDIR` silently exceeds
-  # it. Refuse here, where the reason is legible, rather than in a `bind`
-  # failure that reads like a real red.
-  let probeSocket = workRoot / "d.sock"
-  if probeSocket.len >= 108:
+  # A long `TMPDIR` silently exceeds `sockaddr_un.sun_path`. Refuse here,
+  # where the reason is legible, rather than in a `bind` failure that reads
+  # like a real red. The sockets are bound and dialled by the C helpers, so
+  # the KERNEL's limit applies (not std/net's): 108 bytes on Linux, 104 on
+  # macOS and the BSDs, terminating NUL included. This used to hard-code 108
+  # — Linux's value, which let a 104..107-byte path through on macOS — and to
+  # probe `d.sock`, eight bytes shorter than the longest name `startDaemon`
+  # is actually given (`untrusted`).
+  const SunPathBytes = when defined(linux): 108 else: 104
+  let probeSocket = workRoot / "untrusted.sock"
+  if probeSocket.len >= SunPathBytes:
     raise newException(IOError,
       "fixture socket path is " & $probeSocket.len & " bytes, which will not " &
-      "fit sockaddr_un.sun_path (108); use a shorter TMPDIR")
+      "fit sockaddr_un.sun_path (" & $SunPathBytes & " on this host); " &
+      "use a shorter TMPDIR")
   compileC(DaemonSource, result.daemonPath, workRoot, "dmn.c")
   compileC(ClientSource, result.clientPath, workRoot, "cli.c")
 

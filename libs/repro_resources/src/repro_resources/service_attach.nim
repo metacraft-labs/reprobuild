@@ -1059,8 +1059,12 @@ proc attachDecision*(running: RunningServiceInstance;
   result.differences = memberDifferences(runningSnapshot, requested)
   result.diagnostic =
     "attaching to the running instance of service `" &
-    requested.serviceName & "`, which was started from a DIFFERENT " &
-    "definition. Running project `" & runningSnapshot.projectName &
+    requested.serviceName & "`: the interface declaration text differs " &
+    "from the running definition. Default expressions are compared as text; " &
+    "resolved values may be identical. Check the registration reconciliation " &
+    "report (minted, reused, withdrawn) for behavioural evidence about " &
+    "registrations only; reuse does not prove all service behaviour is " &
+    "unchanged. Running project `" & runningSnapshot.projectName &
     "` (package `" & runningSnapshot.packageName & "`) interface " &
     "fingerprint " & runningSnapshot.fingerprint & "; this definition " &
     "(project `" & requested.projectName & "`, package `" &

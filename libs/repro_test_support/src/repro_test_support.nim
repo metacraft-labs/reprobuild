@@ -45,6 +45,10 @@ when defined(windows):
   import std/winlean
 else:
   import std/posix
+  # Short, collision-free fallback rendezvous names for over-long scratch
+  # roots; see ``runquotaRendezvousDir``.
+  import std/sha1
+  from repro_test_support/process_fixtures import releaseDirAtProcessExit
 
 type
   LoopbackSshLogin = object
@@ -732,6 +736,20 @@ proc runquotaSocketEndpoint*(name: string): string =
   ## shipped code would not is a test of something nobody runs.
   runquotaEndpointPath(name)
 
+const RunquotaRendezvousSocketNameBudget* = 24
+  ## The longest socket FILE NAME a caller of ``runquotaRendezvousDir`` may
+  ## append to the directory it returns (callers use ``runquota.sock`` and
+  ## ``d.sock``). The directory is chosen so that it plus ``/`` plus a name
+  ## of this many bytes still fits ``sun_path`` with its NUL.
+  ##
+  ## The bound is ``sizeof(Sockaddr_un().sun_path)`` as ``std/posix``
+  ## declares it — the same expression the product's
+  ## ``runquotaEndpointPath`` uses. That is 108 on Linux but only 92 on
+  ## macOS, where Nim declares a conservative array shorter than the
+  ## kernel's 104 (measured on aarch64-darwin). The fallback directory is at
+  ## most ``/tmp/repro-rqt-<uid:10>-<sha1:40>`` = 66 bytes, and 66 + 1 + 24
+  ## leaves room for the NUL under 92.
+
 proc runquotaRendezvousDir*(root: string): string =
   ## THE one place a test that owns a scratch tree decides where a
   ## locally spawned ``runquotad`` may bind. Returns the directory; the
@@ -765,9 +783,47 @@ proc runquotaRendezvousDir*(root: string): string =
   ## ``EndpointTrustError`` carrying the refusal text when it cannot. A
   ## caller must let that propagate: a fixture that cannot get a
   ## trustworthy rendezvous has not "skipped", it has failed to set up.
+  ##
+  ## THE SOCKET HAS TO FIT A ``sockaddr_un``, AND ``root`` MAY NOT LET IT.
+  ## ``sun_path`` is 104 bytes on macOS and 108 on Linux, terminating NUL
+  ## included (and Nim's ``std/posix`` bounds it at 92 on macOS), and
+  ## ``bind`` of a longer path fails with ``socket path too long`` before
+  ## the daemon exists. ``root`` is the caller's scratch tree,
+  ## whose length is the suite TMPDIR plus whatever the caller nests under
+  ## it: ``run_tests.sh``'s per-checkout slot under ``~/.cache`` is ~50
+  ## bytes on its own, and ``<slot>/repro-inherited-env-XXXXXXXX/runquota/
+  ## ep/runquota.sock`` measured 105 on aarch64-darwin — every case of the
+  ## two engine fixtures failed. So when ``<root>/ep/`` plus a socket name
+  ## of up to ``RunquotaRendezvousSocketNameBudget`` bytes would not fit,
+  ## the rendezvous moves to a short private directory directly under
+  ## ``/tmp``, named by this uid and a hash of the absolute ``root`` (so
+  ## distinct roots never share one). This is the rule the product applies
+  ## to its own spawn (``repro_core/paths.runquotaEndpointPath``), and the
+  ## same rule the HCR fixtures adopted (reprobuild ``6210412a``): fixture
+  ## IPC paths must fit the platform's socket address independently of how
+  ## long the checkout or TMPDIR is. Only the endpoint moves; ``root`` keeps
+  ## everything else.
+  ##
+  ## The relocated directory goes through the very same
+  ## ``ensureEndpointDir`` provisioning and verification — moving it does
+  ## not relax a single trust check (a pre-planted directory of another
+  ## owner, a writable mode, or a symlink is still refused). Only ONCE it
+  ## has passed that verification is it registered with
+  ## ``releaseDirAtProcessExit``, so the process that asked for it removes
+  ## it however it exits, as removing ``root`` would have removed
+  ## ``<root>/ep``. Not before: the name is predictable, and a recursive
+  ## removal registered for a path somebody else planted (a symlink, say)
+  ## would be pointed by them.
   result = root / "ep"
   when defined(posix):
+    let relocated = result.len + 1 + RunquotaRendezvousSocketNameBudget >=
+      sizeof(Sockaddr_un().sun_path)
+    if relocated:
+      let identity = $secureHash(normalizedPath(absolutePath(root)))
+      result = "/tmp" / ("repro-rqt-" & $getuid() & "-" & identity)
     ensureEndpointDir(unixEndpoint(result / "runquota.sock"))
+    if relocated:
+      releaseDirAtProcessExit(result)
   else:
     # Windows: named pipes live in the kernel object namespace and carry
     # their own ACL, so there is no directory to own and no mode to

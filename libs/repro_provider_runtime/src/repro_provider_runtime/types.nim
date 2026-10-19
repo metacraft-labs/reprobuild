@@ -278,6 +278,36 @@ type
       ## per-invocation selection (§6.4) rather than declared. The typed
       ## `instance:` block refuses an `environment` setting by name for
       ## exactly that reason.
+    # ---------------------------------------------------------------
+    # Shared-Development-Services F1 (§4.8 / D-SS15) — WHICH ACTIONS
+    # THIS SERVICE CONSUMES, which is the half F1's blocker-closing
+    # revision left open: "Nothing in this change makes the dev session
+    # BUILD the reported edges ... the remaining half is for the dev
+    # session to order the reported actions before the services it
+    # launches."
+    #
+    # The dev session cannot order what it cannot see. `DevEnvResult`
+    # now carries the actions, but the SERVICE channel carried no edge
+    # back to them, so the supervisor held two unrelated lists: some
+    # actions and some services. This field is the edge.
+    #
+    # READ FROM THE TYPED EDGE, NOT FROM A PATH STRING, for the reason
+    # §4.8 already gives for the orphan check it mirrors: `args
+    # <output>.path` and `runtimeFile <output>` both record the
+    # producing action's id (`ServiceArgDef.producerActionId` /
+    # `ServiceRuntimeFileDef.producerActionId`), so "consumes" is an
+    # identifier match and a renamed output cannot satisfy it by
+    # accident. The orphan check and this field therefore read ONE
+    # derivation of consumption from ONE place; a second derivation
+    # over argv text could disagree with the diagnostic about the same
+    # recipe, which is this document's dominant defect shape.
+    #
+    # EMPTY MEANS "CONSUMES NOTHING", which is the ground state and is
+    # what every pre-F1 recipe reports.
+    consumedActionIds*: seq[string]
+      ## The `BuildActionDef.id` of each action whose output this
+      ## service names, in first-mention order (`args` before
+      ## `runtimeFile`, each in declaration order), deduplicated.
 
   DevEnvDiagnostic* = object
     severity*: DevEnvDiagnosticSeverity
@@ -389,6 +419,34 @@ type
       ## this evaluation made. Appended at the END for the reason the
       ## L8 and L9 service fields were: a diff of the codec reads as an
       ## addition rather than a reshuffle.
+    actions*: seq[GraphNode]
+      ## Shared-Development-Services F1 (§2) — THE ACTIONS CHANNEL:
+      ## every build ACTION the `devEnv:` body registered, as the
+      ## `gnkAction` graph nodes the build lane already carries.
+      ##
+      ## WHY `seq[GraphNode]` AND NOT A NEW RECORD, which is the
+      ## decision this field is. `renderConfigFile` registers a
+      ## `BuildActionDef`; the build lane lowers one into a `gnkAction`
+      ## node whose payload is `actionPayload`'s versioned bytes, and
+      ## `GraphNode` already crosses this codec. A bespoke
+      ## `DevEnvAction` record would be a SECOND representation of one
+      ## action, with a second codec to version and two readings that
+      ## can disagree about the same edge -- which is the shape this
+      ## campaign keeps finding. One representation, two channels.
+      ##
+      ## L9's F1 measured the absence: "`DevEnvResult` ... has NO
+      ## actions field, so an action registered while the `devEnv:` body
+      ## runs reaches nothing", and the consequence end to end was
+      ## `repro up --activity sso` reporting the session up with
+      ## `etc/sso/` never created -- "the path reached argv and the file
+      ## never did".
+      ##
+      ## AN ACTION NOTHING CONSUMES IS AN ERROR DIAGNOSTIC, not an
+      ## absence: see `buildPackageDevEnv`. Carrying the actions without
+      ## that check would move the silent drop one hop downstream rather
+      ## than close it.
+      ##
+      ## Appended at the END, for `sharedResolutions`' reason.
 
   ProviderGraphRequest* = object
     kind*: ProviderRequestKind

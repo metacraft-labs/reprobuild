@@ -250,10 +250,10 @@ proc profileCompileBuildAction*(profileRoot, rbpiPath, nimcacheDir,
   ## (`automaticMonitorGatheringPolicy`). There is no hand-written depfile:
   ## everything such a file could list, the monitor observes, and a list
   ## somebody maintains is only correct until a profile reads something its
-  ## author did not anticipate. Do NOT pass `depfile =` to `action()` here
-  ## either: it rewrites a depfile next to an automatic-monitor policy into
-  ## the UNMONITORED `dgRecognizedFormat` policy, which is how this edge used
-  ## to be unmonitored while every comment said otherwise.
+  ## author did not anticipate. `action()` rejects a legacy depfile next to
+  ## an explicit automatic-monitor policy: that combination used to silently
+  ## select UNMONITORED `dgRecognizedFormat` evidence, which is how this edge
+  ## used to be unmonitored while every comment said otherwise.
   ##
   ## Declared output: the published RBPI envelope.
   ##

@@ -127,13 +127,15 @@ fi
 # pin and every Nix execution surface must therefore agree on one immutable
 # source root. Exact counts make removal of any one surface fail this quick
 # repository check instead of surfacing after a minute-long CodeTracer compile.
-trace_format_rev="808ffdb4507634c3aba0661d96cbc353420ed856"
+trace_format_rev="b4794ba69fa7ccb0b568de7c582a576994c63e5b"
 require_contains flake.nix "github:metacraft-labs/codetracer-trace-format-nim/${trace_format_rev}"
 # The bootstrap modules follow this Repro flake, so its former nested Repro
 # release (and duplicate trace-format node) is absent. The remaining node
 # records the same immutable revision in both `locked` and `original`.
 # t_flake_lock_has_no_competing_reprobuild_pin also checks the parsed graph
 # so a differently pinned extra trace-format node cannot evade this count.
+# Whether this is the RIGHT revision -- the one the pinned CodeTracer's
+# repro.lock names -- is the flake check `ct-trace-format-pin-coherence`.
 require_count flake.lock "\"rev\": \"${trace_format_rev}\"" 2
 require_contains "${package_nix}" 'requiredModule = "${sourceRoot}/codetracer_trace_writer/span_stream.nim";'
 # ONE definition of the guarded source root, in the derivation, read back by
