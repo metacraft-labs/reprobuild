@@ -88,7 +88,11 @@ suite "Local daemons/control-plane M1 user-daemon lifecycle":
         repoRoot())
       check started.contains("repro daemon: running")
       check started.contains("role: repro-daemon/user")
-      check started.contains("protocol: 1.1")
+      # 1.2 since `udkLeaseReapProviders`/`Ack` were added (a MINOR bump:
+      # additive frames, every earlier request unchanged). The daemon
+      # reports the version it speaks, so this pins the bump rather than a
+      # constant.
+      check started.contains("protocol: 1.2")
       check started.contains("features: lifecycle,status,logs,shutdown")
       check started.contains("active-sessions: 0")
       check not started.contains("reprostored")
