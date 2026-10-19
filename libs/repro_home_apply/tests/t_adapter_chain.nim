@@ -28,13 +28,19 @@
 ##
 ## Hermetic: every target is synthetic (`realizationTargetFor`), nothing is
 ## downloaded (selection is static metadata), and the only host fact used is a
-## stub executable this test drops on PATH. No mocks.
+## stub executable this test drops on PATH. The extractor argument check uses
+## a spy callback that raises immediately after recording its arguments: this
+## proves delegation identity without running Windows MSI tools on other hosts
+## or fabricating an executable/probe result. The selection cases use no mocks.
 
 import std/[options, os, strutils, tables, unittest]
 from repro_core/paths import extendedPath
 from repro_test_support import testCaseScratchSlug
 
 import repro_home_apply/package_catalog
+import repro_tool_profiles
+import repro_interface_artifacts
+import repro_tool_profiles/archive_steps
 import repro_dsl_stdlib/package_registry
 
 let FixtureRoot = "build/test-tmp/t-adapter-chain-" & testCaseScratchSlug()
@@ -84,9 +90,9 @@ suite "GM4b — selection policy":
     check r.selection.trace.len == 1
     check r.selection.trace[0].kind == rkTarball
     check r.selection.trace[0].selected
-    # The jdk archive flattens an inner dir: the home archive realizer
-    # owns it, and its projection carries the realization inputs.
-    check r.archiveRoute == arInstaller
+    # Flattening uses the shared provisioning edge; its projection still
+    # carries the realization inputs for compatibility callers.
+    check r.archiveRoute == arExtract
     check r.archive.urlUsed == r.selection.tarball.url
     check r.archive.digestAlgorithm == "sha256"
     check r.archive.extractPath == "jdk-21.0.5+11"
@@ -184,3 +190,101 @@ suite "GM4b — selection policy":
     pref["darwin"] = @["homebrew"]
     expect ValueError:
       discard selectionPolicyFor(pref, poMacos)
+
+  test "clingo Windows conda acquisition is shared by recipes and profiles":
+    let projected = profileToolUse("clingo")
+    check projected.known
+    let recipe = tarballAcquisitionPlan(projected.useDef, target = windowsX64)
+    check recipe.archiveType == "conda"
+    let home = resolveProfilePackage("clingo", windowsX64, @[rkTarball])
+    check home.archiveRoute == arExtract
+    check home.selection.tarball == recipe.record
+    check $home.archive.archiveFormat == "conda"
+    check archiveRecordOf(home.archive) == recipe.record
+
+  test "every supported archive spelling keeps recipe and profile acquisition equivalent":
+    # Exact vocabulary from extractTarballArchive and the acquisition default.
+    # No downloads: these are real selection/strict-decoding/acquisition calls.
+    for (spelling, canonical) in [
+        ("", "tar.gz"), ("zip", "zip"), ("tar", "tar"),
+        ("tar.gz", "tar.gz"), ("tgz", "tar.gz"),
+        ("tar.xz", "tar.xz"), ("txz", "tar.xz"),
+        ("tar.bz2", "tar.bz2"), ("tbz", "tar.bz2"), ("tbz2", "tar.bz2"),
+        ("tar.zst", "tar.zst"), ("tzst", "tar.zst"),
+        ("pkg.tar.zst", "tar.zst"), ("7z", "7z"),
+        ("7z.exe", "7z-sfx"), ("7z-sfx", "7z-sfx"), ("raw", "raw"),
+        ("conda", "conda"), ("msi", "installer-msi"),
+        ("installer-msi", "installer-msi"),
+        ("installer-nsis", "installer-nsis"), ("dmg", "dmg"), ("pkg", "pkg")]:
+      for token in [spelling, spelling.toUpperAscii()]:
+        checkpoint("archiveType=" & token)
+        let parsed = parseArchiveFormatToken(token)
+        check parsed.ok
+        if parsed.ok:
+          check $parsed.format == canonical
+        let record = InterfaceTarballProvisioning(url: "https://example.invalid/tool",
+          sha256: repeat('a', 64), archiveType: token,
+          executablePath: "bin/tool", cpu: "any", os: "any")
+        let useDef = InterfaceToolUse(rawConstraint: "format-fixture",
+          packageSelector: "format-fixture", executableName: "tool",
+          tarballProvisioning: @[record])
+        var catalog = ProfileCatalog()
+        catalog.uses["format-fixture"] = useDef
+        let recipe = tarballAcquisitionPlan(useDef, target = windowsX64)
+        let home = resolveProfilePackage("format-fixture", windowsX64,
+          @[rkTarball], catalog = catalog)
+        check home.archiveRoute == arExtract
+        check home.selection.tarball == recipe.record
+        check archiveRecordOf(home.archive) == recipe.record
+        check $home.archive.archiveFormat == canonical
+
+  test "plain tar and conda compose with installation metadata in both acquisitions":
+    for token in ["tar", "conda"]:
+      checkpoint("archiveType=" & token)
+      var record = InterfaceTarballProvisioning(url: "https://example.invalid/tool",
+        sha256: repeat('a', 64), archiveType: token,
+        executablePath: "bin/tool", cpu: "any", os: "any")
+      record.detail.extractPath = "payload"
+      let useDef = InterfaceToolUse(rawConstraint: "composed-format-fixture",
+        packageSelector: "composed-format-fixture", executableName: "tool",
+        tarballProvisioning: @[record])
+      var catalog = ProfileCatalog()
+      catalog.uses["composed-format-fixture"] = useDef
+      let recipe = tarballAcquisitionPlan(useDef, target = windowsX64)
+      let home = resolveProfilePackage("composed-format-fixture", windowsX64,
+        @[rkTarball], catalog = catalog)
+      check home.archiveRoute == arExtract
+      check home.selection.tarball == recipe.record
+      check $home.archive.archiveFormat == token
+      check archiveRecordOf(home.archive) == recipe.record
+
+  test "composed MSI dispatch preserves its extraction token and strip depth":
+    let fixtureDir = FixtureRoot / "msi-extractor-dispatch"
+    resetDir(fixtureDir)
+    defer: removeDir(extendedPath(fixtureDir))
+    for installMethodToken in ["extract", "source-bootstrap"]:
+      var record = InterfaceTarballProvisioning(url: "https://example.invalid/tool.msi",
+        sha256: repeat('a', 64), archiveType: "msi",
+        executablePath: "bin/tool", cpu: "any", os: "any")
+      record.detail.installMethod = installMethodToken
+      record.detail.extractPath = "payload"
+      let resolution = archiveRealizationOf("msi-dispatch-fixture", record)
+      var called = false
+      var observedType = ""
+      var observedStrip = -1
+      let stop = newException(ValueError, "stop after extractor dispatch")
+      try:
+        discard stageArchiveInstallation(resolution, "unused.msi",
+          fixtureDir / installMethodToken, 1, ArchiveStageTools(),
+          proc(archivePath, destination, archiveType: string;
+              stripComponents: int; declaredExecutablePath: string) =
+            called = true
+            observedType = archiveType
+            observedStrip = stripComponents
+            raise stop)
+        check false
+      except ValueError as err:
+        check err == stop
+      check called
+      check observedType == "msi"
+      check observedStrip == 1

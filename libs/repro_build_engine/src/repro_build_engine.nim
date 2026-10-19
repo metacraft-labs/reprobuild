@@ -3230,7 +3230,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              actionCachePolicy = ffpTimestamp;
              depfile = ""; monitorDepfile = "";
              dynamicDepsFile = "";
-             dependencyPolicy = automaticMonitorGatheringPolicy();
+             dependencyPolicy: DependencyGatheringPolicy |
+               Option[DependencyGatheringPolicy] = none(DependencyGatheringPolicy);
              nonDeterminism = ndpUnblessed;
              nonDeterminismJustification = "";
              isolateHostEnvironment = false;
@@ -3247,13 +3248,25 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
   ## is the point. "An action constructed without a governing lock identity is
   ## a build-time error, not a default." A default here would be the
   ## convention §7.2 explicitly refuses to rely on.
+  # An omitted policy alone enables the legacy depfile shorthand. Keep explicit
+  # monitor requests distinguishable even when they equal the default policy;
+  # otherwise a caller that asked for monitoring could publish depfile-only
+  # evidence. Accept the policy object directly for existing callers, or an
+  # Option for forwarding an optional policy without inventing a default.
+  let requestedPolicy =
+    when dependencyPolicy is DependencyGatheringPolicy: some(dependencyPolicy)
+    else: dependencyPolicy
+  if requestedPolicy.isSome and depfile.len > 0 and monitorDepfile.len == 0 and
+      requestedPolicy.get.kind == dgAutomaticMonitor:
+    raise newException(ValueError,
+      "action '" & id & "': depfile conflicts with explicit automatic-monitor " &
+      "dependencyPolicy without monitorDepfile; use monitorValidatedPolicy " &
+      "with a recognized report, or omit dependencyPolicy for depfile-only evidence")
   let effectiveDependencyPolicy =
-    if depfile.len > 0 and monitorDepfile.len == 0 and
-        dependencyPolicy.kind == dgAutomaticMonitor:
-      legacyDepfileGatheringPolicy(depfile,
-        dependencyPolicy.ignoredInputPrefixes)
+    if requestedPolicy.isNone and depfile.len > 0 and monitorDepfile.len == 0:
+      legacyDepfileGatheringPolicy(depfile, [])
     else:
-      dependencyPolicy
+      requestedPolicy.get(automaticMonitorGatheringPolicy())
   BuildAction(
     governingLockIdentity: governingLockIdentity,
     kind: bakProcess,
@@ -12646,8 +12659,141 @@ proc deferRuntimeLibraryEnvForShell*(argv: seq[string];
         result = wrapMonitoredPayloadWithRuntimeEnv(argv, payloadIndex,
           prefix)
 
+const NimStandardLibrarySubdirs = ["", "deprecated/core", "deprecated/pure",
+  "pure/collections", "pure/concurrency", "impure", "wrappers",
+  "wrappers/linenoise", "windows", "posix", "js", "pure/unidecode",
+  "arch", "core", "pure"]
+  ## Import aliases supplied by Nim's config/nim.cfg and compiler stdlibDirs.
+
+const NimLibraryMetadataArgs* = ["dump", "--dump.format:json", "--skipCfg:on",
+  "--skipUserCfg:on", "--skipParentCfg:on", "--skipProjCfg:on",
+  "--verbosity:0", "--eval:discard"]
+  ## Only the compiler installation is inspected. In particular, discovering
+  ## its library must not evaluate the consumer's config.nims a second time.
+
+proc nimCompilerLibraryRoot(command, searchPath, cwd: string;
+                            env: seq[string]): tuple[libraryRoot, compilerPrefix: string] =
+  var executable = command
+  if not command.isAbsolute:
+    if command.contains(DirSep) or command.contains(AltSep):
+      executable = absolutePath(command, cwd)
+    else:
+      executable = ""
+      for dir in searchPath.split(PathSep):
+        let candidate = absolutePath(dir / addFileExt(command, ExeExt), cwd)
+        if isExecutableFile(candidate):
+          executable = candidate
+          break
+  if executable.len == 0 or not fileExists(executable):
+    raiseEngine("cannot validate Nim producer modules: compiler not found: " & command)
+  let physicalExecutable = expandFilename(executable)
+  let prefix = physicalExecutable.parentDir.parentDir
+  var image = open(physicalExecutable, fmRead)
+  var magic: array[2, char]
+  let magicLength = image.readChars(magic)
+  image.close()
+  let scriptWrapper = magicLength == 2 and magic[0] == '#' and magic[1] == '!'
+  if not scriptWrapper:
+    for candidate in [prefix / "lib", prefix / "lib/nim/lib"]:
+      if fileExists(candidate / "system.nim"):
+        return (candidate, prefix)
+  # A wrapper need not share its directory with the compiler's library. This
+  # is a bounded tool-metadata query, not a build action: absolute executable,
+  # fixed arguments, no shell, no project/config evaluation, no emitted files.
+  var childEnv: StringTableRef
+  if env.len > 0:
+    childEnv = newStringTable(modeCaseSensitive)
+    for entry in env:
+      let separator = entry.find('=')
+      if separator >= 0:
+        childEnv[entry[0 ..< separator]] = entry[separator + 1 .. ^1]
+  let child = startProcess(executable, args = NimLibraryMetadataArgs,
+    workingDir = cwd, env = childEnv, options = {poStdErrToStdOut})
+  let output = drainStream(child.outputStream)
+  let code = child.waitForExit()
+  closeProcessOnce(child)
+  if code == 0:
+    try:
+      let metadata = parseJson(output)
+      let root = metadata{"libpath"}.getStr()
+      let compilerPrefix = metadata{"prefixdir"}.getStr()
+      if root.isAbsolute and compilerPrefix.isAbsolute and
+          fileExists(root / "system.nim"):
+        return (root, compilerPrefix)
+    except ValueError, JsonParsingError:
+      discard
+  raiseEngine("cannot validate Nim producer modules: cannot locate standard library for " &
+    executable & ": " & output.strip())
+
+proc validateNimProducerRoots(argv: openArray[string]; base: int;
+                              nimPathDirs: openArray[string];
+                              compilerEnv: seq[string]; cwd: string) =
+  var modules: seq[tuple[root, relative: string]]
+  for root in nimPathDirs:
+    if root.len == 0:
+      continue
+    let absoluteRoot = absolutePath(root, cwd)
+    if dirExists(absoluteRoot / "std") or fileExists(absoluteRoot / "std.nim"):
+      raiseEngine("Nim producer source root " & root &
+        " uses the reserved standard-library module namespace std")
+    var pending = @[(directory: absoluteRoot, ancestors: newSeq[string]())]
+    while pending.len > 0:
+      let entry = pending.pop()
+      if not dirExists(entry.directory):
+        continue
+      # Stop ancestor cycles, but visit distinct import aliases to the same
+      # directory: harmless/os and pure/os have different collision semantics.
+      let physical = expandFilename(entry.directory)
+      if physical in entry.ancestors:
+        continue
+      let ancestors = entry.ancestors & @[physical]
+      for kind, path in walkDir(entry.directory):
+        case kind
+        of pcDir, pcLinkToDir:
+          pending.add((directory: path, ancestors: ancestors))
+        of pcFile, pcLinkToFile:
+          if path.splitFile.ext.toLowerAscii == ".nim":
+            modules.add((absoluteRoot, relativePath(path, absoluteRoot)))
+  if modules.len == 0:
+    return
+  let searchPath = if compilerEnv.len > 0:
+    lookupEnv(compilerEnv, "PATH").value else: getEnv("PATH")
+  let compiler = nimCompilerLibraryRoot(argv[base], searchPath, cwd, compilerEnv)
+  var libraries = @[compiler.libraryRoot]
+  var explicitLibrary = ""
+  for i in base + 2 ..< argv.len:
+    let option = argv[i].toLowerAscii
+    if option.startsWith("--lib:") or option.startsWith("--lib="):
+      explicitLibrary = argv[i][6 .. ^1]
+  if explicitLibrary.len > 0:
+    var root = ""
+    var position = 0
+    while position < explicitLibrary.len:
+      if explicitLibrary[position] != '$':
+        root.add(explicitLibrary[position])
+        inc position
+      elif explicitLibrary.substr(position, position + 3) == "$nim" and
+          (position + 4 == explicitLibrary.len or
+           explicitLibrary[position + 4] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}):
+        # Match the complete variable, so $nimble is never mistaken for $nim.
+        root.add(compiler.compilerPrefix)
+        position += 4
+      else:
+        raiseEngine("cannot validate Nim producer modules: unsupported --lib substitution: " &
+          explicitLibrary)
+    libraries.add(absolutePath(root.expandTilde(), cwd))
+  for module in modules:
+    for library in libraries:
+      for subdir in NimStandardLibrarySubdirs:
+        let standardModule = library / subdir / module.relative
+        if fileExists(standardModule):
+          raiseEngine("Nim producer module " & (module.root / module.relative) &
+            " collides with standard-library module " & standardModule)
+
 proc applyNimPathArgs*(argv: openArray[string];
-                       nimPathDirs: openArray[string]): seq[string] =
+                       nimPathDirs: openArray[string];
+                       compilerEnv: seq[string] = @[];
+                       cwd = getCurrentDir()): seq[string] =
   ## Cross-Repo-Source-Consumption SC-11 (§4.2a.3) — the Nim library-source
   ## channel's argv projection. Where the C/C++ channels prepend an ENV VAR,
   ## the Nim channel prepends a compiler FLAG: for each sibling Nim library
@@ -12662,7 +12808,9 @@ proc applyNimPathArgs*(argv: openArray[string];
   ## ``compile``/``compileToC``/``c++``/``cpp``/``js``/``e``) appears at
   ## ``argv[base+1]``. The flags are inserted immediately AFTER that subcommand
   ## token (Nim accepts options anywhere after the command, so this is
-  ## order-safe against the trailing ``--out:``/positional source). An empty
+  ## order-safe against the trailing ``--out:``/positional source). Producer
+  ## roots are checked for reserved standard module names before insertion;
+  ## valid producers retain Nim's original path precedence. An empty
   ## ``nimPathDirs`` or a non-Nim argv is the identity transform, so every
   ## non-Nim-library-consumer action is byte-for-byte unchanged.
   ##
@@ -12700,6 +12848,7 @@ proc applyNimPathArgs*(argv: openArray[string];
     "c++", "cpp", "js", "e"]
   if argv[base + 1].toLowerAscii notin compileSubcommands:
     return
+  validateNimProducerRoots(argv, base, nimPathDirs, compilerEnv, cwd)
   var flags: seq[string] = @[]
   for d in nimPathDirs:
     if d.len > 0:
@@ -13461,7 +13610,8 @@ proc preparedRunQuotaCommand(action: BuildAction;
         "[" & nonSipShellSearchReport() & "]")
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
   let threadedEnv = preparedActionEnv(action, config, auxPaths)
-  let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
+  let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs,
+    threadedEnv, action.cwd)
   let includePaths = partitionCompilerIncludePaths(auxPaths)
   let adjustedArgv = applyCompilerSystemIncludeArgs(nimAdjustedArgv,
     includePaths.systemDirs)
@@ -16522,10 +16672,15 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         # channel that says who filled it is attribution.
         var provisionerReads: seq[string] = @[]
         if resp.hasKey("dependencies"):
+          # The helper resolves symlinks in every reported path. Resolve the
+          # base too, so a cwd under /var (or any directory alias) yields
+          # the same relative inputs as its canonical spelling.
+          let reportCwd = expandFilename(
+            if action.cwd.len > 0: action.cwd else: getCurrentDir())
           for depNode in resp["dependencies"]:
             let depPath = depNode.getOrDefault("path").getStr()
             if depPath.len > 0:
-              provisionerReads.add(relativePath(depPath, action.cwd))
+              provisionerReads.add(relativePath(depPath, reportCwd))
 
         result.status = asSucceeded
         result.exitCode = 0

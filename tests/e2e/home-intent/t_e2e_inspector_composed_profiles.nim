@@ -22,9 +22,10 @@
 ##   helpers contribute, each with its activity, guard and state, and its
 ##   `enabled` lines are exactly the `[package]` section of `repro home apply
 ##   --plan` for the same host (two hosts); `why` explains a helper's
-##   package. A reference under a nested `when` is reported `ignored` and is
-##   indeed not planned (the planner reads one guard level; issue
-##   2026-10-18-home-planner-drops-packages-under-nested-activity-guards).
+##   package. A reference under a nested `when` is `enabled` and planned:
+##   nested guards conjoin (issue
+##   2026-10-18-home-planner-drops-packages-under-nested-activity-guards;
+##   `t_e2e_nested_activity_guards` covers it in depth).
 ## * `e2e_add_remove_step_over_composed_constructs`: `add` writes the package
 ##   line beside the helper calls and before the activity's `stow:` /
 ##   `resources:` blocks -- every other byte of the file kept -- and the
@@ -276,14 +277,14 @@ suite "inspector: profiles that compose helpers":
     check listedAs(nl.stdout, "enabled", "gnm-outer", "default")
     check listedAs(nl.stdout, "enabled", "gnm-one-level", "default",
       "linux or macos or windows")
-    check listedAs(nl.stdout, "ignored", "gnm-nested", "default",
+    check listedAs(nl.stdout, "enabled", "gnm-nested", "default",
       "(linux or macos or windows) and (linux or macos or windows)")
     let np = nested.runRepro(["home", "apply", "--plan"],
       extraEnv = nestedEnv)
     show("apply --plan (nested)", np)
     require np.exitCode == 0
     check enabledPackages(nl.stdout) == plannedPackages(np.stdout)
-    check "gnm-nested" notin plannedPackages(np.stdout)
+    check "gnm-nested" in plannedPackages(np.stdout)
 
   test "e2e_add_remove_step_over_composed_constructs":
     let sb = composedSandbox("gnm-ra-addrm")

@@ -38,6 +38,17 @@
                 "kind": "packageRef",
                 "name": "patchelf",
                 "version": ""
+              },
+              {
+                "kind": "whenGuard",
+                "predicate": "x86_64",
+                "body": [
+                  {
+                    "kind": "packageRef",
+                    "name": "gm5-linux-x86-tool",
+                    "version": ""
+                  }
+                ]
               }
             ]
           },
@@ -423,16 +434,16 @@
   "provenance": {
     "repro": {
       "version": "0.2.6",
-      "sourceRevision": "c0a2b186e658a931beaf96fe78287c344c7202fd-dirty"
+      "sourceRevision": "ccf6320d3657cc426c1220f823d448fbe11e72b3-dirty"
     },
     "hostSource": "env",
     "profile": {
       "root": "home.nim",
-      "digest": "d82b6926443c9f6c241b7e6c84e138faf76992f26841dc5ee7a694633f2d188f",
+      "digest": "fef66cd3699d01344456fdff3c5704e1a517b76e5dcd839dfbc75e0662e1ccb5",
       "inputs": [
         {
           "path": "home.nim",
-          "blake3": "165cef53d0dee9ef68b828d75140bf68655620e44481f4622398a883524747c2"
+          "blake3": "f03cd33bbc82001aa7775d65d6967004918a02c1adc14b305ea5598310de9430"
         }
       ]
     },

@@ -9,8 +9,13 @@
 ## producer side -- "synthetic fragments are not enough" -- and it applies just
 ## as directly to the consumer.
 ##
-## So this test runs a REAL monitored process, uses the REAL depfile it
-## produced, and asserts on the cache decision of a real `runBuild`.
+## This test runs a REAL monitored process and first proves its original
+## incomplete depfile cannot yield a cache hit. A separate test-only depfile
+## then removes exactly the validated platform tree-lifetime limitation and
+## preserves every other observed record. This explicit derived fixture is
+## necessary to isolate environment-key behavior: the real verdict must fail
+## closed until Windows has a complete process-tree lifetime guard. No mock
+## producer or synthetic environment records replace the live capture.
 ##
 ## The monitored program is `where.exe`, which ships with Windows and whose
 ## behaviour genuinely depends on the variables it reads: it resolves a command
@@ -52,6 +57,7 @@ when defined(windows):
   import io_mon
   import io_mon/fs_snoop
   import io_mon/types
+  import repro_test_support/descendant_guard_expectations
 
   const WhereExe = r"C:\Windows\System32\where.exe"
 
@@ -90,11 +96,10 @@ when defined(windows):
     doAssert res.exitCode == 0,
       "where.exe cmd exited " & $res.exitCode &
         "; this run cannot test the observed-environment path"
-    # The run must also be COMPLETE. A capture that graded incomplete would take
-    # the action down a monitor-loss path and the cache decision below would be
-    # about that instead of about the environment.
-    doAssert res.completeness == mcComplete,
-      "the monitored where.exe run graded incomplete"
+    doAssert res.completeness == mcIncomplete,
+      "the real Windows capture must fail closed without a tree-lifetime guard"
+    doAssert descendantSubsystemEvidence(res.depFile).completeness == mcComplete,
+      "where.exe produced loss beyond the exact platform limitation"
     result = @[]
     for r in res.records:
       if r.kind == mrEnvRead:
@@ -119,6 +124,30 @@ when defined(windows):
     runBuild(graph([scenarioAction(scenario, env)]),
       defaultBuildEngineConfig(scenario.cacheRoot))
 
+  proc isolateEnvironmentControl(scenario: var Scenario; env: openArray[string]) =
+    # First exercise the ORIGINAL file twice. The environment must not bless
+    # a capture that cannot establish the process tree's lifetime.
+    let first = runOnce(scenario, env)
+    let second = runOnce(scenario, env)
+    doAssert first.results.len == 1 and second.results.len == 1
+    doAssert first.results[0].status == asSucceeded
+    doAssert second.results[0].status == asSucceeded
+    doAssert first.results[0].cacheDecision != cdHit and
+      second.results[0].cacheDecision != cdHit,
+      "the original incomplete Windows capture must never yield a cache hit"
+    let originalPath = scenario.rmdfPath
+    let subsystem = descendantSubsystemEvidence(readMonitorDepFile(originalPath))
+    doAssert subsystem.completeness == mcComplete,
+      "the environment control must retain every unrelated loss"
+    scenario.rmdfPath = scenario.root / "environment-subsystem.iomon"
+    let raw = encodeCanonical(subsystem.records)
+    var bytes = newString(raw.len)
+    if raw.len > 0: copyMem(addr bytes[0], unsafeAddr raw[0], raw.len)
+    writeFile(scenario.rmdfPath, bytes)
+    # Keep the original file and avoid reusing action state from its two
+    # fail-closed runs in the separate environment-key control.
+    scenario.cacheRoot = scenario.root / "subsystem-cache"
+
   suite "M10 live: a real shim capture reaches the action cache":
 
     test "where.exe's observed PATH read invalidates the action when PATH moves":
@@ -130,7 +159,7 @@ when defined(windows):
         checkpoint("SKIPPED: no io-mon shim found; build it into build/lib " &
           "or set REPRO_MONITOR_SHIM_LIB")
       else:
-       let scenario = setupScenario("path")
+       var scenario = setupScenario("path")
        defer: removeDir(scenario.root)
 
        # 1. The producer half, live. `where` resolves a command by walking PATH
@@ -139,6 +168,9 @@ when defined(windows):
        checkpoint("observed environment reads: " & observed.join(","))
        check "PATH" in observed
        check "PATHEXT" in observed
+
+       isolateEnvironmentControl(scenario,
+         ["PATH=C:\\one;C:\\two", "PATHEXT=.COM;.EXE"])
 
        # 2. The consumer half. Same PATH twice: a hit, which is the direction an
        #    implementation that always invalidates would fail.
@@ -165,10 +197,12 @@ when defined(windows):
       if not fileExists(WhereExe) or not shimAvailable():
         checkpoint("SKIPPED: where.exe or the io-mon shim is unavailable")
       else:
-       let scenario = setupScenario("unrelated")
+       var scenario = setupScenario("unrelated")
        defer: removeDir(scenario.root)
        let observed = captureWhereEnvReads(scenario)
        check "IOMON_M10_UNRELATED" notin observed
+       isolateEnvironmentControl(scenario,
+         ["PATH=C:\\one", "PATHEXT=.EXE", "IOMON_M10_UNRELATED=before"])
 
        let first = runOnce(scenario,
          ["PATH=C:\\one", "PATHEXT=.EXE", "IOMON_M10_UNRELATED=before"])

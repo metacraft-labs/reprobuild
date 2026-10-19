@@ -14,6 +14,10 @@ profile "gm5Neutral":
     package("cmake", "3.0.0-gm5-pin", binaries = @["cmake"])
     when linux():
       patchelf
+      # Nested guards conjoin: x86_64 Linux only (reprobuild-pm issue
+      # 2026-10-18-home-planner-drops-packages-under-nested-activity-guards).
+      when x86_64():
+        `gm5-linux-x86-tool`
     when macos() and arm64():
       `gm5-mac-arm-tool`
 

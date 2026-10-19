@@ -30,6 +30,12 @@
           "activity": "default"
         },
         {
+          "name": "gm5-linux-x86-tool",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
           "name": "patchelf",
           "version": "",
           "binaries": [],
@@ -1386,6 +1392,12 @@
           "version": "",
           "binaries": [],
           "activity": "desktop"
+        },
+        {
+          "name": "gm5-linux-x86-tool",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
         },
         {
           "name": "llvm",

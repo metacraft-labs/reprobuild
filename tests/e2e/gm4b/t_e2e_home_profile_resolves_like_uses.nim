@@ -143,19 +143,11 @@ proc recipeOutcome(useDef: InterfaceToolUse; kind: RealizationKind;
       result = Outcome(selected: true, kind: rkTarball, record: record.url,
         lockIdentity: contributorLockIdentity(record.contributor,
           tarballRealizationLockIdentity(record)))
-      if archiveInstallerFeatures(record).len == 0:
-        # The real acquisition plan carries the same identity.
-        check tarballAcquisitionPlan(useDef, target = target).lockIdentity ==
-          result.lockIdentity
-      else:
-        # An installer-class record is SELECTED alike; only the `uses:`
-        # provisioning edge refuses to realize it, and says which record.
-        try:
-          discard tarballAcquisitionPlan(useDef, target = target)
-          check false
-        except ValueError as err:
-          check record.url in err.msg
-          check "realized by `repro home apply` only" in err.msg
+      # Every tarball, including installer-class records, reaches the same
+      # acquisition plan with the selected record and identity intact.
+      let plan = tarballAcquisitionPlan(useDef, target = target)
+      check plan.lockIdentity == result.lockIdentity
+      check plan.record == record
     of rkNix:
       let record = selectNixProvisioning(useDef, target)
       let plan = nixAcquisitionPlan(useDef, target)

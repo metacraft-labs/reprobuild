@@ -37,7 +37,8 @@
 #     explicit opt-in for `default` alone); a profile without one selects
 #     `default` everywhere;
 #   * packages: the `packageRef`s of enabled activities, a `whenGuard`'s only
-#     when its predicate holds, one per package (first occurrence wins);
+#     when its predicate holds (nested guards conjoin: every enclosing
+#     predicate must hold), one per package (first occurrence wins);
 #     sorted by name (the planner's order is a topological sort over
 #     extractor edges with ties broken by name, which only the resolver can
 #     compute -- consumers should not depend on order);
@@ -216,8 +217,11 @@ let
       { inherit host; } // systemManagementOf doc host;
 
   # The packages an activity body contributes on `facts`
-  # (`collectPackagesFromBody`). A guard's body holds package references only;
-  # anything else is refused rather than skipped.
+  # (`plan.packageOriginsFromBody`, the planner's rule). Guards nest and
+  # conjoin: a package under a `whenGuard` inside a `whenGuard` is
+  # contributed where both hold, and an inner guard is evaluated only where
+  # the outer one holds (Home-Profile-Intent-Layer.md §`when` and `if`
+  # predicates). Any other element kind is refused rather than skipped.
   bodyPackages =
     facts: activity: body:
     concatMap (
@@ -225,18 +229,7 @@ let
       if el.kind == "packageRef" then
         [ (el // { inherit activity; }) ]
       else if el.kind == "whenGuard" then
-        (
-          if holdsFor facts el.predicate then
-            map (
-              inner:
-              if inner.kind == "packageRef" then
-                inner // { inherit activity; }
-              else
-                throw "reprobuild: activity `${activity}`: a `${inner.kind}` inside a `whenGuard` is not something this library (or the planner) evaluates"
-            ) el.body
-          else
-            [ ]
-        )
+        (if holdsFor facts el.predicate then bodyPackages facts activity el.body else [ ])
       else
         throw "reprobuild: activity `${activity}`: unknown activity element kind `${toString (el.kind or null)}`"
     ) body;

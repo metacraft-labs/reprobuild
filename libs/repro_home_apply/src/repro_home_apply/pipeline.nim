@@ -45,6 +45,7 @@ import ./current_rotation
 import ./partial_recovery
 import ./stow
 import ./suppression
+import ./file_facts
 
 const
   KillStepEnvVar* = "REPRO_TEST_APPLY_KILL_AFTER_STEP"
@@ -1226,12 +1227,47 @@ proc collectProfileResources(profilePath, homeDir: string; ctx: HostContext;
   ## absent under a non-matching predicate; an activity-scoped resource
   ## (GM9) only when `activities` enables its activity. Two resources may
   ## share an address as long as no host gets both.
+  ##
+  ## Likewise two resources a host gets may not write one real-world
+  ## object -- one file, one variable, one block, one unit -- under two
+  ## addresses (`file_facts.sharesTargetWith`). Each address is bound to
+  ## what it writes, so the apply would write the object twice (the last
+  ## declaration winning, and the next apply reporting the first
+  ## resource's drift against the second's write), and removing either
+  ## resource later would destroy what the other still declares. The pair
+  ## is refused here, at plan time and before anything is written, naming
+  ## both addresses and whatever they disagree on; `repro home facts` runs
+  ## this same planner, so facts and apply refuse the same profiles
+  ## (reprobuild-pm issue
+  ## 2026-10-18-home-apply-applies-two-resources-for-one-path-or-variable;
+  ## Home-Profile-Resource-Lifecycle.md §One Real-World Object, One
+  ## Resource). Unlike a
+  ## stow file on a resource's path (`resolveStowResourceOverlap`), an
+  ## agreeing pair is refused too: a stow file has no binding to release,
+  ## a second resource does.
+  var lineOf = initTable[string, int]()
   for node in applicableResourceEntries(nodes, ctx, activities):
     let r = resourceFromEntry(profilePath, homeDir, node)
     if r.address in into.resources:
       resourceProfileError(profilePath, node.resourceHeaderLine,
         "duplicate resource address `" & r.address &
         "` in the profile's `resources:` block")
+    for _, earlier in into.resources:
+      if earlier.sharesTargetWith(r):
+        let differing = differingTargetFields(earlier, r)
+        let both = "resources `" & earlier.address & "` (line " &
+          $lineOf.getOrDefault(earlier.address) & ") and `" & r.address &
+          "` both write `" & resourceTargetLabel(r, homeDir) & "` (" &
+          $r.kind & ")"
+        resourceProfileError(profilePath, node.resourceHeaderLine,
+          if differing.len > 0:
+            both & " and disagree on " & differing.join(" and ") &
+              "; one object has one writer: remove one of them"
+          else:
+            both & "; they agree, but each resource owns what it " &
+              "writes, so removing either would destroy the other's: " &
+              "declare it once")
+    lineOf[r.address] = node.resourceHeaderLine
     into.add(r)
 
 proc parseProfileResources*(profile: Profile; homeDir: string;
@@ -1491,7 +1527,18 @@ proc profileIntentSnapshot*(profileDir: string; profile: Profile):
   ## here puts it in the generation id and keeps it with the generation, so
   ## rollback and `repro home history` never consult the live file. The
   ## one constructor for both the plan preview and the apply.
-  result.files = defaultWalkProfileFiles(profileDir)
+  ##
+  ## The source files are the top-level `*.nim` files plus everything under
+  ## the profile directory the compile was observed reading
+  ## (`profileSourceFiles` over `Profile.compiledFrom`), so helper modules
+  ## imported from subdirectories are recorded too. A data file is recorded
+  ## once, with its data role.
+  var dataPaths = initHashSet[string]()
+  for f in profile.loadedDataFiles:
+    dataPaths.incl f.path.replace('\\', '/')
+  for e in profileSourceFiles(profileDir, profile.compiledFrom):
+    if e.path notin dataPaths:
+      result.files.add e
   for f in profile.loadedDataFiles:
     var bytes = newSeq[byte](f.content.len)
     for i, ch in f.content:
@@ -2072,35 +2119,37 @@ proc profilePackageReferences*(profile: Profile): seq[PlannedPackage] =
       outp.add PlannedPackage(packageId: node.packageName,
         fromActivity: activity, requestedVersion: node.packageVersion,
         binaries: node.packageBinaries)
+  proc walk(outp: var seq[PlannedPackage]; body: seq[IntentNode];
+            activity: string) =
+    # Guards nest (the planner conjoins them, `plan.packageOriginsFromBody`),
+    # so a reference at any depth is one some host and platform may plan.
+    for node in body:
+      case node.kind
+      of nkPackageRef:
+        outp.add(node, activity)
+      of nkCondBlock:
+        outp.walk(node.condChildren, activity)
+      else:
+        discard
   for child in profile.root.children:
     if child.kind != nkActivity:
       continue
-    for node in child.activityChildren:
-      case node.kind
-      of nkPackageRef:
-        result.add(node, child.activityName)
-      of nkCondBlock:
-        for inner in node.condChildren:
-          if inner.kind == nkPackageRef:
-            result.add(inner, child.activityName)
-      else:
-        discard
+    result.walk(child.activityChildren, child.activityName)
 
 proc classifyPackages*(references: seq[PlannedPackage];
                        adapterPreference: OrderedTable[string, seq[string]];
                        platform, arch: string;
-                       lock: Option[HomeProfileLock]; relock: bool;
                        catalog: ProfileCatalog): PackageClassification =
   ## THE package classification `repro home export` publishes for one
   ## target: each reference resolved as the planner resolves it for a target
-  ## that is not the host -- the profile's policy, the lock's pins and the
-  ## catalog, without the host's `PATH` / Scoop inventory, which a document
-  ## about the profile cannot depend on -- and classified by
+  ## that is not the host, without its local lock -- the profile's policy
+  ## and catalog only. A shared document cannot depend on the host-local
+  ## `home.lock`, `PATH` or Scoop inventory. The selection is classified by
   ## `packageConcern`. `repro home apply` on a host that splits `packages`
   ## from `applications` computes it too and refuses when its own selection
   ## disagrees (`refuseClassificationDisagreement`).
   let ctx = profileResolutionContext(adapterPreference, platform, arch,
-    false, lock, relock, catalog)
+    false, catalog = catalog)
   let previews = previewPackageResolutions(references, ctx)
   for i, pp in previews:
     let key = packageClassificationKey(references[i].packageId,
@@ -2118,17 +2167,17 @@ proc refuseClassificationDisagreement(opts: ApplyOptions; plan: ApplyPlan;
                                       catalog: ProfileCatalog) =
   ## On a host whose declaration gives `packages` and `applications` to
   ## different sides, the Nix side reads which package is an application
-  ## from the export (`classifyPackages`, made without the host inventory).
+  ## from the export (`classifyPackages`, made without the host-local lock
+  ## or inventory). Actual previews still honor the local lock, so a pin
+  ## that changes a package's concern must be checked as well.
   ## A package this host's selection puts in the other concern would then be
   ## applied by neither side (or by both): refuse, naming it and the remedy.
   ## A host that keeps both concerns on one side never consults it.
   if not applied.declared or
       (hcPackages in applied.concerns) == (hcApplications in applied.concerns):
     return
-  let lock = readHomeProfileLock(homeProfileLockPath(opts.profileDir))
   let exported = classifyPackages(plan.packages, plan.adapterPreference,
-    opts.targetContext.platform, opts.targetContext.arch, lock, opts.relock,
-    catalog)
+    opts.targetContext.platform, opts.targetContext.arch, catalog)
   var problems: seq[string]
   for i, pp in previews:
     let key = packageClassificationKey(plan.packages[i].packageId,
@@ -2139,14 +2188,15 @@ proc refuseClassificationDisagreement(opts: ApplyOptions; plan: ApplyPlan;
       problems.add pp.packageId & " is `" & $here & "` by this host's " &
         "selection (" & pp.detail & ") but `" & $there & "` by the " &
         "selection `repro home export` publishes, which cannot consult this " &
-        "host's PATH or Scoop inventory"
+        "host's home.lock, PATH or Scoop inventory"
   if problems.len > 0:
     raisePlanFailed("hosts." & opts.host & ".applies gives `packages` and " &
       "`applications` to different tools, and the Nix side reads which " &
       "package is an application from `repro home export`; " &
       problems.join("; ") & ". Order `adapterPreference` so that a " &
       "host-inventory kind (path, scoop) does not precede the application's " &
-      "realization, or give both concerns to the same side")
+      "realization; inspect the current catalog and use `--relock` to " &
+      "replace a differing local pin, or give both concerns to the same side")
 
 proc concernSeed(applied: AppliedConcerns): string =
   ## The generation-id contribution of a concern declaration: the applied
@@ -2336,6 +2386,13 @@ proc planDesiredState*(rawOpts: ApplyOptions): PlannedDesiredState =
   result.plan.generatedFiles = suppressed.files
   result.desiredResources = composeDesiredResources(result.profile,
     opts.homeDir, opts.targetContext)
+  # A stow file and an `fs.userFile` on one path: one writer when they
+  # agree, refused when they do not (`resolveStowResourceOverlap`).
+  let overlap = resolveStowResourceOverlap(result.plan.generatedFiles,
+    result.stowDiscovery.entries, result.desiredResources, opts.profileDir,
+    opts.homeDir)
+  result.plan.generatedFiles = overlap.files
+  result.stowDiscovery.entries = overlap.stowEntries
   result.applied = appliedConcernsFor(result.profile, opts.host)
 
 proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
@@ -2832,7 +2889,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
     let stowDiscovery = selectStowEntries(
       discoverStowEntries(opts.profileDir, opts.homeDir), profile,
       opts.targetContext)
-    let stowEntries = stowDiscovery.entries
+    var stowEntries = stowDiscovery.entries
     if stowEntries.len > 0:
       let stowPlanned = stowEntriesToPlanned(stowEntries)
       for sp in stowPlanned:
@@ -2858,6 +2915,19 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       applyPlan.configContributions)
     applyPlan.generatedFiles = suppressed.files
     for d in suppressed.diagnostics:
+      applyPlan.diagnostics.add(d)
+    # A stow file and an `fs.userFile` resource naming one path: the
+    # resource is the one writer when the two agree on mode and digest, and
+    # the apply is refused here -- before the commit marker, so before
+    # anything is written -- when they do not (Home-Profile-Intent-Layer.md
+    # §Stow-Style Dotfile Support; `planDesiredState` applies the same rule
+    # for `--plan` and `repro home facts`).
+    let overlap = resolveStowResourceOverlap(applyPlan.generatedFiles,
+      stowEntries, composeDesiredResources(profile, opts.homeDir,
+        opts.targetContext), opts.profileDir, opts.homeDir)
+    applyPlan.generatedFiles = overlap.files
+    stowEntries = overlap.stowEntries
+    for d in overlap.diagnostics:
       applyPlan.diagnostics.add(d)
     if opts.recordOnlyGeneratedFiles:
       if stowEntries.len > 0:
@@ -3055,6 +3125,19 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
           srpReconcileDrift
         else:
           srpFailClosed
+      # A removed `fs.userFile` that agreed with a stow file hands its path
+      # back: remove the file it wrote (only while its bytes are what it
+      # recorded writing) so the stow file is linked again, and release its
+      # binding in step 9b instead of destroying it (`file_facts`).
+      let stowIds = stowTargetIds(materializedStowEntries, opts.homeDir)
+      if prevManifest.isSome and stowIds.len > 0:
+        let handoverDesired = composeDesiredResources(profile, opts.homeDir,
+          opts.targetContext)
+        for rb in prevManifest.get.resourceBindings:
+          if rb.resourceKind.len == 0: continue
+          let recorded = toRecorded(rb)
+          if handedToStow(recorded, handoverDesired, stowIds, opts.homeDir):
+            discard removeUnchangedUserFile(recorded)
       for entry in materializedStowEntries:
         let rec = materializeStowEntry(opts.profileDir, opts.homeDir, entry,
           stowReconcile)
@@ -3334,8 +3417,16 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               # released: not planned (so never destroyed or drift-checked)
               # and not recorded by the new generation.
               if concernOfBinding(rb, prevApps) notin owned: continue
+              # A removed `fs.userFile` whose path a stow file of this
+              # generation now links is released too: the stow step has
+              # already put its link there, and destroying the binding would
+              # delete that link (`file_facts.handedToStow`).
+              let recorded = toRecorded(rb)
+              if handedToStow(recorded, desiredResources, stowIds,
+                  opts.homeDir):
+                continue
               # Skip destroyed records (postWriteDigest is zero).
-              recordedBindings[rb.resourceAddress] = toRecorded(rb)
+              recordedBindings[rb.resourceAddress] = recorded
           except CatchableError:
             discard
       var reconcilePolicy = rpFailClosed

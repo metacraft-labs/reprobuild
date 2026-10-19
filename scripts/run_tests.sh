@@ -7,7 +7,10 @@ set -euo pipefail
 # stay shell-shaped until typed-tool resolver coverage reaches those helpers.
 mkdir -p build build/nimcache test-logs
 # Protocol evidence describes one execution, never a reusable build artifact.
-rm -rf test-logs/results test-logs/parallel-run.json
+# test-logs/suite-finished.json is the end-of-script marker written just
+# before the final exit (see write_suite_finished_marker); a previous run's
+# copy must never vouch for this one, so it goes before anything is built.
+rm -rf test-logs/results test-logs/parallel-run.json test-logs/suite-finished.json
 mkdir -p test-logs/results
 repo_root="$(pwd -P)"
 # Keep large suite scratch off /tmp and outside the checkout; some tests build
@@ -878,4 +881,41 @@ if (( package_fixtures_status != 0 )); then
     "${package_fixtures_status}" >&2
   (( suite_status != 0 )) || suite_status="${package_fixtures_status}"
 fi
+
+# The end-of-script marker: written only here, after the Python phase and the
+# re-raise above, so its presence means this script reached its end. The
+# runner's test-logs/parallel-run.json says the Nim cases reached a verdict,
+# but not that the Python modules after them ran; CI's "Declare suite
+# coverage" step (scripts/ci_suite_coverage.py --finished-marker) needs both
+# before it calls a run a verdict on the code. Removed at the top of this
+# script so a stale copy cannot count. Written to a temporary name and
+# renamed, so a reader never sees half a document. Failing to write it is
+# reported and does not change the exit status: the status is the gate, the
+# marker is only evidence that the status is final.
+json_string() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '"%s"' "${s}"
+}
+write_suite_finished_marker() {
+  local marker="test-logs/suite-finished.json"
+  local modules="" module
+  for module in "${python_failed_modules[@]+"${python_failed_modules[@]}"}"; do
+    modules+="${modules:+, }$(json_string "${module}")"
+  done
+  {
+    printf '{\n'
+    printf '  "schema": "reprobuild.suite-finished.v1",\n'
+    printf '  "test_builds_status": %d,\n' "${test_builds_status}"
+    printf '  "cross_repo_fixtures_status": %d,\n' "${cross_repo_fixtures_status}"
+    printf '  "package_fixtures_status": %d,\n' "${package_fixtures_status}"
+    printf '  "nim_phase_status": %d,\n' "${nim_phase_status}"
+    printf '  "python_failed_modules": [%s],\n' "${modules}"
+    printf '  "suite_status": %d\n' "${suite_status}"
+    printf '}\n'
+  } > "${marker}.tmp" && mv -f "${marker}.tmp" "${marker}"
+}
+write_suite_finished_marker \
+  || printf '::warning:: could not write test-logs/suite-finished.json\n' >&2
 exit "${suite_status}"

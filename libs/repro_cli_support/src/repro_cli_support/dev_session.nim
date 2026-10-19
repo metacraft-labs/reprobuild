@@ -927,6 +927,11 @@ type
     ## moment it decides whether to concretize a token.
     value*: string
     provenance*: RegistrarProvenance
+    registeredMember: string
+      ## The reader carries the member name alongside both lookup aliases.
+      ## A member can contain colons, so its name cannot be recovered by
+      ## inspecting whether a table key looks service-qualified. Empty for
+      ## caller-built tables, whose keys are reported verbatim instead.
 
   InstanceAttribute* = object
     ## Shared-Development-Services §7.3 — one computed attribute of the
@@ -1091,7 +1096,7 @@ proc readSharedInstanceMintedAttributes*(outDir: string):
   var ambiguous: seq[string] = @[]
   for row in readSharedInstanceMintedRows(outDir):
     let attr = MintedAttribute(value: row.mintedId,
-      provenance: row.provenance)
+      provenance: row.provenance, registeredMember: row.member)
     result[row.serviceName & ":" & row.member] = attr
     if row.member in result and result[row.member] != attr:
       ambiguous.add(row.member)
@@ -1403,9 +1408,11 @@ proc substituteMintedAttributes*(serviceName: string;
       result.add(attr.value)
     else:
       var known: seq[string] = @[]
-      for key in minted.keys:
-        if ':' notin key:
-          known.add(key)
+      for key, attr in minted:
+        let memberName =
+          if attr.registeredMember.len > 0: attr.registeredMember else: key
+        if memberName notin known:
+          known.add(memberName)
       known.sort()
       # D-SS10 (§7.1) requires an early read to report WHICH ATTRIBUTE,
       # WHICH RESOURCE and WHICH EDGE would have ordered it. All three
@@ -1441,6 +1448,8 @@ proc substituteMintedAttributes*(serviceName: string;
                                  seq[string] =
   ## The PROVENANCE-BLIND spelling, for a caller that holds only
   ## identifiers.
+  ## Without registration metadata, diagnostic member names are the supplied
+  ## keys verbatim, including any colons; no key spelling is guessed away.
   ##
   ## Every row it supplies is treated as `unstamped`, which is the truth
   ## about a table that cannot say otherwise -- so `@minted:` resolves

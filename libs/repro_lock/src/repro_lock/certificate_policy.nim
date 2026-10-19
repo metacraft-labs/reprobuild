@@ -850,6 +850,53 @@ proc stricterMode*(a, b: PolicyMode): PolicyMode =
   ## anchor's ``gate_mode`` (Push-Gateway-Wiring-And-Policy §4.2).
   if ord(a) >= ord(b): a else: b
 
+proc unionPlatforms*(a, b: openArray[string]): seq[string] =
+  ## The platform set that satisfies BOTH ``a`` and ``b`` and nothing
+  ## stronger than it must (operator decision D19, 2026-10-18).
+  ##
+  ## Every concrete platform listed must be covered on its own, so a union
+  ## of concrete sets is their set union. ``["*"]`` (``anyPlatform``) asks
+  ## that SOME platform cover the name on its own, which any non-empty
+  ## concrete set already implies: covering ``linux/amd64`` on its own
+  ## platform is covering it on one platform. So ``*`` joined with a
+  ## concrete set is that concrete set, and ``*`` with ``*`` stays ``*``.
+  ## The result is never empty when either side is non-empty, and never
+  ## mixes ``*`` with a concrete platform (the snapshot's own invariant).
+  let aAny = a.len == 1 and a[0] == AnyPlatformMarker
+  let bAny = b.len == 1 and b[0] == AnyPlatformMarker
+  if aAny and bAny:
+    return @[AnyPlatformMarker]
+  for p in a:
+    if p != AnyPlatformMarker and p notin result: result.add(p)
+  for p in b:
+    if p != AnyPlatformMarker and p notin result: result.add(p)
+  if result.len == 0 and (aAny or bAny):
+    result = @[AnyPlatformMarker]
+
+proc unionRequirements*(a, b: openArray[PolicyRequirement]):
+    seq[PolicyRequirement] =
+  ## Every certificate either side requires, each on the ``unionPlatforms``
+  ## of the two sides' platform sets (operator decision D19). Order is
+  ## ``a``'s names first, then the names only ``b`` requires, so a gate's
+  ## diagnostic lists the pushed rule's names before the anchor's.
+  ##
+  ## The gateway's ratchet judges a push by the union of the anchor's
+  ## requirement and the pushed commit's: a commit cannot drop a name, or
+  ## narrow its platforms, in the same push the dropped requirement judges.
+  for req in a:
+    var merged = req
+    for other in b:
+      if other.certificate == req.certificate:
+        merged.platforms = unionPlatforms(req.platforms, other.platforms)
+    result.add(merged)
+  for other in b:
+    var present = false
+    for req in result:
+      if req.certificate == other.certificate:
+        present = true
+    if not present:
+      result.add(other)
+
 proc platformsLabel*(platforms: openArray[string]): string =
   ## ``any platform`` for ``["*"]``, the platforms joined otherwise.
   if platforms.len == 1 and platforms[0] == AnyPlatformMarker:

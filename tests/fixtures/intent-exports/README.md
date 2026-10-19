@@ -41,6 +41,10 @@ Cases:
   `resources:` block in `activity cli:` and `activity laptop:`, and a data
   resource row with `activity = "cli"`), so each host's evaluation holds only
   the scoped resources of the activities it selects.
+  A `when x86_64():` nested in `default`'s `when linux():` puts
+  `gm5-linux-x86-tool` in the x86_64-linux evaluations only: nested guards
+  conjoin, in the planner and in `nix/lib/intent.nix` alike (reprobuild-pm
+  issue 2026-10-18-home-planner-drops-packages-under-nested-activity-guards).
   Since GM10 `m1`'s entry says `system: managedElsewhere("example-org/infra")`,
   so the export carries `intent.systemManagedElsewhere` and every evaluation
   `system` (`elsewhere` for m1, `here` for home-pc); `lib-tests` also checks

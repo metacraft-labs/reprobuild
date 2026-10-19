@@ -22,7 +22,6 @@ libs/repro_elevation/src/repro_elevation/inline_exec_driver.nim
 libs/repro_elevation/src/repro_elevation/posix_system_driver.nim
 libs/repro_elevation/src/repro_elevation/windows_system_driver.nim
 libs/repro_elevation/src/repro_elevation/windows_vs_installer_driver.nim
-libs/repro_home_apply/src/repro_home_apply/builtin_adapter.nim
 libs/repro_home_apply/src/repro_home_apply/package_catalog.nim
 libs/repro_home_apply/src/repro_home_apply/stow.nim
 libs/repro_home_intent/src/repro_home_intent/host_identity.nim
@@ -82,6 +81,7 @@ libs/repro_system_rollback/src/repro_system_rollback.nim
 libs/repro_test_support/src/repro_test_support.nim
 libs/repro_test_support/src/repro_test_support/per_case_runs.nim
 libs/repro_tool_profiles/src/repro_tool_profiles.nim
+libs/repro_tool_profiles/src/repro_tool_profiles/archive_steps.nim
 libs/repro_workspace_manifests/src/repro_workspace_manifests/manifest_refresh.nim
 libs/repro_workspace_manifests/src/repro_workspace_manifests/provenance.nim
 libs/repro_workspace_vcs/src/git_actions.nim

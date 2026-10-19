@@ -23,15 +23,13 @@
 ##     lengthen that interval. So the TIMING is asserted, not only the output.
 ##
 ## PLATFORMS, AND WHAT EACH ONE CAN SHOW. Both hosting forms run on Linux and
-## macOS, and the evidence comparison runs on both. Two things do not exist on
-## macOS and are therefore asserted on Linux only, each with a pin that reddens
-## the day the platform gains them:
-##
-##   * the §4.1 detached-descendant guard — io-mon's is a ``/proc`` scan that
-##     runs only on Linux, so off Linux both arms grade a live descendant
-##     ``mcComplete`` (recorded as a gap in io-mon issues/
-##     2026-10-17-macos-grades-a-live-detached-descendant-complete.md);
-##   * hence the timing case's calibration, which is counted in grace windows.
+## macOS, and the evidence comparison runs on both. Linux has the §4.1
+## detached-descendant guard and its grace-window timing calibration. macOS
+## fails closed with an explicit tree-lifetime limitation on every capture,
+## including the quiesced control. That exact marker is required in both
+## arms; the control must remain complete after removing only that marker,
+## so unrelated loss cannot make the comparison pass vacuously. Raw records
+## and engine evidence, including the marker, are always compared in full.
 ##
 ## The macOS shim also stamps per-object and per-process identities
 ## (``ino=``, ``mtime=``, ``start=``, ``childstart=``, KERN_PROC_PID MIBs) that
@@ -102,6 +100,7 @@
 import std/[algorithm, os, sets, strutils, tables, unittest]
 
 import repro_build_engine
+import repro_test_support/descendant_guard_expectations
 import repro_build_engine/worker_pool
 from repro_test_support import prepareMonitorTools, testCaseScratchSlug
 from repro_core/dependency_gathering import automaticMonitorGatheringPolicy
@@ -581,12 +580,13 @@ else:
       ## diffs against — and the two must produce the same evidence.
       ##
       ## IT IS RUN FOR TWO FIXTURES AND THE SECOND ONE IS THE POINT. The
-      ## quiesced fixture is the control: it exists so the detached-descendant
-      ## fixture below cannot pass because io-mon grades this whole family
-      ## ``mcIncomplete`` for some unrelated reason. The descendant fixture is
+      ## quiesced fixture is the control: after accounting for the exact macOS
+      ## tree-lifetime limitation, it must carry no unrelated loss. The
+      ## descendant fixture is
       ## the acceptance: a real child is left running past the root's
       ## exit, held alive across every grace window either path can open, so
-      ## BOTH arms must reach ``mcIncomplete`` through the §4.1 guard. Two
+      ## BOTH arms must reach ``mcIncomplete`` through the §4.1 guard on
+      ## Linux or the explicit platform limitation on macOS. Two
       ## paths agreeing on ``mcComplete`` proves nothing.
       ##
       ## MUTATION TARGETS.
@@ -617,7 +617,8 @@ else:
       template runOneArm(tag: string; hosted: bool; descendant: bool):
           tuple[records: seq[string]; pidCount, inodeCount: int;
                 evidence, histogram: string;
-                completeness: MonitorCompleteness; status: ActionStatus] =
+                completeness, subsystemCompleteness: MonitorCompleteness;
+                status: ActionStatus] =
         # The work directory is torn down and REBUILT for every arm, with
         # the same contents at the same absolute path. That is what makes the
         # two runs' real paths equal by construction instead of by a
@@ -654,11 +655,12 @@ else:
         let depFile =
           if fileExists(depPath): readMonitorDepFile(depPath)
           else: MonitorDepFile()
+        let subsystemCompleteness = descendantSubsystemEvidence(depFile).completeness
         (renderRecords(depFile, work), distinctPids(depFile),
          distinctInodes(depFile),
          renderEvidence(run.results[0].evidence, work),
          kindHistogram(depFile), depFile.completeness,
-         run.results[0].status)
+         subsystemCompleteness, run.results[0].status)
 
       putEnv("IO_MON_LINUX_DESCENDANT_GRACE_MS", $GraceMs)
       defer: delEnv("IO_MON_LINUX_DESCENDANT_GRACE_MS")
@@ -671,13 +673,19 @@ else:
           quiescedWrapped.status == asSucceeded,
         "the quiesced fixture did not succeed on both arms: hosted=" &
         $quiescedHosted.status & " wrapped=" & $quiescedWrapped.status
-      checkOrEcho quiescedHosted.completeness == mcComplete and
-          quiescedWrapped.completeness == mcComplete,
-        "CONTROL: a quiesced monitored action must grade mcComplete on both " &
-        "arms, otherwise the descendant case below cannot distinguish the " &
-        "§4.1 downgrade from a fixture that is incomplete for some other " &
-        "reason. hosted=" & $quiescedHosted.completeness & " wrapped=" &
-        $quiescedWrapped.completeness
+      when defined(macosx):
+        checkOrEcho quiescedHosted.completeness == mcIncomplete and
+            quiescedWrapped.completeness == mcIncomplete,
+          "macOS must fail closed on both quiesced arms without a tree-lifetime guard"
+      else:
+        checkOrEcho quiescedHosted.completeness == mcComplete and
+            quiescedWrapped.completeness == mcComplete,
+          "CONTROL: a quiesced Linux action must grade mcComplete on both arms"
+      checkOrEcho quiescedHosted.subsystemCompleteness == mcComplete and
+          quiescedWrapped.subsystemCompleteness == mcComplete,
+        "CONTROL: the quiesced fixture has loss beyond the exact platform " &
+        "tree-lifetime limitation: hosted=" & $quiescedHosted.subsystemCompleteness &
+        " wrapped=" & $quiescedWrapped.subsystemCompleteness
       # NOT VACUOUS: identical-but-empty would satisfy every comparison below.
       checkOrEcho quiescedHosted.records.len > 0,
         "the hosted arm produced NO records, so comparing the two arms " &
@@ -739,53 +747,18 @@ else:
           liveWrapped.status == asSucceeded,
         "the descendant fixture did not succeed on both arms: hosted=" &
         $liveHosted.status & " wrapped=" & $liveWrapped.status
-      # THE HALF THAT MAKES THE COMPARISON MEAN SOMETHING. Both arms must
-      # reach the §4.1 downgrade; agreeing on mcComplete would be agreement
-      # that the guard never ran.
-      #
-      # §4.1 EXISTS ON LINUX ONLY. io-mon's detached-descendant guard is a
-      # ``/proc/*/environ`` scan, and ``settleMonitorDescendants``
-      # (``io_mon/fs_snoop.nim``) runs it ``when defined(linux)`` and does
-      # nothing on macOS or Windows: "macOS and Windows have no §4.1
-      # equivalent yet". io-mon's own pins of the guard
-      # (``tests/linux/test_io_mon_external_host_descendant_guard.nim``,
-      # ``tests/linux/test_io_mon_evidence_identical_across_launch_paths``)
-      # are Linux-only for that reason. Off Linux, BOTH arms therefore grade
-      # this fixture ``mcComplete`` — measured at reprobuild 8a61fb6963 on
-      # aarch64-darwin at load averages ~6 and ~21 alike, so it is the
-      # platform and not the host's load.
-      when defined(linux):
-        checkOrEcho liveHosted.completeness == mcIncomplete,
-          "the HOSTED arm graded an action with a descendant alive across " &
-          "the whole grace window " & $liveHosted.completeness &
-          "; the §4.1 guard did not downgrade it, so the pooled finish is " &
-          "erring toward mcComplete — the direction DH-4 says is wrong"
-        checkOrEcho liveWrapped.completeness == mcIncomplete,
-          "the WRAPPED reference graded the descendant fixture " &
-          $liveWrapped.completeness & ", so this fixture does not exercise " &
-          "the §4.1 guard at all and the assertion above proves nothing"
-      else:
-        # What TP-2 owes here is that the pooled finish grades the edge
-        # EXACTLY as the batch reference does, and that is asserted on every
-        # platform: same completeness, and (below) the same records, the same
-        # process and object counts, the same engine evidence — and more
-        # processes than the quiesced fixture, so the detached child IS in
-        # the evidence being compared.
-        checkOrEcho liveHosted.completeness == liveWrapped.completeness,
-          "the two arms graded the descendant fixture differently: hosted=" &
-          $liveHosted.completeness & " wrapped=" & $liveWrapped.completeness
-        # And the platform premise is pinned rather than assumed, so this
-        # gate cannot outlive it. The day io-mon grows a §4.1 guard on this
-        # platform, the descendant fixture grades mcIncomplete here, this
-        # line reddens, and the Linux arm above must be enabled for it —
-        # instead of the gate silently keeping the stronger assertion off.
-        # The gap itself is recorded in io-mon issues/
-        # 2026-10-17-macos-grades-a-live-detached-descendant-complete.md.
-        checkOrEcho liveHosted.completeness == mcComplete,
-          "the descendant fixture graded " & $liveHosted.completeness &
-          " off Linux, where io-mon has had no §4.1 guard: if io-mon now " &
-          "implements one here, enable the `when defined(linux)` arm above " &
-          "for this platform"
+      # Both hosting forms must reject completeness for a live descendant.
+      # Linux observes the §4.1 grace expiry; macOS carries its explicit
+      # platform limitation. The real verdict and every raw record survive
+      # the control's separate subsystem-grade calculation above.
+      checkOrEcho liveHosted.completeness == mcIncomplete,
+        "the HOSTED arm graded a live detached descendant " & $liveHosted.completeness
+      checkOrEcho liveWrapped.completeness == mcIncomplete,
+        "the WRAPPED arm graded a live detached descendant " & $liveWrapped.completeness
+      when defined(macosx):
+        checkOrEcho liveHosted.subsystemCompleteness == mcComplete and
+            liveWrapped.subsystemCompleteness == mcComplete,
+          "the descendant fixture has unexpected loss beyond the exact platform limitation"
 
       checkOrEcho liveHosted.histogram == liveWrapped.histogram,
         "the two arms disagree about WHICH KINDS of observation the " &
@@ -950,7 +923,8 @@ else:
       # because each finish holds the detached-descendant window open for a
       # full grace — and io-mon's guard is a ``/proc`` scan that
       # ``settleMonitorDescendants`` runs ``when defined(linux)`` alone
-      # ("macOS and Windows have no §4.1 equivalent yet"). Off Linux a finish
+      # (macOS and Windows fail closed without a tree-lifetime scan).
+      # Off Linux a finish
       # holds nothing open, so the one-worker arm's worst delay is the sum of
       # three ordinary finishes: 20.8 ms at load ~21 and 24.7 ms at load ~70,
       # measured on aarch64-darwin at reprobuild 8a61fb6963 / 07391efa6e.
@@ -961,7 +935,8 @@ else:
       # Everywhere, the handoff itself is still asserted: every monitor of
       # both arms was handed to the pool (``samples`` above) and the submit
       # reaches a worker promptly (below). The evidence case pins that the
-      # platform still lacks the guard, so this gate cannot outlive it.
+      # platform limitation is explicit, so a future macOS lifetime guard
+      # must update that assertion and this calibration together.
       when defined(linux):
         # THE INSTRUMENT IS NOT BLIND. With one worker the k-th finish waits
         # for its k-1 predecessors, each of which holds the §4.1 window open

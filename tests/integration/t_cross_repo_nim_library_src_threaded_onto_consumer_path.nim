@@ -386,6 +386,19 @@ created_at = "2026-07-04T00:00:00Z"
           checkpoint("develop app-out.txt(after edit)=" & got2)
           check got2 == greetStampEdited
 
+        # Reject the producer before its standard-module poison can reach a
+        # compile. A fresh source input forces this check through launch even
+        # when the preceding valid consumer build is cached.
+        createDir(siblingRoot / "src/std")
+        writeFile(siblingRoot / "src/std/objectdollar.nim",
+          "{.error: \"producer replaced std/objectdollar\".}\n")
+        writeFile(consumerRoot / "src/app.nim", consumerAppSource &
+          "\n# producer collision validation\n")
+        let refused = run(cmd, repoRoot)
+        checkpoint(refused.output)
+        check refused.code != 0
+        check refused.output.contains("reserved standard-library module namespace std")
+
       # ==================================================================
       # LOCK-PINNED MODE — no override → fetched tree's src/ (§4.2a.6, §5.2)
       # ==================================================================
@@ -470,6 +483,16 @@ created_at = "2026-07-04T00:00:00Z"
           let got2 = readFile(marker).strip()
           checkpoint("lock-pinned app-out.txt(after refreshed pin)=" & got2)
           check got2 == greetStampEdited
+
+        createDir(remote / "src/std")
+        writeFile(remote / "src/std/objectdollar.nim",
+          "{.error: \"producer replaced std/objectdollar\".}\n")
+        gitCommitAll(remote, gitBin, "sc11 producer reserved namespace")
+        writeLock(consumerRoot, remote, gitHead(remote, gitBin))
+        let refused = run(cmd, repoRoot)
+        checkpoint(refused.output)
+        check refused.code != 0
+        check refused.output.contains("reserved standard-library module namespace std")
 
       # ==================================================================
       # FALSIFIABILITY — a CONTROL consumer that names NO ``uses: "greetlib"``

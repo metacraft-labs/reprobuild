@@ -59,6 +59,32 @@ name: Suite case counts
 # contributor whose shell predates the hook pushes with no gate at all and no
 # warning that it is missing. This workflow is the layer that does not depend
 # on anyone's local state.
+#
+# RECOVERING A STALE `dev` (job `regenerate-on-dev`)
+#
+# A gate that only reports leaves `dev` stale until someone volunteers a
+# regeneration: five consecutive `dev` commits once carried a stale baseline,
+# and every pull request opened meanwhile inherited the red (reprobuild-pm
+# issue 2026-10-01; spec Test-Suite-Architecture-Guidelines, "Suite-Artifact
+# Staleness", "Mainline recovery"). So when the gate fails on a push to `dev`,
+# a second job runs `scripts/regenerate_suite_artifacts.py`, which regenerates
+# the two build-free artifacts with the commands the refusal prints -- and
+# nothing that records a judgement -- and opens one pull request into `dev`
+# with the drift report as its body, or updates the one already open from the
+# standing branch `automation/regenerate-suite-artifacts`.
+#
+# It never pushes to `dev`. A regeneration can record COVERAGE LOST, and the
+# script marks the pull request for review when it does, so a human merges
+# it. That is also all GITHUB_TOKEN permits: a pull request or push made with
+# it triggers no workflows, so the pull request's checks do not start on their
+# own -- a maintainer closes and reopens it (or pushes to its branch) to run
+# them before merging.
+#
+# The pull request is closed again, with its branch deleted, once it is moot
+# (`scripts/retire_regeneration_pr.sh`): by job `retire-regeneration-on-dev`
+# when the gate PASSES on a push to `dev` (fixed another way), and by
+# `regenerate-on-dev` itself when the regeneration finds nothing to change.
+# Left open, it would be a stale proposal a reviewer might still merge.
 
 on:
   push:
@@ -105,3 +131,173 @@ jobs:
             export SUITE_CASE_COUNTS_BASE="${ATTRIBUTION_BASE}"
           fi
           bash scripts/check_suite_case_counts.sh
+
+  regenerate-on-dev:
+    name: Regeneration pull request for a stale dev
+    needs: suite-case-counts
+    # Only a stale `dev` itself: on a pull request the remedy is the author's,
+    # and the refusal already names it. `failure()` rather than the default
+    # `success()`, because this job exists for exactly the gate's red.
+    if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    # EXEMPTION (CIP-5): hosted runner -- the same pure-python source scan as
+    # the gate, plus git and gh, which the standard image carries. See header.
+    runs-on: ubuntu-latest
+    # The only write token in this workflow, and only these two scopes: push
+    # the standing branch, open or edit its pull request.
+    permissions:
+      contents: write
+      pull-requests: write
+    # Serialise stale pushes in quick succession, so the standing branch is
+    # rewritten by one run at a time. Serialising does not ORDER the runs by
+    # commit -- an older push's job can start after a newer one's -- which is
+    # what the `tip` step below is for.
+    concurrency:
+      group: ${{ github.workflow }}-regenerate-on-dev
+      cancel-in-progress: false
+    env:
+      STANDING_BRANCH: automation/regenerate-suite-artifacts
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The commit the gate refused, not whatever `dev` has become since.
+          ref: ${{ github.sha }}
+      # Act only while this commit is still the tip of `dev`. Runs in the
+      # shared group are serialised but not ordered by commit, so without this
+      # an older push's job could overwrite a newer regeneration, or close the
+      # pull request a newer red push just opened. A later push runs its own
+      # copy of this workflow, so a skipped commit's decision is not lost.
+      - name: Act only for the current tip of dev
+        id: tip
+        run: |
+          # No pipe: the default `bash -e` has no pipefail, and a failed query
+          # must fail the step rather than read as "dev moved on".
+          listing="$(git ls-remote --exit-code origin refs/heads/dev)"
+          tip="${listing%%[[:space:]]*}"
+          if [ "${tip}" = "${GITHUB_SHA}" ]; then
+            echo "current=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "current=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::dev moved on from ${GITHUB_SHA} to ${tip}; its own run decides."
+          fi
+      - name: Regenerate the build-free suite artifacts
+        id: regenerate
+        if: steps.tip.outputs.current == 'true'
+        env:
+          # For the exit-3 arm, which retires a now-moot standing PR.
+          GH_TOKEN: ${{ github.token }}
+          DEV_SHA: ${{ github.sha }}
+        run: |
+          status=0
+          python3 scripts/regenerate_suite_artifacts.py \
+            "${RUNNER_TEMP}/pr-body.md" \
+            --title-file "${RUNNER_TEMP}/pr-title.txt" || status=$?
+          # 3: neither artifact was stale, so what made the gate red needs a
+          # judgement (enrol a test, fix the shape rule) and there is nothing
+          # to propose -- and a standing PR from an earlier run is moot, so it
+          # is closed. Stop green; the gate job's red already says why.
+          case "${status}" in
+            0) echo "changed=true" >> "${GITHUB_OUTPUT}" ;;
+            3)
+              echo "changed=false" >> "${GITHUB_OUTPUT}"
+              bash scripts/retire_regeneration_pr.sh "${DEV_SHA}" \
+                "has current suite artifacts; what is red there needs a judgement this pull request does not carry"
+              ;;
+            *) exit "${status}" ;;
+          esac
+      - name: Open or update the regeneration pull request
+        if: steps.regenerate.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEV_SHA: ${{ github.sha }}
+        run: |
+          # The default `bash -e` has no pipefail: without it a failed
+          # `gh pr list` below would read as "no pull request open" and fall
+          # through to creating a second one.
+          set -o pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898233+github-actions[bot]@users.noreply.github.com'
+          git switch --force-create "${STANDING_BRANCH}"
+          # Exactly the two regenerated paths: whatever else the run left in
+          # the checkout stays out of the commit.
+          git add -- scripts/reprobuild-suite-static-case-counts.tsv \
+            benchmarks/reports/reprobuild-suite-m0-inventory-sources.json
+          git commit --file - <<EOF
+          chore(suite): regenerate build-free suite artifacts for dev
+
+          The Suite case counts gate refused dev at ${DEV_SHA}: its checked-in
+          description of the test suite was stale. This regenerates the static
+          case-count baseline and the inventory entry set at that commit, with
+          the two commands the refusal prints, and nothing else. The pull
+          request body carries the drift report.
+          EOF
+          # Force: the standing branch is rebuilt from the refused commit on
+          # every run, so a later stale push replaces the earlier proposal
+          # instead of stacking on it. Only this branch is ever pushed.
+          git push --force origin "HEAD:refs/heads/${STANDING_BRANCH}"
+          title="$(cat "${RUNNER_TEMP}/pr-title.txt")"
+          # Same-repository pull requests only, exactly as
+          # retire_regeneration_pr.sh filters: `--head` matches a branch NAME,
+          # so a fork's identically named branch would match too, and editing
+          # it would overwrite someone else's pull request.
+          number="$(gh pr list --head "${STANDING_BRANCH}" --base dev --state open \
+            --json number,headRefName,isCrossRepository |
+            jq -r --arg branch "${STANDING_BRANCH}" \
+              'first(.[] | select(.isCrossRepository == false and .headRefName == $branch) | .number) // empty')"
+          if [ -n "${number}" ]; then
+            gh pr edit "${number}" --title "${title}" \
+              --body-file "${RUNNER_TEMP}/pr-body.md"
+          else
+            gh pr create --base dev --head "${STANDING_BRANCH}" \
+              --title "${title}" --body-file "${RUNNER_TEMP}/pr-body.md"
+          fi
+
+  retire-regeneration-on-dev:
+    name: Close a moot regeneration pull request
+    needs: suite-case-counts
+    # `dev` passed the gate, so any open regeneration PR was overtaken by a
+    # fix that landed another way. A no-op when none is open.
+    if: success() && github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    # EXEMPTION (CIP-5): hosted runner -- bash, jq and gh from the standard
+    # image, nothing else. See header.
+    runs-on: ubuntu-latest
+    # Close the PR, delete its (standing) branch; nothing else.
+    permissions:
+      contents: write
+      pull-requests: write
+    # Shares the regeneration's group: a retirement must not race a run that
+    # is recreating the same branch.
+    concurrency:
+      group: ${{ github.workflow }}-regenerate-on-dev
+      cancel-in-progress: false
+    env:
+      STANDING_BRANCH: automation/regenerate-suite-artifacts
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      # Act only while this commit is still the tip of `dev`. Runs in the
+      # shared group are serialised but not ordered by commit, so without this
+      # an older push's job could overwrite a newer regeneration, or close the
+      # pull request a newer red push just opened. A later push runs its own
+      # copy of this workflow, so a skipped commit's decision is not lost.
+      - name: Act only for the current tip of dev
+        id: tip
+        run: |
+          # No pipe: the default `bash -e` has no pipefail, and a failed query
+          # must fail the step rather than read as "dev moved on".
+          listing="$(git ls-remote --exit-code origin refs/heads/dev)"
+          tip="${listing%%[[:space:]]*}"
+          if [ "${tip}" = "${GITHUB_SHA}" ]; then
+            echo "current=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "current=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::dev moved on from ${GITHUB_SHA} to ${tip}; its own run decides."
+          fi
+      - name: Close the standing regeneration pull request, if open
+        if: steps.tip.outputs.current == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEV_SHA: ${{ github.sha }}
+        run: |
+          bash scripts/retire_regeneration_pr.sh "${DEV_SHA}" \
+            "passes the suite case-count gate, so the regeneration this proposed is no longer needed"

@@ -915,3 +915,34 @@ fix it.
 The design specs behind this page (`Unified-Locking-And-Hooks.md`,
 `CLI/hooks.md`, `CLI/push-hook-publication-protocol.md`) live in
 Reprobuild's non-public specification repository.
+
+## Restore a project set in a fresh directory
+
+`repro ws restore` checks out a selected project union at the exact commits in
+a workspace lock or named snapshot:
+
+```sh
+repro ws restore ../workspace ../restored --projects=compiler,tools \
+  --record=/path/to/record.toml
+repro ws restore https://example.com/org/workspace.git ../release \
+  --at=<metadata-commit> --projects=compiler,tools --snapshot=release
+```
+
+A local source uses its committed metadata `HEAD`; `--at` selects another
+metadata revision and is required for URL sources. Uncommitted source changes
+are ignored. Relative record paths resolve from the invoking directory.
+Alternatively, `--record=project/repo@<full-commit>` reads the exact record from
+a separate record store. Local sources discover `.repro/records` (with the
+legacy `.repro/manifests` fallback); `--record-store=PATH|URL` selects one
+explicitly. Automatic discovery covers only those conventional local locations;
+configured Git stores elsewhere require `--record-store`. Read its committed
+`HEAD` or `--record-store-at=REV`; URL stores
+require the revision flag. The resolved store commit is reported and retained
+at `<destination>/.repro/records`.
+
+Every selected Git repository must have a matching full commit pin. Checkouts
+are detached, the active project selection is recorded, and output lists the
+verified commit for each checkout. Other VCS members are refused. The
+source workspace is preserved. Use an absent or empty destination outside the
+local source workspace and input repositories, with an existing parent directory. Failed restores
+remove staging and preserve an initially empty destination.

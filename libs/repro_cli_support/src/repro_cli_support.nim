@@ -9,6 +9,7 @@ else:
   # this module's namespace.
   from std/posix import sigaction, sigemptyset, Sigaction, SIGPIPE, SIG_IGN
 import repro_core
+import repro_cli_support/workspace_restore
 # W8-R1/R2 — the one canonicalization the deleting consumers in this file ask
 # their containment question under. Imported by MODULE rather than folded into
 # `repro_core`'s re-exports on purpose: it is wanted at four named sites here
@@ -450,6 +451,9 @@ proc renderUsage*(programName: string): string =
           programName &
       " workspace|ws {bootstrap [<dir>] | init <project|url> [<path>] | " &
       "new <path> [--branch=NAME] [--existing-branch] [--projects=A,B] | " &
+      "restore <source> <destination> --projects=A,B [--at=REV] " &
+      "(--record=PATH|PROJECT/REPO@SHA | --snapshot=NAME) " &
+      "[--record-store=SOURCE] [--record-store-at=REV] | " &
       "sync [<project>...] | pull | switch <branch> [-b] | " &
       "status [<project>] | lock [<project>] | " &
       "list | enable <project>... [--default] " &
@@ -461,6 +465,7 @@ proc renderUsage*(programName: string): string =
       "provision | publish-evidence | " &
       "migrate-locks [--dry-run|--apply]} " &
       "[--workspace-root=PATH]\n\n" &
+      "clone objects: --clone-objects=shared|private=<dir>|none (dissociate alias)\n" &
       "workspace reports: the workspace verbs (init, sync, pull, lock, " &
       "status, list, manifests, shared-clones, forall, develop, hooks " &
       "ensure, check, push, branch, switch) write a JSON report file " &
@@ -20485,23 +20490,56 @@ const ManagedHookRefusalDirAssignment = "REPRO_REFUSAL_RECORD_DIR="
   ## reports every installed hook as "old or partially upgraded" and `repro
   ## push` stops at hook-preflight.
 
+type ManagedHookAuthorLineForm = object
+  ## One generation of the escape-hatch author line: the literal text around
+  ## the path, and whether the path between them is shell-quoted.
+  prefix, suffix: string
+  quoted: bool
+
 const
-  # The two anchors around the FIRST such value. Kept beside the reader rather
-  # than inside it so the coupling to
-  # `vcsManagedHookBody`'s escape-hatch block is visible from both ends.
+  # The anchors around the FIRST such value, one entry per GENERATION of the
+  # line any released build has written. Kept beside the reader rather than
+  # inside it so the coupling to `vcsManagedHookBody`'s escape-hatch block is
+  # visible from both ends.
   #
-  # That block writes the line as
-  #   echo <quoteShellPosix("repro hooks: ... REPROBUILD_REPRO=" &
-  #                         quoteShellPosix(author) & " git push")> >&2
-  # and the message always contains spaces, so the outer quoting is always
-  # the single-quoted form. Change one end and the other stops finding the
-  # author: every hook written from a second path of the same build is then
-  # reported as "old or partially upgraded" and `repro push` stops at
-  # hook-preflight. Tripwire: t_repro_push_accepts_hooks_the_same_build_wrote_
-  # from_another_path (tests/integration/t_repro_push_sync_integrates_...).
-  ManagedHookAuthorEchoPrefix =
-    "      echo 'repro hooks:        REPROBUILD_REPRO="
-  ManagedHookAuthorEchoSuffix = " git push' >&2"
+  # The reader must accept every generation, not only the one this build
+  # writes. An installed body is long-lived: it changes only when a writing
+  # build's `hooks ensure` happens to run in that repository, so one workspace
+  # holds bodies of several generations at once (measured 2026-10-03: 695 of
+  # 700 bodies were the double-quoted form while this build wrote the
+  # single-quoted one). A body whose author is not found loses its writer from
+  # `health`'s "written by" and is refused at push hook-preflight. Generations:
+  #
+  #   * before 99a3f3fe3 (2026-08-27): no author line. Nothing to match; ""
+  #     is the correct answer.
+  #   * 99a3f3fe3 up to 02304993^: double-quoted message, path spliced RAW:
+  #       echo "repro hooks:        REPROBUILD_REPRO=<path> git push" >&2
+  #   * 02304993 (2026-09-23) onward, what this build writes:
+  #       echo <quoteShellPosix("repro hooks: ... REPROBUILD_REPRO=" &
+  #                             quoteShellPosix(author) & " git push")> >&2
+  #     The message always contains spaces, so its quoting is always the
+  #     single-quoted form.
+  #
+  # The list only grows: a change to how the line is written ADDS an entry
+  # and removes none. Widening it is safe because the value read only proposes
+  # a candidate that `managedHookBodyIsCurrent` re-renders byte-exactly, so a
+  # wider read can reject a body but never accept one. Change the writer
+  # without adding its form here and every hook written from a second path of
+  # the same build is reported as "old or partially upgraded". Tripwires:
+  # t_repro_push_accepts_hooks_the_same_build_wrote_from_another_path
+  # (tests/integration/t_repro_push_sync_integrates_...) and
+  # tests/integration/t_managed_hook_author_is_read_from_every_generation.nim.
+  ManagedHookAuthorLineForms = [
+    # 02304993 onward. First, because it is what this build writes.
+    ManagedHookAuthorLineForm(
+      prefix: "      echo 'repro hooks:        REPROBUILD_REPRO=",
+      suffix: " git push' >&2",
+      quoted: true),
+    # 99a3f3fe3 up to 02304993^.
+    ManagedHookAuthorLineForm(
+      prefix: "      echo \"repro hooks:        REPROBUILD_REPRO=",
+      suffix: " git push\" >&2",
+      quoted: false)]
 
 proc unquoteShellPosixWord(quoted: string): string =
   ## Inverse of `quoteShellPosix` for one word: bare as-is, or `'...'` with
@@ -20515,16 +20553,17 @@ proc unquoteShellPosixWord(quoted: string): string =
 
 proc managedHookAuthorBin*(body: string): string =
   ## The `repro` path an installed managed hook advertises in its escape
-  ## hatch, or "" when the hook carries none.
+  ## hatch, or "" when the hook carries none. Reads every generation in
+  ## `ManagedHookAuthorLineForms`.
   for line in body.splitLines():
-    if line.startsWith(ManagedHookAuthorEchoPrefix) and
-        line.endsWith(ManagedHookAuthorEchoSuffix) and
-        line.len > ManagedHookAuthorEchoPrefix.len +
-          ManagedHookAuthorEchoSuffix.len:
-      # Undo the outer (message) quoting, then the inner (path) quoting.
-      let inner = line[ManagedHookAuthorEchoPrefix.len ..
-        ^(ManagedHookAuthorEchoSuffix.len + 1)].replace("'\"'\"'", "'")
-      return unquoteShellPosixWord(inner)
+    for form in ManagedHookAuthorLineForms:
+      if line.startsWith(form.prefix) and line.endsWith(form.suffix) and
+          line.len > form.prefix.len + form.suffix.len:
+        let inner = line[form.prefix.len .. ^(form.suffix.len + 1)]
+        if not form.quoted:
+          return inner
+        # Undo the outer (message) quoting, then the inner (path) quoting.
+        return unquoteShellPosixWord(inner.replace("'\"'\"'", "'"))
   ""
 
 proc managedHookRefusalRecordDirAdvertised*(body: string): string =
@@ -26761,6 +26800,44 @@ proc catalogLockedDep*(catalogRoot, root: string;
     ReprobuildPackagesRootEnv & " pointing at one) and refresh again")
   none(LockedDep)
 
+proc respelledUnderInvokingAncestor(canonical, invoking: string): string =
+  ## ``canonical`` — a symlink-resolved path, as Git prints them — re-expressed
+  ## under the spelling of ``invoking``'s ancestors, so the two can be related
+  ## by ``relativePath`` without the result depending on which spelling each
+  ## side happened to arrive in.
+  ##
+  ## Walks up from ``invoking`` to the DEEPEST ancestor whose resolved form
+  ## contains ``canonical`` and splices the remainder onto that ancestor's
+  ## spelling: with ``invoking = /tmp/s/consumer/.claude/worktrees/w`` and
+  ## ``canonical = /private/tmp/s/consumer`` the answer is
+  ## ``/tmp/s/consumer``. The deepest ancestor is the one that keeps the most
+  ## of the caller's spelling. Returns ``canonical`` unchanged when no
+  ## ancestor resolves into it (it then lies outside every alias the caller
+  ## used) or when nothing can be resolved.
+  var ancestor = os.normalizedPath(absolutePath(invoking))
+  while ancestor.len > 0:
+    var resolved = ""
+    try:
+      if dirExists(extendedPath(ancestor)):
+        resolved = os.normalizedPath(expandFilename(ancestor))
+    except OSError:
+      discard
+    if resolved.len > 0:
+      if cmpPaths(resolved, canonical) == 0:
+        return ancestor
+      let rest = relativePath(canonical, resolved).replace('\\', '/')
+      # ``..`` alone or as the first component means ``canonical`` lies
+      # outside this ancestor; a child that merely starts with two dots
+      # (``..cache``) is inside it.
+      if rest.len > 0 and rest != "." and rest != ".." and
+          not rest.startsWith("../") and not rest.isAbsolute:
+        return os.normalizedPath(ancestor / rest)
+    let parent = parentDir(ancestor)
+    if parent.len == 0 or parent == ancestor:
+      break
+    ancestor = parent
+  canonical
+
 proc committedLockPathBase(projectRoot: string): string =
   ## The directory a COMMITTED lock's ``deps`` paths are relative to.
   ##
@@ -26791,6 +26868,19 @@ proc committedLockPathBase(projectRoot: string): string =
   ## project in a subdirectory keeps writing paths relative to its own
   ## directory — where its lock lives — rather than to the repository top.
   ##
+  ## THE RESULT IS SPELLED THE WAY ``projectRoot`` IS. Git prints both
+  ## ``top`` and ``main`` with every symlink resolved, while the dep locations
+  ## callers relate to the result (``relativePath(depAbs, pathBase)``) keep the
+  ## invoking spelling. Through an alias — macOS's ``/tmp`` ->
+  ## ``/private/tmp``, or any workspace reached through a symlink — mixing the
+  ## two climbed to the filesystem root and back down,
+  ## ``../../../../../tmp/<scratch>/producer``, and relating the alias-spelled
+  ## project to the resolved ``top`` lost the project's position within the
+  ## repository as well (Unified-Locking-And-Hooks.md §14.2 makes the path
+  ## writer-independent). So the position is measured canonically, and the
+  ## answer is re-expressed under the invoking spelling
+  ## (``respelledUnderInvokingAncestor``).
+  ##
   ## Degrades to ``projectRoot`` whenever the main worktree cannot be
   ## determined: no VCS tool, a directory that is not a checkout, or a layout
   ## whose worktree listing is unavailable. That is the previous behaviour,
@@ -26801,10 +26891,19 @@ proc committedLockPathBase(projectRoot: string): string =
   if top.len == 0: return normalized
   let main = gitMainWorktreeTop(normalized)
   if main.len == 0 or cmpPaths(main, top) == 0: return normalized
-  let within = relativePath(normalized, top).replace('\\', '/')
-  if within.len == 0 or within == "." or within.startsWith(".."):
-    return os.normalizedPath(main)
-  os.normalizedPath(main / within)
+  # ``top`` is canonical, so the project is measured against it canonically.
+  # When the project cannot be canonicalised the invoking spelling is the best
+  # remaining guess; it is right whenever no alias is involved.
+  let canonicalProject =
+    try: os.normalizedPath(expandFilename(normalized))
+    except OSError: normalized
+  let within = relativePath(canonicalProject, top).replace('\\', '/')
+  let canonicalBase =
+    if within.len == 0 or within == "." or within.startsWith(".."):
+      os.normalizedPath(main)
+    else:
+      os.normalizedPath(main / within)
+  respelledUnderInvokingAncestor(canonicalBase, normalized)
 
 proc lockedDepsForWorkspace*(workspaceRoot: string;
                             usesSelectors: seq[string] = @[];
@@ -26891,7 +26990,10 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     let repoRoot = gitTopLevel(recipeRoot)
     if repoRoot.len == 0:
       continue
-    let depAbs = absolutePath(repoRoot)
+    # Git answers with symlinks resolved; ``pathBase`` keeps the invoking
+    # spelling. Relate the two in ONE spelling (``committedLockPathBase``).
+    let depAbs = respelledUnderInvokingAncestor(absolutePath(repoRoot),
+      absolutePath(recipeRoot))
     if cmpPaths(depAbs, root) == 0:
       continue
     let rel = relativePath(depAbs, pathBase).replace('\\', '/')
@@ -32106,6 +32208,28 @@ proc initHcrWatchSession(config: HcrWatchConfig; projectRoot = ""): HcrWatchSess
     if resolvedConfig.artifacts.len > 0 and not resolvedConfig.artifacts.isAbsolute:
       resolvedConfig.artifacts = resolveProjectPath(projectRoot, resolvedConfig.artifacts)
   resolvedConfig.validateHcrWatchConfig()
+  when defined(posix):
+    # A RELATIVE socket that resolves long is hashed into ``/tmp`` above,
+    # but a path the user spelled ABSOLUTE is theirs and is not moved. It
+    # still has to fit what ``std/net`` binds -- 107 bytes on Linux, 91 on
+    # macOS (``repro_core/paths.unixSocketPathMaxLen``) -- and past that
+    # ``bindUnix`` fails with a bare ``socket path too long`` naming neither
+    # the path nor the flag. Refuse here instead, naming both. The legacy
+    # ``--hcr-agent-socket`` session and every ``--hcr-target`` session are
+    # initialised through this proc, so both are covered; the message names
+    # whichever flag supplied the path.
+    if resolvedConfig.hcrWatchEnabled and resolvedConfig.socketPath.len > 0 and
+        not unixSocketPathFits(resolvedConfig.socketPath):
+      let flag =
+        if resolvedConfig.targetName.len > 0:
+          "--hcr-target=" & resolvedConfig.targetName & " socket"
+        else:
+          "--hcr-agent-socket"
+      raise newException(ValueError,
+        flag & " path " & resolvedConfig.socketPath & " is " &
+          $resolvedConfig.socketPath.len & " bytes, longer than the " &
+          $unixSocketPathMaxLen() & "-byte Unix-socket path limit on this " &
+          "platform; pass a shorter path")
   result.enabled = resolvedConfig.hcrWatchEnabled
   result.config = resolvedConfig
   if result.enabled:
@@ -33994,6 +34118,11 @@ type
     rows: seq[DevelopListRow]
     stages: seq[DevelopSelectionStage]
     backends: seq[DevelopBackendReport]
+    emptyLockSet: bool
+      ## The run failed for the ONE reason that is also an answer: no backend
+      ## yielded a single lock record, so develop mode places nothing. The
+      ## managed hooks read that as "nothing is substituted"
+      ## (``hookSubstitutedDevelopSet``); every verb still refuses on it.
 
 proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
                            args: DevelopAllArgs): DevelopLockSet
@@ -34740,6 +34869,7 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
       "`repro workspace lock` records a routed tier's per-repo entries)."
     var r = failure(msg, notices, 1)
     r.backends = composed.backends
+    r.emptyLockSet = true
     return r
 
   # DS-4 — evidence-only repos are excluded from the develop set, but they are
@@ -37530,6 +37660,28 @@ proc installUserDaemonWatchExecutor() =
         discard
       restoreDaemonRequestEnvironment(previousEnv))
 
+proc parseCloneObjects(raw: string): string =
+  ## Validate before any workspace mutation and capture the invocation cwd for
+  ## private roots. Never export this setting into child process environments.
+  case raw
+  of "shared": "shared"
+  of "none", "dissociate": "none"
+  else:
+    if raw.startsWith("private=") and raw.len > "private=".len:
+      "private=" & absolutePath(raw["private=".len .. ^1])
+    else:
+      raise newException(ValueError,
+        "--clone-objects expects shared, private=<non-empty directory>, none or dissociate")
+
+proc cloneObjectsLabel(policy: string): string =
+  if policy.len == 0: "shared" else: policy
+
+proc cloneObjectsRoot(policy, workspaceRoot: string): string =
+  ## An empty root is the no-pool sentinel; callers must not refresh it.
+  if policy == "none": ""
+  elif policy.startsWith("private="): policy["private=".len .. ^1]
+  else: defaultCacheRoot(workspaceRoot)
+
 # ---- M9: `repro workspace init` -------------------------------------------
 #
 # Drive the M6 single-project resolver (or M7 variant composer, or M8
@@ -37546,14 +37698,16 @@ type
     ## RA-18 — one copyfile/linkfile dest materialized at the workspace
     ## root after a repo's checkout succeeds. Emitted by both
     ## ``executeWorkspaceInit`` and ``executeWorkspaceSync``.
-    repo*: string        ## repo ``path`` that declared the directive
-    kind*: string        ## "copyfile" | "linkfile"
-    src*: string         ## repo-relative source
-    dest*: string        ## workspace-root-relative destination
-    status*: string      ## "materialized" | "failed"
-    diagnostic*: string  ## empty on success
+    repo*: string ## repo ``path`` that declared the directive
+    kind*: string ## "copyfile" | "linkfile"
+    src*: string ## repo-relative source
+    dest*: string ## workspace-root-relative destination
+    status*: string ## "materialized" | "failed"
+    diagnostic*: string ## empty on success
 
   WorkspaceInitClonedEntry* = object
+    cloneObjects*: string
+    clonePoolRoot*: string
     name*: string
     path*: string
     remote*: string
@@ -37617,6 +37771,8 @@ type
     project*: string
     workspaceRoot*: string
     cloned*: seq[WorkspaceInitClonedEntry]
+    manifestClones*: seq[WorkspaceInitClonedEntry]
+    rootClone*: WorkspaceInitClonedEntry
     upToDate*: seq[WorkspaceInitUpToDateEntry]
     divergences*: seq[WorkspaceInitDivergenceEntry]
     skippedLayers*: seq[WorkspaceInitSkippedLayerEntry]
@@ -37641,11 +37797,24 @@ proc toJsonNode*(report: WorkspaceInitReport): JsonNode =
   for entry in report.cloned:
     var obj = newJObject()
     obj["name"] = %entry.name
+    obj["cloneObjects"] = %entry.cloneObjects
+    obj["clonePoolRoot"] = %entry.clonePoolRoot
     obj["path"] = %entry.path
     obj["remote"] = %entry.remote
     obj["revision"] = %entry.revision
     cloned.add(obj)
   result["cloned"] = cloned
+  var manifestClones = newJArray()
+  for entry in report.manifestClones:
+    manifestClones.add(%*{"name": entry.name, "path": entry.path,
+      "remote": entry.remote, "revision": entry.revision,
+      "cloneObjects": entry.cloneObjects, "clonePoolRoot": entry.clonePoolRoot})
+  result["manifestClones"] = manifestClones
+  if report.rootClone.path.len > 0:
+    let entry = report.rootClone
+    result["rootClone"] = %*{"name": entry.name, "path": entry.path,
+      "remote": entry.remote, "revision": entry.revision,
+      "cloneObjects": entry.cloneObjects, "clonePoolRoot": entry.clonePoolRoot}
   var upToDate = newJArray()
   for entry in report.upToDate:
     var obj = newJObject()
@@ -37731,6 +37900,7 @@ proc renderInitTextLines*(report: WorkspaceInitReport): seq[string] =
 
 type
   WorkspaceInitArgs = object
+    cloneObjects: string
     projectName: string
     workspaceRoot: string
     toolProvisioning: ToolProvisioningMode
@@ -38016,6 +38186,9 @@ proc parseWorkspaceInitArgs(args: openArray[string]): WorkspaceInitArgs =
     let arg = args[i]
     if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
       result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--clone-objects" or arg.startsWith("--clone-objects="):
+      result.cloneObjects = parseCloneObjects(valueFromFlag(args, i,
+          "--clone-objects"))
     elif arg == "--tool-provisioning" or
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
@@ -38687,7 +38860,11 @@ proc existingRecordStoreRoot*(workspaceRoot: string): string =
       return candidate
   ""
 
-proc bootstrapManifestCache(args: WorkspaceInitArgs) =
+proc gitRunPlain(identity: GitToolIdentity;
+                 args: openArray[string]): tuple[code: int; output: string]
+
+proc bootstrapManifestCache(args: WorkspaceInitArgs): seq[
+    WorkspaceInitClonedEntry] =
   ## RA-11 bootstrap manifest cache. When ``--manifest-url`` is given and
   ## the workspace has no manifest checkout yet, clone the
   ## manifest repo into the tool-managed bootstrap cache
@@ -38711,7 +38888,43 @@ proc bootstrapManifestCache(args: WorkspaceInitArgs) =
   let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
   createDir(args.workspaceRoot / ".repro")
 
-  let cacheRoot = defaultManifestCacheRoot(private = false)
+  let policyRoot = cloneObjectsRoot(args.cloneObjects, args.workspaceRoot)
+  proc clonedEntry(url, path: string): WorkspaceInitClonedEntry =
+    WorkspaceInitClonedEntry(name: path, path: path, remote: url,
+      revision: args.manifestBranch,
+      cloneObjects: cloneObjectsLabel(args.cloneObjects),
+          clonePoolRoot: policyRoot)
+
+  if args.cloneObjects == "none":
+    # Bootstrap manifests are normally symlinked to a host cache. A portable
+    # workspace instead owns these checkouts inside its destination too.
+    for (url, path) in [(args.manifestUrl, ".repro/manifests"),
+        (args.privateManifestUrl, ".repro/manifests-private")]:
+      if url.len == 0: continue
+      let target = args.workspaceRoot / path
+      if dirExists(target): continue
+      # Do not publish an unverified checkout at the trusted manifest path:
+      # a retry would otherwise accept its projects/ before verification.
+      let staging = createTempDir("manifest-clone-", "", target.parentDir)
+      defer:
+        if dirExists(staging): removeDir(staging)
+      var argv = @["clone", "--no-local"]
+      if args.manifestBranch.len > 0: argv.add(@["--branch",
+          args.manifestBranch])
+      argv.add(@[url, staging])
+      let cloned = gitRunPlain(identity, argv)
+      if cloned.code != 0:
+        raise newException(ValueError, "could not bootstrap manifest repo '" &
+          url & "': " & cloned.output)
+      if path == ".repro/manifests" and isVerificationActive(args.verifySpec):
+        verifyManifestProvenance(identity.binaryPath, staging, args.verifySpec)
+      moveDir(staging, target)
+      result.add(clonedEntry(url, path))
+    return
+
+  let cacheRoot =
+    if args.cloneObjects.startsWith("private="): policyRoot / "manifests"
+    else: defaultManifestCacheRoot(private = false)
   let cached = ensureManifestCache(identity.binaryPath, cacheRoot,
     args.manifestUrl, args.manifestBranch)
   if not cached.ok:
@@ -38744,10 +38957,14 @@ proc bootstrapManifestCache(args: WorkspaceInitArgs) =
   except OSError, IOError:
     copyDir(cached.sharedBarePath, manifestsDir)
 
+  result.add(clonedEntry(args.manifestUrl, ".repro/manifests"))
+
   if args.privateManifestUrl.len > 0:
     let privateDir = args.workspaceRoot / ".repro" / "manifests-private"
     if not dirExists(privateDir):
-      let privateCacheRoot = defaultManifestCacheRoot(private = true)
+      let privateCacheRoot =
+        if args.cloneObjects.startsWith("private="): policyRoot / "manifests-private"
+        else: defaultManifestCacheRoot(private = true)
       let privCached = ensureManifestCache(identity.binaryPath,
         privateCacheRoot, args.privateManifestUrl, args.manifestBranch)
       if not privCached.ok:
@@ -38759,6 +38976,8 @@ proc bootstrapManifestCache(args: WorkspaceInitArgs) =
         createSymlink(privCached.sharedBarePath, privateDir)
       except OSError, IOError:
         copyDir(privCached.sharedBarePath, privateDir)
+      result.add(clonedEntry(args.privateManifestUrl,
+          ".repro/manifests-private"))
 
 proc normalizeMaterializeRel(raw: string): string =
   ## A copyfile/linkfile path is authored with forward slashes (the
@@ -39074,9 +39293,6 @@ proc refreshWorkspaceProjectsIndexBestEffort(workspaceRoot, verb: string) =
     stderr.writeLine(verb & ": could not generate workspace-projects.md: " &
       err.msg)
 
-proc gitRunPlain(identity: GitToolIdentity;
-                 args: openArray[string]): tuple[code: int; output: string]
-
 type
   RemoteAgreement* = enum
     ## Why (or why not) the checkout in front of us is recognizably the repo a
@@ -39382,11 +39598,12 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # RA-11: bootstrap the manifest repo into the tool-managed cache when
   # a manifest URL resolved and no manifest checkout exists yet, so
   # ``init`` works OUTSIDE an existing workspace.
-  bootstrapManifestCache(args)
+  let manifestClones = bootstrapManifestCache(args)
   let resolution = resolveWorkspaceInitProject(args)
   let resolved = resolution.project
   var report: WorkspaceInitReport
   report.project = resolved.projectName
+  report.manifestClones = manifestClones
   report.workspaceRoot = args.workspaceRoot
   report.skippedLayers = resolution.skippedLayers
   var cloneFailures = 0
@@ -39404,10 +39621,10 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # without racing a fetch into the same bare. Every step is best-effort:
   # if a shared bare can't be populated, the affected clone simply runs
   # standalone (no ``--reference``) and the accelerator is a no-op for it.
-  let cacheRoot = defaultCacheRoot(args.workspaceRoot)
+  let cacheRoot = cloneObjectsRoot(args.cloneObjects, args.workspaceRoot)
   var sharedBareByUrl = initTable[string, string]()
   proc sharedReferenceFor(fetchUrl: string): string =
-    if fetchUrl.len == 0:
+    if cacheRoot.len == 0 or fetchUrl.len == 0:
       return ""
     if sharedBareByUrl.hasKey(fetchUrl):
       return sharedBareByUrl[fetchUrl]
@@ -39459,6 +39676,8 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
     cloneActions.add(action)
     cloneEntries.add(WorkspaceInitClonedEntry(
       name: repo.name, path: repo.path,
+      cloneObjects: cloneObjectsLabel(args.cloneObjects),
+          clonePoolRoot: cacheRoot,
       remote: initCloneUrl, revision: repo.revision))
 
   if cloneActions.len > 0:
@@ -39593,7 +39812,8 @@ proc writeWorkspaceInitReport(report: WorkspaceInitReport;
   createDir(parentDir(destination))
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
-proc runWorkspaceInitCommand*(args: openArray[string]): int =
+proc runWorkspaceInitCommand*(args: openArray[string];
+    rootClone = WorkspaceInitClonedEntry()): int =
   ## ``repro workspace init <project-or-variant> [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]
   ## [--write-report[=PATH]]``.
@@ -39607,7 +39827,8 @@ proc runWorkspaceInitCommand*(args: openArray[string]): int =
   ##         from exit-1 ("init blew up") so scripts can tell the two
   ##         apart.
   let parsed = parseWorkspaceInitArgs(args)
-  let outcome = executeWorkspaceInit(parsed)
+  var outcome = executeWorkspaceInit(parsed)
+  outcome.report.rootClone = rootClone
   writeWorkspaceInitReport(outcome.report,
     reportDestination(parsed.report, outcome.report.workspaceRoot, "init"))
   stageFailureReport(parsed.report, outcome.report.workspaceRoot, "init",
@@ -39636,6 +39857,7 @@ proc runWorkspaceInitCommand*(args: openArray[string]): int =
 
 type
   ColdStartInitArgs = object
+    cloneObjects: string
     ## Parsed argv for the RA-31 cold-start ``init <url> [local-path]`` form.
     url: string                          ## the <url> argument (form 1/2/3)
     localPath: string                    ## optional explicit destination dir
@@ -39656,6 +39878,10 @@ proc parseColdStartInitArgs(args: openArray[string]): ColdStartInitArgs =
     let arg = args[i]
     if arg == "--print-resolved-url":
       result.printResolvedUrl = true
+    elif arg == "--clone-objects" or arg.startsWith("--clone-objects="):
+      let policy = parseCloneObjects(valueFromFlag(args, i, "--clone-objects"))
+      result.cloneObjects = policy
+      result.passthrough.add("--clone-objects=" & policy)
     elif arg == "--tool-provisioning" or
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
@@ -39734,7 +39960,7 @@ proc pathIsCwdOrAncestor*(candidate, fromDir: string): bool =
   false
 
 proc cloneOrgRootRepo(identity: GitToolIdentity;
-                      url, destination: string):
+                      url, destination: string; independentObjects = false):
     tuple[ok: bool; diagnostic: string] =
   ## Clone the org root workspace repo at ``url`` into ``destination`` (a
   ## fresh named directory). Best-effort; returns a structured failure so
@@ -39753,12 +39979,22 @@ proc cloneOrgRootRepo(identity: GitToolIdentity;
   ##
   ## A repo with no submodules is unaffected — the flag is a no-op there.
   var cmd = quoteShell(identity.binaryPath) &
-    " clone --recurse-submodules " & quoteShell(url) &
+    " clone " & (if independentObjects: "--no-local " else: "") &
+    "--recurse-submodules " & quoteShell(url) &
     " " & quoteShell(destination)
   let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
     env = scrubbedGitRepositoryEnv())
   if res.exitCode != 0:
     return (ok: false, diagnostic: res.output.strip())
+  if independentObjects:
+    # Git does not propagate the parent's --no-local into submodule clones.
+    # A local submodule source can borrow too. Copy borrowed objects before
+    # dropping its alternate, and preserve it on repack failure.
+    const ownSubmoduleObjects = """if test -f "$(git rev-parse --git-path objects/info/alternates)"; then git repack -a -d && rm -- "$(git rev-parse --git-path objects/info/alternates)"; fi"""
+    let owned = gitRunPlain(identity, ["-C", destination, "submodule", "foreach",
+      "--quiet", "--recursive", ownSubmoduleObjects])
+    if owned.code != 0:
+      return (ok: false, diagnostic: "could not make root submodules independent: " & owned.output)
   (ok: true, diagnostic: "")
 
 proc runWorkspaceInitFromUrl*(args: openArray[string];
@@ -39819,7 +40055,8 @@ proc runWorkspaceInitFromUrl*(args: openArray[string];
 
   # (3) Clone the org ROOT workspace repo into the named directory.
   stdout.writeLine("workspace init: cloning org root repo …")
-  let cloned = cloneOrgRootRepo(identity, resolution.url, destAbs)
+  let cloned = cloneOrgRootRepo(identity, resolution.url, destAbs,
+    independentObjects = parsed.cloneObjects notin ["", "shared"])
   if not cloned.ok:
     stderr.writeLine("repro workspace init: error: could not clone org root " &
       "repo '" & resolution.url & "': " & cloned.diagnostic)
@@ -39834,7 +40071,11 @@ proc runWorkspaceInitFromUrl*(args: openArray[string];
     innerArgs.add(flag)
   stdout.writeLine("workspace init: reading bootstrap config and syncing " &
     "the workspace …")
-  let inner = runWorkspaceInitCommand(innerArgs)
+  let innerPolicy = parseWorkspaceInitArgs(innerArgs).cloneObjects
+  let inner = runWorkspaceInitCommand(innerArgs,
+    rootClone = WorkspaceInitClonedEntry(name: "<workspace-root>", path: ".",
+      remote: resolution.url, cloneObjects: cloneObjectsLabel(innerPolicy),
+      clonePoolRoot: cloneObjectsRoot(innerPolicy, destAbs)))
 
   if inner == 0:
     stdout.writeLine("workspace init: workspace ready at '" & destAbs & "'.")
@@ -39873,6 +40114,8 @@ type
     diagnostic*: string
 
   WorkspaceSyncRepoEntry* = object
+    cloneObjects*: string
+    clonePoolRoot*: string
     ## One per ``ResolvedRepo`` after sync. ``syncCase`` is the
     ## snake_case tag of the planner's decision; ``action`` is the
     ## scheduled mutating-action tag (``none`` for refuse-and-report or
@@ -40088,6 +40331,8 @@ proc toJsonNode*(report: WorkspaceSyncReport): JsonNode =
     var obj = newJObject()
     obj["name"] = %entry.name
     obj["path"] = %entry.path
+    obj["cloneObjects"] = %entry.cloneObjects
+    obj["clonePoolRoot"] = %entry.clonePoolRoot
     obj["syncCase"] = %entry.syncCase
     obj["action"] = %entry.action
     obj["expected"] = %entry.expected
@@ -40234,6 +40479,7 @@ proc renderSyncTextLines*(report: WorkspaceSyncReport;
 
 type
   WorkspaceSyncArgs = object
+    cloneObjects: string
     workspaceRoot: string
     projectName: string
     scopeProjects: seq[string]
@@ -40349,6 +40595,9 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
     let arg = args[i]
     if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
       result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--clone-objects" or arg.startsWith("--clone-objects="):
+      result.cloneObjects = parseCloneObjects(valueFromFlag(args, i,
+          "--clone-objects"))
     elif arg == "--tool-provisioning" or
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
@@ -40852,44 +41101,29 @@ proc gitRunPlain(identity: GitToolIdentity;
       env = scrubbedGitRepositoryEnv())
     (code: res.exitCode, output: res.output)
 
-proc gitRunPlainQuery(identity: GitToolIdentity;
-                      args: openArray[string]):
+proc gitRunSeparated(gitBin: string; args: openArray[string];
+                     env: StringTableRef; exactStdout = false):
     tuple[code: int; output: string; diagnostic: string] =
-  ## Invoke git for an answer that will be PARSED.
+  ## Invoke ``gitBin`` with ``args`` under ``env``, keeping git's stderr OUT
+  ## of ``output``. This is the body of ``gitRunPlainQuery`` (whose comment
+  ## below gives the reasons) parameterized on the binary and the
+  ## environment, so a caller that has a bare git path and its own
+  ## environment — the certificate-note reader, which must keep the
+  ## receive-pack object-store bindings — reads git's answer the same way.
   ##
-  ## ``gitRunPlain`` above merges git's stderr into its stdout
-  ## (``poStdErrToStdOut``). For a caller that only tests the exit code, or
-  ## that reads the merged text precisely BECAUSE it wants git's diagnostic,
-  ## that is the right shape and it keeps it. For a caller that parses git's
-  ## ANSWER it is not: a benign diagnostic then arrives indistinguishable
-  ## from the answer.
-  ##
-  ## Measured, not hypothetical. A repo carrying a stale split commit-graph
-  ## chain — a derived cache git writes and prunes on its own — makes every
-  ## command in it print ``warning: unable to find all commit-graph files`` on
-  ## stderr while still exiting 0 and still printing the right answer on
-  ## stdout. ``git status --porcelain`` in such a repo prints ZERO stdout
-  ## lines and that one stderr line, so every "clean is an empty porcelain
-  ## stream" probe in this file read a PRISTINE tree as dirty: the `repro
-  ## push` preflight refused with "commit or stash changes in <repo>" naming
-  ## a repo with nothing to commit, `observeWorktreeState` refused to issue a
-  ## certificate, and the post-commit lock writer skipped the workspace lock
-  ## reporting a "dirty sibling" that was clean.
-  ##
-  ## ``output`` is stdout ALONE. ``diagnostic`` is the merged, trimmed text —
-  ## what ``gitRunPlain``'s ``output`` would have held — so a caller reporting
-  ## a FAILURE still surfaces git's message, which lives on stderr.
-  ##
-  ## Both streams are drained CONCURRENTLY. Reading one to EOF and only then
-  ## the other deadlocks the moment the unread pipe fills, and git's stderr is
-  ## unbounded in principle (per-ref fetch lines, per-object lfs lines).
+  ## ``exactStdout`` makes ``output`` git's stdout BYTE FOR BYTE. Without it
+  ## the POSIX path re-assembles stdout line by line (``execCmdEx``), which
+  ## appends a newline the bytes did not end with and turns ``\r\n`` into
+  ## ``\n``; harmless for a parsed answer, wrong for a payload that must be
+  ## exactly what git stores (a certificate note blob, Transport §3.1). The
+  ## Windows path copies the pipe's bytes verbatim either way.
   when defined(windows):
     # Structured argv and a PeekNamedPipe drain, for the same reason
     # ``gitRunPlain`` uses one: Nim 2.2's ``readAll`` stops at the first short
     # pipe read on Windows, so a blocking read of either stream would also
     # truncate. Two handles now, drained in the same pass.
-    let process = startProcess(identity.binaryPath, args = @args,
-      env = scrubbedGitRepositoryEnv(), options = {poUsePath})
+    let process = startProcess(gitBin, args = @args,
+      env = env, options = {poUsePath})
     defer: process.close()
     const PollSleepMs = 2
     let handles = [Handle(process.outputHandle), Handle(process.errorHandle)]
@@ -40924,41 +41158,102 @@ proc gitRunPlainQuery(identity: GitToolIdentity;
     # through ``/bin/sh`` and the SHELL can put stderr in a file. One pipe, no
     # interleaving, no deadlock, and the same subprocess shape as
     # ``gitRunPlain``.
-    var cmd = quoteShell(identity.binaryPath)
+    var cmd = quoteShell(gitBin)
     for arg in args:
       cmd.add(" ")
       cmd.add(quoteShell(arg))
     var errPath = ""
+    var outPath = ""
     try:
-      let created = createTempFile("repro-gitq-", ".stderr")
-      created.cfile.close()
-      errPath = created.path
-    except CatchableError, Defect:
-      errPath = ""
-    if errPath.len > 0:
-      cmd.add(" 2>" & quoteShell(errPath))
-    # Without the redirect the child's stderr would be an unread pipe that can
-    # fill and hang it, so fall back to the MERGED stream instead — degraded
-    # (the caller sees diagnostics in ``output``, exactly ``gitRunPlain``'s
-    # behaviour) but never hung.
-    let options =
-      if errPath.len > 0: {poUsePath}
-      else: {poUsePath, poStdErrToStdOut}
-    let res = execCmdEx(cmd, options = options,
-      env = scrubbedGitRepositoryEnv())
-    result.code = res.exitCode
-    result.output = res.output
-    var errText = ""
-    if errPath.len > 0:
       try:
-        errText = readFile(errPath)
-      except CatchableError:
-        discard
-      try:
-        removeFile(errPath)
-      except CatchableError:
-        discard
-    result.diagnostic = (errText & res.output).strip()
+        let created = createTempFile("repro-gitq-", ".stderr")
+        created.cfile.close()
+        errPath = created.path
+      except CatchableError, Defect:
+        errPath = ""
+      if exactStdout:
+        try:
+          let created = createTempFile("repro-gitq-", ".stdout")
+          created.cfile.close()
+          outPath = created.path
+        except CatchableError, Defect:
+          outPath = ""
+        if outPath.len == 0 or errPath.len == 0:
+          # No exact capture is possible, and a line-rebuilt answer must not
+          # pass for one: report a failed run instead.
+          result.code = -1
+          result.diagnostic = "cannot create a temporary file to capture " &
+            "git's output in"
+          return
+        cmd.add(" >" & quoteShell(outPath))
+      if errPath.len > 0:
+        cmd.add(" 2>" & quoteShell(errPath))
+      # Without the redirect the child's stderr would be an unread pipe that
+      # can fill and hang it, so fall back to the MERGED stream instead —
+      # degraded (the caller sees diagnostics in ``output``, exactly
+      # ``gitRunPlain``'s behaviour) but never hung.
+      let options =
+        if errPath.len > 0: {poUsePath}
+        else: {poUsePath, poStdErrToStdOut}
+      let res = execCmdEx(cmd, options = options, env = env)
+      result.code = res.exitCode
+      result.output = res.output
+      if outPath.len > 0:
+        # The shell wrote stdout to the file; read its bytes verbatim.
+        try:
+          result.output = readFile(outPath)
+        except CatchableError as err:
+          result.code = -1
+          result.output = ""
+          result.diagnostic = "cannot read git's captured stdout: " & err.msg
+          return
+      var errText = ""
+      if errPath.len > 0:
+        try:
+          errText = readFile(errPath)
+        except CatchableError:
+          discard
+      result.diagnostic = (errText & result.output).strip()
+    finally:
+      for path in [errPath, outPath]:
+        if path.len > 0:
+          try:
+            removeFile(path)
+          except CatchableError:
+            discard
+
+proc gitRunPlainQuery(identity: GitToolIdentity;
+                      args: openArray[string]):
+    tuple[code: int; output: string; diagnostic: string] =
+  ## Invoke git for an answer that will be PARSED.
+  ##
+  ## ``gitRunPlain`` above merges git's stderr into its stdout
+  ## (``poStdErrToStdOut``). For a caller that only tests the exit code, or
+  ## that reads the merged text precisely BECAUSE it wants git's diagnostic,
+  ## that is the right shape and it keeps it. For a caller that parses git's
+  ## ANSWER it is not: a benign diagnostic then arrives indistinguishable
+  ## from the answer.
+  ##
+  ## Measured, not hypothetical. A repo carrying a stale split commit-graph
+  ## chain — a derived cache git writes and prunes on its own — makes every
+  ## command in it print ``warning: unable to find all commit-graph files`` on
+  ## stderr while still exiting 0 and still printing the right answer on
+  ## stdout. ``git status --porcelain`` in such a repo prints ZERO stdout
+  ## lines and that one stderr line, so every "clean is an empty porcelain
+  ## stream" probe in this file read a PRISTINE tree as dirty: the `repro
+  ## push` preflight refused with "commit or stash changes in <repo>" naming
+  ## a repo with nothing to commit, `observeWorktreeState` refused to issue a
+  ## certificate, and the post-commit lock writer skipped the workspace lock
+  ## reporting a "dirty sibling" that was clean.
+  ##
+  ## ``output`` is stdout ALONE. ``diagnostic`` is the merged, trimmed text —
+  ## what ``gitRunPlain``'s ``output`` would have held — so a caller reporting
+  ## a FAILURE still surfaces git's message, which lives on stderr.
+  ##
+  ## Both streams are drained CONCURRENTLY. Reading one to EOF and only then
+  ## the other deadlocks the moment the unread pipe fills, and git's stderr is
+  ## unbounded in principle (per-ref fetch lines, per-object lfs lines).
+  gitRunSeparated(identity.binaryPath, args, scrubbedGitRepositoryEnv())
 
 template withDrivenOperationContext*(body: untyped) =
   ## Invariant 15 — mark every git child spawned inside ``body`` as a step of
@@ -45903,7 +46198,7 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
     var tipRepo = ""
     var tipRef = ""
     var evidenceSource = ""
-    if newCloneUrl.len > 0:
+    if cacheRoot.len > 0 and newCloneUrl.len > 0:
       if newCloneUrl notin bareForUrl:
         let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot,
           newCloneUrl)
@@ -46092,7 +46387,7 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
     #    `repro ws shared-clones rewire` is the consolidation step.
     for entry in readAlternates(destination):
       outcome.alternates.add(entry)
-    if newCloneUrl.len > 0:
+    if cacheRoot.len > 0 and newCloneUrl.len > 0:
       let bare = bareForUrl.getOrDefault(newCloneUrl)
       if bare.len > 0 and not isWiredTo(destination, bare):
         let wired = wireAlternates(destination, bare, identity.binaryPath)
@@ -46177,7 +46472,8 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
         "' -> '" & repo.path & "' (" & identityEvidence & ")")
     result[repoIdx] = outcome
 
-proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
+proc executeWorkspaceSync(args: WorkspaceSyncArgs;
+    prospectiveProjects: seq[string] = @[]): WorkspaceSyncOutcome =
   ## End-to-end driver. (1) Refresh manifest layers so the composer
   ## reads the freshest manifest data. (2) Resolve the project / compose
   ## layers. (3) Gather an observation for every declared repo. (4) Run
@@ -46232,7 +46528,13 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       # Resolve the recorded/composed workspace, not the positional, so the
       # scope filter below can narrow the full set.
       resolveArgs.projectName = ""
-  var resolved = resolveWorkspaceSyncProject(resolveArgs)
+  # Enable previews resolve their validated prospective membership in memory;
+  # an ordinary scoped sync still filters the recorded workspace set.
+  var resolved =
+    if prospectiveProjects.len > 0:
+      resolveProjectSet(args.workspaceRoot, prospectiveProjects)
+    else:
+      resolveWorkspaceSyncProject(resolveArgs)
   report.project = resolved.projectName
   report.scopeProjects = args.scopeProjects
   report.dryRun = args.dryRun
@@ -46301,7 +46603,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   # the expression is cheaper than moving the whole jobs block above a phase
   # that has nothing to do with it.
   let relocations = relocateDeclaredRenames(identity, args.workspaceRoot,
-    defaultCacheRoot(args.workspaceRoot), resolved.repos,
+    cloneObjectsRoot(args.cloneObjects, args.workspaceRoot), resolved.repos,
     emitProgress = not args.json and args.progressMode != bpmQuiet)
 
   alignWorkspaceRemotes(args.workspaceRoot, resolved.repos, identity)
@@ -46334,7 +46636,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   # front per URL and made a dependency of that URL's fetches so concurrent
   # fetches read a consistent object pool without racing into the same
   # bare.
-  let cacheRoot = defaultCacheRoot(args.workspaceRoot)
+  let cacheRoot = cloneObjectsRoot(args.cloneObjects, args.workspaceRoot)
 
   # RA-14 optimized-fetch: load the locked ``path -> sha`` map once so the
   # fetch loop can skip the network round-trip for any repo already at (or
@@ -46418,7 +46720,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     var reports: seq[LeafCheckReport]
     for repo in resolved.repos:
       let repoPath = args.workspaceRoot / repo.path
-      if dirExists(repoPath / ".git"):
+      if args.cloneObjects in ["", "shared"] and dirExists(repoPath / ".git"):
         reports.add(checkLeaf(identity.binaryPath, repoPath, lcmRepair,
           cacheRoot))
     emitLeafReports(reports)
@@ -46469,7 +46771,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     # common one-remote-many-repos manifest layout, which left the cache
     # permanently unpopulated.
     let cloneUrl = cloneUrlFor(repo)
-    if cloneUrl.len > 0:
+    if cacheRoot.len > 0 and cloneUrl.len > 0:
       if not sharedBareRefreshAction.hasKey(cloneUrl):
         # RA-27 — the RA-5 shared-bare warm-up used to run HERE, serially, one
         # blocking `git fetch`/`clone --bare` per unique URL BEFORE any progress
@@ -46703,7 +47005,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   # partial-advance — the readable repos still converge).
   var sharedBareForClone = initTable[string, string]()
   proc cloneReferenceFor(fetchUrl: string): string =
-    if fetchUrl.len == 0:
+    if cacheRoot.len == 0 or fetchUrl.len == 0:
       return ""
     if sharedBareForClone.hasKey(fetchUrl):
       return sharedBareForClone[fetchUrl]
@@ -47153,6 +47455,9 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     report.repos.add(WorkspaceSyncRepoEntry(
       name: decision.name,
       path: decision.path,
+      cloneObjects: (if repoIdx in cloneRepoIdx: cloneObjectsLabel(
+          args.cloneObjects) else: ""),
+      clonePoolRoot: (if repoIdx in cloneRepoIdx: cacheRoot else: ""),
       syncCase: syncCaseTag(decision.syncCase),
       action: actionTag,
       expected: decision.expected,
@@ -47253,6 +47558,8 @@ proc emitLockCoherenceAdvisory*[T](toolProvisioning: ToolProvisioningMode;
 
 type
   MainlineSyncEntry* = object
+    cloneObjects*: string
+    clonePoolRoot*: string
     name*: string
     path*: string
     branch*: string
@@ -47287,6 +47594,8 @@ proc toJsonNode*(report: MainlineSyncReport): JsonNode =
   for e in report.repos:
     var obj = newJObject()
     obj["name"] = %e.name
+    obj["cloneObjects"] = %e.cloneObjects
+    obj["clonePoolRoot"] = %e.clonePoolRoot
     obj["path"] = %e.path
     obj["branch"] = %e.branch
     obj["mainlineBranch"] = %e.mainlineBranch
@@ -47493,14 +47802,16 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
   let decisions = planMainlineSync(resolved.repos, observations,
     args.mainlineFlavor)
 
+  let clonePoolRoot = cloneObjectsRoot(args.cloneObjects, args.workspaceRoot)
+
   # Clone phase for missing repositories:
   var sharedBareForClone = initTable[string, string]()
   proc cloneReferenceFor(fetchUrl: string): string =
-    if fetchUrl.len == 0:
+    if clonePoolRoot.len == 0 or fetchUrl.len == 0:
       return ""
     if sharedBareForClone.hasKey(fetchUrl):
       return sharedBareForClone[fetchUrl]
-    let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    let refreshed = refreshSharedBare(identity.binaryPath, clonePoolRoot, fetchUrl)
     emitLeafReports(refreshed.leafReports)
     let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
     if not refreshed.ok and refreshed.diagnostic.len > 0:
@@ -47563,6 +47874,9 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     let repoAbs = args.workspaceRoot / repo.path
     var entry = MainlineSyncEntry(
       name: decision.name, path: decision.path,
+      cloneObjects: (if decision.action == msaClone: cloneObjectsLabel(
+          args.cloneObjects) else: ""),
+      clonePoolRoot: (if decision.action == msaClone: clonePoolRoot else: ""),
       branch: decision.branch, mainlineBranch: decision.mainlineBranch,
       outcome: mainlineSyncCaseTag(decision.syncCase),
       action: mainlineSyncActionTag(decision.action),
@@ -47727,7 +48041,8 @@ execution:
   --tool-provisioning=path|nix|tarball|scoop
 """
 
-proc runWorkspaceSyncCommand*(args: openArray[string]): int =
+proc runWorkspaceSyncWithProjects(args: openArray[string];
+    prospectiveProjects: seq[string]): int =
   ## ``repro workspace sync [<project>...] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop]
   ## [--jobs N|-j N] [--jobs-network N] [--jobs-checkout N]
@@ -47796,7 +48111,7 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   # so a separate executor — see the block comment above it.
   if parsed.mainline:
     return runMainlineSyncCommand(parsed)
-  let outcome = executeWorkspaceSync(parsed)
+  let outcome = executeWorkspaceSync(parsed, prospectiveProjects)
   # RA-27: a dry run does not run any mutating step, so it does not write a
   # report artifact (there is nothing to persist about a run that did not
   # happen). The plan is rendered to the chosen surface and we exit 0.
@@ -47832,6 +48147,9 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
       outcome.report.repos)
   outcome.report.exitCode
 
+proc runWorkspaceSyncCommand*(args: openArray[string]): int =
+  runWorkspaceSyncWithProjects(args, @[])
+
 # ---- RA-11: `repro workspace pull` ----------------------------------------
 #
 # ``pull`` is the converge-to-manifest-revision operation, distinct from
@@ -47866,17 +48184,19 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
 
 type
   WorkspacePullRepoOutcome* = enum
-    ppoConvergedExisting   ## Existing checkout converged to the manifest
-                           ## revision on a tracking branch.
-    ppoCloned              ## Missing checkout cloned + put on a tracking
-                           ## branch at the manifest revision.
-    ppoFailed              ## A clone / fetch / branch-attach step failed.
-    ppoSkippedWorkAtRisk   ## Converging would have repointed a branch (or
-                           ## moved HEAD off one) carrying work no remote
-                           ## carries. The checkout is left EXACTLY as it was
-                           ## and the report names what stopped it.
+    ppoConvergedExisting ## Existing checkout converged to the manifest
+                         ## revision on a tracking branch.
+    ppoCloned            ## Missing checkout cloned + put on a tracking
+                         ## branch at the manifest revision.
+    ppoFailed            ## A clone / fetch / branch-attach step failed.
+    ppoSkippedWorkAtRisk ## Converging would have repointed a branch (or
+                         ## moved HEAD off one) carrying work no remote
+                         ## carries. The checkout is left EXACTLY as it was
+                         ## and the report names what stopped it.
 
   WorkspacePullRepoEntry* = object
+    cloneObjects*: string
+    clonePoolRoot*: string
     ## One per declared repo after ``pull``. ``trackingBranch`` is the
     ## local branch HEAD is attached to after convergence (empty only on
     ## failure); ``revision`` is the manifest-declared revision the repo
@@ -47936,6 +48256,8 @@ proc toJsonNode*(report: WorkspacePullReport): JsonNode =
   for entry in report.repos:
     var obj = newJObject()
     obj["name"] = %entry.name
+    obj["cloneObjects"] = %entry.cloneObjects
+    obj["clonePoolRoot"] = %entry.clonePoolRoot
     obj["path"] = %entry.path
     obj["revision"] = %entry.revision
     obj["trackingBranch"] = %entry.trackingBranch
@@ -48018,6 +48340,7 @@ proc renderPullTextLines*(report: WorkspacePullReport): seq[string] =
 
 type
   WorkspacePullArgs = object
+    cloneObjects: string
     workspaceRoot: string
     projectName: string
     toolProvisioning: ToolProvisioningMode
@@ -48039,6 +48362,9 @@ proc parseWorkspacePullArgs(args: openArray[string]): WorkspacePullArgs =
     let arg = args[i]
     if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
       result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--clone-objects" or arg.startsWith("--clone-objects="):
+      result.cloneObjects = parseCloneObjects(valueFromFlag(args, i,
+          "--clone-objects"))
     elif arg == "--tool-provisioning" or
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
@@ -48355,10 +48681,10 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
   let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
   installGitVcsExecutor()
 
-  let cacheRoot = defaultCacheRoot(args.workspaceRoot)
+  let cacheRoot = cloneObjectsRoot(args.cloneObjects, args.workspaceRoot)
   var sharedBareByUrl = initTable[string, string]()
   proc sharedReferenceFor(fetchUrl: string): string =
-    if fetchUrl.len == 0:
+    if cacheRoot.len == 0 or fetchUrl.len == 0:
       return ""
     if sharedBareByUrl.hasKey(fetchUrl):
       return sharedBareByUrl[fetchUrl]
@@ -48375,6 +48701,8 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
     var entry = WorkspacePullRepoEntry(
       name: repo.name, path: repo.path, revision: repo.revision)
     if not dirExists(absPath):
+      entry.cloneObjects = cloneObjectsLabel(args.cloneObjects)
+      entry.clonePoolRoot = cacheRoot
       # Missing checkout — clone first (so the converge step has a tree).
       let receiptDir = args.workspaceRoot / ".repro" / "workspace" / "receipts"
       createDir(receiptDir)
@@ -50301,7 +50629,8 @@ type EffectivePrePushHookKind = enum
   ephReproIncompatible
   ephThirdParty
 
-# `ManagedHookAuthorEchoPrefix` / `unquoteShellPosixWord` /
+# The author-line anchors (now `ManagedHookAuthorLineForms`, then
+# `ManagedHookAuthorEchoPrefix`) / `unquoteShellPosixWord` /
 # `managedHookAuthorBin` used to live here. They moved up beside
 # `managedHookContract` (PG-14) because `hooks ensure` now needs to name the
 # build that wrote an installed body, and that happens long before this point
@@ -53453,6 +53782,12 @@ type
     pinnedByRecipe*: seq[string]
       ## inputs `flake.nix` pins by exact revision that no override
       ## substitutes: not compared with their checkout (§16.5)
+    notSubstituted*: seq[string]
+      ## inputs bound to a sibling checkout that develop mode does not
+      ## substitute (`repro flake override-args --all` leaves them at their
+      ## pin): not compared with their checkout (§16.5, amended 2026-10-18).
+      ## Filled only on the authoritative path; the cheap pre-filter never
+      ## resolves the develop set.
     # ---- HL-11 H3: the plan, when the refresh was asked not to write ----
     #
     # The `pre-commit` hook plans BOTH locks before writing either, so that a
@@ -53584,13 +53919,21 @@ proc classifySiblingPin*(identity: GitToolIdentity;
       dir & ", so this sibling cannot be classified until it is fetched — " &
       "nothing local can say where a checkout stands relative to a revision " &
       "it does not have")
-  let counts = gitRunPlain(identity,
+  # STDOUT ALONE is the answer (``gitRunPlainQuery``). A checkout whose
+  # commit-graph chain names a layer that no longer exists — a shared bare
+  # clone it borrows from rewrote its graph — makes git print `warning: unable
+  # to find all commit-graph files` on stderr while exiting 0 with the right
+  # counts on stdout. Read merged, that line made a healthy comparison
+  # "distance UNKNOWN", and the hook, the refresh and the gate all failed
+  # closed on it with no remedy (reprobuild-pm issue
+  # `2026-10-12-release-commit-pin-refused-by-commit-and-push-gates.md`).
+  let counts = gitRunPlainQuery(identity,
     ["-C", dir, "rev-list", "--left-right", "--count",
      pinnedRev & "..." & headRev])
   if counts.code != 0:
     return (relation: sprUnknown, aheadBy: 0, behindBy: 0, detail:
       "`git rev-list --left-right --count` failed in " & dir & " (" &
-      counts.output.strip() & ")")
+      counts.diagnostic.strip() & ")")
   let fields = counts.output.strip().splitWhitespace()
   if fields.len != 2:
     return (relation: sprUnknown, aheadBy: 0, behindBy: 0, detail:
@@ -54663,6 +55006,19 @@ proc gatherConsistencyInputs(repoRoot: string; source: ConsistencySource;
 # dependency by selector name, as H1 relates it, and that dependency to a
 # flake input by canonical repository URL or checkout path. Either recipe's
 # pin exempts the repository from BOTH locks' comparisons.
+#
+# And of what is left, the FLAKE half compares only what develop mode actually
+# substitutes (amended 2026-10-18, reprobuild-pm issue
+# `2026-10-12-release-commit-pin-refused-by-commit-and-push-gates.md`): an
+# input the shell's own binding (`repro flake override-args --all`,
+# ``flakeShellBindingsOf``) does not substitute keeps its `flake.lock` pin and
+# is BUILT at that pin, so its checkout says nothing about what was built.
+# Re-pinning it at commit would record a revision nobody built, and refusing
+# the push over it named a refresh that declines (the refresh verb uses that
+# same shell binding). So such an input is neither re-pinned nor compared: a
+# workspace root, `infra` and a pm repo can each hold their own pin of one
+# `nixos-modules` checkout. ``hookSubstitutedDevelopSet`` applies the rule; an
+# explicitly overridden exact pin stays compared (§16.4).
 # ---------------------------------------------------------------------------
 
 proc manifestMembershipOf(repoRoot: string;
@@ -54702,6 +55058,10 @@ type
     ## ``observeCommittedLockSiblings``).
     flakeMembers: seq[HookFlakeMember]
     pinnedByRecipe: seq[RecipePinnedSibling]
+    notSubstituted: seq[HookFlakeMember]
+      ## Inputs bound to a sibling checkout that develop mode does NOT
+      ## substitute (``hookSubstitutedDevelopSet``): built at their pin, so
+      ## neither re-pinned nor compared. Empty until that filter ran.
     notices: seq[string]
 
 proc describeRecipePin(p: RecipePinnedSibling): string =
@@ -54712,6 +55072,11 @@ proc describeRecipePin(p: RecipePinnedSibling): string =
 proc describeHookFlakeMember(m: HookFlakeMember): string =
   ## ``flake.lock:<input>=<repo>`` — one entry of the "consulted" list.
   "flake.lock:" & m.input & "=" & m.repo
+
+proc describeNotSubstituted(m: HookFlakeMember): string =
+  ## ``<input>=<repo>`` — one entry of the pre-commit log's "not substituted
+  ## by develop mode, not compared" list.
+  m.input & "=" & m.repo
 
 proc explicitDevelopOverrideTargets(workspaceRoot, repoRoot: string):
     tuple[names: HashSet[string]; paths: HashSet[string];
@@ -55017,6 +55382,11 @@ proc hookDevelopSetOf(repoRoot, workspaceRoot: string;
   ## matched by canonical URL or checkout path: §16.5 exempts the repository,
   ## whichever recipe pins it. Only inputs with a sibling checkout are listed
   ## there: a pin of something nobody has checked out was never compared.
+  ##
+  ## This is the set of CANDIDATES. Before the hooks compare a member they
+  ## also ask whether develop mode substitutes it at all
+  ## (``hookSubstitutedDevelopSet``, amended §16.5): one the shell builds at
+  ## its pin is moved to ``notSubstituted`` and not compared.
   let flakeRoot = os.normalizedPath(absolutePath(repoRoot))
   if not fileExists(flakeRoot / "flake.nix") or
       not fileExists(flakeRoot / "flake.lock"):
@@ -55227,7 +55597,9 @@ proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies;
       path: relativePath(depAbs, pathBase).replace('\\', '/'), pinned: pinned,
       declared: declared, relation: sprUnknown)
     if not isGitCheckoutDir(depAbs): return
-    let head = gitRunPlain(identity, ["-C", depAbs, "rev-parse", "HEAD"])
+    # Parsed, so stdout alone (``gitRunPlainQuery``): a stderr warning is not
+    # part of the revision.
+    let head = gitRunPlainQuery(identity, ["-C", depAbs, "rev-parse", "HEAD"])
     if head.code != 0: return
     result.observed = head.output.strip()
     # Untracked files count: a build reads them as readily as tracked ones.
@@ -56441,8 +56813,9 @@ proc coordinateCommitRepin(repoRoot, workspaceRoot: string;
             if c.startsWith("flake.lock:" & r.input & "="): consulted = true
           if not consulted:
             why = " (the flake.lock refresh does not consult this input: " &
-              "no sibling checkout is bound to it, or flake.nix pins it by " &
-              "revision and no develop override substitutes it)"
+              "no sibling checkout is bound to it, develop mode does not " &
+              "substitute it, or flake.nix pins it by revision and no " &
+              "develop override substitutes it)"
       let flakeSaid =
         if fNew == fOld: "flake.lock leaves input '" & r.input & "' at " &
           fOld & why
@@ -56865,7 +57238,13 @@ proc applyCommitTimeLockWriters*(site: CommitTimeWriterSite;
       " hook-develop-set consulted: " &
       (if consulted.len == 0: "(none)" else: consulted.join(", ")) &
       "; pinned by recipe, not compared: " &
-      (if pinned.len == 0: "(none)" else: pinned.join(", ")))
+      (if pinned.len == 0: "(none)" else: pinned.join(", ")) &
+      # §16.5 (amended 2026-10-18): bound to a checkout, but the shell builds
+      # it at its pin. Printed only when there is one, so the line every
+      # existing reader parses is unchanged otherwise.
+      (if flake.notSubstituted.len == 0: ""
+       else: "; not substituted by develop mode, not compared: " &
+         flake.notSubstituted.join(", ")))
 
   var used, examined: seq[string]
   var allowedRegressions: seq[PinRegression]
@@ -61156,6 +61535,32 @@ proc gitNoteRun(gitBin: string;
     env = receivedObjectStoreEnv(received))
   (code: res.exitCode, output: res.output)
 
+proc gitNoteQuery(gitBin: string;
+                  args: openArray[string];
+                  received = ReceivedObjectStore()):
+    tuple[code: int; output: string; diagnostic: string] =
+  ## ``gitNoteRun`` for a READ whose stdout is the answer: the note blob, the
+  ## notes tree listing, the resolved notes ref. ``output`` is git's stdout
+  ## ALONE; ``diagnostic`` is stderr followed by stdout, trimmed, for the
+  ## message a failed read reports. Same environment as ``gitNoteRun``
+  ## (``received`` included), same subprocess shape as ``gitRunPlainQuery``.
+  ##
+  ## Merging the streams is wrong here because the note's framing is judged
+  ## on the text read (test-certificates-spec Transport §3.1): a non-empty
+  ## piece before the first ``# --- test-certificate ---`` line is a framing
+  ## fault. Anything git prints on stderr while showing a well-formed note —
+  ## a ``safe.directory`` notice, a replace-object warning, a lazy-fetch
+  ## message in a partial clone, ``GIT_TRACE*`` output — landed exactly
+  ## there, and the gateway and the CI plan reported a carrier fault the note
+  ## did not have (reprobuild-pm issue
+  ## ``2026-10-12-note-reads-merge-git-stderr-into-the-note-text``). Transport
+  ## §3.1 defines the blob, not the output of the command that fetched it.
+  ##
+  ## ``exactStdout``: the body is exactly the blob's bytes — no newline added
+  ## to a blob that does not end in one, no ``\r\n`` folded to ``\n``.
+  gitRunSeparated(gitBin, args, receivedObjectStoreEnv(received),
+    exactStdout = true)
+
 proc certificateNoteRecord*(cert: TestCertificate): string =
   ## One record as it is written into a note (Transport §3.1): the CANONICAL
   ## PAYLOAD, followed — only when the certificate is signed — by one blank
@@ -61365,13 +61770,13 @@ proc noteBlobFromNotesCommit(gitBin, repoPath, notesCommitSha,
   ## ``commit``. A git failure at any step is ``gorUnreadable`` and says which
   ## step failed — a notes-commit the push just delivered is not allowed to
   ## read as "no certificate".
-  let ls = gitNoteRun(gitBin,
+  let ls = gitNoteQuery(gitBin,
     ["-C", repoPath, "ls-tree", "-r", notesCommitSha], received)
   if ls.code != 0:
     return GitNoteRead(status: gorUnreadable, body: "",
       diagnostic: "cannot read the notes tree of " & notesCommitSha &
         " in '" & repoPath & "' (git ls-tree exit " & $ls.code & ": " &
-        ls.output.strip() & ")")
+        ls.diagnostic & ")")
   for rawLine in ls.output.splitLines():
     let line = rawLine.strip()
     if line.len == 0: continue
@@ -61383,14 +61788,14 @@ proc noteBlobFromNotesCommit(gitBin, repoPath, notesCommitSha,
     let objSha = meta[2]
     let path = line[tabIdx + 1 .. ^1].strip()
     if path.replace("/", "") == commit:
-      let blob = gitNoteRun(gitBin,
+      let blob = gitNoteQuery(gitBin,
         ["-C", repoPath, "cat-file", "blob", objSha], received)
       if blob.code == 0:
         return GitNoteRead(status: gorPresent, body: blob.output)
       return GitNoteRead(status: gorUnreadable, body: "",
         diagnostic: "the notes tree of " & notesCommitSha & " names blob " &
           objSha & " for " & commit & " but it cannot be read (git cat-file " &
-          "exit " & $blob.code & ": " & blob.output.strip() & ")")
+          "exit " & $blob.code & ": " & blob.diagnostic & ")")
   GitNoteRead(status: gorAbsent, body: "")
 
 type
@@ -61435,20 +61840,24 @@ proc readNoteBlob*(gitBin, repoPath, annotated, notesRef: string;
   ##
   ## Folding step 3 into step 2 is the shape that told an author whose
   ## certificate was right there in the push to mint it again.
+  ##
+  ## Every step reads through ``gitNoteQuery``: the body is git's stdout
+  ## alone, and what git wrote on stderr goes only into a failure's
+  ## diagnostic, never into the note text.
   let looksLikeSha = notesRef.len in [40, 64] and
     notesRef.allCharsInSet(HexDigits)
   if looksLikeSha:
     return noteBlobFromNotesCommit(gitBin, repoPath, notesRef, annotated,
       received)
   else:
-    let exists = gitNoteRun(gitBin,
+    let exists = gitNoteQuery(gitBin,
       ["-C", repoPath, "rev-parse", "--verify", "--quiet", notesRef],
       received)
     if exists.code != 0 or exists.output.strip().len == 0:
       # STEP 1 — no such notes ref here.
       return GitNoteRead(status: gorAbsent, body: "")
     else:
-      let res = gitNoteRun(gitBin,
+      let res = gitNoteQuery(gitBin,
         ["-C", repoPath, "notes", "--ref", notesRef, "show", annotated],
         received)
       return
@@ -61462,7 +61871,7 @@ proc readNoteBlob*(gitBin, repoPath, annotated, notesRef: string;
           GitNoteRead(status: gorUnreadable, body: "",
             diagnostic: "the note attached to " & annotated & " under " &
               notesRef & " in '" & repoPath & "' cannot be read (git notes " &
-              "show exit " & $res.code & ": " & res.output.strip() & ")")
+              "show exit " & $res.code & ": " & res.diagnostic & ")")
 
 proc readNotedCertificates*(gitBin, repoPath, annotated, notesRef: string;
                             received = ReceivedObjectStore()):
@@ -61560,13 +61969,18 @@ proc commitTreeOid*(gitBin, repoPath, commit: string;
     tuple[ok: bool; tree, diagnostic: string] =
   ## ``<commit>^{tree}`` in ``repoPath`` — inside a receive quarantine when
   ## ``received`` carries its bindings.
-  let res = gitNoteRun(gitBin,
+  ##
+  ## Read through ``gitNoteQuery``, like the note itself: the oid is parsed
+  ## from stdout alone, so a warning git prints on stderr cannot turn a tree
+  ## that resolves into an unreadable note.
+  let res = gitNoteQuery(gitBin,
     ["-C", repoPath, "rev-parse", "--verify", "--quiet", commit & "^{tree}"],
     received)
   let tree = res.output.strip()
   if res.code != 0 or tree.len == 0 or not tree.allCharsInSet(HexDigits):
     return (false, "", "the tree of " & commit & " cannot be resolved in '" &
-      repoPath & "' (git rev-parse exit " & $res.code & ": " & tree & ")")
+      repoPath & "' (git rev-parse exit " & $res.code & ": " &
+      res.diagnostic & ")")
   (true, tree, "")
 
 proc readAttachedCertificatesFrom*(gitBin, repoPath, commit,
@@ -61662,6 +62076,14 @@ proc certificateGate(report: var CheckReport;
   ## their platforms (Test-Certificates.md §"How a gate computes coverage").
   ## A commit with no snapshot has no requirement (TC-9d: the project's
   ## ``[certificates]`` table is no longer read).
+  ##
+  ## There is NO ratchet here (operator decision D19 applies it at the
+  ## gateway only). The client has no reliable view of the anchor: the
+  ## remote-tracking ref may be stale, the remote's advertised tip may name
+  ## objects this clone never fetched, and a fork's remote is not the
+  ## upstream the gateway anchors on. A push that drops or narrows its own
+  ## requirement is therefore judged here by its own snapshot and refused at
+  ## the gateway, which is the enforcement point; this gate is fast feedback.
   ##
   ## DEFAULT-OFF (RA-32): no snapshot, an unmatched branch, or a rule whose
   ## ``gate_mode`` is ``off`` is a strict NO-OP on
@@ -62728,7 +63150,8 @@ proc gatewayLockAsContentFile(read: GatewayLockRead): ContentFile =
 
 type
   GatewayRatchetAnchor* = object
-    ## Where the ratchet's ``gate_mode`` came from for one branch.
+    ## What the ratchet read at the anchor for one branch: its ``gate_mode``
+    ## and, since operator decision D19, its requirement set.
     found*: bool
       ## An anchor commit was resolved and its lock was read.
     commit*: string
@@ -62738,6 +63161,11 @@ type
     mode*: PolicyMode
       ## The anchor snapshot's ``gate_mode`` for the branch (``off`` when the
       ## anchor carries no snapshot or no rule matches).
+    requires*: seq[PolicyRequirement]
+      ## The ``requires`` of the anchor's rule for the branch (D19). Empty
+      ## when the anchor carries no snapshot or no rule matches, and when
+      ## its snapshot is malformed: the names cannot be read then, and only
+      ## the mode is raised (to ``required``).
     detail*: string
 
 proc localRepositoryPath(url: string): string =
@@ -62759,8 +63187,9 @@ proc gatewayRatchetAnchor*(gitBin, gatewayBareDir, upstreamUrl: string;
   ## §4.2): the upstream's published ``refs/heads/<branch>`` — NOT the
   ## ``<old>`` value the hook is handed and NOT the gateway's own refs, both
   ## of which are per-workspace state a fork or a re-created gateway resets.
-  ## Its ``[certificate_policy]`` snapshot's ``gate_mode`` for the same branch
-  ## is the floor a pushed commit cannot relax.
+  ## Its ``[certificate_policy]`` snapshot's rule for the same branch is the
+  ## floor a pushed commit cannot relax: its ``gate_mode`` and, since
+  ## operator decision D19, its ``requires``.
   ##
   ## The anchor commit's objects are read from the gateway (which holds every
   ## commit it forwarded) and, failing that, from the upstream itself when it
@@ -62820,8 +63249,10 @@ proc gatewayRatchetAnchor*(gitBin, gatewayBareDir, upstreamUrl: string;
     let match = matchPolicy(snap.policy, target)
     if match.matched:
       result.mode = match.rule.gateMode
+      result.requires = match.rule.requires
       result.detail = "the anchor's " & ruleLabel(snap.policy,
-        match.ruleIndex) & " sets gate_mode " & $match.rule.gateMode
+        match.ruleIndex) & " sets gate_mode " & $match.rule.gateMode &
+        ", requires " & requirementsLabel(match.rule.requires)
     else:
       result.detail = "the anchor's policy: " & match.reason
   except CertificatePolicySnapshotError as err:
@@ -62839,11 +63270,16 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
   ##   * the requirement (TC-9c) is the ``[certificate_policy]`` snapshot in
   ##     the PUSHED commit's ``repro.lock``, read inside the receive
   ##     quarantine: the first rule matching the DESTINATION branch, its
-  ##     ``gate_mode`` and its ``requires``. ``gate_mode`` alone is ratcheted:
-  ##     the anchor's value for the branch is read too, and the stricter one
-  ##     applies, so a commit cannot relax the rule that judges it. The sets
-  ##     are not ratcheted (Push-Gateway-Wiring §4.2). A pushed commit with no
-  ##     snapshot has no requirement of its own (TC-9d). A config written
+  ##     ``gate_mode`` and its ``requires``. Both are ratcheted (operator
+  ##     decision D19): the anchor's rule for the branch is read too, the
+  ##     stricter ``gate_mode`` applies, and the requirement is the UNION of
+  ##     the anchor's names and the pushed commit's, each on the union of
+  ##     both sides' platforms (``unionRequirements``). A commit therefore
+  ##     cannot relax the rule that judges it: a push that weakens the policy
+  ##     must still satisfy the anchor's, and is the anchor for the pushes
+  ##     after it. A pushed commit with no snapshot has no requirement of its
+  ##     own (TC-9d) and is judged by the anchor's; a new branch (no anchor)
+  ##     is judged by the pushed commit's own. A config written
   ##     before TC-9d may still bake ``gate_mode`` / ``required_*``: they are
   ##     never applied, and the gateway says so once per push;
   ##   * the certificates are the notes on the pushed commit's TREE (TC-8c),
@@ -62893,19 +63329,37 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
         requirement.error & "; REFUSING (a policy the gateway cannot read " &
         "is not a policy it may wave through)"
       return
-    # The anchor can only raise the mode, and a mode gates nothing when no
-    # name is required (the sets are not ratcheted, §4.2). With no snapshot
-    # there is no policy in play, so the gateway does not query the upstream
-    # at all: `off` stays a transparent forward, as it was before the ratchet
-    # existed.
-    let anchor =
-      if requirement.source != gpsSnapshot and requirement.requires.len == 0:
-        GatewayRatchetAnchor(source: "not resolved: no policy in play")
-      else:
-        gatewayRatchetAnchor(gitBin, gatewayBareDir, cfg.upstreamUrl, target,
-          received)
+    # The ratchet (operator decision D19): the anchor is resolved for EVERY
+    # branch update, including one whose pushed tree carries no snapshot —
+    # deleting `[certificate_policy]` is exactly the push the anchor must
+    # still judge. The anchor raises the mode and adds its names; it never
+    # lowers or removes anything the pushed rule asks for.
+    let anchor = gatewayRatchetAnchor(gitBin, gatewayBareDir,
+      cfg.upstreamUrl, target, received)
     let pushedMode = toPolicyMode(requirement.mode)
     let effective = toGateMode(stricterMode(pushedMode, anchor.mode))
+    # A side whose mode is `off` requires nothing at push time, whatever its
+    # rule lists: its names are not a requirement, so they do not enter the
+    # union. That keeps a rule `off` with names inert, as it is on its own.
+    let pushedRequires =
+      if pushedMode == pmOff: newSeq[PolicyRequirement]()
+      else: requirement.requires
+    let anchorRequires =
+      if anchor.mode == pmOff: newSeq[PolicyRequirement]()
+      else: anchor.requires
+    let requires = unionRequirements(pushedRequires, anchorRequires)
+    # What the anchor holds that the pushed rule dropped or narrowed: named,
+    # because "the push asks for nothing and is refused" needs its reason.
+    var heldByAnchor: seq[PolicyRequirement]
+    for req in requires:
+      var pushedSide: seq[string]
+      var named = false
+      for p in pushedRequires:
+        if p.certificate == req.certificate:
+          named = true
+          pushedSide = p.platforms
+      if not named or pushedSide != req.platforms:
+        heldByAnchor.add(req)
     # A gateway with no policy anywhere stays silent: `off` is a documented
     # strict no-op, and the absence of output is its specification.
     if requirement.source == gpsSnapshot or effective != cgmOff:
@@ -62916,12 +63370,18 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
         "; applied gate_mode " & $effective &
         (if toPolicyMode(effective) != pushedMode:
            " (the pushed commit's " & $pushedMode & " cannot relax it)"
+         else: "") &
+        ", requires " & requirementsLabel(requires) &
+        (if effective != cgmOff and heldByAnchor.len > 0:
+           " (the anchor's " & requirementsLabel(heldByAnchor) &
+             " still applies: a commit cannot drop or narrow the " &
+             "requirement that judges it)"
          else: ""))
     if effective == cgmOff:
       continue
-    if requirement.requires.len == 0:
-      # Nothing to attest: a pushed rule that names nothing (the sets are
-      # not ratcheted, §4.2).
+    if requires.len == 0:
+      # Nothing to attest: neither the pushed rule nor the anchor's names a
+      # certificate.
       continue
     # TC-8c (Transport §3): the certificates for the pushed commit are the
     # notes on its TREE, ``<new>^{tree}``, resolved inside the receive
@@ -62970,7 +63430,7 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
     # the pushed tree, or, for a project that opted into a lock record store
     # (a configured ``lock_records_dir``), the record for the pushed commit.
     let verdict = evaluateRequirementCoverage(found, evaluated,
-      requirement.requires, keys, lockSource, couldNotLook)
+      requires, keys, lockSource, couldNotLook)
     case verdict.outcome
     of voCovered:
       # COVERED — and by WHAT. An acceptance that says nothing is
@@ -71133,6 +71593,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     var leaves = 0
     var stale: seq[string]
     var broken: seq[string]
+    var chains: seq[string]
+    var diagnostics: seq[string]
     for repo in ctx.resolved.repos:
       let abs = parsed.workspaceRoot / repo.path
       if not dirExists(abs / ".git"):
@@ -71143,15 +71605,20 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         continue
       inc leaves
       ctx.leafReports.add(lr)
+      if lr.diagnostic.len > 0:
+        diagnostics.add(repo.path & ": " & lr.diagnostic)
       for f in lr.findings:
         case f.kind
+        of lfkRefetchChainMissing:
+          chains.add(repo.path)
         of lfkStaleRemoteRef:
           stale.add(repo.path & " " & f.refName)
         of lfkLocalTipMissing, lfkLocalHistoryMissing:
           broken.add(repo.path & " " & f.refName)
         else:
           discard
-    if stale.len == 0 and broken.len == 0:
+    if stale.len == 0 and broken.len == 0 and chains.len == 0 and
+        diagnostics.len == 0:
       checks.add(HealthCheck(
         name: "shared-clone-leaves",
         status: hsOk,
@@ -71160,6 +71627,12 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         remedy: "", fixKind: hfNone))
     else:
       var detail: seq[string]
+      if chains.len > 0:
+        detail.add($chains.len & " checkout(s) lacked a working refetch chain " &
+          "to a partial shared clone: " & chains.join(", "))
+      if diagnostics.len > 0:
+        detail.add(diagnostics.join("; "))
+      let canRepair = stale.len > 0 or chains.len > 0 or diagnostics.len > 0
       if stale.len > 0:
         detail.add($stale.len & " stale remote-tracking ref(s) whose " &
           "commit no longer exists upstream or in the shared clone: " &
@@ -71173,9 +71646,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         status: hsWarn,
         detail: detail.join("; "),
         remedy:
-          if stale.len > 0: self & " health --fix"
+          if canRepair: self & " health --fix"
           else: "follow the per-ref fix in the messages printed below",
-        fixKind: if stale.len > 0: hfSharedCloneLeaves else: hfNone))
+        fixKind: if canRepair: hfSharedCloneLeaves else: hfNone))
 
   # Test-Certificates TC-9b: `certificate_policy_snapshot_stale`. A row only
   # when some participating repository carries a snapshot or names a policy,
@@ -71428,8 +71901,8 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
       if not ctx.gitOk:
         result.add("fix: cannot repair shared-clone leaves (no usable git tool)")
         continue
-      result.add("fix: removing stale remote-tracking refs from checkouts " &
-        "that borrow from shared clones")
+      result.add("fix: repairing refetch chains and stale remote-tracking refs " &
+        "in checkouts that borrow from shared clones")
       for lr in ctx.leafReports:
         let repaired = checkLeaf(ctx.gitIdentity.binaryPath, lr.leaf,
           lcmRepair, pool = lr.pool)
@@ -72504,14 +72977,16 @@ proc runWorkspaceForallCommand*(args: openArray[string]): int =
 
 type
   BranchRepoOutcome* = enum
-    broCreated         ## ``gitBranchCreate`` ran successfully.
-    broAlreadyAtHead   ## Pre-existing branch at HEAD — idempotent.
-    broDirtyRefused    ## Repo was dirty; nothing scheduled.
+    broCreated       ## ``gitBranchCreate`` ran successfully.
+    broAlreadyAtHead ## Pre-existing branch at HEAD — idempotent.
+    broDirtyRefused  ## Repo was dirty; nothing scheduled.
     broCollisionRefused
-                       ## Pre-existing branch at a different SHA.
-    broActionFailed    ## ``gitBranchCreate`` action returned non-OK.
+      ## Pre-existing branch at a different SHA.
+    broActionFailed  ## ``gitBranchCreate`` action returned non-OK.
 
   BranchRepoEntry* = object
+    cloneObjects*: string
+    clonePoolRoot*: string
     ## Per-repo line in the JSON report. ``existingSha`` carries the
     ## SHA the colliding branch pointed at (empty unless ``outcome``
     ## is ``collision_refused``); ``dirtyReason`` carries the
@@ -72594,6 +73069,8 @@ proc toJsonNode*(report: BranchReport): JsonNode =
   for entry in report.repos:
     var obj = newJObject()
     obj["name"] = %entry.name
+    obj["cloneObjects"] = %entry.cloneObjects
+    obj["clonePoolRoot"] = %entry.clonePoolRoot
     obj["path"] = %entry.path
     obj["headSha"] = %entry.headSha
     obj["outcome"] = %entry.outcome
@@ -72727,6 +73204,7 @@ type
       ## leaving the unpublished work behind in the source workspace.
 
   BranchArgs = object
+    cloneObjects: string
     workspaceRoot: string
     projectName: string
     branchName: string
@@ -72845,6 +73323,9 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
     let arg = args[i]
     if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
       result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--clone-objects" or arg.startsWith("--clone-objects="):
+      result.cloneObjects = parseCloneObjects(valueFromFlag(args, i,
+          "--clone-objects"))
     elif arg == "--tool-provisioning" or
         arg.startsWith("--tool-provisioning="):
       result.toolProvisioning = parseToolProvisioning(
@@ -75804,6 +76285,13 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   ## ``--fetch`` (the default) refreshes those mainlines first; ``--no-fetch``
   ## reads what is already on disk. Neither degrades silently — see the mainline
   ## block below.
+  var clonedPaths = initHashSet[string]()
+  defer:
+    for entry in result.repos.mitems:
+      if entry.path in clonedPaths:
+        entry.cloneObjects = cloneObjectsLabel(parsed.cloneObjects)
+        entry.clonePoolRoot = cloneObjectsRoot(parsed.cloneObjects,
+            parsed.forkPath)
   result.branch = parsed.branchName
   result.form = "fork"
   result.sourceWorkspaceRoot = parsed.workspaceRoot
@@ -76473,7 +76961,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   # ---- materialize the new workspace ------------------------------------
   # Resuming (see the destination guard) means the root clone is already there.
   if not resuming and not dirExists(parsed.forkPath / ".git"):
-    let rootClone = cloneOrgRootRepo(identity, rootOrigin, parsed.forkPath)
+    let rootClone = cloneOrgRootRepo(identity, rootOrigin, parsed.forkPath,
+      independentObjects = parsed.cloneObjects notin ["", "shared"])
     if not rootClone.ok:
       result.exitCode = 1
       result.repos.add(BranchRepoEntry(
@@ -76502,6 +76991,9 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           rootMainlineTip & "': " & co.output.strip()))
       return
 
+  if not resuming:
+    clonedPaths.incl(".")
+
   # Member repos: reuse the M9 materialization pass verbatim — it already
   # schedules the clones concurrently on the engine and is resumable, so a
   # re-run after a partial fork only clones what is still missing.
@@ -76515,7 +77007,10 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   if forkProjects.len > 1:
     initArgs.additionalProjects = forkProjects[1 .. ^1]
   initArgs.toolProvisioning = parsed.toolProvisioning
+  initArgs.cloneObjects = parsed.cloneObjects
   let initOutcome = executeWorkspaceInit(initArgs)
+  for entry in initOutcome.report.cloned:
+    clonedPaths.incl(entry.path)
   if initOutcome.cloneFailures > 0:
     # Partial materialization is LEFT IN PLACE (no rollback): re-running the
     # identical command clones only what is still missing.
@@ -84619,24 +85114,40 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
   ## Membership itself stays idempotent, while the clone phase still creates
   ## anything missing — which makes a re-run the repair path for a partially
   ## cloned workspace.
-  let workspaceRoot = parseProjectsWorkspaceRoot(args)
-  var explicit = parseMembershipProjects(args)
+  var normalizedArgs: seq[string]
+  var argIndex = 0
+  while argIndex < args.len:
+    let arg = args[argIndex]
+    if arg == "--clone-objects" or arg.startsWith("--clone-objects="):
+      let policy = parseCloneObjects(valueFromFlag(args, argIndex,
+          "--clone-objects"))
+      normalizedArgs.add("--clone-objects=" & policy)
+    else:
+      normalizedArgs.add(arg)
+    inc argIndex
+  let workspaceRoot = parseProjectsWorkspaceRoot(normalizedArgs)
+  var explicit = parseMembershipProjects(normalizedArgs)
   var useDefault = false
   var noSync = false
+  var dryRun = false
   # Flags the materialization phase understands are forwarded to it rather
   # than rejected here: `enable`'s real work IS a sync, so the report and the
   # JSON digest describing what happened are that sync's.
   var forwarded: seq[string]
-  for arg in args:
+  for arg in normalizedArgs:
     if arg == "--default":
       useDefault = true
     elif arg == "--no-sync":
       noSync = true
+    elif arg == "--dry-run":
+      dryRun = true
+      forwarded.add(arg)
     elif arg.startsWith("--workspace-root="):
       discard
-    elif arg == "--json" or arg == "--verbose" or arg == "--dry-run" or
+    elif arg == "--json" or arg == "--verbose" or
         arg == "--write-report" or arg.startsWith("--write-report=") or
-        arg.startsWith("--jobs") or arg.startsWith("--tags="):
+        arg.startsWith("--jobs") or arg.startsWith("--tags=") or
+        arg.startsWith("--clone-objects="):
       forwarded.add(arg)
     elif arg.startsWith("-"):
       stderr.writeLine("repro workspace enable: unknown flag " & arg)
@@ -84721,6 +85232,24 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
   except CatchableError as err:
     unresolved = err.msg
 
+  var syncArgs = @(toAdd)
+  syncArgs.add("--workspace-root=" & workspaceRoot)
+  for flag in forwarded:
+    syncArgs.add(flag)
+
+  # Validation above is shared with a real enable; nothing below this preview
+  # may persist membership or refresh derived workspace files.
+  if dryRun:
+    for project in merged:
+      stdout.writeLine(project)
+    if unresolved.len > 0:
+      stderr.writeLine("repro workspace enable (dry-run): could not resolve " &
+        "the manifest yet; no materialization plan is available — " & unresolved)
+      return 0
+    if noSync or missing.len == 0:
+      return 0
+    return runWorkspaceSyncWithProjects(syncArgs, merged)
+
   writeWorkspaceProjects(workspaceRoot, merged)
   for p in readWorkspaceProjects(workspaceRoot):
     stdout.writeLine(p)
@@ -84754,10 +85283,6 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
     return 0
   stdout.writeLine("repro workspace enable: checking out " &
     $missing.len & " repo(s) introduced by " & toAdd.join(", "))
-  var syncArgs = @(toAdd)
-  syncArgs.add("--workspace-root=" & workspaceRoot)
-  for f in forwarded:
-    syncArgs.add(f)
   return runWorkspaceSyncCommand(syncArgs)
 
 # ---- Workspace-Membership-Model.md: local-state reconciliation -------------
@@ -85935,6 +86460,9 @@ type
     exceptNames: seq[string]
     notices: seq[string]   ## non-fatal; still reported, never swallowed
     refusals: seq[string]  ## fatal; ``ok`` is false when any is present
+    emptyLockSet: bool
+      ## ``ok`` is false because the workspace lock set is EMPTY
+      ## (``DevelopAllResult.emptyLockSet``): develop mode substitutes nothing.
 
 proc flakeDevelopSelectionOf(passthrough: openArray[string];
     explicitRoot: string): FlakeDevelopSelection =
@@ -85971,6 +86499,7 @@ proc flakeDevelopSelectionOf(passthrough: openArray[string];
 
   let developed = executeDevelopAll(developArgs)
   if developed.exitCode != 0:
+    result.emptyLockSet = developed.emptyLockSet
     for n in developed.notices: result.refusals.add(n)
     for o in developed.outcomes:
       if o.diagnostic.len > 0: result.refusals.add(o.diagnostic)
@@ -86166,6 +86695,15 @@ proc hookFlakeSelection(hs: HookDevelopSet;
     if hasCoordinates(p.input) and p.repo.len > 0 and
         p.repo notin result.exceptNames:
       result.exceptNames.add(p.repo)
+  # An input develop mode does not substitute is left out on purpose too, but
+  # only under a key no compared member uses: two inputs can resolve one repo
+  # (`x` and `x-sui`), and excluding the shared key would drop the one the
+  # shell DOES substitute.
+  for m in hs.notSubstituted:
+    let key = if hasCoordinates(m.input) and m.repo.len > 0: m.repo
+              else: m.bindKey
+    if key notin result.selected and key notin result.exceptNames:
+      result.exceptNames.add(key)
   for n in hs.notices: result.notices.add(n)
 
 proc flakeBindInputsToCheckouts(inputNames: openArray[string];
@@ -86339,10 +86877,11 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
         " a git checkout (`repro develop --only=" & repo &
         "` places one), or leave it on its pin.")
       continue
-    let head = gitRunPlain(identity, ["-C", dir, "rev-parse", "HEAD"])
+    # Parsed, so stdout alone; git's message, on failure, is the diagnostic.
+    let head = gitRunPlainQuery(identity, ["-C", dir, "rev-parse", "HEAD"])
     if head.code != 0 or head.output.strip().len == 0:
       report.add("NOT substituted: flake input '" & name & "' resolves to " &
-        dir & ", whose HEAD could not be read (" & head.output.strip() &
+        dir & ", whose HEAD could not be read (" & head.diagnostic.strip() &
         "), so no revision can be observed for it. It keeps its flake.lock " &
         "pin. Remedy: repair that checkout (`git -C " & dir &
         " rev-parse HEAD` shows the error).")
@@ -86506,6 +87045,140 @@ proc bulkExactFlakePins(flakeRoot, workspaceRoot: string;
       "--only=" & repo & "` substitutes it, as does an explicit " &
       "`--only=" & repo & "` here or an explicit overrideInputs entry.")
 
+type
+  FlakeShellBindings = object
+    ## What the shell's develop-mode activation substitutes for one flake:
+    ## ``repro flake override-args``'s whole answer, before it is printed.
+    ok: bool
+    refusals: seq[string]    ## fatal; ``ok`` is false when any is present
+    selection: FlakeDevelopSelection
+    flakePath: string
+    inputNames: seq[string]  ## every input `flake.nix` declares
+    suffixes: seq[string]
+    pinRule: tuple[keep: seq[string]; skipped: seq[FlakeBulkPinSkip]]
+    emitted: seq[FlakeOverrideBinding]
+    report: seq[string]      ## the notices `override-args` prints on stderr
+
+proc flakeShellBindingsOf(flakeRoot: string; passthrough: openArray[string];
+    explicitRoot: string; suffixes: seq[string];
+    identity: GitToolIdentity): FlakeShellBindings =
+  ## The substitution develop mode performs for the flake at ``flakeRoot``:
+  ## the develop set through `repro develop`'s own composer
+  ## (``flakeDevelopSelectionOf``), the flake's declared inputs, §16.4's
+  ## bulk exact-pin rule (``bulkExactFlakePins``) and NF-1's binder.
+  ##
+  ## ONE computation for the shell and for the managed hooks. `repro flake
+  ## override-args` prints exactly ``emitted``, and ``useFlakeDevShell``
+  ## substitutes what it prints; the hooks compare only the inputs it binds
+  ## (``hookSubstitutedDevelopSet``). Two derivations of "which inputs are
+  ## overridden" is how the push gate came to refuse inputs the shell had
+  ## built at their pin (reprobuild-pm issue
+  ## `2026-10-12-release-commit-pin-refused-by-commit-and-push-gates.md`).
+  result.suffixes = suffixes
+  result.selection = flakeDevelopSelectionOf(passthrough, explicitRoot)
+  if not result.selection.ok:
+    for r in result.selection.refusals: result.refusals.add(r)
+    return
+  result.report = result.selection.notices
+  let declared = flakeDeclaredInputsAt(flakeRoot)
+  result.flakePath = declared.flakePath
+  if not declared.ok:
+    for r in declared.refusals: result.refusals.add(r)
+    return
+  result.inputNames = declared.names
+  result.pinRule = bulkExactFlakePins(flakeRoot,
+    result.selection.workspaceRoot, result.inputNames, result.selection,
+    suffixes, result.report)
+  result.emitted = flakeBindInputsToCheckouts(result.pinRule.keep,
+    result.selection.checkoutOf, suffixes, identity,
+    result.selection.workspaceRoot, result.report, result.selection.onlyNames,
+    result.selection.exceptNames, flakeRoot)
+  result.ok = true
+
+proc hookSubstitutedDevelopSet(hs: HookDevelopSet;
+    flakeRoot, workspaceRoot: string; identity: GitToolIdentity):
+    tuple[ok: bool; hookSet: HookDevelopSet; refusals: seq[string]] =
+  ## §16.5, amended 2026-10-18: of the hooks' develop set ``hs`` (the repo's
+  ## own sibling inputs, ``hookDevelopSetOf``), keep the members develop mode
+  ## actually substitutes — the inputs `repro flake override-args --all`
+  ## binds (``flakeShellBindingsOf``), to the same checkout the member is
+  ## bound to — and move every other member to
+  ## ``notSubstituted``. An input the shell does not substitute is built at its
+  ## `flake.lock` pin, so its checkout is not what was built: re-pinning it
+  ## records a revision nobody built, and refusing a push over it is a refusal
+  ## no refresh can clear (Unified-Locking-And-Hooks.md §13.6, "the sibling
+  ## revisions the overrides actually used"; Nix-Flake-Coexistence.md §4,
+  ## "overridden inputs").
+  ##
+  ## A member whose exact recipe pin an EXPLICIT develop override substitutes
+  ## (``exactPinOverridden``) is kept regardless, so §16.4's commit refusal
+  ## keeps an experiment from being published by accident.
+  ##
+  ## An unresolvable develop set is NOT an answer: ``ok`` is false with the
+  ## cause, and the caller refuses, as it does for any develop set it cannot
+  ## resolve. The one failure that IS an answer is an empty workspace lock
+  ## set: develop mode then places nothing, so nothing is substituted.
+  result.hookSet = hs
+  result.hookSet.flakeMembers = @[]
+  if hs.flakeMembers.len == 0:
+    result.ok = true
+    return
+  # input -> the checkout the shell substitutes for it. A member is kept only
+  # when the shell substitutes THAT checkout: the shell binds a `git+` URL
+  # input by its suffix-stripped name, where ``hookDevelopSetOf`` binds it by
+  # canonical URL, and a member compared against a checkout the shell did not
+  # build would be the same false comparison this rule removes.
+  var bound = initTable[string, string]()
+  let shell = flakeShellBindingsOf(flakeRoot,
+    ["--all", "--workspace-root=" & workspaceRoot,
+     "--tool-provisioning=path"], workspaceRoot,
+    defaultFlakeInputStripSuffixes, identity)
+  if shell.ok:
+    for e in shell.emitted:
+      bound[e.input] = os.normalizedPath(absolutePath(e.path))
+  elif shell.selection.emptyLockSet:
+    result.hookSet.notices.add("the workspace lock set at " & workspaceRoot &
+      " is empty, so develop mode substitutes no flake input of " & flakeRoot)
+  else:
+    result.refusals = shell.refusals
+    return
+  proc sameCheckout(shellPath, memberPath: string): bool =
+    # Both sides are normalised absolute paths derived from one workspace
+    # root, so string equality is the expected answer. The identity check
+    # covers the two spellings of one directory (a symlinked workspace root,
+    # macOS's `/tmp` -> `/private/tmp`): a member the shell DOES substitute
+    # must never be dropped from the comparison over how its path is spelled,
+    # because dropping it is the direction that lets the gate pass silently.
+    if shellPath.len == 0: return false
+    if shellPath == memberPath: return true
+    try: sameFile(shellPath, memberPath)
+    except CatchableError: false
+  for m in hs.flakeMembers:
+    let shellPath = bound.getOrDefault(m.input, "")
+    if m.exactPinOverridden or sameCheckout(shellPath, m.path):
+      result.hookSet.flakeMembers.add(m)
+    else:
+      result.hookSet.notSubstituted.add(m)
+      if shellPath.len > 0:
+        # The shell DOES substitute this input, but with another checkout
+        # than the one the hooks bind it to (the shell binds a `git+` URL
+        # input by its suffix-stripped name, the hooks by repository URL).
+        # Neither checkout describes both the pin and the build, so it is
+        # not compared — and that is said, not left to look like "kept its
+        # pin".
+        result.hookSet.notices.add("flake input '" & m.input & "' is bound " &
+          "by the hooks to " & m.path & " but develop mode substitutes " &
+          shellPath & " for it, so it is not compared with either checkout")
+      # The shell's own reason (no `flake.nix`, not in the develop set, …),
+      # carried as a notice: the binder is told to leave the input out, so
+      # without this a refusal's inventory would lose the one line that says
+      # why the input kept its pin. A gate prints notices only when it refuses.
+      for line in shell.report:
+        if ("flake input '" & m.input & "'") in line and
+            line notin result.hookSet.notices:
+          result.hookSet.notices.add(line)
+  result.ok = true
+
 proc flakeLocalDirOfOverrideRef*(rf: string): string =
   ## The local directory a ``--override-input`` reference names, or "" when it
   ## names something that is not a working tree on this machine.
@@ -86617,11 +87290,12 @@ proc flakeBindingsFromAppliedArgs*(args: openArray[string];
         "your shell is building. flake.lock still pins something else and " &
         "there is no way to say whether they agree.")
       continue
-    let head = gitRunPlain(identity, ["-C", dir, "rev-parse", "HEAD"])
+    # Parsed, so stdout alone; git's message, on failure, is the diagnostic.
+    let head = gitRunPlainQuery(identity, ["-C", dir, "rev-parse", "HEAD"])
     if head.code != 0 or head.output.strip().len == 0:
       report.add("SUBSTITUTED but UNOBSERVABLE: flake input '" & input &
         "' is overridden to " & dir & ", whose HEAD could not be read (" &
-        head.output.strip() & "), so nothing can name the revision your " &
+        head.diagnostic.strip() & "), so nothing can name the revision your " &
         "shell is building. Remedy: repair that checkout (`git -C " & dir &
         " rev-parse HEAD` shows the error).")
       continue
@@ -87068,7 +87742,10 @@ proc flakeClassifyPublication(identity: GitToolIdentity;
   let target = flakePushTarget(identity, dir, headRev)
   result.remote = target.remote
   result.branch = target.branch
-  let unreachable = gitRunPlain(identity,
+  # Parsed — "any output names an unpublished commit" — so stdout alone
+  # (``gitRunPlainQuery``): a `warning: unable to find all commit-graph files`
+  # on stderr made a published revision read as unpublished.
+  let unreachable = gitRunPlainQuery(identity,
     ["-C", dir, "rev-list", "--max-count=1", headRev, "--not", "--remotes"])
   if unreachable.code != 0:
     # The probe itself failed, so publication is UNPROVEN — and unproven is not
@@ -87082,7 +87759,7 @@ proc flakeClassifyPublication(identity: GitToolIdentity;
     # paste and run unchanged from wherever the message was printed.
     result.detail = "could not be shown to exist anywhere but this checkout " &
       "— `git -C " & dir & " rev-list --max-count=1 " & headRev &
-      " --not --remotes` failed (" & unreachable.output.strip() & ")"
+      " --not --remotes` failed (" & unreachable.diagnostic.strip() & ")"
     return
   if unreachable.output.strip().len == 0:
     return
@@ -87570,37 +88247,26 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
       "emitted for a directory whose content nothing can name")
     return refuse()
 
-  # ---- the develop set, through `repro develop`'s own composer ------------
-  let selection = flakeDevelopSelectionOf(passthrough, explicitRoot)
-  if not selection.ok:
-    for r in selection.refusals: refusals.add(r)
-    return refuse()
-  var report = selection.notices
-  let checkoutOf = selection.checkoutOf
-  let selectedNames = selection.selected
-
-  # ---- the flake's declared inputs ---------------------------------------
+  # ---- the develop set, the declared inputs, §16.4's bulk exact-pin rule
+  # and the binding: ONE computation, which the managed hooks also use to
+  # decide what develop mode substitutes (``flakeShellBindingsOf``) ---------
   let flakeRoot =
     if flakeDir.len > 0: absolutePath(flakeDir) else: getCurrentDir()
-  let declared = flakeDeclaredInputsAt(flakeRoot)
-  let flakePath = declared.flakePath
-  if not declared.ok:
-    for r in declared.refusals: refusals.add(r)
-    return refuse()
-  let inputNames = declared.names
-
   let suffixes =
     if stripGiven: parseCommaList(stripSpec)
     else: defaultFlakeInputStripSuffixes
-
-  # ---- §16.4: the automatic mode leaves an exact recipe pin alone --------
-  let pinRule = bulkExactFlakePins(flakeRoot, selection.workspaceRoot,
-    inputNames, selection, suffixes, report)
-
-  # ---- bind inputs to develop-set checkouts ------------------------------
-  let emitted = flakeBindInputsToCheckouts(pinRule.keep, checkoutOf, suffixes,
-    identity, selection.workspaceRoot, report, selection.onlyNames,
-    selection.exceptNames, flakeRoot)
+  let shell = flakeShellBindingsOf(flakeRoot, passthrough, explicitRoot,
+    suffixes, identity)
+  if not shell.ok:
+    for r in shell.refusals: refusals.add(r)
+    return refuse()
+  let selection = shell.selection
+  var report = shell.report
+  let selectedNames = selection.selected
+  let flakePath = shell.flakePath
+  let inputNames = shell.inputNames
+  let pinRule = shell.pinRule
+  let emitted = shell.emitted
 
   # ---- the SAME bindings, compared against the pins (§3.2) ----------------
   let state = flakeOverrideStateReport(flakeRoot, emitted, identity)
@@ -90348,6 +91014,13 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
   ## compared with its checkout, so it is neither re-pinned nor refused; it is
   ## reported in ``pinnedByRecipe``. ``consulted`` names the inputs that were.
   ##
+  ## And of those, only the inputs develop mode actually substitutes
+  ## (``hookSubstitutedDevelopSet``, §16.5 amended 2026-10-18): an input the
+  ## shell builds at its pin is neither re-pinned nor refused, whichever way
+  ## its checkout has moved, and is reported in ``notSubstituted``. That is
+  ## decided on the authoritative path only, after the pre-filter below, which
+  ## stays a superset of it.
+  ##
   ## ## The cheap negative, and why it is not a shortcut around correctness
   ##
   ## Resolving the develop set is not free — `repro develop --list --all`
@@ -90504,7 +91177,9 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
           if locked.kind != JObject or not locked.hasKey("rev"):
             continue
           let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
-          let head = gitRunPlain(identity, ["-C", dir, "rev-parse", "HEAD"])
+          # Parsed, so stdout alone: a stderr warning is not part of HEAD.
+          let head = gitRunPlainQuery(identity,
+            ["-C", dir, "rev-parse", "HEAD"])
           if head.code != 0:
             # Unproven is not "unchanged": hand over rather than skip.
             candidateMoved = true
@@ -90518,12 +91193,32 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
       result.line = "flake-lock up-to-date: every overridable input of " &
         lockPath & " already names its sibling's HEAD; not touched"
       return
+    # §16.5 (amended 2026-10-18) — only what develop mode substitutes. The
+    # pre-filter above considered every member; an input the shell builds at
+    # its pin leaves here, so a checkout that moved without being built is
+    # neither recorded nor refused as a regression.
+    let substituted = hookSubstitutedDevelopSet(hookSet, flakeRoot,
+      workspaceRoot, ensureGitToolResolvable(tpmPathOnly, getEnv("PATH")))
+    if not substituted.ok:
+      result.line = "flake-lock refused-unresolvable-workspace: which flake " &
+        "inputs develop mode substitutes could not be resolved (" &
+        substituted.refusals.join("; ") & "), so flake.lock was left alone; " &
+        "repair the workspace (`repro workspace status --workspace-root=" &
+        workspaceRoot & "`) and commit again"
+      result.failure = result.line
+      return
+    result.consulted = @[]
+    for m in substituted.hookSet.flakeMembers:
+      result.consulted.add(describeHookFlakeMember(m))
+    for m in substituted.hookSet.notSubstituted:
+      result.notSubstituted.add(describeNotSubstituted(m))
     let outcome = executeFlakeLockRefresh(flakeRoot, workspaceRoot,
       currentRepo, @["--all"], defaultFlakeInputStripSuffixes,
       toolProvisioning, recordDowngrade = false,
       label = label, allowRegression = allowRegression,
       refuseRegressions = true, planOnly = planOnly,
-      preset = some(hookFlakeSelection(hookSet, workspaceRoot, flakeRoot)),
+      preset = some(hookFlakeSelection(substituted.hookSet, workspaceRoot,
+        flakeRoot)),
       deriveFields = deriveFields, announce = announce)
     result.line = "flake-lock " & outcome.tag & ": " & outcome.diagnostic
     result.wouldChange = outcome.wouldChange
@@ -90682,7 +91377,13 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   # own input was verified depend on lock records of repos it does not depend
   # on. An input `flake.nix` pins by exact revision, and no explicit develop
   # override substitutes, is not compared with its checkout at all: a sibling
-  # ahead of a release pin is not drift.
+  # ahead of a release pin is not drift. Nor is an input develop mode does not
+  # substitute (§16.5, amended 2026-10-18; ``hookSubstitutedDevelopSet``): the
+  # shell built it at its pin, so the pin describes the build, and the refresh
+  # this gate would name declines it ("NOT in the develop set"). Comparing it
+  # made N repos that pin one sibling at N revisions unpushable from one
+  # checkout (reprobuild-pm issue
+  # `2026-10-12-release-commit-pin-refused-by-commit-and-push-gates.md`).
   let wsRoot = flakeOverrideWorkspaceRoot(workspaceRoot)
   var memberRepos: seq[ResolvedRepo]
   var membershipFailure = ""
@@ -90697,8 +91398,14 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
         refusals: @["the workspace membership at " & wsRoot &
           " could not be resolved: " & membershipFailure])
     else:
-      hookFlakeSelection(hookDevelopSetOf(flakeRoot, wsRoot, memberRepos),
-        wsRoot, flakeRoot)
+      let substituted = hookSubstitutedDevelopSet(
+        hookDevelopSetOf(flakeRoot, wsRoot, memberRepos), flakeRoot, wsRoot,
+        identity)
+      if substituted.ok:
+        hookFlakeSelection(substituted.hookSet, wsRoot, flakeRoot)
+      else:
+        FlakeDevelopSelection(ok: false, workspaceRoot: wsRoot,
+          refusals: substituted.refusals)
   if not selection.ok:
     # No answer at all. REFUSE, naming the cause: the alternative is to publish
     # a state whose lock nobody could check, which is §3.1 with the gate's
@@ -91317,7 +92024,7 @@ proc runWorkspacePublishEvidenceCommand*(args: openArray[string]): int =
   if failed > 0: 1 else: 0
 
 const reproWorkspaceSubcommands = [
-  "init", "sync", "pull", "lock", "status", "list", "manifests",
+  "init", "restore", "sync", "pull", "lock", "status", "list", "manifests",
   "shared-clones", "forall", "bootstrap", "provision",
   # WV-2..WV-6 — membership, definition, and the two branch-family verbs.
   # `sets` is the membership model's spelling of `projects`, which is kept
@@ -91754,9 +92461,9 @@ proc validateFragmentPath(value: string): string =
 
 proc runWorkspaceSetsCommand*(args: openArray[string];
                               spelling = "sets"): int =
-  ## ``repro workspace sets list|add|remove`` — the DEFINITION axis for repo
-  ## sets. `add` / `remove` write, commit and push to the manifest repo;
-  ## `list` is read-only.
+  ## ``repro workspace sets list|resolve|add|remove`` — the DEFINITION axis
+  ## for repo sets. `add` / `remove` write, commit and push to the manifest
+  ## repo; `list` and `resolve` are read-only.
   ##
   ## Enabling a set in this workspace is `enable` / `disable`; see
   ## `reprobuild-specs/CLI/workspace.md` §"The Two Axes".
@@ -91772,10 +92479,15 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
   let verb = "repro workspace " & spelling
   if args.len > 0 and args[0] in ["--help", "-h", "help"]:
     echo verb & " list [--enabled|--disabled|--all] [--json]"
+    echo verb & " resolve <name>... [--at=REV] [--json]"
     echo verb & " add <name> [--template=NAME|--no-template] [-m DESC]"
     echo verb & " remove <name> [--prune-orphan-repos]"
     echo "  list   every DEFINED repo-set, marked enabled/disabled for this " &
       "workspace."
+    echo "  resolve  the repos a workspace enabling exactly <name>... would " &
+      "participate in (read-only; enabled or not, checked out or not)."
+    echo "  --at=REV  resolve from the manifest repository's commit REV " &
+      "instead of its working tree (no layers; nothing is written)."
     echo "  add    define a NEW " &
       (if spelling == "sets": "repo-set (repo-sets/<name>.toml)"
        else: "project (projects/<name>.toml)") &
@@ -91849,6 +92561,153 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
       if not r.defined:
         line.add("\tUNDEFINED (no manifest declares it)")
       stdout.writeLine(line)
+    return 0
+
+  if sub == "resolve":
+    # CLI/workspace.md §"`repro workspace projects`" — `resolve <name>...`
+    # prints the RESOLVED PARTICIPATING REPO SET of the named sets: the closure
+    # a workspace enabling exactly those names would participate in.
+    #
+    # It sits before the manifest-repo / git-identity checks below for the same
+    # reason `list` does: it reads manifests and nothing else. It never writes,
+    # never consults the active set, and never looks at checkouts, which is
+    # what distinguishes it from `sync <p>… --dry-run` (scoped to the ACTIVE
+    # set, so a defined but not-enabled project silently contributed nothing)
+    # and from `repos list --set=NAME` (one name, raw fragments, no fetch URL).
+    var names: seq[string]
+    var asJson = false
+    # `--at=REV`: resolve from the manifest repository's HISTORY instead of
+    # its working tree (reprobuild-pm issue 2026-10-09 "workspace metadata is
+    # readable only from a working tree"). `atRevision` stays "" without it.
+    var atRevision = ""
+    for arg in rest:
+      if arg == "--json":
+        asJson = true
+      elif arg.startsWith("--workspace-root="):
+        discard # parsed by parseProjectsWorkspaceRoot above
+      elif arg.startsWith("--at="):
+        atRevision = arg["--at=".len .. ^1]
+        if atRevision.len == 0:
+          stderr.writeLine(verb & " resolve: --at= needs a revision " &
+            "(a commit id, branch or tag of the manifest repository)")
+          return 2
+      elif arg.startsWith("-"):
+        stderr.writeLine(verb & " resolve: unknown flag " & arg)
+        return 2
+      elif arg notin names:
+        # A name given twice counts once; first occurrence keeps its place,
+        # because the FIRST name is the primary and order is union order.
+        names.add(arg)
+    if names.len == 0:
+      stderr.writeLine(verb & " resolve: missing <name>... (usage: " & verb &
+        " resolve <name>... [--at=REV] [--json])")
+      return 2
+
+    # Resolution is EXACTLY `resolveProjectSet` — the same call `enable` uses
+    # to validate a prospective set — so this report cannot drift from what
+    # enabling those names would actually do. A conflict is a distinct outcome
+    # (an operator decision, reported with its evidence as data); every other
+    # failure — an unknown name, an unreadable manifest — is `error`.
+    #
+    # With `--at=REV` the same ladder and Union Rules run over ONE tree: the
+    # workspace's manifest repository (the git repository at
+    # `manifestsRoot(workspaceRoot)`) at REV, read from its objects through a
+    # git-revision source. The working tree, the index and the `[[manifest]]`
+    # layers (workspace-local state, which has no revision) are not read, and
+    # nothing is written to the repository. REV is resolved once to a commit
+    # and reported as `metadataRevision`.
+    var status = "resolved"
+    var resolved: ResolvedProject
+    var conflict = newJNull()
+    var errorNode = newJNull()
+    var diagnostic = ""
+    var revisionSource: ManifestSource = nil
+    defer: revisionSource.close()
+    try:
+      if atRevision.len > 0:
+        revisionSource = openGitRevisionSource(manifestsRoot(workspaceRoot),
+          atRevision)
+        resolved = resolveProjectSetAt(revisionSource, names)
+      else:
+        resolved = resolveProjectSet(workspaceRoot, names)
+    except WorkspaceProjectSetConflictError as exc:
+      status = "conflict"
+      # The INNER message, not `msg`: `msg` carries a "[<file>] at key ..."
+      # prefix written for `enable`, which names `.repro/workspace.toml` /
+      # `workspace.projects` — the active-set record. `resolve` never consults
+      # that record, so the prefix would misattribute the conflict. The inner
+      # message already names the path, both sources and the differing facts.
+      diagnostic = exc.innerMessage
+      conflict = %*{"path": exc.checkoutPath, "sources": exc.sources,
+                    "fields": exc.fields, "message": exc.innerMessage}
+    except CatchableError as exc:
+      status = "error"
+      diagnostic = exc.msg
+      errorNode = %exc.msg
+
+    # `primary` is the RESOLVED name of the first requested set (a variant
+    # reports its composed project name, which is what every single-project
+    # consumer keys on). When the union failed after the first name resolved,
+    # that name is still knowable, so it is reported; when the first name is
+    # itself the failure there is no primary, and "" says so.
+    var primary = ""
+    if status == "resolved":
+      primary = resolved.projectName
+    elif atRevision.len == 0:
+      try:
+        primary = resolveWorkspaceProjectByName(workspaceRoot,
+          names[0]).projectName
+      except CatchableError:
+        primary = ""
+    elif not revisionSource.isNil:
+      # Only when the revision itself opened: an unreadable revision has no
+      # primary to report.
+      try:
+        primary = resolveManifestNameAt(revisionSource, names[0]).projectName
+      except CatchableError:
+        primary = ""
+
+    if status != "resolved":
+      # Nim may construct a proc's `result` IN PLACE in the caller's variable,
+      # so a raise part-way through `resolveProjectSet` can leave the repos
+      # resolved before the failure sitting in `resolved`. A refused set has
+      # no closure; report none rather than a fragment of one.
+      resolved = ResolvedProject()
+
+    if asJson:
+      var repos = newJArray()
+      for repo in resolved.repos:
+        # What the union compares (name, path, fetch URL, revision, vcs) plus
+        # the remote binding and tracked branch, so a consumer can clone and
+        # place each repo without re-implementing the resolver.
+        repos.add(%*{"name": repo.name, "path": repo.path,
+                     "remote": repo.projectRemote, "fetchUrl": repo.fetchUrl,
+                     "revision": repo.revision, "branch": repo.branch,
+                     "vcs": repo.vcs})
+      # The report is printed on refusal too: a conflict is data a consumer
+      # acts on, and exit 1 alone would make it parse prose from stderr.
+      var doc = %*{"schema": "reprobuild.workspace-set-resolve.v1",
+               "workspaceRoot": workspaceRoot,
+               "requested": names,
+               "primary": primary,
+               "status": status,
+               "repos": repos,
+               "conflict": conflict,
+               "error": errorNode}
+      # Additive, so the schema keeps its `.v1`: present exactly when the
+      # names were resolved at a revision that opened — the full commit id
+      # REV resolved to, which is what makes the report reproducible after
+      # the ref moves.
+      if not revisionSource.isNil:
+        doc["metadataRevision"] = %revisionSource.resolvedCommit
+      echo doc.pretty
+      return (if status == "resolved": 0 else: 1)
+    if status != "resolved":
+      stderr.writeLine(verb & " resolve: " & diagnostic)
+      return 1
+    for repo in resolved.repos:
+      stdout.writeLine(repo.name & "\t" & repo.path & "\t" & repo.fetchUrl &
+        "\t" & repo.revision)
     return 0
 
   let manifestRoot = manifestRepoRootFor(workspaceRoot)
@@ -92137,7 +92996,7 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
     return res.code
   else:
     stderr.writeLine(verb & ": unknown subcommand '" & sub &
-      "' (expected: list, add, remove)")
+      "' (expected: list, resolve, add, remove)")
     return 2
 
 proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
@@ -93560,6 +94419,13 @@ proc runThinAppDispatch(programName: string): int =
       stderr.writeLine("repro health: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "restore":
+    try:
+      return runWorkspaceRestoreCommand(args[2 .. ^1], existingRecordStoreRoot)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace restore: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "init":
     # M9 — `repro workspace init <project-or-variant>`. The milestone
     # spec names the path ``apps/repro/subcmds/workspace_init.nim``;
@@ -93863,8 +94729,9 @@ proc runThinAppDispatch(programName: string): int =
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "sets":
-    # Workspace-Membership-Model.md — `repro workspace sets list|add|remove`.
-    # DEFINITION: inspect or author repo-set definitions in the manifest repo.
+    # Workspace-Membership-Model.md —
+    # `repro workspace sets list|resolve|add|remove`. DEFINITION: inspect,
+    # resolve or author repo-set definitions in the manifest repo.
     # Enabling one in this workspace is `enable`.
     try:
       let pArgs =
@@ -93876,10 +94743,10 @@ proc runThinAppDispatch(programName: string): int =
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "projects":
-    # WV-3 — `repro workspace projects list|add|remove`, the retained spelling
-    # of `sets`. Kept while the manifest repo still carries `projects/*.toml`;
-    # it differs from `sets` in exactly one respect, which directory `add`
-    # scaffolds into.
+    # WV-3 — `repro workspace projects list|resolve|add|remove`, the
+    # retained spelling of `sets`. Kept while the manifest repo still carries
+    # `projects/*.toml`; it differs from `sets` in exactly one respect, which
+    # directory `add` scaffolds into.
     try:
       let pArgs =
         if args.len > 2: args[2 .. ^1]

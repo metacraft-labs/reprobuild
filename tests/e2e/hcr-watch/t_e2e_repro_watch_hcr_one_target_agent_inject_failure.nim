@@ -257,7 +257,11 @@ suite "t_e2e_repro_watch_hcr_one_target_agent_inject_failure":
          (defined(linux) and defined(amd64)):
       let repoRoot = getCurrentDir()
       let reproBin = compileRepro(repoRoot)
-      let tempRoot = createTempDir("repro-hcr-m4-inject-fail", "")
+      # Canonical, because the watch reports the source paths it observed
+      # canonicalised: under the stock macOS TMPDIR (`/var/folders/...`,
+      # `/var` a symlink to `/private/var`) an as-created path compares
+      # unequal to the one in the patch request.
+      let tempRoot = expandFilename(createTempDir("repro-hcr-m4-inject-fail", ""))
       defer: removeDir(tempRoot)
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let pathValue = prepareGccProxy(tempRoot / "tools")

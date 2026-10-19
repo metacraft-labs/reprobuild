@@ -313,27 +313,23 @@ proc lockedIdentityMiss(kind: RealizationKind; identity: string;
        else: ""))
 
 # ---------------------------------------------------------------------------
-# Which realizer a tarball record needs
+# Operations requested by a tarball record
 # ---------------------------------------------------------------------------
 #
-# Two realizers consume ``tarball`` records (Provisioning-Contributions.md
-# §"Profile Package References", open gap 3): the ``uses:`` provisioning edge
-# (``repro_tool_profiles.resolveTarballTool``), which downloads, verifies,
-# extracts and lays out a prefix, and the home archive realizer
-# (``repro_home_apply/builtin_adapter``), which alone runs installers, merges
-# MSYS2 packages, replays allowlisted pre-install steps and emits launchers.
-# These two predicates are the ONE statement of that split; both realizers
-# refuse a record the other one owns, and home apply routes by them.
+# One provisioning edge consumes every ``tarball`` record for recipes and
+# home profiles (``repro_tool_profiles.resolveTarballTool``). It downloads, verifies,
+# extracts, installs and lays out a prefix for both recipes and profiles.
+# The predicates below classify requested operations; they do not route
+# records between different realizers.
 
 const InstallerOnlyArchiveTypes* = ["7z-sfx", "installer-nsis",
     "installer-msi", "dmg", "pkg"]
-  ## ``ArchiveFormat`` tokens only the home archive realizer unpacks.
+  ## Archive formats that require installation-aware staging.
 
 proc archiveInstallerFeatures*(record: InterfaceTarballProvisioning):
     seq[string] =
-  ## What ``record`` asks of realization beyond download, verify and
-  ## extract — the work only the home archive realizer performs. Empty for a
-  ## plain archive.
+  ## Installation operations the shared provisioning edge must stage in
+  ## addition to its ordinary archive extraction. Empty for a plain archive.
   let detail = record.detail
   if detail.installMethod.len > 0 and detail.installMethod != "extract":
     result.add("installMethod " & detail.installMethod)
@@ -355,9 +351,8 @@ proc archiveInstallerFeatures*(record: InterfaceTarballProvisioning):
 
 proc extractRealizerFeatures*(record: InterfaceTarballProvisioning):
     seq[string] =
-  ## What ``record`` asks that only the ``uses:`` provisioning edge
-  ## performs: the home archive realizer has no strip, alias, prune,
-  ## script-launcher or closure step.
+  ## Compatibility classifier for the edge's layout operations. These may
+  ## freely accompany installation operations in the same realization.
   if record.stripComponents > 0: result.add("stripComponents")
   if record.executableAlias.len > 0: result.add("executableAlias")
   if record.prunePaths.len > 0: result.add("prune")

@@ -270,7 +270,14 @@
         # ancestor. Each directory a glob(3) scan opens is recorded with the
         # pattern component matched there, when it can be named with
         # certainty, so the engine keys the scan on the matching entries.
-      url = "github:metacraft-labs/io-mon/3f8788ce721a8f2d47eff09350b7c2047e1f3628";
+      # macOS and Windows now fail incomplete when descendant quiescence
+      # cannot be established; keep the host and its capture tests in sync.
+      # Bumped to 091fa26 (2026-10-18), io-mon's `agents` tip; 45773f6 is an
+      # ancestor. The macOS shim records a relative path anchored on the
+      # directory it resolved against when the call was made, so a tool that
+      # chdir()s (`git -C <repo>`) is no longer keyed on phantom paths under
+      # the action's cwd.
+      url = "github:metacraft-labs/io-mon/091fa26ce03d9dd1ca8cfa6a1d9d46624dc50491";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -637,7 +644,7 @@
     # destructor takes it, and VM/NimScript trace recording changes (exact I/O
     # event kinds, one value-carrying step per recorded position).
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=1e19cf261413667ef69123a3ef221e239d1f8897";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=fa22200571d36eb8c24c0aaa883940d93c71b397";
       flake = false;
     };
     nim-csources-src = {

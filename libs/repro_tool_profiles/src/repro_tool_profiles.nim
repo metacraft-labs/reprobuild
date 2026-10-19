@@ -1,4 +1,4 @@
-import std/[algorithm, json, options, os, osproc, sequtils, sets, streams, strtabs, strutils, tables, tempfiles, times, net]
+import std/[algorithm, json, options, os, osproc, sequtils, sets, streams, strtabs, strutils, tables, tempfiles, times, net, jsonutils]
 
 import blake3
 import cbor
@@ -40,6 +40,7 @@ import repro_local_store
 # is what closes the gap where a package realized by URL+digest never
 # consulted the shared cache at all — see `substituteToolPrefix` below.
 import repro_binary_cache_client/cache_key
+import repro_binary_cache_client/compat_check
 import repro_binary_cache_client/types as bcClientTypes
 import repro_peer_cache/auth as peerAuth
 import repro_binary_cache_client/caches_config
@@ -52,7 +53,11 @@ import repro_project_dsl/reprobuild_packages_catalog
 # edges, registers the `"tarball"` provisioner's executor with the engine, and
 # runs the provisioning subgraph through `runBuild`.
 import repro_build_engine
-import nimcrypto/[hash, sha2]
+import repro_tool_profiles/[archive_inputs, archive_steps, archive_digest]
+import repro_dsl_stdlib/packages_schema
+import repro_dsl_stdlib/packages/[lessmsi, wix3, innounp, php, jdk]
+from repro_project_dsl import PackageDef, PackageUseDef, registeredPackages, registeredProvisioningContributions
+export archive_inputs
 # repro_local_store provides the M56 unified store. Every adapter
 # (Nix / tarball / Scoop) calls `registerInUnifiedStore` after laying
 # out its realized prefix on disk so the same SQLite-backed
@@ -149,6 +154,7 @@ type
     tarballUrl*: string
     tarballMirrors*: seq[string]
     tarballSelectedUrl*: string
+    tarballCacheHit*: bool
     tarballSha256*: string
     archiveType*: string
     stripComponents*: int
@@ -308,6 +314,11 @@ type
     lockIdentity*: string
 
   TarballAcquisitionPlan* = object
+    record*: InterfaceTarballProvisioning
+      ## Complete canonical declaration, serialized with the edge plan.
+    digestAlgorithm*: string
+    digestValue*: string
+    installationToolsIdentity*: string
     packageSelector*: string
     packageId*: string
     url*: string
@@ -1794,29 +1805,8 @@ proc normalizedSha256(value: string): string =
     raise newException(ValueError, "invalid sha256 digest: " & value)
 
 proc fileSha256Hex*(path: string): string =
-  ## The SHA-256 hex digest of `path`, computed in-process.
-  ##
-  ## This used to shell out to whichever of sha256sum / shasum / certutil /
-  ## openssl was first on `PATH`, which made the verifier of every tarball
-  ## provisioning edge an ambient tool -- the thing
-  ## Dependency-Provisioning-In-Build-Graph.md section 4 rules out. Hashing is
-  ## not a tool the edge needs; it is arithmetic, and nimcrypto does it.
-  var f: File
-  if not open(f, extendedPath(path), fmRead):
-    raise newException(OSError,
-      "tool-resolution failed: cannot open for sha256 verification: " & path)
-  defer: close(f)
-  var ctx: sha256
-  ctx.init()
-  var buffer = newSeq[byte](1 shl 20)
-  while true:
-    let got = f.readBytes(buffer, 0, buffer.len)
-    if got <= 0:
-      break
-    ctx.update(buffer.toOpenArray(0, got - 1))
-  let digest = ctx.finish()
-  ctx.clear()
-  toLowerAscii($digest)
+  ## Shared streaming in-process archive verifier.
+  fileShaHex(path, "sha256")
 
 proc hostCpuToken(): string =
   ## Host CPU as the lowercase string DSL ``tarball cpu = "..."``
@@ -1887,26 +1877,6 @@ proc selectTarballProvisioning*(useDef: InterfaceToolUse;
   else:
     raise selectionFailure(useDef, rkTarball, choice, pin, target)
 
-proc refuseUnrealizableTarball(useDef: InterfaceToolUse;
-                               selected: InterfaceTarballProvisioning) =
-  ## GM4b: the ``uses:`` provisioning edge extracts an archive and nothing
-  ## else. A record that needs an installer run, an MSYS2 package merge, a
-  ## pre-install script or launcher emission — the archive realizations that
-  ## moved here from the retired ``VersionedProvisioning`` catalog — is
-  ## realized only by the home archive realizer (``repro_home_apply``'s
-  ## ``builtin_adapter``). Extracting such a record as a plain archive would
-  ## yield a prefix that looks realized and is not, so it is refused by name.
-  ## That two realizers consume tarball records is recorded as an open gap in
-  ## Provisioning-Contributions.md §"Profile Package References".
-  let unsupported = archiveInstallerFeatures(selected)
-  if unsupported.len > 0:
-    raise newException(ValueError,
-      "tool-resolution failed: the tarball realization of package \"" &
-      useDef.packageSelector & "\" selected for this host (" & selected.url &
-      ") needs " & unsupported.join(", ") & ", which the `uses:` " &
-      "provisioning edge does not perform; it is realized by `repro home " &
-      "apply` only")
-
 proc tarballAcquisitionPlan*(useDef: InterfaceToolUse;
                              honorRequestedContributor = true;
                              target = hostRealizationTarget()):
@@ -1919,8 +1889,15 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse;
       noProvisioningAtAllHint(useDef))
   let selected = selectTarballProvisioning(useDef, honorRequestedContributor,
     target)
-  refuseUnrealizableTarball(useDef, selected)
-  let sha256 = normalizedSha256(selected.sha256)
+  # Decode every installation field before an edge can download anything.
+  let installation = archiveInstallerFeatures(selected).len > 0
+  let decoded = if installation:
+      archiveRealizationOf(useDef.packageSelector, selected)
+    else: ArchiveRealization()
+  let algorithm = if installation: decoded.digestAlgorithm else: "sha256"
+  let digest = if installation: decoded.digestValue
+    else: normalizedSha256(selected.sha256)
+  let sha256 = if algorithm == "sha256": digest else: ""
   if selected.url.len == 0 or selected.executablePath.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: incomplete tarball metadata for package \"" &
@@ -1930,6 +1907,9 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse;
       "tool-resolution failed: unsafe tarball executablePath for package \"" &
       useDef.packageSelector & "\": " & selected.executablePath)
   TarballAcquisitionPlan(
+    record: selected,
+    digestAlgorithm: algorithm,
+    digestValue: digest,
     packageSelector: useDef.packageSelector,
     packageId: if selected.packageId.len >
     0: selected.packageId else: selected.url,
@@ -2013,6 +1993,7 @@ type
     ## refused by name rather than satisfied from the host.
     sevenZip*: string
     zstd*: string
+    installation*: ArchiveStageTools
 
 const
   ExtractorRoleSevenZip* = "7z"
@@ -2023,7 +2004,7 @@ proc extractorRolesFor*(archiveType: string): seq[string] =
   ## needs, beyond the irreducible host tools. This is the dependency list of
   ## a tarball provisioning edge, and the only place it is decided.
   case archiveType.toLowerAscii()
-  of "7z", "7z.exe": @[ExtractorRoleSevenZip]
+  of "7z", "7z.exe", "7z-sfx": @[ExtractorRoleSevenZip]
   of "tar.zst", "tzst", "pkg.tar.zst", "conda": @[ExtractorRoleZstd]
   else: @[]
 
@@ -2076,35 +2057,73 @@ proc downloadUrlToFile(url, destination: string) =
       raise newException(IOError, "unsupported archive URL or missing file: " & url)
     copyFile(extendedPath(url), extendedPath(destination))
 
+proc archiveDigestAlgorithm(plan: TarballAcquisitionPlan): string =
+  if plan.digestAlgorithm.len > 0: plan.digestAlgorithm else: "sha256"
+
+proc archiveDigestValue(plan: TarballAcquisitionPlan): string =
+  if plan.digestValue.len > 0: plan.digestValue else: plan.sha256
+
+proc installationIdentity(plan: TarballAcquisitionPlan): string =
+  ## Every semantic install field and helper receipt is an input to both
+  ## local and shared-cache prefix identity. Plain archives retain their key.
+  if archiveInstallerFeatures(plan.record).len > 0 or
+      plan.record.detail.extraExecutables.len > 0:
+    $jsonutils.toJson(plan.record.detail) & "\0tools:" & plan.installationToolsIdentity
+  else: ""
+
 proc verifiedDownload(plan: TarballAcquisitionPlan; storeRoot: string):
     tuple[path: string; selectedUrl: string] =
+  let algorithm = archiveDigestAlgorithm(plan)
+  let expected = archiveDigestValue(plan)
+  if algorithm == "sha1":
+    stderr.writeLine("WSha1HashAccepted: " & plan.packageSelector &
+      " is pinned by the upstream's weak SHA-1 digest")
   let downloads = storeRoot / "downloads"
   let tmpRoot = storeRoot / "tmp"
   createDir(extendedPath(downloads))
   createDir(extendedPath(tmpRoot))
-  let finalPath = downloads / (plan.sha256 & ".archive")
+  # Windows command dispatch and installer tools rely on native extensions.
+  # Keep executable/MSI suffixes when a formerly home-only record reaches
+  # this common downloader; ordinary archive cache paths stay unchanged.
+  let suffix =
+    case plan.archiveType.toLowerAscii()
+    of "installer-nsis", "7z-sfx", "7z.exe": ".exe"
+    of "installer-msi": ".msi"
+    else: ".archive"
+  let finalPath = downloads / (expected & suffix)
   if fileExists(extendedPath(finalPath)):
-    let actual = fileSha256Hex(finalPath)
-    if actual == plan.sha256:
+    let actual = fileShaHex(finalPath, algorithm)
+    if actual == expected:
       return (path: finalPath, selectedUrl: "cache")
     removeFile(extendedPath(finalPath))
 
   var diagnostics: seq[string] = @[]
+  var mismatch: ref EBuiltinDigestMismatch
   for url in @[plan.url] & plan.mirrors:
     let tmpPath = tmpRoot / ("download." & $getCurrentProcessId() & "." &
       $getTime().toUnix & "." & $diagnostics.len)
     try:
       downloadUrlToFile(url, tmpPath)
-      let actual = fileSha256Hex(tmpPath)
-      if actual != plan.sha256:
-        diagnostics.add(url & ": sha256 mismatch expected " & plan.sha256 &
+      let actual = fileShaHex(tmpPath, algorithm)
+      if actual != expected:
+        diagnostics.add(url & ": " & algorithm & " mismatch expected " & expected &
           " got " & actual)
+        # Preserve the verifier's structured failure for callers while
+        # still allowing a later mirror to supply the declared bytes.
+        mismatch = newException(EBuiltinDigestMismatch,
+          diagnostics[^1])
+        mismatch.packageId = plan.packageSelector
+        mismatch.expectedAlgorithm = algorithm
+        mismatch.expectedDigest = expected
+        mismatch.observedDigest = actual
+        mismatch.step = 7
+        mismatch.stepName = "realize"
         removeFile(extendedPath(tmpPath))
         continue
       try:
         moveFile(extendedPath(tmpPath), extendedPath(finalPath))
       except OSError:
-        if fileExists(extendedPath(finalPath)) and fileSha256Hex(finalPath) == plan.sha256:
+        if fileExists(extendedPath(finalPath)) and fileShaHex(finalPath, algorithm) == expected:
           if fileExists(extendedPath(tmpPath)):
             removeFile(extendedPath(tmpPath))
         else:
@@ -2114,9 +2133,12 @@ proc verifiedDownload(plan: TarballAcquisitionPlan; storeRoot: string):
       diagnostics.add(url & ": " & e.msg)
       if fileExists(extendedPath(tmpPath)):
         removeFile(extendedPath(tmpPath))
-  raise newException(OSError,
-    "tool-resolution failed: all tarball archive URLs failed for " &
-    plan.packageSelector & "\n" & diagnostics.join("\n"))
+  let message = "tool-resolution failed: all tarball archive URLs failed for " &
+    plan.packageSelector & "\n" & diagnostics.join("\n")
+  if not mismatch.isNil:
+    mismatch.msg = message
+    raise mismatch
+  raise newException(OSError, message)
 
 proc requireHostTar(): string =
   ## N51: the two ``tar`` call sites below named their tool as the bare
@@ -2270,7 +2292,7 @@ proc validateTarEntries(archivePath, archiveType: string) =
       @["-tjf", tarOperand(archivePath)]
     of "tar":
       @["-tf", tarOperand(archivePath)]
-    of "zip", "7z", "7z.exe", "raw", "conda", "tar.zst", "tzst",
+    of "zip", "7z", "7z.exe", "7z-sfx", "raw", "conda", "tar.zst", "tzst",
         "pkg.tar.zst", "msi":
       # Formats this pre-flight listing does not inspect. For the archive
       # types host `tar` cannot read directly, listing would need the same
@@ -2530,6 +2552,34 @@ proc bootstrapZstdToolUse*(): InterfaceToolUse =
   else:
     result.nixProvisioning = @[bootstrapNixExtractor("zstd", "bin/zstd")]
 
+proc launcherToolRole(spec: LauncherEmitSpec): string =
+  if spec.interpreter_package_id.len > 0: spec.interpreter_package_id
+  elif spec.kind == lekPhar: "php"
+  elif spec.kind == lekJar: "jdk"
+  else: "bash"
+
+proc installationToolRoles*(record: InterfaceTarballProvisioning): seq[string] =
+  ## Tool requirements are declared before staging and realized by dependency
+  ## edges. Store rows and the caller's PATH never select installer helpers.
+  let detail = record.detail
+  if detail.nested7z or detail.installMethod in
+      ["installer-nsis", "installer-nsis-bundle"]:
+    result.add(ExtractorRoleSevenZip)
+  if detail.installMethod in ["installer-msi", "installer-nsis-bundle"] and
+      not detail.msiAdminInstall:
+    result.add("lessmsi")
+  if detail.installMethod == "installer-nsis-bundle": result.add("wix3")
+  if detail.installMethod == "installer-inno-setup": result.add("innounp")
+  for encoded in detail.preInstall:
+    case decodePreInstallAction(encoded).kind
+    of piaExpand7z: result.add(ExtractorRoleSevenZip)
+    of piaExpandDark, piaExpandMsi:
+      if not detail.msiAdminInstall: result.add("lessmsi")
+    of piaExpandInno: result.add("innounp")
+    else: discard
+  for encoded in detail.launcherEmit:
+    result.add(launcherToolRole(decodeLauncherEmitSpec(encoded)))
+
 proc extractorToolUses*(role: string): seq[InterfaceToolUse] =
   ## The provisioned package an extractor role is realized from, as a list
   ## of pinned ALTERNATIVES tried in order by one edge.
@@ -2541,7 +2591,12 @@ proc extractorToolUses*(role: string): seq[InterfaceToolUse] =
       @[bootstrapSevenZipToolUse()]
   of ExtractorRoleZstd: @[bootstrapZstdToolUse()]
   else:
-    raise newException(ValueError, "unknown extractor role: " & role)
+    var helper = PackageDef(packageName: "archiveHelpers")
+    helper.toolUses = @[PackageUseDef(rawConstraint: role,
+      packageSelector: role, executableName: role)]
+    let projected = toProjectInterface(helper, registeredPackages(),
+      registeredProvisioningContributions())
+    @[projected.toolUses[0]]
 
 proc removeSingleTopLevelDir(destination: string) =
   ## When a zip / 7z archive ships its payload under a single top-
@@ -2752,7 +2807,7 @@ proc mergeRustInstallerComponents(destination: string) =
     try: removeFile(extendedPath(installSh))
     except OSError: discard
 
-proc extractTarballArchive(archivePath, destination, archiveType: string;
+proc extractTarballArchive*(archivePath, destination, archiveType: string;
                            stripComponents: int;
                            declaredExecutablePath = "";
                            tools = ExtractorTools()) =
@@ -2907,7 +2962,7 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
         declaredExecutablePath, tools)
     finally:
       removeDir(extendedPath(staging))
-  of "7z", "7z.exe":
+  of "7z", "7z.exe", "7z-sfx":
     # The 7-Zip is the provisioned package the provisioning edge's 7-Zip
     # dependency edge realized -- never one found on PATH.
     let sevenZipExe = tools.sevenZip
@@ -3015,6 +3070,8 @@ proc writeTarballReceipt(prefix: string; plan: TarballAcquisitionPlan;
                          selectedUrl: string) =
   let receipt = %*{
     "installMethod": "tarball",
+    "digestAlgorithm": plan.digestAlgorithm,
+    "digestValue": plan.digestValue,
     "packageSelector": plan.packageSelector,
     "packageId": plan.packageId,
     "url": plan.url,
@@ -3135,6 +3192,8 @@ proc unpackClosure(plan: TarballAcquisitionPlan;
     entryPlan.url = entry.url
     entryPlan.mirrors = @[]
     entryPlan.sha256 = entry.sha256
+    entryPlan.digestAlgorithm = "sha256"
+    entryPlan.digestValue = entry.sha256
     # npm publishes every package as a `package/`-rooted gzip tarball.
     entryPlan.archiveType = "tar.gz"
     entryPlan.stripComponents = 1
@@ -3162,16 +3221,19 @@ proc toolCacheIdentity(plan: TarballAcquisitionPlan;
   ## The URL is deliberately NOT part of the key. A mirror serving identical
   ## bytes should hit the same entry — the digest is the identity, the URL is
   ## only where it was fetched from.
+  let localPlatform = detectLocalPlatform("")
   let platform = bcTypes.PlatformTriple(
-    cpu: hostCpuToken(),
-    os: hostOsToken(),
+    cpu: localPlatform.cpu,
+    os: localPlatform.os,
     abi: "",
     libcVariant: "",
     microarch: "")
   let toolchain = bcTypes.ToolchainIdentity(name: "tarball-realize")
   result = newCacheEntryIdentity(packageName, version, platform, toolchain,
     "repro-tool-profiles-v1")
-  result.addOption("sha256", normalizedSha256(plan.sha256))
+  result.addOption(archiveDigestAlgorithm(plan), archiveDigestValue(plan))
+  if installationIdentity(plan).len > 0:
+    result.addOption("installation", installationIdentity(plan))
   result.addOption("archiveType", plan.archiveType)
   result.addOption("executablePath", plan.declaredExecutablePath)
   result.addOption("executableAlias", plan.declaredExecutableAlias)
@@ -3235,6 +3297,8 @@ proc cloneSiblingRealization(plan: TarballAcquisitionPlan;
   ## field, unreadable candidate, a link the filesystem will not make, or a
   ## result whose declared executable does not resolve — each moves on. The
   ## failure mode of this optimisation is that it does nothing.
+  if installationIdentity(plan).len > 0:
+    return false
   if plan.lockIdentity.len == 0:
     # No declaration to key on. Matching on the checksum alone would clone
     # between packages whose authors never said they were the same thing.
@@ -3289,6 +3353,8 @@ proc cloneSiblingRealization(plan: TarballAcquisitionPlan;
         continue
       return true
   false
+
+proc validateExtraTarballExecutables(plan: TarballAcquisitionPlan; prefix: string)
 
 proc substituteToolPrefix(plan: TarballAcquisitionPlan;
                           packageName, version, prefix, storeRoot: string):
@@ -3346,6 +3412,10 @@ proc substituteToolPrefix(plan: TarballAcquisitionPlan;
           rejectSymlinks = true).len == 0:
         removeDir(extendedPath(staging))
         return false
+      validateExtraTarballExecutables(plan, staging)
+      if archiveInstallerFeatures(plan.record).len > 0:
+        verifyArchiveApplication(archiveRealizationOf(plan.packageSelector,
+          plan.record), staging, tarballAppTrust)
       createDir(extendedPath(prefix.parentDir))
       moveDir(extendedPath(staging), extendedPath(prefix))
     except CatchableError:
@@ -3394,6 +3464,11 @@ proc publishToolPrefix(plan: TarballAcquisitionPlan;
   ## ordinary case for most developers and is silent by design; it is not an
   ## error and must not read like one.
   if getEnv("REPRO_CACHE_DISABLE").len > 0:
+    return
+  # A caller may relax application trust checks for local fixtures. Such a
+  # prefix has not met the normal publication contract, so it must never be
+  # advertised under the same cache identity as a strictly verified product.
+  if tarballAppTrust != {}:
     return
   # The package said so. Realizing it is fine, substituting it from a cache
   # somebody else populated is fine; what must not happen is THIS machine
@@ -3452,6 +3527,8 @@ proc tarballPrefixLayoutParts(plan: TarballAcquisitionPlan): seq[string] =
   ## `python3` then never reached PATH. The alias, the launcher and the prune
   ## set are added only when declared, so no other package's key moves.
   result = @[plan.archiveType, $plan.stripComponents]
+  if installationIdentity(plan).len > 0:
+    result.add("installation=" & installationIdentity(plan))
   if plan.declaredExecutableAlias.len > 0:
     result.add("alias=" & plan.declaredExecutableAlias)
   if plan.declaredLauncher.len > 0:
@@ -3459,10 +3536,21 @@ proc tarballPrefixLayoutParts(plan: TarballAcquisitionPlan): seq[string] =
   if plan.declaredPrunePaths.len > 0:
     result.add("prune=" & plan.declaredPrunePaths.join(","))
 
+proc validateExtraTarballExecutables(plan: TarballAcquisitionPlan; prefix: string) =
+  for extra in plan.record.detail.extraExecutables:
+    let probe = probeDeclaredExecutable(prefix, extra, rejectSymlinks = false)
+    if probe.verdict != deOk:
+      raise newException(OSError, "tool-resolution failed: " & probe.reason)
+    let realPrefix = expandFilename(extendedPath(prefix))
+    let realExtra = expandFilename(extendedPath(probe.resolvedPath))
+    if not realExtra.startsWith(realPrefix & DirSep):
+      raise newException(OSError, "tool-resolution failed: extraExecutable " &
+        extra & " resolves outside the realized prefix: " & realExtra)
+
 proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
                               writerMode = "direct";
                               tools = ExtractorTools()):
-    tuple[prefix: string; archivePath: string; selectedUrl: string] =
+    tuple[prefix: string; archivePath: string; selectedUrl: string; cacheHit: bool] =
   ## Materializes a tarball realization into the unified M56 layout
   ## (`<store-root>/prefixes/<package>/<version>-<hash>/`).
   let tmpRoot = storeRoot / "tmp"
@@ -3471,11 +3559,13 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
   let resolvedVersion =
     if versionFromPackageSelector(plan.packageSelector).len > 0:
       versionFromPackageSelector(plan.packageSelector)
+    elif plan.record.detail.version.len > 0:
+      plan.record.detail.version
     else:
-      plan.sha256[0 .. 15]
+      archiveDigestValue(plan)[0 .. 15]
   let unified = unifiedPrefixPath(storeRoot, packageName, resolvedVersion,
     "tarball", plan.lockIdentity, plan.declaredExecutablePath,
-    plan.url, plan.sha256, tarballPrefixLayoutParts(plan))
+    plan.url, archiveDigestValue(plan), tarballPrefixLayoutParts(plan))
   let prefix = unified.absolutePath
   if dirExists(extendedPath(prefix)):
     let existing = probeDeclaredExecutable(prefix,
@@ -3484,11 +3574,14 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
       raise newException(OSError,
         "tool-resolution failed: existing tarball realization " &
         existing.reason & ": " & prefix)
+    if archiveInstallerFeatures(plan.record).len > 0:
+      verifyArchiveApplication(archiveRealizationOf(plan.packageSelector,
+        plan.record), prefix, tarballAppTrust)
     return (prefix: prefix, archivePath: "",
-        selectedUrl: selectedUrlFromReceipt(prefix))
+        selectedUrl: selectedUrlFromReceipt(prefix), cacheHit: true)
 
   let tempPrefix = tmpRoot / ("extract." & $getCurrentProcessId() & "." &
-    $getTime().toUnix & "." & plan.sha256[0 .. 15])
+    $getTime().toUnix & "." & archiveDigestValue(plan)[0 .. 15])
   if dirExists(extendedPath(tempPrefix)):
     removeDir(extendedPath(tempPrefix))
 
@@ -3520,15 +3613,33 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
   # nothing a dev env provisioned was ever cache-substitutable.
   if not cloned and substituteToolPrefix(plan, packageName, resolvedVersion,
       prefix, storeRoot):
+    if archiveInstallerFeatures(plan.record).len > 0:
+      verifyArchiveApplication(archiveRealizationOf(plan.packageSelector,
+        plan.record), prefix, tarballAppTrust)
     return (prefix: prefix, archivePath: "",
-        selectedUrl: selectedUrlFromReceipt(prefix))
+        selectedUrl: selectedUrlFromReceipt(prefix), cacheHit: true)
   let downloaded =
     if cloned: (path: "", selectedUrl: plan.url)
     else: verifiedDownload(plan, storeRoot)
   try:
     if not cloned:
-      extractTarballArchive(downloaded.path, tempPrefix, plan.archiveType,
-        plan.stripComponents, plan.declaredExecutablePath, tools)
+      if archiveInstallerFeatures(plan.record).len > 0:
+        let resolution = archiveRealizationOf(plan.packageSelector, plan.record)
+        let installed = stageArchiveInstallation(resolution, downloaded.path,
+          tempPrefix, plan.stripComponents, tools.installation,
+          proc(path, dest, kind: string; strip: int; executable: string) =
+            extractTarballArchive(path, dest, kind, strip, executable, tools),
+          tarballAppTrust, prefix,
+          proc(path: string; count: int) = flattenStripComponents(path, count))
+        var installerArgv: seq[string]
+        for arg in installed.installerArgvUsed:
+          installerArgv.add(arg.replace(tempPrefix, "${prefix}").replace(
+            downloaded.path, "${archive}"))
+        writeFile(extendedPath(tempPrefix / ".repro-installation.json"), $(%*{
+          "installerArgvUsed": installerArgv}))
+      else:
+        extractTarballArchive(downloaded.path, tempPrefix, plan.archiveType,
+          plan.stripComponents, plan.declaredExecutablePath, tools)
       # The declared closure, unpacked into the same staging prefix. After
       # the root archive because an entry lands UNDER it
       # (``node_modules/...``), and before the prune/alias/launcher steps
@@ -3625,6 +3736,10 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
           # Preserve the execute bit the copy does not carry on POSIX.
           setFilePermissions(extendedPath(aliasPath),
             getFilePermissions(extendedPath(extractedExecutable)))
+    validateExtraTarballExecutables(plan, tempPrefix)
+    if archiveInstallerFeatures(plan.record).len > 0:
+      verifyArchiveApplication(archiveRealizationOf(plan.packageSelector,
+        plan.record), tempPrefix, tarballAppTrust)
     writeTarballReceipt(tempPrefix, plan, downloaded.selectedUrl)
     createDir(extendedPath(prefix.parentDir))
     try:
@@ -3650,14 +3765,15 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
     # alongside the binary receipt).
     discard registerInUnifiedStore(storeRoot, packageName,
       resolvedVersion, "tarball", plan.lockIdentity,
-      plan.declaredExecutablePath, plan.url, plan.sha256, "directory",
+      plan.declaredExecutablePath, plan.url, archiveDigestValue(plan), "directory",
       tarballPrefixLayoutParts(plan), prefix,
-      [plan.declaredExecutablePath], writerMode = writerMode,
+      @[plan.declaredExecutablePath] & plan.record.detail.extraExecutables,
+      writerMode = writerMode,
       declaredExecutableAlias = plan.declaredExecutableAlias,
       declaredLauncher = plan.declaredLauncher,
       declaredPrunePaths = plan.declaredPrunePaths)
     (prefix: prefix, archivePath: downloaded.path,
-      selectedUrl: downloaded.selectedUrl)
+      selectedUrl: downloaded.selectedUrl, cacheHit: false)
   except CatchableError:
     if dirExists(extendedPath(tempPrefix)):
       removeDir(extendedPath(tempPrefix))
@@ -3919,7 +4035,7 @@ proc tarballProfileFor(useDef: InterfaceToolUse; plan: TarballAcquisitionPlan;
 const
   TarballProvisionerName* = "tarball"
   NixProvisionerName = "nix"
-  TarballProvisionEdgeSchema = "reprobuild.tarball-provision.v1"
+  TarballProvisionEdgeSchema = "reprobuild.tarball-provision.v2"
 
 type
   ProvisioningEdges* = object
@@ -3936,6 +4052,7 @@ type
     prefix*: string
     executable*: string
     selectedUrl*: string
+    cacheHit*: bool
 
 proc provisioningStateRoot*(storeRoot: string): string =
   ## Where the provisioning subgraph keeps its receipts and its action cache.
@@ -3945,6 +4062,9 @@ proc provisioningStateRoot*(storeRoot: string): string =
 
 proc planJson(plan: TarballAcquisitionPlan): JsonNode =
   %*{
+    "record": jsonutils.toJson(plan.record),
+    "digestAlgorithm": plan.digestAlgorithm,
+    "digestValue": plan.digestValue,
     "packageSelector": plan.packageSelector,
     "packageId": plan.packageId,
     "url": plan.url,
@@ -3968,6 +4088,9 @@ proc jsonStrings(node: JsonNode): seq[string] =
 
 proc planFromJson(node: JsonNode): TarballAcquisitionPlan =
   TarballAcquisitionPlan(
+    record: jsonutils.jsonTo(node["record"], InterfaceTarballProvisioning),
+    digestAlgorithm: node{"digestAlgorithm"}.getStr(),
+    digestValue: node{"digestValue"}.getStr(),
     packageSelector: node{"packageSelector"}.getStr(),
     packageId: node{"packageId"}.getStr(),
     url: node{"url"}.getStr(),
@@ -4114,7 +4237,8 @@ proc addTarballProvisionEdge(edges: var ProvisioningEdges;
 
   var roles: seq[string]
   for plan in plans:
-    for role in extractorRolesFor(plan.archiveType):
+    for role in extractorRolesFor(plan.archiveType) &
+        installationToolRoles(plan.record):
       if role notin roles:
         roles.add(role)
   visiting.add(id)
@@ -4202,7 +4326,8 @@ proc readTarballProvisionReceipt*(path: string): TarballProvisionReceipt =
     planIndex: node{"planIndex"}.getInt(),
     prefix: storeResolvedPath(node{"prefix"}.getStr(), storeRoot),
     executable: storeResolvedPath(node{"executable"}.getStr(), storeRoot),
-    selectedUrl: node{"selectedUrl"}.getStr())
+    selectedUrl: node{"selectedUrl"}.getStr(),
+    cacheHit: node{"cacheHit"}.getBool())
 
 proc extractorExecutable(node: JsonNode): string =
   ## The executable a dependency edge's receipt names.
@@ -4246,19 +4371,33 @@ proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} 
       let storeRoot = spec{"storeRoot"}.getStr()
       let writerMode = spec{"writerMode"}.getStr("direct")
       var tools = ExtractorTools()
+      var toolIdentities = ""
       for node in spec{"extractors"}:
         let exe = extractorExecutable(node)
+        toolIdentities.add(node{"role"}.getStr() & ":" &
+          storeRelativePath(exe, storeRoot) & "\n")
         case node{"role"}.getStr()
-        of ExtractorRoleSevenZip: tools.sevenZip = exe
+        of ExtractorRoleSevenZip:
+          tools.sevenZip = exe
+          tools.installation.sevenZip = exe
         of ExtractorRoleZstd: tools.zstd = exe
-        else:
-          raise newException(ValueError,
-            "unknown extractor role in " & action.id)
+        of "lessmsi": tools.installation.lessmsi = exe
+        of "wix3": tools.installation.dark = exe
+        of "innounp": tools.installation.innounp = exe
+        else: discard # declared interpreters are mapped in declaration order below
       var failures: seq[string]
       var firstError: ref CatchableError = nil
       var index = 0
       for planNode in spec{"plans"}:
-        let plan = planFromJson(planNode)
+        var plan = planFromJson(planNode)
+        plan.installationToolsIdentity = toolIdentities
+        tools.installation.interpreters = @[]
+        for encoded in plan.record.detail.launcherEmit:
+          let launcher = decodeLauncherEmitSpec(encoded)
+          let role = launcherToolRole(launcher)
+          for dependency in spec{"extractors"}:
+            if dependency{"role"}.getStr() == role:
+              tools.installation.interpreters.add(extractorExecutable(dependency))
         try:
           let materialized = materializeTarballPrefix(plan, storeRoot,
             writerMode, tools)
@@ -4274,11 +4413,14 @@ proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} 
           let receiptStore = receiptStoreRoot(absolutePath(receipt))
           writeFile(extendedPath(receipt), $(%*{
             "schema": TarballProvisionEdgeSchema,
+            "digestAlgorithm": plan.digestAlgorithm,
+            "digestValue": plan.digestValue,
             "packageSelector": plan.packageSelector,
             "planIndex": index,
             "prefix": storeRelativePath(materialized.prefix, receiptStore),
             "executable": storeRelativePath(resolved, receiptStore),
-            "selectedUrl": materialized.selectedUrl}) & "\n")
+            "selectedUrl": materialized.selectedUrl,
+            "cacheHit": materialized.cacheHit}) & "\n")
           result.status = asSucceeded
           result.exitCode = 0
           result.evidence = PathSetEvidence(declaredInputs: action.inputs,
@@ -4325,8 +4467,18 @@ proc runProvisioningEdges*(edges: ProvisioningEdges; storeRoot: string;
                            forceRebuild = false): BuildRunResult =
   registerTarballProvisioner()
   lastProvisionError = nil
-  runBuild(graph(edges.actions), provisioningEngineConfig(storeRoot,
-    forceRebuild))
+  try:
+    runBuild(graph(edges.actions), provisioningEngineConfig(storeRoot,
+      forceRebuild))
+  except BuildEngineError:
+    # A failed helper can leave its consumer blocked before the engine can
+    # return results. Keep the realizer's original structured diagnostic,
+    # just as raiseProvisioningFailure does for a failed root edge.
+    if not lastProvisionError.isNil:
+      let error = lastProvisionError
+      lastProvisionError = nil
+      raise error
+    raise
 
 proc raiseProvisioningFailure(run: BuildRunResult) =
   for item in run.results:
@@ -4357,6 +4509,7 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
       getCurrentDir() / ".repro" / "tool-store"
   let edges = tarballProvisioningEdges(useDef, root, writerMode)
   var receipt: TarballProvisionReceipt
+  var actionCacheHit = false
   for attempt in 0 .. 1:
     # A receipt restored or kept by the action cache can outlive the prefix
     # it names -- the store is garbage-collectable and the cache does not
@@ -4364,6 +4517,9 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
     # re-realizes whatever is missing.
     let run = runProvisioningEdges(edges, root, forceRebuild = attempt > 0)
     raiseProvisioningFailure(run)
+    for item in run.results:
+      if item.id == edges.rootId:
+        actionCacheHit = item.status in {asCacheHit, asUpToDate}
     receipt = readTarballProvisionReceipt(edges.rootReceipt)
     # The receipt must name a prefix that carries what the package declares
     # NOW, its alias included. An edge record from before a package gained an
@@ -4395,6 +4551,14 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
         "tool-resolution failed: tarball realization " & receiptProbe.reason &
         " (receipt " & edges.rootReceipt &
         " names " & receipt.executable & ")")
+  validateExtraTarballExecutables(plan, receipt.prefix)
+  let finalProbe = probeDeclaredExecutable(receipt.prefix,
+    plan.declaredExecutablePath, rejectSymlinks = true)
+  if finalProbe.verdict != deOk:
+    raise newException(OSError, finalProbe.reason)
+  if archiveInstallerFeatures(plan.record).len > 0:
+    verifyArchiveApplication(archiveRealizationOf(plan.packageSelector,
+      plan.record), receipt.prefix, tarballAppTrust)
   refuseUnrunnableTarballExecutable(useDef, receipt.executable,
     receipt.prefix)
   result = tarballProfileFor(useDef, plan, receipt.prefix,
@@ -4402,6 +4566,7 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
   # Not part of the profile fingerprint (see the field), so set after the
   # profile is sealed.
   result.provisioningReceipt = edges.rootReceipt
+  result.tarballCacheHit = actionCacheHit or receipt.cacheHit
 
 # ---------------------------------------------------------------------------
 # Nix realization in tool resolution as a build-graph edge.

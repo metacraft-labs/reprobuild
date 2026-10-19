@@ -51,7 +51,12 @@ fixture script and the real Justfile.
 
 from __future__ import annotations
 
+import os
+import platform
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -384,6 +389,105 @@ class TheEdgeBuildsTheRecorderTheRecorderWay(unittest.TestCase):
         fixture = re.search(r"^hcr_ct_mcr_fixture:\n((?:[ \t]+.*\n)+)", justfile, re.M)
         self.assertIsNotNone(fixture)
         self.assertIn(FIXTURE_SCRIPT, fixture.group(1))
+
+
+# --------------------------------------------------------------------------
+# A prebuilt bundle: the script RUN, not read
+# --------------------------------------------------------------------------
+
+
+@unittest.skipUnless(
+    platform.system() == "Linux" and platform.machine() in ("x86_64", "amd64"),
+    "the fixture script stages a bundle on Linux x86-64 only (elsewhere it "
+    "exits 0 having staged nothing, which these cases cannot tell apart)",
+)
+class PrebuiltBundle(unittest.TestCase):
+    """`CT_CODETRACER_NATIVE_RECORDER_PREBUILT=1` stages the named recorder
+    checkout's existing bundle without building it.
+
+    The recorder's own HX-S-2 gate builds the tree it tests and then runs this
+    gate's recipe from it; the fixture's build runs in a cleared environment,
+    so it is not incremental over the gate's and cost that row most of a full
+    recorder build (64 s against the 30 s limit).
+
+    The script is copied into a temporary repository root (it stages into
+    `<its root>/build/test-fixtures/hcr-ct-mcr`) and pointed at a temporary
+    recorder checkout holding the bundle files. `nix` on PATH is a stand-in
+    that records that it ran and fails. Justification: the property is that
+    the build is NOT run, so the build must be observable and cheap; the real
+    build is the recorder's `just build-ct-mcr`, which the gate exercises.
+    HOW IT GOES RED ON THE UNFIXED SCRIPT: the variable is ignored, the
+    stand-in `nix` runs and fails, and the script exits non-zero.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="hcr-prebuilt-"))
+        self.root = self.tmp / "reprobuild"
+        (self.root / "scripts").mkdir(parents=True)
+        shutil.copy2(REPO_ROOT / FIXTURE_SCRIPT, self.root / FIXTURE_SCRIPT)
+        self.recorder = self.tmp / "recorder"
+        script = read(FIXTURE_SCRIPT)
+        bundle = re.search(r"readonly BUNDLE=\((.*?)\)", script, re.S)
+        marker = re.search(r'readonly HXS2_MARKER="([^"]+)"', script)
+        self.assertIsNotNone(bundle)
+        self.assertIsNotNone(marker)
+        self.bundle = bundle.group(1).split()
+        for rel in ["Justfile", "flake.nix", marker.group(1)] + self.bundle:
+            path = self.recorder / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("content of " + rel + "\n", encoding="utf-8")
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        self.nix_ran = self.tmp / "nix-ran"
+        nix = self.bin / "nix"
+        nix.write_text(f"#!/bin/sh\ntouch '{self.nix_ran}'\nexit 1\n", encoding="utf-8")
+        nix.chmod(0o755)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_script(self, prebuilt: bool) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        env["PATH"] = str(self.bin) + os.pathsep + env.get("PATH", "")
+        env["CT_CODETRACER_NATIVE_RECORDER_SIBLING"] = str(self.recorder)
+        env.pop("CT_CODETRACER_NATIVE_RECORDER_PREBUILT", None)
+        if prebuilt:
+            env["CT_CODETRACER_NATIVE_RECORDER_PREBUILT"] = "1"
+        return subprocess.run(
+            ["bash", str(self.root / FIXTURE_SCRIPT)],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+
+    def staged(self) -> Path:
+        return self.root / "build" / "test-fixtures" / "hcr-ct-mcr"
+
+    def test_a_prebuilt_bundle_is_staged_without_building(self):
+        result = self.run_script(prebuilt=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.nix_ran.exists(), "the recorder was built anyway")
+        for rel in self.bundle:
+            staged = self.staged() / Path(rel).name
+            self.assertTrue(staged.is_file(), f"{rel} was not staged")
+            self.assertEqual(
+                staged.read_text(encoding="utf-8"),
+                (self.recorder / rel).read_text(encoding="utf-8"),
+            )
+
+    def test_without_the_variable_the_recorder_is_built(self):
+        # The control: the same checkout without the variable runs the build
+        # (the stand-in fails it), so the case above is not passing because
+        # the build never runs at all.
+        result = self.run_script(prebuilt=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.nix_ran.exists(), "the build did not run")
+
+    def test_a_prebuilt_bundle_missing_a_file_is_refused(self):
+        (self.recorder / self.bundle[0]).unlink()
+        result = self.run_script(prebuilt=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CT_CODETRACER_NATIVE_RECORDER_PREBUILT", result.stderr)
+        self.assertFalse(self.nix_ran.exists())
+        self.assertFalse(self.staged().exists(), "a partial bundle was left staged")
 
 
 if __name__ == "__main__":

@@ -7,10 +7,9 @@
 ## References"). This module realizes the SELECTION with the realizer of its
 ## kind:
 ##
-##   * ``tarball``, plain archive — the ``uses:`` provisioning edge
-##     (``repro_tool_profiles.resolveTarballTool``), the realizer recipes use;
-##   * ``tarball``, installer / MSYS2 / pre-install / launcher emission — the
-##     home archive realizer (``builtin_adapter.realizeBuiltinPackage``);
+##   * ``tarball`` — the same ``resolveTarballTool`` provisioning edge a
+##     recipe uses, including installation, MSYS2 and launcher operations;
+##     ``builtin_adapter`` only projects its activation metadata;
 ##   * ``nix`` — ``repro_tool_profiles.resolveNixTool``, then a store prefix
 ##     recording the Nix store path;
 ##   * ``scoop`` — ``repro_tool_profiles.resolveScoopTool`` (Windows);
@@ -55,9 +54,8 @@ type
     akScoop = "scoop"
     akTarball = "tarball"
     akBuiltin = "builtin"
-      ## A ``tarball`` selection realized by the home archive realizer
-      ## (``builtin_adapter.realizeBuiltinPackage``): installers, MSYS2
-      ## packages, pre-install steps, launcher emission.
+      ## Legacy adapter label retained for decoding existing generations.
+      ## New archive realizations are produced by the tarball edge.
     akNix = "nix"
       ## GM4b: a ``nixPackage`` selection realized by
       ## ``repro_tool_profiles.resolveNixTool``.
@@ -330,8 +328,8 @@ proc realizeScoopAdapter(store: var Store; packageId: string;
 proc realizeBuiltinAdapter(store: var Store;
                            resolution: ArchiveRealization;
                            appTrust: AppTrustPolicy = {}): RealizedRecord =
-  ## Run the home archive realizer on a projected ``tarball`` selection and
-  ## pack the result into the ``RealizedRecord`` the pipeline consumes.
+  ## Project the shared tarball edge's result into home activation metadata.
+  ## This compatibility wrapper owns no realization or store mutation.
   ## A macOS application that fails its archive handling or a trust check
   ## fails the apply at step 7, naming the package and the check.
   let outcome =
@@ -356,9 +354,8 @@ proc realizeBuiltinAdapter(store: var Store;
   result.digestValue = outcome.digestValue
   result.archiveFormat = outcome.archiveFormat
   result.envBindings = outcome.envBindings
-  # Provenance: a typed `builtin:<algorithm>:<digest>` blob so cross-
-  # adapter callers can identify which adapter realized the prefix.
-  result.provenance = bytesOfText("builtin:" & outcome.digestAlgorithm & ":" &
+  # The prefix and provenance identify the one tarball provisioning edge.
+  result.provenance = bytesOfText("tarball:" & outcome.digestAlgorithm & ":" &
     outcome.digestValue)
   if outcome.appBundlePath.len > 0:
     result.appBundle = AppBundleRealization(
@@ -371,50 +368,8 @@ proc realizeBuiltinAdapter(store: var Store;
 
 
 # ---------------------------------------------------------------------------
-# Extract-route tarball and Nix realization
+# Nix realization
 # ---------------------------------------------------------------------------
-
-proc substitutedEnv(record: InterfaceTarballProvisioning;
-                    prefixAbs: string): seq[tuple[name, value: string]] =
-  ## A plain archive's ``env`` bindings with ``${prefix}`` substituted —
-  ## what the home archive realizer computes for its own records, so an
-  ## env-declaring package binds the same variables whichever realizer ran.
-  var raw: seq[tuple[name, value: string]] = @[]
-  for binding in record.detail.env:
-    let eq = binding.find('=')
-    if eq > 0:
-      raw.add((name: binding[0 ..< eq], value: binding[eq + 1 .. ^1]))
-  for i in 0 ..< raw.len:
-    for j in i + 1 ..< raw.len:
-      if raw[j].name < raw[i].name:
-        swap(raw[i], raw[j])
-  substituteEnv(raw, prefixAbs)
-
-proc realizeExtractTarball(store: var Store;
-                           resolution: ProfilePackageResolution):
-    RealizedRecord =
-  ## A plain archive: realized by the ``uses:`` provisioning edge
-  ## (``resolveTarballTool``), the realizer a recipe's ``uses:`` of the same
-  ## package runs. ``resolution.useDef`` carries only the selected record,
-  ## so the edge cannot select a different one.
-  let packageId = resolution.packageId
-  let record = resolution.selection.tarball
-  let profile =
-    try:
-      resolveTarballTool(resolution.useDef, store.root)
-    except CatchableError as err:
-      raiseRealizeFailed(packageId, "tarball", err.msg)
-  result = recordFromStorePrefix(store, packageId, akTarball, "tarball",
-    profile.selectedStorePath, profile.resolvedExecutablePath,
-    "tarball:" & resolution.selection.lockIdentity)
-  result.resolvedVersion = record.detail.version
-  result.urlUsed = profile.tarballSelectedUrl
-  result.digestAlgorithm = "sha256"
-  result.digestValue = profile.tarballSha256
-  let format = parseArchiveFormatToken(record.archiveType)
-  if format.ok:
-    result.archiveFormat = format.format
-  result.envBindings = substitutedEnv(record, profile.selectedStorePath)
 
 proc realizeNixSelection(store: var Store;
                          resolution: ProfilePackageResolution):
@@ -560,11 +515,9 @@ proc realizeResolution*(store: var Store;
   let selection = resolution.selection
   case selection.kind
   of rkTarball:
-    case resolution.archiveRoute
-    of arExtract:
-      result = realizeExtractTarball(store, resolution)
-    of arInstaller:
-      result = realizeBuiltinAdapter(store, resolution.archive, appTrust)
+    result = realizeBuiltinAdapter(store,
+      archiveRealizationOf(resolution.packageId, selection.tarball), appTrust)
+    result.adapter = akTarball
   of rkNix:
     result = realizeNixSelection(store, resolution)
   of rkScoop:

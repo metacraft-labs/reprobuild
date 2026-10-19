@@ -100,7 +100,10 @@ That single command:
    after a reprobuild update adds a newer one, until you change the
    policy or pass `--relock`. If a locked realization is no longer
    offered, plan and apply stop and ask for `--relock` rather than
-   picking another one.
+   picking another one. This file is host-local apply state: exclude it from
+   version control and do not share it between machines, even if they use the
+   same profile and target. Export ignores it and classifies packages from
+   policy and the current catalog.
 
 Expected output (abridged):
 

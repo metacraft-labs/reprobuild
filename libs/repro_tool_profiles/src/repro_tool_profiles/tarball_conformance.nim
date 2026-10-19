@@ -13,17 +13,9 @@
 ## ``resolveTarballTool`` — the same path `repro` uses, not a re-implementation
 ## of it — and then applies the realizer's own probe to the result.
 ##
-## It exists as a library rather than inside a test because two sweeps drive
-## it (the `uses:` provisioning edge's arms here, the home archive realizer's
-## arms through ``repro_home_apply/archive_conformance``) and because a check
-## whose logic lives in a test cannot be run from anywhere else.
-##
-## **Ownership is decided structurally, never from message text.** Each arm is
-## routed to exactly one realizer (Provisioning-Contributions.md §"Open gaps"
-## 3); ``archiveInstallerFeatures`` is that routing, so an arm the `uses:`
-## edge does not perform is reported as ``acvOwnedByHomeRealizer`` without a
-## download, rather than realized and then classified by parsing the refusal
-## it raised.
+## Recipe and home conformance callers both use this check. Every tarball
+## arm follows the same provisioning edge and the same strict primary-path
+## probe, including installer, flattening and alternative-digest records.
 
 import std/[os, strutils]
 
@@ -41,8 +33,8 @@ type
       ## Realized, and the declared executable is a regular file inside the
       ## sealed prefix.
     acvOwnedByHomeRealizer = "owned-by-home-realizer"
-      ## The arm asks for work only the home archive realizer performs, so
-      ## this sweep is not its conformance check. Nothing was downloaded.
+      ## Legacy verdict retained for callers; unified realization never
+      ## produces it.
     acvRealizeFailed = "realize-failed"
       ## Realization itself refused or failed: a stale digest, an upstream
       ## that no longer serves the URL, an extractor the host lacks. The
@@ -189,12 +181,6 @@ proc conformTarballArm*(useDef: InterfaceToolUse;
     url: arm.url, declaredExecutablePath: arm.executablePath,
     archiveType: arm.archiveType, os: arm.os, cpu: arm.cpu)
 
-  let homeFeatures = archiveInstallerFeatures(arm)
-  if homeFeatures.len > 0:
-    result.verdict = acvOwnedByHomeRealizer
-    result.detail = "needs " & homeFeatures.join(", ")
-    return
-
   var single = useDef
   single.tarballProvisioning = @[arm]
   var hostNote = ""
@@ -249,10 +235,8 @@ proc conformTarballArm*(useDef: InterfaceToolUse;
   # ``extraExecutable`` is never that: it is reached by NAME from the prefix
   # directory once that directory is on PATH, and a link inside the prefix
   # pointing at a sibling inside the same prefix serves that name correctly.
-  # So the rule asked of it is the one ``repro_home_apply/
-  # archive_conformance`` already asks of the extras it owns — present
-  # following symlinks, resolving inside the prefix, executable — which also
-  # keeps one rule for the field across both realizers.
+  # Every caller uses this rule: present following symlinks, resolving
+  # inside the prefix, executable.
   for extra in arm.detail.extraExecutables:
     if extra.len == 0: continue
     let extraProbe = probeDeclaredExecutable(result.prefix, extra)
