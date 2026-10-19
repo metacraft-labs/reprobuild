@@ -102,11 +102,66 @@ static:
     removeFile(producer / "greetlib.nim")
     let prefix = @["repro", "internal", "io", "monitor", "--", "nim", "c"]
     check applyNimPathArgs(prefix & @["--path:consumer", "app.nim"],
-      @[producer]) == prefix & @["--path:" & producer, "--path:consumer", "app.nim"]
+      @[producer]) == prefix & @["--excludePath:" & producer,
+        "--excludePath:consumer", "--path:" & producer, "--path:consumer", "app.nim"]
+    check applyNimPathArgs(prefix & @["app.nim", "--path:runtime-only"],
+      @[producer]) == prefix & @["--excludePath:" & producer,
+        "--path:" & producer, "app.nim", "--path:runtime-only"]
+    for command in [@["nim", "c"], prefix]:
+      check applyNimPathArgs(command & @["app.nim", "--", "runtime"],
+        @[producer]) == command & @["--excludePath:" & producer,
+          "--path:" & producer, "app.nim", "--", "runtime"]
     check applyNimPathArgs(@["clang", "-c", "app.c"], @[producer]) ==
       @["clang", "-c", "app.c"]
     check applyNimPathArgs(@["nim", "c", "app.nim"], @[]) ==
       @["nim", "c", "app.nim"]
+
+  test "selected producer roots outrank stale config without bypassing it":
+    let nim = uncontrolledFindExe("nim")
+    require nim.len > 0
+    let scratch = createTempDir("nim-producer-config-precedence-", "")
+    defer: removeDir(scratch)
+    let producer = scratch / "selected producer"
+    let stale = scratch / "stale producer"
+    let consumer = scratch / "consumer modules"
+    let earlier = scratch / "earlier consumer modules"
+    for root in [producer, stale, consumer, earlier]: createDir(root)
+    writeFile(earlier / "chosen.nim", "const choice* = \"earlier\"\n")
+    writeFile(producer / "propagation.nim",
+      "proc resolveSipReplacement*(): string = \"selected revision\"\n")
+    writeFile(stale / "propagation.nim", "proc oldApi*() = discard\n")
+    writeFile(producer / "chosen.nim", "const choice* = \"producer\"\n")
+    writeFile(consumer / "chosen.nim", "const choice* = \"consumer\"\n")
+    let marker = scratch / "config-executed"
+    writeFile(scratch / "config.nims", "import std/os\n" &
+      "switch(\"path\", " & consumer.escape & ")\n" &
+      "switch(\"path\", " & producer.escape & ")\n" &
+      "switch(\"path\", " & stale.escape & ")\n" &
+      "writeFile(" & marker.escape & ", \"configured\")\n")
+    let source = scratch / "app.nim"
+    writeFile(source, "import propagation, chosen\nstatic:\n" &
+      "  doAssert resolveSipReplacement() == \"selected revision\"\n" &
+      "  doAssert choice == \"consumer\"\n")
+    let tail = @["--hints:off", "--compileOnly:on",
+      "--nimcache:" & (scratch / "cache"), source]
+    # This is the original projection, not a mocked resolver: the compiler
+    # actually imports the stale module and names the missing newer API.
+    let control = uncontrolledExecCmdEx((@[nim, "c", "--path:" & producer,
+      "--path:" & consumer] & tail).quoteShellCommand, workingDir = scratch)
+    checkpoint(control.output)
+    check control.exitCode != 0
+    check control.output.contains("undeclared identifier: 'resolveSipReplacement'")
+    check readFile(marker) == "configured"
+    var pathCases: seq[seq[string]]
+    for spelling in ["--path:", "--path=", "-p:", "-p=", "--Path:", "--p_a_t_h:"]:
+      pathCases.add(@[spelling & consumer])
+    pathCases.add(@["--path:" & earlier, "--path:" & consumer,
+      "--path:" & earlier])
+    for paths in pathCases:
+      removeFile(marker)
+      let argv = @[nim, "c"] & paths & tail
+      check compile(applyNimPathArgs(argv, @[producer]), scratch) == 0
+      check readFile(marker) == "configured"
 
   when defined(posix):
     test "resolve compiler symlinks and wrappers without evaluating config":

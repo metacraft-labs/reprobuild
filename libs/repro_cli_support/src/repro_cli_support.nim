@@ -4683,6 +4683,11 @@ var producerMaterializedAuxPaths*: Table[string, ProducerAuxPaths] =
   ## non-producer / executable-only build resolves every ref byte-for-byte as
   ## before. Exported for the SC-3 integration test to observe the splice.
 
+var producerMaterializedSourceRoots: Table[string, string] =
+  initTable[string, string]()
+  ## Provenance of the cached channels. A later consumer must validate the
+  ## source actually reused, which may differ from its freshly discovered root.
+
 var producerActionHashes*: Table[string, string] =
   initTable[string, string]()
   ## SC-2 fingerprint fold sink: consumer selector -> the producer edge's
@@ -4907,6 +4912,69 @@ proc lockPinnedProducerCacheRoot(workspaceRoot: string): string =
   ## per-producer + per-revision below so a refreshed pin fetches a fresh tree.
   absolutePath(workspaceRoot) / ".repro" / "cross-repo-producers"
 
+proc verifyLockPinnedProducerSource(dep: LockedDep;
+                                    sourceRoot, consumerRoot: string) =
+  ## A pin identifies the checked-out source, not merely an object present in
+  ## its repository. Share this boundary between placed siblings and fetched
+  ## caches so neither can silently supply a different library revision.
+  if dep.coordinates.kind != ckVcs:
+    return
+  let revision = dep.coordinates.revision
+  let gitBin = uncontrolledFindExe("git")
+  let lockPath = absolutePath(consumerRoot) / CommittedLockFileNameForIdentity
+  proc gitRev(args: openArray[string]): tuple[code: int; output: string] =
+    if gitBin.len == 0:
+      return (1, "git is not available")
+    var command = quoteShell(gitBin) & " -C " & quoteShell(sourceRoot)
+    for arg in args: command.add(" " & quoteShell(arg))
+    # These observations deliberately inspect the real checkout. Repository
+    # environment variables must not redirect them to an unrelated Git tree.
+    let execution = uncontrolledExecCmdEx(command,
+      env = scrubbedGitRepositoryEnv())
+    (execution.exitCode, execution.output.strip())
+  let top = gitRev(["rev-parse", "--show-toplevel"])
+  let head = gitRev(["rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD^{commit}"])
+  let pinned = gitRev(["rev-parse", "--verify", "--quiet", "--end-of-options", revision & "^{commit}"])
+  let actual = if head.code == 0: head.output else: "<unavailable>"
+  let expected = if pinned.code == 0: pinned.output else: revision
+  var ownsRepository = false
+  if top.code == 0:
+    try:
+      ownsRepository = sameFile(sourceRoot, top.output)
+    except OSError:
+      discard
+  proc refuse(detail: string) =
+    raise newException(OSError,
+      "cross-repo producer \"" & dep.name & "\" source revision mismatch at " &
+      sourceRoot & ": consumer lock " & lockPath & " expects " & expected &
+      ", actual checkout HEAD is " & actual & ". " & detail &
+      (if ownsRepository:
+        " Check out the pin with `git -C " & quoteShell(sourceRoot) &
+        " checkout --detach " & quoteShell(revision) &
+        "`, or update the consumer lock with `repro lock update " &
+        quoteShell(dep.name) & " --to=" &
+        quoteShell(if head.code == 0: actual else: revision) & "` in " &
+        quoteShell(consumerRoot) & "."
+       else: " Restore a producer Git checkout at " & quoteShell(sourceRoot) & ".") &
+      " For intentional editable source, run " &
+      "`repro develop --only=" & quoteShell(dep.name) & " --workspace-root=" &
+      quoteShell(consumerRoot) & "`.")
+  if not ownsRepository:
+    refuse("Cannot verify the producer repository root: " & top.output & ".")
+  if revision.len == 0 or head.code != 0 or pinned.code != 0:
+    refuse("The locked revision or checkout HEAD cannot be resolved.")
+  if actual != expected:
+    refuse("The source checkout must agree with the consumer's pin.")
+  if dep.integrity.len > 0 and dep.integrity.startsWith("git-sha"):
+    let observed = gitObjectMultihash(gitObjectFormatOf(sourceRoot), expected)
+    if observed != dep.integrity:
+      raise newException(OSError,
+        "cross-repo producer \"" & dep.name & "\" integrity check FAILED at " &
+        sourceRoot & ": consumer lock " & lockPath & " pins revision " &
+        expected & " with integrity " & dep.integrity &
+        ", actual checkout integrity is " & observed &
+        "; regenerate the consumer lock or restore the pinned source.")
+
 proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
   ## SC-6 (§5.2): materialize a lock-pinned producer's source at its pinned
   ## revision and verify integrity. Returns the checkout root of the fetched
@@ -4951,30 +5019,11 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
     (code: r.exitCode, output: r.output)
 
   proc verifyRevisionIntegrity() =
-    ## Reuse the MO-9 gate computation: the fetched commit object at the pinned
-    ## revision must be PRESENT and its self-describing object id must equal the
-    ## locked integrity. A tampered integrity or an unreachable revision fails.
-    let rp = git(["-C", checkoutRoot, "rev-parse", "--verify", "--quiet",
-      revision & "^{commit}"])
-    if rp.code != 0 or rp.output.strip().len == 0:
-      raise newException(OSError,
-        "cross-repo producer \"" & dep.name & "\" locked revision " & revision &
-        " is not present/reachable in the fetched checkout at " & checkoutRoot &
-        " (the pin points at a revision the remote " & url &
-        " does not provide).")
-    if dep.integrity.len > 0 and dep.integrity.startsWith("git-sha"):
-      let observed =
-        gitObjectMultihash(gitObjectFormatOf(checkoutRoot), revision)
-      if observed != dep.integrity:
-        raise newException(OSError,
-          "cross-repo producer \"" & dep.name &
-          "\" integrity check FAILED: the fetched commit at the pinned " &
-          "revision " & revision & " has integrity " & observed &
-          " but the lock records " & dep.integrity &
-          " (the fetch is refused; regenerate the lock or fix the remote).")
+    verifyLockPinnedProducerSource(dep, checkoutRoot, workspaceRoot)
 
   # Reuse an already-materialized + verified checkout for the SAME pin.
-  if dirExists(extendedPath(checkoutRoot / ".git")):
+  if dirExists(extendedPath(checkoutRoot / ".git")) or
+      fileExists(extendedPath(checkoutRoot / ".git")):
     verifyRevisionIntegrity()
     return checkoutRoot
 
@@ -5018,6 +5067,12 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
   verifyRevisionIntegrity()
   checkoutRoot
 
+const NimProducerPathProjectionVersion = "nim-path-projection:restore-after-config.v2"
+
+proc hasNimProducerPaths(selector: string): bool =
+  producerMaterializedAuxPaths.hasKey(selector) and
+    producerMaterializedAuxPaths[selector].nimPathDirs.anyIt(it.len > 0)
+
 proc producerChannelIdentity*(selector: string): string =
   ## Cross-Repo-Source-Consumption §4.3 (2026-10-12) — what a consuming action
   ## is handed for producer ``selector`` WITHOUT reading anything: the realized
@@ -5048,6 +5103,12 @@ proc producerChannelIdentity*(selector: string): string =
     addDirs("lib:", aux.libDirs)
     addDirs("pkgconfig:", aux.pkgConfigDirs)
     addDirs("cmake:", aux.cmakePrefixDirs)
+    if hasNimProducerPaths(selector):
+      # The previous launch-only projection could successfully import a stale
+      # configured library. Its observed reads remain fresh, so changing argv
+      # projection alone cannot invalidate that result. Scope this transition
+      # to actions actually handed Nim source roots; other channels stay stable.
+      payload.add(NimProducerPathProjectionVersion & "\x00")
     addDirs("nimpath:", aux.nimPathDirs)
   digestHex(blake3DomainDigest(payload.bytesOf(), hdActionFingerprint))
 
@@ -5111,6 +5172,14 @@ proc foldProducerSourceIdentities*(actions: var seq[BuildAction]) =
         bindings.add(producerSourceBindings[selector])
       action.weakFingerprint =
         foldOverridesIntoFingerprint(action.weakFingerprint, bindings)
+      if selectors.anyIt(hasNimProducerPaths(it)):
+        # Recognised-format and unobserved actions retain their source-binding
+        # fold, but must also stop reusing successful pre-repair Nim imports.
+        # No channel directories are added to this evidence mode's key.
+        let payload = NimProducerPathProjectionVersion & "\x00" &
+          digestHex(action.weakFingerprint)
+        action.weakFingerprint =
+          blake3DomainDigest(payload.bytesOf(), hdActionFingerprint)
 
 proc durableFileEvidence(path: string): DurableFileEvidence =
   try:
@@ -9616,10 +9685,26 @@ proc producerSourceRoot(binding: ProducerBinding; selector,
     let sibling = findSiblingProjectFile(selector, workspaceRoot)
     if sibling.len > 0:
       result = parentDir(sibling)
+      verifyLockPinnedProducerSource(binding.lockedDep, result, workspaceRoot)
     elif fetchMissingPinnedSource:
       result = fetchLockPinnedProducer(binding.lockedDep, workspaceRoot)
   of pbkOnDiskSibling, pbkNotProducer:
     discard
+
+proc canReuseMaterializedProducer(selector: string; binding: ProducerBinding;
+                                  consumerRoot: string): bool =
+  result = producerMaterializedBinDirs.hasKey(selector) or
+    producerMaterializedAuxPaths.hasKey(selector)
+  if not result or binding.kind != pbkLockPinned:
+    return
+  let cachedRoot = producerMaterializedSourceRoots.getOrDefault(selector)
+  if cachedRoot.len == 0:
+    raise newException(OSError,
+      "cross-repo producer \"" & selector & "\" source revision mismatch: " &
+      "cached source root is unrecorded; cannot verify consumer lock " &
+      (consumerRoot / CommittedLockFileNameForIdentity) &
+      ". Restart the build to rematerialize the producer.")
+  verifyLockPinnedProducerSource(binding.lockedDep, cachedRoot, consumerRoot)
 
 proc recordProducerMaterialization(selector, producerRootAbs: string;
                                    producerArtifact: ProjectInterfaceArtifact;
@@ -9695,6 +9780,7 @@ proc recordProducerMaterialization(selector, producerRootAbs: string;
   if realizedBinaries.len == 0 and not haveLibChannel:
     return false
 
+  producerMaterializedSourceRoots[selector] = producerRootAbs
   if binDirs.len > 0:
     producerMaterializedBinDirs[selector] = binDirs
   if haveLibChannel:
@@ -11990,15 +12076,14 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       if selector.len == 0:
         continue
       let selectorInSelectedClosure = selector in selectedClosureSelectors
-      if producerMaterializedBinDirs.hasKey(selector) or
-          producerMaterializedAuxPaths.hasKey(selector):
-        continue  # already built + spliced in this session (dedup)
       # ``resolveProducerBinding`` re-raises a structured override diagnostic
       # (a registered override whose local checkout is missing) instead of a
       # silent host-PATH fallthrough — the SC-1 "no silent fallback" contract.
       let producer = resolveProducerBinding(selector, result.projectRoot)
       if not producer.declaresProducerEdge:
         continue
+      if canReuseMaterializedProducer(selector, producer, result.projectRoot):
+        continue  # reuse only after validating the cached source for THIS pin
       # Materialize the producer's SOURCE root. Develop mode always has one on
       # disk (``localPathAbsolute``). Lock-pinned mode uses an existing sibling
       # checkout beside the consumer if present (SC-2); OTHERWISE — the SC-6
@@ -12038,7 +12123,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           "\" at " & producerRootAbs & ". Active stack: " &
           producerBuildStack.join(" -> ") & ".")
       logSummary("cross-repo producer: resolving \"" & selector &
-        "\" from source at " & producerRootAbs & " (" & $producer.kind & ")")
+        "\" from source at " & producerRootAbs & " (" & $producer.kind &
+        (if producer.kind == pbkLockPinned and
+            producer.lockedDep.coordinates.kind == ckVcs:
+          ", revision=" & producer.lockedDep.coordinates.revision else: "") & ")")
       producerBuildStack.add(producerRootAbs)
       # Stable per-producer output base under the consumer's ``outDir`` for the
       # producer's interface-extract artifacts. Independent of whether the
@@ -28620,11 +28708,12 @@ proc recordMaterializedProducersForInspection(
   ## and reports a misleading missing source-recipe error.
   for useDef in artifact.projectInterface.toolUses:
     let selector = useDef.packageSelector
-    if selector.len == 0 or producerMaterializedBinDirs.hasKey(selector) or
-        producerMaterializedAuxPaths.hasKey(selector):
+    if selector.len == 0:
       continue
     let binding = resolveProducerBinding(selector, projectRoot)
     if not binding.declaresProducerEdge:
+      continue
+    if canReuseMaterializedProducer(selector, binding, projectRoot):
       continue
     let sourceRoot = producerSourceRoot(binding, selector, projectRoot,
       fetchMissingPinnedSource = true)

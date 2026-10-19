@@ -8731,7 +8731,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_build_engine/tests/t_nim_producer_stdlib_collisions.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31239,7 +31239,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_cross_repo_nim_library_src_threaded_onto_consumer_path.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -40116,13 +40116,17 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_cli_support"
+        "repro_cli_support",
+        "repro_core",
+        "repro_dsl_stdlib",
+        "repro_lock",
+        "repro_project_dsl"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_source_revalidation_invocation_scope.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
