@@ -1,0 +1,1 @@
+{ "description": "An inline array must hold tables to be rows.", "error": ["`package`", "must be an array of tables"] }

@@ -118,8 +118,8 @@ suite "Local daemons/control-plane M1 user-daemon lifecycle":
       let afterStop = requireSuccess(reproDaemonCommand(tempRoot, "status"),
         repoRoot())
       check afterStop.contains("repro daemon: not-running")
-      check not fileExists(tempRoot / "state" / "status" /
-        (daemonEndpoint(tempRoot).extractFilename & ".status"))
+      check not fileExists(statusFileForEndpoint(tempRoot / "state",
+        daemonEndpoint(tempRoot)))
 
       let restarted = requireSuccess(reproDaemonCommand(tempRoot, "restart"),
         repoRoot())

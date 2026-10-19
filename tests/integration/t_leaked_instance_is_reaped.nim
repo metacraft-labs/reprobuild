@@ -68,6 +68,8 @@
 import std/[algorithm, options, os, osproc, posix, strutils, times,
             unittest]
 
+import repro_test_support/process_fixtures
+
 import repro_attest
 import repro_attest/cloud_lease
 import repro_cli_support/attest
@@ -165,7 +167,12 @@ if childRole.len > 0:
 # ---------------------------------------------------------------------
 
 let scratch = getTempDir() / "repro-cloud-lease-" & $getCurrentProcessId()
-createDir(scratch)
+# Removed when THIS process exits, whichever cases it ran — not by a final
+# "teardown" case, which under the runner's one-process-per-case model ran in
+# one process and left every other case process's scratch behind. Registering
+# a path that is never created is harmless. See
+# ``repro_test_support/process_fixtures``.
+releaseDirAtProcessExit(scratch)
 
 var caseCounter = 0
 proc freshCase(name: string): tuple[store: CloudLeaseStore;
@@ -2112,12 +2119,3 @@ suite "how long a leaked instance can keep billing, as a number":
     check reapDecision(lease, now + 1, olUnknowable) == rdHeld
     check reapDecision(lease, now + MaxLeaseTtlSeconds, olUnknowable) ==
       rdExpired
-
-suite "teardown":
-
-  test "every child this gate started is gone":
-    # A gate about not leaking processes must not leak processes. The
-    # children are all killed and waited for in their own cases; this
-    # asserts the scratch tree is the only thing left, and removes it.
-    removeDir(scratch)
-    check not dirExists(scratch)

@@ -107,7 +107,17 @@ suite "RDMF v2 envelope":
     signManifest(producer, m)
     var wire = encodeManifest(m)
     # formatVersion is the u16 immediately after the 4-byte magic.
-    wire[4] = 99'u8
+    #
+    # DERIVED FROM THE EXPORTED CONSTS, not poked as a literal. This was
+    # the FOURTH instance of the class the three fixed sites belong to --
+    # a bare integer written into a version field and chosen by hand to
+    # sit above the accepted set. 99 has 97 bumps of headroom, so the
+    # risk here is remote; the reason to fix it anyway is that a class is
+    # closed by having no instances, and an instance left standing
+    # because it is currently harmless is how the class regenerates.
+    let unknown = DeployManifestFormatVersionV2 + 1'u16
+    wire[4] = byte(unknown and 0xff'u16)
+    wire[5] = byte((unknown shr 8) and 0xff'u16)
     expect DeployManifestCodecError:
       discard decodeManifest(wire)
 

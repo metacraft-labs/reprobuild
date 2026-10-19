@@ -39,7 +39,8 @@ import std/[os, strtabs, strutils, tempfiles, unittest]
 from repro_core/paths import extendedPath
 from repro_core/source_root import InstalledSourceRootSubdir,
   InstalledSourceTreesSubdir
-from repro_core/c_compiler import BuiltCCompilerPath
+from repro_core/c_compiler import BuiltCCompilerPath, cCompilerFamily,
+  cCompilerAcceptsFlag, clangNoTempFileCFlags, clangNoTempFileFlag
 
 import repro_core
 import repro_build_engine
@@ -80,6 +81,8 @@ template extraResources*(targetResources: var seq[ResourceIntent]) =
 # ---------------------------------------------------------------------------
 # Profile-root resolution.
 # ---------------------------------------------------------------------------
+
+const nullDevice = when defined(windows): "NUL" else: "/dev/null"
 
 suite "M83 Phase C: profile-root resolution":
 
@@ -487,6 +490,68 @@ suite "installed repro: profile compile source root and compiler":
     for arg in argv:
       check not arg.startsWith("--cc:")
       check not arg.startsWith("--gcc.exe:")
+      check not arg.startsWith("--passC:")
+
+  # clang's `-fno-temp-file` (reprobuild-pm issue
+  # 2026-10-14-clang-profile-compile-is-not-published-on-its-first-run). The
+  # end-to-end proof that it makes a clang-driven compile publish on its
+  # first run is `tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim`.
+
+  test "executed profiles force C compilation rather than reuse opaque Nim objects":
+    let argv = profileCompileArgv("/n/bin/nim", "/p/home.nim", "/c/nc",
+      "/c/out", "/r")
+    check "--forceBuild:on" in argv
+
+  test "C flags reach nim as --passC, before the profile":
+    let argv = profileCompileArgv("/n/bin/nim", "/p/home.nim", "/c/nc",
+      "/c/out", "/r", "/cc/bin/clang", [clangNoTempFileFlag])
+    check ("--passC:" & clangNoTempFileFlag) in argv
+    check argv[^1] == "/p/home.nim"
+
+  test "-fno-temp-file is probed by a real compile and is clang-only":
+    # Real compilers, no fakes: the probe's job is to ask THIS binary, so a
+    # stand-in would only test the stand-in. gcc rejects the flag, which is
+    # the fail-safe arm measured on a real compiler; an invented flag is the
+    # same arm on clang. Linux's dev shell has both compilers (`cc` is clang,
+    # `gcc` is gcc); elsewhere each family present is checked.
+    let scratch = createTempDir("repro-cc-flag-probe-", " dir")
+    defer: removeDir(scratch)
+    var clangExe, gccExe = ""
+    for name in ["clang", "cc", "gcc"]:
+      let exe = findExe(name)
+      if exe.len == 0:
+        continue
+      if cCompilerFamily(exe) == "clang":
+        if clangExe.len == 0: clangExe = exe
+      elif gccExe.len == 0:
+        gccExe = exe
+    when defined(linux):
+      doAssert clangExe.len > 0 and gccExe.len > 0,
+        "needs clang and gcc on PATH (enter reprobuild's dev shell)"
+    doAssert clangExe.len > 0 or gccExe.len > 0,
+      "needs a C compiler on PATH (enter reprobuild's dev shell)"
+    if clangExe.len > 0:
+      checkpoint("clang: " & clangExe)
+      check cCompilerAcceptsFlag(clangExe, clangNoTempFileFlag, scratch)
+      check clangNoTempFileCFlags(clangExe, scratch) == @[clangNoTempFileFlag]
+      check profileCompileCFlags(clangExe, scratch) ==
+        @[clangNoTempFileFlag, "-Xclang -dependency-file -Xclang " & nullDevice]
+      check not cCompilerAcceptsFlag(clangExe, "-fno-repro-no-such-flag",
+        scratch)
+    if gccExe.len > 0:
+      checkpoint("gcc: " & gccExe)
+      check not cCompilerAcceptsFlag(gccExe, clangNoTempFileFlag, scratch)
+      check clangNoTempFileCFlags(gccExe, scratch).len == 0
+      check profileCompileCFlags(gccExe, scratch).len == 0
+      # Positive control: the probe can say yes to gcc, so the no above is
+      # gcc rejecting the flag and not a probe that never succeeds.
+      check cCompilerAcceptsFlag(gccExe, "-O1", scratch)
+    # A compiler that does not exist is a no, never an exception.
+    check not cCompilerAcceptsFlag(scratch / "no-such-cc",
+      clangNoTempFileFlag, scratch)
+    check clangNoTempFileCFlags("", scratch).len == 0
+    # The probe cleans up after itself.
+    check not dirExists(scratch / "cc-flag-probe")
 
 # ---------------------------------------------------------------------------
 # An installed layout's source-only inputs (Gradual-Nix-To-Reprobuild-Migration

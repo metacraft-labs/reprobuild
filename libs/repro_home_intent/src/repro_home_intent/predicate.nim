@@ -115,8 +115,9 @@ proc currentHostContext*(): HostContext =
 
 type
   TokenKind = enum
-    tkEof, tkIdent, tkStr, tkLParen, tkRParen, tkLBracket, tkRBracket,
-    tkComma, tkAnd, tkOr, tkNot, tkEq, tkNe, tkIn, tkTrue, tkFalse
+    tkEof, tkIdent, tkStr, tkUnterminatedStr, tkLParen, tkRParen,
+    tkLBracket, tkRBracket, tkComma, tkAnd, tkOr, tkNot, tkEq, tkNe, tkIn,
+    tkTrue, tkFalse
 
   Token = object
     kind: TokenKind
@@ -169,10 +170,16 @@ proc lex(src: string): seq[Token] =
           s.add src[j]
           inc j
       if j >= src.len:
-        # Unterminated string — let the parser surface this; emit what
-        # we have and the parser will hit eof while looking for tkRBracket
-        # / a closing context.
-        result.add Token(kind: tkStr, text: s, col: startCol)
+        # Unterminated string literal. It used to be emitted as an ordinary
+        # `tkStr`, on the theory that the parser would hit eof while looking
+        # for a closing context -- but at the end of a comparison nothing is
+        # expected, so `host == "m1` parsed as `host == "m1"` and a data-file
+        # row guarded by it was applied. No grammar position accepts this
+        # token, so whichever production meets it reports it (`parseAtom`, or
+        # the end-of-expression check) with its column. Its text is the
+        # literal as written, opening quote included, for the diagnostic.
+        result.add Token(kind: tkUnterminatedStr, text: src[i ..< src.len],
+          col: startCol)
         i = j
       else:
         result.add Token(kind: tkStr, text: s, col: startCol)
@@ -279,6 +286,10 @@ proc parseAtom(p: var Parser): PredNode =
     expect(p, tkRParen, "')'")
   of tkLBracket:
     result = parseList(p)
+  of tkUnterminatedStr:
+    raiseUnstructured(p.profilePath, p.line, t.col,
+      "the unterminated string literal " & t.text,
+      "a closing '\"'")
   else:
     raiseUnstructured(p.profilePath, p.line, t.col,
       "'" & t.text & "'",

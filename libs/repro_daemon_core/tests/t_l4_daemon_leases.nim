@@ -60,13 +60,38 @@
 ##       untouched on purpose) and a QUARANTINED one (moved aside by this
 ##       sweep) do not. ``failed`` is empty in all three, so a verdict keyed on
 ##       ``failed`` alone would call a permanently obstructed store clean.
+##   (m) the same tick reaps a shared service INSTANCE whose last lease has
+##       lapsed -- Shared-Development-Services §4.5's "an instance is reaped
+##       when its last lease lapses", end to end through the DAEMON rather
+##       than through a direct `reapOnce`. This is the case that measures
+##       the WIRING: that the daemon installs the real instance-reap handler
+##       around its tick, that the handler reaches the daemon's own
+##       registry, and that the stop is a real signal to a real process.
+##       Nothing is stubbed in it -- the instance is a real detached child
+##       and its absence is read from `/proc`.
+##   (n)-(r) the §4.2 DESTROY TRANSPORT's registration half
+##       (Ephemeral-State-Leases §4.2): the `udkLeaseReapProviders` frame's
+##       body codec and its bound on a hostile entry (n); a real frame over
+##       the real IPC stack reaching a real daemon's reap registry, and the
+##       refusals — no typeId, no binaryPath, a relative path, an empty
+##       pool key — each named in the ack and in the daemon's log (o); what
+##       the registry does to the transport selection once filled, read on
+##       the only thread that touches it (o2); a registration against NO
+##       daemon as a healthy no-op, since the artifact is persisted in the
+##       record anyway (p); `clearLeaseReapProviders`, which the daemon's
+##       shutdown defer calls (q); and the feature gate that makes a new
+##       CLI refuse an old daemon truthfully instead of provoking an error
+##       frame (r).
 
 import std/[os, options, times, tables, locks, random, strutils, unittest]
 
 import repro_core
 import repro_daemon_core
+import repro_daemon_core/instance_registry   # the real probe + materialiser
 import repro_resources
-import repro_project_dsl          # TypedExtensionBox
+import repro_resources/service_identity
+import repro_resources/service_registry
+import repro_project_dsl          # TypedExtensionBox / ServiceIdentityDef
 
 # ---------------------------------------------------------------------------
 # Stub provider — PLAIN globals + a lock (cross-thread visible), destroy log.
@@ -942,7 +967,108 @@ suite "L4: daemon-hosted lease registry + wall-clock reaping":
       # It is still there, which is why retrying cannot help.
       check fileExists(bad)
 
-  test "(m) the reap-provider frame round-trips, and refuses an unusable entry":
+  test "(m) the tick reaps a shared service INSTANCE whose last lease lapsed":
+    ## Shared-Development-Services §4.5: "an instance is reaped when its
+    ## last lease lapses." Cases (b) and (c) above measure the tick over a
+    ## STUB resource; this one measures it over a real shared service
+    ## instance, which is a different path through the same sweep: an
+    ## instance record carries no attrs marshaller and no provider driver
+    ## by design, so it is reaped through the typed `ReapHandler` the
+    ## daemon installs around the tick rather than through
+    ## `reconstructInstance`.
+    ##
+    ## WHY THIS CASE EXISTS BESIDE THE REGISTRY'S OWN SUITE.
+    ## `libs/repro_resources/tests/t_l7_instance_registry_converges_in_any_order.nim`
+    ## drives `reapOnce` with the handler installed BY THE TEST. That
+    ## measures the handler. It cannot measure the WIRING -- that
+    ## `runScopedLeaseReapTick` installs it, that it is handed a pointer to
+    ## the daemon's own registry object, and that it is restored afterwards
+    ## -- because in that suite the test is the installer. Here the daemon
+    ## is, and the test only writes a record and waits.
+    ##
+    ## NOTHING IS STUBBED. The key comes from the real
+    ## `serviceInstanceKey` over a real `ServiceIdentityDef`; the record is
+    ## written by the real `recordMaterialisedInstance` through the real
+    ## `mergeHolderDeadlines` into the real `StateStore` the daemon is
+    ## pointed at; the instance is a real detached child started by the
+    ## real `materialiseServiceInstanceProcess`; the liveness probe is the
+    ## real `writerLiveness`; and "the process is gone" is read from
+    ## `/proc`, not from the daemon's report.
+    let root = scratchRoot("instance-tick")
+    let stateRoot = root / "lease-state"
+    removeDir(root)
+    createDir(stateRoot)
+
+    let key = serviceInstanceKey(
+      DslServiceDef(packageName: "l4InstPkg", serviceName: "zitadel",
+        identity: ServiceIdentityDef(kind: sikStable,
+          stableId: "com.example.l4.instance-tick"),
+        scope: sscWorkspace),
+      ServiceScopeContext(projectRoot: root, workspaceRoot: root,
+        workspaceId: "l4-instance-tick", user: "l4tester"),
+      [], "dev")
+    let address = serviceInstanceAddress(key)
+
+    var registry = openServiceInstanceRegistry(stateRoot,
+      serviceInstanceLivenessProbe())
+    let started = materialiseServiceInstanceProcess(
+      @["sh", "-c", "while :; do sleep 1; done"], root,
+      serviceInstanceOutputLogPath(stateRoot, key))
+    doAssert not started.exitedEarly,
+      "fixture instance died during its start grace window: " &
+      describeEarlyServiceInstanceExit(started, address)
+    let process = started.process
+    # A lease that lapsed an hour ago: the holder is dated (`delayed`), so
+    # the gate SELECTS the record. A `keep` holder would never be selected,
+    # which is D-SS5's default and is asserted in the registry's own suite.
+    discard recordMaterialisedInstance(registry, key,
+      ServiceInterfaceSnapshot(serviceName: "zitadel",
+        packageName: "l4InstPkg", projectName: "l4", activityName: "sso",
+        handleType: "H", compatibilityMajor: 1, fingerprint: "f",
+        projectFingerprint: "pf", members: @[]),
+      process, "holder:l4-instance-tick",
+      delayed(initDuration(minutes = 1)),
+      getTime() - initDuration(hours = 1))
+
+    let store = openStateStore(stateRoot)
+    check hasStateRecord(store, address)
+    check readStateRecord(store, address).typeId == ServiceInstanceTypeId
+    check dirExists("/proc/" & $process.pid)
+
+    putEnv("REPRO_DAEMON_LEASE_REAP_INTERVAL_MS", "100")
+    var thread: Thread[DaemonArgs]
+    let config = startThrowawayDaemon(root, stateRoot, thread)
+    defer:
+      try: requestUserDaemonShutdown(config.endpoint) except CatchableError: discard
+      joinThread(thread)
+      # Belt and braces: if the tick did NOT stop the instance, this case
+      # must not leak a `sleep` loop into the rest of the suite.
+      discard stopServiceInstanceProcess(process, graceMs = 1500)
+      removeDir(root)
+
+    let deadline = epochTime() + 15.0
+    while epochTime() < deadline and hasStateRecord(store, address):
+      sleep(50)
+
+    # The RECORD is gone...
+    check not hasStateRecord(store, address)
+    # ...and so is the PROCESS, read from the process table. `/proc/<pid>`
+    # survives an exit until the child is waited on, so its absence also
+    # witnesses that the daemon reaped the zombie rather than merely
+    # signalling it.
+    let pidDeadline = epochTime() + 10.0
+    while epochTime() < pidDeadline and dirExists("/proc/" & $process.pid):
+      sleep(50)
+    check not dirExists("/proc/" & $process.pid)
+
+    # And the daemon SAID so. Without this, a tick that silently declined
+    # every record would be indistinguishable from one that reaped.
+    let log = readFile(config.logPath)
+    check log.contains("lease reap tick reaped=")
+    check not log.contains("lease reap tick error")
+    check not log.contains("cannot reap address=" & address)
+
+  test "(n) the reap-provider frame round-trips, and refuses an unusable entry":
     ## Ephemeral-State-Leases §4.2 — the FRESH half of the destroy-transport
     ## artifact resolution, on the wire. Body codec first, because a frame that
     ## does not round-trip makes every behavioural assertion below it a test of
@@ -990,7 +1116,7 @@ suite "L4: daemon-hosted lease registry + wall-clock reaping":
     expect ValueError:
       discard parseLeaseReapProvidersRequestBody(hostile)
 
-  test "(n) a registration over the socket reaches the daemon's reap registry":
+  test "(o) a registration over the socket reaches the daemon's reap registry":
     ## The feeder whose absence made the whole `rtSession` arm unreachable from
     ## the product: `registerLeaseReapProvider` had NO caller in the shipped
     ## tree (reprobuild-pm/issues/
@@ -1137,9 +1263,9 @@ suite "L4: daemon-hosted lease registry + wall-clock reaping":
     for wanted in wantedLines:
       check logText.contains(wanted)
 
-  test "(n2) the in-process registry drives the transport selection":
+  test "(o2) the in-process registry drives the transport selection":
     ## The other half of (n), asserted WITHOUT a daemon thread so the registry
-    ## is read by the only thread that touches it. (n) proves the frame reaches
+    ## is read by the only thread that touches it. (o) proves the frame reaches
     ## the daemon; this proves what the registry does once filled — that the
     ## §4.2 transport selection turns a registered artifact into a SESSION
     ## route for that type and leaves every other type in-process.
@@ -1168,7 +1294,7 @@ suite "L4: daemon-hosted lease registry + wall-clock reaping":
     check not transport.inProcess("l4.outoftree")   # over the session
     check transport.inProcess("l4.stub")            # in-process, as before
 
-  test "(o) a registration against NO daemon is a healthy no-op":
+  test "(p) a registration against NO daemon is a healthy no-op":
     ## No-daemon-safe, on the same terms as `renewLeaseBestEffort`: the
     ## registration is a freshness optimization, and the artifact is persisted
     ## in each state record anyway, so a reconcile must not fail — or even
@@ -1188,7 +1314,7 @@ suite "L4: daemon-hosted lease registry + wall-clock reaping":
     # process, so a client that could not reach one has registered nothing.
     check not hasLeaseReapProviders()
 
-  test "(p) clearLeaseReapProviders empties the registry and the pool":
+  test "(q) clearLeaseReapProviders empties the registry and the pool":
     ## The daemon's shutdown `defer` calls this, which is what makes
     ## `clearLeaseReapProviders`' own docstring true. It used to claim the
     ## shutdown path with no caller — and that mattered once records began
@@ -1221,7 +1347,7 @@ suite "L4: daemon-hosted lease registry + wall-clock reaping":
     check registeredLeaseReapArtifacts().len == 0
     check leaseReapSessionCount() == 0
 
-  test "(q) the capability is advertised, and the client gate refuses what is not":
+  test "(r) the capability is advertised, and the client gate refuses what is not":
     ## §4.2 registration is BEST-EFFORT, and best-effort has to be able to tell
     ## "no daemon wants this" from "the daemon broke". A daemon that predates
     ## `lease-reap-providers` would answer an unknown frame kind with

@@ -15,8 +15,7 @@
 ##
 ##   1. ``test_m0_topo_sort_7zip_before_erlang`` — erlang uses
 ##      ``imInstallerNsis`` which needs ``7z.exe``; 7-Zip (the
-##      ``sevenzip`` package since GM4b) must realize
-##      first.
+##      ``7zip`` package) must realize first.
 ##   2. ``test_m0_topo_sort_lessmsi_before_meson`` — meson uses
 ##      ``imInstallerMsi`` which needs ``lessmsi.exe``; lessmsi must
 ##      realize first.
@@ -92,9 +91,9 @@ suite "M0 — plan.nim topological sort over realize ops":
     # ``7zip`` catalog package. 7zip alphabetically PRECEDES erlang
     # already, so the pre-M0 alphabetical sort happened to produce
     # the right order for this case — the topo sort must agree.
-    let inputs = @[pkg("erlang", "28.5"), pkg("sevenzip", "26.01")]
+    let inputs = @[pkg("erlang", "28.5"), pkg("7zip", "26.01")]
     let sorted = topologicallySortPackages(inputs, defaultExtractorDeps)
-    check orderOf(sorted) == @["sevenzip", "erlang"]
+    check orderOf(sorted) == @["7zip", "erlang"]
 
   test "test_m0_topo_sort_lessmsi_before_meson":
     # meson uses imInstallerMsi → needs lessmsi.exe → depends on
@@ -234,7 +233,7 @@ suite "M0 — plan.nim topological sort over realize ops":
     check "swift" in actual           # imInstallerNsisBundle consumer
     check "git" in actual             # afSevenZipSfx consumer
     check "gcc" in actual             # afSevenZip consumer
-    check "sevenzip" notin actual         # provider — NOT in the plan
+    check "7zip" notin actual         # provider — NOT in the plan
     check "lessmsi" notin actual      # provider — NOT in the plan
     check "wix3" notin actual         # provider — NOT in the plan
     check "innounp" notin actual      # provider — NOT in the plan

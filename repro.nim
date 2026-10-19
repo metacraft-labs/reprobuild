@@ -170,7 +170,11 @@ import ct_test_runner_install
 type
   TestGraphArtifact* = object
     path*: string      ## repo-relative output path, as the producing edge declares it
-    actionId*: string  ## the producing edge's action id
+    actionId*: string
+      ## the producing edge's action id; EMPTY for a checked-in fixture file,
+      ## which no edge produces — its path is still a typed input of the
+      ## execute edge, so editing it re-runs the test, and there is nothing to
+      ## order before it
   TestGraphArtifacts* = object
     source*: string
     artifacts*: seq[TestGraphArtifact]
@@ -211,10 +215,43 @@ const
     ## tool directory made every case's extraction of the same recipe a
     ## (correct) cache miss.
 
+  sc7CapstoneFixtureRoot* = "tests/fixtures/sc7-capstone"
+    ## The SC-7 capstone's checked-in producer and consumer recipes; see
+    ## ``tests/fixtures/sc7-capstone/README.md``.
+
   M4ConsolidationVerificationTest* =
     "tests/integration/t_m4_pure_unit_consolidation.nim"
     ## Suite-Modernization M4. The one test whose execute edge takes EVERY
     ## shared pure-unit binary as a typed input; see the loop below.
+
+  PerCaseFixtureGate* =
+    "tests/integration/" &
+    "t_when_each_case_runs_alone_no_fixture_outlives_its_process.nim"
+    ## Runs each subject below the way the suite runner does -- a
+    ## `--list-json` probe, then one process per case -- and fails when a
+    ## fixture outlives the process that acquired it. Its execute edge takes
+    ## every subject's binary as a typed input; see the loop below.
+
+  PerCaseFixtureGateSubjects* = [
+    "libs/repro_cas_store/tests/t_cas_ingest_link.nim",
+    "libs/repro_cas_store/tests/t_cas_link_mutation_safety.nim",
+    "libs/repro_cas_store/tests/t_cas_materialize_link.nim",
+    "libs/repro_cas_store/tests/t_cas_store_occupancy_cost.nim",
+    "libs/repro_cas_store/tests/t_link_capability_facts.nim",
+    "libs/repro_cas_store/tests/t_link_capability_probe.nim",
+    "libs/repro_fs_facts/tests/t_fs_facts_conformance.nim",
+    "tests/integration/t_cloud_adapter_launches_nothing_in_ci.nim",
+    "tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim",
+    "tests/integration/t_leaked_instance_is_reaped.nim",
+    "tests/integration/t_measurement_manifest_cross_check.nim",
+    "tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim",
+    "tests/integration/t_snp_expectation_reaches_the_manifest.nim",
+    "tests/integration/t_teardown_runs_on_failure_path.nim",
+    "tests/integration/t_verify_e2e_mock.nim",
+  ]
+    ## The test files that once released their fixtures only in a final
+    ## "teardown" CASE, and so leaked them from every other per-case process.
+    ## Kept in step with the gate's own list by the gate's last case.
 
   profileCompileNimSpy = TestGraphArtifact(
     path: "build/test-bin/nim_spy",
@@ -238,12 +275,31 @@ const
                  "t_e2e_data_file_rollback_restores_rows",
                  "t_e2e_data_file_validation",
                  "t_e2e_home_add_appends_data_row",
-                 "t_e2e_home_export_expands_data_files"]:
+                 "t_e2e_home_export_expands_data_files",
+                 "t_e2e_nix_reads_data_like_profile",
+                 "t_e2e_nix_reads_intent_like_export",
+                 "t_e2e_profile_compile_clang_first_run_published",
+                 "t_e2e_profile_compile_ignores_ancestor_membership",
+                 "t_e2e_home_facts_from_isolated_plan"]:
       rows.add TestGraphArtifacts(source: "tests/e2e/m83/" & name & ".nim",
         artifacts: @[profileCompileNimSpy])
+    # The clang first-run gate's positive control compiles through a "clang"
+    # that drops `-fno-temp-file` (`tests/e2e/m83/exec_without_arg.nim`); a
+    # compiled program for the reason `nim_spy` is one, so the control runs
+    # on macOS as well as Linux.
+    rows.add TestGraphArtifacts(
+      source: "tests/e2e/m83/" &
+        "t_e2e_profile_compile_clang_first_run_published.nim",
+      artifacts: @[TestGraphArtifact(path: "build/test-bin/exec_without_arg",
+        actionId: "reprobuild.test_helpers.exec_without_arg")])
     rows
 
   testFixtureArtifacts*: seq[TestGraphArtifacts] = @[
+    TestGraphArtifacts(
+      source: "libs/repro_build_engine/tests/t_engine_macos_sip_safe_launch.nim",
+      artifacts: @[TestGraphArtifact(
+        path: "build/test-fixtures/macos-no-bundle/no_bundle_launch",
+        actionId: "reprobuild.test_fixtures.macos_no_bundle_launch")]),
     TestGraphArtifacts(
       source: "tests/integration/t_runner_exclusive_phase_budget.nim",
       artifacts: @[
@@ -304,6 +360,21 @@ const
           actionId: "reprobuild.test_fixtures.rp3_provider_consumer_b"),
         TestGraphArtifact(path: rp3FixtureProviderRoot & "/plain",
           actionId: "reprobuild.test_fixtures.rp3_provider_plain")]),
+    # CHECKED-IN fixture recipes, not graph-built artifacts: no producing
+    # edge, so no action id. The test copies them into its scratch tree; their
+    # bytes are fixed so the run-wide action cache serves their recipe
+    # compiles (see the note in the test).
+    TestGraphArtifacts(
+      source: "tests/integration/" &
+        "t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes.nim",
+      artifacts: @[
+        TestGraphArtifact(path: sc7CapstoneFixtureRoot & "/exeprod/repro.nim"),
+        TestGraphArtifact(path: sc7CapstoneFixtureRoot & "/libprod/repro.nim"),
+        TestGraphArtifact(path: sc7CapstoneFixtureRoot & "/libprod/greeting.h"),
+        TestGraphArtifact(path: sc7CapstoneFixtureRoot & "/consumer/repro.nim"),
+        TestGraphArtifact(path: sc7CapstoneFixtureRoot & "/consumer/main.c"),
+        TestGraphArtifact(
+          path: sc7CapstoneFixtureRoot & "/noedge-consumer/repro.nim")]),
     TestGraphArtifacts(
       source: "tools/catalog-harvester/tests/" &
         "test_harvester_app_name_validation.nim",
@@ -1525,6 +1596,17 @@ package reprobuild:
     # `checkBundleLimits` refuses a bundle that lives anywhere else.
     var pureUnitBundleArtifacts: seq[TestGraphArtifact] = @[]
 
+    # The per-case fixture gate's subjects, collected the same way and for the
+    # same two reasons: the PATH so a changed subject re-runs the gate, the
+    # ACTION ID so a focused build of the gate builds its subjects first.
+    # Every subject's source sorts before the gate's (`libs/...`, or a
+    # `tests/integration/t_<name>` alphabetically before `t_when_...`), so it
+    # has been collected by the time the gate's spec comes round; the gate's
+    # branch below REFUSES a short list rather than registering an edge that
+    # silently declares less.
+    var perCaseFixtureGateInputs: seq[TestGraphArtifact] = @[]
+    var perCaseFixtureGateNeedsRepro = false
+
     for spec in reprobuildTestSpecs:
       when defined(windows):
         if spec.source.contains("nix_daemon"):
@@ -1550,6 +1632,14 @@ package reprobuild:
             when defined(windows): spec.binary & ".exe"
             else: spec.binary,
           actionId: edge.action.id))
+      if spec.source in PerCaseFixtureGateSubjects:
+        perCaseFixtureGateInputs.add(TestGraphArtifact(
+          path:
+            when defined(windows): spec.binary & ".exe"
+            else: spec.binary,
+          actionId: edge.action.id))
+        perCaseFixtureGateNeedsRepro =
+          perCaseFixtureGateNeedsRepro or spec.requiresReproBinary
       # THE C BACKEND, DECLARED ON THE TEST-BUILD EDGES TOO.
       #
       # ``nim c`` emits C and shells out to a BARE ``gcc``. ``nim.c(...)``
@@ -1605,6 +1695,23 @@ package reprobuild:
         for artifact in pureUnitBundleArtifacts:
           requiredBinaries.add(artifact.path)
           executeDeps.add(artifact.actionId)
+      if spec.source == PerCaseFixtureGate:
+        # The gate EXECUTES each subject, so it needs what a subject's own
+        # execute edge declares: its binary and, for the subjects that drive
+        # the engine, the two CLI images. (No subject has a
+        # `testFixtureArtifacts` row; one that did would need it here too.)
+        doAssert perCaseFixtureGateInputs.len ==
+            PerCaseFixtureGateSubjects.len,
+          "PerCaseFixtureGate reached with " & $perCaseFixtureGateInputs.len &
+          " of " & $PerCaseFixtureGateSubjects.len & " subjects collected: " &
+          "a subject that is not a registered test, or one that sorts after " &
+          "the gate, would be run without being declared"
+        for artifact in perCaseFixtureGateInputs:
+          requiredBinaries.add(artifact.path)
+          executeDeps.add(artifact.actionId)
+        if perCaseFixtureGateNeedsRepro and not spec.requiresReproBinary:
+          requiredBinaries.add(reproBinaryPath)
+          requiredBinaries.add(reprobuildEngineBinaryPath)
       # Graph-Owned-Test-Artifacts M3: typed fixture inputs on the EXECUTE
       # edge, read from ONE table instead of a chain of source-path ``if``s.
       #
@@ -1637,6 +1744,11 @@ package reprobuild:
         if entry.source != spec.source:
           continue
         for artifact in entry.artifacts:
+          if artifact.actionId.len == 0:
+            # A checked-in fixture file: an input as spelled, with no
+            # producing edge to order before this one and no ``.exe``.
+            requiredBinaries.add(artifact.path)
+            continue
           let artifactPath =
             when defined(windows): artifact.path & ".exe"
             else: artifact.path
@@ -2470,6 +2582,17 @@ package reprobuild:
       nimcache = "build/nimcache/nim_spy",
       actionId = "reprobuild.test_helpers.nim_spy"))
 
+    # The clang first-run gate's argument-dropping compiler wrapper (see the
+    # row in ``profileCompileNimSpyConsumers``): standard library only.
+    reprobuildTestHelpersActions.add(nim.c(
+      source = "tests/e2e/m83/exec_without_arg.nim",
+      binary = "build/test-bin/exec_without_arg",
+      paths = sourceOnlyNimPaths,
+      passL = testRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/exec_without_arg",
+      actionId = "reprobuild.test_helpers.exec_without_arg"))
+
     reprobuildTestHelpersActions.add(nim.c(
       source = "tools/test-runner/repro_test_runner.nim",
       binary = "build/bin/repro_test_runner",
@@ -2511,6 +2634,20 @@ package reprobuild:
     # above. The shim is a host-native artifact (LD_PRELOAD / DYLD_INSERT
     # / IAT-patch DLL), so the host arm is the correct (and only) target.
     var reprobuildTestFixturesActions: seq[BuildActionDef] = @[]
+
+    # A separate build configuration preserves the real missing-bundle control
+    # even when the test executable itself retains shipped replacement tools.
+    reprobuildTestFixturesActions.add(nim.c(
+      source = "tests/fixtures/macos-no-bundle-launch/no_bundle_launch.nim",
+      binary = "build/test-fixtures/macos-no-bundle/no_bundle_launch",
+      defines = @["StackableHooksBuiltToolsDir="],
+      threadsOn = true,
+      parallelBuild = 2,
+      paths = sourceOnlyNimPaths,
+      passL = testRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/macos_no_bundle_launch",
+      actionId = "reprobuild.test_fixtures.macos_no_bundle_launch"))
 
     reprobuildTestFixturesActions.add(nim.c(
       source = "tests/fixtures/exclusive-phase/probe.nim",

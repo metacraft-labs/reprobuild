@@ -66,7 +66,7 @@ suite "input-access sidecar":
     let raw = encodeInputAccesses("ab12", sample())
     check decodeInputAccesses(raw, "cd34").isNone
     var future = raw
-    future[4] = 0x7f'u8                   # the version's low byte
+    future[4] = byte(firstUnknownInputAccessVersion() and 0xff'u16)
     check decodeInputAccesses(future, "ab12").isNone
     var magic = raw
     magic[0] = byte(ord('X'))

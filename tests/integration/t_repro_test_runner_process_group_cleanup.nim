@@ -41,11 +41,8 @@ when defined(posix):
   import repro_core/cli_images
   # For `systemdUnitName` and `launchdLabel`: the teardown below stops the
   # transient unit / launchd job the daemon this case launches runs under,
-  # and the name has to come from the runtime that chose it. Only the names
-  # it needs: the whole `repro_daemon_core` facade crashes the CodeTracer Nim
-  # fork's compiler (SIGSEGV, no position) when imported into this module.
-  from repro_daemon_core/runtime import UserDaemonConfig,
-    defaultUserDaemonConfig, launchdLabel, systemdUnitName
+  # and the name has to come from the runtime that chose it.
+  import repro_daemon_core
 
   type
     ProcessRecord = object

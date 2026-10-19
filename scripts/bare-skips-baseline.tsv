@@ -111,7 +111,6 @@ libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim	a PRESE
 libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim	an input absent inside an existing output path is skipped	1
 libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim	the store-absence skip row is wired and is reset with its count	1
 libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	BUYS: retargeting a dangling link to another absent target invalidates	1
-libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	COSTS: a dangling link whose target appears does NOT invalidate	1
 libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	a FIFO input is not recorded; a dangling symlink input is	1
 libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	a symlink to a file tracks the LINK, not the file it points at	1
 libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	regular file, directory, symlinks, dangling link, FIFO, absent path	1

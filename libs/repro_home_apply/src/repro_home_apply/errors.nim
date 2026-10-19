@@ -42,6 +42,25 @@ type
     packageId*: string
     adapter*: string
 
+  EApplyAppBundleFailed* = object of EHomeApply
+    ## Step 9b: placing a realized macOS application bundle in its
+    ## Applications directory failed -- the staged copy failed a trust
+    ## check (``check`` names it: "signature", "identity", "bundle-id",
+    ## "version", "team-id", "developer-id", "notarization",
+    ## "info-plist"), or the copy or rename itself failed (``check`` is
+    ## "placement"). Nothing was placed: the staged copy was removed, a
+    ## bundle already at the target is untouched, and no disk image is
+    ## attached at this step (images are detached when step 7 copies the
+    ## bundle out of them). Store-And-Installation-Layout.md § macOS
+    ## Application Bundles.
+    packageId*: string
+    resourceAddress*: string
+    bundleName*: string
+      ## ``<Name>.app``.
+    targetPath*: string
+      ## Where the bundle would have been placed.
+    check*: string
+
   EApplyMaterializeFailed* = object of EHomeApply
     ## Step 8: a generated-file write or managed-block rewrite failed.
     absoluteOutputPath*: string
@@ -188,6 +207,25 @@ proc raiseRealizeFailed*(packageId, adapter, msg: string) {.noreturn.} =
   e.stepName = "realize"
   e.packageId = packageId
   e.adapter = adapter
+  raise e
+
+proc raiseAppBundleFailed*(packageId, resourceAddress, bundleName,
+                           targetPath, check, msg: string) {.noreturn.} =
+  ## Step 9b failure of one application bundle (``EApplyAppBundleFailed``).
+  let what =
+    if check == "placement": "could not be placed"
+    else: "was refused: the staged copy failed the " & check & " check"
+  var e = newException(EApplyAppBundleFailed,
+    "repro home apply: step 9b (place application) failed for package " &
+    packageId & ": " & bundleName & " " & what & "; nothing was placed at " &
+    targetPath & " and the staged copy was removed. " & msg)
+  e.step = 9
+  e.stepName = "place_app_bundle"
+  e.packageId = packageId
+  e.resourceAddress = resourceAddress
+  e.bundleName = bundleName
+  e.targetPath = targetPath
+  e.check = check
   raise e
 
 proc raiseMaterializeFailed*(absoluteOutputPath, msg: string) {.noreturn.} =

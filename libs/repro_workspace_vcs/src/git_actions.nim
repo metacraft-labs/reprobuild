@@ -54,7 +54,8 @@ import repro_hash
 
 import git_tool
 from shared_clones import prepareSharedBare, sharedBareFetchArgs,
-  checkRegisteredLeaves, messages, registerLeafWithPool
+  checkRegisteredLeaves, messages, registerLeafWithPool,
+  withCacheEntryVcsLock, withCheckoutVcsLock, isTransientGitLockContention
 
 export GitToolIdentity, EGitToolUnresolved, ensureGitToolResolvable,
   resolveGitTool, digestHex, ToolProvisioningMode
@@ -1195,16 +1196,24 @@ proc executeFetch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     fetchArgs.add("--depth")
     fetchArgs.add($payload.depth)
   fetchArgs.add(payload.remoteName)
-  let res = runGit(payload, fetchArgs)
-  if res.exitCode != 0:
-    return failed("fetch-failed",
-      "git fetch exited " & $res.exitCode & ": " & res.output.trimmed)
-  let headRes = resolveHeadSha(payload, target)
-  if not headRes.ok:
-    return failed("fetch-head-probe-failed", headRes.diagnostic)
-  let receipt = renderFetchReceipt(payload, headRes.sha, res.output)
-  writeReceipt(receiptPath, receipt)
-  succeeded()
+  withCheckoutVcsLock(target):
+    var res: tuple[exitCode: int; output: string]
+    const MaxFetchLockRetries = 5
+    for attempt in 0 .. MaxFetchLockRetries:
+      res = runGit(payload, fetchArgs)
+      if res.exitCode == 0 or attempt == MaxFetchLockRetries or
+          not isTransientGitLockContention(res.output):
+        break
+      sleep(25 * (attempt + 1))
+    if res.exitCode != 0:
+      return failed("fetch-failed",
+        "git fetch exited " & $res.exitCode & ": " & res.output.trimmed)
+    let headRes = resolveHeadSha(payload, target)
+    if not headRes.ok:
+      return failed("fetch-head-probe-failed", headRes.diagnostic)
+    let receipt = renderFetchReceipt(payload, headRes.sha, res.output)
+    writeReceipt(receiptPath, receipt)
+    return succeeded()
 
 proc executeSwitch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResult =
   let target = absoluteRepoPath(payload, cwd)
@@ -1385,7 +1394,8 @@ proc executeRefreshBare(payload: GitVcsPayload;
   ## than the serial in-line loop it replaces) is safe because each unique URL
   ## maps to its OWN bare directory: the race the serial loop guarded against is
   ## per-bare, and distinct bares share no state. The caller deduplicates by
-  ## URL, so two actions never target the same directory.
+  ## URL, so two actions in the same graph never target the same directory;
+  ## ``withCacheEntryVcsLock`` additionally serializes concurrent processes.
   ##
   ## Both arms go through ``shared_clones.prepareSharedBare`` -- the same
   ## preparation ``refreshSharedBare`` does. This action used to fetch with
@@ -1396,44 +1406,75 @@ proc executeRefreshBare(payload: GitVcsPayload;
   ## for every refresh path is what keeps the two from drifting apart again.
   let bare = payload.repoPath
   var outcome = "fetched"
+  var checkLeaves = false
+  withCacheEntryVcsLock(bare):
+    if dirExists(bare / "objects") or dirExists(bare / ".git"):
+      let prepared = prepareSharedBare(payload.binaryPath, bare)
+      if prepared.len > 0:
+        return failed("refresh-bare-prepare-failed", prepared)
+      var res: tuple[exitCode: int; output: string]
+      const MaxRefreshLockRetries = 5
+      for attempt in 0 .. MaxRefreshLockRetries:
+        res = runGit(payload, sharedBareFetchArgs(bare))
+        if res.exitCode == 0 or attempt == MaxRefreshLockRetries or
+            not isTransientGitLockContention(res.output):
+          break
+        sleep(25 * (attempt + 1))
+      if res.exitCode != 0:
+        return failed("refresh-bare-fetch-failed",
+          "git fetch in shared bare failed (" & $res.exitCode & "): " &
+            res.output.trimmed)
+      checkLeaves = true
+    else:
+      let parent = bare.splitPath.head
+      if parent.len > 0:
+        try: createDir(parent)
+        except OSError as e:
+          return failed("refresh-bare-parent-failed",
+            "could not create cache parent " & parent & ": " & e.msg)
+      let res = runGit(payload,
+        ["clone", "--bare", "--quiet", payload.remoteUrl, bare])
+      if res.exitCode != 0:
+        if dirExists(bare / "objects") or dirExists(bare / ".git"):
+          let prepared = prepareSharedBare(payload.binaryPath, bare)
+          if prepared.len > 0:
+            return failed("refresh-bare-prepare-failed", prepared)
+          var fetched: tuple[exitCode: int; output: string]
+          const MaxRefreshLockRetries = 5
+          for attempt in 0 .. MaxRefreshLockRetries:
+            fetched = runGit(payload, sharedBareFetchArgs(bare))
+            if fetched.exitCode == 0 or attempt == MaxRefreshLockRetries or
+                not isTransientGitLockContention(fetched.output):
+              break
+            sleep(25 * (attempt + 1))
+          if fetched.exitCode != 0:
+            return failed("refresh-bare-fetch-failed",
+              "git fetch in shared bare failed (" & $fetched.exitCode & "): " &
+                fetched.output.trimmed)
+          checkLeaves = true
+        else:
+          # Leave no half-populated bare behind so the next attempt re-clones.
+          if dirExists(bare):
+            try: removeDir(bare)
+            except OSError: discard
+          return failed("refresh-bare-clone-failed",
+            "git clone --bare into shared cache failed (" & $res.exitCode & "): " &
+              res.output.trimmed)
+      else:
+        let prepared = prepareSharedBare(payload.binaryPath, bare)
+        if prepared.len > 0:
+          return failed("refresh-bare-prepare-failed",
+            "cloned the shared bare but " & prepared)
+        outcome = "cloned"
+  # Shared-Clone-Pool-Integrity §4.2: a refresh is what strands a rewritten
+  # upstream's old commits, so every leaf registered with this pool is
+  # checked right after it (outside the bare lock so lock ordering remains
+  # strictly checkout -> pool). The fetches that depend on this action
+  # therefore run in leaves that have already been repaired. The messages
+  # travel on stdout; ``repro sync`` prints them.
   var leafMessages: seq[string]
-  if dirExists(bare / "objects") or dirExists(bare / ".git"):
-    let prepared = prepareSharedBare(payload.binaryPath, bare)
-    if prepared.len > 0:
-      return failed("refresh-bare-prepare-failed", prepared)
-    let res = runGit(payload, sharedBareFetchArgs(bare))
-    if res.exitCode != 0:
-      return failed("refresh-bare-fetch-failed",
-        "git fetch in shared bare failed (" & $res.exitCode & "): " &
-          res.output.trimmed)
-    # Shared-Clone-Pool-Integrity §4.2: a refresh is what strands a rewritten
-    # upstream's old commits, so every leaf registered with this pool is
-    # checked right after it. The fetches that depend on this action
-    # therefore run in leaves that have already been repaired. The messages
-    # travel on stdout; ``repro sync`` prints them.
+  if checkLeaves:
     leafMessages = messages(checkRegisteredLeaves(payload.binaryPath, bare))
-  else:
-    let parent = bare.splitPath.head
-    if parent.len > 0:
-      try: createDir(parent)
-      except OSError as e:
-        return failed("refresh-bare-parent-failed",
-          "could not create cache parent " & parent & ": " & e.msg)
-    let res = runGit(payload,
-      ["clone", "--bare", "--quiet", payload.remoteUrl, bare])
-    if res.exitCode != 0:
-      # Leave no half-populated bare behind so the next attempt re-clones.
-      if dirExists(bare):
-        try: removeDir(bare)
-        except OSError: discard
-      return failed("refresh-bare-clone-failed",
-        "git clone --bare into shared cache failed (" & $res.exitCode & "): " &
-          res.output.trimmed)
-    let prepared = prepareSharedBare(payload.binaryPath, bare)
-    if prepared.len > 0:
-      return failed("refresh-bare-prepare-failed",
-        "cloned the shared bare but " & prepared)
-    outcome = "cloned"
   var receipt = RefreshBareReceiptHeader & "\n"
   receipt.add("kind\t" & WorkspaceVcsKind & "\n")
   receipt.add("operation\trefresh-bare\n")

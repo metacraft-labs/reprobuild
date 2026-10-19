@@ -98,9 +98,16 @@ require_contains flake.nix 'nixos-modules.url = "github:metacraft-labs/devops-mo
 require_contains flake.nix 'nixpkgs.follows = "nixos-modules/nixpkgs-unstable"'
 require_contains flake.nix 'flake-parts.follows = "nixos-modules/flake-parts"'
 require_contains flake.nix 'git-hooks.follows = "nixos-modules/git-hooks-nix"'
-for system in x86_64-linux aarch64-linux x86_64-darwin aarch64-darwin; do
+# metacraft-dev-guidelines repo-requirements.md §1 lists the flake systems.
+# x86_64-darwin is not among them here: the pinned nixpkgs (26.11) dropped it,
+# so nothing can be built or evaluated for it. Its absence is required, so a
+# re-added entry (which fails `nix flake check --all-systems`) is caught here.
+for system in x86_64-linux aarch64-linux aarch64-darwin; do
   require_contains flake.nix "\"${system}\""
 done
+if sed -n '/^      systems = \[/,/^      \];/p' flake.nix | grep -Fq '"x86_64-darwin"'; then
+  fail "flake.nix systems must not list x86_64-darwin: the pinned nixpkgs dropped it"
+fi
 require_contains flake.nix "devShells.default"
 require_contains flake.nix "packages.default"
 require_contains flake.nix "checks ="
@@ -237,9 +244,8 @@ require_contains .github/workflows/ci.yml "run: dev-exec nix build --no-update-l
 require_contains .github/workflows/ci.yml "if: always()"
 require_contains .github/workflows/ci.yml "actions/upload-artifact@v4"
 require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "Linux", "X64", "benchmark"]'\'''
-# The macOS benchmark leg uses capability labels. The Linux benchmark leg
-# retains its dedicated persistent benchmark runner requirement above.
-require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "macos", "arm64"]'\'''
+# Both measurement legs require dedicated benchmark runners.
+require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "darwin", "nix-darwin", "aarch64-darwin", "benchmark"]'\'''
 require_contains .github/workflows/benchmark.yml "metacraft-labs/runquota"
 require_contains .github/workflows/benchmark.yml "metacraft-labs/reprobuild-cmake"
 require_contains .github/workflows/benchmark.yml "ref: reprobuild"

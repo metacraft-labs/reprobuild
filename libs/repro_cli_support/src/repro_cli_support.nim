@@ -112,6 +112,20 @@ import repro_local_store
 import repro_cas_store
 import repro_store_daemon
 import repro_daemon_core
+# Shared-Development-Services L8: `serviceInstanceStoreRoot` is the ONE
+# derivation of the registry's store root -- `leaseStoreRootForScope`,
+# called rather than re-derived (see its own note). The CLI reconciles
+# the registrations after the daemon has answered, so it needs that same
+# root; re-deriving it here is how a reconcile ends up writing into a
+# store the reaper does not sweep.
+import repro_cli_support/service_registrar  # §7.2: the declared registrar program
+from repro_daemon_core/instance_registry import serviceInstanceStoreRoot
+import repro_resources/service_registry
+  # Shared-Development-Services L7 (§4.5): the instance registry's key
+  # codec and outcome vocabulary. It re-exports `service_attach` and
+  # `service_identity`, so this one import brings
+  # `serviceInterfaceSnapshot`, `serviceLeaseHolderId` and
+  # `degradationReport` with it.
 import repro_resources          # Named-Runnable-Edges N2: ResourceInstance / StateStore / decodeResourceGraphPayload / toLeasedDep (the leased-consumes bridge)
 import repro_launch_plan
 import repro_hcr_agent
@@ -342,11 +356,11 @@ proc renderUsage*(programName: string): string =
           programName &
       " shell hook bash|zsh|fish|nushell|pwsh [--repro-bin=PATH]\n       " &
           programName &
-      " up [selector] [--activity=name] [--foreground] [--http=HOST:PORT]\n       " &
+      " up [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--ready-timeout=MS] [--replace [--force]]\n       " &
           programName &
-      " down [selector] [--activity=name] [--force]\n       " &
+      " down [selector] [--activity=name] [--force] [--stop-timeout=MS]\n       " &
           programName &
-      " dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--debounce-ms=N]\n       " &
+      " dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--debounce-ms=N] [--ready-timeout=MS] [--replace [--force]]\n       " &
           programName &
       " hooks ensure|reinstall|uninstall [--vcs] [--shell-direnv] [--shell bash|zsh|fish|powershell] [--json] [--write-report[=PATH]] [path]\n       " &
           programName &
@@ -382,7 +396,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " debug artifact <path> [--format=text|json]\n       " &
           programName &
-      " home {add | remove | enable | disable | list | why | history | apply | plan | rollback | set | get | adopt | resource} [--profile-dir=PATH] [--host=NAME] ...\n       " &
+      " home {add | remove | enable | disable | list | why | history | apply | plan | export | facts | compare | rollback | set | get | adopt | resource} [--profile-dir=PATH] [--host=NAME] ...\n       " &
           programName &
       " daemon {status | start | stop | restart | logs | sessions} [--endpoint=PATH] [--state-dir=PATH] [--log=PATH]\n       " &
           programName &
@@ -6729,6 +6743,26 @@ proc canonicalVariantAssignments(): string =
   parts.sort()
   parts.join(",")
 
+proc canonicalEnvironmentSignature(): string =
+  ## Shared-Development-Services L5 (§6.4): the SELECTED ENVIRONMENT, in
+  ## the canonical form both lowered-graph cache keys fold in.
+  ##
+  ## §6.4 is a requirement on exactly this code: "The selected
+  ## environment MUST be a tracked solver input that participates in the
+  ## graph cache key. An ambient `getEnv` is silently ignored when a
+  ## lowered graph is served from cache, so an environment selected that
+  ## way could hand a developer a production issuer out of a warm cache
+  ## — a failure that is both silent and security-relevant."
+  ##
+  ## The projection itself lives in ``repro_project_dsl``
+  ## (``canonicalEnvironmentSelection``) because that is where the
+  ## ``environment`` block is declared and where the selection is read
+  ## when the bindings are applied; reading it twice, in two normal
+  ## forms, is how a cache key and the value it is supposed to track
+  ## drift apart. Empty when no environment is selected, so the key is
+  ## byte-identical to the pre-L5 one for every build that selects none.
+  canonicalEnvironmentSelection()
+
 proc providerGraphStoreRoot(base: string): string =
   ## Provider-graph snapshot store root, isolated per active variant set.
   ##
@@ -6745,7 +6779,20 @@ proc providerGraphStoreRoot(base: string): string =
   ## start (and a fresh provider invocation) when the variants change, and lets
   ## the two configurations' snapshots coexist and cache independently — the
   ## same way cargo keeps ``target/debug`` and ``target/release`` separate.
-  let sig = canonicalVariantAssignments()
+  # Shared-Development-Services L5 (§6.4): the selected ENVIRONMENT is
+  # folded in beside the variant set, for the identical reason the
+  # comment above gives for variants. An environment's bindings are
+  # applied at provider-run time (module init of the recipe), so they
+  # change the EMITTED GRAPH -- a service's argv carries the bound
+  # hostname -- while leaving ``providerArtifactId`` untouched. Two
+  # builds differing only in their environment would otherwise share one
+  # snapshot and the second would reuse the first's fragments with
+  # ``providerInvocations: 0``, which is §6.4's "production issuer out of
+  # a warm cache" in its most literal form.
+  let envSig = canonicalEnvironmentSignature()
+  let sig =
+    if envSig.len == 0: canonicalVariantAssignments()
+    else: canonicalVariantAssignments() & "|env=" & envSig
   if sig.len == 0:
     return base
   var slug = ""
@@ -6781,6 +6828,21 @@ proc loweredGraphCacheKey(artifact: ProjectInterfaceArtifact;
   payload.addCacheField(toolIdentityCacheKey(artifact, mode))
   payload.addCacheField(providerArtifactId)
   payload.addCacheField(canonicalVariantAssignments())
+  # Shared-Development-Services L5 (§6.4): the selected environment.
+  # This is the field the gate's control measures -- "a warm cache
+  # cannot serve a graph lowered for another environment".
+  #
+  # APPENDED ONLY WHEN NON-EMPTY, and that is deliberate rather than
+  # tidy. ``addCacheField("")`` is not a no-op: it appends ``"0:\n"``,
+  # so an unconditional field would change the key of every build that
+  # selects NO environment and cold-start the whole fleet's lowered-graph
+  # caches once, for a feature those builds do not use. Guarded, the
+  # no-environment key is BYTE-IDENTICAL to the pre-L5 one. There is no
+  # ambiguity cost: every field is length-prefixed, and "" is not a
+  # spellable environment name -- it IS the unselected case.
+  let environmentSignature = canonicalEnvironmentSignature()
+  if environmentSignature.len > 0:
+    payload.addCacheField(environmentSignature)
   if fileExists(extendedPath(providerSnapshotPath)):
     payload.addCacheField(fileContentDigest(providerSnapshotPath))
   else:
@@ -7121,6 +7183,30 @@ proc prewarmDaemonParentCaches*(outDir: string): DaemonParentPrewarmReport =
   result.toolIdentities = prewarmToolIdentitiesFrom(outDir, stamps)
   prewarmStamps = stamps
   prewarmedOutDir = if stamps.len > 0: outDir else: ""
+
+when defined(reproEnvironmentCacheKeyTest):
+  ## Seams for
+  ## ``libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim``.
+  ## ``loweredGraphCacheKey`` and ``providerGraphStoreRoot`` are
+  ## module-private and the property under test -- that a warm cache
+  ## cannot serve a graph lowered for another environment -- is a
+  ## property of the KEY, not of anything observable from a finished
+  ## build. Compiled in only for that test, so no shipped image carries
+  ## a second way to compute a cache key.
+  proc loweredGraphCacheKeyForTest*(artifact: ProjectInterfaceArtifact;
+                                    mode: ToolProvisioningMode;
+                                    providerArtifactId,
+                                    providerSnapshotPath,
+                                    pathEnv: string;
+                                    extensionSignature = ""): string =
+    loweredGraphCacheKey(artifact, mode, providerArtifactId,
+      providerSnapshotPath, pathEnv, extensionSignature)
+
+  proc providerGraphStoreRootForTest*(base: string): string =
+    providerGraphStoreRoot(base)
+
+  proc canonicalEnvironmentSignatureForTest*(): string =
+    canonicalEnvironmentSignature()
 
 when defined(reproDaemonParentPrewarmTest):
   ## Seams for ``t_daemon_parent_prewarm``. The warm tables and the cache
@@ -7923,6 +8009,13 @@ type
     ## graph. Only an in-process build can deliver it: a daemon-hosted build
     ## reports an exit code and diagnostics, so a caller that installs a sink
     ## gets a direct build (``runBuildCommand``).
+
+  BuildGraphAugmenter* = proc(actions: var seq[BuildAction])
+    ## Adds actions to, or ordering edges between, the actions an engine pass
+    ## is about to schedule, after lowering and every fingerprint fold. The
+    ## certifying ``repro test`` uses it to add the HL-10 lock-update node
+    ## and make every test command depend on it. Like the outcome sink it
+    ## needs an in-process build (``runBuildCommand``).
 
   BuildCommandOutcome = object
     exitCode: int
@@ -9156,10 +9249,17 @@ proc seedCmakeRegenerationCache(meta: CmakeRegenerationMetadata;
   var cache = openActionCache(sharedRoot / "action-cache")
   defer:
     cache.flushHotIndex()
-  let record = cache.recordActionResult(cas, regenerationAction.weakFingerprint,
-    regenerationAction.actionCachePolicy, regenerationAction.inputs,
-    regenerationAction.outputs, regenerationAction.cwd,
-    storeOutputBlobs = false)
+  let record =
+    try:
+      cache.recordActionResult(cas, regenerationAction.weakFingerprint,
+        regenerationAction.actionCachePolicy, regenerationAction.inputs,
+        regenerationAction.outputs, regenerationAction.cwd,
+        storeOutputBlobs = false)
+    except UnreadableInputError:
+      # An input this content-keyed record would need cannot be read, so
+      # there is no record to seed: report "not seeded" and let the edge
+      # run, rather than failing the build over an observed file's state.
+      return false
   writeActionResultRecordFile(
     dependencyEvidencePath(cmakeCacheRoot, regenerationAction.id), record)
   true
@@ -9697,6 +9797,64 @@ var interfaceEdgeSessionResults: Table[string, ProjectInterfaceArtifact]
   ## engine for each would re-validate the same evidence with nothing able to
   ## have changed in between.
 
+proc ensureLockPinnedCatalog*(modulePath, consumerRoot: string): string =
+  ## Provisioning-Contributions.md §Lookup:
+  ## Before compiling a recipe whose committed repro.lock pins reprobuild-packages,
+  ## the build engine materializes that revision under
+  ## .repro/cross-repo-producers/reprobuild-packages/<rev> (or verifies it is
+  ## already present) unless $REPROBUILD_PACKAGES_ROOT or a develop sibling
+  ## takes precedence.
+  ## Returns the checkout root of the materialized catalog, or "" if skipped.
+  if getEnv(ReprobuildPackagesRootEnv).len > 0:
+    return ""
+
+  let startDir =
+    if modulePath.len > 0: modulePath.parentDir
+    elif consumerRoot.len > 0: consumerRoot
+    else: getCurrentDir()
+
+  # Develop-mode sibling beside consumer or any ancestor
+  var dir = startDir
+  for _ in 0 ..< 16:
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      break
+    let sibling = parent / ReprobuildPackagesRepositoryName
+    if dirExists(sibling):
+      # Develop-mode sibling takes precedence
+      return ""
+    dir = parent
+
+  # Find enclosing repro.lock
+  var lockDir = ""
+  var lockFile = ""
+  dir = startDir
+  for _ in 0 ..< 16:
+    let candidate = dir / CommittedLockFileName
+    if fileExists(candidate):
+      lockDir = dir
+      lockFile = candidate
+      break
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      break
+    dir = parent
+
+  if lockFile.len == 0:
+    return ""
+
+  try:
+    let content = readFile(lockFile)
+    let ld = parseLockedDependencies(content)
+    for dep in ld.deps:
+      if dep.name == ReprobuildPackagesRepositoryName and dep.coordinates.kind == ckVcs:
+        return fetchLockPinnedProducer(dep, lockDir)
+  except CatchableError as err:
+    if err of OSError:
+      raise
+    discard
+  return ""
+
 proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
                           workDir, scratchDir, consumerRoot, publicCliPath,
                           cacheRoot: string;
@@ -9744,14 +9902,22 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   ## reads — could not appear in it. Editing such a file left the gate warm
   ## and served a stale interface with a green build. The engine's decision
   ## comes from the monitored read set, which does see those files.
+  discard ensureLockPinnedCatalog(modulePath, consumerRoot)
   let helperCliPath = internalReproHelperCliPath(publicCliPath)
   if helperCliPath.len == 0 or not cliPathExists(helperCliPath):
     # No engine-executable image to spawn back into. Embedded callers and
     # the bootstrap path land here; they get the pre-existing in-process
     # extraction, which is the same code the helper runs.
-    return extractInterfaceFromModule(modulePath, artifactPath, stubPath,
+    result = extractInterfaceFromModule(modulePath, artifactPath, stubPath,
       workDir, scratchDir, requireStub, resourceModule, extraPaths,
       consumerRoot)
+    # Shared-Development-Services §4.3's stale-lift precondition -- see
+    # the publish sites at the foot of this proc for the full note. This
+    # is the embedded/bootstrap path, and it produced the bytes in this
+    # process, so it records their provenance like the others.
+    writeInterfaceArtifactProvenance(artifactPath, modulePath,
+      resourceModule = resourceModule, extraPaths = extraPaths)
+    return
 
   # Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
   # compiles" (owner decision 2026-10-09): the extraction runs IN the
@@ -9797,7 +9963,7 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     providerCompileConfigurationIdentity(compileCommand)
   # The selected catalog decides which module a catalog `uses:` imports;
   # see `catalogSelectionIdentity`. Appended only when one is selected.
-  let catalogSelection = catalogSelectionIdentity()
+  let catalogSelection = catalogSelectionIdentity(modulePath)
   let keySuffix = "\x00provider-compile-configuration\x00" &
     digestHex(compileConfiguration) &
     (if catalogSelection.len > 0: "\x00" & catalogSelection else: "")
@@ -10067,6 +10233,29 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
         publishIfChanged(stubPath, readFile(extendedPath(edgeStubPath)))
     else:
       result = readInterfaceArtifact(artifactPath)
+    # Shared-Development-Services §4.3's STALE-LIFT PRECONDITION: record
+    # what the artifact at the CALLER's path was lifted from, beside it.
+    #
+    # HERE, in the parent, rather than in the edge child, and the reason
+    # is measured. For a relocatable edge the child writes its outputs
+    # under the action-cache root (`recipeCompileOutputDir`) and only the
+    # ARTIFACT and the STUB are copied to `artifactPath` -- which is why,
+    # at `8b39340a0`, `.repro/dev-env/default/` in this checkout carries
+    # neither `.inputs` nor `.inputs.meta` while `.repro/build/repro/`
+    # carries both. A sidecar written by the child would therefore be
+    # absent from exactly the two directories a consumer's resolver
+    # enumerates (`.repro/dev-env/*/`, `.repro/build/*/`).
+    #
+    # This runs on a cache HIT as well as on a RUN, and that is sound
+    # rather than lax: the engine has just decided these bytes are the
+    # correct output for this recipe's current inputs, so the closure
+    # hashed here is the closure they were produced from. What is NOT
+    # done is stamping an artifact nobody asked the engine about -- see
+    # the session-result short-circuit above, which returns without
+    # stamping, and `writeInterfaceArtifactProvenance`'s own note on why
+    # there is no `ensure` variant.
+    writeInterfaceArtifactProvenance(artifactPath, modulePath,
+      resourceModule = resourceModule, extraPaths = extraPaths)
     interfaceEdgeSessionResults[sessionKey] = result
   finally:
     releaseInterfaceArtifactLock(artifactLock)
@@ -10152,7 +10341,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         peerCachePublisher: PeerCacheActionPublisher = nil;
                         peerCacheInstaller: PeerCacheActionBundleInstaller =
                           nil;
-                        actionOutcomeSink: BuildActionOutcomeSink = nil):
+                        actionOutcomeSink: BuildActionOutcomeSink = nil;
+                        graphAugmenter: BuildGraphAugmenter = nil):
     BuildCommandOutcome =
   ## ``actionOutcomeSink`` receives the per-action outcome of the engine pass
   ## this invocation runs over its lowered graph (``ExecutedActionRecord``),
@@ -10699,6 +10889,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # ``contentIdentity`` / lock-pinned ``revision``+``integrity``). No-op
     # when nothing was materialized (byte-identical to today).
     foldProducerSourceIdentities(scheduledActions)
+    # HL-10: a certifying run adds its lock-update node here, after every
+    # fold, so the node changes no other action's cache key.
+    if graphAugmenter != nil:
+      graphAugmenter(scheduledActions)
     try:
       progressRenderer.renderPhase("checking graph actions=" &
         $scheduledActions.len)
@@ -11178,6 +11372,21 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
               let stagedPath = projectionPath & ".projection-tmp"
               writeInterfaceArtifact(stagedPath, producerArtifact)
               moveFile(extendedPath(stagedPath), extendedPath(projectionPath))
+            # Shared-Development-Services §4.3's stale-lift precondition.
+            #
+            # FOUND BY GOING LOOKING, not by a failing test. This is a
+            # SECOND publication of a producer's interface, at a path
+            # `extractInterfaceEdge` above did not write -- and it is one
+            # of the two directories a consumer's resolver enumerates
+            # (`ownerInterfaceCandidates`: `.repro/dev-env/*/` and
+            # `.repro/build/*/`). Left unstamped it would be found,
+            # answered "provenance unknown" and refused: the safe
+            # direction, but a refusal with the wrong cause for a
+            # producer that had just been lifted correctly. Stamped here
+            # rather than by an `ensure` helper, because this is the site
+            # that produced those bytes from `recipeDir / "repro.nim"`.
+            writeInterfaceArtifactProvenance(projectionPath,
+              recipeDir / "repro.nim")
           finally:
             releaseInterfaceArtifactLock(projectionLock)
         let dependencies =
@@ -12322,6 +12531,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # ``contentIdentity`` / lock-pinned ``revision``+``integrity``). No-op
     # when nothing was materialized (byte-identical to today).
     foldProducerSourceIdentities(scheduledActions)
+    # HL-10: a certifying run adds its lock-update node here, after every
+    # fold, so the node changes no other action's cache key.
+    if graphAugmenter != nil:
+      graphAugmenter(scheduledActions)
     try:
       progressRenderer.renderPhase("checking graph actions=" &
         $scheduledActions.len)
@@ -12704,6 +12917,7 @@ proc runInterfaceExtractHelper(args: openArray[string]): int =
       stderr.writeLine("repro interface extract: missing " & name)
       return 2
   try:
+    discard ensureLockPinnedCatalog(modulePath, consumerRoot)
     # ``useExtractionCache = false``: reaching this process at all means the
     # engine already decided the edge must run. Re-asking the narrower
     # text-closure key here could only ever overrule that decision, and it
@@ -14128,14 +14342,18 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
   ## The PATH contribution that makes a dev-env activation PROVIDE the
   ## toolchain its recipe declares, rather than merely name it.
   ##
-  ## Before this, `uses: "rustc >=1.92"` reached an activated shell as a
-  ## `toolProfiles` entry with an EMPTY `realizedPrefix`: the artifact knew
-  ## which packages the project wanted and even carried an execution-profile
-  ## identity for each, but nothing realized them and nothing put them on
-  ## PATH. `rustc` in that shell was whatever the host happened to have
-  ## installed — which is the property a declared toolchain exists to remove,
-  ## and the reason projects kept a second, imperative provisioning system
-  ## (an `env.ps1`, a flake dev shell) beside their recipe.
+  ## Before this, `uses: "rustc >=1.92"` reached an activated shell only as a
+  ## `toolProfiles` entry: the artifact knew which packages the project
+  ## wanted and even carried an execution-profile identity for each, but
+  ## nothing realized them and nothing put them on PATH. (That entry's
+  ## `policyPath`, once misnamed `realizedPrefix`, is the `uses:` nesting
+  ## path and is empty for a top-level entry; it never records a prefix.
+  ## The artifact is produced before any tool is realized, so the realized
+  ## prefix lives only in the PATH this proc contributes.) `rustc` in that
+  ## shell was whatever the host happened to have installed — which is the
+  ## property a declared toolchain exists to remove, and the reason projects
+  ## kept a second, imperative provisioning system (an `env.ps1`, a flake dev
+  ## shell) beside their recipe.
   ##
   ## `repro develop` has realized tools since the beginning, through exactly
   ## the call below. What was missing was not the capability but its reach:
@@ -14485,7 +14703,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      daemonHosted = false;
                      eventSink: BuildCommandEventSink = nil;
                      cancelCheck: BuildCancelCallback = nil;
-                     actionOutcomeSink: BuildActionOutcomeSink = nil): int
+                     actionOutcomeSink: BuildActionOutcomeSink = nil;
+                     graphAugmenter: BuildGraphAugmenter = nil): int
 
 type
   RunTargetResolution = object
@@ -15089,7 +15308,7 @@ proc runReproRunCommand(args: openArray[string];
           #
           # WHAT IS EXECUTED BY A TEST AND WHAT IS NOT: the client/daemon halves
           # of this call are covered end-to-end by
-          # `libs/repro_daemon_core/tests/t_l4_daemon_leases.nim` cases (m)-(o)
+          # `libs/repro_daemon_core/tests/t_l4_daemon_leases.nim` cases (n)-(p)
           # — body codec, a real frame over the real IPC stack reaching a real
           # daemon's registry, and the no-daemon no-op. THIS call site (building
           # the request from `resolution.providerArtifacts`) is reached only by
@@ -15798,9 +16017,49 @@ type
     httpBind: string
     debounceMs: int
     force: bool
+    replace: bool
+      ## Shared-Development-Services L7 / §4.3's explicit takeover:
+      ## ``repro up --replace`` stops the running instance of a shared
+      ## service and starts THIS definition. Accepted only by ``up`` and
+      ## ``dev`` -- ``down`` refuses it, because ``down`` takes nothing
+      ## over.
+      ##
+      ## L6 deliberately did NOT add this flag, and said why: there was
+      ## no registry to resolve against, so a flag that parsed and then
+      ## did nothing "would be a silently-dropped construct added by the
+      ## milestone whose standing hunt is for silently-dropped
+      ## constructs". L7 is the milestone that supplies the registry, so
+      ## the flag arrives with the behaviour.
+    readyTimeoutMs: int
+      ## ``--ready-timeout=MS``, or 0 when the user did not pass it. Reaches
+      ## ``waitForDevSessionReady`` through ``readyBudget``; see
+      ## ``runUpOrDevCommand``.
+    stopTimeoutMs: int
+      ## ``--stop-timeout=MS``, or 0 when the user did not pass it. Reaches
+      ## ``runDownCommand``'s wait through ``stopBudget``. The mirror image
+      ## of the field above, and accepted on exactly the opposite set of
+      ## commands.
 
-proc parseDevSessionArgs(args: openArray[string]; commandName: string):
-    ParsedDevSessionCommand =
+proc parseDevSessionArgs(args: openArray[string]; commandName: string;
+                         acceptReadyTimeout: bool;
+                         acceptStopTimeout = false;
+                         acceptReplace = false): ParsedDevSessionCommand =
+  ## ``acceptReadyTimeout`` has no default because ``down`` must REFUSE
+  ## ``--ready-timeout`` rather than accept and ignore it: ``down`` does not
+  ## wait for readiness, so an accepted flag there would be a flag that
+  ## parses and does nothing, which is the failure mode this campaign keeps
+  ## finding. A new caller has to decide in writing.
+  ##
+  ## ``acceptReplace`` follows the same rule and the same default-to-
+  ## refusing convention: ``down`` must REFUSE ``--replace`` rather than
+  ## accept and ignore it, because ``down`` takes no instance over.
+  ##
+  ## ``acceptStopTimeout`` is the same rule pointing the other way, and it
+  ## DOES default -- to false, the refusing value. ``up`` and ``dev`` do not
+  ## wait for a session to stop, so ``--stop-timeout`` there would parse and
+  ## do nothing; only ``down`` passes true. A default that refuses means a
+  ## future command gets the refusal until someone writes down that it
+  ## waits.
   var selection = DevEnvCliSelection()
   result.httpBind = "127.0.0.1:0"
   result.debounceMs = 250
@@ -15818,12 +16077,35 @@ proc parseDevSessionArgs(args: openArray[string]; commandName: string):
       result.foreground = true
     elif arg == "--force":
       result.force = true
+    elif arg == "--replace":
+      if not acceptReplace:
+        raise newException(ValueError,
+          "unsupported " & commandName & " flag: " & arg)
+      result.replace = true
     elif arg == "--http" or arg.startsWith("--http="):
       result.httpBind = valueFromFlag(args, i, "--http")
     elif arg == "--debounce-ms" or arg.startsWith("--debounce-ms="):
       result.debounceMs = parseInt(valueFromFlag(args, i, "--debounce-ms"))
       if result.debounceMs < 0:
         raise newException(ValueError, "--debounce-ms must be non-negative")
+    elif arg == "--ready-timeout" or arg.startsWith("--ready-timeout="):
+      if not acceptReadyTimeout:
+        raise newException(ValueError,
+          "unsupported " & commandName & " flag: " & arg)
+      result.readyTimeoutMs = parseInt(valueFromFlag(args, i,
+        "--ready-timeout"))
+      if result.readyTimeoutMs <= 0:
+        raise newException(ValueError,
+          "--ready-timeout must be a positive number of milliseconds")
+    elif arg == "--stop-timeout" or arg.startsWith("--stop-timeout="):
+      if not acceptStopTimeout:
+        raise newException(ValueError,
+          "unsupported " & commandName & " flag: " & arg)
+      result.stopTimeoutMs = parseInt(valueFromFlag(args, i,
+        "--stop-timeout"))
+      if result.stopTimeoutMs <= 0:
+        raise newException(ValueError,
+          "--stop-timeout must be a positive number of milliseconds")
     elif arg.startsWith("-"):
       raise newException(ValueError,
         "unsupported " & commandName & " flag: " & arg)
@@ -15901,12 +16183,1410 @@ proc startBackgroundSupervisor(config: DevSessionSupervisorConfig) =
       raise newException(OSError,
         "failed to launch dev session supervisor: " & command)
 
+const DevSessionStillStartingExitCode* = 75
+  ## The exit code ``repro up`` / ``repro dev`` returns when its wait expired
+  ## while the session was STILL COMING UP, as opposed to failing to start.
+  ##
+  ## The choice, stated explicitly because the issue turns on it. Three
+  ## outcomes need three codes, and the daemonised default is why:
+  ##
+  ## * ``0`` -- the session is up. Reserved for exactly that. Returning 0
+  ##   for "still starting" was the tempting fix and it is wrong: a script
+  ##   that reads 0 goes on to use the services, and they are not there yet.
+  ## * ``1`` -- the session CANNOT start. Unchanged: every genuine failure
+  ##   to start keeps the code it had, which is what the dispatcher returns
+  ##   for any ``CatchableError`` out of here.
+  ## * ``75`` -- still starting; THIS COMMAND STOPPED NOTHING. Worded that
+  ##   way rather than "the session was left running", because that is the
+  ##   part the code can promise: nothing on this path stops a supervisor,
+  ##   but in the arm where no status was ever read nothing established that
+  ##   there is a supervisor to leave. The diagnostic draws the same
+  ##   distinction per arm; see ``waitForDevSessionReady``. A script can
+  ##   now tell this from both of the above, which is the whole complaint in
+  ##   the issue: ``repro up`` used to return the failure code for a session
+  ##   that was about to be fine, so the caller could neither trust success
+  ##   nor act on failure, and a second ``repro up`` would contend with the
+  ##   first. On 75 the correct response is to keep waiting (or to raise
+  ##   ``--ready-timeout``), never to start another session.
+  ##
+  ## 75 is ``EX_TEMPFAIL`` from ``sysexits.h`` -- "the user is invited to
+  ## retry" -- which is as close to this meaning as a conventional code
+  ## gets. It is outside the 1-2 range the rest of the CLI uses for
+  ## refusals, so no existing caller can confuse it with one.
+
+const
+  SharedInstanceLedgerFile = "shared-instances.json"
+    ## Where `repro up` records the shared service instances THIS session
+    ## took a holder on, so `repro down` releases exactly those.
+  SharedInstanceLedgerSchemaId =
+    "reprobuild.dev-session.shared-instances.v1"
+
+proc sharedInstanceLedgerPath(outDir: string): string =
+  outDir.sessionDir / SharedInstanceLedgerFile
+
+proc writeSharedInstanceLedger(outDir, holderId: string;
+    entries: openArray[tuple[serviceName, keyJson, address: string]]) =
+  ## Record what was converged.
+  ##
+  ## WHY A LEDGER RATHER THAN RE-READING THE RECIPE AT `repro down` TIME.
+  ## `down` must release the holder this session TOOK, and the recipe can
+  ## have changed since -- an identity renamed, a scope widened, an
+  ## `instance` block deleted. Re-resolving would then release a
+  ## different instance (or none) and leave this project counted as a
+  ## holder of the real one forever, which is the one failure that cannot
+  ## be recovered from without a daemon restart. The ledger is also why
+  ## `down` needs no dev-env edge: it does not have to evaluate the
+  ## provider to know what to let go of.
+  createDir(extendedPath(outDir.sessionDir))
+  var instances = newJArray()
+  for entry in entries:
+    instances.add(%*{"serviceName": entry.serviceName,
+      "keyJson": entry.keyJson, "address": entry.address})
+  let doc = %*{"schemaId": SharedInstanceLedgerSchemaId,
+    "holderId": holderId}
+  doc["instances"] = instances
+  writeFile(extendedPath(outDir.sharedInstanceLedgerPath), $doc & "\n")
+
+proc readSharedInstanceLedger(outDir: string):
+    tuple[holderId: string;
+          entries: seq[tuple[serviceName, keyJson, address: string]]] =
+  ## Read the ledger back. A missing ledger is the ordinary case (a
+  ## session with no shared services) and yields an empty result; a
+  ## ledger that is present and unreadable RAISES, because silently
+  ## releasing nothing is how a holder becomes permanent.
+  result.entries = @[]
+  let path = outDir.sharedInstanceLedgerPath
+  if not fileExists(extendedPath(path)):
+    return
+  let doc = readJsonFileResilient(path)
+  if doc.isNil or doc.kind != JObject:
+    raise newException(ValueError,
+      "the shared-instance ledger at " & path & " is not a JSON object; " &
+      "this session's holders cannot be released without it")
+  let schemaId = doc{"schemaId"}.getStr("")
+  if schemaId != SharedInstanceLedgerSchemaId:
+    raise newException(ValueError,
+      "the shared-instance ledger at " & path & " carries schemaId `" &
+      schemaId & "`; this build reads `" & SharedInstanceLedgerSchemaId &
+      "` only")
+  result.holderId = doc{"holderId"}.getStr("")
+  if result.holderId.len == 0:
+    raise newException(ValueError,
+      "the shared-instance ledger at " & path & " names no holder, so " &
+      "there is no reference to drop")
+  let instances = doc{"instances"}
+  if not instances.isNil and instances.kind == JArray:
+    for item in instances:
+      if item.kind != JObject:
+        continue
+      result.entries.add((
+        serviceName: item{"serviceName"}.getStr(""),
+        keyJson: item{"keyJson"}.getStr(""),
+        address: item{"address"}.getStr("")))
+
+proc liftedServiceDeclaration(interfacePath, serviceName: string):
+    tuple[snapshot: ServiceInterfaceSnapshot;
+          identity: ServiceIdentityDef; scope: ServiceScope] =
+  ## Everything `repro up` needs about a shared service, out of the REAL
+  ## project interface artifact the dev-env edge just produced -- the
+  ## same lift L3 built, L4 put the identity and scope on, and L6
+  ## decides over. Not reconstructed and not approximated.
+  ##
+  ## ONE READ, THREE FACTS, so the interface fingerprint and the instance
+  ## key cannot come from different revisions of the same recipe. The
+  ## enum mappings are ordinal-for-ordinal on pairs that
+  ## `repro_interface_artifacts` keeps in step with static asserts.
+  if not fileExists(extendedPath(interfacePath)):
+    raise newException(IOError,
+      "service `" & serviceName & "` declares a shared `instance`, and " &
+      "the project interface artifact that carries its interface " &
+      "fingerprint, identity and scope is not at " & interfacePath &
+      ". Shared-Development-Services.md §4.3 decides attach-or-refuse " &
+      "on that fingerprint, so there is nothing to decide with.")
+  let bytes = readFile(extendedPath(interfacePath))
+  var raw = newSeq[byte](bytes.len)
+  if bytes.len > 0:
+    copyMem(addr raw[0], unsafeAddr bytes[0], bytes.len)
+  let artifact = decodeProjectInterfaceArtifact(raw)
+  result.snapshot = serviceInterfaceSnapshot(artifact.projectInterface,
+    serviceName)
+  for svc in artifact.projectInterface.publicServices:
+    if svc.name != serviceName:
+      continue
+    result.identity = ServiceIdentityDef(
+      kind: ServiceIdentityKind(ord(svc.identityMode)),
+      stableId: svc.identityStableId)
+    result.scope = ServiceScope(ord(svc.scope))
+    return
+  # Unreachable in practice: `serviceInterfaceSnapshot` above already
+  # raises `ServiceAttachError` naming every service the interface
+  # declares. Stated rather than left implicit, because a silent
+  # fall-through here would hand back the DEFAULT identity (`derived`,
+  # empty id) and the default scope -- a key every service would share.
+  raise newException(ServiceAttachError,
+    "the lifted interface carries a snapshot for service `" &
+    serviceName & "` but no row for it, which cannot happen; refusing " &
+    "rather than resolving a default identity")
+
+proc ownerArtifactGeneration*(artifactPath, ownerRecipeDir,
+                              ownerPackage, ownerProject: string):
+    ServiceArtifactGenerationCheck =
+  ## Shared-Development-Services §4.3's SAME-GENERATION PRECONDITION,
+  ## ESTABLISHED: does the owner's lifted interface artifact correspond
+  ## to the owner's definition as it stands on disk right now?
+  ##
+  ## § THE MECHANISM, AND WHY IT IS THIS ONE
+  ##
+  ## The lift records a PROVENANCE STAMP beside the artifact -- the
+  ## content-addressed semantic identity of the recipe's own import
+  ## closure (`recipeClosureSourceDigests`, over
+  ## `projectSourceSemanticIdentity`). This proc reads that stamp,
+  ## RE-WALKS the owner's recipe closure, and compares. Three answers,
+  ## because §4.3 names three states.
+  ##
+  ## The comparand is a pure function of the owner's SOURCES -- no
+  ## absolute path, no `workDir`, no compiler identity, no reprobuild
+  ## library fingerprint -- which is the property the check needs,
+  ## because the process that re-establishes it is a different process
+  ## in a different directory, often with a different engine install,
+  ## from the one that recorded it. The three records already in the
+  ## tree all fail that test; `repro_interface_artifacts`'
+  ## provenance section says exactly how, for each.
+  ##
+  ## THE CLOSURE IS RE-DISCOVERED, NOT RE-HASHED FROM THE RECORDED
+  ## LIST. Adding an import adds a file, so a check that hashed only the
+  ## files the record names could not see a definition grow -- and that
+  ## is not hypothetical here: `extractInterfaceEdge`'s own header
+  ## records a previous hand-rolled gate being UNSOUND for the mirror
+  ## reason (its key could not see a file the recipe acquires during
+  ## macro expansion). The recorded per-source digests are used only to
+  ## NAME what moved.
+  ##
+  ## § WHAT IS AND IS NOT ESTABLISHED
+  ##
+  ## This establishes "the artifact was lifted from the recipe closure
+  ## that is on disk now". It does NOT establish that the closure is
+  ## everything the lift read: a `staticRead`, a `staticExec`, or a
+  ## `dslDeps` package the recipe acquires during macro expansion is
+  ## seen by the engine's monitored read set and NOT by
+  ## `discoverNimSources`. So a `sagFresh` answer is a true statement
+  ## about the import closure and a conservative one about everything
+  ## else -- it can miss a staleness, and it cannot invent one. That
+  ## asymmetry is the right direction (§4.3 makes a refusal cheap and a
+  ## silent attach expensive) but it is a LIMIT, stated here rather than
+  ## left for a reader to discover, and it is the residue a lift-side
+  ## stamp over the monitored read set would close.
+  result = ServiceArtifactGenerationCheck(
+    generation: sagUnknownProvenance,
+    artifactPath: artifactPath,
+    ownerPackage: ownerPackage,
+    ownerProject: ownerProject,
+    movedSources: @[])
+  let recorded = readInterfaceArtifactProvenance(artifactPath)
+  if recorded.isNone:
+    result.detail =
+      "No readable provenance record is beside it, at " &
+      interfaceArtifactProvenancePath(artifactPath) &
+      " -- so what it was lifted from is unknown. An artifact produced " &
+      "before the lift recorded provenance reads exactly like this, and " &
+      "it is answered with a refusal rather than an assumption."
+    return
+  let provenance = recorded.get
+  if provenance.recipeFileName.len == 0 or ownerRecipeDir.len == 0:
+    result.detail =
+      "Its provenance record names no recipe file (or the owning " &
+      "project's directory is not known here), so the definition to " &
+      "compare it against cannot be located."
+    return
+  let recipePath = ownerRecipeDir / provenance.recipeFileName
+  if not fileExists(extendedPath(recipePath)):
+    result.detail =
+      "Its provenance record says it was lifted from `" &
+      provenance.recipeFileName & "`, and there is no such file at " &
+      recipePath & " -- so the current definition cannot be read."
+    return
+  # A declared resource module / extra path CHANGES THE CLOSURE, so one
+  # that cannot be resolved here is UNKNOWN provenance and not a closure
+  # walked without it. Walking a narrower closure would compute a
+  # different identity and report a difference that is an artefact of
+  # this proc, which is a false refusal -- still the safe direction, but
+  # a refusal that names the wrong cause, and this names the right one.
+  var resourceModule = ""
+  if provenance.resourceModule.len > 0:
+    resourceModule = ownerRecipeDir / provenance.resourceModule
+    if not fileExists(extendedPath(resourceModule)):
+      result.detail =
+        "Its provenance record says the lift included the separate " &
+        "resource module `" & provenance.resourceModule & "`, and there " &
+        "is no such file at " & resourceModule & " -- so the closure it " &
+        "was lifted from cannot be re-walked."
+      return
+  var extraPaths: seq[string] = @[]
+  for extra in provenance.extraPaths:
+    let resolved = ownerRecipeDir / extra
+    if not dirExists(extendedPath(resolved)):
+      result.detail =
+        "Its provenance record says the lift searched the extra path `" &
+        extra & "`, and there is no such directory at " & resolved &
+        " -- so the closure it was lifted from cannot be re-walked."
+      return
+    extraPaths.add(resolved)
+  var current: tuple[identity: string;
+                     sources: seq[tuple[path, digest: string]]]
+  try:
+    current = recipeClosureSourceDigests(recipePath, resourceModule,
+      extraPaths, provenance.includeSiblingSources)
+  except CatchableError as err:
+    result.detail =
+      "The owner's definition at " & recipePath & " could not be walked " &
+      "to compute its current source closure (" & err.msg & ")."
+    return
+  result.recordedIdentity = provenance.closureIdentity
+  result.currentIdentity = current.identity
+  if provenance.closureIdentity == current.identity:
+    result.generation = sagFresh
+    return
+  result.generation = sagStale
+  # WHICH sources moved, from the per-source digests both sides carry.
+  # Named in the running instance's... no: named in the RECORD's order
+  # first (changed and removed), then the additions, which is the same
+  # shape `memberDifferences` uses and for the same reason -- a reader
+  # scanning a refusal should meet the two sides in one order.
+  var recordedByPath = initTable[string, string]()
+  for src in provenance.sourceDigests:
+    recordedByPath[src.path] = src.digest
+  var currentByPath = initTable[string, string]()
+  for src in current.sources:
+    currentByPath[src.path] = src.digest
+  for src in provenance.sourceDigests:
+    if src.path notin currentByPath:
+      result.movedSources.add(src.path & " (removed)")
+    elif currentByPath[src.path] != src.digest:
+      result.movedSources.add(src.path & " (edited)")
+  for src in current.sources:
+    if src.path notin recordedByPath:
+      result.movedSources.add(src.path & " (added)")
+  if result.movedSources.len == 0:
+    # The identities differ and no per-source row explains it. Said out
+    # loud rather than reported as an empty list: it means the recorded
+    # rows and the comparand were produced by different schemes, which
+    # is a defect in this pair of procs and not a fact about the owner.
+    result.movedSources.add(
+      "(the recorded source rows do not explain the difference -- the " &
+      "closure identity is what decided, and the two were computed by " &
+      "schemes that disagree; this is a reprobuild defect, not an " &
+      "owner's edit)")
+
+proc ownerInterfaceCandidates(ownerRecipeDir: string): seq[string] =
+  ## Every path the owner's lifted interface could be at, in a
+  ## deterministic order.
+  ##
+  ## There is NO single path, and that is a fact about this tree rather
+  ## than a choice here: `repro dev-env` writes
+  ## `<project>/.repro/dev-env/<activity-segment>/project-interface.rbsz`
+  ## (`defaultDevEnvOutDir`) and `repro build` writes
+  ## `<project>/.repro/build/<target>/project-interface.rbsz`
+  ## (`outputDirForTarget`), so the segment depends on which activity
+  ## the owner enabled and which target it built. A hard-coded path
+  ## would be right for exactly one owner layout and silently absent for
+  ## every other, which the caller would report as "run `repro dev-env`"
+  ## for a project that had already run it.
+  ##
+  ## So the candidates are enumerated and SORTED, and the caller picks
+  ## the first that actually carries the service it is resolving. Sorted
+  ## rather than directory order so two runs on one tree agree about
+  ## which artifact answered.
+  for parent in [".repro" / "dev-env", ".repro" / "build"]:
+    let base = ownerRecipeDir / parent
+    if not dirExists(extendedPath(base)):
+      continue
+    var segments: seq[string] = @[]
+    for kind, path in walkDir(base):
+      if kind == pcDir or kind == pcLinkToDir:
+        segments.add(lastPathPart(path))
+    segments.sort()
+    for segment in segments:
+      let candidate = base / segment / "project-interface.rbsz"
+      if fileExists(extendedPath(candidate)):
+        result.add(candidate)
+
+proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
+                                    edge: DevEnvEdgeResult;
+                                    commandName: string): int =
+  ## Shared-Development-Services D-SS11 (§4.6): run every
+  ## `<package>.<service>.shared(...)` this project's recipe wrote.
+  ##
+  ## THIS IS WHERE §4's MACHINERY TRIGGERS FOR A CONSUMER. §4.6: "The
+  ## resolver is where the machinery of §4 is triggered. It resolves
+  ## `(identity, scope, environment)`, takes a lease, and runs the attach
+  ## decision of §4.3 -- so a fingerprint mismatch warns *here*, at a
+  ## named call site in the consumer's recipe, rather than somewhere
+  ## inside a supervisor's log." Every diagnostic this proc prints names
+  ## the resolver's own file and line, which the resolution record
+  ## carries from the consumer's compilation.
+  ##
+  ## FOUR STEPS PER RESOLUTION, in this order and not interchangeable:
+  ##
+  ##   1. READ THE OWNER'S LIFTED INTERFACE, from the owner's own
+  ##      project-interface artifact. That is where the identity, the
+  ##      scope and the interface FINGERPRINT come from -- §4.3 decides
+  ##      attach-or-refuse on the fingerprint, and a consumer that
+  ##      invented one would be comparing the running instance against
+  ##      itself. Absent is a REFUSAL naming the path and the project to
+  ##      run `repro dev-env` in.
+  ##   2. RESOLVE THE KEY: `(identity, scope, environment)` through the
+  ##      same `sharedServiceInstanceKey` the owner's converge uses, with
+  ##      the environment the consumer's EVALUATION selected.
+  ##   3. CONVERGE, ATTACH-ONLY: the daemon runs L6's `attachDecision`
+  ##      and takes this project's lease. The request carries NO command,
+  ##      and that is the whole of "a resolver is not a constructor"
+  ##      (§4.6): a consumer cannot materialise a service it does not
+  ##      own, because it has no definition of one -- the lift carries
+  ##      the signature and deliberately not the `executable` or `args`.
+  ##      The daemon already refuses a command-less converge that finds
+  ##      no instance, by name.
+  ##   4. DEPOSIT THE CONTRIBUTIONS, validated against what the RUNNING
+  ##      instance declares. Refused, never dropped (§4.6), including
+  ##      under version skew.
+  ##   5. READ BACK WHAT THE INSTANCE MINTED, from the instance's own
+  ##      durable registration record, into THIS session's minted file --
+  ##      L9's **F5**. See the step's own comment at the foot of the
+  ##      loop for the design and for the four alternatives it rejects.
+  ##
+  ## Returns 0 when every resolution attached and deposited, and 1 when
+  ## any refused. Called BEFORE the supervisor is launched, for
+  ## `convergeSharedServiceInstances`' reason: a refusal has to stop the
+  ## session rather than arrive after it published `session.up`.
+  let artifact =
+    try:
+      readDevEnvArtifact(edge.artifactPath)
+    except CatchableError as err:
+      raise newException(IOError,
+        "could not read the dev-env artifact at " & edge.artifactPath &
+        " to find resolved shared services: " & err.msg)
+  if artifact.sharedResolutions.len == 0:
+    return 0
+  let projectRoot = parsed.selection.projectRoot
+  let holderId = serviceLeaseHolderId(projectRoot)
+  let storeRoot = serviceInstanceStoreRoot(dlsUser)
+  var refused = 0
+  # L9 F5: what every instance this session resolved has minted,
+  # accumulated across the resolutions and merged into the session's
+  # minted record ONCE, below the loop. Accumulated rather than merged
+  # per resolution because the merge is a read-modify-write of one file:
+  # doing it inside the loop would read back rows it had just written,
+  # which is the shape in which a merge rule becomes order-dependent.
+  var crossSessionMinted: seq[tuple[serviceName, member, mintedId: string;
+                                    provenance: RegistrarProvenance]] = @[]
+  # §7.3: and what every such instance reported ABOUT ITSELF. On the
+  # SAME durable record, read by the SAME call, merged into the SAME
+  # session document -- which is §7.3's decision rather than a saving:
+  # "Giving the issuer a second, different mechanism would mean two ways
+  # to carry one class of value, and the one that looked simpler would be
+  # the one that cannot work." A second accumulator here would be the
+  # start of that second mechanism; a second READER would be the whole of
+  # it.
+  var crossSessionAttributes: seq[SharedInstanceAttributeRow] = @[]
+  for resolution in artifact.sharedResolutions:
+    let site =
+      if resolution.sourceFile.len == 0: "<unknown site>"
+      else: resolution.sourceFile & ":" & $resolution.sourceLine
+    let reference = resolution.ownerPackage &
+      (if resolution.activityName.len > 0: "." & resolution.activityName
+       else: "") & "." & resolution.serviceName
+    proc refuse(detail: string) =
+      stderr.writeLine("repro " & commandName & ": " & site & ": `" &
+        reference & ".shared()`: " & detail)
+    let candidates =
+      if resolution.ownerRecipeDir.len == 0: @[]
+      else: ownerInterfaceCandidates(resolution.ownerRecipeDir)
+    var lifted: tuple[snapshot: ServiceInterfaceSnapshot;
+                      identity: ServiceIdentityDef; scope: ServiceScope]
+    var liftedFrom = ""
+    var liftErrors: seq[string] = @[]
+    for candidate in candidates:
+      try:
+        lifted = liftedServiceDeclaration(candidate, resolution.serviceName)
+        liftedFrom = candidate
+        break
+      except CatchableError as err:
+        liftErrors.add(candidate & ": " & err.msg)
+    if liftedFrom.len == 0:
+      refuse("the owning project's lifted interface does not carry " &
+        "service `" & resolution.serviceName & "`, so this resolver " &
+        "has no identity, no scope and no interface fingerprint to " &
+        "resolve against. Shared-Development-Services.md §4.3 decides " &
+        "attach-or-refuse on that fingerprint, so there is nothing to " &
+        "decide with. " &
+        (if candidates.len == 0:
+           "No project-interface artifact was found under " &
+           (resolution.ownerRecipeDir / ".repro") &
+           " at all; run `repro dev-env` in the project that declares `" &
+           resolution.ownerPackage & "`."
+         else:
+           "Probed: " & liftErrors.join("; ") & ".") &
+        " (Refused rather than attached on a default identity: the " &
+        "default is `derived` with an empty id, which every service in " &
+        "the workspace would share.)")
+      inc refused
+      continue
+    let declaration = SharedServiceInstanceDeclaration(
+      declared: true,
+      serviceName: resolution.serviceName,
+      environment: resolution.environment,
+      leaseTtlSeconds: SharedServiceInstanceDefaultTtlSeconds)
+    let key =
+      try:
+        sharedServiceInstanceKey(declaration, projectRoot,
+          lifted.identity, lifted.scope)
+      except CatchableError as err:
+        refuse(err.msg)
+        inc refused
+        continue
+    if key.degradationReport().len > 0:
+      # Reported, never swallowed -- L4's rule, and the consumer side
+      # needs it as much as the owner's: a narrower-than-declared
+      # sharing boundary here means this consumer attaches to a
+      # DIFFERENT instance than the owner started, and the symptom
+      # would be contributions that never appear.
+      stderr.writeLine("repro " & commandName & ": " & site & ": `" &
+        reference & ".shared()`: " & key.degradationReport())
+    let response = requestUserDaemonServiceConverge(
+      DaemonServiceConvergeRequest(
+        scope: dlsUser,
+        keyJson: encodeServiceInstanceKey(key),
+        snapshotJson: encodeServiceInterfaceSnapshot(lifted.snapshot),
+        holderId: holderId,
+        ttlSeconds: declaration.leaseTtlSeconds,
+        # NO COMMAND, and no `--replace` / `--force` either. A resolver
+        # attaches; it does not construct, and it does not take over. A
+        # takeover is `repro up --replace` in the project that DECLARES
+        # the service, which is the only place a definition to run
+        # exists.
+        command: @[],
+        workingDir: projectRoot,
+        replace: false,
+        force: false,
+        # §4.3's SAME-GENERATION PRECONDITION, established HERE because
+        # this is the process that can: it knows the owner's recipe
+        # directory (`resolution.ownerRecipeDir`) and which artifact
+        # under it answered (`liftedFrom`). The daemon knows neither --
+        # it holds the RUNNING instance's snapshot, which is the other
+        # side of the comparison.
+        generationJson: encodeServiceArtifactGenerationCheck(
+          ownerArtifactGeneration(liftedFrom, resolution.ownerRecipeDir,
+            resolution.ownerPackage, lifted.snapshot.projectName))))
+    let outcome =
+      try:
+        parseConvergeOutcome(response.outcome)
+      except CatchableError as err:
+        raise newException(ValueError,
+          "the daemon answered `repro " & commandName &
+          "` with an outcome this build does not know: " & err.msg)
+    if not response.ok or convergeRefused(outcome):
+      refuse((if response.diagnostic.len > 0: response.diagnostic
+              else: "the daemon refused the attach (" &
+                response.outcome & ")") &
+        " A resolver ATTACHES to an instance and cannot materialise " &
+        "one: the lift carries the service's signature and " &
+        "deliberately not its command, so `repro up` in the project " &
+        "that DECLARES `" & resolution.serviceName & "` is what starts " &
+        "it (Shared-Development-Services.md §4.6).")
+      inc refused
+      continue
+    if response.diagnostic.len > 0:
+      # §4.3 row 2's warning, AT THE RESOLVER'S OWN CALL SITE, which is
+      # the property §4.6 asks for by name.
+      stderr.writeLine("repro " & commandName & ": " & site & ": `" &
+        reference & ".shared()`: " & response.diagnostic)
+    stderr.writeLine("repro " & commandName & ": " & site & ": `" &
+      reference & ".shared()` " & outcomeWord(outcome) & " at " &
+      response.address & " with " & $response.holders.len & " holder" &
+      (if response.holders.len == 1: "" else: "s"))
+    # The RUNNING instance's own declaration of its contribution points,
+    # as the DAEMON answered -- not as the owner's artifact on disk
+    # describes it.
+    #
+    # §4.6's refusal is about what the INSTANCE declares, and under
+    # version skew the instance was built from an older definition than
+    # the artifact now on disk. Reading the artifact a second time would
+    # make the skew case undetectable; the daemon reads the registry
+    # entry's own persisted snapshot, which is the running definition.
+    #
+    # And it is the daemon's answer rather than a store read for a
+    # measured reason: the daemon's records live under its own
+    # `--state-root`, while this process's
+    # `serviceInstanceStoreRoot(dlsUser)` with no override is the user
+    # cache. A client that read the record itself would find nothing
+    # whenever the daemon was started with an explicit root.
+    let runningPoints = response.contributionPoints
+    var rows: seq[ServiceContribution] = @[]
+    for i in 0 ..< resolution.contributionPoints.len:
+      var members: seq[string] = @[]
+      for j in 0 ..< resolution.contributionMembers.len:
+        if resolution.contributionMemberPoints[j] ==
+           resolution.contributionPoints[i]:
+          members.add(resolution.contributionMembers[j])
+      rows.add(ServiceContribution(
+        point: resolution.contributionPoints[i],
+        contributor: resolution.consumerPackage,
+        operation: resolution.contributionOperations[i],
+        precedence: resolution.contributionPrecedences[i],
+        members: members,
+        site: resolution.contributionSites[i]))
+    try:
+      validateServiceContributions(runningPoints, rows,
+        serviceInstanceAddress(key))
+    except CatchableError as err:
+      refuse(err.msg)
+      inc refused
+      continue
+    let deposited =
+      try:
+        depositServiceContributions(storeRoot, key,
+          resolution.consumerPackage, rows)
+      except CatchableError as err:
+        refuse("depositing this project's contributions failed: " & err.msg)
+        inc refused
+        continue
+    # Said out loud even when nothing changed, and even when the
+    # deposit is EMPTY. An empty deposit is a withdrawal, not a no-op,
+    # and a consumer that removed its last contribution should see that
+    # its removal was recorded rather than wonder whether the resolver
+    # ran at all.
+    stderr.writeLine("repro " & commandName & ": " & site & ": `" &
+      reference & ".shared()`: deposited " & $deposited.added &
+      " contribution" & (if deposited.added == 1: "" else: "s") &
+      " for `" & resolution.consumerPackage & "`, replacing " &
+      $deposited.replaced & ", of " &
+      $deposited.set.contributions.len & " on the instance")
+
+    # ── STEP 5 — L9's F5: READ WHAT THE INSTANCE MINTED, FROM THE
+    # INSTANCE, IN A SESSION THAT DID NOT CONVERGE IT ────────────────
+    #
+    # THE DEFECT, as L9 F4 measured it at `f927919fa`: the minted table
+    # lived ONLY in the session directory of the process that converged
+    # the instance. `substituteMintedAttributes` resolves
+    # `@minted:<member>@` out of
+    # `readSharedInstanceMintedAttributes(config.outDir)`, the one
+    # writer of that file is `convergeSharedServiceInstances` in the
+    # SAME `repro up`, and a second project's session directory has no
+    # such file. So a consuming service declared in another product's
+    # recipe, asking for a member the shared instance had already
+    # minted, was REFUSED -- and F5 (delete the hand-written wrapper),
+    # the product recipe migration and §9's "declared once" were all
+    # blocked behind that one reader.
+    #
+    # THE READER IS KEYED ON THE INSTANCE, NOT ON THE SESSION, and that
+    # is the whole decision. §4.4 already settled where a shared
+    # instance's state lives -- "addressed by its identity" -- and L8
+    # put the registrations there for its own reason ("KEYED BY THE
+    # INSTANCE, SO THE IDENTIFIERS SURVIVE A RESTART"). A value keyed by
+    # `(identity, scope, environment)` is by construction "one place per
+    # instance, not per session", so the crossing needs no new store, no
+    # new file format and no new protocol verb: it needs the read that
+    # was missing. `readServiceRegistrations` is the same proc the
+    # owner's `reconcileServiceRegistrations` reads through, so the two
+    # sessions cannot disagree about what the instance minted.
+    #
+    # WHAT WAS REJECTED, AND WHY:
+    #
+    #   * COPY THE OWNER'S SESSION FILE. Keyed on the session, which is
+    #     the defect; needs the owner's project path, which this process
+    #     has no business knowing; and survives the owner's `repro down`
+    #     as last run's answer, which is the exposure L9's review
+    #     measured in `dev-server.sh`'s descriptor.
+    #   * SERVE THE TABLE FROM THE DAEMON. The registration record is
+    #     deliberately NOT the daemon's: "The instance record is the
+    #     DAEMON's ... The registrations are the CONSUMER's reconcile,
+    #     run from the CLI after the daemon has answered. Two writers on
+    #     one record is a race." A verb that served a record the daemon
+    #     never writes would put it in front of state it does not own,
+    #     and would need protocol negotiation to deliver bytes both
+    #     sides can already read from one agreed root -- the root the
+    #     cross-process CONTRIBUTION lane above already crosses on.
+    #   * A DESCRIPTOR FILE OR AN ENVIRONMENT VARIABLE between the two
+    #     projects. That is the construct §7.2 exists to replace: it
+    #     carries no stamp, so the consumer cannot ask where the value
+    #     came from, and it outlives the issuer it describes.
+    #   * RE-RUN THE REGISTRAR IN THE CONSUMER'S SESSION. It would mint
+    #     in a SECOND identifier space -- L9 F4's measured defect, the
+    #     one §7.2 closed -- and would require every consumer to hold
+    #     the issuer's credentials.
+    #   * LET THE CONSUMER RESOLVE THE KEY ITSELF, without the lift.
+    #     §4.6 puts the machinery here for §4.3's reason: a consumer
+    #     that invented an identity would attach to a DIFFERENT instance
+    #     and see contributions that never appear. That is `key`'s
+    #     `degradationReport()` above, reported rather than swallowed.
+    #
+    # THE INSTANCE NOT RUNNING, AND THE READER NOT BEING A HOLDER, ARE
+    # BOTH UNREPRESENTABLE HERE, STRUCTURALLY AND NOT BY ASSERTION.
+    # This statement is reachable only below step 3's `continue`s: the
+    # daemon's command-less converge refuses by name when no instance is
+    # present (a resolver attaches, it cannot materialise), and the same
+    # request is what TOOK this project's lease with `holderId`. So a
+    # reader that gets here has an instance and is one of its holders,
+    # and a reader that is neither never reads -- `repro up` returns
+    # non-zero with the daemon's own refusal and the supervisor is never
+    # launched.
+    #
+    # AN EMPTY RECORD IS NOT A REFUSAL HERE. A consumer may resolve a
+    # service only to attach and contribute, with no token to
+    # concretize, and an instance with no `converge` point mints
+    # nothing. The refusal for a token that cannot be resolved belongs
+    # at the POINT OF USE, where `substituteMintedAttributes` already
+    # names the attribute, the resource and the ordering edge. Refusing
+    # here would break every consumer that reads nothing by design.
+    let instanceMinted =
+      try:
+        readServiceRegistrations(storeRoot, key)
+      except CatchableError as err:
+        refuse("reading what this instance has minted failed: " &
+          err.msg & " The registration record is where a consumer in " &
+          "another session reads an identifier this instance minted " &
+          "(Shared-Development-Services.md §4.4), so this is refused " &
+          "rather than read as `nothing minted`: reading it as empty " &
+          "would turn a corrupt record into an unresolvable token and " &
+          "report the wrong cause.")
+        inc refused
+        continue
+    for reg in instanceMinted.registrations:
+      # THE STAMP CROSSES WITH THE VALUE, verbatim from the durable row.
+      # §7.2's refusal has to stay reachable from the second session --
+      # "a cross-session reader that loses the stamp would be strictly
+      # worse than the refusal it replaces" -- so nothing here derives,
+      # defaults or upgrades a provenance. A row minted before the field
+      # existed arrives as `unstamped` and `@issuer-minted:` refuses it,
+      # which is the fail-closed direction.
+      crossSessionMinted.add((serviceName: resolution.serviceName,
+        member: reg.member, mintedId: reg.mintedId,
+        provenance: reg.provenance))
+    for attr in instanceMinted.attributes:
+      # §7.3's rows cross with their stamps for the same reason, and the
+      # fail-closed direction is the same: a row written by a build that
+      # predates the field arrives `unstamped`, and
+      # `@instance-attribute:` refuses it rather than pointing this
+      # project's service at a URL nothing claimed.
+      crossSessionAttributes.add((serviceName: resolution.serviceName,
+        name: attr.name, value: attr.value, registrar: attr.registrar,
+        provenance: attr.provenance))
+    # SAID OUT LOUD, including when it is zero. A read that silently
+    # found nothing is this campaign's own defect class, and the number
+    # is the one fact that distinguishes "the instance minted nothing"
+    # from "this session never read it".
+    # §7.3's count is APPENDED AFTER `from instance <address>`, not spliced
+    # between the minted count and it, and the position is load-bearing
+    # rather than stylistic: `t_f5_two_sessions_read_one_instances_minted_id`
+    # asserts the exact substring `read 1 minted attribute from instance`
+    # twice, and that control is L9 F5's -- it is what distinguishes "the
+    # cross-session reader ran and found the row" from "the session had the
+    # row all along". Splicing a second count into the middle of it reddened
+    # both assertions while the behaviour they test was intact, which is a
+    # false negative in exactly the control this round must not weaken. The
+    # new count is said out loud for its own reason (a read that silently
+    # found nothing is this campaign's defect class), so it is added where it
+    # costs no existing assertion its power.
+    stderr.writeLine("repro " & commandName & ": " & site & ": `" &
+      reference & ".shared()`: read " &
+      $instanceMinted.registrations.len & " minted attribute" &
+      (if instanceMinted.registrations.len == 1: "" else: "s") &
+      " from instance " & serviceInstanceAddress(key) & " and " &
+      $instanceMinted.attributes.len & " instance attribute" &
+      (if instanceMinted.attributes.len == 1: "" else: "s") &
+      " of that instance")
+  if crossSessionMinted.len > 0 or crossSessionAttributes.len > 0:
+    # MERGED, not written: `convergeSharedServiceInstances` has already
+    # written this session's OWN declarations' rows at this point in
+    # `runUpOrDevCommand`, and a project may both declare one shared
+    # service and resolve another. A plain write here would discard the
+    # rows it converged a moment ago.
+    mergeSharedInstanceMinted(parsed.selection.outDir, crossSessionMinted,
+      crossSessionAttributes)
+  if refused > 0: 1 else: 0
+
+proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
+                                    edge: DevEnvEdgeResult;
+                                    commandName: string): int =
+  ## Shared-Development-Services L7 (§4.5): converge every shared service
+  ## instance this project declares, BEFORE the supervisor is launched.
+  ##
+  ## Before, and not after, for a reason that is not ordering taste: a
+  ## session-owned service may depend on the shared instance being up,
+  ## and a refusal (§4.3's major mismatch, §4.5 rule 1) has to stop the
+  ## session rather than arrive after it published `session.up`.
+  ##
+  ## Returns 0 when every declaration converged, and 1 when any refused.
+  ## A non-zero return means NOTHING was started: the supervisor has not
+  ## been launched yet at this point in `runUpOrDevCommand`.
+  let artifact =
+    try:
+      readDevEnvArtifact(edge.artifactPath)
+    except CatchableError as err:
+      raise newException(IOError,
+        "could not read the dev-env artifact at " & edge.artifactPath &
+        " to find shared service instances: " & err.msg)
+  var declarations: seq[tuple[declaration: SharedServiceInstanceDeclaration;
+    service: DevEnvServiceSummary]] = @[]
+  for service in artifact.services:
+    let declaration = sharedServiceInstanceOf(service)
+    if declaration.declared:
+      declarations.add((declaration: declaration, service: service))
+  if declarations.len == 0:
+    # No shared services. The ledger is removed rather than left behind:
+    # a stale ledger from a previous `repro up` of a recipe that has since
+    # dropped its `instance` block would make the next `repro down`
+    # release a holder this session never took.
+    try:
+      removeFile(extendedPath(
+        parsed.selection.outDir.sharedInstanceLedgerPath))
+    except OSError, IOError:
+      discard
+    # Shared-Development-Services L8: and the MINTED record, for exactly
+    # the reason above one level over. A stale registration record from
+    # a previous `repro up` of a recipe that has since dropped its
+    # `converge` (or its whole `instance` block) would let the
+    # supervisor concretize a `@minted:` token the recipe no longer
+    # declares -- a value from a run nobody can see, which is worse than
+    # the refusal the author would otherwise get. The write at the foot
+    # of this proc already says "written unconditionally, including
+    # empty" for the same reason; this is the path that never reaches
+    # it.
+    try:
+      removeFile(extendedPath(
+        parsed.selection.outDir.sharedInstanceMintedPath))
+    except OSError, IOError:
+      discard
+    return 0
+  if parsed.replace and declarations.len == 0:
+    return 0
+  let projectRoot = parsed.selection.projectRoot
+  let holderId = serviceLeaseHolderId(projectRoot)
+  # The one artifact path this proc reads its lifted declarations from,
+  # named once so the §4.3 generation check below and
+  # `liftedServiceDeclaration` cannot be pointed at two different files.
+  let interfacePathForGeneration = edge.interfacePath
+  var ledger: seq[tuple[serviceName, keyJson, address: string]] = @[]
+  var minted: seq[tuple[serviceName, member, mintedId: string;
+                        provenance: RegistrarProvenance]] = @[]
+  # Shared-Development-Services §7.3: what each instance reported ABOUT
+  # ITSELF, accumulated beside what it minted and written to the same
+  # session document at the foot of this proc.
+  var attributes: seq[SharedInstanceAttributeRow] = @[]
+  var refused = 0
+  for item in declarations:
+    let lifted = liftedServiceDeclaration(edge.interfacePath,
+      item.declaration.serviceName)
+    let snapshot = lifted.snapshot
+    # Shared-Development-Services L8 -- ONE FACT, AND A REFUSAL IF THE
+    # TWO CHANNELS DISAGREE.
+    #
+    # The identity and the scope now reach `DevEnvServiceSummary`
+    # directly (L7's review assigned that plumbing to L8). The interface
+    # artifact still carries them too, because that is where the
+    # FINGERPRINT comes from and §4.3 decides attach-or-refuse on the
+    # fingerprint. So there are two readings of one fact, and the thing
+    # to do with two readings is not to pick one: it is to compare them
+    # and refuse a disagreement. A disagreement means the artifact and
+    # the interface were produced from different evaluations of the
+    # recipe, and continuing would attach this project to an instance
+    # key neither declaration names.
+    let summaryDeclared = summaryDeclaredIdentityAndScope(item.service)
+    if summaryDeclared.declared:
+      if summaryDeclared.identity != lifted.identity or
+         summaryDeclared.scope != lifted.scope:
+        stderr.writeLine("repro " & commandName & ": service `" &
+          item.declaration.serviceName & "`: the dev-env artifact and " &
+          "the interface artifact disagree about this service's " &
+          "declared identity/scope (artifact: " &
+          $summaryDeclared.identity.kind & " `" &
+          summaryDeclared.identity.stableId & "` / " &
+          $summaryDeclared.scope & "; interface: " &
+          $lifted.identity.kind & " `" & lifted.identity.stableId &
+          "` / " & $lifted.scope & "). They are produced from one " &
+          "`service` block, so a disagreement means the two artifacts " &
+          "came from different evaluations. Re-run `repro dev-env` to " &
+          "rebuild both; attaching on either reading would pick an " &
+          "instance key the recipe does not declare.")
+        inc refused
+        continue
+    let key = sharedServiceInstanceKey(item.declaration, projectRoot,
+      lifted.identity, lifted.scope)
+    if key.degradationReport().len > 0:
+      # Reported, never swallowed. L4's own note: a caller that reports
+      # nothing "turns a narrower-than-declared sharing boundary into a
+      # silent one".
+      stderr.writeLine("repro " & commandName & ": service `" &
+        item.declaration.serviceName & "`: " & key.degradationReport())
+
+    let launch = sharedServiceInstanceLaunch(projectRoot, item.service)
+    let response = requestUserDaemonServiceConverge(
+      DaemonServiceConvergeRequest(
+        scope: dlsUser,
+        keyJson: encodeServiceInstanceKey(key),
+        snapshotJson: encodeServiceInterfaceSnapshot(snapshot),
+        holderId: holderId,
+        ttlSeconds: item.declaration.leaseTtlSeconds,
+        command: launch.command,
+        workingDir: launch.workingDir,
+        replace: parsed.replace,
+        force: parsed.force,
+        # §4.3's SAME-GENERATION PRECONDITION, on the OWNER's own
+        # converge too.
+        #
+        # It is tempting to claim `sagFresh` by construction here --
+        # this artifact is `edge.interfacePath`, which the dev-env edge
+        # this very command just ran produced. It is not claimed, and
+        # the reason is measured: `repro_dev_env_engine`'s own
+        # `useCachedInterface` gate is keyed by `devEnvCacheKey`, whose
+        # `projectFile=` part fingerprints the recipe FILE and not its
+        # import closure, so an edit to a module the recipe imports does
+        # not move that key and the edge can hand back an interface
+        # older than the definition. An owner that attaches to its own
+        # instance on a stale artifact is the same defect as a consumer
+        # doing so -- so the owner establishes it the same way, from the
+        # same stamp, rather than asserting it.
+        generationJson: encodeServiceArtifactGenerationCheck(
+          ownerArtifactGeneration(interfacePathForGeneration,
+            projectRoot, snapshot.packageName, snapshot.projectName))))
+    let outcome =
+      try:
+        parseConvergeOutcome(response.outcome)
+      except CatchableError as err:
+        raise newException(ValueError,
+          "the daemon answered `repro " & commandName &
+          "` with an outcome this build does not know: " & err.msg)
+    if not response.ok or convergeRefused(outcome):
+      stderr.writeLine("repro " & commandName & ": service `" &
+        item.declaration.serviceName & "`: " & response.diagnostic)
+      refused.inc
+      continue
+    if response.diagnostic.len > 0:
+      # §4.3 row 2's warning, and §4.5 rule 2's forced-override notice.
+      stderr.writeLine("repro " & commandName & ": service `" &
+        item.declaration.serviceName & "`: " & response.diagnostic)
+    stderr.writeLine("repro " & commandName & ": service `" &
+      item.declaration.serviceName & "` " & outcomeWord(outcome) &
+      " at " & response.address & " pid " & $response.pid &
+      " with " & $response.holders.len & " holder" &
+      (if response.holders.len == 1: "" else: "s"))
+    ledger.add((serviceName: item.declaration.serviceName,
+      keyJson: encodeServiceInstanceKey(key), address: response.address))
+    # Shared-Development-Services L8 -- RECONCILE THE REGISTRATIONS, now
+    # that the instance is LIVE.
+    #
+    # §7's ordering requirement, and it is the whole of what §7 says is
+    # left to build: "The registration resource's provider needs the
+    # issuer *running* before it can reconcile, so the resource depends
+    # on the service's readiness, and consuming edges depend on the
+    # resource." This is that point in the program: the daemon has
+    # answered that the instance is materialised or attached, and the
+    # supervisor has NOT been launched yet, so every consuming edge is
+    # downstream of here.
+    #
+    # D-SS10 IS NOT RESOLVED BY THIS, and the difference is worth
+    # stating. The decision asks whether the ordering edge is "an
+    # ordinary `dependsOn` onto the service node, a leased
+    # `stateGroup`, or a distinct readiness edge". This is none of the
+    # three: it is a sequential step in the CLI, ordered by program
+    # order rather than by a graph edge. It satisfies the REQUIREMENT
+    # (nothing reads an attribute before it is computed) without taking
+    # the decision.
+    #
+    # THE MINTER IS A PLACEHOLDER AND IT SAYS SO. There is no OIDC
+    # client in this repository: the real minter registers an
+    # application against a running Zitadel, which L9 owns. What runs
+    # here derives a deterministic identifier from the instance address
+    # and the member -- which is enough to prove the lane (mint once,
+    # persist, reuse byte-identically, reach argv) and is NOT enough to
+    # be an OIDC client id. A consumer handed one of these will fail at
+    # the issuer, loudly, which is the right failure for a placeholder.
+    # Shared-Development-Services D-SS11 (§4.6) -- APPLY THE
+    # CROSS-PROCESS CONTRIBUTIONS.
+    #
+    # §4.6: the consumer's contributions are "applied by the owner's
+    # instance when it converges". This is that point: the instance is
+    # live, and the members this instance must register are the owner's
+    # own fold PLUS every row a consumer's `repro up` deposited in the
+    # instance's identity-keyed contribution store.
+    #
+    # THE OWNER MUST READ THEM, and that is not an enhancement.
+    # `reconcileServiceRegistrations` removes a member no longer
+    # contributed -- §5's withdrawal property -- so an owner that passed
+    # only its own members would WITHDRAW every consumer's registration
+    # on its next `repro up`. A live OIDC client would be deleted
+    # because the project that asked for it was not the one converging.
+    #
+    # THE GATE IS `registrationPoints`, NOT `registrationMembers`, and
+    # this is a deliberate change from L8's gate. A service that
+    # declares `converge` points and currently folds no members of its
+    # own can still have a consumer's members to register, and -- the
+    # other direction -- a consumer that withdrew its last contribution
+    # must cause a withdrawal rather than leave last week's registration
+    # in place with nothing asking for it. The old gate made both of
+    # those no-ops.
+    var unionMembers = item.service.registrationMembers
+    var unionContributors = item.service.registrationContributors
+    let declaredPoints = contributionPointsOf(snapshot)
+    if item.service.registrationPoints.len > 0:
+      let contributionStoreRoot = serviceInstanceStoreRoot(dlsUser)
+      let stored =
+        try:
+          readServiceContributions(contributionStoreRoot, key)
+        except CatchableError as err:
+          stderr.writeLine("repro " & commandName & ": service `" &
+            item.declaration.serviceName &
+            "`: reading the cross-process contributions of this " &
+            "instance failed: " & err.msg)
+          refused.inc
+          continue
+      if stored.contributions.len > 0:
+        let folded =
+          try:
+            foldCrossProcessContributions(declaredPoints,
+              stored.contributions, serviceInstanceAddress(key))
+          except CatchableError as err:
+            stderr.writeLine("repro " & commandName & ": service `" &
+              item.declaration.serviceName & "`: " & err.msg)
+            refused.inc
+            continue
+        for i in 0 ..< folded.members.len:
+          unionMembers.add(folded.members[i])
+          unionContributors.add(folded.contributors[i])
+        stderr.writeLine("repro " & commandName & ": service `" &
+          item.declaration.serviceName & "`: applying " &
+          $folded.members.len & " contributed member" &
+          (if folded.members.len == 1: "" else: "s") & " from " &
+          $stored.contributions.len & " cross-process contribution" &
+          (if stored.contributions.len == 1: "" else: "s"))
+    if item.service.registrationPoints.len > 0:
+      let storeRoot = serviceInstanceStoreRoot(dlsUser)
+      # Shared-Development-Services D-SS10 (§7.1) -- THE EDGE, AND WHAT
+      # CHANGED HERE.
+      #
+      # The registration no longer runs because this statement is below
+      # the converge. It runs because `reconcileResources` reaches it
+      # after the SERVICE NODE it `dependsOn`, and that node's provider
+      # completes on the service's DECLARED READINESS. The comment this
+      # replaces said the ordering was "a sequential step in the CLI,
+      # ordered by program order rather than by a graph edge ... It
+      # satisfies the REQUIREMENT ... without taking the decision." The
+      # decision is now taken, and the ordering is `topoOrder`'s.
+      #
+      # IT ALSO FIXES WHAT THAT ORDERING MEANT. The daemon answers
+      # converged when the instance is MATERIALISED or attached -- for a
+      # child it has just spawned, and (L9's review measured this) even
+      # for one that has already died. A registration ordered on that
+      # answer reconciles against the listening-but-unseeded instance
+      # §7.1 refuses. The service node waits for the probe instead.
+      var reconciled: tuple[set: ServiceRegistrationSet;
+        outcomes: seq[tuple[member: string;
+                            outcome: ServiceRegistrationOutcome]]]
+      var registrarRan = false
+      setServiceReadinessProber(
+        proc (url: string): bool {.closure.} =
+          readinessProbeSatisfied(url))
+      setReadinessEdgeEventSink(
+        proc (kind, service, detail: string) {.closure.} =
+          appendSessionEvent(parsed.selection.outDir, kind, service, detail))
+      # Shared-Development-Services §7.2 -- WHICH REGISTRAR, AND WHY THE
+      # DEVELOPMENT ONE IS STILL THE DEFAULT.
+      #
+      # "The development registrar stays the default for `repro up` in a
+      # workspace with no issuer, because requiring one to bring a stack
+      # up would make the offline path impossible. It is the SILENCE
+      # that is wrong, not the fallback." So the fallback is kept and
+      # the silence is removed: whichever registrar is installed
+      # announces itself into the session's `events.jsonl` (the
+      # `registrar.installed` event, published by
+      # `announceInstalledRegistrar`), and everything it produces is
+      # STAMPED with its provenance all the way to the supervisor
+      # child's argv.
+      #
+      # Reprobuild ships no product registrar (§7.2 settles that), so
+      # the issuer's one arrives as a declared program --
+      # `REPRO_SERVICE_REGISTRAR`, see `service_registrar.nim` for why
+      # that spelling and what the protocol is.
+      let registrarProgram = resolveExternalServiceRegistrarProgram()
+      let registrarIdentity =
+        if registrarProgram.len > 0:
+          externalServiceRegistrarIdentity(registrarProgram)
+        else:
+          developmentRegistrarIdentity
+      stderr.writeLine("repro " & commandName & ": service `" &
+        item.declaration.serviceName & "`: registrar " &
+        registrarIdentity.name & " (provenance " &
+        $registrarIdentity.provenance & ")")
+      # What the declared program answered, captured so the reconcile's
+      # REUSED rows can be checked against it below.
+      var issuerAnswers = initTable[string, string]()
+      # §7.3: what the SAME answer said about the instance itself, and
+      # what the store recorded for it. Captured from the one run of the
+      # registrar -- `runExternalServiceRegistrarAnswer` returns both
+      # halves of one document, so there is no second run, no second
+      # parse, and no way for the two halves to come from different
+      # answers.
+      var answeredAttributes: seq[tuple[name, value: string]] = @[]
+      var recordedAttributes: seq[ServiceInstanceAttribute] = @[]
+      # The service's name as a plain local. `item` is a `lent` loop
+      # variable, so a closure that reached into it would not compile
+      # ("cannot be captured as it would violate memory safety") -- and
+      # the refusal below needs the name.
+      let convergingServiceName = item.declaration.serviceName
+      setServiceRegistrar(
+        proc (attrs: ServiceRegistrationAttrs):
+            seq[tuple[member, mintedId: string]] {.closure.} =
+          if registrarProgram.len > 0:
+            # Run ONCE for the whole folded member set, before the
+            # reconcile, rather than per missing member. The issuer is
+            # the authority on what a member's client id is, so a run
+            # that asked only about the members this workspace happens
+            # not to have recorded could not notice that a recorded one
+            # has since changed at the issuer.
+            let answer = runExternalServiceRegistrarAnswer(
+              registrarProgram,
+              parsed.selection.outDir.sessionDir / "registrar", attrs)
+            for row in answer.registrations:
+              issuerAnswers[row.member] = row.mintedId
+            answeredAttributes = answer.instanceAttributes
+          # ── §7.3 — RECORD THE INSTANCE'S OWN ATTRIBUTES ─────────────
+          #
+          # UNCONDITIONALLY, INCLUDING ON THE OFFLINE PATH, and that is
+          # the whole anti-staleness mechanism rather than an
+          # afterthought. The call REPLACES the stored set with what the
+          # registrar installed RIGHT NOW answered, so:
+          #
+          #   * the development registrar answers nothing and the
+          #     previous run's issuer URL is REMOVED. Skipping the call
+          #     when no program is declared would leave last run's URL
+          #     on the record and serve it to a consumer as if it were
+          #     this instance's -- the `dev-server.sh` descriptor defect
+          #     L9's review measured, reconstructed inside the fix for
+          #     the minted half;
+          #   * a program that answers a DIFFERENT URL replaces the old
+          #     one, because an issuer URL legitimately moves when the
+          #     instance rebinds. That is the opposite of the minted
+          #     id's mint-once reuse, and the asymmetry is in the
+          #     values, not in the lane.
+          #
+          # AND IT RUNS *BEFORE* THE REGISTRATIONS RECONCILE, which is
+          # the only ordering that closes a stale read. The registration
+          # reconcile can REFUSE -- an empty minted id, or the issuer
+          # having changed a client id this workspace already recorded
+          # (the refusal raised a few lines below) -- and a refusal
+          # after this call would leave the PREVIOUS run's issuer URL on
+          # the durable record for a consumer in another session to
+          # read. Running first means the attribute written is always
+          # the one the registrar just reported about the instance that
+          # is actually up, whatever the registrations then do; and that
+          # is sound rather than optimistic, because the instance IS
+          # running at that address -- it is the REGISTRATIONS that are
+          # in doubt, not the address.
+          #
+          # THIS IS PROGRAM ORDER, NOT AN ASSERTED PROPERTY. No test
+          # covers the ordering: provoking it needs a converge whose
+          # registrar answers successfully and whose registration
+          # reconcile then refuses, with the instance's address having
+          # moved in between. `t_dss72_the_registrar_reaches_a_services
+          # _argv`'s case C constructs the refusal and
+          # `t_dss73_the_issuer_url_reaches_a_consuming_services_argv`'s
+          # case C constructs the move; a case composing the two, and
+          # reading the durable record rather than the session file,
+          # would redden if these two statements were swapped back.
+          recordedAttributes = reconcileServiceInstanceAttributes(
+            storeRoot, key, answeredAttributes,
+            registrar = registrarIdentity.name,
+            provenance = registrarIdentity.provenance).attributes
+          reconciled = reconcileServiceRegistrations(storeRoot, key,
+            attrs.members, attrs.contributors,
+            proc (member, contributor: string): string {.closure.} =
+              if registrarProgram.len > 0:
+                # `""` is impossible here: `decodeServiceRegistrarAnswer`
+                # refuses an answer that omits a requested member, and
+                # `reconcileServiceRegistrations` refuses an empty
+                # minted id anyway. Spelled as a lookup with no default
+                # so a future change cannot turn it into one.
+                issuerAnswers[member]
+              else:
+                digestHex(blake3DomainDigest(
+                  ("repro-dev-registration.v1\x00" & response.address &
+                   "\x00" & member).bytesOf(),
+                  hdMetadataEnvelope))[0 ..< 24],
+            registrar = registrarIdentity.name,
+            # §7.2's stamp, now RECORDED IN THE DURABLE ROW and not only
+            # in this session's file. L9 F5: a consumer in another
+            # project's session reads this record, and that process has
+            # no registrar installed -- it attaches, it does not mint --
+            # so a stamp that lived only in `computedAttributes` would
+            # not survive the crossing. Taken from the SAME
+            # `registrarIdentity` that `setServiceRegistrar` installed,
+            # so the durable stamp and the in-process one cannot
+            # disagree about a value minted in this run.
+            provenance = registrarIdentity.provenance)
+          registrarRan = true
+          result = @[]
+          for reg in reconciled.set.registrations:
+            if issuerAnswers.hasKey(reg.member) and
+               issuerAnswers[reg.member] != reg.mintedId:
+              # The store and the issuer disagree about a member this
+              # workspace already had. REFUSED rather than resolved
+              # either way: preferring the store would hand a consumer a
+              # client id the issuer has replaced, and silently
+              # preferring the issuer would rewrite a record L8 makes
+              # byte-stable on purpose.
+              raise newException(ValueError,
+                "member `" & reg.member & "` of service `" &
+                convergingServiceName & "` is recorded as `" &
+                reg.mintedId & "` by registrar `" &
+                registrarIdentity.name & "`, but that registrar now " &
+                "answers `" & issuerAnswers[reg.member] & "`. The " &
+                "issuer's registration changed after this workspace " &
+                "recorded it. Refused rather than guessed: clear this " &
+                "instance's registration record (`repro down` for this " &
+                "activity, then remove the `registrations` state " &
+                "record under " & storeRoot & ") and converge again, " &
+                "which re-registers every member against the issuer " &
+                "as it is now.")
+            result.add((member: reg.member, mintedId: reg.mintedId)),
+        registrarIdentity)
+      try:
+        let plan = planRegistrationEdge(item.declaration.serviceName,
+          response.address,
+          ServiceReadinessProbe(kind: launch.readinessKind,
+            path: launch.readinessPath, url: launch.readinessUrl,
+            timeoutMs: launch.readinessTimeoutMs),
+          unionMembers, unionContributors)
+        discard reconcileResources(plan)
+      except CatchableError as err:
+        stderr.writeLine("repro " & commandName & ": service `" &
+          item.declaration.serviceName &
+          "`: registering its contributed members failed: " & err.msg)
+        refused.inc
+        continue
+      if not registrarRan:
+        # The registrar is the ONLY thing that computes an attribute, so
+        # a reconcile that returned without calling it is a silent drop
+        # wearing the shape of a success. Refused rather than reported as
+        # "0 minted": a run that registers nothing and says so cheerfully
+        # is how a consumer ends up with an uncomputed `clientId` and a
+        # failure at the issuer.
+        stderr.writeLine("repro " & commandName & ": service `" &
+          item.declaration.serviceName & "`: the registration resource " &
+          "reconciled WITHOUT running its registrar, so nothing was " &
+          "registered and no attribute was computed. That is a defect " &
+          "in the D-SS10 readiness edge, not in this recipe; report it.")
+        refused.inc
+        continue
+      for reg in reconciled.set.registrations:
+        # THE STAMP IS READ BACK FROM WHERE THE PROVIDER RECORDED IT,
+        # not re-derived from `registrarIdentity` here. Two independent
+        # derivations of one fact are two things that can disagree, and
+        # the one that matters is the provider's: it is what
+        # `registrationApply` actually attached to the value. Reading it
+        # also means an attribute the provider did not record REFUSES
+        # here, by name, instead of being written to the session file
+        # with a confident provenance.
+        let stamp = computedResourceAttributeStamp(
+          computedClientIdAddress(response.address, reg.member),
+          ClientIdAttributeName, response.address)
+        minted.add((serviceName: item.declaration.serviceName,
+          member: reg.member, mintedId: stamp.value,
+          provenance: stamp.provenance))
+      for attr in recordedAttributes:
+        # READ BACK FROM WHAT THE STORE RECORDED, not from the
+        # registrar's answer, for the reason the minted stamp is read
+        # back from `computedResourceAttributeStamp`: the durable row is
+        # what a consumer in ANOTHER session will read, so this
+        # session's argv has to be concretized from the same bytes. Two
+        # independent derivations of one fact are two things that can
+        # disagree, and here they would disagree silently -- one
+        # session's service pointed at one issuer and another's at
+        # another.
+        attributes.add((serviceName: item.declaration.serviceName,
+          name: attr.name, value: attr.value, registrar: attr.registrar,
+          provenance: attr.provenance))
+      var mintedCount = 0
+      var reusedCount = 0
+      var withdrawnCount = 0
+      for outcome in reconciled.outcomes:
+        case outcome.outcome
+        of sroMinted: inc mintedCount
+        of sroReused: inc reusedCount
+        of sroWithdrawn: inc withdrawnCount
+      stderr.writeLine("repro " & commandName & ": service `" &
+        item.declaration.serviceName & "`: " & $mintedCount &
+        " registration" & (if mintedCount == 1: "" else: "s") &
+        " minted, " & $reusedCount & " reused, " & $withdrawnCount &
+        " withdrawn")
+      # §7.3, SAID OUT LOUD INCLUDING WHEN IT IS ZERO, for the reason
+      # the cross-session read's count is: a reader that silently found
+      # nothing is this campaign's own defect class, and the number is
+      # the one fact that distinguishes "this registrar reported no
+      # attributes" from "nobody looked". Zero is the normal, correct
+      # answer on the offline path, and it is the answer a developer
+      # debugging a refused `@instance-attribute:` token needs to see.
+      stderr.writeLine("repro " & commandName & ": service `" &
+        item.declaration.serviceName & "`: " &
+        $recordedAttributes.len & " instance attribute" &
+        (if recordedAttributes.len == 1: "" else: "s") & " recorded" &
+        (if recordedAttributes.len == 0: "" else: ": " &
+           recordedAttributes.mapIt(it.name).join(", ")))
+  # D-SS10: drop the readiness edge's installed collaborators.
+  #
+  # `setServiceReadinessProber` / `setServiceRegistrar` /
+  # `setReadinessEdgeEventSink` are module globals (the driver callbacks
+  # are `{.nimcall.}` and have no closure environment), and the registrar
+  # installed above CAPTURES this loop's `key`, `response` and
+  # `storeRoot`. Leaving it installed would mean that any later
+  # `reconcileResources` in this process -- `reconcileConsumedStateGroups`
+  # is one -- could reach a registrar bound to a declaration it has
+  # nothing to do with. No such resource exists today, so this is a
+  # hazard rather than a defect; it is cleared because the alternative is
+  # to rely on nobody adding one.
+  clearReadinessEdgeCollaborators()
+  # The ledger records what was CONVERGED, including on a run where
+  # another declaration refused: this project really does hold those
+  # instances, and a `repro down` that did not release them would leave
+  # them held forever.
+  writeSharedInstanceLedger(parsed.selection.outDir, holderId, ledger)
+  # And what was MINTED, for the supervisor child to concretize argv
+  # from. Written unconditionally, including empty: a stale file from a
+  # previous run would otherwise resolve a token the recipe no longer
+  # declares.
+  writeSharedInstanceMinted(parsed.selection.outDir, minted, attributes)
+  if refused > 0: 1 else: 0
+
+proc releaseSharedServiceInstances(outDir: string): int =
+  ## L7 (§4.5): drop this project's holder on every instance the ledger
+  ## records. Returns 0 when every release was decided, 1 when any
+  ## refused or failed.
+  # L9 F5 -- THE MINTED RECORD GOES FIRST, AND BEFORE THE EARLY RETURN.
+  #
+  # A NEAR-MISS FOUND BY PROBING THE CROSS-SESSION READER, in the same class
+  # as the one L9's review found in `infra`'s `dev-server.sh` (`cleanup()`
+  # removed the readiness marker and not the descriptor, so a product read a
+  # dead issuer's client ids after `repro down`). This file is the same shape:
+  # it names identifiers of an instance this session has just stopped holding,
+  # and nothing removed it.
+  #
+  # A HAZARD RATHER THAN A LIVE DEFECT, stated precisely because the
+  # difference matters: every `repro up` rewrites it before the supervisor
+  # starts -- a project with declarations writes it at the foot of
+  # `convergeSharedServiceInstances`, and a PURE CONSUMER has it REMOVED by
+  # that proc's `declarations.len == 0` arm and then re-merged by the
+  # resolver -- so no run reads a stale table. What the removal closes is the
+  # window between a `down` and the next `up`, in which the file on disk
+  # names an instance that may already be gone. The descriptor case says what
+  # that window costs when someone reads it.
+  #
+  # BEFORE the `ledger.entries.len == 0` early return, and that placement is
+  # the whole point: a PURE CONSUMER -- the F5 case, a project that resolves
+  # another's service and declares none of its own -- takes no holder and so
+  # has NO LEDGER. A removal placed after that return would be dead code for
+  # exactly the sessions this reader was built for.
+  try:
+    removeFile(extendedPath(outDir.sharedInstanceMintedPath))
+  except OSError, IOError:
+    discard
+  let ledger =
+    try:
+      readSharedInstanceLedger(outDir)
+    except CatchableError as err:
+      stderr.writeLine("repro down: " & err.msg)
+      return 1
+  if ledger.entries.len == 0:
+    return 0
+  var failed = 0
+  var released = 0
+  for entry in ledger.entries:
+    let response = requestUserDaemonServiceRelease(
+      DaemonServiceReleaseRequest(
+        scope: dlsUser, keyJson: entry.keyJson,
+        holderId: ledger.holderId))
+    if not response.ok:
+      stderr.writeLine("repro down: service `" & entry.serviceName &
+        "`: " & response.diagnostic)
+      failed.inc
+      continue
+    if response.diagnostic.len > 0:
+      stderr.writeLine("repro down: service `" & entry.serviceName &
+        "`: " & response.diagnostic)
+    let outcome =
+      try:
+        parseReleaseOutcome(response.outcome)
+      except CatchableError as err:
+        stderr.writeLine("repro down: " & err.msg)
+        failed.inc
+        continue
+    if outcome == srlRefuseUnknownHolders:
+      failed.inc
+      continue
+    stderr.writeLine("repro down: service `" & entry.serviceName & "` " &
+      outcomeWord(outcome) & " at " & response.address & "; " &
+      $response.remainingHolders.len & " holder" &
+      (if response.remainingHolders.len == 1: "" else: "s") & " remain" &
+      (if response.remainingHolders.len == 1: "s" else: ""))
+    released.inc
+  if failed > 0:
+    # The ledger is KEPT when anything refused, so a later `repro down`
+    # can retry the releases that did not happen. Deleting it would make
+    # this project a permanent holder of whatever was left.
+    return 1
+  try:
+    removeFile(extendedPath(outDir.sharedInstanceLedgerPath))
+  except OSError, IOError:
+    discard
+  0
+
 proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
                        mode: DevSessionMode): int =
   let commandName = if mode == dsmDev: "dev" else: "up"
-  var parsed = parseDevSessionArgs(args, commandName)
+  var parsed = parseDevSessionArgs(args, commandName,
+    acceptReadyTimeout = true, acceptReplace = true)
+  if parsed.force and not parsed.replace:
+    # REFUSED, not ignored, and this closes a silent drop that was
+    # present at the base commit: `parseDevSessionArgs` set
+    # `result.force` for every command and only `runDownCommand` ever
+    # read it, so `repro up --force` and `repro dev --force` parsed
+    # cleanly and did nothing at all. §4.3 gives `--force` exactly one
+    # meaning on `up` -- "proceeds under `--force`" over other holders of
+    # a shared instance -- and that meaning needs `--replace` to be
+    # about anything.
+    raise newException(ValueError,
+      "--force has no effect on `repro " & commandName &
+        "` without --replace: its only meaning here is to override the " &
+        "live holders of a shared service instance that `--replace` is " &
+        "taking over (Shared-Development-Services.md §4.3). Pass both, " &
+        "or neither.")
+  if parsed.foreground and parsed.readyTimeoutMs > 0:
+    # Refused rather than ignored. ``--foreground`` runs the supervisor in
+    # this process, so there is no parent wait for ``--ready-timeout`` to
+    # bound -- the flag would parse and do nothing, and the user would
+    # reasonably believe it had taken effect.
+    raise newException(ValueError,
+      "--ready-timeout has no effect with --foreground: a foreground " &
+        "session IS the supervisor, so there is no wait to bound. Drop one " &
+        "of the two flags.")
   let edge = computePublicDevEnv(parsed.selection, publicCliPath,
     announce = true)
+  # Shared-Development-Services L7 (§4.5): converge the shared service
+  # instances this project declares before anything in this session is
+  # started. A refusal returns here, with nothing launched.
+  let converged = convergeSharedServiceInstances(parsed, edge, commandName)
+  if converged != 0:
+    return converged
+  # Shared-Development-Services D-SS11 (§4.6): and run every resolver
+  # this project's recipe wrote, AFTER its own declarations converged and
+  # before anything is started.
+  #
+  # AFTER, for a reason that is not ordering taste: a project may both
+  # declare a shared service and resolve another one, and its own
+  # declaration's instance has to exist before a sibling consumer
+  # attaches to it in the same workspace. Before the supervisor, because
+  # a refused resolution must stop the session rather than arrive after
+  # `session.up`.
+  let resolved = resolveSharedServiceReferences(parsed, edge, commandName)
+  if resolved != 0:
+    return resolved
   let config = supervisorConfig(parsed, edge, publicCliPath, mode)
   if parsed.foreground:
     # W2 — the SAME resolver the detached arm re-creates in
@@ -15914,15 +17594,37 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
     # a required parameter precisely so these two arms cannot drift again.
     return runDevSessionSupervisor(config,
       devEnvProducerOpsResolver(parsed.selection.projectRoot))
+  let budget = config.readyBudget(parsed.readyTimeoutMs)
+  # The previous session's published control-API bind is removed BEFORE the
+  # supervisor is launched, so that neither this process's wait nor the
+  # supervisor's own can read a port that closed when the last session
+  # ended. Doing it here rather than only in the supervisor is what closes
+  # the window: the supervisor is a detached child, so between the launch
+  # below and its own removal the file is still on disk and this process is
+  # already polling. See ``discardStaleControlApiBind``.
+  config.discardStaleControlApiBind()
   config.startBackgroundSupervisor()
-  let status = waitForDevSessionReady(config)
+  # Announced BEFORE the wait, and on stderr beside the dev-env
+  # announcement, for two reasons: a `repro up` that sits for minutes should
+  # say what it is waiting for and for how long, and the number it is about
+  # to hold itself to should be visible on the SUCCESS path too -- not only
+  # in the diagnostic nobody sees when things work.
+  stderr.writeLine("repro " & commandName & ": waiting up to " &
+    budget.describe() & " for the session to report `session.up`")
+  let status =
+    try:
+      waitForDevSessionReady(config, budget)
+    except DevSessionStillStartingError as err:
+      stderr.writeLine("repro " & commandName & ": " & err.msg)
+      return DevSessionStillStartingExitCode
   echo "repro " & commandName & ": session " &
     status["sessionId"].getStr() & " " & status["status"].getStr() &
     " " & status["httpBind"].getStr()
   0
 
 proc runDownCommand(args: openArray[string]): int =
-  let parsed = parseDevSessionArgs(args, "down")
+  let parsed = parseDevSessionArgs(args, "down", acceptReadyTimeout = false,
+    acceptStopTimeout = true)
   let metadataPath = parsed.selection.outDir.sessionMetadataPath()
   if not fileExists(extendedPath(metadataPath)):
     raise newException(IOError,
@@ -15952,18 +17654,82 @@ proc runDownCommand(args: openArray[string]): int =
       StopRequestFile), "{\"source\":\"force-file\"}\n")
     stderr.writeLine("repro down: HTTP stop failed; wrote stop request file: " &
       err.msg)
+  # The wait is DERIVED, from the same number the supervisor's own stop
+  # honours, rather than the hardcoded `10000` this used to be. That
+  # constant was the start side's defect one command over: a session with
+  # four services is allowed four sequential stop graces by
+  # `stopServices`, which is 12_000 ms of supervisor work this process used
+  # to abandon at 10_000 and report as a timeout. See
+  # `derivedStopTimeoutMs` for why the derivation is NOT the start side's
+  # and why `--stop-timeout` exists anyway.
+  let budget = stopBudget(metadata, parsed.stopTimeoutMs)
+  # Announced before the wait, on stderr, for the reason `repro up`
+  # announces its own: a command that may sit for half a minute should say
+  # what it is waiting for and for how long, and the number should be
+  # visible on the path where nothing goes wrong too.
+  stderr.writeLine("repro down: waiting up to " & budget.describe() &
+    " for the session to report `down`")
+  let started = epochTime()
+  # `lastStatus` exists to BOUND WHAT THE DIAGNOSTIC MAY ASSERT, exactly as
+  # its namesake does in `waitForDevSessionReady`: empty means no status was
+  # ever read, and the message must not describe a session state in that
+  # case. It is not a second source of truth for the loop's decision --
+  # that still turns on what the current read says.
+  var lastStatus = ""
   var waited = 0
-  while waited <= 10000:
+  while waited <= budget.timeoutMs:
     if fileExists(extendedPath(metadataPath)):
       let current = readJsonFileResilient(metadataPath)
-      if current{"status"}.getStr() == "down":
+      let reported = current{"status"}.getStr("")
+      if reported.len > 0:
+        lastStatus = reported
+      if lastStatus == "down":
         echo "repro down: session " & current{"sessionId"}.getStr() &
           " down"
-        return 0
+        # Shared-Development-Services L7 (§4.5): drop this project's
+        # holder on every shared instance, AFTER the session is down.
+        # After, because a session-owned service may still have been
+        # talking to the instance a moment ago, and §4.5's point is that
+        # this release stops nothing unless it was the last reference.
+        return releaseSharedServiceInstances(parsed.selection.outDir)
     sleep(100)
     waited.inc(100)
+  # WHAT THIS MESSAGE MAY ASSERT IS BOUNDED BY WHAT THE LOOP OBSERVED, the
+  # same discipline `waitForDevSessionReady`'s expiry diagnostic keeps. The
+  # text this replaces -- "timed out waiting for dev session to stop:
+  # <path>" -- named the file and nothing else: not the status the file was
+  # actually reporting, not how long the wait had been, not where that
+  # length came from, and not the one artifact that can say why the
+  # supervisor had not finished. A reader could not tell a session still
+  # working through its services from one that never heard the stop
+  # request.
+  let waitedMs = int((epochTime() - started) * 1000.0)
+  let headline =
+    if lastStatus.len > 0:
+      "it still reports `" & lastStatus & "`, not `down`, after this " &
+        "command waited " & $waitedMs & " ms"
+    else:
+      "no status was ever read from " & metadataPath & " after this " &
+        "command waited " & $waitedMs & " ms"
+  let evidence =
+    if lastStatus == "stopping":
+      "  the supervisor HAD begun stopping, so this is a wait that " &
+        "expired rather than a stop that was not heard"
+    elif lastStatus.len > 0:
+      "  the supervisor had not begun stopping: it never published " &
+        "`stopping`, so either it has not yet read the stop request or it " &
+        "is not running to read it"
+    else:
+      "  that file was absent or unreadable for the whole wait"
   raise newException(IOError,
-    "timed out waiting for dev session to stop: " & metadataPath)
+    "dev session " & metadata{"sessionId"}.getStr("(unnamed)") &
+      " did not stop: " & headline & "\n" &
+      "  that wait was " & budget.describe() & "\n" &
+      evidence & "\n" &
+      "  per-service state: " & (parsed.selection.outDir.sessionDir /
+        "events.jsonl") & "\n" &
+      "  supervisor output: " & (parsed.selection.outDir.sessionDir /
+        "supervisor.log"))
 
 proc runDevSessionSupervisorHelper(args: openArray[string];
                                    publicCliPath: string): int =
@@ -19057,15 +20823,15 @@ proc detectWorkspaceProjectName(workspaceRoot: string): string =
   ## ``[workspace].project``; when neither workspace.toml nor that field
   ## is present we look for exactly one ``projects/*.toml`` under
   ## ``projects/`` and use its stem.
+  ## A state file that exists but does not parse raises the strict reader's
+  ## diagnostic: guessing a project from ``projects/`` instead would resolve
+  ## a workspace other than the one the file records.
   let workspaceToml = workspaceTomlPath(workspaceRoot)
   if fileExists(workspaceToml):
-    try:
-      let recorded =
-        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-      if recorded.len > 0:
-        return recorded
-    except WorkspaceManifestParseError:
-      discard
+    let recorded =
+      readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+    if recorded.len > 0:
+      return recorded
   let projectsDir = manifestsRoot(workspaceRoot) / "projects"
   if dirExists(projectsDir):
     var single = ""
@@ -19078,7 +20844,7 @@ proc detectWorkspaceProjectName(workspaceRoot: string): string =
       return extractFilename(single).changeFileExt("")
   ""
 
-proc enumerateParticipatingRepos(workspaceRoot: string):
+proc enumerateParticipatingReposStrict(workspaceRoot: string):
     tuple[mode: string; projectName: string;
           repos: seq[HookRepoTarget]] =
   ## Returns ``(mode, projectName, repos)``. ``mode`` is
@@ -19186,6 +20952,24 @@ proc enumerateParticipatingRepos(workspaceRoot: string):
   result.projectName = ""
   # The single-repo path leaves ``repos`` empty; the caller falls back to
   # ``gitHooksDir(targetPath)`` exactly like the pre-M17 implementation.
+
+
+proc enumerateParticipatingRepos(workspaceRoot: string):
+    tuple[mode: string; projectName: string;
+          repos: seq[HookRepoTarget]] =
+  ## ``enumerateParticipatingReposStrict``. A manifest file that does not
+  ## parse (a ``repos/*.toml`` fragment, a project manifest) raises its
+  ## diagnostic — except inside ``toleratingMalformedWorkspaceFiles``
+  ## (``repro health``), where it is set aside for health's ``manifest`` row
+  ## and no repo is enumerated, so the rows that sweep the repo set (hooks,
+  ## push gateway) report on nothing instead of aborting the whole report.
+  try:
+    result = enumerateParticipatingReposStrict(workspaceRoot)
+  except WorkspaceManifestParseError as err:
+    if not setAsideMalformedWorkspaceFile(err, mwkManifest):
+      raise
+    result = (mode: "workspace", projectName: "",
+      repos: newSeq[HookRepoTarget]())
 
 proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
   ## M17 workspace-aware ``ensure`` driver. Walks every participating
@@ -23697,18 +25481,26 @@ proc catalogLockedDep*(catalogRoot, root: string;
   let top = gitTopLevel(catalogRoot)
   if top.len > 0:
     let depAbs = absolutePath(top)
-    if cmpPaths(depAbs, root) == 0 or root.isRelativeTo(depAbs):
+    let targetBase = if pathBase.len > 0: pathBase else: root
+    let targetTop = gitTopLevel(targetBase)
+    let canonTargetBase = if targetTop.len > 0: absolutePath(targetTop) else: absolutePath(targetBase)
+    if cmpPaths(depAbs, canonTargetBase) == 0 or canonTargetBase.isRelativeTo(depAbs):
       return none(LockedDep)
     let facts = committedLockRepoFacts(depAbs)
     let originName = repositoryNameFromUrl(facts.originUrl)
     let bareName = extractFilename(depAbs.strip(
       leading = false, trailing = true, chars = {'/', '\\'}))
+    let depName = (if originName.len > 0: originName
+                   elif bareName.len > 0: bareName
+                   else: ReprobuildPackagesRepositoryName)
+    let depPath =
+      if depAbs.isRelativeTo(canonTargetBase / ".repro") or depAbs.isRelativeTo(absolutePath(root) / ".repro"):
+        "../" & depName
+      else:
+        relativePath(depAbs, canonTargetBase).replace('\\', '/')
     return some(LockedDep(
-      name: (if originName.len > 0: originName
-             elif bareName.len > 0: bareName
-             else: ReprobuildPackagesRepositoryName),
-      path: relativePath(depAbs,
-        (if pathBase.len > 0: pathBase else: root)).replace('\\', '/'),
+      name: depName,
+      path: depPath,
       coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
         gitRef: facts.publishedRef, revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
@@ -24154,7 +25946,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      daemonHosted = false;
                      eventSink: BuildCommandEventSink = nil;
                      cancelCheck: BuildCancelCallback = nil;
-                     actionOutcomeSink: BuildActionOutcomeSink = nil): int =
+                     actionOutcomeSink: BuildActionOutcomeSink = nil;
+                     graphAugmenter: BuildGraphAugmenter = nil): int =
   let originalArgs = @args
   # Named-Lock-Files NLF-M5 §5.4 — `--strategy <s>`. Absent, `strategyGiven`
   # stays false and the lock-consumption block below is byte-unchanged.
@@ -24868,7 +26661,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         peerCacheFetcher = peerCacheBuildWiring.fetcher,
         peerCachePublisher = peerCacheBuildWiring.publisher,
         peerCacheInstaller = peerCacheBuildWiring.installer,
-        actionOutcomeSink = actionOutcomeSink).exitCode
+        actionOutcomeSink = actionOutcomeSink,
+        graphAugmenter = graphAugmenter).exitCode
       if statsCapture.enabled and daemonHosted:
         enqueueStatsObservation(scgSessions, "build-finish", %*{
           "exitCode": result
@@ -24964,7 +26758,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # A caller that needs the per-action outcome (certificate issuance) gets a
   # direct build: the daemon protocol carries an exit code and diagnostics,
   # not the engine's per-action results.
-  if forceDirect or daemonMode == bdmOff or actionOutcomeSink != nil:
+  if forceDirect or daemonMode == bdmOff or actionOutcomeSink != nil or
+      graphAugmenter != nil:
     return runDirectBuild()
   try:
     return runDaemonBuild()
@@ -30324,19 +32119,18 @@ proc resolveDevelopWorkspacePrimary(
     return composeWorkspaceLayers(workspaceRoot, unrecordedProject)
   let manifestsRoot = manifestsRoot(workspaceRoot)
   if fileExists(workspaceToml):
-    try:
-      let recorded = readWorkspaceLocal(absolutePath(workspaceToml))
-      if recorded.workspace.project.len > 0:
-        let projectFile = manifestsRoot / "projects" /
-          (recorded.workspace.project & ".toml")
-        let variantFile = manifestsRoot / "variants" /
-          (recorded.workspace.project & ".toml")
-        if fileExists(projectFile):
-          return resolveProject(projectFile)
-        if fileExists(variantFile):
-          return resolveVariant(variantFile)
-    except WorkspaceManifestParseError:
-      discard
+    # A malformed state file raises the strict reader's diagnostic; it is
+    # never mistaken for an absent one.
+    let recorded = readWorkspaceLocal(absolutePath(workspaceToml))
+    if recorded.workspace.project.len > 0:
+      let projectFile = manifestsRoot / "projects" /
+        (recorded.workspace.project & ".toml")
+      let variantFile = manifestsRoot / "variants" /
+        (recorded.workspace.project & ".toml")
+      if fileExists(projectFile):
+        return resolveProject(projectFile)
+      if fileExists(variantFile):
+        return resolveVariant(variantFile)
   # Last resort: a workspace with exactly one ``projects/*.toml`` and no
   # metadata file. M22's primary callers always have a workspace.toml
   # (M9 init writes one) so this arm mostly serves tests that pre-seed
@@ -31714,12 +33508,19 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
   # Load the existing override file once; fold every placed node into it. Read
   # BEFORE the ``--list`` branch too: the `develop` state of a row is exactly
   # "this repo has an override entry".
-  var overrides =
-    try:
-      let existing = readDevelopOverridesFile(root)
-      if existing.isSome: existing.get() else: newDevelopOverrides()
-    except WorkspaceManifestParseError:
-      newDevelopOverrides()
+  #
+  # An override file that exists but does not parse is a refusal carrying the
+  # strict reader's diagnostic: treating it as empty would lose every
+  # registration it holds the next time this command writes the file back.
+  var overrides = newDevelopOverrides()
+  try:
+    let existing = readDevelopOverridesFile(root)
+    if existing.isSome:
+      overrides = existing.get()
+  except WorkspaceManifestParseError as err:
+    notices.add(err.msg)
+    return DevelopAllResult(outcomes: @[], notices: notices, exitCode: 2,
+      backends: composed.backends)
 
   # ---- DS-6 — ``--list``: print the resolved lock set and exit. -----------
   #
@@ -34927,6 +36728,74 @@ const stateFileWording = "`.repro/workspace-state.toml` (or the older " &
   ## How diagnostics name the per-checkout state file while both names are
   ## read (Workspace-Settings-Files.md §8 step 1).
 
+type
+  NoActiveProjectSetError* = object of ValueError
+    ## A verb needed a project and the workspace has no active project set
+    ## recorded (and the caller named none). ``msg`` is the full one-line
+    ## refusal INCLUDING its remedy; ``diagnosis`` is the same text without
+    ## the remedy, for a caller that prints the remedy on a line of its own
+    ## (``repro health``'s ``remedy:`` row) and would otherwise say it twice.
+    diagnosis*: string
+
+const noProjectSetRemedyCommand* = "repro workspace enable <project>"
+  ## The command that WRITES the state file ``stateFileWording`` names --
+  ## CLI/workspace.md, "The Two Axes: Membership and Definition": ``enable``
+  ## is the membership verb, and the active project set it records is what
+  ## every verb below reads when no ``<project>`` is given.
+
+proc noProjectSetError*(workspaceRoot, opLabel: string;
+                        acceptsProjectArgument: bool):
+    ref NoActiveProjectSetError =
+  ## Interactive-UX-And-Progress.md Principle 2 ("Every failure teaches the
+  ## remedy") -- the ONE builder for "``opLabel`` found no recorded project
+  ## set at ``workspaceRoot``". Every site that refuses for that reason calls
+  ## it, so the diagnosis and the remedy cannot drift apart between verbs.
+  ##
+  ## WHY IT EXISTS. Five sites raised the first sentence below on their own
+  ## and stopped there: it named the file that was missing and never the
+  ## command that creates it. In the field (reprobuild-pm issue
+  ## ``2026-09-20-workspace-toml-errors-do-not-name-remedy``) the refusal came
+  ## from the pre-push gate, the answer had to be dug out of a migration note
+  ## in another repository, and the workaround within reach was
+  ## ``git push --no-verify`` -- exactly the routing-around Principle 2 exists
+  ## to prevent.
+  ##
+  ## THE FIRST SENTENCE IS UNCHANGED, byte for byte, for both shapes it had:
+  ## other suites match on it, and the diagnosis was never wrong, only
+  ## incomplete. The remedy is APPENDED on the same line, ``-- remedy:``
+  ## style, rather than on a new one: this text is also embedded whole into
+  ## one-line records -- the post-commit lock log
+  ## (``<timestamp> no-lock-failed NO lock written: <msg>``) and
+  ## ``repro health``'s ``detail`` column -- which a newline would split.
+  ##
+  ## ``acceptsProjectArgument`` decides whether the one-off route is offered.
+  ## ``repro branch`` / ``repro switch`` take no ``<project>`` (the project is
+  ## deliberately not a positional there, M13), so advising one would be a
+  ## remedy that fails when followed; for them the alternative is phrased as
+  ## "a project name recoverable from" the state file, as it always was.
+  ##
+  ## NOT FOR THE RECORD STORE. ``noNameableProjectError`` routes a bare
+  ## manifests clone to its own diagnostic BEFORE this one, because there
+  ## recording a project set is the forbidden route inference
+  ## (Unified-Locking-And-Hooks.md §10), not a remedy.
+  let diagnosis =
+    if acceptsProjectArgument:
+      opLabel & " requires either " & stateFileWording & " or a <project> " &
+        "argument; neither was present at " & workspaceRoot
+    else:
+      opLabel & " requires either " & stateFileWording & " or a project " &
+        "name recoverable from one; neither was present at " & workspaceRoot
+  let oneOff =
+    if acceptsProjectArgument:
+      "; or pass <project> to this command to run it once without " &
+        "recording a set"
+    else: ""
+  result = newException(NoActiveProjectSetError, diagnosis &
+    " -- remedy: `" & noProjectSetRemedyCommand & "` records the active " &
+    "project set (`repro workspace projects list` names the projects)" &
+    oneOff)
+  result.diagnosis = diagnosis
+
 proc findBootstrapConfigPath(workspaceRoot: string): string =
   ## Locate the workspace settings file: ``REPRO_WORKSPACE_CONFIG`` when set,
   ## else ``repro-workspace.toml`` — or, until the old name is retired, the
@@ -36854,12 +38723,23 @@ proc legacyMigratedWorkspaceProjectName(workspaceRoot: string): string =
   except CatchableError:
     return ""
 
-proc noNameableProjectError(workspaceRoot, opLabel: string): ref ValueError =
+proc noNameableProjectError(workspaceRoot, opLabel: string;
+                            acceptsProjectArgument = true): ref ValueError =
   ## Interactive-UX-And-Progress.md Principle 2 -- the ONE diagnostic for
   ## "``opLabel`` could name no project at ``workspaceRoot``". Shared by the
-  ## MO-9 ladder below and by ``repro workspace lock``'s own copy of the same
-  ## dispatch, so the two cannot drift into two different pieces of advice
-  ## about the same directory.
+  ## MO-9 ladder below, by ``repro workspace lock``'s own copy of the same
+  ## dispatch, and by the ``repro workspace list`` / ``repro branch`` /
+  ## ``repro switch`` resolvers, so none of them can drift into a different
+  ## piece of advice about the same directory. (Those last three used to
+  ## raise the original sentence by hand; routing them here is what keeps the
+  ## record store from being told to record a project set by them, now that
+  ## the original sentence carries that remedy.)
+  ##
+  ## ``acceptsProjectArgument`` is false for ``branch`` / ``switch``, which
+  ## take no ``<project>``: it selects the "recoverable from one" wording of
+  ## the original sentence and drops the store diagnostic's sentence about
+  ## passing a ``<project>``, which those verbs cannot do. With it true (the
+  ## default) both diagnostics are byte-identical to what they were.
   ##
   ## WHAT WAS WRONG WITH THE ONE MESSAGE. It named the two things that were
   ## ABSENT -- "requires either `.repro/workspace.toml` or a <project>
@@ -36909,11 +38789,22 @@ proc noNameableProjectError(workspaceRoot, opLabel: string): ref ValueError =
   ## never looks at the file at all, so without this check it could reach
   ## this message and assert the absence of a ``repro.lock`` sitting right
   ## there in the root it is naming.
+  ##
+  ## The original sentence, where it stands, now carries its remedy -- the
+  ## command that records a project set -- via ``noProjectSetError``, the
+  ## builder every other no-project-set site shares. The store branch below
+  ## deliberately does NOT: recording a set there is the very claim it warns
+  ## against.
   let manifest = standaloneMembershipManifestCheckout(workspaceRoot)
   if manifest.len == 0 or hasCommittedLockWorkspaceMarker(workspaceRoot):
-    return newException(ValueError,
-      opLabel & " requires either " & stateFileWording & " or a <project> " &
-        "argument; neither was present at " & workspaceRoot)
+    return noProjectSetError(workspaceRoot, opLabel, acceptsProjectArgument)
+  let projectArgumentSentence =
+    if acceptsProjectArgument:
+      "Passing a <project> does not get past this either -- it only makes " &
+        "this command operate on the store as though it were the workspace, " &
+        "doing its work inside THIS repo instead of inside the workspace " &
+        "these records describe. "
+    else: ""
   newException(ValueError,
     opLabel & ": found membership manifest data at " & workspaceRoot &
       " (" & manifest & ") with no `.repro/` workspace shell beside it and " &
@@ -36925,10 +38816,7 @@ proc noNameableProjectError(workspaceRoot, opLabel: string): ref ValueError =
       "not open here either. Do NOT hand-create a `.repro/` state file " &
       "here: that makes this checkout claim to BE the workspace it " &
       "describes, which Unified-Locking-And-Hooks.md section 10 forbids. " &
-      "Passing a <project> does not get past this either -- it only makes " &
-      "this command operate on the store as though it were the workspace, " &
-      "doing its work inside THIS repo instead of inside the workspace " &
-      "these records describe. If this is the " &
+      projectArgumentSentence & "If this is the " &
       "record store, " & opLabel & " does not apply to it -- run it from " &
       "the workspace that consumes these records. If you meant THIS " &
       "directory to become a workspace, `repro workspace init <project> " &
@@ -36970,12 +38858,12 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
     # A metadata-only workspace.toml (M13) can supply the project name so the
     # single-project branch resolves without the user repeating it.
     if fileExists(workspaceToml):
-      try:
-        let recorded =
-          readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-        if recorded.len > 0: name = recorded
-      except WorkspaceManifestParseError:
-        discard
+      # A state file that exists but does not parse raises the strict
+      # reader's diagnostic (file and key) rather than reading as absent and
+      # ending in "neither was present".
+      let recorded =
+        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+      if recorded.len > 0: name = recorded
     else:
       # repo-workspaces v2.10 wrote its metadata immediately before the
       # native-layout cutover. Read that known migration artifact narrowly;
@@ -37095,9 +38983,8 @@ proc resolveNamedProjectOrVariant(workspaceRoot, name: string;
   # declares (the composer's ``noLayerDeclaresProjectTag``) falls through to
   # the diagnostics below; any other composition failure (an unreachable
   # layer, a malformed fragment, conflicting declarations) is the answer.
-  let rootOnlyNonProject = not fileExists(projectFile) and
-    (fileExists(variantFile) or fileExists(repoSetFile))
-  if not rootOnlyNonProject and isCompositionalWorkspaceToml(workspaceRoot, name):
+  if not namesOnlyRootVariantOrRepoSet(workspaceRoot, name) and
+      isCompositionalWorkspaceToml(workspaceRoot, name):
     try:
       return resolveWorkspaceProjectByName(workspaceRoot, name,
         layersMayOmitProject = true)
@@ -42557,11 +44444,8 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     let workspaceToml = workspaceTomlPath(args.workspaceRoot)
     var haveBase = isCompositionalWorkspaceToml(args.workspaceRoot)
     if not haveBase and fileExists(workspaceToml):
-      try:
-        haveBase =
-          readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project.len > 0
-      except WorkspaceManifestParseError:
-        haveBase = false
+      haveBase =
+        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project.len > 0
     if haveBase:
       # Resolve the recorded/composed workspace, not the positional, so the
       # scope filter below can narrow the full set.
@@ -43543,6 +45427,11 @@ type
     project*: string
     workspaceRoot*: string
     flavor*: string
+    dryRun*: bool
+      ## CLI/sync.md §`--dry-run` with `--mainline`: the document is a PLAN.
+      ## Each entry's ``outcome`` is the planner's verdict and ``action`` the
+      ## step a real run would take, but nothing ran, so ``headAfter`` equals
+      ## ``headBefore`` and ``exitCode`` is 0.
     repos*: seq[MainlineSyncEntry]
     exitCode*: int
 
@@ -43551,6 +45440,7 @@ proc toJsonNode*(report: MainlineSyncReport): JsonNode =
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
   result["mainline"] = %true
+  result["dryRun"] = %report.dryRun
   result["flavor"] = %report.flavor
   var repos = newJArray()
   for e in report.repos:
@@ -43574,8 +45464,23 @@ proc renderMainlineSyncTextLines*(report: MainlineSyncReport;
   var counts = initOrderedTable[string, int]()
   for e in report.repos:
     counts[e.outcome] = counts.getOrDefault(e.outcome, 0) + 1
+    # CLI/sync.md §`--dry-run` with `--mainline`: a dry run names every repo
+    # with a PENDING action as "would <action>", routine or not — a planned
+    # fast-forward is the very thing the operator asked to preview, and
+    # printing the planner's past-tense verdict alone ("fast_forwarded") read
+    # as if it had happened. Repos with no pending action (up to date, or a
+    # refusal) render exactly as in a real run.
+    let pending = report.dryRun and e.action.len > 0 and e.action != "none"
     let isRoutine = e.outcome in ["up_to_date", "fast_forwarded"]
-    if verbose or not isRoutine:
+    if pending:
+      var line = "workspace sync: " & e.path & " would " & e.action &
+        " (" & e.outcome & ")"
+      if e.branch.len > 0 and e.mainlineBranch.len > 0:
+        line.add(" " & e.branch & " <- " & e.mainlineBranch)
+      if e.diagnostic.len > 0:
+        line.add(" (" & e.diagnostic & ")")
+      result.add(line)
+    elif verbose or not isRoutine:
       var line = "workspace sync: " & e.path & " " & e.outcome
       if e.branch.len > 0 and e.mainlineBranch.len > 0:
         line.add(" " & e.branch & " <- " & e.mainlineBranch)
@@ -43585,7 +45490,11 @@ proc renderMainlineSyncTextLines*(report: MainlineSyncReport;
   var parts: seq[string]
   for tag, n in counts:
     parts.add($n & " " & tag)
-  result.add("workspace sync --mainline: " & parts.join(", ") &
+  # Same "(dry-run)" marker the ordinary sync's summary carries.
+  let summaryPrefix =
+    if report.dryRun: "workspace sync --mainline (dry-run): "
+    else: "workspace sync --mainline: "
+  result.add(summaryPrefix & parts.join(", ") &
     " (" & $report.repos.len & " repo(s))")
 
 proc mainlineFlavorTag(flavor: MainlineSyncFlavor): string =
@@ -43595,8 +45504,18 @@ proc mainlineFlavorTag(flavor: MainlineSyncFlavor): string =
   of msfMerge: "merge"
 
 proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
+  ## Run (or, under ``--dry-run``, only plan) a mainline sync.
+  ##
+  ## CLI/sync.md §`--dry-run` with `--mainline`: a dry run reads refs and
+  ## predicts conflicts, and does nothing else. Every phase that writes is
+  ## gated on ``args.dryRun`` below — the receipt directory, the fetch phase,
+  ## the clone-action construction (whose shared-bare refresh is itself a
+  ## fetch into the clone cache), and the ff/rebase/merge steps — so the plan
+  ## is computed against whatever remote-tracking refs the last fetch left.
+  ## A stale preview is acceptable; a preview that moves refs is not.
   result.workspaceRoot = args.workspaceRoot
   result.flavor = mainlineFlavorTag(args.mainlineFlavor)
+  result.dryRun = args.dryRun
 
   var resolveArgs = args
   if args.scopeProjects.len > 0:
@@ -43623,8 +45542,16 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
   var fetchActions: seq[BuildAction]
   var fetchIdByPath = initTable[string, string]()
   let receiptDir = args.workspaceRoot / ".repro" / "workspace" / "receipts"
-  createDir(receiptDir)
-  for idx, repo in resolved.repos:
+  # A dry run creates no receipts and does not fetch: no receipt directory,
+  # and no fetch actions, so the engine (and its cache root) never runs.
+  # ``reposToFetch`` is empty under a dry run, which leaves ``fetchActions``
+  # empty and ``fetchFailure`` with no entries.
+  if not args.dryRun:
+    createDir(receiptDir)
+  let reposToFetch =
+    if args.dryRun: newSeq[ResolvedRepo]()
+    else: resolved.repos
+  for idx, repo in reposToFetch:
     if not dirExists(args.workspaceRoot / repo.path / ".git"):
       continue
     let idSeg = safeRepoIdSegment(repo.name) & "-" & $idx
@@ -43691,8 +45618,17 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     # split commit-graph chain prints a warning on stderr and nothing on
     # stdout, which merged read as one dirty line and made this gatherer
     # report a pristine sibling as dirty.
-    obs.isClean = gitRunPlainQuery(identity,
-      ["-C", repoAbs, "status", "--porcelain"]).output.strip().len == 0
+    #
+    # Under ``--dry-run`` the query also passes ``--no-optional-locks``:
+    # ``git status`` otherwise opportunistically rewrites the index to record
+    # refreshed stat data, which is a write to the checkout a preview must not
+    # make (https://git-scm.com/docs/git#Documentation/git.txt---no-optional-locks).
+    let statusArgs =
+      if args.dryRun:
+        @["--no-optional-locks", "-C", repoAbs, "status", "--porcelain"]
+      else:
+        @["-C", repoAbs, "status", "--porcelain"]
+    obs.isClean = gitRunPlainQuery(identity, statusArgs).output.strip().len == 0
     if obs.mainlineBranch.len > 0:
       obs.mainlineTip = revParse(identity, repoAbs,
         "refs/remotes/" & gitRemoteNameFor(repo) & "/" & obs.mainlineBranch)
@@ -43733,10 +45669,15 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     sharedBareForClone[fetchUrl] = reference
     reference
 
+  # Not even CONSTRUCTED under a dry run: building a clone action calls
+  # ``cloneReferenceFor``, whose ``refreshSharedBare`` clones or fetches the
+  # shared bare into the clone cache — a network fetch and a cache write
+  # before any clone runs. The plan's ``clone`` verdict comes from
+  # ``decisions`` alone.
   var cloneActions: seq[BuildAction]
   var cloneActionRepoIdx = initTable[string, int]()
   for i, decision in decisions:
-    if decision.action == msaClone:
+    if decision.action == msaClone and not args.dryRun:
       let repo = resolved.repos[i]
       let idSeg = safeRepoIdSegment(repo.name) & "-" & $i
       let receiptRel = ".repro" / "workspace" / "receipts" /
@@ -43879,8 +45820,13 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
             stderr.writeLine("workspace sync: [" & (if isRebase: "rebased" else: "merged") & "] " & repo.path)
     result.repos.add(entry)
 
+  # CLI/sync.md §`--dry-run` with `--mainline`: "The exit code is `0` whatever
+  # the verdicts: a dry run is informational, and the refusal and failure
+  # codes describe a run that happened." The verdicts themselves stay in the
+  # entries, so a script still reads which repos would be refused.
   result.exitCode =
-    if anyFailure: 1
+    if args.dryRun: 0
+    elif anyFailure: 1
     elif anyRefusal: 2
     else: 0
 
@@ -43892,8 +45838,13 @@ proc writeMainlineSyncReport(report: MainlineSyncReport; destination: string) =
 
 proc runMainlineSyncCommand(parsed: WorkspaceSyncArgs): int =
   let report = executeMainlineSync(parsed)
-  writeMainlineSyncReport(report,
-    reportDestination(parsed.report, report.workspaceRoot, "sync"))
+  # A dry run persists no report, even under ``--write-report``: there is
+  # nothing to record about a run that did not happen, and the plan reaches
+  # the operator on stdout below (CLI/sync.md §`--dry-run` with `--mainline`;
+  # the ordinary path in ``runWorkspaceSyncCommand`` does the same).
+  if not parsed.dryRun:
+    writeMainlineSyncReport(report,
+      reportDestination(parsed.report, report.workspaceRoot, "sync"))
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -43925,7 +45876,9 @@ execution:
   --jobs N, -j N        default parallelism for fetch and checkout
   --jobs-network N      parallel fetches (default 8)
   --jobs-checkout N     parallel checkouts (default: CPU count)
-  --dry-run             print the plan and exit; mutates nothing
+  --dry-run             print the plan and exit 0; mutates nothing (no
+                        fetch, so --mainline plans against the current
+                        remote-tracking refs)
   --json                one machine-readable document on stdout
   --write-report[=PATH] persist the report as sync-report.json
   --verbose, -v         include raw per-repo tool output
@@ -43946,7 +45899,9 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   ##     projects' repos); an unknown name errors clearly. No positional =
   ##     the whole workspace.
   ##   - The plan (which repos / what action) is ANNOUNCED before acting;
-  ##     ``--dry-run`` prints the plan and exits WITHOUT mutating.
+  ##     ``--dry-run`` prints the plan and exits WITHOUT mutating. That holds
+  ##     under ``--mainline`` too (``executeMainlineSync``): no fetch, clone,
+  ##     integration, receipt or report, and exit 0 whatever the verdicts.
   ##   - Per-repo live progress is emitted to stderr (suppressed under
   ##     ``--json``); the run ends with a scannable per-repo summary digest.
   ##   - ``--json`` emits the machine surface (plan + per-repo results +
@@ -44464,8 +46419,16 @@ proc convergeRepoToManifestRevision(
   # Always fetch first so <remoteName>/<branch> reflects the manifest's
   # upstream tip (pull is a network-converge op, unlike a pure checkout).
   let rName = if remoteName.len > 0: remoteName else: "origin"
-  let fetched = gitRunPlain(identity, ["-C", repoPath, "fetch", "--quiet",
-    "--prune", rName])
+  var fetched: tuple[code: int; output: string]
+  withCheckoutVcsLock(repoPath):
+    const MaxPullFetchLockRetries = 5
+    for attempt in 0 .. MaxPullFetchLockRetries:
+      fetched = gitRunPlain(identity, ["-C", repoPath, "fetch", "--quiet",
+        "--prune", rName])
+      if fetched.code == 0 or attempt == MaxPullFetchLockRetries or
+          not isTransientGitLockContention(fetched.output):
+        break
+      sleep(25 * (attempt + 1))
   if fetched.code != 0:
     return (false, "", "",
       "git fetch failed: " & fetched.output.strip())
@@ -45160,21 +47123,19 @@ proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
   if parsed.projectName.len == 0:
     # Allow a metadata-only workspace.toml to supply the project name.
     if fileExists(workspaceToml):
-      try:
-        let recordedProject =
-          readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-        if recordedProject.len > 0:
-          var withProject = parsed
-          withProject.projectName = recordedProject
-          # PS-2 — a lock with no explicit ``<project>`` is a snapshot of the
-          # WORKSPACE, so it pins every repo of the active project set. The
-          # lock's DESTINATION stays the primary project (see
-          # ``pickRecordStoreRoot`` and the ``locks/<project>/`` layout).
-          let recovered = resolveWorkspaceLockProject(withProject)
-          return (extendWithActiveProjectSet(parsed.workspaceRoot,
-            recovered.resolved), recovered.workspaceLocal)
-      except WorkspaceManifestParseError:
-        discard
+      # A malformed state file raises the strict reader's diagnostic.
+      let recordedProject =
+        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+      if recordedProject.len > 0:
+        var withProject = parsed
+        withProject.projectName = recordedProject
+        # PS-2 — a lock with no explicit ``<project>`` is a snapshot of the
+        # WORKSPACE, so it pins every repo of the active project set. The
+        # lock's DESTINATION stays the primary project (see
+        # ``pickRecordStoreRoot`` and the ``locks/<project>/`` layout).
+        let recovered = resolveWorkspaceLockProject(withProject)
+        return (extendWithActiveProjectSet(parsed.workspaceRoot,
+          recovered.resolved), recovered.workspaceLocal)
     else:
       let migratedProject =
         legacyMigratedWorkspaceProjectName(parsed.workspaceRoot)
@@ -45917,7 +47878,16 @@ proc writeWorkspaceLockReport(report: WorkspaceLockReport;
 #   - REFUSE if the manifest repo is dirty OUTSIDE ``locks/`` — a publish
 #     commit must touch only locks, never sweep up unrelated edits. When
 #     refusing, unstage what we just staged so the index is left as we
-#     found it; the dirty file itself is never touched.
+#     found it; the dirty file itself is never touched. UNTRACKED files
+#     under ``.repro/build/`` are not dirt: that tree is disposable derived
+#     output (hook reports and logs), and since publication stages only
+#     explicit ``locks/`` paths such a file can neither enter the commit nor
+#     make the committed tree inconsistent. Tracked changes there, and
+#     anything under the retired ``.repro/workspace/``, still refuse. The
+#     verified-recovery check and ``repro push``'s backend preflight carry
+#     the same carve-out; without it the recovery check, which runs after
+#     the publish commit, refused over the trace that commit's own
+#     post-commit hook had just written.
 #   - Reject empty / zero-byte staged lock files before committing.
 #   - Commit with a focused message (``Publish N workspace lock entr…``).
 #   - Push to the manifest repo's upstream (``git push <remote>
@@ -45979,6 +47949,29 @@ proc pathIsUnderLocks(path: string): bool =
   ## lives under the top-level ``locks/`` directory.
   let normalized = path.replace('\\', '/')
   normalized == "locks" or normalized.startsWith("locks/")
+
+proc isUntrackedDisposableBuildOutput(code, path: string): bool =
+  ## A status entry the dirty-outside-``locks/`` guard does NOT count as dirt:
+  ## an UNTRACKED file (porcelain ``??``) under the root's ``.repro/build/``.
+  ##
+  ## That tree is disposable derived output by definition — Retired-Names.md
+  ## moved every ``<verb>-report.json`` there BECAUSE "a report is derived
+  ## output", and CLI/README.md forbids any command from reading one back to
+  ## decide anything. And neither harm the guard exists to prevent can come
+  ## from such a file: publication stages only explicit canonical ``locks/``
+  ## paths, so it cannot be swept into the commit, and an untracked file is
+  ## not part of the tree being committed, so it cannot make that tree
+  ## inconsistent. Refusing on it is what turned a hook's trace into a
+  ## permanent publication wedge: the publisher's own commit fires the hook
+  ## that writes the trace.
+  ##
+  ## Deliberately narrow. A TRACKED or staged change under ``.repro/build/``
+  ## is somebody's committed content changing, which is real dirt and still
+  ## refuses. The RETIRED ``.repro/workspace/`` spelling is not tolerated
+  ## either: nothing current writes there, so a file under it is either an
+  ## old engine still running or something an operator put there, and both
+  ## are worth a refusal that names it.
+  code == "??" and path.replace('\\', '/').startsWith(".repro/build/")
 
 proc pushOutputIsNonFastForward*(output: string): bool =
   ## A push rejected because a COMPETING WRITER moved the remote ref (or held
@@ -46729,6 +48722,16 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
     # split: a record THIS operation is supposed to publish must not still be
     # untracked by the time we verify it. That is checked against
     # ``expected``, which is exactly the set the publisher was told to stage.
+    #
+    # And the same reachability argument covers UNTRACKED disposable output
+    # under ``.repro/build/`` (``isUntrackedDisposableBuildOutput``): nothing
+    # stages it, so nothing can sweep it into a resumed publication. This
+    # check runs AFTER the publication commit, and that commit fires the
+    # store's post-commit hook — whose trace is exactly such a file — so a
+    # guard that counted it would refuse a publish over output its own commit
+    # produced.
+    if isUntrackedDisposableBuildOutput(entry.code, entry.path):
+      continue
     if entry.code == "??" and pathIsUnderLocks(entry.path):
       let parsed = parseLockRecordRelPath(entry.path)
       if not parsed.ok:
@@ -47190,9 +49193,20 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
   # ``locks/`` means the publish commit would either sweep up unrelated
   # work (staged) or run against an inconsistent tree. Refuse, and unstage
   # what we just staged so the operator's index is left untouched.
+  #
+  # One carve-out, and only one: an UNTRACKED file under ``.repro/build/`` is
+  # disposable derived output (a hook report, a log), which can neither be
+  # swept into a commit that stages explicit ``locks/`` paths nor make the
+  # committed tree inconsistent — see ``isUntrackedDisposableBuildOutput``.
+  # Counting it as dirt made the refusal self-sustaining: the commit made
+  # below fires the post-commit hook, whose trace is exactly such a file, so
+  # every publish into a store that misclassified itself regenerated its own
+  # refusal (measured in the field with the trace at the retired
+  # ``.repro/workspace/`` path, which stays refused).
   var dirtyOutside: seq[string]
   for entry in gitPorcelainEntries(identity, manifestRepoRoot):
-    if not pathIsUnderLocks(entry.path):
+    if not pathIsUnderLocks(entry.path) and
+        not isUntrackedDisposableBuildOutput(entry.code, entry.path):
       dirtyOutside.add(entry.path)
   if dirtyOutside.len > 0:
     # Reset only the locks subtree we staged; leave any pre-existing
@@ -48438,6 +50452,8 @@ proc preCommitLogPath*(workspaceRoot: string): string =
   ## commit?" a question about line ordering in a shared append-only file.
   workspaceReportDir(workspaceRoot) / "pre-commit-lock.log"
 
+proc appendCommitHookReportLine(workspaceRoot, logPath, line: string)
+
 proc appendPreCommitLog(workspaceRoot, line: string) =
   ## Append one line to ``pre-commit-lock.log``. Never raises — a failed log
   ## write must not fail the commit.
@@ -48447,6 +50463,13 @@ proc appendPreCommitLog(workspaceRoot, line: string) =
   ## so this changes no behaviour today; it is here because the hazard is a
   ## property of the WRITER (a recursive ``createDir`` in a root the engine
   ## may have disclaimed), not of one caller's current control flow.
+  appendCommitHookReportLine(workspaceRoot, preCommitLogPath(workspaceRoot),
+    line)
+
+proc appendCommitHookReportLine(workspaceRoot, logPath, line: string) =
+  ## Append ``line`` to ``logPath`` in the commit hooks' report directory.
+  ## Never raises. Nothing is written where ``commitHookReportDir`` says the
+  ## hooks may not write.
   if workspaceRoot.len == 0: return
   try:
     let dir = commitHookReportDir(workspaceRoot)
@@ -48454,11 +50477,17 @@ proc appendPreCommitLog(workspaceRoot, line: string) =
       return
     createDir(dir)
     var f: File
-    if open(f, preCommitLogPath(workspaceRoot), fmAppend):
+    if open(f, logPath, fmAppend):
       f.writeLine(line)
       f.close()
   except CatchableError:
     discard
+
+proc lockUpdateLogPath*(workspaceRoot: string): string =
+  ## Where the HL-10 lock-update node of a certifying run files its outcome:
+  ## beside ``pre-commit-lock.log``, in a file of its own, so "what did THIS
+  ## commit's hook do" stays a question about one file.
+  workspaceReportDir(workspaceRoot) / "lock-update.log"
 
 proc preCommitRepinMarkerPath(workspaceRoot, repoRoot: string): string =
   ## TC-8g — where the `pre-commit` refresh phase notes a lock it re-pinned
@@ -49220,6 +51249,16 @@ type
     allowed*: seq[PinRegression] ## regressions recorded because they were named
     allowanceUsed*: seq[string]  ## named inputs that really were regressing
     examined*: seq[string]       ## every flake input name the refresh considered
+    wouldChange*: bool           ## ``mayWrite = false``: it would have rewritten
+    notStaged*: string
+      ## Set by the caller that stages: why the rewritten lock could not be
+      ## staged ("" when it was, or when nothing was written).
+    failure*: string
+      ## Why the refresh could not be performed at all (an unreadable flake
+      ## or lock, no git, an unresolvable workspace, an unwritable lock, an
+      ## exception), "" otherwise. A pin regression is not a failure: it is
+      ## ``refused``. The hook logs a failure and lets the commit proceed; the
+      ## HL-10 lock-update node withholds the certificate on one.
 
 proc shortRev(rev: string): string =
   if rev.len >= 12: rev[0 ..< 12] else: rev
@@ -49365,7 +51404,14 @@ proc pinRegressionSyncCommand*(workspaceRoot, repo: string): string =
     if recorded.len > 0: candidates.add(recorded)
   except CatchableError:
     discard
-  for p in activeProjectSetOrEmpty(root):
+  # Best-effort like the read above: this only words a remedy for a refusal
+  # that is already being reported, so unreadable state must not replace it.
+  var active: seq[string]
+  try:
+    active = activeProjectSetOrEmpty(root)
+  except CatchableError:
+    discard
+  for p in active:
     if p notin candidates: candidates.add(p)
   for p in candidates:
     var resolved: ResolvedProject
@@ -49497,7 +51543,8 @@ proc pinRegressionAllowanceNotes*(allowance: PinRegressionAllowance;
 
 proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
   toolProvisioning: ToolProvisioningMode;
-  allowRegression: seq[string] = @[]; mayWrite = true): FlakeCommitRefresh
+  allowRegression: seq[string] = @[]; mayWrite = true;
+  label = "repro pre-commit"): FlakeCommitRefresh
   ## NF-2 — forward declaration. The implementation lives beside the rest of
   ## the flake-coexistence code far below (it needs the NF-1 override-set
   ## machinery); the commit hook that drives it is here.
@@ -50036,8 +52083,8 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
 # act from testing one, and a stale checkout must not become a stale published
 # lock.
 
-proc stageRefreshedFlakeLock(repoRoot, lockPath: string):
-    tuple[ok: bool; diagnostic: string] =
+proc stageRefreshedFlakeLock(repoRoot, lockPath: string;
+    useHookIndex = true): tuple[ok: bool; diagnostic: string] =
   ## `git add` the refreshed lock into the IN-FLIGHT index, so the commit
   ## being formed carries it.
   ##
@@ -50088,10 +52135,17 @@ proc stageRefreshedFlakeLock(repoRoot, lockPath: string):
   ## `t_every_commit_form_stages_through_the_installed_hook`, which drives the
   ## hook `repro hooks ensure --vcs` actually installs; its second case asserts
   ## that nothing else of git's repository-local environment reaches `repro`.
+  ##
+  ## ``useHookIndex = false`` is the HL-10 lock-update node, which runs inside
+  ## ``repro test`` rather than inside ``git commit``: no commit is in flight,
+  ## so the index to stage into is the repository's own, and an inherited
+  ## ``GIT_INDEX_FILE`` is not consulted.
   var env = scrubbedGitRepositoryEnv()
-  var indexFile = getEnv(HookGitIndexFileEnv)
-  if indexFile.len == 0:
-    indexFile = getEnv("GIT_INDEX_FILE")
+  var indexFile = ""
+  if useHookIndex:
+    indexFile = getEnv(HookGitIndexFileEnv)
+    if indexFile.len == 0:
+      indexFile = getEnv("GIT_INDEX_FILE")
   if indexFile.len > 0:
     # A relative value reaches here only on the fallback path (the carrier is
     # absolutised in the hook body). It is resolved against the current working
@@ -50397,46 +52451,260 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string):
   result.summary = "the committed repro.lock does not pin the sibling " &
     "revisions this repo is being pushed against: " & result.evidence
 
-proc preCommitFlakeLock(workspaceRoot, repoRoot: string;
+type
+  CommitTimeWriterSite* = enum
+    ## Who applies the commit-time lock writers (Unified-Locking-And-Hooks
+    ## HL-10). ONE implementation serves both, so the hook and the lock-update
+    ## node cannot disagree about what "current" means: a writer added to one
+    ## is added to the other by construction.
+    ctwsPreCommitHook
+      ## The managed `pre-commit` hook, inside `git commit`: stages into the
+      ## index of the commit being formed and notes each re-pin for the
+      ## certificate gate of the same commit (TC-8g).
+    ctwsLockUpdateNode
+      ## The lock-update node of a certifying `repro test` / `repro certify`
+      ## (§13.7.3): stages into the repository's own index, and notes nothing
+      ## for a gate, because no commit is in flight.
+
+  CommitTimeWritersOutcome* = object
+    ## What one application of the commit-time writers did.
+    written*: seq[string]
+      ## The locks it rewrote (absolute paths), in the order written.
+    changes*: seq[string]
+      ## One line per rewritten lock saying what it records now.
+    notStaged*: seq[string]
+      ## A lock that was rewritten but could not be staged, with git's reason.
+    refused*: seq[PinRegression]
+      ## Pin regressions nobody allowed. When non-empty NOTHING was written.
+    allowed*: seq[PinRegression]
+      ## Regressions written because the allowance named them.
+    failures*: seq[string]
+      ## A writer that could not run at all: an unreadable lock, a flake
+      ## refresh that could not resolve the workspace, a failed write. The
+      ## hook logs these and lets the commit proceed (§13.3 "Blocks only on a
+      ## regression"); the lock-update node withholds the certificate.
+
+  CommitTimeWritersPlan* = object
+    ## The WOULD-WRITE predicate: what the commit-time writers would do to
+    ## ``repoRoot`` right now, computed without writing anything. Every writer
+    ## ``applyCommitTimeLockWriters`` runs is planned here as well.
+    wouldWrite*: seq[string]
+      ## The locks that would be rewritten (absolute paths).
+    refused*: seq[PinRegression]
+    failures*: seq[string]
+
+proc commitTimeWriterLabel(site: CommitTimeWriterSite): string =
+  case site
+  of ctwsPreCommitHook: "repro pre-commit"
+  of ctwsLockUpdateNode: "repro lock-update"
+
+proc appendCommitTimeWriterLog(site: CommitTimeWriterSite;
+    workspaceRoot, line: string) =
+  case site
+  of ctwsPreCommitHook: appendPreCommitLog(workspaceRoot, line)
+  of ctwsLockUpdateNode:
+    appendCommitHookReportLine(workspaceRoot, lockUpdateLogPath(workspaceRoot),
+      line)
+
+proc commitTimeHasFlakeLock(repoRoot: string): bool =
+  fileExists(repoRoot / "flake.nix") and fileExists(repoRoot / "flake.lock")
+
+proc commitTimeHasReproLock(repoRoot: string): bool =
+  fileExists(repoRoot / CommittedLockFileName)
+
+proc committedLockRepinFailure(plan: CommittedLockRepinPlan): string =
+  ## The re-pin could not even be planned: the lock is unreadable or carries
+  ## no `deps` line. A pin regression is a decision, not a failure.
+  if plan.refused.len == 0 and plan.line.startsWith("repro-lock refused-"):
+    plan.line
+  else: ""
+
+proc preCommitFlakeLock(site: CommitTimeWriterSite;
+    workspaceRoot, repoRoot: string;
     toolProvisioning: ToolProvisioningMode; timestamp: string;
     allowRegression: seq[string]; mayWrite: bool): FlakeCommitRefresh
   ## NF-2's `flake.lock` refresh; defined after the dispatcher.
 
-proc preCommitReproLock(workspaceRoot, repoRoot, timestamp: string;
-    plan: CommittedLockRepinPlan; apply: bool) =
+proc preCommitReproLock(site: CommitTimeWriterSite;
+    workspaceRoot, repoRoot, timestamp: string;
+    plan: CommittedLockRepinPlan; apply: bool;
+    outcome: var CommitTimeWritersOutcome) =
   ## §13.3 — report the planned `repro.lock` re-pin and, when ``apply`` (no
-  ## lock refuses this commit), write it and stage it into the commit being
-  ## formed. Never raises.
+  ## lock refuses), write it and stage it. From the hook it is staged into
+  ## the commit being formed; from the lock-update node into the
+  ## repository's index. Never raises.
+  let label = commitTimeWriterLabel(site)
   for w in plan.warnings:
-    stderr.writeLine("repro pre-commit: " & w)
+    stderr.writeLine(label & ": " & w)
   if plan.line.len == 0: return
   var line = timestamp & " "
   if plan.refused.len > 0:
     line.add(plan.line)
   elif not apply:
-    # This lock had nothing to refuse, but `flake.lock` refused the commit:
-    # a refused commit writes nothing, so neither lock is touched.
+    # This lock had nothing to refuse, but `flake.lock` refused: a refusal
+    # writes nothing, so neither lock is touched.
     line.add("repro-lock not-written-commit-refused" &
       (if plan.changed: " (would have: " & plan.line & ")" else: ""))
   else:
     let applied = applyCommittedLockRepin(plan)
     line.add(applied.line)
-    if applied.ok and plan.changed:
-      stderr.writeLine("repro pre-commit: " & plan.line)
-      let staged = stageRefreshedFlakeLock(repoRoot, plan.lockPath)
+    if not applied.ok:
+      outcome.failures.add(applied.line)
+    elif plan.changed:
+      outcome.written.add(plan.lockPath)
+      outcome.changes.add(plan.line)
+      stderr.writeLine(label & ": " & plan.line)
+      let staged = stageRefreshedFlakeLock(repoRoot, plan.lockPath,
+        useHookIndex = site == ctwsPreCommitHook)
       if staged.ok:
-        line.add("; staged into this commit")
-        notePreCommitRepin(workspaceRoot, repoRoot, plan.lockPath)
+        case site
+        of ctwsPreCommitHook:
+          line.add("; staged into this commit")
+          notePreCommitRepin(workspaceRoot, repoRoot, plan.lockPath)
+        of ctwsLockUpdateNode:
+          line.add("; staged")
       else:
         line.add("; NOT STAGED: " & staged.diagnostic)
-        stderr.writeLine("repro pre-commit: repro.lock was re-pinned but " &
-          "could NOT be staged, so THIS COMMIT DOES NOT CARRY IT: " &
-          staged.diagnostic)
-        stderr.writeLine("repro pre-commit: remedy: `git add " &
-          plan.lockPath & "` and `git commit --amend --no-edit`")
+        outcome.notStaged.add(plan.lockPath & ": " & staged.diagnostic)
+        case site
+        of ctwsPreCommitHook:
+          stderr.writeLine(label & ": repro.lock was re-pinned but " &
+            "could NOT be staged, so THIS COMMIT DOES NOT CARRY IT: " &
+            staged.diagnostic)
+          stderr.writeLine(label & ": remedy: `git add " &
+            plan.lockPath & "` and `git commit --amend --no-edit`")
+        of ctwsLockUpdateNode:
+          stderr.writeLine(label & ": repro.lock was re-pinned but could " &
+            "NOT be staged: " & staged.diagnostic)
+          stderr.writeLine(label & ": remedy: `git add " & plan.lockPath &
+            "`, then run the tests again")
   if plan.warnings.len > 0:
     line.add("; " & plan.warnings.join("; "))
-  appendPreCommitLog(workspaceRoot, line)
+  appendCommitTimeWriterLog(site, workspaceRoot, line)
+
+proc planCommitTimeLockWriters*(workspaceRoot, repoRoot: string;
+    toolProvisioning: ToolProvisioningMode;
+    allowance: PinRegressionAllowance): CommitTimeWritersPlan =
+  ## The would-write predicate (HL-10): what ``applyCommitTimeLockWriters``
+  ## would do to ``repoRoot`` now, for each writer the managed `pre-commit`
+  ## hook runs — the `repro.lock` sibling re-pin (§13.3) and the
+  ## `flake.lock` refresh (§13.6). Writes nothing and stages nothing. (The
+  ## Pre-Commit-Check-Sets PCS-5 managed block is not built; when it is, it
+  ## is a third writer and is planned here too.)
+  let root = absolutePath(repoRoot)
+  let hasReproLock = commitTimeHasReproLock(root)
+  if hasReproLock:
+    try:
+      let plan = planCommittedLockRepin(root, allowance.names)
+      let failure = committedLockRepinFailure(plan)
+      if failure.len > 0:
+        result.failures.add(failure)
+      for r in plan.refused: result.refused.add(r)
+      if plan.changed:
+        result.wouldWrite.add(plan.lockPath)
+    except CatchableError as err:
+      result.failures.add("repro-lock error: " & err.msg)
+  if commitTimeHasFlakeLock(root):
+    var flake: FlakeCommitRefresh
+    try:
+      flake = refreshFlakeLockAtCommit(workspaceRoot, root, toolProvisioning,
+        allowance.names, mayWrite = false,
+        label = commitTimeWriterLabel(ctwsLockUpdateNode))
+    except CatchableError as err:
+      flake.failure = "flake-lock error: " & err.msg
+    if flake.failure.len > 0:
+      result.failures.add(flake.failure)
+    for r in flake.refused: result.refused.add(r)
+    if flake.wouldChange or flake.changed:
+      result.wouldWrite.add(flake.lockPath)
+
+proc applyCommitTimeLockWriters*(site: CommitTimeWriterSite;
+    workspaceRoot, repoRoot: string; toolProvisioning: ToolProvisioningMode;
+    timestamp: string; allowance: PinRegressionAllowance;
+    allowedVia = PinRegressionAllowEnv): CommitTimeWritersOutcome =
+  ## Apply every commit-time writer to ``repoRoot``'s working tree and stage
+  ## what changed: the `repro.lock` sibling re-pin (§13.3) and the
+  ## `flake.lock` refresh (§13.6). The managed `pre-commit` hook and the
+  ## HL-10 lock-update node both call this, and nothing else writes a lock
+  ## on either path. Under the same rules for both: no solve, write only on
+  ## change, and a pin regression the allowance does not name refuses and
+  ## writes NEITHER lock.
+  ##
+  ## Prints what it changes and the allowance notes; the caller renders a
+  ## refusal (its wording depends on what was refused: a commit, or a lock
+  ## update before a test run). Never raises.
+  let label = commitTimeWriterLabel(site)
+  let action =
+    case site
+    of ctwsPreCommitHook: "commit"
+    of ctwsLockUpdateNode: "lock update"
+  let hasFlake = commitTimeHasFlakeLock(repoRoot)
+  let hasReproLock = commitTimeHasReproLock(repoRoot)
+  # A pin never moves backward silently. The `repro.lock` re-pin is PLANNED
+  # first (a few local git queries per sibling), the `flake.lock` refresh
+  # runs knowing whether it may write, and only when neither lock refuses is
+  # anything written — so a refusal leaves the tree and the index exactly as
+  # it found them, and every regression in both locks is reported at once.
+  var reproPlan: CommittedLockRepinPlan
+  var reproPlanned = false
+  if hasReproLock:
+    try:
+      reproPlan = planCommittedLockRepin(repoRoot, allowance.names)
+      reproPlanned = true
+      let failure = committedLockRepinFailure(reproPlan)
+      if failure.len > 0:
+        result.failures.add(failure)
+    except CatchableError as err:
+      result.failures.add("repro-lock error: " & err.msg)
+      appendCommitTimeWriterLog(site, workspaceRoot, timestamp &
+        " repro-lock error: " & err.msg)
+  let reproRefuses = reproPlanned and reproPlan.refused.len > 0
+  var flake: FlakeCommitRefresh
+  if hasFlake:
+    flake = preCommitFlakeLock(site, workspaceRoot, repoRoot,
+      toolProvisioning, timestamp, allowance.names,
+      mayWrite = not reproRefuses)
+    if flake.failure.len > 0:
+      result.failures.add(flake.failure)
+    if flake.changed:
+      result.written.add(flake.lockPath)
+      result.changes.add(flake.line)
+      if flake.notStaged.len > 0:
+        result.notStaged.add(flake.lockPath & ": " & flake.notStaged)
+  let refused = reproRefuses or flake.refused.len > 0
+  if reproPlanned:
+    preCommitReproLock(site, workspaceRoot, repoRoot, timestamp, reproPlan,
+      apply = not refused, result)
+
+  var used, examined: seq[string]
+  var allowedRegressions: seq[PinRegression]
+  if reproPlanned:
+    for n in reproPlan.examined: examined.add(n)
+    for r in reproPlan.allowed: allowedRegressions.add(r)
+  for n in flake.examined: examined.add(n)
+  for r in flake.allowed: allowedRegressions.add(r)
+  for r in allowedRegressions: used.add(r.sibling)
+  # A named input that regressed counts as used even when nothing was written
+  # for it (a refusal, an unpublished revision): the note is for names that
+  # matched no regression at all.
+  for n in flake.allowanceUsed: used.add(n)
+  if not refused:
+    # The downgrade is visible afterwards, not just permitted.
+    for r in allowedRegressions:
+      let announced = pinRegressionAllowedLine(r, allowedVia)
+      stderr.writeLine(label & ": " & announced)
+      appendCommitTimeWriterLog(site, workspaceRoot, timestamp &
+        (if r.lock == "flake.lock": " flake-lock " else: " repro-lock ") &
+        announced)
+      result.allowed.add(r)
+  for note in pinRegressionAllowanceNotes(allowance, used, examined, action):
+    stderr.writeLine(label & ": note: " & note)
+    appendCommitTimeWriterLog(site, workspaceRoot, timestamp &
+      " pin-regression-allowance note: " & note)
+  if refused:
+    if reproPlanned:
+      for r in reproPlan.refused: result.refused.add(r)
+    for r in flake.refused: result.refused.add(r)
 
 proc runPreCommitLockCommand*(args: openArray[string]): int =
   ## ``repro hooks dispatch pre-commit --repo-root=<repo>`` routes here.
@@ -50448,6 +52716,10 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
   ## (Unified-Locking-And-Hooks.md §13.3, Nix-Flake-Coexistence.md §3.2). Every
   ## other failure is logged to ``pre-commit-lock.log`` and the commit
   ## proceeds.
+  ##
+  ## The writers themselves are ``applyCommitTimeLockWriters``, shared with
+  ## the lock-update node a certifying ``repro test`` runs before its tests
+  ## (HL-10): for content certified that way this hook finds nothing to do.
   let parsed = parsePostCommitArgs(args)
   let timestamp = isoTimestampNow()
   # The managed hook body cd's to the repo root before dispatching, so an
@@ -50466,11 +52738,10 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
   # the other 56% is the pin-vs-HEAD comparison inside
   # `refreshFlakeLockAtCommit`, which is what keeps a develop-set resolution
   # off the commit path.
-  let hasFlake = fileExists(repoRoot / "flake.nix") and
-    fileExists(repoRoot / "flake.lock")
+  let hasFlake = commitTimeHasFlakeLock(repoRoot)
   # §13.3 — a committed `repro.lock` is the other in-tree lock this hook
   # maintains; its sibling pins are re-observed below.
-  let hasReproLock = fileExists(repoRoot / CommittedLockFileName)
+  let hasReproLock = commitTimeHasReproLock(repoRoot)
   if not hasFlake and not hasReproLock:
     return 0
 
@@ -50511,64 +52782,12 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
       stderr.writeLine("repro " & standDown.report)
     return 0
 
-  # (2) A pin never moves backward silently. The `repro.lock` re-pin is
-  # PLANNED first (a few local git queries per sibling), the `flake.lock`
-  # refresh runs knowing whether it may write, and only when neither lock
-  # refuses is anything written — so a refused commit leaves the tree and the
-  # index exactly as it found them, and every regression in both locks is
-  # reported in one refusal rather than one per attempt.
+  # (2) The writers, shared with the HL-10 lock-update node.
   let allowance = parsePinRegressionAllowance(getEnv(PinRegressionAllowEnv))
-  var reproPlan: CommittedLockRepinPlan
-  var reproPlanned = false
-  if hasReproLock:
-    try:
-      reproPlan = planCommittedLockRepin(repoRoot, allowance.names)
-      reproPlanned = true
-    except CatchableError as err:
-      appendPreCommitLog(workspaceRoot, timestamp & " repro-lock error: " &
-        err.msg)
-  let reproRefuses = reproPlanned and reproPlan.refused.len > 0
-  var flake: FlakeCommitRefresh
-  if hasFlake:
-    flake = preCommitFlakeLock(workspaceRoot, repoRoot,
-      parsed.toolProvisioning, timestamp, allowance.names,
-      mayWrite = not reproRefuses)
-  let refused = reproRefuses or flake.refused.len > 0
-  if reproPlanned:
-    preCommitReproLock(workspaceRoot, repoRoot, timestamp, reproPlan,
-      apply = not refused)
-
-  var used, examined: seq[string]
-  var allowedRegressions: seq[PinRegression]
-  if reproPlanned:
-    for n in reproPlan.examined: examined.add(n)
-    for r in reproPlan.allowed: allowedRegressions.add(r)
-  for n in flake.examined: examined.add(n)
-  for r in flake.allowed: allowedRegressions.add(r)
-  for r in allowedRegressions: used.add(r.sibling)
-  # A named input that regressed counts as used even when nothing was written
-  # for it (a refused commit, an unpublished revision): the note is for names
-  # that matched no regression at all.
-  for n in flake.allowanceUsed: used.add(n)
-  if not refused:
-    # The downgrade is visible afterwards, not just permitted.
-    for r in allowedRegressions:
-      let announced = pinRegressionAllowedLine(r)
-      stderr.writeLine("repro pre-commit: " & announced)
-      appendPreCommitLog(workspaceRoot, timestamp &
-        (if r.lock == "flake.lock": " flake-lock " else: " repro-lock ") &
-        announced)
-  for note in pinRegressionAllowanceNotes(allowance, used, examined):
-    stderr.writeLine("repro pre-commit: note: " & note)
-    appendPreCommitLog(workspaceRoot, timestamp &
-      " pin-regression-allowance note: " & note)
-  if not refused:
+  let outcome = applyCommitTimeLockWriters(ctwsPreCommitHook, workspaceRoot,
+    repoRoot, parsed.toolProvisioning, timestamp, allowance)
+  if outcome.refused.len == 0:
     return 0
-
-  var regressions: seq[PinRegression]
-  if reproPlanned:
-    for r in reproPlan.refused: regressions.add(r)
-  for r in flake.refused: regressions.add(r)
   var identity: GitToolIdentity
   try:
     identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
@@ -50576,22 +52795,25 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
     # Both refreshes already resolved git to get this far; were it to vanish
     # now, the refusal still stands and only the upstream name is lost.
     discard
-  for line in renderPinRegressionRefusal(regressions, workspaceRoot,
+  for line in renderPinRegressionRefusal(outcome.refused, workspaceRoot,
       identity):
     stderr.writeLine("repro pre-commit: " & line)
   return 1
 
-proc preCommitFlakeLock(workspaceRoot, repoRoot: string;
+proc preCommitFlakeLock(site: CommitTimeWriterSite;
+    workspaceRoot, repoRoot: string;
     toolProvisioning: ToolProvisioningMode; timestamp: string;
     allowRegression: seq[string]; mayWrite: bool): FlakeCommitRefresh =
+  let label = commitTimeWriterLabel(site)
   try:
     result = refreshFlakeLockAtCommit(workspaceRoot, repoRoot,
-      toolProvisioning, allowRegression, mayWrite)
+      toolProvisioning, allowRegression, mayWrite, label = label)
   except CatchableError as err:
     # Belt and braces: the refresh already downgrades its own failures, and a
     # raise reaching here would still not be a reason to reject the commit.
-    appendPreCommitLog(workspaceRoot,
+    appendCommitTimeWriterLog(site, workspaceRoot,
       timestamp & " flake-lock error: " & err.msg)
+    result.failure = "flake-lock error: " & err.msg
     return
   if result.line.len == 0:
     return
@@ -50601,22 +52823,36 @@ proc preCommitFlakeLock(workspaceRoot, repoRoot: string;
     # (2) STAGE it. Without this the refresh would be a working-tree
     # modification the developer has to notice and commit separately — which
     # is the post-commit behaviour §13.1 rejects, reproduced one hook earlier.
-    let staged = stageRefreshedFlakeLock(repoRoot, result.lockPath)
+    let staged = stageRefreshedFlakeLock(repoRoot, result.lockPath,
+      useHookIndex = site == ctwsPreCommitHook)
     if staged.ok:
-      line.add("; staged into this commit")
-      notePreCommitRepin(workspaceRoot, repoRoot, result.lockPath)
+      case site
+      of ctwsPreCommitHook:
+        line.add("; staged into this commit")
+        notePreCommitRepin(workspaceRoot, repoRoot, result.lockPath)
+      of ctwsLockUpdateNode:
+        stderr.writeLine(label & ": " & result.line)
+        line.add("; staged")
     else:
       # Said out loud on BOTH channels. A refreshed-but-unstaged lock is the
       # one outcome that looks like success in the log and behaves like the
       # defect: the commit goes out naming the old revision while the file on
       # disk names the new one.
       line.add("; NOT STAGED: " & staged.diagnostic)
-      stderr.writeLine("repro pre-commit: flake.lock was refreshed but could " &
-        "NOT be staged, so THIS COMMIT DOES NOT CARRY IT: " &
-        staged.diagnostic)
-      stderr.writeLine("repro pre-commit: remedy: `git add " &
-        result.lockPath & "` and `git commit --amend --no-edit`")
-  appendPreCommitLog(workspaceRoot, line)
+      result.notStaged = staged.diagnostic
+      case site
+      of ctwsPreCommitHook:
+        stderr.writeLine(label & ": flake.lock was refreshed but could " &
+          "NOT be staged, so THIS COMMIT DOES NOT CARRY IT: " &
+          staged.diagnostic)
+        stderr.writeLine(label & ": remedy: `git add " &
+          result.lockPath & "` and `git commit --amend --no-edit`")
+      of ctwsLockUpdateNode:
+        stderr.writeLine(label & ": flake.lock was refreshed but could " &
+          "NOT be staged: " & staged.diagnostic)
+        stderr.writeLine(label & ": remedy: `git add " & result.lockPath &
+          "`, then run the tests again")
+  appendCommitTimeWriterLog(site, workspaceRoot, line)
 
 # ---- M19a: post-merge / post-checkout manifest auto-refresh ---------------
 #
@@ -51296,12 +53532,12 @@ proc deriveCheckActiveBranch(parsed: CheckArgs;
   ##   2. The ``workspaceLocal`` we already loaded (composer-mode
   ##      shortcut that avoids re-reading the file).
   ##   3. The resolver's ``trunk``.
-  try:
-    let recorded = readWorkspaceBranch(parsed.workspaceRoot)
-    if recorded.isSome:
-      return recorded.get()
-  except WorkspaceManifestParseError:
-    discard
+  ##
+  ## A malformed state file raises the strict reader's diagnostic: the gate
+  ## must not guess the branch from a file it could not read.
+  let recorded = readWorkspaceBranch(parsed.workspaceRoot)
+  if recorded.isSome:
+    return recorded.get()
   if workspaceLocal.isSome and
       workspaceLocal.get().workspace.branch.isSome and
       workspaceLocal.get().workspace.branch.get().len > 0:
@@ -56366,37 +58602,28 @@ const
     ## state today and must not be reported as a defect.
 
 proc workspaceDeclaresGatewayOff(workspaceRoot: string): bool =
-  ## §7.4's per-WORKSPACE opt-out: ``push_gateway = "off"`` in
-  ## ``.repro-workspace.toml``.
+  ## §7.4's per-WORKSPACE opt-out: ``push_gateway = "off"`` at the top level of
+  ## the workspace settings file (``repro-workspace.toml``, or the old
+  ## ``.repro-workspace.toml``), read through the typed settings reader — the
+  ## one source of truth for that file, which also refuses any value §7.4
+  ## does not define, naming the file and the key.
   ##
-  ## Read by a line scan rather than through the typed bootstrap reader, and
-  ## the reason is stated so it is not mistaken for laziness: the key has NO
-  ## schema entry yet (PG-11 owns adding one), so a typed read would either
-  ## reject the file or silently drop the field. A scan that skips comments and
-  ## requires the key on the left of ``=`` is narrow enough not to match prose,
-  ## and the failure direction is the safe one — an unrecognised spelling reads
-  ## as "not opted out", which reports MORE than the operator asked for, and
-  ## §7.4 is explicit that an opt-out suppresses wiring and never reporting.
+  ## A settings file that does not parse raises, like every other reader of
+  ## it. Inside ``repro health`` (``toleratingMalformedWorkspaceFiles``) the failure
+  ## is set aside and reported in health's own ``workspace-settings`` row, and
+  ## the workspace reads as NOT opted out — the direction that reports more,
+  ## never less, which is §7.4's rule (an opt-out suppresses wiring, never
+  ## reporting).
   let configPath = findBootstrapConfigPath(workspaceRoot)
   if configPath.len == 0:
     return false
-  var content = ""
   try:
-    content = readFile(configPath)
-  except CatchableError:
+    return readWorkspaceSettings(configPath).push_gateway ==
+      some(pushGatewayOptOutValues[0])
+  except WorkspaceManifestParseError as err:
+    if not setAsideMalformedWorkspaceFile(err, mwkSettings):
+      raise
     return false
-  for rawLine in content.splitLines():
-    let line = rawLine.strip()
-    if line.len == 0 or line.startsWith("#"):
-      continue
-    let eq = line.find('=')
-    if eq <= 0:
-      continue
-    if line[0 ..< eq].strip() != "push_gateway":
-      continue
-    let value = line[(eq + 1) .. ^1].strip().strip(chars = {'"', '\''})
-    return value.toLowerAscii() in ["off", "false", "no", "disabled"]
-  false
 
 proc observeWorkspaceGateways*(workspaceRoot: string; cacheRoot = "";
                                remoteName = "origin"):
@@ -56727,6 +58954,28 @@ proc developSetClosure(repos: seq[ResolvedRepo];
         if dep.len > 0 and dep notin result:
           pending.add(dep)
 
+proc manifestMembershipOf(repoRoot: string): tuple[resolved: bool;
+    workspaceRoot: string; repos: seq[ResolvedRepo]; selfName: string] =
+  ## The enclosing workspace's resolved membership and the name it gives the
+  ## repo at ``repoRoot``: the lookup ``manifestDevelopSiblings`` and the lock
+  ## writer's ``declaredDevelopSet`` share. ``resolved`` is false under the
+  ## same conditions ``manifestDevelopSiblings`` documents (no workspace, a
+  ## workspace that is the repo itself, a membership that fails to resolve or
+  ## does not contain this repo).
+  result = (false, "", @[], "")
+  let root = committedLockPathBase(repoRoot)
+  let ws = enclosingWorkspaceRoot(root)
+  if ws.len == 0 or cmpPaths(absolutePath(ws), root) == 0:
+    return
+  var repos: seq[ResolvedRepo]
+  try:
+    repos = resolveWorkspaceProjectShared(ws, "", "lock refresh").resolved.repos
+  except CatchableError:
+    return
+  for r in repos:
+    if cmpPaths(absolutePath(ws / r.path), root) == 0:
+      return (true, absolutePath(ws), repos, r.name)
+
 proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
     workspaceRoot: string; siblings: seq[ResolvedRepo]] =
   ## The develop-set siblings of the repo at ``repoRoot`` as the enclosing
@@ -56752,46 +59001,22 @@ proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
   ## (see ``committedLockPathBase``) in the membership dimension rather than
   ## the path dimension.
   result = (false, "", @[])
-  let root = committedLockPathBase(repoRoot)
-  let ws = enclosingWorkspaceRoot(root)
-  if ws.len == 0 or cmpPaths(absolutePath(ws), root) == 0:
+  let membership = manifestMembershipOf(repoRoot)
+  if not membership.resolved:
     return
-  var repos: seq[ResolvedRepo]
-  try:
-    repos = resolveWorkspaceProjectShared(ws, "", "lock refresh").resolved.repos
-  except CatchableError:
-    return
-  var selfName = ""
-  for r in repos:
-    if cmpPaths(absolutePath(ws / r.path), root) == 0:
-      selfName = r.name
-      break
-  if selfName.len == 0:
-    return
-  let closure = developSetClosure(repos, selfName)
+  let closure = developSetClosure(membership.repos, membership.selfName)
   var siblings: seq[ResolvedRepo] = @[]
-  for r in repos:
-    if r.name != selfName and r.name in closure:
+  for r in membership.repos:
+    if r.name != membership.selfName and r.name in closure:
       siblings.add(r)
   siblings.sort(proc(a, b: ResolvedRepo): int = cmp(a.name, b.name))
-  result = (true, absolutePath(ws), siblings)
+  result = (true, membership.workspaceRoot, siblings)
 
-proc undeclaredDependsInClosure(repos: seq[ResolvedRepo];
-    pushedRepoName: string): seq[string] =
-  ## Every ``depends`` entry reachable from ``pushedRepoName`` that names no
-  ## repo the workspace declares, in first-seen order and de-duplicated.
-  ##
-  ## Such an edge used to be dropped in silence. The effect was that the gate
-  ## verified a SMALLER set than the manifests declare while still reporting
-  ## success: one typo in a ``depends`` list removed a real dependency from the
-  ## cleanliness / publication / lock stages, and nothing said so. That is the
-  ## same shape as a check that passes having verified nothing, just at the
-  ## granularity of one edge — so the gate refuses on it and names the edge.
-  ##
-  ## The resolver already refuses a fragment that references an undeclared
-  ## remote for exactly this reason ("turning a typo into a silent success is a
-  ## worse failure mode than the transitional convenience is worth"); this is
-  ## the same rule applied to the other cross-reference a fragment can make.
+proc undeclaredDependEdges(repos: seq[ResolvedRepo];
+    pushedRepoName: string): seq[tuple[owner, dep: string]] =
+  ## The edges behind ``undeclaredDependsInClosure``: each ``depends`` entry
+  ## reachable from ``pushedRepoName`` that names no repo in ``repos``, with
+  ## the repo that declares it, in first-seen order and de-duplicated by name.
   if pushedRepoName.len == 0:
     return
   var byName = initHashSet[string]()
@@ -56818,10 +59043,29 @@ proc undeclaredDependsInClosure(repos: seq[ResolvedRepo];
       if dep notin byName:
         if dep notin reported:
           reported.incl(dep)
-          result.add(name & " -> " & dep)
+          result.add((owner: name, dep: dep))
         continue
       if dep notin seen:
         pending.add(dep)
+
+proc undeclaredDependsInClosure(repos: seq[ResolvedRepo];
+    pushedRepoName: string): seq[string] =
+  ## Every ``depends`` entry reachable from ``pushedRepoName`` that names no
+  ## repo the workspace declares, in first-seen order and de-duplicated.
+  ##
+  ## Such an edge used to be dropped in silence. The effect was that the gate
+  ## verified a SMALLER set than the manifests declare while still reporting
+  ## success: one typo in a ``depends`` list removed a real dependency from the
+  ## cleanliness / publication / lock stages, and nothing said so. That is the
+  ## same shape as a check that passes having verified nothing, just at the
+  ## granularity of one edge — so the gate refuses on it and names the edge.
+  ##
+  ## The resolver already refuses a fragment that references an undeclared
+  ## remote for exactly this reason ("turning a typo into a silent success is a
+  ## worse failure mode than the transitional convenience is worth"); this is
+  ## the same rule applied to the other cross-reference a fragment can make.
+  for edge in undeclaredDependEdges(repos, pushedRepoName):
+    result.add(edge.owner & " -> " & edge.dep)
 
 proc repoNameForFragment(identity: GitToolIdentity; membershipRoot, relPath,
     newTip, oldTip: string): string =
@@ -57359,8 +59603,16 @@ proc headPublicationOf*(identity: GitToolIdentity;
   # exactly the shape that produced the false negative. The verdict itself
   # stays scoped exactly as the pre-push gate scopes it — this widens what gets
   # refreshed, never what counts as published.
-  let fetched = gitRunPlain(identity,
-    ["-C", repoAbsPath, "fetch", "--all", "--quiet"])
+  var fetched: tuple[code: int; output: string]
+  withCheckoutVcsLock(repoAbsPath):
+    const MaxPublishFetchLockRetries = 5
+    for attempt in 0 .. MaxPublishFetchLockRetries:
+      fetched = gitRunPlain(identity,
+        ["-C", repoAbsPath, "fetch", "--all", "--quiet"])
+      if fetched.code == 0 or attempt == MaxPublishFetchLockRetries or
+          not isTransientGitLockContention(fetched.output):
+        break
+      sleep(25 * (attempt + 1))
   let second = queryGitState(isPublishedQuery(repoAbsPath, remoteName),
     identity)
   result.scope = second.publishedScope
@@ -59034,7 +61286,11 @@ proc manifestPublicationEnabled(workspaceRoot: string): bool =
   ## writes/refreshes and passes, but must NOT publish to the central manifest
   ## repo. Any read/parse error is treated as "not enabled" (fail closed toward
   ## the safe, non-publishing default) — this gates PUBLICATION only and never
-  ## affects manifest FETCH / refresh / augmentation.
+  ## affects manifest FETCH / refresh / augmentation. It runs only after the
+  ## gate passed, and the gate resolves the workspace through the strict
+  ## settings reader, so a malformed settings file has already refused the
+  ## push before this point; the catch here guards the post-gate publish
+  ## step, which sits outside the gate's error translation.
   # Resolve the config the SAME way ``loadLockingRouting`` resolves the
   # ``[locking]`` table (``findBootstrapConfigPath``: ``REPRO_WORKSPACE_CONFIG``
   # override → ``<workspaceRoot>/repro-workspace.toml`` (or the old
@@ -59419,7 +61675,7 @@ type
 
   PushRepoOutcome = enum
     proPushed              ## had unpublished commits → ``git push`` succeeded.
-    proAlreadyPublished    ## HEAD already on a remote-tracking branch.
+    proAlreadyPublished    ## HEAD already reachable from an advertised branch.
     proSkippedDirty        ## dirty/divergent → STOP (never silently discarded).
     proFailed              ## the ``git push`` itself failed.
 
@@ -59843,6 +62099,33 @@ proc advertisedPushHeads(identity: GitToolIdentity; probeGitDir,
     if result == 0: result = cmp(a.oid, b.oid))
   result.ok = true
 
+proc remoteTrackingContainmentHints(identity: GitToolIdentity; repoRoot,
+    headOid: string): HashSet[string] =
+  ## Branch names that MAY contain ``headOid`` on a remote, read from the
+  ## source checkout's own remote-tracking refs (``refs/remotes/<remote>/<b>``
+  ## containing HEAD). Strictly a hint for which advertised heads are worth
+  ## transferring into the publication probe: nothing is concluded from it,
+  ## every hinted head is re-proven against a fresh advertisement.
+  ##
+  ## Remote names may themselves contain ``/``, so every suffix after a ``/``
+  ## is offered as a candidate branch name. An over-wide hint costs at most one
+  ## probe fetch of a branch that turns out not to contain HEAD; a missing hint
+  ## only falls back to the exact-destination rule. A failed query therefore
+  ## yields no hints rather than an error.
+  result = initHashSet[string]()
+  let contained = gitRunPlainQuery(identity,
+    ["--no-optional-locks", "-C", repoRoot, "for-each-ref",
+     "--format=%(refname)", "--contains=" & headOid, "refs/remotes/"])
+  if contained.code != 0: return
+  const prefix = "refs/remotes/"
+  for raw in contained.output.splitLines():
+    let refName = raw.strip()
+    if not refName.startsWith(prefix): continue
+    let rest = refName[prefix.len .. ^1]
+    for index, ch in rest:
+      if ch == '/' and index + 1 < rest.len:
+        result.incl(rest[index + 1 .. ^1])
+
 proc observeFreshPushPublication(identity: GitToolIdentity; repoRoot,
     remoteName, expectedLocationFingerprint, headOid,
     destinationRef: string):
@@ -59851,14 +62134,44 @@ proc observeFreshPushPublication(identity: GitToolIdentity; repoRoot,
   ## remote-tracking refs. This is used once during global preflight and again
   ## immediately before deciding between a no-op and `git push`.
   ##
+  ## Publication is decided from COMMITS, not from the existence of a branch
+  ## name: where the exact destination branch does not exist at a URL, HEAD
+  ## still counts as published there if another advertised branch contains
+  ## it. This matches the pre-push gate's own publication probe (any remote
+  ## branch containing HEAD). It matters for checkouts parked on a local-only
+  ## branch name, such as a pinned dependency on
+  ## ``reprobuild/pinned/<short-sha>`` at a revision its upstream already
+  ## carries on ``main``: the exact destination ref exists nowhere remotely,
+  ## yet there is nothing to publish. Reading "no remote branch of this name"
+  ## as "unpublished" made push transmit such a member, which stops the
+  ## closure on a read-only third-party upstream and, on a writable one,
+  ## creates a stray branch there.
+  ##
   ## A push remote can have multiple push URLs and Git publishes to each one.
   ## For an attached checkout, classify the exact destination ref that the
-  ## later ``HEAD:<branch>`` transport will update at every URL. A partially
-  ## published set is pushable only when every existing destination tip is an
-  ## ancestor of HEAD; otherwise one URL could advance before a later URL
-  ## rejects the same multi-push. For a detached checkout there is no
-  ## destination ref to update, so only the already-published case is valid:
-  ## HEAD must be reachable from some advertised branch at every URL.
+  ## later ``HEAD:<branch>`` transport would update at every URL. Where that
+  ## ref EXISTS it alone decides: a destination behind HEAD is fast-forwarded
+  ## even if another branch already contains HEAD (the checkout's own remote
+  ## branch must not be left stale), and a divergent one is refused. Only
+  ## where it is MISSING are the advertised branches that the source's
+  ## remote-tracking refs suggest may contain HEAD fetched into the probe and
+  ## checked (see ``remoteTrackingContainmentHints``; fetching every
+  ## advertised branch on every push would make an ordinary push of new work
+  ## transfer the whole remote). If the exact ref contains HEAD, or (where it
+  ## is missing) a hinted branch does, at EVERY URL, HEAD is published and no
+  ## transport happens. Otherwise a partially published set is pushable only
+  ## when every existing destination tip is an ancestor of HEAD; otherwise one
+  ## URL could advance before a later URL rejects the same multi-push. For a detached checkout
+  ## there is no destination ref to update, so only the already-published case
+  ## is valid: HEAD must be reachable from some advertised branch at every URL.
+  ##
+  ## The advertisement fingerprint records every head a decision rested on: the
+  ## exact destination state and, when another branch proved publication, that
+  ## branch's name. Revalidation recomputes the decision from a fresh
+  ## advertisement, so deleting or rewinding the containing branch changes the
+  ## outcome or the fingerprint and is refused; a mere fast-forward of the
+  ## containing branch (which keeps HEAD published) is deliberately not a
+  ## change, so a busy upstream does not fail the push spuriously.
   let format = storageObjectFormat(identity.binaryPath, repoRoot)
   let oidLength =
     case format
@@ -59901,6 +62214,14 @@ proc observeFreshPushPublication(identity: GitToolIdentity; repoRoot,
     return
   writeFile(alternatesDir / "alternates", sourceObjects & "\n")
 
+  # Only an attached checkout consults other branches; a detached one already
+  # considers every advertised branch below.
+  let containmentHints =
+    if destinationRef.len > 0:
+      remoteTrackingContainmentHints(identity, repoRoot, headOid)
+    else:
+      initHashSet[string]()
+
   result.published = true
   result.pushable = true
   var destinationStates: seq[string]
@@ -59912,30 +62233,67 @@ proc observeFreshPushPublication(identity: GitToolIdentity; repoRoot,
         " did not provide a valid branch advertisement"
       return
 
-    var relevantHeads: seq[AdvertisedPushHead]
+    # `ls-remote` gives exact destination OIDs but does not transfer their
+    # objects. Fetch a named advertised head, without FETCH_HEAD or any local
+    # ref update, when ancestry cannot yet be evaluated locally. A head whose
+    # objects cannot be obtained fails closed: its ancestry is unknown.
+    proc ensureProbeHasHead(head: AdvertisedPushHead): bool =
+      let available = gitRunPlainEnv(identity,
+        ["--git-dir=" & probeGitDir, "cat-file", "-e",
+         head.oid & "^{commit}"])
+      if available.code == 0: return true
+      let fetched = gitRunPlainEnv(identity,
+        ["--git-dir=" & probeGitDir, "fetch", "--quiet", "--no-tags",
+         "--no-write-fetch-head", "--", pushLocation, head.refName])
+      fetched.code == 0 and gitRunPlainEnv(identity,
+        ["--git-dir=" & probeGitDir, "cat-file", "-e",
+         head.oid & "^{commit}"]).code == 0
+
+    proc probeIsAncestor(ancestor, descendant: string): bool =
+      gitRunPlainEnv(identity,
+        ["--git-dir=" & probeGitDir, "merge-base", "--is-ancestor",
+         ancestor, descendant]).code == 0
+
+    # Attached: classify against the exact destination, then, only when that
+    # branch is absent at this URL, against hinted other branches. Ancestry is
+    # evaluated on the first advertisement; the race check below proves the
+    # second advertisement identical, so the conclusions hold for it too.
+    var exactTip = ""
+    var headInTip = false
+    var tipInHead = false
+    var containingRef = ""
     if destinationRef.len > 0:
       for head in first.heads:
         if head.refName == destinationRef and
             head.oid != repeat('0', oidLength):
-          relevantHeads.add(head)
+          if not ensureProbeHasHead(head):
+            result.diagnostic = "push destination " & $(index + 1) &
+              " advertised an unverifiable branch tip"
+            return
+          exactTip = head.oid
+          headInTip = probeIsAncestor(headOid, exactTip)
+          tipInHead = probeIsAncestor(exactTip, headOid)
+          break
+      if exactTip.len == 0 and containmentHints.len > 0:
+        const headsPrefix = "refs/heads/"
+        for head in first.heads:
+          if head.refName == destinationRef or
+              head.oid == repeat('0', oidLength) or
+              not head.refName.startsWith(headsPrefix) or
+              head.refName[headsPrefix.len .. ^1] notin containmentHints:
+            continue
+          if not ensureProbeHasHead(head):
+            result.diagnostic = "push destination " & $(index + 1) &
+              " advertised an unverifiable branch tip"
+            return
+          if probeIsAncestor(headOid, head.oid):
+            # Heads are sorted by name, so the first containing branch is a
+            # deterministic choice for the fingerprint.
+            containingRef = head.refName
+            break
     else:
-      relevantHeads = first.heads
-
-    # `ls-remote` gives exact destination OIDs but does not transfer their
-    # objects. Fetch only the relevant named advertised heads, without
-    # FETCH_HEAD or any local ref update, when ancestry cannot yet be
-    # evaluated locally.
-    for head in relevantHeads:
-      let available = gitRunPlainEnv(identity,
-        ["--git-dir=" & probeGitDir, "cat-file", "-e",
-         head.oid & "^{commit}"])
-      if available.code != 0:
-        let fetched = gitRunPlainEnv(identity,
-          ["--git-dir=" & probeGitDir, "fetch", "--quiet", "--no-tags",
-           "--no-write-fetch-head", "--", pushLocation, head.refName])
-        if fetched.code != 0 or gitRunPlainEnv(identity,
-            ["--git-dir=" & probeGitDir, "cat-file", "-e",
-             head.oid & "^{commit}"]).code != 0:
+      for head in first.heads:
+        if not ensureProbeHasHead(head):
           result.diagnostic = "push destination " & $(index + 1) &
             " advertised an unverifiable branch tip"
           return
@@ -59951,27 +62309,15 @@ proc observeFreshPushPublication(identity: GitToolIdentity; repoRoot,
 
     let locationId = remoteLocationDigest(pushLocation)
     if destinationRef.len > 0:
-      var exactTip = ""
-      for advertised in second.heads:
-        if advertised.refName == destinationRef and
-            advertised.oid != repeat('0', oidLength):
-          exactTip = advertised.oid
-          break
-      destinationStates.add(locationId & "\t" & destinationRef & "\t" &
-        (if exactTip.len > 0: exactTip else: "<missing>"))
-      if exactTip.len == 0:
+      var state = locationId & "\t" & destinationRef & "\t" &
+        (if exactTip.len > 0: exactTip else: "<missing>")
+      if containingRef.len > 0:
+        state.add("\tcontained-by\t" & containingRef)
+      destinationStates.add(state)
+      if not headInTip and containingRef.len == 0:
         result.published = false
-      else:
-        let headInTip = gitRunPlainEnv(identity,
-          ["--git-dir=" & probeGitDir, "merge-base", "--is-ancestor",
-           headOid, exactTip]).code == 0
-        let tipInHead = gitRunPlainEnv(identity,
-          ["--git-dir=" & probeGitDir, "merge-base", "--is-ancestor",
-           exactTip, headOid]).code == 0
-        if not headInTip:
-          result.published = false
-        if not tipInHead:
-          result.pushable = false
+      if exactTip.len > 0 and not tipInHead:
+        result.pushable = false
     else:
       var state = locationId
       var reachable = false
@@ -60300,7 +62646,12 @@ proc preflightLockBackendPlan(identity: GitToolIdentity;
     result.diagnostic = hook.diagnostic
     return
   let dirty = gitPorcelainEntries(identity, plan.root)
-  let unexpectedDirty = dirty.filterIt(not plan.pendingFileIsCanonicalLock(it))
+  # Untracked disposable output under ``.repro/build/`` is not backend dirt
+  # here either, for the reason ``publishWorkspaceLock``'s dirty guard gives:
+  # nothing this publication does can stage it.
+  let unexpectedDirty = dirty.filterIt(
+    not plan.pendingFileIsCanonicalLock(it) and
+      not isUntrackedDisposableBuildOutput(it.code, it.path))
   if unexpectedDirty.len > 0:
     result.diagnostic = "lock backend is not clean before source publication: " &
       unexpectedDirty.mapIt(it.code & " " & it.path).join(", ")
@@ -61279,15 +63630,13 @@ proc deriveActiveBranch(workspaceRoot: string;
   ##      default branch, e.g. ``main``). Used when no live repo
   ##      checkout reports a current branch.
   ##   4. Empty string.
-  try:
-    let recorded = readWorkspaceBranch(workspaceRoot)
-    if recorded.isSome:
-      return recorded.get()
-  except WorkspaceManifestParseError:
-    # A malformed workspace.toml: fall back to the M12 heuristic so
-    # ``status`` still produces a useful answer. The dispatcher will
-    # have already surfaced the structured diagnostic if needed.
-    discard
+  ##
+  ## A malformed state file raises the strict reader's diagnostic rather
+  ## than falling back to the heuristic: a guessed branch about a workspace
+  ## whose state could not be read is an answer the operator cannot trust.
+  let recorded = readWorkspaceBranch(workspaceRoot)
+  if recorded.isSome:
+    return recorded.get()
   # Composer-mode workspaces that pre-date M13 and never re-ran init
   # carry their branch directly on the parsed ``WorkspaceLocal`` — the
   # ``readWorkspaceBranch`` path above already covers them, but we
@@ -61626,17 +63975,15 @@ proc resolveWorkspaceListProject(parsed: WorkspaceListArgs):
     return extendWithActiveProjectSet(parsed.workspaceRoot,
       composeWorkspaceLayers(parsed.workspaceRoot, parsed.projectName))
   if parsed.projectName.len == 0:
-    # Allow a metadata-only workspace.toml to supply the project name. Only the
-    # read of workspace.toml is guarded here: if resolving the *named* project
-    # fails (e.g. its manifest references an undeclared remote), that error must
-    # propagate rather than be masked by the "requires a project" message below.
+    # Allow a metadata-only workspace.toml to supply the project name. A
+    # state file that exists but does not parse raises the strict reader's
+    # diagnostic, and so does a failure to resolve the *named* project (e.g.
+    # its manifest references an undeclared remote): neither may be masked by
+    # the "requires a project" message below.
     var recordedProject = ""
     if fileExists(workspaceToml):
-      try:
-        recordedProject =
-          readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-      except WorkspaceManifestParseError:
-        recordedProject = ""
+      recordedProject =
+        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
     if recordedProject.len > 0:
       var withProject = parsed
       withProject.projectName = recordedProject
@@ -61644,10 +63991,8 @@ proc resolveWorkspaceListProject(parsed: WorkspaceListArgs):
       # i.e. the union of the active project set (deduplicated by path).
       return extendWithActiveProjectSet(parsed.workspaceRoot,
         resolveWorkspaceListProject(withProject))
-    raise newException(ValueError,
-      "`repro workspace list` requires either " & stateFileWording & " " &
-        "or a <project> argument; neither was present at " &
-        parsed.workspaceRoot)
+    raise noNameableProjectError(parsed.workspaceRoot,
+      "`repro workspace list`")
   let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
   let projectFile = manifestsRoot / "projects" /
     (parsed.projectName & ".toml")
@@ -61770,6 +64115,9 @@ type
     initialized: bool
     resolved: ResolvedProject
     resolvedOk: bool
+    setAsideFiles: int
+      ## Malformed workspace files ``gatherHealthChecks`` set aside; the rows
+      ## then describe the workspace without them, so ``--fix`` must not act.
     missingSiblings: seq[ResolvedRepo]
     gitIdentity: GitToolIdentity
     gitOk: bool
@@ -62185,7 +64533,7 @@ proc formatFindingList(items: openArray[string]; verbose: bool;
     let elided = items.len - maxShown
     shown.join(", ") & " (+" & $elided & " more)"
 
-proc gatherHealthChecks(parsed: HealthArgs):
+proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     tuple[checks: seq[HealthCheck]; ctx: HealthContext] =
   ## Diagnose every layer once and return the ordered check list plus the
   ## resolved context (so ``--fix`` can act without re-resolving).
@@ -62523,6 +64871,21 @@ proc gatherHealthChecks(parsed: HealthArgs):
         detail: "project '" & ctx.resolved.projectName & "' resolved (" &
           $ctx.resolved.repos.len & " repos)",
         remedy: "", fixKind: hfNone))
+    except NoActiveProjectSetError as err:
+      # Principle 2: ``workspace sync`` -- the generic remedy below -- refuses
+      # on this root with the very error being reported, so it is no remedy.
+      # What is missing is the recorded project set, and ``workspace enable``
+      # is what records it. ``diagnosis`` keeps the detail column free of the
+      # remedy the error's own message carries, which the ``remedy:`` row
+      # states instead.
+      ctx.resolvedOk = false
+      checks.add(HealthCheck(
+        name: "manifest",
+        status: hsFail,
+        detail: "manifest unresolved: " & err.diagnosis,
+        remedy: self & " workspace enable <project>   (records the active " &
+          "project set; `" & self & " workspace projects list` names them)",
+        fixKind: hfNone))
     except CatchableError as err:
       ctx.resolvedOk = false
       checks.add(HealthCheck(
@@ -63241,6 +65604,64 @@ proc gatherHealthChecks(parsed: HealthArgs):
 
   result = (checks: checks, ctx: ctx)
 
+proc gatherHealthChecks(parsed: HealthArgs):
+    tuple[checks: seq[HealthCheck]; ctx: HealthContext] =
+  ## ``gatherHealthChecksOverSettings`` with a malformed settings or state
+  ## file reported as a failing row (``workspace-settings`` /
+  ## ``workspace-state``, naming the file and the key) instead of aborting
+  ## the whole diagnosis. Every other verb refuses such a file; health keeps
+  ## diagnosing the remaining layers as if the file declared / recorded
+  ## nothing (``toleratingMalformedWorkspaceFiles``) and localizes the failure
+  ## here (CLI/health.md), so it is never silent.
+  var setAside: seq[SetAsideWorkspaceFile]
+  toleratingMalformedWorkspaceFiles(setAside):
+    result = gatherHealthChecksOverSettings(parsed)
+  result.ctx.setAsideFiles = setAside.len
+  for failure in setAside:
+    if failure.kind == mwkManifest:
+      # The ``manifest`` row resolves the same closure and already failed
+      # naming the file and the key; add one only if it somehow did not.
+      var reported = false
+      for row in result.checks.mitems:
+        if row.name == "manifest" and row.status == hsFail:
+          reported = true
+          # Say what it cost the rows that sweep the repo set, which would
+          # otherwise read as a clean bill of health over zero repos.
+          const sweptNone = " (so the rows that sweep the workspace's repos " &
+            "— vcs-hooks, push-gateway — swept none)"
+          if sweptNone notin row.detail:
+            row.detail.add(sweptNone)
+      if reported:
+        continue
+    if failure.kind == mwkState:
+      # The ladder behind the manifest row read the set-aside state as
+      # recording nothing and said so ("neither was present"), which is false
+      # about a file that IS present. Say what actually happened.
+      for row in result.checks.mitems:
+        if row.name == "manifest" and row.status == hsFail:
+          row.detail = "manifest unresolved: the workspace state file does " &
+            "not parse, so no project could be read from it (the " &
+            "`workspace-state` row names the file and the key)"
+    let what =
+      case failure.kind
+      of mwkSettings: "settings file does not parse, so its `[[manifest]]` " &
+        "layers were NOT applied to the rows above: "
+      of mwkState: "state file does not parse, so the rows above read the " &
+        "workspace as recording no state: "
+      of mwkManifest: "manifest unresolved, so the rows above that sweep " &
+        "the workspace's repos swept none: "
+    let fix =
+      if failure.keyPath.len > 0: "fix the named key in " & failure.path
+      else: "fix the TOML syntax at the line and column named in " &
+        failure.path
+    result.checks.add(HealthCheck(
+      name: $failure.kind,
+      status: hsFail,
+      detail: what & failure.message,
+      remedy: fix & "; every other `repro` verb refuses this workspace " &
+        "until it parses",
+      fixKind: hfNone))
+
 proc healthHasFailure(checks: seq[HealthCheck]): bool =
   for c in checks:
     if c.status == hsFail:
@@ -63429,7 +65850,13 @@ proc runHealthCommand*(args: openArray[string]): int =
   let parsed = parseHealthArgs(args)
   var (checks, ctx) = gatherHealthChecks(parsed)
 
-  if parsed.fix:
+  if parsed.fix and ctx.setAsideFiles > 0:
+    # The rows were computed with a malformed workspace file set aside, so the
+    # repo set they name may not be this workspace's. Report, do not act.
+    stderr.writeLine("repro health: --fix skipped: a workspace settings, " &
+      "state or manifest file does not parse (see the failing row); fix it " &
+      "first")
+  elif parsed.fix:
     let actions = applyHealthFixes(parsed, checks, ctx)
     # Re-diagnose after fixing so the final report reflects the new state.
     (checks, ctx) = gatherHealthChecks(parsed)
@@ -63775,6 +66202,7 @@ type
     sharedBarePath*: string
     barePresent*: bool
     wired*: bool
+    verdict*: string
     rewired*: bool
     # RA-15 maintenance fields (populated for the ``gc`` verb).
     maintenanceRan*: bool
@@ -63811,6 +66239,7 @@ proc toJsonNode*(report: SharedClonesReport): JsonNode =
     obj["sharedBarePath"] = %entry.sharedBarePath
     obj["barePresent"] = %entry.barePresent
     obj["wired"] = %entry.wired
+    obj["verdict"] = %entry.verdict
     obj["rewired"] = %entry.rewired
     obj["maintenanceRan"] = %entry.maintenanceRan
     obj["looseBefore"] = %entry.looseBefore
@@ -63867,6 +66296,8 @@ proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
       " bare=" & entry.sharedBarePath &
       " present=" & $entry.barePresent &
       " wired=" & $entry.wired
+    if entry.verdict.len > 0:
+      line.add(" verdict=" & entry.verdict)
     if report.verb == "rewire":
       line.add(" rewired=" & $entry.rewired)
     if report.verb == "gc":
@@ -64012,6 +66443,7 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
     entry.sharedBarePath = info.sharedBarePath
     entry.barePresent = info.barePresent
     entry.wired = info.wired
+    entry.verdict = info.verdict
 
     if parsed.verb == "rewire":
       let repoAbs = parsed.workspaceRoot / repo.path
@@ -64909,18 +67341,17 @@ proc resolveBranchProject(parsed: BranchArgs):
   # argument every repo of the active project set participates.
   let membershipFromMetadata = parsed.projectName.len == 0
   if projectName.len == 0 and fileExists(workspaceToml):
-    try:
-      let recorded =
-        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-      if recorded.len > 0:
-        projectName = recorded
-    except WorkspaceManifestParseError:
-      discard
+    # A malformed state file raises the strict reader's diagnostic.
+    let recorded =
+      readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+    if recorded.len > 0:
+      projectName = recorded
   if projectName.len == 0:
-    raise newException(ValueError,
-      "`repro branch <name>` requires either " & stateFileWording & " " &
-        "or a project name recoverable from one; neither was present at " &
-        parsed.workspaceRoot)
+    # Principle 2 -- see ``noNameableProjectError``: the diagnosis plus the
+    # command that records a project set (or, at a bare manifests clone, the
+    # explanation that this command does not apply there).
+    raise noNameableProjectError(parsed.workspaceRoot,
+      "`repro branch <name>`", acceptsProjectArgument = false)
   let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
   let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
@@ -64964,13 +67395,12 @@ proc executeBranchShow(parsed: BranchArgs): BranchReport =
   # ``project`` field. The show form never fails when no project is
   # recoverable; we just leave the field empty.
   let workspaceToml = workspaceTomlPath(parsed.workspaceRoot)
+  # The state file was already read successfully above (a malformed one
+  # returned ``metadata_unreadable``), so this read cannot fail on parsing.
   if fileExists(workspaceToml):
-    try:
-      let local = readWorkspaceLocal(absolutePath(workspaceToml))
-      if local.workspace.project.len > 0:
-        result.project = local.workspace.project
-    except WorkspaceManifestParseError:
-      discard
+    let local = readWorkspaceLocal(absolutePath(workspaceToml))
+    if local.workspace.project.len > 0:
+      result.project = local.workspace.project
   result.exitCode = 0
 
 proc executeBranchCreate(parsed: BranchArgs): BranchReport =
@@ -65753,18 +68183,16 @@ proc resolveSwitchProject(parsed: SwitchArgs):
   # explicit project argument every repo of the active project set switches.
   let membershipFromMetadata = parsed.projectName.len == 0
   if projectName.len == 0 and fileExists(workspaceToml):
-    try:
-      let recorded =
-        readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
-      if recorded.len > 0:
-        projectName = recorded
-    except WorkspaceManifestParseError:
-      discard
+    # A malformed state file raises the strict reader's diagnostic.
+    let recorded =
+      readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
+    if recorded.len > 0:
+      projectName = recorded
   if projectName.len == 0:
-    raise newException(ValueError,
-      "this command requires either " & stateFileWording & " " &
-        "or a project name recoverable from one; neither was present at " &
-        parsed.workspaceRoot)
+    # Principle 2 -- see ``noNameableProjectError`` (and the same raise in
+    # ``resolveBranchProject``).
+    raise noNameableProjectError(parsed.workspaceRoot, "this command",
+      acceptsProjectArgument = false)
   let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
   let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
@@ -68009,15 +70437,12 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     # repo's own ``origin/HEAD``.
     let bootstrapPath = findBootstrapConfigPath(parsed.workspaceRoot)
     if bootstrapPath.len > 0:
-      try:
-        let declared = rootMainline(readWorkspaceSettings(bootstrapPath))
-        if declared.isSome:
-          rootMainlineBranch = declared.get().strip()
-      except CatchableError:
-        # An unreadable bootstrap config is not this command's error to raise;
-        # fall through to ``origin/HEAD`` and, failing that, to the refusal
-        # below, which names the key to set.
-        discard
+      # A settings file that exists but does not parse raises the strict
+      # reader's diagnostic: falling through to ``origin/HEAD`` would cut the
+      # root from a branch other than the one the file declares.
+      let declared = rootMainline(readWorkspaceSettings(bootstrapPath))
+      if declared.isSome:
+        rootMainlineBranch = declared.get().strip()
     if rootMainlineBranch.len == 0:
       let headRef = gitRunPlain(identity,
         ["-C", parsed.workspaceRoot, "symbolic-ref", "--short", "-q",
@@ -68358,6 +70783,41 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     result.exitCode = if anyProbeFailed: 1 else: 2
     return
 
+  # Helper for WV-7 --from-mainlines target repo matching
+  proc matchSourceState(targetRepo: ResolvedRepo;
+                        states: openArray[ForkSourceState];
+                        used: var HashSet[int]): int =
+    for prior in targetRepo.previously:
+      for idx, state in states:
+        if idx in used: continue
+        if (prior.name.len > 0 and state.repo.name == prior.name) or
+            (prior.path.len > 0 and state.repo.path == prior.path) or
+            (prior.fetchUrl.len > 0 and state.repo.fetchUrl.len > 0 and
+             state.repo.fetchUrl == prior.fetchUrl):
+          used.incl(idx)
+          return idx
+    for idx, state in states:
+      if idx in used: continue
+      if state.repo.name == targetRepo.name:
+        used.incl(idx)
+        return idx
+    if targetRepo.fetchUrl.len > 0:
+      for idx, state in states:
+        if idx in used: continue
+        if state.repo.fetchUrl.len > 0 and state.repo.fetchUrl == targetRepo.fetchUrl:
+          used.incl(idx)
+          return idx
+    -1
+
+  type
+    TargetBranchState = object
+      repo: ResolvedRepo
+      srcIdx: int
+      mainlineBranch: string
+      targetTip: string
+      probeFailed: bool
+      probeReason: string
+
   # ---- materialize the new workspace ------------------------------------
   # Resuming (see the destination guard) means the root clone is already there.
   if not resuming and not dirExists(parsed.forkPath / ".git"):
@@ -68366,6 +70826,28 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       result.exitCode = 1
       result.repos.add(BranchRepoEntry(
         outcome: "root_clone_failed", diagnostic: rootClone.diagnostic))
+      return
+
+  if parsed.fromMainlines:
+    var co = gitRunPlain(identity,
+      ["-C", parsed.forkPath, "checkout", "--detach", "--quiet", rootMainlineTip])
+    if co.code != 0:
+      discard gitRunPlain(identity,
+        ["-C", parsed.forkPath, "fetch", "--quiet", "origin"])
+      co = gitRunPlain(identity,
+        ["-C", parsed.forkPath, "checkout", "--detach", "--quiet", rootMainlineTip])
+      if co.code != 0:
+        discard gitRunPlain(identity,
+          ["-C", parsed.forkPath, "fetch", "--quiet", parsed.workspaceRoot])
+        co = gitRunPlain(identity,
+          ["-C", parsed.forkPath, "checkout", "--detach", "--quiet", rootMainlineTip])
+    if co.code != 0:
+      result.exitCode = 1
+      result.repos.add(BranchRepoEntry(
+        name: "<workspace-root>", path: ".",
+        outcome: "root_checkout_failed",
+        diagnostic: "could not check out target workspace root at mainline tip '" &
+          rootMainlineTip & "': " & co.output.strip()))
       return
 
   # Member repos: reuse the M9 materialization pass verbatim — it already
@@ -68399,60 +70881,99 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   # intentionally after init: guessing the remote HEAD here would bypass the
   # manifest/lock checkout rules, and could turn an invalid declaration into a
   # silently different workspace.
+  var targetResolved: ResolvedProject
+  var targetStates: seq[TargetBranchState]
   var targetBaselineProbeFailed = false
-  if not parsed.existingBranch:
-    for idx in 0 ..< states.len:
-      if not states[idx].useDeclaredBaseline:
+
+  if parsed.fromMainlines:
+    try:
+      targetResolved = resolveProjectSet(parsed.forkPath, forkProjects)
+    except CatchableError as err:
+      result.exitCode = 1
+      result.repos.add(BranchRepoEntry(
+        outcome: "project_set_unresolved",
+        diagnostic: "could not resolve target workspace project set: " & err.msg))
+      return
+
+    var usedSource = initHashSet[int]()
+    for targetRepo in targetResolved.repos:
+      var ts: TargetBranchState
+      ts.repo = targetRepo
+      ts.srcIdx = matchSourceState(targetRepo, states, usedSource)
+      ts.mainlineBranch = declaredMainlineBranch(targetResolved, targetRepo.name)
+      let targetPath = parsed.forkPath / targetRepo.path
+      if ts.mainlineBranch.len == 0:
+        ts.probeFailed = true
+        ts.probeReason = "no mainline is declared for '" & targetRepo.path & "': " &
+          "its manifest fragment sets no `branch`, its `revision` is a pin rather than a branch, " &
+          "and the project declares no `trunk`"
+        targetBaselineProbeFailed = true
+        targetStates.add(ts)
         continue
-      let targetPath = parsed.forkPath / states[idx].repo.path
-      if parsed.fromMainlines:
-        # WV-7 — the repo had no source checkout, so its mainline could not be
-        # read in pre-flight; the fresh clone carries the remote-tracking refs
-        # and is the authority now. A mainline that is missing HERE is a
-        # partial-advance failure (exit 1, tree left in place, resumable) rather
-        # than a pre-flight refusal — the clone has already happened, and
-        # claiming "nothing was created" would be a lie.
-        let remoteName = gitRemoteNameFor(states[idx].repo)
-        states[idx].mainlineTip = revParse(identity, targetPath,
-          "refs/remotes/" & remoteName & "/" & states[idx].mainlineBranch)
-        if states[idx].mainlineTip.len == 0:
+      let remoteName = gitRemoteNameFor(targetRepo)
+      if ts.srcIdx >= 0 and states[ts.srcIdx].mainlineBranch == ts.mainlineBranch and
+          states[ts.srcIdx].mainlineTip.len > 0:
+        ts.targetTip = states[ts.srcIdx].mainlineTip
+      else:
+        ts.targetTip = revParse(identity, targetPath,
+          "refs/remotes/" & remoteName & "/" & ts.mainlineBranch)
+      if ts.targetTip.len == 0:
+        ts.probeFailed = true
+        ts.probeReason = "the declared mainline '" &
+          ts.mainlineBranch & "' of '" & targetRepo.path &
+          "' has no `refs/remotes/" & remoteName & "/" &
+          ts.mainlineBranch & "` in the freshly cloned checkout at '" &
+          targetPath & "'"
+        targetBaselineProbeFailed = true
+      targetStates.add(ts)
+  else:
+    if not parsed.existingBranch:
+      for idx in 0 ..< states.len:
+        if not states[idx].useDeclaredBaseline:
+          continue
+        let targetPath = parsed.forkPath / states[idx].repo.path
+        let targetHead = queryGitState(headShaQuery(targetPath), identity)
+        if targetHead.status != gqsOk:
           states[idx].probeFailed = true
-          states[idx].probeReason = "the declared mainline '" &
-            states[idx].mainlineBranch & "' of '" & states[idx].repo.path &
-            "' has no `refs/remotes/" & remoteName & "/" &
-            states[idx].mainlineBranch & "` in the freshly cloned checkout " &
-            "at '" & targetPath & "'"
+          states[idx].probeReason =
+            "target declared-checkout HEAD probe failed: " &
+              targetHead.diagnostic
           targetBaselineProbeFailed = true
         else:
-          states[idx].headSha = states[idx].mainlineTip
-        continue
-      let targetHead = queryGitState(headShaQuery(targetPath), identity)
-      if targetHead.status != gqsOk:
-        states[idx].probeFailed = true
-        states[idx].probeReason =
-          "target declared-checkout HEAD probe failed: " &
-            targetHead.diagnostic
-        targetBaselineProbeFailed = true
-      else:
-        states[idx].headSha = targetHead.headSha
+          states[idx].headSha = targetHead.headSha
 
   if targetBaselineProbeFailed:
-    for state in states:
-      var entry = BranchRepoEntry(
-        name: state.repo.name,
-        path: state.repo.path,
-        headSha: state.headSha,
-        baselineSource: state.baselineSource,
-        mainlineBranch: state.mainlineBranch,
-        publication:
-          (if state.publicationAsked: $state.publication.status else: ""),
-        sourceBranch: state.sourceBranch)
-      if state.probeFailed:
-        entry.outcome = "probe_failed"
-        entry.diagnostic = state.probeReason
-      else:
-        entry.outcome = "ready"
-      result.repos.add(entry)
+    if parsed.fromMainlines:
+      for ts in targetStates:
+        var entry = BranchRepoEntry(
+          name: ts.repo.name,
+          path: ts.repo.path,
+          headSha: ts.targetTip,
+          baselineSource: "mainline_head",
+          mainlineBranch: ts.mainlineBranch)
+        if ts.probeFailed:
+          entry.outcome = "probe_failed"
+          entry.diagnostic = ts.probeReason
+        else:
+          entry.outcome = "ready"
+        result.repos.add(entry)
+    else:
+      for state in states:
+        var entry = BranchRepoEntry(
+          name: state.repo.name,
+          path: state.repo.path,
+          headSha: state.headSha,
+          baselineSource: state.baselineSource,
+          mainlineBranch: state.mainlineBranch,
+          publication:
+            (if state.publicationAsked: $state.publication.status else: ""),
+          sourceBranch: state.sourceBranch)
+        if state.probeFailed:
+          entry.outcome = "probe_failed"
+          entry.diagnostic = state.probeReason
+        else:
+          entry.outcome = "ready"
+        result.repos.add(entry)
     result.exitCode = 1
     return
 
@@ -68511,37 +71032,61 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     actions.add(rootAction)
     actionRepoIndex[rootActionId] = RootEntryIndex
 
-  for idx, state in states:
-    let receiptRel = ".repro" / "workspace" / "receipts" /
-      ("start-fork-" & safeRepoIdSegment(state.repo.name) & "-" & $idx &
-       ".receipt")
-    let actionId = "workspace-start-fork-" &
-      safeRepoIdSegment(state.repo.name) & "-" & $idx
-    var action =
-      if parsed.existingBranch:
-        # The repo was just cloned, so the branch is reachable as a
-        # remote-tracking ref; `git switch <name>` DWIMs the tracking branch
-        # off ``refs/remotes/origin/<name>`` — the same path `repro switch`
-        # relies on for a remote-only branch.
-        gitSwitchAction(actionId, identity,
-          branchName = parsed.branchName,
-          repoPath = state.repo.path,
-          receiptPath = receiptRel)
-      else:
-        let baselineRepoPath =
-          if state.useDeclaredBaseline: parsed.forkPath / state.repo.path
-          else: state.srcPath
-        gitForkBranchAction(actionId, identity,
-          branchName = parsed.branchName,
-          sourceRepoPath = baselineRepoPath,
-          targetSha = state.headSha,
-          repoPath = state.repo.path,
-          receiptPath = receiptRel)
-    action.cwd = parsed.forkPath
-    action.pool = "vcs/fetch"
-    action.poolUnits = 1'u32
-    actions.add(action)
-    actionRepoIndex[actionId] = idx
+  if parsed.fromMainlines:
+    for idx, ts in targetStates:
+      let receiptRel = ".repro" / "workspace" / "receipts" /
+        ("start-fork-" & safeRepoIdSegment(ts.repo.name) & "-" & $idx &
+         ".receipt")
+      let actionId = "workspace-start-fork-" &
+        safeRepoIdSegment(ts.repo.name) & "-" & $idx
+      let baselineRepoPath =
+        if ts.srcIdx >= 0 and states[ts.srcIdx].sourcePresent:
+          states[ts.srcIdx].srcPath
+        else:
+          parsed.forkPath / ts.repo.path
+      var action = gitForkBranchAction(actionId, identity,
+        branchName = parsed.branchName,
+        sourceRepoPath = baselineRepoPath,
+        targetSha = ts.targetTip,
+        repoPath = ts.repo.path,
+        receiptPath = receiptRel)
+      action.cwd = parsed.forkPath
+      action.pool = "vcs/fetch"
+      action.poolUnits = 1'u32
+      actions.add(action)
+      actionRepoIndex[actionId] = idx
+  else:
+    for idx, state in states:
+      let receiptRel = ".repro" / "workspace" / "receipts" /
+        ("start-fork-" & safeRepoIdSegment(state.repo.name) & "-" & $idx &
+         ".receipt")
+      let actionId = "workspace-start-fork-" &
+        safeRepoIdSegment(state.repo.name) & "-" & $idx
+      var action =
+        if parsed.existingBranch:
+          # The repo was just cloned, so the branch is reachable as a
+          # remote-tracking ref; `git switch <name>` DWIMs the tracking branch
+          # off ``refs/remotes/origin/<name>`` — the same path `repro switch`
+          # relies on for a remote-only branch.
+          gitSwitchAction(actionId, identity,
+            branchName = parsed.branchName,
+            repoPath = state.repo.path,
+            receiptPath = receiptRel)
+        else:
+          let baselineRepoPath =
+            if state.useDeclaredBaseline: parsed.forkPath / state.repo.path
+            else: state.srcPath
+          gitForkBranchAction(actionId, identity,
+            branchName = parsed.branchName,
+            sourceRepoPath = baselineRepoPath,
+            targetSha = state.headSha,
+            repoPath = state.repo.path,
+            receiptPath = receiptRel)
+      action.cwd = parsed.forkPath
+      action.pool = "vcs/fetch"
+      action.poolUnits = 1'u32
+      actions.add(action)
+      actionRepoIndex[actionId] = idx
 
   var outcomeById = initTable[string, ActionResult]()
   if actions.len > 0:
@@ -68588,73 +71133,104 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
             (if parsed.fromMainlines: "branched_from_mainline"
              else: "branched")))
       continue
-    let state = states[idx]
-    var entry = BranchRepoEntry(
-      name: state.repo.name,
-      path: state.repo.path,
-      headSha: state.headSha,
-      baselineSource: state.baselineSource,
-      mainlineBranch: state.mainlineBranch,
-      publication:
-        (if state.publicationAsked: $state.publication.status else: ""),
-      sourceBranch: state.sourceBranch)
-    if not ok:
-      inc failures
-      entry.outcome = "fork_failed"
-      entry.diagnostic = "status=" & $outcome.status & " reason=" &
-        outcome.reason & " " & outcome.stderr
+    if parsed.fromMainlines:
+      let ts = targetStates[idx]
+      var entry = BranchRepoEntry(
+        name: ts.repo.name,
+        path: ts.repo.path,
+        headSha: ts.targetTip,
+        baselineSource: "mainline_head",
+        mainlineBranch: ts.mainlineBranch,
+        publication: "",
+        sourceBranch: (if ts.srcIdx >= 0: states[ts.srcIdx].sourceBranch else: ""))
+      if not ok:
+        inc failures
+        entry.outcome = "fork_failed"
+        entry.diagnostic = "status=" & $outcome.status & " reason=" &
+          outcome.reason & " " & outcome.stderr
+      else:
+        entry.outcome = "branched_from_mainline"
+        # ---- optional WIP carry-over ------------------------------------
+        if parsed.includeChanges and ts.srcIdx >= 0 and not states[ts.srcIdx].isClean:
+          let copied = copyWorkingTreeChanges(identity, states[ts.srcIdx].srcPath,
+            parsed.forkPath / ts.repo.path,
+            parsed.forkPath / ".repro" / "workspace",
+            safeRepoIdSegment(ts.repo.name))
+          if not copied.ok:
+            inc failures
+            entry.outcome = "changes_failed"
+            entry.diagnostic = copied.diagnostic
+          elif copied.changed:
+            entry.outcome = "branched_with_changes"
+      result.repos.add(entry)
     else:
-      entry.outcome =
-        if state.baselineSource == "mainline_head":
-          "branched_from_mainline"
-        elif state.baselineSource == "declared_checkout":
-          "branched_from_declared_baseline"
-        else:
-          "branched"
-      # ---- F0.3: attribution for carried unpublished work --------------
-      # The commits are here only because ``--unpublished=carry`` said so, and
-      # the branch they are now on is named after the DESTINATION DIRECTORY.
-      # That is what threw away the meaning last time: six repos arrived on a
-      # branch called `reproos` and nothing recorded that they had been
-      # `migrate-to-self-hosted-runners`, `live`, `codetracer` and so on.
-      #
-      # So re-create the source branch name here, pointing at the same commit.
-      # It is a plain local ref — HEAD stays on the workspace branch — but
-      # `git branch --contains` names it, and pushing it publishes the work
-      # under the name it was written with. Recorded in the report either way.
-      if state.publicationAsked and
-          state.publication.status in {hpsUnpublished, hpsUnknown} and
-          not state.useDeclaredBaseline and
-          state.sourceBranch.len > 0 and
-          state.sourceBranch != parsed.branchName:
-        let targetRepo = parsed.forkPath / state.repo.path
-        let existing = gitRunPlain(identity,
-          ["-C", targetRepo, "rev-parse", "--verify", "--quiet",
-           "refs/heads/" & state.sourceBranch])
-        if existing.code != 0 or existing.output.strip().len == 0:
-          let made = gitRunPlain(identity,
-            ["-C", targetRepo, "branch", state.sourceBranch, state.headSha])
-          if made.code != 0:
-            # Attribution is additive: failing to record the name must not
-            # undo a fork whose commits are already in place. Say so and move
-            # on rather than failing the repo.
-            entry.diagnostic = "carried unpublished work, but could not " &
-              "record the source branch name '" & state.sourceBranch &
-              "': git branch exited " & $made.code & ": " &
-              made.output.strip()
-      # ---- optional WIP carry-over ------------------------------------
-      if parsed.includeChanges and not state.isClean:
-        let copied = copyWorkingTreeChanges(identity, state.srcPath,
-          parsed.forkPath / state.repo.path,
-          parsed.forkPath / ".repro" / "workspace",
-          safeRepoIdSegment(state.repo.name))
-        if not copied.ok:
-          inc failures
-          entry.outcome = "changes_failed"
-          entry.diagnostic = copied.diagnostic
-        elif copied.changed:
-          entry.outcome = "branched_with_changes"
-    result.repos.add(entry)
+      let state = states[idx]
+      var entry = BranchRepoEntry(
+        name: state.repo.name,
+        path: state.repo.path,
+        headSha: state.headSha,
+        baselineSource: state.baselineSource,
+        mainlineBranch: state.mainlineBranch,
+        publication:
+          (if state.publicationAsked: $state.publication.status else: ""),
+        sourceBranch: state.sourceBranch)
+      if not ok:
+        inc failures
+        entry.outcome = "fork_failed"
+        entry.diagnostic = "status=" & $outcome.status & " reason=" &
+          outcome.reason & " " & outcome.stderr
+      else:
+        entry.outcome =
+          if state.baselineSource == "mainline_head":
+            "branched_from_mainline"
+          elif state.baselineSource == "declared_checkout":
+            "branched_from_declared_baseline"
+          else:
+            "branched"
+        # ---- F0.3: attribution for carried unpublished work --------------
+        # The commits are here only because ``--unpublished=carry`` said so, and
+        # the branch they are now on is named after the DESTINATION DIRECTORY.
+        # That is what threw away the meaning last time: six repos arrived on a
+        # branch called `reproos` and nothing recorded that they had been
+        # `migrate-to-self-hosted-runners`, `live`, `codetracer` and so on.
+        #
+        # So re-create the source branch name here, pointing at the same commit.
+        # It is a plain local ref — HEAD stays on the workspace branch — but
+        # `git branch --contains` names it, and pushing it publishes the work
+        # under the name it was written with. Recorded in the report either way.
+        if state.publicationAsked and
+            state.publication.status in {hpsUnpublished, hpsUnknown} and
+            not state.useDeclaredBaseline and
+            state.sourceBranch.len > 0 and
+            state.sourceBranch != parsed.branchName:
+          let targetRepo = parsed.forkPath / state.repo.path
+          let existing = gitRunPlain(identity,
+            ["-C", targetRepo, "rev-parse", "--verify", "--quiet",
+             "refs/heads/" & state.sourceBranch])
+          if existing.code != 0 or existing.output.strip().len == 0:
+            let made = gitRunPlain(identity,
+              ["-C", targetRepo, "branch", state.sourceBranch, state.headSha])
+            if made.code != 0:
+              # Attribution is additive: failing to record the name must not
+              # undo a fork whose commits are already in place. Say so and move
+              # on rather than failing the repo.
+              entry.diagnostic = "carried unpublished work, but could not " &
+                "record the source branch name '" & state.sourceBranch &
+                "': git branch exited " & $made.code & ": " &
+                made.output.strip()
+        # ---- optional WIP carry-over ------------------------------------
+        if parsed.includeChanges and not state.isClean:
+          let copied = copyWorkingTreeChanges(identity, state.srcPath,
+            parsed.forkPath / state.repo.path,
+            parsed.forkPath / ".repro" / "workspace",
+            safeRepoIdSegment(state.repo.name))
+          if not copied.ok:
+            inc failures
+            entry.outcome = "changes_failed"
+            entry.diagnostic = copied.diagnostic
+          elif copied.changed:
+            entry.outcome = "branched_with_changes"
+      result.repos.add(entry)
 
   if failures > 0 or rootFailed:
     result.exitCode = 1
@@ -68799,6 +71375,12 @@ type
       ## ``--ct-incremental-trace-dir=PATH`` — the incremental adapter's
       ## trace dir; when set, the no-op decision consults the canonical
       ## ct-incremental change signal in addition to the commit/lock signal.
+    allowPinRegression: seq[string]
+      ## ``--allow-pin-regression=<sibling>[,<sibling>…]`` — the siblings whose
+      ## pin the lock-update node (HL-10) may move backward, in addition to
+      ## any ``REPRO_ALLOW_PIN_REGRESSION`` names. The same rule the managed
+      ## ``pre-commit`` hook applies, given on the command line because here
+      ## the user does invoke the command.
 
 proc emitShardDiagnostic(msg: string) =
   stderr.writeLine("repro test: error: " & msg)
@@ -70231,6 +72813,17 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
     elif arg == "--ct-incremental-trace-dir" or
         arg.startsWith("--ct-incremental-trace-dir="):
       result.certTraceDir = valueFromFlag(args, i, "--ct-incremental-trace-dir")
+    elif arg == "--allow-pin-regression" or
+        arg.startsWith("--allow-pin-regression="):
+      let named = parsePinRegressionAllowance(
+        valueFromFlag(args, i, "--allow-pin-regression"))
+      if named.rejected.len > 0 or named.names.len == 0:
+        raise newException(ValueError, "--allow-pin-regression names each " &
+          "sibling whose pin may move backward (there is no wildcard): " &
+          "--allow-pin-regression=<sibling>[,<sibling>...]")
+      for name in named.names:
+        if name notin result.allowPinRegression:
+          result.allowPinRegression.add(name)
     elif arg.startsWith("-"):
       raise newException(ValueError, "unsupported repro test flag: " & arg)
     else:
@@ -71461,6 +74054,157 @@ proc collectorSink(collector: ActionOutcomeCollector): BuildActionOutcomeSink =
     for record in batch:
       collector.records[record.id] = record
 
+# ---------------------------------------------------------------------------
+# Unified-Locking-And-Hooks HL-10 — the lock-update node.
+#
+# A plan that contains a certificate-producing node gains one LOCK-UPDATE NODE
+# for the attested repository (§13.3 amended, §13.7.3). It is a real edge of
+# the build graph, a ``bakLockUpdate`` built-in, and every test command of
+# every certificate-producing node the run judges depends on it, so the engine
+# runs it before the first of them. It applies exactly the writers the managed
+# ``pre-commit`` hook applies (``applyCommitTimeLockWriters``: the
+# ``repro.lock`` sibling re-pin and the ``flake.lock`` refresh) to the working
+# tree, under the hook's rules: no solve, write only on change, refuse a pin
+# regression unless ``REPRO_ALLOW_PIN_REGRESSION`` or
+# ``--allow-pin-regression`` names the sibling. It stages exactly what it
+# wrote (``git add -- <lock>``), so a plain ``git commit`` records the tested
+# lock and the hook then finds nothing to do (Test-Certificates D14 (1)).
+#
+# The before-run state that issuance binds (TC-8d) is taken AFTER the node:
+# when the would-write predicate (``planCommitTimeLockWriters``) says the node
+# will rewrite a lock, the preconditions are evaluated by the node itself once
+# it has written; otherwise the content cannot change and they are evaluated
+# before the build, which keeps the incremental no-op. Should the node write
+# anyway (a sibling moved in between), it evaluates them again.
+#
+# A refusal or a failure of the node never fails it as an action: the tests
+# still run and the exit code stays the build's own (Interactive-UX
+# Principle 2). It withholds every certificate of the run instead, and the run
+# ends with the refusal text and "no certificate".
+#
+# A plan without a certificate-producing node, ``--no-certify`` and a run that
+# executes nothing (``--dry-run`` and the listings) never reach here, so they
+# never write a lock: §13.3's "Build-time refresh is rejected" still holds for
+# them.
+# ---------------------------------------------------------------------------
+
+type
+  LockUpdateNodeState = ref object
+    ## Shared between a certifying run and its lock-update node's executor.
+    workspaceRoot, repoRoot: string
+    mode: ToolProvisioningMode
+    allowance: PinRegressionAllowance
+    allowedVia: string
+    ran: bool
+      ## The engine executed the node in this run.
+    standDown: string
+      ## Why the node applied nothing without judging (a git operation in
+      ## flight, no workspace), "" otherwise. Not a refusal: the managed hook
+      ## stands down in the same states, so the commit records the content
+      ## tested.
+    outcome: CommitTimeWritersOutcome
+    afterApply: proc(wrote: bool)
+      ## Called by the node once its writers are done, before any test
+      ## command can start: takes the before-run state issuance binds.
+
+proc lockUpdateNodeId(repoRoot: string): string =
+  ## One node per attested repository, named after it.
+  "repro-lock-update:" & lastPathPart(absolutePath(repoRoot))
+
+proc lockUpdateNodeAction(state: LockUpdateNodeState): BuildAction =
+  ## The node as a graph edge. Never cached: its job is to observe the
+  ## siblings as they are now. No declared output: the files it may rewrite
+  ## are tracked sources, which the engine must neither clean nor restore.
+  builtinAction(bakLockUpdate, lockUpdateNodeId(state.repoRoot),
+    cwd = state.repoRoot, cacheable = false, text = state.repoRoot,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph())
+
+proc lockUpdateNodeRefused(state: LockUpdateNodeState): bool =
+  ## Did the node refuse or fail, so that no certificate may be issued?
+  state.ran and (state.outcome.refused.len > 0 or
+    state.outcome.failures.len > 0 or state.outcome.notStaged.len > 0)
+
+proc runLockUpdateNode(state: LockUpdateNodeState) =
+  ## The node's body. Never raises: a failure is recorded in the outcome.
+  state.ran = true
+  state.standDown = ""
+  state.outcome = CommitTimeWritersOutcome()
+  let label = "repro lock-update"
+  # Observation only, apart from the one `git add` per lock written: a plain
+  # `git status` in a sibling must not rewrite that sibling's index.
+  let savedLocks = suspendOptionalGitLocks()
+  defer: restoreOptionalGitLocks(savedLocks)
+  try:
+    if state.workspaceRoot.len == 0 or
+        not isInitializedWorkspace(state.workspaceRoot):
+      # The hook does nothing outside an initialized workspace either.
+      state.standDown = "no initialized workspace encloses " & state.repoRoot
+      return
+    # The hook stands down inside a rebase / cherry-pick / `am`; so does the
+    # node, so that what it leaves is what that operation's commit records.
+    # Only the in-flight state paths count, never the reflog tail.
+    let standDown = managedHookStandDown("lock-update", state.repoRoot,
+      consultReflog = false)
+    if standDown.standDown:
+      state.standDown = standDown.report
+      stderr.writeLine(label & ": " & standDown.report)
+      appendCommitHookReportLine(state.workspaceRoot,
+        lockUpdateLogPath(state.workspaceRoot), isoTimestampNow() & " " &
+        standDown.report)
+      return
+    state.outcome = applyCommitTimeLockWriters(ctwsLockUpdateNode,
+      state.workspaceRoot, state.repoRoot, state.mode, isoTimestampNow(),
+      state.allowance, state.allowedVia)
+  except CatchableError as err:
+    state.outcome.failures.add("the lock-update node failed: " & err.msg)
+  if state.outcome.refused.len > 0:
+    stderr.writeLine(label & ": REFUSED: " & $state.outcome.refused.len &
+      " pinned sibling revision(s) would move backward; nothing was " &
+      "written. The tests still run; no certificate will be issued " &
+      "(details at the end of the run).")
+  for failure in state.outcome.failures:
+    stderr.writeLine(label & ": " & failure)
+
+proc lockUpdateExecutorFor(state: LockUpdateNodeState): LockUpdateExecutor =
+  ## The engine-side executor of ``state``'s node. It always SUCCEEDS as an
+  ## action, so the test commands that depend on it are never blocked; a
+  ## refusal or failure travels in ``state`` and withholds the certificates.
+  ## ``launched`` is true only when it rewrote a lock, so a dependent re-runs
+  ## its cache lookup against the new bytes rather than taking an
+  ## outputs-present shortcut.
+  result = proc(action: BuildAction): ActionResult {.gcsafe.} =
+    {.cast(gcsafe).}:
+      runLockUpdateNode(state)
+      let wrote = state.outcome.written.len > 0
+      if state.afterApply != nil:
+        state.afterApply(wrote)
+      var res = ActionResult(id: action.id, status: asSucceeded,
+        exitCode: 0, launched: wrote)
+      res.rewrittenSources = state.outcome.written
+      result = res
+
+proc reportLockUpdateRefusal(state: LockUpdateNodeState; rerun: string) =
+  ## The end of a run whose lock-update node refused or failed: the hook's
+  ## refusal text, then "no certificate".
+  if state.outcome.refused.len > 0:
+    var identity: GitToolIdentity
+    try:
+      identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+    except CatchableError:
+      discard
+    for line in renderPinRegressionRefusal(state.outcome.refused,
+        state.workspaceRoot, identity, action = "lock update",
+        rerun = rerun):
+      stderr.writeLine("repro lock-update: " & line)
+  for failure in state.outcome.failures:
+    stderr.writeLine("repro lock-update: failed: " & failure)
+  for unstaged in state.outcome.notStaged:
+    stderr.writeLine("repro lock-update: written but not staged: " & unstaged)
+  stderr.writeLine("repro test: no certificate — the lock-update node " &
+    (if state.outcome.refused.len > 0: "refused" else: "failed") &
+    ", so the tested content does not carry the locks a commit of it " &
+    "would have to record; the tests ran, and the exit code is theirs")
+
 proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
                             publicCliPath: string): int =
   ## TC-8e: ``repro test`` / ``repro certify`` on the build-engine path, with
@@ -71536,19 +74280,49 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
   let workspaceRoot =
     if opts.certWorkspaceRoot.len > 0: absolutePath(opts.certWorkspaceRoot)
     else: enclosingWorkspaceRoot(currentRepo)
+  # HL-10: the lock-update node of this plan, and the would-write predicate
+  # that says whether it will change the content the preconditions bind.
+  var allowance = parsePinRegressionAllowance(getEnv(PinRegressionAllowEnv))
+  for name in opts.allowPinRegression:
+    if name notin allowance.names:
+      allowance.names.add(name)
+  let lockUpdate = LockUpdateNodeState(workspaceRoot: workspaceRoot,
+    repoRoot: currentRepo, mode: mode, allowance: allowance,
+    allowedVia:
+      if opts.allowPinRegression.len > 0: "--allow-pin-regression"
+      else: PinRegressionAllowEnv)
+  var deferPreconditions = false
+  if workspaceRoot.len > 0 and isInitializedWorkspace(workspaceRoot):
+    let wouldWrite = planCommitTimeLockWriters(workspaceRoot, currentRepo,
+      mode, allowance)
+    deferPreconditions = wouldWrite.wouldWrite.len > 0 and
+      wouldWrite.refused.len == 0
   var pre: IssuancePreconditions
-  if workspaceRoot.len == 0:
-    pre = IssuancePreconditions(kind: ipNoWorkspace, offender: currentRepo,
-      remedy: "run inside an initialized reprobuild workspace, or pass " &
-        "--workspace-root=PATH")
-  else:
-    pre = evaluateIssuancePreconditions(workspaceRoot, currentRepo, mode)
+  var preTaken = false
+  proc takePreconditions() =
+    if workspaceRoot.len == 0:
+      pre = IssuancePreconditions(kind: ipNoWorkspace, offender: currentRepo,
+        remedy: "run inside an initialized reprobuild workspace, or pass " &
+          "--workspace-root=PATH")
+    else:
+      pre = evaluateIssuancePreconditions(workspaceRoot, currentRepo, mode)
+    preTaken = true
+  lockUpdate.afterApply = proc(wrote: bool) =
+    # The before-run state is the state AFTER the node (TC-8d "one tested
+    # state"): taken here when the node changed the content, or when it was
+    # deferred because it was going to.
+    if wrote or not preTaken:
+      takePreconditions()
+  if not deferPreconditions:
+    takePreconditions()
 
   # 3. The incremental no-op, per name: a name the local store already
   # certifies for this content on this platform is not issued again. When
-  # every selector is such a name, nothing runs at all.
+  # every selector is such a name, nothing runs at all. When the lock-update
+  # node is about to rewrite a lock, the content is not yet known, so nothing
+  # is covered.
   var covered: seq[string]
-  if pre.kind == ipOk:
+  if preTaken and pre.kind == ipOk:
     let algorithmName = parseContentId(pre.content).algorithmName
     let existing = findCertificatesInLocalStore(stateWithKnownContent(
       [KnownContentId(algorithm: algorithmName, id: pre.content)]))
@@ -71597,6 +74371,24 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
       run.memberDeps[aliases.byAction.getOrDefault(id, id)] = above
     runs.add(run)
 
+  # 4b. HL-10: the lock-update node is an implicit dependency of every test
+  # command of the nodes this run judges, so the engine runs it before the
+  # first of them. Build steps that run no test are left free to start.
+  var testCommands = initHashSet[string]()
+  for run in runs:
+    for id in run.members:
+      testCommands.incl(id)
+  let nodeAction = lockUpdateNodeAction(lockUpdate)
+  let lockUpdateAugmenter: BuildGraphAugmenter =
+    proc(actions: var seq[BuildAction]) =
+      for action in actions:
+        if action.id == nodeAction.id:
+          return
+      for action in actions.mitems:
+        if action.id in testCommands and nodeAction.id notin action.deps:
+          action.deps.add(nodeAction.id)
+      actions.add(nodeAction)
+
   # 5. The build, in-process so its per-action outcome is observable. It
   # keeps the action cache: a reused test result counts when it may be
   # attested (D16, ``reusedResultRefusal``).
@@ -71607,14 +74399,20 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
     for name in names:
       args.add(name)
     let collector = ActionOutcomeCollector()
+    # HL-10: the lock-update node joins the graph, and every test command
+    # of every node this run judges depends on it.
+    registerLockUpdateExecutor(lockUpdateExecutorFor(lockUpdate))
+    defer: clearLockUpdateExecutor()
     result.code = runBuildCommand(args, publicCliPath,
-      actionOutcomeSink = collectorSink(collector))
+      actionOutcomeSink = collectorSink(collector),
+      graphAugmenter = lockUpdateAugmenter)
     result.delivered = collector.delivered
     result.records = collector.records
 
   var outcome = certifyingBuild(@[])
   var verdicts: seq[CertificateNodeVerdict]
-  if pre.kind == ipOk and outcome.delivered:
+  if preTaken and pre.kind == ipOk and outcome.delivered and
+      not lockUpdateNodeRefused(lockUpdate):
     for run in runs:
       verdicts.add(certificateNodeVerdict(run, outcome.records))
     # ``repro certify`` is the remedy for a reused result that cannot be
@@ -71643,7 +74441,27 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
   let code = outcome.code
 
   # 6. Issue for each passing node.
-  if pre.kind != ipOk:
+  if lockUpdateNodeRefused(lockUpdate):
+    var rerun = (if opts.certifyExplicit: "repro certify" else: "repro test")
+    var regressing: seq[string]
+    for r in lockUpdate.outcome.refused:
+      if r.sibling notin regressing:
+        regressing.add(r.sibling)
+    for name in lockUpdate.allowance.names:
+      if name notin regressing:
+        regressing.add(name)
+    rerun.add(" --allow-pin-regression=" &
+      quoteShell(regressing.join(",")))
+    for sel in opts.selectors:
+      rerun.add(" " & quoteShell(sel))
+    reportLockUpdateRefusal(lockUpdate, rerun)
+  elif not preTaken:
+    # Deferred to the node, which never ran: the build stopped before it.
+    stderr.writeLine("repro test: no certificate — the lock-update node " &
+      "did not run" &
+      (if code != 0: " (the build failed before it)" else: "") &
+      ", so the state the tests ran against was never taken")
+  elif pre.kind != ipOk:
     reportRefusedPreconditions(pre)
   elif not outcome.delivered:
     stderr.writeLine("repro test: no certificate — the build reported no " &
@@ -72813,6 +75631,21 @@ const SolverInputsEmitEnvVar = "REPRO_EMIT_SOLVER_INPUTS"
   ## — the env var the compiled provider's ``finalizeVariants()`` honours to
   ## emit the solved inputs.
 
+type UnreachedUsesSelector = object
+  ## A ``uses:`` selector the transitive solver-input walk
+  ## (``foldProviderSolverInputs``) could not resolve to a recipe directory:
+  ## no develop override, no on-disk sibling, no source-catalog recipe. Most
+  ## are plain tools (``cargo``, ``nim``) and are fine to leave unresolved;
+  ## one that names a develop-set sibling means that sibling's recipe — and
+  ## every range it declares — is missing from the solve. See
+  ## ``unreachedDevelopSiblings``.
+  selector: string
+    ## The bare package selector, as ``discoverProducerSourceRoot`` was
+    ## asked for it.
+  owner: string
+    ## The recipe DIRECTORY whose ``uses:`` named it (the project root for a
+    ## direct use, a sibling's directory for a transitive one).
+
 type CompiledProviderSolverInputs = object
   variants: seq[variant_encoder.VariantDecl]
   packages: seq[PackageDecl]
@@ -72825,6 +75658,10 @@ type CompiledProviderSolverInputs = object
     ## The `reprobuild-packages` catalog checkouts the solved tool uses'
     ## definitions were read from (`catalogRootsOfToolUses`). A lock records
     ## each one (Provisioning-Contributions.md, "Locks And Snapshots").
+  unreachedSelectors: seq[UnreachedUsesSelector]
+    ## Every ``uses:`` selector the transitive walk could not reach, with the
+    ## recipe that named it. Filled by ``foldProviderSolverInputs``; the lock
+    ## writer refuses when one names a develop-set sibling.
 
 type DurableSolverProviderArtifacts = object
   interfaceArtifact: ProjectInterfaceArtifact
@@ -73350,6 +76187,11 @@ proc foldProviderSolverInputs(projectDir: string;
   for useDef in aggregate.toolUses:
     pending.add((root, useDef))
   var seenRecipeDirs = @[root]
+  # Which selectors resolved to a recipe from SOME owner. Discovery walks up
+  # from the naming recipe's directory, so the same selector can miss from one
+  # owner and hit from another; only a selector no owner reached is reported.
+  var reachedSelectors: seq[string] = @[]
+  var unreached: seq[UnreachedUsesSelector] = @[]
   var cursor = 0
   while cursor < pending.len:
     let (owner, useDef) = pending[cursor]
@@ -73359,7 +76201,21 @@ proc foldProviderSolverInputs(projectDir: string;
       let outcome = tryResolveFromSourceTool(useDef, recipeRoot)
       recipeDir = sourceProviderRecipeDirForSolverFold(outcome)
     if recipeDir.len == 0:
+      # Not silently: this used to be a bare `continue`, and a develop-set
+      # sibling that was not checked out vanished from the solve with its
+      # ranges, so the lock fell to the floors of the recipes that remained
+      # (reprobuild-pm issue 2026-10-12, "lock refresh grounds a package at
+      # the root floor"). Most selectors land here legitimately — a plain tool
+      # such as `cargo` has no recipe to fold — so the walk only RECORDS the
+      # miss; deciding whether it names a develop-set sibling is the lock
+      # writer's job (`unreachedDevelopSiblings`), which knows the develop set.
+      let miss = UnreachedUsesSelector(selector: useDef.packageSelector,
+        owner: owner)
+      if miss notin unreached:
+        unreached.add(miss)
       continue
+    if useDef.packageSelector notin reachedSelectors:
+      reachedSelectors.add(useDef.packageSelector)
     recipeDir = absolutePath(recipeDir)
     if recipeDir in seenRecipeDirs:
       continue
@@ -73373,6 +76229,10 @@ proc foldProviderSolverInputs(projectDir: string;
       pending.add((recipeDir, transitiveUse))
     aggregate.mergeProviderSolverInputs(producerInputs)
   aggregate.sourceRecipeRoots = seenRecipeDirs[1 .. ^1]
+  aggregate.unreachedSelectors = @[]
+  for miss in unreached:
+    if miss.selector notin reachedSelectors:
+      aggregate.unreachedSelectors.add(miss)
   aggregate.catalogRoots = catalogRootsOfToolUses(aggregate.toolUses)
   aggregate.text = solver_variants.renderSolverInputsFixture(
     aggregate.variants, aggregate.packages)
@@ -73385,11 +76245,16 @@ proc unreadableRecipeLockRefusal(recipe, failure: string): string =
     "uses resolve from; refusing to write one (the committed lock is " &
     "left as it is): " & failure
 
-proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
+type RefreshSolverInputs = tuple[
     found: bool; variants: seq[variant_encoder.VariantDecl];
     packages: seq[PackageDecl]; text: string; source: string;
     usesSelectors: seq[string]; sourceRecipeRoots: seq[string];
-    catalogRoots: seq[string]] =
+    catalogRoots: seq[string]; unreachedSelectors: seq[UnreachedUsesSelector]]
+  ## What ``resolveRefreshSolverInputs`` answers. Named once because
+  ## ``repro lock validate`` declares a variable of it.
+
+proc resolveRefreshSolverInputs(projectDir, inputsOverride: string):
+    RefreshSolverInputs =
   ## MO-12 — resolve the solver inputs for ``lock refresh`` / ``validate``,
   ## PREFERRING the compiled project provider (the real recipe's solve) and
   ## falling back to the ``repro.solver`` sidecar. An explicit ``--inputs``
@@ -73399,6 +76264,10 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
   ## FUP-M — ``usesSelectors`` carries the recipe's declared ``uses:`` producer
   ## selectors (provider path only; the sidecar has none) so ``lock refresh``
   ## folds each sibling PRODUCER edge into the committed lock's ``deps``.
+  ##
+  ## ``unreachedSelectors`` carries every ``uses:`` selector the transitive
+  ## fold could not resolve to a recipe (provider path only), so the lock
+  ## writer can refuse a solve that is missing a develop-set sibling's recipe.
   var probeFailure = ""
   if inputsOverride.len == 0:
     let fromProvider = solverInputsFromCompiledProvider(projectDir,
@@ -73418,16 +76287,18 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
         # records. Spelled exactly as the recipe-without-solve answer below,
         # so the two agree on the inputs digest of an empty solve.
         return (true, @[], @[], "", "recipe-without-solve",
-          p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots)
+          p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots,
+          p.unreachedSelectors)
       return (true, p.variants, p.packages, p.text, "provider",
-        p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots)
+        p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots,
+        p.unreachedSelectors)
   let inputsP =
     if inputsOverride.len > 0: absolutePath(inputsOverride)
     else: solverInputsPath(projectDir)
   if fileExists(extendedPath(inputsP)):
     let loaded = loadSolverInputsFile(inputsP)
     return (true, loaded.variants, loaded.packages, loaded.text, "sidecar",
-      @[], @[], @[])
+      @[], @[], @[], @[])
   # A recipe that declares nothing to solve (a dev-env-only `repro.nim`) still
   # has a develop set, and its committed lock is where that set's revisions
   # are recorded (Unified-Locking-And-Hooks.md §14.2). Its solve is the empty
@@ -73447,19 +76318,25 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
         # to PATH. A recipe this refresh cannot read is a failed refresh.
         raise newException(IOError, unreadableRecipeLockRefusal(
           recipe, probeFailure))
-      return (true, @[], @[], "", "recipe-without-solve", @[], @[], @[])
+      return (true, @[], @[], "", "recipe-without-solve", @[], @[], @[], @[])
   if probeFailure.len > 0:
     stderr.writeLine("repro lock refresh: could not read the tool uses of " &
       "the recipe in " & projectDir & ": " & probeFailure)
-  return (false, @[], @[], "", "", @[], @[], @[])
+  return (false, @[], @[], "", "", @[], @[], @[], @[])
 
 proc buildLockGenerationRequest(projectDir, inputsOverride,
                                 platformOverride: string;
                                 gen: LockVerbOptions;
                                 entryPoint: LockGenerationEntryPoint;
                                 verb: string;
-                                request: var LockGenerationRequest): int =
+                                request: var LockGenerationRequest;
+                                unreached: var seq[UnreachedUsesSelector]):
+                                int =
   ## Assemble the generation request the four CLI doors share.
+  ##
+  ## ``unreached`` receives the ``uses:`` selectors the solver-input fold could
+  ## not resolve to a recipe; each door decides, through
+  ## ``unreachedDevelopSiblings``, whether that makes the solve incomplete.
   ##
   ## MO-12 — the solver inputs come from the COMPILED PROJECT PROVIDER (the
   ## real recipe's solve) when available, falling back to the ``repro.solver``
@@ -73495,7 +76372,159 @@ proc buildLockGenerationRequest(projectDir, inputsOverride,
     extraDeps: lockedDepsForWorkspace(projectDir, resolved.usesSelectors,
       resolved.sourceRecipeRoots, resolved.catalogRoots),
     entryPoint: entryPoint)
+  unreached = resolved.unreachedSelectors
   return 0
+
+const IncompleteSolveExitCode = 5
+  ## ``repro lock refresh`` / ``repro lock solve --write``: the solve could not
+  ## reach a develop-set sibling's recipe, so nothing was written. Distinct
+  ## from 1 (generic failure), 2 (usage / invalid lock), 3 (UNSAT) and 4 (a
+  ## sibling pin would move backward), so a caller can tell "check out the
+  ## sibling" apart from every other refusal.
+
+type UnreachedDevelopSibling = object
+  ## A develop-set sibling whose recipe a ``uses:`` names but the solve did
+  ## not read. The solve is then INCOMPLETE: every range that recipe declares
+  ## is missing, so a lock written from it pins the floors of fewer recipes
+  ## than the next build in a complete workspace checks against.
+  sibling: string     ## the develop-set repo name the selector matched
+  ownerRecipe: string ## the recipe whose ``uses:`` names it
+  expectedAt: string  ## the sibling's checkout path, absolute
+  checkedOut: bool
+    ## False: no checkout at ``expectedAt``. True: a checkout carrying a
+    ## recipe that ``uses:`` discovery did not find (it looks for
+    ## ``<ancestor>/<selector>/repro.nim`` above the naming recipe, or a
+    ## develop override), so the recipe exists and was still not read.
+  siblingRecipe: string ## that recipe's path when ``checkedOut``
+
+proc declaredDevelopSet(projectDir, lockPath: string):
+    seq[tuple[name, checkout: string]] =
+  ## The develop set a lock written for ``projectDir`` is answerable to, as
+  ## (repo name, absolute checkout path) pairs, each name once. It is the
+  ## UNION of every place that set is declared, because each one alone can
+  ## understate it — and an understated set is exactly how a partial solve
+  ## goes unnoticed:
+  ##
+  ##   * The workspace MANIFEST's ``depends`` closure over the resolved
+  ##     membership (``developSetClosure``), at the paths the manifest gives.
+  ##   * Every ``depends`` name in that closure the resolved membership does
+  ##     NOT contain (``undeclaredDependEdges``), at the workspace-sibling path
+  ##     ``<workspace>/<name>``. The membership is the ENABLED projects, not
+  ##     every repo the manifest knows: a workspace that enables a project
+  ##     containing ``codetracer`` but not the one containing ``isonim-tui``
+  ##     resolves no ``isonim-tui`` at all, though ``codetracer`` depends on
+  ##     it. Relying on the resolved closure alone missed precisely the
+  ##     sibling that is not checked out — the case this check exists for.
+  ##   * The committed lock at ``lockPath``: its non-root VCS ``deps``, at the
+  ##     paths it records. Outside a workspace (a standalone clone, CI) it is
+  ##     the only record; inside one it still names siblings a narrower
+  ##     membership cannot see. An unreadable or absent lock adds nothing.
+  ##
+  ## A manifest path wins over a lock path for the same name.
+  proc addMember(members: var seq[tuple[name, checkout: string]];
+                 name, checkout: string) =
+    for member in members:
+      if member.name == name: return
+    members.add((name, os.normalizedPath(absolutePath(checkout))))
+  let membership = manifestMembershipOf(projectDir)
+  if membership.resolved:
+    let closure = developSetClosure(membership.repos, membership.selfName)
+    for r in membership.repos:
+      if r.name != membership.selfName and r.name in closure:
+        result.addMember(r.name, membership.workspaceRoot / r.path)
+    for edge in undeclaredDependEdges(membership.repos, membership.selfName):
+      result.addMember(edge.dep, membership.workspaceRoot / edge.dep)
+  if lockPath.len == 0 or not fileExists(extendedPath(lockPath)): return
+  var existing: seq[LockedDep]
+  try:
+    existing = parseWorkspaceLockedDeps(readFile(extendedPath(lockPath)),
+      lockPath).deps
+  except CatchableError:
+    return
+  let pathBase = committedLockPathBase(absolutePath(projectDir))
+  for d in existing:
+    if d.path == "." or d.path.len == 0 or d.coordinates.kind != ckVcs:
+      continue
+    result.addMember(d.name, pathBase / d.path)
+
+proc unreachedDevelopSiblings(projectDir, lockPath: string;
+    unreached: seq[UnreachedUsesSelector]): seq[UnreachedDevelopSibling] =
+  ## Which of the ``uses:`` selectors the solver-input fold could not reach
+  ## name a develop-set sibling whose recipe is therefore missing from the
+  ## solve.
+  ##
+  ## WHY. A lock written from a solve that never read a sibling's recipe pins
+  ## the floors of a strict SUBSET of the recipes a later build checks it
+  ## against; the build then refuses it (``ELockConflict``), and nothing at
+  ## write time said the solve was partial. That is reprobuild-pm issue
+  ## 2026-10-12 ("lock refresh grounds a package at the root floor"): every
+  ## refresh in a tree missing ``isonim-gpui`` wrote ``cargo = 1.0.0`` and
+  ## every build in a complete tree refused it.
+  ##
+  ## WHAT IS NOT A FINDING, deliberately:
+  ##   * a selector naming no develop-set sibling — a plain tool such as
+  ##     ``cargo`` or ``nim`` has no sibling recipe to miss;
+  ##   * a sibling checked out WITHOUT a recipe — it declares no constraints,
+  ##     so a solve without it loses nothing.
+  ## A sibling that is not checked out, or is checked out with a recipe that
+  ## discovery could not reach, is one: in both cases a recipe that exists is
+  ## absent from the solve.
+  if unreached.len == 0: return
+  let developSet = declaredDevelopSet(projectDir, lockPath)
+  if developSet.len == 0: return
+  var reported: seq[string] = @[]
+  for miss in unreached:
+    if miss.selector in reported: continue
+    var checkout = ""
+    for member in developSet:
+      if member.name == miss.selector:
+        checkout = member.checkout
+        break
+    if checkout.len == 0: continue
+    let ownerRecipe =
+      try:
+        let match = resolveProjectFile(miss.owner).path
+        if match.len > 0: match else: miss.owner
+      except CatchableError: miss.owner
+    var finding = UnreachedDevelopSibling(sibling: miss.selector,
+      ownerRecipe: ownerRecipe, expectedAt: checkout)
+    if dirExists(extendedPath(checkout)):
+      let siblingRecipe =
+        try: resolveProjectFile(checkout).path
+        except CatchableError:
+          # Both `repro.nim` and `reprobuild.nim`: a recipe exists, it is just
+          # ambiguous. It is still a recipe the solve did not read.
+          checkout / CanonicalProjectFileName
+      if siblingRecipe.len == 0:
+        continue  # a checkout without a recipe declares no constraints
+      finding.checkedOut = true
+      finding.siblingRecipe = siblingRecipe
+    reported.add(miss.selector)
+    result.add(finding)
+
+proc renderUnreachedDevelopSibling(f: UnreachedDevelopSibling): string =
+  ## One finding, as a self-contained sentence: the sibling, the recipe whose
+  ## `uses:` names it, where it was expected, why that matters, and the
+  ## remedy. The same text is a refusal for a writing door and a warning for
+  ## a non-writing one.
+  let consequence = "its recipe's constraints would be missing from the " &
+    "solve, so the lock would pin versions the next build in a complete " &
+    "workspace refuses"
+  if not f.checkedOut:
+    "develop-set sibling '" & f.sibling & "' is not checked out at " &
+      f.expectedAt & ", but " & f.ownerRecipe & " declares `uses: \"" &
+      f.sibling & "\"`; " & consequence & ". Check it out (`repro sync`, " &
+      "or `repro ws enable` the project that declares it) and run the " &
+      "command again"
+  else:
+    "develop-set sibling '" & f.sibling & "' is checked out at " &
+      f.expectedAt & " with a recipe (" & f.siblingRecipe & "), but the " &
+      "`uses: \"" & f.sibling & "\"` in " & f.ownerRecipe & " could not " &
+      "reach it (discovery looks for `<ancestor>/" & f.sibling &
+      "/repro.nim` above that recipe, or a develop override); " &
+      consequence & ". Check it out where the workspace declares it " &
+      "(`repro sync`, or `repro ws enable` the project that declares it) " &
+      "and run the command again"
 
 type
   RefreshPinGate = object
@@ -73642,10 +76671,30 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
     if lockOverride.len > 0: absolutePath(lockOverride)
     else: committedLockPath(projectDir)
   var request: LockGenerationRequest
+  var unreached: seq[UnreachedUsesSelector]
   let prc = buildLockGenerationRequest(projectDir, inputsOverride,
-    platformOverride, gen, entryPoint, verb, request)
+    platformOverride, gen, entryPoint, verb, request, unreached)
   if prc != 0: return prc
   let writeTo = if writeByDefault or gen.write: lockP else: ""
+  # A solve that could not read a develop-set sibling's recipe is a PARTIAL
+  # solve: a lock written from it is one the next build in a complete
+  # workspace refuses. A writing door refuses before anything is written (and
+  # before the pin gate, whose remedies would be moot); a non-writing one says
+  # the same thing as a warning, since its answer is still worth seeing.
+  let incomplete = unreachedDevelopSiblings(projectDir, lockP, unreached)
+  if incomplete.len > 0:
+    if writeTo.len > 0:
+      for f in incomplete:
+        stderr.writeLine("repro lock " & verb & ": " &
+          renderUnreachedDevelopSibling(f))
+      stderr.writeLine("repro lock " & verb & ": refusing to write a lock " &
+        "from a solve that could not read " & $incomplete.len &
+        " develop-set sibling recipe(s); the committed lock " & writeTo &
+        " is left as it is")
+      return IncompleteSolveExitCode
+    for f in incomplete:
+      stderr.writeLine("repro lock " & verb & ": warning: " &
+        renderUnreachedDevelopSibling(f))
   if entryPoint == lgeLockRefresh and writeTo.len > 0:
     let envAllowance = parsePinRegressionAllowance(
       getEnv(PinRegressionAllowEnv))
@@ -73704,7 +76753,9 @@ proc runReproLockRefresh(rest: openArray[string]): int =
   ## produced; only the lock file is written. Exits 4, writing nothing, when
   ## a sibling pin would move backward or onto another line of history and
   ## ``--allow-pin-regression`` / ``REPRO_ALLOW_PIN_REGRESSION`` does not
-  ## name it.
+  ## name it. Exits 5 (``IncompleteSolveExitCode``), writing nothing, when a
+  ## ``uses:`` names a develop-set sibling whose recipe the solve could not
+  ## read (``unreachedDevelopSiblings``).
   runLockGenerationVerb(rest, "refresh", lgeLockRefresh,
     writeByDefault = true)
 
@@ -73726,9 +76777,16 @@ proc applyStrategyHiddenLock(projectDir: string; strategy: LockStrategy;
   ## nothing is the shape this campaign keeps finding."
   var gen = LockVerbOptions(strategy: strategy, registries: @[], write: false)
   var request: LockGenerationRequest
+  var unreached: seq[UnreachedUsesSelector]
   let prc = buildLockGenerationRequest(projectDir, "", "", gen,
-    lgeStrategyHiddenLock, "build --strategy", request)
+    lgeStrategyHiddenLock, "build --strategy", request, unreached)
   if prc != 0: return prc
+  # The hidden lock is never committed, so an incomplete solve is a warning
+  # here rather than a refusal — but it is said: a build pinned from a solve
+  # missing a sibling's ranges may resolve versions that sibling forbids.
+  for f in unreachedDevelopSiblings(projectDir, committedLock, unreached):
+    stderr.writeLine("repro build: --strategy " & $strategy & ": warning: " &
+      renderUnreachedDevelopSibling(f))
   # NLF-M3 — a strategy invocation must SOLVE, not re-affirm. Any pins an
   # enclosing context left in the environment would make the hidden lock a
   # copy of the committed one and the whole experiment vacuous.
@@ -73878,11 +76936,7 @@ proc runReproLockValidate(rest: openArray[string]): int =
   # preferred, sidecar fallback) so a provider-sourced lock validates against
   # the provider's solve rather than mis-comparing it to a stale sidecar.
   block staleCheck:
-    var resolved: tuple[found: bool;
-      variants: seq[variant_encoder.VariantDecl];
-      packages: seq[PackageDecl]; text: string; source: string;
-      usesSelectors: seq[string]; sourceRecipeRoots: seq[string];
-      catalogRoots: seq[string]]
+    var resolved: RefreshSolverInputs
     try:
       resolved = resolveRefreshSolverInputs(projectDir, inputsOverride)
     except CatchableError as e:
@@ -74612,6 +77666,14 @@ proc runPromptCommand*(args: openArray[string]): int =
   ## computing them reads and decodes the settings files — neither fits a
   ## segment that must be silent when it has nothing to show and do only cheap
   ## reads (CLI/prompt.md). The verbs the operator actually runs report them.
+  ##
+  ## Malformed files follow the same rule. The prompt never reads the settings
+  ## files, and a state file that does not parse only costs it the branch
+  ## field (``readPromptState``): the segment degrades to ``[ws]``, exit 0,
+  ## nothing on stderr. Every workspace-resolving verb refuses such a file
+  ## loudly, naming it and the key; the prompt is the one place that must not,
+  ## because it runs on every shell render (CLI/prompt.md: "each read is
+  ## defensive").
   let parsed = parsePromptArgs(args)
   withoutWorkspaceNotices:
     let root =
@@ -75073,31 +78135,23 @@ proc readDefaultTemplateFromHostConfig(workspaceRoot: string): string =
   ## in the binary, so an absent config or an absent key means "no default" and
   ## the empty stub is what gets written.
   ##
-  ## Best-effort in the same sense `[projects] default` is: an unreadable
-  ## config yields "" rather than failing the `add`. That is the safe
-  ## direction here — no template is the pre-template behaviour, whereas
-  ## refusing would make an unrelated config typo block authoring entirely.
+  ## A settings file that exists but does not parse raises the strict
+  ## reader's diagnostic: silently writing the empty stub would hide that the
+  ## declared template was not applied.
   let configPath = findBootstrapConfigPath(workspaceRoot)
   if configPath.len == 0:
     return ""
-  try:
-    let cfg = readWorkspaceSettings(configPath)
-    return cfg.projects.default_template.get("")
-  except CatchableError:
-    return ""
+  readWorkspaceSettings(configPath).projects.default_template.get("")
 
 proc readDefaultProjectsFromHostConfig(workspaceRoot: string): seq[string] =
   ## RA-8 fallback source for ``enable --default``: the host bootstrap
-  ## config's ``[projects] default`` set. Best-effort — a missing/malformed
-  ## config yields an empty set (the env var is the primary source).
+  ## config's ``[projects] default`` set. A missing config yields an empty
+  ## set (the env var is the primary source); one that exists but does not
+  ## parse raises the strict reader's diagnostic.
   let configPath = findBootstrapConfigPath(workspaceRoot)
   if configPath.len == 0:
     return @[]
-  try:
-    let cfg = readWorkspaceSettings(configPath)
-    return cfg.projects.default
-  except CatchableError:
-    return @[]
+  readWorkspaceSettings(configPath).projects.default
 
 # ---- WV-2: `repro workspace enable` / `disable` -----------------------------
 #
@@ -75222,6 +78276,16 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
     elif arg.startsWith("-"):
       stderr.writeLine("repro workspace enable: unknown flag " & arg)
       return 2
+
+  # A state or settings file that exists but does not parse is refused here,
+  # before anything is recorded: the resolution step below tolerates an
+  # unreachable manifest (and records membership anyway), and it must not
+  # tolerate a file the operator wrote and the strict reader rejected.
+  try:
+    checkWorkspaceSettingsAndState(workspaceRoot)
+  except WorkspaceManifestParseError as err:
+    stderr.writeLine("repro workspace enable: error: " & err.msg)
+    return 1
 
   var toAdd: seq[string]
   if useDefault:
@@ -76724,13 +79788,106 @@ proc flakeDeclaredInputsAt(flakeRoot: string):
     return
   result.ok = true
 
+type FlakeInputOriginal = object
+  original: JsonNode
+  diagnostic: string
+
+proc flakeInputOriginals(flakeRoot: string;
+    report: var seq[string]): tuple[ok: bool; inputs: Table[string, FlakeInputOriginal]] =
+  ## Input attributes refer to lock nodes by an independent node key. Inspect
+  ## only `original`: `locked` may already describe a substituted local tree.
+  let lockPath = flakeRoot / "flake.lock"
+  result.ok = true
+  if not fileExists(lockPath): return
+  try:
+    let doc = parseJson(readFile(lockPath))
+    if doc.kind != JObject or doc{"nodes"} == nil or doc["nodes"].kind != JObject:
+      raise newException(ValueError, "flake.lock has no nodes object")
+    let nodes = doc["nodes"]
+    if doc.hasKey("root") and doc["root"].kind != JString:
+      raise newException(ValueError, "flake.lock root reference is malformed")
+    let root = doc{"root"}.getStr("root")
+    let rootNode = nodes{root}
+    if rootNode == nil or rootNode.kind != JObject or
+        rootNode{"inputs"} == nil or rootNode["inputs"].kind != JObject:
+      raise newException(ValueError, "flake.lock has no root inputs object")
+    for name, target in rootNode["inputs"].pairs:
+      # A follows path does not own a lock node. Leave it pinned rather than
+      # guessing a sibling from its attribute name.
+      if target.kind != JString:
+        result.inputs[name] = FlakeInputOriginal(diagnostic:
+          if target.kind == JArray: "a follows path has no independent lock node"
+          else: "its root lock reference is malformed")
+        continue
+      let node = nodes{target.getStr()}
+      if node == nil or node.kind != JObject:
+        result.inputs[name] = FlakeInputOriginal(diagnostic: "its lock node is absent or malformed")
+        continue
+      let original = node{"original"}
+      result.inputs[name] =
+        if original == nil or original.kind == JObject:
+          FlakeInputOriginal(original: original)
+        else: FlakeInputOriginal(diagnostic: "its original lock reference is malformed")
+  except CatchableError as err:
+    result.ok = false
+    report.add("could not read original repository coordinates from " &
+      lockPath & " (" & err.msg & "); keeping all inputs on their pins instead of guessing by input name")
+
+proc flakeOriginalRepository(reference: FlakeInputOriginal):
+    tuple[present: bool; identity, diagnostic: string] =
+  ## A hosted fetcher or any coordinate component requires a complete source
+  ## identity. Missing owner/repo fields cannot turn a malformed hosted
+  ## reference into a coordinate-free indirect/path input eligible for name
+  ## fallback.
+  if reference.diagnostic.len > 0:
+    result.present = true
+    result.diagnostic = reference.diagnostic
+    return
+  let original = reference.original
+  if original == nil: return
+  let kindValue = original{"type"}
+  if kindValue != nil and (kindValue.kind != JString or kindValue.getStr().len == 0):
+    result.present = true
+    result.diagnostic = "original repository fetcher type is malformed"
+    return
+  let kind = kindValue.getStr()
+  let defaultHost = case kind
+    of "github": "github.com"
+    of "gitlab": "gitlab.com"
+    of "sourcehut": "git.sr.ht"
+    else: ""
+  result.present = original.hasKey("repo") or original.hasKey("owner") or
+    original.hasKey("host") or defaultHost.len > 0
+  if not result.present: return
+  let owner = original{"owner"}.getStr()
+  let repo = original{"repo"}.getStr()
+  if owner.len == 0 or repo.len == 0:
+    result.diagnostic = "original owner/repo coordinates are incomplete"
+    return
+  if defaultHost.len == 0:
+    result.diagnostic = "original owner/repo coordinates use unsupported fetcher '" & kind & "'"
+    return
+  let hostValue = original{"host"}
+  if hostValue != nil and (hostValue.kind != JString or hostValue.getStr().len == 0):
+    result.diagnostic = "original repository host is malformed"
+    return
+  let host = hostValue.getStr(defaultHost)
+  for c in host:
+    if c in {'/', '\\', '@', '?', '#', ' ', '\t', '\r', '\n'}:
+      result.diagnostic = "original repository host is malformed"
+      return
+  result.identity = canonicalRemoteIdentity("https://" & host & "/" & owner & "/" & repo)
+
 proc flakeBindInputsToCheckouts(inputNames: openArray[string];
     checkoutOf: Table[string, string]; suffixes: openArray[string];
     identity: GitToolIdentity; workspaceRoot: string;
     report: var seq[string]; onlyNames: openArray[string] = [];
-    exceptNames: openArray[string] = []): seq[FlakeOverrideBinding] =
+    exceptNames: openArray[string] = [];
+    flakeRoot: string = ""): seq[FlakeOverrideBinding] =
   ## Bind each declared flake input to the develop-set checkout of the repo its
-  ## (suffix-stripped) name denotes. Every input that is NOT bound and could
+  ## original repository coordinates identify, or its suffix-stripped name
+  ## denotes when no owner/repo coordinates are present. Every input that is
+  ## NOT bound and could
   ## plausibly have been is NAMED in ``report`` rather than dropped, because a
   ## silently skipped override is the shape of §5's inert knob.
   ##
@@ -76791,13 +79948,58 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
   ## still named, with the selection given as one possible reason.
   var unknownToWorkspace: seq[string]
   let wsRoot = if workspaceRoot.len > 0: absolutePath(workspaceRoot) else: ""
+  let originals = flakeInputOriginals(flakeRoot, report)
+  if not originals.ok: return
+  if fileExists(flakeRoot / "flake.lock"):
+    for name in inputNames:
+      if not originals.inputs.hasKey(name):
+        report.add("NOT substituted: flake input '" & name &
+          "' has no root entry in flake.lock; keeping its pin instead of guessing by input name")
+  var candidates: seq[ResolvedRepo]
+  var membershipFailure = ""
+  var needsCoordinates = false
   for name in inputNames:
-    let repo = stripFlakeInputSuffix(name, suffixes)
+    if flakeOriginalRepository(originals.inputs.getOrDefault(name)).present:
+      needsCoordinates = true
+  if needsCoordinates:
+    try:
+      candidates = resolveWorkspaceProjectShared(workspaceRoot, "",
+        "flake repository coordinates").resolved.repos
+    except CatchableError as err:
+      membershipFailure = err.msg
+  for name in inputNames:
+    if fileExists(flakeRoot / "flake.lock") and not originals.inputs.hasKey(name): continue
+    var repo = stripFlakeInputSuffix(name, suffixes)
+    var candidatePath = if wsRoot.len > 0: wsRoot / repo else: ""
+    let coordinate = flakeOriginalRepository(originals.inputs.getOrDefault(name))
+    if coordinate.present:
+      var reason = coordinate.diagnostic
+      var matches: seq[ResolvedRepo]
+      if reason.len == 0 and membershipFailure.len > 0:
+        reason = "workspace repository identities could not be resolved (" & membershipFailure & ")"
+      if reason.len == 0:
+        for candidate in candidates:
+          if candidate.fetchUrl.len > 0 and
+              canonicalRemoteIdentity(candidate.fetchUrl) == coordinate.identity:
+            matches.add(candidate)
+        if matches.len == 0:
+          reason = "no workspace repository matches original coordinates '" & coordinate.identity & "'"
+        elif matches.len > 1:
+          var names: seq[string]
+          for candidate in matches: names.add(candidate.name)
+          names.sort()
+          reason = "original coordinates '" & coordinate.identity & "' match multiple workspace repositories: " & names.join(", ")
+      if reason.len > 0:
+        report.add("NOT substituted: flake input '" & name & "': " & reason &
+          "; it keeps its flake.lock pin (input-name fallback is disabled when original coordinates are present)")
+        continue
+      repo = matches[0].name
+      candidatePath = absolutePath(wsRoot / matches[0].path)
     if repo notin checkoutOf and
         (repo in exceptNames or (onlyNames.len > 0 and repo notin onlyNames)):
       continue
     if repo notin checkoutOf:
-      let sibling = if wsRoot.len > 0: wsRoot / repo else: ""
+      let sibling = candidatePath
       if sibling.len > 0 and dirExists(extendedPath(sibling)):
         report.add("NOT substituted: flake input '" & name & "' names repo '" &
           repo & "', which IS checked out at " & sibling & " but is NOT in " &
@@ -76813,6 +80015,10 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
             else: " NOTE: that checkout has no flake.nix, so a lock record " &
               "alone would not make it substitutable either — nix cannot take " &
               "a non-flake directory as an input."))
+      elif coordinate.present:
+        report.add("NOT substituted: flake input '" & name & "' names repo '" &
+          repo & "', whose original coordinates match the workspace source but whose checkout is absent at " &
+          sibling & "; it keeps its flake.lock pin. Remedy: `repro develop --only=" & repo & "` places it.")
       else:
         unknownToWorkspace.add(name)
       continue
@@ -77988,7 +81194,7 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
   # ---- bind inputs to develop-set checkouts ------------------------------
   let emitted = flakeBindInputsToCheckouts(inputNames, checkoutOf, suffixes,
     identity, selection.workspaceRoot, report, selection.onlyNames,
-    selection.exceptNames)
+    selection.exceptNames, flakeRoot)
 
   # ---- the SAME bindings, compared against the pins (§3.2) ----------------
   let state = flakeOverrideStateReport(flakeRoot, emitted, identity)
@@ -78622,6 +81828,10 @@ type
     diagnostic*: string
     lockPath*: string
     changed*: bool
+    wouldChange*: bool
+      ## ``mayWrite = false`` only: the refresh WOULD have rewritten the lock.
+      ## The would-write predicate of the commit-time writers (HL-10) reads
+      ## it; ``changed`` stays false because nothing was written.
     rewrites*: seq[FlakeLockRewrite]
     notices*: seq[string]
     blockedBy*: seq[string] ## dirty siblings that suppressed the refresh
@@ -78874,8 +82084,19 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
   result.notices = selection.notices
   let bound = flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
     suffixes, identity, selection.workspaceRoot, result.notices,
-    selection.onlyNames, selection.exceptNames)
+    selection.onlyNames, selection.exceptNames, flakeRoot)
   if bound.len == 0:
+    # Unknown lock identity is not proof that no input needs a substitution.
+    # Preserve the refresh's malformed-lock refusal even when binding stopped
+    # before producing a row.
+    var coordinateNotices: seq[string]
+    let originals = flakeInputOriginals(flakeRoot, coordinateNotices)
+    let emptyState = flakeOverrideStateReport(flakeRoot, bound, identity)
+    if not originals.ok or not emptyState.ok:
+      result.tag = "refused-unreadable-lock"
+      result.diagnostic = (coordinateNotices & emptyState.refusals).join("; ")
+      result.exitCode = 2
+      return
     result.tag = "no-overrides"
     result.diagnostic = "no flake input of " & declared.flakePath &
       " is substituted by a workspace checkout, so there is no observed " &
@@ -79097,6 +82318,7 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     var wouldMove: seq[string]
     for r in refreshed.rewrites:
       wouldMove.add(r.input & ": " & r.oldRev & " -> " & r.newRev)
+    result.wouldChange = true
     result.tag = "not-written-commit-refused"
     result.diagnostic = "flake.lock NOT refreshed because the commit is " &
       "refused for a repro.lock pin regression; it would have recorded " &
@@ -79275,10 +82497,18 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
       outcome.diagnostic)
   outcome.exitCode
 
+proc flakeCommitFailure(outcome: FlakeLockRefreshOutcome): string =
+  ## The refresh could not be performed at all: every ``refused-*`` tag but
+  ## the pin regression, which is a decision and travels in ``refused``.
+  if outcome.tag.startsWith("refused-") and
+      outcome.tag != "refused-pin-regression":
+    "flake-lock " & outcome.tag & ": " & outcome.diagnostic
+  else: ""
+
 proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     toolProvisioning: ToolProvisioningMode;
-    allowRegression: seq[string] = @[]; mayWrite = true):
-    FlakeCommitRefresh =
+    allowRegression: seq[string] = @[]; mayWrite = true;
+    label = "repro pre-commit"): FlakeCommitRefresh =
   ## The commit-path entry point, driven by the managed `pre-commit` hook
   ## (§13.1: an in-tree lock is written "as part of forming the revision").
   ## Returns one log line, whether the file was rewritten, and the lock's path
@@ -79328,6 +82558,7 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     if not declared.ok:
       result.line = "flake-lock refused-unreadable-flake: " &
         declared.refusals.join("; ")
+      result.failure = result.line
       return
     result.examined = declared.names
     # Where each candidate repo's checkout would be. The manifest is consulted
@@ -79383,13 +82614,15 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
       let outcome = executeFlakeLockRefresh(flakeRoot, workspaceRoot,
         currentRepo, @["--all"], defaultFlakeInputStripSuffixes,
         toolProvisioning, recordDowngrade = false,
-        label = flakePreCommitLabel, allowRegression = allowRegression,
+        label = label, allowRegression = allowRegression,
         refuseRegressions = true, mayWrite = mayWrite)
       result.line = "flake-lock " & outcome.tag &
         " (the workspace membership at " & workspaceRoot &
         " could not be resolved — " & membershipFailure &
         " — so the fast pre-filter could not locate any sibling checkout and " &
         "handed over): " & outcome.diagnostic
+      result.wouldChange = outcome.wouldChange
+      result.failure = flakeCommitFailure(outcome)
       result.changed = outcome.changed
       result.refused = outcome.refused
       result.allowed = outcome.allowed
@@ -79397,7 +82630,15 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
       return
     let lockText = readFile(lockPath)
     let doc = parseJson(lockText)
-    var candidateMoved = false
+    # The cheap name scan cannot prove an aliased coordinate input unchanged.
+    # Hand coordinate-bearing references to the authoritative shared binder.
+    var coordinateNotices: seq[string]
+    let originals = flakeInputOriginals(flakeRoot, coordinateNotices)
+    var candidateMoved = not originals.ok
+    for name in declared.names:
+      if not originals.inputs.hasKey(name) or
+          flakeOriginalRepository(originals.inputs.getOrDefault(name)).present:
+        candidateMoved = true
     if doc.kind == JObject and doc.hasKey("nodes"):
       let rootKey =
         if doc.hasKey("root") and doc["root"].kind == JString:
@@ -79445,9 +82686,11 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     let outcome = executeFlakeLockRefresh(flakeRoot, workspaceRoot,
       currentRepo, @["--all"], defaultFlakeInputStripSuffixes,
       toolProvisioning, recordDowngrade = false,
-      label = flakePreCommitLabel, allowRegression = allowRegression,
+      label = label, allowRegression = allowRegression,
       refuseRegressions = true, mayWrite = mayWrite)
     result.line = "flake-lock " & outcome.tag & ": " & outcome.diagnostic
+    result.wouldChange = outcome.wouldChange
+    result.failure = flakeCommitFailure(outcome)
     result.changed = outcome.changed
     result.refused = outcome.refused
     result.allowed = outcome.allowed
@@ -79456,6 +82699,7 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     # Best-effort, exactly like every other commit-path action: say what went
     # wrong and let the commit stand.
     result.line = "flake-lock error: " & err.msg
+    result.failure = "flake-lock error: " & err.msg
 
 
 proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
@@ -79577,7 +82821,7 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   for n in selection.notices: skipped.add(n)
   let exact = flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
     defaultFlakeInputStripSuffixes, identity, selection.workspaceRoot, skipped,
-    selection.onlyNames, selection.exceptNames)
+    selection.onlyNames, selection.exceptNames, flakeRoot)
   var state = flakeOverrideStateReport(flakeRoot, exact, identity)
   if not state.ok:
     result.examined = true
@@ -79959,7 +83203,7 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
     for n in selection.notices: notices.add(n)
     bindings = flakeBindInputsToCheckouts(declared.names,
       selection.checkoutOf, suffixes, identity, selection.workspaceRoot,
-      notices, selection.onlyNames, selection.exceptNames)
+      notices, selection.onlyNames, selection.exceptNames, flakeRoot)
 
   var state = flakeOverrideStateReport(flakeRoot, bindings, identity)
   if not state.ok:
@@ -81008,6 +84252,11 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     # i.e. it is part of this workspace's participating set. Computed from the
     # resolved set rather than from the fragment, because a fragment says
     # nothing about who includes it.
+    #
+    # The resolution below tolerates a manifest it cannot reach yet (every repo
+    # then lists as disabled); a state or settings file that exists but does
+    # not parse is not that, and raises the strict reader's diagnostic first.
+    checkWorkspaceSettingsAndState(workspaceRoot)
     var enabledPaths: seq[string]
     if active.len > 0:
       try:
@@ -81031,6 +84280,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     sort(files)
     var arr = newJArray()
     var lines: seq[string]
+    var unreadableFragments = false
     for file in files:
       let fragmentName = file.splitFile.name
       var repoPath = fragmentName
@@ -81044,8 +84294,13 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         # blank column for every converted fragment.
         remote = m.repo.url_prefix.get(m.repo.remote.get(""))
         revision = m.repo.mainlineBranch.get(m.repo.revision.get(""))
-      except CatchableError:
-        discard
+      except CatchableError as err:
+        # Still listed — this listing is the remedy other diagnostics point
+        # at for a fragment the reader refuses (an escaping checkout path) —
+        # but never silently: the reader's diagnostic names the file and the
+        # key, and the listing exits non-zero.
+        stderr.writeLine("repro workspace repos list: error: " & err.msg)
+        unreadableFragments = true
       if scopeSet.len > 0 and repoPath notin scopePaths:
         continue
       let enabled = repoPath in enabledPaths
@@ -81071,7 +84326,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     else:
       for line in lines:
         stdout.writeLine(line)
-    return 0
+    return (if unreadableFragments: 1 else: 0)
 
   let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
   let gitBin = identity.binaryPath

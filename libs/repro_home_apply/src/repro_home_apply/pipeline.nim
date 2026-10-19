@@ -1816,8 +1816,10 @@ proc packageResolutionContext(opts: ApplyOptions; plan: ApplyPlan):
   var names: seq[string] = @[]
   for p in plan.packages:
     names.add(p.packageId)
+  # A profile's `catalogs:` section imports contribution catalogs into the
+  # same projection, as a recipe's `import` does.
   let catalog = projectCatalogPackages(names, opts.profilePath,
-    opts.stateDir / "catalog-projection")
+    opts.stateDir / "catalog-projection", plan.catalogImports)
   profileResolutionContext(plan.adapterPreference,
     opts.targetContext.platform, opts.targetContext.arch,
     targetIsThisHost(opts), lock, opts.relock, catalog)
@@ -1919,6 +1921,54 @@ proc resolveProfileSelections*(rawOpts: ApplyOptions): ProfileSelections =
   result.policySource = ctx.policySource
   result.previews = previewPackageResolutions(applyPlan.packages, ctx)
 
+type
+  PlannedDesiredState* = object
+    ## The desired state of a home, as the planning half of the apply
+    ## computes it: what `repro home apply --plan` previews and what the
+    ## host-facts producer (`host_facts.collectHostFacts`) reports. One
+    ## constructor, `planDesiredState`, so the two can never plan
+    ## differently.
+    options*: ApplyOptions          ## the resolved options
+    profile*: Profile
+    plan*: ApplyPlan                ## packages, and every planned file
+                                    ## (synthetic + stow, after stow
+                                    ## shadowing) in `plan.generatedFiles`
+    stowDiscovery*: StowDiscovery
+    desiredResources*: DesiredSet   ## the composed `resources:` set,
+                                    ## topologically ordered
+
+proc planDesiredState*(rawOpts: ApplyOptions): PlannedDesiredState =
+  ## Steps 2 and 4 of the apply (load intent, build the plan, stow
+  ## discovery and shadowing) plus the composed desired resource set, for
+  ## the host and target platform in `rawOpts`. Performs only reads: no
+  ## store write, no generation, nothing under `homeDir` (stow discovery
+  ## reads the profile's `stow/` tree; target paths are computed, not
+  ## touched). Raises what the apply raises for an intent that cannot be
+  ## planned (`EApplyIntentLoad`, `EHomePlanCyclicDependency`, ...).
+  let opts = resolveOptions(rawOpts)
+  result.options = opts
+  if not fileExists(extendedPath(opts.profilePath)):
+    raiseIntentLoad(opts.profilePath,
+      "no home.nim at expected path (profile-dir: " & opts.profileDir & ")")
+  result.profile = resolveProfileFromOpts(opts)
+  result.plan = buildPlan(result.profile, opts.profileDir, opts.targetContext)
+  var packageIds: seq[string]
+  for p in result.plan.packages:
+    packageIds.add(p.packageId)
+  let synthetic = parseSyntheticPackageGenerates(opts.homeDir, packageIds,
+    result.plan.configContributions)
+  for s in synthetic:
+    result.plan.generatedFiles.add(s)
+  result.stowDiscovery = discoverStowEntries(opts.profileDir, opts.homeDir)
+  if result.stowDiscovery.entries.len > 0:
+    for sp in stowEntriesToPlanned(result.stowDiscovery.entries):
+      result.plan.generatedFiles.add(sp)
+  let suppressed = suppressStowShadowed(result.plan.generatedFiles,
+    result.plan.configContributions)
+  result.plan.generatedFiles = suppressed.files
+  result.desiredResources = composeDesiredResources(result.profile,
+    opts.homeDir, opts.targetContext)
+
 proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   ## M72 Deliverable 2: `repro home apply --plan`. A NON-MUTATING
   ## preview of the FULL apply. Runs the planning half of the pipeline
@@ -1941,30 +1991,16 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   let opts = resolveOptions(rawOpts)
   ensureStateDir(opts.stateDir)
 
-  # ---- Step 2: load intent ----------------------------------------------
-  if not fileExists(extendedPath(opts.profilePath)):
-    raiseIntentLoad(opts.profilePath,
-      "no home.nim at expected path (profile-dir: " & opts.profileDir & ")")
-  let profile = resolveProfileFromOpts(opts)
-
-  # ---- Step 4: build plan + synthetic seams + stow discovery ------------
-  var applyPlan = buildPlan(profile, opts.profileDir, opts.targetContext)
+  # ---- Steps 2 and 4: load intent, build plan + synthetic seams + stow
+  # discovery (`planDesiredState`, shared with the host-facts producer) --
+  let state = planDesiredState(opts)
+  let profile = state.profile
+  let applyPlan = state.plan
+  let stowDiscovery = state.stowDiscovery
+  let stowEntries = stowDiscovery.entries
   var packageIds: seq[string]
   for p in applyPlan.packages:
     packageIds.add(p.packageId)
-  let synthetic = parseSyntheticPackageGenerates(opts.homeDir, packageIds,
-    applyPlan.configContributions)
-  for s in synthetic:
-    applyPlan.generatedFiles.add(s)
-  let stowDiscovery = discoverStowEntries(opts.profileDir, opts.homeDir)
-  let stowEntries = stowDiscovery.entries
-  if stowEntries.len > 0:
-    let stowPlanned = stowEntriesToPlanned(stowEntries)
-    for sp in stowPlanned:
-      applyPlan.generatedFiles.add(sp)
-  let suppressed = suppressStowShadowed(applyPlan.generatedFiles,
-    applyPlan.configContributions)
-  applyPlan.generatedFiles = suppressed.files
 
   # ---- Step 6: derive generation id + no-op detection -------------------
   let intentSnapshot = profileIntentSnapshot(opts.profileDir, profile)
@@ -1973,8 +2009,7 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   # M78: the generation-id resource seed is the composed desired set
   # (profile `resources:` block + `REPRO_TEST_RESOURCES` override),
   # so a change to a profile-declared resource produces a distinct id.
-  let resourcesSeed = resourceSeedString(
-    composeDesiredResources(profile, opts.homeDir, opts.targetContext))
+  let resourcesSeed = resourceSeedString(state.desiredResources)
   # GM4b: resolve every package reference first — the selections are part
   # of the generation id. Resolution is static metadata plus host-inventory
   # READS (PATH, `scoop list`, bucket manifests); nothing is realized and the
@@ -2120,8 +2155,7 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   # ---- Resource preview (reuses the M68 read-only planner) --------------
   # M78: the desired set is the profile's `resources:` block, with
   # `REPRO_TEST_RESOURCES` merged over it as a test-only override.
-  let desiredResources = composeDesiredResources(profile, opts.homeDir,
-    opts.targetContext)
+  let desiredResources = state.desiredResources
   # M69 Phase C follow-up: defence-in-depth layer 1 — the SAME
   # pre-dispatch gate as `runApply`. The `--plan` path composes the
   # plan via `composePlan` -> `observeResource` -> the observe procs
@@ -3004,11 +3038,29 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             # staged copy (trust checks + the store bundle's identity),
             # rename it into place. Replacing an existing bundle is allowed
             # only when this profile placed it (checked above as well).
-            let placed = placeAppBundle(desired.appBundleSource,
-              desired.appBundleTargetDir, desired.appBundleName,
-              desired.appBundleExpectation, desired.appBundleTrust,
-              managedPrior = managesAppBundle(action.address),
-              pinned = desired.appBundleIdentity)
+            # A refusal of the staged copy, or a failed copy or rename, is
+            # an apply failure naming the package, the bundle and the
+            # check; `placeAppBundle` has already removed the staged copy
+            # and left the target as it was.
+            let placed =
+              try:
+                placeAppBundle(desired.appBundleSource,
+                  desired.appBundleTargetDir, desired.appBundleName,
+                  desired.appBundleExpectation, desired.appBundleTrust,
+                  managedPrior = managesAppBundle(action.address),
+                  pinned = desired.appBundleIdentity)
+              except EAppBundleRefused as err:
+                raiseAppBundleFailed(
+                  packageIdOfAppBundleAddress(action.address),
+                  action.address, desired.appBundleName,
+                  desired.appBundleTargetDir / desired.appBundleName,
+                  err.check, err.msg)
+              except EAppBundlePlacement as err:
+                raiseAppBundleFailed(
+                  packageIdOfAppBundleAddress(action.address),
+                  action.address, desired.appBundleName,
+                  desired.appBundleTargetDir / desired.appBundleName,
+                  "placement", err.msg)
             postWriteBytes = appBundleCanonicalBytes(placed)
             payloadKindStr = "app-bundle-identity"
           let rb = toResourceBinding(action.address, desired.kind,

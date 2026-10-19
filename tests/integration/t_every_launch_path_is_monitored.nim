@@ -328,12 +328,13 @@
 ## dependency evidence the engine actually produced, not a call
 ## assertion.
 
-import std/[algorithm, compilesettings, exitprocs, os, osproc, sequtils, sets,
+import std/[algorithm, compilesettings, os, osproc, sequtils, sets,
             streams, strutils, tables, tempfiles, unittest]
 
 import repro_build_engine
 import repro_core
 import repro_test_support
+import repro_test_support/process_fixtures
 
 type
   LaunchPathKind = enum
@@ -1344,8 +1345,6 @@ type DaemonHandle = object
   process: Process
   socket: string
   started: bool
-  previousSocket, previousBypass: string
-  hadSocket, hadBypass: bool
 
 proc startRunQuotaDaemon(repoRoot, endpointRoot: string;
                          cpuMilli: int): DaemonHandle =
@@ -1383,15 +1382,13 @@ proc startRunQuotaDaemon(repoRoot, endpointRoot: string;
   var died = false
   for _ in 0 ..< 400:
     if statExists(socketPath):
-      result = DaemonHandle(process: daemon, socket: socketPath, started: true,
-        previousSocket: getEnv("RUNQUOTA_SOCKET"),
-        previousBypass: getEnv("REPROBUILD_NO_RUNQUOTA"),
-        hadSocket: existsEnv("RUNQUOTA_SOCKET"),
-        hadBypass: existsEnv("REPROBUILD_NO_RUNQUOTA"))
+      result = DaemonHandle(process: daemon, socket: socketPath, started: true)
       putEnv("RUNQUOTA_SOCKET", socketPath)
       # Graph actions inherit bypass to avoid reacquiring the outer leased
       # pool. This fixture has its own authority, so exercise real leases here.
-      # The caller's policy is restored on stop; the engine policy is unchanged.
+      # Only this process's environment changes, and the daemon lives exactly
+      # as long as the process does (see ``ensureFixture``); the engine
+      # policy is unchanged.
       delEnv("REPROBUILD_NO_RUNQUOTA")
       return
     # A REFUSAL EXITS; it does not hang. Noticing that here turns a
@@ -1413,18 +1410,6 @@ proc startRunQuotaDaemon(repoRoot, endpointRoot: string;
     "runquotad did not bind " & socketPath &
     (if died: " (it exited first)" else: " (timed out)") &
     (if output.len > 0: "; it said: " & output else: "; it said nothing"))
-
-proc stop(handle: var DaemonHandle) =
-  if not handle.started: return
-  handle.process.terminate()
-  discard handle.process.waitForExit()
-  handle.process.close()
-  removeFile(handle.socket)
-  if handle.hadSocket: putEnv("RUNQUOTA_SOCKET", handle.previousSocket)
-  else: delEnv("RUNQUOTA_SOCKET")
-  if handle.hadBypass: putEnv("REPROBUILD_NO_RUNQUOTA", handle.previousBypass)
-  else: delEnv("REPROBUILD_NO_RUNQUOTA")
-  handle.started = false
 
 proc configFor(lp: LaunchPath; repoRoot, cacheRoot: string):
     BuildEngineConfig =
@@ -1622,17 +1607,24 @@ proc renderEntropyObservations(observations: seq[EntropyObservation]):
     result.add observation.source & "@" & $observation.origin & "@" &
       observation.image
 
+proc renderEvidencePaths(name: string; paths: seq[string];
+                         subs: seq[(string, string)]): string =
+  ## Darwin records both lexical /tmp paths and canonical /private/tmp
+  ## companions. Compare the set of names after mapping both spellings.
+  var items: seq[string] = @[]
+  for p in paths:
+    var value = p
+    for sub in subs:
+      value = value.replace(sub[0], sub[1])
+    if value notin items:
+      items.add value
+  items.sort()
+  name & "=[" & items.join(" ") & "]"
+
 proc evidenceShape(res: ActionResult;
                    subs: seq[(string, string)]): string =
   proc render(name: string; paths: seq[string]): string =
-    var items: seq[string] = @[]
-    for p in paths:
-      var value = p
-      for sub in subs:
-        value = value.replace(sub[0], sub[1])
-      items.add value
-    items.sort()
-    name & "=[" & items.join(" ") & "]"
+    renderEvidencePaths(name, paths, subs)
 
   let ev = res.evidence
   @[
@@ -1767,13 +1759,19 @@ proc looksLikeSharedObject(path: string): bool =
 proc caseSubstitutions(tempRoot, caseDir, workRoot, marker,
                        outPath: string): seq[(string, string)] =
   ## Longest and most specific first — the absolute forms have to be
-  ## consumed before the directory prefixes they contain.
+  ## consumed before the directory prefixes they contain. Include canonical
+  ## companions for outputs and directories as well as inputs; otherwise a
+  ## recorded /private/tmp write becomes /private<out> instead of <out>.
   result = @[
     (expandFilename(marker), "<marker>"),
     (marker, "<marker>"),
+    (expandFilename(outPath), "<out>"),
     (outPath, "<out>"),
+    (expandFilename(workRoot), "<work>"),
     (workRoot, "<work>"),
+    (expandFilename(caseDir), "<case>"),
     (caseDir, "<case>"),
+    (expandFilename(tempRoot), "<temp>"),
     (tempRoot, "<temp>"),
     (marker.extractFilename, "<marker>"),
     (outPath.extractFilename, "<out>")
@@ -1886,6 +1884,35 @@ template checkMonitoredEvidence(res: ActionResult; markerPath, label: string) =
       "requires monitor evidence but no iomon path is selected")
 
 suite "every_launch_path_is_monitored":
+
+  when defined(linux) or defined(macosx):
+    test "evidence shape folds aliases while retaining distinct and missing writes":
+      let root = createTempDir("repro-evidence-shape-", "", "/tmp")
+      defer: removeDir(root)
+      let actual = root / "actual"
+      let alias = root / "alias"
+      createDir(actual)
+      createSymlink(actual, alias)
+      let caseDir = alias / "case"
+      let workRoot = caseDir / "work"
+      createDir(workRoot)
+      let marker = workRoot / "marker.txt"
+      let output = workRoot / "out.txt"
+      writeFile(marker, "marker")
+      writeFile(output, "output")
+      let subs = caseSubstitutions(root, caseDir, workRoot, marker, output)
+      let shape = renderEvidencePaths("monitorWrites",
+        @[output, expandFilename(output)], subs)
+      check shape == "monitorWrites=[<out>]"
+      # An unrelated output with the same basename is still another write.
+      let extraDir = actual / "elsewhere"
+      createDir(extraDir)
+      let extra = extraDir / "out.txt"
+      writeFile(extra, "extra")
+      let extraShape = renderEvidencePaths("monitorWrites", @[output, extra], subs)
+      check shapeList(extraShape, "monitorWrites").len == 2
+      check extraShape != "monitorWrites=[<out>]"
+      check renderEvidencePaths("monitorWrites", @[], subs) == "monitorWrites=[]"
 
   test "the enumeration matches the engine source":
     ## A list nobody tested is not an enumeration. This re-derives the
@@ -2534,28 +2561,34 @@ suite "every_launch_path_is_monitored":
 
     proc ensureFixture() =
       ## THE FIXTURE COMES UP INSIDE THE CASE THAT NEEDS IT, NOT AT MODULE
-      ## LEVEL. Module-level code also runs for the runner's ``--list-json``
-      ## probe and for every case process, and only the "teardown" case
-      ## stopped a daemon (its own process's), so each probe and each other
-      ## case left a ``runquotad`` and a scratch tree behind for good —
-      ## dozens accumulated on a dev host over a week of runs — and every
-      ## probe compiled the C fixture. Called from a ``test`` body, the exit
-      ## proc is registered after the protocol hook and so runs before that
-      ## hook's ``quit``, which skips anything registered earlier.
+      ## LEVEL, AND GOES AWAY WITH THE PROCESS THAT STARTED IT. Module-level
+      ## code also runs for the runner's ``--list-json`` probe and for every
+      ## case process, and a "teardown" case stopped only its own process's
+      ## daemon, so each probe and each other case left a ``runquotad`` and a
+      ## scratch tree behind for good — dozens accumulated on a dev host over
+      ## a week of runs — and every probe compiled the C fixture.
+      ##
+      ## The release is ``repro_test_support/process_fixtures``, not an
+      ## ``addExitProc`` closure over ``daemon`` and ``tempRoot``: ORC
+      ## destroys those globals when the module's top-level code ends, before
+      ## any exit hook runs, so such a closure reads freed memory. Measured at
+      ## reprobuild 6aa91f75 with that closure in place: one per-case run of
+      ## this file left five ``repro-hm4-launch-paths*`` trees in ``/tmp``.
       if fixtureUp: return
       fixtureUp = true
       tempRoot = createTempDir("repro-hm4-launch-paths", "", "/tmp")
+      releaseDirAtProcessExit(tempRoot)
       let fixtureSource = tempRoot / "fixture.c"
       fixtureBin = tempRoot / "fixture"
       writeFile(fixtureSource, FixtureSource)
       compileFixture(fixtureSource, fixtureBin)
       try:
         daemon = startRunQuotaDaemon(repoRoot, tempRoot, cpuMilli = 1000)
+        # Registered after the directory, so it runs first: the daemon is
+        # stopped before the tree holding its socket is removed.
+        terminateAtProcessExit(daemon.process.processID)
       except CatchableError as err:
         runQuotaError = err.msg
-      addExitProc(proc() =
-        daemon.stop()
-        if tempRoot.len > 0: removeDir(tempRoot))
 
     ## Which enumerated paths this run actually EXECUTED, as opposed to
     ## reported something about. Written by the case bodies below and
@@ -3300,16 +3333,3 @@ suite "every_launch_path_is_monitored":
           "`childEnv` overwrites whatever the engine puts there."
       check countOccurrences(engineSrc,
         "\"--interest\", interestToTokens(") == 1
-
-    test "teardown":
-      ensureFixture()
-      daemon.stop()
-      check existsEnv("RUNQUOTA_SOCKET") == daemon.hadSocket
-      check getEnv("RUNQUOTA_SOCKET") == daemon.previousSocket
-      check existsEnv("REPROBUILD_NO_RUNQUOTA") == daemon.hadBypass
-      check getEnv("REPROBUILD_NO_RUNQUOTA") == daemon.previousBypass
-      removeDir(tempRoot)
-      # ``check true`` could not fail, so a teardown that silently left the
-      # daemon running or the scratch tree on disk still reported [OK].
-      # Assert the post-state the teardown exists to produce.
-      check not dirExists(tempRoot)

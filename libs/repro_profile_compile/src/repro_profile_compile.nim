@@ -27,6 +27,7 @@ import ./repro_profile_compile/helper
 import ./repro_profile_compile/platforms
 import ./repro_profile_compile/adapter_home
 import ./repro_profile_compile/adapter_system
+import ./repro_profile_compile/resource_scope
 import ./repro_profile_compile/data_expansion
 import ./repro_profile_compile/infra_apply_broker
 import ./repro_profile_compile/apply_build_actions
@@ -53,6 +54,7 @@ export compile.ProfileNimCompilerEnvVar
 export compile.resolveProfileNimCompiler
 export compile.resolveProfileCCompiler
 export compile.NimDefaultCCompilerExe
+export compile.profileCompileCFlags
 export compile.requireReprobuildSources
 export compile.profileCompileChildEnv
 export compile.profileCompileArgv
@@ -62,8 +64,10 @@ export compile.rbpiBytesFromJson
 export compile.writeBytesAtomic
 export compile.readBytes
 export compile.rbpiEnvelopeIsValid
-export compile.stageProfileConfig
-export compile.unstageProfileConfig
+export compile.StagedProfilePackageName
+export compile.StagedProfilePackageFile
+export compile.stageProfileFiles
+export compile.unstageProfileFiles
 export compile.startProfileNim
 export compile.finishProfileNim
 # Target platforms and the platform probe (GM3).
@@ -109,6 +113,10 @@ export helper.runProfilePlatformProbeHelper
 export adapter_home.profileIntentToHomeProfile
 export adapter_system.profileIntentToSystemProfile
 export adapter_system.renderSystemProfileToText
+
+# One resource-scope classification for both adapters.
+export resource_scope.ResourceScope
+export resource_scope.resourceScope
 
 # GM4: plan-time expansion of the profile's data files.
 export data_expansion.ExpandedHomeIntent

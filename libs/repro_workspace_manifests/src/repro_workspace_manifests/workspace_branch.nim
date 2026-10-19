@@ -300,7 +300,16 @@ proc withSettingsLayers*(local: WorkspaceLocal;
   let settingsPath = findWorkspaceSettingsPath(workspaceRoot)
   if settingsPath.len == 0:
     return
-  let composed = composeSettingsLayers(readWorkspaceSettings(settingsPath))
+  var settings: WorkspaceSettings
+  try:
+    settings = readWorkspaceSettings(settingsPath)
+  except WorkspaceManifestParseError as err:
+    # Only inside ``toleratingMalformedWorkspaceFiles`` (``repro health``),
+    # which reports what it set aside; everywhere else it propagates.
+    if not setAsideMalformedWorkspaceFile(err, mwkSettings):
+      raise
+    return
+  let composed = composeSettingsLayers(settings)
   result.skipped = composed.skipped
   if composed.layers.len == 0:
     return
@@ -349,6 +358,18 @@ proc effectiveWorkspaceLocal*(workspaceRoot: string;
   reportSkippedSettingsLayers(eff.skipped)
   eff.local
 
+proc checkWorkspaceSettingsAndState*(workspaceRoot: string) =
+  ## Raise the strict reader's ``WorkspaceManifestParseError`` — naming the
+  ## file and the key or line — when the state file or a settings file
+  ## (``repro-workspace.toml`` / ``repro-workspace.local.toml``) governing
+  ## ``workspaceRoot`` EXISTS but does not parse or validate; do nothing when
+  ## each either parses or does not exist. For a verb that must refuse before
+  ## it writes anything, and that would otherwise reach the files only inside
+  ## a step whose other failures it tolerates (``repro workspace enable``
+  ## records membership even while the manifests are not reachable yet).
+  discard withSettingsLayers(readWorkspaceStateOrEmpty(workspaceRoot),
+    workspaceRoot)
+
 proc isCompositionalWorkspaceToml*(workspaceRoot: string;
                                    projectName = ""): bool =
   ## True iff the workspace composes at least one ``[[manifest]]`` layer —
@@ -368,27 +389,35 @@ proc isCompositionalWorkspaceToml*(workspaceRoot: string;
   ##
   ## Callers that answer ``true`` compose through ``effectiveWorkspaceLocal``
   ## / ``composeWorkspaceLayers`` with the same ``projectName``.
+  ##
+  ## A state or settings file that EXISTS but does not parse or validate
+  ## raises the strict reader's ``WorkspaceManifestParseError`` (naming the
+  ## file and the key) instead of answering ``false``. Answering ``false``
+  ## used to route the caller to the single-project ladder, which never reads
+  ## the settings files' layers: a typo in ``repro-workspace.toml`` silently
+  ## dropped every repo a partner layer adds, with exit 0, and a rejected key
+  ## in the state file surfaced as "neither was present" about a file that
+  ## was present (Workspace-Settings-Files.md §4: every genuine layer failure
+  ## is an error). Only a file that does not exist counts as absent.
   let path = workspaceTomlPath(workspaceRoot)
   if not fileExists(path):
-    if projectName.len == 0:
-      return false
-    try:
-      return withSettingsLayers(WorkspaceLocal(schema: schemaWorkspaceStateV1),
-        workspaceRoot).local.manifest.len > 0
-    except WorkspaceManifestParseError:
-      return false
-  try:
-    let local = readWorkspaceLocal(path)
-    if local.manifest.len > 0:
-      return true
-    return withSettingsLayers(local, workspaceRoot).local.manifest.len > 0
-  except WorkspaceManifestParseError:
-    # A malformed state or settings file is the user's problem; let the
-    # caller surface the structured diagnostic when it next tries to parse
-    # the file directly. For dispatch purposes, treat it as "present but
-    # unusable" — return false so the caller falls back to single-project
-    # mode (which will then either succeed or emit its own diagnostic).
+    # The settings files are read (and so validated) even when no project is
+    # named, so a malformed one is reported by every verb that asks, not only
+    # by the ones that happen to name a project.
+    let composes = withSettingsLayers(
+      WorkspaceLocal(schema: schemaWorkspaceStateV1),
+      workspaceRoot).local.manifest.len > 0
+    return composes and projectName.len > 0
+  let local = readWorkspaceLocal(path)
+  if local.workspace.project.len == 0 and projectName.len == 0:
+    # A state file the strict reader accepts always records a project, so
+    # this is ``repro health`` reading a malformed one it set aside
+    # (``toleratingMalformedWorkspaceFiles``): with no project there is
+    # nothing to compose, exactly as with no state file and no project named.
     return false
+  if local.manifest.len > 0:
+    return true
+  withSettingsLayers(local, workspaceRoot).local.manifest.len > 0
 
 proc standaloneMembershipManifestCheckout*(workspaceRoot: string): string =
   ## "" unless ``workspaceRoot`` IS a membership-manifest checkout rather than
@@ -413,12 +442,20 @@ proc standaloneMembershipManifestCheckout*(workspaceRoot: string): string =
   ## verdict on ``hasResolvedManifestCheckout`` being TRUE says it of real
   ## workspaces, and the migrated-workspace fixtures are exactly those.
   ##
-  ## DISCLOSED LIMIT: a record store that has acquired a ``.repro/`` directory
-  ## -- from a tool that wrote state into it -- reads as the metadata-less
-  ## workspace and gets the generic diagnostic back. That is the same
-  ## ambiguity ``hasResolvedManifestCheckout`` accepts, and the managed hooks
-  ## are what keep it theoretical: RA-10 Part 4 asserts that no hook ever
-  ## manufactures a ``.repro/`` inside the store.
+  ## DISCLOSED LIMIT, NOW NARROWER THAN IT WAS. A record store that has
+  ## acquired a ``.repro/`` directory -- the field state: an older engine
+  ## filed ``.repro/workspace/post-commit-*`` into it, and deleting those
+  ## files leaves the directory -- is no longer CLASSIFIED as a workspace:
+  ## ``hasResolvedManifestCheckout`` treats membership beside a top-level
+  ## ``locks/``, with no settings or state file in the root, as the store
+  ## (Workspace-Manifests.md: metadata and records are never one repository),
+  ## so the hooks and the gate stand down there and file nothing. What
+  ## remains is only THIS diagnostic's wording: it states that no ``.repro/``
+  ## shell sits beside the manifests, so for a store carrying a stray one it
+  ## returns "" and the caller gives the generic sentence instead of a false
+  ## one. RA-10's stray-shell case asserts the classification half; nothing
+  ## reaches this message from a hook any more, only from a verb an operator
+  ## runs by hand inside the store.
   if workspaceRoot.len == 0:
     return ""
   if dirExists(workspaceRoot / ".repro"):
@@ -451,8 +488,11 @@ proc isInitializedWorkspace*(workspaceRoot: string): bool =
   ##
   ## Neither is the LOCK RECORD STORE — the manifests repo, which carries
   ## ``projects/``, ``repos/`` and ``locks/`` at its top level and neither
-  ## marker above. It describes a workspace; it is not one. See
-  ## ``hasResolvedManifestCheckout`` for what that misclassification cost.
+  ## marker above — and that holds even after the store has acquired a stray
+  ## ``.repro/`` directory, because ``hasResolvedManifestCheckout`` reads
+  ## membership beside a top-level ``locks/`` as the store. It describes a
+  ## workspace; it is not one. See ``hasResolvedManifestCheckout`` for what
+  ## that misclassification cost.
   if workspaceRoot.len == 0:
     return false
   if fileExists(workspaceTomlPath(workspaceRoot)):
