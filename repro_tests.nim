@@ -12924,6 +12924,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_health_reports_disjoint_local_branches.nim",
+    binary: "build/test-bin/t_health_reports_disjoint_local_branches",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_health_reports_each_layer_status_with_remedy.nim",
     binary: "build/test-bin/t_health_reports_each_layer_status_with_remedy",
     defines: @[],

@@ -70973,6 +70973,37 @@ proc checkedOutPushPolicy*(repoPath: string): CheckedOutPushPolicy =
     result.detail = CommittedLockFileName & " carries a malformed " &
       "[certificate_policy] (" & err.msg & "); every gate refuses on it"
 
+proc healthBranchAncestry(identity: GitToolIdentity; abs: string;
+                          repo: ResolvedRepo; branch, mainline: string):
+    tuple[disjoint: bool, comparison, diagnostic: string] =
+  ## Local ancestry evidence only: exit 1 with no output is Git's unrelated
+  ## roots verdict. Missing refs, probe errors and shallow boundaries cannot
+  ## establish that verdict and stay explicitly unconfirmed.
+  let shallow = gitRunPlain(identity,
+    ["-C", abs, "rev-parse", "--is-shallow-repository"])
+  if shallow.code != 0 or shallow.output.strip() == "true":
+    result.diagnostic = "cannot establish ancestry; deepen shallow history or repair Git: " &
+      shallow.output.strip()
+    return
+  let upstream = gitRunPlain(identity, ["-C", abs, "for-each-ref",
+    "--format=%(upstream)", "refs/heads/" & branch])
+  if upstream.code != 0:
+    result.diagnostic = "cannot read upstream: " & upstream.output.strip()
+    return
+  result.comparison = upstream.output.strip()
+  if result.comparison.len == 0:
+    if mainline.len == 0:
+      result.diagnostic = "no upstream or declared mainline to compare"
+      return
+    result.comparison = "refs/remotes/" & gitRemoteNameFor(repo) & "/" & mainline
+  let mb = gitRunPlain(identity,
+    ["-C", abs, "merge-base", "refs/heads/" & branch, result.comparison])
+  if mb.code == 1 and mb.output.strip().len == 0:
+    result.disjoint = true
+  elif mb.code != 0:
+    result.diagnostic = "cannot compare with " & result.comparison & ": " &
+      mb.output.strip().splitLines().join(" | ")
+
 proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     tuple[checks: seq[HealthCheck]; ctx: HealthContext] =
   ## Diagnose every layer once and return the ordered check list plus the
@@ -72238,7 +72269,17 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         discard
       of hpsUnpublished:
         offenders.add(where)
-        remedies.add("git -C " & repo.path & " push")
+        let ancestry = if verdict.branch.len > 0:
+            healthBranchAncestry(ctx.gitIdentity, abs, repo, verdict.branch,
+              declaredMainlineBranch(ctx.resolved, repo.name))
+          else: (disjoint: false, comparison: "", diagnostic: "detached HEAD")
+        let anyRemote = gitRunPlain(ctx.gitIdentity, ["-C", abs,
+          "for-each-ref", "--format=%(refname)", "--contains=HEAD", "refs/remotes/"])
+        if anyRemote.code != 0 or (anyRemote.output.strip().len == 0 and
+            (ancestry.disjoint or ancestry.diagnostic.len > 0)):
+          remedies.add("do not push " & repo.path & "; inspect disjoint-local-branches and migrate unique work before retiring old history")
+        else:
+          remedies.add("git -C " & repo.path & " push")
       of hpsUnknown:
         unconfirmed.add(where & ": " & verdict.diagnostic)
     if offenders.len == 0 and unconfirmed.len == 0:
@@ -72267,6 +72308,96 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           if remedies.len > 0: remedies.join(" && ")
           else: "re-run with the remotes reachable",
         fixKind: hfNone))
+
+  # Sweep branches beyond HEAD: a rewritten branch can stay inert locally
+  # while the checkout's HEAD is published. Published disjoint roots are
+  # legitimate imports, so absence from all remote refs is required too.
+  # This row only diagnoses; subject matches never authorize deleting work.
+  block disjointBranchesCheck:
+    var findings: seq[string]
+    var inspected = 0
+    if not ctx.resolvedOk or not ctx.gitOk:
+      findings.add("unconfirmed: manifest unresolved or no usable git tool")
+    else:
+      for repo in ctx.resolved.repos:
+        let abs = parsed.workspaceRoot / repo.path
+        if not dirExists(abs / ".git") and not fileExists(abs / ".git"):
+          continue
+        let branches = gitRunPlain(ctx.gitIdentity,
+          ["-C", abs, "for-each-ref", "--format=%(refname:strip=2)", "refs/heads/"])
+        if branches.code != 0:
+          findings.add(repo.path & ": unconfirmed: cannot enumerate local branches")
+          continue
+        var fetched = false
+        var fetchDiagnostic = ""
+        for branch in branches.output.strip().splitLines():
+          if branch.len == 0: continue
+          inc inspected
+          let where = repo.path & " branch '" & branch & "'"
+          let branchRef = "refs/heads/" & branch
+          var published = gitRunPlain(ctx.gitIdentity, ["-C", abs,
+            "for-each-ref", "--format=%(refname)", "--contains=" & branchRef,
+            "refs/remotes/"])
+          if published.code != 0:
+            findings.add(where & ": unconfirmed: cannot probe publication")
+            continue
+          if published.output.strip().len > 0: continue
+          var ancestry = healthBranchAncestry(ctx.gitIdentity, abs, repo, branch,
+            declaredMainlineBranch(ctx.resolved, repo.name))
+          if ancestry.diagnostic.len > 0:
+            findings.add(where & ": unconfirmed: " & ancestry.diagnostic)
+            continue
+          if not ancestry.disjoint: continue
+          if not fetched:
+            withCheckoutVcsLock(abs):
+              let fetch = gitRunPlain(ctx.gitIdentity,
+                ["-C", abs, "fetch", "--all", "--quiet"])
+              if fetch.code != 0:
+                fetchDiagnostic = "fetch failed; publication/ancestry unconfirmed: " &
+                  fetch.output.strip().splitLines().join(" | ")
+            fetched = true
+          if fetchDiagnostic.len > 0:
+            findings.add(where & ": " & fetchDiagnostic)
+            continue
+          published = gitRunPlain(ctx.gitIdentity, ["-C", abs,
+            "for-each-ref", "--format=%(refname)", "--contains=" & branchRef,
+            "refs/remotes/"])
+          if published.code != 0:
+            findings.add(where & ": unconfirmed: cannot probe publication after fetch")
+            continue
+          if published.output.strip().len > 0: continue
+          ancestry = healthBranchAncestry(ctx.gitIdentity, abs, repo, branch,
+            declaredMainlineBranch(ctx.resolved, repo.name))
+          if ancestry.diagnostic.len > 0:
+            findings.add(where & ": unconfirmed: " & ancestry.diagnostic)
+            continue
+          if not ancestry.disjoint: continue
+          let oldSubjects = gitRunPlain(ctx.gitIdentity,
+            ["-C", abs, "log", "--format=%s", branchRef, "--"])
+          let newSubjects = gitRunPlain(ctx.gitIdentity,
+            ["-C", abs, "log", "--format=%s", ancestry.comparison, "--"])
+          var subjectDetail = "subject comparison unconfirmed"
+          if oldSubjects.code == 0 and newSubjects.code == 0:
+            let current = newSubjects.output.splitLines().toHashSet()
+            var missing: seq[string]
+            for subject in oldSubjects.output.splitLines():
+              if subject notin current and subject notin missing:
+                missing.add(subject)
+            subjectDetail = if missing.len == 0:
+              "all subjects occur on comparison history"
+            else: $missing.len & " missing subject(s): " & missing.join(" | ")
+          findings.add(where & ": no merge-base with " & ancestry.comparison &
+            ", tip on no remote ref; " & subjectDetail &
+            " (subject matching is a heuristic, not proof deletion is safe)")
+    let prefix = $findings.len & " disjoint or unconfirmed local branch finding(s): "
+    checks.add(HealthCheck(name: "disjoint-local-branches",
+      status: (if findings.len == 0: hsOk else: hsWarn),
+      detail: (if findings.len == 0: "checked " & $inspected & " local branch(es)"
+        else: prefix & formatFindingList(findings, parsed.verbose)),
+      fullDetail: (if findings.len == 0: "" else: prefix & findings.join(", ")),
+      remedy: (if findings.len == 0: "" else:
+        "do not push these branches; inspect comparison history, deepen shallow history or repair failed probes; migrate unique work onto the new history before manually retiring a stale branch"),
+      fixKind: hfNone))
 
   # 14. Shared-Clone-Pool-Integrity §4.2 — checkouts that borrow from a
   #     shared clone and name an object that is gone from both. Report-only:
