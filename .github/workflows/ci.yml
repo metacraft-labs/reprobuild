@@ -11,13 +11,18 @@ on:
   #
   # That omission is not cosmetic: it is why a check that fails ONLY under CI
   # conditions could not be worked on. `just lint`'s sibling-pin gate failed on
-  # every run for five days because the runner injects a scoped installation
-  # token that this repo's own probe anchors are not covered by -- a condition
-  # that cannot be reproduced on a laptop and, with the triggers above, could
-  # not be reproduced on a branch either. The only way to get a verdict was to
-  # push to `dev` or open a pull request into it, so the fix for a gate that
-  # blocks promotions could not be tested without doing the thing the gate
-  # blocks. Promotions landed on locally-substituted evidence instead.
+  # every run for five days because `actions/checkout` persists an
+  # `http.https://github.com/.extraheader` into the repo-local git config while
+  # the dev-env exports a second `extraHeader` for the same host through
+  # `GIT_CONFIG_*`. `http.extraHeader` is multi-valued, so git sent BOTH and
+  # github answered `Duplicate header: "Authorization"` with HTTP 400 -- in
+  # about 400ms, which reads like being offline. That is a condition that cannot
+  # be reproduced on a laptop, where there is exactly one credential, and, with
+  # the triggers above, could not be reproduced on a branch either. The only
+  # way to get a verdict was to push to `dev` or open a pull request into it,
+  # so the fix for a gate that blocks promotions could not be tested without
+  # doing the thing the gate blocks. Promotions landed on locally-substituted
+  # evidence instead.
   workflow_dispatch:
 
 # This workflow supersedes its own older runs, on branches as well as pull
