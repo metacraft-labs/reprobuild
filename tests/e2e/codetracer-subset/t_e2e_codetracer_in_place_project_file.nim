@@ -16,6 +16,29 @@ const
     "tests/fixtures/codetracer-subset/config-f1745b89.nims"
   PinnedCodeTracerFixtureHeaderLines = 6
   PinnedCodeTracerProjectPayloadSha256 =
+    "91305a29434b1e120bcf78ed7e77e5226b7d4d62ac0842f2bf673f4ff0623b68"
+  # The project fixture departs from the pinned commit in ONE marked block:
+  # its `stage-app-for-dmg` is the process action CodeTracer stages the app
+  # with, because the pinned commit's `fs.preserveTree` over the `.app` that
+  # `macos-app` generates in the same graph is refused when the recipe is
+  # evaluated. `upstreamProjectPayload` puts the pinned stanza back, and the
+  # result must hash to the pinned commit's `repro.nim`, so the deviation can
+  # neither grow past its markers nor hide a drift elsewhere.
+  # `deviatedProjectPayload` drops the fixture's own lines instead (the
+  # markers and the `#:` notes), which leaves the recipe CodeTracer carries
+  # once it stages the app with the process action.
+  FixtureDeviationBegin = "        # --- begin Reprobuild fixture deviation"
+  FixtureDeviationEnd = "        # --- end Reprobuild fixture deviation"
+  FixtureNotePrefix = "        #:"
+  PinnedStageAppStanza =
+    "        let stagingApp = fs.preserveTree(\n" &
+    "          sourceRoot = \"non-nix-build/CodeTracer.app\",\n" &
+    "          outputRoot = \"non-nix-build/dmg-staging/CodeTracer.app\",\n" &
+    "          actionId = \"stage-app-for-dmg\",\n" &
+    "          after = @[macosApp]\n" &
+    "        )\n" &
+    "\n"
+  PinnedCodeTracerUpstreamProjectSha256 =
     "3561c345dd330cc80cf749e7496f8d0a6e8e21c9dd1734442dac5511e31c14f8"
   PinnedCodeTracerConfigPayloadSha256 =
     "469f008a005d9d0d6b274fca8f8422b9f96bc78156567e269b35b0f3ce625a80"
@@ -424,7 +447,8 @@ proc sha256Hex(data: string): string =
 
 proc pinnedCodeTracerPayload(path, expectedSha256: string): string =
   ## The retained fixture carries its own AGPL/provenance header. The payload
-  ## after that header remains byte-identical to the pinned public source.
+  ## after that header is the pinned public source, except the project
+  ## fixture's one declared deviation (see `upstreamProjectPayload`).
   let lines = readFile(path).splitLines(keepEol = true)
   if lines.len <= PinnedCodeTracerFixtureHeaderLines or
       not lines[0].contains("SPDX-License-Identifier: AGPL-3.0-or-later") or
@@ -439,6 +463,56 @@ proc pinnedCodeTracerPayload(path, expectedSha256: string): string =
       "pinned CodeTracer fixture payload differs from reviewed commit " &
       CodeTracerProjectContractCommit & ": " & path)
 
+proc fixtureDeviationSpan(payload: string): tuple[first, last: int] =
+  ## Byte span of the project fixture's one marked deviation block, from the
+  ## start of its begin-marker line to the end of its end-marker line
+  ## (newline included). Refuses a payload whose markers are missing,
+  ## repeated, out of order or not at the start of a line.
+  let begin = payload.find(FixtureDeviationBegin)
+  let finish = payload.find(FixtureDeviationEnd)
+  if begin < 0 or finish < begin or
+      payload.find(FixtureDeviationBegin, begin + 1) >= 0 or
+      payload.find(FixtureDeviationEnd, finish + 1) >= 0 or
+      (begin > 0 and payload[begin - 1] != '\n') or
+      payload[finish - 1] != '\n':
+    raise newException(ValueError,
+      "pinned CodeTracer fixture must carry exactly one marked deviation " &
+      "block: " & PinnedCodeTracerProjectFile)
+  let lineEnd = payload.find('\n', finish)
+  if lineEnd < 0:
+    raise newException(ValueError,
+      "pinned CodeTracer fixture deviation block is not terminated: " &
+      PinnedCodeTracerProjectFile)
+  (first: begin, last: lineEnd)
+
+proc upstreamProjectPayload(payload: string): string =
+  ## The project fixture's payload with its one declared deviation undone:
+  ## the marked block, markers included, replaced by the pinned commit's
+  ## `stage-app-for-dmg` stanza. Refuses a restored form that is not the
+  ## pinned commit's `repro.nim` byte for byte.
+  let span = fixtureDeviationSpan(payload)
+  result = payload[0 ..< span.first] & PinnedStageAppStanza &
+    payload[span.last + 1 .. ^1]
+  if sha256Hex(result) != PinnedCodeTracerUpstreamProjectSha256:
+    raise newException(ValueError,
+      "pinned CodeTracer fixture differs from commit " &
+      CodeTracerProjectContractCommit & " outside its declared deviation: " &
+      PinnedCodeTracerProjectFile)
+
+proc deviatedProjectPayload(payload: string): string =
+  ## The project fixture's payload as CodeTracer carries it with the
+  ## deviation landed: the block's markers and its `#:` note lines dropped,
+  ## every other byte kept.
+  let span = fixtureDeviationSpan(payload)
+  result = payload[0 ..< span.first]
+  for line in payload[span.first .. span.last].splitLines(keepEol = true):
+    if line.startsWith(FixtureDeviationBegin) or
+        line.startsWith(FixtureDeviationEnd) or
+        line.startsWith(FixtureNotePrefix):
+      continue
+    result.add(line)
+  result.add(payload[span.last + 1 .. ^1])
+
 proc pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot: string): string =
   ## Use a Reprobuild-owned snapshot of CodeTracer's reviewed ``dev`` graph so
   ## an adjacent checkout's branch or uncommitted state cannot silently change
@@ -449,8 +523,10 @@ proc pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot: string): string =
   if not fileExists(projectFixture) or not fileExists(configFixture):
     raise newException(ValueError,
       "pinned CodeTracer project contract fixtures are missing")
-  let projectPayload = pinnedCodeTracerPayload(projectFixture,
+  let fixturePayload = pinnedCodeTracerPayload(projectFixture,
     PinnedCodeTracerProjectPayloadSha256)
+  let upstreamPayload = upstreamProjectPayload(fixturePayload)
+  let deviatedPayload = deviatedProjectPayload(fixturePayload)
   let configPayload = pinnedCodeTracerPayload(configFixture,
     PinnedCodeTracerConfigPayloadSha256)
 
@@ -461,7 +537,12 @@ proc pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot: string): string =
       raise newException(ValueError,
         "canonical CodeTracer project contract files are missing at " &
         codeTracerRoot)
-    if readFile(liveProject) != projectPayload or
+    # A live checkout matches when it is the pinned commit's recipe, or that
+    # recipe with the deviation CodeTracer itself carries once it stages the
+    # app with the process action -- the two reviewed states of the file.
+    let liveProjectText = readFile(liveProject)
+    if (liveProjectText != upstreamPayload and
+        liveProjectText != deviatedPayload) or
         readFile(liveConfig) != configPayload:
       raise newException(ValueError,
         "live CodeTracer project contract differs from pinned commit " &

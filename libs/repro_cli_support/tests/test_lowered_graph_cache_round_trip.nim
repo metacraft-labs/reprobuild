@@ -76,7 +76,8 @@ suite "lowered graph cache action round trip":
       nonDeterminismJustification: "temp names only",
       requiresElevation: true,
       fixedOutput: true,
-      scratchDirs: @["/recipe/zlib/.repro/build/work"])
+      scratchDirs: @["/recipe/zlib/.repro/build/work"],
+      removeBeforeRun: @["/recipe/zlib/.repro/output/install"])
 
     let decoded = loweredGraphActionRoundTripForTest(@[action])
     check decoded.len == 1
@@ -107,6 +108,9 @@ suite "lowered graph cache action round trip":
     # lookup on its description alone, so the flag must survive a warm build.
     check roundTrip.fixedOutput
     check roundTrip.scratchDirs == action.scratchDirs
+    # A warm build that lost it would re-run a ``create_dmg`` edge over the
+    # ``.dmg`` its previous run wrote, and fail ``File exists``.
+    check roundTrip.removeBeforeRun == action.removeBeforeRun
 
     # The declared/passthrough CLASSIFICATION must survive the cache, and
     # this is not a formality. Before it was serialised, a warm build
@@ -183,7 +187,7 @@ suite "lowered graph cache action round trip":
       id: "codec-version-test")
     var encoded = loweredGraphCacheBytesForTest(@[action])
     let versionOffset = loweredGraphCacheVersionOffsetForTest()
-    check encoded[versionOffset] == 12'u8
+    check encoded[versionOffset] == 13'u8
     check encoded[versionOffset + 1] == 0'u8
     # An older version could not carry the newer per-action fields (v5:
     # `envPassthrough`; v6: the dependency-policy event-interest opt-ins;
@@ -192,7 +196,8 @@ suite "lowered graph cache action round trip":
     # REPLACED v6's two bools with one enum byte; v11: the fixed-output
     # sentinel, one byte after the cache identity, whose absence would shift
     # every later field; v12: the scratch-directory list, after the elevation
-    # sentinel). Decoding such a record under
+    # sentinel; v13: the remove-before-run output list, after the scratch
+    # directories). Decoding such a record under
     # the current layout would silently return defaults for every action rather
     # than failing, so the rejection below is what makes a field's absence
     # impossible instead of invisible.
@@ -206,7 +211,7 @@ suite "lowered graph cache action round trip":
     # what that value now spells. Poking an ancient version instead would leave
     # the one skew that can silently mis-restore a warm edge's capture unasserted
     # by anything.
-    encoded[versionOffset] = 11'u8
+    encoded[versionOffset] = 12'u8
     var rejected = false
     try:
       discard loweredGraphCacheActionsForTest(encoded)

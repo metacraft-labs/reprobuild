@@ -158,6 +158,12 @@ type
       ## through to the engine so ``repro why`` can print the reason a
       ## tool's randomness was ignored instead of leaving it to folklore.
     providerEntrypointId*: string
+    removeBeforeRunFlags*: seq[string]
+      ## The output flags (``role = output`` parameters) whose values the
+      ## engine removes before every edge of this command runs, declared
+      ## with ``removeBeforeRun <flag>...`` for a tool that refuses to write
+      ## over an existing output. Inherited by nested ``subcmd`` scopes the
+      ## way ``outputFlags`` is. Lowered to ``BuildActionDef.removeBeforeRun``.
     outputFlags*: seq[string]
       ## Named-Targets M0: cumulative union of every ``outputs`` statement on
       ## the lexical path from the cli root to this command, materialised per
@@ -1753,6 +1759,13 @@ type
       ## does under one is an input or an output. A working tree the action
       ## builds in belongs here; what it produces goes to `declaredOutputs`.
       ## See `BuildAction.scratchDirs` in the engine. Payload codec v30+.
+    removeBeforeRun*: seq[string]
+      ## Declared outputs the engine removes before the action runs, for a
+      ## tool that refuses to write over an existing output (create-dmg's
+      ## ``hdiutil convert``). Each must be one of the action's own outputs;
+      ## removal never follows a link. Declared by a typed tool with
+      ## ``cli: removeBeforeRun <flag>`` or passed to ``buildAction``. See
+      ## `BuildAction.removeBeforeRun` in the engine. Payload codec v31+.
     declaredOutputs*: seq[string]
       ## M9.R.75 — R7 (double-write reject) per-action write-root
       ## declaration. Spec cite: Filesystem-Policy-And-Observed-

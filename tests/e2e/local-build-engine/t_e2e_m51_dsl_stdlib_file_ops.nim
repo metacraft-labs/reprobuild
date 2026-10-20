@@ -166,6 +166,30 @@ proc writeSymlinkOutputProject(path: string) =
     "    let all = aggregate(\"all\", actions = @[copied, mirrored])\n" &
     "    defaultTarget(all)\n")
 
+proc writeGeneratedSourcePreserveTreeProject(path: string) =
+  ## `fs.preserveTree` over a tree an `after` action generates: refused when
+  ## the recipe is evaluated (preserveTree mirrors SOURCE trees and lists
+  ## them at evaluation, before the generator runs).
+  createDir(path.splitPath.head)
+  writeFile(path,
+    "import repro_dsl_stdlib\n" &
+    "import repro_dsl_stdlib/packages/sh\n\n" &
+    "package m51TreeGenerated:\n" &
+    "  defaultToolProvisioning \"path\"\n" &
+    "  uses:\n" &
+    "    \"sh\"\n" &
+    "  build:\n" &
+    "    let gen = shell(\n" &
+    "      command = \"rm -rf out/app && mkdir -p out/app && echo a > out/app/a.txt\",\n" &
+    "      actionId = \"gen-app\",\n" &
+    "      extraOutputs = @[\"out/app\"])\n" &
+    "    let mirrored = fs.preserveTree(\n" &
+    "      sourceRoot = \"out/app\",\n" &
+    "      outputRoot = \"out/staging/app\",\n" &
+    "      actionId = \"stage-app\",\n" &
+    "      after = @[gen])\n" &
+    "    defaultTarget(mirrored)\n")
+
 suite "m51_dsl_stdlib_file_ops":
   when isNixSupported:
     test "m51_stdlib_copy_and_stamp_e2e":
@@ -260,6 +284,37 @@ suite "m51_dsl_stdlib_file_ops":
       assertAction(secondReport, "fs-preserveTree-mirror", "asSucceeded", true)
       check fileExists(projectRoot / "mirror" / "keep.txt")
       check not fileExists(projectRoot / "mirror" / "nested" / "drop.txt")
+
+    test "m51_preserve_tree_refuses_a_generated_source_e2e":
+      # Before the refusal this graph evaluated, staged an EMPTY directory on
+      # a fresh tree and reported success, and failed `preserveTree source
+      # file disappeared before execution` once the generator dropped a file.
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-m51-preserve-tree-generated", "")
+      defer: removeDir(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      let reproBin = reproBinary(repoRoot)
+      let projectRoot = tempRoot / "project"
+      writeGeneratedSourcePreserveTreeProject(projectRoot / "reprobuild.nim")
+      let res = runShell(shellCommand([reproBin, "build", projectRoot,
+        "--daemon=off", "--tool-provisioning=path", "--log=actions"]),
+        repoRoot)
+      checkpoint(res.output)
+      check res.code != 0
+      check res.output.contains("fs.preserveTree 'stage-app' cannot mirror " &
+        "'out/app'")
+      check res.output.contains("action 'gen-app'")
+      check res.output.contains("mirrors SOURCE trees")
+      # Refused at evaluation: nothing ran, nothing was staged.
+      check not dirExists(projectRoot / "out" / "staging")
 
     test "m51_preserve_tree_preserves_symlinks_e2e":
       let repoRoot = getCurrentDir()

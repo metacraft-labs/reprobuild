@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2259,
+    "nimTestBinaries": 2265,
     "pureUnitConsolidationGroups": 63,
-    "pureUnitTests": 676,
+    "pureUnitTests": 677,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2290
+    "testEntries": 2296
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -160,7 +160,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 30,
+      "count": 31,
       "defines": [],
       "dependencyShape": [
         "repro_dsl_stdlib",
@@ -169,6 +169,7 @@
       "owner": "libs/repro_dsl_stdlib",
       "sources": [
         "libs/repro_dsl_stdlib/tests/t_cargo_test_no_default_features.nim",
+        "libs/repro_dsl_stdlib/tests/t_create_dmg_removes_its_image_before_running.nim",
         "libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim",
         "libs/repro_dsl_stdlib/tests/t_nde0a_apt_jammy.nim",
         "libs/repro_dsl_stdlib/tests/t_nde0d_dbus_broker.nim",
@@ -1316,10 +1317,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 17,
-      "integration": 1239,
+      "integration": 1242,
       "platform/destructive": 138,
-      "pure unit": 676,
-      "unclassified": 220
+      "pure unit": 677,
+      "unclassified": 222
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1521,9 +1522,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2259,
+    "nimTestBinaryCount": 2265,
     "pythonTestFileCount": 31,
-    "testEntryCount": 2290
+    "testEntryCount": 2296
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8973,6 +8974,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_preserve_tree_rerun_never_writes_through_links",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_preserve_tree_rerun_never_writes_through_links.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_relocatable_record_follows_the_working_tree",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -8990,6 +9009,25 @@
       "source": "libs/repro_build_engine/tests/t_relocatable_record_follows_the_working_tree.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_remove_before_run",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_hash",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_remove_before_run.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -11720,6 +11758,24 @@
       "source": "libs/repro_dsl_stdlib/tests/t_committed_lock_variants_are_hard.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_create_dmg_removes_its_image_before_running",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_create_dmg_removes_its_image_before_running.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -18448,6 +18504,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_dsl_remove_before_run_names_only_outputs",
+      "class": "unclassified",
+      "classificationReason": "spawns a subprocess (through `libs/repro_project_dsl/tests/dsl_port/service_block_compile_probe.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_dsl_remove_before_run_names_only_outputs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_dsl_run_consumes_roundtrip",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -18839,6 +18910,23 @@
       "owner": "libs/repro_project_dsl",
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/t_multi_package_macro.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_preserve_tree_refuses_a_generated_source",
+      "class": "unclassified",
+      "classificationReason": "mutates the process working directory",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_preserve_tree_refuses_a_generated_source.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -26876,6 +26964,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_create_dmg_reruns_over_its_image",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/local-build-engine/t_e2e_create_dmg_reruns_over_its_image.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_local_reprobuild_project_build",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -26907,7 +27012,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/local-build-engine/t_e2e_m51_dsl_stdlib_file_ops.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

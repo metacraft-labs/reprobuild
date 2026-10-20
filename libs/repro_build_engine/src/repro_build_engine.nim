@@ -513,6 +513,19 @@ type
       ## Refused (the action fails) when a scratch directory is or contains
       ## the action's cwd, a declared input or a declared output: emptying it
       ## would destroy what the action reads or makes.
+    removeBeforeRun*: seq[string]
+      ## Declared outputs the engine REMOVES before the action runs, for a
+      ## tool that refuses to write over an existing output: create-dmg's
+      ## final ``hdiutil convert -o <dmg>`` fails ``File exists``, so a
+      ## ``create_dmg`` edge re-run after any input change failed because
+      ## the previous run had succeeded. Opt-in per action -- declared by the
+      ## typed tool (``cli: removeBeforeRun <flag>``) or by ``buildAction``
+      ## -- because most tools overwrite in place and gain nothing from it.
+      ##
+      ## Removal never follows a link (a symlink there is unlinked, its
+      ## target left alone) and touches only the action's own outputs: an
+      ## entry that is not exactly one of ``outputs`` / ``declaredOutputs``
+      ## is refused and the action fails (``removeBeforeRunProblem``).
     fixedOutput*: bool
       ## Cache-Scope P3.4 — a FIXED-OUTPUT action (BuildXL's download pip,
       ## Nix's fixed-output derivation): its outputs are determined by
@@ -8660,6 +8673,28 @@ proc removeTreeNoFollow(path: string) =
   else:
     removeDir(path)
 
+proc removePathNoFollow(path: string) =
+  ## Removes whatever is at `path` WITHOUT FOLLOWING A LINK: a symlink (or,
+  ## on Windows, a directory link or junction) is unlinked and its target is
+  ## left alone, a regular file is deleted, a real directory is removed with
+  ## `removeTreeNoFollow`. A missing path is not an error.
+  if symlinkExists(path):
+    when defined(windows):
+      # A directory link is removed as a directory, never as a file -- and
+      # never by recursing into it, which is what `removeDir` would do.
+      if dirExists(path):
+        if scratchRemoveDirectoryW(newWideCString(path)) == 0:
+          raiseOSError(osLastError(), path)
+        return
+    removeFile(path)
+  elif dirExists(path):
+    removeTreeNoFollow(path)
+  elif fileExists(path):
+    when defined(windows):
+      discard scratchSetFileAttributesW(newWideCString(path),
+        DWORD(0x80))   # FILE_ATTRIBUTE_NORMAL: clears read-only
+    removeFile(path)
+
 proc ensureOutputParents*(action: BuildAction) =
   ## Creates the parent directory of each of the action's outputs and
   ## declared outputs before it runs (ninja and BuildXL do the same). What
@@ -8695,6 +8730,44 @@ proc ensureOutputParents*(action: BuildAction) =
       createDir(extendedPath(parent))
     except CatchableError:
       discard
+
+proc removeBeforeRunProblem*(action: BuildAction): string =
+  ## Why removing the action's ``removeBeforeRun`` paths would be unsafe, or
+  ## "". Each must be exactly one of the action's declared outputs -- not a
+  ## parent of one, not an input -- so the removal can only ever destroy
+  ## what this action is about to make again.
+  var owned: seq[string] = @[]
+  for output in action.outputs & action.declaredOutputs:
+    if output.len > 0:
+      owned.add(scratchKey(materialPath(action.cwd, output)))
+  for path in action.removeBeforeRun:
+    if path.len == 0:
+      continue
+    let key = scratchKey(materialPath(action.cwd, path))
+    if key notin owned:
+      return "'" & path & "' is listed to be removed before the action " &
+        "runs, but it is not a declared output of the action"
+    if key.count('/') < 2:
+      return "'" & path & "' is too close to a filesystem root to remove " &
+        "before the action runs"
+  ""
+
+proc removeOutputsBeforeRun*(action: BuildAction): string =
+  ## Removes the action's ``removeBeforeRun`` outputs before it runs, without
+  ## following links; returns why it could not, or "". A missing output is
+  ## not an error -- a first run has nothing to remove.
+  let problem = action.removeBeforeRunProblem()
+  if problem.len > 0:
+    return problem
+  for path in action.removeBeforeRun:
+    if path.len == 0:
+      continue
+    try:
+      removePathNoFollow(extendedPath(materialPath(action.cwd, path)))
+    except CatchableError as err:
+      return "cannot remove output '" & path & "' before the action runs: " &
+        err.msg
+  ""
 
 proc resetScratchDirs*(action: BuildAction): string =
   ## Empties the action's scratch directories before it runs; returns why it
@@ -15716,13 +15789,6 @@ proc copyFileReplacingBusyDestination(source, destination: string) =
     # sweep above collects it on the next build.
     discard tryRemoveFile(extendedPath(displaced))
 
-proc removeExistingPath(path: string) =
-  let expanded = extendedPath(path)
-  if symlinkExists(expanded) or fileExists(expanded):
-    removeFile(expanded)
-  elif dirExists(expanded):
-    removeDir(expanded)
-
 proc pathWithinRoot(path, root: string): tuple[inside: bool; relative: string] =
   let relative = relativePath(os.normalizedPath(path), os.normalizedPath(root))
   if relative == ".":
@@ -15768,6 +15834,104 @@ proc parsePreserveTreeEntry(entry: string): PreserveTreeEntry =
       relative: fields[1],
       target: fields[2])
   PreserveTreeEntry(kind: ptekFile, relative: normalized)
+
+# ---------------------------------------------------------------------------
+# preserveTree over a previous output tree.
+#
+# The output root is a CONTAINER directory output (Incremental-Invalidation,
+# "Non-regular outputs"): the action owns the entries it mirrors -- this run's
+# and, through the manifest, the previous run's -- and other writers may put
+# entries of their own beside them. So a re-run cannot assume the tree holds
+# what it wrote last time, and it must never WRITE THROUGH what it finds: a
+# symlink an earlier run mirrored, or one another writer left, at an ancestor
+# of an entry would send the copy into the link's target. That is how the
+# CodeTracer dmg staging walked into `/nix/store` and failed with `Permission
+# denied` over a tree the user could not delete. The helpers below are the
+# only way the executor touches the tree: every path component strictly
+# inside the output root on an entry's path is made a real directory (a link
+# there is unlinked, never followed), and nothing is removed through a
+# component that is not one.
+# ---------------------------------------------------------------------------
+
+proc preserveTreeEntryParts(relative: string): seq[string] =
+  ## The components of an entry's path below the output root. Refuses an
+  ## absolute path or one that climbs out with `..`: the DSL never encodes
+  ## one, and an entry the executor resolved outside the root would be a
+  ## write to a path the action does not own.
+  let normalized = relative.replace('\\', '/')
+  if normalized.startsWith("/") or normalized.isAbsolute:
+    raiseEngine("preserveTree entry lies outside the output root: " & relative)
+  for part in normalized.split('/'):
+    if part.len == 0 or part == ".":
+      continue
+    if part == "..":
+      raiseEngine("preserveTree entry lies outside the output root: " &
+        relative)
+    result.add(part)
+  if result.len == 0:
+    raiseEngine("preserveTree entry names the output root itself: " &
+      relative)
+
+proc preserveTreeJoin(root: string; parts: openArray[string]): string =
+  result = root
+  for part in parts:
+    result = result / part
+
+proc ensureRealDirectory(path: string) =
+  ## Makes `path` a real directory. A symlink there (to a directory or not)
+  ## is unlinked, never followed, and a regular file is removed; an existing
+  ## real directory is kept with its contents.
+  let expanded = extendedPath(path)
+  if symlinkExists(expanded) or
+      (fileExists(expanded) and not dirExists(expanded)):
+    removePathNoFollow(expanded)
+  if not dirExists(expanded):
+    createDir(expanded)
+
+proc preparePreserveTreeDestination(outputRoot: string;
+                                    parts: openArray[string];
+                                    keepRegularFile: bool): string =
+  ## Readies the path of one entry for writing and returns it: every
+  ## ancestor strictly inside `outputRoot` becomes a real directory, and
+  ## whatever occupies the destination itself -- a symlink, or a directory
+  ## where a file or link goes -- is removed without following links.
+  ## `outputRoot` itself must already be a real directory.
+  ##
+  ## `keepRegularFile` leaves a regular file at the destination for the copy
+  ## to replace: `copyFileReplacingBusyDestination` replaces one that a live
+  ## process still has mapped on Windows by renaming it aside, which an
+  ## unlink here would refuse first.
+  var current = outputRoot
+  for i in 0 ..< parts.len - 1:
+    current = current / parts[i]
+    ensureRealDirectory(current)
+  result = current / parts[^1]
+  let expanded = extendedPath(result)
+  if keepRegularFile and not symlinkExists(expanded) and
+      not dirExists(expanded):
+    return
+  removePathNoFollow(expanded)
+
+proc removeStalePreserveTreeEntry(outputRoot: string;
+                                  parts: openArray[string]) =
+  ## Removes an entry the previous run mirrored and this one does not.
+  ##
+  ## Only through real directories: when an ancestor of the stale path is a
+  ## symlink, or is missing or a file, the stale entry is not in the tree any
+  ## more, and the path would resolve to somewhere this action does not own
+  ## (the case that used to delete a CURRENT entry through a link the same
+  ## run had just created). And only a file or a symlink: a real directory
+  ## at the path now holds entries this action did not put there, so it is
+  ## left alone -- container semantics.
+  var current = outputRoot
+  for i in 0 ..< parts.len - 1:
+    current = current / parts[i]
+    let expanded = extendedPath(current)
+    if symlinkExists(expanded) or not dirExists(expanded):
+      return
+  let stale = extendedPath(current / parts[^1])
+  if symlinkExists(stale) or (fileExists(stale) and not dirExists(stale)):
+    removePathNoFollow(stale)
 
 type
   NixDaemonCandidate* = object
@@ -16428,25 +16592,44 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
       let roots = builtinRoots(action.builtinText)
       let sourceRoot = action.builtinPath(roots.sourceRoot)
       let outputRoot = action.builtinPath(roots.outputRoot)
-      createDir(extendedPath(outputRoot))
+      # See "preserveTree over a previous output tree" above for why every
+      # write below goes through those helpers.
+      var entries: seq[tuple[entry: PreserveTreeEntry; parts: seq[string]]] = @[]
       var expected = initHashSet[string]()
       var currentEntries: seq[string] = @[]
       for rawEntry in action.builtinEntries:
         let entry = parsePreserveTreeEntry(rawEntry)
-        let relative = entry.relative
-        if relative.len == 0:
+        if entry.relative.len == 0:
           continue
-        expected.incl(relative)
-        currentEntries.add(relative)
-        let source = sourceRoot / relative
-        let destination = outputRoot / relative
-        createDir(extendedPath(destination.splitPath.head))
+        entries.add((entry: entry,
+          parts: preserveTreeEntryParts(entry.relative)))
+        expected.incl(entry.relative)
+        currentEntries.add(entry.relative)
+      ensureRealDirectory(outputRoot)
+      # The previous run's entries this run does not mirror go FIRST. Removed
+      # after the copy, a stale path can resolve through a link this run has
+      # just created and delete a current entry, or remove the link this run
+      # has just replaced with a directory.
+      let manifestPath = preserveTreeManifestPath(action)
+      for previous in readManifestEntries(manifestPath):
+        if expected.contains(previous):
+          continue
+        var parts: seq[string] = @[]
+        try:
+          parts = preserveTreeEntryParts(previous)
+        except BuildEngineError:
+          continue   # never written by this executor; nothing of ours there
+        removeStalePreserveTreeEntry(outputRoot, parts)
+      for item in entries:
+        let entry = item.entry
+        let source = preserveTreeJoin(sourceRoot, item.parts)
         case entry.kind
         of ptekFile:
           if not fileExists(extendedPath(source)):
             raiseEngine("preserveTree source file disappeared before execution: " &
               source)
-          prepareBuiltinFileOutput(destination)
+          let destination = preparePreserveTreeDestination(outputRoot,
+            item.parts, keepRegularFile = true)
           # Preserve source mode bits (notably the exec bit) — see the
           # bakCopyFile note above; preserveTree mirrors arbitrary trees that
           # may contain executables. It mirrors DLLs too, and unlike bakCopyFile
@@ -16457,16 +16640,11 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
           if not symlinkExists(extendedPath(source)):
             raiseEngine("preserveTree source symlink disappeared before execution: " &
               source)
+          let destination = preparePreserveTreeDestination(outputRoot,
+            item.parts, keepRegularFile = false)
           let currentTarget = copiedSymlinkTarget(sourceRoot, outputRoot, source,
             destination, entry.target)
-          removeExistingPath(destination)
           createSymlink(currentTarget, extendedPath(destination))
-      let manifestPath = preserveTreeManifestPath(action)
-      for previous in readManifestEntries(manifestPath):
-        if not expected.contains(previous):
-          let stale = outputRoot / previous
-          if symlinkExists(extendedPath(stale)) or fileExists(extendedPath(stale)):
-            removeFile(extendedPath(stale))
       currentEntries.sort(system.cmp[string])
       writeManifestEntries(manifestPath, currentEntries)
     of bakWorkspaceVcs:
@@ -18136,6 +18314,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       outputs.add("declaredOutput=" & materialPath(action.cwd, output))
     for dir in action.scratchDirs:
       outputs.add("scratch=" & materialPath(action.cwd, dir))
+    for path in action.removeBeforeRun:
+      outputs.add("removeBeforeRun=" & materialPath(action.cwd, path))
     outputs.sort()
     result.add(outputs)
     # Passthrough is keyed by NAME (BuildXL): the value is the host's, but
@@ -20668,6 +20848,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runResult.results[idx].status = asFailed
             runResult.results[idx].stderr = scratchProblem
             runResult.trace(id, "failed", scratchProblem)
+            blockClosure(id, id)
+            emitProgress(bpkActionCompleted, id)
+            completed = terminalCount()
+            launchedAny = true
+            continue
+        if action.removeBeforeRun.len > 0:
+          let removeProblem = action.removeOutputsBeforeRun()
+          if removeProblem.len > 0:
+            statuses[id] = asFailed
+            let idx = idToIndex.resultIndex(id)
+            runResult.results[idx].status = asFailed
+            runResult.results[idx].stderr = removeProblem
+            runResult.trace(id, "failed", removeProblem)
             blockClosure(id, id)
             emitProgress(bpkActionCompleted, id)
             completed = terminalCount()

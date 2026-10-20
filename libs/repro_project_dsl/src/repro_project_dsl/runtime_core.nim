@@ -260,7 +260,9 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion* = 30'u16
+  BuildActionPayloadVersion* = 31'u16
+    ## v31: ``removeBeforeRun`` — declared outputs the engine removes before
+    ## the action runs, a string list appended last.
     ## v30: ``scratchDirs`` — the action's scratch directories (BuildXL's pip
     ## temp directories), a string list appended last.
     ## v29: ``subToolRefs`` — the typed tool's own bare-name sub-tools
@@ -2035,7 +2037,8 @@ proc buildAction*(id: string; call: PublicCliCall;
                   cwdCustomPath = "";
                   declaredOutputs: openArray[string] = [];
                   readOnlyRoots: openArray[string] = [];
-                  scratchDirs: openArray[string] = []):
+                  scratchDirs: openArray[string] = [];
+                  removeBeforeRun: openArray[string] = []):
     BuildActionDef {.dynOrStatic.} =
   ## ``outputTag`` (Recipe-Val M8): which package-output this edge
   ## contributes to. Defaults to the empty string which the closure
@@ -2118,7 +2121,8 @@ proc buildAction*(id: string; call: PublicCliCall;
     cwdCustomPath: cwdCustomPath,
     declaredOutputs: @declaredOutputs,
     readOnlyRoots: @readOnlyRoots,
-    scratchDirs: @scratchDirs)
+    scratchDirs: @scratchDirs,
+    removeBeforeRun: @removeBeforeRun)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
@@ -2977,6 +2981,29 @@ proc appendRegisteredActionToolIdentityRefs*(actionId: string;
           buildActionRegistry[i].toolIdentityRefs.add(refName)
       return
 
+proc appendRegisteredActionRemoveBeforeRun*(actionId: string;
+                                            call: PublicCliCall;
+                                            flags: openArray[string]) {.dynOrStatic.} =
+  ## Record, on an already-registered action, the output paths a typed tool
+  ## declared with ``cli: removeBeforeRun <flag>...``: the values the call
+  ## supplied for those flags, in declaration order, deduplicated. A flag
+  ## the call did not supply contributes nothing. The generated typed-tool
+  ## wrapper calls this right after ``recordToolInvocation``; the macro has
+  ## already checked that each flag is an output (``role = output``), so
+  ## every path recorded here is one of the action's declared outputs. No-op
+  ## when the id is absent.
+  var paths: seq[string] = @[]
+  for flagName in flags:
+    for arg in call.arguments:
+      if arg.name == flagName:
+        paths.addRoleValues(arg)
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      for path in paths:
+        if path.len > 0 and path notin buildActionRegistry[i].removeBeforeRun:
+          buildActionRegistry[i].removeBeforeRun.add(path)
+      return
+
 proc appendRegisteredActionSubToolRefs*(actionId: string;
                                         refs: openArray[string]) {.dynOrStatic.} =
   ## Record the typed tool's own bare-name sub-tools (``cli: subTools``) on
@@ -3606,6 +3633,85 @@ proc shouldExcludePreserveTreeEntry(relative: string;
         normalizedPrefix & "/"):
       return true
 
+proc normalizedDeclaredProjectPath*(projectRoot, path: string): string {.dynOrStatic.} =
+  result = path.replace('\\', '/').strip()
+  while result.startsWith("./"):
+    result = result.substr(2)
+  while result.endsWith("/") and result.len > 1:
+    result.setLen(result.len - 1)
+  if result.len == 0:
+    return
+  if projectRoot.len > 0 and path.isAbsolute:
+    let normalizedRoot = normalizedPath(projectRoot).replace('\\', '/')
+    let normalizedPathValue = normalizedPath(path).replace('\\', '/')
+    if normalizedPathValue == normalizedRoot:
+      return "."
+    let prefix = normalizedRoot & "/"
+    if normalizedPathValue.startsWith(prefix):
+      return normalizedPathValue.substr(prefix.len)
+    result = normalizedPathValue
+
+proc refuseGeneratedPreserveTreeSource(sourceRoot, outputRoot, actionId: string;
+                                       deps: openArray[string];
+                                       after: openArray[BuildActionDef]) =
+  ## ``fs.preserveTree`` mirrors a SOURCE tree -- Tup's ``!tup_preserve``
+  ## (Typed-Tool-Definitions.md §Built-In File Operations) -- and it lists
+  ## that tree HERE, when the recipe is evaluated, not when the action runs.
+  ## A tree that an action of the same build generates is read before its
+  ## producer runs, so the mirror is a snapshot of the PREVIOUS build's tree:
+  ## on a fresh checkout it stages nothing and "succeeds", and once the
+  ## producer drops a file the build fails with ``preserveTree source file
+  ## disappeared before execution`` (seen staging CodeTracer's macOS dmg
+  ## from the ``.app`` the same build generates). Refuse it while the
+  ## producer is in hand: one of the actions the call is ordered after
+  ## (``after``, or ``deps`` by id) declares an output that is the source
+  ## root, lies under it, or contains it.
+  ##
+  ## A producer the call is NOT ordered after is not looked for: that graph
+  ## is already wrong for a second reason (the mirror may run first), and
+  ## the registry seen here holds only the actions registered so far.
+  let projectRoot = activeProviderProjectRoot()
+  let source = normalizedDeclaredProjectPath(projectRoot, sourceRoot)
+  if source.len == 0:
+    return
+  proc overlaps(output: string): bool =
+    let produced = normalizedDeclaredProjectPath(projectRoot, output)
+    if produced.len == 0:
+      return false
+    produced == source or source == "." or produced == "." or
+      produced.startsWith(source & "/") or source.startsWith(produced & "/")
+  var producers: seq[BuildActionDef] = @[]
+  for action in after:
+    producers.add(action)
+  for id in deps:
+    for action in buildActionRegistry:
+      if action.id == id:
+        producers.add(action)
+        break
+  for producer in producers:
+    # The registry entry is authoritative: a typed-tool wrapper appends to the
+    # registered action after it returned the value the caller holds.
+    var current = producer
+    for action in buildActionRegistry:
+      if action.id == producer.id:
+        current = action
+        break
+    for output in current.outputs & current.declaredOutputs:
+      if overlaps(output):
+        let caller =
+          if actionId.len > 0: "fs.preserveTree '" & actionId & "'"
+          else: "fs.preserveTree"
+        raise newException(ValueError,
+          caller & " cannot mirror '" & sourceRoot & "' into '" &
+            outputRoot & "': action '" & current.id &
+            "', which it runs after, declares the output '" & output &
+            "', so that tree is generated in this build. preserveTree " &
+            "mirrors SOURCE trees and lists its source when the recipe is " &
+            "evaluated, before '" & current.id & "' runs, so it would stage " &
+            "the previous build's tree (or nothing). Stage a generated tree " &
+            "in the action that produces it, or in a process action that " &
+            "declares the staging directory as its output.")
+
 proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
                    actionId = ""; deps: openArray[string] = [];
                    after: openArray[BuildActionDef] = [];
@@ -3613,6 +3719,8 @@ proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
                    commandStatsId = ""):
     BuildActionDef {.discardable, dynOrStatic.} =
   discard tool
+  refuseGeneratedPreserveTreeSource(sourceRoot, outputRoot, actionId, deps,
+    after)
   providerDirectoryInput(sourceRoot)
   let tree = collectPreserveTree(sourceRoot)
   for dirPath in tree.dirs:
@@ -3648,24 +3756,6 @@ proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
     extraOutputs = outputs,
     commandStatsId = commandStatsId,
     dependencyPolicy = automaticMonitorPolicy())
-
-proc normalizedDeclaredProjectPath*(projectRoot, path: string): string {.dynOrStatic.} =
-  result = path.replace('\\', '/').strip()
-  while result.startsWith("./"):
-    result = result.substr(2)
-  while result.endsWith("/") and result.len > 1:
-    result.setLen(result.len - 1)
-  if result.len == 0:
-    return
-  if projectRoot.len > 0 and path.isAbsolute:
-    let normalizedRoot = normalizedPath(projectRoot).replace('\\', '/')
-    let normalizedPathValue = normalizedPath(path).replace('\\', '/')
-    if normalizedPathValue == normalizedRoot:
-      return "."
-    let prefix = normalizedRoot & "/"
-    if normalizedPathValue.startsWith(prefix):
-      return normalizedPathValue.substr(prefix.len)
-    result = normalizedPathValue
 
 proc inferDeclaredActionDeps*(actions: openArray[BuildActionDef];
                               projectRoot = ""): seq[BuildActionDef] {.dynOrStatic.} =
@@ -4146,6 +4236,9 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
   # v30: the action's scratch directories.
   if version >= 30'u16:
     payload.writeStringSeq(action.scratchDirs)
+  # v31: declared outputs the engine removes before the action runs.
+  if version >= 31'u16:
+    payload.writeStringSeq(action.removeBeforeRun)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(version)
@@ -4374,6 +4467,12 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     result.scratchDirs = readStringSeq(bytes, pos)
   else:
     result.scratchDirs = @[]
+  if version >= 31'u16:
+    result.removeBeforeRun = readStringSeq(bytes, pos)
+  else:
+    # Absence of the list is absence of the request: the engine then removes
+    # nothing, which is what every action did before the field existed.
+    result.removeBeforeRun = @[]
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

@@ -90,7 +90,9 @@ libs/repro_build_engine/tests/t_path_mutation_evidence.nim	nim	4
 libs/repro_build_engine/tests/t_pattern_scoped_enumeration_keys_only_matching_entries.nim	nim	9
 libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim	nim	10
 libs/repro_build_engine/tests/t_portable_record_from_local_hit.nim	nim	4
+libs/repro_build_engine/tests/t_preserve_tree_rerun_never_writes_through_links.nim	nim	10
 libs/repro_build_engine/tests/t_relocatable_record_follows_the_working_tree.nim	nim	7
+libs/repro_build_engine/tests/t_remove_before_run.nim	nim	5
 libs/repro_build_engine/tests/t_scratch_dirs.nim	nim	4
 libs/repro_build_engine/tests/t_self_written_set_is_derived.nim	nim	8
 libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
@@ -237,6 +239,7 @@ libs/repro_dsl_stdlib/tests/t_cargo_test_no_default_features.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_certificate_policy_builder.nim	nim	10
 libs/repro_dsl_stdlib/tests/t_committed_lock_pins_versions.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_committed_lock_variants_are_hard.nim	nim	7
+libs/repro_dsl_stdlib/tests/t_create_dmg_removes_its_image_before_running.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_da6_capture_breadth_dsl_surface.nim	nim	14
 libs/repro_dsl_stdlib/tests/t_declared_package_source_reaches_the_solver_inputs.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_develop_dependency_source_is_read_not_solved.nim	nim	11
@@ -607,6 +610,7 @@ libs/repro_project_dsl/tests/t_dsl_outputs_typed_multiple_interfaces.nim	nim	1
 libs/repro_project_dsl/tests/t_dsl_outputs_unknown_flag_error.nim	nim	1
 libs/repro_project_dsl/tests/t_dsl_outputs_untyped_form_unchanged.nim	nim	1
 libs/repro_project_dsl/tests/t_dsl_platforms_resolved_form.nim	nim	6
+libs/repro_project_dsl/tests/t_dsl_remove_before_run_names_only_outputs.nim	nim	3
 libs/repro_project_dsl/tests/t_dsl_run_consumes_roundtrip.nim	nim	4
 libs/repro_project_dsl/tests/t_dsl_run_target_named_and_listed.nim	nim	4
 libs/repro_project_dsl/tests/t_dsl_state_group_membership.nim	nim	4
@@ -628,6 +632,7 @@ libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim	nim	7
 libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim	nim	7
 libs/repro_project_dsl/tests/t_m9r79_registry_mutators.nim	nim	6
 libs/repro_project_dsl/tests/t_multi_package_macro.nim	nim	5
+libs/repro_project_dsl/tests/t_preserve_tree_refuses_a_generated_source.nim	nim	5
 libs/repro_project_dsl/tests/t_service_config_is_a_cached_build_output.nim	nim	3
 libs/repro_project_dsl/tests/t_service_lowers_typed_edges_into_the_graph_fragment.nim	nim	11
 libs/repro_project_dsl/tests/t_source_cache_identity.nim	nim	2
@@ -1072,8 +1077,9 @@ tests/e2e/home-set-get/t_e2e_home_get_returns_the_effective_value.nim	nim	1
 tests/e2e/home-set-get/t_e2e_repro_home_set_triggers_focused_rebuild.nim	nim	1
 tests/e2e/io-monitor/t_debug_io_monitor_reads_monitor_depfile.nim	nim	0
 tests/e2e/launcher-isolation/t_e2e_windows_launcher_isolation.nim	nim	0
+tests/e2e/local-build-engine/t_e2e_create_dmg_reruns_over_its_image.nim	nim	1
 tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim	nim	18
-tests/e2e/local-build-engine/t_e2e_m51_dsl_stdlib_file_ops.nim	nim	5
+tests/e2e/local-build-engine/t_e2e_m51_dsl_stdlib_file_ops.nim	nim	6
 tests/e2e/local-build-engine/t_e2e_provider_graph_tracks_binary.nim	nim	1
 tests/e2e/local-build-engine/t_e2e_repro_build_multiple_named_targets.nim	nim	2
 tests/e2e/local-build-engine/t_e2e_repro_build_named_target.nim	nim	2

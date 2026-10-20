@@ -562,6 +562,7 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
                    parentParams: openArray[CliParamDef];
                    parentOutputFlags: openArray[string];
                    parentTypedOutputs: openArray[TypedOutputDef];
+                   parentRemoveBeforeRun: openArray[string];
                    parentPolicy: BuildActionDependencyPolicy;
                    parentNonDeterminism: NonDeterminismDecl;
                    wholeBody: NimNode;
@@ -598,6 +599,7 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
   result.params = @parentParams
   result.outputFlags = @parentOutputFlags
   result.typedOutputs = @parentTypedOutputs
+  result.removeBeforeRunFlags = @parentRemoveBeforeRun
 
   for stmt in body:
     let head = calleeName(stmt).normalize
@@ -682,6 +684,37 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
                 "declared in this cli interface)", stmt)
           if result.outputFlags.find(flagName) < 0:
             result.outputFlags.add(flagName)
+    of "removebeforerun":
+      # ``removeBeforeRun <flag>...`` — outputs the engine removes before
+      # the edge runs, for a tool that refuses to write over an existing
+      # output (create-dmg's ``hdiutil convert``). Only an OUTPUT parameter
+      # may be named: that is what keeps the removal to paths the edge
+      # declares as its own, and it is checked here, where the author can
+      # still see the declaration.
+      if stmt.len < 2:
+        error("removeBeforeRun requires at least one output flag name", stmt)
+      var operands: seq[NimNode] = @[]
+      for i in 1 ..< stmt.len:
+        collectOutputsOperands(stmt[i], operands)
+      for operand in operands:
+        if operand.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+          error("removeBeforeRun expects a flag name identifier, got: " &
+            operand.repr, operand)
+        let flagName = identText(operand)
+        var found = false
+        for param in result.params:
+          if param.name == flagName:
+            found = true
+            if param.role != carOutput:
+              error("removeBeforeRun: '" & flagName & "' is not an output " &
+                "(declare it with `role = output`); only an edge's own " &
+                "outputs may be removed before it runs", operand)
+            break
+        if not found:
+          error("removeBeforeRun: '" & flagName & "' is not a flag or " &
+            "positional visible in this cli scope", operand)
+        if result.removeBeforeRunFlags.find(flagName) < 0:
+          result.removeBeforeRunFlags.add(flagName)
     of "subtools":
       if not isRoot:
         error("subTools is a property of the TOOL: declare it once, " &
@@ -695,7 +728,8 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
       let childBody = stmt[stmt.len - 1]
       discard parseCliScope(packageName, executableName, childBody,
         childPath, false, result.params, result.outputFlags,
-        result.typedOutputs, result.dependencyPolicy,
+        result.typedOutputs, result.removeBeforeRunFlags,
+        result.dependencyPolicy,
         (result.nonDeterminism, result.nonDeterminismJustification),
         wholeBody, commands)
     else:
@@ -790,7 +824,7 @@ proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
       # directly under ``cli:`` and seeds the cumulative output set that
       # each subcommand inherits, all in one source-order pass.
       let rootCmd = parseCliScope(packageName, result.exportName, cliBody,
-        @[], true, @[], @[], @[], defaultDependencyPolicy(),
+        @[], true, @[], @[], @[], @[], defaultDependencyPolicy(),
         # M6: every tool starts UNBLESSED. A tool is blessed only where its
         # own spec says so, in writing, with a reason.
         (ndpUnblessed, ""), cliBody,
@@ -3119,6 +3153,8 @@ proc packageLiteral(pkg: PackageDef): string =
         ", nonDeterminismJustification: " &
           escForCode(cmd.nonDeterminismJustification) &
         ", subTools: @[" & escapedCodeList(cmd.subTools) &
+        "], removeBeforeRunFlags: @[" &
+          escapedCodeList(cmd.removeBeforeRunFlags) &
         "], outputFlags: @[")
       for ofIndex, flagName in cmd.outputFlags:
         if ofIndex > 0:
@@ -3613,6 +3649,9 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
     if cmd.subTools.len > 0:
       result.add("  appendRegisteredActionSubToolRefs(" & actionRef &
         ".id, [" & escapedCodeList(cmd.subTools) & "])\n")
+    if cmd.removeBeforeRunFlags.len > 0:
+      result.add("  appendRegisteredActionRemoveBeforeRun(" & actionRef &
+        ".id, call, [" & escapedCodeList(cmd.removeBeforeRunFlags) & "])\n")
     # Typed-Outputs M1: bind each typed-output field by evaluating its
     # ``pathExpr`` in the call-site flag scope. The shared
     # ``emitTypedOutputBindings`` helper handles both the typed-handle
