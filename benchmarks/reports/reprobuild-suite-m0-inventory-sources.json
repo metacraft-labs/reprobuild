@@ -13616,8 +13616,8 @@
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
       "source": "libs/repro_home_apply/tests/t_smoke_home_apply.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13946,8 +13946,8 @@
       "owner": "libs/repro_home_resources",
       "requiresReproBinary": false,
       "source": "libs/repro_home_resources/tests/t_smoke_home_resources.nim",
-      "sourceSuiteCount": 12,
-      "staticCaseCount": 166,
+      "sourceSuiteCount": 13,
+      "staticCaseCount": 174,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

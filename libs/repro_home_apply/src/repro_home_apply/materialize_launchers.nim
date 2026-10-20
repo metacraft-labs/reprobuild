@@ -30,6 +30,7 @@ import repro_launch_plan
 # so this adds no new link-time surface, only a use of what is already there.
 import repro_project_dsl
 
+import repro_home_resources/test_home_fence
 import ./app_activation
 import ./errors
 import ./plan
@@ -201,6 +202,7 @@ proc materializeLaunchers*(store: var Store; binDir: string;
   ## a launcher of an application runs the placed copy there
   ## (``app_activation.launcherExecutablePath``). "" keeps every launcher
   ## on the realized prefix.
+  enforceTestHomeFence(binDir, "home.launcher write")
   createDir(extendedPath(binDir))
   # Build a quick lookup from package id → realized record.
   var byPkg: seq[(string, RealizedRecord)]
@@ -297,6 +299,7 @@ proc materializeLaunchers*(store: var Store; binDir: string;
 
 proc removeLauncher*(binDir, commandName: string) =
   ## Drop the launcher artifact for a command removed from the plan.
+  enforceTestHomeFence(binDir, "home.launcher remove")
   when defined(windows):
     let cmdExe = binDir / (commandName & ".exe")
     let sidecar = cmdExe & LaunchPlanSidecarSuffix

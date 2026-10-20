@@ -43,6 +43,7 @@ from repro_core/process_streams import drainStream
 from repro_home_generations import Digest256
 
 import ./../manifest_record
+import ./../test_home_fence
 import ./../types
 
 # ---------------------------------------------------------------------------
@@ -211,6 +212,7 @@ proc writeUserFileBytes*(hostPath: string;
   ## `contentFromCommand` path (`applyUserFileResourceCmd`) so the
   ## atomic-write, mode-apply, and post-apply-reprobe contract is
   ## implemented once.
+  enforceTestHomeFence(hostPath, "fs.userFile apply")
   let parent = parentDir(hostPath)
   if parent.len > 0:
     createDir(extendedPath(parent))
@@ -321,6 +323,7 @@ proc destroyUserFileResource*(hostPath: string) =
   ## flag needed on a whole-file owner). A missing file is a no-op
   ## (the lifecycle algorithm catches "destroy a thing that's not
   ## there" upstream; this guard is defence-in-depth).
+  enforceTestHomeFence(hostPath, "fs.userFile destroy")
   if fileExists(extendedPath(hostPath)):
     try: removeFile(extendedPath(hostPath)) except OSError: discard
   # Also clean a stray `.repro.tmp` if one happens to exist — a crash
