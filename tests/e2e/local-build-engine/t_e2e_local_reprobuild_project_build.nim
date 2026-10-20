@@ -1,9 +1,11 @@
-import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
+import std/[compilesettings, json, os, osproc, sequtils, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
 import repro_tool_profiles
 import repro_runquota
 import repro_test_support
+
+const CompileSearchPaths = querySettingSeq(MultipleValueSetting.searchPaths)
 
 proc removeDirEventually(path: string) =
   ## Daemon-backed builds can leave just-closed metadata files visible briefly.
@@ -1300,44 +1302,34 @@ suite "e2e_local_reprobuild_project_build":
         "nim", "check", "--verbosity:0", "--hints:off", "--skipUserCfg:on",
         "--skipParentCfg:on", "--skipProjCfg:on", "--noNimblePath"
       ]
-      for relativePath in [
-        "libs/repro_project_dsl/src",
-        "libs/repro_dsl_stdlib/src",
-        "libs/repro_solver/src",
-        "libs/repro_binary_cache_client/src",
-        "libs/repro_binary_cache_server/src",
-        "libs/repro_core/src",
-        # ``repro_project_dsl`` re-exports ``install_mirror_resolver``, which
-        # uses the local store's prefix-path helpers and, since "Reject
-        # foreign source realizations", ``repro_platform``'s ``currentHost``
-        # to name the host a mirror was realized for. This list is
-        # hand-maintained, so an import added to anything in
-        # ``repro_project_dsl``'s closure has to be added here too —
-        # otherwise the arm below stops testing what it says it tests: the
-        # check fails with "cannot open file:" long before it can reach the
-        # ``m46Tool`` identifier this case is about.
-        "libs/repro_local_store/src",
-        "libs/repro_platform/src",
-        # ``repro_project_dsl`` also re-exports ``repro_lock_files`` (and
-        # its ``ct_registry``) since "The DSL surface for named lock files".
-        "libs/repro_lock_files/src",
-        "libs/blake3/src",
-        "libs/nimcrypto",
-        "libs/nim-faststreams/src",
-        "libs/nim-stew/src",
-        "libs/nim-serialization/src",
-        "libs/nim-json-serialization/src",
-        "libs/nim-ssz-serialization/src",
-        "libs/results/src",
-        "libs/stint/src",
-      ]:
-        checkArgs.add("--path:" & repoRoot / relativePath)
+      # Reuse the configured compilation's library roots so new DSL imports
+      # cannot turn this into a missing-dependency test. Exclude project and
+      # test roots: exposing package helper directories would defeat the
+      # visibility boundary. Nim prepends --path entries, so replay its search
+      # order backwards to preserve which version of a dependency is selected.
+      let repositoryRoot = normalizedPath(repoRoot)
+      let libraryRoot = repositoryRoot / "libs" & DirSep
+      for index in countdown(CompileSearchPaths.high, 0):
+        let path = normalizedPath(CompileSearchPaths[index])
+        if path.startsWith(libraryRoot) or
+            (path != repositoryRoot and
+             not path.startsWith(repositoryRoot & DirSep)):
+          # Dependency roots may be supplied by the shell from a sibling
+          # checkout or a package store, rather than from vendored libs/.
+          checkArgs.add("--path:" & path)
       checkArgs.add(projectRoot / "reprobuild.nim")
 
       let output = requireFailure(shellCommand(checkArgs), projectRoot)
       checkpoint(output)
       check output.contains("undeclared identifier: 'm46Tool'")
       check not output.contains("cannot open file:")
+
+      # A successful compile with only the opt-in added proves the negative
+      # arm reached the helper visibility boundary with a complete DSL closure.
+      let recipePath = projectRoot / "reprobuild.nim"
+      writeFile(recipePath, readFile(recipePath).replace("package m46Project:\n",
+        "package m46Project:\n  usesImportPath \"reprobuild/packages\"\n"))
+      discard requireSuccess(shellCommand(checkArgs), projectRoot)
 
     test "generated tool object records action and path roles without buildAction":
       let repoRoot = getCurrentDir()
