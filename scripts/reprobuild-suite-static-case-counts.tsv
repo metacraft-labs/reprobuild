@@ -1472,7 +1472,7 @@ tests/integration/t_inference_commitment_is_hiding_and_binding.nim	nim	15
 tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim	nim	3
 tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim	nim	5
 tests/integration/t_install_mirror_atomic_patching.nim	nim	9
-tests/integration/t_installed_engine_read_only_source_tree.nim	nim	2
+tests/integration/t_installed_engine_read_only_source_tree.nim	nim	5
 tests/integration/t_installed_reprobuild_resolves_moved_packages_from_its_own_catalog.nim	nim	3
 tests/integration/t_installer_tarball_shared_cache.nim	nim	2
 tests/integration/t_integration_build_engine_api_ready_queue.nim	nim	18

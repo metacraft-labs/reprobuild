@@ -4853,12 +4853,26 @@
           "executedVariables": [
             "cmd"
           ],
-          "line": 198,
+          "line": 203,
           "path": "tests/integration/t_installed_engine_read_only_source_tree.nim",
           "patterns": [
             "nim-compile-verb"
           ],
-          "snippet": "var cmd = quoteShell(nimExe) & \" c --compileOnly --hints:off --warnings:off\""
+          "snippet": "if checkOnly: quoteShell(nimExe) & \" check --hints:off --warnings:off\""
+        },
+        {
+          "assignedCommandVariable": "cmd",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "cmd"
+          ],
+          "line": 204,
+          "path": "tests/integration/t_installed_engine_read_only_source_tree.nim",
+          "patterns": [
+            "nim-compile-verb"
+          ],
+          "snippet": "else: quoteShell(nimExe) & \" c --compileOnly --hints:off --warnings:off\""
         }
       ],
       "source": "tests/integration/t_installed_engine_read_only_source_tree.nim"
@@ -33919,8 +33933,8 @@
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_installed_engine_read_only_source_tree.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
