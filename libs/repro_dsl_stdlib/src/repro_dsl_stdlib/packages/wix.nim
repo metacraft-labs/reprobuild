@@ -1,8 +1,8 @@
-## ``wix`` — the WiX v3 toolset as electron-builder packages it.
+## ``wix`` — the WiX toolset as electron-builder packages it.
 ##
 ## **Why this and not ``wix3_tools``.** Both provide ``candle.exe`` and
-## ``light.exe`` from WiX v3, but they are different builds from different
-## publishers, and which one a project needs is decided by its consumer.
+## ``light.exe``, but they are different builds from different publishers,
+## and which one a project needs is decided by its consumer.
 ## electron-builder's MSI target fetches this exact artifact — its
 ## ``MsiTarget.ts`` calls ``getBinFromUrl("wix", "4.0.0.5512.2", …)`` against
 ## the ``electron-builder-binaries`` repository — so a project that builds an
@@ -11,11 +11,13 @@
 ##
 ## ``wix3_tools`` remains the right choice for anything driving WiX directly.
 ##
-## The ``4.0.0.5512.2`` string is electron-builder's PACKAGING tag, not a WiX
-## version: the binaries inside are the WiX v3 toolset (candle / light), not
-## the unified WiX v4 ``wix.exe``. Both live flat at the archive root.
+## The ``4.0.0.5512.2`` string is electron-builder's PACKAGING tag: a fifth
+## component appended to the WiX build inside, whose ``candle.exe -?``
+## reports "WiX Toolset Compiler version 4.0.0.5512". That build is the
+## record's ``version``. It still ships the v3 command set (candle / light),
+## not the unified ``wix.exe``. Both live flat at the archive root.
 ##
-## Windows only, and not because the other platforms are unpackaged: WiX v3
+## Windows only, and not because the other platforms are unpackaged: this WiX
 ## is a .NET Framework toolset that builds Windows Installer databases, and
 ## neither half of that exists elsewhere.
 
@@ -30,6 +32,7 @@ package wix:
       sha256 = "fe677fcd837b18c9b912985d91636bbd8a1e800c3b3a6a841b6f96e89624e839",
       archiveType = "7z",
       executablePath = "candle.exe",
+      version = "4.0.0.5512",
       packageId = "wix@" & WixPackagingTag,
       cpu = "x86_64",
       os = "windows",

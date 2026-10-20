@@ -80,6 +80,16 @@
 ## SHA-lock layer and MO-2's evidence model). MO-1 records the source
 ## identity the unified solver actually keys on (the package-definition
 ## name); deeper provenance layers above it.
+##
+## ## Locked provisioning realizations (ReproOS-Campaign-Completion M7 D2)
+##
+## A v2 document may also carry ``provisioning = [{ record = "…", … }]`` —
+## the locked provisioning realizations of ``repro_lock/provisioning``,
+## re-exported here. The key is written only when there is at least one
+## record, so a lock without them is byte-identical to what this module
+## wrote before they existed; the reader is strict about it (see that
+## module). They are not part of ``lockIdentityOf``: see
+## ``LockedDependencies.provisioning``.
 
 import std/[algorithm, strutils, tables]
 
@@ -87,12 +97,16 @@ import repro_solver
 import repro_multihash
 import repro_lock/identity
 import repro_lock/toml_subset
+import repro_lock/provisioning
+import repro_lock/catalog_imports
 import repro_lock/certificate_policy
 
 export UnifiedSolution
 export SelectionStatus
 export repro_multihash
 export identity
+export provisioning
+export catalog_imports
 
 const SolvedGraphLockSchemaV1* = "reprobuild.solved-graph-lock.v1"
   ## The historical MO-1 schema string, retained ONLY so a stale lock can be
@@ -299,6 +313,48 @@ type
     variants*: seq[LockedVariant]
     packages*: seq[LockedPackage]
     deps*: seq[LockedDep]
+    provisioning: seq[LockedRealization]
+      ## M7 deliverable 2 — the locked provisioning realizations
+      ## (``repro_lock/provisioning``), serialised under the ``provisioning``
+      ## key and ONLY when non-empty, so every lock written before them
+      ## re-serialises byte-identically.
+      ##
+      ## Deliberately NOT exported. A record is handed out for USE only by
+      ## ``lockedRealizationFor``, which takes the CURRENT interface and
+      ## contribution fingerprints and refuses a stale record. The one other
+      ## reader is ``lockedProvisioningClaims``, which hands the raw records
+      ## to the provisioning RESOLVER
+      ## (``repro_interface_artifacts/contribution_selection``) so it can
+      ## learn which contributor each record pins; that resolver re-checks
+      ## every record through ``requireCurrentRealization`` (the same gate)
+      ## plus the catalog coordinate and realization before selecting from
+      ## it. Set it with ``withProvisioningRealizations``.
+      ##
+      ## Deliberately NOT projected into ``lockIdentityOf`` either. The spec
+      ## (Provisioning-Contributions.md, Locks And Snapshots) requires that
+      ## refreshing only a contribution leave downstream typechecking cached
+      ## while invalidating the realization and build edges that selected
+      ## it. The §6.2 lock identity governs EVERY action under the lock, so
+      ## folding the record in would invalidate typechecking too.
+      ##
+      ## The realization and build edges that select a locked realization
+      ## ARE keyed on its contribution fingerprint (M7 deliverables 3/4): a
+      ## resolver-selected ``ProvisioningPin`` carries it, and
+      ## ``repro_tool_profiles`` folds it into the acquisition plan's lock
+      ## identity, which keys the realized prefix, the tool profile
+      ## fingerprint and the typed-tool action fingerprint. So a
+      ## contribution-only refresh moves those keys while this identity --
+      ## and with it downstream typechecking -- stays put. A record whose
+      ## contribution no longer matches the catalogs is REFUSED by the
+      ## resolver, never re-used.
+    catalogImports: seq[LockedCatalogImport]
+      ## ReproOS M6 deliverable 1 -- the catalog import pins
+      ## (``repro_lock/catalog_imports``), serialised under the
+      ## ``catalog_imports`` key and ONLY when non-empty, so every lock
+      ## written before them re-serialises byte-identically. Not projected
+      ## into ``lockIdentityOf``, for the reason ``provisioning`` is not: they
+      ## govern which catalog revisions a provisioning selection is verified
+      ## against, never typechecking. Set with ``withCatalogImportPins``.
     certificatePolicySection*: string
       ## Test-Certificates TC-9b: the ``[certificate_policy]`` snapshot,
       ## VERBATIM as the lock carries it (``""`` when it carries none).
@@ -658,6 +714,66 @@ proc lockIdentityOf*(ld: LockedDependencies): LockIdentity =
   ## not a parameter and cannot become one.
   lockIdentityOf(canonicalSolvedGraph(ld))
 
+proc withProvisioningRealizations*(ld: LockedDependencies;
+                                   records: seq[LockedRealization]):
+    LockedDependencies =
+  ## ``ld`` with its locked provisioning realizations replaced by
+  ## ``records``. Every record must have been sealed by
+  ## ``sealLockedRealization`` (or read back by the strict reader);
+  ## ``serializeLockedDependencies`` refuses one that was not.
+  result = ld
+  result.provisioning = records
+
+proc lockedProvisioningClaims*(ld: LockedDependencies):
+    seq[LockedRealization] =
+  ## The lock's provisioning records as CLAIMS, for the provisioning
+  ## resolver only (``repro_interface_artifacts/contribution_selection
+  ## .resolveProvisioningSelections``). A claim says which contributor the
+  ## lock pins; it is not a selection. The resolver checks every claim
+  ## against the composed catalogs -- through ``requireCurrentRealization``
+  ## (interface and contribution fingerprints), the catalog coordinate and
+  ## the declared realization -- and refuses rather than select from one
+  ## that does not match. Anything else that wants a record uses
+  ## ``lockedRealizationFor``.
+  ld.provisioning
+
+proc provisioningRealizationCount*(ld: LockedDependencies): int =
+  ## How many provisioning realizations the lock records. A count, not the
+  ## records: see ``lockedRealizationFor``.
+  ld.provisioning.len
+
+proc withCatalogImportPins*(ld: LockedDependencies;
+                            pins: seq[LockedCatalogImport]):
+    LockedDependencies =
+  ## ``ld`` with its catalog import pins replaced by ``pins`` (M6 D1;
+  ## ``repro_lock/catalog_imports``). Validated when serialised.
+  result = ld
+  result.catalogImports = pins
+
+proc lockedCatalogImportPins*(ld: LockedDependencies):
+    seq[LockedCatalogImport] =
+  ## The lock's catalog import pins, as read (strictly) or as set.
+  ld.catalogImports
+
+proc catalogImportPinCount*(ld: LockedDependencies): int =
+  ## How many catalog import pins the lock records.
+  ld.catalogImports.len
+
+proc lockedRealizationFor*(ld: LockedDependencies;
+                           packageName, hostPlatform, targetPlatform: string;
+                           currentInterfaceFingerprint,
+                           currentContributionFingerprint: string):
+    LockedRealization =
+  ## The locked provisioning realization of ``packageName`` on this
+  ## host/target pair, returned ONLY if it still matches the current
+  ## canonical interface fingerprint and the current contribution
+  ## fingerprint. Raises ``StaleLockedRealizationError`` (saying which one
+  ## moved) otherwise, and ``LockedRealizationError`` when the lock records
+  ## none. See ``repro_lock/provisioning.requireCurrentRealization``.
+  requireCurrentRealization(ld.provisioning, packageName, hostPlatform,
+    targetPlatform, currentInterfaceFingerprint,
+    currentContributionFingerprint)
+
 # ---------------------------------------------------------------------------
 # MO-11 — non-VCS coordinates + integrity for solved packages, and the lift of
 # the solved package graph into first-class ``LockedDep``s.
@@ -918,6 +1034,20 @@ proc serializeLockedDependencies*(ld: LockedDependencies): string =
     if i > 0: result.add(", ")
     result.add(serializeDepInline(d))
   result.add("]\n")
+  # provisioning — M7 D2's locked realizations. Emitted ONLY when there is
+  # one, so a lock without them is byte-identical to what this writer
+  # produced before they existed. Raises ``LockedRealizationError`` on a
+  # record that was not sealed by the lock writer, is malformed, or shares
+  # a (package, host, target) key with another.
+  if ld.provisioning.len > 0:
+    result.add(ProvisioningLockKey & " = " &
+      serializeProvisioningRealizations(ld.provisioning) & "\n")
+  # catalog_imports -- M6 D1's import pins. Emitted ONLY when there is one,
+  # for the same reason. Raises ``LockedCatalogImportError`` on a malformed
+  # pin, or on two pins for one repo or one remote.
+  if ld.catalogImports.len > 0:
+    result.add(CatalogImportsLockKey & " = " &
+      serializeCatalogImports(ld.catalogImports) & "\n")
   # TC-9b: the certificate-policy snapshot, last and verbatim. Absent from
   # every lock that enacts no policy, so those re-serialize byte-identically.
   if ld.certificatePolicySection.len > 0:
@@ -950,6 +1080,24 @@ proc serializeSolvedGraphLock*(lock: SolvedGraphLock): string =
   ## (``tests/t_lock_writer_output_reads_back.nim``).
   serializeLockedDependencies(lockedDepsFromSolved(lock))
 
+const ProvisioningRepairAdvice =
+  "the lock writer never produces this, and `repro lock refresh` carries " &
+  "the provisioning array forward rather than regenerating it (it refuses " &
+  "to replace a lock whose array it cannot read); restore the " &
+  "`provisioning` line from version control, or remove it deliberately"
+  ## The repair a malformed ``provisioning`` array calls for. NOT "regenerate
+  ## with ``repro lock refresh``": a refresh re-solves the package graph and
+  ## cannot re-derive a locked provisioning selection, so it carries the
+  ## array forward (``withProvisioningCarriedForward``) and refuses one it
+  ## cannot read rather than dropping it.
+
+const CatalogImportsRepairAdvice* =
+  "catalog import pins are written only by `repro lock refresh " &
+  "--provisioning`, and a plain refresh carries them forward rather than " &
+  "re-resolving them; restore the `catalog_imports` line from version " &
+  "control, or re-pin deliberately with `repro lock refresh --provisioning`"
+  ## The repair a malformed ``catalog_imports`` array calls for (M6 D1).
+
 proc parseLockedDependencies*(content: string): LockedDependencies =
   ## Parse a committed lock into the unified model. Accepts the v3 and v2
   ## schemas; a v1-tagged (or any other) lock is rejected LOUDLY by
@@ -969,14 +1117,57 @@ proc parseLockedDependencies*(content: string): LockedDependencies =
   result = lockedDepsFromSolved(solved)
   let split = splitCertificatePolicySection(content)
   result.certificatePolicySection = split.policySection
-  # Pull the ``deps`` array (empty when the lock carries no deps).
+  # Pull the ``deps`` array (empty when the lock carries no deps), and
+  # M7 D2's ``provisioning`` array (absent from every lock written before it),
+  # and M6 D1's ``catalog_imports`` array (likewise) -- all from the lock
+  # part; the certificate-policy section after it is carried verbatim.
+  var sawProvisioning = false
+  var sawCatalogImports = false
   for rawLine in split.lockPart.splitLines():
     let line = rawLine.strip()
     if line.len == 0 or line.startsWith("#") or line.startsWith("["):
       continue
     let eq = line.find('=')
-    if eq <= 0: continue
-    if line[0 ..< eq].strip() != "deps": continue
+    if eq <= 0:
+      # A ``provisioning`` line cut before its ``=`` is a truncated record
+      # array, not a line to skip: skipping it would read a lock that
+      # selected a contributor as one that selected none.
+      if line.startsWith(ProvisioningLockKey):
+        raise newException(SolvedGraphLockParseError,
+          "lock has a truncated `" & ProvisioningLockKey & "` line; " &
+          ProvisioningRepairAdvice)
+      if line.startsWith(CatalogImportsLockKey):
+        raise newException(SolvedGraphLockParseError,
+          "lock has a truncated `" & CatalogImportsLockKey & "` line; " &
+          CatalogImportsRepairAdvice)
+      continue
+    let key = line[0 ..< eq].strip()
+    if key == CatalogImportsLockKey:
+      if sawCatalogImports:
+        raise newException(SolvedGraphLockParseError,
+          "lock carries the `" & CatalogImportsLockKey & "` key twice; " &
+          CatalogImportsRepairAdvice)
+      sawCatalogImports = true
+      try:
+        result.catalogImports = parseCatalogImports(line[eq + 1 .. ^1])
+      except LockedCatalogImportError as err:
+        raise newException(SolvedGraphLockParseError,
+          "lock " & err.msg & "; " & CatalogImportsRepairAdvice)
+      continue
+    if key == ProvisioningLockKey:
+      if sawProvisioning:
+        raise newException(SolvedGraphLockParseError,
+          "lock carries the `" & ProvisioningLockKey & "` key twice; " &
+          ProvisioningRepairAdvice)
+      sawProvisioning = true
+      try:
+        result.provisioning = parseProvisioningRealizations(
+          line[eq + 1 .. ^1])
+      except LockedRealizationError as err:
+        raise newException(SolvedGraphLockParseError,
+          "lock " & err.msg & "; " & ProvisioningRepairAdvice)
+      continue
+    if key != "deps": continue
     let rhs = line[eq + 1 .. ^1].strip()
     for f in inlineTables(rhs):
       let kindRaw = f.getOrDefault("coord_kind", "vcs")
@@ -1031,3 +1222,322 @@ proc parseLockedDependencies*(content: string): LockedDependencies =
           build: f.getOrDefault("archive_build", ""))))
   if solved.schema == SolvedGraphLockSchemaV3:
     validateV3Deps(result.deps)
+
+proc decodedKeyText(keyPart: string): string =
+  ## ``keyPart`` with TOML's ``\uXXXX`` / ``\UXXXXXXXX`` escapes -- and TOML
+  ## 1.1's ``\xHH`` -- of ASCII code points decoded, so
+  ## ``"provisioning"`` and ``"\x70rovisioning"`` read as the key they
+  ## spell. Everything else is kept byte for byte.
+  var i = 0
+  while i < keyPart.len:
+    if keyPart[i] == '\\' and i + 1 < keyPart.len and
+        keyPart[i + 1] in {'u', 'U', 'x'}:
+      let digits =
+        case keyPart[i + 1]
+        of 'u': 4
+        of 'U': 8
+        else: 2
+      if i + 2 + digits <= keyPart.len:
+        try:
+          let code = parseHexInt(keyPart[i + 2 ..< i + 2 + digits])
+          if code >= 0 and code < 128:
+            result.add(char(code))
+            i += 2 + digits
+            continue
+        except ValueError:
+          discard
+    result.add(keyPart[i])
+    inc i
+
+proc lockLineKeyText*(line: string): string =
+  ## The KEY text of a (stripped, non-comment) lock line, as the key-spelling
+  ## guards inspect it, with TOML escapes of ASCII code points decoded
+  ## (``decodedKeyText``).
+  ##
+  ## A table header, or a line without ``=``, is key text as a whole.
+  ## Otherwise the key text is EVERY key the line spells, one per line of
+  ## the result: the text before the first ``=``, and, inside an inline
+  ## table, the text from each ``{`` or ``,`` to the next ``=`` -- so
+  ## ``x = { catalog_imports = [...] }`` and ``catalog = { imports = [...] }``
+  ## are seen for what TOML makes of them (``x.catalog_imports``,
+  ## ``catalog.imports``) and not as the keys ``x`` and ``catalog``. Quoted
+  ## strings are scanned as units, so an ``=``, ``,`` or ``#`` inside a
+  ## quoted key neither splits nor ends it, and a quoted VALUE is never key
+  ## text (a dependency named after a lock key is not a match). A ``#``
+  ## outside a string ends the line. A key still open at the end of the
+  ## line (an unterminated quote, say) is key text too.
+  if line.startsWith("[") or line.find('=') < 0:
+    return decodedKeyText(line)
+  var keys = ""
+  var current = ""
+  var inKey = true
+  var i = 0
+  while i < line.len:
+    let ch = line[i]
+    if ch == '"' or ch == '\'':
+      var j = i + 1
+      while j < line.len and line[j] != ch:
+        if ch == '"' and line[j] == '\\' and j + 1 < line.len:
+          j += 2
+        else:
+          inc j
+      if inKey:
+        current.add(line[i ..< min(j + 1, line.len)])
+      i = j + 1
+      continue
+    case ch
+    of '#':
+      break
+    of '=':
+      if inKey:
+        keys.add(current & "\n")
+        current = ""
+        inKey = false
+    of '{', ',':
+      inKey = true
+      current = ""
+    of '}', ']':
+      inKey = false
+      current = ""
+    else:
+      if inKey:
+        current.add(ch)
+    inc i
+  if inKey and current.strip().len > 0:
+    keys.add(current & "\n")
+  decodedKeyText(keys)
+
+proc readsProvisioningLine*(line: string): bool =
+  ## The ONE form ``parseLockedDependencies`` reads records from:
+  ## a (stripped) non-header line whose key, before its first ``=``, is
+  ## exactly ``provisioning``.
+  if line.startsWith("[") or line.startsWith("#"):
+    return false
+  let eq = line.find('=')
+  eq > 0 and line[0 ..< eq].strip() == ProvisioningLockKey
+
+proc namesProvisioningKey*(line: string): bool =
+  ## Whether the KEY part of a (stripped, non-comment) line -- the whole of a
+  ## header line, else the text before its first ``=`` -- names
+  ## ``provisioning`` in any spelling: bare, quoted, escaped (``\u``, ``\U``
+  ## and TOML 1.1's ``\x``), dotted, as a table or array-of-tables header,
+  ## or behind bytes TOML does not treat as
+  ## whitespace (a BOM, a no-break space) -- and in ANY ASCII letter case.
+  ## TOML keys are case-sensitive, so ``Provisioning = [...]`` is another
+  ## key that every reader skips; but a lock that spells it so meant to pin,
+  ## and skipping it would build unpinned. (The lock's own keys are a fixed
+  ## lower-case set; package names are values, never keys.) Values are not
+  ## inspected, so a dependency that merely mentions the word is not a
+  ## match -- and neither is a member of another key's inline table
+  ## (``x = { provisioning = 1 }``), which M7's own end-to-end case pins as
+  ## "not the provisioning key".
+  let eq = line.find('=')
+  let keyPart =
+    if line.startsWith("[") or eq < 0: line
+    else: line[0 ..< eq]
+  ProvisioningLockKey in decodedKeyText(keyPart).toLowerAscii()
+
+proc lockDeclaresProvisioning*(text: string): bool =
+  ## True when ``text`` has a line that names the ``provisioning`` key in ANY
+  ## spelling (see ``namesProvisioningKey``), including the writer's own.
+  for rawLine in text.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    if namesProvisioningKey(line):
+      return true
+  false
+
+proc lockHasUnreadProvisioningSpelling*(text: string): bool =
+  ## True when ``text`` names the ``provisioning`` key on some line OTHER
+  ## than the one form the strict reader reads (``readsProvisioningLine``).
+  ## The strict reader silently skips every other spelling -- quoted,
+  ## escaped, dotted, table headers -- (measured), so records written that
+  ## way would be dropped: alone they read as "no record", and beside a
+  ## read line (say, one holding only another platform's records) the
+  ## host's records vanish while the lock still parses. Either way the CLI
+  ## build path refuses instead of building unpinned, and a refresh refuses
+  ## to replace the lock (``withProvisioningCarriedForward``) rather than
+  ## drop them.
+  for rawLine in text.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    if readsProvisioningLine(line):
+      continue
+    if namesProvisioningKey(line):
+      return true
+  false
+
+proc readsCatalogImportsLine*(line: string): bool =
+  ## The ONE form ``parseLockedDependencies`` reads catalog import pins from
+  ## (M6 D1): a stripped non-header line whose key, before its first ``=``,
+  ## is exactly ``catalog_imports``.
+  if line.startsWith("[") or line.startsWith("#"):
+    return false
+  let eq = line.find('=')
+  eq > 0 and line[0 ..< eq].strip() == CatalogImportsLockKey
+
+proc namesCatalogImportsKey*(line: string): bool =
+  ## Whether the KEY text of a (stripped, non-comment) line
+  ## (``lockLineKeyText``: every key the line spells, inline-table keys
+  ## included, escapes decoded) names ``catalog_imports`` in any spelling --
+  ## the ``namesProvisioningKey`` rule, widened further for a two-word key:
+  ## everything but ASCII letters and digits is ignored, in any letter case,
+  ## so ``Catalog-Imports``, ``catalogImports``, ``catalog.imports``,
+  ## ``"catalog imports"``, ``[catalog.imports]`` and
+  ## ``catalog = { imports = [...] }`` match too, as does a key with a
+  ## zero-width or full-width separator, raw or escaped (an escape of a
+  ## non-ASCII code point, which ``decodedKeyText`` keeps as text, is
+  ## dropped here like any other separator). A lock that spells the key in a
+  ## way the reader skips meant to pin, and a false refusal is the safe side
+  ## -- which is also why this guard, unlike ``namesProvisioningKey``, looks
+  ## inside inline tables: no lock has ever carried a member of that name.
+  let text = lockLineKeyText(line)
+  var folded = ""
+  var i = 0
+  while i < text.len:
+    let ch = text[i]
+    if ch == '\\' and i + 1 < text.len and text[i + 1] in {'u', 'U', 'x'}:
+      let digits =
+        case text[i + 1]
+        of 'u': 4
+        of 'U': 8
+        else: 2
+      var n = 0
+      while n < digits and i + 2 + n < text.len and
+          text[i + 2 + n] in HexDigits:
+        inc n
+      if n == digits:
+        i += 2 + digits
+        continue
+    let lower = toLowerAscii(ch)
+    if lower in {'a'..'z', '0'..'9'}:
+      folded.add(lower)
+    inc i
+  "catalogimports" in folded
+
+proc lockDeclaresCatalogImports*(text: string): bool =
+  ## True when ``text`` has a line that names ``catalog_imports`` in ANY
+  ## spelling, including the writer's own.
+  for rawLine in text.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    if namesCatalogImportsKey(line):
+      return true
+  false
+
+proc lockHasUnreadCatalogImportsSpelling*(text: string): bool =
+  ## True when ``text`` names ``catalog_imports`` on some line OTHER than the
+  ## one form the strict reader reads.
+  for rawLine in text.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    if readsCatalogImportsLine(line):
+      continue
+    if namesCatalogImportsKey(line):
+      return true
+  false
+
+proc documentCarriesCatalogImports(content: string): bool =
+  ## Whether a committed lock document carries the writer's
+  ## ``catalog_imports`` line. A line cut before its ``=`` is not looked for
+  ## here: it names the key in a form the reader does not read, which
+  ## ``lockHasUnreadCatalogImportsSpelling`` refuses first.
+  for rawLine in content.splitLines():
+    if readsCatalogImportsLine(rawLine.strip()):
+      return true
+  false
+
+proc documentCarriesProvisioning(content: string): bool =
+  ## Whether a committed lock document spells a ``provisioning`` key at all
+  ## -- including one cut before its ``=`` -- by the line rules
+  ## ``parseLockedDependencies`` applies.
+  for rawLine in content.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#") or line.startsWith("["):
+      continue
+    let eq = line.find('=')
+    if eq <= 0:
+      if line.startsWith(ProvisioningLockKey): return true
+    elif line[0 ..< eq].strip() == ProvisioningLockKey:
+      return true
+  false
+
+proc withProvisioningCarriedForward*(fresh: LockedDependencies;
+                                     incumbentDocument: string):
+    LockedDependencies =
+  ## ``fresh`` -- a lock just produced by a SOLVE, which knows nothing about
+  ## provisioning -- carrying the locked provisioning realizations of the
+  ## incumbent committed lock document UNCHANGED. The two doors that write
+  ## the committed lock (``repro lock refresh`` and ``repro lock solve
+  ## --write``, ``repro_lock_gen``) call this, so a refresh never silently
+  ## turns a pinned contributor into "no lock, choose again".
+  ##
+  ## Carrying a record forward unchanged is safe: a record is handed back
+  ## only by ``lockedRealizationFor`` against the CURRENT interface and
+  ## contribution fingerprints, so a record the new solve made stale refuses
+  ## on read instead of being used. Re-selecting a contributor is M7
+  ## deliverables 3 and 5, not a side effect of re-solving versions.
+  ##
+  ## An incumbent without a ``provisioning`` key contributes nothing (and
+  ## may be any document at all, as before). An incumbent WITH one must
+  ## parse; otherwise this raises ``SolvedGraphLockParseError`` and the
+  ## caller must not replace the committed lock.
+  result = fresh
+  if lockHasUnreadProvisioningSpelling(incumbentDocument):
+    # Records under a key spelling the strict reader skips (quoted, escaped,
+    # dotted, a table header, another letter case) are invisible to it:
+    # rewriting the lock would drop them without a word, and the next build
+    # would run unpinned.
+    var spelled = ""
+    for rawLine in incumbentDocument.splitLines():
+      let line = rawLine.strip()
+      if line.len > 0 and not line.startsWith("#") and
+          not readsProvisioningLine(line) and namesProvisioningKey(line):
+        spelled = line
+        break
+    raise newException(SolvedGraphLockParseError,
+      "refusing to replace the committed lock: it names `" &
+      ProvisioningLockKey & "` in a form the lock reader does not read " &
+      "(only the writer's `" & ProvisioningLockKey & " = [...]` line is " &
+      "read): " & (if spelled.len > 80: spelled[0 ..< 80] & "..." else: spelled).escape() &
+      "; a refresh carries locked provisioning realizations forward -- it " &
+      "never drops one silently. Restore the writer's line from version " &
+      "control, or remove the line deliberately.")
+  if lockHasUnreadCatalogImportsSpelling(incumbentDocument):
+    # M6 D1: the same rule for catalog import pins. Dropping them would make
+    # the next build refuse for want of a pin -- safe -- but a refresh that
+    # silently un-pins a catalog is still a refresh that re-selected.
+    raise newException(SolvedGraphLockParseError,
+      "refusing to replace the committed lock: it names `" &
+      CatalogImportsLockKey & "` in a form the lock reader does not read " &
+      "(only the writer's `" & CatalogImportsLockKey & " = [...]` line is " &
+      "read); a refresh carries catalog import pins forward -- it never " &
+      "drops one silently. " & CatalogImportsRepairAdvice & ".")
+  let carriesProvisioning = documentCarriesProvisioning(incumbentDocument)
+  let carriesCatalogImports = documentCarriesCatalogImports(incumbentDocument)
+  if not carriesProvisioning and not carriesCatalogImports:
+    return
+  var incumbent: LockedDependencies
+  try:
+    incumbent = parseLockedDependencies(incumbentDocument)
+  except CatchableError as err:
+    if carriesProvisioning:
+      raise newException(SolvedGraphLockParseError,
+        "refusing to replace the committed lock: it carries a `" &
+        ProvisioningLockKey & "` array that cannot be read, and a refresh " &
+        "carries locked provisioning realizations forward -- it never drops " &
+        "one silently (" & err.msg & ")")
+    raise newException(SolvedGraphLockParseError,
+      "refusing to replace the committed lock: it carries a `" &
+      CatalogImportsLockKey & "` array that cannot be read, and a refresh " &
+      "carries catalog import pins forward -- it never drops one silently (" &
+      err.msg & ")")
+  result.provisioning = incumbent.provisioning
+  # M6 D1: catalog import pins are carried forward unchanged too. A plain
+  # refresh never re-resolves a moving reference; only ``repro lock refresh
+  # --provisioning`` re-pins.
+  result.catalogImports = incumbent.catalogImports

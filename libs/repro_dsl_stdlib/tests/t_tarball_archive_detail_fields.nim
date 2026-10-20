@@ -340,8 +340,10 @@ suite "GM4b: tarball archive detail fields":
         inc seen
     check seen == 1
     # The field is new in v28: an envelope written at v22..v27 does not
-    # carry it, and decodes as a record with no installer application.
-    check InterfaceFormatVersion == 28'u16
+    # carry it, and decodes as a record with no installer application. (v29,
+    # the current version, adds the ReproOS imported-contribution flag; the
+    # field is still there.)
+    check InterfaceFormatVersion >= 28'u16
     for version in [22'u16, 27'u16]:
       checkpoint "v" & $version
       let older = decodeInterfacePayload(encodeInterfacePayload(

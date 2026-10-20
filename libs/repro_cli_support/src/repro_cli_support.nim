@@ -3,6 +3,7 @@ import std/[algorithm, base64, hashes, json, options, os, osproc, sequtils,
 
 when defined(windows):
   import std/winlean
+  import repro_daemon_core/windows_detached_spawn
 else:
   # Only these names, and only for the pipe-feeding guard in
   # ``runFeedingStdin`` — `from … import` keeps the rest of `std/posix` out of
@@ -147,6 +148,8 @@ import repro_cli_support/content_id
 # local certificate store (test-certificates Transport §2).
 import repro_cli_support/certificate_store
 export certificate_store
+import repro_cli_support/provisioning_lock_selection
+import repro_cli_support/catalog_publication
 # HL-11: the recipe-constraint reader. What a `flake.nix` input URL and a
 # `repro.nim` `uses:` entry state about a dependency's revision, and the
 # canonical repository each names (Unified-Locking-And-Hooks.md §16.2).
@@ -287,6 +290,8 @@ export home.runHomeCommand, home.setPackageCatalogLookup,
        home.PackageCatalogLookup, home.CatalogEnvVar,
        home.ConfigurableSchemaEnvVar
 export infra.runInfraCommand, infra.runSystemCommand
+export provisioning_lock_selection
+export catalog_publication
 export cli_hardware.runHardwareCommand
 export cli_disk.runDiskCommand, cli_disk.parseDiskArgs,
        cli_disk.loadDiskoFromSource, cli_disk.renderPlan,
@@ -2807,6 +2812,92 @@ proc governingLockIdentityFor*(projectRoot, lockFileName: string):
   recordLockBinding(name, identity)
   identity
 
+proc committedProvisioningLockPath*(projectRoot: string): string =
+  ## The committed lock whose ``provisioning`` records govern a build of the
+  ## project at ``projectRoot`` (ReproOS M7 deliverable 3): the SAME file
+  ## ``governingLockIdentityFor`` reads for ``default`` -- an explicit
+  ## ``--lock`` binding for ``default``, else ``<projectRoot>/repro.lock``.
+  ## Empty when there is neither a binding nor a project root.
+  let bound = activeLockFilePath(DefaultLockFileName)
+  if bound.len > 0:
+    return absolutePath(bound)
+  if projectRoot.len == 0:
+    return ""
+  projectRoot / CommittedLockFileNameForIdentity
+
+proc buildProvisioningPins*(artifact: ProjectInterfaceArtifact;
+                            projectRoot: string;
+                            lockPath = ""): seq[ProvisioningPin] =
+  ## The provisioning pins a build of ``artifact`` provisions under: the
+  ## committed lock (``lockPath``, default ``committedProvisioningLockPath``)
+  ## resolved against the composed catalogs by
+  ## ``provisioning_lock_selection.lockSelectedProvisioningPins``, in THIS
+  ## process, on every call. ``@[]`` when the lock governs no provisioning
+  ## (no lock, or no ``provisioning`` record for this platform pair) -- the
+  ## unpinned behaviour, unchanged. Raises ``ProvisioningSelectionRefused``
+  ## with the resolver's message otherwise; callers let it fail the build
+  ## and never retry unpinned.
+  ##
+  ## A lock NAMED for the build (a ``--lock`` binding for ``default``, or a
+  ## declared ``path =``) that is missing or not a file refuses: the user
+  ## asked for that lock, so its absence is missing evidence, not "no
+  ## lock". Only the implicit ``<project>/repro.lock`` may be absent.
+  let named = lockPath.len == 0 and
+    activeLockFilePath(DefaultLockFileName).len > 0
+  let path =
+    if lockPath.len > 0: lockPath
+    else: committedProvisioningLockPath(projectRoot)
+  lockSelectedProvisioningPins(artifact, projectRoot, path,
+    lockRequired = named)
+
+proc reproBuildErrorText*(message: string): string =
+  ## What ``repro build`` prints on stderr for a failure it reports with
+  ## exit 1 -- among them a provisioning refusal
+  ## (``ProvisioningSelectionRefused``), whose message is printed whole.
+  "repro build: error: " & message
+
+proc devEnvProvisioningRefusalText*(refusal: string): string =
+  ## What dev-env activation prints on stderr when the committed lock's
+  ## provisioning selection is refused. Activation is never fatal: it
+  ## provisions NOTHING (nothing is provisioned unpinned) and the shell
+  ## keeps the ambient PATH.
+  "repro dev-env: error: " & refusal & "\n" &
+    "repro dev-env: no declared tool is provisioned (nothing is " &
+    "provisioned unpinned); the activated shell will resolve tools from " &
+    "the ambient PATH."
+
+proc carriesContributedRealization(pi: ProjectInterface): bool =
+  ## True when some tool use carries a realization from a provisioning
+  ## CONTRIBUTION (a non-empty contributor) -- the only realizations a
+  ## contributor selection can apply to.
+  for useDef in pi.toolUses:
+    for r in useDef.nixProvisioning:
+      if r.contributor.len > 0: return true
+    for r in useDef.tarballProvisioning:
+      if r.contributor.len > 0: return true
+    for r in useDef.scoopProvisioning:
+      if r.contributor.len > 0: return true
+  false
+
+proc producerRuntimeProvisioningPins*(runtimeArtifact: ProjectInterfaceArtifact;
+                                      producerRoot: string):
+    seq[ProvisioningPin] =
+  ## The pins for a cross-repo PRODUCER's runtime tools. The producer is
+  ## built from its OWN committed ``repro.lock``, so that lock -- never the
+  ## consumer's ``--lock`` binding -- governs its provisioning.
+  ##
+  ## ``toProjectInterface`` appends contributed realizations to ``toolUses``
+  ## only, never to ``runtimeToolUses``, so a runtime artifact normally
+  ## carries none and there is no contributor to select: ``@[]``, the
+  ## behaviour this site always had, and no refusal for a lock whose records
+  ## concern the producer's other tools. Should a runtime use ever carry a
+  ## contributed realization, the producer's lock is resolved and enforced
+  ## exactly as for a build.
+  if not carriesContributedRealization(runtimeArtifact.projectInterface):
+    return @[]
+  buildProvisioningPins(runtimeArtifact, producerRoot,
+    lockPath = producerRoot / CommittedLockFileNameForIdentity)
+
 proc workspaceGoverningLockIdentity*(projectRoot: string): LockIdentity =
   ## The identity governing an edge that designated nothing — §4.3's final
   ## rung, which is `default`.
@@ -4552,6 +4643,24 @@ var warmToolIdentities = initTable[string, WarmToolIdentity]()
 var warmProviderSnapshots = initTable[string, WarmProviderSnapshot]()
 var warmLoweredGraphs = initTable[string, WarmLoweredGraph]()
 
+proc dropWarmEntriesWithPrefix[T](table: var Table[string, T];
+                                  prefix: string) =
+  ## Drop every entry whose table key starts with ``prefix`` -- the entries
+  ## for one persisted file (a lowered-graph record, a mode's stable identity
+  ## file) under OTHER cache keys. That file is rewritten whenever the key
+  ## changes, so such an entry's file evidence is already stale and it can
+  ## never hit again; keeping it only grows a long-lived process (the Windows
+  ## daemon builds in-process; the POSIX daemon parent re-prewarms after
+  ## every build). An uncacheable Nix expression (ReproOS M7 sibling (6))
+  ## changes the key on EVERY build, so without this each build added one
+  ## identity and one whole lowered graph that nothing could read.
+  var stale: seq[string] = @[]
+  for key in table.keys:
+    if key.startsWith(prefix):
+      stale.add(key)
+  for key in stale:
+    table.del(key)
+
 type
   WarmBuildCacheCounters* = object
     ## Dependency-Attribution MAC-2 — how often the three warm tables above
@@ -5654,6 +5763,7 @@ proc warmReadFreshLoweredGraphCache(path, modulePath, projectRoot,
     selectedActionId, pathEnv, cacheKey)
   if result.isSome:
     let lowered = result.get()
+    warmLoweredGraphs.dropWarmEntriesWithPrefix(path & "\0")
     warmLoweredGraphs[tableKey] = WarmLoweredGraph(
       populatedByPid: getCurrentProcessId(), cachePath: path,
       modulePath: modulePath, projectRoot: projectRoot,
@@ -5675,6 +5785,7 @@ proc writeLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
     actions: lowered.actions,
     pools: lowered.pools)
   writeFile(extendedPath(path), fromBytes(encodeLoweredGraphCache(record)))
+  warmLoweredGraphs.dropWarmEntriesWithPrefix(path & "\0")
   warmLoweredGraphs[path & "\0" & cacheKey] = WarmLoweredGraph(
     populatedByPid: getCurrentProcessId(), cachePath: path,
     modulePath: modulePath, projectRoot: projectRoot,
@@ -6809,19 +6920,103 @@ proc pathModeResolutionSignature(artifact: ProjectInterfaceArtifact;
     payload.addCacheField(signatures[index])
   payload
 
-proc toolIdentityCacheKey*(artifact: ProjectInterfaceArtifact;
-                           mode: ToolProvisioningMode;
-                           pathValue = getEnv("PATH")): string =
+proc toolIdentityCacheKeyInfo*(artifact: ProjectInterfaceArtifact;
+                               mode: ToolProvisioningMode;
+                               pathValue = getEnv("PATH");
+                               pins: openArray[ProvisioningPin] = []):
+    tuple[key: string; cacheable: bool] =
+  ## ``toolIdentityCacheKey`` plus whether the key is CACHEABLE: false when
+  ## some tool use carries a Nix ``expressionFile`` (see v7 below and
+  ## ``uncacheableNixExpressionKey``), in which case the key carries a fresh
+  ## nonce -- it never equals a stored key, so every lookup misses -- and
+  ## the callers skip writing keyed cache files nobody can ever read.
+  ##
   ## Exported so ``tests/unit/t_tool_identity_key_resolves_before_it_keys.nim``
   ## can assert both directions of the ``$PATH`` contract against the real
   ## key rather than against a stand-in. ``pathValue`` defaults to the
   ## process ``$PATH``; every production call site takes the default.
+  ##
+  ## ``pins`` (ReproOS M7 deliverable 3): the provisioning pins the identity
+  ## is resolved under -- ``buildProvisioningPins`` over the committed lock,
+  ## resolved in THIS process. Every field of every pin is bound, so an
+  ## identity resolved under one lock selection is never served under
+  ## another (a lock moved from contributor A to B, or to another
+  ## contribution or realization of A, re-resolves). The key is a digest:
+  ## the pins are never recoverable from it, and nothing turns a cached key
+  ## or identity back into a pin (see ``provisioning_lock_selection``'s
+  ## trust boundary). With no pins -- every build whose lock has no
+  ## ``provisioning`` record -- the pins add nothing to the key.
+  ##
+  ## ``importedProvisioningMetadataDigest`` (M7 deliverable 4): the
+  ## realization metadata of IMPORTED contribution records, which
+  ## ``interfaceFingerprint`` no longer carries. The tool identity is
+  ## resolved FROM that metadata, so it is bound here; empty (and absent
+  ## from the key) when the artifact imports no contribution.
+  ##
+  ## v5 (ReproOS M7): each tool use's realizations are bound WHOLE, through
+  ## ``toolUseRealizationDigest`` (the codec's fingerprint-mode bytes of
+  ## every Nix / tarball / Scoop entry, in declaration order, location
+  ## normalised away), instead of through a list of fields. The v4 list
+  ## missed ``packageName``, ``nixpkgsRef`` / ``nixpkgsRev`` /
+  ## ``nixpkgsNarHash``, ``executableAlias``, ``prunePaths``, ``cpu`` and
+  ## ``os``, and ``interfaceFingerprint`` omits tool-use realizations
+  ## entirely, so for a tool package's OWN realization (no contribution
+  ## record, so no ``importedProvisioningMetadataDigest`` either) a change
+  ## of only one of them was served the stale identity: another entry
+  ## selected by ``cpu`` / ``os`` was never realized, an alias never
+  ## created, a prune never applied. Every v4 key changes once (a one-time
+  ## miss, approved); nothing else about the key did.
+  ##
+  ## v6 (ReproOS M7 sibling (6)): every Nix ``expressionFile`` a tool use
+  ## carries is bound by its CONTENT CLOSURE (``nixExpressionClosureKey``:
+  ## the file, every file and directory it names -- ``../nixpkgs.nix``,
+  ## ``src = ./.`` -- recursively), in a framed, counted section after the
+  ## uses. v5 bound the expression by its PATH only (through the codec
+  ## bytes), so bumping the nixpkgs pin or editing a lock file the
+  ## expression reads served the stale identity. Bound in EVERY mode: Nix is
+  ## reached from path mode (the Linux/macOS fallback) and from-source mode
+  ## (the stdlib fall-through) as well as nix mode. Every v5 key changes
+  ## once (a one-time miss, approved).
+  ##
+  ## v7 (owner decision, 2026-10-14; Edge-Derived-Identities.md §7 rider):
+  ## the expression-closure scanner behind v6 PREDICTED what the Nix
+  ## evaluator reads, and was dropped before its replacement (campaign M19,
+  ## whose key binds the ``nix-realise`` output) exists. Until then any tool
+  ## use carrying a Nix ``expressionFile`` makes the key UNCACHEABLE, in
+  ## every mode, exactly as v6 already treated an uncacheable closure: a
+  ## fresh nonce in the key (and so in the lowered-graph key), no keyed
+  ## cache file written, no warm entry kept. Without an ``expressionFile``
+  ## the key binds what v5 bound. The tag moves forward, so no key written
+  ## under v6 (the scanner's) or earlier is ever looked up again. M19's key
+  ## binding the realise output is therefore v8, not v7.
   var payload = ""
-  payload.addCacheField("reprobuild.toolIdentityCache.v4")
+  payload.addCacheField("reprobuild.toolIdentityCache.v7")
   payload.addCacheField(mode.modeName)
   payload.addCacheField(artifact.projectInterface.projectName)
   payload.addCacheField(artifact.projectInterface.packageName)
   payload.addCacheField(digestHex(artifact.interfaceFingerprint))
+  let importedMetadata =
+    importedProvisioningMetadataDigest(artifact.projectInterface)
+  if importedMetadata.len > 0:
+    payload.addCacheField("imported-provisioning-metadata")
+    payload.addCacheField(importedMetadata)
+  if pins.len > 0:
+    # Sorted on the full field tuple so pin order is not observable; not
+    # de-duplicated, so the key is a function of exactly what was passed.
+    var framed: seq[string] = @[]
+    for pin in pins:
+      var one = ""
+      one.addCacheField(pin.packageName)
+      one.addCacheField(pin.contributor)
+      one.addCacheField(pin.contributionFingerprint)
+      one.addCacheField(pin.contributionRecordDigest)
+      one.addCacheField(pin.realizationLockIdentity)
+      framed.add(one)
+    framed.sort(cmp)
+    payload.addCacheField("provisioning-pins.v1")
+    payload.addCacheField($framed.len)
+    for one in framed:
+      payload.addCacheField(one)
   if mode == tpmPathOnly:
     payload.addCacheField(pathModeResolutionSignature(artifact, pathValue))
   # Cross-Repo-Source-Consumption SC-6 (§5.2 "a changed pin invalidates the
@@ -6856,36 +7051,27 @@ proc toolIdentityCacheKey*(artifact: ProjectInterfaceArtifact;
     payload.addCacheField(useDef.packageSelector)
     payload.addCacheField(useDef.executableName)
     payload.addCacheField(useDef.policyPath.join("/"))
-    for nix in useDef.nixProvisioning:
-      payload.addCacheField(nix.contributor)
-      payload.addCacheField(nix.selector)
-      payload.addCacheField(nix.executablePath)
-      payload.addCacheField(nix.expressionFile)
-      payload.addCacheField(nix.packageId)
-      payload.addCacheField(nix.lockIdentity)
-    for tarball in useDef.tarballProvisioning:
-      payload.addCacheField(tarball.contributor)
-      payload.addCacheField(tarball.url)
-      payload.addCacheField(tarball.mirrors.join("\n"))
-      payload.addCacheField(tarball.sha256)
-      payload.addCacheField(tarball.archiveType)
-      payload.addCacheField($tarball.stripComponents)
-      payload.addCacheField(tarball.executablePath)
-      payload.addCacheField(tarball.packageId)
-      payload.addCacheField(tarball.lockIdentity)
-    for scoop in useDef.scoopProvisioning:
-      payload.addCacheField(scoop.contributor)
-      payload.addCacheField(scoop.bucket)
-      payload.addCacheField(scoop.app)
-      payload.addCacheField(scoop.version)
-      payload.addCacheField(scoop.preferredVersion)
-      payload.addCacheField(scoop.manifestChecksum)
-      payload.addCacheField(scoop.manifestUrl)
-      payload.addCacheField(scoop.executablePath)
-      payload.addCacheField($scoop.requiresExecutionProfileChecksum)
-      payload.addCacheField(scoop.packageId)
-      payload.addCacheField(scoop.lockIdentity)
-  digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
+    # Every realization the use carries, whole (see the v5 note above).
+    payload.addCacheField(toolUseRealizationDigest(useDef))
+  # v7: a Nix ``expressionFile`` anywhere makes the key uncacheable (see
+  # above). The nonce is the LAST field, so nothing after it could make two
+  # such keys equal.
+  result.cacheable = true
+  for useDef in artifact.projectInterface.toolUses:
+    for entry in useDef.nixProvisioning:
+      if entry.expressionFile.len > 0:
+        result.cacheable = false
+  if not result.cacheable:
+    payload.addCacheField("uncacheable-nix-expression-file")
+    payload.addCacheField(uncacheableNixExpressionKey())
+  result.key = digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
+
+proc toolIdentityCacheKey*(artifact: ProjectInterfaceArtifact;
+                           mode: ToolProvisioningMode;
+                           pathValue = getEnv("PATH");
+                           pins: openArray[ProvisioningPin] = []): string =
+  ## See ``toolIdentityCacheKeyInfo``.
+  toolIdentityCacheKeyInfo(artifact, mode, pathValue, pins).key
 
 proc toolIdentityRealizationsUsable(identity: PathOnlyBuildIdentity): bool =
   # The cache is usable when the artifacts the identity points at are
@@ -6956,12 +7142,55 @@ proc writeKeyedToolIdentity(outDir: string; key: string;
     writePathOnlyBuildIdentity(staged, identity))
   writeKeyedInspection(keyed.inspectionPath, identity)
 
+proc toolIdentityServable(identity: var PathOnlyBuildIdentity):
+    tuple[servable: bool; refreshed: bool] =
+  ## What EVERY tool-identity cache hit -- the warm table, the stable
+  ## identity file, the keyed cache file, and so a daemon-parent prewarm --
+  ## must establish before serving: the realizations still exist
+  ## (``toolIdentityRealizationsUsable``) AND every resolved executable is
+  ## still the bytes whose digest the identity records
+  ## (``verifyIdentityExecutables``: one stat per tool, a re-hash only on a
+  ## stat-evidence mismatch or racy evidence). ReproOS M7 sibling (7): the
+  ## existence check alone served a tool rewritten in place with its OLD
+  ## ``resolvedExecutableDigest``, warm and cold, and the typed-tool action
+  ## fingerprints never moved. A changed digest is a miss (the identity is
+  ## re-resolved, so the new digest reaches the fingerprints and, through
+  ## ``resolvedToolIdentityDigest``, the lowered-graph key); an unchanged
+  ## one after a touch is a hit with ``refreshed`` set, and the caller
+  ## writes the refreshed evidence back so the next hit is a stat again.
+  if not identity.toolIdentityRealizationsUsable():
+    return (servable: false, refreshed: false)
+  let executables = verifyIdentityExecutables(identity)
+  (servable: executables.current, refreshed: executables.refreshed)
+
+proc rewriteRefreshedIdentity(paths: openArray[string];
+                              identity: PathOnlyBuildIdentity) =
+  ## Persist refreshed executable evidence into every identity file that
+  ## exists. Best effort: a failed write only means the next hit re-hashes.
+  for path in paths:
+    if path.len == 0 or not fileExists(extendedPath(path)):
+      continue
+    try:
+      # Staged and renamed (``replaceFile``), like every keyed write: a
+      # concurrent reader sees the old identity or the refreshed one.
+      replaceFile(path, proc (staged: string) =
+        writePathOnlyBuildIdentity(staged, identity))
+    except CatchableError:
+      discard
+
 proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
                         artifact: ProjectInterfaceArtifact;
                         stableIdentityPath,
-                        stableInspectionPath: string):
+                        stableInspectionPath: string;
+                        keyInfo: tuple[key: string; cacheable: bool]):
     tuple[hit: bool; identity: PathOnlyBuildIdentity] =
-  let key = toolIdentityCacheKey(artifact, mode)
+  ## ``keyInfo`` is computed ONCE by the caller, before any resolution, and
+  ## the same value keys the write (``writeToolIdentityCache``) and the
+  ## ``current-key`` stamp: an input edited while the identity resolves is
+  ## then stored under the OLDER key, which the next build misses.
+  if not keyInfo.cacheable:
+    return
+  let key = keyInfo.key
   let cacheDir = outDir / "tool-identity-cache"
   let keyed = keyedToolIdentityPaths(outDir, key)
   let stableKeyPath = cacheDir / (mode.modeName & ".current-key")
@@ -6974,11 +7203,14 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
   if not fileExists(extendedPath(keyed.identityPath)):
     return
   try:
-    let identity = readPathOnlyBuildIdentity(keyed.identityPath)
+    var identity = readPathOnlyBuildIdentity(keyed.identityPath)
     if identity.interfaceFingerprint != artifact.interfaceFingerprint:
       return
-    if not identity.toolIdentityRealizationsUsable():
+    let served = identity.toolIdentityServable()
+    if not served.servable:
       return
+    if served.refreshed:
+      rewriteRefreshedIdentity([keyed.identityPath], identity)
     if not fileExists(extendedPath(keyed.inspectionPath)):
       writeKeyedInspection(keyed.inspectionPath, identity)
     let alreadyCurrent =
@@ -6986,6 +7218,11 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
         fileExists(extendedPath(stableIdentityPath)) and
         fileExists(extendedPath(stableInspectionPath)) and
         readFile(extendedPath(stableKeyPath)).strip() == key
+    if alreadyCurrent and served.refreshed:
+      # The stable copy names this key, so it is this identity: give it the
+      # refreshed evidence too, or a reader of the path this call returns
+      # (and the next warm hit, which re-checks it) sees the stale stamp.
+      rewriteRefreshedIdentity([stableIdentityPath], identity)
     if not alreadyCurrent:
       writePathOnlyBuildIdentity(stableIdentityPath, identity)
       createDir(extendedPath(parentDir(stableInspectionPath)))
@@ -6999,9 +7236,13 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
 
 proc writeToolIdentityCache(outDir: string; mode: ToolProvisioningMode;
                             artifact: ProjectInterfaceArtifact;
-                            identity: PathOnlyBuildIdentity) =
-  writeKeyedToolIdentity(outDir, toolIdentityCacheKey(artifact, mode),
-    identity)
+                            identity: PathOnlyBuildIdentity;
+                            keyInfo: tuple[key: string; cacheable: bool]) =
+  ## An uncacheable key (a nonce) is never looked up again, so nothing is
+  ## written under it.
+  if not keyInfo.cacheable:
+    return
+  writeKeyedToolIdentity(outDir, keyInfo.key, identity)
 
 proc providerSnapshotInputsFresh(snapshot: ProviderGraphSnapshot): bool =
   if snapshot.fragments.len == 0:
@@ -7144,11 +7385,30 @@ proc providerGraphStoreRoot(base: string): string =
       slug.add('_')
   base / ("variants-" & slug)
 
-proc loweredGraphCacheKey(artifact: ProjectInterfaceArtifact;
+proc resolvedToolIdentityDigest*(identity: PathOnlyBuildIdentity): string =
+  ## 64 hex over the fingerprints of a RESOLVED tool identity: every
+  ## profile's ``profileFingerprint`` and every action identity's
+  ## ``actionFingerprint``, in order, counted. Both bind
+  ## ``resolvedExecutableDigest``; neither binds the stat evidence, so a
+  ## touch that leaves the bytes alone does not move it.
+  var payload = ""
+  payload.addCacheField("reprobuild.resolvedToolIdentity.v1")
+  payload.addCacheField($identity.profiles.len)
+  for profile in identity.profiles:
+    payload.addCacheField(digestHex(profile.profileFingerprint))
+  payload.addCacheField($identity.actionIdentities.len)
+  for action in identity.actionIdentities:
+    payload.addCacheField(digestHex(action.actionFingerprint))
+  digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
+
+proc loweredGraphCacheKey*(artifact: ProjectInterfaceArtifact;
                           mode: ToolProvisioningMode;
                           providerArtifactId, providerSnapshotPath,
                           pathEnv: string;
-                          extensionSignature = ""): string =
+                          extensionSignature = "";
+                          pins: openArray[ProvisioningPin] = [];
+                          resolvedIdentity = PathOnlyBuildIdentity()):
+    string =
   ## ``extensionSignature`` (Workspace-Manifest-Optional MO-13, correcting
   ## MO-6) folds the ACTIVE ``projectExtension`` set into the key. The disk
   ## cache is otherwise keyed on the BASE snapshot's content digest, so an
@@ -7166,7 +7426,19 @@ proc loweredGraphCacheKey(artifact: ProjectInterfaceArtifact;
   payload.addCacheField(artifact.projectInterface.projectName)
   payload.addCacheField(artifact.projectInterface.packageName)
   payload.addCacheField(digestHex(artifact.interfaceFingerprint))
-  payload.addCacheField(toolIdentityCacheKey(artifact, mode))
+  # ``pins``: the same provisioning pins the tool identity was resolved
+  # under, so a lowered graph cached under one lock selection is not served
+  # under another (see ``toolIdentityCacheKey``).
+  payload.addCacheField(toolIdentityCacheKey(artifact, mode, pins = pins))
+  # ``resolvedIdentity`` (ReproOS M7 sibling (7)): the identity the graph is
+  # lowered AGAINST. Every typed-tool action's weak fingerprint embeds its
+  # profile's fingerprint, and the tool-identity KEY above does not move
+  # when a tool is rewritten in place -- only the resolved identity does
+  # (the stat-guarded hit check re-resolves it). Without this a graph
+  # lowered against the old executable was served with the old action
+  # fingerprints, and the action cache with them. Both production call
+  # sites pass the identity they just resolved.
+  payload.addCacheField(resolvedToolIdentityDigest(resolvedIdentity))
   payload.addCacheField(providerArtifactId)
   payload.addCacheField(canonicalVariantAssignments())
   # Shared-Development-Services L5 (§6.4): the selected environment.
@@ -7193,12 +7465,21 @@ proc loweredGraphCacheKey(artifact: ProjectInterfaceArtifact;
     payload.addCacheField(pathEnv)
   digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
 
-proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
-                             outDir: string;
-                             mode: ToolProvisioningMode;
-                             storeRootOverride = ""):
+proc resolveAndWriteIdentityKeyed(artifact: ProjectInterfaceArtifact;
+                                  outDir: string;
+                                  mode: ToolProvisioningMode;
+                                  storeRootOverride: string;
+                                  pins: seq[ProvisioningPin];
+                                  keyInfo: tuple[key: string;
+                                    cacheable: bool]):
     tuple[identity: PathOnlyBuildIdentity; identityPath: string;
       inspectionPath: string] =
+  ## ``pins``: the provisioning pins ``buildProvisioningPins`` resolved from
+  ## the committed lock in THIS process (empty when the lock governs no
+  ## provisioning). They reach ``toolBuildIdentity`` and are bound into the
+  ## tool-identity cache key, so a cached identity is only ever served for
+  ## the selection it was resolved under.
+  ##
   ## ``storeRootOverride`` names the tool store the realizations land in.
   ##
   ## Empty keeps the historical behaviour — a store under ``outDir`` — which
@@ -7216,7 +7497,7 @@ proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
   ## is keyed on the archive digest, which is not.
   let paths = identityPaths(outDir, mode)
   let cached = cachedToolIdentity(outDir, mode, artifact,
-    paths.identityPath, paths.inspectionPath)
+    paths.identityPath, paths.inspectionPath, keyInfo)
   if cached.hit:
     return (identity: cached.identity, identityPath: paths.identityPath,
       inspectionPath: paths.inspectionPath)
@@ -7243,44 +7524,111 @@ proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
       (if storeRootOverride.len > 0: storeRootOverride
        else: outDir / "tool-store"),
     producerExecutableSelectors = producerExecutableSelectors,
-    producerAuxSelectors = producerAuxSelectors)
+    producerAuxSelectors = producerAuxSelectors,
+    pins = pins)
   writePathOnlyBuildIdentity(paths.identityPath, identity)
   writeInspectionJson(paths.inspectionPath, identity)
-  writeToolIdentityCache(outDir, mode, artifact, identity)
+  writeToolIdentityCache(outDir, mode, artifact, identity, keyInfo)
   createDir(extendedPath(outDir / "tool-identity-cache"))
+  # The key computed BEFORE resolution (see ``cachedToolIdentity``), not a
+  # fresh one: re-deriving it here would stamp an identity resolved from
+  # the old inputs with the key of inputs edited meanwhile.
   writeFile(extendedPath(outDir / "tool-identity-cache" / (mode.modeName & ".current-key")),
-    toolIdentityCacheKey(artifact, mode) & "\n")
+    keyInfo.key & "\n")
   (identity: identity, identityPath: paths.identityPath,
     inspectionPath: paths.inspectionPath)
 
-proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
-                                 outDir: string;
-                                 mode: ToolProvisioningMode):
+proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
+                             outDir: string;
+                             mode: ToolProvisioningMode;
+                             storeRootOverride = "";
+                             pins: seq[ProvisioningPin] = @[]):
     tuple[identity: PathOnlyBuildIdentity; identityPath: string;
       inspectionPath: string] =
-  let key = toolIdentityCacheKey(artifact, mode)
+  ## ``resolveAndWriteIdentityKeyed`` with the key computed here, once.
+  resolveAndWriteIdentityKeyed(artifact, outDir, mode, storeRootOverride,
+    pins, toolIdentityCacheKeyInfo(artifact, mode, pins = pins))
+
+proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
+                                  outDir: string;
+                                  mode: ToolProvisioningMode;
+                                  pins: seq[ProvisioningPin];
+                                  keyInfo: tuple[key: string; cacheable: bool]):
+    tuple[identity: PathOnlyBuildIdentity; identityPath: string;
+      inspectionPath: string] =
+  ## The warm resolver under a key computed ONCE by the caller (see the
+  ## exported overloads below).
+  let key = keyInfo.key
   let paths = identityPaths(outDir, mode)
   let tableKey = outDir & "\0" & mode.modeName & "\0" & key
   let stableKeyPath = outDir / "tool-identity-cache" /
     (mode.modeName & ".current-key")
-  if warmToolIdentities.hasKey(tableKey):
+  if keyInfo.cacheable and warmToolIdentities.hasKey(tableKey):
     let warm = warmToolIdentities[tableKey]
     if warm.key == key and warm.identity.interfaceFingerprint ==
         artifact.interfaceFingerprint and
         evidenceFresh(warm.identityPath, warm.identityEvidence) and
-        evidenceFresh(stableKeyPath, warm.keyEvidence) and
-        warm.identity.toolIdentityRealizationsUsable():
-      if warm.populatedByPid != getCurrentProcessId():
-        inc warmBuildCacheCounters.inheritedWarmHits
-      return (identity: warm.identity, identityPath: warm.identityPath,
-        inspectionPath: warm.inspectionPath)
+        evidenceFresh(stableKeyPath, warm.keyEvidence):
+      # The executables are checked on the warm hit too (ReproOS M7
+      # sibling (7)): a warm entry is as old as the process that decoded
+      # it, and a tool rewritten since must not be served from it.
+      let served = warm.identity.toolIdentityServable()
+      if served.servable:
+        if served.refreshed:
+          # Into the KEYED entry, the authoritative copy, and into the stable
+          # file this entry was warmed from: ``evidenceFresh`` above has just
+          # shown that file unchanged since, so it still holds this identity.
+          rewriteRefreshedIdentity([keyedToolIdentityPaths(outDir,
+            key).identityPath, warm.identityPath], warm.identity)
+          warm.identityEvidence = durableFileEvidence(warm.identityPath)
+        if warm.populatedByPid != getCurrentProcessId():
+          inc warmBuildCacheCounters.inheritedWarmHits
+        return (identity: warm.identity, identityPath: warm.identityPath,
+          inspectionPath: warm.inspectionPath)
   inc warmBuildCacheCounters.toolIdentityResolves
-  result = resolveAndWriteIdentity(artifact, outDir, mode)
-  warmToolIdentities[tableKey] = WarmToolIdentity(
-    populatedByPid: getCurrentProcessId(), key: key,
-    identityPath: result.identityPath, inspectionPath: result.inspectionPath,
-    identityEvidence: durableFileEvidence(result.identityPath),
-    keyEvidence: durableFileEvidence(stableKeyPath), identity: result.identity)
+  result = resolveAndWriteIdentityKeyed(artifact, outDir, mode, "", pins,
+    keyInfo)
+  warmToolIdentities.dropWarmEntriesWithPrefix(
+    outDir & "\0" & mode.modeName & "\0")
+  # An uncacheable key (a nonce) is never looked up again: nothing is kept
+  # under it.
+  if keyInfo.cacheable:
+    warmToolIdentities[tableKey] = WarmToolIdentity(
+      populatedByPid: getCurrentProcessId(), key: key,
+      identityPath: result.identityPath, inspectionPath: result.inspectionPath,
+      identityEvidence: durableFileEvidence(result.identityPath),
+      keyEvidence: durableFileEvidence(stableKeyPath), identity: result.identity)
+
+
+proc warmResolveAndWriteIdentity*(artifact: ProjectInterfaceArtifact;
+                                  outDir: string;
+                                  mode: ToolProvisioningMode;
+                                  pins: seq[ProvisioningPin] = @[]):
+    tuple[identity: PathOnlyBuildIdentity; identityPath: string;
+      inspectionPath: string] =
+  ## The build path's tool-identity resolution: the in-process warm table,
+  ## then the on-disk cache, then ``toolBuildIdentity``. Exported so the M7
+  ## end-to-end test drives THIS cache rather than a stand-in. ``pins`` as
+  ## for ``resolveAndWriteIdentity``; the warm table is keyed on the same
+  ## key, so it cannot serve an identity resolved under other pins either.
+  warmResolveAndWriteIdentity(artifact, outDir, mode, pins,
+    toolIdentityCacheKeyInfo(artifact, mode, pins = pins))
+
+proc warmResolveAndWriteIdentityKeyed*(artifact: ProjectInterfaceArtifact;
+                                       outDir: string;
+                                       mode: ToolProvisioningMode;
+                                       pins: seq[ProvisioningPin] = @[]):
+    tuple[resolved: tuple[identity: PathOnlyBuildIdentity;
+      identityPath: string; inspectionPath: string];
+      keyInfo: tuple[key: string; cacheable: bool]] =
+  ## ``warmResolveAndWriteIdentity``, also returning the key the identity was
+  ## resolved and stored under -- computed ONCE, before resolution -- so a
+  ## caller reporting the keyed entry names the one actually written rather
+  ## than re-deriving a key that may differ (other pins, an input edited
+  ## meanwhile, or the nonce of an uncacheable key).
+  result.keyInfo = toolIdentityCacheKeyInfo(artifact, mode, pins = pins)
+  result.resolved = warmResolveAndWriteIdentity(artifact, outDir, mode, pins,
+    result.keyInfo)
 
 # ---------------------------------------------------------------------------
 # Dependency-Attribution MAC-2 — the daemon-parent prewarm.
@@ -7393,6 +7741,7 @@ proc prewarmLoweredGraphsFrom(outDir: string; stamps: var seq[PrewarmStamp]):
       let evidence = durableFileEvidence(path)
       if not evidence.exists:
         continue
+      warmLoweredGraphs.dropWarmEntriesWithPrefix(path & "\0")
       warmLoweredGraphs[path & "\0" & record.cacheKey] = WarmLoweredGraph(
         populatedByPid: getCurrentProcessId(),
         cachePath: path,
@@ -7487,6 +7836,11 @@ proc prewarmToolIdentitiesFrom(outDir: string;
       if not fileExists(extendedPath(keyed.identityPath)):
         continue
       let identity = readPathOnlyBuildIdentity(keyed.identityPath)
+      # ReproOS M7 sibling (6): the stamp is rewritten in place under a new
+      # key on every build whose key carries a nonce; the warm table keeps
+      # ONE entry per mode, not one per key the stamp ever named.
+      warmToolIdentities.dropWarmEntriesWithPrefix(
+        outDir & "\0" & mode.modeName & "\0")
       warmToolIdentities[outDir & "\0" & mode.modeName & "\0" & key] =
         WarmToolIdentity(
           populatedByPid: getCurrentProcessId(),
@@ -7584,6 +7938,8 @@ when defined(reproDaemonParentPrewarmTest):
       selectedActionId, pathEnv, cacheKey)
 
   proc warmLoweredGraphCountForTest*(): int = warmLoweredGraphs.len
+
+  proc warmToolIdentityCountForTest*(): int = warmToolIdentities.len
 
 proc shouldEnterBuildPipeline*(mode: ToolProvisioningMode): bool =
   ## M9.R.8 Part 1 — extracted predicate for the build-pipeline dispatch
@@ -12232,7 +12588,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             producerArtifact.projectInterface.runtimeToolUses
           runtimeArtifact.projectInterface.runtimeToolUses = @[]
           producerRuntimeIdentity = toolBuildIdentity(runtimeArtifact,
-            effectiveMode, storeRoot = producerOutDirBase / "runtime-tool-store")
+            effectiveMode, storeRoot = producerOutDirBase / "runtime-tool-store",
+            pins = producerRuntimeProvisioningPins(runtimeArtifact,
+              producerRootAbs))
         # Decide whether the producer sub-build is required for the CONSUMED
         # artifact. A build is needed only when the producer exposes a
         # COMPILED artifact on disk:
@@ -12453,6 +12811,17 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         "per-project provider compile")
 
   if shouldEnterBuildPipeline(effectiveMode):
+    # ReproOS M7 deliverable 3: the committed lock's ``provisioning`` records
+    # select each package's contribution. Resolved HERE, in this process,
+    # from the lock as it is on disk now, and handed to the tool-identity
+    # resolution below and to the lowered-graph cache key further down --
+    # never persisted. A refusal (``ProvisioningSelectionRefused``, the
+    # resolver's own message) fails the build; nothing retries unpinned. A
+    # materialized publication/substitution provisions no tool, so it selects
+    # nothing and needs no pins.
+    let provisioningPins =
+      if materializedOnly: newSeq[ProvisioningPin]()
+      else: buildProvisioningPins(buildArtifact, result.projectRoot)
     let identityStart = statStart(statsEnabled)
     let resolved =
       if materializedOnly:
@@ -12465,7 +12834,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           inspectionPath: "")
       else:
         progressRenderer.renderPhase("resolving tool identities")
-        warmResolveAndWriteIdentity(buildArtifact, outDir, effectiveMode)
+        warmResolveAndWriteIdentity(buildArtifact, outDir, effectiveMode,
+          pins = provisioningPins)
     finishStat(buildStats, statsEnabled, "repro tool identity resolve",
       identityStart)
     let identity = resolved.identity
@@ -12781,7 +13151,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
 
     let graphCacheKey = loweredGraphCacheKey(buildArtifact, effectiveMode,
       providerArtifactId, refresh.persistedSnapshotPath, pathEnv,
-      extensionSignature)
+      extensionSignature, pins = provisioningPins,
+      resolvedIdentity = identity)
     let graphCacheReadStart = statStart(statsEnabled)
     progressRenderer.renderPhase("reading lowered graph cache")
     let cachedLowered =
@@ -14930,6 +15301,19 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
       "REPRO_TOOL_PROVISIONING (for example REPRO_TOOL_PROVISIONING=nix).")
     return
 
+  # ReproOS M7 deliverable 3: select from the committed lock exactly as a
+  # build does. This surface is never fatal (above), but a lock refusal is
+  # NOT one of the failures the per-tool retry below may paper over: that
+  # retry would provision the locked packages UNPINNED. So a refusal
+  # provisions nothing, says why with the resolver's own message, and leaves
+  # the shell on the ambient PATH the way every other failure here does.
+  var provisioningPins: seq[ProvisioningPin] = @[]
+  try:
+    provisioningPins = buildProvisioningPins(interfaceArtifact,
+      selection.projectRoot)
+  except ProvisioningSelectionRefused as refusal:
+    stderr.writeLine(devEnvProvisioningRefusalText(refusal.msg))
+    return
   let storeRoot = resolveStoreRoot() / "tool-store"
   var binDirs: seq[string] = @[]
   var prefixOps: seq[DevEnvShellOp] = @[]
@@ -14941,7 +15325,8 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
       result.profiles = identity.profiles.filterIt(it.installMethod != "path")
   try:
     let identity = contributed(resolveAndWriteIdentity(interfaceArtifact,
-      selection.outDir, mode, storeRootOverride = storeRoot).identity)
+      selection.outDir, mode, storeRootOverride = storeRoot,
+      pins = provisioningPins).identity)
     binDirs = binDirsForDevelop(identity, storeRoot = storeRoot)
     prefixOps = prefixEnvOpsForDevelop(identity)
   except CatchableError as batchErr:
@@ -14962,8 +15347,11 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
       var single = interfaceArtifact
       single.projectInterface.toolUses = @[useDef]
       try:
+        # The SAME pins as the batch: a single-tool artifact keeps every
+        # contribution record, so a pin for another package is accepted and
+        # stamped nowhere, and this package stays pinned.
         let singleIdentity = contributed(toolBuildIdentity(single, mode,
-          storeRoot = storeRoot))
+          storeRoot = storeRoot, pins = provisioningPins))
         for dir in binDirsForDevelop(singleIdentity, storeRoot = storeRoot):
           if dir notin binDirs:
             binDirs.add(dir)
@@ -23609,6 +23997,10 @@ proc runCMakeDevelopCommand(target: string; mode: ToolProvisioningMode;
   let interfacePath = outDir / "cmake-develop-interface.rbsz"
   let artifact = cmakeDevelopArtifact(sourceRoot)
   writeInterfaceArtifact(interfacePath, artifact)
+  # No provisioning pins (ReproOS M7 deliverable 3), by construction: this
+  # synthetic artifact carries no provisioning contribution record, so there
+  # is no contributor to select -- ``applyProvisioningPins`` would refuse any
+  # pin against it -- and a CMake source tree has no committed repro.lock.
   let resolved = warmResolveAndWriteIdentity(artifact, outDir, mode)
   let toolchainPath = outDir / "reprobuild-cmake-toolchain.cmake"
   # Windows: filename includes .ps1 so PowerShell will execute it directly.
@@ -29161,7 +29553,9 @@ proc recordMaterializedProducersForInspection(
         producerArtifact.projectInterface.runtimeToolUses
       runtimeArtifact.projectInterface.runtimeToolUses = @[]
       runtimeIdentity = toolBuildIdentity(runtimeArtifact, mode,
-        storeRoot = producerOutDir / "runtime-tool-store")
+        storeRoot = producerOutDir / "runtime-tool-store",
+        pins = producerRuntimeProvisioningPins(runtimeArtifact,
+          sourceRootAbs))
     if not recordProducerMaterialization(selector, sourceRootAbs,
         producerArtifact, runtimeIdentity, binding):
       raise newException(IOError,
@@ -29240,22 +29634,40 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   var identity = PathOnlyBuildIdentity(
     projectName: artifact.projectInterface.projectName,
     interfaceFingerprint: artifact.interfaceFingerprint)
+  # ReproOS M7 deliverable 3: inspection lowers the SAME graph a build
+  # would, so it resolves the same lock-selected provisioning pins (and
+  # refuses the same way). Only needed when a tool identity is resolved.
+  let provisioningPins =
+    if lowerGraph and shouldEnterBuildPipeline(effectiveMode):
+      buildProvisioningPins(artifact, projectRoot)
+    else: newSeq[ProvisioningPin]()
   if lowerGraph and shouldEnterBuildPipeline(effectiveMode):
     recordMaterializedProducersForInspection(artifact, projectRoot, outDir,
       publicCliPath, effectiveMode)
-    let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
+    let keyedResolution = warmResolveAndWriteIdentityKeyed(artifact, outDir,
+      effectiveMode, pins = provisioningPins)
+    let resolved = keyedResolution.resolved
     identity = resolved.identity
     # Report the KEYED memo entry, not the stable files: those are rewritten
     # by every later invocation in this outDir with another key (a narrower
     # target, another $PATH), so the path this payload names would describe
     # whatever ran last by the time a caller opens it — not this graph.
-    let key = toolIdentityCacheKey(artifact, effectiveMode)
-    let keyed = keyedToolIdentityPaths(outDir, key)
-    if not fileExists(extendedPath(keyed.identityPath)) or
-        not fileExists(extendedPath(keyed.inspectionPath)):
-      writeKeyedToolIdentity(outDir, key, identity)
-    result.toolIdentityPath = keyed.identityPath
-    result.toolInspectionPath = keyed.inspectionPath
+    # The key is the one the identity was resolved under, pins included: a
+    # key re-derived here without them would store a lock-selected identity
+    # where an unpinned resolution looks it up. An uncacheable key (a Nix
+    # expressionFile: a nonce) has no keyed entry and none is written under
+    # it; the stable files this resolution just wrote are reported instead.
+    if keyedResolution.keyInfo.cacheable:
+      let key = keyedResolution.keyInfo.key
+      let keyed = keyedToolIdentityPaths(outDir, key)
+      if not fileExists(extendedPath(keyed.identityPath)) or
+          not fileExists(extendedPath(keyed.inspectionPath)):
+        writeKeyedToolIdentity(outDir, key, identity)
+      result.toolIdentityPath = keyed.identityPath
+      result.toolInspectionPath = keyed.inspectionPath
+    else:
+      result.toolIdentityPath = resolved.identityPath
+      result.toolInspectionPath = resolved.inspectionPath
 
   let hasBuildBlock = moduleHasBuildBlock(modulePath)
   if not hasBuildBlock and
@@ -29424,7 +29836,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   let pathEnv = getEnv("PATH")
   let graphCacheKey = loweredGraphCacheKey(artifact, effectiveMode,
     result.providerArtifactId, refresh.persistedSnapshotPath, pathEnv,
-    extensionSignature)
+    extensionSignature, pins = provisioningPins,
+    resolvedIdentity = identity)
   let cachePath = loweredGraphCachePath(outDir, selectedActionId)
   result.loweredGraphCachePath = cachePath
   let cachedLowered =
@@ -37003,7 +37416,10 @@ proc runDevelopCommand*(args: openArray[string]): int =
     raise newException(ValueError,
       "unsupported develop tool provisioning mode: " & effectiveMode.modeName)
 
-  let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
+  # ReproOS M7 deliverable 3: a develop session provisions the same tools a
+  # build does, so it selects them from the same committed lock.
+  let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode,
+    pins = buildProvisioningPins(artifact, projectRootForModule(modulePath)))
   echo "repro develop: compatibility dev-env path active (provider-driven " &
     "artifact integration pending, tool-provisioning=" & effectiveMode.modeName & ")"
   echo "project: " & artifact.projectInterface.projectName
@@ -53831,9 +54247,10 @@ proc parsePostCommitArgs(args: openArray[string]):
 #
 #   * POSIX: a new session via ``setsid ... &`` with stdio to /dev/null.
 #   * Windows (W4): a SHELL-FREE detached child — ``CreateProcessW`` with
-#     ``DETACHED_PROCESS`` and stdio bound to ``NUL``. No ``cmd.exe``, no
-#     ``start /b``. See ``spawnDetachedNoShell`` below for why the shell
-#     route is not merely inelegant but unusable here.
+#     a hidden console, stdio bound to ``NUL`` and no other handle
+#     inherited. No ``cmd.exe``, no ``start /b``. See
+#     ``spawnDetachedNoShell`` below for why the shell route is not merely
+#     inelegant but unusable here.
 #
 # The DECISION (which detach mechanism + child argv for a given OS) is
 # factored into the pure ``cachePushSpawnCommand`` below so it is
@@ -53879,8 +54296,8 @@ proc cachePushSpawnCommand*(targetOs: WorkspaceTargetOs;
   ##                    ``sh`` quoting convention, so the round trip is
   ##                    lossless and the shell earns its place.
   ##   * ``wtWindows``→ NO shell string at all: the caller spawns ``argv``
-  ##                    directly with ``CreateProcessW`` +
-  ##                    ``DETACHED_PROCESS`` (``spawnDetachedNoShell``).
+  ##                    directly with ``CreateProcessW``
+  ##                    (``spawnDetachedNoShell``).
   ##                    ``cmd.exe`` cannot round-trip a ``quoteShell``ed
   ##                    command line — see W4 and the long comment on
   ##                    ``spawnDetachedNoShell``.
@@ -54061,9 +54478,10 @@ proc runCachePushCommand*(args: openArray[string]): int =
 
 when defined(windows):
   proc spawnDetachedNoShell*(argv: openArray[string]): bool =
-    ## Launch ``argv`` as a fully detached Windows child — no console, no
-    ## window, no shell, stdio bound to ``NUL`` — and return WITHOUT
-    ## waiting for it. Returns false when the child could not be started.
+    ## Launch ``argv`` as a detached Windows child — no visible window, no
+    ## shell, stdio bound to ``NUL``, no other handle of this process — and
+    ## return WITHOUT waiting for it. Returns false when the child could not
+    ## be started.
     ##
     ## WHY THIS EXISTS AND WHY IT DOES NOT USE ``cmd.exe`` (W4)
     ## -------------------------------------------------------
@@ -54087,75 +54505,51 @@ when defined(windows):
     ## Dropping the ``quoteShell`` would have fixed the one observed hang
     ## and left the rest of the class armed.
     ##
-    ## So the fix is to stop asking a shell to re-parse a command line:
+    ## So the fix is to stop asking a shell to re-parse a command line.
+    ## ``spawnWithOwnStdio`` calls ``CreateProcessW`` directly:
     ##
     ##   * ``CreateProcessW`` consumes ``quoteShellWindows``'s convention,
     ##     which is ITS OWN convention — correct by construction, for
     ##     spaces (``C:\Program Files\…``) and metacharacters alike.
-    ##   * ``DETACHED_PROCESS`` gives a child with no console and no
-    ##     window, which is what ``start /b`` was being asked for.
-    ##   * Three inheritable ``NUL`` handles give the stdio redirection
+    ##     ``lpApplicationName`` is passed as well as ``argv[0]`` in the
+    ##     command line, so its space-probing search of an unquoted first
+    ##     token never applies.
+    ##   * ``NUL`` stdin, stdout and stderr give the stdio redirection
     ##     ``>NUL 2>&1`` was there for, so the child cannot write into the
     ##     commit's output and cannot die on a broken pipe.
     ##
-    ## ``lpApplicationName`` is passed explicitly as well as ``argv[0]`` in
-    ## the command line, so ``CreateProcessW``'s space-probing search of an
-    ## unquoted first token never applies.
+    ## ONLY THE ``NUL`` HANDLES ARE INHERITED. ``bInheritHandles`` has to be
+    ## TRUE for them to reach the child, and on its own it also hands the
+    ## child every OTHER inheritable handle of this process. In the hook
+    ## those include the hook's own stdout and stderr, which git passed on
+    ## from its caller: when that caller reads ``git commit``'s output from
+    ## a pipe (``$(…)`` in a shell, a test runner, an agent's command tool),
+    ## the write end is inheritable, and a cache push holding it kept the
+    ## caller from seeing EOF until the push and any shared-bare gc after it
+    ## had finished, long after the hook returned (reprobuild-pm issue
+    ## 2026-10-20). ``spawnWithOwnStdio`` narrows inheritance to the ``NUL``
+    ## handles with a ``PROC_THREAD_ATTRIBUTE_HANDLE_LIST``, as it does for
+    ## the per-user daemon, which leaked a caller's pipe the same way.
     ##
-    ## Handle inheritance is left at the process-wide default (the NUL
-    ## handles must be inherited, which requires ``bInheritHandles``).
-    ## That matches what ``osproc.startProcess`` — every other child spawn
-    ## in this codebase — already does, and what the ``cmd`` route did
-    ## before it; narrowing it would need a ``PROC_THREAD_ATTRIBUTE_``
-    ## ``HANDLE_LIST`` here and nowhere else, which is inconsistency
-    ## without safety.
+    ## A HIDDEN CONSOLE, NOT ``DETACHED_PROCESS``. The child runs ``git``
+    ## (the push, then possibly gc/repack), a console program, through
+    ## ``osproc`` without ``poDaemon``. Started from a process with NO
+    ## console, each of those git processes would get a console window of
+    ## its own. ``CREATE_NO_WINDOW`` gives the child a console that is never
+    ## shown and that its git children share. It is still not the hook's
+    ## console, so a Ctrl+C or a closed window at the caller's end does not
+    ## reach the push.
+    ##
+    ## The working directory and the environment are this process's: the
+    ## child resolves a relative ``REPRO_WORKSPACE_CLONES`` against its
+    ## working directory, as ``runCachePushCommand`` documents.
     if argv.len == 0:
       return false
-
-    var commandLine = ""
-    for i, arg in argv:
-      if i > 0:
-        commandLine.add(' ')
-      commandLine.add(quoteShellWindows(arg))
-
-    var inheritable = SECURITY_ATTRIBUTES(
-      nLength: int32(sizeof(SECURITY_ATTRIBUTES)),
-      lpSecurityDescriptor: nil,
-      bInheritHandle: 1)
-    let nulName = newWideCString("NUL")
-    let shareMode = DWORD(FILE_SHARE_READ or FILE_SHARE_WRITE)
-    let nulIn = createFileW(nulName, DWORD(GENERIC_READ), shareMode,
-      addr inheritable, DWORD(OPEN_EXISTING), 0, 0)
-    let nulOut = createFileW(nulName, DWORD(GENERIC_WRITE), shareMode,
-      addr inheritable, DWORD(OPEN_EXISTING), 0, 0)
-    let nulErr = createFileW(nulName, DWORD(GENERIC_WRITE), shareMode,
-      addr inheritable, DWORD(OPEN_EXISTING), 0, 0)
-    defer:
-      for handle in [nulIn, nulOut, nulErr]:
-        if handle != INVALID_HANDLE_VALUE and handle != Handle(0):
-          discard closeHandle(handle)
-    if nulIn == INVALID_HANDLE_VALUE or nulOut == INVALID_HANDLE_VALUE or
-        nulErr == INVALID_HANDLE_VALUE:
+    try:
+      discard spawnWithOwnStdio(argv[0], argv.toOpenArray(1, argv.high),
+        env = [], inheritEnvironment = true, logPath = "", workingDir = "")
+    except OSError:
       return false
-
-    var startup = STARTUPINFO()
-    startup.cb = int32(sizeof(STARTUPINFO))
-    startup.dwFlags = STARTF_USESTDHANDLES
-    startup.hStdInput = nulIn
-    startup.hStdOutput = nulOut
-    startup.hStdError = nulErr
-
-    var spawned = PROCESS_INFORMATION()
-    var applicationName = newWideCString(argv[0])
-    var mutableCommandLine = newWideCString(commandLine)
-    let created = createProcessW(applicationName, mutableCommandLine,
-      nil, nil, 1, DETACHED_PROCESS, nil, nil, startup, spawned)
-    if created == 0:
-      return false
-    # Neither handle is waited on: the point is detachment. Closing them
-    # releases OUR references; the child keeps running.
-    discard closeHandle(spawned.hThread)
-    discard closeHandle(spawned.hProcess)
     true
 
 proc spawnAsyncCachePush(repoRoot, workspaceName: string) =
@@ -54170,8 +54564,8 @@ proc spawnAsyncCachePush(repoRoot, workspaceName: string) =
   ##     ``quoteShell`` on POSIX IS ``sh``'s own quoting convention, so
   ##     the shell round trip is lossless and the shell is doing real work
   ##     (``setsid`` + the ``&`` background fork).
-  ##   * Windows (W4): ``CreateProcessW`` + ``DETACHED_PROCESS`` with
-  ##     stdio to ``NUL``, straight from ``spec.argv``. No shell is
+  ##   * Windows (W4): ``CreateProcessW`` with stdio to ``NUL`` and no
+  ##     other handle inherited, straight from ``spec.argv``. No shell is
   ##     involved, so no quoting convention has to survive a second
   ##     parser. See ``spawnDetachedNoShell``.
   if workspaceName.len == 0:
@@ -65835,9 +66229,9 @@ proc headPublicationOf*(identity: GitToolIdentity;
   result.diagnostic = evidence & " (every configured remote was fetched first)"
 
 proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
-  ## Drive the five-stage gate. Each stage short-circuits on the first
-  ## failure — the spec is explicit that the gate names ONE failure at
-  ## a time so the operator's next step is unambiguous. RA-3 removed the
+  ## Collect independent read-only refusals before attempting lock writes.
+  ## Identity, scope and protocol failures still stop checks that need them.
+  ## Each reported blocker names its own offender and remedy. RA-3 removed the
   ## former branch-mismatch stage (no branch-name enforcement); the gate
   ## now starts at the sibling-repo cleanliness check. M23 inserted
   ## the develop-override cleanliness stage between the sibling-repo
@@ -66108,9 +66502,8 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     discard
 
   # Walk the participating repos for the cleanliness + publication
-  # passes. We gather the M4 evidence triple for every repo so the
-  # second / third stages can short-circuit cleanly while preserving
-  # the full observed state for the lock stage. Repos OUTSIDE the pushed
+  # passes. Gather the M4 evidence triple for every repo so independent
+  # checks share the same observations and the lock stage sees the full state. Repos OUTSIDE the pushed
   # repo's dependency closure are skipped entirely (RA-21).
   type
     RepoObs = object
@@ -66185,8 +66578,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
             resolved.projectName, obs.name, obs.headSha)))
         break
   # M4 evidence records are intentionally not folded into the gate
-  # report yet — the gate carries its own short-circuiting structure
-  # and the unified evidence is already exposed by ``repro workspace
+  # report yet — unified evidence is already exposed by ``repro workspace
   # status`` for general inspection. ``toolDigest`` and ``observedAt``
   # are retained in scope so a future caller wishing to fold the
   # observation triple into ``WorkspaceVcsEvidence`` can do so without
@@ -66214,52 +66606,52 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   #
   # The stage is a strict no-op when no private repo is unreadable, so every
   # all-public / fully-cloned workspace (the existing gate tests) is unchanged.
-  if unreadablePrivate.len > 0:
-    let routing = loadLockingRouting(parsed.workspaceRoot)
-    var assignments: seq[RepoBackendAssignment]
-    var routingFailed = false
-    try:
-      assignments = resolveRepoBackends(
-        routing, resolved.repos, parsed.workspaceRoot, identity,
-        identity.binaryPath)
-    except StoreRoutingError as err:
-      routingFailed = true
-      result.failures.add(CheckFailure(
-        repo: "",
-        property: "evidence-only-no-backend",
-        remediation: "declare a `[[locking.route]]` backend for the private " &
-          "repo so its participation evidence has a store to read",
-        evidence: err.msg))
-      result.exitCode = 2
-    if routingFailed:
-      return
-    var byName = initTable[string, RepoBackendAssignment]()
-    for asg in assignments:
-      byName[asg.repoName] = asg
-    for repo in unreadablePrivate:
-      let asg = byName.getOrDefault(repo.name)
-      let outcome = gateDecideUnreadableRepo(
-        repo, asg.store, resolved.projectName)
-      # HL-6 (§7.3): Decision 2's loud-vs-warn applies to the evidence READ of an
-      # unreachable backend. ``decideEvidenceReadTierPolicy`` is the single shared
-      # decision (the integration test drives the SAME proc): a PERSONAL-tier
-      # unreachable evidence read WARNS but ALLOWS; a team/public (shared) tier —
-      # or an evidence-proven violation — REFUSES.
-      case decideEvidenceReadTierPolicy(outcome, asg.visibility)
-      of ergdSatisfied:
-        result.notices.add(outcome.notice)
-      of ergdWarnAllow:
-        result.notices.add(
-          evidenceReadUnreachableWarning(repo.path, asg.backendKind,
-            parsed.workspaceRoot))
-      of ergdRefuse:
-        result.failures.add(outcome.failure)
+  block privateEvidenceChecks:
+    if unreadablePrivate.len > 0:
+      let routing = loadLockingRouting(parsed.workspaceRoot)
+      var assignments: seq[RepoBackendAssignment]
+      var routingFailed = false
+      try:
+        assignments = resolveRepoBackends(
+          routing, resolved.repos, parsed.workspaceRoot, identity,
+          identity.binaryPath)
+      except StoreRoutingError as err:
+        routingFailed = true
+        result.failures.add(CheckFailure(
+          repo: "",
+          property: "evidence-only-no-backend",
+          remediation: "declare a `[[locking.route]]` backend for the private " &
+            "repo so its participation evidence has a store to read",
+          evidence: err.msg))
         result.exitCode = 2
-        return
+      if routingFailed:
+        break privateEvidenceChecks
+      var byName = initTable[string, RepoBackendAssignment]()
+      for asg in assignments:
+        byName[asg.repoName] = asg
+      for repo in unreadablePrivate:
+        let asg = byName.getOrDefault(repo.name)
+        let outcome = gateDecideUnreadableRepo(
+          repo, asg.store, resolved.projectName)
+        # HL-6 (§7.3): Decision 2's loud-vs-warn applies to the evidence READ of an
+        # unreachable backend. ``decideEvidenceReadTierPolicy`` is the single shared
+        # decision (the integration test drives the SAME proc): a PERSONAL-tier
+        # unreachable evidence read WARNS but ALLOWS; a team/public (shared) tier —
+        # or an evidence-proven violation — REFUSES.
+        case decideEvidenceReadTierPolicy(outcome, asg.visibility)
+        of ergdSatisfied:
+          result.notices.add(outcome.notice)
+        of ergdWarnAllow:
+          result.notices.add(
+            evidenceReadUnreachableWarning(repo.path, asg.backendKind,
+              parsed.workspaceRoot))
+        of ergdRefuse:
+          result.failures.add(outcome.failure)
+          result.exitCode = 2
 
   # ---- TC-3 / RA-32: certificate-coverage gate (opt-in per project) ------
   # This nested stage runs ONLY after every other stage has passed (the gate
-  # short-circuits on the first failure, so by the time we reach it the
+  # refuses before entering lock stages, so by the time we invoke it the
   # closure is clean + published + at the locked revisions and the lock is
   # current). It is invoked from EACH exit point of stage 5 (and the final
   # fall-through) via ``applyCertificateGate`` so it sees a resolved lock.
@@ -66358,7 +66750,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # the working tree holds; that is also what lets `repro check` answer it in
   # a tree with work in progress.
   #
-  # FIRST, before any stage that compares a lock with a sibling checkout: an
+  # Report this before comparisons with a sibling checkout: an
   # inconsistency inside the pushed revision is a fact about the revision, and
   # reporting it as a stale sibling (`flake_lock_stale`) would send the
   # operator to move a checkout that is not the problem. The `pre-commit` hook
@@ -66389,8 +66781,6 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         evidence: consistencyFailureEvidence(vs),
         source: vs[0].recipeFile))
       result.exitCode = 2
-    if result.exitCode != 0:
-      return
 
   # ---- 1. dirty ----------------------------------------------------------
   for obs in observations:
@@ -66421,7 +66811,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           obs.path & " stash') then 'repro push'",
         evidence: evidence))
       result.exitCode = 2
-      return
+
 
   # ---- 2. unpublished ----------------------------------------------------
   for obs in observations:
@@ -66477,7 +66867,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         remediation: remediation,
         evidence: evidence))
       result.exitCode = 2
-      return
+
 
   # ---- 2b. outgoing history rewrite --------------------------------------
   # A push that names one ref, whose local object is the independently
@@ -66499,88 +66889,91 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   #
   # Refusals here never say the repository is unpublished — it is being
   # published by this very push — and each names what would be lost.
-  if outgoing.outgoingCurrent and
-      outgoing.updateShape in {ouRewrite, ouRewriteOpaque}:
-    let pushedBranch =
-      if outgoing.remoteRef.startsWith("refs/heads/"):
-        outgoing.remoteRef["refs/heads/".len .. ^1]
-      else: outgoing.remoteRef
-    let repoLabel =
-      if currentRepoPath.len > 0: currentRepoPath else: parsed.currentRepo
-    let remoteLabel =
-      if outgoing.remoteName.len > 0: outgoing.remoteName else: "the remote"
-    if outgoing.updateShape == ouRewriteOpaque:
-      # The old tip is not a commit in this checkout, so what the update
-      # discards cannot be enumerated. "Nothing is discarded" and "what is
-      # discarded cannot be seen" are different answers and only the first is
-      # safe to act on, so refuse — but say which one this is.
-      result.failures.add(CheckFailure(
-        repo: repoLabel,
-        property: "history-rewrite-unverifiable",
-        remediation: "run 'git -C " & parsed.currentRepo & " fetch " &
-          remoteLabel & " " & pushedBranch & "' so the commits this update " &
-          "would replace are present locally, then retry the push — HEAD " &
-          outgoing.headOid & " is publishable; this is refused only because " &
-          "the gate cannot see what the update would discard",
-        evidence: "'" & remoteLabel & "/" & pushedBranch & "' is at " &
-          outgoing.remoteOldOid & ", which is not a commit object in this " &
-          "checkout, so the commits this non-fast-forward update would make " &
-          "unreachable cannot be enumerated"))
-      result.exitCode = 2
-      return
-    let orphanedCommits = commitsMadeUnreachable(identity.binaryPath,
-      parsed.currentRepo, outgoing.remoteOldOid, outgoing.headOid)
-    var orphans = initHashSet[string]()
-    orphans.incl(outgoing.remoteOldOid.toLowerAscii())
-    for oid in orphanedCommits:
-      orphans.incl(oid)
-    # A declared MAINLINE is refused regardless of what is pinned. The
-    # asymmetry is the justification: feature branches are rebased constantly
-    # and a rewrite there costs nothing, whereas mainline is what every other
-    # checkout tracks, so rewriting it invalidates teammates' working state —
-    # which no lock records and the check below therefore cannot see. The rule
-    # fires only on a branch the MANIFEST declares, never on an inferred one,
-    # so its false-refusal rate is the rate at which mainline is deliberately
-    # rewritten: near zero, which is what keeps a blanket rule from becoming
-    # a bypass lesson.
-    let mainline = declaredMainlineBranch(resolved, currentRepoName)
-    if mainline.len > 0 and pushedBranch == mainline:
-      result.failures.add(CheckFailure(
-        repo: repoLabel,
-        property: "mainline-history-rewrite",
-        remediation: "do not rewrite the shared mainline '" & pushedBranch &
-          "' — put this work on top of " & outgoing.remoteOldOid &
-          " (rebase onto it, or revert), or push this history to a " &
-          "different branch. HEAD " & outgoing.headOid & " is publishable; " &
-          "only discarding '" & pushedBranch & "' history is refused",
-        evidence: "'" & pushedBranch & "' is the mainline branch the " &
-          "manifest declares for " & currentRepoName &
-          ", and this update is not a fast-forward: it would make " &
-          $orphans.len & " commit(s) unreachable there, including " &
-          outgoing.remoteOldOid))
-      result.exitCode = 2
-      return
-    let pinned = findLockPinningOrphan(identity,
-      workspaceLockRoots(parsed.workspaceRoot, layerLocations), orphans)
-    if pinned.orphanOid.len > 0:
-      result.failures.add(CheckFailure(
-        repo: repoLabel,
-        property: "orphans-locked-commit",
-        remediation: "push this history to a different branch, or keep " &
-          pinned.orphanOid & " reachable from '" & pushedBranch &
-          "' — discarding it makes that lock record unresolvable, and " &
-          "re-pinning it is a coordinated change to shared lock history " &
-          "that this push must not make implicitly. HEAD " & outgoing.headOid &
-          " is publishable; only discarding " & pinned.orphanOid &
-          " is refused",
-        evidence: "lock record " & pinned.lockRelPath & " (keyed at " &
-          pinned.lockTriggerSha & ", which this push does NOT discard) pins " &
-          pinned.lockedPath & " at " & pinned.orphanOid &
-          ", and this non-fast-forward update to '" & pushedBranch &
-          "' would make that commit unreachable",
-        source: pinned.lockRoot / pinned.lockRelPath.replace('/', DirSep)))
-      result.exitCode = 2
-      return
+  block historyRewriteChecks:
+    if outgoing.outgoingCurrent and
+        outgoing.updateShape in {ouRewrite, ouRewriteOpaque}:
+      let pushedBranch =
+        if outgoing.remoteRef.startsWith("refs/heads/"):
+          outgoing.remoteRef["refs/heads/".len .. ^1]
+        else: outgoing.remoteRef
+      let repoLabel =
+        if currentRepoPath.len > 0: currentRepoPath else: parsed.currentRepo
+      let remoteLabel =
+        if outgoing.remoteName.len > 0: outgoing.remoteName else: "the remote"
+      if outgoing.updateShape == ouRewriteOpaque:
+        # The old tip is not a commit in this checkout, so what the update
+        # discards cannot be enumerated. "Nothing is discarded" and "what is
+        # discarded cannot be seen" are different answers and only the first is
+        # safe to act on, so refuse — but say which one this is.
+        result.failures.add(CheckFailure(
+          repo: repoLabel,
+          property: "history-rewrite-unverifiable",
+          remediation: "run 'git -C " & parsed.currentRepo & " fetch " &
+            remoteLabel & " " & pushedBranch & "' so the commits this update " &
+            "would replace are present locally, then retry the push — HEAD " &
+            outgoing.headOid & " is publishable; this is refused only because " &
+            "the gate cannot see what the update would discard",
+          evidence: "'" & remoteLabel & "/" & pushedBranch & "' is at " &
+            outgoing.remoteOldOid & ", which is not a commit object in this " &
+            "checkout, so the commits this non-fast-forward update would make " &
+            "unreachable cannot be enumerated"))
+        result.exitCode = 2
+        break historyRewriteChecks
+
+      let orphanedCommits = commitsMadeUnreachable(identity.binaryPath,
+        parsed.currentRepo, outgoing.remoteOldOid, outgoing.headOid)
+      var orphans = initHashSet[string]()
+      orphans.incl(outgoing.remoteOldOid.toLowerAscii())
+      for oid in orphanedCommits:
+        orphans.incl(oid)
+      # A declared MAINLINE is refused regardless of what is pinned. The
+      # asymmetry is the justification: feature branches are rebased constantly
+      # and a rewrite there costs nothing, whereas mainline is what every other
+      # checkout tracks, so rewriting it invalidates teammates' working state —
+      # which no lock records and the check below therefore cannot see. The rule
+      # fires only on a branch the MANIFEST declares, never on an inferred one,
+      # so its false-refusal rate is the rate at which mainline is deliberately
+      # rewritten: near zero, which is what keeps a blanket rule from becoming
+      # a bypass lesson.
+      let mainline = declaredMainlineBranch(resolved, currentRepoName)
+      if mainline.len > 0 and pushedBranch == mainline:
+        result.failures.add(CheckFailure(
+          repo: repoLabel,
+          property: "mainline-history-rewrite",
+          remediation: "do not rewrite the shared mainline '" & pushedBranch &
+            "' — put this work on top of " & outgoing.remoteOldOid &
+            " (rebase onto it, or revert), or push this history to a " &
+            "different branch. HEAD " & outgoing.headOid & " is publishable; " &
+            "only discarding '" & pushedBranch & "' history is refused",
+          evidence: "'" & pushedBranch & "' is the mainline branch the " &
+            "manifest declares for " & currentRepoName &
+            ", and this update is not a fast-forward: it would make " &
+            $orphans.len & " commit(s) unreachable there, including " &
+            outgoing.remoteOldOid))
+        result.exitCode = 2
+
+      let pinned = findLockPinningOrphan(identity,
+        workspaceLockRoots(parsed.workspaceRoot, layerLocations), orphans)
+      if pinned.orphanOid.len > 0:
+        result.failures.add(CheckFailure(
+          repo: repoLabel,
+          property: "orphans-locked-commit",
+          remediation: "push this history to a different branch, or keep " &
+            pinned.orphanOid & " reachable from '" & pushedBranch &
+            "' — discarding it makes that lock record unresolvable, and " &
+            "re-pinning it is a coordinated change to shared lock history " &
+            "that this push must not make implicitly. HEAD " & outgoing.headOid &
+            " is publishable; only discarding " & pinned.orphanOid &
+            " is refused",
+          evidence: "lock record " & pinned.lockRelPath & " (keyed at " &
+            pinned.lockTriggerSha & ", which this push does NOT discard) pins " &
+            pinned.lockedPath & " at " & pinned.orphanOid &
+            ", and this non-fast-forward update to '" & pushedBranch &
+            "' would make that commit unreachable",
+          source: pinned.lockRoot / pinned.lockRelPath.replace('/', DirSep)))
+        result.exitCode = 2
+        break historyRewriteChecks
+
 
   # ---- 3. develop-mode override cleanliness (M23) ------------------------
   # The blocking condition reproduces
@@ -66606,7 +66999,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         evidence: err.msg,
         source: developOverridesPath(parsed.workspaceRoot)))
       result.exitCode = 2
-      return
+      none(DevelopOverrides)
   # The declared repo an override's source path names, and whether THIS repo is
   # itself one of the overrides: the inputs to ``overrideAwaitsThisPush``.
   # Asked of the declared checkout paths, which is what ``repro develop``
@@ -66641,7 +67034,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           evidence: "override source path does not exist",
           source: sourcePath))
         result.exitCode = 2
-        return
+        continue
       # Skip non-git overrides — the M20 schema accepts overrides that
       # point at any directory (the CLI even has a "register-only" arm
       # that does not require a VCS root). Treat the absence of ``.git``
@@ -66667,8 +67060,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           evidence: "clean-probe-failed: " & cleanRes.diagnostic,
           source: sourcePath))
         result.exitCode = 2
-        return
-      if not cleanRes.isClean:
+      elif not cleanRes.isClean:
         result.failures.add(CheckFailure(
           repo: entry.package,
           property: "develop_override_dirty",
@@ -66676,7 +67068,6 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           evidence: "working tree has uncommitted changes",
           source: sourcePath))
         result.exitCode = 2
-        return
       # Accept ANY remote-tracking branch. A develop-override is an arbitrary
       # local path, not a manifest repo, so there is no `ResolvedRepo` to feed
       # `gitRemoteNameFor` and no configured expectation of which remote it
@@ -66696,7 +67087,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           evidence: "publish-probe-failed: " & pubRes.diagnostic,
           source: sourcePath))
         result.exitCode = 2
-        return
+        continue
       if not pubRes.isPublished:
         let headRes = queryGitState(headShaQuery(sourcePath), identity)
         let headSha =
@@ -66765,7 +67156,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           evidence: evidence,
           source: sourcePath))
         result.exitCode = 2
-        return
+        continue
 
   # ---- 3b. NF-3: the IN-TREE lock is VERIFIED, never produced ------------
   #
@@ -66819,7 +67210,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         evidence: verdict.evidence,
         source: parsed.currentRepo / "flake.lock"))
       result.exitCode = 2
-      return
+
     # A verified-and-agreeing flake is NOT announced. §NF-3's own test
     # (`a_clean_workspace_pushes_without_a_diagnostic`) is the reason: a gate
     # that says something on every clean push trains people to scroll past the
@@ -66859,7 +67250,12 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         evidence: pins.evidence,
         source: parsed.currentRepo / CommittedLockFileName))
       result.exitCode = 2
-      return
+
+
+  # Refusals are collected above using read-only observations. Never let a
+  # failed independent check reach lock creation or publication below.
+  if result.exitCode != 0:
+    return
 
   # ---- 4. lock currency --------------------------------------------------
   # Pick the manifest-layer root the way M11 / M12 do, then read the
@@ -83071,6 +83467,10 @@ type
     write: bool
     allowRegression: seq[string]
       ## ``--allow-pin-regression=<sibling>[,<sibling>…]`` (refresh only)
+    reselectProvisioning: bool
+      ## ReproOS M7 deliverable 5 — ``repro lock refresh --provisioning``:
+      ## re-select the lock's provisioning records instead of carrying them
+      ## forward (``reselectCommittedProvisioning``). ``refresh`` only.
     repin: seq[string]
       ## ``--repin=<package>[,<package>…]`` (refresh only): the targeted
       ## re-pin of `Locking-And-Solver.md` §"Targeted re-pin". Empty is the
@@ -83124,6 +83524,17 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
       gen.registries.add(valueFromFlag(rest, i, "--registry"))
     elif arg == "--write":
       gen.write = true
+    elif arg == "--provisioning":
+      # ReproOS M7 deliverable 5. Re-selection rewrites the committed lock's
+      # provisioning records, so it belongs to the verb that writes the
+      # committed lock by definition; `solve --write` keeps carrying them
+      # forward, and `validate` writes nothing.
+      if verb != "refresh":
+        stderr.writeLine("repro lock " & verb & ": --provisioning " &
+          "re-selects the committed lock's provisioning records and is " &
+          "accepted only by `repro lock refresh`")
+        return 2
+      gen.reselectProvisioning = true
     elif arg == "--json":
       asJson = true
     elif verb == "refresh" and (arg == "--allow-pin-regression" or
@@ -84734,6 +85145,31 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
     defer:
       try: removeDir(extendedPath(request.workDir))
       except CatchableError: discard
+    if gen.reselectProvisioning and entryPoint == lgeLockRefresh:
+      # ReproOS M7 deliverable 5 — EXPLICIT re-selection. Re-solve exactly
+      # as a refresh does, but land nothing until the provisioning records
+      # are re-selected: any refusal leaves the committed lock untouched,
+      # never half-refreshed.
+      var generated = runLockRefresh(request, "")
+      let incumbentExists = fileExists(extendedPath(lockP))
+      let incumbentText =
+        if incumbentExists: readFile(extendedPath(lockP)) else: ""
+      let platform =
+        if platformOverride.len > 0: platformOverride
+        else: currentPlatformId()
+      let outcome = reselectCommittedProvisioning(projectDir, lockP,
+        incumbentExists, incumbentText, generated.lockDocument, platform,
+        platform)
+      if not outcome.reselected:
+        stderr.writeLine(renderReselectionRefusal(verb, lockP,
+          outcome.refusals))
+        return 1
+      stdout.writeLine(outcome.report)
+      createDir(parentDir(lockP))
+      writeFile(lockP, outcome.document)
+      generated.lockDocument = outcome.document
+      generated.lockPath = lockP
+      return reportGeneratedLock(verb, lockP, generated)
     let generated =
       if gen.repin.len > 0:
         runLockRepin(request, committedForRepin, gen.repin, writeTo)
@@ -84759,6 +85195,13 @@ proc runReproLockRefresh(rest: openArray[string]): int =
   ## name it. Exits 5 (``IncompleteSolveExitCode``), writing nothing, when a
   ## ``uses:`` names a develop-set sibling whose recipe the solve could not
   ## read (``unreachedDevelopSiblings``).
+  ##
+  ## The lock's ``provisioning`` records (ReproOS M7) are CARRIED FORWARD
+  ## unchanged: a refresh never re-selects a contributor as a side effect
+  ## of re-solving versions. ``--provisioning`` re-selects them explicitly
+  ## (``provisioning_lock_selection.reselectCommittedProvisioning``) and
+  ## prints the provisioning diff; it refuses, writing nothing, when the
+  ## selection cannot be made in full.
   runLockGenerationVerb(rest, "refresh", lgeLockRefresh,
     writeByDefault = true)
 
@@ -85320,6 +85763,73 @@ proc runReproLockList(rest: openArray[string]): int =
     lockFileDeclarationsFromCompiledProvider(absolutePath(projectDir))))
   0
 
+proc lockDiffReport*(oldPath, newPath: string): tuple[rc: int; text: string] =
+  ## ``repro lock diff <old-lock> <new-lock>`` (ReproOS M7 deliverable 5):
+  ## the provisioning-level diff of two committed locks, each change with
+  ## why it changed (``provisioning_lock_diff``). ``rc`` follows ``diff``:
+  ## 0 = no provisioning selection changed, 1 = changes, 2 = a lock cannot
+  ## be read (a refused diff is never reported as "no change").
+  for path in [oldPath, newPath]:
+    if not fileExists(extendedPath(path)):
+      return (2, "repro lock diff: cannot read " & path & ": " &
+        (if dirExists(extendedPath(path)): "it is a directory"
+         else: "no such file"))
+  var oldText, newText: string
+  try:
+    oldText = readFile(extendedPath(oldPath))
+    newText = readFile(extendedPath(newPath))
+  except CatchableError as err:
+    return (2, "repro lock diff: " & err.msg)
+  # ReproOS M6 D2: evidence for a field-level explanation, read from each
+  # record's OWN catalog coordinate (remote + revision) in the workspace's
+  # shared clones, where readable. Optional by construction: evidence is
+  # used only if it reproduces a recorded fingerprint, and a catalog that
+  # cannot be read leaves the cause "not determinable from the records".
+  var evidence = ProvisioningDiffEvidence()
+  var oldRecords, newRecords: seq[LockedRealization]
+  var oldFailures, newFailures: seq[CatalogEvidenceFailure]
+  let anchor = parentDir(absolutePath(newPath))
+  if provisioningRecordsOf(oldText, "the old lock", oldRecords).len == 0:
+    evidence.previous = catalogEvidenceForRecords(oldRecords, anchor,
+      oldFailures)
+  if provisioningRecordsOf(newText, "the new lock", newRecords).len == 0:
+    evidence.current = catalogEvidenceForRecords(newRecords, anchor,
+      newFailures)
+  let diff = diffProvisioningLockDocuments(oldText, newText, evidence)
+  if diff.refused:
+    return (2, "repro lock diff: " & renderProvisioningDiff(diff))
+  if diff.unchanged:
+    return (0, "repro lock diff: no provisioning selection changed")
+  var text = renderProvisioningDiff(diff)
+  # ReproOS M6 D4: a cause the diff could not determine says WHY -- the
+  # catalogs that could not be read at the recorded revisions, each with
+  # its cause and the command that makes it readable -- rather than only
+  # "not determinable". Only for those records: an explained change, or a
+  # change that needs no evidence, adds nothing.
+  let failures = relevantEvidenceFailures(diff.changes,
+    oldRecords & newRecords, oldFailures & newFailures)
+  if failures.len > 0:
+    for line in renderEvidenceFailures(failures):
+      text.add("\n" & line)
+  (1, text)
+
+proc runReproLockDiff(rest: openArray[string]): int =
+  var paths: seq[string] = @[]
+  for arg in rest:
+    if arg.startsWith("--"):
+      stderr.writeLine("repro lock diff: unknown flag " & arg)
+      return 2
+    paths.add(arg)
+  if paths.len != 2:
+    stderr.writeLine("usage: repro lock diff <old-lock> <new-lock>")
+    return 2
+  let report = lockDiffReport(paths[0], paths[1])
+  if report.rc == 2:
+    stderr.writeLine(report.text)
+  else:
+    stdout.writeLine(report.text)
+  report.rc
+
 proc runReproLockUpdate*(args: openArray[string]): int
   ## HL-11 M4 — ``repro lock update <dependency> [--to <rev>]``. Forward
   ## declaration: the implementation lives beside the `flake.lock` refresh
@@ -85339,7 +85849,7 @@ proc runReproLockCommand*(args: openArray[string]): int =
   ## ``visualize`` (Locking-And-Solver.md §"CLI Surface") remain future work.
   if args.len == 0:
     stderr.writeLine("repro lock: error: missing verb " &
-      "(one of: list, solve, refresh, update, validate, explain)")
+      "(one of: list, solve, refresh, update, validate, explain, diff)")
     return 2
   let rest =
     if args.len > 1: args[1 .. ^1]
@@ -85355,6 +85865,8 @@ proc runReproLockCommand*(args: openArray[string]): int =
     return runReproLockSolve(rest)
   of "validate":
     return runReproLockValidate(rest)
+  of "diff":
+    return runReproLockDiff(rest)
   of "explain":
     var variantName = ""
     var fixturePath = ""
@@ -95294,7 +95806,7 @@ proc runThinAppDispatch(programName: string): int =
       stderr.write(renderUnknownTargetDiagnostic(err[]))
       return 2
     except CatchableError as err:
-      stderr.writeLine("repro build: error: " & err.msg)
+      stderr.writeLine(reproBuildErrorText(err.msg))
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "test":
     # CI-Sharding M2 — ``repro test --shard k/N [...]``.  Implementation

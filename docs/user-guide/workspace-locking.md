@@ -279,6 +279,11 @@ Use this whenever a repo isn't landing in the tier you expect: the
 
 `repro push` runs the client `pre-push` gate. Most refusals name the
 offending repo, its tier, its backend, and a copy-pasteable next step.
+The gate reports independent blockers together, so a history refusal does not
+hide stale sibling pins that also need attention. The console output and the
+structured check report include each refusal. Invalid workspace identity or
+push protocol still stops checks that depend on it. Refused pushes do not
+create, refresh or publish locks.
 Here is what each one means.
 
 ### Refreshing hooks after a protocol mismatch

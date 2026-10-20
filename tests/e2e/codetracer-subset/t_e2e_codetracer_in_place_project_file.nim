@@ -9,16 +9,16 @@ import repro_test_support
 
 const
   CodeTracerProjectContractCommit =
-    "222a4a0099115066ba331817e94a3ac9f2293290"
+    "f1745b89e93179eca20778943bbafae91ebb6dfd"
   PinnedCodeTracerProjectFile =
-    "tests/fixtures/codetracer-subset/repro-222a4a00.nim"
+    "tests/fixtures/codetracer-subset/repro-f1745b89.nim"
   PinnedCodeTracerConfigFile =
-    "tests/fixtures/codetracer-subset/config-222a4a00.nims"
+    "tests/fixtures/codetracer-subset/config-f1745b89.nims"
   PinnedCodeTracerFixtureHeaderLines = 6
   PinnedCodeTracerProjectPayloadSha256 =
-    "ccf12e902fdd57ae789434591256683a46b3d35e19ba81df0d7b28cc0c0f6582"
+    "3561c345dd330cc80cf749e7496f8d0a6e8e21c9dd1734442dac5511e31c14f8"
   PinnedCodeTracerConfigPayloadSha256 =
-    "5a619728256fbebfaa8fffde8280293e93a2600daac684375193a4413b69c3dd"
+    "469f008a005d9d0d6b274fca8f8422b9f96bc78156567e269b35b0f3ce625a80"
   # `reprobuild-provision` used to live in THIS repo, at
   # `.github/actions/reprobuild-provision/action.yml`. It was moved to the
   # shared-actions repo because GitHub materialises a composite action by
@@ -135,6 +135,17 @@ else:
   const CodeTracerDevToolExecutables: seq[string] =
     CodeTracerCommonDevToolExecutables & CodeTracerTupToolExecutables &
       CodeTracerMacDevToolExecutables
+
+# Tool `uses:` entries no PATH fixture provides, because the native edges that
+# reference them resolve them themselves: `zstd-dev` is a header/library
+# channel, not an executable (CodeTracer 01d8b6e54), and `dsymutil` is the
+# macOS debug-info pass (CodeTracer 3be367fc1). They count toward the declared
+# tool total but are not in `CodeTracerDevToolExecutables`, whose members must
+# each resolve to a fixture.
+when defined(macosx):
+  const CodeTracerNonFixtureToolUses: seq[string] = @["zstd-dev", "dsymutil"]
+else:
+  const CodeTracerNonFixtureToolUses: seq[string] = @["zstd-dev"]
 
 const CodeTracerSourcePackages = [
   "isonim",
@@ -1094,9 +1105,17 @@ proc codeTracerPathDirs(includeClang = false): seq[string] =
   # clang is unsigned and injectable). The ``nim`` script likewise forwards
   # to the test's own Nim (see its header for why not CodeTracer's bundled
   # one). Both must exist, as they had to when they were baked in per case.
-  check findExe(
+  let realCompiler = findExe(
     when defined(macosx): "clang"
-    else: "gcc").len > 0
+    else: "gcc")
+  check realCompiler.len > 0
+  # Where the PATH search cannot find it, because the edge's PATH is hermetic.
+  # CodeTracer's native edges declare their backend compiler (CodeTracer
+  # 23d5af70f), so their PATH is only the directories their declared tools
+  # resolved into, and the proxy's is the only compiler directory among them.
+  # The proxy then execs the compiler this names (see `gcc-proxy.c`). It is the
+  # same compiler the PATH search finds on the inherited-PATH edges.
+  putEnv("REPROBUILD_CODETRACER_REAL_COMPILER", realCompiler)
   check findExe("nim").len > 0
   let gcc = codeTracerToolBinary("bin/gcc",
     "reprobuild.test_fixtures.codetracer_tool_gcc")
@@ -1160,6 +1179,9 @@ proc codeTracerHybridNimPathValue(codeTracerRoot: string): string =
   # on PATH for native targets.
   let localNim = codeTracerNimPath(codeTracerRoot)
   check findExe("nim").len > 0
+  # The native edges' PATH is hermetic, so the appended directory never
+  # reaches them; `hybrid-nim/nim` falls back to this.
+  putEnv("REPROBUILD_CODETRACER_NATIVE_NIM", localNim)
   (@[codeTracerToolDir("hybrid-nim")] &
     codeTracerPathDirs(includeClang = true) &
     @[getEnv("PATH"), localNim.parentDir]).join($PathSep)
@@ -2695,7 +2717,7 @@ when defined(macosx) or defined(linux):
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
       check first.contains("selectedTarget: frontend")
-      # The pinned recipe's `frontend` aggregate (CodeTracer 222a4a00) is the
+      # The pinned recipe's `frontend` aggregate (CodeTracer f1745b89) is the
       # 14 `frontendActions` plus the `frontend-styles` target's 6:
       #   frontend-ui-js, frontend-public-ui-js, frontend-index-js,
       #   frontend-src-index-js, frontend-server-index-js,
@@ -2934,7 +2956,7 @@ when defined(macosx) or defined(linux):
       check first.contains("providerCompile:")
       check first.contains("providerGraphSnapshot:")
       # THE ACTION COUNT FOLLOWS THE PINNED RECIPE, so it is derived from
-      # `PinnedCodeTracerProjectFile` (CodeTracer 222a4a00) rather than from
+      # `PinnedCodeTracerProjectFile` (CodeTracer f1745b89) rather than from
       # the last value that passed. `repro build <projectRoot>` names a
       # target, so the recipe's `defaultBuildAction` is NOT consulted, and
       # the unselected lowering (`lowerProviderSnapshot` with no selector)
@@ -3081,15 +3103,15 @@ when defined(macosx) or defined(linux):
       # declared and unrealized. The declared set, the denominator of
       # `selected tool identities:`, has three parts:
       #   * the recipe's `uses:` tools for this platform, which is
-      #     `CodeTracerDevToolExecutables` (46 on macOS);
-      #   * its six source packages, which are `CodeTracerSourcePackages`
-      #     plus `isonim-tui`;
+      #     `CodeTracerDevToolExecutables` plus `CodeTracerNonFixtureToolUses`;
+      #   * its seven source packages, which are `CodeTracerSourcePackages`
+      #     plus `isonim-tui` and `codetracer-trace-format-nim`;
       #   * the commands of the generated install-mirror script, which every
       #     package declares as native tools (`registerInstallMirrorTools`,
       #     from `typedInstallMirrorShellTools`): `sh rm mkdir cp touch sed
       #     chmod`, and 14 more on Linux. `sh` is counted again, because its
       #     dependency kind differs from the `uses:` entry.
-      # Measured on macOS: 46 + 6 + 7 = 59.
+      # Measured on macOS before CodeTracer 01d8b6e54: 46 + 6 + 7 = 59.
       #
       # It used to assert one profile per declared tool and source package
       # (written 2026-07-12, before the scoping). That fails with
@@ -3097,10 +3119,16 @@ when defined(macosx) or defined(linux):
       const M52RealizedTools = ["gcc", "nim", "node"]
       # `isonim-tui` joined the pinned recipe's `uses:` after
       # `CodeTracerSourcePackages` was written.
-      let declaredSourcePackages = @CodeTracerSourcePackages & @["isonim-tui"]
+      # `codetracer-trace-format-nim` joined it at CodeTracer 01d8b6e54.
+      let declaredSourcePackages = @CodeTracerSourcePackages &
+        @["isonim-tui", "codetracer-trace-format-nim"]
       let declaredToolUses = CodeTracerDevToolExecutables.len +
+        CodeTracerNonFixtureToolUses.len +
         declaredSourcePackages.len +
         typedInstallMirrorShellTools("codeTracer").len
+      for line in first.splitLines:
+        if line.startsWith("selected tool identities: "):
+          checkpoint(line)
       check first.contains("selected tool identities: " &
         $M52RealizedTools.len & "/" & $declaredToolUses)
       let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))

@@ -37,6 +37,14 @@
 ## The handles created here are closed again as soon as the child exists; the
 ## child holds its own duplicates.
 ##
+## THE SAME LAUNCH SERVES THE POST-COMMIT CACHE PUSH. `repro_cli_support`'s
+## `spawnDetachedNoShell` starts the detached `repro hooks cache-push` through
+## `spawnWithOwnStdio`, with no log, because a git hook's stdout is its
+## caller's pipe exactly as `repro`'s is here (reprobuild-pm issue 2026-10-20,
+## "the detached post-commit cache push inherits every inheritable handle of
+## the hook"). That child runs git, so the console reasoning above applies to it
+## unchanged.
+##
 ## THE WORKING DIRECTORY IS THE SAME RULE APPLIED TO THE CURRENT DIRECTORY.
 ## With `lpCurrentDirectory = nil` the child starts in the caller's current
 ## directory, and Windows refuses to delete a directory that is some process's
@@ -130,7 +138,7 @@ when defined(windows):
 
     let nulIn = openInheritable("NUL", GENERIC_READ, OPEN_EXISTING, 0)
     if nulIn == INVALID_HANDLE_VALUE:
-      raiseOSError(osLastError(), "cannot open NUL for the daemon's stdin")
+      raiseOSError(osLastError(), "cannot open NUL for the child's stdin")
     defer: discard closeHandle(nulIn)
     var output = INVALID_HANDLE_VALUE
     if logPath.len > 0:
@@ -143,7 +151,7 @@ when defined(windows):
     if output == INVALID_HANDLE_VALUE:
       output = openInheritable("NUL", GENERIC_WRITE, OPEN_EXISTING, 0)
     if output == INVALID_HANDLE_VALUE:
-      raiseOSError(osLastError(), "cannot open NUL for the daemon's output")
+      raiseOSError(osLastError(), "cannot open NUL for the child's output")
     defer: discard closeHandle(output)
 
     # Each handle once: the list must not repeat one, and stdout and stderr

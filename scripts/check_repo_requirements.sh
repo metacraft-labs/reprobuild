@@ -160,8 +160,39 @@ require_contains tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_f
   '"CODETRACER_TRACE_FORMAT_NIM_SRC",'
 require_contains tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim \
   'let pinnedSource = getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC")'
-require_contains tests/fixtures/codetracer-subset/config-222a4a00.nims \
-  'addPathIfDir(getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC"))'
+
+# The CodeTracer e2e fixtures (tests/e2e/codetracer-subset/README.md) pin the
+# SAME CodeTracer revision `codetracer-src` does: the vendored repro.nim and
+# config.nims payloads and the Tuprules command-semantics extract name one
+# reviewed commit. Moving `codetracer-src` without refreshing them is not caught
+# by anything quicker than the full suite, and there only once a sibling
+# checkout contains the new pin -- it went unnoticed across four pin moves
+# (222a4a00 -> f1745b89). Fail here, at the commit that moves the pin, instead.
+codetracer_rev="$(sed -n 's|^ *url = "github:metacraft-labs/codetracer/\([0-9a-f]\{40\}\)";$|\1|p' flake.nix)"
+if [ "$(printf '%s\n' "${codetracer_rev}" | grep -c .)" != 1 ]; then
+  fail "flake.nix must pin codetracer-src to exactly one full revision (found: ${codetracer_rev:-none})"
+else
+  # `locked` and `original` both record it.
+  require_count flake.lock "\"rev\": \"${codetracer_rev}\"" 2
+  codetracer_short="${codetracer_rev:0:8}"
+  ct_fixture_refresh="refresh the CodeTracer e2e fixtures to codetracer-src ${codetracer_rev} (tests/e2e/codetracer-subset/README.md)"
+  for fixture in "repro-${codetracer_short}.nim" "config-${codetracer_short}.nims" "Tuprules-${codetracer_short}.tup"; do
+    if [ -f "tests/fixtures/codetracer-subset/${fixture}" ]; then
+      # The provenance header names the revision twice: commit and source URL.
+      require_count "tests/fixtures/codetracer-subset/${fixture}" "${codetracer_rev}" 2
+    else
+      fail "missing tests/fixtures/codetracer-subset/${fixture}: ${ct_fixture_refresh}"
+    fi
+  done
+  for t in t_e2e_codetracer_in_place_project_file.nim t_e2e_codetracer_build_subset_without_tup.nim; do
+    grep -Fq "\"${codetracer_rev}\"" "tests/e2e/codetracer-subset/${t}" ||
+      fail "tests/e2e/codetracer-subset/${t} does not pin codetracer-src ${codetracer_rev}: ${ct_fixture_refresh}"
+  done
+  if [ -f "tests/fixtures/codetracer-subset/config-${codetracer_short}.nims" ]; then
+    require_contains "tests/fixtures/codetracer-subset/config-${codetracer_short}.nims" \
+      'addPathIfDir(getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC"))'
+  fi
+fi
 
 # The incremental-test seam (``ct_incremental_adapter.nim``), for the same
 # reason and with one extra requirement the trace-format case does not have.

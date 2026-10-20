@@ -7,7 +7,7 @@ Reprobuild project and builds it through the public `repro build` command with
 The macOS gate does not invoke `tup`. Homebrew marks `tup` Linux-only and
 nixpkgs marks it broken on this host. Instead, the test parses and fingerprints
 the command-semantics fixture pinned from CodeTracer commit
-`222a4a0099115066ba331817e94a3ac9f2293290`, the revision this repository's
+`f1745b89e93179eca20778943bbafae91ebb6dfd`, the revision this repository's
 `flake.lock` pins for `codetracer-src`; using a Reprobuild-owned fixture keeps
 the oracle independent of an adjacent CodeTracer checkout's branch or
 uncommitted state. The fixture covers the exact
@@ -34,14 +34,14 @@ that the selected source slice resolves the same checked-in libraries.
 
 The in-place project-file tests use exact `repro.nim` and `config.nims`
 payloads pinned from reviewed CodeTracer commit
-`222a4a0099115066ba331817e94a3ac9f2293290`. The files retain CodeTracer's
+`f1745b89e93179eca20778943bbafae91ebb6dfd`. The files retain CodeTracer's
 `AGPL-3.0-or-later` license in explicit SPDX/provenance headers. Every byte
 after those headers is identical to the corresponding public source:
 
-- `https://github.com/metacraft-labs/codetracer/blob/222a4a0099115066ba331817e94a3ac9f2293290/repro.nim`
-- `https://github.com/metacraft-labs/codetracer/blob/222a4a0099115066ba331817e94a3ac9f2293290/config.nims`
+- `https://github.com/metacraft-labs/codetracer/blob/f1745b89e93179eca20778943bbafae91ebb6dfd/repro.nim`
+- `https://github.com/metacraft-labs/codetracer/blob/f1745b89e93179eca20778943bbafae91ebb6dfd/config.nims`
 
-`222a4a00` is not an arbitrary newer commit. It is the revision this
+`f1745b89` is not an arbitrary newer commit. It is the revision this
 repository's `flake.lock` pins for its `codetracer-src` input, so the vendored
 project contract, the Tup command-semantics extract and the flake-pinned
 CodeTracer source all name one reviewed commit instead of three. The previous
@@ -52,6 +52,20 @@ adding the build-graph gate edges and the development-environment
 activation), `config.nims` (sibling-then-override search-path order) and the
 `NIM_REPO_PATH_FLAGS` feeding `!nim_js` (the runquota library paths). The
 remedy is to refresh the fixtures, not to relax the comparison.
+
+The `f1745b89` refresh caught up with four `codetracer-src` moves
+(222a4a009 → 23d5af70f → 6b6d05a08 → 2097ae648 → f1745b89e) that had left the
+fixtures behind; the suite reported it as drift once the sibling checkout
+reached 6b6d05a08. Between 222a4a009 and f1745b89e CodeTracer vendored
+`libs/nim-regex` and put `libs/nim-regex/src` on the search path in all three
+files (so `!nim_js`, which expands `NIM_REPO_PATH_FLAGS`, gets a new
+fingerprint; `!trace_object_file` is unchanged), and `repro.nim` declares
+`zstd-dev`, `codetracer-trace-format-nim` and the macOS-only `dsymutil` as
+`uses:` entries and names the backend C compiler, `zstd-dev` and `dsymutil` as
+tool refs on the native `ctNative` edges. `scripts/check_repo_requirements.sh`
+now requires the fixture names and both test pins to match the `codetracer-src`
+revision in `flake.nix`, so the next pin move fails `just lint` in the commit
+that makes it instead of in a full suite run.
 
 The `222a4a00` refresh followed the next `codetracer-src` pin. Between
 17c111fb2 and 222a4a009 `repro.nim`, `config.nims` and `src/Tuprules.tup` are

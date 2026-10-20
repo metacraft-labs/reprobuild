@@ -4,7 +4,10 @@
 # forwards to it), native targets with CodeTracer's own Nim, which the test
 # appends as the LAST directory on PATH so that it shadows nothing else.
 set -euf
-self_dir=$(dirname "$0")
+# Parameter expansion, not `dirname`: the native edges run under a hermetic
+# PATH (their declared tools only), which carries no coreutils. The engine
+# invokes this script by absolute path, so `$0` always contains a slash.
+self_dir=${0%/*}
 IFS=:
 if [ "${1:-}" = "js" ]; then
   after_self=0
@@ -28,6 +31,13 @@ else
   done
   if [ -n "$last" ]; then
     exec "$last" "$@"
+  fi
+  # The native edges declare their tools, so their PATH is hermetic and holds
+  # only this directory among the `nim`s: CodeTracer's own Nim, appended to
+  # the case's PATH, is not on it. The test names that Nim here instead.
+  native_nim="${REPROBUILD_CODETRACER_NATIVE_NIM:-}"
+  if [ -n "$native_nim" ] && [ -f "$native_nim" ] && [ -x "$native_nim" ]; then
+    exec "$native_nim" "$@"
   fi
 fi
 echo "nim fixture: no nim on PATH for $self_dir" >&2

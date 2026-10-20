@@ -1,4 +1,5 @@
 import std/[algorithm, json, options, os, osproc, sequtils, sets, streams, strtabs, strutils, tables, tempfiles, times, net, jsonutils]
+from std/sysrand import urandom
 
 import blake3
 import cbor
@@ -28,6 +29,9 @@ import repro_interface_artifacts
 # `uses:` and a home profile's `package` reference.
 import repro_tool_profiles/realization_selection
 export realization_selection
+# ReproOS M7 deliverable 3: the resolver's provisioning pin (committed lock or
+# curator policy), re-checked by the planners below.
+import repro_interface_artifacts/provisioning_pins
 # The probe a realized prefix's declared executable has to pass, and the
 # reason it gives when it does not. Exported because the home archive
 # realizer applies the same rule to the arms it owns, and because the catalog
@@ -53,6 +57,11 @@ import repro_project_dsl/reprobuild_packages_catalog
 # edges, registers the `"tarball"` provisioner's executor with the engine, and
 # runs the provisioning subgraph through `runBuild`.
 import repro_build_engine
+import nimcrypto/[hash, sha2]
+# ReproOS M7 sibling (7): stat evidence of the resolved executable, checked on
+# every tool-identity cache hit.
+import repro_tool_profiles/executable_evidence
+export executable_evidence
 import repro_tool_profiles/[archive_inputs, archive_steps, archive_digest]
 import repro_dsl_stdlib/packages_schema
 import repro_dsl_stdlib/packages/[lessmsi, wix3, innounp, php, jdk]
@@ -185,6 +194,12 @@ type
       ## whose CONTENT changes with the realization. Consumers declare it as
       ## an input (section 3, step 5) through ``ToolActionIdentity`` and the
       ## engine's ``withProvisioningReceiptInputs``.
+    executableEvidence*: ExecutableEvidence
+      ## Stat evidence of ``resolvedExecutablePath`` taken when the digest
+      ## was computed (codec v10). NOT fingerprinted -- it says when to
+      ## re-hash, not what the tool is: a touch that leaves the bytes alone
+      ## refreshes it without moving any fingerprint. See
+      ## ``verifyResolvedExecutable``.
     # M9.R.14e.1 — additional search-path channels populated by the
     # from-source resolver when the sibling recipe's install tree carries
     # the relevant artefacts. The engine threads each list onto a
@@ -376,7 +391,13 @@ const
   # v9 — ``provisioningReceipt`` on both the profile and the action
   # identity, so a cached identity still tells the engine which provisioning
   # edge's receipt its consumers depend on.
-  ArtifactVersion = 9'u16
+  # v10 — ``executableEvidence`` on the profile (ReproOS M7 sibling (7); it
+  # was "v9" on the campaign line, renumbered when it merged after
+  # ``agents``' own v9): the stat evidence every cache hit compares before
+  # trusting the digest. A v9 or older profile reads back with no evidence,
+  # so its first hit re-hashes (and a changed executable is then a miss)
+  # instead of being trusted.
+  ArtifactVersion = 10'u16
   NixMaterializationMagic = [byte(ord('R')), byte(ord('B')), byte(ord('N')), byte(ord('M'))]
   NixMaterializationVersion = 3'u16
 
@@ -644,6 +665,23 @@ proc resolvedExecutableContentDigest*(path: string): string =
     # to a readable file's digest.
     result = "unreadable"
 
+proc sealExecutable*(path: string):
+    tuple[digest: string; evidence: ExecutableEvidence] =
+  ## ``resolvedExecutableContentDigest(path)`` together with the stat
+  ## evidence of the bytes that were read: stat, hash, stat again. The
+  ## evidence is recorded only when both stats agree (the file did not change
+  ## under the read), stamped with the moment hashing STARTED -- the
+  ## reference the racy window is measured from (see ``executable_evidence``).
+  if path.len == 0:
+    return (digest: "", evidence: ExecutableEvidence())
+  let started = nowNs()
+  let before = statExecutable(path)
+  result.digest = resolvedExecutableContentDigest(path)
+  let after = statExecutable(path)
+  if before.ok and after.ok and sameFileState(before.evidence, after.evidence):
+    result.evidence = before.evidence
+    result.evidence.recordedAtNs = started
+
 proc profileFingerprintFor(profile: PathOnlyToolProfile): ContentDigest =
   var payload: seq[byte] = @[]
   # v7 — the profile fingerprint now keys on WHAT WAS RESOLVED, not on
@@ -796,9 +834,69 @@ proc refreshProfileIdentity*(profile: var PathOnlyToolProfile) =
   ## Adding an adapter means adding a call here. There is no compiler
   ## check for that, so it is stated where the field is declared as well
   ## (see ``PathOnlyToolProfile.profileFingerprint``).
-  profile.resolvedExecutableDigest =
-    resolvedExecutableContentDigest(profile.resolvedExecutablePath)
+  let sealed = sealExecutable(profile.resolvedExecutablePath)
+  profile.resolvedExecutableDigest = sealed.digest
+  profile.executableEvidence = sealed.evidence
   profile.profileFingerprint = profileFingerprintFor(profile)
+
+type
+  ExecutableCheck* = enum
+    ecCurrent    ## stat evidence matched and is not racy: nothing read
+    ecRefreshed  ## re-hashed, same digest: the evidence was refreshed
+    ecChanged    ## missing, changed under the read, or a different digest
+
+proc verifyResolvedExecutable*(profile: var PathOnlyToolProfile):
+    ExecutableCheck =
+  ## The per-hit check of a cached profile's executable (ReproOS M7 sibling
+  ## (7); see ``executable_evidence``). One stat; a re-hash only on an
+  ## evidence mismatch or racy evidence; a different digest is
+  ## ``ecChanged`` -- the caller must treat the whole identity as a miss.
+  let path = profile.resolvedExecutablePath
+  if path.len == 0:
+    return ecCurrent
+  let current = statExecutable(path)
+  if not current.ok:
+    return ecChanged
+  let recorded = profile.executableEvidence
+  if sameFileState(recorded, current.evidence) and not recorded.racy:
+    return ecCurrent
+  let sealed = sealExecutable(path)
+  if not sealed.evidence.recorded:
+    # The file changed while it was being read (or vanished): whatever the
+    # digest says, it is not evidence of the recorded bytes.
+    return ecChanged
+  if sealed.digest != profile.resolvedExecutableDigest:
+    return ecChanged
+  profile.executableEvidence = sealed.evidence
+  ecRefreshed
+
+proc verifyIdentityExecutables*(identity: var PathOnlyBuildIdentity):
+    tuple[current: bool; refreshed: bool] =
+  ## Every profile's executable, then every action identity's mirror of it:
+  ## ``current`` is false as soon as one is ``ecChanged``, or an action
+  ## identity names an executable / digest no verified profile carries.
+  ## ``refreshed`` is true when some evidence was refreshed and the identity
+  ## should be written back.
+  var verified = initTable[string, string]()
+  for profile in identity.profiles.mitems:
+    case verifyResolvedExecutable(profile)
+    of ecChanged:
+      return (current: false, refreshed: false)
+    of ecRefreshed:
+      result.refreshed = true
+    of ecCurrent:
+      discard
+    if profile.resolvedExecutablePath.len > 0:
+      verified[profile.resolvedExecutablePath] =
+        profile.resolvedExecutableDigest
+  for action in identity.actionIdentities:
+    if action.resolvedExecutablePath.len == 0:
+      continue
+    if not verified.hasKey(action.resolvedExecutablePath) or
+        verified[action.resolvedExecutablePath] !=
+          action.resolvedExecutableDigest:
+      return (current: false, refreshed: false)
+  result.current = true
 
 proc findExecutableOnPath(executableName: string;
                           pathSearchList: openArray[string]): string =
@@ -1068,35 +1166,165 @@ proc pathOnlyResolutionSignatures*(uses: openArray[InterfaceToolUse];
   for useDef in uses:
     result.add(pathOnlyResolutionSignature(useDef, pathValue, lookup))
 
-proc requestedProvisioningContributor(): string =
-  getEnv("REPRO_PROVISIONING_CONTRIBUTOR").strip()
+const RemovedContributorSelectorEnv* = "REPRO_PROVISIONING_CONTRIBUTOR"
+  ## The environment-variable pseudo-lock M7 deliverable 3 removed. It is not
+  ## read as a selection any more; a non-empty value REFUSES provisioning
+  ## selection (``refuseRemovedContributorSelector``) rather than being
+  ## ignored, so a caller that still relies on it learns that it no longer
+  ## selects anything instead of silently getting another contributor.
 
-proc requestedContributorPin(honor = true): Option[string] =
-  ## ``REPRO_PROVISIONING_CONTRIBUTOR`` as a selection pin. Unset (or not
-  ## honoured, for reprobuild's own bootstrap pins) lets a unique contributor
-  ## select.
-  let requested = if honor: requestedProvisioningContributor() else: ""
-  if requested.len > 0: some(requested) else: none(string)
+proc refuseRemovedContributorSelector(packageSelector: string) =
+  ## Refuse loudly while the removed selector is still set. Ignoring it
+  ## would be silent: whoever set it expects contributor X, and would get
+  ## the lock's or the unique eligible contributor instead with no signal.
+  ## Honouring it would let the environment override the committed lock.
+  let value = getEnv(RemovedContributorSelectorEnv)
+  if value.len > 0:
+    raise newException(ValueError,
+      "tool-resolution failed: " & RemovedContributorSelectorEnv &
+      " is set (\"" & value & "\") while resolving package \"" &
+      packageSelector & "\", but selecting a provisioning contributor " &
+      "through the environment was removed (ReproOS M7 deliverable 3). A " &
+      "contribution is selected only by the committed lock (the repro.lock " &
+      "`provisioning` records) or an explicit curator policy, and the " &
+      "environment never overrides either. Unset " &
+      RemovedContributorSelectorEnv & "; to pin a contributor, lock the " &
+      "selection.")
+
+proc contributorPin(useDef: InterfaceToolUse;
+                    honorRequestedContributor = true): Option[string] =
+  ## The contributor pin the ``uses:`` planners hand to
+  ## ``realization_selection``: the resolver's ``provisioningPin`` -- the
+  ## committed lock or an explicit curator policy, already checked against
+  ## the composed catalogs and the consumer's artifact -- re-checked here,
+  ## else ``none``, under which a unique eligible contributor selects and
+  ## more than one refuses (Provisioning-Contributions.md, Resolution).
+  ## Import order never decides, and neither does the environment: the
+  ## removed ``REPRO_PROVISIONING_CONTRIBUTOR`` refuses while it is set.
+  ##
+  ## ``honorRequestedContributor = false`` is reprobuild's own bootstrap
+  ## selection (the archive extractor a tarball edge depends on), which no
+  ## user selection is about: the removed environment selector is not
+  ## consulted for it at all, neither to select nor to refuse.
+  if honorRequestedContributor:
+    refuseRemovedContributorSelector(useDef.packageSelector)
+  let pin = useDef.provisioningPin
+  if not pin.isPinned:
+    return none(string)
+  let defects = pinDefects(pin)
+  if defects.len > 0:
+    raise newException(ValueError,
+      "tool-resolution failed: malformed provisioning pin on package \"" &
+      useDef.packageSelector & "\": " & defects.join("; "))
+  if pin.packageName != useDef.packageSelector:
+    raise newException(ValueError,
+      "tool-resolution failed: the provisioning pin on package \"" &
+      useDef.packageSelector & "\" was made for package \"" &
+      pin.packageName & "\"")
+  some(pin.contributor)
+
+proc contributorLockIdentity(contributor: string; pin: ProvisioningPin;
+                             realizationIdentity: string): string =
+  ## The plan's lock identity. A PINNED selection additionally binds the
+  ## contribution fingerprint the resolver verified, so the realized prefix
+  ## (``unifiedPrefixPath``), the tool profile fingerprint and the typed-tool
+  ## action fingerprint all move when only the contribution changes -- the
+  ## realization and build edges that selected it are invalidated -- while
+  ## the lock's ``lockIdentityOf`` (typechecking) does not
+  ## (Provisioning-Contributions.md, Locks And Snapshots; M7 deliverable 4).
+  ## Unpinned, it is ``realization_selection.contributorLockIdentity``, the
+  ## identity a home profile records for the same record.
+  if pin.isPinned:
+    "contributor:" & contributor & "\ncontribution:" &
+      pin.contributionFingerprint & "\n" & realizationIdentity
+  else:
+    contributorLockIdentity(contributor, realizationIdentity)
+
+proc lockedRealizationOf(useDef: InterfaceToolUse): string =
+  ## The realization lock identity a COMMITTED-LOCK pin names, or "" when
+  ## the use is unpinned or the pin selects a contributor only (curator
+  ## policy / unique eligible).
+  if useDef.provisioningPin.isPinned:
+    useDef.provisioningPin.realizationLockIdentity
+  else:
+    ""
+
+proc refuseLockedRealizationMissing(useDef: InterfaceToolUse;
+                                    family, scope: string) {.noreturn.} =
+  raise newException(ValueError,
+    "tool-resolution failed: the provisioning selection for package \"" &
+    useDef.packageSelector & "\" pins realization \"" &
+    useDef.provisioningPin.realizationLockIdentity & "\" of " &
+    describePin(useDef.provisioningPin) & ", but the pinned contributor " &
+    "declares no " & family & " realization with that lock identity" &
+    scope & ". The locked realization is not replaced by another of the " &
+    "contributor's realizations: provision the package in the family the " &
+    "lock pins, or refresh the lock.")
+
+proc lockedCandidates[T](useDef: InterfaceToolUse; records: seq[T]):
+    tuple[records: seq[T]; positions: seq[int]] =
+  ## ``records`` narrowed to the realization a committed-lock pin names: the
+  ## pinned contributor's entries whose DECLARED ``lockIdentity`` is the one
+  ## the lock records (``applyProvisioningPins`` checked that the record
+  ## declares it exactly once). Every record when the use is unpinned or
+  ## pinned by contributor only. ``positions`` maps back into ``records``.
+  let wanted = lockedRealizationOf(useDef)
+  for i, record in records:
+    if wanted.len == 0 or
+        (record.contributor == useDef.provisioningPin.contributor and
+         record.lockIdentity == wanted):
+      result.records.add(record)
+      result.positions.add(i)
+
+proc targetScope(target: RealizationTarget): string =
+  ## " for host cpu=... os=..." -- the scope a tarball diagnostic names.
+  if target.isHost:
+    " for host cpu=" & $target.platform.family & " os=" & $target.os
+  else:
+    " for target " & describeTarget(target)
 
 proc selectionFailure(useDef: InterfaceToolUse; kind: RealizationKind;
-                      choice: KindChoice; pin: Option[string];
+                      choice, unpinned: KindChoice; pin: Option[string];
                       target: RealizationTarget): ref ValueError =
   ## The ``uses:`` wording of a per-kind selection failure. The decision is
-  ## ``realization_selection``'s; only the sentence is the recipe path's, and
-  ## it keeps the text recipes and their tests have always seen.
+  ## ``realization_selection``'s; only the sentence is the recipe path's.
+  ## ``unpinned`` is the same selection made without the contributor pin:
+  ## it names the contributors a pin is not relaxed to.
   case choice.status
   of kcAmbiguous:
     newException(ValueError,
       "tool-resolution failed: ambiguous " & $kind &
       " provisioning for package \"" & useDef.packageSelector &
       "\"; eligible contributors: " &
-      choice.contributors.mapIt(contributorLabel(it)).join(", ") &
-      "; select one through the lock or REPRO_PROVISIONING_CONTRIBUTOR")
-  of kcContributorNotOffered:
-    newException(ValueError,
-      "tool-resolution failed: provisioning contributor \"" &
-      pin.get("") & "\" has no " & $kind & " realization for package \"" &
-      useDef.packageSelector & "\"")
+      # Sorted: the declaration order is import order, which never decides
+      # and so must not be observable in the refusal either.
+      choice.contributors.sorted(cmp).mapIt(contributorLabel(it)).join(", ") &
+      "; import order is never a selection rule -- select one through the " &
+      "committed lock (repro.lock `provisioning`) or an explicit curator " &
+      "policy")
+  of kcContributorNotOffered, kcNoneForTarget:
+    if pin.isSome and
+        unpinned.status notin {kcNoRecords, kcNoneForTarget, kcInvalidRecord}:
+      # Other contributors ARE eligible: a pin is never relaxed to one.
+      let scope = if kind == rkTarball: targetScope(target) else: ""
+      newException(ValueError,
+        "tool-resolution failed: the provisioning selection for package \"" &
+        useDef.packageSelector & "\" pins " &
+        describePin(useDef.provisioningPin) & ", but no " & $kind &
+        " realization from it is eligible" & scope &
+        "; eligible contributors: " &
+        (if unpinned.contributors.len == 0: "<none>"
+         else: unpinned.contributors.sorted(cmp).mapIt(
+           contributorLabel(it)).join(", ")) &
+        ". The pin is not relaxed to another contributor: provision the " &
+        "package in a family the pinned contribution declares, or refresh " &
+        "the lock.")
+    else:
+      newException(ValueError,
+        "tool-resolution failed: package \"" & useDef.packageSelector &
+        "\" has no " & $kind & " realization for " & describeTarget(target) &
+        " requested by uses \"" & useDef.rawConstraint & "\": " &
+        choice.detail)
   else:
     newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
@@ -1108,14 +1336,22 @@ proc selectNixProvisioning*(useDef: InterfaceToolUse;
     InterfaceNixProvisioning =
   ## The ``uses:`` nix selection — ``realization_selection.selectNixRecord``
   ## (Provisioning-Contributions.md §"Profile Package References"), so a
-  ## recipe and a home profile select the same record. An entry whose
-  ## selector is empty is still an ELIGIBLE entry with incomplete metadata;
+  ## recipe and a home profile select the same record — under the
+  ## resolver's provisioning pin (``contributorPin``): a pinned contributor
+  ## is never relaxed to another, and a committed-lock pin provisions
+  ## exactly the realization it names or refuses. An entry whose selector is
+  ## empty is still an ELIGIBLE entry with incomplete metadata;
   ## ``nixAcquisitionPlan`` owns the completeness diagnostic.
-  let pin = requestedContributorPin()
-  let choice = selectNixRecord(useDef.nixProvisioning, target, "", pin)
+  let pin = contributorPin(useDef)
+  let locked = lockedCandidates(useDef, useDef.nixProvisioning)
+  if locked.records.len == 0:
+    refuseLockedRealizationMissing(useDef, "nix", "")
+  let choice = selectNixRecord(locked.records, target, "", pin)
   if choice.status != kcSelected:
-    raise selectionFailure(useDef, rkNix, choice, pin, target)
-  useDef.nixProvisioning[choice.index]
+    raise selectionFailure(useDef, rkNix, choice,
+      selectNixRecord(useDef.nixProvisioning, target, "", none(string)),
+      pin, target)
+  useDef.nixProvisioning[locked.positions[choice.index]]
 
 proc noProvisioningAtAllHint(useDef: InterfaceToolUse): string =
   ## Appended to a "does not declare provisioning" error when the tool use
@@ -1164,7 +1400,8 @@ proc nixAcquisitionPlan*(useDef: InterfaceToolUse;
     nixpkgsRef: selected.nixpkgsRef,
     nixpkgsRev: selected.nixpkgsRev,
     nixpkgsNarHash: selected.nixpkgsNarHash,
-    lockIdentity: contributorLockIdentity(selected.contributor, lockIdentity))
+    lockIdentity: contributorLockIdentity(selected.contributor,
+      useDef.provisioningPin, lockIdentity))
 
 proc safeStoreSegment*(value, fallback: string): string =
   for ch in value:
@@ -1297,17 +1534,61 @@ proc materializationKeyFileComponent(value: string): string =
   safeStoreSegment(value[0 .. min(value.high, 31)], "nix-materialization") &
     "-" & value
 
-proc nixMaterializationExpressionDigest(path: string): string =
-  if path.len == 0:
-    return ""
-  if not fileExists(extendedPath(path)):
-    return "missing"
-  blake3.toHex(blake3.digest(readFile(extendedPath(path))))
+proc uncacheableNixExpressionKey*(): string =
+  ## What a cache key binds for a Nix ``expressionFile``: a fresh random
+  ## nonce on EVERY call, so a key that binds it never equals any other key
+  ## -- including itself computed again -- and every lookup under it misses.
+  ##
+  ## Owner decision, 2026-10-14 (reprobuild landing of the ReproOS campaign;
+  ## Edge-Derived-Identities.md §7 rider): the Nix expression-closure
+  ## scanner, which PREDICTED what the evaluator reads, was dropped before
+  ## its replacement (the ``nix-eval`` / ``nix-realise`` edges, campaign
+  ## M19) exists. Binding the expression by anything less than what the
+  ## evaluator read would reopen the false accept the scanner closed (an
+  ## edited imported ``.nix`` file, a bumped pin it reads, served stale), so
+  ## until M19 lands a Nix tool use with an ``expressionFile`` is
+  ## UNCACHEABLE: the tool-identity key and the Nix materialization key
+  ## carry this nonce, nothing is written under such a key, and no cache
+  ## entry is ever served for it. A selector-only use (no
+  ## ``expressionFile``) is keyed exactly as before the scanner existed.
+  var bytes: array[16, byte]
+  if not urandom(bytes):
+    raise newException(OSError,
+      "cannot draw the nonce that keeps a Nix expressionFile uncacheable")
+  result = "uncacheable:nix-expression-file:"
+  for b in bytes:
+    result.add(toHex(int(b), 2).toLowerAscii)
 
-proc nixMaterializationCacheKey(useDef: InterfaceToolUse;
-                                plan: NixAcquisitionPlan): string =
+type
+  NixMaterializationKey* = tuple[cacheable: bool; key: string]
+    ## ``cacheable`` is false when the plan carries a Nix ``expressionFile``
+    ## (see ``uncacheableNixExpressionKey``): the key is then a fresh nonce
+    ## and the materialization cache is neither read nor written.
+
+proc nixMaterializationCacheKey*(useDef: InterfaceToolUse;
+                                 plan: NixAcquisitionPlan):
+    NixMaterializationKey =
+  ## v3 (2026-10-14). A plan with an ``expressionFile`` is uncacheable
+  ## (``uncacheableNixExpressionKey``). A selector-only plan binds exactly
+  ## the fields v1 bound before the expression-closure scanner existed --
+  ## with the expression file and its digest both empty, as v1 wrote them
+  ## for such a plan -- under a NEW tag, so no entry written under the
+  ## scanner's v2 (or under v1) is ever looked up again. Exported so the
+  ## key test drives the real key.
+  ##
+  ## What a selector-only key does NOT bind (Edge-Derived-Identities.md
+  ## §2.5; campaign M7 open items (iv) and (vii), closed only by M19's
+  ## ``nix-realise`` output identity): the content of a flake outside
+  ## nixpkgs or of its lock, the flake registry an unpinned ``nixpkgs#``
+  ## selector resolves through, ``system`` beyond the host OS / CPU,
+  ## ``nix.conf``, the Nix version, and the derivation or output hash. It is
+  ## complete only as far as the selector itself is content-locked: a
+  ## ``nixpkgs#`` selector with a pinned ``nixpkgsRev`` and
+  ## ``nixpkgsNarHash`` (``effectiveNixSelector``).
+  if plan.nixExpressionFile.len > 0:
+    return (cacheable: false, key: uncacheableNixExpressionKey())
   var payload: seq[byte] = @[]
-  payload.writeString("reprobuild.nix.materialization.v1")
+  payload.writeString("reprobuild.nix.materialization.v3")
   payload.writeString(hostOS)
   payload.writeString(hostCPU)
   payload.writeString(useDef.packageSelector)
@@ -1316,8 +1597,8 @@ proc nixMaterializationCacheKey(useDef: InterfaceToolUse;
   payload.writeString(plan.packageId)
   payload.writeString(plan.nixSelector)
   payload.writeString(plan.declaredExecutablePath)
-  payload.writeString(plan.nixExpressionFile)
-  payload.writeString(nixMaterializationExpressionDigest(plan.nixExpressionFile))
+  payload.writeString("")  # the expression file: none (v1's field)
+  payload.writeString("")  # its digest: none (v1's field)
   payload.writeString(plan.nixpkgsRef)
   payload.writeString(plan.nixpkgsRev)
   payload.writeString(plan.nixpkgsNarHash)
@@ -1328,7 +1609,8 @@ proc nixMaterializationCacheKey(useDef: InterfaceToolUse;
     payload.writeByte(byte(ord(probe.kind)))
     payload.writeString(probe.name)
     payload.writeStringSeq(probe.args)
-  blake3.toHex(blake3.digest(toByteString(payload)))
+  (cacheable: true,
+   key: blake3.toHex(blake3.digest(toByteString(payload))))
 
 proc nixMaterializationCachePath(storeRoot, key: string): string =
   storeRoot / "nix-materialization-cache" /
@@ -1419,12 +1701,16 @@ proc expandNixPropagatedStorePaths*(paths: var seq[string])
 proc expandNixProfilePropagatedPaths*(profile: var PathOnlyToolProfile)
 
 proc readCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
-                                  plan: NixAcquisitionPlan):
+                                  plan: NixAcquisitionPlan;
+                                  key: NixMaterializationKey):
     tuple[hit: bool; profile: PathOnlyToolProfile] =
-  if storeRoot.len == 0:
+  ## ``key`` is computed ONCE, before resolution, and the same value is
+  ## passed to ``writeCachedNixMaterialization``: an input edited while the
+  ## realization runs is then cached under the OLDER key, which the next
+  ## build (computing the newer one) misses -- never the reverse.
+  if storeRoot.len == 0 or not key.cacheable:
     return
-  let key = nixMaterializationCacheKey(useDef, plan)
-  let path = nixMaterializationCachePath(storeRoot, key)
+  let path = nixMaterializationCachePath(storeRoot, key.key)
   if not fileExists(extendedPath(path)):
     return
   try:
@@ -1439,11 +1725,11 @@ proc readCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
 
 proc writeCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
                                    plan: NixAcquisitionPlan;
-                                   profile: PathOnlyToolProfile) =
-  if storeRoot.len == 0:
+                                   profile: PathOnlyToolProfile;
+                                   key: NixMaterializationKey) =
+  if storeRoot.len == 0 or not key.cacheable:
     return
-  let key = nixMaterializationCacheKey(useDef, plan)
-  let path = nixMaterializationCachePath(storeRoot, key)
+  let path = nixMaterializationCachePath(storeRoot, key.key)
   createDir(extendedPath(parentDir(path)))
   writeFile(extendedPath(path),
     toByteString(encodeNixMaterializationProfile(profile)))
@@ -1640,7 +1926,9 @@ else:
     # evaluation read (``flake.nix`` / ``flake.lock``), are relative to the
     # working directory -- a project's own ``repro`` invocation.
     let workspaceRoot = getCurrentDir()
-    let cached = readCachedNixMaterialization(storeRoot, useDef, plan)
+    let materializationKey = nixMaterializationCacheKey(useDef, plan)
+    let cached = readCachedNixMaterialization(storeRoot, useDef, plan,
+      materializationKey)
     if cached.hit:
       let receipt = nixToolProvisionReceipt(useDef, storeRoot)
       if nixReceiptNamesProfile(receipt, cached.profile):
@@ -1791,7 +2079,8 @@ else:
       # the materialization, which is served only while the receipt still
       # names it (``nixReceiptNamesProfile``).
       result.provisioningReceipt = receipt
-      writeCachedNixMaterialization(storeRoot, useDef, plan, result)
+      writeCachedNixMaterialization(storeRoot, useDef, plan, result,
+        materializationKey)
     # ``receipt`` is "" for a store-less resolution (see above).
     result.provisioningReceipt = receipt
 
@@ -1861,21 +2150,46 @@ proc selectTarballProvisioning*(useDef: InterfaceToolUse;
   ## specific (cpu, os) coordinate wins, then the highest satisfied
   ## microarchitecture floor, then declaration order — so an early entry
   ## still beats a later catch-all of the same specificity, as before.
-  let pin = requestedContributorPin(honorRequestedContributor)
-  let choice = selectTarballRecord(useDef.tarballProvisioning, target, "",
-    pin, versionRange = requestedUsesVersionRange(useDef))
+  ##
+  ## WHICH contributor's entries are eligible is decided among the entries
+  ## that apply to the target, by the resolver's pin (``contributorPin``),
+  ## else a unique eligible contributor, else an ambiguity refusal -- and a
+  ## committed-lock pin names the realization, in which case that entry and
+  ## no other is taken, or the selection refuses. The ``uses:`` version
+  ## range filters as it does unpinned (``requestedUsesVersionRange``).
+  let pin = contributorPin(useDef, honorRequestedContributor)
+  let locked = lockedCandidates(useDef, useDef.tarballProvisioning)
+  let wanted = lockedRealizationOf(useDef)
+  let versionRange = requestedUsesVersionRange(useDef)
+  if locked.records.len == 0:
+    refuseLockedRealizationMissing(useDef, "tarball",
+      " eligible" & targetScope(target))
+  let choice = selectTarballRecord(locked.records, target, "", pin,
+    versionRange = versionRange)
   case choice.status
   of kcSelected:
-    useDef.tarballProvisioning[choice.index]
-  of kcNoneForTarget:
-    raise newException(ValueError,
-      "tool-resolution failed: no tarball provisioning entry for package \"" &
-      useDef.packageSelector & "\" matches host cpu=" &
-      $target.platform.family & " os=" & $target.os & " (" &
-      $useDef.tarballProvisioning.len &
-      " entries; see the package's `provisioning:` block)")
+    useDef.tarballProvisioning[locked.positions[choice.index]]
+  of kcNoneForTarget, kcContributorNotOffered:
+    if wanted.len > 0:
+      # The locked realization exists but is declared for another target:
+      # it is refused, never replaced by the contributor's entry for this one.
+      refuseLockedRealizationMissing(useDef, "tarball",
+        " eligible" & targetScope(target))
+    let unpinned = selectTarballRecord(useDef.tarballProvisioning, target,
+      "", none(string), versionRange = versionRange)
+    if pin.isNone or
+        unpinned.status in {kcNoRecords, kcNoneForTarget, kcInvalidRecord}:
+      raise newException(ValueError,
+        "tool-resolution failed: no tarball provisioning entry for package \"" &
+        useDef.packageSelector & "\" matches host cpu=" &
+        $target.platform.family & " os=" & $target.os & " (" &
+        $useDef.tarballProvisioning.len &
+        " entries; see the package's `provisioning:` block)")
+    raise selectionFailure(useDef, rkTarball, choice, unpinned, pin, target)
   else:
-    raise selectionFailure(useDef, rkTarball, choice, pin, target)
+    raise selectionFailure(useDef, rkTarball, choice,
+      selectTarballRecord(useDef.tarballProvisioning, target, "",
+        none(string), versionRange = versionRange), pin, target)
 
 proc tarballAcquisitionPlan*(useDef: InterfaceToolUse;
                              honorRequestedContributor = true;
@@ -1929,7 +2243,7 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse;
       else: "",
     stripComponents: selected.stripComponents,
     lockIdentity: contributorLockIdentity(selected.contributor,
-      tarballRealizationLockIdentity(selected)))
+      useDef.provisioningPin, tarballRealizationLockIdentity(selected)))
 
 proc systemToolEnv(): StringTableRef =
   ## A copy of the current environment with the dynamic-linker override
@@ -3081,6 +3395,7 @@ proc writeTarballReceipt(prefix: string; plan: TarballAcquisitionPlan;
     "archiveType": plan.archiveType,
     "stripComponents": plan.stripComponents,
     "prunePaths": plan.declaredPrunePaths,
+    "executableAlias": plan.declaredExecutableAlias,
     "declaredExecutablePath": plan.declaredExecutablePath,
     "lockIdentity": plan.lockIdentity,
     "realizationBoundary": prefix
@@ -3095,6 +3410,41 @@ proc selectedUrlFromReceipt(prefix: string): string =
     result = parseFile(path){"selectedUrl"}.getStr("existing")
   except CatchableError:
     result = "existing"
+
+proc tarballPrefixLayoutMismatch(prefix: string;
+                                 plan: TarballAcquisitionPlan): string =
+  ## Why the existing ``prefix`` was NOT realized with ``plan``'s alias and
+  ## prune list, from the receipt realize sealed into it; "" when it was, or
+  ## when the receipt does not say. A receipt records ``prunePaths`` since
+  ## pruning exists and ``executableAlias`` since the prefix key binds it
+  ## (``tarballPrefixLayoutParts``), so an older engine's prefix left
+  ## where a plan without a prune now resolves is refused rather than served
+  ## with files missing. A receipt without the ``executableAlias`` key is
+  ## not evidence either way and is accepted (its only possible difference
+  ## is an extra copy of the declared executable under another name).
+  let path = tarballReceiptPath(prefix)
+  if not fileExists(extendedPath(path)):
+    return ""
+  var receipt: JsonNode
+  try:
+    receipt = parseFile(path)
+  except CatchableError:
+    return ""
+  if receipt.kind != JObject:
+    return ""
+  if receipt.hasKey("prunePaths"):
+    var recorded: seq[string] = @[]
+    for item in receipt["prunePaths"].getElems():
+      recorded.add(item.getStr())
+    if recorded != plan.declaredPrunePaths:
+      return "prunePaths [" & recorded.join(", ") & "] (the plan declares [" &
+        plan.declaredPrunePaths.join(", ") & "])"
+  if receipt.hasKey("executableAlias"):
+    let recorded = receipt["executableAlias"].getStr()
+    if recorded != plan.declaredExecutableAlias:
+      return "executableAlias \"" & recorded & "\" (the plan declares \"" &
+        plan.declaredExecutableAlias & "\")"
+  ""
 
 proc flushStoreDiagnostics() =
   ## Push a store diagnostic out of the buffer immediately.
@@ -3574,6 +3924,13 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
       raise newException(OSError,
         "tool-resolution failed: existing tarball realization " &
         existing.reason & ": " & prefix)
+    let mismatch = tarballPrefixLayoutMismatch(prefix, plan)
+    if mismatch.len > 0:
+      raise newException(OSError,
+        "tool-resolution failed: the existing tarball realization at " &
+        prefix & " was realized with " & mismatch & "; it is not reused " &
+        "for a plan that differs. Remove the prefix (an older engine " &
+        "keyed it without the prune list and alias) and realize again.")
     if archiveInstallerFeatures(plan.record).len > 0:
       verifyArchiveApplication(archiveRealizationOf(plan.packageSelector,
         plan.record), prefix, tarballAppTrust)
@@ -4196,8 +4553,10 @@ proc addTarballProvisionEdge(edges: var ProvisioningEdges;
   ## decoder). Its extractor dependency edges are added first.
   ##
   ## An `extractor` edge's package is reprobuild's own bootstrap pin, which
-  ## has one contributor, so a contributor the user requested for THEIR
-  ## packages (`REPRO_PROVISIONING_CONTRIBUTOR`) does not filter it out.
+  ## has one contributor, so it is selected with
+  ## `honorRequestedContributor = false`: the removed environment selector
+  ## (`REPRO_PROVISIONING_CONTRIBUTOR`), which refuses a USER package's
+  ## selection while it is set, is not consulted for it.
   if alternatives.len == 0:
     raise newException(ValueError, "tarball provisioning edge needs a package")
   var plans: seq[TarballAcquisitionPlan]
@@ -4680,11 +5039,19 @@ proc nixToolProvisioningEdges*(useDef: InterfaceToolUse; storeRoot: string;
     inputs = inputs,
     outputs = [receipt],
     commandStatsId = "repro nix tool provision edge",
-    cacheable = true,
+    # Owner decision, 2026-10-14 (Edge-Derived-Identities.md §7 rider): a
+    # Nix tool use with an ``expressionFile`` is never served from a cache
+    # until the ``nix-eval`` / ``nix-realise`` edges of campaign M19 exist.
+    # This edge declares only the top-level expression and the flake files
+    # as inputs and the evaluation runs in the helper, outside the monitor,
+    # so a recorded result would be served after an edit of a file the
+    # expression imports. For such a use it runs every time; its
+    # fingerprint's materialization key is then a nonce anyway.
+    cacheable = plan.nixExpressionFile.len == 0,
     weakFingerprint = weakFingerprintFromText(
       NixToolProvisionEdgeSchema & "\0" &
-      nixMaterializationCacheKey(useDef, plan) & "\0" & selector & "\0" &
-      workspaceRoot),
+      nixMaterializationCacheKey(useDef, plan).key & "\0" & selector &
+      "\0" & workspaceRoot),
     actionCachePolicy = ffpChecksum,
     text = text,
     networkMode = netFetch,
@@ -5927,13 +6294,22 @@ proc selectScoopProvisioning*(useDef: InterfaceToolUse;
     InterfaceScoopProvisioning =
   ## The ``uses:`` scoop selection — ``realization_selection.
   ## selectScoopRecord``, the selection a home profile makes for the same
-  ## package (Provisioning-Contributions.md §"Profile Package References").
-  let pin = requestedContributorPin()
-  let choice = selectScoopRecord(useDef.scoopProvisioning, target, "", pin,
-    versionRange = requestedUsesVersionRange(useDef))
+  ## package (Provisioning-Contributions.md §"Profile Package References") —
+  ## under the resolver's provisioning pin (``contributorPin``), as for nix,
+  ## and filtered by the ``uses:`` version range as it is unpinned.
+  let pin = contributorPin(useDef)
+  let locked = lockedCandidates(useDef, useDef.scoopProvisioning)
+  let versionRange = requestedUsesVersionRange(useDef)
+  if locked.records.len == 0:
+    refuseLockedRealizationMissing(useDef, "scoop", "")
+  let choice = selectScoopRecord(locked.records, target, "", pin,
+    versionRange = versionRange)
   if choice.status != kcSelected:
-    raise selectionFailure(useDef, rkScoop, choice, pin, target)
-  useDef.scoopProvisioning[choice.index]
+    raise selectionFailure(useDef, rkScoop, choice,
+      selectScoopRecord(useDef.scoopProvisioning, target, "", none(string),
+        versionRange = versionRange),
+      pin, target)
+  useDef.scoopProvisioning[locked.positions[choice.index]]
 
 proc scoopAcquisitionPlan*(useDef: InterfaceToolUse;
                            target = hostRealizationTarget()):
@@ -5972,7 +6348,8 @@ proc scoopAcquisitionPlan*(useDef: InterfaceToolUse;
     declaredExecutablePath: selected.executablePath,
     requiresExecutionProfileChecksum:
       selected.requiresExecutionProfileChecksum,
-    lockIdentity: contributorLockIdentity(selected.contributor, lockIdentity))
+    lockIdentity: contributorLockIdentity(selected.contributor,
+      useDef.provisioningPin, lockIdentity))
 
 proc resolveScoopRoot(scoopOverride: string): string =
   let explicit = getEnv("SCOOP")
@@ -8950,8 +9327,32 @@ proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
                           Table[string, ProducerExecutableDirs] =
                             initTable[string, ProducerExecutableDirs]();
                         producerAuxSelectors: Table[string, ProducerAuxDirs] =
-                          initTable[string, ProducerAuxDirs]()):
+                          initTable[string, ProducerAuxDirs]();
+                        pins: openArray[ProvisioningPin] = []):
     PathOnlyBuildIdentity =
+  ## ``pins`` (M7 deliverable 3): the provisioning selections the resolver
+  ## (``repro_interface_artifacts/contribution_selection``) made from the
+  ## committed lock or an explicit curator policy. They are checked against
+  ## this artifact and stamped onto its tool uses by
+  ## ``applyProvisioningPins`` (which refuses a pin the artifact does not
+  ## carry exactly); each pinned use then provisions ONLY from its pinned
+  ## contributor, and the plan's lock identity binds the pinned contribution
+  ## fingerprint, so every profile and action fingerprint below moves with
+  ## the contribution (deliverable 4). Empty keeps the unpinned behaviour --
+  ## a unique eligible contributor, or an ambiguity refusal. A caller that
+  ## CACHES the result must bind the pins into its cache key:
+  ## ``repro_cli_support``'s tool-identity cache does
+  ## (``toolIdentityCacheKey``), and the CLI build path passes the pins
+  ## ``buildProvisioningPins`` resolves from the committed lock.
+  ##
+  ## TRUST BOUNDARY: ``pins`` are trusted. They are checked against the
+  ## artifact, but the contribution fingerprint cannot be recomputed here
+  ## and the lock is not re-read, so a forged pin with the right record
+  ## digest is accepted. Pass only pins ``contribution_selection.pinOf``
+  ## produced in this process -- as ``buildProvisioningPins`` does, on every
+  ## call; a pin that was persisted, cached or received needs verification
+  ## this engine can check first (see ``ProvisioningPin``).
+  ##
   ## SC-3: ``producerAuxSelectors`` maps the ``uses:`` selectors that the
   ## cross-repo producer pre-pass materialized as LIBRARY-channel producers
   ## (consumed via the aux channels, not PATH) to their realized aux dirs.
@@ -8962,7 +9363,7 @@ proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
   result.projectName = artifact.projectInterface.projectName
   result.interfaceFingerprint = artifact.interfaceFingerprint
   let pathLookup = SidecarPathLookup()
-  for useDef in artifact.projectInterface.toolUses:
+  for useDef in applyProvisioningPins(artifact.projectInterface, pins):
     var profile = toolProfileFor(useDef, mode, pathValue, storeRoot,
       producerExecutableSelectors, producerAuxSelectors, pathLookup)
     if mode == tpmFromSource:
@@ -9074,6 +9475,16 @@ proc writeProfile(outp: var seq[byte]; profile: PathOnlyToolProfile) =
   outp.writeString(profile.resolvedExecutableDigest)
   # v9 — the provisioning edge's receipt. Same trailing-extension discipline.
   outp.writeString(profile.provisioningReceipt)
+  # v10 — the executable's stat evidence (see ``executable_evidence``).
+  let evidence = profile.executableEvidence
+  outp.writeByte(byte(ord(evidence.recorded)))
+  outp.writeU64Le(cast[uint64](evidence.size))
+  outp.writeU64Le(cast[uint64](evidence.mtimeNs))
+  outp.writeU64Le(cast[uint64](evidence.ctimeNs))
+  outp.writeU64Le(evidence.volume)
+  outp.writeU64Le(evidence.fileIdHigh)
+  outp.writeU64Le(evidence.fileIdLow)
+  outp.writeU64Le(cast[uint64](evidence.recordedAtNs))
   outp.writeDigest(profile.profileFingerprint)
 
 proc readProfile(bytes: openArray[byte]; pos: var int;
@@ -9142,6 +9553,20 @@ proc readProfile(bytes: openArray[byte]; pos: var int;
     result.resolvedExecutableDigest = readString(bytes, pos)
   if version >= 9'u16:
     result.provisioningReceipt = readString(bytes, pos)
+  if version >= 10'u16:
+    let recordedByte = readByte(bytes, pos)
+    if recordedByte > 1'u8:
+      raiseEnvelopeError(eeMalformed, "invalid executable evidence flag")
+    result.executableEvidence.recorded = recordedByte == 1'u8
+    result.executableEvidence.size = cast[int64](readU64Le(bytes, pos))
+    result.executableEvidence.mtimeNs = cast[int64](readU64Le(bytes, pos))
+    result.executableEvidence.ctimeNs = cast[int64](readU64Le(bytes, pos))
+    result.executableEvidence.volume = readU64Le(bytes, pos)
+    result.executableEvidence.fileIdHigh = readU64Le(bytes, pos)
+    result.executableEvidence.fileIdLow = readU64Le(bytes, pos)
+    result.executableEvidence.recordedAtNs = cast[int64](readU64Le(bytes, pos))
+  # A v < 10 artifact leaves the evidence unrecorded, so its first cache hit
+  # re-hashes the executable rather than trusting the digest.
   # A v < 8 artifact leaves the digest empty. Its stored
   # ``profileFingerprint`` was computed under the v6 profile scheme and
   # will not equal ``profileFingerprintFor(result)``, so every freshness

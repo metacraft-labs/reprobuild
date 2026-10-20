@@ -86,16 +86,13 @@
 
 import std/[json, options, os, osproc, strtabs, streams, strutils, tempfiles,
     times, unittest]
-when defined(linux):
-  import std/posix          # kill / SIGTERM / SIGKILL for the teardown reap
 
 import repro_cli_support/dev_session      # the two argv token families
 import repro_cli_support/service_registrar  # the declared-program protocol
 import repro_resources/service_registry
 import repro_resources/state_store
 import repro_test_support
-when defined(macosx):
-  import repro_test_support/darwin_fixture_processes
+import repro_test_support/fixture_processes
 
 const
   IssuerOwner = "f5issuerowner"
@@ -440,64 +437,6 @@ proc closeDaemon(c: F5Case; daemon: var owned(Process)) =
       discard daemon.waitForExit()
     daemon.close()
 
-proc belongsToThisCase(pid: int; tempRoot: string): bool =
-  ## Does this pid still look like something THIS CASE started?
-  ##
-  ## The reasoning is
-  ## `t_dss11_cross_process_contribution_reaches_the_instance.nim`'s
-  ## `belongsToThisCase` verbatim in substance: a pid is a HISTORICAL
-  ## RECORD, not a handle, so it is checked against TWO witnesses — this
-  ## case's own `createTempDir` path in the process's argv, or as its
-  ## working directory — before any signal is sent. Killing by number
-  ## alone turns a reap of a dead fixture into an attack on a live
-  ## stranger. This predicate uses Linux's /proc witnesses; macOS instead
-  ## uses the native libproc cwd witness in reapCaseProcesses below.
-  when defined(linux):
-    let cmdline =
-      try: readFile("/proc/" & $pid & "/cmdline")
-      except CatchableError: ""
-    if cmdline.len > 0 and cmdline.contains(tempRoot):
-      return true
-    try:
-      let cwd = expandSymlink("/proc/" & $pid & "/cwd")
-      cwd == tempRoot or cwd.startsWith(tempRoot & "/")
-    except CatchableError:
-      false
-  else:
-    false
-
-proc reapCaseProcesses(c: F5Case) =
-  ## Reap whatever this case started and `repro down` did not stop.
-  ##
-  ## NOT A STRUCTURAL GUARANTEE: it is a teardown sweep over a process
-  ## table read at one instant, so a process that forks after the scan is
-  ## missed. It is an assertion that this file cleans up the leak
-  ## D-SS11's review measured (12 orphaned session-http processes and 4
-  ## orphaned fixture shells accumulated over its runs), not a proof that
-  ## nothing can leak.
-  when defined(linux):
-    proc caseOwnedPids(): seq[int] =
-      result = @[]
-      for kind, path in walkDir("/proc"):
-        if kind != pcDir:
-          continue
-        var pid = 0
-        try: pid = parseInt(path.extractFilename)
-        except ValueError: continue
-        if pid <= 0 or pid == getCurrentProcessId():
-          continue
-        if belongsToThisCase(pid, c.tempRoot):
-          result.add(pid)
-    for signal in [SIGTERM, SIGKILL]:
-      let pids = caseOwnedPids()   # re-read before EACH round
-      if pids.len == 0:
-        break
-      for pid in pids:
-        discard posix.kill(Pid(pid), signal)
-      sleep(300)
-  elif defined(macosx):
-    reapDarwinFixtureProcesses(c.tempRoot)
-
 proc cliStateStoreRoot(c: F5Case): string =
   ## The CLI's own state store for this case: `$HOME/.cache/repro/state`
   ## under the substituted `HOME`. It is NOT the daemon's, whose records
@@ -584,11 +523,18 @@ suite "L9 F5 — two sessions read one instance's minted identifier":
       for project in [c.issuerOwner, c.devOwner]:
         discard c.runRepro(project, @["down", "--activity=" & Activity])
       c.closeDaemon(daemon)
-      # REAP BEFORE THE TREE IS REMOVED and AFTER the daemon is closed: the
+      # REAP WHAT `repro down` DID NOT STOP: it does not stop everything a
+      # session started. `repro_test_support/fixture_processes` records the
+      # measured leak and the witnesses that decide what is signalled.
+      # Before the tree is removed and after the daemon is closed: the
       # daemon's own argv names this case's `tempRoot`, so an earlier sweep
       # would kill it out from under the graceful `repro down` calls.
-      c.reapCaseProcesses()
-      try: removeDir(c.tempRoot) except OSError, IOError: discard
+      # The reap raises when something outlives SIGKILL; the tree is
+      # removed either way.
+      try:
+        reapFixtureProcesses(c.tempRoot)
+      finally:
+        try: removeDir(c.tempRoot) except OSError, IOError: discard
 
     daemon = c.startDaemon()
 

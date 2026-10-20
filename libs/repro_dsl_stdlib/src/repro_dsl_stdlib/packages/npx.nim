@@ -41,11 +41,14 @@ package npx:
     # Direct-download: same Node.js 7z as `node.nim`; npx.cmd ships at
     # the root of the flattened tree as a regular file, so the Windows arm
     # needs none of the launcher machinery the POSIX arms below do.
+    # ``version`` is npm's, as in npm.nim: npx is npm's ``npx-cli.js`` and
+    # reports npm's version, read from each archive's npm ``package.json``.
     tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-win-x64.zip",
       sha256 = "edaca9bd58ec8e92037dac4e877d52f6b8f430b81c18b57e264b4e2fb111cd56",
       archiveType = "zip",
       stripComponents = 1,
       executablePath = "npx.cmd",
+      version = "11.13.0",
       packageId = "node@24.16.0",
       cpu = "x86_64",
       os = "windows",
@@ -63,6 +66,7 @@ package npx:
       prune = "lib/node_modules/npm/bin/npx.cmd",
       prune = "lib/node_modules/npm/bin/npm",
       prune = "lib/node_modules/npm/bin/npm.cmd",
+      version = "11.13.0",
       packageId = "node@24.16.0",
       cpu = "x86_64",
       os = "linux",
@@ -80,6 +84,7 @@ package npx:
       prune = "lib/node_modules/npm/bin/npx.cmd",
       prune = "lib/node_modules/npm/bin/npm",
       prune = "lib/node_modules/npm/bin/npm.cmd",
+      version = "11.13.0",
       packageId = "node@24.16.0",
       cpu = "aarch64",
       os = "macos",

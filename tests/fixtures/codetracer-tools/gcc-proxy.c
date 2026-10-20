@@ -142,6 +142,28 @@ static int find_real_compiler(const char *self_dir, char *out) {
   return -1;
 }
 
+/* The real compiler the test names in `real_compiler_env`, for an edge whose
+   PATH holds no real compiler at all.
+
+   An edge that declares a tool ref runs with a HERMETIC PATH: only the
+   directories its declared tools resolved into (`actionPathDecision`). Since
+   CodeTracer 23d5af70f the native `ctNative` edges declare their backend C
+   compiler, which resolves to this proxy's directory, so the PATH they run
+   under is this directory plus `nim`'s and `zstd-dev`'s, and the search above
+   finds nothing. The test exports the absolute path of its own compiler in
+   this variable; it reaches the edge as an inherited variable. The real
+   compiler's bytes are still read under the monitor when it is exec'd, so
+   the edge's evidence names it. */
+static const char *real_compiler_env = "REPROBUILD_CODETRACER_REAL_COMPILER";
+
+static int find_named_real_compiler(char *out) {
+  const char *named = getenv(real_compiler_env);
+  if (named == NULL || named[0] != '/' || strlen(named) >= PATH_MAX) return -1;
+  if (!is_executable_file(named) || is_stand_in(named)) return -1;
+  strcpy(out, named);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   if (argc == 2 && strcmp(argv[1], "--version") == 0) {
     puts("gcc proxy 1.0.0");
@@ -157,10 +179,16 @@ int main(int argc, char **argv) {
   }
   char self_dir[PATH_MAX];
   char real_compiler[PATH_MAX];
-  if (own_directory(self_dir) != 0 ||
-      find_real_compiler(self_dir, real_compiler) != 0) {
-    fprintf(stderr, "gcc proxy: no %s on PATH after its own directory\n",
-            real_compiler_name);
+  if (own_directory(self_dir) != 0) {
+    fprintf(stderr, "gcc proxy: cannot resolve its own directory\n");
+    return 127;
+  }
+  if (find_real_compiler(self_dir, real_compiler) != 0 &&
+      find_named_real_compiler(real_compiler) != 0) {
+    fprintf(stderr,
+            "gcc proxy: no %s on PATH after its own directory, and `%s` "
+            "does not name a real compiler\n",
+            real_compiler_name, real_compiler_env);
     return 127;
   }
   for (int i = 1; i < argc; i++) {

@@ -89,11 +89,15 @@ package npm:
     # picks the ``npm`` / ``npm.cmd`` shim out of the shared archive.
     # Same shape as npx.nim. Sha256 + URL come from
     # https://nodejs.org/dist/v24.16.0/SHASUMS256.txt.
+    # ``version`` is npm's, not Node's: a ``uses "npm >=10"`` ranges over
+    # npm. 11.13.0 is read from ``lib/node_modules/npm/package.json``
+    # (``node_modules/npm/package.json`` in the zip) of each pinned archive.
     tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-win-x64.zip",
       sha256 = "edaca9bd58ec8e92037dac4e877d52f6b8f430b81c18b57e264b4e2fb111cd56",
       archiveType = "zip",
       stripComponents = 1,
       executablePath = "npm.cmd",
+      version = "11.13.0",
       packageId = "node@24.16.0",
       cpu = "x86_64",
       os = "windows",
@@ -109,6 +113,7 @@ package npm:
       prune = "lib/node_modules/npm/bin/npm.cmd",
       prune = "lib/node_modules/npm/bin/npx",
       prune = "lib/node_modules/npm/bin/npx.cmd",
+      version = "11.13.0",
       packageId = "node@24.16.0",
       cpu = "x86_64",
       os = "linux",
@@ -124,6 +129,7 @@ package npm:
       prune = "lib/node_modules/npm/bin/npm.cmd",
       prune = "lib/node_modules/npm/bin/npx",
       prune = "lib/node_modules/npm/bin/npx.cmd",
+      version = "11.13.0",
       packageId = "node@24.16.0",
       cpu = "aarch64",
       os = "macos",
@@ -139,6 +145,7 @@ package npm:
       prune = "lib/node_modules/npm/bin/npm.cmd",
       prune = "lib/node_modules/npm/bin/npx",
       prune = "lib/node_modules/npm/bin/npx.cmd",
+      version = "11.13.0",
       packageId = "node@24.16.0",
       cpu = "x86_64",
       os = "macos",

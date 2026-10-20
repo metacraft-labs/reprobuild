@@ -48,14 +48,11 @@
 
 import std/[options, os, osproc, strtabs, streams, strutils, tempfiles,
     times, unittest]
-when defined(linux):
-  import std/posix          # kill / SIGTERM / SIGKILL for the teardown reap
 
 import repro_resources/service_registry
 import repro_resources/state_store
 import repro_test_support
-when defined(macosx):
-  import repro_test_support/darwin_fixture_processes
+import repro_test_support/fixture_processes
 
 const
   OwnerPackage = "dss11owner"
@@ -301,113 +298,6 @@ proc closeDaemon(c: Dss11Case; daemon: var owned(Process)) =
       discard daemon.waitForExit()
     daemon.close()
 
-proc belongsToThisCase(pid: int; tempRoot: string): bool =
-  ## Does this pid still look like something THIS CASE started?
-  ##
-  ## Asked before every signal, for the reason
-  ## `tests/e2e/dev-env/t_e2e_repro_dev_sessions.nim`'s
-  ## `belongsToSession` gives at length: a pid is a HISTORICAL RECORD,
-  ## not a handle. Between a process exiting and this teardown running,
-  ## the number can be reissued -- to a nim compiler, to a parallel
-  ## test's fixture, to a login shell. Killing by number alone turns a
-  ## reap of a dead fixture into an attack on a live stranger, and
-  ## SIGKILL gives the stranger no say. This host runs CI jobs
-  ## concurrently with developer trees, so that is not hypothetical.
-  ##
-  ## TWO WITNESSES, because this case's processes do not all name it the
-  ## same way. The daemon and the `__repro-dev-session-http` child carry
-  ## this case's own directories in their argv (`--endpoint`,
-  ## `--state-dir`, `--project-root`); a declared SERVICE instance is
-  ## `sh scripts/idp.sh`, which names nothing at all -- its only link to
-  ## the case is its WORKING DIRECTORY, which the materialiser sets to
-  ## the project root. Requiring argv alone would leave every service
-  ## process behind, which is the leak this reap exists to close.
-  ##
-  ## `tempRoot` is this case's own `createTempDir` path, so either
-  ## witness is conclusive: no process outside this case can mention it.
-  ##
-  ## This predicate uses Linux's /proc witnesses. The macOS reap below
-  ## instead uses the shared native libproc cwd witness; an unqueryable
-  ## process is never signalled on either platform.
-  when defined(linux):
-    let cmdline =
-      try: readFile("/proc/" & $pid & "/cmdline")
-      except CatchableError: ""
-    if cmdline.len > 0 and cmdline.contains(tempRoot):
-      return true
-    try:
-      let cwd = expandSymlink("/proc/" & $pid & "/cwd")
-      cwd == tempRoot or cwd.startsWith(tempRoot & "/")
-    except CatchableError:
-      false
-  else:
-    false
-
-proc reapCaseProcesses(c: Dss11Case) =
-  ## Reap whatever this case started and `repro down` did not stop.
-  ##
-  ## WHY THIS IS NEEDED AND `repro down` IS NOT ENOUGH. Two recorded
-  ## findings of this campaign meet here: `repro down` cannot stop a
-  ## `repro dev` session, and `reapSession` is best-effort because it
-  ## signals only the pids a session PUBLISHED. The observable result
-  ## was that this file's `defer` -- `repro down` twice, then close the
-  ## daemon -- left its fixture service shells running: a review of
-  ## D-SS11 had to kill 12 orphaned `repro-dev-session-http` processes
-  ## and 4 orphaned `idp.sh` loops accumulated over its runs. Each run
-  ## of this file leaked, and every later run inherited them.
-  ##
-  ## The sweep reads the live process table (/proc on Linux, libproc on
-  ## macOS), rather than recorded pids, which improves on `reapSession`. A
-  ## pid-record walk cannot see a process the session never recorded --
-  ## a grandchild a service forked, or a service whose pid was not
-  ## written before its supervisor died -- which is precisely the
-  ## residue `reapSession`'s own header admits it leaves. A fixture
-  ## service descendant keeps its cwd under this case's `tempRoot`; Linux
-  ## also checks argv for the daemon and HTTP roles. A live path witness
-  ## supplies authority that a historical pid list cannot.
-  ##
-  ## WHAT THIS IS NOT: a structural guarantee. It is a teardown sweep
-  ## over a process table read at one instant, so a process that forks
-  ## after the scan is missed, and the real fix is for a session to stop
-  ## what it started on the way out. It is an assertion that the leak
-  ## this file was observed to cause is cleaned up, not a proof that
-  ## nothing can leak.
-  ##
-  ## SIGTERM FIRST, THEN A RE-CHECK, THEN SIGKILL. The re-check is not
-  ## belt-and-braces: a pid that exited under the SIGTERM needs no
-  ## SIGKILL, and if its number has already been reissued the second
-  ## signal is exactly the one that must not be sent.
-  when defined(linux):
-    proc caseOwnedPids(): seq[int] =
-      result = @[]
-      for kind, path in walkDir("/proc"):
-        if kind != pcDir:
-          continue
-        let name = path.extractFilename
-        var pid = 0
-        try: pid = parseInt(name)
-        except ValueError: continue
-        if pid <= 0 or pid == getCurrentProcessId():
-          continue
-        if belongsToThisCase(pid, c.tempRoot):
-          result.add(pid)
-    # `posix.kill` rather than a `kill(1)` command string: the signal is
-    # sent by this process, with no shell in the path. That is the
-    # in-tree idiom (`t_declared_daemon_ipc_trust.nim`,
-    # `t_thin_client_refuses_to_exec_itself.nim`) and it keeps this
-    # teardown clear of `scripts/check_shell_command_strings.sh`'s
-    # subject -- a shell operator inside a command string that Windows
-    # never hands to a shell.
-    for signal in [SIGTERM, SIGKILL]:
-      let pids = caseOwnedPids()   # re-read before EACH round
-      if pids.len == 0:
-        break
-      for pid in pids:
-        discard posix.kill(Pid(pid), signal)
-      sleep(300)
-  elif defined(macosx):
-    reapDarwinFixtureProcesses(c.tempRoot)
-
 proc cliStateStoreRoot(c: Dss11Case): string =
   ## The CLI's own state store for this case: `$HOME/.cache/repro/state`
   ## under the substituted `HOME`.
@@ -485,15 +375,22 @@ suite "D-SS11 §4.6 — a consumer in another process contributes to the instanc
       discard c.runRepro(c.ownerProject,
         @["down", "--activity=" & OwnerActivity])
       c.closeDaemon(daemon)
-      # REAP BEFORE THE TREE IS REMOVED, and after the daemon is closed.
+      # REAP WHAT `repro down` DID NOT STOP: it does not stop everything a
+      # session started. `repro_test_support/fixture_processes` records the
+      # measured leak and the witnesses that decide what is signalled.
+      # Before the tree is removed, and after the daemon is closed.
       # Before the removal because the identity witness is the path: a
       # process whose cwd has been deleted still answers, but the argv
       # witness is the stronger of the two and reading it is free while
       # the tree exists. After `closeDaemon` because the daemon's own argv
       # names this case's `tempRoot`, so the sweep would otherwise kill
       # the daemon out from under the graceful `repro down` calls above.
-      c.reapCaseProcesses()
-      try: removeDir(c.tempRoot) except OSError, IOError: discard
+      # The reap raises when something outlives SIGKILL; the tree is
+      # removed either way.
+      try:
+        reapFixtureProcesses(c.tempRoot)
+      finally:
+        try: removeDir(c.tempRoot) except OSError, IOError: discard
 
     daemon = c.startDaemon()
 

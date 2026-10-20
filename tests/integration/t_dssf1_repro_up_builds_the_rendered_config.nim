@@ -38,6 +38,7 @@ import std/[os, osproc, strtabs, streams, strutils, tempfiles, times,
     unittest]
 
 import repro_test_support
+import repro_test_support/fixture_processes
 
 const
   PackageName = "dssf1up"
@@ -205,7 +206,33 @@ suite "F1 §4.8 — `repro up` builds the rendered configuration first":
         try:
           c.closeDaemon(daemon)
         finally:
-          try: removeDir(c.tempRoot) except OSError, IOError: discard
+          try:
+            # REAP WHAT THIS CASE STARTED AND `repro down` LEFT RUNNING.
+            # Recorded as four `__repro-dev-session-http` children that
+            # outlived their removed tree (reprobuild-pm issue 2026-10-20,
+            # "the F1 up case leaves its dev-session HTTP processes
+            # running"), with every case green. Measured again at
+            # `0c0797f4b`: no HTTP child survived, but the first case left
+            # the shared `reprobuild-nix-daemon` running with its cwd in
+            # this case's deleted project dir -- and the final check below
+            # fails on exactly that when the reap is removed.
+            # `repro_test_support/fixture_processes` gives the reasoning and
+            # the witnesses; this is the call its four shared-instance
+            # siblings already make.
+            #
+            # After `closeDaemon`, because the daemon's own argv names this
+            # case's `tempRoot`; before `removeDir`, because the cwd
+            # witness needs the tree. The survivors are recorded first so
+            # a failure names what `repro down` left, and the final check
+            # is what turns a leak into a failing case: the reap raises if
+            # anything outlives SIGKILL, and nothing may remain after it.
+            let survivors = fixtureProcessIds(c.tempRoot)
+            checkpoint("case-owned processes alive after `repro down` and " &
+              "closeDaemon: " & $survivors)
+            reapFixtureProcesses(c.tempRoot)
+            check fixtureProcessIds(c.tempRoot).len == 0
+          finally:
+            try: removeDir(c.tempRoot) except OSError, IOError: discard
 
   setup:
     # Registration also runs for --list/--list-json from a scratch cwd.
