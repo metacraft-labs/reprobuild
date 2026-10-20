@@ -3,7 +3,7 @@
     "graphOwnedHelperArtifacts": 33,
     "nimTestBinaries": 2283,
     "pureUnitConsolidationGroups": 64,
-    "pureUnitTests": 680,
+    "pureUnitTests": 679,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
     "testEntries": 2314
   },
@@ -1331,9 +1331,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1244,
+      "integration": 1245,
       "platform/destructive": 138,
-      "pure unit": 680,
+      "pure unit": 679,
       "unclassified": 234
     },
     "graphOwnedTestArtifacts": [
@@ -14834,8 +14834,8 @@
     },
     {
       "binary": "build/test-bin/t_codec_smoke",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -14846,8 +14846,8 @@
       "owner": "libs/repro_launch_plan",
       "requiresReproBinary": false,
       "source": "libs/repro_launch_plan/tests/t_codec_smoke.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 12,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

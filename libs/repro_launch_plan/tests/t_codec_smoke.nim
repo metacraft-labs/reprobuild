@@ -4,7 +4,7 @@
 ## ELF64 fixture (RUNPATH rewriting), and against the real script
 ## generator (byte-determinism for two structurally-identical plans).
 
-import std/[os, strutils, tables, tempfiles, unittest]
+import std/[os, osproc, streams, strutils, tables, tempfiles, unittest]
 from repro_core/paths import extendedPath
 
 import repro_local_store
@@ -129,8 +129,8 @@ suite "M57 POSIX launcher script generator":
     let b = generatePosixLauncherScript(plan, "LD_LIBRARY_PATH")
     check a == b
     # Sanity-check: the chosen path variable name appears, the magic
-    # prefix is on line 1, and each dependency dir is mentioned once.
-    check a.startsWith(LaunchScriptMagicPosix)
+    # marker follows the shebang, and each dependency dir is mentioned once.
+    check a.startsWith("#!/bin/sh\n" & LaunchScriptMagicPosix & "\n")
     check "LD_LIBRARY_PATH" in a
     var dirAOccurrences = 0
     var dirBOccurrences = 0
@@ -153,3 +153,25 @@ suite "M57 POSIX launcher script generator":
                     "':/usr/lib'", "':/lib'", "':/usr/local/lib'"]:
       if needle in script: inc nonDeclaredHits
     check nonDeclaredHits == 0
+
+when defined(posix):
+  suite "POSIX launcher direct execution":
+    test "kernel executes generated Linux and macOS launchers":
+      let root = createTempDir("repro-launch-exec-", "")
+      defer: removeDir(root)
+      for binding in [lbkLinuxScript, lbkMacosScript]:
+        var plan = samplePlan(binding, @[])
+        plan.executablePath = "/bin/sh"
+        plan.arguments = @["-c", "printf '%s\\n' \"$1\" \"$2\"; exit 23",
+          "launcher", "static argument"]
+        let launcher = root / "launcher"
+        writeFile(launcher, generatePosixLauncherScript(plan,
+          if binding == lbkLinuxScript: "LD_LIBRARY_PATH" else: "DYLD_LIBRARY_PATH"))
+        setFilePermissions(launcher, {fpUserRead, fpUserWrite, fpUserExec})
+        # startProcess executes the absolute path directly, without a shell's
+        # ENOEXEC fallback. Both argument boundaries and exit status survive.
+        let child = startProcess(launcher, args = @["dynamic argument"], options = {})
+        defer: child.close()
+        let output = child.outputStream.readAll()
+        check child.waitForExit() == 23
+        check output == "static argument\ndynamic argument\n"
