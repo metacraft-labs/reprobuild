@@ -43106,7 +43106,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_workspace_pull_converges_each_repo_to_manifest_revision_tracking_branch.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
