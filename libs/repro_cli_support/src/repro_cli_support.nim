@@ -10902,9 +10902,22 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
 
   template logSummary(line: string) =
     appendDiagnostic(line)
-    if eventSink != nil:
+    # ``--log`` selects the same status lines on both routes (CLI/build.md
+    # §"Daemon Mode"). A daemon worker always sets ``eventSink`` and both
+    # clients print every diagnostic event they receive, so the filter is
+    # applied here, at the source, rather than in each client: the worker
+    # re-parses the client's own ``rawArgs`` and ``REPROBUILD_LOG`` crosses in
+    # ``daemonCarriedEnvironment``, so this ``logMode`` IS the client's
+    # selection. Filtering in the thin client (``apps/repro-client``) instead
+    # would mean a second copy of the ``--log`` parse there. This used to
+    # forward before consulting ``logMode``, so a daemon-hosted build printed
+    # every line even under ``--log=quiet`` (reprobuild-pm issues/2026-10-17-
+    # daemon-hosted-build-ignores-log-and-direct-fallback-is-silent.md).
+    if logMode == blmQuiet:
+      discard
+    elif eventSink != nil:
       eventSink("diagnostic", line, "{}")
-    elif logMode != blmQuiet:
+    else:
       # Terminate any in-flight progress line on stderr before the stdout
       # echo so captured output (execCmdEx merges stderr+stdout) keeps each
       # diagnostic line on its own physical line. Without this, the
@@ -28636,9 +28649,15 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       raise newException(ValueError,
         "daemon-hosted stats capture requested but repro-daemon cannot " &
           "execute builds: " & err.msg)
-    if logMode != blmQuiet:
-      stderr.writeLine("repro build: daemon build unsupported; falling " &
-        "back to direct mode: " & err.msg)
+    # The route switch is reported whatever ``--log`` says, as ``repro watch``
+    # reports its own. ``--log`` governs the build's status lines, which the
+    # direct route then prints or not exactly as the daemon route would; the
+    # switch itself is not one of them. Gated on ``logMode`` it was invisible
+    # under the quiet default, so a daemon that had gone away turned every
+    # later build direct without a word (reprobuild-pm issues/2026-10-17-
+    # daemon-hosted-build-ignores-log-and-direct-fallback-is-silent.md).
+    stderr.writeLine("repro build: daemon build unsupported; falling " &
+      "back to direct mode: " & err.msg)
     if statsCapture.enabled:
       raise newException(ValueError,
         "daemon-hosted stats capture requested but repro-daemon is unavailable: " &
@@ -28652,9 +28671,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       raise newException(ValueError,
         "daemon-hosted stats capture requested but repro-daemon is unavailable: " &
           err.msg)
-    if logMode != blmQuiet:
-      stderr.writeLine("repro build: daemon unavailable; falling back to " &
-        "direct mode: " & err.msg)
+    # Reported unconditionally for the reason given in the arm above.
+    stderr.writeLine("repro build: daemon unavailable; falling back to " &
+      "direct mode: " & err.msg)
     return runDirectBuild()
 
 proc parseGraphOutputFormat(value: string; allowDot: bool): GraphOutputFormat =

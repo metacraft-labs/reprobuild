@@ -336,9 +336,13 @@ suite "e2e_scoop_repro_build_drives_real_install":
 
       # Shell out the public CLI. `$env:SCOOP` is already pointing at
       # the sandboxed root (setupScoopSandbox sets it), so real
-      # scoop.exe will read/write only inside tempRoot.
+      # scoop.exe will read/write only inside tempRoot. The assertions below
+      # read status and action lines, so ``--log=actions`` is explicit: the
+      # quiet default prints neither on either route (reprobuild-pm
+      # issues/2026-10-17-daemon-hosted-build-ignores-log-and-direct-fallback-
+      # is-silent.md).
       let buildOutput = requireSuccessShell(shellCmd2([reproBin, "build",
-        projectRoot, "--tool-provisioning=scoop"]), repoRoot)
+        projectRoot, "--tool-provisioning=scoop", "--log=actions"]), repoRoot)
 
       # Public-CLI evidence the spec requires.
       check buildOutput.contains("tool-provisioning=scoop")
