@@ -5717,6 +5717,7 @@ def build_inventory(
             "sourceFingerprint": current_source_fingerprint,
             "status": git_value(root, "status", "--short"),
             "runtime": runtime_metadata() if describe_environment else None,
+            "catalogHost": current_catalog_host(),
         },
         "static": {
             "nimTestBinaryCount": len(nim_specs),
@@ -6065,6 +6066,84 @@ def load_source_inventory(root: Path) -> dict[str, Any]:
 def load_tracked_inventory(root: Path) -> dict[str, Any]:
     path = root / DEFAULT_JSON
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def current_catalog_host() -> dict[str, str]:
+    """Stable OS/CPU identity for the platform-dependent binary catalog."""
+    os_name = {"darwin": "darwin", "linux": "linux", "win32": "windows"}.get(
+        sys.platform, sys.platform
+    )
+    machine = platform.machine().lower()
+    cpu = {"amd64": "x86_64", "aarch64": "arm64"}.get(machine, machine)
+    return {"os": os_name, "cpu": cpu}
+
+
+def catalog_currency_projection(
+    document: Mapping[str, Any],
+    platform_cases: Mapping[str, Mapping[str, set[str]]],
+    quarantine_by_os: Mapping[str, Mapping[str, str]],
+) -> dict[str, tuple[str, int]]:
+    """Remove only explicitly pinned platform cases from each binary count.
+
+    The inventory's catalog is measured on one host. Comparing its raw total
+    on another host cannot work: compile-time gates register different cases.
+    The exact per-source case ledger is the normalization oracle. Subtracting
+    that host's named exclusive cases leaves the common cases, which must
+    agree PER SOURCE on both platforms. A new platform-conditioned source or
+    renamed case is rejected separately by the ledger's declaration census and
+    exact live-name assertions; this is never an exemption for gated sources.
+
+    Quarantines are likewise exact, named platform facts. Only those entries
+    are normalized to catalog provenance, with zero common cases. Unexpected
+    exclusions fail before any normalization. All other provenance is retained.
+    """
+    metadata = document.get("metadata")
+    host = metadata.get("catalogHost") if isinstance(metadata, Mapping) else None
+    if not isinstance(host, dict) or set(host) != {"os", "cpu"}:
+        raise ValueError("inventory metadata.catalogHost must name its OS and CPU")
+    if host not in (
+        {"os": "linux", "cpu": "x86_64"},
+        {"os": "darwin", "cpu": "arm64"},
+    ):
+        raise ValueError(f"no exact platform case ledger for catalog host {host!r}")
+    os_name = host["os"]
+    expected_quarantine = dict(quarantine_by_os[os_name])
+    actual_quarantine = {
+        item["source"]: item["reason"]
+        for item in document["catalogEnumeration"]["quarantine"]
+    }
+    if actual_quarantine != expected_quarantine:
+        raise ValueError(
+            f"{os_name} quarantine differs from its pinned membership: "
+            f"expected {expected_quarantine!r}, got {actual_quarantine!r}"
+        )
+    result = {}
+    count_sources: dict[str, int] = {}
+    for item in document["tests"]:
+        source = item["source"]
+        if source in result:
+            raise ValueError(f"duplicate catalog source {source}")
+        count_sources[item["countSource"]] = count_sources.get(item["countSource"], 0) + 1
+        count = item["sourceCaseCount"]
+        provenance = item["countSource"]
+        if source in expected_quarantine:
+            if count != 0 or provenance != "quarantined":
+                raise ValueError(f"{source}: quarantined source contributes cases")
+            provenance = "catalog"
+        if source in platform_cases:
+            count -= len(platform_cases[source][os_name])
+        if count < 0:
+            raise ValueError(f"{source}: catalog lacks pinned {os_name} cases")
+        result[source] = (provenance, count)
+    if count_sources != document["catalogEnumeration"]["countSourceCounts"]:
+        raise ValueError("inventory countSourceCounts does not count its entries")
+    if not set(expected_quarantine) <= set(result):
+        raise ValueError("inventory omits pinned quarantine sources")
+    if not set(platform_cases) <= set(result):
+        raise ValueError("inventory omits pinned platform case sources")
+    if sum(item["sourceCaseCount"] for item in document["tests"]) != document["static"]["sourceCaseCount"]:
+        raise ValueError("inventory sourceCaseCount does not sum its entries")
+    return result
 
 
 def source_inventory_drift(

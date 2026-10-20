@@ -55,7 +55,8 @@ const
     ## `dssf1_action_fixtures.nim` records: a derived expectation
     ## asserts whatever the implementation produced.
 
-proc repoRootDir(): string = getCurrentDir()
+proc repoRootDir(): string =
+  currentSourcePath().parentDir.parentDir.parentDir
 
 proc reproBinary(): string =
   requireBinary(repoRootDir() / "build" / "bin" / addFileExt("repro", ExeExt),
@@ -96,11 +97,16 @@ proc recipe(): string =
   "    enable " & ActivityName & "\n"
 
 proc prepareCase(): UpCase =
-  result.tempRoot = createTempDir("repro-dssf1-up-", "")
-  result.project = result.tempRoot / "p1"
-  createDir(result.project)
-  writeFile(result.project / "reprobuild.nim", recipe())
+  # Resolve the graph fixture before allocating anything that needs cleanup.
   result.reproBin = reproBinary()
+  result.tempRoot = createTempDir("repro-dssf1-up-", "")
+  try:
+    result.project = result.tempRoot / "p1"
+    createDir(result.project)
+    writeFile(result.project / "reprobuild.nim", recipe())
+  except CatchableError:
+    removeDir(result.tempRoot)
+    raise
 
 proc daemonEndpoint(c: UpCase): string =
   daemonSocketEndpoint(c.tempRoot.extractFilename)
@@ -174,23 +180,39 @@ proc startDaemon(c: UpCase): owned(Process) =
     raise
 
 proc closeDaemon(c: UpCase; daemon: var owned(Process)) =
-  c.stopDaemon()
-  if not daemon.isNil:
-    if daemon.running():
-      daemon.terminate()
-      discard daemon.waitForExit()
-    daemon.close()
+  try:
+    c.stopDaemon()
+  finally:
+    if not daemon.isNil:
+      if daemon.running():
+        daemon.terminate()
+        discard daemon.waitForExit()
+      daemon.close()
 
 suite "F1 §4.8 — `repro up` builds the rendered configuration first":
-  var c = prepareCase()
-  var daemon = c.startDaemon()
+  var c: UpCase
+  var daemon: owned(Process)
+  var prepared = false
   var upOutput = ""
   var upExit = -1
 
   defer:
-    discard c.runRepro(@["down", "--activity", ActivityName])
-    c.closeDaemon(daemon)
-    try: removeDir(c.tempRoot) except OSError, IOError: discard
+    if prepared:
+      try:
+        discard c.runRepro(@["down", "--activity", ActivityName])
+      finally:
+        try:
+          c.closeDaemon(daemon)
+        finally:
+          try: removeDir(c.tempRoot) except OSError, IOError: discard
+
+  setup:
+    # Registration also runs for --list/--list-json from a scratch cwd.
+    # Only executing a case may allocate the project or start a daemon.
+    if not prepared:
+      c = prepareCase()
+      prepared = true
+      daemon = c.startDaemon()
 
   test "the state F1 measured: nothing is on disk before the session runs":
     # POSITIVE CONTROL FOR EVERY EXTRACTION BELOW. Both files are
