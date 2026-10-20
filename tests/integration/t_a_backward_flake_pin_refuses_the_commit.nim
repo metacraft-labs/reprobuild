@@ -73,9 +73,10 @@ proc lineWith(text: string; needles: varargs[string]): string =
     if all: return line
   ""
 
-proc depEntryPresent(reproLockText, path: string): bool =
-  ## Does the committed `repro.lock` carry a `deps` entry at ``path``?
-  ("path = \"" & path & "\"") in reproLockText
+proc depEntryPresent(reproLockText, name: string): bool =
+  ## Does the committed `repro.lock` carry a `deps` entry named ``name``? By
+  ## name: a lock records no checkout path.
+  ("{ name = \"" & name & "\"") in reproLockText
 
 proc lockedRev(lockText, node: string): string =
   ## `locked.rev` of one node, read from its raw text.
@@ -272,8 +273,8 @@ suite "the commit-time flake.lock refresh never moves a pin backward silently":
       check refresh.code == 0
       commitLockAndPublish(fx, "commit repro.lock beside the flake")
       let reproLock = fx.app / "repro.lock"
-      check depEntryPresent(readFile(reproLock), "../epsilon")
-      check depEntryPresent(readFile(reproLock), "../alpha")
+      check depEntryPresent(readFile(reproLock), "epsilon")
+      check depEntryPresent(readFile(reproLock), "alpha")
 
       # epsilon advances and a commit records it (ahead), then its checkout
       # is rewound: repro.lock now pins epsilon one ahead of the checkout.

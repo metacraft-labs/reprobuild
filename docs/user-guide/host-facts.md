@@ -59,6 +59,16 @@ Every entry has a **logical id** both sides can produce:
 - `mode` of a linked file is `0755` when executable, else `0644` (a link shows
   its target's bits, and a store file is read-only either way). A
   `fsUserFile(mode = "0600")` reports `0600`.
+- A category holds each id once. If two producers report the same id, such as
+  two `envUserPath` resources sharing an entry, and they agree on every
+  compared field, the first entry is kept. If they differ, `repro home facts`
+  refuses, naming both origins and each differing field.
+- A stow file and an `fsUserFile` for the same path are settled by the
+  planner, the same way `repro home apply` settles them. If they agree on
+  `mode` and `digest`, the resource writes the file and the facts carry one
+  entry from it. If they disagree, the plan is refused before anything is
+  written, and the error names the path, both sources and the differing
+  fields.
 - **`unmapped`** entries are ones their producer could not give a logical id —
   a Nix package or Homebrew token that no contribution catalog claims, a Mac
   App Store app, a `homebrewCask` resource. They are listed, never compared,

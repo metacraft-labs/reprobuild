@@ -8,9 +8,12 @@
 ## makes to what the engine treats as an input — exactly which paths the
 ## dev-env introspection edge stops recording.
 ##
-## MOCKS: none. Every case runs against the real filesystem (`createTempDir`
-## plus real `.envrc` / `flake.nix` / `repro.nim` files) or against pure
-## functions with no boundary at all. The nix-dependent half of NF-4 lives in
+## MOCKS: the resolver-volume regression substitutes this test executable for
+## `repro flake override-args`, so stdout/stderr sizes and exit status are
+## controlled independently of host workspace warnings. The production helper,
+## process launch, pipes/files, JSON parser and error propagation are real.
+## Other cases use the real filesystem (`createTempDir` plus real `.envrc` /
+## `flake.nix` / `repro.nim` files) or pure functions. The nix-dependent half lives in
 ## `tests/e2e/dev-env/t_e2e_nf4_flake_dev_shell.nim`, which runs a real `nix`.
 
 import std/[algorithm, os, osproc, sequtils, streams, strutils, tempfiles, unittest]
@@ -47,6 +50,49 @@ proc hasOpFor(ops: openArray[ForeignEnvOp]; name: string): bool =
       return true
   false
 
+# A real resolver process writes beyond the pipe capacity before closing stdout.
+# Self-exec keeps the producer independent of host shell tools and pipe sizes.
+const ResolverDiagnosticBytes = 2 * 1024 * 1024
+if paramCount() >= 2 and paramStr(1) == "flake" and
+    paramStr(2) == "override-args":
+  let root = getEnv("REPRO_TEST_RESOLVER_ROOT")
+  let mode = getEnv("REPRO_TEST_RESOLVER_MODE")
+  writeFile(root / "resolver-started", "")
+  stderr.write("diagnostic-start:" & repeat('w',
+    if mode == "small": 1024 else: ResolverDiagnosticBytes) & ":diagnostic-end")
+  stderr.flushFile()
+  writeFile(root / "resolver-wrote-stderr", "")
+  if mode == "failure": quit(37)
+  stdout.write("{\"schemaId\":\"reprobuild.flake-override-args.v1\"," &
+    "\"overrides\":[{\"input\":\"sibling-src\",\"path\":\"/resolved/sibling\"}]," &
+    "\"padding\":\"" & repeat('j', ResolverDiagnosticBytes) & "\"}")
+  quit(0)
+
+if paramCount() == 3 and paramStr(1) == "--resolver-worker":
+  let root = paramStr(2)
+  let mode = paramStr(3)
+  putEnv("REPROBUILD_REPRO", getAppFilename())
+  putEnv("REPRO_TEST_RESOLVER_ROOT", root)
+  putEnv("REPRO_TEST_RESOLVER_MODE", mode)
+  if mode == "failure":
+    var failed = false
+    try:
+      discard workspaceFlakeOverrides(root)
+    except ForeignEnvCaptureError as err:
+      failed = true
+      doAssert "exited 37" in err.msg
+      doAssert ("diagnostic-start:" & repeat('w', ResolverDiagnosticBytes) &
+        ":diagnostic-end") in err.msg
+    doAssert failed
+  else:
+    doAssert workspaceFlakeOverrides(root) ==
+      @[("sibling-src", "/resolved/sibling")]
+  let scratch = flakeForeignEnvWorkDir(root)
+  if dirExists(scratch):
+    for kind, path in walkDir(scratch):
+      doAssert false, "resolver left scratch behind: " & path
+  quit(0)
+
 # Child mode exercises the real capture boundary in independent processes.
 if paramCount() == 3 and paramStr(1) == "--capture-worker":
   let root = paramStr(2)
@@ -60,6 +106,31 @@ if paramCount() == 3 and paramStr(1) == "--capture-worker":
   quit(0)
 
 suite "nf4_foreign_env_contract":
+
+  test "workspace_resolver_keeps_large_diagnostics_separate_and_never_blocks":
+    for mode in ["small", "success", "failure"]:
+      let root = createTempDir("repro-resolver-pipes-", "")
+      defer: removeDir(root)
+      createDir(root / ".repro")
+      writeFile(root / ".repro" / "workspace.toml",
+        "schema = \"reprobuild.workspace.local.v1\"\n")
+      var worker = startProcess(getAppFilename(), args =
+        ["--resolver-worker", root, mode], options = {poStdErrToStdOut})
+      defer:
+        if worker.running(): worker.kill()
+        worker.close()
+      # This deadline detects the pipe deadlock in this tiny self-contained
+      # protocol; it is not a cutoff on building or running the whole suite.
+      let code = worker.waitForExit(30000)
+      if code == -1:
+        worker.kill()
+        discard worker.waitForExit()
+      checkpoint("resolver mode: " & mode)
+      if code != 0: checkpoint(worker.outputStream.readAll())
+      check fileExists(root / "resolver-started")
+      check fileExists(root / "resolver-wrote-stderr")
+      check code == 0
+
 
   test "concurrent_captures_keep_their_own_output_and_script":
     let root = createTempDir("repro-concurrent-capture-", "")
@@ -462,7 +533,12 @@ suite "nf4_foreign_env_contract":
     require direnv.len > 0
     checkpoint "using direnv at " & direnv
 
-    let root = createTempDir("repro-nf4-envrc", "")
+    # direnv evaluates `$PWD` with the kernel's spelling of the working
+    # directory, so the `PATH_add` it reports is fully resolved. Resolve the
+    # fixture root the same way: on macOS the inherited `TMPDIR` is typically
+    # under `/tmp`, a symlink to `/private/tmp`, and comparing against the
+    # unresolved spelling would fail a correctly captured prepend.
+    let root = expandFilename(createTempDir("repro-nf4-envrc", ""))
     defer: removeDir(root)
     let project = root / "project"
     createDir(project)

@@ -27,6 +27,7 @@
 
 import std/[options, os, sequtils, strutils]
 from repro_core/paths import extendedPath
+from repro_project_dsl/selector_names import isNimKeyword
 
 import ./errors
 import ./model
@@ -377,11 +378,14 @@ proc profileHasMacroImport(p: Profile): bool =
   false
 
 proc needsQuotedPackageSpelling(pkg: string): bool =
-  ## A package name that cannot be written bare or backtick-quoted because
-  ## it does not start like a Nim identifier (``7zip``). It is written as a
+  ## A package name that cannot be written bare: it does not start like a
+  ## Nim identifier (``7zip``), or it is a Nim keyword (``nil``, matched
+  ## style-insensitively as the lexer does), which the parser refuses bare
+  ## and the profile macro would read as the keyword. It is written as a
   ## string, the form the parser and the profile macro both accept
   ## (Package-Model.md §"Package names").
-  pkg.len > 0 and not (pkg[0].isAlphaAscii() or pkg[0] == '_')
+  pkg.len > 0 and
+    (not (pkg[0].isAlphaAscii() or pkg[0] == '_') or isNimKeyword(pkg))
 
 proc renderPackageRefSpelling(p: Profile; pkg: string): string =
   ## M83 Phase F3: emit a hyphenated package name with backticks

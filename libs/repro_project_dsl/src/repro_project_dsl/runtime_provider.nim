@@ -426,6 +426,33 @@ when defined(reproProviderMode):
     for arg in service.typedArgs:
       result.add(arg.value)
 
+  proc typedServiceConsumedActionIds(service: DslServiceDef): seq[string] =
+    ## Shared-Development-Services F1 (§4.8) — the ids of the build
+    ## actions whose outputs THIS service names, which is the edge the
+    ## dev session orders on.
+    ##
+    ## ONE DERIVATION OF "CONSUMES", READ FROM THE TYPED EDGE. `args
+    ## <output>.path` and `runtimeFile <output>` each record the
+    ## producing action's id on the service record, so this is an
+    ## identifier match rather than a search for a path in argv text.
+    ## `buildPackageDevEnv`'s PRODUCED-AND-NEVER-CONSUMED check reads
+    ## this same proc over every service of the package: the diagnostic
+    ## that refuses an unconsumed action and the ordering that builds a
+    ## consumed one must not be able to disagree about what consumption
+    ## is, and two derivations of it is exactly how they would.
+    ##
+    ## Order is `args` first then `runtimeFile`, each in declaration
+    ## order, deduplicated -- a stable order so the field is a function
+    ## of the recipe and not of a table's iteration.
+    for arg in service.typedArgs:
+      if arg.producerActionId.len > 0 and
+         arg.producerActionId notin result:
+        result.add(arg.producerActionId)
+    for runtimeFile in service.runtimeFiles:
+      if runtimeFile.producerActionId.len > 0 and
+         runtimeFile.producerActionId notin result:
+        result.add(runtimeFile.producerActionId)
+
   proc typedServiceReadinessWord(kind: ServiceReadinessKind): string =
     ## Shared-Development-Services L9: the wire word for a typed
     ## `readiness` probe, or `""` when the body declared none.
@@ -616,6 +643,8 @@ when defined(reproProviderMode):
         existing.instanceDeclared = typed.instance.declared
         existing.instanceLeaseTtlSeconds = typed.instance.leaseTtlSeconds
         existing.instanceEnvironment = typed.instance.environment
+        # F1 (§4.8): the edge to the actions this service consumes.
+        existing.consumedActionIds = typedServiceConsumedActionIds(typed)
         landed = true
       if landed:
         continue
@@ -639,7 +668,8 @@ when defined(reproProviderMode):
         stateDirectories: typed.stateDirectories,
         instanceDeclared: typed.instance.declared,
         instanceLeaseTtlSeconds: typed.instance.leaseTtlSeconds,
-        instanceEnvironment: typed.instance.environment))
+        instanceEnvironment: typed.instance.environment,
+        consumedActionIds: typedServiceConsumedActionIds(typed)))
 
   proc buildPackageDevEnv*(pkg: PackageDef; request: ProviderGraphRequest;
                            devEnvProc: proc ()): DevEnvResult {.dynOrStatic.} =
@@ -732,16 +762,21 @@ when defined(reproProviderMode):
     # consumes. Narrowing it to the selected activity would make the
     # error depend on `--activity`, which is a different claim than the
     # one this check makes.
+    #
+    # AND IT IS THE SAME DERIVATION THE SERVICE RECORD CARRIES.
+    # `typedServiceConsumedActionIds` is read here and at the two sites
+    # in `mergeTypedServiceFacts` that fill
+    # `DevEnvServiceMetadata.consumedActionIds`, so the diagnostic that
+    # refuses an unconsumed action and the ordering the dev session
+    # derives from the same field cannot disagree about what
+    # consumption is. It was open-coded here before F1's second half,
+    # and two copies of this loop is precisely the drift this campaign
+    # keeps finding.
     var consumedActionIds: seq[string] = @[]
     for typed in registeredServices(pkg.packageName):
-      for arg in typed.typedArgs:
-        if arg.producerActionId.len > 0 and
-           arg.producerActionId notin consumedActionIds:
-          consumedActionIds.add(arg.producerActionId)
-      for runtimeFile in typed.runtimeFiles:
-        if runtimeFile.producerActionId.len > 0 and
-           runtimeFile.producerActionId notin consumedActionIds:
-          consumedActionIds.add(runtimeFile.producerActionId)
+      for id in typedServiceConsumedActionIds(typed):
+        if id notin consumedActionIds:
+          consumedActionIds.add(id)
     for action in devEnvActions:
       if action.id in consumedActionIds:
         continue
@@ -763,6 +798,10 @@ when defined(reproProviderMode):
         dedsError)
 
     let selectedActivities = selectedActivityList(request.activity)
+    # An activity selector naming nothing this dev-env declares is an
+    # ERROR, recorded before `diagnostics:` below reads the registry (see
+    # `reportUnknownActivitySelection`).
+    reportUnknownActivitySelection(pkg.packageName, selectedActivities)
     result = DevEnvResult(
       schemaVersion: 1'u32,
       providerArtifactId: request.providerArtifactId,

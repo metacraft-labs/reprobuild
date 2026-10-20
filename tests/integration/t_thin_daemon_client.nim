@@ -795,7 +795,13 @@ suite "MAC-1 thin daemon client":
       # checks pass but the request source is the engine's `request`. With
       # both identity fixes and no dev-bin sweep, `dev-bin` holds two
       # generations.
-      let tempRoot = createTempDir("repro-mac1-stale", "")
+      # Keep macOS's /tmp alias in the fixture even when TMPDIR already
+      # names /private/tmp. Status resolves it, and getCurrentDir() in the
+      # child reports the physical directory rather than this spelling.
+      let tempParent = when defined(macosx): "/tmp" else: ""
+      let tempRoot = createTempDir("repro-mac1-stale", "", tempParent)
+      when defined(macosx):
+        check tempRoot != expandFilename(tempRoot)
       let endpoint = daemonSocketEndpoint("mac1-stale")
       defer:
         stopDaemon(tempRoot, endpoint)
@@ -816,8 +822,9 @@ suite "MAC-1 thin daemon client":
       setFilePermissions(otherEngine, {fpUserRead, fpUserWrite, fpUserExec})
 
       let project = freshProject(tempRoot)
-      let shimEnv = @[("REPRO_MONITOR_SHIM_LIB",
-        repoRoot() / "build" / "lib" / "librepro_monitor_shim.so")]
+      let shim = monitorShimPath(repoRoot())
+      require fileExists(shim)
+      let shimEnv = @[("REPRO_MONITOR_SHIM_LIB", shim)]
       let baseEnv = @[
         ("REPRO_DAEMON_ENDPOINT", endpoint),
         ("REPRO_DAEMON_STATE_DIR", tempRoot / "state"),
@@ -848,14 +855,21 @@ suite "MAC-1 thin daemon client":
       checkpoint("other-engine stderr:\n" & viaOther.errors)
       let before = daemonStatus()
       checkpoint("status with the other engine resident:\n" & before)
-      check statusField(before, "source-image-path") == otherEngine
+      check expandFilename(statusField(before, "source-image-path")) ==
+        expandFilename(otherEngine)
       let otherHash = statusField(before, "running-hash")
       check otherHash.len > 0
 
       # The THIN CLIENT, told about the real engine by a RELATIVE path that
       # resolves from its working directory.
-      let relativeEngine = relativePath(fullCliBin(), tempRoot)
+      # Relative overrides resolve from the actual cwd. Computing this from
+      # /tmp instead of /private/tmp drops a required parent traversal and
+      # names /private/Users/... rather than the engine under /Users/....
+      let relativeEngine = relativePath(expandFilename(fullCliBin()),
+        expandFilename(tempRoot))
       check not relativeEngine.isAbsolute
+      check expandFilename(tempRoot / relativeEngine) ==
+        expandFilename(fullCliBin())
       let viaThin = runCaptured(thinCliBin(), buildArgs(project, tempRoot),
         tempRoot, baseEnv & @[("REPRO_FULL_CLI", relativeEngine)])
       checkpoint("thin stdout:\n" & viaThin.output)
@@ -876,7 +890,8 @@ suite "MAC-1 thin daemon client":
       # real engine's, by path and by content.
       let after = daemonStatus()
       checkpoint("status after the thin build:\n" & after)
-      check statusField(after, "source-image-path") == fullCliBin()
+      check expandFilename(statusField(after, "source-image-path")) ==
+        expandFilename(fullCliBin())
       let runningHash = statusField(after, "running-hash")
       check runningHash.len > 0
       check runningHash != otherHash

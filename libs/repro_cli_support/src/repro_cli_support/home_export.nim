@@ -39,6 +39,7 @@ import blake3
 import repro_core
 import repro_home_intent
 import repro_home_apply
+from repro_home_generations/intent_snapshot import observedProfileFiles
 import repro_profile_compile
 import repro_home_resources/concerns
 from repro_project_dsl/reprobuild_packages_catalog import
@@ -162,29 +163,12 @@ proc profileInputs*(profileDir: string; observed: openArray[string]):
   ## that still exist as regular files, with their content digests, sorted by
   ## path. A read of something that is gone (the helper's temporary
   ## `config.nims`) or is a directory is not an input a reader could check.
-  var roots = @[absolutePath(profileDir)]
-  try:
-    let real = expandFilename(profileDir)
-    if real notin roots:
-      roots.add real
-  except OSError:
-    discard
-  var seen = initHashSet[string]()
-  for raw in observed:
-    if not raw.isAbsolute:
-      continue
-    for root in roots:
-      if not raw.startsWith(root & DirSep):
-        continue
-      let rel = raw.relativePath(root).replace('\\', '/')
-      if rel in seen:
-        break
-      if not fileExists(extendedPath(raw)) or dirExists(extendedPath(raw)):
-        break
-      seen.incl rel
-      result.add ProfileInput(path: rel, blake3: fileBlake3Hex(raw))
-      break
-  result.sort(proc(a, b: ProfileInput): int = cmp(a.path, b.path))
+  ## The selection is the one a home generation's intent snapshot records
+  ## (`repro_home_generations.observedProfileFiles`), so the export's
+  ## `provenance.profile.inputs` and the snapshot name the same files.
+  for rel in observedProfileFiles(profileDir, observed):
+    result.add ProfileInput(path: rel,
+      blake3: fileBlake3Hex(profileDir / rel))
 
 proc profileDigest*(inputs: openArray[ProfileInput]): string =
   ## BLAKE3 over `<path>\t<blake3>\n` for each input in path order; `""`
@@ -295,8 +279,8 @@ proc packageClassificationDocument*(intent: ProfileIntent;
   ## host inventory, over every reference of the profile
   ## (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply, "The
   ## per-package split comes from Reprobuild"). `intent` is the expanded
-  ## intent; the lock is the one beside the profile; catalog projections are
-  ## staged under `stateDir`.
+  ## intent; catalog projections are staged under `stateDir`. The host-local
+  ## lock is not read: one host's selections must not change a shared export.
   ##
   ## Raises `ValueError` when a reference is defined nowhere this process can
   ## see and no `reprobuild-packages` catalog is reachable: the catalog might
@@ -310,12 +294,11 @@ proc packageClassificationDocument*(intent: ProfileIntent;
       names.add r.packageId
   let catalog = projectCatalogPackages(names, profilePath,
     stateDir / "catalog-projection", profile.catalogImports)
-  let lock = readHomeProfileLock(homeProfileLockPath(profilePath.parentDir))
   var unknown: seq[string]
   result = newJObject()
   for t in ProfileTargetPlatforms:
     let c = classifyPackages(references, profile.adapterPreference,
-      t.platform, t.arch, lock, false, catalog)
+      t.platform, t.arch, catalog)
     result[t.system] = %*{"applications": sortedNames(c.applications),
       "unresolved": sortedNames(c.unresolved)}
     for key in c.unknownDefinitions:

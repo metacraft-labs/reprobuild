@@ -435,8 +435,9 @@ proc parseCli(argv: openArray[string]): CliOptions =
           stderr.writeLine("error: --app-alias both sides must be non-empty")
           quit(2)
         # The target is a package name, held to ``isValidAppName``'s rule:
-        # letters, digits and underscores, a leading digit included
-        # (``7zip`` is written ``package "7zip":``). Hyphens are not.
+        # letters, digits and underscores, a leading digit or a Nim keyword
+        # included (``7zip`` is written ``package "7zip":``, ``nil``
+        # ``package "nil":``). Hyphens are not.
         for ch in dstName:
           if ch notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
             stderr.writeLine("error: --app-alias target '" & dstName &
@@ -480,7 +481,8 @@ proc writeDiagnostics(diagnostics: openArray[Diagnostic]) =
 proc isValidAppName(name: string): bool =
   ## An output app name is a package name, so it need not be a Nim
   ## identifier (Package-Model.md §"Package names"): ``7zip`` is declared
-  ## ``package "7zip":`` in ``pkg_7zip.nim`` (``harvestModuleName``). It is
+  ## ``package "7zip":`` in ``pkg_7zip.nim``, and the keyword ``nil``
+  ## ``package "nil":`` in ``pkg_nil.nim`` (``harvestModuleName``). It is
   ## restricted to letters, digits and underscores, so hyphens and dots
   ## (``dotnet-sdk``, ``foo.bar``) still need ``--app-alias``.
   if name.len == 0: return false

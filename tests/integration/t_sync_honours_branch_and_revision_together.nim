@@ -34,7 +34,7 @@
 ## No mocks: real `git init --bare` upstreams, the real resolver, and the
 ## engine-built `build/bin/repro` driving a real clone.
 
-import std/[os, osproc, strutils, tempfiles, unittest]
+import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
 import repro_workspace_manifests
@@ -170,11 +170,18 @@ suite "a fragment may track a branch AND sit at a pinned commit":
 
       writeFragment(workspaceRoot, "vendored-lib", "vendored-origin",
         branch = "main", revision = pinned)
+      writeFragment(workspaceRoot, "tracking-lib", "vendored-origin",
+        branch = "main", revision = "")
       writeProject(workspaceRoot, "vendored-origin", fileUrl(origin),
-        ["repos/vendored-lib.toml"])
+        ["repos/vendored-lib.toml", "repos/tracking-lib.toml"])
+
+      # A real workspace records its branch before enable materializes repos.
+      # Attaching a new checkout to this branch must not discard its pin.
+      writeWorkspaceBranch(workspaceRoot, "vendored", "main")
 
       let res = runShell(shellCommand(@[reproBinary(), "workspace", "enable",
-        "vendored", "--workspace-root=" & workspaceRoot]))
+        "vendored", "--jobs=1", "--workspace-root=" & workspaceRoot],
+        env = [("REPRO_WORKSPACE_CLONES", scratch / "clones")]))
       if res.code != 0:
         checkpoint("output: " & res.output)
       check res.code == 0
@@ -182,10 +189,49 @@ suite "a fragment may track a branch AND sit at a pinned commit":
       check dirExists(workspaceRoot / "vendored-lib" / ".git")
       let head = requireGit(q(gitBin) & " -C " &
         q(workspaceRoot / "vendored-lib") & " rev-parse HEAD").strip()
-      # The property the manifest was trying to express. Against the pre-fix
-      # build this is `tip`: the pin resolved to the branch name, so the clone
-      # landed wherever the branch pointed.
+      # The final workspace branch attachment used to move the correctly
+      # cloned pin back to the branch tip.
       check head == pinned
       check head != tip
       check fileExists(workspaceRoot / "vendored-lib" / "first.txt")
       check not fileExists(workspaceRoot / "vendored-lib" / "second.txt")
+
+      let branch = requireGit(q(gitBin) & " -C " &
+        q(workspaceRoot / "vendored-lib") & " symbolic-ref --short HEAD").strip()
+      check branch == "reprobuild/pinned/" & pinned[0 ..< 12]
+
+      let tracking = workspaceRoot / "tracking-lib"
+      check requireGit(q(gitBin) & " -C " & q(tracking) &
+        " rev-parse HEAD").strip() == tip
+      check requireGit(q(gitBin) & " -C " & q(tracking) &
+        " symbolic-ref --short HEAD").strip() == "main"
+
+      # Repair an already enabled workspace, now using its warm shared pool.
+      removeDir(workspaceRoot / "vendored-lib")
+      let repaired = runShell(shellCommand(@[reproBinary(), "workspace", "enable",
+        "vendored", "--jobs=1", "--workspace-root=" & workspaceRoot],
+        env = [("REPRO_WORKSPACE_CLONES", scratch / "clones")]))
+      checkpoint(repaired.output)
+      let listed = runShell(shellCommand(@[reproBinary(), "workspace", "repos",
+        "list", "--project=vendored", "--json", "--workspace-root=" & workspaceRoot]))
+      checkpoint(listed.output)
+      check listed.code == 0
+      let rows = parseJson(listed.output)["repos"]
+      check rows.len == 2
+      var sawPinned, sawTracking = false
+      for row in rows:
+        if row["repo"].getStr() == "vendored-lib":
+          sawPinned = true
+          check row["revision"].getStr() == pinned
+        elif row["repo"].getStr() == "tracking-lib":
+          sawTracking = true
+          check row["revision"].getStr() == "main"
+
+      check sawPinned
+      check sawTracking
+      check repaired.code == 0
+      check requireGit(q(gitBin) & " -C " &
+        q(workspaceRoot / "vendored-lib") & " rev-parse HEAD").strip() == pinned
+      check requireGit(q(gitBin) & " -C " &
+        q(workspaceRoot / "vendored-lib") &
+        " symbolic-ref --short HEAD").strip() == "reprobuild/pinned/" & pinned[0 ..< 12]

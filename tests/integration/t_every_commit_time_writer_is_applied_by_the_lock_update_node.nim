@@ -88,7 +88,7 @@ suite "HL-10 — every commit-time writer is applied by the node":
         let ws = fx.cf.sib.ws
         fx.ensureHooks()
         writeFile(fx.app / "repro.lock",
-          fx.lockText().withRef("../lib-c", "never-published"))
+          fx.lockText().withRef("lib-c", "never-published"))
         discard fx.mustGitApp("commit", "--no-verify", "-q", "-a", "-m",
           "plant a stale ref")
         let plan = planCommitTimeLockWriters(ws, fx.app, tpmPathOnly,

@@ -6,7 +6,7 @@
 ## `t_provenance_*` modules.
 ##
 ## Test-double policy: NO mocks, doubles, or fakes. `writeCommittedLock`
-## writes a real `reprobuild.solved-graph-lock.v2` document with the real
+## writes a real `reprobuild.solved-graph-lock.v3` document with the real
 ## `solutionToLock` -> `serializeLockedDependencies` pair — the bytes
 ## `repro lock refresh` produces — and `readCommittedLock` reads it back with
 ## the real `parseSolvedGraphLock`, the same reader

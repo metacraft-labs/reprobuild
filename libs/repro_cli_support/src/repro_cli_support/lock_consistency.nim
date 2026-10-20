@@ -120,7 +120,15 @@ type
     repoRoot*: string
     flakeNix*, flakeLock*, reproNim*, reproLock*: ConsistencyText
     lockPathBase*: string
-      ## The directory the `repro.lock`'s `deps` paths are relative to.
+      ## The directory the `repro.lock`'s dependency checkouts are located
+      ## relative to (each `LockedDep.path`, derived locally — a lock records
+      ## no checkout path).
+    localizeLockedDeps*: proc (ld: var LockedDependencies) {.closure.}
+      ## Replace each parsed dependency's default checkout location with where
+      ## THIS machine has it (`repro_cli_support`'s `localizeLockedDeps` for
+      ## the repo at `repoRoot`), or nil to keep the parser's one-level
+      ## sibling default. A hook: this module stays a pure check and cannot
+      ## read develop overrides or a workspace membership itself.
     producerVersions*: proc (depName, depAbs: string):
         tuple[found: bool; file: string; entries: seq[ReproVersionEntry]] {.closure.}
       ## The `versions:` entries of the recipe at ``depAbs`` (a producer's
@@ -330,8 +338,8 @@ proc exactRevisionOf(inputs: ConsistencyInputs; c: ReproUsesConstraint;
   let where = c.file & ":" & $c.line
   if dep.path.len == 0:
     report.notChecked.add(where & ": '" & c.selector & " " & c.rangeText &
-      "' — the repro.lock entry carries no checkout path, so the producer's " &
-      "versions: table cannot be read")
+      "' — the repro.lock entry has no checkout (it is not a repository " &
+      "dependency), so the producer's versions: table cannot be read")
     return
   if inputs.producerVersions.isNil: return
   let depAbs = os.normalizedPath(absolutePath(dep.path, inputs.lockPathBase))
@@ -390,7 +398,7 @@ proc checkReproH1(inputs: ConsistencyInputs;
     packagesByName.mgetOrPut(p.name, @[]).add(p)
   var depsByName = initTable[string, LockedDep]()
   for d in ld.deps:
-    if d.path != "." and d.coordinates.kind == ckVcs:
+    if not isSelfLockedDep(d) and d.coordinates.kind == ckVcs:
       depsByName[d.name] = d
   for decl in decls:
     let c = decl.constraint
@@ -501,7 +509,7 @@ proc checkH2(inputs: ConsistencyInputs; constraints: FlakeRecipeConstraints;
     if not d.conditional and d.constraint.kind == uckExact:
       exactUses[d.constraint.selector] = d
   for dep in ld.deps:
-    if dep.path == "." or dep.coordinates.kind != ckVcs: continue
+    if isSelfLockedDep(dep) or dep.coordinates.kind != ckVcs: continue
     let identity = canonicalRepositoryUrl(dep.coordinates.url)
     if identity.len == 0: continue
     let reproRev = dep.coordinates.revision.toLowerAscii()
@@ -617,6 +625,8 @@ proc checkRecipeLockConsistency*(inputs: ConsistencyInputs): ConsistencyReport =
   if inputs.reproLock.present:
     try:
       ld = parseLockedDependencies(inputs.reproLock.text)
+      if not inputs.localizeLockedDeps.isNil:
+        inputs.localizeLockedDeps(ld)
       haveReproLock = true
     except CatchableError as err:
       result.diagnostics.add(inputs.reproLock.path & " could not be read " &

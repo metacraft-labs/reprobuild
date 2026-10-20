@@ -256,6 +256,14 @@ type
       ## apply pipeline records them in the generation's intent snapshot so
       ## the generation keeps the data it was planned from (rollback and
       ## `repro home history` never re-read the live file).
+    compiledFrom*: seq[string]
+      ## The files the profile compile edge was observed reading (absolute
+      ## paths, as the monitor recorded them; `ProfileCompileArtifact.
+      ## observedInputs`). Set by the compile-then-adapt path. The apply
+      ## pipeline snapshots those under the profile directory -- helper
+      ## modules in subdirectories included -- into the generation's intent
+      ## snapshot (`intent_snapshot.profileSourceFiles`). Empty for a
+      ## profile read as text, and when the monitor reported nothing.
 
   LoadedDataFile* = object
     ## One plan-time data file as read: its reference and its bytes.

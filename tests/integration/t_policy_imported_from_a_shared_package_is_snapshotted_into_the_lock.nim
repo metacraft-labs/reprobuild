@@ -95,11 +95,12 @@ suite "TC-9b — the shared policy is snapshotted into the lock":
       let pin1 = ws.headOf(ws.policyPkg)
       let entry1 = depLine(lock1, "certpolicy")
       checkpoint("certpolicy entry: " & entry1)
-      check "path = \"../certpolicy\"" in entry1
+      check entry1.len > 0
+      check "path =" notin entry1
       check ("revision = \"" & pin1 & "\"") in entry1
       # The lock is still an ordinary lock: its readers take the lock keys,
       # not the snapshot's `schema` / `name`.
-      check lock1.startsWith("schema = \"reprobuild.solved-graph-lock.v2\"")
+      check lock1.startsWith("schema = \"reprobuild.solved-graph-lock.v3\"")
 
       # (2) A second refresh writes nothing.
       let stamp = getLastModificationTime(ws.consumer / "repro.lock")

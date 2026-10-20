@@ -370,7 +370,9 @@ proc setupNf2Fixture*(label: string;
   ## has always got.
   result.gitBin = findExe("git")
   result.repro = absolutePath(reproBinaryPath())
-  result.scratch = createTempDir("nf2-" & label & "-", "")
+  # Git renders checkout paths physically; Darwin's /tmp aliases /private/tmp.
+  # Build the fixture in that frame so exact remedy assertions match Git.
+  result.scratch = expandFilename(createTempDir("nf2-" & label & "-", ""))
   result.ws = result.scratch / "ws"
   result.app = result.ws / "app"
   createDir(result.ws)

@@ -45,6 +45,7 @@ import std/[os, strutils]
 
 import repro_deploy_agent
 import repro_deploy_agent/apply_hook
+import repro_home_intent/host_identity
 import repro_profile
 import ./infra
 
@@ -57,6 +58,9 @@ type
     cacheRoot: string
     fetchTimeoutMs: int
     hostIdentity: string
+    hostGiven: bool
+      ## `--host` was passed at all: an empty `--host=` is refused by the
+      ## resolver, not read as "no flag".
     secretsKey: string
     secretsDir: string
 
@@ -77,7 +81,9 @@ proc parseFlags(args: openArray[string]): DeployAgentFlags =
     of "--allowed-signers": result.allowedSigners = need(i, a, args)
     of "--state-dir": result.stateDir = need(i, a, args)
     of "--cache-root": result.cacheRoot = need(i, a, args)
-    of "--host": result.hostIdentity = need(i, a, args)
+    of "--host":
+      result.hostIdentity = need(i, a, args)
+      result.hostGiven = true
     of "--secrets-key": result.secretsKey = need(i, a, args)
     of "--secrets-dir": result.secretsDir = need(i, a, args)
     of "--fetch-timeout-ms":
@@ -94,6 +100,7 @@ proc parseFlags(args: openArray[string]): DeployAgentFlags =
         result.cacheRoot = a["--cache-root=".len .. ^1]
       elif a.startsWith("--host="):
         result.hostIdentity = a["--host=".len .. ^1]
+        result.hostGiven = true
       elif a.startsWith("--secrets-key="):
         result.secretsKey = a["--secrets-key=".len .. ^1]
       elif a.startsWith("--secrets-dir="):
@@ -137,6 +144,30 @@ proc runDeployAgentCommand*(args: seq[string]): int =
     stderr.writeLine("repro deploy-agent: --secrets-dir given without " &
       "--secrets-key; the directory alone cannot open a sealed section")
     return 2
+
+  # The host identity every generation this tick commits records (and an
+  # input to its generation id). It comes from the ONE resolver `repro
+  # home`, `repro infra` and `repro system` use (`selectHost`:
+  # `$REPRO_HOST`, else `--host`, else the lower-cased OS hostname), so one
+  # machine has one name in every scope (Home-Profile-Intent-Layer.md §Host
+  # Identity; CLI/infra/README.md §Host identity; Deploy-Agent.md §CLI
+  # surface). The agent used to record the invented
+  # `reprobuild-deploy-agent` when no `--host` was given (reprobuild-pm
+  # issue
+  # 2026-10-18-deploy-agent-invents-a-host-identity-instead-of-resolving-one).
+  # An unresolvable identity is refused, never invented; like an unreadable
+  # trust-anchor file it wedges the loop until an operator acts, so it is
+  # recorded as well as printed, with the same non-retryable exit 2.
+  let host =
+    try:
+      selectHost(flags.hostIdentity, flags.hostGiven).name
+    except EHostIdentity as e:
+      stderr.writeLine("repro deploy-agent: " & e.msg)
+      var rec = tickStatusForRaise(flags.target, e.msg)
+      rec.exitCode = 2
+      rec.errorCode = "host_unresolved"
+      recordTick(flags.stateDir, flags.target, rec)
+      return 2
 
   let anchors =
     try:
@@ -196,9 +227,7 @@ proc runDeployAgentCommand*(args: seq[string]): int =
 
   let deps = AgentDeps(
     apply: mkRunInfraApplyHook(flags.stateDir, flags.cacheRoot,
-      hostIdentity =
-        (if flags.hostIdentity.len > 0: flags.hostIdentity
-         else: "reprobuild-deploy-agent"),
+      hostIdentity = host,
       profileResolver = resolver))
 
   # `runAgentTickRecorded`, not `runAgentTick`: it runs the same tick, resolves
@@ -214,6 +243,7 @@ proc runDeployAgentCommand*(args: seq[string]): int =
   let outcome = tick.outcome
   echo "repro deploy-agent"
   echo "  target       : " & outcome.target
+  echo "  host         : " & host
   echo "  outcome      : " & $outcome.kind
   if outcome.sequence > 0'u64:
     echo "  sequence     : " & $outcome.sequence

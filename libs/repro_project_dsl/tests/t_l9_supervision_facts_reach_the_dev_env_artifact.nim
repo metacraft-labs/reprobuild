@@ -318,7 +318,7 @@ suite "L9: every supervision fact survives the artifact codec":
     check "\"instanceLeaseTtlSeconds\":-1" in json
     check L9StateDir in json
 
-  test "the artifact schema version is 4, which is what makes a refusal possible":
+  test "the artifact schema version is 6, which is what makes a refusal possible":
     # The fields are appended to a positional codec, so a payload
     # written before they existed would decode with shifted offsets --
     # which is not an error, just wrong values. The version bump is what
@@ -334,9 +334,12 @@ suite "L9: every supervision fact survives the artifact codec":
     #
     # MOVED 3 -> 4 BY D-SS11, which appended
     # `DevEnvArtifact.sharedResolutions`, and 4 -> 5 BY F1, which
-    # appended `DevEnvArtifact.actions`. This case is a PIN ON THE
-    # NUMBER, so it has to move with the number, and both moves were
+    # appended `DevEnvArtifact.actions`, and 5 -> 6 BY F1's second half
+    # (`dfacf036b`), which appended
+    # `DevEnvServiceSummary.consumedActionIds`. That addition leaves the
+    # supervision facts asserted above unchanged. This case is a PIN ON
+    # THE NUMBER, so it has to move with the number, and these moves were
     # found by the regression sweep rather than by reading -- which is
     # the argument for the sweep: L9's own version bump broke the same
     # pin in `t_dev_env_large_values` and was found the same way.
-    check DevEnvArtifactSchemaVersion == 5'u32
+    check DevEnvArtifactSchemaVersion == 6'u32

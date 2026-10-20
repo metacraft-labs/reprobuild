@@ -9,6 +9,11 @@
 ## (§ Locks And Snapshots): ``adapterPreference:`` is that curator policy, so
 ## the lock records the policy and every selection made under it.
 ##
+## This is host-local apply state, excluded from version control even when
+## several hosts share the profile and target. One target record describes
+## this host's last selections, including ambient inventory; it is not a
+## union of hosts. Export never reads it and classifies from policy/catalog.
+##
 ## Reading rules (``lockedPin``):
 ##
 ## * a recorded NON-ambient selection pins the next resolution of the same

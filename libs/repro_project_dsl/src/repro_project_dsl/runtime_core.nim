@@ -1646,6 +1646,72 @@ when defined(reproProviderMode):
           digest: result))
         return
 
+  proc selectableActivityNames(): seq[string] =
+    ## Every activity name a selection can name and have an effect: the
+    ## activities the `devEnv:` body declared (`activity "x"` and the
+    ## `activity x:` block form, which goes through the same proc), every
+    ## name a shell op, tool, task or service record requires (a record
+    ## gated on an undeclared name is still switched on by selecting it),
+    ## and `default`, the implicit selection of every surface. Read after
+    ## the `devEnv:` body ran.
+    result = @["default"]
+    template addName(name: string) =
+      if name.len > 0 and result.find(name) < 0:
+        result.add(name)
+    for name in devEnvActivityRegistry: addName(name)
+    for op in devEnvShellOpsRegistry:
+      for name in op.activityRequirements: addName(name)
+    for tool in devEnvToolRegistry:
+      for name in tool.activityRequirements: addName(name)
+    for task in devEnvTaskRegistry:
+      for name in task.activityRequirements: addName(name)
+    for service in devEnvServiceRegistry:
+      for name in service.activityRequirements: addName(name)
+
+  proc reportUnknownActivitySelection(packageName: string;
+                                      selected: openArray[string]) =
+    ## Record an ERROR diagnostic for every selected activity no record of
+    ## this dev-env can be switched on by (reprobuild-pm issue
+    ## 2026-10-13-unknown-activity-selector-is-silently-ignored).
+    ##
+    ## A selector that names nothing used to be accepted, written into the
+    ## session record and then select nothing -- the declared-looks-wired-
+    ## silently-dropped shape Shared-Development-Services.md §7.2 removes,
+    ## and §10's first criterion refuses for the analogous misspelled
+    ## service reference. Every activating surface (`exec`, `run`,
+    ## `shell`, `tasks`, `dev-env export`, `up`, `dev`) exits non-zero on
+    ## an error diagnostic before it starts anything, and the diagnostic
+    ## travels in the dev-env artifact, so a cached edge refuses too.
+    ##
+    ## THE COMPARISON IS THE GATE'S OWN: verbatim. `activityRecordIsActive`
+    ## and the typed-service gate compare names exactly, and the provider
+    ## runtime checks that the result's selection is the request's, so a
+    ## normalizing comparison here would accept `--activity SSO` and then
+    ## let it select nothing -- the `desktopkind` trap of the L5 binding
+    ## guard, which compared one way and looked up another. A name equal to
+    ## a selectable one under Nim's identifier normalization is named as
+    ## the likely intent instead.
+    let known = selectableActivityNames()
+    var listed: seq[string] = @[]
+    for candidate in known:
+      listed.add("`" & candidate & "`")
+    for name in selected:
+      if known.find(name) >= 0:
+        continue
+      var hint = ""
+      for candidate in known:
+        if candidate.normalize == name.normalize:
+          hint = " (did you mean `" & candidate & "`? activity names " &
+            "are compared exactly)"
+          break
+      diagnostic(
+        "activity `" & name & "` is not declared by package `" &
+        packageName & "`" & hint & "; the activities it declares are: " &
+        listed.join(", ") & ". Refused rather " &
+        "than ignored: an activity selector that names nothing would " &
+        "start nothing and still record the session as selecting it.",
+        dedsError)
+
   proc activityRecordIsActive(requirements, selected: openArray[string]): bool =
     if requirements.len == 0:
       return true
@@ -3423,10 +3489,16 @@ proc unmonitorableActionDepfile*(tool: ReproFs; output: string;
   ## children either. The only dependency evidence the edge then has is this
   ## file.
   ##
-  ## WHY AN ACTION MIGHT NOT BE MONITORABLE. Today exactly one reason
-  ## qualifies: the action performs library interposition ITSELF, so the
+  ## WHY AN ACTION MIGHT NOT BE MONITORABLE. The action may perform library
+  ## interposition ITSELF, so the
   ## engine's interposer and the action's re-enter each other on the same libc
-  ## entry points and the pair livelocks. "Monitoring is inconvenient", "the
+  ## entry points and the pair livelocks. A recorder-backed test can also
+  ## require an unchanged recorded address space: injecting the monitor
+  ## changes executable mappings and maps mutable shared-memory files, which
+  ## the recorder must refuse. Such a test must additionally be non-cacheable,
+  ## since this declaration-derived depfile cannot observe its runtime input
+  ## closure (Sandbox-And-Monitoring.md, "Tests that record their own children").
+  ## "Monitoring is inconvenient", "the
   ## action is slow", and "the evidence looks noisy" are NOT reasons — those
   ## keep ``automaticMonitorPolicy()``, which is the baseline and the thing
   ## that keeps the action cache sound.

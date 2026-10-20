@@ -57,17 +57,19 @@ proc lit(s: string): string = s.escape()
 
 proc packageNameSyntax(toolName: string): string =
   ## How ``package`` spells ``toolName``: bare when it is a Nim identifier
-  ## (``package hello:``), else as a string (``package "7zip":``), the form
-  ## the macro accepts for any package name (Package-Model.md §"Package
-  ## names").
-  if toolName.validIdentifier: toolName else: lit(toolName)
+  ## (``package hello:``), else as a string (``package "7zip":``,
+  ## ``package "nil":``), the form the macro accepts for any package name
+  ## (Package-Model.md §"Package names"). ``isNimIdentifier`` decides, so a
+  ## keyword — which ``strutils.validIdentifier`` accepts — is quoted.
+  if toolName.isNimIdentifier: toolName else: lit(toolName)
 
 proc harvestModuleName*(toolName: string): string =
   ## The basename (without ``.nim``) of the module written for ``toolName``.
   ## A Nim identifier names its own module, as it always has; any other name
   ## goes through ``selectorModuleName``, the mapping ``usesImportCode``
-  ## imports a selector's stdlib module by (``7zip`` -> ``pkg_7zip``).
-  if toolName.validIdentifier: toolName else: selectorModuleName(toolName)
+  ## imports a selector's stdlib module by (``7zip`` -> ``pkg_7zip``,
+  ## ``nil`` -> ``pkg_nil``: a module named by a keyword cannot be imported).
+  if toolName.isNimIdentifier: toolName else: selectorModuleName(toolName)
 
 proc cpuToken(cpu: PlatformCpu): string =
   case cpu

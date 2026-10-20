@@ -1079,8 +1079,10 @@ proc packageNameText(name: NimNode): string =
   ## selector string, like a ``uses:`` selector, so besides the identifier
   ## form (``package just:``) it may be written as a string literal
   ## (``package "7zip":``) — the only spelling of a name that is not a Nim
-  ## identifier, such as one starting with a digit. Every Nim identifier the
-  ## macro emits is derived from it through ``selectorModuleName``.
+  ## identifier, such as one starting with a digit. A Nim keyword may also
+  ## be written backtick-quoted (`` package `nil`: ``). Every Nim identifier
+  ## the macro emits is derived from it through ``selectorModuleName``, which
+  ## escapes a digit-led or keyword name (``pkg_7zip``, ``pkg_nil``).
   case name.kind
   of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
     if name.strVal.strip().len == 0:
@@ -4192,6 +4194,14 @@ proc dirLooksWritable(dir: string): bool =
   ## internal to ``cmd.exe``. That matters because a macro shelling out at
   ## compile time runs inside a Nim compile action whose ``PATH`` is only
   ## ``<nim>/bin:<gcc-wrapper>/bin`` — see ``compile_time_shell.nim``.
+  ##
+  ## ``false`` does NOT by itself mean "not writable". The probe's answer is
+  ## read from ``staticExec`` output, and a compile that does not execute
+  ## ``staticExec`` (``nim check``) returns "" here for every directory. A
+  ## caller that turns ``false`` into a refusal must first ask
+  ## `staticExecRuns` whether the probe ran at all, as `requireDslScratchDir`
+  ## does; this proc does not, so the happy path pays for one subprocess, not
+  ## two.
   if dir.len == 0:
     return false
   when defined(windows):
@@ -4213,6 +4223,34 @@ proc requireDslScratchDir(dir, scratchRoot, consumerSourceFile: string) =
     return
   let existing = deepestExistingDir(dir)
   if existing.len == 0 or not dirLooksWritable(existing):
+    if existing.len > 0 and not staticExecRuns():
+      # The probe did not run, so it established nothing about permissions.
+      # Under `nim check` that is every directory on every host, and calling
+      # it "not writable" sent the reader to a directory they can write, with
+      # a remedy (another scratch root) that fails the same way.
+      #
+      # Nor can the macro go on without the probe: the directory is missing,
+      # so no accessor is cached in it, and producing one means running the
+      # generator, which goes through `staticExec` as well.
+      error(
+        "reprobuild: the build scratch directory does not exist, and this " &
+        "compile cannot\n" &
+        "  produce what it would hold.\n" &
+        "  path:      " & dir & "\n" &
+        "  cause:     " & staticExecSuppressedCause() & ".\n" &
+        "             The writability probe on " & existing & "\n" &
+        "             did not run, so nothing was concluded about " &
+        "permissions. The resource\n" &
+        "             accessors this directory caches are generated through " &
+        "`staticExec` too,\n" &
+        "             so the compile cannot proceed without them.\n" &
+        "  remedy:    compile the recipe once with `nim c` (or build it with " &
+        "`repro build`);\n" &
+        "             that creates this directory and caches the accessors, " &
+        "and `nim check`\n" &
+        "             reuses them afterwards. " & DslScratchRootEnv &
+        " does not help: no scratch\n" &
+        "             root passes a probe that cannot run.")
     error(
       "reprobuild: the build scratch directory cannot be created.\n" &
       "  path:      " & dir & "\n" &
@@ -4258,7 +4296,7 @@ proc unresolvedMovedPackageDiagnostic(pkg: PackageDef;
         useDef.rawConstraint,
         if useDef.sourceFile.len > 0: useDef.sourceFile
         else: consumerSourceFile,
-        useDef.sourceLine, listName)
+        useDef.sourceLine, listName, lookupSourceFile = consumerSourceFile)
       if diagnostic.len > 0:
         reported.add(selector)
         if result.len > 0:
@@ -4960,8 +4998,25 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
             error("resource accessor generation failed for '" & selector &
               "': expected an IFP frame, got:\n" & genOut.strip())
         if genOut.len == 0:
+          # Empty output has two causes and they need different remedies: the
+          # generator never ran (a compile that does not execute `staticExec`,
+          # i.e. `nim check`), or it ran and printed nothing. Only the second
+          # is a generator failure.
+          if not staticExecRuns():
+            error("resource accessor generation for '" & selector &
+              "' did not run.\n" &
+              "  cause:     " & staticExecSuppressedCause() & ".\n" &
+              "             The generator is compiled and run through " &
+              "`staticExec`, and no current accessor\n" &
+              "             for this producer is cached in " & accDir & "\n" &
+              "             (none was generated yet, or the producer changed " &
+              "since).\n" &
+              "  remedy:    compile the recipe once with `nim c` (or build " &
+              "it with `repro build`);\n" &
+              "             that caches the accessors, and `nim check` " &
+              "reuses them afterwards.")
           error("resource accessor generation failed for '" & selector &
-            "': generator produced no output")
+            "': the generator ran and produced no output")
 
         # TI3 Level-2 reuse-in-place: the producer's source changed (stamp miss)
         # but if the InterfaceFingerprint matches the ``.ifp`` sidecar the edit

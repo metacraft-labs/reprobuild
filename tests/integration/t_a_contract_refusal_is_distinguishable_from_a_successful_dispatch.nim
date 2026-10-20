@@ -100,6 +100,14 @@
 ##       records into another workspace's report directory — and every other
 ##       case in this file stays green while it does, which is why this arm
 ##       exists.
+##   (K) TWO REPOSITORIES sharing a workspace and a checkout basename retain
+##       independent records: servicing one cannot delete the other's refusal,
+##       and a second refusal cannot overwrite the first. Mutating only the
+##       installed demand makes the real engine refuse without manufacturing a
+##       second compiler build. Live health still names both installed contracts
+##       and then only the remaining stale one after the other is restored.
+##       All five hook names remain independent within one repository; legacy
+##       workspace-wide evidence is left untouched because ownership is unknown.
 ##
 ## THE FIXTURE USES A STUB `repro`, and that is the whole point rather than a
 ## shortcut: the defect is about an interpreter the workspace did NOT build,
@@ -119,6 +127,7 @@
 import std/[algorithm, json, os, osproc, sha1, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_hash
 # `skip("...")` on BOTH unittests the suite is built with: the CodeTracer fork
 # declares `skip*(reason = "")`, the stock compiler Windows uses declares only
 # `skip*()`, and calling the first form against the second does not compile at
@@ -202,10 +211,8 @@ proc durableSnapshot(dir: string): seq[string] =
   ## report instead of recording the refusal, must be visible here too.
   if not dirExists(dir):
     return @[]
-  for kind, path in walkDir(dir):
-    if kind != pcFile:
-      continue
-    result.add(extractFilename(path) & "\t" &
+  for path in walkDirRec(dir):
+    result.add(relativePath(path, dir) & "\t" &
       $secureHash(readFile(path)))
   result.sort()
 
@@ -282,6 +289,40 @@ proc bakedRecordDir(repoPath, hookName: string): string =
       return quoted
   ""
 
+proc expectedRefusalDir(workspaceRoot, repoRoot: string): string =
+  ## Pin the specified domain and full digest, independent of the generated
+  ## body's advertised destination used when driving the actual hook.
+  let canonicalRoot = expandFilename(repoRoot)
+  var bytes: seq[byte]
+  for ch in canonicalRoot:
+    bytes.add(byte(ord(ch)))
+  workspaceRoot / ".repro" / "build" / "reports" / "managed-hook-refusals" /
+    toHex(blake3DomainDigest(bytes, hdMetadataEnvelope).bytes)
+
+proc foreignContractBody(body: string): string =
+  ## A genuinely incompatible installed generation, without another compiler
+  ## build: retain the real generated body and replace only its demanded token.
+  ## Both the live health comparison and the actual handshake must reject it.
+  const flag = "--hook-contract="
+  let start = body.find(flag) + flag.len
+  doAssert start >= flag.len
+  var finish = start
+  while finish < body.len and body[finish] in
+      {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '.', '-', '_'}:
+    inc finish
+  let token = body[start ..< finish]
+  body.replace(token, token & "-foreign-generation")
+
+proc hooksHealth(reproBin, workspaceRoot: string): JsonNode =
+  let res = runShellSplit(shellCommand(@[reproBin, "health", "p", "--json",
+    "--workspace-root=" & workspaceRoot],
+    @[(name: "REPROBUILD_REPRO", value: reproBin)]))
+  let report = parseJson(res.stdout)
+  for row in report["checks"]:
+    if row["name"].getStr() == "vcs-hooks":
+      return row
+  raise newException(ValueError, "health emitted no vcs-hooks row: " & res.stdout)
+
 suite "a contract refusal is distinguishable from a successful dispatch":
 
   test "t_a_contract_refusal_is_distinguishable_from_a_successful_dispatch":
@@ -292,7 +333,10 @@ suite "a contract refusal is distinguishable from a successful dispatch":
         "compares what each left on disk, none of which has a substitute " &
         "that would still prove the claim")
     else:
-      let scratch = createTempDir("repro-refusal-record-", "")
+      # Darwin's temporary directory may be spelled /var while Git reports
+      # its /private/var target. Keep attribution comparisons about the same
+      # canonical paths rather than the host's temporary-directory alias.
+      let scratch = expandFilename(createTempDir("repro-refusal-record-", ""))
       defer: removeDirEventually(scratch)
       let reproBin = reproBinary()
 
@@ -378,7 +422,9 @@ suite "a contract refusal is distinguishable from a successful dispatch":
 
       let reportDir = workspaceRoot / ".repro" / "build" / "reports"
       let reportPath = reportDir / "post-commit-report.json"
-      let refusalPath = reportDir / "post-commit-contract-refusal.json"
+      let refusalDir = bakedRecordDir(repoPath, "post-commit")
+      check refusalDir == expectedRefusalDir(workspaceRoot, repoPath)
+      let refusalPath = refusalDir / "post-commit-contract-refusal.json"
 
       # ---- (A) THE TRAP: a serviced dispatch, and its report ------------
       writeFile(repoPath / "first.txt", "serviced work\n")
@@ -579,7 +625,7 @@ suite "a contract refusal is distinguishable from a successful dispatch":
       check lateSecond.outcomes == @["refreshed-drifted"]
       # DIRECTION, not merely difference: nowhere -> the report directory.
       check bakedRecordDir(lateRepo, "post-commit") ==
-        lateRoot / ".repro" / "build" / "reports"
+        expectedRefusalDir(lateRoot, lateRepo)
 
       let lateThird = ensureOutcomes(reproBin, lateRoot)
       checkpoint("(I) run 3 outcomes: " & lateThird.outcomes.join(",") &
@@ -597,7 +643,7 @@ suite "a contract refusal is distinguishable from a successful dispatch":
         @[(name: "REPROBUILD_REPRO", value: staleStub)]))
       checkpoint("(I) post-heal refused commit: " & lateRefused.output)
       check lateRefused.code == 0
-      check fileExists(lateRoot / ".repro" / "build" / "reports" /
+      check fileExists(bakedRecordDir(lateRepo, "post-commit") /
         "post-commit-contract-refusal.json")
       check "NOT RECORDED" notin lateRefused.output
 
@@ -638,5 +684,168 @@ suite "a contract refusal is distinguishable from a successful dispatch":
       # `outerBaked != innerBaked`: a guard-wide memo keyed on the wrong repo
       # would make them equal, but so would two unrelated bugs, and only the
       # equalities say which directory is right.
-      check outerBaked == twoRoot / ".repro" / "build" / "reports"
-      check innerBaked == twoRoot / "nested" / ".repro" / "build" / "reports"
+      check outerBaked == expectedRefusalDir(twoRoot, outerRepo)
+      check innerBaked == expectedRefusalDir(twoRoot / "nested", innerRepo)
+
+      # ---- (K) sibling repositories retain independent refusal evidence ---
+      # Both checkouts deliberately have the same basename. A namespace based
+      # on just the checkout's leaf name would pass a simple lib-a/lib-b case
+      # while still letting one repository erase another's evidence.
+      let sharedRoot = scratch / "shared-workspace"
+      writeFlatMembership(sharedRoot, originUrl, [
+        (name: "first", path: "first/lib"),
+        (name: "second", path: "second/lib")])
+      writeWorkspaceBranch(sharedRoot, project = "p", branch = "main")
+      let firstRepo = sharedRoot / "first" / "lib"
+      let secondRepo = sharedRoot / "second" / "lib"
+      for repo in [firstRepo, secondRepo]:
+        createDir(repo.parentDir)
+        discard requireGit(q(gitBin) & " clone --branch main " & q(originUrl) &
+          " " & q(repo))
+        configIdentity(gitBin, repo)
+      let legacyRecord = sharedRoot / ".repro" / "build" / "reports" /
+        "post-commit-contract-refusal.json"
+      createDir(legacyRecord.parentDir)
+      const legacyBytes = "legacy refusal with unknown ownership\n"
+      writeFile(legacyRecord, legacyBytes)
+      let sharedEnsured = ensureOutcomes(reproBin, sharedRoot)
+      checkpoint("(K) ensure: " & sharedEnsured.diagnostic)
+      require sharedEnsured.code == 0
+      let firstRecord = bakedRecordDir(firstRepo, "post-commit") /
+        "post-commit-contract-refusal.json"
+      let secondRecord = bakedRecordDir(secondRepo, "post-commit") /
+        "post-commit-contract-refusal.json"
+      # Run the installed managed bodies directly, in their real repository
+      # cwd, so only the hook under test fires. In particular a pre-commit
+      # self-healing sweep must not repair the deliberately refusing body.
+      proc fire(repo, interpreter: string): tuple[code: int; output: string] =
+        runShell(shellCommand(@["sh", repo / ".git" / "hooks" /
+          "post-commit.repro-managed"],
+          @[(name: "REPROBUILD_REPRO", value: interpreter)]), cwd = repo)
+      let firstBodyPath = firstRepo / ".git" / "hooks" /
+        "post-commit.repro-managed"
+      let secondBodyPath = secondRepo / ".git" / "hooks" /
+        "post-commit.repro-managed"
+      let firstOriginal = readFile(firstBodyPath)
+      let secondOriginal = readFile(secondBodyPath)
+      writeFile(firstBodyPath, foreignContractBody(firstOriginal))
+      let firstRefused = fire(firstRepo, reproBin)
+      checkpoint("(K) first refused: " & firstRefused.output)
+      require firstRefused.code == 0
+      require fileExists(firstRecord)
+      let firstBytes = readFile(firstRecord)
+      check parseJson(firstBytes){"repoRoot"}.getStr() == firstRepo
+      let siblingServiced = fire(secondRepo, reproBin)
+      checkpoint("(K) sibling serviced: " & siblingServiced.output)
+      require siblingServiced.code == 0
+      check "could not be evaluated" notin siblingServiced.output
+      # This is the deletion defect: a healthy sibling must leave the first
+      # refusal byte-identical. It fails against the original shared path.
+      check fileExists(firstRecord)
+      if fileExists(firstRecord):
+        check readFile(firstRecord) == firstBytes
+
+      discard fire(firstRepo, reproBin)
+      writeFile(secondBodyPath, foreignContractBody(secondOriginal))
+      let secondRefused = fire(secondRepo, reproBin)
+      checkpoint("(K) second refused: " & secondRefused.output)
+      require secondRefused.code == 0
+      check firstRecord != secondRecord
+      require fileExists(firstRecord)
+      require fileExists(secondRecord)
+      # This is the overwrite defect: both records still name their owner.
+      check parseFile(firstRecord){"repoRoot"}.getStr() == firstRepo
+      check parseFile(secondRecord){"repoRoot"}.getStr() == secondRepo
+      let bothHealth = hooksHealth(reproBin, sharedRoot)
+      check bothHealth["status"].getStr() != "ok"
+      check "2 managed hook(s) STALE" in bothHealth["detail"].getStr()
+      check "first/post-commit" in bothHealth["detail"].getStr()
+      check "second/post-commit" in bothHealth["detail"].getStr()
+      let secondBytes = readFile(secondRecord)
+      writeFile(firstBodyPath, firstOriginal)
+      let firstServiced = fire(firstRepo, reproBin)
+      checkpoint("(K) first serviced: " & firstServiced.output)
+      require firstServiced.code == 0
+      check not fileExists(firstRecord)
+      require fileExists(secondRecord)
+      check readFile(secondRecord) == secondBytes
+      let remainingHealth = hooksHealth(reproBin, sharedRoot)
+      check remainingHealth["status"].getStr() != "ok"
+      check "1 managed hook(s) STALE" in remainingHealth["detail"].getStr()
+      check "second/post-commit" in remainingHealth["detail"].getStr()
+      check "first/post-commit" notin remainingHealth["detail"].getStr()
+      check readFile(legacyRecord) == legacyBytes
+      check not fileExists(staleMarker)
+
+      # The repository namespace must preserve the independent hook axis.
+      # Every installed hook really refuses; pre-push remains fail-closed.
+      for hook in ["pre-push", "post-commit", "post-checkout", "post-merge",
+          "pre-commit"]:
+        let bodyPath = firstRepo / ".git" / "hooks" /
+          (hook & ".repro-managed")
+        let original = readFile(bodyPath)
+        writeFile(bodyPath, foreignContractBody(original))
+        # pre-push requires the protocol carrier supplied by its dispatcher.
+        # Drive that real boundary so the contract probe is reached; invoking
+        # its managed body bare would test an earlier dispatcher refusal.
+        let invokedPath =
+          if hook == "pre-push": firstRepo / ".git" / "hooks" / hook
+          else: bodyPath
+        # Supply an empty push-ref stream. runShell otherwise leaves stdin
+        # open, and the real pre-push dispatcher drains it before probing.
+        let refused = runShell(shellCommand(@["sh", "-c",
+          "exec sh \"$1\" </dev/null", "sh", invokedPath],
+          @[(name: "REPROBUILD_REPRO", value: reproBin)]), cwd = firstRepo)
+        checkpoint("(K) independent " & hook & ": " & refused.output)
+        check refused.code == (if hook == "pre-push": 1 else: 0)
+        let recordPath = firstRecord.parentDir /
+          (hook & "-contract-refusal.json")
+        require fileExists(recordPath)
+        check parseFile(recordPath){"hook"}.getStr() == hook
+        check parseFile(recordPath){"repoRoot"}.getStr() == firstRepo
+        writeFile(bodyPath, original)
+      discard fire(firstRepo, reproBin)
+      check not fileExists(firstRecord)
+      for hook in ["pre-push", "post-checkout", "post-merge", "pre-commit"]:
+        check fileExists(firstRecord.parentDir /
+          (hook & "-contract-refusal.json"))
+      check readFile(secondRecord) == secondBytes
+      check readFile(legacyRecord) == legacyBytes
+
+      # Old bodies retain their old shell destination until a repair sweep.
+      # The destination is site metadata, so migration is drift without a
+      # contract change, and repairing it must preserve the old flat record.
+      writeFile(secondBodyPath, secondOriginal)
+      let currentAssignment = "REPRO_REFUSAL_RECORD_DIR=" &
+        qsh(bakedRecordDir(firstRepo, "post-commit"))
+      let legacyAssignment = "REPRO_REFUSAL_RECORD_DIR=" &
+        qsh(legacyRecord.parentDir)
+      require currentAssignment in firstOriginal
+      writeFile(firstBodyPath,
+        firstOriginal.replace(currentAssignment, legacyAssignment))
+      let migrated = ensureOutcomes(reproBin, sharedRoot)
+      check migrated.code == 0
+      check migrated.outcomes == @["already-up-to-date", "refreshed-drifted"]
+      check readFile(firstBodyPath) == firstOriginal
+      let converged = ensureOutcomes(reproBin, sharedRoot)
+      check converged.code == 0
+      check converged.outcomes == @["already-up-to-date"]
+      discard fire(firstRepo, reproBin)
+      check readFile(legacyRecord) == legacyBytes
+
+      when not defined(windows):
+        # Re-declare the same checkout through a symlink. Its installed body
+        # and record namespace must converge on the same canonical root.
+        let aliasPath = sharedRoot / "first-alias"
+        createSymlink(firstRepo, aliasPath)
+        let fragmentPath = sharedRoot / "repos" / "first.toml"
+        let fragment = readFile(fragmentPath)
+        writeFile(fragmentPath, fragment.replace("path = \"first/lib\"",
+          "path = \"first-alias\""))
+        let aliased = ensureOutcomes(reproBin, sharedRoot)
+        checkpoint("(K) alias ensure: " & aliased.diagnostic)
+        check aliased.code == 0
+        check aliased.outcomes == @["already-up-to-date"]
+        check readFile(firstBodyPath) == firstOriginal
+        check bakedRecordDir(aliasPath, "post-commit") == firstRecord.parentDir
+        writeFile(fragmentPath, fragment)

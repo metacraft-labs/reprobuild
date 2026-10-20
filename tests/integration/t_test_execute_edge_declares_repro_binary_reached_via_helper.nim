@@ -46,6 +46,9 @@
 ##                it, so the gate cannot be satisfied by declaring the
 ##                binary on every edge (which would pass this file and
 ##                destroy the action cache's selectivity).
+## ``overlap``  — force the control query to finish between the anchor's
+##                report write and read. Each invocation must read its own
+##                closure even under this otherwise timing-dependent overlap.
 ## ``analysis`` — both directions of the classifier itself, against a
 ##                synthetic source tree on the real filesystem: calling a
 ##                helper that resolves the CLI is ``true``; merely
@@ -97,7 +100,8 @@ proc singleFileScanSaysYes(source: string): bool =
       "runShell" in source or
       "runWithRunquotaOnPath" in source))
 
-proc dryRunClosure(repoRoot, selector: string):
+proc dryRunClosure(repoRoot, selector: string;
+    beforeRead: proc() {.closure.} = nil):
     tuple[actions: seq[string]; output: string; exitCode: int] =
   ## Ask the engine which actions it would schedule for ``selector``.
   ##
@@ -107,9 +111,11 @@ proc dryRunClosure(repoRoot, selector: string):
   ## compiler invocation. ``--no-runquota`` is safe for the same reason —
   ## nothing is launched, so there is nothing to meter.
   let reproBin = repoRoot / "build" / "bin" / addFileExt("repro", ExeExt)
-  let reportPath = repoRoot / ".repro" / "build" / "repro" /
-    "dry-run-closure-report.json"
-  discard tryRemoveFile(reportPath)
+  # Cases run concurrently, so every query owns its report until parsing is
+  # complete. Another query must neither overwrite nor remove this report.
+  let scratch = createTempDir("repro-helper-closure-", "")
+  defer: removeDir(scratch)
+  let reportPath = scratch / "report.json"
   let args = @[
     reproBin.quoteShell,
     "build",
@@ -128,6 +134,10 @@ proc dryRunClosure(repoRoot, selector: string):
   let run = execCmdEx(args.join(" "), env = env, workingDir = repoRoot)
   result.output = run.output
   result.exitCode = run.exitCode
+  # Force an overlapping query at the report boundary without replacing the
+  # real engine or relying on subprocess timing to reproduce interference.
+  if beforeRead != nil:
+    beforeRead()
   result.actions = @[]
   if fileExists(reportPath):
     let report = parseFile(reportPath)
@@ -204,6 +214,33 @@ suite "test execute edges follow helpers to the repro binary":
     # destroy the action cache's selectivity. It must not be declared
     # here.
     check ReproProducerId notin closure.actions
+
+  test "overlap: each dry-run reads its own closure report":
+    let repoRoot = findRepoRoot()
+    var control: tuple[actions: seq[string]; output: string; exitCode: int]
+    var controlRan = false
+    let anchor = dryRunClosure(repoRoot, ".#" & AnchorExecuteId,
+      beforeRead = proc() =
+        control = dryRunClosure(repoRoot, ".#" & ControlExecuteId)
+        controlRan = true)
+
+    checkpoint("anchor exit=" & $anchor.exitCode & " actions=" &
+      anchor.actions.join(", "))
+    checkpoint("control exit=" & $control.exitCode & " actions=" &
+      control.actions.join(", "))
+    if anchor.exitCode != 0:
+      checkpoint(anchor.output)
+    if control.exitCode != 0:
+      checkpoint(control.output)
+    check controlRan
+    check anchor.exitCode == 0
+    check control.exitCode == 0
+    check AnchorExecuteId in anchor.actions
+    check ReproProducerId in anchor.actions
+    check ControlExecuteId notin anchor.actions
+    check ControlExecuteId in control.actions
+    check AnchorExecuteId notin control.actions
+    check ReproProducerId notin control.actions
 
   test "analysis: calling a helper taints, importing it alone does not":
     # A synthetic source tree on the real filesystem, laid out the way

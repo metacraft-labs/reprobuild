@@ -25,13 +25,37 @@
 # developer happened to add projects in, so a genuine disagreement is refused
 # instead — see `Workspace-And-Develop-Mode.md` §"Multi-Project Workspaces".
 
-import std/[options, os, strutils, tables]
+import std/[os, strutils, tables]
 
 import types
 import diagnostics
 import resolver
 import compose
 import workspace_branch
+
+# ---- the by-name ladder, over any manifest source --------------------------
+#
+# Workspace-Membership-Model.md — a name resolves through ONE ladder:
+# `projects/<name>.toml`, then `variants/<name>.toml`, then
+# `repo-sets/<name>.toml`. It is defined once, over a `ManifestSource`, so the
+# working tree (a directory source) and a pinned revision of the metadata
+# repository (a git source) cannot drift apart in which file a name means.
+
+proc ladderRelPaths(name: string):
+    tuple[project, variant, repoSet: string] =
+  ## The three source-relative paths the ladder consults, in order.
+  (project: "projects/" & name & ".toml",
+   variant: "variants/" & name & ".toml",
+   repoSet: repoSetsDirName & "/" & name & ".toml")
+
+proc namesOnlyVariantOrRepoSetAt*(source: ManifestSource;
+                                  name: string): bool =
+  ## Whether ``name`` is, in ``source``, ONLY a variant or a repo-set: no
+  ## ``projects/<name>.toml``, but a ``variants/<name>.toml`` or
+  ## ``repo-sets/<name>.toml``.
+  let rel = ladderRelPaths(name)
+  not source.hasFile(rel.project) and
+    (source.hasFile(rel.variant) or source.hasFile(rel.repoSet))
 
 proc namesOnlyRootVariantOrRepoSet*(workspaceRoot, name: string): bool =
   ## Whether ``name`` is, at the workspace's manifests root, ONLY a variant or
@@ -40,10 +64,32 @@ proc namesOnlyRootVariantOrRepoSet*(workspaceRoot, name: string): bool =
   ## resolves from the root and is never composed across manifest layers: the
   ## composer composes projects, and neither kind is defined across layers.
   ## The one definition of that rule for every name lookup that routes on it.
-  let manifests = manifestsRoot(workspaceRoot)
-  not fileExists(manifests / "projects" / (name & ".toml")) and
-    (fileExists(manifests / "variants" / (name & ".toml")) or
-     fileExists(manifests / repoSetsDirName / (name & ".toml")))
+  namesOnlyVariantOrRepoSetAt(newDirectorySource(manifestsRoot(workspaceRoot)),
+    name)
+
+proc resolveManifestNameAt*(source: ManifestSource;
+                            name: string): ResolvedProject =
+  ## Resolve ONE name through the ladder over ``source``. An unresolvable
+  ## name raises: the diagnostic names the source root and the three paths
+  ## looked for, in the source's display form.
+  let rel = ladderRelPaths(name)
+  # Workspace-Membership-Model.md — a repo-set that is ENABLED is what used to
+  # be called a project, so `repo-sets/<name>.toml` joins the same ladder
+  # rather than getting a parallel one. Looked up last, so a converted manifest
+  # repo and an unconverted one both resolve the name they actually carry, and
+  # a workspace mid-conversion keeps preferring the project it already had.
+  if source.hasFile(rel.project):
+    return resolveProjectAt(source, rel.project)
+  if source.hasFile(rel.variant):
+    return resolveVariantAt(source, rel.variant)
+  if source.hasFile(rel.repoSet):
+    return resolveRepoSetAt(source, rel.repoSet)
+  raise newException(ValueError,
+    "no repo-set, project or variant named '" & name & "' found under '" &
+      source.displayRoot & "' (looked for '" &
+      source.displayPath(rel.project) & "', '" &
+      source.displayPath(rel.variant) & "' and '" &
+      source.displayPath(rel.repoSet) & "')")
 
 proc resolveWorkspaceProjectByName*(workspaceRoot, name: string;
                                     layersMayOmitProject = false):
@@ -70,8 +116,8 @@ proc resolveWorkspaceProjectByName*(workspaceRoot, name: string;
   ## declares only as a VARIANT or a REPO-SET resolves from the root, as it
   ## always did: the composer composes projects, and neither kind is defined
   ## across layers.
-  let manifests = manifestsRoot(workspaceRoot)
-  if not namesOnlyRootVariantOrRepoSet(workspaceRoot, name) and
+  let manifests = newDirectorySource(manifestsRoot(workspaceRoot))
+  if not namesOnlyVariantOrRepoSetAt(manifests, name) and
       isCompositionalWorkspaceToml(workspaceRoot, name):
     let absToml = absolutePath(workspaceTomlPath(workspaceRoot))
     var workspaceLocal = effectiveWorkspaceLocal(workspaceRoot, name)
@@ -81,34 +127,26 @@ proc resolveWorkspaceProjectByName*(workspaceRoot, name: string;
     workspaceLocal.workspace.project = name
     return composeManifestLayersWithOptions(workspaceLocal, workspaceRoot,
       absToml, ComposeOptions(layersMayOmitProject: layersMayOmitProject)).project
-  let projectFile = manifests / "projects" / (name & ".toml")
-  let variantFile = manifests / "variants" / (name & ".toml")
-  # Workspace-Membership-Model.md — a repo-set that is ENABLED is what used to
-  # be called a project, so `repo-sets/<name>.toml` joins the same ladder
-  # rather than getting a parallel one. Looked up last, so a converted manifest
-  # repo and an unconverted one both resolve the name they actually carry, and
-  # a workspace mid-conversion keeps preferring the project it already had.
-  let repoSetFile = manifests / repoSetsDirName / (name & ".toml")
-  if fileExists(projectFile):
-    return resolveProject(projectFile)
-  if fileExists(variantFile):
-    return resolveVariant(variantFile)
-  if fileExists(repoSetFile):
-    return resolveRepoSet(repoSetFile)
-  raise newException(ValueError,
-    "no repo-set, project or variant named '" & name & "' found under '" &
-      manifests & "' (looked for '" & projectFile & "', '" & variantFile &
-      "' and '" & repoSetFile & "')")
+  resolveManifestNameAt(manifests, name)
 
 # `WorkspaceProjectSetConflictError` and `conflictingFields` moved to
 # `resolver.nim` when repo-set expansion gained the same dedup-by-path rule:
 # one refusal, one set of evidence, whichever route reached the second
 # declaration. Re-exported here so every existing caller is unaffected.
-export WorkspaceProjectSetConflictError, conflictingFields
+export WorkspaceProjectSetConflictError, conflictingFields,
+  conflictingFieldIds
 
-proc raiseProjectSetConflict(workspaceRoot, path: string;
+type
+  ProjectSetConflictFrame = object
+    ## What a union conflict is attributed to: the workspace's active-set
+    ## record (`.repro/workspace.toml`, key `workspace.projects`) for a
+    ## workspace union, or the metadata source itself for a union resolved
+    ## at a revision, which has no active-set record to blame.
+    path, keyPath, schema: string
+
+proc raiseProjectSetConflict(frame: ProjectSetConflictFrame; path: string;
                              owningProject, otherProject: string;
-                             differences: seq[string]) {.noreturn.} =
+                             differences, fieldIds: seq[string]) {.noreturn.} =
   let inner = "projects '" & owningProject & "' and '" & otherProject &
     "' declare checkout path '" & path & "' with different " &
     differences.join(", ") &
@@ -116,13 +154,50 @@ proc raiseProjectSetConflict(workspaceRoot, path: string;
     "resolved. Align the two manifests (normally by having both projects " &
     "`include` the same repo fragment) or drop one project from the set"
   var e = newException(WorkspaceProjectSetConflictError, "")
-  e.path = workspaceTomlPath(workspaceRoot)
-  e.keyPath = "workspace.projects"
-  e.expectedSchema = schemaWorkspaceStateV1
-  e.observedSchema = schemaWorkspaceStateV1
+  e.path = frame.path
+  e.keyPath = frame.keyPath
+  e.expectedSchema = frame.schema
+  e.observedSchema = frame.schema
   e.innerMessage = inner
-  e.msg = "[" & e.path & "] at key 'workspace.projects': " & inner
+  e.checkoutPath = path
+  e.sources = @[owningProject, otherProject]
+  e.fields = fieldIds
+  e.msg = "[" & e.path & "]" &
+    (if e.keyPath.len > 0: " at key '" & e.keyPath & "'" else: "") & ": " &
+    inner
   raise e
+
+proc unionResolved(primary: ResolvedProject; additional: openArray[string];
+                   resolveName: proc (name: string): ResolvedProject;
+                   frame: ProjectSetConflictFrame): ResolvedProject =
+  ## The Union Rules (Workspace-And-Develop-Mode.md §"Union Rules"), once,
+  ## for every route: dedup by checkout path, identical declarations merge,
+  ## a disagreement is refused, first-seen order. ``resolveName`` resolves one
+  ## additional name (through the workspace's ladder, or a source's).
+  result = primary
+  if additional.len == 0:
+    return
+  var byPath = initTable[string, int]()
+  var declaredBy = initTable[string, string]()
+  for idx, repo in result.repos:
+    byPath[repo.path] = idx
+    declaredBy[repo.path] = primary.projectName
+  for name in additional:
+    let other = resolveName(name)
+    for repo in other.repos:
+      if repo.path in byPath:
+        let existing = result.repos[byPath[repo.path]]
+        let differences = conflictingFields(existing, repo)
+        if differences.len > 0:
+          raiseProjectSetConflict(frame, repo.path,
+            declaredBy.getOrDefault(repo.path, primary.projectName), name,
+            differences, conflictingFieldIds(existing, repo))
+        # Identical declaration — the common case for shared infrastructure
+        # repos every project includes. One checkout, one entry.
+      else:
+        byPath[repo.path] = result.repos.len
+        declaredBy[repo.path] = name
+        result.repos.add(repo)
 
 proc unionProjectSet*(workspaceRoot: string; primary: ResolvedProject;
                       additional: openArray[string]): ResolvedProject =
@@ -136,29 +211,11 @@ proc unionProjectSet*(workspaceRoot: string; primary: ResolvedProject;
   ##
   ## First-seen order is preserved, so adding a project APPENDS its
   ## previously-unseen repos and never reorders what was already there.
-  result = primary
-  if additional.len == 0:
-    return
-  var byPath = initTable[string, int]()
-  var declaredBy = initTable[string, string]()
-  for idx, repo in result.repos:
-    byPath[repo.path] = idx
-    declaredBy[repo.path] = primary.projectName
-  for name in additional:
-    let other = resolveWorkspaceProjectByName(workspaceRoot, name)
-    for repo in other.repos:
-      if repo.path in byPath:
-        let differences = conflictingFields(result.repos[byPath[repo.path]], repo)
-        if differences.len > 0:
-          raiseProjectSetConflict(workspaceRoot, repo.path,
-            declaredBy.getOrDefault(repo.path, primary.projectName), name,
-            differences)
-        # Identical declaration — the common case for shared infrastructure
-        # repos every project includes. One checkout, one entry.
-      else:
-        byPath[repo.path] = result.repos.len
-        declaredBy[repo.path] = name
-        result.repos.add(repo)
+  unionResolved(primary, additional,
+    proc (name: string): ResolvedProject =
+      resolveWorkspaceProjectByName(workspaceRoot, name),
+    ProjectSetConflictFrame(path: workspaceTomlPath(workspaceRoot),
+      keyPath: "workspace.projects", schema: schemaWorkspaceStateV1))
 
 proc activeProjectSetOrEmpty*(workspaceRoot: string): seq[string] =
   ## The recorded active project set, or an empty seq when the workspace
@@ -202,3 +259,29 @@ proc resolveProjectSet*(workspaceRoot: string;
   result = resolveWorkspaceProjectByName(workspaceRoot, names[0])
   if names.len > 1:
     result = unionProjectSet(workspaceRoot, result, names[1 .. ^1])
+
+proc resolveProjectSetAt*(source: ManifestSource;
+                          names: openArray[string]): ResolvedProject =
+  ## Resolve an explicit set of names against ONE metadata tree — `source` —
+  ## with the same ladder (`resolveManifestNameAt`) and the same Union Rules
+  ## (`unionResolved`) `resolveProjectSet` applies to a workspace.
+  ##
+  ## This is the entry point for resolving a project set at a pinned
+  ## REVISION of the metadata repository (`openGitRevisionSource`) without a
+  ## working tree, and without writing to that repository. What it reads is
+  ## that single repository's tree and nothing else: the `[[manifest]]` layer
+  ## composition `resolveWorkspaceProjectByName` performs is NOT applied,
+  ## because the layer list lives in `.repro/workspace.toml` and the settings
+  ## files — workspace-local state outside the metadata repository, which has
+  ## no revision to be read at. A conflict is attributed to the source root
+  ## (`displayRoot`), not to an active-set record.
+  if names.len == 0:
+    raise newException(ValueError,
+      "resolveProjectSetAt requires a project name")
+  result = resolveManifestNameAt(source, names[0])
+  if names.len > 1:
+    result = unionResolved(result, names[1 .. ^1],
+      proc (name: string): ResolvedProject =
+        resolveManifestNameAt(source, name),
+      ProjectSetConflictFrame(path: source.displayRoot, keyPath: "",
+        schema: ""))

@@ -7,6 +7,11 @@
 import std/[os, strutils]
 import types
 
+const missingManifestMessage* = "manifest file does not exist"
+  ## The inner message of the file-level diagnostic for a manifest that is not
+  ## there, whichever source was asked (a directory, or a git revision through
+  ## `manifest_source.nim`), so the two cannot word it differently.
+
 proc raiseManifestError*(
     path: string;
     keyPath, expectedSchema, observedSchema, innerMessage: string) {.noreturn.} =

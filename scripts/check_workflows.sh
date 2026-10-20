@@ -242,14 +242,26 @@ sibling_repo_branch_pins() {
 # refused. Promotions then either blocked on it or were waved through on
 # evidence substituted from a laptop, where no second header exists.
 #
-# A SECOND, SEPARATE PROBLEM, found while fixing the first. The installation
-# token is SCOPED: ci.yml lists the repositories it covers, and github refuses
-# a request for a repo outside that list EVEN WHEN THE REPO IS PUBLIC, with a
-# 404, rather than degrading it to an anonymous request. `reprobuild` and
-# `nixos-modules` -- the two repos THIS SCRIPT probes to decide reachability and
-# to check its own resolvers -- are not on that list, and neither is the
-# `metacraft-github-actions=dev` entry. So even with one header those three
-# could not be read with the ambient credential.
+# A LATENT RISK, noticed while fixing the above, which the anonymous arm covers.
+# The installation token is SCOPED: ci.yml lists the repositories it covers, and
+# `reprobuild` and `nixos-modules` -- the two repos THIS SCRIPT probes to decide
+# reachability and to check its own resolvers -- are not on that list, nor is the
+# `metacraft-github-actions=dev` entry.
+#
+# An earlier version of this comment went further and claimed those three
+# therefore could not be read at all, on the theory that github answers 404 for
+# a repo outside the installation's list even when the repo is public. That is
+# NOT what was measured. The first green run of this gate
+# (39000151336, job 117302107572, sha 1bc5a6c0a) reports
+# `answered by: ambient=0 single-header=17 anonymous=0` -- all seventeen
+# entries, those three included, resolved with one header, and the anonymous arm
+# was never reached. The duplicate header was the entire cause of the failure.
+#
+# The scoping omission is still worth keeping in mind: the three entries are
+# genuinely absent from ci.yml's `repositories:` list, so a future private
+# sibling added there would need the anonymous arm or a wider token. It is a
+# risk this script is built to survive, not a defect it was built to work
+# around.
 #
 # Hence three arms, because no single credential state can resolve every entry:
 #

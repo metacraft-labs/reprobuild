@@ -47,14 +47,44 @@
 ##   when the file changes — the shape alone licenses nothing;
 ## * `objects/info/alternates` appearing MUST still invalidate — it decides
 ##   WHERE names are looked up, so it is not a by-name lookup itself.
+##
+## THE KEY IS CHECKED ON EVERY PLATFORM, PUBLICATION ONLY WHERE IT EXISTS.
+## Each scenario first asks `cacheInputPaths` / `cacheEnumeratedDirectories`
+## what the key WOULD be built from, over the evidence the monitor really
+## recorded in run 1: no observed by-name object-store entry may be in it,
+## while `HEAD`, `refs/heads/main` and `objects/info/alternates` (and, in the
+## lookalike control, the lookalike file) must be. That is the classification
+## itself, and it needs no published record. The reuse half — a second run
+## hitting after the store moved — needs one, and on macOS and Windows there
+## never is: io-mon's `docs/usage.md` ("macOS and Windows limitation
+## (normative)", io-mon 57ce305) makes every capture there carry an
+## `mrEventLoss` tree-lifetime marker and grade `mcIncomplete`, consumers
+## MUST conservatively rebuild, and nothing promotes such a capture to
+## complete. So where `NoTreeLifetimeGuard` holds, the publication-dependent
+## assertions are replaced by the specified fail-closed behaviour — the
+## marker and `monitor-loss` are reported, no record exists, and the next run
+## re-launches and reads the current store — and Linux keeps every reuse
+## assertion unchanged. Neither arm filters or overrides the loss.
+##
+## TWO HOST FACTS THE FIXTURE ACCOMMODATES, both measured on macOS:
+##
+## * `/bin/sh` is SIP-protected, so the kernel strips the shim's injection
+##   from it and from everything it spawns — git included — and run 1 would
+##   observe only `/bin/sh`. On macOS the script is written to a `#!/bin/sh`
+##   file run as argv[0], which io-mon's shebang handling hands to its shipped
+##   non-SIP shell (the same route as `t_da1i_evidence_scope_reaches_io_mon`).
+## * `/tmp` (and so a dev shell's `TMPDIR`) is a firmlink to `/private/tmp`;
+##   git canonicalises its git directory and the macOS shim records
+##   `F_GETPATH` spellings. The fixture root is resolved once, so every
+##   prefix this file compares against is spelled as the monitor spells it.
 
 import std/[os, osproc, sequtils, strutils, tempfiles, times, unittest]
 
 import repro_build_engine
 import repro_core
-import repro_hash
 import repro_local_store
 import repro_test_support
+import repro_test_support/descendant_guard_expectations
 import repro_test_support/reasoned_skip
 
 const RepoRootMarker = "repro.nim"
@@ -172,7 +202,11 @@ proc looseObjectPath(f: Fixture; oid: string): string =
   f.gitDir / "objects" / oid[0 .. 1] / oid[2 .. ^1]
 
 proc makeFixture(prefix: string): Fixture =
-  let root = createTempDir(prefix, "", dir = nonVolatileTempBase())
+  # Resolved, because the monitor records resolved spellings (see the header):
+  # an unresolved `/tmp/...` root would make every prefix comparison below
+  # miss paths the monitor did record under `/private/tmp/...`.
+  let root = expandFilename(
+    createTempDir(prefix, "", dir = nonVolatileTempBase()))
   if root.isVolatilePrefix():
     raise newException(IOError,
       "fixture root " & root & " is under a volatile prefix the engine drops " &
@@ -202,7 +236,20 @@ proc monitoredEdge(f: Fixture; id: string; script: string): BuildAction =
   ## `dgAutomaticMonitor` every path the action depends on comes from the
   ## monitor, which is exactly how the dev-env introspection edge sees the
   ## flake's object store.
-  action(id, ["/bin/sh", "-c", script],
+  let command =
+    when defined(macosx):
+      # A SIP-protected `/bin/sh` root would strip injection from git too
+      # (see the header); a `#!/bin/sh` file lets io-mon substitute its
+      # non-SIP shell. Linux keeps `/bin/sh -c`: nothing strips injection
+      # there, and the file would only add one more recorded input.
+      let scriptPath = f.root / "scripts" / (id.replace('/', '-') & ".sh")
+      createDir(scriptPath.parentDir)
+      writeFile(scriptPath, "#!/bin/sh\n" & script & "\n")
+      setFilePermissions(scriptPath, {fpUserRead, fpUserWrite, fpUserExec})
+      @[scriptPath]
+    else:
+      @["/bin/sh", "-c", script]
+  action(id, command,
     cwd = f.workRoot,
     inputs = [],
     outputs = [],
@@ -263,13 +310,68 @@ proc recordedInputsUnder(f: Fixture; edge: BuildAction; dir: string):
         input.path.replace('\\', '/') == dir.replace('\\', '/'):
       result.add(input.path)
 
+proc checkFailsClosed(f: Fixture; edge: BuildAction; r0: ActionResult) =
+  ## Where `NoTreeLifetimeGuard` holds, the specified outcome of run 1 in
+  ## place of a published record (io-mon `docs/usage.md`, "macOS and Windows
+  ## limitation (normative)"): the capture carries this platform's exact
+  ## tree-lifetime marker, the engine reports the skip as `monitor-loss`, and
+  ## nothing was published — so a later run cannot reuse it and must rebuild.
+  ## Asserting all three keeps the arm from passing on an unrelated failure
+  ## (a run that published nothing because it observed nothing, say).
+  var markers = 0
+  for diagnostic in r0.evidence.diagnostics:
+    const lead = "monitor loss: "
+    if diagnostic.startsWith(lead) and
+        diagnostic[lead.len .. ^1].isTreeLifetimeLimitation:
+      inc markers
+  checkpoint(edge.id & " diagnostics: " & $r0.evidence.diagnostics)
+  checkpoint(edge.id & " publish skipped: " & r0.cachePublishSkipReason)
+  check markers == 1
+  check "monitor-loss" in r0.cachePublishSkipReason
+  var cache = openActionCache(f.cacheRoot / "action-cache")
+  check not cache.readHotRecord(edge.weakFingerprint).found
+
+proc checkKeyClassification(f: Fixture; edge: BuildAction; r0: ActionResult) =
+  ## The classification under test, asked of the evidence the monitor REALLY
+  ## recorded in run 1 rather than of a published record, so it holds on every
+  ## platform (see the header). Every observed by-name object-store entry must
+  ## be absent from the key, and what decides which names are looked up —
+  ## `HEAD`, the branch ref, `objects/info/alternates` — must be in it.
+  let objects = f.gitDir / "objects"
+  let inputs = edge.cacheInputPaths(r0.evidence)
+  let enumerated = edge.cacheEnumeratedDirectories(r0.evidence)
+  let byName = r0.observedUnder(objects).filterIt(isGitObjectStorePath(it))
+  # The denominator: a loose object (the issue's own `objects/<2>/<38>`
+  # shape) must be among what was observed, or "none is in the key" would
+  # hold of an evidence set that never reached the store at all.
+  let head = f.git("rev-parse", "HEAD")
+  checkpoint(edge.id & " by-name observed: " & $byName)
+  check f.looseObjectPath(head) in byName
+  for path in byName:
+    checkpoint(path)
+    check path notin inputs
+    check path notin enumerated
+  for path in r0.evidence.monitorDirectoryEnumerations.toSeq:
+    if path.isGitObjectStorePath:
+      checkpoint(path)
+      check path notin enumerated
+  check (f.gitDir / "HEAD") in inputs
+  check (f.gitDir / "refs" / "heads" / "main") in inputs
+  check (objects / "info" / "alternates") in inputs
+
+type FirstRun = object
+  config: BuildEngineConfig
+  result: ActionResult
+
 proc firstRun(f: Fixture; repoRoot: string; edge: BuildAction;
-              name: string): BuildEngineConfig =
-  ## Run 1: execute, publish, and prove the action really looked inside the
-  ## object store — otherwise every "still a hit" below is vacuous.
-  result = monitoredConfig(repoRoot, f.cacheRoot)
-  let first = runBuild(graph([edge]), result)
+              name: string): FirstRun =
+  ## Run 1: execute, publish where the platform can, and prove the action
+  ## really looked inside the object store — otherwise every "still a hit"
+  ## below is vacuous. The observation precondition holds on EVERY platform.
+  result.config = monitoredConfig(repoRoot, f.cacheRoot)
+  let first = runBuild(graph([edge]), result.config)
   let r0 = first.byId(edge.id)
+  result.result = r0
   let seen = r0.observedUnder(f.gitDir / "objects")
   checkpoint(name & " first: status=" & $r0.status & " launched=" &
     $r0.launched & " stderr=" & r0.stderr)
@@ -278,6 +380,9 @@ proc firstRun(f: Fixture; repoRoot: string; edge: BuildAction;
   check r0.launched
   check f.runLines(name).len == 1
   check seen.len > 0
+  f.checkKeyClassification(edge, r0)
+  if NoTreeLifetimeGuard:
+    f.checkFailsClosed(edge, r0)
 
 proc secondRun(f: Fixture; config: BuildEngineConfig; edge: BuildAction;
                name: string): ActionResult =
@@ -286,6 +391,24 @@ proc secondRun(f: Fixture; config: BuildEngineConfig; edge: BuildAction;
   checkpoint(name & " second: status=" & $result.status & " decision=" &
     $result.cacheDecision & " launched=" & $result.launched & " missReason=" &
     result.cacheMissReason)
+
+proc checkReuse(f: Fixture; r: ActionResult; name: string) =
+  ## The positive cases' run 2, after the store moved under names run 1 read.
+  ## Where records are published the edge must be reused without running.
+  ## Where `NoTreeLifetimeGuard` holds nothing was published (run 1 checked
+  ## that), so the specified outcome is a conservative rebuild: the edge
+  ## re-launches, succeeds, and reads the same content through the moved
+  ## store. That arm says nothing about the elision — `checkKeyClassification`
+  ## carries it there — and must not be read as a reuse result.
+  if NoTreeLifetimeGuard:
+    check r.status == asSucceeded
+    check r.cacheDecision notin ReuseDecisions
+    check r.launched
+    check f.runLines(name) == @["ran one", "ran one"]
+  else:
+    check r.cacheDecision in ReuseDecisions
+    check not r.launched
+    check f.runLines(name).len == 1
 
 suite "a git object store's churn does not invalidate a by-name lookup":
 
@@ -304,7 +427,7 @@ suite "a git object store's churn does not invalidate a by-name lookup":
       let f = makeFixture("repro-git-objects-freshen-")
       defer: removeDir(f.root)
       let edge = f.gitReadEdge("freshen")
-      let config = f.firstRun(repoRoot, edge, "freshen")
+      let config = f.firstRun(repoRoot, edge, "freshen").config
       let blob = f.git("rev-parse", "HEAD:a.txt")
       let loose = f.looseObjectPath(blob)
       check fileExists(loose)
@@ -319,9 +442,7 @@ suite "a git object store's churn does not invalidate a by-name lookup":
       # Precondition: the store really moved under a name the action read.
       check after != before
       let r = f.secondRun(config, edge, "freshen")
-      check r.cacheDecision in ReuseDecisions
-      check not r.launched
-      check f.runLines("freshen").len == 1
+      f.checkReuse(r, "freshen")
 
   test "objects moving from loose into a pack do not invalidate":
     ## `git repack -a -d` + `git prune-packed`: every loose object the first
@@ -336,7 +457,7 @@ suite "a git object store's churn does not invalidate a by-name lookup":
       let f = makeFixture("repro-git-objects-repack-")
       defer: removeDir(f.root)
       let edge = f.gitReadEdge("repack")
-      let config = f.firstRun(repoRoot, edge, "repack")
+      let config = f.firstRun(repoRoot, edge, "repack").config
       let head = f.git("rev-parse", "HEAD")
       let refBefore = readFile(f.gitDir / "refs" / "heads" / "main")
       discard f.git("repack", "-a", "-d", "-q")
@@ -347,9 +468,7 @@ suite "a git object store's churn does not invalidate a by-name lookup":
       check toSeq(walkFiles(f.gitDir / "objects" / "pack" / "pack-*.pack")).len == 1
       check readFile(f.gitDir / "refs" / "heads" / "main") == refBefore
       let r = f.secondRun(config, edge, "repack")
-      check r.cacheDecision in ReuseDecisions
-      check not r.launched
-      check f.runLines("repack").len == 1
+      f.checkReuse(r, "repack")
 
   test "control: a commit that moves the branch invalidates":
     ## The other half of the soundness argument: the object NAMES the action
@@ -362,10 +481,13 @@ suite "a git object store's churn does not invalidate a by-name lookup":
       let f = makeFixture("repro-git-objects-commit-")
       defer: removeDir(f.root)
       let edge = f.gitReadEdge("commit")
-      let config = f.firstRun(repoRoot, edge, "commit")
+      let config = f.firstRun(repoRoot, edge, "commit").config
       # The ref really is a recorded input (the guarantee this control leans
-      # on), not merely something the engine happened to notice.
-      check f.recordedInputsUnder(edge, f.gitDir / "refs").len > 0
+      # on), not merely something the engine happened to notice. Without a
+      # published record (`NoTreeLifetimeGuard`) `firstRun` has already
+      # checked the ref is in the key the record would have been built from.
+      if not NoTreeLifetimeGuard:
+        check f.recordedInputsUnder(edge, f.gitDir / "refs").len > 0
       sleep(20)
       f.commitFile("two")
       let r = f.secondRun(config, edge, "commit")
@@ -384,16 +506,83 @@ suite "a git object store's churn does not invalidate a by-name lookup":
       let f = makeFixture("repro-git-objects-alternates-")
       defer: removeDir(f.root)
       let edge = f.gitReadEdge("alternates")
-      let config = f.firstRun(repoRoot, edge, "alternates")
+      let config = f.firstRun(repoRoot, edge, "alternates").config
       let alternates = f.gitDir / "objects" / "info" / "alternates"
-      check alternates in f.recordedInputsUnder(edge, f.gitDir / "objects")
+      # As in the commit control: without a published record, `firstRun`'s
+      # key check is what shows `alternates` is kept.
+      if not NoTreeLifetimeGuard:
+        check alternates in f.recordedInputsUnder(edge, f.gitDir / "objects")
       let other = f.root / "other.git"
       discard f.git("init", "-q", "--bare", other)
       writeFile(alternates, other / "objects" & "\n")
       let r = f.secondRun(config, edge, "alternates")
       check r.cacheDecision notin ReuseDecisions
       check r.launched
-      check "alternates" in r.cacheMissReason
+      # The miss can only NAME `alternates` when there was a record to
+      # compare it against; without one the rebuild is unconditional, and
+      # the run must still have seen the store as it now is.
+      if NoTreeLifetimeGuard:
+        check f.runLines("alternates") == @["ran one", "ran one"]
+      else:
+        check "alternates" in r.cacheMissReason
+
+  test "`git -C` paths are not re-anchored on the action's cwd":
+    ## Issue: `reprobuild-pm/issues/2026-10-18-macos-shim-records-relative-
+    ## paths-the-engine-anchors-on-the-action-cwd.md`. `git -C <repo>`
+    ## chdir()s into the repository and then opens `.git/HEAD`,
+    ## `.git/objects/xx/...` and probes `.mailmap` and `HEAD:a.txt` by
+    ## RELATIVE path. The macOS monitor recorded those strings verbatim and
+    ## the evidence fold joined them onto the action's cwd, so the key carried
+    ## phantom inputs `<work>/.git/HEAD`, `<work>/.git/objects/...`,
+    ## `<work>/.mailmap` that git never looked at — creating any of them in
+    ## the action's cwd would have missed the cache. Every relative path has
+    ## to be anchored on the directory the process was in when it made the
+    ## call.
+    ##
+    ## The action's cwd is `work/`, and git does nothing there but name it
+    ## (its startup `getcwd`). So no path BELOW `work/` may be observed,
+    ## enumerated or folded into the key. The key is asked of the evidence
+    ## (`cacheInputPaths` / `cacheEnumeratedDirectories`), as
+    ## `checkKeyClassification` does, so the case holds where no record is
+    ## published (see the header). The positive half — the repository's own
+    ## `.git` was observed — keeps the negative half from passing on an empty
+    ## capture.
+    ##
+    ## git is the action's root process (the resolved Nix image, not SIP
+    ## protected), so neither a `/bin/sh` root nor the script route stands
+    ## between the monitor and the calls this case inspects.
+    if gitExe().len == 0:
+      skip(NoGitReason)
+    else:
+      let repoRoot = findRepoRoot()
+      let f = makeFixture("repro-git-objects-anchor-")
+      defer: removeDir(f.root)
+      let edge = action("git-objects/anchor",
+        [f.git, "-C", f.repo, "show", "HEAD:a.txt"],
+        cwd = f.workRoot,
+        inputs = [],
+        outputs = [],
+        env = f.gitEnv(),
+        cacheable = true,
+        weakFingerprint = weakFingerprintFromText("git-object-store.anchor"),
+        dependencyPolicy = automaticMonitorGatheringPolicy(),
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
+      let config = monitoredConfig(repoRoot, f.cacheRoot)
+      let r0 = runBuild(graph([edge]), config).byId(edge.id)
+      checkpoint("anchor: status=" & $r0.status & " stderr=" & r0.stderr)
+      check r0.status == asSucceeded
+      check r0.launched
+      check r0.observedUnder(f.gitDir).len > 0
+      check (f.gitDir / "HEAD") in edge.cacheInputPaths(r0.evidence)
+      let work = f.workRoot
+      let underWork = proc(path: string): bool =
+        path.replace('\\', '/').startsWith(work.replace('\\', '/') & "/")
+      let phantoms = r0.observedUnder(work) &
+        r0.evidence.monitorDirectoryEnumerations.toSeq.filter(underWork) &
+        edge.cacheInputPaths(r0.evidence).filter(underWork) &
+        edge.cacheEnumeratedDirectories(r0.evidence).filter(underWork)
+      checkpoint("paths attributed to the action's cwd: " & $phantoms)
+      check phantoms.len == 0
 
   test "control: a non-git tree shaped like an object store stays observed":
     ## The SHAPE `objects/<2 hex>/<38 hex>` licenses nothing on its own. Here
@@ -416,7 +605,12 @@ suite "a git object store's churn does not invalidate a by-name lookup":
     let config = monitoredConfig(repoRoot, f.cacheRoot)
     let r0 = runBuild(graph([edge]), config).byId(edge.id)
     check r0.status == asSucceeded
-    check lookalike in f.recordedInputsUnder(edge, f.root / "data")
+    # The key half holds everywhere; the record half where one is published.
+    check lookalike in edge.cacheInputPaths(r0.evidence)
+    if NoTreeLifetimeGuard:
+      f.checkFailsClosed(edge, r0)
+    else:
+      check lookalike in f.recordedInputsUnder(edge, f.root / "data")
     sleep(20)
     writeFile(lookalike, "second\n")
     let r = f.secondRun(config, edge, "lookalike")

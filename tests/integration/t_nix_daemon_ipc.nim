@@ -69,8 +69,11 @@ proc prepareFixtureRoot(repoRoot: string): string =
         "failed to prepare Nix fixture git index: " & output)
 
 proc fixtureDependencyHash(resp: JsonNode; path: string): string =
+  # The helper's dependency contract resolves symlinks, including macOS's
+  # /var and /tmp aliases; compare the same file identity on both sides.
+  let canonicalPath = expandFilename(path)
   for dep in resp["dependencies"]:
-    if dep["path"].getStr() == path:
+    if dep["path"].getStr() == canonicalPath:
       return dep["hash"].getStr()
   check false
   ""

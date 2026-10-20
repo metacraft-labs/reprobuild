@@ -4,6 +4,14 @@ import repro_core/paths
 when defined(posix):
   import std/posix
 
+  const PathLimit = min(Sockaddr_un_path_length,
+    sizeof(Sockaddr_un().sun_path)) - 1
+    ## The longest Unix-socket path `std/net` binds or dials: `makeUnixAddr`
+    ## refuses `path.len >= Sockaddr_un_path_length` and copies the NUL too.
+    ## 107 on Linux, 91 on macOS. Stated here rather than taken from
+    ## `unixSocketPathMaxLen`, so the bound is checked independently of the
+    ## code under test, which is also checked to agree with it.
+
 template withTempRoot(root: string; body: untyped) =
   let wasSet = existsEnv("TMPDIR")
   let previous = getEnv("TMPDIR")
@@ -30,8 +38,8 @@ suite "RunQuota endpoint paths":
         let first = runquotaEndpointPath("caller-1")
         let second = runquotaEndpointPath("caller-2")
         checkpoint(first)
-        check first.len < sizeof(Sockaddr_un().sun_path)
-        check second.len < sizeof(Sockaddr_un().sun_path)
+        check first.len <= PathLimit
+        check second.len <= PathLimit
         check first.parentDir != second.parentDir
         check first.parentDir != "/tmp"
         check first.isAbsolute
@@ -41,7 +49,8 @@ suite "RunQuota endpoint paths":
 
   test "the terminating NUL counts against the native socket address budget":
     when defined(posix):
-      let limit = sizeof(Sockaddr_un().sun_path) - 1
+      check unixSocketPathMaxLen() == PathLimit
+      let limit = PathLimit
       let root = "/tmp/" & repeat('x', limit - "/tmp//caller/runquota.sock".len)
       withTempRoot(root):
         let exact = root / "caller" / "runquota.sock"
@@ -60,7 +69,7 @@ suite "RunQuota endpoint paths":
         let common = repeat('n', 200)
         let first = runquotaEndpointPath(common & "a")
         let second = runquotaEndpointPath(common & "b")
-        check first.len < sizeof(Sockaddr_un().sun_path)
+        check first.len <= PathLimit
         check first.parentDir != second.parentDir
 
     else:
@@ -79,6 +88,6 @@ suite "RunQuota endpoint paths":
   test "UTF-8 paths are bounded in bytes rather than characters":
     when defined(posix):
       withTempRoot("/tmp/" & repeat("\xc3\xa9", 60)):
-        check runquotaEndpointPath("caller").len < sizeof(Sockaddr_un().sun_path)
+        check runquotaEndpointPath("caller").len <= PathLimit
     else:
       skip()

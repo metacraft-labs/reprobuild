@@ -176,8 +176,11 @@ suite "old names are read until retired":
     check s.schema == schemaWorkspaceSettingsV1
     check o.schema == schemaWorkspaceBootstrapV1
     sameSettings(s, o)
-    # The old `[manifest] branch` is also what the root mainline was read from.
-    check o.rootMainline == some("latest")
+    # The old `[manifest] branch` is also what the root mainline was read
+    # from — but only while that `[manifest]` store IS the root repo. When it
+    # names a separate record store the branch is the store's, not the root's.
+    check o.rootMainline(legacyStoreIsRoot = true) == some("latest")
+    check o.rootMainline(legacyStoreIsRoot = false) == none(string)
 
     # Both in one directory: the new name wins.
     writeFile(legacy / "repro-workspace.toml",

@@ -20,7 +20,16 @@
 ##     `keepHolders` for the `keep` holders that pin with no deadline,
 ##     `keepHoldersKnown`, `effectiveDeadline`, `lastRenewed`) — defined +
 ##     round-tripped here, populated by L2 (reconcile) and L4 (daemon renew),
-##     read by the L3 reaper.
+##     read by the L3 reaper,
+##   * `providerArtifact` — HOW TO REACH THE PROVIDER that owns `typeId`
+##     (Ephemeral-State-Leases.md §4.2, v5). A reaper can reconstruct a record
+##     of an out-of-tree type and still have no route to its real-world state:
+##     the destroy has to go over a provider SESSION, and opening one needs the
+##     provider binary's path + its content-addressed artifact id. Recording it
+##     WITH the record is what makes the session transport reachable after a
+##     daemon restart, with no re-evaluation of the recipe that produced it —
+##     the §4.3 "the on-disk store is the source of truth" property applied to
+##     the transport as well as to the lease.
 ##
 ## Writes are ATOMIC and DURABLE: a record is serialized to a temp file
 ## (unique per write) in the same directory, the temp is flushed + fsynced,
@@ -69,7 +78,7 @@ const
     ## wrongly destroy. v1 stored a bare u64 and is not read. Track B keeps
     ## the v2 reader (`decodeRecordLegacy`) so on-disk records written
     ## before the SSZ migration still decode — nothing on disk breaks.
-  StateRecordSszVersion* = 4'u16
+  StateRecordSszVersion* = 5'u16
     ## Track B (Typed-Extension-Interfaces-And-Provider-Libraries.md,
     ## Incremental-Invalidation.md §"Binary formats from Reprobuild domain
     ## types"): the CURRENT, WRITTEN format. The record body is a versioned
@@ -78,19 +87,32 @@ const
     ## `ResourceStateRecordSsz` mirror type — spec-mandated versioned SSZ
     ## over domain types, not a hand-written binary struct.
     ##
-    ## v4 adds `keepHolders` + `keepHoldersKnown` to the mirror: before it, a
+    ## v5 adds `providerArtifact` (Ephemeral-State-Leases.md §4.2): the
+    ## provider binary a reaper opens a SESSION to in order to destroy this
+    ## record's state. Before it, a reaping process could only learn that from
+    ## its own memory, so no shipped code path could give the daemon the
+    ## artifact and the session transport was unreachable from the product
+    ## (reprobuild-pm issue
+    ## 2026-10-14-no-production-path-enables-the-daemons-session-reap-transport).
+    ##
+    ## v4 added `keepHolders` + `keepHoldersKnown` to the mirror: before it, a
     ## `keep` holder was recorded nowhere, so `effectiveDeadline == none`
     ## could not say whether a keep holder pinned the state or no dated holder
     ## existed, and no reader could name the pin (reprobuild-pm issue
     ## 2026-10-09-a-keep-holders-identity-is-never-persisted-in-a-lease-record).
     ##
-    ## The reader accepts THREE framings: this v4 envelope, the v3 envelope
-    ## (`StateRecordSszVersionV3`, the same mirror without the keep-holder
-    ## fields), and the legacy LE framing (`StateRecordVersion` above).
-    ## Read-old / write-new: a pre-v4 record decodes with no keep holders and
+    ## The reader accepts FOUR framings: this v5 envelope, the v4 envelope
+    ## (`StateRecordSszVersionV4`, the same mirror without the provider
+    ## artifact), the v3 envelope (`StateRecordSszVersionV3`, v4 without the
+    ## keep-holder fields), and the legacy LE framing (`StateRecordVersion`
+    ## above). Read-old / write-new: a pre-v5 record decodes with
+    ## `providerArtifact = none`, a pre-v4 record also with no keep holders and
     ## `keepHoldersKnown = false` (true if it carries a dated deadline or was
-    ## never renewed — see `pre4KeepHoldersKnown`), and the next write
-    ## upgrades it to v4.
+    ## never renewed — see `pre4KeepHoldersKnown`), and the next write upgrades
+    ## it to v5.
+  StateRecordSszVersionV4 = 4'u16
+    ## The pre-provider-artifact SSZ envelope. READ-ONLY: nothing writes it.
+    ## Its payload is `ResourceStateRecordSszV4`.
   StateRecordSszVersionV3 = 3'u16
     ## The pre-keep-holder SSZ envelope. READ-ONLY: nothing writes it. Its
     ## payload is `ResourceStateRecordSszV3`.
@@ -121,6 +143,20 @@ type
     ## directory itself (the caller decides where `.repro/state` lives so
     ## tests can point it at a throwaway dir).
     root*: string
+
+  ResourceProviderArtifactRef* = object
+    ## The provider binary that serves a resource `typeId` — the three fields a
+    ## session launch needs, a strict subset of the RP runtime's
+    ## `ProviderArtifactRef`.
+    ##
+    ## It lives HERE, with the store, because from v5 on it is PERSISTED in the
+    ## state record (see `ResourceStateRecord.providerArtifact`). One definition
+    ## serves all three consumers — the store, the L3 reaper's session transport,
+    ## and the CLI's run-edge resolver — so a field cannot be added to one
+    ## reader's idea of a provider artifact and not another's.
+    binaryPath*: string
+    providerArtifactId*: string
+    workingDir*: string
 
   ResourceStateRecord* = object
     ## One persisted, reconstructable resource. Everything here survives a
@@ -199,6 +235,32 @@ type
       ## only reap a `some(t)` with `t <= now`.
     lastRenewed*: Time
       ## Wall-clock of the most recent lease renewal.
+    providerArtifact*: Option[ResourceProviderArtifactRef]
+      ## v5 (Ephemeral-State-Leases.md §4.2): the provider binary a reaper
+      ## opens a SESSION to in order to destroy this state, written by the
+      ## reconcile that materialized it over such a session. `none` for a
+      ## resource whose driver was linked in the materializing process (an
+      ## in-tree type has no artifact to launch) and for every record written
+      ## before v5.
+      ##
+      ## WHY IT IS IN THE RECORD. A reap needs two things the record otherwise
+      ## supplies on its own — `typeId` and the attrs payload — plus a ROUTE to
+      ## the code that knows how to destroy the thing. For an out-of-tree type
+      ## the reaping process has no such code and cannot get it: the daemon is a
+      ## fixed binary with no recipe to import. Carrying the route here makes
+      ## the §4.2 session transport reachable from the on-disk store alone, so
+      ## it survives a daemon restart and needs no re-evaluation — the same
+      ## reason §4.3 puts the lease itself on disk rather than in daemon memory.
+      ##
+      ## IT CAN GO STALE, and that is tolerated rather than prevented: the
+      ## recorded path is a build output, so a rebuild or a store garbage
+      ## collection can leave it naming nothing. A stale ref makes the session
+      ## fail to launch, which is a PER-RECORD reap failure `reapOnce` already
+      ## records and §4.5 already reports — not a sweep failure, and not
+      ## something the record can be trusted to notice about itself. An artifact
+      ## registered with the running daemon (`registerLeaseReapProvider`) comes
+      ## from a run that is using the type right now, so it is fresher and
+      ## OUTRANKS this one; see `reapTransportFactory`.
 
 # ---------------------------------------------------------------------------
 # Store handle / directory management.
@@ -304,7 +366,10 @@ proc decodeRecordLegacy(bytes: openArray[byte]): ResourceStateRecord =
   result.determinism = decodeDeterminism(readU32Le(bytes, pos))
   result.attrsTypeId = readString(bytes, pos)
   result.attrsJson = readString(bytes, pos)
-  let deps = int(readU32Le(bytes, pos))
+  let depsRaw = readU32Le(bytes, pos)
+  if not elementCountFits(depsRaw, bytes.len - pos, 4):
+    raise newException(IOError, "element count exceeds remaining bytes")
+  let deps = int(depsRaw)
   result.dependsOn = newSeq[string](deps)
   for i in 0 ..< deps:
     result.dependsOn[i] = readString(bytes, pos)
@@ -315,7 +380,10 @@ proc decodeRecordLegacy(bytes: openArray[byte]): ResourceStateRecord =
   result.present = bytes[pos] != 0'u8
   inc pos
   result.holders = initTable[string, Time]()
-  let holderCount = int(readU32Le(bytes, pos))
+  let holderCountRaw = readU32Le(bytes, pos)
+  if not elementCountFits(holderCountRaw, bytes.len - pos, 12):
+    raise newException(IOError, "element count exceeds remaining bytes")
+  let holderCount = int(holderCountRaw)
   for i in 0 ..< holderCount:
     let consumerId = readString(bytes, pos)
     let deadline = decodeUnixTime(readU64Le(bytes, pos))
@@ -369,7 +437,7 @@ type
     deadlineUnix: uint64
 
   ResourceStateRecordSsz = object
-    ## Fixed-schema SSZ mirror of `ResourceStateRecord` — the v4 schema
+    ## Fixed-schema SSZ mirror of `ResourceStateRecord` — the v5 schema
     ## (`StateRecordSszVersion`). Field order is the schema; changing it
     ## requires a new `StateRecordSszTypeId`/version.
     address: SszText
@@ -391,11 +459,43 @@ type
     hasEffectiveDeadline: bool
     effectiveDeadlineUnix: uint64
     lastRenewedUnix: uint64
+    hasProviderArtifact: bool
+      ## v5: whether the three fields below carry a provider artifact ref.
+      ## An explicit presence flag rather than "empty `binaryPath` means
+      ## none", because an empty path is a corrupt ref and must be
+      ## distinguishable from a record that never had one — `none` is the
+      ## in-tree case and routes in-process, while a present-but-empty ref
+      ## would be a session launch of nothing.
+    providerBinaryPath: SszText
+    providerArtifactId: SszText
+    providerWorkingDir: SszText
+
+  ResourceStateRecordSszV4 = object
+    ## The v4 mirror (`StateRecordSszVersionV4`), kept so v4 records still
+    ## decode. READ-ONLY and FROZEN: it must match what the v4 encoder wrote,
+    ## byte for byte, or a v4 record stops decoding. What it lacks is the
+    ## provider artifact ref.
+    address: SszText
+    typeId: SszText
+    determinism: uint32
+    attrsTypeId: SszText
+    attrsJson: List[byte, MaxAttrsBytes]
+    dependsOn: List[SszText, MaxStateDeps]
+    identity: SszText
+    digest: array[DigestSize, byte]
+    present: bool
+    holders: List[StateHolderSsz, MaxStateHolders]
+    keepHolders: List[SszText, MaxStateHolders]
+    keepHoldersKnown: bool
+    hasEffectiveDeadline: bool
+    effectiveDeadlineUnix: uint64
+    lastRenewedUnix: uint64
 
   ResourceStateRecordSszV3 = object
     ## The v3 mirror (`StateRecordSszVersionV3`), kept so v3 records still
     ## decode. READ-ONLY and FROZEN: it must match what the v3 encoder wrote,
-    ## byte for byte, or a v3 record stops decoding.
+    ## byte for byte, or a v3 record stops decoding. What it lacks is the
+    ## keep-holder fields AND the provider artifact ref.
     address: SszText
     typeId: SszText
     determinism: uint32
@@ -498,6 +598,23 @@ proc toSszRecord(rec: ResourceStateRecord): ResourceStateRecordSsz =
     result.hasEffectiveDeadline = false
     result.effectiveDeadlineUnix = 0
   result.lastRenewedUnix = uint64(rec.lastRenewed.toUnix())
+  if rec.providerArtifact.isSome:
+    let a = rec.providerArtifact.get
+    # A ref with no binary path cannot launch anything, so persisting it as
+    # PRESENT would turn an in-tree record into one whose reap tries to spawn
+    # the empty string on every tick. Refuse at the codec, where the record is
+    # still the writer's problem, rather than leave it for the reaper.
+    if a.binaryPath.len == 0:
+      failCodec("state-record providerArtifact has an empty binaryPath")
+    result.hasProviderArtifact = true
+    result.providerBinaryPath = toStateText(a.binaryPath)
+    result.providerArtifactId = toStateText(a.providerArtifactId)
+    result.providerWorkingDir = toStateText(a.workingDir)
+  else:
+    result.hasProviderArtifact = false
+    result.providerBinaryPath = toStateText("")
+    result.providerArtifactId = toStateText("")
+    result.providerWorkingDir = toStateText("")
 
 proc fromSszRecord(wire: ResourceStateRecordSsz): ResourceStateRecord =
   result.address = fromStateText(wire.address)
@@ -531,16 +648,63 @@ proc fromSszRecord(wire: ResourceStateRecordSsz): ResourceStateRecord =
   else:
     result.effectiveDeadline = none(Time)
   result.lastRenewed = decodeUnixTime(wire.lastRenewedUnix)
+  if wire.hasProviderArtifact:
+    let binaryPath = fromStateText(wire.providerBinaryPath)
+    # The presence flag and an empty path contradict each other; the encoder
+    # refuses to write that pair, so reading it means the bytes are not what
+    # this codec produced. A `some(ref)` with no path would be handed to a
+    # session launch, so it is corruption, not a tolerable oddity.
+    if binaryPath.len == 0:
+      failCodec("state-record providerArtifact is present with an empty " &
+        "binaryPath")
+    result.providerArtifact = some(ResourceProviderArtifactRef(
+      binaryPath: binaryPath,
+      providerArtifactId: fromStateText(wire.providerArtifactId),
+      workingDir: fromStateText(wire.providerWorkingDir)))
+  else:
+    result.providerArtifact = none(ResourceProviderArtifactRef)
+
+proc fromSszRecordV4(wire: ResourceStateRecordSszV4): ResourceStateRecord =
+  ## READ-OLD: lift a v4 payload into the current record. Every v4 field has
+  ## the same meaning in v5, so the v4 mirror is copied field-for-field into a
+  ## v5 mirror and decoded by the ONE v5 reader. What v4 lacks is the provider
+  ## artifact ref: a v4 writer recorded no route to the provider, so the record
+  ## has none and the reaper falls back to its in-memory registry or to the
+  ## in-process arm for that type (Ephemeral-State-Leases.md §4.2). There is no
+  ## equivalent of `pre4KeepHoldersKnown` to decide here — an absent artifact is
+  ## simply absent, never an unknown that must be treated conservatively, because
+  ## nothing is pinned by it and the §4.5 finding reports a type it cannot reach.
+  fromSszRecord(ResourceStateRecordSsz(
+    address: wire.address,
+    typeId: wire.typeId,
+    determinism: wire.determinism,
+    attrsTypeId: wire.attrsTypeId,
+    attrsJson: wire.attrsJson,
+    dependsOn: wire.dependsOn,
+    identity: wire.identity,
+    digest: wire.digest,
+    present: wire.present,
+    holders: wire.holders,
+    keepHolders: wire.keepHolders,
+    keepHoldersKnown: wire.keepHoldersKnown,
+    hasEffectiveDeadline: wire.hasEffectiveDeadline,
+    effectiveDeadlineUnix: wire.effectiveDeadlineUnix,
+    lastRenewedUnix: wire.lastRenewedUnix,
+    hasProviderArtifact: false,
+    providerBinaryPath: toStateText(""),
+    providerArtifactId: toStateText(""),
+    providerWorkingDir: toStateText("")))
 
 proc fromSszRecordV3(wire: ResourceStateRecordSszV3): ResourceStateRecord =
   ## READ-OLD: lift a v3 payload into the current record. Every v3 field has
   ## the same meaning in v4, so the v3 mirror is copied field-for-field into
-  ## a v4 mirror and decoded by the ONE v4 reader. What v3 lacks is the keep
+  ## a v4 mirror and decoded by the ONE v4 reader (which in turn funnels into
+  ## the v5 one). What v3 lacks is the keep
   ## holders, and since a v3 writer dropped them on the floor the record
   ## cannot claim to know them — unless its deadline or `lastRenewed` proves
   ## there are none: no `keepHolders`, and `keepHoldersKnown` from
   ## `pre4KeepHoldersKnown`.
-  result = fromSszRecord(ResourceStateRecordSsz(
+  result = fromSszRecordV4(ResourceStateRecordSszV4(
     address: wire.address,
     typeId: wire.typeId,
     determinism: wire.determinism,
@@ -578,6 +742,14 @@ proc decodeSszPayload(payload: openArray[byte]): ResourceStateRecordSsz =
   except IOError as err:
     failCodec("could not read SSZ state-record payload: " & err.msg)
 
+proc decodeSszPayloadV4(payload: openArray[byte]): ResourceStateRecordSszV4 =
+  try:
+    SSZ.decode(payload, ResourceStateRecordSszV4)
+  except SszError as err:
+    failCodec("invalid v4 SSZ state-record payload: " & err.msg)
+  except IOError as err:
+    failCodec("could not read v4 SSZ state-record payload: " & err.msg)
+
 proc decodeSszPayloadV3(payload: openArray[byte]): ResourceStateRecordSszV3 =
   try:
     SSZ.decode(payload, ResourceStateRecordSszV3)
@@ -606,7 +778,9 @@ proc decodeSszEnvelope(bytes: openArray[byte]): ResourceStateRecord =
     failCodec("SSZ state-record envelope too short")
   var pos = StateRecordMagic.len
   let version = readU16Le(bytes, pos)
-  if version != StateRecordSszVersion and version != StateRecordSszVersionV3:
+  if version != StateRecordSszVersion and
+     version != StateRecordSszVersionV4 and
+     version != StateRecordSszVersionV3:
     failCodec("unsupported SSZ state-record version " & $version)
   let typeId = readU16Le(bytes, pos)
   if typeId != StateRecordSszTypeId:
@@ -626,16 +800,19 @@ proc decodeSszEnvelope(bytes: openArray[byte]): ResourceStateRecord =
   # Same envelope, same checksum; only the payload schema differs by version.
   if version == StateRecordSszVersionV3:
     fromSszRecordV3(decodeSszPayloadV3(payload))
+  elif version == StateRecordSszVersionV4:
+    fromSszRecordV4(decodeSszPayloadV4(payload))
   else:
     fromSszRecord(decodeSszPayload(payload))
 
 proc decodeRecord(bytes: openArray[byte]): ResourceStateRecord =
   ## READ-ALL dispatcher: after the shared `RSST` magic, sniff the format
   ## by the first version half-word. The SSZ envelope's version is a u16 LE
-  ## — `StateRecordSszVersion` (4, written) or `StateRecordSszVersionV3` (3,
-  ## read-only); the legacy LE framing's version is a u32 LE
+  ## — `StateRecordSszVersion` (5, written) or one of the read-only
+  ## `StateRecordSszVersionV4` (4) / `StateRecordSszVersionV3` (3); the legacy
+  ## LE framing's version is a u32 LE
   ## `StateRecordVersion` (2), whose low half-word is therefore 2. None of
-  ## them collide (4 / 3 vs 2), so reading a u16 at the post-magic offset
+  ## them collide (5 / 4 / 3 vs 2), so reading a u16 at the post-magic offset
   ## disambiguates cleanly; `decodeSszEnvelope` then picks the payload schema
   ## by that same version. A future SSZ version bump stays > any legacy
   ## value, preserving the split.
@@ -647,6 +824,7 @@ proc decodeRecord(bytes: openArray[byte]): ResourceStateRecord =
   var probe = StateRecordMagic.len
   let versionWord = readU16Le(bytes, probe)
   if versionWord == StateRecordSszVersion or
+     versionWord == StateRecordSszVersionV4 or
      versionWord == StateRecordSszVersionV3:
     decodeSszEnvelope(bytes)
   elif versionWord > StateRecordSszVersion:
@@ -766,7 +944,10 @@ proc buildStateRecord*(inst: ResourceInstance; binding: ResourceBinding;
                        effectiveDeadline: Option[Time] = none(Time);
                        lastRenewed: Time = fromUnix(0);
                        keepHolders: seq[string] = @[];
-                       keepHoldersKnown = true): ResourceStateRecord =
+                       keepHoldersKnown = true;
+                       providerArtifact =
+                         none(ResourceProviderArtifactRef)):
+    ResourceStateRecord =
   ## Assemble a record from a reconciled resource + its recorded binding.
   ## The attrs are serialized HERE via the extension-registry marshaller
   ## (`marshalAttrs`) — the exact seam the RP protocol lane uses — so the
@@ -775,6 +956,12 @@ proc buildStateRecord*(inst: ResourceInstance; binding: ResourceBinding;
   ## `keepHoldersKnown` defaults to TRUE: a record assembled by current code
   ## knows its keep holders (possibly none). Only a renewal of a pre-v4
   ## record that could not see them passes `false` through.
+  ##
+  ## `providerArtifact` defaults to NONE, which is the correct answer for the
+  ## in-process reconcile: the type's driver is linked in the materializing
+  ## process, so there is no provider binary to record. The session reconcile
+  ## passes the artifact it launched the type over
+  ## (Ephemeral-State-Leases.md §4.2).
   ResourceStateRecord(
     address: inst.address,
     typeId: inst.typeId,
@@ -789,7 +976,8 @@ proc buildStateRecord*(inst: ResourceInstance; binding: ResourceBinding;
     keepHolders: keepHolders,
     keepHoldersKnown: keepHoldersKnown,
     effectiveDeadline: effectiveDeadline,
-    lastRenewed: lastRenewed)
+    lastRenewed: lastRenewed,
+    providerArtifact: providerArtifact)
 
 proc writeStateRecord*(store: StateStore; inst: ResourceInstance;
                        binding: ResourceBinding;
@@ -797,11 +985,13 @@ proc writeStateRecord*(store: StateStore; inst: ResourceInstance;
                        effectiveDeadline: Option[Time] = none(Time);
                        lastRenewed: Time = fromUnix(0);
                        keepHolders: seq[string] = @[];
-                       keepHoldersKnown = true) =
+                       keepHoldersKnown = true;
+                       providerArtifact =
+                         none(ResourceProviderArtifactRef)) =
   ## Convenience overload: build + atomically write in one call.
   writeStateRecord(store,
     buildStateRecord(inst, binding, holders, effectiveDeadline, lastRenewed,
-                     keepHolders, keepHoldersKnown))
+                     keepHolders, keepHoldersKnown, providerArtifact))
 
 proc readStateRecord*(store: StateStore; address: string): ResourceStateRecord =
   ## Read the record for `address`. Raises `IOError` if absent (callers
@@ -1038,9 +1228,11 @@ proc reconstructInstanceOpaque*(rec: ResourceStateRecord): ResourceInstance =
   ## NOT the cause of the outage recorded in
   ## reprobuild-pm/issues/2026-09-29-lease-reap-tick-has-never-once-succeeded.md.
   ## That daemon reaped on the IN-PROCESS transport throughout (no provider
-  ## artifact was registered, and nothing in the shipped tree registers one),
-  ## where its record had no linked driver either and the strict path is still
-  ## the right one. See `reaper.nim`'s module header.
+  ## artifact was registered, and at the time nothing in the shipped tree could
+  ## register one), where its record had no linked driver either and the strict
+  ## path is still the right one. A record written by current code carries its
+  ## own artifact (`providerArtifact`, above), so the session arm is now
+  ## reachable — see `reaper.nim`'s module header.
   ResourceInstance(
     typeId: rec.typeId,
     address: rec.address,

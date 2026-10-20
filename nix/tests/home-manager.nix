@@ -76,6 +76,8 @@ let
       ]
       ++ lib.optional isDarwin "package:busybox" # Linux-only in nixpkgs
       ++ lib.optional (system == "aarch64-darwin") "package:gm5-mac-arm-tool"
+      # Under `when linux():` inside which `when x86_64():` (nested guards).
+      ++ lib.optional (system == "x86_64-linux") "package:gm5-linux-x86-tool"
     );
     uncategorized = [
       "config:git.credentialHelper"

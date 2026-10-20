@@ -1,3 +1,15 @@
+const
+  dslHeadArgumentDropRule = "An extra argument here is REFUSED rather " &
+    "than dropped: it is never semchecked, so an identifier that does not " &
+    "exist compiles clean, and an argument that is accepted and then has " &
+    "no effect is indistinguishable from support for it."
+    ## The rule every fixed-arity block HEAD in this DSL states when it
+    ## refuses an argument written beside it -- ``service <name>:``, an
+    ## activity-level ``config:``, and the package-level section heads
+    ## ``refusePackageHeadArguments`` checks. One constant rather than a
+    ## copy per walker: the copies had already drifted apart in wording,
+    ## and the sentence is the same promise in every position.
+
 type
   ForeachLift = object
     id: string
@@ -2092,10 +2104,6 @@ const
     "`readiness <probe>`, `workingDirectory \"<dir>\"`, " &
     "`stateDirectory \"<dir>\"`, `instance:`, `converge <point>`, " &
     "the systemd-unit setters and `on <trigger>:` blocks"
-  m5ServiceHeadDropRule = "An extra argument here is REFUSED rather than " &
-    "dropped: it is never semchecked, so an identifier that does not " &
-    "exist compiles clean and an argument that is accepted and then not " &
-    "there is indistinguishable from support for it."
 
 const
   ## The trigger MODIFIERS ``Package-Model.md`` §"Service Lifecycle And
@@ -3910,7 +3918,7 @@ proc m5ServiceEmission(packageName: string; stmt: NimNode;
         "`service " & stmt[1].repr.strip() & ":` is neither. " &
         "Package-Model.md §Collections: a service is declared by name " &
         "and everything it carries is a setter in the body — " &
-        m5ServiceSetterSurface & ". " & m5ServiceHeadDropRule,
+        m5ServiceSetterSurface & ". " & dslHeadArgumentDropRule,
         m5ServiceStmtAnchor(extra))
   let parsed = m5ServiceEntryAst(stmt)
   if not parsed.matched:
@@ -4389,10 +4397,6 @@ const
     "that is accepted and then not there is indistinguishable from " &
     "support for it. This is the same defect the `args` setter and the " &
     "`on <trigger>:` walker had before Shared-Development-Services L1."
-  l2ActivityConfigHeadDropRule = "An extra argument here is REFUSED " &
-    "rather than dropped: it is never semchecked, so an identifier that " &
-    "does not exist compiles clean, and an argument that is accepted and " &
-    "then has no effect is indistinguishable from support for it."
 
 type
   L2ActivityParam = object
@@ -4594,7 +4598,7 @@ proc l2ParseActivityConfig(activityName: string;
       error("activity `" & activityName & "`: `config:` takes no " &
         "arguments, and `" & extra.repr.strip() & "` is written on its " &
         "head. Every key is declared INSIDE the block body. " &
-        l2ActivityConfigRule & " " & l2ActivityConfigHeadDropRule,
+        l2ActivityConfigRule & " " & dslHeadArgumentDropRule,
         l2StmtAnchor(extra))
     var pendingDoc = ""
     for entry in stmt[^1]:
@@ -9892,6 +9896,136 @@ proc emitDeclaredPackageImports(sectionStmts: NimNode): NimNode =
             newLit(recipe),
             ident(importAliasFor(name)))))
 
+proc packageHeadBodyHint(head: string): string =
+  ## Where the thing an author wrote on a no-argument section head
+  ## actually belongs, quoted back in the refusal. ``head`` is normalized.
+  case head
+  of "config":
+    "Every configurable is declared INSIDE the block body, as " &
+      "`<name>: <Type> = <default>`."
+  of "versions": "Every version entry is declared INSIDE the block body."
+  of "build": "Every action is written INSIDE the block body."
+  of "devenv":
+    "Every `activity`, `enable` and dev-env setting is written INSIDE " &
+      "the block body."
+  else: "Everything it carries is written INSIDE the block body."
+
+proc headArgumentAnchor(extra: NimNode): NimNode =
+  ## The node a refusal of ``extra`` -- an argument written on a section
+  ## head -- reports at: the FIRST token the author wrote. Nim hangs the
+  ## line info of a call on its opening parenthesis, of ``a.b`` on the
+  ## dot and of ``a + b`` on the operator, so anchoring on ``extra``
+  ## itself points several columns to the right of the argument. Descend
+  ## through the left-hand side until the leftmost token is reached.
+  result = extra
+  while true:
+    case result.kind
+    of nnkCall, nnkCommand, nnkCallStrLit, nnkDotExpr, nnkBracketExpr,
+       nnkExprEqExpr, nnkExprColonExpr, nnkObjConstr, nnkPragmaExpr:
+      if result.len == 0: break
+      result = result[0]
+    of nnkInfix:
+      if result.len < 2: break
+      result = result[1]
+    else:
+      break
+
+proc refuseNoArgumentHead(owner: string; stmt: NimNode) =
+  ## ``stmt`` is a section whose ONLY legal children are its head and an
+  ## optional block body: ``config:``, ``versions:``, ``build:`` (at
+  ## package level and inside an artifact) and ``devEnv:``. Refuse every
+  ## child in between, anchored on that child.
+  ##
+  ## The upper bound is the body when there is one and the end of the
+  ## statement when there is not, so ``versions junk`` with no colon is
+  ## refused as well: every walker of these sections reads ``stmt[^1]``
+  ## as the body, finds it is not a ``StmtList`` and skips the section,
+  ## which drops ``junk`` exactly as silently as the block form did.
+  let spelling = identText(stmt[0])
+  let last = if stmt[^1].kind == nnkStmtList: stmt.len - 1 else: stmt.len
+  for i in 1 ..< last:
+    let extra = stmt[i]
+    error(owner & ": `" & spelling & ":` takes no arguments, and `" &
+      extra.repr.strip() & "` is written on its head. " &
+      packageHeadBodyHint(spelling.normalize) & " " &
+      dslHeadArgumentDropRule, headArgumentAnchor(extra))
+
+proc refusePackageHeadArguments(name, body: NimNode) =
+  ## Refuse an argument written beside a fixed-arity package-level
+  ## section head, before any walker reads the section.
+  ##
+  ## Seven heads accepted such an argument and dropped it (filed as
+  ## ``reprobuild-pm/issues/2026-10-08-package-level-dsl-heads-and-
+  ## bodies-silently-drop-arguments.md``): ``config``, ``executable``,
+  ## ``library``, ``files``, ``versions``, ``build`` and ``devEnv``.
+  ## Each is read by SEVERAL walkers -- ``parsePackageDef``,
+  ## ``emitM2ConfigDefaults``, ``emitM2Versions``, ``emitM3Artifacts``,
+  ## ``collectBuildStatements``, ``collectDevEnvStatements``, the M4
+  ## build emitters -- and every one of them reads the name at
+  ## ``stmt[1]`` and/or the body at ``stmt[^1]`` and never looks at the
+  ## children in between, so ``executable probeBin, junkArg:`` lowered as
+  ## ``executable probeBin:`` would and ``junkArg`` was never semchecked.
+  ## Some walkers were worse than silent: ``parseExecutable`` and
+  ## ``collectBuildStatements`` read ``stmt[2]`` as the body, so the same
+  ## spelling ALSO lost the artifact's ``name:`` and nested ``build:``.
+  ##
+  ## The check lives here, in one pre-pass at the top of ``packageImpl``,
+  ## rather than in each walker, so the refusal fires once and in source
+  ## order regardless of which walker would have reached the statement
+  ## first, and so a walker added later cannot reopen the hole by
+  ## forgetting a guard. It is an arity check and carries no design
+  ## decision, the same as the ``service`` head in ``m5ServiceEmission``
+  ## and the activity-level ``config`` head in ``l2ParseActivityConfig``.
+  ##
+  ## Deliberately NOT checked here: unrecognised statements INSIDE these
+  ## bodies. That is the other half of the same issue and needs a ruling
+  ## (a package-level ``config:`` / ``discard`` body is a deliberate
+  ## no-op in hundreds of recipes), not an arity check.
+  ##
+  ## A sweep of ``recipes/``, ``libs/``, ``examples/``, ``tests/``,
+  ## ``apps/`` and the sibling recipe repositories found no recipe that
+  ## writes anything beside these heads, so nothing legal is refused.
+  if body.kind != nnkStmtList:
+    return
+  let packageText =
+    if name.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}: name.strVal
+    else: name.repr.strip()
+  let owner = "package `" & packageText & "`"
+  for stmt in body:
+    if stmt.kind notin {nnkCall, nnkCommand} or stmt.len < 2:
+      continue
+    let head = calleeName(stmt).normalize
+    case head
+    of "config", "versions", "build", "devenv":
+      refuseNoArgumentHead(owner, stmt)
+    of "executable", "library", "files":
+      # Legal: ``<head> <name>`` (bare, no body) or ``<head> <name>:``
+      # with a block body. ``stmt[1]`` is the name; anything after it
+      # and before the body is the extra argument.
+      let spelling = identText(stmt[0])
+      let hasBody = stmt[^1].kind == nnkStmtList
+      let last = if hasBody: stmt.len - 1 else: stmt.len
+      let artifactHead = spelling & " " & stmt[1].repr.strip()
+      for i in 2 ..< last:
+        let extra = stmt[i]
+        error(owner & ": `" & spelling & " <name>:` takes one name and " &
+          "an optional block body; `" & extra.repr.strip() & "` beside " &
+          "the head of `" & artifactHead & (if hasBody: ":" else: "") &
+          "` is neither. Everything the artifact carries -- its `name:`, " &
+          "`lockFile`, `build:` and the rest -- is written INSIDE the " &
+          "block body. " & dslHeadArgumentDropRule, headArgumentAnchor(extra))
+      # The ``build:`` nested in an artifact body has the same arity and
+      # the same walkers (``collectBuildStatements`` iterates
+      # ``stmt[1]``, the M4 artifact lowering reads ``stmt[^1]``), so it
+      # had the same hole one level down.
+      if hasBody:
+        for member in stmt[^1]:
+          if member.kind in {nnkCall, nnkCommand} and member.len >= 2 and
+              calleeName(member).normalize == "build":
+            refuseNoArgumentHead(owner & ", `" & artifactHead & "`", member)
+    else:
+      discard
+
 macro package*(name: untyped; body: untyped): untyped =
   ## Top-level package declaration — STAGE 1.
   ##
@@ -10050,6 +10184,10 @@ macro packageImpl*(name: untyped;
   ##    the ``config:`` block lowers to a
   ##    ``let <name> = declareVariant[T](...)`` plus a trailing
   ##    ``finalizeVariants()`` call.
+  # Before ANY walker reads a section: an argument beside a fixed-arity
+  # head is refused here, once, rather than dropped by whichever of the
+  # several walkers below reached it first.
+  refusePackageHeadArguments(name, body)
   let (sectionStmts, preservedStmts) = partitionPackageBody(body)
   let pkg = parsePackageDef(name, body, resolvedPlatforms,
     resolvedToolProvisioning, resolvedUses)
@@ -10566,7 +10704,7 @@ macro depends_on*(packageName: untyped; deps: untyped): untyped =
   ## deferred to a follow-on milestone, per
   ## ``reprobuild-specs/Three-Mode-Convention-System.md`` §"Honest scope".
   # A package name, spelled as ``package`` spells it: an identifier or, for
-  # a name that is not one (``7zip``), a string literal.
+  # a name that is not one (``7zip``, the keyword ``nil``), a string literal.
   let pkgName = packageNameText(packageName)
   if pkgName.len == 0:
     error("depends_on expects a package identifier as its first argument",

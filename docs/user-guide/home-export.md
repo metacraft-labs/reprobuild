@@ -272,7 +272,7 @@ since the Nix side keeps its own links (schema version unchanged).
 | `intent.resources[].activity` | The activity the resource belongs to — it was declared in a `resources:` block inside `activity <name>:`, or by a data-file row with `activity = "<name>"` — or `null` for a profile-wide resource. A resource with an activity applies only on a host whose selection enables that activity (`default` plus the host's `hosts:` entry), and only where its `guard` also holds. It always names an activity in `intent.activities`; refuse a document where it does not. |
 | `intent.hostApplies` | Present only when some `hosts:` entry declares `applies:` (block form, below): host → the concerns Reprobuild applies on that host. A host absent from it lets Reprobuild apply every concern. |
 | `intent.systemManagedElsewhere` | Present only when some `hosts:` entry says `system: managedElsewhere` ([below](#hosts-whose-system-is-managed-elsewhere)): host → `{ "managedBy": "<pointer>" }`, or `{ "managedBy": null }` when the entry names no manager. A host absent from it has its system managed by this configuration. |
-| `concerns` | Present only with `intent.hostApplies`: the concern names, every home-scope resource kind's concern, the concern of a `config:` override, and `packages` — for every target system, the package references (keyed `name`, or `name@version` when pinned) whose selected realization there places an application (`applications`), and those that resolve to nothing there (`unresolved`); every other reference is a plain package. It is Reprobuild's classification, made with the same selection `repro home apply` makes but without the host's `PATH` / Scoop inventory, so a consumer never restates it. `--check` compares it, so a catalog or lock change that reclassifies a package shows up. `profileBin` says, for every target system, where the launchers of the active generation are reached on a host that uses the default state directory: a `base` (`home` = `$HOME`, `xdgStateHome` = `$XDG_STATE_HOME` or `$HOME/.local/state`, `localAppData` = `%LOCALAPPDATA%`) and a `/`-separated `path` below it. |
+| `concerns` | Present only with `intent.hostApplies`: the concern names, every home-scope resource kind's concern, the concern of a `config:` override, and `packages` — for every target system, the package references (keyed `name`, or `name@version` when pinned) whose selected realization there places an application (`applications`), and those that resolve to nothing there (`unresolved`); every other reference is a plain package. It is Reprobuild's classification, made from profile policy and the current catalog, without the host-local `home.lock` or the host's `PATH` / Scoop inventory, so a consumer never restates it. `--check` compares it, so a policy or catalog change that reclassifies a package shows up. `profileBin` says, for every target system, where the launchers of the active generation are reached on a host that uses the default state directory: a `base` (`home` = `$HOME`, `xdgStateHome` = `$XDG_STATE_HOME` or `$HOME/.local/state`, `localAppData` = `%LOCALAPPDATA%`) and a `/`-separated `path` below it. |
 | `platforms` | For each target platform, whether this document describes it: `same` (the profile evaluated for that platform declares exactly this intent), `differs` (a compile-time `when defined(...)` changed it — refuse the document for that platform), or `unevaluated` (the profile could not be evaluated for that platform — treat as `differs`; the reason is in `provenance.compile.probe`). The compiling platform is always described, whatever its entry says. |
 | `provenance.repro.version` | The `repro` release that produced the document. |
 | `provenance.repro.sourceRevision` | The commit that `repro` was built from (`…-dirty` if the tree had uncommitted changes), or `null` if the build did not record it. The version alone does not identify a build. |
@@ -316,14 +316,24 @@ the declaration and routes each package by the concern Reprobuild classified
 it into ([nix-helper-library.md](./nix-helper-library.md#the-home-manager-module)).
 
 To classify the packages, `repro home export` resolves every package
-reference for every target system. A reference no definition it can see
+reference for every target system from the profile's policy and current
+catalog. It ignores `home.lock`: that file records this host's apply
+selections and must stay out of version control, even when multiple hosts
+share a profile and target. Adding, removing or changing the local lock
+cannot change a committed export or its `--check` result.
+
+A reference no definition it can see
 names at all might be an application defined in the `reprobuild-packages`
 catalog, so when there is one and no catalog checkout is reachable (beside
 the profile, beside the `reprobuild` checkout, or `$REPROBUILD_PACKAGES_ROOT`),
 the export fails instead of guessing. On a host that gives Reprobuild one of
 `packages` / `applications` and Nix the other, `repro home apply` refuses a
-package whose selection on this host — which can use the host's `PATH` —
-would put it in a different concern than the export says.
+package whose selection on this host — which honors the local lock and can
+use the host's `PATH` — would put it in a different concern than the export
+says. Inspect the current catalog and use `--relock` to replace a differing
+pin, reorder `adapterPreference`, or give both concerns to the same tool.
+Plan and apply keep honoring lock pins; a withdrawn pin still requires
+`--relock`.
 
 The commands of the packages Reprobuild applies -- including the ones an
 application bundle carries, such as `code` or `utmctl` -- are launchers in

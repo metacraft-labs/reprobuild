@@ -491,7 +491,7 @@ proc extractPrefixRaw(archive: openArray[byte]; outDir: string) =
         ArchiveEntryKind(rawKind)
     let mode = readU32LE(archive, pos)
     let size = readU64LE(archive, pos)
-    if pos + int(size) > archive.len:
+    if size > uint64(archive.len - pos):
       raise newException(IOError,
         "rbcarc truncated reading file body for " & rel)
     let absOut = outDir / rel

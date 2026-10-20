@@ -54,6 +54,8 @@ when defined(linux):
 import repro_resources/service_registry
 import repro_resources/state_store
 import repro_test_support
+when defined(macosx):
+  import repro_test_support/darwin_fixture_processes
 
 const
   OwnerPackage = "dss11owner"
@@ -324,14 +326,9 @@ proc belongsToThisCase(pid: int; tempRoot: string): bool =
   ## `tempRoot` is this case's own `createTempDir` path, so either
   ## witness is conclusive: no process outside this case can mention it.
   ##
-  ## LINUX ONLY, and the `else` branch is a decision rather than a gap --
-  ## the same decision, for the same measured reason, that
-  ## `belongsToSession` records. Both witnesses come from `/proc`, which
-  ## no other platform has. Answering `true` elsewhere would reap by
-  ## unverified pid; answering `false` would leak with certainty. This
-  ## returns false, so on a platform where the identity cannot be
-  ## checked the teardown does what it did before this change and says
-  ## so, rather than signalling numbers it cannot vouch for.
+  ## This predicate uses Linux's /proc witnesses. The macOS reap below
+  ## instead uses the shared native libproc cwd witness; an unqueryable
+  ## process is never signalled on either platform.
   when defined(linux):
     let cmdline =
       try: readFile("/proc/" & $pid & "/cmdline")
@@ -359,14 +356,15 @@ proc reapCaseProcesses(c: Dss11Case) =
   ## and 4 orphaned `idp.sh` loops accumulated over its runs. Each run
   ## of this file leaked, and every later run inherited them.
   ##
-  ## SO THE SWEEP IS OVER `/proc`, NOT OVER RECORDED PIDS, and that is
-  ## the one way it improves on `reapSession` rather than copying it. A
+  ## The sweep reads the live process table (/proc on Linux, libproc on
+  ## macOS), rather than recorded pids, which improves on `reapSession`. A
   ## pid-record walk cannot see a process the session never recorded --
   ## a grandchild a service forked, or a service whose pid was not
   ## written before its supervisor died -- which is precisely the
-  ## residue `reapSession`'s own header admits it leaves. Every process
-  ## this case started is under this case's `tempRoot` by argv or by
-  ## cwd, so the path is a complete witness where a pid list is not.
+  ## residue `reapSession`'s own header admits it leaves. A fixture
+  ## service descendant keeps its cwd under this case's `tempRoot`; Linux
+  ## also checks argv for the daemon and HTTP roles. A live path witness
+  ## supplies authority that a historical pid list cannot.
   ##
   ## WHAT THIS IS NOT: a structural guarantee. It is a teardown sweep
   ## over a process table read at one instant, so a process that forks
@@ -407,6 +405,8 @@ proc reapCaseProcesses(c: Dss11Case) =
       for pid in pids:
         discard posix.kill(Pid(pid), signal)
       sleep(300)
+  elif defined(macosx):
+    reapDarwinFixtureProcesses(c.tempRoot)
 
 proc cliStateStoreRoot(c: Dss11Case): string =
   ## The CLI's own state store for this case: `$HOME/.cache/repro/state`
@@ -472,27 +472,14 @@ proc memberCount(value: ServiceRegistrationSet): int =
   value.registrations.len
 
 suite "D-SS11 §4.6 — a consumer in another process contributes to the instance":
-  # Prepared on the first case's `setup`, NOT in the suite body. The suite
-  # body runs at registration, in every process this binary starts --
-  # including `--list` / `--list-json`, which only enumerates and is run
-  # from a scratch working directory. Preparing here made enumeration
-  # resolve `<cwd>/build/bin/repro` (raising from any other directory, so
-  # no case was listed) and start a daemon just to print case names. The
-  # runner executes each case in its own process, so a case still prepares
-  # the fixture and starts the daemon exactly once, and the deferred
-  # cleanup below still runs in that process -- only if a case prepared.
-  var prepared = false
-  var c: Dss11Case
-  var daemon: owned(Process)
-
+  # Every case owns a fresh workspace and daemon, whether run alone or as
+  # part of the whole binary. Setup stays lazy so --list/--list-json never
+  # resolves the engine or starts a daemon. Register cleanup before daemon
+  # startup so a startup failure also removes this case's fixture.
   setup:
-    if not prepared:
-      c = prepareCase()
-      prepared = true
-      daemon = c.startDaemon()
-
-  defer:
-    if prepared:
+    let c = prepareCase()
+    var daemon: owned(Process)
+    defer:
       discard c.runRepro(c.consumerProject,
         @["down", "--activity=" & ConsumerActivity])
       discard c.runRepro(c.ownerProject,
@@ -508,16 +495,12 @@ suite "D-SS11 §4.6 — a consumer in another process contributes to the instanc
       c.reapCaseProcesses()
       try: removeDir(c.tempRoot) except OSError, IOError: discard
 
-  # ONE PROCESS PER CASE. The suite runner executes every case in a process
-  # of its own (`--run "<suite>::<case>"`), and each such process prepares a
-  # FRESH fixture and daemon in `setup` above. The cases below are one
-  # scenario told in steps, and a later step asserts on state an earlier
-  # step created -- so each step is a template, and a case first REPLAYS the
-  # earlier steps its state depends on, assertions and all, then runs its
-  # own. Run alone, a case therefore measures exactly what it measured as
-  # part of the sequence; a prerequisite step that fails fails the dependent
-  # case too, at that step's own assertion, rather than letting it pass or
-  # fail on a fixture it never built.
+    daemon = c.startDaemon()
+
+  # Each scenario replays every prerequisite against its own fresh fixture,
+  # retaining the prerequisite's assertions. Whole-binary and isolated runs
+  # therefore test the same transitions without inheriting an earlier case's
+  # registrations, edited recipes or event log.
 
   template ownerAppliesTheConsumersContribution() =
     # The steps of case "the owner materialises, the consumer attaches and deposits, the owner applies".
@@ -648,7 +631,7 @@ suite "D-SS11 §4.6 — a consumer in another process contributes to the instanc
     # two refusals are now separable: this case is the stale one, and the
     # next re-lifts so that the point-level one is what fires.
     # ONLY the owner's recipe moves. The consumer's is left exactly as the
-    # previous case left it, so the ONE thing that changed between a
+    # prerequisite step left it, so the ONE thing that changed between a
     # passing `consumerUp` and this one is the owner's definition having
     # moved out from under its artifact.
     writeFile(c.ownerProject / "repro.nim", ownerRecipe(true))
@@ -664,7 +647,7 @@ suite "D-SS11 §4.6 — a consumer in another process contributes to the instanc
       "that declares `" & OwnerPackage & "`")
     # And it is a REFUSAL, so NOTHING was deposited and nothing dropped:
     # the instance's contribution set still holds exactly what the
-    # previous case left on it.
+    # prerequisite step left on it.
     check c.contributionSet.contributions.len == 1
     check memberCount(c.registrationSet) == 3
 

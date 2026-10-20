@@ -13,7 +13,9 @@
 ##     through `selectHost`, which also refuses a `--host` that `$REPRO_HOST`
 ##     would silently override (§Host Identity).
 
-import std/[os, osproc, strutils]
+import std/[os, strutils]
+when not defined(windows):
+  from std/nativesockets import getHostname
 from repro_core/paths import extendedPath
 
 import ./errors
@@ -129,7 +131,7 @@ type
       ## `$HOSTNAME` (consulted on POSIX only).
     probe*: proc (): string {.closure.}
       ## The OS call used when the variable is empty: `GetComputerNameW` on
-      ## Windows, the `hostname` command on POSIX. May be nil (no probe).
+      ## Windows, gethostname(2) on POSIX. May be nil (no probe).
 
 proc osHostnameFrom*(s: OsHostnameSources): string =
   ## The normalized OS hostname: the platform's variable (`%COMPUTERNAME%` on
@@ -149,13 +151,19 @@ proc probeOsHostname(): string =
       return $buf
     ""
   else:
+    # gethostname(2), not the `hostname` command: the command needs a binary
+    # on `PATH`, and the places that most need an identity have none -- a
+    # systemd unit whose `path` holds only a compiler (the NixOS
+    # `services.mcl-repro-deploy-agent` unit), a nix build sandbox, a
+    # minimal container. `$HOSTNAME` is a bash variable that is normally
+    # not exported, so without this every such run refused ("pass --host
+    # NAME"). The command itself only prints gethostname(2), so the name is
+    # the same wherever both work (reprobuild-pm issue
+    # 2026-10-18-deploy-agent-invents-a-host-identity-instead-of-resolving-one).
     try:
-      let (output, exitCode) = execCmdEx("hostname")
-      if exitCode == 0:
-        return output
+      getHostname()
     except OSError:
-      discard
-    ""
+      ""
 
 proc currentOsHostnameSources*(): OsHostnameSources =
   ## The hostname sources of this process on this platform.
@@ -168,7 +176,7 @@ proc currentOsHostnameSources*(): OsHostnameSources =
 proc systemHostname*(): string =
   ## OS hostname, normalized (`normalizeHostName`). On Windows uses
   ## `%COMPUTERNAME%` (or `GetComputerNameW` as a fallback); on POSIX uses
-  ## `$HOSTNAME`, else the `hostname` command.
+  ## `$HOSTNAME`, else gethostname(2).
   osHostnameFrom(currentOsHostnameSources())
 
 proc currentHost*(): string =

@@ -41,6 +41,14 @@ import repro_cli_support            # reconcileConsumedStateGroups (the N3a brid
 
 const NoDaemon = "/nonexistent/repro-m2-no-daemon.sock"
 
+# This case injects a provider HANDLE directly and never builds an artifact
+# ref, so it has none to pass: the record it writes carries no reap route, and
+# that is correct for a hand-fed session. `providerArtifacts` has no default so
+# that this is a STATEMENT rather than an omission — the production call site
+# losing the argument is the regression the required parameter prevents.
+let noArtifacts: seq[tuple[typeId: string;
+                           artifact: ResourceProviderArtifactRef]] = @[]
+
 # The out-of-tree member type is ``m2.state``. Its attrs codec is registered in
 # the PROVIDER only (providerBody below), NEVER in this reconciling process.
 type
@@ -236,7 +244,7 @@ suite "M2: opaque attr pass-through (out-of-tree, codec provider-only)":
 
     # ── FIRST reconcile: materialize over the SESSION, with the store ────────
     let first = reconcileConsumedStateGroups(consumes, "topology-lease-smoke",
-      resources, groups, store, endpoint = NoDaemon, now = t0,
+      resources, groups, store, noArtifacts, endpoint = NoDaemon, now = t0,
       sessionResolver = resolver)
     check first.missingGroups.len == 0
     check first.renewedGroups == @["topology"]
@@ -261,7 +269,7 @@ suite "M2: opaque attr pass-through (out-of-tree, codec provider-only)":
     # ── SECOND reconcile WITHIN ttl: REUSE (no re-apply) + RENEW ─────────────
     let t1 = t0 + initDuration(minutes = 10)
     let second = reconcileConsumedStateGroups(consumes, "topology-lease-smoke",
-      resources, groups, store, endpoint = NoDaemon, now = t1,
+      resources, groups, store, noArtifacts, endpoint = NoDaemon, now = t1,
       sessionResolver = resolver)
     check second.renewedGroups == @["topology"]
     let afterSecond = readFile(extendedPath(worldPath)).split('\n')

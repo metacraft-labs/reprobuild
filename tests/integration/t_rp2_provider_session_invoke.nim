@@ -282,3 +282,94 @@ suite "RP2 provider session: launch + handshake + invoke + reuse":
       let res = handle.invokeEntryPoint("rp2widget.root",
         @[marshalRequest(request)])
       check res.ok
+
+  test "closeProviderSession evicts ONE artifact's sessions and leaves the rest":
+    ## `closeProviderSession` is new public pool API, added for the
+    ## Ephemeral-State-Leases reaper (§4.2): a LONG-LIVED pool must evict the
+    ## child for a provider the store has stopped referencing — a rebuilt
+    ## provider mints a new content-addressed id every time — WITHOUT dropping
+    ## the sessions its next tick still wants. `closeAll` cannot express that,
+    ## and expressing eviction as `closeAll` made a daemon reaping two
+    ## providers with non-simultaneous deadlines relaunch both every other tick.
+    ##
+    ## The reaper's own cases exercise it transitively, but each of those
+    ## compiles a provider and drives whole daemon ticks; this pins the pool
+    ## API's four promises directly, where the pool lives:
+    ##
+    ##   1. the matching session is closed and REMOVED from the pool;
+    ##   2. sessions for other keys stay LIVE and usable;
+    ##   3. it reports whether it closed anything;
+    ##   4. it is idempotent — a second call for the same id is a no-op.
+    ##
+    ## NON-VACUITY: the surviving session is INVOKED after the eviction, so
+    ## "left live" is proven by use rather than by a counter; and the two
+    ## sessions are distinguished by `providerArtifactId`, which is what the
+    ## pool keys on.
+    let tempRoot = getTempDir() / ("rp2-close-" & $getCurrentProcessId())
+    removeDir(extendedPath(tempRoot))
+    defer: removeDir(extendedPath(tempRoot))
+    let provider = buildProvider(tempRoot)
+
+    let pool = newProviderSessionPool()
+    defer: pool.closeAll()
+    let request = rootRequest(provider.projectRoot, provider.artifactId)
+
+    # Two sessions over the SAME real binary under two different claimed
+    # artifact ids — two distinct pool keys, which is exactly the shape a
+    # provider rebuild leaves behind. (A v1 provider self-attests no id, so the
+    # engine binds the session to the id it was given.)
+    let keepArtifact = ProviderArtifactRef(
+      binaryPath: provider.binary,
+      providerArtifactId: provider.artifactId,
+      workingDir: getCurrentDir())
+    let evictArtifact = ProviderArtifactRef(
+      binaryPath: provider.binary,
+      providerArtifactId: provider.artifactId & "-superseded",
+      workingDir: getCurrentDir())
+
+    let keep = pool.openProviderSession(keepArtifact, defaultSessionPolicy(),
+      engineHello())
+    let evict = pool.openProviderSession(evictArtifact, defaultSessionPolicy(),
+      engineHello())
+    check pool.launchCount == 2
+    check pool.sessionCount == 2
+    check keep.session != evict.session
+    # Both work before the eviction, so the failure below cannot be confused
+    # with a session that never worked.
+    check keep.invokeEntryPoint("rp2widget.root", @[marshalRequest(request)]).ok
+    check evict.invokeEntryPoint("rp2widget.root", @[marshalRequest(request)]).ok
+
+    # (1) + (3): the matching session is closed, and it says so.
+    check pool.closeProviderSession(evictArtifact.providerArtifactId)
+    check pool.sessionCount == 1
+
+    # (2) THE SURVIVOR IS STILL USABLE — proven by invoking it, not by the
+    # count. An eviction that took the whole pool with it would fail here, and
+    # that is precisely the thrash `closeAll` produced.
+    let after = keep.invokeEntryPoint("rp2widget.root",
+      @[marshalRequest(request)])
+    check after.ok
+    # ...and reopening the surviving key reuses the same child: the eviction
+    # did not disturb the pool's bookkeeping for other keys.
+    let reopened = pool.openProviderSession(keepArtifact,
+      defaultSessionPolicy(), engineHello())
+    check pool.launchCount == 2            # no relaunch
+    check reopened.session == keep.session
+
+    # (4) idempotent: the id is gone, so a second call closes nothing and
+    # changes nothing.
+    check not pool.closeProviderSession(evictArtifact.providerArtifactId)
+    check pool.sessionCount == 1
+    # An id that was never in the pool is likewise a no-op, not an error.
+    check not pool.closeProviderSession("never-opened-id")
+    check pool.sessionCount == 1
+
+    # Reopening the EVICTED key launches a fresh child — the session really was
+    # torn down rather than merely unlinked from the pool.
+    let relaunched = pool.openProviderSession(evictArtifact,
+      defaultSessionPolicy(), engineHello())
+    check pool.launchCount == 3
+    check relaunched.session != evict.session
+    check pool.sessionCount == 2
+    check relaunched.invokeEntryPoint("rp2widget.root",
+      @[marshalRequest(request)]).ok

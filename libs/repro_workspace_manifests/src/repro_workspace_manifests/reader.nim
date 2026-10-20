@@ -34,7 +34,7 @@ proc slurpManifest(path, expectedSchema: string): string =
   ## file-level failures.
   if not fileExists(path):
     raiseManifestError(path, "", expectedSchema, "",
-      "manifest file does not exist")
+      missingManifestMessage)
   try:
     result = readFile(path)
   except IOError as e:
@@ -250,10 +250,13 @@ const workspaceRootCheckoutPath* = "."
   ## (CLI/develop.md §"Which record, for a commit-addressed backend"), it is
   ## what the develop-manageable set is defined as the union *minus*
   ## (§"Composing the lock set"), and it is the only repo that can carry the
-  ## root's own `depends` edges. Reprobuild writes this exact value into the
-  ## locks it emits (`LockedDep.path = "."`) and every consumer recognizes it
-  ## with a literal `== "."` compare — `isRootLockedDep`, the root-repo lookup
-  ## in `composeDevelopLockSet`, the integrity walk, the lock-claim keying.
+  ## root's own `depends` edges. A lock reader holds a lock's own repository
+  ## at exactly this value (`LockedDep.path = "."`, written on disk as
+  ## `self = "true"` since `reprobuild.solved-graph-lock.v3`, and as `path =
+  ## "."` before it), and every consumer recognizes it with a literal
+  ## `== "."` compare — `isSelfLockedDep` / `isRootLockedDep`, the root-repo
+  ## lookup in `composeDevelopLockSet`, the integrity walk, the lock-claim
+  ## keying.
   ##
   ## Because those compares are EXACT, the spelling is load-bearing rather
   ## than cosmetic: `./.` denotes the same directory but is not `.`, so it
@@ -427,6 +430,15 @@ proc lockedCheckoutPathRejection*(value: string): string =
   ## Why `value` is not usable as a checkout path recorded in a LOCK, or ""
   ## when it is. The lock plane's boundary — the third question, and the one
   ## that was missing.
+  ##
+  ## Since `reprobuild.solved-graph-lock.v3` a lock records no checkout path
+  ## at all, and a v2 lock's recorded path is no longer believed: the lock
+  ## plane DERIVES each dependency's location locally from its name
+  ## (`repro_cli_support`'s `lockedDepCheckoutPath`). This rule is now asked
+  ## of those derived locations — the placement skips a candidate it refuses,
+  ## and `validateLockedDeps` asks again — because the deletes below are
+  ## handed them exactly as they were handed recorded ones. The history that
+  ## follows is of recorded paths, which is how each shape was first found.
   ##
   ## ## Why the lock plane cannot reuse the manifest plane's rule
   ##
@@ -810,12 +822,15 @@ proc checkRepoRoles(path, content, schema: string; fragment: var RepoFragment) =
     "repo.branch-roles",
     if "branch-roles" in repoKeys: repoNode.tableVal["branch-roles"] else: nil)
 
-proc readRepoFragment*(path: string): RepoFragment =
+proc readRepoFragmentFromContent*(content, path: string): RepoFragment =
   ## Read `repos/<repo>.toml` in either schema: `repo.v2` (`mainline` and the
   ## role keys) or `repo.v1` (`branch`). The record keeps the key the file
   ## used; `mainlineBranch` is the mainline for both, so nothing downstream
   ## needs to know which schema the file used.
-  let content = slurpManifest(path, schemaRepoFragmentV2)
+  ##
+  ## `content` is the manifest's bytes and `path` is only the DISPLAY path
+  ## every diagnostic carries: nothing is read from it, so bytes read from a
+  ## git revision (`manifest_source.nim`) pass the same validation as a file.
   let schema = validateSchemaOneOf(path, content,
     [schemaRepoFragmentV2, schemaRepoFragmentV1])
   # The typed decoder refuses the header spelling `[repo.branch-roles]` of a
@@ -870,15 +885,22 @@ proc readRepoFragment*(path: string): RepoFragment =
           "or the live checkout becomes a candidate for being moved onto " &
           "itself")
 
+proc readRepoFragment*(path: string): RepoFragment =
+  ## `readRepoFragmentFromContent` over the bytes of the file at `path`.
+  readRepoFragmentFromContent(slurpManifest(path, schemaRepoFragmentV2), path)
+
 # ---- url-prefixes/<name>.toml ----------------------------------------------
 
-proc readUrlPrefix*(path: string): UrlPrefixManifest =
+proc readUrlPrefixFromContent*(content, path: string): UrlPrefixManifest =
   ## Workspace-Membership-Model.md — a URL prefix shared by many repos,
   ## declared once for the workspace. `url` is a PREFIX in every case: the
   ## former "a fetch base ending in .git is used verbatim" special case is not
   ## carried over, because a field whose meaning depends on the shape of its own
   ## value is a defect waiting for the first input of the other shape.
-  let content = slurpManifest(path, schemaUrlPrefixV1)
+  ##
+  ## `content` is the manifest's bytes and `path` is only the DISPLAY path
+  ## every diagnostic carries: nothing is read from it, so bytes read from a
+  ## git revision (`manifest_source.nim`) pass the same validation as a file.
   validateSchema(path, content, schemaUrlPrefixV1)
   result = decodeStrict(path, content, schemaUrlPrefixV1, UrlPrefixManifest)
   requireNonEmpty(path, schemaUrlPrefixV1, "url-prefix.name",
@@ -886,40 +908,62 @@ proc readUrlPrefix*(path: string): UrlPrefixManifest =
   requireNonEmpty(path, schemaUrlPrefixV1, "url-prefix.url",
                   result.`url-prefix`.url)
 
+proc readUrlPrefix*(path: string): UrlPrefixManifest =
+  ## `readUrlPrefixFromContent` over the bytes of the file at `path`.
+  readUrlPrefixFromContent(slurpManifest(path, schemaUrlPrefixV1), path)
+
 # ---- repo-sets/<set>.toml --------------------------------------------------
 
-proc readRepoSet*(path: string): RepoSetManifest =
+proc readRepoSetFromContent*(content, path: string): RepoSetManifest =
   ## A named membership list (`member_sets` + `member_repos`). The strict
   ## decode is what forbids identity fields: `default_revision`, `trunk` and
   ## friends are simply not on `RepoSetManifest`, so a shared set cannot
   ## quietly become a half-project. It is also what rejects the single-list
   ## `members` spelling this replaced — a bare name that had to be resolved
   ## against both namespaces at once, which no manifest can express now.
-  let content = slurpManifest(path, schemaRepoSetV1)
+  ##
+  ## `content` is the manifest's bytes and `path` is only the DISPLAY path
+  ## every diagnostic carries: nothing is read from it, so bytes read from a
+  ## git revision (`manifest_source.nim`) pass the same validation as a file.
   validateSchema(path, content, schemaRepoSetV1)
   result = decodeStrict(path, content, schemaRepoSetV1, RepoSetManifest)
   requireNonEmpty(path, schemaRepoSetV1, "repo-set.name",
                   result.`repo-set`.name)
 
+proc readRepoSet*(path: string): RepoSetManifest =
+  ## `readRepoSetFromContent` over the bytes of the file at `path`.
+  readRepoSetFromContent(slurpManifest(path, schemaRepoSetV1), path)
+
 # ---- templates/<template>.toml ---------------------------------------------
 
-proc readTemplate*(path: string): TemplateManifest =
+proc readTemplateFromContent*(content, path: string): TemplateManifest =
   ## Workspace-Membership-Model.md §"Templates". The strict decode is what
   ## forbids a template carrying the scaffolded set's name: `TemplateManifest`
   ## has a `[template] name` (the template's own identity) and the two
   ## membership keys, and nothing else — so `[repo-set] name = "…"` in a
   ## template file is an unknown key rather than a silent second source of the
   ## name the `add` argument already gave.
-  let content = slurpManifest(path, schemaTemplateV1)
+  ##
+  ## `content` is the manifest's bytes and `path` is only the DISPLAY path
+  ## every diagnostic carries: nothing is read from it, so bytes read from a
+  ## git revision (`manifest_source.nim`) pass the same validation as a file.
   validateSchema(path, content, schemaTemplateV1)
   result = decodeStrict(path, content, schemaTemplateV1, TemplateManifest)
   requireNonEmpty(path, schemaTemplateV1, "template.name",
                   result.`template`.name)
 
+proc readTemplate*(path: string): TemplateManifest =
+  ## `readTemplateFromContent` over the bytes of the file at `path`.
+  readTemplateFromContent(slurpManifest(path, schemaTemplateV1), path)
+
 # ---- projects/<project>.toml ----------------------------------------------
 
-proc readProjectManifest*(path: string): ProjectManifest =
-  let content = slurpManifest(path, schemaProjectManifestV1)
+proc readProjectManifestFromContent*(content, path: string): ProjectManifest =
+  ## Validate `content` against this schema.
+  ##
+  ## `content` is the manifest's bytes and `path` is only the DISPLAY path
+  ## every diagnostic carries: nothing is read from it, so bytes read from a
+  ## git revision (`manifest_source.nim`) pass the same validation as a file.
   validateSchema(path, content, schemaProjectManifestV1)
   result = decodeStrict(path, content, schemaProjectManifestV1,
                         ProjectManifest)
@@ -935,10 +979,19 @@ proc readProjectManifest*(path: string): ProjectManifest =
         schemaProjectManifestV1, schemaProjectManifestV1,
         "required key `remote[].fetch` is missing or empty")
 
+proc readProjectManifest*(path: string): ProjectManifest =
+  ## `readProjectManifestFromContent` over the bytes of the file at `path`.
+  readProjectManifestFromContent(
+    slurpManifest(path, schemaProjectManifestV1), path)
+
 # ---- variants/<...>.toml ---------------------------------------------------
 
-proc readVariantManifest*(path: string): VariantManifest =
-  let content = slurpManifest(path, schemaVariantManifestV1)
+proc readVariantManifestFromContent*(content, path: string): VariantManifest =
+  ## Validate `content` against this schema.
+  ##
+  ## `content` is the manifest's bytes and `path` is only the DISPLAY path
+  ## every diagnostic carries: nothing is read from it, so bytes read from a
+  ## git revision (`manifest_source.nim`) pass the same validation as a file.
   validateSchema(path, content, schemaVariantManifestV1)
   result = decodeStrict(path, content, schemaVariantManifestV1,
                         VariantManifest)
@@ -952,10 +1005,19 @@ proc readVariantManifest*(path: string): VariantManifest =
         schemaVariantManifestV1, schemaVariantManifestV1,
         "required key `override[].fragment` is missing or empty")
 
+proc readVariantManifest*(path: string): VariantManifest =
+  ## `readVariantManifestFromContent` over the bytes of the file at `path`.
+  readVariantManifestFromContent(
+    slurpManifest(path, schemaVariantManifestV1), path)
+
 # ---- locks/<project>/<sha>.toml --------------------------------------------
 
-proc readLock*(path: string): Lock =
-  let content = slurpManifest(path, schemaLockV1)
+proc readLockFromContent*(content, path: string): Lock =
+  ## Validate `content` against this schema.
+  ##
+  ## `content` is the manifest's bytes and `path` is only the DISPLAY path
+  ## every diagnostic carries: nothing is read from it, so bytes read from a
+  ## git revision (`manifest_source.nim`) pass the same validation as a file.
   validateSchema(path, content, schemaLockV1)
   result = decodeStrict(path, content, schemaLockV1, Lock)
   requireNonEmpty(path, schemaLockV1, "lock.project", result.lock.project)
@@ -992,10 +1054,18 @@ proc readLock*(path: string): Lock =
         schemaLockV1, schemaLockV1,
         "required key `repo[].revision` is missing or empty")
 
+proc readLock*(path: string): Lock =
+  ## `readLockFromContent` over the bytes of the file at `path`.
+  readLockFromContent(slurpManifest(path, schemaLockV1), path)
+
 # ---- locks/<project>/index.toml --------------------------------------------
 
-proc readLockIndex*(path: string): LockIndex =
-  let content = slurpManifest(path, schemaLockIndexV1)
+proc readLockIndexFromContent*(content, path: string): LockIndex =
+  ## Validate `content` against this schema.
+  ##
+  ## `content` is the manifest's bytes and `path` is only the DISPLAY path
+  ## every diagnostic carries: nothing is read from it, so bytes read from a
+  ## git revision (`manifest_source.nim`) pass the same validation as a file.
   validateSchema(path, content, schemaLockIndexV1)
   result = decodeStrict(path, content, schemaLockIndexV1, LockIndex)
   for i, e in result.entry:
@@ -1016,10 +1086,18 @@ proc readLockIndex*(path: string): LockIndex =
         schemaLockIndexV1, schemaLockIndexV1,
         "required key `entry[].created_at` is missing or empty")
 
+proc readLockIndex*(path: string): LockIndex =
+  ## `readLockIndexFromContent` over the bytes of the file at `path`.
+  readLockIndexFromContent(slurpManifest(path, schemaLockIndexV1), path)
+
 # ---- snapshots/<name>.toml -------------------------------------------------
 
-proc readSnapshot*(path: string): Snapshot =
-  let content = slurpManifest(path, schemaSnapshotV1)
+proc readSnapshotFromContent*(content, path: string): Snapshot =
+  ## Validate `content` against this schema.
+  ##
+  ## `content` is the manifest's bytes and `path` is only the DISPLAY path
+  ## every diagnostic carries: nothing is read from it, so bytes read from a
+  ## git revision (`manifest_source.nim`) pass the same validation as a file.
   validateSchema(path, content, schemaSnapshotV1)
   result = decodeStrict(path, content, schemaSnapshotV1, Snapshot)
   requireNonEmpty(path, schemaSnapshotV1, "snapshot.name", result.snapshot.name)
@@ -1044,6 +1122,10 @@ proc readSnapshot*(path: string): Snapshot =
       raiseManifestError(path, "repo[" & $i & "].revision",
         schemaSnapshotV1, schemaSnapshotV1,
         "required key `repo[].revision` is missing or empty")
+
+proc readSnapshot*(path: string): Snapshot =
+  ## `readSnapshotFromContent` over the bytes of the file at `path`.
+  readSnapshotFromContent(slurpManifest(path, schemaSnapshotV1), path)
 
 # ---- .repro/workspace-state.toml (and the old .repro/workspace.toml) -------
 

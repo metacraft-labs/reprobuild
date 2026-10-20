@@ -270,7 +270,14 @@
         # ancestor. Each directory a glob(3) scan opens is recorded with the
         # pattern component matched there, when it can be named with
         # certainty, so the engine keys the scan on the matching entries.
-      url = "github:metacraft-labs/io-mon/3f8788ce721a8f2d47eff09350b7c2047e1f3628";
+      # macOS and Windows now fail incomplete when descendant quiescence
+      # cannot be established; keep the host and its capture tests in sync.
+      # Bumped to 091fa26 (2026-10-18), io-mon's `agents` tip; 45773f6 is an
+      # ancestor. The macOS shim records a relative path anchored on the
+      # directory it resolved against when the call was made, so a tool that
+      # chdir()s (`git -C <repo>`) is no longer keyed on phantom paths under
+      # the action's cwd.
+      url = "github:metacraft-labs/io-mon/091fa26ce03d9dd1ca8cfa6a1d9d46624dc50491";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -301,9 +308,10 @@
       # build + override-free CI jobs have no sibling, so seed it from here.
       # repro_shm_index consumes ONLY Layer 1 (pure std/posix, no serialization).
       #
-      # Pinned to the nim-shm-queue rev that adds the Layer-1 EmbeddedRing
-      # (repro_shm_index's action-cache ring embeds it in the control region).
-      url = "github:metacraft-labs/nim-shm-queue/a3564c13e0b7d0c6a092c19c998cd3faee5ce20a";
+      # Includes the Layer-1 EmbeddedRing (repro_shm_index's action-cache ring
+      # embeds it in the control region). 91451f22 aligns the workspace agent
+      # landing branch and its complete compiler source closure.
+      url = "github:metacraft-labs/nim-shm-queue/91451f2250beb89d1d221f0a77be0841c19b182e";
       flake = false;
     };
     nimcrypto-src = {
@@ -411,7 +419,9 @@
       # ff7eb18 (2026-10-16, the published `agents`/`dev` tip; 3af63afc is an
       # ancestor) brings ab71ccb (2026-10-15), which rejects protected symlink
       # hops in SIP tool resolution; only ``propagation.nim`` changes.
-      url = "github:metacraft-labs/nim-stackable-hooks/ff7eb18af166f9355c5e62bf1434ba5f9fd2c99e";
+      # 4f8f7e60 aligns this pin with the workspace's agent landing branch;
+      # its additions since ff7eb18 affect Windows hook freezing only.
+      url = "github:metacraft-labs/nim-stackable-hooks/4f8f7e60af74dc94efbff05159d9b3f6084ca5df";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -637,7 +647,7 @@
     # destructor takes it, and VM/NimScript trace recording changes (exact I/O
     # event kinds, one value-carrying step per recorded position).
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=1e19cf261413667ef69123a3ef221e239d1f8897";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=fa22200571d36eb8c24c0aaa883940d93c71b397";
       flake = false;
     };
     nim-csources-src = {
@@ -2114,7 +2124,7 @@
                 fail = msg: throw "reprobuild ct-trace-format-pin-coherence: ${msg}";
                 ctLockPath = "${codetracer-src}/repro.lock";
                 ctRev = codetracer-src.rev or "<no rev: not a locked revision>";
-                # repro.lock is TOML (schema reprobuild.solved-graph-lock.v2);
+                # repro.lock is TOML (schema reprobuild.solved-graph-lock.v3, or v2);
                 # the source deps sit in the `[lock]` table's `deps` array.
                 ctLock = builtins.fromTOML (builtins.readFile ctLockPath);
                 named = builtins.filter (dep: (dep.name or null) == "codetracer-trace-format-nim") (

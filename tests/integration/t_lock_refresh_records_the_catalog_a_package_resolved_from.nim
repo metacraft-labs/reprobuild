@@ -102,8 +102,8 @@ proc catalogEntry(lockBody: string): string =
   lockBody[start .. lockBody.find(" }", start) + 1]
 
 proc rootDepends(lockBody: string): string =
-  ## The `depends` value of the root (`path = "."`) dependency.
-  let at = lockBody.find("path = \".\"")
+  ## The `depends` value of the root (`self = "true"`) dependency.
+  let at = lockBody.find("self = \"true\"")
   if at < 0:
     return ""
   let key = lockBody.find("depends = \"", at)
@@ -136,7 +136,8 @@ suite "lock refresh records the catalog a package resolved from":
     checkpoint(lockBody)
     let entry = catalogEntry(lockBody)
     check entry.len > 0
-    check "path = \"../reprobuild-packages\"" in entry
+    # Recorded by name; where the checkout is is not part of the lock.
+    check "path =" notin entry
     check "coord_kind = \"vcs\"" in entry
     check ("revision = \"" & catalogSha & "\"") in entry
     check "integrity = \"git-" in entry

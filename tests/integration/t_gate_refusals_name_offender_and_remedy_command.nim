@@ -718,6 +718,14 @@ suite "RA-28 — refusals name the offender and a remedy command":
       # A committed-lock-only workspace: no manifest checkout, so
       # ``resolveWorkspaceLockedDeps`` routes it to the committed lock — the
       # plane that had no boundary at all before W5.
+      #
+      # The degenerate value is a REVISION, not a checkout path: since
+      # `reprobuild.solved-graph-lock.v3` a lock records no path, and the
+      # `path` a v2 record carries is ignored (the checkout is placed by the
+      # dependency's name), so a recorded `./.` can no longer reach anything.
+      # The revision is the lock-supplied string that still becomes a
+      # directory segment of a delete (the lock-pinned producer cache), and
+      # its refusal must name the offender and the remedy the same way.
       let scratch = createTempDir("repro-ra28-developlock-", "")
       defer: removeDir(scratch)
       let reproBin = reproBinary()
@@ -732,7 +740,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
         "variants = []\npackages = []\n" &
         "deps = [{ name = \"dep\", path = \"./.\", coord_kind = \"vcs\", " &
         "url = \"" & fileUrl(depOrigin) & "\", ref = \"main\", " &
-        "revision = \"" & depSha & "\", integrity = \"git-sha1:" & depSha &
+        "revision = \"../../victim\", integrity = \"git-sha1:" & depSha &
         "\", version = \"\", visibility = \"public\", " &
         "participation = \"\", depends = \"\", groups = \"\" }]\n")
 
@@ -746,7 +754,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       # because a lock is machine-written and "edit it" is not an
       # instruction.
       assertNamesOffenderAndRemedy(res.output, "dep")
-      check res.output.contains("'./.'")
+      check res.output.contains("'../../victim'")
       check res.output.contains("repro lock refresh")
 
   test "checkout_missing_branch_names_offender_and_remedy":

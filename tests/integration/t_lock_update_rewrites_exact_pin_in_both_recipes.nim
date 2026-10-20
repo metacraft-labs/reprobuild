@@ -96,6 +96,7 @@
 import std/[json, os, strutils, unittest]
 
 import hl11_two_lock_fixture
+import repro_lock
 import repro_test_support/reasoned_skip
 
 const
@@ -191,6 +192,24 @@ proc appFiles(fx: Nf2Fixture): AppFiles =
   AppFiles(flakeNix: readOr(fx.app / "flake.nix"),
     flakeLock: readOr(lockPath(fx)), reproNim: readOr(fx.app / "repro.nim"),
     reproLock: readOr(fx.app / "repro.lock"), tree: indexTree(fx))
+
+proc asRewritten(lockText: string): string =
+  ## ``lockText`` as a partial lock writer leaves it once it rewrites the
+  ## ``deps`` line: the line re-rendered by the current writer (no checkout
+  ## ``path``, the self entry marked) and the schema tagged v3 — the rest of
+  ## the document byte for byte. The fixture commits a v2 lock, so the first
+  ## write migrates it; that is the documented behaviour, not churn.
+  var depsLine = ""
+  for line in serializeLockedDependencies(
+      parseLockedDependencies(lockText)).splitLines():
+    if line.startsWith("deps = ["): depsLine = line
+  result = lockText
+  for line in lockText.splitLines():
+    if line.startsWith("deps = ["):
+      result = result.replace(line, depsLine)
+      break
+  result = result.replace("schema = \"" & SolvedGraphLockSchemaV2 & "\"",
+    "schema = \"" & SolvedGraphLockSchemaV3 & "\"")
 
 proc checkUnchanged(fx: Nf2Fixture; before: AppFiles) =
   let now = appFiles(fx)
@@ -553,7 +572,7 @@ suite "HL-11 M4: repro lock update":
       check again.code == 0
       check nodeRev(readFile(lockPath(fx)), "beta-src", "locked") == target
       check readFile(fx.app / "repro.lock") ==
-        before.reproLock.replace(betaSeed, target)
+        asRewritten(before.reproLock.replace(betaSeed, target))
 
   test "t_lock_update_refuses_an_unpublished_target_for_a_flake_lock":
     if not nf3Prerequisites(
@@ -619,7 +638,7 @@ suite "HL-11 M4: repro lock update":
       check ok.code == 0
       check nodeRev(readFile(lockPath(fx)), "beta-src", "locked") == local
       check readFile(fx.app / "repro.lock") ==
-        before.reproLock.replace(betaSeed, local)
+        asRewritten(before.reproLock.replace(betaSeed, local))
 
       # ---- (2) a branch-following input, through `refresh-lock --only`. ---
       # Nothing fetches here (the commit refresh's rewriter moves locked.rev
@@ -659,9 +678,9 @@ suite "HL-11 M4: repro lock update":
       # a published branch containing the revision, and none contains it yet
       # (the commit-time re-pin records an unpublished HEAD the same way).
       check readFile(fx.app / "repro.lock") ==
-        before3.reproLock.replace(local, local2).replace(
+        asRewritten(before3.reproLock.replace(local, local2).replace(
           "ref = \"main\", revision = \"" & local2,
-          "ref = \"\", revision = \"" & local2)
+          "ref = \"\", revision = \"" & local2))
       check before3.reproLock.count("ref = \"main\", revision = \"" &
         local) == 1
       check (UpdateLabel & "note: the target " & local2 & " exists ONLY in " &
@@ -726,7 +745,7 @@ suite "HL-11 M4: repro lock update":
       check explicit.code == 0
       check nodeRev(readFile(lockPath(fx)), "beta-src", "locked") == next
       check readFile(fx.app / "repro.lock") ==
-        before.reproLock.replace(betaSeed, next)
+        asRewritten(before.reproLock.replace(betaSeed, next))
 
   test "t_lock_update_moves_every_input_of_one_repository":
     if not nf3Prerequisites(
@@ -1108,7 +1127,8 @@ suite "HL-11 M4: repro lock update":
       let after = appFiles(fx)
       check after.flakeNix == before.flakeNix.replace("rev=" & betaSeed,
         "rev=" & betaNext)
-      check after.reproLock == before.reproLock.replace(betaSeed, betaNext)
+      check after.reproLock ==
+        asRewritten(before.reproLock.replace(betaSeed, betaNext))
       check nodeRev(after.flakeLock, "beta-src", "locked") == betaNext
       check nodeRev(after.flakeLock, "beta-src", "original") == betaNext
       check nodeNarHash(after.flakeLock, "beta-src").startsWith("sha256-")

@@ -358,7 +358,10 @@ proc decodeManifestBytes*(bytes: openArray[byte];
       raiseManifestCorrupt(filePath, "trailingChecksum",
         "BLAKE3-256 trailing checksum mismatch")
   result.schemaVersion = version
-  let rpCount = int(readU32Le(bytes, pos))
+  let rpCountRaw = readU32Le(bytes, pos)
+  if not elementCountFits(rpCountRaw, bodyEnd - pos, 44):
+    raiseManifestCorrupt(filePath, "rpCount", "element count exceeds remaining body")
+  let rpCount = int(rpCountRaw)
   result.realizedPackages = newSeq[RealizedPackage](rpCount)
   for i in 0 ..< rpCount:
     var rec: RealizedPackage
@@ -369,7 +372,10 @@ proc decodeManifestBytes*(bytes: openArray[byte];
     rec.provenance = readBlob(bytes, pos, filePath,
       "realizedPackages[" & $i & "].provenance")
     result.realizedPackages[i] = rec
-  let ecCount = int(readU32Le(bytes, pos))
+  let ecCountRaw = readU32Le(bytes, pos)
+  if not elementCountFits(ecCountRaw, bodyEnd - pos, 44):
+    raiseManifestCorrupt(filePath, "ecCount", "element count exceeds remaining body")
+  let ecCount = int(ecCountRaw)
   result.exportedCommands = newSeq[ExportedCommand](ecCount)
   for i in 0 ..< ecCount:
     var rec: ExportedCommand
@@ -379,7 +385,10 @@ proc decodeManifestBytes*(bytes: openArray[byte];
     rec.binDirRelativePath = readString(bytes, pos)
     rec.binDirArtifactKind = readString(bytes, pos)
     result.exportedCommands[i] = rec
-  let gfCount = int(readU32Le(bytes, pos))
+  let gfCountRaw = readU32Le(bytes, pos)
+  if not elementCountFits(gfCountRaw, bodyEnd - pos, 77):
+    raiseManifestCorrupt(filePath, "gfCount", "element count exceeds remaining body")
+  let gfCount = int(gfCountRaw)
   result.generatedFiles = newSeq[GeneratedFile](gfCount)
   for i in 0 ..< gfCount:
     var rec: GeneratedFile
@@ -401,7 +410,10 @@ proc decodeManifestBytes*(bytes: openArray[byte];
       "generatedFiles[" & $i & "].postWriteDigest")
     rec.stowSource = readString(bytes, pos)
     result.generatedFiles[i] = rec
-  let mbCount = int(readU32Le(bytes, pos))
+  let mbCountRaw = readU32Le(bytes, pos)
+  if not elementCountFits(mbCountRaw, bodyEnd - pos, 76):
+    raiseManifestCorrupt(filePath, "mbCount", "element count exceeds remaining body")
+  let mbCount = int(mbCountRaw)
   result.managedBlocks = newSeq[ManagedBlock](mbCount)
   for i in 0 ..< mbCount:
     var rec: ManagedBlock
@@ -414,7 +426,10 @@ proc decodeManifestBytes*(bytes: openArray[byte];
     rec.postWriteFileDigest = readDigest(bytes, pos, filePath,
       "managedBlocks[" & $i & "].postWriteFileDigest")
     result.managedBlocks[i] = rec
-  let rbCount = int(readU32Le(bytes, pos))
+  let rbCountRaw = readU32Le(bytes, pos)
+  if not elementCountFits(rbCountRaw, bodyEnd - pos, 20):
+    raiseManifestCorrupt(filePath, "rbCount", "element count exceeds remaining body")
+  let rbCount = int(rbCountRaw)
   result.resourceBindings = newSeq[ResourceBinding](rbCount)
   for i in 0 ..< rbCount:
     var rec: ResourceBinding

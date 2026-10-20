@@ -432,6 +432,11 @@ const
         path: "build/bin/repro-peer-cache-admin",
         actionId: "reprobuild.apps.repro-peer-cache-admin")]),
     TestGraphArtifacts(
+      source: "tests/integration/t_installer_tarball_shared_cache.nim",
+      artifacts: @[TestGraphArtifact(
+        path: "build/bin/repro-binary-cache",
+        actionId: "reprobuild.apps.repro-binary-cache")]),
+    TestGraphArtifacts(
       source: "tests/integration/t_rp3_bind_deps_and_sharing.nim",
       artifacts: @[
         TestGraphArtifact(path: rp3FixtureProviderRoot & "/dep",
@@ -1978,22 +1983,37 @@ package reprobuild:
       # dependency the build does not have. If one of these tests grows one,
       # add it below.
       #
-      # THE INTENDED END STATE, unchanged: these two tests compile their shim
+      # THE INTENDED END STATE, unchanged: the shim tests compile their shim
       # AT RUNTIME. Lifting that compile into its own graph edge (which
       # milestone M3 wants regardless) would make the compiler emit this
       # depfile for free, and the generator call below could be deleted.
+      #
+      # The recorder-backed HCR gate has another structural incompatibility:
+      # injecting the monitor changes executable mappings and maps mutable
+      # shared-memory shards. The recorder correctly refuses those mappings.
+      # Its generated depfile names the test and every graph fixture, but
+      # does not observe its runtime compiler/recorder input closure, so this
+      # execute edge must never cache a verdict. Build edges keep their normal
+      # policy (Sandbox-And-Monitoring.md, "Tests that record their own children").
+      let recordsHcrChild = spec.source ==
+        "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim"
       var executeAfter: seq[BuildActionDef] = @[]
       let executePolicy =
         if spec.selfInterposes:
           let testDepfile = reproTestDepfilePath(spec.binary)
-          let testDepfileEdge = dslfs.unmonitorableActionDepfile(
-            output = testDepfile,
-            inputs = @[spec.binary] & @(requiredBinaries),
-            reason =
+          let incompatibilityReason =
+            if recordsHcrChild:
+              "test records its child; the monitor's modified executable " &
+              "mappings and mutable mapped shards violate recorder invariants"
+            else:
               "test performs LD_PRELOAD interposition itself; the engine's " &
               "io-monitor injects a second interposer and the two livelock " &
               "on the same libc entry points (observed: 19h spin in " &
-              "t_stackable_hooks_extracted_process_tree)")
+              "t_stackable_hooks_extracted_process_tree)"
+          let testDepfileEdge = dslfs.unmonitorableActionDepfile(
+            output = testDepfile,
+            inputs = @[spec.binary] & @(requiredBinaries),
+            reason = incompatibilityReason)
           reprobuildTestBuildActions.add(testDepfileEdge)
           executeAfter.add(testDepfileEdge)
           makeDepfilePolicy(testDepfile, suppressMonitorShimSeed = true)
@@ -2003,6 +2023,7 @@ package reprobuild:
         deps = executeDeps,
         after = executeAfter,
         requiredBinaries = requiredBinaries,
+        cacheable = not recordsHcrChild,
         actionId = executeActionId,
         registerImplicitName = false,
         extraEnv = optInLayerEnvFor(spec.source, on = false),
@@ -2060,6 +2081,8 @@ package reprobuild:
       let sourceRevisionTest = source == "tests/unit/test_source_revision.py"
       let ciLockCredentialsTest =
         source == "tests/unit/test_ci_reconcile_lock_credentials.py"
+      let hcrFixtureEdgeTest =
+        source == "tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py"
       let pyExecute = pythonUnittest.run(
         source = source,
         actionId = pyActionId,
@@ -2078,6 +2101,9 @@ package reprobuild:
           # contract cases read.
           @["scripts/ci_lock_source_credentials.py",
             ".github/workflows/ci.yml"]
+        elif hcrFixtureEdgeTest:
+          # The fixture script its prebuilt-bundle cases run.
+          @["scripts/build_hcr_ct_mcr_fixture.sh"]
         else: @[])
       when not defined(windows):
         if hookScopeTest:
@@ -2096,6 +2122,11 @@ package reprobuild:
       # for the loopback-forge cases.
       if ciLockCredentialsTest:
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["git"])
+      # The prebuilt-bundle cases run the fixture script, which uses what the
+      # bundle edge declares for it (`git` only for its closing message).
+      if hcrFixtureEdgeTest:
+        appendRegisteredActionToolIdentityRefs(pyExecute.id,
+          ["bash", "git", "mkdir", "cp"])
       if hookScopeTest:
         discard target("test-dev-shell-hook-scope", pyExecute)
       if nixCacheTest:

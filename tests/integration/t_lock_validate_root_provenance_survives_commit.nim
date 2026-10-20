@@ -91,6 +91,50 @@ suite "committed root provenance validation":
       writeFile(linked / "repro.lock", serializeLockedDependencies(lock))
       check validate(linked).code == 2
 
+  test "a linked worktree checks sibling integrity in the main checkout frame":
+    # A committed lock places dependencies relative to the main worktree,
+    # including when it is read from a deeply nested linked worktree. Both
+    # readers must inspect the same real sibling, rather than silently skip
+    # verification because a sibling of the invoking worktree is absent.
+    # No doubles: the sibling, linked worktree and validation CLI are real.
+    withFixture("sibling-worktree"):
+      let sibling = scratch / "lib"
+      seedRepo(sibling)
+      let pinned = mustRun(["git", "rev-parse", "HEAD"], sibling)
+      let linked = project / ".repro" / "linked" / "branch"
+      discard mustRun(["git", "worktree", "add", "-b", "linked", linked], project)
+      refresh(project)
+      var lock = parseLockedDependencies(readFile(project / "repro.lock"))
+      lock.deps.add(LockedDep(name: "lib", path: "../lib",
+        coordinates: Coordinates(kind: ckVcs, url: "file://" & sibling,
+          gitRef: "main", revision: pinned),
+        integrity: "git-sha1:" & pinned, visibility: "public"))
+      var body = serializeLockedDependencies(lock)
+      # Keep this a v2 input fixture so the same test can interrogate the
+      # pre-migration CLI as a negative control, even when the test itself
+      # was compiled against the current path-free writer.
+      if "reprobuild.solved-graph-lock.v3" in body:
+        body = body.replace("reprobuild.solved-graph-lock.v3",
+          "reprobuild.solved-graph-lock.v2")
+          .replace("self = \"true\"", "path = \".\"")
+          .replace("{ name = \"lib\",", "{ name = \"lib\", path = \"../lib\",")
+      writeFile(project / "repro.lock", body)
+      writeFile(linked / "repro.lock", body)
+      check validate(project).code == 0
+      check validate(linked).code == 0
+
+      writeFile(sibling / "later.txt", "a different published identity\n")
+      discard mustRun(["git", "add", "later.txt"], sibling)
+      discard mustRun(["git", "commit", "-m", "Advance sibling"], sibling)
+      let atRoot = validate(project)
+      let inLinked = validate(linked)
+      checkpoint($atRoot.report)
+      checkpoint($inLinked.report)
+      check atRoot.code == 2
+      check "dep 'lib' integrity mismatch" in $atRoot.report
+      check inLinked.code == 2
+      check "dep 'lib' integrity mismatch" in $inLinked.report
+
   test "root integrity tampering remains a refusal":
     withFixture("tamper"):
       refresh(project)
@@ -204,3 +248,21 @@ suite "committed root provenance validation":
       let after = validate(project)
       check after.code == 2
       check "dep 'sibling' integrity mismatch" in $after.report
+
+  test "validation reports malformed v3 dependency metadata":
+    withFixture("malformed-v3"):
+      refresh(project)
+      let generated = readFile(project / "repro.lock")
+      var depsLine = ""
+      for line in generated.splitLines():
+        if line.startsWith("deps = ["): depsLine = line
+      doAssert depsLine.len > 0
+      for entries in [
+          "{ name = \"same\", coord_kind = \"vcs\" }, { name = \"same\", coord_kind = \"vcs\" }",
+          "{ name = \"pkg\", self = \"true\", coord_kind = \"store\" }"]:
+        writeFile(project / "repro.lock", generated.replace(depsLine,
+          "deps = [" & entries & "]"))
+        let invalid = validate(project)
+        check invalid.code == 2
+        check not invalid.report["valid"].getBool()
+        check "cannot read locked dependencies" in $invalid.report["problems"]

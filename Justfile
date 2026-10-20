@@ -604,6 +604,15 @@ lint:
     python3 ./tools/attestation-mutations/fixture_lifecycle_mutations.py --verify-rows 2>&1 | tee -a test-logs/lint.log
     python3 ./tools/attestation-mutations/cvm_emulator_mutations.py --verify-rows 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_workflows.sh 2>&1 | tee -a test-logs/lint.log
+    # The CI test job's ceiling and the suite's measured duration, held as a
+    # checked pair: every step of ci.yml's `test` job carries a timeout above
+    # its worst measured duration, `just test` pins run_tests.sh's backstops
+    # below its step limit, and the steps fit the job limit -- so GitHub's
+    # silent job ceiling is never the first limit to fire and a `cancelled`
+    # is not mistaken for a verdict (reprobuild-pm issue 2026-09-30, the six-
+    # hour ceiling). Reads one file, under a second; beside actionlint because
+    # both grade the workflow.
+    python3 ./scripts/check_ci_test_budget.py 2>&1 | tee -a test-logs/lint.log
     # The four suite-description gates, LAST, and that position is the point.
     # They hold tracked bookkeeping -- the case-count baseline, the inventory
     # entry set, the edge table -- to the tree, and bookkeeping goes stale
@@ -1415,6 +1424,15 @@ e2e_repro_watch_hcr_one_target_agent_inject_failure:
         --out:build/test-bin/e2e_repro_watch_hcr_one_target_agent_inject_failure \
         tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim \
         2>&1 | tee test-logs/e2e_repro_watch_hcr_one_target_agent_inject_failure.log
+
+e2e_repro_watch_refuses_an_over_long_hcr_agent_socket:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_repro_watch_refuses_an_over_long_hcr_agent_socket \
+        --out:build/test-bin/e2e_repro_watch_refuses_an_over_long_hcr_agent_socket \
+        tests/e2e/hcr-watch/t_repro_watch_refuses_an_over_long_hcr_agent_socket.nim \
+        2>&1 | tee test-logs/e2e_repro_watch_refuses_an_over_long_hcr_agent_socket.log
 
 # The one gate in the family with a genuinely mixed body: a structural case
 # that runs on every host and an engine case that is macOS-arm64 only. The lane
@@ -3007,3 +3025,7 @@ e2e_hcr_linux_registration_payloads_travel_over_the_production_wire:
         --out:build/test-bin/e2e_hcr_linux_registration_payloads_travel_over_the_production_wire \
         tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.log
+
+# Exercise the actual fork parser and independent script publication guard.
+test-format:
+    bash ./tests/integration/t_format_preserves_meaning.sh

@@ -1042,7 +1042,9 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
       result.add("--depth")
       result.add($payload.depth)
 
-  var args = @["clone"]
+  # A local source may itself borrow objects. Disable Git's local copying
+  # shortcut so only the explicitly selected reference can become an alternate.
+  var args = @["clone", "--no-local"]
   # RA-5: accelerate via the shared bare clone. ``--reference <bare>``
   # leaves ``objects/info/alternates`` pointing at the shared pool (no
   # ``--dissociate``), so the clone reads objects already present in the
@@ -1072,7 +1074,7 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     # broken/locked shared bare never breaks init. The RA-14 accelerators
     # are kept — they are independent of the shared bare.
     discard removeCloneTargetSafely(target, cwd)
-    var plain = @["clone"]
+    var plain = @["clone", "--no-local"]
     for f in accelFlags():
       plain.add(f)
     plain.add(payload.remoteUrl)
@@ -1433,7 +1435,7 @@ proc executeRefreshBare(payload: GitVcsPayload;
           return failed("refresh-bare-parent-failed",
             "could not create cache parent " & parent & ": " & e.msg)
       let res = runGit(payload,
-        ["clone", "--bare", "--quiet", payload.remoteUrl, bare])
+        ["clone", "--bare", "--no-local", "--quiet", payload.remoteUrl, bare])
       if res.exitCode != 0:
         if dirExists(bare / "objects") or dirExists(bare / ".git"):
           let prepared = prepareSharedBare(payload.binaryPath, bare)

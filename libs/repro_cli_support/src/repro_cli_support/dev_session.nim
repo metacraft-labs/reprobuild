@@ -1,4 +1,4 @@
-import std/[algorithm, hashes, json, net, options, os, osproc, sequtils,
+import std/[algorithm, atomics, hashes, json, net, options, os, osproc, sequtils,
             strtabs, strutils, tables, times]
 
 import cbor
@@ -14,6 +14,7 @@ import repro_resources/service_registry  # the snapshot codec + lease words
 import repro_resources/readiness_edge    # D-SS10 (§7.1): the edge's own names
 import repro_cli_support/service_registrar  # §7.3: the env var a refusal names
 import repro_cli_support/watch
+import repro_cli_support/session_process_owner
 
 type
   DevSessionMode* = enum
@@ -46,6 +47,7 @@ type
     ## (``t_w2_activation_surfaces_declare_producer_ops.nim``) reads.
 
   DevSessionSupervisorConfig* = object
+    sessionId*: string
     mode*: DevSessionMode
     foreground*: bool
     projectRoot*: string
@@ -63,6 +65,9 @@ type
     debounceMs*: int
 
   DevSessionHttpConfig* = object
+    parentPid*: int
+    supervised*: bool
+    sessionId*: string
     sessionDir*: string
     host*: string
     port*: int
@@ -87,6 +92,18 @@ type
     readinessUrl*: string
     readinessTimeoutMs*: int
     resources*: seq[tuple[kind, path: string]]
+    consumedActionIds*: seq[string]
+      ## Shared-Development-Services F1 (§4.8 / D-SS15), SECOND HALF:
+      ## the ids of the build actions whose outputs this service NAMES,
+      ## carried from `DevEnvServiceSummary.consumedActionIds`.
+      ##
+      ## This is the ORDERING EDGE, and it is the edge that already
+      ## exists rather than a new one: `args <output>.path` and
+      ## `runtimeFile <output>` record the producing action's id on the
+      ## service record, so the dev session reads an IDENTIFIER MATCH.
+      ## `devSessionStartPlan` folds these into the SAME topological
+      ## walk `dependsOn` goes through, so an action and a service are
+      ## two kinds of node in one order rather than two orderings.
 
   SharedServiceInstanceDeclaration* = object
     ## Shared-Development-Services L7 (§4.5): the dev-session service
@@ -205,6 +222,7 @@ type
     activity: string
     sessionDir: string
     httpBind: string
+    httpPid: int
     status: string
     terminalEvents: bool
     resources: seq[tuple[kind, path, status: string]]
@@ -404,6 +422,7 @@ proc stateJson(state: SessionState): JsonNode =
     "sessionDir": state.sessionDir,
     "metadataPath": state.metadataPath,
     "httpBind": state.httpBind,
+    "httpPid": state.httpPid,
     "status": state.status,
     "failure": state.failure,
     "supervisorPid": getCurrentProcessId(),
@@ -915,6 +934,11 @@ type
     ## moment it decides whether to concretize a token.
     value*: string
     provenance*: RegistrarProvenance
+    registeredMember: string
+      ## The reader carries the member name alongside both lookup aliases.
+      ## A member can contain colons, so its name cannot be recovered by
+      ## inspecting whether a table key looks service-qualified. Empty for
+      ## caller-built tables, whose keys are reported verbatim instead.
 
   InstanceAttribute* = object
     ## Shared-Development-Services §7.3 — one computed attribute of the
@@ -1079,7 +1103,7 @@ proc readSharedInstanceMintedAttributes*(outDir: string):
   var ambiguous: seq[string] = @[]
   for row in readSharedInstanceMintedRows(outDir):
     let attr = MintedAttribute(value: row.mintedId,
-      provenance: row.provenance)
+      provenance: row.provenance, registeredMember: row.member)
     result[row.serviceName & ":" & row.member] = attr
     if row.member in result and result[row.member] != attr:
       ambiguous.add(row.member)
@@ -1391,9 +1415,11 @@ proc substituteMintedAttributes*(serviceName: string;
       result.add(attr.value)
     else:
       var known: seq[string] = @[]
-      for key in minted.keys:
-        if ':' notin key:
-          known.add(key)
+      for key, attr in minted:
+        let memberName =
+          if attr.registeredMember.len > 0: attr.registeredMember else: key
+        if memberName notin known:
+          known.add(memberName)
       known.sort()
       # D-SS10 (§7.1) requires an early read to report WHICH ATTRIBUTE,
       # WHICH RESOURCE and WHICH EDGE would have ordered it. All three
@@ -1429,6 +1455,8 @@ proc substituteMintedAttributes*(serviceName: string;
                                  seq[string] =
   ## The PROVENANCE-BLIND spelling, for a caller that holds only
   ## identifiers.
+  ## Without registration metadata, diagnostic member names are the supplied
+  ## keys verbatim, including any colons; no key spelling is guessed away.
   ##
   ## Every row it supplies is treated as `unstamped`, which is the truth
   ## about a table that cannot say otherwise -- so `@minted:` resolves
@@ -1484,6 +1512,11 @@ proc serviceSpecFromSummary*(projectRoot: string;
       "than treated as absent, because treating it as absent would " &
       "silently fall through to the typed `service` block's facts and " &
       "supervise something the author did not write.")
+  # F1 (§4.8), second half: the ordering edge, carried verbatim. No
+  # normalisation and no path resolution -- these are ACTION IDS, not
+  # paths, which is the whole point of reading consumption from the
+  # typed edge rather than from argv text.
+  result.consumedActionIds = service.consumedActionIds
   result.command = metadata{"command"}.stringArray()
   if result.command.len == 0:
     # Shared-Development-Services L8: fall back to the TYPED `service`
@@ -1772,6 +1805,265 @@ proc serviceStartOrder(services: openArray[ServiceSpec]): seq[ServiceSpec] =
   for i in 0 ..< services.len:
     visitService(i, services, temporary, permanent, result)
 
+# ───────────────────────────────────────────────────────────────────────
+# Shared-Development-Services F1 (§4.8 / D-SS15), SECOND HALF —
+# THE DEV SESSION BUILDS THE REPORTED ACTIONS, ORDERED BEFORE THE
+# SERVICES THAT CONSUME THEIR OUTPUTS.
+#
+# WHAT WAS STILL ABSENT, in §4.8's own words: "Reporting an action is
+# not running it. Nothing in this change makes the dev session BUILD the
+# reported edges, so F1's clause is not met by it -- what is closed is
+# F1's stated blocker ... and the remaining half is for the dev session
+# to order the reported actions before the services it launches."
+#
+# So F1's measurement still reproduced after the actions channel landed:
+# `repro up` reported the session up, the path reached the service's
+# argv, and the FILE was never written. An action carried and not run is
+# the same missing file with better bookkeeping.
+#
+# THE ORDER IS THE EXISTING ONE, NOT A NEW ONE. §7.1 settled that the
+# readiness edge is "the `dependsOn` that already exists" and that "a
+# service node's completion is its declared readiness"; the same
+# principle decides this. `serviceStartOrder` already walks `dependsOn`
+# as a DAG over service nodes, so an action becomes a NODE IN THAT WALK
+# rather than a second sequencing concept: `devSessionStartPlan` folds
+# `ServiceSpec.consumedActionIds` into the same depth-first visit, and
+# the plan it returns is ONE topological order over both kinds of node.
+# A test can therefore assert the ordering as an index comparison on the
+# plan -- the action's step comes before its consumer's -- instead of
+# inferring it from process timing.
+#
+# CONSUMPTION IS AN IDENTIFIER MATCH, read from the typed edge. That is
+# §4.8's rule for the orphan diagnostic and it is the same rule here,
+# from the same derivation (`typedServiceConsumedActionIds` in
+# `repro_project_dsl/runtime_provider.nim`), because a diagnostic that
+# refuses an unconsumed action and an ordering that builds a consumed
+# one must not be able to disagree about what consumption is.
+# ───────────────────────────────────────────────────────────────────────
+
+type
+  DevSessionStartStepKind* = enum
+    dsskAction
+      ## A build action the `devEnv:` body registered. It is BUILT.
+    dsskService
+      ## A service the session starts. It is not started by the action
+      ## pass -- its presence in the plan is what makes the ORDERING
+      ## claim readable, and its position is what the ordering is.
+
+  DevSessionStartStep* = object
+    ## One node of the session's start order. Two kinds in ONE list,
+    ## deliberately: a plan that held actions and services in separate
+    ## lists would state the order nowhere, which is how "ordered
+    ## before" becomes an assertion about nothing.
+    kind*: DevSessionStartStepKind
+    action*: DevEnvActionSummary
+      ## `dsskAction` only.
+    consumers*: seq[string]
+      ## `dsskAction` only: the names of the services whose
+      ## `consumedActionIds` name this action, in plan order. Carried so
+      ## a failure can say WHICH SERVICE will not start because of it --
+      ## "an action failed" names the wrong half of the problem.
+    service*: ServiceSpec
+      ## `dsskService` only.
+
+  DevSessionActionRunner* =
+      proc (action: DevEnvActionSummary; projectRoot: string): string
+    ## Build ONE dev-env action. Returns `""` on success and a reason
+    ## otherwise.
+    ##
+    ## A CALLBACK FOR THE REASON `DevSessionProducerOpsResolver` IS ONE,
+    ## plus a layering reason of its own. Lowering a `gnkAction` node
+    ## into an engine `BuildAction` is `repro_cli_support.nim`'s
+    ## `lowerGraphAction` -- the ONE lowering the build lane itself goes
+    ## through -- and that module IMPORTS this one. Re-implementing the
+    ## lowering here would be a second reading of the same payload, with
+    ## its own notion of which argument carries the text and which
+    ## carries the output path; two readings of one record is the defect
+    ## shape this document keeps finding. So this module owns the ORDER
+    ## and the caller owns HOW an action node becomes a run edge.
+
+proc devSessionStartPlan*(actions: openArray[DevEnvActionSummary];
+                          services: openArray[ServiceSpec]):
+    seq[DevSessionStartStep] =
+  ## ONE topological order over the actions a `devEnv:` body registered
+  ## and the services the session starts, with every action placed
+  ## BEFORE every service that names it.
+  ##
+  ## EVERY REPORTED ACTION IS IN THE PLAN, including one no SELECTED
+  ## activity's service consumes. That direction is §4.8's own, stated
+  ## there for the orphan check: the actions registry holds what every
+  ## activity body of the package registered, while `services` is gated
+  ## on `--activity`, so dropping an unclaimed action would make what
+  ## the session builds a function of the selection. An action nothing
+  ## in the PACKAGE consumes is already refused at evaluation by the
+  ## `PRODUCED AND NEVER CONSUMED` diagnostic, so the set reaching here
+  ## is consumed by something.
+  # COPIED INTO LOCALS BEFORE THE NESTED VISITS, because an `openArray`
+  # cannot be captured by a closure without violating memory safety and
+  # the walk below is two mutually recursive nested procs. The copy is
+  # also what lets the signature stay an `openArray`, so a caller with a
+  # `seq` and a caller with an array both reach it without a conversion
+  # at the call site.
+  let actionList = @actions
+  let specList = @services
+  var actionAt = initTable[string, int]()
+  for i, action in actionList:
+    if action.actionId in actionAt:
+      raise newException(ValueError,
+        "two dev-env actions share the id `" & action.actionId &
+        "`, so an ordering edge onto it would be ambiguous: a service " &
+        "naming it could not say which of the two has to be built " &
+        "first. Refused rather than resolved by position.")
+    actionAt[action.actionId] = i
+
+  # Which services name each action, in the order the services were
+  # given. Built once, read by the plan and by the failure message.
+  var consumersOf = initTable[string, seq[string]]()
+  for spec in specList:
+    for id in spec.consumedActionIds:
+      if id notin actionAt:
+        raise newException(ValueError,
+          "service `" & spec.name & "` names the output of dev-env " &
+          "action `" & id & "`, which this dev-env artifact does not " &
+          "carry (" & $actionList.len & " action(s): " &
+          actionList.mapIt(it.actionId).join(", ") & "). The service's " &
+          "argv therefore holds a path nothing in this session will " &
+          "write -- which is exactly the failure " &
+          "Shared-Development-Services F1 measured -- so the session " &
+          "is refused rather than started against a missing file.")
+      if id notin consumersOf:
+        consumersOf[id] = @[]
+      if spec.name notin consumersOf[id]:
+        consumersOf[id].add(spec.name)
+
+  # The action-to-action edges, read off the SAME payload the build lane
+  # reads. An action may declare `deps` on other actions (a rendered
+  # file assembled from another rendered file); only deps that are
+  # themselves actions of this dev-env are orderable here, and a dep on
+  # anything else belongs to the build lane rather than to this session.
+  var actionDeps = newSeq[seq[string]](actionList.len)
+  for i, action in actionList:
+    let payload =
+      try:
+        decodeBuildActionPayload(toBytes(action.payload))
+      except CatchableError as err:
+        raise newException(ValueError,
+          "dev-env action `" & action.actionId & "` carries a payload " &
+          "this build cannot decode (" & err.msg & "). Refused rather " &
+          "than skipped: an action whose payload cannot be read is an " &
+          "action whose output nothing will produce, and a service " &
+          "names that output.")
+    for dep in payload.deps:
+      if dep in actionAt and dep != action.actionId:
+        actionDeps[i].add(dep)
+
+  var temporary: seq[string] = @[]
+  var permanent: seq[string] = @[]
+  var plan: seq[DevSessionStartStep] = @[]
+
+  proc visitAction(index: int)
+  proc visitSpec(index: int)
+
+  proc visitAction(index: int) =
+    let key = "action:" & actionList[index].actionId
+    if permanent.find(key) >= 0:
+      return
+    if temporary.find(key) >= 0:
+      raise newException(ValueError,
+        "cycle in dev-env action dependencies at " &
+        actionList[index].actionId)
+    temporary.add(key)
+    for dep in actionDeps[index]:
+      visitAction(actionAt[dep])
+    discard temporary.pop()
+    permanent.add(key)
+    plan.add(DevSessionStartStep(kind: dsskAction,
+      action: actionList[index],
+      consumers: consumersOf.getOrDefault(actionList[index].actionId, @[])))
+
+  proc visitSpec(index: int) =
+    let key = "service:" & specList[index].name
+    if permanent.find(key) >= 0:
+      return
+    if temporary.find(key) >= 0:
+      raise newException(ValueError,
+        "cycle in dev service dependencies at " & specList[index].name)
+    temporary.add(key)
+    # THE ACTIONS FIRST, inside the same visit `dependsOn` goes through.
+    # Putting them here rather than in a pass of their own is what makes
+    # this one order instead of two: a service that depends on another
+    # service which consumes an action gets that action ahead of BOTH,
+    # with no second rule to state it.
+    for id in specList[index].consumedActionIds:
+      visitAction(actionAt[id])
+    for dep in specList[index].dependsOn:
+      let depIndex = specList.serviceIndex(dep)
+      if depIndex < 0:
+        raise newException(ValueError,
+          "service " & specList[index].name &
+          " depends on unknown service " & dep)
+      visitSpec(depIndex)
+    discard temporary.pop()
+    permanent.add(key)
+    plan.add(DevSessionStartStep(kind: dsskService,
+      service: specList[index]))
+
+  for i in 0 ..< specList.len:
+    visitSpec(i)
+  # Any action no listed service claimed, appended after the claimed
+  # ones in declaration order. See the docstring: the set the session
+  # builds must not be a function of `--activity`.
+  for i in 0 ..< actionList.len:
+    visitAction(i)
+  plan
+
+proc buildDevEnvActions*(actions: openArray[DevEnvActionSummary];
+                         services: openArray[ServiceSpec];
+                         projectRoot: string;
+                         run: DevSessionActionRunner):
+    tuple[built: seq[string]; failure: string] =
+  ## Build every action in `devSessionStartPlan` order. Returns the ids
+  ## built, in that order, and `""` for `failure` when all of them
+  ## succeeded.
+  ##
+  ## A FAILURE NAMES THE CONSUMING SERVICE, not only the action, and the
+  ## caller stops the session on it. §4.8's whole complaint about F1's
+  ## original defect is that the session came UP with the file missing;
+  ## an action that fails and a session that starts anyway is the same
+  ## outcome reached one step later. The services are started by the
+  ## supervisor (and the shared instances by the daemon) only after this
+  ## returns with no failure, which is the ordering stated as control
+  ## flow rather than as a hope about timing.
+  if run == nil:
+    return (built: @[], failure:
+      "no dev-env action runner was supplied, so the " &
+      $actions.len & " action(s) this dev-env registered would be " &
+      "reported and never built -- which is the half of " &
+      "Shared-Development-Services F1 that this call exists to close. " &
+      "Refused rather than skipped.")
+  var plan: seq[DevSessionStartStep]
+  try:
+    plan = devSessionStartPlan(actions, services)
+  except CatchableError as err:
+    return (built: @[], failure: err.msg)
+  var builtIds: seq[string] = @[]
+  for step in plan:
+    if step.kind != dsskAction:
+      continue
+    let reason = run(step.action, projectRoot)
+    if reason.len > 0:
+      let who =
+        if step.consumers.len == 0: "no service of the selected activity"
+        else: "service(s) " & step.consumers.join(", ")
+      return (built: builtIds, failure:
+        "dev-env action `" & step.action.actionId & "` FAILED to " &
+        "build: " & reason & ". " & who.capitalizeAscii() &
+        " name(s) its output on the command line, so the session is " &
+        "refused rather than started against a file that was not " &
+        "written (Shared-Development-Services §4.8 / D-SS15).")
+    builtIds.add(step.action.actionId)
+  (built: builtIds, failure: "")
+
 proc serviceSpecsFromArtifact(artifact: DevEnvArtifact;
                               minted = initTable[string, MintedAttribute]();
                               attributes =
@@ -1862,30 +2154,11 @@ proc readyPath(config: DevSessionSupervisorConfig): string =
   config.outDir.sessionDir / HttpReadyFile
 
 proc discardStaleControlApiBind*(config: DevSessionSupervisorConfig) =
-  ## Delete this session directory's ``http-ready.json`` BEFORE a supervisor
-  ## is started in it, so that nothing can read a previous session's bind
-  ## address out of it.
-  ##
-  ## That file is published by the control-API child and was never
-  ## invalidated by anything: ``repro down`` leaves it, a killed supervisor
-  ## leaves it, and the next ``repro up`` in the same directory therefore
-  ## finds a file naming a port that closed when the last session ended.
-  ## TWO readers take that bind at face value, which is why this has to
-  ## happen before the launch rather than inside either of them:
-  ##
-  ## * ``runDevSessionSupervisor``'s own ``waitForReadyFile`` checks for the
-  ##   file BEFORE sleeping, so a leftover file is returned on the first
-  ##   check -- every time, not as a race -- and the supervisor publishes
-  ##   that dead address as its own ``httpBind`` in ``session.json``. That
-  ##   is the address ``repro up`` prints and the address ``repro down``
-  ##   later tries to POST to.
-  ## * ``waitForDevSessionReady``'s phase 1 does the same, so the parent
-  ##   polls a closed port for its whole budget.
-  ##
-  ## Removing the file makes both of them wait for the bind THIS session's
-  ## control API publishes. Nothing else reads it: ``repro down`` takes its
-  ## ``httpBind`` from ``session.json``, so removing this file does not take
-  ## a running session's stop path away.
+  ## The exclusively locked supervisor clears a previous helper's marker
+  ## before spawning its child. Helpers normally remove their own marker,
+  ## but an abruptly killed helper or an older binary can leave one behind.
+  ## The launching parent must not clear it: only the admitted owner may
+  ## mutate this directory, and the parent instead checks its launch ID.
   try:
     removeFile(extendedPath(config.readyPath))
   except OSError, IOError:
@@ -2184,6 +2457,42 @@ proc controlApiStatus(httpBindValue: string): JsonNode =
   except CatchableError:
     nil
 
+proc reusableDevSession*(config: DevSessionSupervisorConfig): JsonNode =
+  ## Convergence can be repeated while a session is up. Admit that existing
+  ## owner only through its live API and held lock; a persisted `up` record
+  ## or an orphaned listener is insufficient proof of a running session.
+  let metadataPath = config.outDir.sessionDir / MetadataFile
+  if not fileExists(extendedPath(metadataPath)): return nil
+  let persisted = readJsonFileResilient(metadataPath)
+  let live = controlApiStatus(persisted{"httpBind"}.getStr())
+  if live.isNil or
+      live{"sessionId"}.getStr().len == 0 or
+      live{"sessionId"}.getStr() != persisted{"sessionId"}.getStr() or
+      live{"supervisorPid"}.getInt() != persisted{"supervisorPid"}.getInt() or
+      live{"projectRoot"}.getStr() != config.projectRoot:
+    return nil
+  if not sessionProcessAlive(live{"supervisorPid"}.getInt()):
+    raise newException(IOError,
+      "the existing dev session control API outlived its supervisor; " &
+      "stop that orphaned listener before starting another session")
+  try:
+    let unowned = acquireSessionProcessLock(config.outDir.sessionDir / "supervisor.lock")
+    unowned.release()
+    raise newException(IOError,
+      "the existing live dev session has no supervisor ownership lock; " &
+      "run `repro down` before starting it again")
+  except SessionProcessBusyError:
+    discard
+  if live{"mode"}.getStr() != config.mode.modeName:
+    raise newException(ValueError,
+      "dev session is already running in " & live{"mode"}.getStr() &
+      " mode; run `repro down` before changing its mode")
+  if live{"status"}.getStr() != "up":
+    raise newException(IOError,
+      "the existing dev session reports " & live{"status"}.getStr() &
+      "; wait for it or run `repro down` before starting another session")
+  live
+
 proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
                              budget: DevSessionReadyBudget): JsonNode =
   ## Wait for the session the caller detached to report ``session.up``, and
@@ -2219,13 +2528,37 @@ proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
   let deadline = started + budgetSeconds
   let readyFile = config.readyPath
 
+  proc checkTerminalLaunch() =
+    if config.sessionId.len == 0: return
+    let metadata = config.outDir.sessionDir / MetadataFile
+    if not fileExists(extendedPath(metadata)): return
+    let terminal = readJsonFileResilient(metadata)
+    if terminal{"sessionId"}.getStr() == config.sessionId and
+        terminal{"status"}.getStr() == "failed":
+      raise newException(IOError,
+        "dev session cannot start: " & terminal{"failure"}.getStr() & "\n" &
+        "  the supervisor reported that after the parent waited " &
+        $int((epochTime() - started) * 1000.0) & " ms of the " &
+        $budget.timeoutMs & " ms allowed\n" & config.eventLogHint())
+
+  var launchBind: JsonNode
+  proc launchReady(): bool =
+    if not fileExists(extendedPath(readyFile)): return false
+    try:
+      launchBind = readJsonFileResilient(readyFile)
+      return config.sessionId.len == 0 or
+        launchBind{"sessionId"}.getStr() == config.sessionId
+    except IOError:
+      return false # a helper can remove its marker while we open it
+
   # Phase 1 -- the control API's ``http-ready.json``. Bounded by
   # ``DevSessionControlApiTimeoutMs`` AND by the budget, whichever is
   # sooner; see that constant for why this phase is not given the whole
   # derived budget.
   let controlDeadline = min(deadline,
     started + DevSessionControlApiTimeoutMs.float / 1000.0)
-  while not fileExists(extendedPath(readyFile)):
+  while not launchReady():
+    checkTerminalLaunch()
     let now = epochTime()
     if now >= controlDeadline:
       if now >= deadline:
@@ -2271,15 +2604,17 @@ proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
           "  supervisor output: " &
           (config.outDir.sessionDir / "supervisor.log"))
     sleep(50)
-  let httpBindValue = readJsonFileResilient(readyFile){"httpBind"}.getStr()
+  let httpBindValue = launchBind{"httpBind"}.getStr()
 
-  # Phase 2 -- the session's own status, read only from the live control
-  # API. ``statusReads`` and ``lastStatus`` exist to BOUND WHAT THE
-  # DIAGNOSTIC MAY ASSERT: see the end of this proc.
+  # Phase 2 requires a live control API for success. A persisted terminal
+  # failure tied to this exact launch remains reportable after its helper
+  # has exited. ``statusReads`` and ``lastStatus`` bound what the expiry
+  # diagnostic may assert about HTTP replies.
   var statusReads = 0
   var lastStatus = ""
   var sessionId = ""
   while true:
+    checkTerminalLaunch()
     let status = controlApiStatus(httpBindValue)
     if not status.isNil:
       statusReads.inc
@@ -2725,15 +3060,18 @@ proc runWatchLoop(state: var SessionState; config: DevSessionSupervisorConfig;
       break
     state.runWatchCycle(config, artifact, artifactPath)
 
-proc startHttpServer(config: DevSessionSupervisorConfig) =
+proc startHttpServer(config: DevSessionSupervisorConfig): Process =
   let httpBindParts = parseHttpBind(config.httpBind)
   let args = @[
     "__repro-dev-session-http",
     "--session-dir", config.outDir.sessionDir,
     "--host", httpBindParts.host,
-    "--port", $httpBindParts.port
+    "--port", $httpBindParts.port,
+    "--parent-pid", $getCurrentProcessId(),
+    "--supervised",
+    "--session-id", config.sessionId
   ]
-  discard startProcess(config.publicCliPath,
+  startProcess(config.publicCliPath,
     args = args,
     workingDir = config.projectRoot,
     options = {poUsePath, poParentStreams})
@@ -2756,8 +3094,8 @@ proc runDevSessionSupervisor*(config: DevSessionSupervisorConfig;
   var state = SessionState(
     schemaId: SessionSchemaId,
     producerOpsFor: producerOpsFor,
-    sessionId: "dev-session-" & $getCurrentProcessId() & "-" &
-      $epochTime().int64,
+    sessionId: if config.sessionId.len > 0: config.sessionId else:
+      "dev-session-" & $getCurrentProcessId() & "-" & $epochTime(),
     mode: config.mode,
     projectRoot: config.projectRoot,
     artifactPath: artifactPath,
@@ -2767,6 +3105,12 @@ proc runDevSessionSupervisor*(config: DevSessionSupervisorConfig;
     status: "starting",
     terminalEvents: config.foreground)
   createDir(extendedPath(state.sessionDir))
+  let ownership = acquireSessionProcessLock(state.sessionDir / "supervisor.lock")
+  defer: ownership.release()
+  # A child of an abruptly killed owner may still be observing its death.
+  # Refuse before changing its record or marker; do not replace that listener.
+  let httpPreflight = acquireSessionProcessLock(state.sessionDir / "http.lock")
+  httpPreflight.release()
   try:
     removeFile(extendedPath(state.stopRequestPath))
   except OSError:
@@ -2775,12 +3119,34 @@ proc runDevSessionSupervisor*(config: DevSessionSupervisorConfig;
   # Before the control-API child can publish a bind, the PREVIOUS session's
   # published bind has to go: ``waitForReadyFile`` below checks for the file
   # before it sleeps, so a leftover one is what it returns, and this
-  # supervisor would record a closed port as its own ``httpBind``. See
-  # ``discardStaleControlApiBind``. The parent does this too, before it
-  # launches this process, because it reads the same file.
+  # supervisor would record a closed port as its own ``httpBind``. Only
+  # this locked owner removes it; the parent checks the launch session ID.
   config.discardStaleControlApiBind()
-  config.startHttpServer()
-  let ready = waitForReadyFile(config.readyPath, 5000)
+  let httpProcess = config.startHttpServer()
+  state.httpPid = httpProcess.processID()
+  let httpPid = state.httpPid
+  var httpStopped = false
+  proc stopHttpServer() =
+    if httpStopped: return
+    if httpProcess.running(): httpProcess.kill()
+    discard httpProcess.waitForExit()
+    httpProcess.close()
+    httpStopped = true
+    let readyPath = config.readyPath
+    try:
+      if fileExists(extendedPath(readyPath)) and
+          readJsonFileResilient(readyPath){"pid"}.getInt() == httpPid:
+        removeFile(extendedPath(readyPath))
+    except CatchableError:
+      discard
+  defer: stopHttpServer()
+  state.writeState()
+  let ready =
+    try:
+      waitForReadyFile(config.readyPath, 5000)
+    except CatchableError as err:
+      state.recordStartFailure("", err.msg)
+      raise
   state.httpBind = ready["httpBind"].getStr()
   state.writeState()
   state.emitEvent("session.created")
@@ -2835,6 +3201,7 @@ proc runDevSessionSupervisor*(config: DevSessionSupervisorConfig;
     state.writeState()
     state.emitEvent("session.stopping")
     state.stopServices()
+    stopHttpServer()
     state.status = "down"
     state.writeState()
     state.emitEvent("session.down")
@@ -2935,12 +3302,16 @@ proc handleHttpClient(client: Socket; sessionDir: string) =
       client.sendResponse(404, "application/json",
         "{\"error\":\"POST required\"}\n")
     else:
+      # Queue the asynchronous acknowledgement before publishing the stop:
+      # either the supervisor or the lifetime watchdog may then close this
+      # process immediately. `repro down` still requires terminal metadata
+      # before reporting success; a failed stop-file write cannot satisfy it.
+      client.sendResponse(202, "application/json", "{\"stopping\":true}\n")
       writeJsonFile(sessionDir / StopRequestFile, %*{
         "schemaId": "reprobuild.dev-session.stop-request.v1",
         "source": "http",
         "time": nowIso()
       })
-      client.sendResponse(202, "application/json", "{\"stopping\":true}\n")
   of "/health":
     client.sendResponse(200, "text/plain", "ok\n")
   else:
@@ -2948,6 +3319,18 @@ proc handleHttpClient(client: Socket; sessionDir: string) =
 
 proc runDevSessionHttpServer*(config: DevSessionHttpConfig): int =
   createDir(extendedPath(config.sessionDir))
+  let parent = openSessionParent(config.parentPid)
+  defer: parent.close()
+  if not parent.alive(): return 0
+  # Direct internal invocations own the supervisor slot themselves. Only a
+  # child launched by the supervisor shares its parent's already-held slot.
+  var supervisorSlot: SessionProcessLock
+  if not config.supervised:
+    supervisorSlot = acquireSessionProcessLock(config.sessionDir / "supervisor.lock")
+  defer: supervisorSlot.release()
+  let ownership = acquireSessionProcessLock(config.sessionDir / "http.lock")
+  defer: ownership.release()
+  defer: config.sessionDir.removeOwnedReady()
   var server = newSocket()
   defer: server.close()
   server.setSockOpt(OptReuseAddr, true)
@@ -2959,9 +3342,19 @@ proc runDevSessionHttpServer*(config: DevSessionHttpConfig): int =
     int(local[1]))
   writeJsonFile(config.sessionDir / HttpReadyFile, %*{
     "schemaId": "reprobuild.dev-session.http.v1",
+    "sessionId": config.sessionId,
     "httpBind": httpBindValue,
     "pid": getCurrentProcessId()
   })
+  # Publish completely before the watchdog may remove the marker. A death
+  # during publication must not race cleanup against a partial JSON write.
+  var stopped: Atomic[bool]
+  var watchdog: Thread[SessionWatchdogArgs]
+  createThread(watchdog, watchSessionParent,
+    (parent: parent, dir: config.sessionDir, stopped: addr stopped))
+  defer:
+    stopped.store(true)
+    joinThread(watchdog)
   while not fileExists(extendedPath(config.sessionDir / StopRequestFile)):
     var client: owned(Socket)
     server.accept(client)

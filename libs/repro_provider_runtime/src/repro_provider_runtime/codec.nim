@@ -3,10 +3,18 @@ import repro_provider_runtime/types
 
 const
   ProviderGraphMagic = [byte(ord('R')), byte(ord('B')), byte(ord('P')), byte(ord('G'))]
-  ProviderGraphVersion = 2'u16  # version-literal-ok: this IS the
+  ProviderGraphVersion = 3'u16  # version-literal-ok: this IS the
                                 # provider-graph envelope version
                                 # definition, not a literal standing in
                                 # for one.
+    ## MOVED 2 -> 3 BY Shared-Development-Services F1's SECOND half
+    ## (§4.8 / D-SS15), which appended
+    ## `DevEnvServiceMetadata.consumedActionIds` -- the edge from a
+    ## service to the actions whose outputs it names, without which the
+    ## dev session can carry the actions and still not know which
+    ## service to order them before. Same positional-payload reasoning
+    ## as the 1 -> 2 move below, one record deeper.
+    ##
     ## MOVED 1 -> 2 BY Shared-Development-Services F1, which appended
     ## `DevEnvResult.actions` -- so the dev-env half of a provider
     ## RESPONSE grew a field, and this module's payloads are positional:
@@ -64,7 +72,7 @@ proc writeStringSeq(outp: var seq[byte]; values: openArray[string]) =
     outp.writeString(value)
 
 proc readStringSeq(bytes: openArray[byte]; pos: var int): seq[string] =
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result = newSeq[string](count)
   for i in 0 ..< count:
     result[i] = readString(bytes, pos)
@@ -152,7 +160,7 @@ proc writeManifest(outp: var seq[byte]; value: ProviderManifest) =
 proc readManifest(bytes: openArray[byte]; pos: var int): ProviderManifest =
   result.providerArtifactId = readString(bytes, pos)
   result.protocolVersion = readU32Le(bytes, pos)
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result.entryPoints = newSeq[GraphEntryPointDescriptor](count)
   for i in 0 ..< count:
     result.entryPoints[i] = readDescriptor(bytes, pos)
@@ -264,23 +272,23 @@ proc readFragment(bytes: openArray[byte]; pos: var int): GraphFragment =
   result.entryPointBodyHash = readString(bytes, pos)
   result.arguments = readString(bytes, pos)
   result.namespace = readString(bytes, pos)
-  var count = int(readU32Le(bytes, pos))
+  var count = readElementCount(bytes, pos, 4)
   result.nodes = newSeq[GraphNode](count)
   for i in 0 ..< count:
     result.nodes[i] = readNode(bytes, pos)
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, 4)
   result.edges = newSeq[types.GraphEdge](count)
   for i in 0 ..< count:
     result.edges[i] = readEdge(bytes, pos)
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, 4)
   result.effectClaims = newSeq[OwnedEffectClaim](count)
   for i in 0 ..< count:
     result.effectClaims[i] = readEffect(bytes, pos)
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, 4)
   result.childEntryPoints = newSeq[GraphEntryPointInvocationSpec](count)
   for i in 0 ..< count:
     result.childEntryPoints[i] = readChildSpec(bytes, pos)
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, 4)
   result.evaluationInputs = newSeq[GraphEvaluationInput](count)
   for i in 0 ..< count:
     result.evaluationInputs[i] = readInput(bytes, pos)
@@ -424,6 +432,14 @@ proc writeDevEnvService(outp: var seq[byte]; value: DevEnvServiceMetadata) =
   outp.writeByte(if value.instanceDeclared: 1'u8 else: 0'u8)
   outp.writeU64Le(cast[uint64](value.instanceLeaseTtlSeconds))
   outp.writeString(value.instanceEnvironment)
+  # Shared-Development-Services F1 (§4.8): appended at the END, for the
+  # reason L8's and L9's blocks were, and `ProviderGraphVersion` moves
+  # 2 -> 3 with it: this record is read positionally inside a response
+  # payload, so a v2 response decoded as a v3 one would read past its
+  # end rather than be refused. See D-SS15a for why one version governs
+  # all three envelopes and why a stale provider-graph SNAPSHOT is
+  # discarded and recomputed rather than raised.
+  outp.writeStringSeq(value.consumedActionIds)
 
 proc readDevEnvService(bytes: openArray[byte]; pos: var int): DevEnvServiceMetadata =
   result = DevEnvServiceMetadata(
@@ -456,6 +472,7 @@ proc readDevEnvService(bytes: openArray[byte]; pos: var int): DevEnvServiceMetad
   result.instanceDeclared = instanceFlag == 1'u8
   result.instanceLeaseTtlSeconds = cast[int64](readU64Le(bytes, pos))
   result.instanceEnvironment = readString(bytes, pos)
+  result.consumedActionIds = readStringSeq(bytes, pos)
 
 proc writeDevEnvDiagnostic(outp: var seq[byte]; value: DevEnvDiagnostic) =
   outp.writeByte(byte(ord(value.severity)))
@@ -533,39 +550,39 @@ proc readDevEnvResult(bytes: openArray[byte]; pos: var int): DevEnvResult =
   result.lockSliceId = readString(bytes, pos)
   result.selectedActivities = readStringSeq(bytes, pos)
   result.declaredActivities = readStringSeq(bytes, pos)
-  var count = int(readU32Le(bytes, pos))
+  var count = readElementCount(bytes, pos, 4)
   result.shellOps = newSeq[DevEnvShellOp](count)
   for i in 0 ..< count:
     result.shellOps[i] = readDevEnvShellOp(bytes, pos)
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, 4)
   result.toolRequirements = newSeq[DevEnvToolRequirement](count)
   for i in 0 ..< count:
     result.toolRequirements[i] = readDevEnvTool(bytes, pos)
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, 4)
   result.tasks = newSeq[DevEnvTaskMetadata](count)
   for i in 0 ..< count:
     result.tasks[i] = readDevEnvTask(bytes, pos)
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, 4)
   result.services = newSeq[DevEnvServiceMetadata](count)
   for i in 0 ..< count:
     result.services[i] = readDevEnvService(bytes, pos)
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, 4)
   result.diagnostics = newSeq[DevEnvDiagnostic](count)
   for i in 0 ..< count:
     result.diagnostics[i] = readDevEnvDiagnostic(bytes, pos)
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, 4)
   result.evaluationInputs = newSeq[GraphEvaluationInput](count)
   for i in 0 ..< count:
     result.evaluationInputs[i] = readInput(bytes, pos)
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, 4)
   result.sourceFingerprints = newSeq[DevEnvSourceFingerprint](count)
   for i in 0 ..< count:
     result.sourceFingerprints[i] = readDevEnvFingerprint(bytes, pos)
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, 4)
   result.sharedResolutions = newSeq[DevEnvSharedResolution](count)
   for i in 0 ..< count:
     result.sharedResolutions[i] = readDevEnvSharedResolution(bytes, pos)
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, 4)
   result.actions = newSeq[GraphNode](count)
   for i in 0 ..< count:
     result.actions[i] = readNode(bytes, pos)
@@ -609,23 +626,23 @@ proc readStoredFragment(bytes: openArray[byte]; pos: var int):
   result.activity = readString(bytes, pos)
   result.namespace = readString(bytes, pos)
   result.fragmentDigest = readString(bytes, pos)
-  var count = int(readU32Le(bytes, pos))
+  var count = readElementCount(bytes, pos, 4)
   result.nodes = newSeq[GraphNode](count)
   for i in 0 ..< count:
     result.nodes[i] = readNode(bytes, pos)
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, 4)
   result.edges = newSeq[types.GraphEdge](count)
   for i in 0 ..< count:
     result.edges[i] = readEdge(bytes, pos)
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, 4)
   result.effectClaims = newSeq[OwnedEffectClaim](count)
   for i in 0 ..< count:
     result.effectClaims[i] = readEffect(bytes, pos)
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, 4)
   result.childEntryPoints = newSeq[GraphEntryPointInvocationSpec](count)
   for i in 0 ..< count:
     result.childEntryPoints[i] = readChildSpec(bytes, pos)
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, 4)
   result.evaluationInputs = newSeq[GraphEvaluationInput](count)
   for i in 0 ..< count:
     result.evaluationInputs[i] = readInput(bytes, pos)
@@ -731,7 +748,7 @@ proc decodeProviderSnapshot*(bytes: openArray[byte]): ProviderGraphSnapshot =
   var pos = 0
   result.providerArtifactId = readString(payload, pos)
   result.manifest = readManifest(payload, pos)
-  let count = int(readU32Le(payload, pos))
+  let count = readElementCount(payload, pos, 4)
   result.fragments = newSeq[StoredGraphFragment](count)
   for i in 0 ..< count:
     result.fragments[i] = readStoredFragment(payload, pos)

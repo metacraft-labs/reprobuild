@@ -19,8 +19,8 @@
 ##   **1 — THE INSTANCE IS NOT RUNNING.** The owner's interface is lifted (so
 ##   the resolver has an identity, a scope and a fingerprint) and NO instance
 ##   is materialised. The consumer's `repro up` must refuse BY NAME and start
-##   nothing. This case is first on purpose: it is the one that would pass
-##   vacuously if the later cases had already left an instance running.
+##   nothing. Its fresh fixture proves the refusal independently of whether
+##   another case has already started an instance.
 ##
 ##   **2 — TWO SESSIONS, ONE INSTANCE, THE SAME BYTES.** The owner's `repro
 ##   up`, with the issuer's registrar program installed, mints the member. A
@@ -94,6 +94,8 @@ import repro_cli_support/service_registrar  # the declared-program protocol
 import repro_resources/service_registry
 import repro_resources/state_store
 import repro_test_support
+when defined(macosx):
+  import repro_test_support/darwin_fixture_processes
 
 const
   IssuerOwner = "f5issuerowner"
@@ -448,9 +450,8 @@ proc belongsToThisCase(pid: int; tempRoot: string): bool =
   ## case's own `createTempDir` path in the process's argv, or as its
   ## working directory — before any signal is sent. Killing by number
   ## alone turns a reap of a dead fixture into an attack on a live
-  ## stranger. Linux only, because both witnesses come from `/proc`;
-  ## elsewhere it answers false and the teardown does what it did before
-  ## this sweep existed.
+  ## stranger. This predicate uses Linux's /proc witnesses; macOS instead
+  ## uses the native libproc cwd witness in reapCaseProcesses below.
   when defined(linux):
     let cmdline =
       try: readFile("/proc/" & $pid & "/cmdline")
@@ -494,6 +495,8 @@ proc reapCaseProcesses(c: F5Case) =
       for pid in pids:
         discard posix.kill(Pid(pid), signal)
       sleep(300)
+  elif defined(macosx):
+    reapDarwinFixtureProcesses(c.tempRoot)
 
 proc cliStateStoreRoot(c: F5Case): string =
   ## The CLI's own state store for this case: `$HOME/.cache/repro/state`
@@ -567,27 +570,14 @@ proc clientIdFromArgv(project: string): string =
     "no `--client-id` on the argv of " & project & ": " & $argv)
 
 suite "L9 F5 — two sessions read one instance's minted identifier":
-  # Prepared on the first case's `setup`, NOT in the suite body. The suite
-  # body runs at registration, in every process this binary starts --
-  # including `--list` / `--list-json`, which only enumerates and is run
-  # from a scratch working directory. Preparing here made enumeration
-  # resolve `<cwd>/build/bin/repro` (raising from any other directory, so
-  # no case was listed) and start a daemon just to print case names. The
-  # runner executes each case in its own process, so a case still prepares
-  # the fixture and starts the daemon exactly once, and the deferred
-  # cleanup below still runs in that process -- only if a case prepared.
-  var prepared = false
-  var c: F5Case
-  var daemon: owned(Process)
-
+  # Every case owns a fresh workspace and daemon, whether run alone or as
+  # part of the whole binary. Setup stays lazy so --list/--list-json never
+  # resolves the engine or starts a daemon. Register cleanup before daemon
+  # startup so a startup failure also removes this case's fixture.
   setup:
-    if not prepared:
-      c = prepareCase()
-      prepared = true
-      daemon = c.startDaemon()
-
-  defer:
-    if prepared:
+    let c = prepareCase()
+    var daemon: owned(Process)
+    defer:
       for project in [c.issuerConsumer, c.devConsumer]:
         discard c.runRepro(project,
           @["down", "--activity=" & ConsumerActivity])
@@ -600,16 +590,12 @@ suite "L9 F5 — two sessions read one instance's minted identifier":
       c.reapCaseProcesses()
       try: removeDir(c.tempRoot) except OSError, IOError: discard
 
-  # ONE PROCESS PER CASE. The suite runner executes every case in a process
-  # of its own (`--run "<suite>::<case>"`), and each such process prepares a
-  # FRESH fixture and daemon in `setup` above. The cases below are one
-  # scenario told in steps, and a later step asserts on state an earlier
-  # step created -- so each step is a template, and a case first REPLAYS the
-  # earlier steps its state depends on, assertions and all, then runs its
-  # own. Run alone, a case therefore measures exactly what it measured as
-  # part of the sequence; a prerequisite step that fails fails the dependent
-  # case too, at that step's own assertion, rather than letting it pass or
-  # fail on a fixture it never built.
+    daemon = c.startDaemon()
+
+  # Each scenario replays every prerequisite against its own fresh fixture,
+  # retaining the prerequisite's assertions. Whole-binary and isolated runs
+  # therefore test the same transitions without inheriting an earlier case's
+  # registrations, edited recipes or event log.
 
   template resolverRefusesWithoutInstance() =
     # The steps of case "the instance is not running: the resolver refuses by name".
@@ -769,11 +755,8 @@ suite "L9 F5 — two sessions read one instance's minted identifier":
     # and the next `up`, in which the file on disk describes an instance that
     # may already be gone.
     #
-    # THE PLACEMENT IS THE LOAD-BEARING PART. A pure consumer takes no holder
-    # and therefore has NO LEDGER, so a removal placed after
-    # `releaseSharedServiceInstances`' `ledger.entries.len == 0` early return
-    # would be dead code for exactly the sessions this reader was built for.
-    # This case is a PURE CONSUMER, which is what makes it able to see that.
+    # A pure consumer takes a holder even though it declares no instances.
+    # Its down must remove the crossed rows alongside releasing that holder.
     let before = mintedRowsOf(c.issuerConsumer, ConsumerActivity)
     check before.len == 1
     check before[0]{"mintedId"}.getStr("") == IssuerClientId
@@ -797,3 +780,122 @@ suite "L9 F5 — two sessions read one instance's minted identifier":
   test "`repro down` removes the crossed rows a pure consumer read":
     twoSessionsReadSameMintedId()
     downRemovesCrossedRows()
+
+  test "down releases a pure consumer holder and the last owner reaps the instance":
+    twoSessionsReadSameMintedId()
+    let ledgerPath = sessionDirOf(c.issuerConsumer, ConsumerActivity) /
+      "shared-instances.json"
+    check fileExists(ledgerPath)
+    let holderId =
+      if fileExists(ledgerPath): parseJson(readFile(ledgerPath))["holderId"].getStr()
+      else: ""
+    check holderId.len > 0
+    # Independently observe the daemon-owned process through the host OS.
+    var instancePid = 0
+    for line in readFile(c.daemonLogPath).splitLines():
+      if line.contains("service converge") and line.contains("outcome=Materialise"):
+        for field in line.splitWhitespace():
+          if field.startsWith("pid="):
+            instancePid = parseInt(field[4 .. ^1])
+    require instancePid > 0
+    proc instanceAlive(): bool =
+      runProgram("/bin/sh", @["-c", "kill -0 " & $instancePid &
+        " 2>/dev/null"], repoRootDir(), nil).exitCode == 0
+    check instanceAlive()
+    # Release the acquired key even if the recipe no longer resolves it.
+    writeFile(c.issuerConsumer / "repro.nim",
+      "import repro_project_dsl\npackage " & IssuerConsumer & ":\n" &
+      "  devEnv:\n    activity stack():\n      discard\n    enable stack\n")
+    let changedUp = c.runRepro(c.issuerConsumer,
+      @["up", "--activity=" & ConsumerActivity])
+    checkpoint(changedUp.output)
+    check changedUp.exitCode == 0
+    check fileExists(ledgerPath)
+    let consumerDown = c.runRepro(c.issuerConsumer,
+      @["down", "--activity=" & ConsumerActivity])
+    checkpoint(consumerDown.output)
+    check consumerDown.exitCode == 0
+    check consumerDown.output.contains("DroppedHolder")
+    check consumerDown.output.contains("; 1 holder remains")
+    check not fileExists(ledgerPath)
+    check instanceAlive()
+    let released = readFile(c.daemonLogPath)
+    check released.contains("service release holder=" & holderId & " address=")
+    let ownerDown = c.runRepro(c.issuerOwner, @["down", "--activity=" & Activity])
+    checkpoint(ownerDown.output)
+    check ownerDown.exitCode == 0
+    check ownerDown.output.contains("ReleasedLastHolder")
+    check ownerDown.output.contains("; 0 holders remain")
+    check not instanceAlive()
+
+  test "a mixed owner and consumer releases both leases from one ledger":
+    let ownService = "      service local:\n" &
+      "        executable executableAtPath(\"/bin/sh\")\n" &
+      "        args \"scripts/idp.sh\"\n" &
+      "        identity stable \"com.example.f5.consumer.local\"\n" &
+      "        scope workspace\n" &
+      "        compatibility 1\n" &
+      "        workingDirectory \".\"\n" &
+      "        readiness fileExists(\"state/idp.ready\", timeoutMs = 60000)\n" &
+      "        instance:\n" &
+      "          lease delayed(3600)\n"
+    let recipePath = c.issuerConsumer / "repro.nim"
+    writeFile(recipePath, readFile(recipePath).replace(
+      "      service consumerApp:", ownService & "      service consumerApp:"))
+    writeExecutable(c.issuerConsumer / "scripts" / "idp.sh", PlainIdpScript)
+    twoSessionsReadSameMintedId()
+    let ledgerPath = sessionDirOf(c.issuerConsumer, ConsumerActivity) /
+      "shared-instances.json"
+    require fileExists(ledgerPath)
+    check parseJson(readFile(ledgerPath))["instances"].len == 2
+    let repeated = c.runRepro(c.issuerConsumer, @["up", "--activity=" & ConsumerActivity])
+    checkpoint(repeated.output)
+    check repeated.exitCode == 0
+    check parseJson(readFile(ledgerPath))["instances"].len == 2
+    let down = c.runRepro(c.issuerConsumer, @["down", "--activity=" & ConsumerActivity])
+    checkpoint(down.output)
+    check down.exitCode == 0
+    check down.output.contains("service `local` ReleasedLastHolder")
+    check down.output.contains("service `idp` DroppedHolder")
+    let ownerDown = c.runRepro(c.issuerOwner, @["down", "--activity=" & Activity])
+    check ownerDown.exitCode == 0
+    check ownerDown.output.contains("ReleasedLastHolder")
+
+  test "down releases an acquired consumer lease when up failed before its session":
+    # A broken durable registration document is encountered AFTER the daemon
+    # accepted the attachment. This deliberately corrupts real persisted state;
+    # no protocol response or daemon collaborator is replaced.
+    twoSessionsReadSameMintedId()
+    let previousDown = c.runRepro(c.issuerConsumer,
+      @["down", "--activity=" & ConsumerActivity])
+    require previousDown.exitCode == 0
+    let store = openStateStore(c.cliStateStoreRoot)
+    var corrupted = false
+    for original in store.listStateRecords():
+      if original.address.endsWith(ServiceRegistrationsAddressSuffix) and
+          original.attrsJson.contains(IssuerClientId):
+        var broken = original
+        broken.attrsJson = "not-json"
+        store.writeStateRecord(broken)
+        corrupted = true
+    require corrupted
+    for freshSession in [false, true]:
+      let metadataPath = sessionDirOf(c.issuerConsumer, ConsumerActivity) / "session.json"
+      if freshSession:
+        removeFile(metadataPath)
+      let up = c.runRepro(c.issuerConsumer, @["up", "--activity=" & ConsumerActivity])
+      checkpoint(up.output)
+      check up.exitCode != 0
+      check up.output.contains("AttachSilently")
+      check up.output.contains("reading what this instance has minted failed")
+      if freshSession:
+        check not fileExists(metadataPath)
+      else:
+        check parseJson(readFile(metadataPath))["status"].getStr() == "down"
+      let down = c.runRepro(c.issuerConsumer, @["down", "--activity=" & ConsumerActivity])
+      checkpoint(down.output)
+      check down.exitCode == 0
+      check down.output.contains("DroppedHolder")
+    let ownerDown = c.runRepro(c.issuerOwner, @["down", "--activity=" & Activity])
+    check ownerDown.exitCode == 0
+    check ownerDown.output.contains("ReleasedLastHolder")
