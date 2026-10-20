@@ -20034,10 +20034,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # The normal cache lookup below fingerprints declared and monitored
         # inputs after dependencies settle, so changed outputs still miss while
         # byte-identical producer reruns leave consumers reusable.
+        #
+        # Each arm of this chain up to `elif action.cacheable` decides the
+        # miss BEFORE any lookup, and a cacheable action records why in
+        # `cacheMissReason` as well as in `reason`. `completeSuccess`
+        # overwrites `reason` with the settle detail once the action launches
+        # (see `recordCacheLookupFacts`), so without it the build report and
+        # `--log=actions` showed a launched miss with no explanation: the
+        # interface extraction re-running for every copy of a recipe on a
+        # `nix-store-references-missing` refusal was invisible that way.
         if config.forceRebuild:
           runResult.results[idToIndex.resultIndex(id)].cacheDecision =
             if action.cacheable: cdMiss else: cdNotCacheable
           runResult.results[idToIndex.resultIndex(id)].reason = "force-rebuild"
+          if action.cacheable:
+            runResult.results[idToIndex.resultIndex(id)].cacheMissReason =
+              "force-rebuild"
           runResult.trace(id, "cache-skipped", "force-rebuild")
         elif config.rebuildSelectorInvalidates(action):
           # `Edge-Determinism-And-Soft-Rebuild.md` §4.1–§4.3. The shape
@@ -20058,6 +20070,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if action.cacheable: cdMiss else: cdNotCacheable
           let reason = config.rebuildClass.flagSpelling & " " &
             $action.determinismClass
+          if action.cacheable:
+            runResult.results[idToIndex.resultIndex(id)].cacheMissReason =
+              reason
           runResult.results[idToIndex.resultIndex(id)].reason = reason
           runResult.trace(id, "cache-skipped", reason)
           cacheInvalidatedByPolicy = true
@@ -20074,6 +20089,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             else: "monitor-loss-narrow-invalidation"
           runResult.trace(id, "cache-skipped",
             runResult.results[idToIndex.resultIndex(id)].reason)
+          runResult.results[idToIndex.resultIndex(id)].cacheMissReason =
+            runResult.results[idToIndex.resultIndex(id)].reason
           # And it must set this, for the same reason
           # ``rebuildSelectorInvalidates`` above does: without it the
           # "outputs are present, call it up to date" shortcut further
@@ -20101,6 +20118,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           runResult.results[idToIndex.resultIndex(id)].cacheDecision =
             if action.cacheable: cdMiss else: cdNotCacheable
           runResult.results[idToIndex.resultIndex(id)].reason = reason
+          if action.cacheable:
+            runResult.results[idToIndex.resultIndex(id)].cacheMissReason =
+              reason
           runResult.trace(id, "cache-skipped", reason)
           cacheInvalidatedByPolicy = true
         elif action.cacheable:
