@@ -380,6 +380,7 @@ for libName in [
   # ReproOS-Remix-Protocol-And-Registry M1: the Remix manifest codec,
   # identities, signatures and lineage.
   "repro_remix",
+  "repro_remix_registry",
   "repro_home_generations",
   "repro_home_apply",
   "repro_home_rollback",
