@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2215,
+    "nimTestBinaries": 2226,
     "pureUnitConsolidationGroups": 61,
-    "pureUnitTests": 663,
+    "pureUnitTests": 664,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2244
+    "testEntries": 2255
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1281,10 +1281,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 17,
-      "integration": 1224,
+      "integration": 1225,
       "platform/destructive": 134,
-      "pure unit": 663,
-      "unclassified": 206
+      "pure unit": 664,
+      "unclassified": 215
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1486,9 +1486,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2215,
+    "nimTestBinaryCount": 2226,
     "pythonTestFileCount": 29,
-    "testEntryCount": 2244
+    "testEntryCount": 2255
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -43660,6 +43660,206 @@
       "source": "tests/unit/t_bearssl_probe_marker_is_the_imported_module.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_binary_decoder_cli_counts",
+      "class": "unclassified",
+      "classificationReason": "imports `binary_decoder_count_support`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_binary_decoder_cli_counts.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_binary_decoder_daemon_counts",
+      "class": "unclassified",
+      "classificationReason": "imports `binary_decoder_count_support`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_daemon_core"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_binary_decoder_daemon_counts.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_binary_decoder_domain_counts",
+      "class": "unclassified",
+      "classificationReason": "imports `binary_decoder_count_support`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_domain_types"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_binary_decoder_domain_counts.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_binary_decoder_element_counts",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_peer_cache"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_binary_decoder_element_counts.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_binary_decoder_interface_counts",
+      "class": "unclassified",
+      "classificationReason": "imports `binary_decoder_count_support`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_binary_decoder_interface_counts.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_binary_decoder_local_record_counts",
+      "class": "unclassified",
+      "classificationReason": "imports `shm_gset`, which this scan does not recognize; refusing to call it pure rather than assuming it is (through `libs/repro_local_store/src/repro_local_store/action_index.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_local_store"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_binary_decoder_local_record_counts.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_binary_decoder_profile_nested_counts",
+      "class": "unclassified",
+      "classificationReason": "spawns a subprocess (through `libs/repro_tool_profiles/src/repro_tool_profiles/archive_steps.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_binary_decoder_profile_nested_counts.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_binary_decoder_provider_graph_counts",
+      "class": "unclassified",
+      "classificationReason": "imports `binary_decoder_count_support`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_provider_runtime"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_binary_decoder_provider_graph_counts.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_binary_decoder_provider_session_counts",
+      "class": "unclassified",
+      "classificationReason": "imports `binary_decoder_count_support`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_provider_runtime"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_binary_decoder_provider_session_counts.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_binary_decoder_resource_legacy_counts",
+      "class": "unclassified",
+      "classificationReason": "imports `winlean`, which grants out-of-process reach (through `libs/repro_resources/src/repro_resources/state_store.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_resources"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_binary_decoder_resource_legacy_counts.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_binary_decoder_secondary_counts",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_binary_cache_client",
+        "repro_binary_cache_server",
+        "repro_cmake_trycompile",
+        "repro_core",
+        "repro_deploy_agent",
+        "repro_dsl_stdlib",
+        "repro_home_generations",
+        "repro_launch_plan",
+        "repro_local_store",
+        "repro_peer_cache",
+        "repro_profile",
+        "repro_project_dsl",
+        "repro_resources",
+        "repro_store_daemon",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_binary_decoder_secondary_counts.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -575,7 +575,7 @@ proc writeStringSeq(buf: var seq[byte]; values: openArray[string]) =
     buf.writeString(value)
 
 proc readStringSeq(buf: openArray[byte]; pos: var int): seq[string] =
-  let count = int(buf.readU32Le(pos))
+  let count = buf.readElementCount(pos, 4)
   result = newSeq[string](count)
   for i in 0 ..< count:
     result[i] = buf.readString(pos)
@@ -743,7 +743,7 @@ proc sessionsBody*(sessions: openArray[UserDaemonSession]): seq[byte] =
 
 proc parseSessionsBody*(body: openArray[byte]): seq[UserDaemonSession] =
   var pos = 0
-  let count = int(body.readU32Le(pos))
+  let count = body.readElementCount(pos, 4)
   result = newSeq[UserDaemonSession](count)
   for i in 0 ..< count:
     result[i] = body.readSession(pos)
@@ -1016,11 +1016,11 @@ proc parseSubstituteResponseBody*(body: openArray[byte]):
   var pos = 0
   result.ok = body.readBool(pos)
   result.reason = body.readString(pos)
-  let planCount = int(body.readU32Le(pos))
+  let planCount = body.readElementCount(pos, 4)
   result.plan = newSeqOfCap[DaemonSubstituteIpcPlanStep](planCount)
   for _ in 0 ..< planCount:
     result.plan.add(body.readSubstituteStep(pos))
-  let outcomeCount = int(body.readU32Le(pos))
+  let outcomeCount = body.readElementCount(pos, 4)
   result.outcomes = newSeqOfCap[DaemonSubstituteIpcOutcome](outcomeCount)
   for _ in 0 ..< outcomeCount:
     result.outcomes.add(body.readSubstituteOutcome(pos))

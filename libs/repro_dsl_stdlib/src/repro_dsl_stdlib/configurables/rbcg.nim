@@ -188,11 +188,17 @@ proc readNodeShallow(buf: openArray[byte]; pos: var int;
     raise newException(ECorruptEnvelope, "invalid merge rule " & $mr)
   result.mergeRule = CollectionMergeRule(mr)
   result.resolvedVal = readValue(buf, pos)
-  let cc = int(readU32Le(buf, pos))
+  let ccRaw = readU32Le(buf, pos)
+  if not elementCountFits(ccRaw, buf.len - pos, 4):
+    raise newException(ECorruptEnvelope, "element count exceeds remaining bytes")
+  let cc = int(ccRaw)
   result.contributions = newSeq[Contribution](cc)
   for i in 0 ..< cc:
     result.contributions[i] = readContribution(buf, pos)
-  let dc = int(readU32Le(buf, pos))
+  let dcRaw = readU32Le(buf, pos)
+  if not elementCountFits(dcRaw, buf.len - pos, 4):
+    raise newException(ECorruptEnvelope, "element count exceeds remaining bytes")
+  let dc = int(dcRaw)
   depPositions = newSeq[uint32](dc)
   for i in 0 ..< dc:
     depPositions[i] = readU32Le(buf, pos)
@@ -240,7 +246,10 @@ proc decodeRbcgPayload(buf: openArray[byte]): seq[ConfigurableNode] =
     raise newException(ESchemaVersionMismatch,
       "RBCG schema version " & $version & " is not supported by this " &
       "build (expected " & $RbcgCurrentVersion & ")")
-  let nodeCount = int(readU32Le(buf, pos))
+  let nodeCountRaw = readU32Le(buf, pos)
+  if not elementCountFits(nodeCountRaw, buf.len - pos, 4):
+    raise newException(ECorruptEnvelope, "element count exceeds remaining bytes")
+  let nodeCount = int(nodeCountRaw)
   result = newSeq[ConfigurableNode](nodeCount)
   var allDepPositions = newSeq[seq[uint32]](nodeCount)
   for i in 0 ..< nodeCount:

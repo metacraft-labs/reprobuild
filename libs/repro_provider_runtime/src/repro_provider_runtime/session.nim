@@ -150,7 +150,7 @@ proc writeBoxedValueSeq(outp: var seq[byte]; values: openArray[BoxedValue]) =
     outp.writeBoxedValue(value)
 
 proc readBoxedValueSeq(bytes: openArray[byte]; pos: var int): seq[BoxedValue] =
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 8)
   result = newSeq[BoxedValue](count)
   for i in 0 ..< count:
     result[i] = readBoxedValue(bytes, pos)
@@ -180,7 +180,7 @@ proc readEvalInput(bytes: openArray[byte]; pos: var int): GraphEvaluationInput =
   result.kind = evaluationInputKindOf(kindByte)
   result.identity = readString(bytes, pos)
   result.digest = readString(bytes, pos)
-  let members = int(readU32Le(bytes, pos))
+  let members = readElementCount(bytes, pos, 4)
   result.directoryMembers = newSeq[string](members)
   for i in 0 ..< members:
     result.directoryMembers[i] = readString(bytes, pos)
@@ -204,7 +204,7 @@ proc encodeEngineHello*(value: EngineHello): seq[byte] =
 proc decodeEngineHello*(bytes: openArray[byte]): EngineHello =
   var pos = 0
   result.protocolVersion = readU32Le(bytes, pos)
-  let caps = int(readU32Le(bytes, pos))
+  let caps = readElementCount(bytes, pos, 4)
   result.engineCapabilities = newSeq[string](caps)
   for i in 0 ..< caps:
     result.engineCapabilities[i] = readString(bytes, pos)
@@ -227,7 +227,7 @@ proc decodeProviderManifestMsg*(bytes: openArray[byte]): ProviderManifest =
   var pos = 0
   result.providerArtifactId = readString(bytes, pos)
   result.protocolVersion = readU32Le(bytes, pos)
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result.entryPoints = newSeq[GraphEntryPointDescriptor](count)
   for i in 0 ..< count:
     result.entryPoints[i].id = readString(bytes, pos)
@@ -277,11 +277,11 @@ proc decodeEntryPointResult*(bytes: openArray[byte]): EntryPointResult =
   inc pos
   if result.hasValue:
     result.value = readBoxedValue(bytes, pos)
-  let inputs = int(readU32Le(bytes, pos))
+  let inputs = readElementCount(bytes, pos, 4)
   result.evaluationInputs = newSeq[GraphEvaluationInput](inputs)
   for i in 0 ..< inputs:
     result.evaluationInputs[i] = readEvalInput(bytes, pos)
-  let diags = int(readU32Le(bytes, pos))
+  let diags = readElementCount(bytes, pos, 4)
   result.diagnostics = newSeq[SessionDiagnostic](diags)
   for i in 0 ..< diags:
     result.diagnostics[i].severity = readString(bytes, pos)
@@ -293,7 +293,7 @@ proc writeEvalInputSeq(outp: var seq[byte]; inputs: openArray[GraphEvaluationInp
     outp.writeEvalInput(input)
 
 proc readEvalInputSeq(bytes: openArray[byte]; pos: var int): seq[GraphEvaluationInput] =
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result = newSeq[GraphEvaluationInput](count)
   for i in 0 ..< count:
     result[i] = readEvalInput(bytes, pos)
@@ -312,7 +312,7 @@ proc encodeBindDependencies*(value: BindDependencies): seq[byte] =
 
 proc decodeBindDependencies*(bytes: openArray[byte]): BindDependencies =
   var pos = 0
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result.bindings = newSeq[DependencyBinding](count)
   for i in 0 ..< count:
     result.bindings[i].logicalName = readString(bytes, pos)

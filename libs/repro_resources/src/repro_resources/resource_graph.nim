@@ -242,18 +242,18 @@ proc decodeResourceGraphPayload*(bytes: openArray[byte]):
   let payloadLen = int(readU32Le(bytes, pos))
   if pos + payloadLen != bytes.len:
     raise newException(ValueError, "resource-graph payload length mismatch")
-  let resCount = int(readU32Le(bytes, pos))
+  let resCount = readElementCount(bytes, pos, 4)
   result.resources = newSeq[ResourceInstance](resCount)
   for i in 0 ..< resCount:
-    let encLen = int(readU32Le(bytes, pos))
+    let encLen = readElementCount(bytes, pos)
     result.resources[i] = decodeResourceInstance(bytes[pos ..< pos + encLen])
     pos += encLen
-  let groupCount = int(readU32Le(bytes, pos))
+  let groupCount = readElementCount(bytes, pos, 16)
   result.groups = newSeq[StateGroupDef](groupCount)
   for i in 0 ..< groupCount:
     var g: StateGroupDef
     g.name = readString(bytes, pos)
-    let memberCount = int(readU32Le(bytes, pos))
+    let memberCount = readElementCount(bytes, pos, 4)
     g.members = newSeq[string](memberCount)
     for j in 0 ..< memberCount:
       g.members[j] = readString(bytes, pos)
@@ -262,7 +262,7 @@ proc decodeResourceGraphPayload*(bytes: openArray[byte]):
     result.groups[i] = g
   result.providerArtifacts = @[]
   if version == ResourceGraphVersionV2:
-    let paCount = int(readU32Le(bytes, pos))
+    let paCount = readElementCount(bytes, pos, 16)
     for i in 0 ..< paCount:
       let typeId = readString(bytes, pos)
       var a: ResourceProviderArtifactRef

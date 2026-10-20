@@ -262,7 +262,10 @@ proc decodeSnapshotBytes*(bytes: openArray[byte];
       raiseIntentSnapshotCorrupt(filePath, "trailingChecksum",
         "BLAKE3-256 trailing checksum mismatch")
   result.schemaVersion = version
-  let count = int(readU32Le(bytes, pos))
+  let countRaw = readU32Le(bytes, pos)
+  if not elementCountFits(countRaw, bodyEnd - pos, 12):
+    raiseIntentSnapshotCorrupt(filePath, "files", "element count exceeds remaining body")
+  let count = int(countRaw)
   result.files = newSeq[IntentFileEntry](count)
   for i in 0 ..< count:
     let pathLen = int(readU32Le(bytes, pos))
@@ -284,7 +287,10 @@ proc decodeSnapshotBytes*(bytes: openArray[byte];
           "files[" & $i & "].role", "unknown role " & $raw)
       role = IntentFileRole(raw)
       inc pos
-    let contentLen = int(readU64Le(bytes, pos))
+    let rawContentLength = readU64Le(bytes, pos)
+    if pos > bodyEnd or rawContentLength > uint64(bodyEnd - pos):
+      raiseIntentSnapshotCorrupt(filePath, "content", "declared content length overflows body")
+    let contentLen = int(rawContentLength)
     if pos + contentLen > bodyEnd:
       raiseIntentSnapshotCorrupt(filePath,
         "files[" & $i & "].content", "truncated content")

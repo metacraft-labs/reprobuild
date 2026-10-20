@@ -5225,7 +5225,7 @@ proc writeStringSeq(outp: var seq[byte]; values: openArray[string]) =
     outp.writeString(value)
 
 proc readStringSeq(bytes: openArray[byte]; pos: var int): seq[string] =
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result = newSeq[string](count)
   for i in 0 ..< count:
     result[i] = readString(bytes, pos)
@@ -5262,7 +5262,7 @@ proc readProcessSpec(bytes: openArray[byte]; pos: var int): ProcessSpec =
   result.kind = CommandKind(kind)
   result.executable = NormalizedPath(kind: npRelative, value: readString(bytes, pos))
   result.args = readStringSeq(bytes, pos)
-  let envCount = int(readU32Le(bytes, pos))
+  let envCount = readElementCount(bytes, pos, 4)
   result.env = newSeq[EnvVar](envCount)
   for i in 0 ..< envCount:
     result.env[i].name = readString(bytes, pos)
@@ -5323,29 +5323,29 @@ proc readDependencyPolicy(bytes: openArray[byte]; pos: var int):
     raiseEnvelopeError(eeMalformed, "invalid dependency gathering kind")
   result.kind = DependencyGatheringKind(kind)
   result.completeness = readCompleteness(bytes, pos)
-  let reportCount = int(readU32Le(bytes, pos))
+  let reportCount = readElementCount(bytes, pos, 4)
   result.recognizedReports = newSeq[RecognizedDependencyReportSpec](reportCount)
   for i in 0 ..< reportCount:
     result.recognizedReports[i].formatName =
       DependencyFormatName(readString(bytes, pos))
-    let outputCount = int(readU32Le(bytes, pos))
+    let outputCount = readElementCount(bytes, pos, 4)
     result.recognizedReports[i].outputs = newSeq[ExpectedDependencyFile](outputCount)
     for j in 0 ..< outputCount:
       result.recognizedReports[i].outputs[j] =
         readExpectedDependencyFile(bytes, pos)
     result.recognizedReports[i].completeness = readCompleteness(bytes, pos)
-  let converterCount = int(readU32Le(bytes, pos))
+  let converterCount = readElementCount(bytes, pos, 4)
   result.postBuildConverters =
     newSeq[PostBuildDependencyConverterSpec](converterCount)
   for i in 0 ..< converterCount:
     result.postBuildConverters[i].converterProcess = readProcessSpec(bytes, pos)
-    let inputCount = int(readU32Le(bytes, pos))
+    let inputCount = readElementCount(bytes, pos, 4)
     result.postBuildConverters[i].inputs =
       newSeq[ExpectedDependencyFile](inputCount)
     for j in 0 ..< inputCount:
       result.postBuildConverters[i].inputs[j] =
         readExpectedDependencyFile(bytes, pos)
-    let outputCount = int(readU32Le(bytes, pos))
+    let outputCount = readElementCount(bytes, pos, 4)
     result.postBuildConverters[i].outputs =
       newSeq[ExpectedDependencyFile](outputCount)
     for j in 0 ..< outputCount:
@@ -5405,7 +5405,7 @@ proc readCacheEntryIdentity(bytes: openArray[byte]; pos: var int):
   result.packageName = readString(bytes, pos)
   result.packageVersion = readString(bytes, pos)
   result.selectedOptions = newTable[string, string]()
-  let optionCount = int(readU32Le(bytes, pos))
+  let optionCount = readElementCount(bytes, pos, 4)
   for _ in 0 ..< optionCount:
     let name = readString(bytes, pos)
     result.selectedOptions[name] = readString(bytes, pos)
@@ -5511,7 +5511,7 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result.builtinText = readString(bytes, pos)
   result.builtinEntries = readStringSeq(bytes, pos)
   result.targetNames = readStringSeq(bytes, pos)
-  let typedOutputCount = int(readU32Le(bytes, pos))
+  let typedOutputCount = readElementCount(bytes, pos, 4)
   result.typedOutputs = newSeq[EngineTypedOutput](typedOutputCount)
   for i in 0 ..< typedOutputCount:
     result.typedOutputs[i].fieldName = readString(bytes, pos)
@@ -5534,7 +5534,7 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
       "invalid lowered action fixedOutput sentinel")
   result.fixedOutput = fixedByte == 1'u8
   result.toolIdentityRefs = readStringSeq(bytes, pos)
-  let refKindCount = int(readU32Le(bytes, pos))
+  let refKindCount = readElementCount(bytes, pos, 1)
   result.toolIdentityRefKinds = newSeq[DepKind](refKindCount)
   for i in 0 ..< refKindCount:
     let rawKind = readByteValue(bytes, pos)
@@ -5581,12 +5581,12 @@ proc decodeLoweredGraphCache(bytes: openArray[byte]): LoweredGraphCacheRecord =
   result.selectedActionId = readString(bytes, pos)
   result.pathEnv = readString(bytes, pos)
   result.cacheKey = readString(bytes, pos)
-  let poolCount = int(readU32Le(bytes, pos))
+  let poolCount = readElementCount(bytes, pos, 4)
   result.pools = newSeq[BuildPool](poolCount)
   for i in 0 ..< poolCount:
     result.pools[i].name = readString(bytes, pos)
     result.pools[i].capacity = readU32Le(bytes, pos)
-  let actionCount = int(readU32Le(bytes, pos))
+  let actionCount = readElementCount(bytes, pos, 4)
   result.actions = newSeq[BuildAction](actionCount)
   for i in 0 ..< actionCount:
     result.actions[i] = readBuildAction(bytes, pos)

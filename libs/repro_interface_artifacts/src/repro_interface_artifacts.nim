@@ -1363,7 +1363,7 @@ proc writeStringSeq(outp: var seq[byte]; values: openArray[string]) =
     outp.writeString(value)
 
 proc readStringSeq(bytes: openArray[byte]; pos: var int): seq[string] =
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result = newSeq[string](count)
   for i in 0 ..< count:
     result[i] = readString(bytes, pos)
@@ -1561,7 +1561,7 @@ proc readCommand(bytes: openArray[byte]; pos: var int): InterfaceCommand =
   result.name = readString(bytes, pos)
   result.providerEntrypointId = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result.params = newSeq[InterfaceParam](count)
   for i in 0 ..< count:
     result.params[i] = readParam(bytes, pos)
@@ -1579,7 +1579,7 @@ proc readExecutable(bytes: openArray[byte]; pos: var int): InterfaceExecutable =
   result.exportName = readString(bytes, pos)
   result.binaryName = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result.commands = newSeq[InterfaceCommand](count)
   for i in 0 ..< count:
     result.commands[i] = readCommand(bytes, pos)
@@ -1635,7 +1635,7 @@ proc readResource(bytes: openArray[byte]; pos: var int): InterfaceResource =
   result.entrypoints.plan = readString(bytes, pos)
   result.entrypoints.apply = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
-  let attrCount = int(readU32Le(bytes, pos))
+  let attrCount = readElementCount(bytes, pos, 4)
   result.attributes = newSeq[InterfaceResourceAttr](attrCount)
   for i in 0 ..< attrCount:
     result.attributes[i] = InterfaceResourceAttr(
@@ -1710,7 +1710,7 @@ proc readService(bytes: openArray[byte]; pos: var int;
   # described. A consumer resolving it is then told, by name at compile
   # time, that it converges no points at all, which is true.
   if version >= 26'u16:
-    let pointCount = int(readU32Le(bytes, pos))
+    let pointCount = readElementCount(bytes, pos, 4)
     result.contributionPoints = newSeq[string](pointCount)
     for i in 0 ..< pointCount:
       result.contributionPoints[i] = readString(bytes, pos)
@@ -1746,14 +1746,14 @@ proc readActivity(bytes: openArray[byte]; pos: var int): InterfaceActivity =
   result.name = readString(bytes, pos)
   result.handleType = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
-  let paramCount = int(readU32Le(bytes, pos))
+  let paramCount = readElementCount(bytes, pos, 4)
   result.params = newSeq[InterfaceActivityParam](paramCount)
   for i in 0 ..< paramCount:
     result.params[i] = InterfaceActivityParam(
       name: readString(bytes, pos),
       nimType: readString(bytes, pos),
       location: readLocation(bytes, pos))
-  let configCount = int(readU32Le(bytes, pos))
+  let configCount = readElementCount(bytes, pos, 4)
   result.config = newSeq[InterfaceConfigKey](configCount)
   for i in 0 ..< configCount:
     var key = InterfaceConfigKey(
@@ -1764,7 +1764,7 @@ proc readActivity(bytes: openArray[byte]; pos: var int): InterfaceActivity =
     key.description = readString(bytes, pos)
     key.location = readLocation(bytes, pos)
     result.config[i] = key
-  let serviceCount = int(readU32Le(bytes, pos))
+  let serviceCount = readElementCount(bytes, pos, 4)
   result.services = newSeq[string](serviceCount)
   for i in 0 ..< serviceCount:
     result.services[i] = readString(bytes, pos)
@@ -2015,20 +2015,20 @@ proc readToolUse(bytes: openArray[byte]; pos: var int;
   if version >= 15'u16:
     result.depKind = readString(bytes, pos)
   if version >= 2'u16:
-    let provisioningCount = int(readU32Le(bytes, pos))
+    let provisioningCount = readElementCount(bytes, pos, 4)
     result.nixProvisioning = newSeq[InterfaceNixProvisioning](
       provisioningCount)
     for i in 0 ..< provisioningCount:
       result.nixProvisioning[i] = readNixProvisioning(bytes, pos, version)
   if version >= 4'u16:
-    let tarballCount = int(readU32Le(bytes, pos))
+    let tarballCount = readElementCount(bytes, pos, 4)
     result.tarballProvisioning = newSeq[InterfaceTarballProvisioning](
       tarballCount)
     for i in 0 ..< tarballCount:
       result.tarballProvisioning[i] = readTarballProvisioning(bytes, pos,
         version)
   if version >= 5'u16:
-    let scoopCount = int(readU32Le(bytes, pos))
+    let scoopCount = readElementCount(bytes, pos, 4)
     result.scoopProvisioning = newSeq[InterfaceScoopProvisioning](scoopCount)
     for i in 0 ..< scoopCount:
       result.scoopProvisioning[i] = readScoopProvisioning(bytes, pos, version)
@@ -2063,23 +2063,23 @@ proc readProvisioningContribution(bytes: openArray[byte]; pos: var int;
   result.contributor = readString(bytes, pos)
   result.developInterface = readByte(bytes, pos) != 0
   result.location = readLocation(bytes, pos)
-  let nixCount = int(readU32Le(bytes, pos))
+  let nixCount = readElementCount(bytes, pos, 4)
   result.nixProvisioning = newSeq[InterfaceNixProvisioning](nixCount)
   for i in 0 ..< nixCount:
     result.nixProvisioning[i] = readNixProvisioning(bytes, pos, version)
-  let tarballCount = int(readU32Le(bytes, pos))
+  let tarballCount = readElementCount(bytes, pos, 4)
   result.tarballProvisioning =
     newSeq[InterfaceTarballProvisioning](tarballCount)
   for i in 0 ..< tarballCount:
     result.tarballProvisioning[i] =
       readTarballProvisioning(bytes, pos, version)
-  let scoopCount = int(readU32Le(bytes, pos))
+  let scoopCount = readElementCount(bytes, pos, 4)
   result.scoopProvisioning = newSeq[InterfaceScoopProvisioning](scoopCount)
   for i in 0 ..< scoopCount:
     result.scoopProvisioning[i] =
       readScoopProvisioning(bytes, pos, version)
   if version >= 27'u16:
-    let homebrewCount = int(readU32Le(bytes, pos))
+    let homebrewCount = readElementCount(bytes, pos, 4)
     result.homebrewProvisioning =
       newSeq[InterfaceHomebrewProvisioning](homebrewCount)
     for i in 0 ..< homebrewCount:
@@ -2169,46 +2169,46 @@ proc decodeInterfacePayload*(bytes: openArray[byte];
     result.defaultToolProvisioning = readString(bytes, pos)
   result.publicSignatureDependencies = readStringSeq(bytes, pos)
   result.location = readLocation(bytes, pos)
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result.publicExecutables = newSeq[InterfaceExecutable](count)
   for i in 0 ..< count:
     result.publicExecutables[i] = readExecutable(bytes, pos)
   # v9 added publicLibraries between executables and toolUses. v<9
   # envelopes have no library block — leave the seq empty.
   if version >= 9'u16:
-    let libCount = int(readU32Le(bytes, pos))
+    let libCount = readElementCount(bytes, pos, 4)
     result.publicLibraries = newSeq[InterfaceLibrary](libCount)
     for i in 0 ..< libCount:
       result.publicLibraries[i] = readLibrary(bytes, pos, version)
   # v12 added publicResources between libraries and toolUses. v<12
   # envelopes have no resource block — leave the seq empty.
   if version >= 12'u16:
-    let resCount = int(readU32Le(bytes, pos))
+    let resCount = readElementCount(bytes, pos, 4)
     result.publicResources = newSeq[InterfaceResource](resCount)
     for i in 0 ..< resCount:
       result.publicResources[i] = readResource(bytes, pos)
   # v23 added publicServices + publicActivities between resources and
   # toolUses. v<23 envelopes have neither block — leave both seqs empty.
   if version >= 23'u16:
-    let svcCount = int(readU32Le(bytes, pos))
+    let svcCount = readElementCount(bytes, pos, 4)
     result.publicServices = newSeq[InterfaceService](svcCount)
     for i in 0 ..< svcCount:
       result.publicServices[i] = readService(bytes, pos, version)
-    let actCount = int(readU32Le(bytes, pos))
+    let actCount = readElementCount(bytes, pos, 4)
     result.publicActivities = newSeq[InterfaceActivity](actCount)
     for i in 0 ..< actCount:
       result.publicActivities[i] = readActivity(bytes, pos)
-  let useCount = int(readU32Le(bytes, pos))
+  let useCount = readElementCount(bytes, pos, 4)
   result.toolUses = newSeq[InterfaceToolUse](useCount)
   for i in 0 ..< useCount:
     result.toolUses[i] = readToolUse(bytes, pos, version)
   if version >= 14'u16:
-    let runtimeUseCount = int(readU32Le(bytes, pos))
+    let runtimeUseCount = readElementCount(bytes, pos, 4)
     result.runtimeToolUses = newSeq[InterfaceToolUse](runtimeUseCount)
     for i in 0 ..< runtimeUseCount:
       result.runtimeToolUses[i] = readToolUse(bytes, pos, version)
   if version >= 13'u16:
-    let contributionCount = int(readU32Le(bytes, pos))
+    let contributionCount = readElementCount(bytes, pos, 4)
     result.provisioningContributions =
       newSeq[InterfaceProvisioningContribution](contributionCount)
     for i in 0 ..< contributionCount:
@@ -2438,7 +2438,7 @@ proc writeFileStamps(outp: var seq[byte]; stamps: openArray[FileStamp]) =
     outp.writeFileStamp(stamp)
 
 proc readFileStamps(bytes: openArray[byte]; pos: var int): seq[FileStamp] =
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result = newSeq[FileStamp](count)
   for i in 0 ..< count:
     result[i] = readFileStamp(bytes, pos)

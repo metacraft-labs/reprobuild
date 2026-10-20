@@ -2022,6 +2022,17 @@ tests/unit/t_action_compatibility_key.nim	nim	4
 tests/unit/t_action_depfile_policy.nim	nim	7
 tests/unit/t_action_index_platform_arm.nim	nim	3
 tests/unit/t_bearssl_probe_marker_is_the_imported_module.nim	nim	5
+tests/unit/t_binary_decoder_cli_counts.nim	nim	2
+tests/unit/t_binary_decoder_daemon_counts.nim	nim	2
+tests/unit/t_binary_decoder_domain_counts.nim	nim	3
+tests/unit/t_binary_decoder_element_counts.nim	nim	5
+tests/unit/t_binary_decoder_interface_counts.nim	nim	2
+tests/unit/t_binary_decoder_local_record_counts.nim	nim	1
+tests/unit/t_binary_decoder_profile_nested_counts.nim	nim	1
+tests/unit/t_binary_decoder_provider_graph_counts.nim	nim	5
+tests/unit/t_binary_decoder_provider_session_counts.nim	nim	7
+tests/unit/t_binary_decoder_resource_legacy_counts.nim	nim	1
+tests/unit/t_binary_decoder_secondary_counts.nim	nim	16
 tests/unit/t_bootstrap_nim_monitoring.nim	nim	3
 tests/unit/t_cached_source_dependency_closure.nim	nim	11
 tests/unit/t_capabilities.nim	nim	3

@@ -366,7 +366,10 @@ proc decodeRecordLegacy(bytes: openArray[byte]): ResourceStateRecord =
   result.determinism = decodeDeterminism(readU32Le(bytes, pos))
   result.attrsTypeId = readString(bytes, pos)
   result.attrsJson = readString(bytes, pos)
-  let deps = int(readU32Le(bytes, pos))
+  let depsRaw = readU32Le(bytes, pos)
+  if not elementCountFits(depsRaw, bytes.len - pos, 4):
+    raise newException(IOError, "element count exceeds remaining bytes")
+  let deps = int(depsRaw)
   result.dependsOn = newSeq[string](deps)
   for i in 0 ..< deps:
     result.dependsOn[i] = readString(bytes, pos)
@@ -377,7 +380,10 @@ proc decodeRecordLegacy(bytes: openArray[byte]): ResourceStateRecord =
   result.present = bytes[pos] != 0'u8
   inc pos
   result.holders = initTable[string, Time]()
-  let holderCount = int(readU32Le(bytes, pos))
+  let holderCountRaw = readU32Le(bytes, pos)
+  if not elementCountFits(holderCountRaw, bytes.len - pos, 12):
+    raise newException(IOError, "element count exceeds remaining bytes")
+  let holderCount = int(holderCountRaw)
   for i in 0 ..< holderCount:
     let consumerId = readString(bytes, pos)
     let deadline = decodeUnixTime(readU64Le(bytes, pos))
