@@ -1,17 +1,30 @@
-## DSL-port M9.R.10a — stdlib provisioning stub for ``perl``.
-##
-## Widened in M9.R.11 from the original M9.R.10a single-nix stub.
+## Stdlib provisioning for ``perl``.
 ##
 ## ``perl`` surfaces on the wayland from-source chain via
 ## ``wayland → gcc → binutils → perl`` (binutils' autotools driver +
 ## the various ``.pl`` helpers under ``binutils-2.43/`` invoke perl at
-## configure + build time). The widening adds scoop (Windows Strawberry
-## Perl via the ScoopInstaller/Main ``perl`` manifest) + the GNU
-## upstream tarball so the resolver lands on the same perl across
-## hosts.
+## configure + build time), and on Windows it is what OpenSSL's MSVC
+## ``Configure`` needs: a native perl, not Git's MSYS one.
 ##
-## sha256 cross-checked against nixpkgs's ``pkgs/development/
-## interpreters/perl/default.nix`` (version 5.42.0).
+## Every realization below yields a runnable ``perl``:
+##
+## * ``nixPackage`` — nixpkgs' perl, the Nix-capable hosts' channel.
+## * ``scoopApp`` — Strawberry Perl through ScoopInstaller/Main's ``perl``
+##   manifest.
+## * ``tarball`` — the Strawberry Perl portable zip, Windows only.
+##
+## **No Linux or macOS tarball, on purpose.** ``spec/CLI/build.md``
+## (``--tool-provisioning=tarball``): "a package with no tarball for the
+## host falls through to its from-source recipe" — for perl,
+## ``reprobuild-packages/packages/source/perl``. Upstream publishes no
+## relocatable binary perl for those hosts, and the cpan.org release is a
+## source tree. That source tree used to be declared here as an
+## ``os = "any"`` arm whose executable was ``Configure``, so tarball mode
+## handed a configure script to every consumer that asked for a perl, and
+## the fall-through to the from-source recipe never happened
+## (reprobuild-pm/issues/
+## 2026-10-20-stdlib-perl-tarball-realization-is-a-source-tree-not-a-perl.md).
+## A source tree belongs in the from-source recipe, not in a ``tarball`` arm.
 
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
@@ -26,35 +39,48 @@ package `perl`:
     scoopApp(bucket = "main", app = "perl",
       preferredVersion = ">=5", executablePath = "perl/bin/perl.exe",
       requiresExecutionProfileChecksum = false)
-    # Direct-download: cpan.org upstream release tarball. Cross-platform
-    # — the perl source tree ships ``Configure`` + ``Makefile.SH``;
-    # Windows hosts that opt into the tarball channel (rare — Scoop is
-    # the conventional Windows route) fall through to MSYS2's perl.
+    # Windows x86_64: the Strawberry Perl PORTABLE zip — a complete,
+    # relocatable perl (interpreter, core modules, and the bundled
+    # mingw toolchain under ``c/`` that XS module builds use), unpacked
+    # with no installer. The zip has no top-level wrapper directory: its
+    # entries are ``perl/``, ``c/``, ``cpan/``, ``data/``, ``licenses/``,
+    # ``win32/`` and a few files at the root, so ``stripComponents`` is 0
+    # and the interpreter is ``perl/bin/perl.exe``.
     #
-    # **executablePath**: The resolver requires this file to exist + be
-    # executable post-extract. Perl's source tarball ships ``Configure``
-    # (capitalised — perl's bespoke autoconf-replacement) at the root
-    # with +x; pointing at it lets the resolver succeed so the chain
-    # advances past tool identity resolution. The convention layer
-    # drives ``./Configure -des && make && make install`` at build time
-    # to produce ``./perl``. M9.R.11.1 follow-up: surface ``bin/perl``
-    # once the from-source convention's install glue is wired, or
-    # migrate to a prebuilt Strawberry/Active Perl bundle.
+    # **sha256**: computed 2026-10-20 from the downloaded asset
+    # (304765269 bytes) and checked against the digest GitHub publishes
+    # for the release asset.
     #
-    # **sha256**: corrected 2026-10-14 against the bytes cpan serves,
-    # which agree with upstream's own published digest at
-    # ``perl-5.42.0.tar.xz.sha256.txt``. The arm had carried
-    # ``e093ef18…``, which matches nothing upstream has ever served, so
-    # it could never realize: every attempt failed the digest check with
-    # "all tarball archive URLs failed for perl". Nothing noticed,
-    # because no check had ever fetched the archive — found by the
-    # catalog conformance sweep this pin now answers to.
-    tarball url = "https://www.cpan.org/src/5.0/perl-5.42.0.tar.xz",
-      sha256 = "73cf6cc1ea2b2b1c110a18c14bbbc73a362073003893ffcedc26d22ebdbdd0c3",
-      archiveType = "tar.xz",
-      stripComponents = 1,
-      executablePath = "Configure",
-      packageId = "perl@5.42.0",
-      cpu = "any",
-      os = "any",
-      lockIdentity = "tarball:perl@5.42.0:sha256:73cf6cc1ea2b2b1c110a18c14bbbc73a362073003893ffcedc26d22ebdbdd0c3"
+    # **version**: ``5.42.3`` is the perl the zip carries; Strawberry's
+    # own fourth component (``.1``, its packaging revision) stays in
+    # ``packageId`` and the URL. Selection matches ``version`` against a
+    # consumer's ``uses: "perl >=…"`` range as semver, which takes at
+    # most three components, so writing ``5.42.3.1`` there would make
+    # the arm unselectable by any versioned ``uses:``.
+    tarball url = "https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54231_64bit/strawberry-perl-5.42.3.1-64bit-portable.zip",
+      sha256 = "6a081a811781c30aca51dbc036afd93092af91e3297901f02c17043795a10690",
+      archiveType = "zip",
+      stripComponents = 0,
+      executablePath = "perl/bin/perl.exe",
+      packageId = "strawberry-perl@5.42.3.1",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:strawberry-perl@5.42.3.1:windows-x86_64:sha256:6a081a811781c30aca51dbc036afd93092af91e3297901f02c17043795a10690",
+      version = "5.42.3"
+    # Windows aarch64: the SAME x64 zip. Strawberry Perl publishes no
+    # arm64 build; Windows 11 on ARM runs the x64 interpreter under its
+    # built-in x64 emulation. That is adequate for perl as a build-script
+    # interpreter (OpenSSL's ``Configure``, autotools helpers) and slow
+    # for heavy perl work. A native arm64 perl replaces this arm when
+    # one is published. The lock identity names the target so the two
+    # arms stay distinguishable in a lock even though their bytes agree.
+    tarball url = "https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54231_64bit/strawberry-perl-5.42.3.1-64bit-portable.zip",
+      sha256 = "6a081a811781c30aca51dbc036afd93092af91e3297901f02c17043795a10690",
+      archiveType = "zip",
+      stripComponents = 0,
+      executablePath = "perl/bin/perl.exe",
+      packageId = "strawberry-perl@5.42.3.1",
+      cpu = "aarch64",
+      os = "windows",
+      lockIdentity = "tarball:strawberry-perl@5.42.3.1:windows-aarch64:sha256:6a081a811781c30aca51dbc036afd93092af91e3297901f02c17043795a10690",
+      version = "5.42.3"
