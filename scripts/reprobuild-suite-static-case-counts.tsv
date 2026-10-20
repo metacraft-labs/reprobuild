@@ -613,7 +613,7 @@ libs/repro_project_dsl/tests/t_dsl_outputs_unknown_flag_error.nim	nim	1
 libs/repro_project_dsl/tests/t_dsl_outputs_untyped_form_unchanged.nim	nim	1
 libs/repro_project_dsl/tests/t_dsl_platforms_resolved_form.nim	nim	6
 libs/repro_project_dsl/tests/t_dsl_remove_before_run_names_only_outputs.nim	nim	3
-libs/repro_project_dsl/tests/t_dsl_run_consumes_roundtrip.nim	nim	4
+libs/repro_project_dsl/tests/t_dsl_run_consumes_roundtrip.nim	nim	5
 libs/repro_project_dsl/tests/t_dsl_run_target_named_and_listed.nim	nim	4
 libs/repro_project_dsl/tests/t_dsl_state_group_membership.nim	nim	4
 libs/repro_project_dsl/tests/t_dss11_resolutions_reach_the_dev_env_artifact.nim	nim	26
@@ -1750,7 +1750,7 @@ tests/integration/t_pre_receive_rejects_public_lock_with_private_ref_and_integri
 tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim	nim	4
 tests/integration/t_private_repo_participates_via_evidence_without_source_exposure.nim	nim	1
 tests/integration/t_production_policy_rejects_all_software_roots.nim	nim	8
-tests/integration/t_project_dsl_build_action_payload.nim	nim	9
+tests/integration/t_project_dsl_build_action_payload.nim	nim	11
 tests/integration/t_project_extension_adds_edges_to_original_when_present.nim	nim	1
 tests/integration/t_project_extension_inert_when_absent_and_auto_activates_in_develop_workspace.nim	nim	1
 tests/integration/t_project_extension_target_rehomed_and_toggles_without_force_rebuild.nim	nim	1

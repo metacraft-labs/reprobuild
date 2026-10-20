@@ -18568,7 +18568,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/t_dsl_run_consumes_roundtrip.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -38952,7 +38952,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_project_dsl_build_action_payload.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

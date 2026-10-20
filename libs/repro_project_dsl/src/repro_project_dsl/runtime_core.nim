@@ -3827,14 +3827,51 @@ proc writeString(outp: var seq[byte]; value: string) =
   for ch in value:
     outp.add(byte(ord(ch)))
 
+const
+  # Smallest encoding of one element of each count-prefixed list, used by
+  # ``readElementCount``. Each is a LOWER bound: a field a later version
+  # appends only makes the element longer, so a bound that is not raised on a
+  # version bump stays safe and merely admits a larger bogus count.
+  StringMinBytes = 4            # u32 length prefix of an empty string
+  StringPairMinBytes = 2 * StringMinBytes
+  CliArgMinBytes = 3 * StringMinBytes  # name, nimType, encodedValue (v1+)
+  TypedOutputMinBytes = 3 * StringMinBytes  # fieldName, types count, path
+  ToolIdentityRefKindMinBytes = 1
+  RunEdgeLeaseMinBytes = 2 * StringMinBytes + 1 + 8
+  TargetExportEntryMinBytes = 4 * StringMinBytes + 1 + 4  # v1 shape
+  CertificateExportEntryMinBytes = 4 * StringMinBytes + 1 + 1 + 4
+
+proc readElementCount(bytes: openArray[byte]; pos: var int;
+                      minElementBytes: int; what: string): int =
+  ## Read the u32 element count of a list and refuse it when the bytes left
+  ## in the payload cannot hold that many elements of at least
+  ## ``minElementBytes`` each.
+  ##
+  ## The check runs BEFORE anything is sized by the count. A corrupted count
+  ## is otherwise trusted up to ``high(uint32)``: ``newSeq`` then asks for
+  ## gigabytes (~68 GB for a string list) and the process dies in the
+  ## allocator or the OOM killer instead of raising the payload error every
+  ## other malformed shape raises. With the check, every allocation a count
+  ## drives is bounded by the payload's own length.
+  assert minElementBytes >= 1
+  let count = readU32Le(bytes, pos)
+  # uint64 arithmetic: a u32 count times a small element size cannot
+  # overflow it, where ``int`` on a 32-bit target could.
+  if uint64(count) * uint64(minElementBytes) > uint64(bytes.len - pos):
+    raisePayload(what & " count exceeds remaining payload bytes")
+  int(count)
+
 proc readString(bytes: openArray[byte]; pos: var int): string =
-  let length = int(readU32Le(bytes, pos))
-  if pos + length > bytes.len:
+  let length = readU32Le(bytes, pos)
+  # Compared as uint64 against the bytes left, so a length near
+  # ``high(uint32)`` can neither overflow ``pos + length`` nor turn negative
+  # when converted to a 32-bit ``int``.
+  if uint64(length) > uint64(bytes.len - pos):
     raisePayload("truncated string in build action payload")
-  result = newString(length)
-  for i in 0 ..< length:
+  result = newString(int(length))
+  for i in 0 ..< int(length):
     result[i] = char(bytes[pos + i])
-  pos += length
+  pos += int(length)
 
 proc fromBytes(bytes: openArray[byte]): string =
   result = newString(bytes.len)
@@ -3850,7 +3887,7 @@ proc writeU32(outp: var seq[byte]; value: uint32) =
   outp.writeU32Le(value)
 
 proc readStringSeq(bytes: openArray[byte]; pos: var int): seq[string] =
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, StringMinBytes, "string list")
   result = newSeq[string](count)
   for i in 0 ..< count:
     result[i] = readString(bytes, pos)
@@ -3926,7 +3963,7 @@ proc readCliCall(bytes: openArray[byte]; pos: var int; version: uint16):
   result.executableName = readString(bytes, pos)
   result.subcommand = readString(bytes, pos)
   result.providerEntrypointId = readString(bytes, pos)
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, CliArgMinBytes, "CLI argument")
   result.arguments = newSeq[PublicCliArg](count)
   for i in 0 ..< count:
     result.arguments[i] = readCliArg(bytes, pos, version)
@@ -4072,7 +4109,10 @@ proc readCacheEntryIdentity(bytes: openArray[byte]; pos: var int):
   ## v16 codec counterpart of ``writeCacheEntryIdentity``.
   result.packageName = readString(bytes, pos)
   result.packageVersion = readString(bytes, pos)
-  let optionCount = int(readU32Le(bytes, pos))
+  # Nothing is pre-sized here, but a bogus count would still spin the loop
+  # below until a string read runs off the end; refuse it up front instead.
+  let optionCount = readElementCount(bytes, pos, StringPairMinBytes,
+    "selected option")
   result.selectedOptions = newTable[string, string]()
   for _ in 0 ..< optionCount:
     let name = readString(bytes, pos)
@@ -4301,7 +4341,8 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   if version >= 11'u16:
     result.targetNames = readStringSeq(bytes, pos)
   if version >= 12'u16:
-    let typedOutputCount = int(readU32Le(bytes, pos))
+    let typedOutputCount = readElementCount(bytes, pos, TypedOutputMinBytes,
+      "typed output")
     result.typedOutputs = newSeq[BuildActionTypedOutput](typedOutputCount)
     for i in 0 ..< typedOutputCount:
       result.typedOutputs[i].fieldName = readString(bytes, pos)
@@ -4313,7 +4354,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   # the closure walker normalises to the default ``"out"`` output —
   # preserving legacy single-output behavior byte-for-byte.
   if version >= 14'u16:
-    let envCount = int(readU32Le(bytes, pos))
+    let envCount = readElementCount(bytes, pos, StringPairMinBytes, "env")
     result.env = newSeq[(string, string)](envCount)
     for i in 0 ..< envCount:
       let name = readString(bytes, pos)
@@ -4350,7 +4391,8 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     # ``toolIdentityRefs``. v16-and-earlier payloads decode with an
     # empty seq — the engine's resolver block is a no-op when the
     # action carries no refs.
-    let refCount = int(readU32Le(bytes, pos))
+    let refCount = readElementCount(bytes, pos, StringMinBytes,
+      "tool identity ref")
     result.toolIdentityRefs = newSeq[string](refCount)
     for i in 0 ..< refCount:
       result.toolIdentityRefs[i] = readString(bytes, pos)
@@ -4421,7 +4463,8 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     result.declaredOutputs = @[]
     result.readOnlyRoots = @[]
   if version >= 23'u16:
-    let refKindCount = int(readU32Le(bytes, pos))
+    let refKindCount = readElementCount(bytes, pos,
+      ToolIdentityRefKindMinBytes, "tool identity ref kind")
     result.toolIdentityRefKinds =
       newSeq[ToolIdentityRefKind](refKindCount)
     for i in 0 ..< refKindCount:
@@ -4530,7 +4573,8 @@ proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef {.dynOrSt
       raisePayload("invalid build target kind in build target payload")
     result.kind = BuildTargetKind(kindByte)
   if version >= 4'u16:
-    let extLen = int(readU32Le(bytes, pos))
+    let extLen = readElementCount(bytes, pos, StringPairMinBytes,
+      "build target extension")
     for _ in 0 ..< extLen:
       let typeId = readString(bytes, pos)
       let jsonStr = readString(bytes, pos)
@@ -4626,7 +4670,8 @@ proc readTargetExportEntry(bytes: openArray[byte]; pos: var int;
   # legacy artifacts decode byte-compatibly.
   if version >= 3'u16:
     result.runArgs = readStringSeq(bytes, pos)
-    let consumeCount = int(readU32Le(bytes, pos))
+    let consumeCount = readElementCount(bytes, pos, RunEdgeLeaseMinBytes,
+      "run-edge lease")
     result.consumes = newSeq[RunEdgeLease](consumeCount)
     for i in 0 ..< consumeCount:
       result.consumes[i] = readRunEdgeLease(bytes, pos)
@@ -4682,11 +4727,13 @@ proc decodeTargetExportTablePayload*(bytes: openArray[byte]):
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
     raisePayload("target export table payload length mismatch")
-  let entryCount = int(readU32Le(bytes, pos))
+  let entryCount = readElementCount(bytes, pos, TargetExportEntryMinBytes,
+    "target export entry")
   result.entries = newSeq[TargetExportEntry](entryCount)
   for i in 0 ..< entryCount:
     result.entries[i] = readTargetExportEntry(bytes, pos, version)
-  let ambiguityCount = int(readU32Le(bytes, pos))
+  let ambiguityCount = readElementCount(bytes, pos, StringPairMinBytes,
+    "target export ambiguity")
   result.ambiguities = newSeq[TargetExportAmbiguity](ambiguityCount)
   for i in 0 ..< ambiguityCount:
     result.ambiguities[i] = readTargetExportAmbiguity(bytes, pos)
@@ -4733,7 +4780,8 @@ proc decodeCertificateExportTablePayload*(bytes: openArray[byte]):
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
     raisePayload("certificate export table payload length mismatch")
-  let entryCount = int(readU32Le(bytes, pos))
+  let entryCount = readElementCount(bytes, pos,
+    CertificateExportEntryMinBytes, "certificate export entry")
   result.entries = newSeq[CertificateExportEntry](entryCount)
   for i in 0 ..< entryCount:
     var entry: CertificateExportEntry

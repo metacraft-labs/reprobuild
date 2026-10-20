@@ -169,3 +169,15 @@ suite "t_certificate_export_table_resolution":
     badKind[kindAt] = 7
     expect BuildActionPayloadError:
       discard decodeCertificateExportTablePayload(badKind)
+    # The entry count is the first payload word after the 10-byte envelope. A
+    # corrupted count must be refused against the bytes left, not used to
+    # size the entry seq: ``high(uint32)`` entries is hundreds of gigabytes.
+    var badCount = bytes
+    for i in 0 ..< 4:
+      badCount[10 + i] = 0xff
+    try:
+      discard decodeCertificateExportTablePayload(badCount)
+      check false
+    except BuildActionPayloadError as err:
+      check err.msg ==
+        "certificate export entry count exceeds remaining payload bytes"
