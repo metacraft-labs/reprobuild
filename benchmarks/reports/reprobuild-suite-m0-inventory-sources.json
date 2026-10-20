@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2214,
+    "nimTestBinaries": 2215,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 663,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2242
+    "testEntries": 2244
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1281,10 +1281,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 17,
-      "integration": 1223,
+      "integration": 1224,
       "platform/destructive": 134,
       "pure unit": 663,
-      "unclassified": 205
+      "unclassified": 206
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1486,9 +1486,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2214,
-    "pythonTestFileCount": 28,
-    "testEntryCount": 2242
+    "nimTestBinaryCount": 2215,
+    "pythonTestFileCount": 29,
+    "testEntryCount": 2244
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2357,7 +2357,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 285,
+          "line": 292,
           "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
           "patterns": [
             "gcc"
@@ -2381,7 +2381,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 350,
+          "line": 357,
           "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
           "patterns": [
             "gcc"
@@ -2405,7 +2405,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 366,
+          "line": 373,
           "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
           "patterns": [
             "gcc"
@@ -13003,7 +13003,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_home_apply/tests/t_app_bundle_records_route.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 11,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31723,6 +31723,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_darwin_fixture_processes_are_reaped_by_cwd",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_darwin_fixture_processes_are_reaped_by_cwd.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_declared_daemon_ipc_trust",
       "class": "platform/destructive",
       "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
@@ -47451,6 +47468,21 @@
       "source": "tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 13,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_hcr_replay_gate_monitor_policy.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -19,8 +19,8 @@
 ##   **1 — THE INSTANCE IS NOT RUNNING.** The owner's interface is lifted (so
 ##   the resolver has an identity, a scope and a fingerprint) and NO instance
 ##   is materialised. The consumer's `repro up` must refuse BY NAME and start
-##   nothing. This case is first on purpose: it is the one that would pass
-##   vacuously if the later cases had already left an instance running.
+##   nothing. Its fresh fixture proves the refusal independently of whether
+##   another case has already started an instance.
 ##
 ##   **2 — TWO SESSIONS, ONE INSTANCE, THE SAME BYTES.** The owner's `repro
 ##   up`, with the issuer's registrar program installed, mints the member. A
@@ -94,6 +94,8 @@ import repro_cli_support/service_registrar  # the declared-program protocol
 import repro_resources/service_registry
 import repro_resources/state_store
 import repro_test_support
+when defined(macosx):
+  import repro_test_support/darwin_fixture_processes
 
 const
   IssuerOwner = "f5issuerowner"
@@ -448,9 +450,8 @@ proc belongsToThisCase(pid: int; tempRoot: string): bool =
   ## case's own `createTempDir` path in the process's argv, or as its
   ## working directory — before any signal is sent. Killing by number
   ## alone turns a reap of a dead fixture into an attack on a live
-  ## stranger. Linux only, because both witnesses come from `/proc`;
-  ## elsewhere it answers false and the teardown does what it did before
-  ## this sweep existed.
+  ## stranger. This predicate uses Linux's /proc witnesses; macOS instead
+  ## uses the native libproc cwd witness in reapCaseProcesses below.
   when defined(linux):
     let cmdline =
       try: readFile("/proc/" & $pid & "/cmdline")
@@ -494,6 +495,8 @@ proc reapCaseProcesses(c: F5Case) =
       for pid in pids:
         discard posix.kill(Pid(pid), signal)
       sleep(300)
+  elif defined(macosx):
+    reapDarwinFixtureProcesses(c.tempRoot)
 
 proc cliStateStoreRoot(c: F5Case): string =
   ## The CLI's own state store for this case: `$HOME/.cache/repro/state`
@@ -567,27 +570,14 @@ proc clientIdFromArgv(project: string): string =
     "no `--client-id` on the argv of " & project & ": " & $argv)
 
 suite "L9 F5 — two sessions read one instance's minted identifier":
-  # Prepared on the first case's `setup`, NOT in the suite body. The suite
-  # body runs at registration, in every process this binary starts --
-  # including `--list` / `--list-json`, which only enumerates and is run
-  # from a scratch working directory. Preparing here made enumeration
-  # resolve `<cwd>/build/bin/repro` (raising from any other directory, so
-  # no case was listed) and start a daemon just to print case names. The
-  # runner executes each case in its own process, so a case still prepares
-  # the fixture and starts the daemon exactly once, and the deferred
-  # cleanup below still runs in that process -- only if a case prepared.
-  var prepared = false
-  var c: F5Case
-  var daemon: owned(Process)
-
+  # Every case owns a fresh workspace and daemon, whether run alone or as
+  # part of the whole binary. Setup stays lazy so --list/--list-json never
+  # resolves the engine or starts a daemon. Register cleanup before daemon
+  # startup so a startup failure also removes this case's fixture.
   setup:
-    if not prepared:
-      c = prepareCase()
-      prepared = true
-      daemon = c.startDaemon()
-
-  defer:
-    if prepared:
+    let c = prepareCase()
+    var daemon: owned(Process)
+    defer:
       for project in [c.issuerConsumer, c.devConsumer]:
         discard c.runRepro(project,
           @["down", "--activity=" & ConsumerActivity])
@@ -600,16 +590,12 @@ suite "L9 F5 — two sessions read one instance's minted identifier":
       c.reapCaseProcesses()
       try: removeDir(c.tempRoot) except OSError, IOError: discard
 
-  # ONE PROCESS PER CASE. The suite runner executes every case in a process
-  # of its own (`--run "<suite>::<case>"`), and each such process prepares a
-  # FRESH fixture and daemon in `setup` above. The cases below are one
-  # scenario told in steps, and a later step asserts on state an earlier
-  # step created -- so each step is a template, and a case first REPLAYS the
-  # earlier steps its state depends on, assertions and all, then runs its
-  # own. Run alone, a case therefore measures exactly what it measured as
-  # part of the sequence; a prerequisite step that fails fails the dependent
-  # case too, at that step's own assertion, rather than letting it pass or
-  # fail on a fixture it never built.
+    daemon = c.startDaemon()
+
+  # Each scenario replays every prerequisite against its own fresh fixture,
+  # retaining the prerequisite's assertions. Whole-binary and isolated runs
+  # therefore test the same transitions without inheriting an earlier case's
+  # registrations, edited recipes or event log.
 
   template resolverRefusesWithoutInstance() =
     # The steps of case "the instance is not running: the resolver refuses by name".

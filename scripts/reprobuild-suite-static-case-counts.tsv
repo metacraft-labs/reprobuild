@@ -309,7 +309,7 @@ libs/repro_elevation/tests/t_smoke_repro_elevation.nim	nim	394
 libs/repro_elevation/tests/t_windows_service_recovery_digest.nim	nim	7
 libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	nim	35
 libs/repro_home_apply/tests/t_adapter_chain.nim	nim	13
-libs/repro_home_apply/tests/t_app_bundle_records_route.nim	nim	11
+libs/repro_home_apply/tests/t_app_bundle_records_route.nim	nim	12
 libs/repro_home_apply/tests/t_archive_conformance_shared.nim	nim	3
 libs/repro_home_apply/tests/t_builtin_adapter.nim	nim	10
 libs/repro_home_apply/tests/t_builtin_adapter_7z_nested.nim	nim	2
@@ -1348,6 +1348,7 @@ tests/integration/t_daemon_accept_loop_survives_probe.nim	nim	3
 tests/integration/t_daemon_idle_does_not_reread_its_image.nim	nim	1
 tests/integration/t_daemon_parent_prewarm_e2e.nim	nim	2
 tests/integration/t_dangling_symlink_in_observed_directory_does_not_abort.nim	nim	6
+tests/integration/t_darwin_fixture_processes_are_reaped_by_cwd.nim	nim	2
 tests/integration/t_declared_daemon_ipc_trust.nim	nim	17
 tests/integration/t_declared_platforms_change_no_existing_resolution.nim	nim	1
 tests/integration/t_default_projects_auto_layer_on_fresh_workspace.nim	nim	3
@@ -2234,6 +2235,7 @@ tests/unit/test_dev_shell_hook_scope.py	python	7
 tests/unit/test_generated_artifact_merge_policy.py	python	19
 tests/unit/test_graph_owned_test_artifacts.py	python	24
 tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py	python	13
+tests/unit/test_hcr_replay_gate_monitor_policy.py	python	2
 tests/unit/test_install_nix_paths.py	python	14
 tests/unit/test_lint_gate_ordering.py	python	4
 tests/unit/test_nix_daemon_descriptors.py	python	5
