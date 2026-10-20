@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 663,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2242
+    "testEntries": 2243
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1284,7 +1284,7 @@
       "integration": 1223,
       "platform/destructive": 134,
       "pure unit": 663,
-      "unclassified": 205
+      "unclassified": 206
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1487,8 +1487,8 @@
       }
     ],
     "nimTestBinaryCount": 2214,
-    "pythonTestFileCount": 28,
-    "testEntryCount": 2242
+    "pythonTestFileCount": 29,
+    "testEntryCount": 2243
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2357,7 +2357,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 285,
+          "line": 292,
           "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
           "patterns": [
             "gcc"
@@ -2381,7 +2381,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 350,
+          "line": 357,
           "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
           "patterns": [
             "gcc"
@@ -2405,7 +2405,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 366,
+          "line": 373,
           "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
           "patterns": [
             "gcc"
@@ -47451,6 +47451,21 @@
       "source": "tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 13,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_hcr_replay_gate_monitor_policy.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

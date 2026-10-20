@@ -8809,7 +8809,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny,
-    selfInterposes: false),
+    selfInterposes: true),
   TestSpec(
     source: "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim",
     binary: "build/test-bin/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch",
@@ -20032,6 +20032,7 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_generated_artifact_merge_policy.py",
   "tests/unit/test_graph_owned_test_artifacts.py",
   "tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py",
+  "tests/unit/test_hcr_replay_gate_monitor_policy.py",
   "tests/unit/test_install_nix_paths.py",
   "tests/unit/test_lint_gate_ordering.py",
   "tests/unit/test_nix_daemon_descriptors.py",

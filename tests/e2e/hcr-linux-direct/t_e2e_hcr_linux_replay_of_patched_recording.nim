@@ -282,6 +282,13 @@ when defined(linux) and defined(amd64):
       createDir(workDir)
 
       # --- prerequisites, loud ------------------------------------------
+      # The execute edge must leave this recorder's subject free of the
+      # engine's monitor. Check the loaded image as well as child-propagated
+      # environment; the recording/replay assertions below still exercise
+      # the real recorder and its unchanged mapping checks.
+      check "librepro_monitor_shim" notin readFile("/proc/self/maps")
+      check "librepro_monitor_shim" notin getEnv("LD_PRELOAD")
+      check getEnv("REPRO_MONITOR_SHIM_LIB").len == 0
       let gcc = findExe("gcc")
       if gcc.len == 0:
         checkpoint("gcc is not on PATH; this gate compiles a real target and " &
