@@ -416,7 +416,7 @@ and it will fail no matter how often you retry.
 
 | Artifact | What it is | Re-pin it with |
 |---|---|---|
-| Committed lock | `repro.lock` at a repo root, schema `reprobuild.solved-graph-lock.v2`, solved from a recipe's solver inputs | `repro lock refresh [<path>]` |
+| Committed lock | `repro.lock` at a repo root, schema `reprobuild.solved-graph-lock.v3` (v2 still read), solved from a recipe's solver inputs | `repro lock refresh [<path>]` |
 | Workspace lock | `locks/<project>/<repo>/<sha>.toml` inside a tier's backend (a git-checkout manifest store, an external DB, …) | `repro workspace lock [<project>] [--workspace-root=PATH]` |
 
 `repro lock refresh` needs solver inputs. Run at a workspace root that
@@ -485,7 +485,7 @@ or removes another entry. Sibling revision pins (`deps`) already in the
 lock, provisioning records and the certificate-policy snapshot are carried
 forward; a sibling the lock does not pin yet (the newly declared producer
 itself) is added at the revision the solve saw. The one
-`deps` entry it rewrites is the repo's own (`path = "."`), which records
+`deps` entry it rewrites is the repo's own (marked `self = "true"`), which records
 the tree the lock was solved from.
 
 - When another held pin **also** contradicts a declared range, the
@@ -946,3 +946,58 @@ verified commit for each checkout. Other VCS members are refused. The
 source workspace is preserved. Use an absent or empty destination outside the
 local source workspace and input repositories, with an existing parent directory. Failed restores
 remove staging and preserve an initially empty destination.
+
+## Detecting a repository renamed on GitHub
+
+GitHub redirects an old repository URL after a rename or transfer. Git can
+clone and fetch successfully while your manifest still names the old owner
+or repository. `repro health` reports these redirects in its
+`repository-identities` row, using the composed manifest fetch URL and the
+canonical name returned by `gh api`. It compares GitHub names without regard
+to case and reports both identities when they differ.
+
+Update the declaration's URL composition to the canonical owner/repository.
+If you also change the manifest repo name or checkout path, record the old
+values so sync can recognize the existing checkout:
+
+```toml
+[extensions]
+previously = [{ name = "old-name", path = "old-path" }]
+```
+
+Keeping the checkout path is valid; `previously` does not by itself change
+the fetch URL. Health only reports the finding, including under `--fix`.
+It never migrates a checkout or shared clone for this row.
+
+The check supports public `github.com` HTTP(S), SSH, Git and SCP URLs. Other
+forges and nonstandard ports are explicitly unconfirmed; local repositories
+need no forge check. Install and authenticate GitHub CLI (`gh auth login
+--hostname github.com`) to enable resolution. API/authentication failures and
+timeouts are reported as unconfirmed warnings. Each query has a five-second
+deadline; after a timeout, remaining queries are explicitly unconfirmed.
+
+`repro health --offline` skips these API queries and reports that identities
+were not confirmed. This flag applies to forge identity queries; other health
+checks retain their existing fetch behavior. Use `--verbose` for every
+finding and its remedy, or `--json` for complete structured results.
+
+## Moving a checkout between shared clone pools
+
+`repro ws shared-clones rewire` adds the canonical pool for each manifest URL.
+It preserves existing alternates, and reports an incomplete migration when a
+checkout still borrows from another pool (including an old organisation or
+repository name under the same cache root).
+
+Run `repro ws shared-clones consolidate [<project>]` to finish the migration.
+It copies the checkout's reachable and reflog objects into its own store,
+hydrates promised objects through the available upstreams, replaces its local
+commit graph, and verifies connectivity before removing the old alternates.
+Tags, safety refs, linked worktrees, reflogs, the index and working files are
+preserved. `repro-pool` then points at the canonical pool. An unresolved object
+or dangling symbolic ref refuses migration and preserves the old wiring;
+repair the reported corruption and rerun the command. The command never deletes
+refs or changes a foreign shared pool.
+
+`repro health` reports how many checkouts with alternates it examined out of
+all checked-out participating repositories. It names foreign pools and reports
+broken connectivity even when the checkout does not yet use reprobuild's pool.

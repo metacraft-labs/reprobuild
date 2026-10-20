@@ -20,6 +20,9 @@
 import std/[os, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_interface_artifacts    # the live-provider mode compiles a REAL
+                                    # provider (RP1 extract + provider compile)
+import repro_hash                   # toHex, for the provider artifact id
 
 proc reproBinary(repoRoot: string): string =
   requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
@@ -73,7 +76,108 @@ proc writeRunTool(binDir: string) =
       "cp \"$input\" \"$output\"\n" &
       "printf '%s %s\\n' \"$output\" \"$forwarded\" >> \"$marker\"\n")
 
-proc writeRunEdgeProject(path: string; requiredMode = "") =
+# ---------------------------------------------------------------------------
+# The live out-of-tree provider for the POSITIVE consumed-state mode.
+#
+# `n1.required`'s fake world is a FILE holding "<applyCounter>\n<value>".
+# `apply` bumps the counter, `observe` reads it back — so the test can tell a
+# real materialize from a reuse, and the file's existence proves the member was
+# materialized BY THE PROVIDER CHILD rather than by anything in the CLI (which
+# links neither this driver nor its attrs codec).
+# ---------------------------------------------------------------------------
+
+const liveProviderBody = """
+import std/[options, os, strutils]
+import repro_project_dsl
+import repro_resources
+
+type
+  RequiredAttrs = object
+    value*: string
+    worldPath*: string
+
+proc rqIdentity(inst: ResourceInstance): string {.nimcall.} =
+  let a = TypedExtensionBox[RequiredAttrs](inst.attrs).val
+  "n1:" & inst.address & ":" & a.worldPath
+
+proc rqDigest(inst: ResourceInstance): Digest256 {.nimcall.} =
+  let a = TypedExtensionBox[RequiredAttrs](inst.attrs).val
+  digestString("n1\x00" & inst.address & "\x00" & a.value)
+
+proc rqObserve(inst: ResourceInstance;
+               recorded: Option[ResourceBinding]): ObservedState {.nimcall.} =
+  let a = TypedExtensionBox[RequiredAttrs](inst.attrs).val
+  if fileExists(a.worldPath):
+    let lines = readFile(a.worldPath).split('\n')
+    let realized = if lines.len >= 2: lines[1] else: ""
+    result.present = true
+    result.digest = digestString("n1\x00" & inst.address & "\x00" & realized)
+  else:
+    result.present = false
+
+proc rqApply(inst: ResourceInstance; action: ResourceActionKind;
+             observed: ObservedState): ResourceBinding {.nimcall.} =
+  let a = TypedExtensionBox[RequiredAttrs](inst.attrs).val
+  if action == rakDestroy:
+    if fileExists(a.worldPath): removeFile(a.worldPath)
+    return ResourceBinding(address: inst.address, typeId: inst.typeId,
+      resourceId: rqIdentity(inst), present: false)
+  var counter = 0
+  if fileExists(a.worldPath):
+    let lines = readFile(a.worldPath).split('\n')
+    if lines.len >= 1:
+      try: counter = parseInt(lines[0]) except ValueError: counter = 0
+  inc counter
+  writeFile(a.worldPath, $counter & "\n" & a.value)
+  result = ResourceBinding(
+    address: inst.address, typeId: inst.typeId,
+    resourceId: rqIdentity(inst),
+    postWriteDigest: rqDigest(inst), present: true)
+
+let requiredDriver = ResourceProviderDriver(
+  identity: rqIdentity, digest: rqDigest,
+  observe: rqObserve, apply: rqApply)
+
+resourceType "n1.required":
+  attrs: RequiredAttrs
+  wrapper: n1Required
+  determinism: rdVolatile
+  driver: requiredDriver
+  attr value: string
+  attr worldPath: string
+
+package n1reqprov:
+  build:
+    discard
+"""
+
+proc buildLiveProvider(tempRoot: string): tuple[binary, artifactId: string] =
+  ## Compile the provider the way the engine does: extract its lifted interface
+  ## (RP1), then compile the provider binary against that fingerprint. The
+  ## resulting absolute path + content-addressed id are what the recipe
+  ## registers, so `repro run` harvests a REAL artifact rather than a literal.
+  let projectRoot = tempRoot / "live-provider-src"
+  let outDir = tempRoot / "live-provider-out"
+  createDir(projectRoot)
+  createDir(outDir)
+  let modulePath = projectRoot / "reprobuild.nim"
+  writeFile(modulePath, liveProviderBody)
+  let interfacePath = outDir / "n1req-interface.rbsz"
+  let stubPath = outDir / "n1req-interface.nim"
+  let artifact = extractInterfaceFromModule(modulePath, interfacePath,
+    stubPath, getCurrentDir())
+  let binPath = outDir / "n1req-provider"
+  let compilePath = outDir / "n1req-provider-compile.rbsz"
+  let plan = providerCompilePlan(modulePath, binPath,
+    artifact.interfaceFingerprint, getCurrentDir())
+  let compiled = compileProviderBinary(modulePath, binPath,
+    artifact.interfaceFingerprint, compilePath, getCurrentDir())
+  (binary: compiled.outputBinaryPath,
+   artifactId: toHex(plan.providerArtifactId.bytes))
+
+proc writeRunEdgeProject(path: string; requiredMode = "";
+                         liveProvider: tuple[binary, artifactId: string] =
+                           ("", "")) =
   ## A typed-tool edge (`build-app`) plus a `run "app-run", build =
   ## "build-app"` run-target naming it. `import repro_resources` brings the
   ## N0 `run` surface into recipe scope.
@@ -94,7 +198,33 @@ proc writeRunEdgeProject(path: string; requiredMode = "") =
     "    flag output is string, alias = \"--output\", role = output\n" &
     "    outputs output\n")
   var requiredState = ""
-  if requiredMode in ["missing-provider", "failed-provider"]:
+  if requiredMode == "live-provider":
+    # The POSITIVE mode. Same consumer-side shape as the negative ones — the
+    # attrs type and a DRIVERLESS provider def, registered in the recipe and
+    # deliberately not linked into the engine, so the member is out-of-tree
+    # from the CLI's point of view — but the artifact names a REAL compiled
+    # provider that does serve the type. `worldPath` is absolute so the
+    # provider child writes where the test can see it.
+    requiredState = """
+type RequiredAttrs = object
+  value: string
+  worldPath: string
+registerExtension[RequiredAttrs]("n1.required")
+registerResourceProvider(ResourceProviderDef(typeId: "n1.required",
+  determinism: rdVolatile))
+stateGroup "required-state":
+  discard resource("n1.required", "required-member",
+    RequiredAttrs(value: "up", worldPath: "@WORLD@"))
+registerResourceProviderArtifact("n1.required", ResourceProviderArtifactRef(
+  binaryPath: "@BINARY@", providerArtifactId: "@ARTIFACT@",
+  workingDir: "@WORKDIR@"))
+"""
+    requiredState = requiredState
+      .replace("@WORLD@", (projectRoot / "required-world.txt").replace("\\", "/"))
+      .replace("@BINARY@", liveProvider.binary.replace("\\", "/"))
+      .replace("@ARTIFACT@", liveProvider.artifactId)
+      .replace("@WORKDIR@", getCurrentDir().replace("\\", "/"))
+  elif requiredMode in ["missing-provider", "failed-provider"]:
     # Registered in the recipe, deliberately not linked into the engine.
     requiredState = """
 type RequiredAttrs = object
@@ -253,3 +383,130 @@ suite "t_e2e_repro_run_named_run_edge":
         projectRoot)
       checkpoint control
       check nonEmptyLines(projectRoot / ".repro" / "n1-runs.log").len == 1
+
+  test "a consumed out-of-tree group records its provider artifact end to end":
+    ## Ephemeral-State-Leases.md §4.2 — the DURABLE half of the reap route,
+    ## through the real `repro run`.
+    ##
+    ## This is the only case that brackets the whole chain in one pass:
+    ##
+    ##   recipe `registerResourceProviderArtifact`
+    ##     -> the `reprobuild.resource-graph.v1` harvest
+    ##     -> `resolution.providerArtifacts` in `runReproRunCommand`
+    ##     -> `reconcileConsumedStateGroups`
+    ##     -> `reconcileResourcesViaSession`
+    ##     -> the state record's `providerArtifact`
+    ##
+    ## Every link had executed coverage except the hand-off from the resolution
+    ## to the bridge, which was one argument at one call site covered by
+    ## reading. (That argument is now a REQUIRED parameter, so dropping it is a
+    ## compile error — this case is the behavioural confirmation on top.)
+    ##
+    ## WHY IT IS A REAL PROVIDER. The member type is served only by a binary
+    ## compiled here: the `repro` CLI links neither its driver nor its attrs
+    ## codec, so the member can only be materialized over a provider session,
+    ## and the world file can only be written by the provider CHILD. The three
+    ## negative modes above prove the failure paths; this proves the success
+    ## path writes a record that names the way back.
+    let repoRoot = getCurrentDir()
+    let reproBin = reproBinary(repoRoot)
+    let tempRoot = createTempDir("repro-live-provider-run", "")
+    defer: removeDir(tempRoot)
+
+    let provider = buildLiveProvider(tempRoot)
+    check fileExists(provider.binary)
+    check provider.artifactId.len > 0
+
+    let binDir = tempRoot / "bin"
+    writeRunTool(binDir)
+    let pathValue = binDir & $PathSep & getEnv("PATH")
+    # HOME is redirected, so the per-user lease store the run writes to is
+    # under the temp root and this test can read the record back.
+    let home = tempRoot / "home"
+    createDir(home)
+    let projectRoot = tempRoot / "live"
+    createDir(projectRoot / "src")
+    writeFile(projectRoot / "src/main.txt", "live provider witness\n")
+    writeRunEdgeProject(projectRoot / "reprobuild.nim", "live-provider",
+      provider)
+
+    let env = @[
+      ("PATH", pathValue), ("HOME", home), ("USERPROFILE", home),
+      ("REPRO_TOOL_PROVISIONING", "path"),
+      ("REPROBUILD_NO_RUNQUOTA", "1"), ("REPRO_DAEMON", "off")]
+
+    let worldPath = projectRoot / "required-world.txt"
+    check not fileExists(worldPath)
+
+    # §4.3 (a) / §4.4 — SEED A RECORD THE START SWEEP MUST REPORT, in the store
+    # this run will sweep. The opportunistic sweep at reconcile start
+    # QUARANTINES a corrupt record as it scans, so a run that did not print its
+    # findings would move the record aside and say nothing: the bytes survive,
+    # but nothing tells the operator the resource that record described may now
+    # be leaked with nothing naming its address. There is no daemon log behind
+    # this sweep — the print in `runReproRunCommand` is the only report.
+    #
+    # This is the only route that covers that print: `runReproRunCommand` is
+    # private, so nothing can call it directly; driving the real `repro run` is
+    # what reaches it.
+    let runStoreRoot = home / ".cache" / "repro" / "state"
+    createDir(runStoreRoot)
+    writeFile(runStoreRoot / "seeded-corrupt.rec", "\x00\x01\x02 not a record")
+
+    let ran = runShell(shellCommand(@[reproBin, "run", "required-run"], env),
+      projectRoot)
+    checkpoint ran.output
+    check ran.code == 0
+
+    # THE FINDING WAS PRINTED, prefixed so its source is unambiguous.
+    check ran.output.contains("repro run: lease reap:")
+    check ran.output.contains("seeded-corrupt.rec")
+    check ran.output.contains("quarantined")
+    # ...and it did NOT change the exit code: the sweep touched state belonging
+    # to a lapsed lease nobody asked for, so a stale record someone else left
+    # must not fail this command (asserted by `ran.code == 0` above, with the
+    # run's own work asserted below).
+    # The sweep really did move it: it is out of the store root and into
+    # `quarantine/`, which is what makes the printed finding actionable rather
+    # than advisory.
+    check not fileExists(runStoreRoot / "seeded-corrupt.rec")
+    check dirExists(runStoreRoot / "quarantine")
+    # The run-edge's own command fired, so the consumed state was materialized
+    # BEFORE execution, as §3.2 requires.
+    check nonEmptyLines(projectRoot / ".repro" / "n1-runs.log").len == 1
+
+    # The member was materialized by the PROVIDER CHILD: the world file exists
+    # and carries its apply counter. Nothing in the CLI could have written it.
+    check fileExists(worldPath)
+    let world = readFile(worldPath).splitLines()
+    check world.len >= 2
+    check world[0] == "1"
+    check world[1] == "up"
+
+    # THE RECORD NAMES THE ROUTE BACK. The per-user store under the redirected
+    # HOME holds a record for the member, carrying exactly the artifact the
+    # recipe registered — which is what lets a later daemon tick, `repro reap`,
+    # or a reconcile-start sweep destroy it over a session, from the store
+    # alone, in a process that links nothing of this provider.
+    let storeRoot = home / ".cache" / "repro" / "state"
+    check dirExists(storeRoot)
+    var recordPaths: seq[string] = @[]
+    for path in walkFiles(storeRoot / "*.rec"):
+      recordPaths.add(path)
+    check recordPaths.len > 0
+    # The record file is named after the address; find the member's.
+    var memberRecord = ""
+    for path in recordPaths:
+      if path.extractFilename.startsWith("required-member"):
+        memberRecord = path
+    check memberRecord.len > 0
+    let raw = readFile(memberRecord)
+    # Asserted on the BYTES, because this test links no state-store codec:
+    # the record must contain the provider binary path and the artifact id the
+    # recipe registered. An empty `providerArtifact` could not contain either.
+    check raw.contains(provider.binary)
+    check raw.contains(provider.artifactId)
+    # ...and the envelope is the v5 format that can carry them.
+    check raw.len > 8
+    check raw[0 .. 3] == "RSST"
+    check byte(raw[4]) == 5'u8

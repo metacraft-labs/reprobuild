@@ -126,3 +126,175 @@ suite "TC-9c — the gateway reads the policy from the pushed tree":
     check nextPush.code == 0
     check fx.upstreamRef("agents") == next
     check "applied gate_mode off" in nextPush.output
+
+
+  test "migration supplies the record-store lock source and repairs existing gateways":
+    let fx = setupStoreFixture(requiredPolicy(@["pre-commit"], @["*"]),
+      "gateway-record-route")
+    defer: removeDir(fx.scratch)
+    # Routing belongs to this fixture, never the reviewer's host configuration.
+    var savedRoutingEnv: seq[tuple[name, value: string; present: bool]]
+    for name in ["REPROBUILD_SYSTEM_CONFIG", "REPROBUILD_USER_CONFIG",
+                 "REPROBUILD_VCS_PRIVATE_CONFIG", "REPRO_WORKSPACE_CONFIG"]:
+      savedRoutingEnv.add((name, getEnv(name), existsEnv(name)))
+      if name == "REPRO_WORKSPACE_CONFIG": delEnv(name)
+      else: putEnv(name, fx.scratch / (name & ".toml"))
+    defer:
+      for saved in savedRoutingEnv:
+        if saved.present: putEnv(saved.name, saved.value)
+        else: delEnv(saved.name)
+    let cache = fx.scratch / "cache" / "clones"
+    let records = fx.workspaceRoot / ".repro" / "manifests"
+    let lockDir = lockRecordsDirFor(records, "lib-a", "lib-a")
+    let wired = ensureGatewayForRepo("git", fx.workspaceRoot, "lib-a",
+      fx.libAPath, cacheRoot = cache)
+    checkpoint(wired.diagnostic)
+    check wired.outcome == gwoWired
+    let cfg = readGatewayConfig(wired.gatewayDir)
+    check cfg.lockRecordsDir == lockDir
+    check cfg.registeredKeysPath == registeredKeyStorePath(fx.workspaceRoot)
+    var trusted = cfg
+
+    # The upstream's required snapshot ratchets this push even though its
+    # tree has no repro.lock: the case originally rejected by the gateway.
+    discard fx.mustGit("rm", "repro.lock")
+    discard fx.mustGit("commit", "--no-verify", "-qm", "record-store content")
+    let c = fx.head
+    createDir(lockDir)
+    let record = lockDir / (c & ".toml")
+    writeFile(record, "[[repo]]\nname = \"lib-a\"\npath = \"lib-a\"\nrevision = \"" & c & "\"\n")
+    fx.noteCertificate(c, @["pre-commit"])
+    let args = @["main:refs/heads/main",
+      certificateNotesRef & ":" & certificateNotesRef]
+    let covered = runArgv(@["git", "-C", fx.libAPath, "push", "--no-verify",
+      "origin"] & args, env = fx.hookEnv)
+    checkpoint("covered record-store push:\n" & covered.output)
+    check covered.code == 0
+    check "COVERED by 1 trusted certificate" in covered.output
+    check fx.upstreamRef("main") == c
+
+    # A valid policy snapshot is not a substitute for the record-store lock.
+    let next = fx.commitPolicy(requiredPolicy(@["pre-commit"], @["*"]))
+    fx.noteCertificate(next, @["pre-commit"])
+    let missing = runArgv(@["git", "-C", fx.libAPath, "push", "--no-verify",
+      "origin"] & args, env = fx.hookEnv)
+    checkpoint("missing record push:\n" & missing.output)
+    check missing.code != 0
+    check "no committed lock record" in missing.output
+    check fx.upstreamRef("main") == c
+    writeFile(lockDir / (next & ".toml"), "not a lock record\n")
+    let malformed = runArgv(@["git", "-C", fx.libAPath, "push", "--no-verify",
+      "origin"] & args, env = fx.hookEnv)
+    checkpoint("malformed record push:\n" & malformed.output)
+    check malformed.code != 0
+    check "pins no revisions" in malformed.output
+    check fx.upstreamRef("main") == c
+    writeFile(lockDir / (next & ".toml"), readFile(record).replace(c, next))
+    let restored = runArgv(@["git", "-C", fx.libAPath, "push", "--no-verify",
+      "origin"] & args, env = fx.hookEnv)
+    checkpoint("valid record with policy-only repro.lock:\n" & restored.output)
+    check restored.code == 0
+    check "COVERED by 1 trusted certificate" in restored.output
+    check fx.upstreamRef("main") == next
+
+    # A migration must repair already-wired configs, and dry-run must leave
+    # even stale configs byte-for-byte unchanged.
+    trusted.lockRecordsDir = ""
+    let stale = serializeGatewayConfig(trusted)
+    writeFile(gatewayConfigPath(wired.gatewayDir), stale)
+    discard ensureGatewayForRepo("git", fx.workspaceRoot, "lib-a",
+      fx.libAPath, cacheRoot = cache, dryRun = true)
+    check readFile(gatewayConfigPath(wired.gatewayDir)) == stale
+    let repaired = ensureGatewayForRepo("git", fx.workspaceRoot, "lib-a",
+      fx.libAPath, cacheRoot = cache)
+    check repaired.outcome == gwoAlreadyWired
+    check readGatewayConfig(wired.gatewayDir).lockRecordsDir == lockDir
+    # An explicit route for another repo must not turn this public repo
+    # into a record-store project merely because a store exists nearby.
+    let customStore = fx.workspaceRoot / "custom-records"
+    discard gitOut(fx.workspaceRoot, "init", "-q", customStore)
+    let routingPath = fx.workspaceRoot / ".repro-workspace.toml"
+    let otherRoute = "schema = \"reprobuild.workspace.bootstrap.v1\"\n" &
+      "[manifest]\nurl = \"https://example.invalid/manifests.git\"\n" &
+      "[locking]\nroute = [{visibility = \"team\", backend = \"git-checkout\", " &
+      "path = \"custom-records\", repos = [\"other\"]}]\n"
+    writeFile(routingPath, otherRoute)
+    discard ensureGatewayForRepo("git", fx.workspaceRoot, "lib-a",
+      fx.libAPath, cacheRoot = cache)
+    check readGatewayConfig(wired.gatewayDir).lockRecordsDir == ""
+    writeFile(routingPath, otherRoute.replace("other", "lib-a"))
+    discard ensureGatewayForRepo("git", fx.workspaceRoot, "lib-a",
+      fx.libAPath, cacheRoot = cache)
+    check readGatewayConfig(wired.gatewayDir).lockRecordsDir ==
+      lockRecordsDirFor(customStore, "lib-a", "lib-a")
+    # Read-only record consumers also support a readable plain directory.
+    removeDir(customStore / ".git")
+    let readable = ensureGatewayForRepo("git", fx.workspaceRoot, "lib-a",
+      fx.libAPath, cacheRoot = cache)
+    checkpoint(readable.diagnostic)
+    check readable.outcome == gwoAlreadyWired
+    check readGatewayConfig(wired.gatewayDir).lockRecordsDir ==
+      lockRecordsDirFor(customStore, "lib-a", "lib-a")
+    let beforeMissingStore = readFile(gatewayConfigPath(wired.gatewayDir))
+    removeDir(customStore)
+    let missingStore = ensureGatewayForRepo("git", fx.workspaceRoot, "lib-a",
+      fx.libAPath, cacheRoot = cache)
+    check missingStore.outcome == gwoFailed
+    check readFile(gatewayConfigPath(wired.gatewayDir)) == beforeMissingStore
+    removeFile(routingPath)
+    removeDir(records)
+    discard ensureGatewayForRepo("git", fx.workspaceRoot, "lib-a",
+      fx.libAPath, cacheRoot = cache)
+    check readGatewayConfig(wired.gatewayDir).lockRecordsDir == ""
+
+    let beforeFailure = readFile(gatewayConfigPath(wired.gatewayDir))
+    writeFile(fx.workspaceRoot / ".repro-workspace.toml",
+      "schema = \"reprobuild.workspace.bootstrap.v1\"\n" &
+      "[manifest]\nurl = \"https://example.invalid/manifests.git\"\n" &
+      "[locking]\nroute = [{visibility = \"team\", backend = \"git-notes\", " &
+      "repos = [\"lib-a\"]}]\n")
+    let failed = ensureGatewayForRepo("git", fx.workspaceRoot, "lib-a",
+      fx.libAPath, cacheRoot = cache)
+    checkpoint(failed.diagnostic)
+    check failed.outcome == gwoFailed
+    check "cannot read locking backend 'git-notes'" in failed.diagnostic
+    check readFile(gatewayConfigPath(wired.gatewayDir)) == beforeFailure
+    # A first wiring must also refuse before creating a gateway or push URL.
+    discard fx.mustGit("config", "--unset", "remote.origin.pushurl")
+    let firstCache = fx.scratch / "first-cache" / "clones"
+    let firstFailed = ensureGatewayForRepo("git", fx.workspaceRoot, "lib-a",
+      fx.libAPath, cacheRoot = firstCache)
+    checkpoint(firstFailed.diagnostic)
+    check firstFailed.outcome == gwoFailed
+    check not dirExists(firstFailed.gatewayDir)
+    check runArgv(@["git", "-C", fx.libAPath, "config", "--get",
+      "remote.origin.pushurl"]).code != 0
+    discard fx.mustGit("remote", "set-url", "--push", "origin", fx.upstreamBare)
+    let foreign = ensureGatewayForRepo("git", fx.workspaceRoot, "lib-a",
+      fx.libAPath, cacheRoot = cache)
+    check foreign.outcome == gwoForeignPushurl
+    check gitOut(fx.libAPath, "config", "--get", "remote.origin.pushurl") ==
+      fx.upstreamBare
+
+    # No active project is needed for the committed default. It must still
+    # refuse to guess a project coordinate for any declared record source.
+    discard fx.mustGit("config", "--unset", "remote.origin.pushurl")
+    removeFile(workspaceTomlPath(fx.workspaceRoot))
+    let routeWithoutProject = ensureGatewayForRepo("git", fx.workspaceRoot,
+      "lib-a", fx.libAPath, cacheRoot = firstCache)
+    check routeWithoutProject.outcome == gwoFailed
+    check not dirExists(routeWithoutProject.gatewayDir)
+    removeFile(routingPath)
+    discard gitOut(fx.workspaceRoot, "init", "-q", records)
+    let storeWithoutProject = ensureGatewayForRepo("git", fx.workspaceRoot,
+      "lib-a", fx.libAPath, cacheRoot = firstCache)
+    check storeWithoutProject.outcome == gwoFailed
+    check not dirExists(storeWithoutProject.gatewayDir)
+    removeDir(records)
+    let defaultWithoutProject = ensureGatewayForRepo("git", fx.workspaceRoot,
+      "lib-a", fx.libAPath, cacheRoot = firstCache)
+    checkpoint(defaultWithoutProject.diagnostic)
+    check defaultWithoutProject.outcome == gwoWired
+    let defaultConfig = readGatewayConfig(defaultWithoutProject.gatewayDir)
+    check defaultConfig.lockRecordsDir == ""
+    check defaultConfig.registeredKeysPath == registeredKeyStorePath(fx.workspaceRoot)

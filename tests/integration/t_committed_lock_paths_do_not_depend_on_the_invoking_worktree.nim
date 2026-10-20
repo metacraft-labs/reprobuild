@@ -1,6 +1,14 @@
 ## A committed `repro.lock` refreshed from a linked worktree records the same
 ## dependencies, at the same paths, as one refreshed at the repository root.
 ##
+## UPDATED for `reprobuild.solved-graph-lock.v3`: a lock now records NO
+## checkout path at all (issue 2026-10-14, a lock pins identity, never a
+## materialization), which removes the defect below by construction. The
+## cases still run, and now assert that each entry is found by name, carries
+## no `path`, and is byte-identical between the two refreshes — the property
+## the original assertions on `../producer` stood in for. The history is kept
+## because it is why a worktree refresh must still produce the same bytes.
+##
 ## WHY THIS EXISTS. `repro lock refresh` computed each dep's `path` as the
 ## sibling's location relative to the INVOKING tree. Run in
 ## `reprobuild/.claude/worktrees/agent-<id>` — four levels below the repo root,
@@ -209,16 +217,26 @@ proc initRepo(gitBin, dir: string) =
 proc headOf(gitBin, work: string): string =
   requireGit(q(gitBin) & " -C " & q(work) & " rev-parse HEAD").strip()
 
-proc depEntryFor(lockBody, path: string): string =
-  ## The inline-table text of the ``deps`` entry whose ``path`` is ``path``,
-  ## or "" when there is none.
-  let key = "path = \"" & path & "\""
-  let at = lockBody.find(key)
+proc depEntryFor(lockBody, name: string): string =
+  ## The inline-table text of the ``deps`` entry named ``name`` (``"."`` for
+  ## the lock's own entry, marked ``self = "true"``), or "" when there is
+  ## none. By NAME: since ``reprobuild.solved-graph-lock.v3`` a lock records
+  ## no checkout path, so the frame-of-reference defect this file pins can
+  ## only resurface as a path key reappearing — which ``entryCarriesNoPath``
+  ## asserts against — or as two refreshes disagreeing on an entry's bytes.
+  let at =
+    if name == ".": lockBody.find("self = \"true\"")
+    # After `deps = [`: a `packages` entry starts with the same prefix.
+    else: lockBody.find("{ name = \"" & name & "\"", max(0, lockBody.find("deps = [")))
   if at < 0: return ""
   let open = lockBody.rfind('{', 0, at)
   let close = lockBody.find('}', at)
   if open < 0 or close < 0: return ""
   lockBody[open .. close]
+
+proc entryCarriesNoPath(entry: string): bool =
+  ## A lock entry pins identity only.
+  entry.len > 0 and "path =" notin entry
 
 proc addDeepWorktree(gitBin, repo, branch: string): string =
   ## A real linked worktree three directories below ``repo`` — the same depth,
@@ -320,7 +338,8 @@ suite "a committed lock does not depend on which worktree refreshed it":
       checkpoint(atRoot.output)
       check atRoot.code == 0
       let rootBody = readFile(consumer / "repro.lock")
-      let rootEntry = depEntryFor(rootBody, "../producer")
+      let rootEntry = depEntryFor(rootBody, "producer")
+      check entryCarriesNoPath(rootEntry)
       check rootEntry.len > 0
       check ("revision = \"" & producerHead & "\"") in rootEntry
       removeFile(consumer / "repro.lock")
@@ -339,7 +358,8 @@ suite "a committed lock does not depend on which worktree refreshed it":
       check inWorktree.code == 0
       let wtBody = readFile(worktree / "repro.lock")
       checkpoint(wtBody)
-      let wtEntry = depEntryFor(wtBody, "../producer")
+      let wtEntry = depEntryFor(wtBody, "producer")
+      check entryCarriesNoPath(wtEntry)
       check wtEntry.len > 0
       let carriesTheDeepForm = deepForm in wtBody
       check not carriesTheDeepForm
@@ -353,6 +373,7 @@ suite "a committed lock does not depend on which worktree refreshed it":
       # lock records no ref rather than a name no other checkout can resolve
       # (Unified-Locking-And-Hooks.md §14.2).
       let wtRootEntry = depEntryFor(wtBody, ".")
+      check entryCarriesNoPath(wtRootEntry)
       check wtRootEntry.len > 0
       check "ref = \"\"" in wtRootEntry
       check "feature" notin wtRootEntry
@@ -424,7 +445,8 @@ suite "a committed lock does not depend on which worktree refreshed it":
       checkpoint(atRoot.output)
       check atRoot.code == 0
       let rootBody = readFile(app / "repro.lock")
-      let rootEntry = depEntryFor(rootBody, "../lib-b")
+      let rootEntry = depEntryFor(rootBody, "lib-b")
+      check entryCarriesNoPath(rootEntry)
       check rootEntry.len > 0
       check ("revision = \"" & libBHead & "\"") in rootEntry
       removeFile(app / "repro.lock")
@@ -438,7 +460,8 @@ suite "a committed lock does not depend on which worktree refreshed it":
       check inWorktree.code == 0
       let wtBody = readFile(worktree / "repro.lock")
       checkpoint(wtBody)
-      let wtEntry = depEntryFor(wtBody, "../lib-b")
+      let wtEntry = depEntryFor(wtBody, "lib-b")
+      check entryCarriesNoPath(wtEntry)
       check wtEntry.len > 0
       check ("revision = \"" & libBHead & "\"") in wtEntry
       let carriesTheDeepForm = "../../../../lib-b" in wtBody
@@ -470,7 +493,8 @@ suite "a committed lock does not depend on which worktree refreshed it":
         check atRoot.code == 0
         let rootBody = readFile(consumer / "repro.lock")
         checkpoint(rootBody)
-        let rootEntry = depEntryFor(rootBody, "../producer")
+        let rootEntry = depEntryFor(rootBody, "producer")
+        check entryCarriesNoPath(rootEntry)
         check rootEntry.len > 0
         check ("revision = \"" & fx.producerHead & "\"") in rootEntry
         removeFile(consumer / "repro.lock")
@@ -494,7 +518,8 @@ suite "a committed lock does not depend on which worktree refreshed it":
         check inWorktree.code == 0
         let wtBody = readFile(worktree / "repro.lock")
         checkpoint(wtBody)
-        let wtEntry = depEntryFor(wtBody, "../producer")
+        let wtEntry = depEntryFor(wtBody, "producer")
+        check entryCarriesNoPath(wtEntry)
         check wtEntry.len > 0
         check wtEntry == rootEntry
         check not pathClimbsAboveTheWorkspace(wtBody)
@@ -536,7 +561,8 @@ suite "a committed lock does not depend on which worktree refreshed it":
         check atRoot.code == 0
         let rootBody = readFile(fx.project / "repro.lock")
         checkpoint(rootBody)
-        let rootEntry = depEntryFor(rootBody, "../../producer")
+        let rootEntry = depEntryFor(rootBody, "producer")
+        check entryCarriesNoPath(rootEntry)
         check rootEntry.len > 0
         check ("revision = \"" & fx.producerHead & "\"") in rootEntry
         removeFile(fx.project / "repro.lock")
@@ -553,7 +579,8 @@ suite "a committed lock does not depend on which worktree refreshed it":
         check inWorktree.code == 0
         let wtBody = readFile(wtProject / "repro.lock")
         checkpoint(wtBody)
-        let wtEntry = depEntryFor(wtBody, "../../producer")
+        let wtEntry = depEntryFor(wtBody, "producer")
+        check entryCarriesNoPath(wtEntry)
         check wtEntry.len > 0
         check wtEntry == rootEntry
         check not pathClimbsAboveTheWorkspace(wtBody)
@@ -608,7 +635,8 @@ suite "a committed lock does not depend on which worktree refreshed it":
         check refresh.code == 0
         let body = readFile(consumer / "repro.lock")
         checkpoint(body)
-        let entry = depEntryFor(body, "../source-catalog")
+        let entry = depEntryFor(body, "source-catalog")
+        check entryCarriesNoPath(entry)
         check entry.len > 0
         check ("revision = \"" & catalogHead & "\"") in entry
 

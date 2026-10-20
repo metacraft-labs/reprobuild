@@ -20,7 +20,15 @@
 ##     and bumps a persisted APPLY COUNTER — the created-at witness. First
 ##     reconcile materializes (counter 1); a second WITHIN ttl REUSES (store
 ##     digest-match ⇒ ``rakNoOp``, no observe/apply over the wire ⇒ counter
-##     stays 1) and RENEWS (the store deadline advances).
+##     stays 1) and RENEWS (the store deadline advances);
+##   * the bridge is given the run-edge's harvested ``providerArtifacts`` and
+##     the record it writes CARRIES that ref (Ephemeral-State-Leases.md §4.2) —
+##     the durable half of the reap route, end to end through the CLI seam
+##     ``repro run`` uses. Without it the record of an out-of-tree member names
+##     no way back to the provider that can destroy it, and the only process
+##     that knew the route is the one that exits
+##     (reprobuild-pm/issues/
+##     2026-10-14-no-production-path-enables-the-daemons-session-reap-transport.md).
 ##
 ## Greppable gate name: t_run_consumes_session_store_out_of_tree.
 
@@ -196,9 +204,18 @@ suite "N3a: session+store leased-consumes bridge (out-of-tree, hermetic)":
       consumerId: "topology", policyKind: relDelayed, ttlSeconds: 30 * 60)]
     let t0 = fromUnix(1_700_000_000)
 
+    # The harvested per-typeId refs, in the shape the resource-graph metadata
+    # hands `repro run` — the same values `buildRunEdgeSessionResolver` builds
+    # the resolver from, so passing them to the bridge is what production does.
+    let harvested = @[(typeId: "n3a.state",
+      artifact: ResourceProviderArtifactRef(
+        binaryPath: provider.binary,
+        providerArtifactId: provider.artifactId,
+        workingDir: getCurrentDir()))]
+
     # ── FIRST reconcile: materialize over the SESSION, with the store ────────
     let first = reconcileConsumedStateGroups(consumes, "topology-lease-smoke",
-      resources, groups, store, endpoint = NoDaemon, now = t0,
+      resources, groups, store, harvested, endpoint = NoDaemon, now = t0,
       sessionResolver = resolver)
     check first.missingGroups.len == 0
     check first.renewedGroups == @["topology"]
@@ -213,13 +230,33 @@ suite "N3a: session+store leased-consumes bridge (out-of-tree, hermetic)":
     check firstRec.present
     check firstRec.effectiveDeadline.isSome
     check firstRec.effectiveDeadline.get == t0 + initDuration(minutes = 30)
-    # The synthetic consumer record exists (never-reap bookkeeping).
+    # THE DURABLE REAP ROUTE (§4.2): the bridge threaded `providerArtifacts`
+    # into the session reconcile, which recorded the ref for this member's type.
+    # A reaper with no registry and no daemon can now open a session to exactly
+    # this provider knowing only the store.
+    check firstRec.providerArtifact.isSome
+    check firstRec.providerArtifact.get.binaryPath == provider.binary
+    check firstRec.providerArtifact.get.providerArtifactId ==
+      provider.artifactId
+    check firstRec.providerArtifact.get.workingDir == getCurrentDir()
+    # ...and the sweep's own resolution agrees: this store yields one artifact,
+    # for this type, so the reap transport for it is the session.
+    let derived = providerArtifactsOfRecords(listStateRecords(store))
+    check derived.len == 1
+    check derived[0].typeId == "n3a.state"
+    check derived[0].artifact.binaryPath == provider.binary
+
+    # The synthetic consumer record exists (never-reap bookkeeping) and names
+    # NO artifact: its driver is always linked and it has no provider binary,
+    # so claiming one would make its reap launch an unrelated provider.
     check hasStateRecord(store, "topology-lease-smoke::consumes::topology")
+    check readStateRecord(store,
+      "topology-lease-smoke::consumes::topology").providerArtifact.isNone
 
     # ── SECOND reconcile WITHIN ttl: REUSE (no re-apply) + RENEW ─────────────
     let t1 = t0 + initDuration(minutes = 10)
     let second = reconcileConsumedStateGroups(consumes, "topology-lease-smoke",
-      resources, groups, store, endpoint = NoDaemon, now = t1,
+      resources, groups, store, harvested, endpoint = NoDaemon, now = t1,
       sessionResolver = resolver)
     check second.renewedGroups == @["topology"]
     # REUSE witness: the provider's apply counter is UNCHANGED (no apply ran
@@ -232,6 +269,10 @@ suite "N3a: session+store leased-consumes bridge (out-of-tree, hermetic)":
     check secondRec.effectiveDeadline.isSome
     check secondRec.effectiveDeadline.get == t1 + initDuration(minutes = 30)
     check secondRec.effectiveDeadline.get > firstRec.effectiveDeadline.get
+    # The reap route survives the REUSE pass, which rewrites the record without
+    # applying anything over the wire.
+    check secondRec.providerArtifact.isSome
+    check secondRec.providerArtifact.get.binaryPath == provider.binary
     # No daemon reached in this hermetic run.
     check second.daemonSent.len == 0
 

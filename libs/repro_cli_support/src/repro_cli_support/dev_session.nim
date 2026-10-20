@@ -1,4 +1,4 @@
-import std/[algorithm, hashes, json, net, options, os, osproc, sequtils,
+import std/[algorithm, atomics, hashes, json, net, options, os, osproc, sequtils,
             strtabs, strutils, tables, times]
 
 import cbor
@@ -14,6 +14,7 @@ import repro_resources/service_registry  # the snapshot codec + lease words
 import repro_resources/readiness_edge    # D-SS10 (§7.1): the edge's own names
 import repro_cli_support/service_registrar  # §7.3: the env var a refusal names
 import repro_cli_support/watch
+import repro_cli_support/session_process_owner
 
 type
   DevSessionMode* = enum
@@ -46,6 +47,7 @@ type
     ## (``t_w2_activation_surfaces_declare_producer_ops.nim``) reads.
 
   DevSessionSupervisorConfig* = object
+    sessionId*: string
     mode*: DevSessionMode
     foreground*: bool
     projectRoot*: string
@@ -63,6 +65,9 @@ type
     debounceMs*: int
 
   DevSessionHttpConfig* = object
+    parentPid*: int
+    supervised*: bool
+    sessionId*: string
     sessionDir*: string
     host*: string
     port*: int
@@ -217,6 +222,7 @@ type
     activity: string
     sessionDir: string
     httpBind: string
+    httpPid: int
     status: string
     terminalEvents: bool
     resources: seq[tuple[kind, path, status: string]]
@@ -416,6 +422,7 @@ proc stateJson(state: SessionState): JsonNode =
     "sessionDir": state.sessionDir,
     "metadataPath": state.metadataPath,
     "httpBind": state.httpBind,
+    "httpPid": state.httpPid,
     "status": state.status,
     "failure": state.failure,
     "supervisorPid": getCurrentProcessId(),
@@ -2147,30 +2154,11 @@ proc readyPath(config: DevSessionSupervisorConfig): string =
   config.outDir.sessionDir / HttpReadyFile
 
 proc discardStaleControlApiBind*(config: DevSessionSupervisorConfig) =
-  ## Delete this session directory's ``http-ready.json`` BEFORE a supervisor
-  ## is started in it, so that nothing can read a previous session's bind
-  ## address out of it.
-  ##
-  ## That file is published by the control-API child and was never
-  ## invalidated by anything: ``repro down`` leaves it, a killed supervisor
-  ## leaves it, and the next ``repro up`` in the same directory therefore
-  ## finds a file naming a port that closed when the last session ended.
-  ## TWO readers take that bind at face value, which is why this has to
-  ## happen before the launch rather than inside either of them:
-  ##
-  ## * ``runDevSessionSupervisor``'s own ``waitForReadyFile`` checks for the
-  ##   file BEFORE sleeping, so a leftover file is returned on the first
-  ##   check -- every time, not as a race -- and the supervisor publishes
-  ##   that dead address as its own ``httpBind`` in ``session.json``. That
-  ##   is the address ``repro up`` prints and the address ``repro down``
-  ##   later tries to POST to.
-  ## * ``waitForDevSessionReady``'s phase 1 does the same, so the parent
-  ##   polls a closed port for its whole budget.
-  ##
-  ## Removing the file makes both of them wait for the bind THIS session's
-  ## control API publishes. Nothing else reads it: ``repro down`` takes its
-  ## ``httpBind`` from ``session.json``, so removing this file does not take
-  ## a running session's stop path away.
+  ## The exclusively locked supervisor clears a previous helper's marker
+  ## before spawning its child. Helpers normally remove their own marker,
+  ## but an abruptly killed helper or an older binary can leave one behind.
+  ## The launching parent must not clear it: only the admitted owner may
+  ## mutate this directory, and the parent instead checks its launch ID.
   try:
     removeFile(extendedPath(config.readyPath))
   except OSError, IOError:
@@ -2469,6 +2457,42 @@ proc controlApiStatus(httpBindValue: string): JsonNode =
   except CatchableError:
     nil
 
+proc reusableDevSession*(config: DevSessionSupervisorConfig): JsonNode =
+  ## Convergence can be repeated while a session is up. Admit that existing
+  ## owner only through its live API and held lock; a persisted `up` record
+  ## or an orphaned listener is insufficient proof of a running session.
+  let metadataPath = config.outDir.sessionDir / MetadataFile
+  if not fileExists(extendedPath(metadataPath)): return nil
+  let persisted = readJsonFileResilient(metadataPath)
+  let live = controlApiStatus(persisted{"httpBind"}.getStr())
+  if live.isNil or
+      live{"sessionId"}.getStr().len == 0 or
+      live{"sessionId"}.getStr() != persisted{"sessionId"}.getStr() or
+      live{"supervisorPid"}.getInt() != persisted{"supervisorPid"}.getInt() or
+      live{"projectRoot"}.getStr() != config.projectRoot:
+    return nil
+  if not sessionProcessAlive(live{"supervisorPid"}.getInt()):
+    raise newException(IOError,
+      "the existing dev session control API outlived its supervisor; " &
+      "stop that orphaned listener before starting another session")
+  try:
+    let unowned = acquireSessionProcessLock(config.outDir.sessionDir / "supervisor.lock")
+    unowned.release()
+    raise newException(IOError,
+      "the existing live dev session has no supervisor ownership lock; " &
+      "run `repro down` before starting it again")
+  except SessionProcessBusyError:
+    discard
+  if live{"mode"}.getStr() != config.mode.modeName:
+    raise newException(ValueError,
+      "dev session is already running in " & live{"mode"}.getStr() &
+      " mode; run `repro down` before changing its mode")
+  if live{"status"}.getStr() != "up":
+    raise newException(IOError,
+      "the existing dev session reports " & live{"status"}.getStr() &
+      "; wait for it or run `repro down` before starting another session")
+  live
+
 proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
                              budget: DevSessionReadyBudget): JsonNode =
   ## Wait for the session the caller detached to report ``session.up``, and
@@ -2504,13 +2528,37 @@ proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
   let deadline = started + budgetSeconds
   let readyFile = config.readyPath
 
+  proc checkTerminalLaunch() =
+    if config.sessionId.len == 0: return
+    let metadata = config.outDir.sessionDir / MetadataFile
+    if not fileExists(extendedPath(metadata)): return
+    let terminal = readJsonFileResilient(metadata)
+    if terminal{"sessionId"}.getStr() == config.sessionId and
+        terminal{"status"}.getStr() == "failed":
+      raise newException(IOError,
+        "dev session cannot start: " & terminal{"failure"}.getStr() & "\n" &
+        "  the supervisor reported that after the parent waited " &
+        $int((epochTime() - started) * 1000.0) & " ms of the " &
+        $budget.timeoutMs & " ms allowed\n" & config.eventLogHint())
+
+  var launchBind: JsonNode
+  proc launchReady(): bool =
+    if not fileExists(extendedPath(readyFile)): return false
+    try:
+      launchBind = readJsonFileResilient(readyFile)
+      return config.sessionId.len == 0 or
+        launchBind{"sessionId"}.getStr() == config.sessionId
+    except IOError:
+      return false # a helper can remove its marker while we open it
+
   # Phase 1 -- the control API's ``http-ready.json``. Bounded by
   # ``DevSessionControlApiTimeoutMs`` AND by the budget, whichever is
   # sooner; see that constant for why this phase is not given the whole
   # derived budget.
   let controlDeadline = min(deadline,
     started + DevSessionControlApiTimeoutMs.float / 1000.0)
-  while not fileExists(extendedPath(readyFile)):
+  while not launchReady():
+    checkTerminalLaunch()
     let now = epochTime()
     if now >= controlDeadline:
       if now >= deadline:
@@ -2556,15 +2604,17 @@ proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
           "  supervisor output: " &
           (config.outDir.sessionDir / "supervisor.log"))
     sleep(50)
-  let httpBindValue = readJsonFileResilient(readyFile){"httpBind"}.getStr()
+  let httpBindValue = launchBind{"httpBind"}.getStr()
 
-  # Phase 2 -- the session's own status, read only from the live control
-  # API. ``statusReads`` and ``lastStatus`` exist to BOUND WHAT THE
-  # DIAGNOSTIC MAY ASSERT: see the end of this proc.
+  # Phase 2 requires a live control API for success. A persisted terminal
+  # failure tied to this exact launch remains reportable after its helper
+  # has exited. ``statusReads`` and ``lastStatus`` bound what the expiry
+  # diagnostic may assert about HTTP replies.
   var statusReads = 0
   var lastStatus = ""
   var sessionId = ""
   while true:
+    checkTerminalLaunch()
     let status = controlApiStatus(httpBindValue)
     if not status.isNil:
       statusReads.inc
@@ -3010,15 +3060,18 @@ proc runWatchLoop(state: var SessionState; config: DevSessionSupervisorConfig;
       break
     state.runWatchCycle(config, artifact, artifactPath)
 
-proc startHttpServer(config: DevSessionSupervisorConfig) =
+proc startHttpServer(config: DevSessionSupervisorConfig): Process =
   let httpBindParts = parseHttpBind(config.httpBind)
   let args = @[
     "__repro-dev-session-http",
     "--session-dir", config.outDir.sessionDir,
     "--host", httpBindParts.host,
-    "--port", $httpBindParts.port
+    "--port", $httpBindParts.port,
+    "--parent-pid", $getCurrentProcessId(),
+    "--supervised",
+    "--session-id", config.sessionId
   ]
-  discard startProcess(config.publicCliPath,
+  startProcess(config.publicCliPath,
     args = args,
     workingDir = config.projectRoot,
     options = {poUsePath, poParentStreams})
@@ -3041,8 +3094,8 @@ proc runDevSessionSupervisor*(config: DevSessionSupervisorConfig;
   var state = SessionState(
     schemaId: SessionSchemaId,
     producerOpsFor: producerOpsFor,
-    sessionId: "dev-session-" & $getCurrentProcessId() & "-" &
-      $epochTime().int64,
+    sessionId: if config.sessionId.len > 0: config.sessionId else:
+      "dev-session-" & $getCurrentProcessId() & "-" & $epochTime(),
     mode: config.mode,
     projectRoot: config.projectRoot,
     artifactPath: artifactPath,
@@ -3052,6 +3105,12 @@ proc runDevSessionSupervisor*(config: DevSessionSupervisorConfig;
     status: "starting",
     terminalEvents: config.foreground)
   createDir(extendedPath(state.sessionDir))
+  let ownership = acquireSessionProcessLock(state.sessionDir / "supervisor.lock")
+  defer: ownership.release()
+  # A child of an abruptly killed owner may still be observing its death.
+  # Refuse before changing its record or marker; do not replace that listener.
+  let httpPreflight = acquireSessionProcessLock(state.sessionDir / "http.lock")
+  httpPreflight.release()
   try:
     removeFile(extendedPath(state.stopRequestPath))
   except OSError:
@@ -3060,12 +3119,34 @@ proc runDevSessionSupervisor*(config: DevSessionSupervisorConfig;
   # Before the control-API child can publish a bind, the PREVIOUS session's
   # published bind has to go: ``waitForReadyFile`` below checks for the file
   # before it sleeps, so a leftover one is what it returns, and this
-  # supervisor would record a closed port as its own ``httpBind``. See
-  # ``discardStaleControlApiBind``. The parent does this too, before it
-  # launches this process, because it reads the same file.
+  # supervisor would record a closed port as its own ``httpBind``. Only
+  # this locked owner removes it; the parent checks the launch session ID.
   config.discardStaleControlApiBind()
-  config.startHttpServer()
-  let ready = waitForReadyFile(config.readyPath, 5000)
+  let httpProcess = config.startHttpServer()
+  state.httpPid = httpProcess.processID()
+  let httpPid = state.httpPid
+  var httpStopped = false
+  proc stopHttpServer() =
+    if httpStopped: return
+    if httpProcess.running(): httpProcess.kill()
+    discard httpProcess.waitForExit()
+    httpProcess.close()
+    httpStopped = true
+    let readyPath = config.readyPath
+    try:
+      if fileExists(extendedPath(readyPath)) and
+          readJsonFileResilient(readyPath){"pid"}.getInt() == httpPid:
+        removeFile(extendedPath(readyPath))
+    except CatchableError:
+      discard
+  defer: stopHttpServer()
+  state.writeState()
+  let ready =
+    try:
+      waitForReadyFile(config.readyPath, 5000)
+    except CatchableError as err:
+      state.recordStartFailure("", err.msg)
+      raise
   state.httpBind = ready["httpBind"].getStr()
   state.writeState()
   state.emitEvent("session.created")
@@ -3120,6 +3201,7 @@ proc runDevSessionSupervisor*(config: DevSessionSupervisorConfig;
     state.writeState()
     state.emitEvent("session.stopping")
     state.stopServices()
+    stopHttpServer()
     state.status = "down"
     state.writeState()
     state.emitEvent("session.down")
@@ -3220,12 +3302,16 @@ proc handleHttpClient(client: Socket; sessionDir: string) =
       client.sendResponse(404, "application/json",
         "{\"error\":\"POST required\"}\n")
     else:
+      # Queue the asynchronous acknowledgement before publishing the stop:
+      # either the supervisor or the lifetime watchdog may then close this
+      # process immediately. `repro down` still requires terminal metadata
+      # before reporting success; a failed stop-file write cannot satisfy it.
+      client.sendResponse(202, "application/json", "{\"stopping\":true}\n")
       writeJsonFile(sessionDir / StopRequestFile, %*{
         "schemaId": "reprobuild.dev-session.stop-request.v1",
         "source": "http",
         "time": nowIso()
       })
-      client.sendResponse(202, "application/json", "{\"stopping\":true}\n")
   of "/health":
     client.sendResponse(200, "text/plain", "ok\n")
   else:
@@ -3233,6 +3319,18 @@ proc handleHttpClient(client: Socket; sessionDir: string) =
 
 proc runDevSessionHttpServer*(config: DevSessionHttpConfig): int =
   createDir(extendedPath(config.sessionDir))
+  let parent = openSessionParent(config.parentPid)
+  defer: parent.close()
+  if not parent.alive(): return 0
+  # Direct internal invocations own the supervisor slot themselves. Only a
+  # child launched by the supervisor shares its parent's already-held slot.
+  var supervisorSlot: SessionProcessLock
+  if not config.supervised:
+    supervisorSlot = acquireSessionProcessLock(config.sessionDir / "supervisor.lock")
+  defer: supervisorSlot.release()
+  let ownership = acquireSessionProcessLock(config.sessionDir / "http.lock")
+  defer: ownership.release()
+  defer: config.sessionDir.removeOwnedReady()
   var server = newSocket()
   defer: server.close()
   server.setSockOpt(OptReuseAddr, true)
@@ -3244,9 +3342,19 @@ proc runDevSessionHttpServer*(config: DevSessionHttpConfig): int =
     int(local[1]))
   writeJsonFile(config.sessionDir / HttpReadyFile, %*{
     "schemaId": "reprobuild.dev-session.http.v1",
+    "sessionId": config.sessionId,
     "httpBind": httpBindValue,
     "pid": getCurrentProcessId()
   })
+  # Publish completely before the watchdog may remove the marker. A death
+  # during publication must not race cleanup against a partial JSON write.
+  var stopped: Atomic[bool]
+  var watchdog: Thread[SessionWatchdogArgs]
+  createThread(watchdog, watchSessionParent,
+    (parent: parent, dir: config.sessionDir, stopped: addr stopped))
+  defer:
+    stopped.store(true)
+    joinThread(watchdog)
   while not fileExists(extendedPath(config.sessionDir / StopRequestFile)):
     var client: owned(Socket)
     server.accept(client)

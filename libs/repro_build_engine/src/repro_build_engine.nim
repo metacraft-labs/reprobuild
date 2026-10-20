@@ -12449,7 +12449,7 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
 proc shellScriptArgIndex(argv: openArray[string]): int =
   ## Return the script argument consumed by a POSIX shell's ``-c`` option.
   ## Monitored actions carry ``repro internal io monitor ... --`` before the
-  ## real command, so use the same last-separator rule as ``applyNimPathArgs``.
+  ## real command.
   if argv.len < 3:
     return -1
   var base = 0
@@ -12810,30 +12810,25 @@ proc applyNimPathArgs*(argv: openArray[string];
   ## token (Nim accepts options anywhere after the command, so this is
   ## order-safe against the trailing ``--out:``/positional source). Producer
   ## roots are checked for reserved standard module names before insertion;
-  ## valid producers retain Nim's original path precedence. An empty
+  ## valid producer paths outrank configuration fallbacks while explicit
+  ## consumer paths retain their original ordering and precedence. An empty
   ## ``nimPathDirs`` or a non-Nim argv is the identity transform, so every
   ## non-Nim-library-consumer action is byte-for-byte unchanged.
   ##
   ## The engine wraps a monitored action's argv in an io-monitor prefix
   ## (``<repro> internal io monitor --depfile <f> -- <real argv>``,
-  ## ``maybeWrapWithMonitor``). ``base`` is the index just past that ``--``
-  ## separator when present, so the Nim compile is recognised whether or not
+  ## ``maybeWrapWithMonitor``). The shared executed-image parser identifies
+  ## the payload, so the Nim compile is recognised whether or not
   ## the action was monitor-wrapped; the ``--path:`` flags are always inserted
   ## into the REAL ``nim c`` argv, never into the monitor prefix.
   result = @[]
   for a in argv: result.add(a)
   if nimPathDirs.len == 0 or argv.len < 2:
     return
-  # Locate the real command start, skipping a leading io-monitor wrapper by
-  # finding the LAST ``--`` argument separator (the monitor CLI ends its own
-  # options with ``--``; a plain ``nim c`` argv has none). ``base`` is the
-  # first token after it, else 0.
-  var base = 0
-  for i in countdown(argv.len - 1, 0):
-    if argv[i] == "--":
-      base = i + 1
-      break
-  if base >= argv.len - 1:
+  # Use the canonical monitor-prefix parser: a -- in the compiled program's
+  # runtime arguments must not be mistaken for the monitor's separator.
+  let base = executedImageArgvIndex(argv)
+  if base < 0 or base >= argv.len - 1:
     return
   let exeBase = extractFilename(argv[base])
   let stem =
@@ -12855,12 +12850,35 @@ proc applyNimPathArgs*(argv: openArray[string];
       flags.add("--path:" & d)
   if flags.len == 0:
     return
-  # Insert the ``--path:`` flags right after the subcommand token
-  # (``base + 1``), preserving the monitor prefix (if any) and the trailing
-  # ``--out:``/positional source.
+  # Nim reads CLI paths before configuration, then parses the CLI again.
+  # Repeated paths are not moved, so merely adding --path lets config.nims
+  # prepend an older library over the selected producer. Clear all paths we
+  # are about to replay before either pass: producer roots first, then the
+  # original consumer arguments. Replaying the originals verbatim preserves
+  # their precedence AND duplicate semantics (A, B, A still leaves B first).
+  var resetPaths: seq[string] = @[]
+  for root in nimPathDirs:
+    if root.len > 0 and root notin resetPaths:
+      resetPaths.add(root)
+  for i in base + 2 ..< argv.len:
+    # Tokens after the project filename belong to the compiled program, even
+    # when they resemble compiler options. Never reset paths from that tail.
+    if argv[i].len == 0 or argv[i][0] != '-':
+      break
+    let separator = argv[i].find({':', '='})
+    if separator < 0:
+      continue
+    let option = argv[i][0 ..< separator].normalize()
+    if option notin ["--path", "-p"]:
+      continue
+    let path = argv[i][separator + 1 .. ^1]
+    if path.len > 0 and path notin resetPaths:
+      resetPaths.add(path)
   result = @[]
   for i in 0 .. base + 1:
     result.add(argv[i])
+  for path in resetPaths:
+    result.add("--excludePath:" & path)
   for f in flags:
     result.add(f)
   for i in base + 2 ..< argv.len:

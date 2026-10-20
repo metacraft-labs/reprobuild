@@ -103,7 +103,7 @@ suite "MO-11: store + registry deps carry coordinates + integrity":
       let refresh = run(reproBinary & " lock refresh " & q(repo))
       check refresh.code == 0
       let lockBody = readFile(repo / "repro.lock")
-      check "reprobuild.solved-graph-lock.v2" in lockBody
+      check "reprobuild.solved-graph-lock.v3" in lockBody
 
       # A ckStore dep for ``app`` with a store_hash coordinate + blake3 integrity.
       check "coord_kind = \"store\"" in lockBody

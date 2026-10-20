@@ -3504,13 +3504,13 @@ proc decodeRecordImpl(payload: openArray[byte]): ActionResultRecord =
   # property that keeps a container independently decodable.
   var pathTable: seq[string] = @[]
   if interned:
-    let tableCount = readU32Le(payload, pos)
+    let tableCount = uint32(readElementCount(payload, pos, 4))
     if tableCount > MaxRecordPathTableEntries:
       raiseEnvelopeError(eeMalformed, "implausible record path table size")
     pathTable = newSeq[string](int(tableCount))
     for i in 0 ..< int(tableCount):
       pathTable[i] = readString(payload, pos)
-  let inputCount = int(readU32Le(payload, pos))
+  let inputCount = readElementCount(payload, pos, 4)
   result.inputs = newSeq[FileFingerprint](inputCount)
   for i in 0 ..< inputCount:
     if interned:
@@ -3531,7 +3531,7 @@ proc decodeRecordImpl(payload: openArray[byte]): ActionResultRecord =
     else:
       result.inputs[i] = readFingerprint(payload, pos)
   if version >= ActionRecordVersionEnv:
-    let envCount = int(readU32Le(payload, pos))
+    let envCount = readElementCount(payload, pos, 9)
     if envCount > 0 and version < ActionRecordVersionInheritedEnv:
       raiseEnvelopeError(eeUnsupportedVersion,
         "action record predates inherited environment evidence")
@@ -3548,7 +3548,7 @@ proc decodeRecordImpl(payload: openArray[byte]): ActionResultRecord =
     result.outputPayloadKind = OutputPayloadKind(outputPayloadKind)
   else:
     result.outputPayloadKind = opkCasBlobs
-  let outputCount = int(readU32Le(payload, pos))
+  let outputCount = readElementCount(payload, pos, 4)
   result.outputs = newSeq[OutputBlob](outputCount)
   for i in 0 ..< outputCount:
     result.outputs[i].path =

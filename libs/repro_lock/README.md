@@ -7,14 +7,19 @@ This library serializes the solver's resolved package graph
 (`UnifiedSolution` from `repro_solver`) — concrete versions, variant
 (option) assignments, per-package source identities, the global
 optimality decision, the platform fact, and solver-inputs provenance —
-into a TOML file (`reprobuild.solved-graph-lock.v2`) committed in the
+into a TOML file (`reprobuild.solved-graph-lock.v3`) committed in the
 project repo at the canonical path `repro.lock`, and loads it back
 deterministically (write→read round-trips).
 
-There is exactly **one** on-disk schema and every writer here emits it, so
-anything this library writes it can read back — pinned by the regression
-`tests/t_lock_writer_output_reads_back.nim`. The historical `…v1` tag is
-rejected on read; nothing writes it.
+Every writer here emits the one current schema, v3, so anything this
+library writes it can read back — pinned by the regression
+`tests/t_lock_writer_output_reads_back.nim`. A `deps` record pins a
+dependency's identity (name, coordinates, integrity) and carries **no**
+checkout path; the lock's own repository is marked `self = "true"`, and a
+reader derives every other dependency's location locally from its name. The
+previous `…v2` schema is still read, with each recorded `path` ignored except
+`"."`, which marks the self entry. The historical `…v1` tag is rejected on
+read; nothing writes v1 or v2.
 
 It is **distinct from** the manifest-repo SHA lock in
 `repro_workspace_manifests` (`lock_writer.nim` / `executeWorkspaceLock`),

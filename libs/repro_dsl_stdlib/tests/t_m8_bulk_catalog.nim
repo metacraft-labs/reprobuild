@@ -59,6 +59,7 @@
 import std/[options, strutils, unittest]
 
 import repro_dsl_stdlib/package_registry
+import repro_tool_profiles/realization_selection
 import ./realization_checks
 
 const M8Tools = ["gcc-winlibs", "llvm-mingw", "7zip"]
@@ -144,12 +145,19 @@ suite "M8 — bulk-harvested realizations validate":
   test "7zip entry is the M8 Scoop-MSI re-harvest (root-level 7z.exe)":
     ## Install method is installer-msi, the archive an MSI, the executable
     ## root-level ``7z.exe``, and the URL the canonical upstream release.
-    ## An MSI is realized by the home archive realizer.
+    ## Like every tarball record, the MSI is realized by the shared
+    ## provisioning edge; it asks that edge for installation.
     let r = defaultOf("7zip")
     check r.detail.installMethod == "installer-msi"
     check r.archiveType == "installer-msi"
     check "7z.exe" in executablesOf(r)
-    check archiveRouteFor("7zip", r) == arInstaller
+    check archiveRouteFor("7zip", r) == arExtract
+    check "installMethod installer-msi" in archiveInstallerFeatures(r)
+    # The edge's input carries the MSI install shape, so it installs the
+    # MSI rather than extracting it as a plain archive.
+    let realization = archiveRealizationOf("7zip", r)
+    check realization.installMethod == imInstallerMsi
+    check realization.archiveFormat == afInstallerMsi
     var sawCanonicalUrl = false
     for rec in tarballRecordsOf("7zip"):
       if rec.url.contains("ip7z/7zip/releases") and rec.url.endsWith(".msi"):

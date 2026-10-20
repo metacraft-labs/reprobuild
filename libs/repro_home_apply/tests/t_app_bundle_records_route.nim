@@ -111,6 +111,69 @@ suite "GM4c: application records — selection, route, activation":
       check expectation.version == "3.0"
       check expectation.teamId == "ABCDE12345"
 
+  test "an application on the shared provisioning edge is classified as " &
+      "an application, and its plan line names the install shape":
+    # Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply: a package
+    # whose selected realization places an application is in
+    # `concerns.packages.<system>.applications`. That classification must
+    # follow the install shape, not the archive route, which is `arExtract`
+    # for every tarball record now that one edge realizes them all.
+    for name in ["gm4capprecord", "gm4cinstallerapp"]:
+      checkpoint name
+      let resolution = resolveProfilePackage(name, macos(), @[rkTarball])
+      check resolution.archiveRoute == arExtract
+      let pp = PackagePreview(packageId: name, resolved: true,
+        resolution: resolution)
+      check placesApplication(pp)
+      check packageConcern(pp) == hcApplications
+      let line = describeResolution(resolution).detail
+      check ((if name == "gm4capprecord": "(sha256, app-bundle)"
+              else: "(sha256, installer-silent)") in line)
+    # A plain archive on the same edge is a package, and its plan line
+    # carries no install shape.
+    register("gm4cplainarchive", @[TarballProvisioningDef(
+      url: "https://example.invalid/tool-1.0.tar.gz", sha256: repeat('c', 64),
+      archiveType: "tar.gz", executablePath: "bin/tool",
+      packageId: "gm4cplainarchive@1.0",
+      lockIdentity: "fixture:gm4cplainarchive@1.0", cpu: "any", os: "macos",
+      detail: TarballArchiveDetail(version: "1.0"))])
+    let plain = resolveProfilePackage("gm4cplainarchive", macos(),
+      @[rkTarball])
+    check plain.archiveRoute == arExtract
+    let plainPreview = PackagePreview(packageId: "gm4cplainarchive",
+      resolved: true, resolution: plain)
+    check not placesApplication(plainPreview)
+    check packageConcern(plainPreview) == hcPackages
+    check "(sha256)" in describeResolution(plain).detail
+    # A Windows installer asks the edge for installation, so its plan line
+    # names that shape, but it places no application: asking for
+    # installation is not the same as placing an application.
+    for (label, installMethod, archiveType) in [
+        ("msi", "installer-msi", "installer-msi"),
+        ("nsis", "installer-nsis", "installer-nsis")]:
+      checkpoint label
+      let name = "gm4cwindows" & label
+      register(name, @[TarballProvisioningDef(
+        url: "https://example.invalid/tool-1.0." & label,
+        sha256: repeat('d', 64), archiveType: archiveType,
+        executablePath: "bin/tool.exe", packageId: name & "@1.0",
+        lockIdentity: "fixture:" & name & "@1.0", cpu: "x86_64",
+        os: "windows", detail: TarballArchiveDetail(version: "1.0",
+          installMethod: installMethod))])
+      let windows = resolveProfilePackage(name,
+        profileRealizationTarget("windows", "x86_64", isHost = false),
+        @[rkTarball])
+      check windows.archiveRoute == arExtract
+      let windowsPreview = PackagePreview(packageId: name, resolved: true,
+        resolution: windows)
+      check not placesApplication(windowsPreview)
+      check packageConcern(windowsPreview) == hcPackages
+      check ("(sha256, " & installMethod & ")") in
+        describeResolution(windows).detail
+    # An unresolved reference has no install shape to call an application.
+    check packageConcern(PackagePreview(packageId: "gm4capprecord")) ==
+      hcPackages
+
   test "disk images and packages are installer-only archive types":
     for t in ["dmg", "pkg"]:
       check t in InstallerOnlyArchiveTypes

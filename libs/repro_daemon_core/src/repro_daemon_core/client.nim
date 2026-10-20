@@ -379,6 +379,59 @@ proc renewLeaseBestEffort*(request: DaemonLeaseRenewRequest;
     (sent: false, response: DaemonLeaseRenewResponse(ok: false,
       reason: "daemon unreachable", effectiveDeadlineUnix: LeaseRenewKeepSentinel))
 
+proc requestUserDaemonLeaseReapProviders*(
+    request: DaemonLeaseReapProvidersRequest;
+    endpoint = defaultUserDaemonEndpoint()):
+    DaemonLeaseReapProvidersResponse =
+  ## Ephemeral-State-Leases L4/L5 (§4.2 destroy transport): tell the running
+  ## daemon which provider artifact serves which resource ``typeId``, so its
+  ## reap tick can destroy an out-of-tree type over a launched provider session
+  ## rather than falling back to in-process linking it does not have. Raises
+  ## ``UserDaemonClientError`` if the daemon is unreachable or answers with
+  ## ``udkError`` — callers that want the best-effort, no-daemon-tolerant
+  ## behaviour use ``registerLeaseReapProvidersBestEffort`` below.
+  ##
+  ## Requires the ``lease-reap-providers`` feature as well as
+  ## ``lease-registry``, so a NEW client against an OLD daemon is refused by
+  ## the handshake rather than by that daemon's "unsupported user-daemon
+  ## message" error frame. Both end as a raise here, but only the first is a
+  ## truthful one: the old daemon is working exactly as built, it simply does
+  ## not have this capability.
+  var socket = connectUserDaemon(endpoint, commandMode = "lease-reap-providers",
+    requiredFeatures = ["lease-registry", "lease-reap-providers"])
+  defer: socket.closeIpcConn()
+  socket.writeFrame(udkLeaseReapProviders,
+    leaseReapProvidersRequestBody(request))
+  let frame = socket.readFrame()
+  if frame.kind == udkLeaseReapProvidersAck:
+    return parseLeaseReapProvidersResponseBody(frame.body)
+  if frame.kind == udkError:
+    raise newException(UserDaemonClientError, parseErrorBody(frame.body))
+  raise newException(UserDaemonClientError,
+    "unexpected user-daemon lease-reap-providers frame: " & $frame.kind)
+
+proc registerLeaseReapProvidersBestEffort*(
+    request: DaemonLeaseReapProvidersRequest;
+    endpoint = defaultUserDaemonEndpoint()):
+    tuple[sent: bool; response: DaemonLeaseReapProvidersResponse] =
+  ## The seam a ``repro`` reconcile that materializes an OUT-OF-TREE leased
+  ## state calls once it knows the provider artifacts: forward them to the
+  ## daemon-hosted reap registry IF one is reachable.
+  ##
+  ## BEST-EFFORT, AND IT MATTERS THAT IT IS. This registration is a freshness
+  ## optimization, not the mechanism: the artifact is also persisted in each
+  ## state record the reconcile writes, so a reaper with no daemon — or a
+  ## daemon restarted since — still finds its route in the store (§4.3). A
+  ## reconcile must therefore never fail, or even slow, because no daemon was
+  ## listening. ``sent`` is false in that case and is purely observational; it
+  ## never raises.
+  try:
+    let response = requestUserDaemonLeaseReapProviders(request, endpoint)
+    (sent: true, response: response)
+  except CatchableError:
+    (sent: false, response: DaemonLeaseReapProvidersResponse(ok: false,
+      reason: "daemon unreachable"))
+
 proc requestUserDaemonBuild*(request: UserDaemonBuildRequest;
                              endpoint = defaultUserDaemonEndpoint();
                              onEvent: proc(event: UserDaemonBuildEvent) = nil):

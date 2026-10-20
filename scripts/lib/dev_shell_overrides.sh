@@ -294,6 +294,31 @@ dev_shell_flake_input_repos() {
   done
 }
 
+# Root input names, including pure follows and non-repository URLs. Unlike
+# dev_shell_flake_declares_input (the sibling-exception check), provenance
+# filtering must retain every declared input, not just repository inputs.
+# Callers only infer absence after the independent URL count validates the
+# structural parse; an unrecognized flake shape must not erase provenance.
+dev_shell_flake_input_names() {
+  local flake="$1"
+  awk '
+    /^  inputs = \{/ { inputs = 1; next }
+    inputs && /^  \};/ { inputs = 0 }
+    !inputs { next }
+    {
+      line = $0; sub(/^[[:space:]]+/, "", line)
+      if (line ~ /^[A-Za-z0-9_-]+([.]|[[:space:]]*=)/) {
+        name = line; sub(/[.[:space:]=].*$/, "", name); print name
+      } else if (line ~ /^"[^"]+"([.]|[[:space:]]*=)/) {
+        name = line; sub(/^"/, "", name); sub(/".*$/, "", name); print name
+      } else if (line !~ /^#/ && line ~ /=/) {
+        # An unsupported declaration is not proof that its input is absent.
+        print "# incomplete input-name parse"
+      }
+    }
+  ' "$flake" | sort -u
+}
+
 # How many `url = "…"` assignments the flake's `inputs` block contains,
 # counted WITHOUT the structural parse above. The two numbers must agree, and
 # the caller fails when they do not.
@@ -737,7 +762,7 @@ dev_shell_write_fingerprint() {
 # one line per drifted input and returns 1 if any drifted.
 dev_shell_fingerprint_drift() {
   local path="$1"
-  [[ -f "$path" ]] || return 0
+  [[ -r "$path" ]] || return 0
   local drifted=0 input dir recorded current
   while IFS=$'\t' read -r input dir recorded; do
     [[ -n "$input" ]] || continue

@@ -11,12 +11,40 @@ when defined(posix):
 
 const
   UserDaemonProtocolMajor* = 1'u16
-  UserDaemonProtocolMinor* = 1'u16
+  UserDaemonProtocolMinor* = 2'u16
+    ## 2 covers every frame added to this protocol since minor 1, which in this
+    ## tree is two independent additions that landed together in a merge:
+    ##
+    ##   * ``udkServiceConverge``/``Ack`` and ``udkServiceRelease``/``Ack``
+    ##     (the shared-service instance registry, 22-25) — added WITHOUT a
+    ##     minor bump on their own branch;
+    ##   * ``udkLeaseReapProviders``/``Ack`` (26-27 — how the daemon reaches an
+    ##     out-of-tree provider to destroy its state, Ephemeral-State-Leases
+    ##     §4.2), which is what raised the minor to 2.
+    ##
+    ## The number is therefore not a claim about either change by itself; it
+    ## says "newer than 1". Said explicitly because the bump arrived with one of
+    ## the two and a reader could otherwise take minor 2 to mean only that one.
+    ##
+    ## A MINOR bump, not a major one: every added frame is additive and no
+    ## earlier request changed, so an old client talks to a new daemon exactly
+    ## as before. The reverse direction — a new client against an old daemon —
+    ## is handled by the FEATURE FLAGS below rather than by this number, which
+    ## is what clients actually gate on; a version comparison cannot say which
+    ## of two independent additions a given daemon has.
   UserDaemonRole* = "repro-daemon/user"
   UserDaemonFeatureFlags* =
     "lifecycle,status,logs,shutdown,sessions,build-routing,build-events," &
     "watch-routing,watch-events,watch-sessions,dev-self-restart," &
-    "substitute-routing,lease-registry,service-instance-registry"
+    "substitute-routing,lease-registry,service-instance-registry," &
+    "lease-reap-providers"
+    ## ``lease-reap-providers`` is advertised separately from
+    ## ``lease-registry``, which only promises the renew half. A new CLI
+    ## against an OLD daemon must fail the feature gate in
+    ## ``requestUserDaemonLeaseReapProviders`` and report ``sent = false``,
+    ## rather than send a frame kind that daemon's lifecycle server answers
+    ## with ``unsupported user-daemon message`` — a best-effort registration
+    ## has to be able to tell "no daemon wants this" from "the daemon broke".
   BuildEventSchemaId* = "reprobuild.daemon.build-event.v1"
   BuildEventSchemaVersion* = 1'u16
   FrameMagic = "RBUD"
@@ -69,6 +97,9 @@ proc userDaemonFeatureDescription*(name: string): string =
   of "service-instance-registry":
     "sharing development service instances between sessions " &
       "(`repro up` / `repro down` converge on and release them)"
+  of "lease-reap-providers":
+    "registering the provider that owns a resource type, so the daemon can " &
+    "reap that type's state over a provider session"
   else: unknownUserDaemonFeatureDescription(name)
 
 proc sanitizeUserDaemonRequestEnvironment*(
@@ -172,6 +203,33 @@ type
       ## ``udkServiceReleaseAck``.
     udkServiceReleaseAck = 25
       ## Reply for ``udkServiceRelease``.
+    udkLeaseReapProviders = 26
+      ## Ephemeral-State-Leases L4/L5 (§4.2 destroy transport). A ``repro``
+      ## reconcile that materializes an OUT-OF-TREE leased state sends this to
+      ## tell the daemon how to reach that type's provider:
+      ## ``{scope, [{typeId, binaryPath, providerArtifactId, workingDir}]}``.
+      ## The daemon registers each with its reap-provider registry, so its next
+      ## wall-clock tick dispatches that type's destroy over a launched provider
+      ## SESSION instead of falling back to in-process linking it does not have.
+      ## The daemon answers with ``udkLeaseReapProvidersAck``.
+      ##
+      ## This is the FRESH half of the §4.2 artifact resolution; the durable
+      ## half is the artifact persisted in the state record itself. The
+      ## registration is in-memory and therefore lost on a daemon restart,
+      ## which is exactly why it is not the only half: see
+      ## ``reapTransportFactory``.
+      ##
+      ## NUMBERED 26, NOT 22. This pair was written as 22/23 on its own branch
+      ## and renumbered when it merged: the shared-service frames above had
+      ## already landed on ``agents`` at 22-25, so they are the PUBLISHED
+      ## meaning of those numbers and a daemon built from that branch answers
+      ## them. Two meanings for one wire number is not a conflict a reader can
+      ## detect at runtime — a mismatched pair would be decoded as the other
+      ## request's body — so the later addition moves. Never reuse a number an
+      ## ancestor published, even if nothing has shipped yet.
+    udkLeaseReapProvidersAck = 27
+      ## Reply for ``udkLeaseReapProviders``: whether the registration was
+      ## accepted and how many entries were registered.
     udkError = 255
 
   UserDaemonBuildEventKind* = enum
@@ -517,7 +575,7 @@ proc writeStringSeq(buf: var seq[byte]; values: openArray[string]) =
     buf.writeString(value)
 
 proc readStringSeq(buf: openArray[byte]; pos: var int): seq[string] =
-  let count = int(buf.readU32Le(pos))
+  let count = buf.readElementCount(pos, 4)
   result = newSeq[string](count)
   for i in 0 ..< count:
     result[i] = buf.readString(pos)
@@ -685,7 +743,7 @@ proc sessionsBody*(sessions: openArray[UserDaemonSession]): seq[byte] =
 
 proc parseSessionsBody*(body: openArray[byte]): seq[UserDaemonSession] =
   var pos = 0
-  let count = int(body.readU32Le(pos))
+  let count = body.readElementCount(pos, 4)
   result = newSeq[UserDaemonSession](count)
   for i in 0 ..< count:
     result[i] = body.readSession(pos)
@@ -958,11 +1016,11 @@ proc parseSubstituteResponseBody*(body: openArray[byte]):
   var pos = 0
   result.ok = body.readBool(pos)
   result.reason = body.readString(pos)
-  let planCount = int(body.readU32Le(pos))
+  let planCount = body.readElementCount(pos, 4)
   result.plan = newSeqOfCap[DaemonSubstituteIpcPlanStep](planCount)
   for _ in 0 ..< planCount:
     result.plan.add(body.readSubstituteStep(pos))
-  let outcomeCount = int(body.readU32Le(pos))
+  let outcomeCount = body.readElementCount(pos, 4)
   result.outcomes = newSeqOfCap[DaemonSubstituteIpcOutcome](outcomeCount)
   for _ in 0 ..< outcomeCount:
     result.outcomes.add(body.readSubstituteOutcome(pos))
@@ -994,6 +1052,13 @@ const
     ## ``ttlSeconds`` value meaning ``keep`` (never auto-reap): the holder
     ## pins the state with no deadline. Any negative value is treated as
     ## ``keep`` on decode so a future renegotiation cannot mis-reap.
+  MaxLeaseReapProviders* = 4096
+    ## Upper bound on the entries one ``udkLeaseReapProviders`` frame may
+    ## carry. The count is read off the wire BEFORE any entry is decoded, so
+    ## without a bound a frame claiming four billion providers would have the
+    ## daemon allocate from a number a client chose. One entry per resource
+    ## TYPE, and a recipe composes tens, so 4096 is far above any real producer
+    ## and still refuses a hostile or corrupt frame outright.
 
 type
   DaemonLeaseScope* = enum
@@ -1291,3 +1356,88 @@ proc parseServiceReleaseResponseBody*(body: openArray[byte]):
   result.remainingHolders = body.readStringSeq(pos)
   result.stoppedPid = int32(body.readI64(pos))
   result.stopDetail = body.readString(pos)
+
+# ---------------------------------------------------------------------------
+# §4.2 destroy transport: the reap-provider registration frame.
+#
+# Same hand-rolled LE vocabulary as the renew frame above, for the same reason:
+# this module stays a leaf over ``repro_core`` and never links the resource
+# lane. The daemon-side handler translates these four strings into the
+# ``LeaseReapProviderArtifact`` its registry holds; the CLI side fills them from
+# the provider-artifact refs the resource-graph metadata already carries.
+# ---------------------------------------------------------------------------
+
+type
+  DaemonLeaseReapProvider* = object
+    ## How to launch the provider that owns one resource ``typeId`` — the three
+    ## fields a session launch needs, plus the type they serve.
+    typeId*: string
+    binaryPath*: string
+    providerArtifactId*: string
+    workingDir*: string
+
+  DaemonLeaseReapProvidersRequest* = object
+    scope*: DaemonLeaseScope
+      ## Which registry the client means (§4.1). Carried for symmetry with the
+      ## renew frame and for the daemon's log line: a daemon serves exactly one
+      ## scope, chosen by how it was started, so it registers into its own
+      ## registry regardless — the client routes by ENDPOINT, as it does for a
+      ## renew.
+    providers*: seq[DaemonLeaseReapProvider]
+
+  DaemonLeaseReapProvidersResponse* = object
+    ok*: bool
+      ## False (with ``reason``) if the daemon refused the registration —
+      ## today, an entry with no ``typeId`` or no ``binaryPath``, which could
+      ## not name or launch anything.
+    reason*: string
+    registered*: int
+      ## How many entries were registered. A client logs or asserts on it; it
+      ## is also what distinguishes an accepted empty frame from a real
+      ## registration.
+
+proc leaseReapProvidersRequestBody*(
+    request: DaemonLeaseReapProvidersRequest): seq[byte] =
+  result.writeU32Le(uint32(ord(request.scope)))
+  result.writeU32Le(uint32(request.providers.len))
+  for p in request.providers:
+    result.writeString(p.typeId)
+    result.writeString(p.binaryPath)
+    result.writeString(p.providerArtifactId)
+    result.writeString(p.workingDir)
+
+proc parseLeaseReapProvidersRequestBody*(body: openArray[byte]):
+    DaemonLeaseReapProvidersRequest =
+  var pos = 0
+  result.scope = scopeFromWire(body.readU32Le(pos))
+  let count = int(body.readU32Le(pos))
+  # Refuse on the COUNT, before allocating anything from it. `readString`
+  # would fail on a truncated body anyway, but only after the seq had been
+  # grown to whatever the frame claimed. (No `count < 0` arm: a `uint32`
+  # widened into a 64-bit `int` cannot be negative, and a guard that cannot
+  # fire reads as though it could.)
+  if count > MaxLeaseReapProviders:
+    raise newException(ValueError,
+      "lease-reap-provider frame claims " & $count & " entries (max " &
+      $MaxLeaseReapProviders & ")")
+  result.providers = newSeqOfCap[DaemonLeaseReapProvider](count)
+  for _ in 0 ..< count:
+    var p: DaemonLeaseReapProvider
+    p.typeId = body.readString(pos)
+    p.binaryPath = body.readString(pos)
+    p.providerArtifactId = body.readString(pos)
+    p.workingDir = body.readString(pos)
+    result.providers.add(p)
+
+proc leaseReapProvidersResponseBody*(
+    response: DaemonLeaseReapProvidersResponse): seq[byte] =
+  result.writeBool(response.ok)
+  result.writeString(response.reason)
+  result.writeU32Le(uint32(response.registered))
+
+proc parseLeaseReapProvidersResponseBody*(body: openArray[byte]):
+    DaemonLeaseReapProvidersResponse =
+  var pos = 0
+  result.ok = body.readBool(pos)
+  result.reason = body.readString(pos)
+  result.registered = int(body.readU32Le(pos))

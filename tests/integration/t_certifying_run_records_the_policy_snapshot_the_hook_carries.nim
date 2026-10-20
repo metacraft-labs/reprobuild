@@ -102,7 +102,7 @@ suite "TC-9b — the node records the snapshot, the hook carries it":
       check "name = \"team\"" in snapshot1
       check "package = \"lib-b\"" in snapshot1
       check "gate_mode = \"advisory\"" in snapshot1
-      check ("revision = \"" & libBPin1 & "\"") in depEntry(lock1, "../lib-b")
+      check ("revision = \"" & libBPin1 & "\"") in depEntry(lock1, "lib-b")
       check fx.stagedLock() == lock1
       check fx.lockSeenByTests() == lock1
       let content1 = fx.contentNow()
@@ -139,7 +139,7 @@ suite "TC-9b — the node records the snapshot, the hook carries it":
       checkpoint("git commit (3):\n" & commit3.output)
       check commit3.code == 0
       let lock3 = fx.lockText()
-      check ("revision = \"" & libBPin2 & "\"") in depEntry(lock3, "../lib-b")
+      check ("revision = \"" & libBPin2 & "\"") in depEntry(lock3, "lib-b")
       check snapshotOf(lock3) == snapshot1
       check "re-pinned" in fx.preCommitLog().lastLinesSince(logBefore3)
 

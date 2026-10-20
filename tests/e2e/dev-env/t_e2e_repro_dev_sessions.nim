@@ -11,7 +11,7 @@
 ## genuinely spends twelve seconds; see
 ## `e2e_repro_up_waits_for_a_service_slower_than_ten_seconds`.
 ##
-## FOUR CASES DO NOT SPAWN `repro`, and none substitutes a fake for
+## SOME CASES DO NOT SPAWN `repro`, and none substitutes a fake for
 ## anything:
 ##
 ## * `e2e_dev_session_wait_names_a_control_api_that_never_answered` calls
@@ -43,6 +43,17 @@
 ## * `e2e_reap_session_only_kills_pids_that_name_the_session` exercises this
 ##   file's own `reapSession` against two real `sh` processes. See its
 ##   comment.
+## * `e2e_session_start_failure_is_scoped_to_the_current_launch` stages
+##   terminal metadata with current and stale launch IDs, then calls the
+##   real readiness waiter. Its bound is the persisted failure's identity,
+##   independent of whether a listener has already exited.
+##
+## The HTTP ownership cases spawn real helpers and a real Python parent,
+## use real file locks and sockets, and kill actual processes. The duplicate
+## case also calls the supervisor with a serialized empty artifact and a nil
+## activation resolver: ownership must refuse before activation can occur.
+## Its legacy records are served by a real helper, and its dead owner is
+## the PID of a real process that exited and was reaped.
 ##
 ## TWO CASES STAGE A SESSION DIRECTORY BY HAND and then drive the real
 ## `repro` against it --
@@ -57,6 +68,7 @@ import std/[json, net, os, osproc, sequtils, strtabs, streams, strutils,
 
 import repro_test_support
 import repro_cli_support/dev_session
+import repro_dev_env_artifacts
 
 proc q(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
@@ -355,6 +367,12 @@ proc pidAlive(pid: int): bool =
   when defined(windows):
     false
   else:
+    when defined(linux):
+      try:
+        let stat = readFile("/proc/" & $pid & "/stat")
+        if stat[stat.rfind(')') + 2] == 'Z': return false
+      except IOError:
+        return false
     runShell(shellCommand(@["kill", "-0", $pid])).code == 0
 
 proc reportedWaitMs(output: string): int =
@@ -603,7 +621,246 @@ proc requirePidGone(pid: int) =
     sleep(50)
   raise newException(OSError, "supervised service pid still alive: " & $pid)
 
+proc waitForHttpReady(path: string; helper: Process) =
+  for _ in 0 ..< 1500:
+    if fileExists(path) or not helper.running(): return
+    sleep(20)
+  raise newException(IOError, "HTTP helper did not publish readiness: " & path)
+
+proc requireControlApiGone(httpBind: string) =
+  let port = Port(parseInt(httpBind[httpBind.rfind(':') + 1 .. ^1]))
+  let probe = newSocket()
+  defer: probe.close()
+  var refused = false
+  try:
+    probe.connect("127.0.0.1", port)
+  except OSError:
+    refused = true
+  require refused
+
 suite "e2e_repro_dev_sessions":
+  test "e2e_session_start_failure_is_scoped_to_the_current_launch":
+    let dir = createTempDir("repro-session-terminal-", "")
+    defer: removeDir(dir)
+    let session = dir / "session"
+    createDir(session)
+    let config = DevSessionSupervisorConfig(outDir: dir,
+      sessionId: "current-launch")
+    let budget = DevSessionReadyBudget(timeoutMs: 100, explicit: true,
+      derivedMs: 100)
+    for withBind in [false, true]:
+      writeFile(session / "session.json", $(%*{
+        "sessionId": "current-launch", "status": "failed",
+        "failure": "controlled startup failure"}))
+      if withBind:
+        writeFile(session / "http-ready.json", $(%*{
+          "sessionId": "current-launch", "httpBind": "http://127.0.0.1:1"}))
+      var diagnostic = ""
+      try: discard waitForDevSessionReady(config, budget)
+      except IOError as err: diagnostic = err.msg
+      check diagnostic.contains("dev session cannot start")
+      check diagnostic.contains("controlled startup failure")
+    removeFile(session / "http-ready.json")
+    writeFile(session / "session.json", $(%*{
+      "sessionId": "previous-launch", "status": "failed",
+      "failure": "stale startup failure"}))
+    expect DevSessionStillStartingError:
+      discard waitForDevSessionReady(config, budget)
+
+  test "e2e_session_http_exits_without_another_connection":
+    let dir = createTempDir("repro-http-owner-", "")
+    defer: removeDir(dir)
+    let args = @[
+      "__repro-dev-session-http", "--session-dir", dir,
+      "--host", "127.0.0.1", "--port", "0",
+      "--parent-pid", $getCurrentProcessId()]
+    var helper = startProcess(reproBinary(), args = args,
+      options = {poParentStreams})
+    defer:
+      if helper.running(): helper.kill()
+      discard helper.waitForExit()
+      helper.close()
+    let readyPath = dir / "http-ready.json"
+    waitForHttpReady(readyPath, helper)
+    require fileExists(readyPath)
+    let ready = parseJson(readFile(readyPath))
+    check ready["pid"].getInt() == helper.processID()
+    writeFile(dir / "stop.request.json", "{}")
+    # No connection follows the stop request: accept used to block forever.
+    for _ in 0 ..< 100:
+      if not helper.running(): break
+      sleep(50)
+    check not helper.running()
+    check not fileExists(readyPath)
+    if helper.running(): helper.kill()
+    discard helper.waitForExit()
+    helper.close()
+    removeFile(dir / "stop.request.json")
+    helper = startProcess(reproBinary(), args = args,
+      options = {poParentStreams})
+    waitForHttpReady(readyPath, helper)
+    require fileExists(readyPath)
+    let httpBind = parseJson(readFile(readyPath))["httpBind"].getStr()
+    let response = dev_session.httpRequest(httpBind, "/session/stop", httpMethod = "POST")
+    check response.status == 202
+    for _ in 0 ..< 100:
+      if not helper.running(): break
+      sleep(50)
+    check not helper.running()
+    check not fileExists(readyPath)
+
+  test "e2e_session_http_refuses_a_second_listener":
+    let root = createTempDir("repro-http-exclusive-", "")
+    defer: removeDir(root)
+    let dir = root / "session"
+    createDir(dir)
+    let args = @["__repro-dev-session-http", "--session-dir", dir,
+      "--host", "127.0.0.1", "--port", "0",
+      "--parent-pid", $getCurrentProcessId()]
+    let first = startProcess(reproBinary(), args = args,
+      options = {poParentStreams})
+    defer:
+      if first.running(): first.kill()
+      discard first.waitForExit()
+      first.close()
+    let readyPath = dir / "http-ready.json"
+    waitForHttpReady(readyPath, first)
+    require fileExists(readyPath)
+    let original = readFile(readyPath)
+    let second = startProcess(reproBinary(), args = args)
+    defer:
+      if second.running(): second.kill()
+      discard second.waitForExit()
+      second.close()
+    for _ in 0 ..< 100:
+      if not second.running(): break
+      sleep(50)
+    check not second.running()
+    if not second.running():
+      check second.peekExitCode() != 0
+      check second.outputStream.readAll().contains("session already has an owner")
+    check readFile(readyPath) == original
+    check first.running()
+    # A real serialized empty artifact lets the supervisor reach ownership
+    # admission. No activation can occur here; the resolver is unused.
+    let artifact = root / "artifact.ssz"
+    writeDevEnvArtifact(artifact, DevEnvArtifact(projectRoot: root))
+    writeFile(dir / "session.json", "existing session record")
+    var refusal = ""
+    try:
+      discard runDevSessionSupervisor(DevSessionSupervisorConfig(
+        outDir: root, artifactPath: artifact, projectRoot: root,
+        publicCliPath: reproBinary()), nil)
+    except IOError as err:
+      refusal = err.msg
+    check refusal.contains("session already has an owner")
+    check refusal.contains("supervisor.lock")
+    check readFile(dir / "session.json") == "existing session record"
+    check readFile(readyPath) == original
+    first.kill()
+    discard first.waitForExit()
+    removeFile(readyPath)
+    let replacement = startProcess(reproBinary(), args = args,
+      options = {poParentStreams})
+    defer:
+      if replacement.running(): replacement.kill()
+      discard replacement.waitForExit()
+      replacement.close()
+    waitForHttpReady(readyPath, replacement)
+    require fileExists(readyPath)
+    check parseJson(readFile(readyPath))["pid"].getInt() == replacement.processID()
+    replacement.kill()
+    discard replacement.waitForExit()
+    removeFile(readyPath)
+    # A pre-upgrade owner can have a genuine live API without the new
+    # supervisor lock. A real supervised helper stages precisely that
+    # absence; the test process remains its live, recorded owner.
+    let legacy = startProcess(reproBinary(), args = args & @[
+      "--supervised", "--session-id", "legacy-without-owner-lock"],
+      options = {poParentStreams})
+    defer:
+      if legacy.running(): legacy.kill()
+      discard legacy.waitForExit()
+      legacy.close()
+    waitForHttpReady(readyPath, legacy)
+    require fileExists(readyPath)
+    let legacyBind = parseJson(readFile(readyPath))["httpBind"].getStr()
+    writeFile(dir / "session.json", $(%*{
+      "sessionId": "legacy-without-owner-lock", "status": "up",
+      "mode": "up", "projectRoot": root,
+      "supervisorPid": getCurrentProcessId(), "httpPid": legacy.processID(),
+      "httpBind": legacyBind}))
+    var legacyRefusal = ""
+    try:
+      discard reusableDevSession(DevSessionSupervisorConfig(
+        mode: dsmUp, outDir: root, projectRoot: root))
+    except IOError as err:
+      legacyRefusal = err.msg
+    check legacyRefusal.contains("ownership lock")
+    check legacyRefusal.contains("repro down")
+    check legacy.running()
+    check parseJson(readFile(readyPath))["httpBind"].getStr() == legacyBind
+    let formerOwner =
+      when defined(windows):
+        startProcess(getEnv("COMSPEC", "cmd.exe"), args = @["/c", "exit", "0"],
+          options = {poUsePath})
+      else:
+        startProcess("/bin/sh", args = @["-c", "exit 0"])
+    let formerPid = formerOwner.processID()
+    discard formerOwner.waitForExit()
+    formerOwner.close()
+    var legacyMetadata = parseJson(readFile(dir / "session.json"))
+    legacyMetadata["supervisorPid"] = %formerPid
+    for oldStatus in ["up", "down", "failed"]:
+      legacyMetadata["status"] = %oldStatus
+      writeFile(dir / "session.json", $legacyMetadata)
+      var orphanRefusal = ""
+      try:
+        discard reusableDevSession(DevSessionSupervisorConfig(
+          mode: dsmUp, outDir: root, projectRoot: root))
+      except IOError as err:
+        orphanRefusal = err.msg
+      check orphanRefusal.contains("outlived its supervisor")
+      check legacy.running()
+      check parseJson(readFile(readyPath))["httpBind"].getStr() == legacyBind
+
+  test "e2e_session_http_dies_with_owner_despite_idle_client":
+    let dir = createTempDir("repro-http-parent-", "")
+    defer: removeDir(dir)
+    # A real parent process creates the real helper. Killing it exercises
+    # reparenting, rather than asking the helper to simulate an owner loss.
+    let owner = startProcess("python3", args = @["-c",
+      "import os, subprocess, sys, time\n" &
+      "p = subprocess.Popen([sys.argv[1], '__repro-dev-session-http', " &
+      "'--session-dir', sys.argv[2], '--host', '127.0.0.1', '--port', '0', " &
+      "'--parent-pid', str(os.getpid())])\n" &
+      "print(p.pid, flush=True)\n" &
+      "time.sleep(3600)\n", reproBinary(), dir], options = {poUsePath})
+    let helperPid = parseInt(owner.outputStream.readLine())
+    defer:
+      if owner.running(): owner.kill()
+      discard owner.waitForExit()
+      owner.close()
+      when defined(posix):
+        discard execCmd("kill -KILL " & $helperPid & " 2>/dev/null")
+      elif defined(windows):
+        discard execCmd("taskkill /F /PID " & $helperPid & " >NUL 2>&1")
+    let readyPath = dir / "http-ready.json"
+    waitForHttpReady(readyPath, owner)
+    require fileExists(readyPath)
+    let httpBind = parseJson(readFile(readyPath))["httpBind"].getStr()
+    let port = parseInt(httpBind[httpBind.rfind(':') + 1 .. ^1])
+    let idle = newSocket()
+    defer: idle.close()
+    idle.connect("127.0.0.1", Port(port))
+    idle.send("GET /status HTTP/1.1\r\n") # deliberately incomplete headers
+    sleep(100)
+    owner.kill()
+    discard owner.waitForExit()
+    requirePidGone(helperPid)
+    requireControlApiGone(httpBind)
+    check not fileExists(readyPath)
+
   when isIoMonitorSupported:
     test "e2e_repro_up_down_supervises_real_services":
       let c = prepareCase("repro-m8-up-down")
@@ -620,6 +877,22 @@ suite "e2e_repro_dev_sessions":
         "declared service readiness timeouts + 10000 ms margin")
       let metadata = waitForStatus(sessionMetadataPath(c.projectRoot), "up")
       let httpBindValue = metadata["httpBind"].getStr()
+      let ready = parseJson(readFile(parentDir(sessionMetadataPath(c.projectRoot)) /
+        "http-ready.json"))
+      let httpPid = ready["pid"].getInt()
+      check metadata{"httpPid"}.getInt() == httpPid
+      check metadata["supervisorPid"].getInt() > 0
+      let repeated = runRepro(c, @["up", c.projectRoot, "--http=127.0.0.1:0"])
+      checkpoint("repeated up while the first session is live:\n" & repeated.output)
+      check repeated.exitCode == 0
+      let reused = upAnnouncement(repeated.output)
+      check reused.sessionId == metadata["sessionId"].getStr()
+      check reused.httpBind == httpBindValue
+      let reusedState = parseJson(readFile(sessionMetadataPath(c.projectRoot)))
+      check reusedState["supervisorPid"] == metadata["supervisorPid"]
+      check reusedState["httpPid"].getInt() == httpPid
+      check parseJson(readFile(parentDir(sessionMetadataPath(c.projectRoot)) /
+        "http-ready.json"))["pid"].getInt() == httpPid
       let status = statusJson(httpBindValue)
       check status["status"].getStr() == "up"
       check status["services"].len == 2
@@ -648,6 +921,10 @@ suite "e2e_repro_dev_sessions":
       check down["services"].allIt(it["status"].getStr() == "stopped")
       for pid in pids:
         requirePidGone(pid)
+      requirePidGone(httpPid)
+      requireControlApiGone(httpBindValue)
+      check not fileExists(parentDir(sessionMetadataPath(c.projectRoot)) /
+        "http-ready.json")
       let order = readFile(c.projectRoot / "state" / "order.log")
       check order.find("db-start") < order.find("api-start")
       check order.find("api-stop") < order.find("db-stop")
@@ -1007,14 +1284,20 @@ suite "e2e_repro_dev_sessions":
       check first.exitCode == 0
       let firstUp = upAnnouncement(first.output)
       check firstUp.sessionId.len > 0
+      let readyPath = parentDir(sessionMetadataPath(c.projectRoot)) / "http-ready.json"
+      let firstPid = parseJson(readFile(readyPath))["pid"].getInt()
       let firstDown = runRepro(c, @["down", c.projectRoot])
       checkpoint("down:\n" & firstDown.output)
       check firstDown.exitCode == 0
+      requirePidGone(firstPid)
+      requireControlApiGone(firstUp.httpBind)
+      check not fileExists(readyPath)
 
       let second = runRepro(c, @["up", c.projectRoot, "--http=127.0.0.1:0"])
       checkpoint("second up:\n" & second.output)
       check second.exitCode == 0
       let secondUp = upAnnouncement(second.output)
+      let secondPid = parseJson(readFile(readyPath))["pid"].getInt()
       check secondUp.sessionId.len > 0
       check secondUp.status == "up"
       check secondUp.sessionId != firstUp.sessionId
@@ -1026,7 +1309,11 @@ suite "e2e_repro_dev_sessions":
       if not live.isNil:
         check live{"status"}.getStr() == "up"
         check live{"sessionId"}.getStr() == secondUp.sessionId
-      discard runRepro(c, @["down", c.projectRoot])
+      let secondDown = runRepro(c, @["down", c.projectRoot])
+      check secondDown.exitCode == 0
+      requirePidGone(secondPid)
+      requireControlApiGone(secondUp.httpBind)
+      check not fileExists(readyPath)
 
     test "e2e_repro_up_does_not_report_a_stale_sessions_identity":
       # B1, second scenario: a session directory left claiming `up` by a

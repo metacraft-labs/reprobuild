@@ -91,7 +91,7 @@ suite "HL-10 — the certifying run refreshes the lock before testing":
       fx.certifyAndCommit("A", "repro-lock re-pinned lib-b", libBNext)
 
       # ---- B. only a ref is stale ------------------------------------------
-      let planted = fx.lockText().withRef("../lib-c", "never-published")
+      let planted = fx.lockText().withRef("lib-c", "never-published")
       writeFile(fx.app / "repro.lock", planted)
       writeFile(fx.app / "README.md", "app fixture, edited for B\n")
       # Committed past the hooks, so the stale ref is what HEAD records.
@@ -107,7 +107,7 @@ suite "HL-10 — the certifying run refreshes the lock before testing":
       check "never-published" notin fx.lockText()
 
       # ---- C. a declared develop-set sibling is not carried ----------------
-      check depEntry(fx.lockText(), "../lib-d").len == 0
+      check depEntry(fx.lockText(), "lib-d").len == 0
       fx.cf.sib.setAppDepends(@["lib-b", "lib-d"])
       let planC = planCommitTimeLockWriters(ws, fx.app, tpmPathOnly,
         PinRegressionAllowance())
@@ -115,4 +115,4 @@ suite "HL-10 — the certifying run refreshes the lock before testing":
       writeFile(fx.app / "README.md", "app fixture, edited for C\n")
       let libD = fx.cf.sib.headOf(ws / "lib-d")
       fx.certifyAndCommit("C", "repro-lock added lib-d", libD)
-      check depEntry(fx.lockText(), "../lib-d").len > 0
+      check depEntry(fx.lockText(), "lib-d").len > 0

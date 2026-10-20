@@ -55,7 +55,8 @@ const
     ## `dssf1_action_fixtures.nim` records: a derived expectation
     ## asserts whatever the implementation produced.
 
-proc repoRootDir(): string = getCurrentDir()
+proc repoRootDir(): string =
+  currentSourcePath().parentDir.parentDir.parentDir
 
 proc reproBinary(): string =
   requireBinary(repoRootDir() / "build" / "bin" / addFileExt("repro", ExeExt),
@@ -96,11 +97,16 @@ proc recipe(): string =
   "    enable " & ActivityName & "\n"
 
 proc prepareCase(): UpCase =
-  result.tempRoot = createTempDir("repro-dssf1-up-", "")
-  result.project = result.tempRoot / "p1"
-  createDir(result.project)
-  writeFile(result.project / "reprobuild.nim", recipe())
+  # Resolve the graph fixture before allocating anything that needs cleanup.
   result.reproBin = reproBinary()
+  result.tempRoot = createTempDir("repro-dssf1-up-", "")
+  try:
+    result.project = result.tempRoot / "p1"
+    createDir(result.project)
+    writeFile(result.project / "reprobuild.nim", recipe())
+  except CatchableError:
+    removeDir(result.tempRoot)
+    raise
 
 proc daemonEndpoint(c: UpCase): string =
   daemonSocketEndpoint(c.tempRoot.extractFilename)
@@ -174,71 +180,73 @@ proc startDaemon(c: UpCase): owned(Process) =
     raise
 
 proc closeDaemon(c: UpCase; daemon: var owned(Process)) =
-  c.stopDaemon()
-  if not daemon.isNil:
-    if daemon.running():
-      daemon.terminate()
-      discard daemon.waitForExit()
-    daemon.close()
+  try:
+    c.stopDaemon()
+  finally:
+    if not daemon.isNil:
+      if daemon.running():
+        daemon.terminate()
+        discard daemon.waitForExit()
+      daemon.close()
 
 suite "F1 §4.8 — `repro up` builds the rendered configuration first":
-  # Prepared in `setup`, NOT in the suite body. The body runs at
-  # registration in every process this binary starts -- including
-  # `--list` / `--list-json`, which only enumerates and is run from a
-  # scratch working directory. Preparing there resolved
-  # `<cwd>/build/bin/repro` and started a daemon just to print case
-  # names: the defect `84e42788f` fixed for the five shared-instance
-  # binaries, which this file still carried.
-  #
-  # Prepared PER CASE rather than once per process, so the replayed step
-  # below starts from the same EMPTY tree whether the runner gives each
-  # case its own process (it does) or one process runs every case. That
-  # keeps the step's positive control -- both files absent -- meaningful
-  # in both modes instead of asserting on a tree a previous case rendered.
-  var prepared = false
   var c: UpCase
   var daemon: owned(Process)
+  var prepared = false
   var upOutput = ""
   var upExit = -1
-
-  setup:
-    c = prepareCase()
-    daemon = c.startDaemon()
-    prepared = true
-    upOutput = ""
-    upExit = -1
 
   teardown:
     if prepared:
       prepared = false
-      discard c.runRepro(@["down", "--activity", ActivityName])
-      c.closeDaemon(daemon)
-      try: removeDir(c.tempRoot) except OSError, IOError: discard
+      try:
+        discard c.runRepro(@["down", "--activity", ActivityName])
+      finally:
+        try:
+          c.closeDaemon(daemon)
+        finally:
+          try: removeDir(c.tempRoot) except OSError, IOError: discard
+
+  setup:
+    # Registration also runs for --list/--list-json from a scratch cwd.
+    # Only executing a case may allocate the project or start a daemon.
+    #
+    # PREPARED PER CASE, not once per process. The step the four later
+    # cases replay opens by asserting that NEITHER rendered file exists
+    # yet, so a case that inherited the previous case's tree would assert
+    # that against a tree already rendered. One case per process -- what
+    # the runner does -- prepares exactly once either way; one process
+    # running every case now gets a fresh project and daemon per case, and
+    # `teardown` above returns each one.
+    c = prepareCase()
+    prepared = true
+    daemon = c.startDaemon()
+    upOutput = ""
+    upExit = -1
 
   # ONE PROCESS PER CASE. The suite runner executes every case in a process
-  # of its own, and this suite body prepares a FRESH project and a fresh
-  # daemon in each such process. The cases below are one scenario told in
-  # steps: the first runs `repro up`, and every later one asserts on what
-  # that run produced -- `upOutput` for the announcement, the project tree
-  # for the rendered file and the consumer's copy of it.
+  # of its own, and `setup` above prepares a fresh project and daemon in
+  # each. The cases below are one scenario told in steps: the first runs
+  # `repro up`, and every later one asserts on what that run produced --
+  # `upOutput` for the announcement, the project tree for the rendered file
+  # and the consumer's own copy of it.
   #
   # Run alone, a dependent case therefore read an EMPTY `upOutput` and an
-  # unrendered tree, and failed on a fixture it never built. That is what
-  # the full-suite run of 2026-10-19/20 measured at reprobuild-sds
-  # 8f8e5e553: cases 2-5 FAILED (case 2 on
-  # `upOutput.contains("built 1 dev-env action(s) ...")`, cases 3-5 on a
-  # file that was never written) while case 1 passed, and the same binary
-  # passed 5 of 5 whenever ONE process ran every case in order. The suite
-  # indices show the split -- the passing case ran at 2634 while three of
-  # the failures ran at 2591-2593.
+  # unrendered tree, and failed on a fixture it never built. The full-suite
+  # run of 2026-10-19/20 measured that at 8f8e5e553: cases 2-5 FAILED --
+  # case 2 on `upOutput.contains("built 1 dev-env action(s) ...")`, cases
+  # 3-5 on a file that was never written -- while case 1 passed, and the
+  # same binary passed 5 of 5 whenever one process ran every case in order.
+  # The suite indices show the split: the passing case ran at 2634, three
+  # of the failures at 2591-2593.
   #
   # So each step is a template, and a dependent case REPLAYS the step its
-  # state comes from, assertions and all, before running its own. This is
-  # the pattern `t_dss11_cross_process_contribution_reaches_the_instance`
-  # and its four shared-instance siblings already carry. Case names, order
-  # and every assertion are unchanged; a failing prerequisite now fails the
-  # dependent case at the PREREQUISITE's own assertion, rather than letting
-  # it fail on a missing file that says nothing about why.
+  # state comes from, assertions and all, before running its own -- the
+  # pattern `t_dss11_cross_process_contribution_reaches_the_instance` and
+  # its four shared-instance siblings already carry. Case names, order and
+  # every assertion are unchanged; a failing prerequisite now fails the
+  # dependent case at the PREREQUISITE's own assertion rather than at a
+  # missing file that says nothing about why.
 
   template nothingIsOnDiskAndThenUpRuns() =
     # The step of case "the state F1 measured: nothing is on disk before

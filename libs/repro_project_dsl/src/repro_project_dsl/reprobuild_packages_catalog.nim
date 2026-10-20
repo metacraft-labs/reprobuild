@@ -348,14 +348,21 @@ proc describeReprobuildPackagesSearch*(search: ReprobuildPackagesSearch):
   lines.join("\n")
 
 proc movedPackageUnresolvedDiagnostic*(selector, rawConstraint,
-    consumerSourceFile: string; sourceLine = 0; listName = "uses"): string =
+    consumerSourceFile: string; sourceLine = 0; listName = "uses";
+    lookupSourceFile = ""): string =
   ## "" unless ``selector`` is a moved package (`MovedToReprobuildPackages`)
   ## that no catalog defines for this consumer; otherwise the full error text.
   ## ``listName`` is the recipe block that names it: ``uses``,
-  ## ``nativeBuildDeps`` or ``runtimeDeps``.
+  ## ``nativeBuildDeps`` or ``runtimeDeps``. ``lookupSourceFile`` supplies
+  ## the original compiler source location when ``consumerSourceFile`` is a
+  ## recipe-relative name persisted for diagnostics.
   if selector notin MovedToReprobuildPackages:
     return ""
-  let search = reprobuildPackagesSearch(selector, consumerSourceFile)
+  # Persisted recipe metadata can name a source relative to its recipe. The
+  # macro supplies its original source location separately so the lookup walks
+  # from the consumer, while the displayed diagnostic keeps the recipe's name.
+  let search = reprobuildPackagesSearch(selector,
+    if lookupSourceFile.len > 0: lookupSourceFile else: consumerSourceFile)
   if search.module.len > 0:
     return ""
   let where =

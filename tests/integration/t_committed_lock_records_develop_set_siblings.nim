@@ -26,11 +26,13 @@
 ##
 ## Asserts:
 ##   1. ``repro lock refresh app`` records lib-b AND lib-c (the TRANSITIVE
-##      closure of the manifest ``depends`` edges) as ``deps`` entries at
-##      ``../lib-b`` / ``../lib-c`` with VCS coordinates, the sibling's HEAD as
-##      ``revision`` and a ``git-sha1:<HEAD>`` integrity; the root entry
-##      ``depends`` on both. lib-d — in the workspace, not in the closure — is
-##      NOT recorded.
+##      closure of the manifest ``depends`` edges) as ``deps`` entries named
+##      ``lib-b`` / ``lib-c`` with VCS coordinates, the sibling's HEAD as
+##      ``revision`` and a ``git-sha1:<HEAD>`` integrity, and no checkout
+##      ``path`` (a lock pins identity only — Workspace-Manifests.md §"The
+##      committed lock carries the full set (schema v3)"); the root entry
+##      (``self = "true"``) ``depends`` on both. lib-d — in the workspace, not
+##      in the closure — is NOT recorded.
 ##   2. After lib-b advances by a published commit, a second refresh re-pins
 ##      lib-b at its new HEAD (an observation of the checkout, not a copy of the
 ##      old pin).
@@ -43,8 +45,8 @@
 ##      DROP a sibling pin merely because it cannot see the sibling.
 ##
 ## Falsifiability (observed): against the pre-§14 ``lockedDepsForWorkspace``
-## the lock carries only ``path = "."``, so (1) fails on the absent
-## ``../lib-b`` entry.
+## the lock carries only the root entry, so (1) fails on the absent ``lib-b``
+## entry.
 ##
 ## NO MOCKS. Every repository is a real local git repository with a real bare
 ## origin; the manifest is a real on-disk manifest the production resolver
@@ -125,11 +127,21 @@ proc fragment(name: string; depends: seq[string]): string =
 proc headOf(gitBin, work: string): string =
   requireGit(q(gitBin) & " -C " & q(work) & " rev-parse HEAD").strip()
 
-proc depLineFor(lockBody, path: string): string =
-  ## The inline-table text of the ``deps`` entry whose ``path`` is ``path``,
-  ## or "" when there is none.
-  let key = "path = \"" & path & "\""
-  let at = lockBody.find(key)
+proc depLineFor(lockBody, name: string): string =
+  ## The inline-table text of the ``deps`` entry named ``name``, or "" when
+  ## there is none. Entries are found by NAME: a lock records no checkout
+  ## path.
+  # After `deps = [`: a `packages` entry starts with the same prefix.
+  let at = lockBody.find("{ name = \"" & name & "\"",
+    max(0, lockBody.find("deps = [")))
+  if at < 0: return ""
+  let close = lockBody.find('}', at)
+  if close < 0: return ""
+  lockBody[at .. close]
+
+proc rootLineFor(lockBody: string): string =
+  ## The inline-table text of the lock's own entry (``self = "true"``).
+  let at = lockBody.find("self = \"true\"")
   if at < 0: return ""
   let open = lockBody.rfind('{', 0, at)
   let close = lockBody.find('}', at)
@@ -182,8 +194,8 @@ suite "the committed lock records the develop-set siblings":
       check refresh.code == 0
       let body = readFile(app / "repro.lock")
       checkpoint(body)
-      let libB = depLineFor(body, "../lib-b")
-      let libC = depLineFor(body, "../lib-c")
+      let libB = depLineFor(body, "lib-b")
+      let libC = depLineFor(body, "lib-c")
       check libB.len > 0
       check libC.len > 0
       check "name = \"lib-b\"" in libB
@@ -192,9 +204,10 @@ suite "the committed lock records the develop-set siblings":
       check ("integrity = \"git-sha1:" & libBHead & "\"") in libB
       check ("revision = \"" & libCHead & "\"") in libC
       check ("integrity = \"git-sha1:" & libCHead & "\"") in libC
-      check depLineFor(body, "../lib-d").len == 0
+      check "path =" notin body
+      check depLineFor(body, "lib-d").len == 0
       check "lib-d" notin body
-      let root = depLineFor(body, ".")
+      let root = rootLineFor(body)
       check "lib-b" in root
       check "lib-c" in root
 
@@ -210,8 +223,8 @@ suite "the committed lock records the develop-set siblings":
       checkpoint(again.output)
       check again.code == 0
       let body2 = readFile(app / "repro.lock")
-      check ("revision = \"" & libBNext & "\"") in depLineFor(body2, "../lib-b")
-      check ("revision = \"" & libCHead & "\"") in depLineFor(body2, "../lib-c")
+      check ("revision = \"" & libBNext & "\"") in depLineFor(body2, "lib-b")
+      check ("revision = \"" & libCHead & "\"") in depLineFor(body2, "lib-c")
 
       # Commit + publish the lock so a fresh clone carries it.
       discard requireGit(q(gitBin) & " -C " & q(app) & " add repro.lock")
@@ -234,8 +247,8 @@ suite "the committed lock records the develop-set siblings":
       check loneRefresh.code == 0
       let body3 = readFile(lone / "repro.lock")
       checkpoint(body3)
-      check ("revision = \"" & libBNext & "\"") in depLineFor(body3, "../lib-b")
-      check ("revision = \"" & libCHead & "\"") in depLineFor(body3, "../lib-c")
+      check ("revision = \"" & libBNext & "\"") in depLineFor(body3, "lib-b")
+      check ("revision = \"" & libCHead & "\"") in depLineFor(body3, "lib-c")
 
       # ---- (4) a recipe with nothing to solve still records its develop set.
       let recipeOnly = workspace / "app"
@@ -249,5 +262,5 @@ suite "the committed lock records the develop-set siblings":
       check noSolve.code == 0
       check "no solver inputs found" notin noSolve.output
       let body4 = readFile(recipeOnly / "repro.lock")
-      check ("revision = \"" & libBNext & "\"") in depLineFor(body4, "../lib-b")
+      check ("revision = \"" & libBNext & "\"") in depLineFor(body4, "lib-b")
       check "packages = []" in body4

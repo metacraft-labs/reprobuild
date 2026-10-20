@@ -160,9 +160,15 @@ proc policyReport*(ws: PolicyWorkspace; repo: string;
     result.report = parseJson(res.output[start .. ^1].strip().splitLines()[0])
 
 proc depLine*(lockBody, name: string): string =
-  ## The ``deps`` inline table of ``name``, or "".
-  let key = "{ name = \"" & name & "\", path = "
-  let at = lockBody.find(key)
+  ## The ``deps`` inline table of ``name``, or "". Matched on the name and
+  ## the separator after it (a lock records no checkout path, so the next
+  ## key is ``self`` or ``coord_kind``), never on a prefix of another name.
+  ## Searched only after `deps = [`, because a `packages` entry starts with
+  ## the same `{ name = "<name>", ` prefix.
+  let key = "{ name = \"" & name & "\", "
+  let depsAt = lockBody.find("deps = [")
+  if depsAt < 0: return ""
+  let at = lockBody.find(key, depsAt)
   if at < 0: return ""
   let close = lockBody.find('}', at)
   if close < 0: return ""

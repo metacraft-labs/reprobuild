@@ -209,8 +209,9 @@ removed in a milestone post-2026-11-30; until then both paths coexist.
   host realizes it. Check `libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/`
   for the canonical name (some tools are spelled differently for
   historical reasons — e.g. `python3` not `python`, `dotnet-sdk` not
-  `dotnet`). A name that is not a Nim identifier, such as `7zip`, is
-  written as a string: `"7zip"`.
+  `dotnet`). A name that is not a Nim identifier, such as `7zip` or the
+  Nim keyword `nil`, is written as a string: `"7zip"`, `"nil"`. A bare
+  `nil` line is refused, because Nim reads it as the keyword.
 - **`--plan` reports "missing-realization: no realization of package
   '<id>' for <target>"**: the package is defined but offers nothing for
   your platform under your selection policy; the message lists each

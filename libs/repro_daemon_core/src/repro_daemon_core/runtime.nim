@@ -1833,6 +1833,63 @@ proc handleServiceRelease(socket: IpcConn; config: UserDaemonConfig;
     $response.remainingHolders.len & " stoppedPid=" &
     $response.stoppedPid)
 
+proc handleLeaseReapProviders(socket: IpcConn; config: UserDaemonConfig;
+                              request: DaemonLeaseReapProvidersRequest) =
+  ## L4/L5 (§4.2 destroy transport) handler: record how to reach the provider
+  ## that owns each named resource ``typeId``, so the next reap tick destroys
+  ## that type over a launched provider SESSION instead of falling back to
+  ## in-process linking this daemon does not have.
+  ##
+  ## This is the feeder whose absence made the whole ``rtSession`` arm
+  ## unreachable from the product
+  ## (reprobuild-pm/issues/2026-10-14-no-production-path-enables-the-daemons-session-reap-transport.md):
+  ## ``registerLeaseReapProvider`` had no caller in the shipped tree.
+  ##
+  ## THE REGISTRY IS A MODULE GLOBAL AND IS NOT LOCKED, which is sound here and
+  ## only here: this handler runs on the event-loop thread, between accepts, and
+  ## so does the reap tick (``runScopedLeaseReapTick``) — the writer and the
+  ## reader are the same thread. Build and watch work runs in detached
+  ## PROCESSES, which share no globals with the loop.
+  ##
+  ## VALIDATION IS A REFUSAL, NOT A FILTER, and it is exactly the test the
+  ## TRANSPORT will later apply (``leaseReapProviderRefusal`` ->
+  ## ``isLaunchableArtifact``): no typeId names no type, and a path that is
+  ## empty OR NOT ABSOLUTE cannot be launched, so the tick would drop it and
+  ## reap in-process. Accepting such an entry would answer ``ok: true,
+  ## registered: 1``, log a successful registration and make
+  ## ``hasLeaseReapProviders()`` true while changing nothing about any sweep —
+  ## reporting success and doing nothing, which is the exact shape this whole
+  ## area has been fixing. The frame is rejected whole, and nothing is
+  ## registered from it.
+  var response = DaemonLeaseReapProvidersResponse(ok: true)
+  for p in request.providers:
+    # The validator is handed THE ARTIFACT THAT WOULD BE REGISTERED, and it
+    # delegates to the same `isLaunchableArtifact` the transport applies — so
+    # the handler cannot accept a ref the tick will throw away. See
+    # `leaseReapProviderRefusal`.
+    let refusal = leaseReapProviderRefusal(p.typeId,
+      LeaseReapProviderArtifact(
+        binaryPath: p.binaryPath,
+        providerArtifactId: p.providerArtifactId,
+        workingDir: p.workingDir))
+    if refusal.len > 0:
+      response = DaemonLeaseReapProvidersResponse(ok: false, reason: refusal)
+      break
+  if response.ok:
+    for p in request.providers:
+      registerLeaseReapProvider(p.typeId, LeaseReapProviderArtifact(
+        binaryPath: p.binaryPath,
+        providerArtifactId: p.providerArtifactId,
+        workingDir: p.workingDir))
+    response.registered = request.providers.len
+  socket.writeFrame(udkLeaseReapProvidersAck,
+    leaseReapProvidersResponseBody(response))
+  logLine(config.logPath, "lease reap providers registered=" &
+    $response.registered & " requested=" & $request.providers.len &
+    " ok=" & $response.ok &
+    (if response.reason.len > 0: " reason=" & response.reason else: "") &
+    " scope=" & (if request.scope == dlsSystem: "system" else: "user"))
+
 proc handleHello(socket: IpcConn; config: UserDaemonConfig; generation: string;
                  frameBody: openArray[byte];
                  devRestart = DevRestartState()): bool =
@@ -2684,6 +2741,15 @@ proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
           "malformed udkServiceRelease body: " & err.msg))
         return
     handleServiceRelease(socket, config, instances, request)
+  of udkLeaseReapProviders:
+    let request =
+      try:
+        parseLeaseReapProvidersRequestBody(frame.body)
+      except CatchableError as err:
+        socket.writeFrame(udkError, errorBody(
+          "malformed udkLeaseReapProviders body: " & err.msg))
+        return
+    handleLeaseReapProviders(socket, config, request)
   else:
     socket.writeFrame(udkError, errorBody(
       "unsupported user-daemon message in lifecycle server: " &
@@ -3029,6 +3095,14 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
   var daemonLock = acquireUserDaemonLock(config)
   defer:
     releaseUserDaemonLock(daemonLock)
+  # L4/L5 (§4.2): close the reap transport's pooled provider sessions on the
+  # way out, and forget the registered artifacts. The pool holds a live
+  # provider CHILD per artifact the tick reaped over, so a daemon that exited
+  # without this would orphan every one of them — and the registration is
+  # in-memory anyway, so a successor re-learns it from the records it sweeps
+  # or from the next consuming `repro run`.
+  defer:
+    try: clearLeaseReapProviders() except CatchableError: discard
 
   let restartChild =
     config.devMode and config.previousStagedGenerationDir.len > 0

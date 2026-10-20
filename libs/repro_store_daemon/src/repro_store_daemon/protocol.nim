@@ -149,7 +149,7 @@ proc writeStringSeq(buf: var seq[byte]; values: openArray[string]) =
     buf.writeString(value)
 
 proc readStringSeq(buf: openArray[byte]; pos: var int): seq[string] =
-  let count = int(buf.readU32Le(pos))
+  let count = readElementCount(buf, pos, 4)
   result = newSeq[string](count)
   for i in 0 ..< count:
     result[i] = buf.readString(pos)

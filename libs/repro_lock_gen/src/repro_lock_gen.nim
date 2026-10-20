@@ -753,7 +753,7 @@ proc attachUpstreamArchives(deps: var seq[LockedDep];
 proc renderLockDocument(req: LockGenerationRequest;
                         sol: UnifiedSolution;
                         plan: seq[MetadataFetchPlanEntry]): string =
-  ## The rule-set artifact: a canonical `reprobuild.solved-graph-lock.v2`
+  ## The rule-set artifact: a canonical `reprobuild.solved-graph-lock.v3`
   ## document.
   ##
   ## Produced through the SAME writer `repro lock refresh` uses
@@ -774,7 +774,7 @@ proc renderLockDocument(req: LockGenerationRequest;
     if s.len > 0:
       solved.packages[i].source = s
   var ld = lockedDepsFromSolved(solved)
-  ld.schema = SolvedGraphLockSchemaV2
+  ld.schema = SolvedGraphLockSchemaV3
   ld.deps = req.extraDeps
   var lifted = lockedDepsFromPackages(ld.packages, req.platform)
   attachUpstreamArchives(lifted, plan)
@@ -1356,10 +1356,10 @@ proc mergeRepinnedLock*(committed, generated: LockedDependencies;
   result.variants.sort(proc (a, b: LockedVariant): int = cmp(a.name, b.name))
   result.deps = @[]
   for d in committed.deps:
-    if d.path == ".":
+    if isSelfLockedDep(d):
       var fresh = d
       for g in generated.deps:
-        if g.path == ".": fresh = g
+        if isSelfLockedDep(g): fresh = g
       result.deps.add(fresh)
     elif isLiftedPackageDep(d) and d.name in changed:
       for g in generated.deps:
@@ -1376,11 +1376,17 @@ proc mergeRepinnedLock*(committed, generated: LockedDependencies;
         if isLiftedPackageDep(d) and d.name == g.name: present = true
       if not present: result.deps.add(g)
     else:
-      # A repository pin is matched by name OR path: either one already
-      # recorded means the committed lock pins that sibling, and its entry
-      # was carried above (or, for the root, refreshed). Matching against the
-      # entries written so far rather than the committed ones also keeps a
-      # sibling the solve lists twice from being added twice.
+      # A repository pin is matched by NAME — the identity a lock records,
+      # unique in `deps` — OR by where THIS machine has it checked out:
+      # either one already recorded means the committed lock pins that
+      # sibling, and its entry was carried above (or, for the root,
+      # refreshed). The location is never one a lock recorded: the committed
+      # entries are placed locally by the caller (`parseLockedDepsAt`) and
+      # the generated ones were observed by this run, so a sibling the
+      # committed lock names one way and this machine observed under another
+      # name is still one checkout. Matching against the entries written so
+      # far rather than the committed ones also keeps a sibling the solve
+      # lists twice from being added twice.
       var present = false
       for d in result.deps:
         if not isLiftedPackageDep(d) and (d.name == g.name or

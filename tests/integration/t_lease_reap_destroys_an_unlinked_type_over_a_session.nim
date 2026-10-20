@@ -13,8 +13,8 @@
 ## WHAT THIS IS NOT. It is not a reproduction of
 ## reprobuild-pm/issues/2026-09-29-lease-reap-tick-has-never-once-succeeded.md.
 ## The daemon in that record swept on the IN-PROCESS transport for all 131,882
-## ticks, because `buildLeaseReapTransport` falls back to it when no provider
-## artifact is registered and nothing in the shipped tree registers one
+## ticks, because the transport falls back to it when no provider artifact is
+## known and, at the time, nothing in the shipped tree could make one known
 ## (reprobuild-pm/issues/2026-10-14-no-production-path-enables-the-daemons-session-reap-transport.md).
 ## Its `vm_harness.nic` record had neither a linked driver nor a linked codec
 ## there, so no change to the reconstruction could have reaped it. What this
@@ -22,6 +22,13 @@
 ## identical symptom in a daemon that DID have the artifact — and the
 ## in-process control below asserts that the strict arm still refuses, so the
 ## two are not confused here either.
+##
+## NOR IS IT THE PRODUCTION-REACHABILITY CASE. This one hands the reaper a
+## resolver over a session it opened itself, which is what isolates the
+## reconstruction property. That the PRODUCT can select this transport with
+## nothing registered by hand — the artifact persisted in the record, the
+## daemon tick opening the session on its own — is
+## `t_lease_reap_session_transport_is_reachable_from_production`'s subject.
 ##
 ## THE SETUP IS A REAL DAEMON CONFIGURATION, not a mock of one. The record on
 ## disk was written by a process that had the codec; the process that sweeps it

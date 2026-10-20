@@ -222,8 +222,8 @@ suite "lock refresh refuses a solve missing a develop-set sibling's recipe":
       let completeLock = readFile(lockPath)
       check lockedVersion(completeLock, "cargo") == "1.85.0"
       check lockedVersion(completeLock, "leaf_pkg").len > 0
-      check "path = \"../leaf\"" in completeLock
-      check "path = \"../mid\"" in completeLock
+      check "{ name = \"leaf\"," in completeLock
+      check "{ name = \"mid\"," in completeLock
 
       # ---- (2) leaf not checked out: the refresh refuses, writing nothing. --
       createDir(parked)
@@ -320,7 +320,7 @@ suite "lock refresh refuses a solve missing a develop-set sibling's recipe":
       require full.code == 0
       let completeLock = readFile(lockPath)
       check lockedVersion(completeLock, "cargo") == "1.85.0"
-      check "path = \"../leaf\"" in completeLock
+      check "{ name = \"leaf\"," in completeLock
 
       # ---- (6) leaf away, no committed lock: the manifest edge declares it. -
       createDir(parked)

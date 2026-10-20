@@ -28,8 +28,8 @@
 ## expect exactly that re-pin; it now expects the input to be named as not
 ## substituted and left alone, and then gives `lib` a lock record of its own
 ## and expects the re-pin — the same re-pin assertion as before, on an input
-## the shell now does substitute. Case 4 gives `spare` a lock record for the
-## same reason. `t_an_input_develop_mode_does_not_substitute_is_not_compared`
+## the shell now does substitute. Case 4 gives `spare` (and the same-named
+## `lib`) a lock record for the same reason. `t_an_input_develop_mode_does_not_substitute_is_not_compared`
 ## covers the amended rule in full (ahead, diverged, push gate).
 ##
 ## Cases:
@@ -48,7 +48,12 @@
 ##       4. `app`'s flake then pins `lib-src` BY REVISION and `lib` moves
 ##          ahead of it: the commit neither re-pins nor refuses, leaves
 ##          `flake.lock` byte-identical, names the input as pinned by recipe
-##          (with its `flake.nix` line), and the push gate does not refuse.
+##          (with its `flake.nix` line), and the push gate does not refuse;
+##          neither prints an edit-the-pin remedy (`repro lock update`,
+##          "pinned BY REVISION") for that input, which nothing substitutes;
+##       5. positive control for 4: after `repro develop --only=lib` (an
+##          explicit override, §16.4) the same state IS refused at the push,
+##          with exactly that remedy.
 ##   * `t_a_sibling_ahead_of_an_exact_pin_is_not_compared_at_push` — the same
 ##     exact-pin rule in the NF-2 workspace, where every sibling HAS a lock
 ##     record (the shape in which the push gate used to refuse
@@ -62,12 +67,10 @@
 ##     by name), and the pre-push `repro.lock` stage does not refuse.
 ##   * `t_a_same_named_input_of_another_repository_is_not_that_sibling` —
 ##     `app`'s input is called `lib-src` but fetches `spare`'s origin. It is
-##     bound by canonical URL to `spare`: `lib` moving changes nothing, and
-##     `spare` moving is examined against `spare` — but, since the 2026-10-18
-##     amendment, not re-pinned, because develop mode does not substitute
-##     `spare` for that input; nor is anything recorded once the shell
-##     substitutes `lib` for it by name. A name never binds an input that
-##     has a repository URL in the hooks.
+##     bound by canonical URL to `spare`, in the hooks and in the shell
+##     alike: `lib` moving changes nothing, and once `spare` (and `lib`) are
+##     in the develop set, `spare` moving re-pins the input to `spare`'s
+##     HEAD. A name never binds an input that has a repository URL.
 ##
 ## Falsifiability (observed against the base commit this was written on):
 ## case 1 fails at step 1 — `lib` has no lock record, so the workspace-wide
@@ -82,6 +85,10 @@
 ## suffix-stripped NAME before its URL: the commit after `lib` moved was
 ## refused, the hook named `lib-src=lib`, and `spare` moving did not re-pin
 ## the input.
+## Against reprobuild `agents` 9b4b298c64, whose shell binder read repository
+## coordinates only from github/gitlab/sourcehut originals, case 4 step 2
+## fails: `override-args` bound `lib-src` to `lib` by name, so the hook (bound
+## to `spare` by URL) compared nothing and the input kept its pin.
 ##
 ## Test-double policy: NO mocks, doubles or fakes. Real bare origins, real
 ## clones, a real workspace manifest read by the production resolver, a real
@@ -202,7 +209,9 @@ proc otherLock(fx: Nf2Fixture; otherRev, thirdPin: string): string =
 proc setupOwnDepsFixture(label: string): Nf2Fixture =
   result.gitBin = findExe("git")
   result.repro = absolutePath(reproBinaryPath())
-  result.scratch = createTempDir("own-deps-" & label & "-", "")
+  # Git reports physical checkout paths; Darwin's /tmp aliases /private/tmp.
+  # Use that same frame without relaxing the exact diagnostic assertions.
+  result.scratch = expandFilename(createTempDir("own-deps-" & label & "-", ""))
   result.ws = result.scratch / "ws"
   result.app = result.ws / "app"
   createDir(result.ws)
@@ -377,7 +386,43 @@ suite "the managed hooks consult only the repo's own dependencies":
         "compared: lib-src=lib@" & fx.app / "flake.nix" & ":" & $pinLine &
         " (rev " & libThird & ")"
       publishRepo(fx, fx.app)
-      noSiblingRefusal(fx, gatePrePush(fx))
+      # No edit-the-pin remedy for an input nothing substitutes: neither the
+      # commit nor the gate tells the author to move a pin the shell does
+      # not build past (issue `2026-10-12-release-commit-pin-refused-by-
+      # commit-and-push-gates.md`, "Never print an edit-the-pin remedy for an
+      # input that is not overridden"). The strings are the ones
+      # ``flakeRevPinEditRemedy`` and the gate's rev-pin sentence print.
+      check "repro lock update" notin c4.output
+      check "no refresh can move it" notin c4.output
+      let g4 = gatePrePush(fx)
+      noSiblingRefusal(fx, g4)
+      check "pinned BY REVISION" notin g4.output
+      check "repro lock update" notin g4.output
+      check "no refresh can move it" notin g4.output
+
+      # ---- 5. POSITIVE CONTROL: an explicit override substitutes it. ----
+      # `repro develop --only=lib` records an explicit override (§16.4), so
+      # the shell substitutes `lib`'s checkout past the pin. Now the gate
+      # refuses and DOES print the edit-the-pin remedy, which is what makes
+      # the absences above meaningful.
+      # `repro develop` adopts a checkout only at the revision its lock record
+      # names (`lib`'s own `repro.lock`, from case 1), so `--reset` puts it
+      # there; `lib` then goes back to `main`, ahead of the pin, the way a
+      # developer resumes work in a checkout they develop.
+      let dev = run(q(fx.repro) & " develop --only=lib --reset " &
+        "--workspace-root=" & q(fx.ws) & " --tool-provisioning=path",
+        cwd = fx.ws)
+      checkpoint("repro develop --only=lib --reset -> " & $dev.code & "\n" &
+        dev.output)
+      check dev.code == 0
+      discard gitIn(fx, fx.ws / "lib", "checkout -q main")
+      check headOf(fx, fx.ws / "lib") == libAhead
+      let g5 = gatePrePush(fx)
+      checkpoint("gate output:\n" & g5.output)
+      check hasGateFailure(g5.report, "flake_lock_stale")
+      check "pinned BY REVISION" in g5.output
+      check "repro lock update" in g5.output
+      check g5.code != 0
 
   test "t_a_sibling_ahead_of_an_exact_pin_is_not_compared_at_push":
     if not nf3Prerequisites(
@@ -525,46 +570,30 @@ suite "the managed hooks consult only the repo's own dependencies":
       noSiblingRefusal(fx, gatePrePush(fx))
 
       # ---- 2. `spare` moves: the input follows the repository it names. --
-      # The hook binds `lib-src` to `spare` (the log names `lib-src=spare`).
-      # Before the §16.5 amendment of 2026-10-18 it then re-pinned the input
-      # to `spare`'s HEAD. It no longer does: develop mode does not
-      # substitute `spare` for this input (`repro flake override-args` binds a
-      # `git+` URL input by its stripped NAME, `lib`, which has no lock
-      # record), so the shell builds the pin and the hook leaves it there.
-      let spareNext = moveAndPublishSibling(fx, "spare", "revision 2")
+      # Both `spare` and the same-named `lib` publish a lock of their own, so
+      # both are in the develop set `repro flake override-args --all`
+      # substitutes from (§16.5 compares only what develop mode substitutes).
+      # The shell binds `lib-src` by its original `git` URL to `spare`, never
+      # by its spelling to `lib`, so the hook and the shell agree: the commit
+      # re-pins the input to `spare`'s HEAD and records nothing of `lib`'s.
+      let libRecorded = recordOwnLock(fx, "lib")
+      let spareNext = recordOwnLock(fx, "spare")
+      let bound = flakeArgs(fx, "--all --json", cwd = fx.app)
+      checkpoint("override-args stderr:\n" & bound.stderr)
+      check bound.code == 0
+      var boundTo = ""
+      for o in parseJson(bound.stdout)["overrides"]:
+        if o["input"].getStr() == "lib-src": boundTo = o["repo"].getStr()
+      check boundTo == "spare"
       let c2 = tryCommitInApp(fx, "the repository the input names moved")
       checkpoint(c2.output)
       checkpoint("pre-commit log:\n" & preCommitLog(fx))
       check c2.code == 0
-      check lockInCommit(fx) == lockBefore
-      check spareNext notin lockInCommit(fx)
+      check lockedRevIn(lockInCommit(fx), "lib-src") == spareNext
       check libNext notin lockInCommit(fx)
+      check libRecorded notin lockInCommit(fx)
       check afterTimestamp(developSetLine(fx)) ==
-        "hook-develop-set consulted: (none); pinned by recipe, not " &
-        "compared: (none); not substituted by develop mode, not compared: " &
-        "lib-src=spare"
+        "hook-develop-set consulted: flake.lock:lib-src=spare; " &
+        "pinned by recipe, not compared: (none)"
       publishRepo(fx, fx.app)
       noSiblingRefusal(fx, gatePrePush(fx))
-
-      # ---- 3. the shell substitutes a DIFFERENT checkout: not compared. --
-      # `lib` publishes a lock of its own, so the shell now substitutes `lib`
-      # for `lib-src` (by name). The hook's member is `spare`, by URL. The
-      # hook compares only a member the shell substitutes AT ITS checkout, so
-      # neither `spare`'s nor `lib`'s revision is recorded, and the push is
-      # not refused over a checkout the comparison would have misattributed.
-      let libRecorded = recordOwnLock(fx, "lib")
-      let c3 = tryCommitInApp(fx, "the same-named lib is developed")
-      checkpoint(c3.output)
-      checkpoint("pre-commit log:\n" & preCommitLog(fx))
-      check c3.code == 0
-      check lockInCommit(fx) == lockBefore
-      check libRecorded notin lockInCommit(fx)
-      check spareNext notin lockInCommit(fx)
-      check afterTimestamp(developSetLine(fx)) ==
-        "hook-develop-set consulted: (none); pinned by recipe, not " &
-        "compared: (none); not substituted by develop mode, not compared: " &
-        "lib-src=spare"
-      publishRepo(fx, fx.app)
-      let g3 = gatePrePush(fx)
-      checkpoint("gate output:\n" & g3.output)
-      check not hasGateFailure(g3.report, "flake_lock_stale")

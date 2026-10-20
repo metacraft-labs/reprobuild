@@ -460,7 +460,10 @@ proc decodeReceipt*(buf: openArray[byte]): RealizationReceipt =
   result.realizationHash = readPrefixId(buf, pos)
   result.realizedPath = readString(buf, pos)
   result.declaredExecutablePath = readString(buf, pos)
-  let exportedCount = int(readU32Le(buf, pos))
+  let exportedCountRaw = readU32Le(buf, pos)
+  if not elementCountFits(exportedCountRaw, bodyEnd - pos, 4):
+    raise newException(EReceiptCorrupt, "element count exceeds remaining body")
+  let exportedCount = int(exportedCountRaw)
   result.exportedExecutables = newSeq[string](exportedCount)
   for i in 0 ..< exportedCount:
     result.exportedExecutables[i] = readString(buf, pos)
@@ -476,7 +479,10 @@ proc decodeReceipt*(buf: openArray[byte]): RealizationReceipt =
     # Recipe-Val M8 v2 trailing fields. v1 receipts decode with
     # both fields empty (single-output legacy semantics).
     result.outputName = readString(buf, pos)
-    let siblingCount = int(readU32Le(buf, pos))
+    let siblingCountRaw = readU32Le(buf, pos)
+    if not elementCountFits(siblingCountRaw, bodyEnd - pos, 8):
+      raise newException(EReceiptCorrupt, "element count exceeds remaining body")
+    let siblingCount = int(siblingCountRaw)
     for i in 0 ..< siblingCount:
       let key = readString(buf, pos)
       let value = readString(buf, pos)
@@ -488,7 +494,10 @@ proc decodeReceipt*(buf: openArray[byte]): RealizationReceipt =
     # nothing, because "empty" and "unknown" are the same bytes here.
     result.declaredExecutableAlias = readString(buf, pos)
     result.declaredLauncher = readString(buf, pos)
-    let pruneCount = int(readU32Le(buf, pos))
+    let pruneCountRaw = readU32Le(buf, pos)
+    if not elementCountFits(pruneCountRaw, bodyEnd - pos, 4):
+      raise newException(EReceiptCorrupt, "element count exceeds remaining body")
+    let pruneCount = int(pruneCountRaw)
     result.declaredPrunePaths = newSeq[string](pruneCount)
     for i in 0 ..< pruneCount:
       result.declaredPrunePaths[i] = readString(buf, pos)

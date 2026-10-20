@@ -29,6 +29,8 @@ import repro_project_dsl                 # StateGroupDef / setResourceGraphHarve
 import repro_resources/instance
 import repro_resources/collect           # collectedResources
 import repro_resources/marshal           # (shared attrs marshaller registry via registerExtension)
+import repro_resources/state_store       # ResourceProviderArtifactRef (persisted
+                                         # in the state record from v5 on)
 import repro_resources/protocol          # encodeResourceInstance / decodeResourceInstance / registerResourceProtocolCodecs
 
 # ---------------------------------------------------------------------------
@@ -119,15 +121,16 @@ registerRunEdgeConsumerProvider()
 # resources side.
 # ---------------------------------------------------------------------------
 
-type
-  ResourceProviderArtifactRef* = object
-    ## The provider binary that serves an out-of-tree resource ``typeId`` —
-    ## the CLI-side analog of the daemon reaper's ``LeaseReapProviderArtifact``
-    ## and a strict subset of the engine's ``ProviderArtifactRef`` (the three
-    ## fields a session launch needs). Carried in the resource-graph metadata.
-    binaryPath*: string
-    providerArtifactId*: string
-    workingDir*: string
+## ``ResourceProviderArtifactRef`` — the provider binary that serves an
+## out-of-tree resource ``typeId``, a strict subset of the engine's
+## ``ProviderArtifactRef`` (the three fields a session launch needs) — is
+## defined in ``state_store.nim`` and re-exported from ``repro_resources``.
+## It used to be declared here, as a CLI-side analog of the daemon reaper's
+## own copy; it moved when the STATE RECORD began to persist it
+## (Ephemeral-State-Leases.md §4.2, record v5), because a type carried in the
+## resource-graph metadata, in the store, and in the reap transport must be
+## ONE type: a field added for one reader and not the others is how the
+## materialize side came to carry refs the reap side never saw.
 
 var resourceProviderArtifacts {.threadvar.}: Table[string, ResourceProviderArtifactRef]
   ## typeId -> the provider artifact serving that out-of-tree type. Populated
@@ -239,18 +242,18 @@ proc decodeResourceGraphPayload*(bytes: openArray[byte]):
   let payloadLen = int(readU32Le(bytes, pos))
   if pos + payloadLen != bytes.len:
     raise newException(ValueError, "resource-graph payload length mismatch")
-  let resCount = int(readU32Le(bytes, pos))
+  let resCount = readElementCount(bytes, pos, 4)
   result.resources = newSeq[ResourceInstance](resCount)
   for i in 0 ..< resCount:
-    let encLen = int(readU32Le(bytes, pos))
+    let encLen = readElementCount(bytes, pos)
     result.resources[i] = decodeResourceInstance(bytes[pos ..< pos + encLen])
     pos += encLen
-  let groupCount = int(readU32Le(bytes, pos))
+  let groupCount = readElementCount(bytes, pos, 16)
   result.groups = newSeq[StateGroupDef](groupCount)
   for i in 0 ..< groupCount:
     var g: StateGroupDef
     g.name = readString(bytes, pos)
-    let memberCount = int(readU32Le(bytes, pos))
+    let memberCount = readElementCount(bytes, pos, 4)
     g.members = newSeq[string](memberCount)
     for j in 0 ..< memberCount:
       g.members[j] = readString(bytes, pos)
@@ -259,7 +262,7 @@ proc decodeResourceGraphPayload*(bytes: openArray[byte]):
     result.groups[i] = g
   result.providerArtifacts = @[]
   if version == ResourceGraphVersionV2:
-    let paCount = int(readU32Le(bytes, pos))
+    let paCount = readElementCount(bytes, pos, 16)
     for i in 0 ..< paCount:
       let typeId = readString(bytes, pos)
       var a: ResourceProviderArtifactRef

@@ -315,6 +315,49 @@ suite "SC-4: producer source change invalidates consumer":
     check scopedLockB.builtin == scopedDev.builtin
     check scopedMoved.builtin != scopedDev.builtin
 
+    # A successful legacy compile could read a configured older library;
+    # those reads remain fresh after the projection is repaired. The Nim
+    # channel must reject that known legacy identity even with unchanged dirs.
+    proc legacyIdentity(payload: string): string =
+      toHex(blake3DomainDigest(payload.toOpenArrayByte(0, payload.high),
+        hdActionFingerprint).bytes)
+    producerMaterializedAuxPaths[producerName] =
+      ProducerAuxPaths(nimPathDirs: @[siblingSrc])
+    let legacyPrefix = "cross-repo-producer-channel.v1\x00" & producerName & "\x00"
+    let oldNimIdentity = legacyIdentity(legacyPrefix & "nimpath:" & siblingSrc & "\x00")
+    check producerChannelIdentity(producerName) != oldNimIdentity
+    let legacySourceKey = foldOverridesIntoFingerprint(
+      consumerOrig.weakFingerprint, @[producerSourceBindings[producerName]])
+    proc legacyMonitoredKey(channel: string): string =
+      legacyIdentity("cross-repo-producer-channel-fold.v1\x00" &
+        toHex(monitoredOrig.weakFingerprint.bytes) & "\x00" &
+        producerName & "=" & channel & "\x00")
+    var repairedNim = @[consumerOrig, monitoredOrig, controlOrig]
+    foldProducerSourceIdentities(repairedNim)
+    check repairedNim[0].weakFingerprint != legacySourceKey
+    check toHex(repairedNim[1].weakFingerprint.bytes) !=
+      legacyMonitoredKey(oldNimIdentity)
+    check repairedNim[2].weakFingerprint == controlOrig.weakFingerprint
+    # C/C++ and executable channels retain exactly their previous identity.
+    producerMaterializedAuxPaths[producerName] = ProducerAuxPaths(
+      includeDirs: @[scratch / "include"], libDirs: @[scratch / "lib"],
+      pkgConfigDirs: @[scratch / "pkgconfig"], cmakePrefixDirs: @[scratch / "cmake"])
+    producerMaterializedBinDirs[producerName] = @[scratch / "bin"]
+    let oldNativeIdentity = legacyIdentity(legacyPrefix &
+      "bin:" & (scratch / "bin") & "\x00" &
+      "include:" & (scratch / "include") & "\x00" &
+      "lib:" & (scratch / "lib") & "\x00" &
+      "pkgconfig:" & (scratch / "pkgconfig") & "\x00" &
+      "cmake:" & (scratch / "cmake") & "\x00")
+    check producerChannelIdentity(producerName) == oldNativeIdentity
+    var unchangedNative = @[consumerOrig, monitoredOrig, controlOrig]
+    foldProducerSourceIdentities(unchangedNative)
+    check unchangedNative[0].weakFingerprint == legacySourceKey
+    check toHex(unchangedNative[1].weakFingerprint.bytes) ==
+      legacyMonitoredKey(oldNativeIdentity)
+    check unchangedNative[2].weakFingerprint == controlOrig.weakFingerprint
+
     # Reset the shared sinks so no state leaks to other tests in the same binary.
     producerSourceBindings.clear()
     producerMaterializedAuxPaths.clear()
+    producerMaterializedBinDirs.clear()

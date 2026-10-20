@@ -335,6 +335,7 @@ import repro_build_engine
 import repro_core
 import repro_test_support
 import repro_test_support/process_fixtures
+import repro_test_support/descendant_guard_expectations
 
 type
   LaunchPathKind = enum
@@ -1543,16 +1544,17 @@ proc resultById(run: BuildRunResult; id: string): ActionResult =
 ## Cross-path evidence identity.
 ##
 ## ``checkMonitoredEvidence`` below asserts each path's evidence is
-## non-empty and complete. That is weaker than what is actually true:
+## non-empty and readable. That is weaker than what is actually true:
 ## for the same fixture, all four launch paths produce the SAME
-## evidence — one read, no writes recorded as differences, no
-## diagnostics. Asserting the identity rather than each half separately
+## evidence, including the required platform limitation diagnostic where
+## the backend has no tree-lifetime guard. Asserting identity
 ## costs nothing and turns "monitored" into "monitored the same way",
 ## which is the property a change to how the monitor is hosted has to
 ## preserve.
 ##
-## Everything that legitimately differs between cases is a path prefix
-## or a per-case filename, so those are substituted out and the whole
+## Legitimate differences are path prefixes, per-case filenames, and the
+## run ID in the exact platform limitation diagnostic. Those are
+## substituted out and the whole
 ## ``PathSetEvidence`` is rendered to one comparable string. Rendering
 ## every field (not just ``monitorReads``) is deliberate: a change that
 ## moved a path from ``monitorReads`` into ``monitorProbes`` on one path
@@ -1632,6 +1634,29 @@ proc renderEvidencePaths(name: string; paths: seq[string];
   items.sort()
   name & "=[" & items.join(" ") & "]"
 
+const MonitorLossSummary =
+  "monitor depfile is incomplete (unknown-scope loss); " &
+  "action-cache publish skipped this session per " &
+  "Failure-Semantics.md §Monitoring Failures"
+const MonitorLossDiagnosticPrefix = "monitor loss: "
+
+proc renderEvidenceDiagnostics(diagnostics: seq[string]): string =
+  ## Compare the full diagnostic multiset. Only the run ID of the exact
+  ## required platform marker varies legitimately between captures. Do not
+  ## apply path substitutions or deduplicate: either can conceal extra loss.
+  var items: seq[string]
+  for diagnostic in diagnostics:
+    var value = diagnostic
+    if diagnostic.startsWith(MonitorLossDiagnosticPrefix):
+      let detail = diagnostic[MonitorLossDiagnosticPrefix.len .. ^1]
+      if detail.isTreeLifetimeLimitation and
+          detail[TreeLifetimeLimitationPrefix.len .. ^1].find(Whitespace) < 0:
+        value = MonitorLossDiagnosticPrefix & TreeLifetimeLimitationPrefix & "<run>"
+    items.add value
+  items.sort()
+  # Quote entries so one diagnostic cannot compare equal to two fragments.
+  "diagnostics=[" & items.mapIt(it.escape).join(" ") & "]"
+
 proc evidenceShape(res: ActionResult;
                    subs: seq[(string, string)]): string =
   proc render(name: string; paths: seq[string]): string =
@@ -1654,7 +1679,7 @@ proc evidenceShape(res: ActionResult;
     # in `evidence is identical across launch paths`.
     render("monitorDirectoryEnumerations",
       ev.monitorDirectoryEnumerations.paths),
-    render("diagnostics", ev.diagnostics),
+    renderEvidenceDiagnostics(ev.diagnostics),
 
     # THE THREE FIELDS `PathSetEvidence` GREW AFTER P10, and the ninth /
     # tenth / eleventh instance of the same shape. `monitorEnvReads` arrived
@@ -1691,7 +1716,7 @@ proc evidenceShape(res: ActionResult;
     #     said the class could not be produced here, because an unblessed
     #     action that reads entropy collects `applyEntropyBlessingPolicy`'s
     #     "action-cache publish skipped" diagnostic and that would cost the
-    #     `diagnostics=[]` pin. FALSE: the policy returns at
+    #     healthy-fixture diagnostic pin. FALSE: the policy returns at
     #     `if not action.cacheable`, and `monitoredFixtureAction` leaves
     #     `cacheable` at its `false` default. `FixtureSource` therefore
     #     draws eight bytes from `getentropy` — io-mon hooks it on BOTH
@@ -1699,7 +1724,7 @@ proc evidenceShape(res: ActionResult;
     #     `shim/macos_interpose.nim`'s `repro_hook_getentropy`) and emits
     #     `mrNonDeterministic` — and all five recorded actions render
     #     `entropyObservations=[getentropy@ecoUnattributed]` with
-    #     `diagnostics=[]` intact. The presence pin below is what says so.
+    #     no entropy-policy diagnostic. The presence pin below is what says so.
     render("monitorEnvReads", ev.monitorEnvReads),
     render("entropyObservations", renderEntropyObservations(
       ev.entropyObservations)),
@@ -1889,13 +1914,61 @@ template checkMonitoredEvidence(res: ActionResult; markerPath, label: string) =
       "\n  diagnostics: ", res.evidence.diagnostics.join("; ")
   check mentionsPath(res.evidence.monitorReads.paths, markerPath)
 
-  # And the evidence is COMPLETE, not merely non-empty.
+  # The depfile must be readable and a monitor must have been selected.
+  # The required platform limitation is checked separately below.
   for diagnostic in res.evidence.diagnostics:
     check not diagnostic.contains("monitor depfile read failed")
     check not diagnostic.contains(
       "requires monitor evidence but no iomon path is selected")
 
 suite "every_launch_path_is_monitored":
+
+  test "evidence shape normalizes only exact platform limitation run IDs":
+    # Synthetic evidence exercises the comparison boundary; the real capture
+    # cases below still require every launch path and its complete evidence.
+    const lossPrefix = "monitor loss: "
+    const markerPrefix = lossPrefix &
+      "detached-descendant quiescence cannot be established: "
+    proc shape(diagnostics: seq[string]; subs: seq[(string, string)] = @[]): string =
+      var res: ActionResult
+      res.evidence.diagnostics = diagnostics
+      evidenceShape(res, subs)
+
+    const summary = "monitor depfile is incomplete (unknown-scope loss); " &
+      "action-cache publish skipped this session per " &
+      "Failure-Semantics.md §Monitoring Failures"
+    let empty = shape(@[])
+    for platform in ["macos", "windows"]:
+      let prefix = markerPrefix & platform &
+        " backend has no complete tree-lifetime guard run="
+      let first = prefix & "1792337726.916988-47315-4"
+      let second = prefix & "1792337727.326327-49434-1"
+      let normalized = prefix & "<run>"
+      let expected = shape(@[summary, normalized])
+      let actual = shape(@[summary, first])
+      if NoTreeLifetimeGuard and
+          prefix == lossPrefix & TreeLifetimeLimitationPrefix:
+        check actual == expected
+        check shape(@[summary, second]) == expected
+      else:
+        # A marker for another backend is evidence of a real difference.
+        check actual != expected
+        check shape(@[summary, second]) != actual
+      check actual != empty
+      check shape(@[first]) != actual
+      check shape(@[summary]) != actual
+      check shape(@[summary, summary, first]) != actual
+      check shape(@[summary, first, first]) != actual
+      check shape(@[summary, first, "additional monitor loss"]) != actual
+      check shape(@[summary, first, second]) != actual
+      check shape(@[summary & " " & first]) != actual
+      for malformed in [prefix, first & " trailing loss", first & "\t",
+          first & "\r", first & "\n", first & "\v", first & "\f"]:
+        check shape(@[summary, malformed]) != expected
+      # Path substitutions must never rewrite arbitrary diagnostic text.
+      check shape(@["unrelated run=" & first], @[(first, "<run>")]) ==
+        shape(@["unrelated run=" & first])
+    check shape(@["other loss", "other loss"]) != shape(@["other loss"])
 
   when defined(linux) or defined(macosx):
     test "evidence shape folds aliases while retaining distinct and missing writes":
@@ -2842,7 +2915,8 @@ suite "every_launch_path_is_monitored":
           # NOT VACUOUS. Identical-but-empty would satisfy the
           # comparison below while proving nothing, so the shared shape
           # is pinned: the fixture's own read is there, nothing else that
-          # is not a mapped library is, and there are no diagnostics.
+          # is not a mapped library is, and the diagnostics contain exactly
+          # the platform limitation and its unknown-scope summary, if required.
           #
           # THIS PIN WAS STALE, AND THE SKIP IS WHY NOBODY SAW IT. It
           # read ``monitorReads=[<marker>]`` — an EXACT set — which was
@@ -2958,7 +3032,17 @@ suite "every_launch_path_is_monitored":
               "shared object: ", unexplained.join(" "), "\n", shape
           check unexplained.len == 0
           check shape.contains("\nmonitorWrites=[<out>]\n")
-          check shape.contains("\ndiagnostics=[]")
+          let expectedDiagnostics =
+            if NoTreeLifetimeGuard:
+              "diagnostics=[" & MonitorLossSummary.escape & " " &
+                (MonitorLossDiagnosticPrefix & TreeLifetimeLimitationPrefix &
+                  "<run>").escape & "]"
+            else:
+              "diagnostics=[]"
+          # Check every path independently, including marker multiplicity;
+          # agreement alone would accept five equally broken captures.
+          for entry in recordedEvidence:
+            check entry.shape.contains("\n" & expectedDiagnostics & "\n")
 
           # AND THE PROBE SET IS NOT EMPTY, WHICH IS THE ONE THAT KEEPS
           # THIS CASE FROM GOING BLIND AGAIN.
@@ -3104,7 +3188,7 @@ suite "every_launch_path_is_monitored":
           # reason it is not here. The reasoning was: an unblessed action
           # that reads entropy collects `applyEntropyBlessingPolicy`'s
           # "action-cache publish skipped" diagnostic, so making the fixture
-          # draw randomness would cost the `diagnostics=[]` pin above, and
+          # draw randomness would cost the diagnostic pin above, and
           # the render line would have to stand as the vacuous half. That is
           # wrong, and the compiler was not going to say so. That policy
           # opens with `if not action.cacheable: return`, and
@@ -3113,7 +3197,8 @@ suite "every_launch_path_is_monitored":
           # Measured, not reasoned: with the `getentropy` call below in
           # `FixtureSource`, all five recorded actions carry
           # `entropyObservations=[getentropy@ecoUnattributed]` AND
-          # `diagnostics=[]`, and this case is 11/0/0.
+          # no entropy-policy diagnostic. The platform limitation, where
+          # required, is independent of this entropy policy.
           #
           # So the class is produced, exactly as `monitorProbes` and
           # `monitorDirectoryEnumerations` produce theirs, and the render

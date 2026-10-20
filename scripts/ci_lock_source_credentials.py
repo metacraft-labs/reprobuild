@@ -33,8 +33,11 @@ WHAT IT DELIBERATELY DOES NOT READ
 
 The ``visibility`` field. Filtering on it is the bug. Every vcs dependency
 under ``<url-base><owner>/`` is credentialed whatever its tier says; the only
-other filter is the root entry (``path = "."``), which is the checkout
-``develop`` runs in and is never cloned by it.
+other filter is the root entry -- marked ``self = "true"`` in a
+``reprobuild.solved-graph-lock.v3`` lock, and spelled ``path = "."`` in the
+still-readable v2 -- which is the checkout ``develop`` runs in and is never
+cloned by it. No other recorded path is consulted: a lock pins identity, not
+where a dependency is checked out.
 
 Dependencies under another owner or host are NOT credentialed -- the token is
 an installation token for ``<owner>`` and has no business being sent
@@ -149,8 +152,28 @@ def validate_url_base(url_base: str) -> str:
         f"http://127.0.0.1:<port>/ address (got {url_base!r})")
 
 
+SCHEMA_V2 = "reprobuild.solved-graph-lock.v2"
+
+
+def is_self_entry(entry: dict, schema: object) -> bool:
+    """Is ``entry`` the lock's OWN repository (the root entry)?
+
+    The engine's rule (``repro_lock.parseLockedDependencies``): a v3 lock
+    marks the entry ``self = "true"``; a v2 lock spelled it ``path = "."``,
+    or left the path empty on a vcs entry. Any other v2 path is a stale
+    materialization and means nothing here.
+    """
+    if schema == SCHEMA_V2:
+        return entry.get("path", "") in ("", ".")
+    return entry.get("self") == "true"
+
+
 def load_lock_deps(lock_path: Path) -> list[dict]:
-    """The ``[lock].deps`` entries of a committed lock, or a loud error."""
+    """The ``[lock].deps`` entries of a committed lock, or a loud error.
+
+    Each entry is a dict as written; ``lock_schema`` reads the schema tag the
+    root-entry test depends on.
+    """
     try:
         raw = lock_path.read_bytes()
     except OSError as error:
@@ -168,6 +191,11 @@ def load_lock_deps(lock_path: Path) -> list[dict]:
             f"lock {lock_path} has no [lock].deps array; this is not a "
             "solved-graph lock, or its schema changed under this script")
     return deps
+
+
+def lock_schema(lock_path: Path) -> object:
+    """The top-level ``schema`` tag of a lock ``load_lock_deps`` accepted."""
+    return tomllib.loads(lock_path.read_bytes().decode("utf-8")).get("schema")
 
 
 def repository_name(url: str, prefix: str) -> str | None:
@@ -208,12 +236,14 @@ def derive_repositories(lock_path: Path, owner: str,
     prefix = f"{url_base}{owner}/"
     names: set[str] = set()
     anonymous: set[str] = set()
-    for entry in load_lock_deps(lock_path):
+    deps = load_lock_deps(lock_path)
+    schema = lock_schema(lock_path)
+    for entry in deps:
         if not isinstance(entry, dict) or entry.get("coord_kind") != "vcs":
             continue
         # The root entry is the checkout develop runs from; it is never
         # cloned, so it needs no credential.
-        if entry.get("path") == ".":
+        if is_self_entry(entry, schema):
             continue
         url = entry.get("url")
         if not isinstance(url, str) or not url:

@@ -93,6 +93,16 @@
 ## served without running anything. The final suite below is that case, and
 ## `keyedOnContentAddressedToolRoot` is what makes it pass.
 
+## KEY CLASSIFICATION IS CHECKED ON EVERY HOST from cacheInputPaths over real
+## evidence, including helper inclusion and content-addressed root elision.
+## On platforms with NoTreeLifetimeGuard every capture is incomplete by
+## io-mon docs/usage.md ("macOS and Windows limitation (normative)"). There
+## the publication/reuse half instead checks the exact tree-lifetime marker,
+## monitor-loss skip reason, no hot record, and conservative re-launches.
+## Linux retains the published-input and reuse checks. No evidence is filtered
+## or promoted. The fixture canonicalises /tmp on macOS to match F_GETPATH
+## evidence and runs shell scripts via the monitor's non-SIP shebang route.
+
 import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_build_engine
@@ -100,6 +110,7 @@ import repro_core
 import repro_hash
 import repro_local_store
 import repro_test_support
+import repro_test_support/descendant_guard_expectations
 
 const RepoRootMarker = "repro.nim"
 
@@ -229,8 +240,8 @@ proc nonVolatileTempBase(): string =
     result = "/tmp"
 
 proc makeFixture(): Fixture =
-  let root = createTempDir("repro-executed-binary-", "",
-    dir = nonVolatileTempBase())
+  let root = expandFilename(createTempDir("repro-executed-binary-", "",
+    dir = nonVolatileTempBase()))
   if root.isVolatilePrefix():
     raise newException(IOError,
       "fixture root " & root & " is under a volatile prefix the engine drops " &
@@ -281,19 +292,30 @@ proc monitoredEdge(f: Fixture; id: string; argv: openArray[string]): BuildAction
     dependencyPolicy = automaticMonitorGatheringPolicy(),
     governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
+proc shellArgv(f: Fixture; name, script: string): seq[string] =
+  ## macOS strips injection from SIP-protected /bin/sh. A shebang lets the
+  ## monitor use its shipped non-SIP shell, preserving nested exec evidence.
+  when defined(macosx):
+    let path = f.root / (name & ".sh")
+    writeFile(path, "#!/bin/sh\n" & script & "\n")
+    setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec})
+    @[path]
+  else:
+    @["/bin/sh", "-c", script]
+
 proc absEdge(f: Fixture): BuildAction =
   ## `abs` — an ABSOLUTE path in a shell command. io-mon records the exec with
   ## the resolved path; nothing else in the depfile names the helper, because a
   ## shell handed an absolute path performs no PATH walk and therefore leaves
   ## no probe.
-  f.monitoredEdge("execdep/abs", ["/bin/sh", "-c",
-    f.helperPath & " " & f.logPath("abs")])
+  f.monitoredEdge("execdep/abs", f.shellArgv("abs",
+    f.helperPath & " " & f.logPath("abs")))
 
 proc bareEdge(f: Fixture): BuildAction =
   ## `bare` — the shape that was already covered, by accident. Present as a
   ## REGRESSION guard: the fix must not disturb it.
-  f.monitoredEdge("execdep/bare", ["/bin/sh", "-c",
-    "execdep_helper " & f.logPath("bare")])
+  f.monitoredEdge("execdep/bare", f.shellArgv("bare",
+    "execdep_helper " & f.logPath("bare")))
 
 proc argv0Edge(f: Fixture): BuildAction =
   ## `argv0` — the action's OWN root image, a bare name with no shell in the
@@ -305,8 +327,8 @@ proc execvpEdge(f: Fixture): BuildAction =
   ## `execvp` — a bare name resolved by glibc, inside a binary the shell
   ## exec'd by absolute path. Two execs: the launcher (absolute, recorded) and
   ## the helper (bare, recorded UNRESOLVED).
-  f.monitoredEdge("execdep/execvp", ["/bin/sh", "-c",
-    f.launcherPath & " " & f.logPath("execvp")])
+  f.monitoredEdge("execdep/execvp", f.shellArgv("execvp",
+    f.launcherPath & " " & f.logPath("execvp")))
 
 proc monitoredConfig(repoRoot, cacheRoot: string): BuildEngineConfig =
   let tools = monitorTools(repoRoot)
@@ -319,20 +341,60 @@ proc monitoredConfig(repoRoot, cacheRoot: string): BuildEngineConfig =
   result.monitorCliPath = tools.monitorCliPath
   result.monitorCliArgs = tools.monitorCliArgs
 
-proc recordedInputs(f: Fixture; edge: BuildAction): seq[FileFingerprint] =
+proc checkFailsClosed(f: Fixture; edge: BuildAction; r: ActionResult) =
+  ## io-mon docs/usage.md requires incomplete captures on hosts without a
+  ## tree-lifetime guard; Failure-Semantics.md forbids publishing or reuse.
+  var markers = 0
+  for diagnostic in r.evidence.diagnostics:
+    const lead = "monitor loss: "
+    if diagnostic.startsWith(lead) and
+        diagnostic[lead.len .. ^1].isTreeLifetimeLimitation:
+      inc markers
+  checkpoint(edge.id & " diagnostics: " & $r.evidence.diagnostics &
+    " publish skipped: " & r.cachePublishSkipReason)
+  check r.status == asSucceeded
+  check r.launched
+  check r.cacheDecision notin ReuseDecisions
+  check markers == 1
+  check "monitor-loss" in r.cachePublishSkipReason
   var cache = openActionCache(f.cacheRoot / "action-cache")
-  let hot = cache.readHotRecord(edge.weakFingerprint)
-  if not hot.found:
-    return @[]
-  hot.record.inputs
+  check not cache.readHotRecord(edge.weakFingerprint).found
+
+proc keyInputs(f: Fixture; edge: BuildAction; r: ActionResult): seq[string] =
+  ## Check the production classification on real evidence everywhere. Where
+  ## publication is allowed, also retain the published-record assertions by
+  ## proving that record contains exactly the classified input paths.
+  result = edge.cacheInputPaths(r.evidence)
+  if NoTreeLifetimeGuard:
+    f.checkFailsClosed(edge, r)
+  else:
+    var cache = openActionCache(f.cacheRoot / "action-cache")
+    let hot = cache.readHotRecord(edge.weakFingerprint)
+    check hot.found
+    if hot.found:
+      let recorded = hot.record.inputs.mapIt(it.path)
+      check recorded.len == result.len
+      for path in result:
+        check path in recorded
+
+proc checkRepeat(f: Fixture; edge: BuildAction; r: ActionResult) =
+  ## Keep every Linux reuse gate. Incomplete platforms must instead prove a
+  ## successful re-launch, the explicit loss marker and absence of a record.
+  if NoTreeLifetimeGuard:
+    f.checkFailsClosed(edge, r)
+  else:
+    check r.cacheDecision in ReuseDecisions
+    check not r.launched
+
+proc expectedRuns(reusable, rebuilt: int): int =
+  if NoTreeLifetimeGuard: rebuilt else: reusable
 
 proc exerciseShape(f: Fixture; repoRoot: string; edge: BuildAction;
                    name: string) =
-  ## One shape, end to end: run it, prove the helper is IN the recorded input
-  ## set, prove a warm run reuses, swap the helper for new bytes at a new
-  ## mtime, prove the edge RE-RUNS with the new helper, and prove the new state
-  ## is itself reusable so the fix did not simply make the edge a permanent
-  ## miss.
+  ## One shape, end to end: prove the helper is in the classified input set,
+  ## then swap it for new bytes at a new mtime and execute the new generation.
+  ## Complete platforms must reuse both stable states; incomplete platforms
+  ## must fail closed and re-launch every time (see checkRepeat).
   let g = graph([edge])
   let config = monitoredConfig(repoRoot, f.cacheRoot)
 
@@ -345,21 +407,20 @@ proc exerciseShape(f: Fixture; repoRoot: string; edge: BuildAction;
   check f.runCount(name) == 1
   check f.logPath(name).readFile.contains("gen=1")
 
-  # The denominator, and the whole point: the helper must be IN the recorded
+  # The denominator, and the whole point: the helper must be IN the classified
   # input set. Without this the invalidation below could pass for an unrelated
   # reason (a directory probe, a sibling file).
-  let inputs = f.recordedInputs(edge)
-  let recorded = inputs.anyIt(it.path == f.helperPath)
-  checkpoint(name & " recorded inputs: " & $inputs.len &
+  let inputs = f.keyInputs(edge, r0)
+  let recorded = inputs.anyIt(it == f.helperPath)
+  checkpoint(name & " classified inputs: " & $inputs.len &
     "; helper among them: " & $recorded)
   check inputs.len > 0
   check recorded
 
   let warm = runBuild(g, config)
   checkpoint(name & " warm: decision=" & $warm.byId(edge.id).cacheDecision)
-  check warm.byId(edge.id).cacheDecision in ReuseDecisions
-  check not warm.byId(edge.id).launched
-  check f.runCount(name) == 1
+  f.checkRepeat(edge, warm.byId(edge.id))
+  check f.runCount(name) == expectedRuns(1, 2)
 
   f.compileHelper(2)
 
@@ -370,15 +431,16 @@ proc exerciseShape(f: Fixture; repoRoot: string; edge: BuildAction;
     " reason=" & r.reason)
   check r.cacheDecision notin ReuseDecisions
   check r.launched
-  check f.runCount(name) == 2
+  if NoTreeLifetimeGuard:
+    f.checkFailsClosed(edge, r)
+  check f.runCount(name) == expectedRuns(2, 3)
   check f.logPath(name).readFile.contains("gen=2")
 
   let settled = runBuild(g, config)
   checkpoint(name & " settled: decision=" &
     $settled.byId(edge.id).cacheDecision)
-  check settled.byId(edge.id).cacheDecision in ReuseDecisions
-  check not settled.byId(edge.id).launched
-  check f.runCount(name) == 2
+  f.checkRepeat(edge, settled.byId(edge.id))
+  check f.runCount(name) == expectedRuns(2, 4)
 
 suite "the binary an action executes is a recorded input":
 
@@ -445,11 +507,11 @@ suite "the binary an action executes is a recorded input":
       check r0.status == asSucceeded
       check f.runCount("execvp") == 1
 
-      let inputs = f.recordedInputs(edge)
+      let inputs = f.keyInputs(edge, r0)
       let phantom = f.workRoot / "execdep_helper"
-      let phantomRecorded = inputs.anyIt(it.path == phantom)
-      let launcherRecorded = inputs.anyIt(it.path == f.launcherPath)
-      checkpoint("execvp recorded inputs: " & $inputs.len &
+      let phantomRecorded = inputs.anyIt(it == phantom)
+      let launcherRecorded = inputs.anyIt(it == f.launcherPath)
+      checkpoint("execvp classified inputs: " & $inputs.len &
         "; launcher recorded: " & $launcherRecorded &
         "; phantom '" & phantom & "' recorded: " & $phantomRecorded)
       check inputs.len > 0
@@ -611,16 +673,16 @@ suite "a tool under a content-addressed root is in the cache key without being a
       check r0.launched
       check f.runCount("store-tool") == 1
 
-      let inputs = f.recordedInputs(edgeA)
-      let toolRecorded = inputs.anyIt(it.path == shA)
+      let inputs = f.keyInputs(edgeA, r0)
+      let toolRecorded = inputs.anyIt(it == shA)
       let underOwnRoot = inputs.filterIt(
-        it.path == rootA or it.path.startsWith(rootA & "/"))
-      let helperRecorded = inputs.anyIt(it.path == f.helperPath)
-      checkpoint("A recorded inputs: " & $inputs.len &
+        it == rootA or it.startsWith(rootA & "/"))
+      let helperRecorded = inputs.anyIt(it == f.helperPath)
+      checkpoint("A classified inputs: " & $inputs.len &
         "; tool recorded: " & $toolRecorded &
         "; under own store root: " & $underOwnRoot.len &
         "; helper recorded: " & $helperRecorded)
-      # The edge published something real ...
+      # The classified key contains a genuine mutable input ...
       check inputs.len > 0
       check helperRecorded
       # ... and the tool is NOT part of it. This is the class-1 elision doing
@@ -631,9 +693,8 @@ suite "a tool under a content-addressed root is in the cache key without being a
 
       let warm = runBuild(graph([edgeA]), config)
       checkpoint("A warm: decision=" & $warm.byId(edgeA.id).cacheDecision)
-      check warm.byId(edgeA.id).cacheDecision in ReuseDecisions
-      check not warm.byId(edgeA.id).launched
-      check f.runCount("store-tool") == 1
+      f.checkRepeat(edgeA, warm.byId(edgeA.id))
+      check f.runCount("store-tool") == expectedRuns(1, 2)
 
       # THE SWAP. A different store path is what a content change to a
       # nix-built tool looks like; the store cannot mutate one in place.
@@ -643,25 +704,24 @@ suite "a tool under a content-addressed root is in the cache key without being a
         " launched=" & $r1.launched & " reason=" & r1.reason)
       check r1.cacheDecision notin ReuseDecisions
       check r1.launched
-      check f.runCount("store-tool") == 2
+      if NoTreeLifetimeGuard:
+        f.checkFailsClosed(edgeB, r1)
+      check f.runCount("store-tool") == expectedRuns(2, 3)
 
-      # ... and the new state is itself reusable, so the fix is a re-key
-      # rather than a permanent miss.
+      # Complete platforms must reuse the new state, proving this is a re-key
+      # rather than a permanent miss; incomplete platforms must rebuild again.
       let settled = runBuild(graph([edgeB]), config)
       checkpoint("B settled: decision=" & $settled.byId(edgeB.id).cacheDecision)
-      check settled.byId(edgeB.id).cacheDecision in ReuseDecisions
-      check not settled.byId(edgeB.id).launched
-      check f.runCount("store-tool") == 2
+      f.checkRepeat(edgeB, settled.byId(edgeB.id))
+      check f.runCount("store-tool") == expectedRuns(2, 4)
 
-      # THE KEY DISTINGUISHES, IT DOES NOT MERELY MOVE. Going back to tool A
-      # serves A's own record without executing anything. An implementation
-      # that invalidated on every build — the cheap way to make the swap
-      # assertion above pass — fails here.
+      # THE KEY DISTINGUISHES, IT DOES NOT MERELY MOVE. Where publication is
+      # allowed, going back to A serves A's own record without executing. That
+      # rejects blanket invalidation; incomplete platforms still rebuild.
       let backToA = runBuild(graph([edgeA]), config)
       checkpoint("back to A: decision=" & $backToA.byId(edgeA.id).cacheDecision)
-      check backToA.byId(edgeA.id).cacheDecision in ReuseDecisions
-      check not backToA.byId(edgeA.id).launched
-      check f.runCount("store-tool") == 2
+      f.checkRepeat(edgeA, backToA.byId(edgeA.id))
+      check f.runCount("store-tool") == expectedRuns(2, 5)
 
   test "a tool under REPROBUILD'S OWN store is in the key just like a Nix one":
     ## THE OTHER CONTENT-ADDRESSED ROOT, and it was the more dangerous of the
@@ -758,16 +818,17 @@ suite "a tool under a content-addressed root is in the cache key without being a
       # The elision applies to this root exactly as it does to a Nix one, so
       # the tool is NOT a recorded input and revalidation cannot see the swap.
       # That is what makes the key the only thing standing between the two.
-      let inputs = f.recordedInputs(edgeA)
-      checkpoint("A recorded inputs: " & $inputs.len)
+      let inputs = f.keyInputs(edgeA, r0)
+      checkpoint("A classified inputs: " & $inputs.len)
       check inputs.len > 0
-      check not inputs.anyIt(it.path == toolA)
-      check not inputs.anyIt(it.path.startsWith(dirA & "/"))
+      check src in inputs
+      check not inputs.anyIt(it == toolA)
+      check not inputs.anyIt(it.startsWith(dirA & "/"))
 
       let warm = runBuild(graph([edgeA]), config)
       checkpoint("A warm: decision=" & $warm.byId(edgeA.id).cacheDecision)
-      check warm.byId(edgeA.id).cacheDecision in ReuseDecisions
-      check f.runCount("repro-store") == 1
+      f.checkRepeat(edgeA, warm.byId(edgeA.id))
+      check f.runCount("repro-store") == expectedRuns(1, 2)
 
       let swapped = runBuild(graph([edgeB]), config)
       let r1 = swapped.byId(edgeB.id)
@@ -775,14 +836,17 @@ suite "a tool under a content-addressed root is in the cache key without being a
         " launched=" & $r1.launched & " reason=" & r1.reason)
       check r1.cacheDecision notin ReuseDecisions
       check r1.launched
-      check f.runCount("repro-store") == 2
+      if NoTreeLifetimeGuard:
+        f.checkFailsClosed(edgeB, r1)
+      check f.runCount("repro-store") == expectedRuns(2, 3)
 
-      # ... and it is a re-key, not a blanket invalidation.
+      # Where publication is allowed, this must be a re-key, not a blanket
+      # invalidation. Otherwise the platform limitation still requires a run.
       let backToA = runBuild(graph([edgeA]), config)
       checkpoint("back to A: decision=" &
         $backToA.byId(edgeA.id).cacheDecision)
-      check backToA.byId(edgeA.id).cacheDecision in ReuseDecisions
-      check f.runCount("repro-store") == 2
+      f.checkRepeat(edgeA, backToA.byId(edgeA.id))
+      check f.runCount("repro-store") == expectedRuns(2, 4)
 
   test "a MUTABLE directory inside the store is neither elided nor keyed as content-addressed":
     ## THE PREDICATE, not the scope — rule 8 one level down.
@@ -1021,9 +1085,9 @@ suite "a tool under a content-addressed root is in the cache key without being a
         check r0.launched
         check f.runCount(name) == 1
 
-        let inputs = f.recordedInputs(edge)
-        let aliasRecorded = inputs.anyIt(it.path == aliasTool)
-        checkpoint(a.relDir & " recorded inputs: " & $inputs.len &
+        let inputs = f.keyInputs(edge, r0)
+        let aliasRecorded = inputs.anyIt(it == aliasTool)
+        checkpoint(a.relDir & " classified inputs: " & $inputs.len &
           "; alias tool among them: " & $aliasRecorded)
         check inputs.len > 0
         # A mutable tree has only the ordinary recorded-input route, and it
@@ -1033,15 +1097,14 @@ suite "a tool under a content-addressed root is in the cache key without being a
         let warm = runBuild(graph([edge]), config)
         checkpoint(a.relDir & " warm: decision=" &
           $warm.byId(edge.id).cacheDecision)
-        check warm.byId(edge.id).cacheDecision in ReuseDecisions
-        check not warm.byId(edge.id).launched
-        check f.runCount(name) == 1
+        f.checkRepeat(edge, warm.byId(edge.id))
+        check f.runCount(name) == expectedRuns(1, 2)
 
         # THE REPOINT — what makes an alias an alias. The SAME path comes to
         # name different bytes, which a content-addressed root cannot do and is
         # precisely why treating one as the other is unsound. The edge value is
         # unchanged, so its weak fingerprint is unchanged: the only thing that
-        # can catch this is the recorded input asserted above.
+        # can catch this on a complete platform is the classified input above.
         #
         # Unlink first: a store copy carries the store's read-only mode, so
         # writing THROUGH the old entry fails with EACCES. Replacing the entry
@@ -1055,16 +1118,17 @@ suite "a tool under a content-addressed root is in the cache key without being a
           " reason=" & r1.reason)
         check r1.cacheDecision notin ReuseDecisions
         check r1.launched
-        check f.runCount(name) == 2
+        if NoTreeLifetimeGuard:
+          f.checkFailsClosed(edge, r1)
+        check f.runCount(name) == expectedRuns(2, 3)
 
-        # ... and the new state is reusable, so this is revalidation working
-        # rather than the edge having become a permanent miss.
+        # Complete platforms must reuse the new state after revalidation;
+        # incomplete platforms must conservatively re-launch again.
         let settled = runBuild(graph([edge]), config)
         checkpoint(a.relDir & " settled: decision=" &
           $settled.byId(edge.id).cacheDecision)
-        check settled.byId(edge.id).cacheDecision in ReuseDecisions
-        check not settled.byId(edge.id).launched
-        check f.runCount(name) == 2
+        f.checkRepeat(edge, settled.byId(edge.id))
+        check f.runCount(name) == expectedRuns(2, 4)
 
   test "only the store root the resolver names exempts anything":
     ## THE THREE ARMS BETWEEN `$REPRO_STORE_ROOT` AND A RECOGNISED ROOT, none
@@ -1188,12 +1252,12 @@ suite "a tool under a content-addressed root is in the cache key without being a
     ## there. That claim was written down and graded by nothing; every fixture
     ## in this file until now put its store root in `argv[0]`.
     ##
-    ## `argv[0]` here is the host's ordinary `/bin/sh`, under no
-    ## content-addressed root at all, so the `argv[0]` arm contributes nothing
+    ## `argv[0]` here is `/bin/sh` (a fixture shell script on macOS), under
+    ## no content-addressed root, so the `argv[0]` arm contributes nothing
     ## and the two roots below can only be subtracted through the environment.
     ##
     ## RULE 7 IS ASSERTED IN BOTH DIRECTIONS, which is what keeps this case
-    ## from passing vacuously. "Not in the recorded inputs" is also satisfied
+    ## from passing vacuously. "Not in the classified inputs" is also satisfied
     ## by the monitor never having seen the read at all — so the monitor's own
     ## set is asserted to CONTAIN each path before the record's set is asserted
     ## not to.
@@ -1240,9 +1304,9 @@ suite "a tool under a content-addressed root is in the cache key without being a
       # `EXECDEP_ROOTS=`'s value for both `PATH` and `NODE_PATH` and subtract
       # nothing. Put `PATH` first and that mistake is invisible for `PATH`.
       let act = action("execdep/env-roots",
-        ["/bin/sh", "-c",
+        f.shellArgv("env-roots",
          "cat " & readP & " " & readN & " > /dev/null; " &
-         f.helperPath & " " & log],
+         f.helperPath & " " & log),
         cwd = f.workRoot,
         inputs = [],
         outputs = [],
@@ -1273,21 +1337,20 @@ suite "a tool under a content-addressed root is in the cache key without being a
       check sawP
       check sawN
 
-      # ... AND THE RECORD CARRIES NEITHER, because both live under a
-      # content-addressed root the declared environment names.
-      let inputs = f.recordedInputs(act)
-      checkpoint("env-roots recorded inputs: " & $inputs.len &
+      # ... AND THE CLASSIFIED KEY CARRIES NEITHER, because both live under
+      # a content-addressed root the declared environment names.
+      let inputs = f.keyInputs(act, r0)
+      checkpoint("env-roots classified inputs: " & $inputs.len &
         "; under the PATH root: " &
-        $inputs.countIt(it.path.startsWith(dirP & "/")) &
+        $inputs.countIt(it.startsWith(dirP & "/")) &
         "; under the NODE_PATH root: " &
-        $inputs.countIt(it.path.startsWith(dirN & "/")))
-      # The edge published something real — the helper is a mutable class-2
-      # input of its own — so "nothing under either root" is a statement about
-      # the elision rather than about an empty record.
+        $inputs.countIt(it.startsWith(dirN & "/")))
+      # The helper is a mutable class-2 input of its own, so "nothing under
+      # either root" grades elision rather than an empty classification.
       check inputs.len > 0
-      check inputs.anyIt(it.path == f.helperPath)
-      check not inputs.anyIt(it.path.startsWith(dirP & "/"))
-      check not inputs.anyIt(it.path.startsWith(dirN & "/"))
+      check inputs.anyIt(it == f.helperPath)
+      check not inputs.anyIt(it.startsWith(dirP & "/"))
+      check not inputs.anyIt(it.startsWith(dirN & "/"))
 
   test "swapping the PROGRAM inside one derivation also re-runs the edge":
     ## THE GRANULARITY CASE, and it was a live hit rather than a hypothetical.
@@ -1346,11 +1409,11 @@ suite "a tool under a content-addressed root is in the cache key without being a
       check r0.status == asSucceeded
       check r0.launched
       check r0.stdout.contains("line-12")
+      check src in f.keyInputs(edgeCat, r0)
 
       let warm = runBuild(graph([edgeCat]), config)
       checkpoint("cat warm: decision=" & $warm.byId(edgeCat.id).cacheDecision)
-      check warm.byId(edgeCat.id).cacheDecision in ReuseDecisions
-      check not warm.byId(edgeCat.id).launched
+      f.checkRepeat(edgeCat, warm.byId(edgeCat.id))
 
       let swapped = runBuild(graph([edgeHead]), config)
       let r1 = swapped.byId(edgeHead.id)
@@ -1358,17 +1421,17 @@ suite "a tool under a content-addressed root is in the cache key without being a
         " launched=" & $r1.launched & " stdout=" & r1.stdout)
       check r1.cacheDecision notin ReuseDecisions
       check r1.launched
+      check src in f.keyInputs(edgeHead, r1)
       # `head` defaults to ten lines, so serving `cat`'s entry would have
       # returned the whole file.
       check not r1.stdout.contains("line-12")
 
-      # ... and going back to `cat` serves `cat`'s own record, so this is a
-      # re-key and not a blanket invalidation.
+      # Where publication is allowed, going back to cat serves its own
+      # record, proving a re-key. Incomplete platforms must still rebuild.
       let backToCat = runBuild(graph([edgeCat]), config)
       checkpoint("back to cat: decision=" &
         $backToCat.byId(edgeCat.id).cacheDecision)
-      check backToCat.byId(edgeCat.id).cacheDecision in ReuseDecisions
-      check not backToCat.byId(edgeCat.id).launched
+      f.checkRepeat(edgeCat, backToCat.byId(edgeCat.id))
 
   test "an argv[0] outside any content-addressed root does not move the key":
     ## THE IDENTITY CASE, and it is a requirement rather than a nicety: a

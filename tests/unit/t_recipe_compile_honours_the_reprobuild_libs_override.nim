@@ -25,6 +25,8 @@
 ##      REPROBUILD_REPO_ROOT naming another checkout, after fixes 1 and 2,
 ##      `provider-compile.rbsz` still named the engine's checkout 105 times.
 ##
+## An explicit package catalog likewise selects source code and must cross
+## the isolated provider launch as a declared environment input.
 ## Each case grades the real function at that boundary. No mocks.
 
 import std/[os, strutils, unittest]
@@ -43,13 +45,15 @@ proc valueIn(env: openArray[string]; name: string): string =
 
 suite "the reprobuild libs override reaches the recipe compile":
   setup:
-    let saved = @[getEnv("REPROBUILD_REPO_ROOT"), getEnv("REPROBUILD_LIBS_DIR")]
+    let saved = @[getEnv("REPROBUILD_REPO_ROOT"), getEnv("REPROBUILD_LIBS_DIR"),
+      getEnv("REPROBUILD_PACKAGES_ROOT")]
     # Per process: cases run concurrently and each teardown removes `home`.
     let home = getTempDir() / ("repro-libs-override-home-" &
       $getCurrentProcessId())
 
   teardown:
-    for i, name in ["REPROBUILD_REPO_ROOT", "REPROBUILD_LIBS_DIR"]:
+    for i, name in ["REPROBUILD_REPO_ROOT", "REPROBUILD_LIBS_DIR",
+        "REPROBUILD_PACKAGES_ROOT"]:
       if saved[i].len > 0: putEnv(name, saved[i])
       else: delEnv(name)
     removeDir(home)
@@ -67,6 +71,14 @@ suite "the reprobuild libs override reaches the recipe compile":
     let env = providerCompileLaunchEnv(home)
     check env.valueIn("REPROBUILD_REPO_ROOT") == "<absent>"
     check env.valueIn("REPROBUILD_LIBS_DIR") == "<absent>"
+
+  test "the isolated provider compile declares an explicit package catalog":
+    putEnv("REPROBUILD_PACKAGES_ROOT", "/elsewhere/catalog")
+    check providerCompileLaunchEnv(home).valueIn("REPROBUILD_PACKAGES_ROOT") ==
+      "/elsewhere/catalog"
+    delEnv("REPROBUILD_PACKAGES_ROOT")
+    check providerCompileLaunchEnv(home).valueIn("REPROBUILD_PACKAGES_ROOT") ==
+      "<absent>"
 
   test "the activation key moves with either override":
     let root = getCurrentDir()
