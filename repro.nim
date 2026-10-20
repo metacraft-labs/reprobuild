@@ -2177,6 +2177,13 @@ package reprobuild:
     # consumers could cut over incrementally. B5 has since deleted that
     # wrapper: these edges are now the only path, and ``.#release`` is the
     # collection the release workflow builds.
+    #
+    # Every app compile runs in its own module's directory
+    # (``runInSourceDir = true``), not in the repository root. nim writes
+    # ``<project>_linkerArgs.txt`` into its working directory on a long link
+    # line and deletes it again; in the root that changed a directory other
+    # compiles record, and they missed on the next build. The paths below
+    # stay spelled from the root; ``nim.c`` re-spells them for the argv.
     var reprobuildAppsActions: seq[BuildActionDef] = @[]
 
     # The FULL CLI / build engine. Named `reprobuild`, not `repro`: `repro`
@@ -2269,6 +2276,7 @@ package reprobuild:
       # backend so each no-op spawn does not load the system libblake3 -> TBB/
       # C++ runtime closure.
       extraEnv = sourceOnlyEnv & @[("REPROBUILD_USE_SYSTEM_HASH_LIBS", "0")],
+      runInSourceDir = true,
       actionId = "reprobuild.apps.reprobuild"))
 
     reprobuildAppsActions.add(nim.c(
@@ -2278,6 +2286,7 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-peer-cache-tier2",
+      runInSourceDir = true,
       actionId = "reprobuild.apps.repro-peer-cache-tier2"))
 
     reprobuildAppsActions.add(nim.c(
@@ -2287,6 +2296,7 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-peer-cache-admin",
+      runInSourceDir = true,
       actionId = "reprobuild.apps.repro-peer-cache-admin"))
 
     reprobuildAppsActions.add(nim.c(
@@ -2296,6 +2306,7 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-peer-cache-mint-cert",
+      runInSourceDir = true,
       actionId = "reprobuild.apps.repro-peer-cache-mint-cert"))
 
     reprobuildAppsActions.add(nim.c(
@@ -2305,6 +2316,7 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-cmake-dyndep-fragment",
+      runInSourceDir = true,
       actionId = "reprobuild.apps.repro-cmake-dyndep-fragment"))
 
     # Provider-mode entries carry ``-d:reproProviderMode`` per the
@@ -2316,6 +2328,7 @@ package reprobuild:
       defines = @["release", "reproProviderMode"],
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
+      runInSourceDir = true,
       actionId = "reprobuild.apps.repro-cmake-trycompile-provider"))
 
     reprobuildAppsActions.add(nim.c(
@@ -2325,6 +2338,7 @@ package reprobuild:
       defines = @["release", "reproProviderMode"],
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
+      runInSourceDir = true,
       actionId = "reprobuild.apps.repro-standard-provider"))
 
     # HISTORY (superseded 2026-08-19): this edge, and every other compile
@@ -2361,6 +2375,7 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-install-mirror-publish",
+      runInSourceDir = true,
       actionId = "reprobuild.apps.repro-install-mirror-publish"))
 
     # B5: the last three ``apps/entrypoints.txt`` rows that had no edge and so
@@ -2381,6 +2396,7 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-binary-cache",
+      runInSourceDir = true,
       actionId = "reprobuild.apps.repro-binary-cache"))
 
     reprobuildAppsActions.add(nim.c(
@@ -2391,6 +2407,7 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-binary-cache-crosshost",
+      runInSourceDir = true,
       actionId = "reprobuild.apps.repro-binary-cache-crosshost"))
 
     # The only entrypoint with a row-local ``--path:``; it becomes an ordinary
@@ -2402,6 +2419,7 @@ package reprobuild:
       paths = @["apps/repro-harvest-apt/src"] & sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-harvest-apt",
+      runInSourceDir = true,
       actionId = "reprobuild.apps.repro-harvest-apt"))
 
     # The last two rows of ``apps/entrypoints.txt``. Both were listed there
@@ -2423,6 +2441,7 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/attestation-agent",
+      runInSourceDir = true,
       actionId = "reprobuild.apps.attestation-agent"))
 
     # Dependency-Attribution MAC-1 — the thin daemon client, and since the
@@ -2458,6 +2477,7 @@ package reprobuild:
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv & @[("REPROBUILD_USE_SYSTEM_HASH_LIBS", "0")],
       nimcache = "build/nimcache/repro",
+      runInSourceDir = true,
       actionId = "reprobuild.apps.repro"))
 
     # Staging pins the build environment's Python into the helper's shebang,
