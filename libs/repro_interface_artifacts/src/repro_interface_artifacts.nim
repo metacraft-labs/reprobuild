@@ -91,6 +91,7 @@ import repro_core/paths as corepaths
 import repro_core/relocation
 import repro_core/source_root
 import repro_core/c_compiler
+import repro_core/nix_store_roots
 import repro_domain_types
 import repro_hash
 import repro_project_dsl
@@ -4377,7 +4378,20 @@ proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
   ##   * `TERM=dumb`, `LANG=C`: diagnostics only, pinned so a terminal or a
   ##     locale is not a cache key;
   ##   * `HOME`: a directory owned by this edge, so a user-level
-  ##     `~/.config/nim` cannot change the compile without being an input.
+  ##     `~/.config/nim` cannot change the compile without being an input;
+  ##   * `NIX_STORE`: the store directory, when the C compiler lives in it.
+  ##     Nix's ld-wrapper turns every `-L<dir>` holding a library the link
+  ##     uses into `-rpath <dir>`, skipping only directories outside
+  ##     `$NIX_STORE`; with the variable unset that test matches every
+  ##     directory. A `-L/usr/lib` then became the provider's RPATH ahead
+  ##     of the Nix glibc, and the provider loaded the host's `libc.so.6`
+  ##     under the Nix loader and crashed before `main` (reprobuild-pm issue
+  ##     2026-10-14-project-provider-rpath-puts-usr-lib-ahead-of-the-nix-glibc).
+  ##     Keeping host directories out of `config.nims`'s own `-L` flags does
+  ##     not avoid this: on a host that has `/usr/lib`, the clang driver adds
+  ##     `-L/usr/lib` to the link itself, after every flag the compile
+  ##     passed. Every Nix shell sets `NIX_STORE` (stdenv's `setup.sh`); the
+  ##     wrapper assumes it.
   ##
   ## WHAT THIS DOES NOT DO. The launcher layers declared values OVER the
   ## inherited environment (`EnvironmentInheritanceCensus`), so this pins the
@@ -4399,6 +4413,13 @@ proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
     result.add("REPRO_NIM_COMPILER=" & nim)
   if cc.len > 0 and cc.isAbsolute:
     result.add(bootstrapCCompilerEnv & "=" & cc)
+    # A profile symlink (`~/.nix-profile/bin/cc`) names a store wrapper too.
+    let store = nixStoreDir()
+    let resolvedCc =
+      try: expandFilename(cc)
+      except OSError: cc
+    if cc.startsWith(store & "/") or resolvedCc.startsWith(store & "/"):
+      result.add("NIX_STORE=" & store)
   let sdk = getEnv(bootstrapSdkRootEnv)
   if sdk.len > 0:
     result.add(bootstrapSdkRootEnv & "=" & sdk)
@@ -6018,9 +6039,10 @@ proc nixLibDirIn*(storeRoot, namePattern: string;
   ## path matching `namePattern` whose libdir holds one of `dylibNames` built
   ## for the host target.
   ##
-  ## Candidates are visited in sorted order — `config.nims` sorts its `find`
-  ## output, and an unsorted `walkDir` would make the choice depend on
-  ## directory order — and each is filtered by `soMatchesHostArch`. Without
+  ## Candidates are visited in sorted order — `config.nims` sorts its store
+  ## listing (`nixStorePrefixes`), and an unsorted `walkDir` would make the
+  ## choice depend on directory order — and each is filtered by
+  ## `soMatchesHostArch`. Without
   ## the filter "the first sorted match" is an arbitrary architecture on a
   ## mixed store: CI's first `*-openssl-*` was a 32-bit build, baked into a
   ## 64-bit helper's RPATH. `storeRoot` is a parameter so the selection can be
@@ -6442,7 +6464,11 @@ proc externalHashFlags(workDir = ""): seq[string] =
   # written into RPATH: this edge runs with an allowlisted environment, so
   # the dev shell's SQLITE_PREFIX is not visible here, and a `/usr/lib`
   # RPATH made a Nix-linked provider load the host's libc under Nix's
-  # loader and die with SIGSEGV before reading the recipe.
+  # loader and die with SIGSEGV before reading the recipe. Leaving it out
+  # here is not sufficient on its own: Nix's ld-wrapper writes an RPATH
+  # entry for any `-L` directory, including the ones the C driver adds,
+  # unless `NIX_STORE` tells it which are outside the store, which is why
+  # `providerCompileLaunchEnv` declares it.
   when not defined(macosx):
     let sqliteNames = ["libsqlite3.so", "libsqlite3.a"]
     let nixInPlay = dirExists("/nix/store")

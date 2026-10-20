@@ -214,6 +214,7 @@ static const char *repro_hcr_lx_quiesce_status_name(int code) {
 
 typedef struct repro_hcr_lx_parked_thread {
   volatile int32_t tid;
+  volatile int32_t entered;     /* handler ran during this attempt */
   volatile int32_t parked;      /* 1 once the handler is about to futex-wait */
   volatile int32_t resumed;     /* 1 once the handler has left the wait */
   volatile int32_t adjusted;    /* 1 when the patcher rewrote the resume PC */
@@ -656,6 +657,18 @@ static void repro_hcr_lx_quiesce_handler(int signo, siginfo_t *info,
   (void)signo;
   (void)info;
 
+  slot = repro_hcr_lx_quiesce_slot_for(tid);
+  if (slot == NULL) {
+    /* A thread created after enumeration is not represented in parked_count. */
+    __atomic_fetch_add(&repro_hcr_lx_quiesce.stray_signals, 1,
+                       __ATOMIC_ACQ_REL);
+    return;
+  }
+  /* Publish before stack inspection. Linux self-blocks the signal throughout
+   * this handler, including late arrivals after the deadline. Retain evidence
+   * through sigreturn so the census can distinguish delivery from blocking. */
+  __atomic_store_n(&slot->entered, 1, __ATOMIC_RELEASE);
+
   if (!repro_hcr_lx_trampoline_verified &&
       !repro_hcr_lx_trampoline_mismatch) {
     /* Learn the trampoline address from OUR OWN frame, and cross-check the two
@@ -676,18 +689,6 @@ static void repro_hcr_lx_quiesce_handler(int signo, siginfo_t *info,
     } else {
       repro_hcr_lx_trampoline_mismatch = 1;
     }
-  }
-
-  slot = repro_hcr_lx_quiesce_slot_for(tid);
-  if (slot == NULL) {
-    /* A thread created after the enumeration that produced the slot table. The
-     * begin loop re-enumerates until two consecutive rounds agree precisely so
-     * this is transient; counting it is what makes it visible rather than
-     * silent. Returning immediately is correct: this thread is not accounted
-     * for in `parked_count`, so the patcher will not think it is parked. */
-    __atomic_fetch_add(&repro_hcr_lx_quiesce.stray_signals, 1,
-                       __ATOMIC_ACQ_REL);
-    return;
   }
 
   repro_hcr_lx_quiesce_handler_stage = 1;
@@ -911,9 +912,13 @@ static int repro_hcr_lx_tid_sets_agree(const int32_t *a, int32_t a_count,
  * synchronous faults). Both clear on their own, both would have parked, and a
  * pre-flight refusal turned each into a failed patch.
  *
- * After the deadline the distinction is free. A thread that has had the signal
- * pending for the whole deadline and STILL has it masked is the structural
- * case; a transiently-masked thread took the signal and parked long before.
+ * A deadline alone cannot distinguish these cases: a handler can arrive late
+ * and still be self-blocked during the census. Each slot therefore retains
+ * handler-entry evidence for this attempt, checked after reading its mask.
+ * Entered threads remain timeouts, even if their masks still contain the
+ * quiescence signal. Requiring the signal to remain thread-pending also covers
+ * delivery before the handler's first store: the kernel consumes pending at
+ * delivery. Only blocked, pending signals without entry retain that diagnosis.
  * And the failure direction is safe: a mislabelled refusal is still a refusal,
  * whereas a pre-flight false positive was a refusal that should never have
  * happened. NOTHING THAT USED TO SUCCEED CAN FAIL BECAUSE OF THIS CODE — it
@@ -986,17 +991,19 @@ static void repro_hcr_lx_status_path_for(int32_t tid) {
   }
 }
 
-/* `SigBlk:` and `Name:` out of one `/proc/self/task/<tid>/status`. Returns 1
- * only when the mask line was found; `out_name` is best-effort and is left as
+/* `SigBlk:`, `SigPnd:` and `Name:` out of one task status snapshot. Returns 1
+ * only when both mask lines were found; `out_name` is best-effort and is left as
  * an empty string when the process has no readable `Name:`. */
 static int repro_hcr_lx_read_thread_status(int32_t tid, uint64_t *out_mask,
-                                           char *out_name) {
+                                           uint64_t *out_pending, char *out_name) {
   long fd;
   size_t held = 0;
   int found_mask = 0;
+  int found_pending = 0;
   size_t i;
   out_name[0] = '\0';
   *out_mask = 0;
+  *out_pending = 0;
   repro_hcr_lx_status_path_for(tid);
   fd = repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_OPENAT, REPRO_HCR_LX_AT_FDCWD,
                              (long)(uintptr_t)repro_hcr_lx_status_path,
@@ -1032,7 +1039,8 @@ static int repro_hcr_lx_read_thread_status(int32_t tid, uint64_t *out_mask,
     }
     j = start;
     if (held - start >= 7 &&
-        memcmp(repro_hcr_lx_status_buffer + start, "SigBlk:", 7) == 0) {
+        (memcmp(repro_hcr_lx_status_buffer + start, "SigBlk:", 7) == 0 ||
+         memcmp(repro_hcr_lx_status_buffer + start, "SigPnd:", 7) == 0)) {
       uint64_t mask = 0;
       int digits = 0;
       j = start + 7;
@@ -1050,8 +1058,13 @@ static int repro_hcr_lx_read_thread_status(int32_t tid, uint64_t *out_mask,
         j += 1;
       }
       if (digits > 0) {
-        *out_mask = mask;
-        found_mask = 1;
+        if (memcmp(repro_hcr_lx_status_buffer + start, "SigBlk:", 7) == 0) {
+          *out_mask = mask;
+          found_mask = 1;
+        } else {
+          *out_pending = mask;
+          found_pending = 1;
+        }
       }
     } else if (held - start >= 5 &&
                memcmp(repro_hcr_lx_status_buffer + start, "Name:", 5) == 0) {
@@ -1068,13 +1081,13 @@ static int repro_hcr_lx_read_thread_status(int32_t tid, uint64_t *out_mask,
     }
     i += 1;
   }
-  return found_mask;
+  return found_mask && found_pending;
 }
 
 /*
  * Censuses the tids already recorded in `unresponsive_tids` — the threads that
  * did not park before the deadline. Returns the number that still block
- * `signo`, which is the number that could never have parked at all.
+ * `signo` with it pending, without having entered this attempt's handler.
  */
 static int32_t repro_hcr_lx_census_unresponsive_signal_masks(int signo) {
   int32_t i;
@@ -1090,14 +1103,22 @@ static int32_t repro_hcr_lx_census_unresponsive_signal_masks(int signo) {
               i < REPRO_HCR_LX_MAX_QUIESCE_THREADS;
        ++i) {
     uint64_t mask = 0;
+    uint64_t pending = 0;
     char name[REPRO_HCR_LX_COMM_MAX];
     if (!repro_hcr_lx_read_thread_status(
-            repro_hcr_lx_quiesce.unresponsive_tids[i], &mask, name)) {
+            repro_hcr_lx_quiesce.unresponsive_tids[i], &mask, &pending, name)) {
       repro_hcr_lx_quiesce.sigmask_read_failed += 1;
       continue;
     }
     repro_hcr_lx_quiesce.sigmask_read_ok += 1;
-    if ((mask & signal_bit) == 0) {
+    /* Read entry evidence AFTER /proc: a handler can start during that read. */
+    repro_hcr_lx_parked_thread *slot = repro_hcr_lx_quiesce_slot_for(
+        repro_hcr_lx_quiesce.unresponsive_tids[i]);
+    /* tgkill leaves a genuinely blocked signal pending. Delivery consumes it
+     * before the kernel enters userspace, closing the window before entered's
+     * first store. SigPnd is thread-directed, matching our tgkill handshake. */
+    if ((mask & pending & signal_bit) == 0 ||
+        (slot != NULL && __atomic_load_n(&slot->entered, __ATOMIC_ACQUIRE))) {
       continue;
     }
     if (repro_hcr_lx_quiesce.blocked_count < REPRO_HCR_LX_MAX_BLOCKED_THREADS) {
@@ -1448,10 +1469,10 @@ static int repro_hcr_lx_quiesce_begin(uint64_t timeout_ns) {
       }
       repro_hcr_lx_quiesce.held = 0;
       /*
-       * Everyone who parked is out of the futex and out of the handler, so
-       * reading `/proc` is allowed again — and the answer is now meaningful,
-       * because a thread that had the signal pending for the whole deadline
-       * and STILL masks it is structurally unreachable rather than slow. See
+       * Release has been published, but late handlers may still be running.
+       * The census excludes handlers that entered this attempt, whose masks
+       * contain the kernel's temporary self-block rather than evidence that
+       * delivery was impossible. See
        * the census's own comment for why this cannot run before the wait.
        */
       if (repro_hcr_lx_quiesce_sigmask_census_enabled &&

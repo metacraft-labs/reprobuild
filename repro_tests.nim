@@ -4815,6 +4815,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_package_name_that_is_a_nim_keyword.nim",
+    binary: "build/test-bin/t_dsl_package_name_that_is_a_nim_keyword",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_provisioning_expression_setters.nim",
     binary: "build/test-bin/t_dsl_provisioning_expression_setters",
     defines: @[],
@@ -15437,6 +15446,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim",
     binary: "build/test-bin/t_provider_library_nimrtl_direct_call_no_marshal",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_provider_link_never_puts_a_host_lib_dir_in_rpath.nim",
+    binary: "build/test-bin/t_provider_link_never_puts_a_host_lib_dir_in_rpath",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

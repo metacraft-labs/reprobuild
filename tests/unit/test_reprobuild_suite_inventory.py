@@ -1,3 +1,4 @@
+import ast
 import contextlib
 import copy
 import importlib.util
@@ -1519,6 +1520,111 @@ class SuiteArtifactActionCompositionTests(unittest.TestCase):
         self.assertTrue(writes and checks)
 
 
+class CatalogCurrencyProjectionTests(unittest.TestCase):
+    """Pure catalog documents exercise the real normalization boundary.
+
+    These fixtures are inputs to the document comparison, not fake binaries:
+    real binary enumeration and exact case identities are checked separately
+    by the built-tree gates. The assertions here pin both transformation
+    directions and reject the exemptions that could otherwise hide lost cases.
+    """
+
+    CASES = {
+        "gated.nim": {"linux": {"linux::one", "linux::two"}, "darwin": {"darwin::one"}},
+        "macos.nim": {"linux": set(), "darwin": {"macos::one"}},
+    }
+    QUARANTINES = {"linux": {"macos.nim": "no-protocol-support"}, "darwin": {}}
+
+    def document(self, os_name):
+        linux = os_name == "linux"
+        tests = [
+            {"source": "common.nim", "sourceCaseCount": 3, "countSource": "catalog"},
+            {"source": "gated.nim", "sourceCaseCount": 4 if linux else 3, "countSource": "catalog"},
+            {"source": "macos.nim", "sourceCaseCount": 0 if linux else 1,
+             "countSource": "quarantined" if linux else "catalog"},
+        ]
+        return {
+            "metadata": {"catalogHost": {"os": os_name, "cpu": "x86_64" if linux else "arm64"}},
+            "static": {"sourceCaseCount": sum(x["sourceCaseCount"] for x in tests)},
+            "catalogEnumeration": {"countSourceCounts": {"catalog": 2, "quarantined": 1} if linux else {"catalog": 3}, "quarantine": [
+                {"source": source, "reason": reason}
+                for source, reason in self.QUARANTINES[os_name].items()
+            ]},
+            "tests": tests,
+        }
+
+    def projection(self, document):
+        return inventory.catalog_currency_projection(document, self.CASES, self.QUARANTINES)
+
+    def test_platform_counts_normalize_to_the_exact_common_cases(self):
+        self.assertEqual(self.projection(self.document("linux")), {
+            "common.nim": ("catalog", 3), "gated.nim": ("catalog", 2),
+            "macos.nim": ("catalog", 0),
+        })
+        self.assertEqual(self.projection(self.document("linux")), self.projection(self.document("darwin")))
+
+    def test_offsetting_count_losses_do_not_hide_in_the_total(self):
+        original = self.document("darwin")
+        damaged = copy.deepcopy(original)
+        damaged["tests"][0]["sourceCaseCount"] += 1
+        damaged["tests"][1]["sourceCaseCount"] -= 1
+        self.assertNotEqual(self.projection(original), self.projection(damaged))
+
+    def test_a_platform_gated_source_retains_its_common_case_guard(self):
+        original = self.document("darwin")
+        damaged = copy.deepcopy(original)
+        damaged["tests"][1]["sourceCaseCount"] -= 1
+        damaged["static"]["sourceCaseCount"] -= 1
+        self.assertNotEqual(self.projection(original), self.projection(damaged))
+
+    def test_a_count_below_the_named_platform_cases_is_refused(self):
+        damaged = self.document("linux")
+        damaged["tests"][1]["sourceCaseCount"] = 1
+        damaged["static"]["sourceCaseCount"] -= 3
+        with self.assertRaisesRegex(ValueError, "lacks pinned linux cases"):
+            self.projection(damaged)
+
+    def test_unexpected_quarantine_cannot_be_normalized_away(self):
+        damaged = self.document("darwin")
+        damaged["catalogEnumeration"]["quarantine"].append({
+            "source": "gated.nim", "reason": "no-protocol-support"
+        })
+        with self.assertRaisesRegex(ValueError, "pinned membership"):
+            self.projection(damaged)
+
+    def test_known_quarantine_cannot_contribute_cases(self):
+        damaged = self.document("linux")
+        damaged["tests"][2]["sourceCaseCount"] = 1
+        with self.assertRaisesRegex(ValueError, "quarantined source contributes cases"):
+            self.projection(damaged)
+
+    def test_missing_or_unknown_host_never_becomes_a_skip(self):
+        for host in (None, {}, {"os": "darwin"}, {"os": "linux", "cpu": "arm64"}):
+            damaged = self.document("darwin")
+            damaged["metadata"]["catalogHost"] = host
+            with self.subTest(host=host), self.assertRaises(ValueError):
+                self.projection(damaged)
+
+    def test_other_count_provenance_still_has_to_agree(self):
+        original = self.document("darwin")
+        damaged = copy.deepcopy(original)
+        damaged["tests"][0]["countSource"] = "missing-binary"
+        damaged["catalogEnumeration"]["countSourceCounts"] = {"catalog": 2, "missing-binary": 1}
+        self.assertNotEqual(self.projection(original), self.projection(damaged))
+
+    def test_published_provenance_census_must_count_the_entries(self):
+        damaged = self.document("darwin")
+        damaged["catalogEnumeration"]["countSourceCounts"]["catalog"] += 1
+        with self.assertRaisesRegex(ValueError, "does not count its entries"):
+            self.projection(damaged)
+
+    def test_published_total_must_sum_the_binary_counts(self):
+        damaged = self.document("darwin")
+        damaged["static"]["sourceCaseCount"] += 1
+        with self.assertRaisesRegex(ValueError, "does not sum its entries"):
+            self.projection(damaged)
+
+
 class SuiteInventoryTests(unittest.TestCase):
     def assert_nim_case_counter_lexes_declarations_not_fixture_text(self):
         source = r'''
@@ -1793,7 +1899,7 @@ test "incomplete name" and:
             # The static number moved; the real case count did not.
             "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim": 8,
             "tests/e2e/m79/t_integration_shell_integration_replan_idempotent.nim": 1,
-            "tests/e2e/m83/t_e2e_profile_modules.nim": 6,
+            "tests/e2e/m83/t_e2e_profile_modules.nim": 7,
         }
         for source, expected in expected_static_multiline_counts.items():
             with self.subTest(static_source=source):
@@ -1814,7 +1920,7 @@ test "incomplete name" and:
             # and it was this disagreement that exposed the whole defect.
             "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim": 4,
             "tests/e2e/m79/t_integration_shell_integration_replan_idempotent.nim": 1,
-            "tests/e2e/m83/t_e2e_profile_modules.nim": 6,
+            "tests/e2e/m83/t_e2e_profile_modules.nim": 7,
         }
         for source, expected in expected_catalog_multiline_counts.items():
             with self.subTest(catalog_source=source):
@@ -1830,25 +1936,20 @@ test "incomplete name" and:
         # Every value in this block is unchanged by the move to catalog
         # counting: the binary and the scanner agree on all nine sources.
         expected_rebased_source_counts = {
-            # Upstream 8a82077f9 adds the unconditional pre-allocation /
-            # pre-HTTP archive-size refusal to this existing binary.  The
-            # rebuilt binary's own ``--list-json`` advertises seven cases and
-            # the independent static baseline records the same 6 -> 7 move.
-            # Pinning the source here makes the aggregate +1 below attributable
-            # to the streaming-publication change rather than an opaque bump.
+            # At 4f7d8624d7 the binary and source scan agree on nine cases,
+            # including compressed publication and transparent extraction.
             "libs/repro_binary_cache_client/tests/"
-            "test_publish_in_process.nim": 7,
-            # 8, not 6: the rebuilt binary and independent static baseline
-            # both include the carried-environment regression now present on
-            # the reconciled upstream tree.
-            "libs/repro_cli_support/tests/t_daemon_carried_environment.nim": 8,
+            "test_publish_in_process.nim": 9,
+            # The 13-case catalog includes client-over-daemon precedence,
+            # defaults, namespace coverage and exact restoration of an unset.
+            "libs/repro_cli_support/tests/t_daemon_carried_environment.nim": 13,
             "libs/repro_resources/tests/"
             "t_attr_missing_interface_diagnostic.nim": 1,
             "libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim": 3,
-            "libs/repro_resources/tests/t_rss_ssz_envelope_roundtrip.nim": 4,
+            "libs/repro_resources/tests/t_rss_ssz_envelope_roundtrip.nim": 18,
             "tests/integration/t_d6_runner_test_timeout.nim": 3,
             "tests/integration/t_extension_type_lifted_and_consumed.nim": 1,
-            "tests/integration/t_local_daemons_control_plane_m10.nim": 6,
+            "tests/integration/t_local_daemons_control_plane_m10.nim": 7,
             "tests/integration/t_pre_push_protocol_v2_ref_validation.nim": 3,
             # 9, not 8: the refusal-outranks-document regression adds
             # "a refused per-case PASS document never overturns the
@@ -2172,8 +2273,8 @@ test "incomplete name" and:
                 "binary": "build/test-bin/"
                 "t_workspace_enable_materializes_added_projects",
                 "language": "nim",
-                "sourceSuiteCount": 1,
-                "sourceCaseCount": 2,
+                "sourceSuiteCount": 2,
+                "sourceCaseCount": 6,
                 "class": "integration",
             },
             "tests/integration/"
@@ -2301,7 +2402,7 @@ test "incomplete name" and:
                 "binary": "build/test-bin/t_m9r14e_3_action_env_threading",
                 "language": "nim",
                 "sourceSuiteCount": 2,
-                "sourceCaseCount": 29,
+                "sourceCaseCount": 31,
                 "class": "pure unit",
             },
             "libs/repro_build_engine/tests/"
@@ -2309,22 +2410,10 @@ test "incomplete name" and:
                 "binary": "build/test-bin/test_tool_identity_env_plumbing",
                 "language": "nim",
                 "sourceSuiteCount": 1,
-                # 9 -> 10, agreed by the built binary and the static baseline.
-                "sourceCaseCount": 10,
-                # "pure unit" -> "unclassified", and this one is NOT a count
-                # moving: the source's classification changed. The classifier
-                # now reports `mutates the process environment`, which its
-                # fail-closed purity rule refuses to call a pure unit and
-                # which none of the four classes M0 names describes either.
-                # Recorded rather than argued away, because it is a real
-                # property of this test and because it is not alone: the
-                # regenerated inventory puts 121 of 1,404 entries in
-                # `unclassified`, a fifth bucket that did not exist in the
-                # 2026-08-06 baseline's 624/16/478/89. Whether M0's four-way
-                # classification deliverable is satisfied by a tree with 121
-                # entries outside it is a question for the ledger, not for
-                # this pin.
-                "class": "unclassified",
+                # The current catalog has 11 cases. Requiring the real repro
+                # binary makes this integration coverage under the classifier.
+                "sourceCaseCount": 11,
+                "class": "integration",
             },
             # Upstream 11cea6789 enrolls six one-case develop-selection
             # integrations. Pin every source-to-binary mapping so a later
@@ -2387,6 +2476,9 @@ test "incomplete name" and:
             # omitted from its checked-in generated graph. Regeneration enrolls
             # exactly these four; fresh binary catalogs account for all 29
             # cases (7 + 5 + 14 + 3).
+            # The transitive peer-cache fixed port / agent httpclient imports
+            # keep these three sources unclassified by the fail-closed purity
+            # scan; exact case coverage remains pinned independently below.
             "libs/repro_deploy_agent/tests/"
             "t_repro_deploy_agent_manifest_v2_secrets.nim": {
                 "binary": "build/test-bin/"
@@ -2394,7 +2486,7 @@ test "incomplete name" and:
                 "language": "nim",
                 "sourceSuiteCount": 1,
                 "sourceCaseCount": 7,
-                "class": "pure unit",
+                "class": "unclassified",
             },
             "libs/repro_deploy_agent/tests/"
             "t_repro_deploy_agent_materialises_secrets.nim": {
@@ -2403,7 +2495,7 @@ test "incomplete name" and:
                 "language": "nim",
                 "sourceSuiteCount": 1,
                 "sourceCaseCount": 5,
-                "class": "pure unit",
+                "class": "unclassified",
             },
             "libs/repro_deploy_agent/tests/"
             "t_repro_deploy_agent_secrets_seal_open.nim": {
@@ -2412,7 +2504,7 @@ test "incomplete name" and:
                 "language": "nim",
                 "sourceSuiteCount": 1,
                 "sourceCaseCount": 14,
-                "class": "pure unit",
+                "class": "unclassified",
             },
             "tests/integration/t_branch_fork_inherits_project_set.nim": {
                 "binary": "build/test-bin/t_branch_fork_inherits_project_set",
@@ -2421,28 +2513,35 @@ test "incomplete name" and:
                 "sourceCaseCount": 3,
                 "class": "integration",
             },
-            # Both Linux and Darwin register 38 cache-daemon cases: Linux keeps
-            # exact-old interop while Darwin substitutes v1/v2 isolation, and
-            # both add legacy-wire interop. The static scan sees both
-            # conditional declarations and therefore reports 39 below.
-            "tests/integration/"
-            "t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim": {
-                "binary": "build/test-bin/"
-                "t_cache_daemon_drains_dedups_persists_and_warms_from_disk",
+            # e42ef05b22 replaced the cache-daemon/ring tests and helper peers
+            # with direct shared action-index coverage. Pin each successor's
+            # real graph entry and catalog rather than retaining deleted tests.
+            "tests/integration/t_action_cache_index_first_lookup_decision_identical.nim": {
+                "binary": "build/test-bin/t_action_cache_index_first_lookup_decision_identical",
                 "language": "nim",
                 "sourceSuiteCount": 1,
-                "sourceCaseCount": 38,
+                "sourceCaseCount": 4,
                 "class": "integration",
             },
-            # A separate graph spec carries the compile-time unavailable-ID
-            # seam, so production and test configurations cannot be confused.
-            "tests/integration/"
-            "t_shm_index_boot_id_unavailable_fails_closed.nim": {
-                "binary": "build/test-bin/"
-                "t_shm_index_boot_id_unavailable_fails_closed",
+            "tests/integration/t_action_cache_oversized_record_is_indexed.nim": {
+                "binary": "build/test-bin/t_action_cache_oversized_record_is_indexed",
                 "language": "nim",
                 "sourceSuiteCount": 1,
-                "sourceCaseCount": 1,
+                "sourceCaseCount": 2,
+                "class": "integration",
+            },
+            "tests/integration/t_action_index_backpressure_and_tombstones.nim": {
+                "binary": "build/test-bin/t_action_index_backpressure_and_tombstones",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 3,
+                "class": "integration",
+            },
+            "tests/integration/t_action_index_flatten_retire_preserves_completeness.nim": {
+                "binary": "build/test-bin/t_action_index_flatten_retire_preserves_completeness",
+                "language": "nim",
+                "sourceSuiteCount": 1,
+                "sourceCaseCount": 3,
                 "class": "integration",
             },
             # The linked-worktree hook regression's seven cases independently
@@ -2487,12 +2586,11 @@ test "incomplete name" and:
                 "sourceCaseCount": 12,
                 "class": "pure unit",
             },
-            "libs/repro_dsl_stdlib/tests/"
-            "t_smoke_catalog_audit_m29.nim": {
-                "binary": "build/test-bin/t_smoke_catalog_audit_m29",
+            "tests/bundles/bundle_repro_dsl_stdlib_catalogs_pure_unit.nim": {
+                "binary": "build/test-bin/bundle_repro_dsl_stdlib_catalogs_pure_unit",
                 "language": "nim",
-                "sourceSuiteCount": 1,
-                "sourceCaseCount": 5,
+                "sourceSuiteCount": 15,
+                "sourceCaseCount": 110,
                 "class": "pure unit",
             },
             "libs/repro_interface_artifacts/tests/"
@@ -2507,8 +2605,9 @@ test "incomplete name" and:
                 "binary": "build/test-bin/t_m9r13a_provider_compile_sharing",
                 "language": "nim",
                 "sourceSuiteCount": 2,
-                # 10 -> 17, agreed by the built binary and the static baseline.
-                "sourceCaseCount": 17,
+                # Twenty declarations now include provider/interface cache
+                # serialization and the shared compilation parallelism bound.
+                "sourceCaseCount": 20,
                 "class": "graph-fixture",
             },
             "tests/unit/t_m9r14c_1_autotools_parallel_make.nim": {
@@ -2560,7 +2659,7 @@ test "incomplete name" and:
                 "t_workspace_post_commit_lock_refresh_is_best_effort",
                 "language": "nim",
                 "sourceSuiteCount": 2,
-                "sourceCaseCount": 13,
+                "sourceCaseCount": 14,
                 "class": "integration",
             },
             # The `repro develop --all` post-condition added by this branch.
@@ -2601,13 +2700,15 @@ test "incomplete name" and:
         # from two to three cases and the generator marks it provider-mode so
         # those cases execute instead of taking their skip fallback.
         recovered_unregistered = {
-            # These remain deliberately unclassified: the former imports
-            # dynlib and the latter re-enters its own executable. Neither may
-            # be admitted to a shared-process pure-unit bundle by assertion.
+            # Both require the real repro binary in the current graph, so
+            # the classifier admits neither to shared-process pure-unit work.
+            # The copy test now covers differing busy destinations as well.
+            # Bypass's second declaration is Windows-only: it remains one
+            # catalog case on both Linux and Darwin despite a static count 2.
             "libs/repro_build_engine/tests/test_builtin_copy_file_idempotent.nim":
-                ("test_builtin_copy_file_idempotent", 1, 1, "unclassified"),
+                ("test_builtin_copy_file_idempotent", 1, 2, "integration"),
             "libs/repro_build_engine/tests/test_bypass_argv_fidelity.nim":
-                ("test_bypass_argv_fidelity", 1, 1, "unclassified"),
+                ("test_bypass_argv_fidelity", 1, 1, "integration"),
             "libs/repro_core/tests/t_ambient_execution_external_import.nim":
                 ("t_ambient_execution_external_import", 1, 1, "integration"),
             "libs/repro_dsl_stdlib/tests/t_prefix_layout.nim":
@@ -2651,27 +2752,26 @@ test "incomplete name" and:
                 "class": classification,
             }
 
-        # Upstream fdaf4d3b adds this provider-mode regression, and a267613c
-        # extends it with CMake and Meson mutable-tree cases. Its built catalog
-        # and the independent source scan both report exactly four cases, so
-        # pin the graph member instead of absorbing it into the aggregate
-        # counts below.
+        # The cleanup regression now executes provider-mode configure and
+        # mutable-tree commands: its fresh catalog and source scan at 606a
+        # agree on twelve cases. Keep its graph mode and subprocess class
+        # explicit as well as the count.
         expected_enrollments[
             "tests/unit/t_configure_build_tree_cleanup.nim"
         ] = {
             "binary": "build/test-bin/t_configure_build_tree_cleanup",
             "language": "nim",
             "sourceSuiteCount": 1,
-            # 4 -> 5, agreed by the built binary and the static baseline.
-            "sourceCaseCount": 5,
-            "class": "pure unit",
+            "sourceCaseCount": 12,
+            "defines": ["reproProviderMode"],
+            "class": "integration",
         }
 
         # Upstream 4294d5763 adds the dependency-rerun cache-lookup
         # regression. The generator enrolls it as a standalone binary (bundle
-        # membership remains explicit), while the current fail-closed purity
-        # classifier independently admits it as a pure unit. Pin both facts,
-        # plus the binary's one-suite/one-case protocol catalog.
+        # membership remains explicit), and now requires the real repro
+        # binary, which makes it integration work. Pin that graph dependency
+        # alongside the unchanged one-suite/one-case protocol catalog.
         expected_enrollments[
             "libs/repro_build_engine/tests/"
             "test_dependency_rerun_cache_lookup.nim"
@@ -2680,7 +2780,8 @@ test "incomplete name" and:
             "language": "nim",
             "sourceSuiteCount": 1,
             "sourceCaseCount": 1,
-            "class": "pure unit",
+            "class": "integration",
+            "requiresReproBinary": True,
         }
 
         # Upstream 84dd86a35 adds three membership-model integration sources.
@@ -2702,8 +2803,8 @@ test "incomplete name" and:
             (
                 "tests/integration/t_membership_model_sets_cli.nim",
                 "t_membership_model_sets_cli",
-                # 4 -> 5, agreed by the built binary and the static baseline.
-                5,
+                # Fresh catalog and source baseline at 606a both report six.
+                6,
             ),
         ):
             expected_enrollments[source] = {
@@ -2738,63 +2839,57 @@ test "incomplete name" and:
                     with self.subTest(field=field):
                         self.assertEqual(entry[field], expected[field])
 
-        cache_source = (
-            "tests/integration/"
-            "t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim"
-        )
-        fail_closed_source = (
-            "tests/integration/"
-            "t_shm_index_boot_id_unavailable_fails_closed.nim"
-        )
-        self.assertEqual(by_source[cache_source]["staticCaseCount"], 39)
-        self.assertEqual(by_source[fail_closed_source]["staticCaseCount"], 1)
-
-        # Strong graph mappings for both subprocess peers and their generator.
-        # These are action assignments rather than loose substring presence:
-        # dropping, duplicating, or pointing an id at another source fails.
+        # The former cache daemon, unavailable-boot-id seam and legacy peers
+        # were removed together by e42ef05b22. Their replacements use their own
+        # binaries as subprocess peers and require no separate helper actions.
         repro_graph = (REPO_ROOT / "repro.nim").read_text(encoding="utf-8")
-        expected_helper_actions = {
-            "reprobuild.test_helpers.legacy_cache_peer_origin_dev": (
-                "tests/fixtures/cache-daemon-origin-dev-9f0a9be/"
-                "legacy_cache_peer.nim",
-                "build/test-bin/legacy_cache_peer_origin_dev",
-            ),
-            "reprobuild.test_helpers.legacy_cache_peer_legacy_wire": (
-                "tests/fixtures/cache-daemon-origin-dev-9f0a9be/"
-                "legacy_cache_peer_legacy_wire.nim",
-                "build/test-bin/legacy_cache_peer_legacy_wire",
-            ),
-        }
-        for action_id, (source, binary) in expected_helper_actions.items():
-            pattern = (
-                r"reprobuildTestHelpersActions\.add\(nim\.c\("
-                r"(?:(?!reprobuildTestHelpersActions\.add).)*?"
-                r"source\s*=\s*\"" + re.escape(source) + r"\""
-                r"(?:(?!reprobuildTestHelpersActions\.add).)*?"
-                r"binary\s*=\s*\"" + re.escape(binary) + r"\""
-                r"(?:(?!reprobuildTestHelpersActions\.add).)*?"
-                r"actionId\s*=\s*\"" + re.escape(action_id) + r"\""
-            )
-            self.assertEqual(len(re.findall(pattern, repro_graph, re.S)), 1)
-        self.assertEqual(
-            len(
-                re.findall(
-                    r"actionId\s*=\s*\"reprobuild\.test_helpers\."
-                    r"generate_legacy_cache_peer_wire\"",
-                    repro_graph,
-                )
-            ),
-            1,
-        )
-        for required in (
-            "build/test-bin/legacy_cache_peer_origin_dev",
-            "build/test-bin/legacy_cache_peer_legacy_wire",
+        for source in (
+            "tests/integration/t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim",
+            "tests/integration/t_shm_index_boot_id_unavailable_fails_closed.nim",
         ):
-            self.assertIn(f'requiredBinaries.add("{required}")', repro_graph)
-        self.assertIn(
-            'defines: @["reproShmIndexTestBootIdUnavailable"]',
+            self.assertFalse((REPO_ROOT / source).exists())
+            self.assertNotIn(source, graph_sources)
+            self.assertNotIn(source, by_source)
+        for obsolete in (
+            "legacy_cache_peer_origin_dev", "legacy_cache_peer_legacy_wire",
+            "generate_legacy_cache_peer_wire",
+        ):
+            self.assertNotIn(obsolete, repro_graph)
+        self.assertNotIn(
+            "reproShmIndexTestBootIdUnavailable",
             (REPO_ROOT / "repro_tests.nim").read_text(encoding="utf-8"),
         )
+        for name in (
+            "t_action_cache_index_first_lookup_decision_identical",
+            "t_action_cache_oversized_record_is_indexed",
+            "t_action_index_backpressure_and_tombstones",
+            "t_action_index_flatten_retire_preserves_completeness",
+        ):
+            spec = next(spec for spec in nim_specs if spec.source == f"tests/integration/{name}.nim")
+            self.assertEqual(spec.binary, f"build/test-bin/{name}")
+            self.assertEqual(spec.defines, [])
+            self.assertFalse(spec.requires_repro_binary)
+            self.assertEqual(spec.target_os, "soAny")
+
+        # The catalog audit is still five exact cases, now enumerated by its
+        # declared bundle. Requiring the member and its qualified identities
+        # prevents moving it out of the graph or hiding its loss in a total.
+        audit_source = "libs/repro_dsl_stdlib/tests/t_smoke_catalog_audit_m29.nim"
+        bundle_source = "tests/bundles/bundle_repro_dsl_stdlib_catalogs_pure_unit.nim"
+        self.assertNotIn(audit_source, graph_sources)
+        self.assertIn(audit_source, inventory.bundle_member_paths(
+            REPO_ROOT, bundle_source, (REPO_ROOT / bundle_source).read_text(encoding="utf-8")
+        ))
+        self.assertEqual({
+            case["name"] for case in by_source[bundle_source]["catalogCases"]
+            if Path(case.get("file") or "").name == "t_smoke_catalog_audit_m29.nim"
+        }, {
+            "M29 Part B — catalog audit::all M29-flagged missing entries now exist",
+            "M29 Part B — catalog audit::every catalog entry declares a provisioning shape",
+            "M29 Part B — catalog audit::every nixpkgs# entry references the canonical pin, not a copy of it",
+            "M29 Part B — catalog audit::the shared pin module holds well-formed values",
+            "M29 Part B — catalog audit::no duplicate catalog entries (case-folded basename)",
+        })
 
         # Exact generated-graph specification counts. An omitted, duplicated,
         # or substituted enrollment cannot be absorbed by the case totals.
@@ -3230,16 +3325,38 @@ test "incomplete name" and:
             },
         )
         # The Python side stays enumerated by NAME rather than by count.
-        # There are five of them, they change perhaps twice a year, and a
-        # count would not say which one had gone.
+        # A count would not say which current policy gate had gone.
         self.assertEqual(
             {spec.source for spec in python_specs},
             {
+                "tests/integration/test_nix_daemon_cache.py",
                 "tests/test_dev_env_m9_policy.py",
+                "tests/unit/test_build_report_attribution.py",
+                "tests/unit/test_ci_bootstrap_logs.py",
+                "tests/unit/test_ci_reconcile_lock_credentials.py",
+                "tests/unit/test_ci_suite_coverage.py",
+                "tests/unit/test_ci_test_budget.py",
                 "tests/unit/test_cmake_generator_competitiveness_bench.py",
+                "tests/unit/test_cmake_prereq_sdk.py",
                 "tests/unit/test_continuous_benchmarking_policy.py",
+                "tests/unit/test_ct_test_surface_addressability.py",
+                "tests/unit/test_dev_shell_hook_scope.py",
+                "tests/unit/test_generated_artifact_merge_policy.py",
+                "tests/unit/test_graph_owned_test_artifacts.py",
+                "tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py",
+                "tests/unit/test_install_nix_paths.py",
+                "tests/unit/test_lint_gate_ordering.py",
+                "tests/unit/test_nix_daemon_descriptors.py",
                 "tests/unit/test_package_root_anchor.py",
+                "tests/unit/test_prune_undeclared_test_binaries.py",
+                "tests/unit/test_publish_surface_routing.py",
+                "tests/unit/test_regenerate_suite_artifacts.py",
+                "tests/unit/test_release_native_packages.py",
+                "tests/unit/test_release_smoke_dev_exec.py",
                 "tests/unit/test_reprobuild_suite_inventory.py",
+                "tests/unit/test_source_revision.py",
+                "tests/unit/test_suite_drift_attribution.py",
+                "tests/unit/test_wrapper_default_provenance.py",
             },
         )
 
@@ -3804,23 +3921,33 @@ test "incomplete name" and:
             )
         }
 
-        # These eleven enrolled provider tests were invisible to the old
-        # command-string detector. Each imports and invokes the authoritative
-        # repro_interface_artifacts API through a direct or reachable wrapper.
+        # Exact API-only consumers at 4f7d8624d7: each reaches an interface
+        # artifact or provider compiler through a direct call or wrapper.
         provider_additions = {
+            'tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim',
+            'tests/e2e/gm4b/t_e2e_home_profile_resolves_like_uses.nim',
+            'tests/e2e/gm4c/t_e2e_home_profile_reaches_catalog_apps.nim',
+            'tests/e2e/local-build-engine/t_e2e_repro_run_named_run_edge.nim',
+            'tests/integration/t_interface_extraction_follows_the_selected_catalog.nim',
+            'tests/integration/t_lease_reap_destroys_an_unlinked_type_over_a_session.nim',
+            'tests/integration/t_lease_reap_session_transport_is_reachable_from_production.nim',
+            'tests/integration/t_source_interface_openssl_runtime.nim',
             "tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim",
             "tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim",
             "tests/integration/t_compiler_scratch_isolation.nim",
             "tests/integration/t_dev_env_artifact.nim",
             "tests/integration/t_rp1_provider_compile_edge_materializes.nim",
             "tests/integration/t_rp2_provider_session_invoke.nim",
-            "tests/integration/t_rp3_bind_deps_and_sharing.nim",
             "tests/integration/t_rp5b_resource_driver_via_protocol.nim",
             "tests/integration/t_run_consumes_opaque_out_of_tree.nim",
             "tests/integration/t_run_consumes_session_store_out_of_tree.nim",
             "tests/integration/t_run_edge_session_resolver_auto.nim",
         }
         profile_additions = {
+            'tests/e2e/gm7/t_e2e_home_apply_applies_declared_concerns.nim',
+            'tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim',
+            'tests/e2e/m83/t_e2e_profile_compile_ignores_ancestor_membership.nim',
+            'tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim',
             "libs/repro_profile_compile/tests/t_smoke_module_imports.nim",
             "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
             "libs/repro_profile_compile/tests/"
@@ -3829,6 +3956,7 @@ test "incomplete name" and:
             "tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim",
         }
         equivalent_api_additions = {
+            "libs/repro_interface_artifacts/tests/t_interface_artifact_provenance_is_recorded_by_the_lift.nim",
             "tests/e2e/m76/"
             "t_integration_stow_byte_identical_target_is_cache_hit.nim",
             "tests/integration/t_ti1_interface_artifact_edge.nim",
@@ -3888,6 +4016,38 @@ test "incomplete name" and:
             },
         )
 
+        # 042636f078 moved RP3's compiler work into five graph fixtures.
+        # It must stay out of the runtime-compilation census while every
+        # provider remains both produced and a typed dependency of the test.
+        rp3_source = "tests/integration/t_rp3_bind_deps_and_sharing.nim"
+        self.assertNotIn(rp3_source, by_source)
+        graph = (REPO_ROOT / "repro.nim").read_text(encoding="utf-8")
+        references = re.search(
+            r'TestGraphArtifacts\(\s*source:\s*"' + re.escape(rp3_source)
+            + r'",\s*artifacts:\s*@\[(.*?)\]\)', graph, re.S
+        )
+        self.assertIsNotNone(references)
+        for name in ("dep", "depv2", "consumer-a", "consumer-b", "plain"):
+            action_id = "reprobuild.test_fixtures.rp3_provider_" + name.replace("-", "_")
+            self.assertEqual(len(re.findall(
+                r'actionId:\s*"' + re.escape(action_id) + r'"', references.group(1)
+            )), 1)
+            producer = (
+                r'reprobuildTestFixturesActions\.add\(nim\.c\('
+                r'(?:(?!reprobuildTestFixturesActions\.add).)*?'
+                r'source\s*=\s*rp3FixtureRecipeRoot\s*&\s*"/' + re.escape(name) + r'/repro\.nim"'
+                r'(?:(?!reprobuildTestFixturesActions\.add).)*?'
+                r'binary\s*=\s*rp3FixtureProviderRoot\s*&\s*"/' + re.escape(name) + r'"'
+                r'(?:(?!reprobuildTestFixturesActions\.add).)*?'
+                r'actionId\s*=\s*"' + re.escape(action_id) + r'"'
+            )
+            self.assertEqual(len(re.findall(producer, graph, re.S)), 1)
+        self.assertIn("repro-lift-interface-artifact", {
+            pattern for match in by_source[
+                "libs/repro_interface_artifacts/tests/t_interface_artifact_provenance_is_recorded_by_the_lift.nim"
+            ]["matches"] for pattern in match["patterns"]
+        })
+
         # The opaque-resource regression is pinned independently because it
         # landed after the original M0 report and exercises the same provider
         # materialization chain with a new resource representation.
@@ -3914,8 +4074,8 @@ test "incomplete name" and:
         )
 
         # Derive the aggregate from independently pinned detector partitions.
-        # Three tests have both an explicit compiler command and an API flow,
-        # so adding 48 + 21 directly would double count them.
+        # Four sources have both a compiler command and an API flow, so
+        # summing the two partitions would count those sources twice.
         cleanup_source = (
             "tests/integration/"
             "t_repro_test_runner_process_group_cleanup.nim"
@@ -4012,6 +4172,7 @@ test "incomplete name" and:
                 "tests/integration/"
                 "t_project_interface_artifact_import_modes.nim",
                 "tests/integration/t_ti3_fingerprint_split.nim",
+                "tests/unit/t_m9r13a_provider_compile_sharing.nim",
             },
         )
         derived_total = len(explicit_sources | api_sources)
@@ -4645,6 +4806,38 @@ test "incomplete name" and:
                 self.assertEqual(by_source[source]["sourceCaseCount"], expected)
                 self.assertEqual(len(resolved[source]), expected)
 
+    @staticmethod
+    def catalog_quarantine_by_os():
+        """Sources that register no protocol on each catalog host, pinned by name.
+
+        Linux exclusions come from explicit macOS-only whole-file branches;
+        Darwin exclusions are checked against real built binaries on m1.
+        A new member must be reviewed rather than absorbed into a count.
+        """
+        no_protocol = "no-protocol-support"
+        windows_only = {
+            "libs/repro_build_engine/tests/test_m10_observed_env_live_windows.nim": no_protocol,
+            "libs/repro_peer_cache/tests/t_n7_multicast_windows_smoke.nim": no_protocol,
+        }
+        return {
+            "linux": {
+                **windows_only,
+                "libs/repro_home_apply/tests/t_macos_archives.nim": no_protocol,
+                "libs/repro_home_apply/tests/t_macos_installer_app_realize.nim": no_protocol,
+                "libs/repro_home_resources/tests/t_macos_app_bundle_placement.nim": no_protocol,
+                "libs/repro_home_resources/tests/t_macos_app_folder_placement.nim": no_protocol,
+                "tests/e2e/gm4c/t_e2e_dmg_app_bundle_install_and_rollback.nim": no_protocol,
+                "tests/e2e/gm4c/t_e2e_installer_app_install_and_rollback.nim": no_protocol,
+                "tests/e2e/gm7/t_e2e_app_vendor_update_and_running_app.nim": no_protocol,
+                "tests/e2e/gm7/t_e2e_home_apply_applies_declared_concerns.nim": no_protocol,
+            },
+            "darwin": {
+                **windows_only,
+                "tests/integration/t_install_mirror_atomic_patching.nim": no_protocol,
+                "tests/integration/t_source_hash_runtime_paths.nim": no_protocol,
+            },
+        }
+
     def test_catalog_quarantine_is_pinned_by_size_and_membership(self):
         """The quarantine list is exhaustive, enumerated and pinned.
 
@@ -4657,41 +4850,8 @@ test "incomplete name" and:
         data = self.inventory_data()
         catalog = data["catalogEnumeration"]
 
-        # Exactly one binary in the tree cannot enumerate. Everything in
-        # `libs/repro_peer_cache/tests/t_n7_multicast_windows_smoke.nim` is
-        # inside `when defined(windows)` with `else: discard`, so on Linux
-        # the binary registers no cases at all and never links the protocol
-        # — it emits nothing for `--list-json`.
-        #
-        # It is labelled `quarantined` and contributes 0 cases. The static
-        # scanner says 1 for this file (it counts the `when`-branch
-        # declaration it cannot evaluate), and that 1 used to be added to
-        # the authoritative total — making the pinned Nim total 6821 while
-        # the binaries actually register 6820. The one place the static
-        # fallback was still used was the exact over-count this rework
-        # exists to eliminate. `staticCaseCount` keeps the number visible;
-        # it no longer votes.
-        # TWO sources now, and the second one is the same shape as the first.
-        # `test_m10_observed_env_live_windows.nim` drives the real `where.exe`
-        # under the real Windows shim; at the merged head it guarded itself
-        # with `when not defined(windows): {.error.}`, which does not skip a
-        # test — `repro_tests.nim` declares one build edge per source
-        # unconditionally, so it failed the ENTIRE Linux suite build (measured:
-        # 1442 of 1443 actions succeeded and this one took the build down, so
-        # no complete tree existed to regenerate the M0 inventory from). It now
-        # follows the convention the entry above established: compile
-        # everywhere, register cases only on Windows.
-        #
-        # MEMBERSHIP IS STILL PINNED BY NAME, deliberately, and the list is
-        # still the whole quarantine. A quarantine entry is coverage that the
-        # suite does not have on this host, so a THIRD one appearing must be a
-        # decision somebody makes, not a number that moves.
-        expected_quarantine = {
-            "libs/repro_build_engine/tests/"
-            "test_m10_observed_env_live_windows.nim": "no-protocol-support",
-            "libs/repro_peer_cache/tests/"
-            "t_n7_multicast_windows_smoke.nim": "no-protocol-support",
-        }
+        host_os = inventory.current_catalog_host()["os"]
+        expected_quarantine = self.catalog_quarantine_by_os()[host_os]
         actual_quarantine = {
             item["source"]: item["reason"] for item in catalog["quarantine"]
         }
@@ -4705,15 +4865,18 @@ test "incomplete name" and:
         for reason in expected_quarantine.values():
             reason_counts[reason] = reason_counts.get(reason, 0) + 1
         self.assertEqual(catalog["quarantineReasonCounts"], reason_counts)
-        # And that BOTH are Windows-only by construction rather than by
-        # coincidence: each names a source whose declarations are inside a
-        # `when defined(windows)` gate. This is the rule the two names above
-        # are instances of; without it, "quarantined" could silently come to
-        # mean "a test that stopped enumerating for some other reason".
+        # An exclusion must be explained by a pinned foreign-platform case
+        # set. The Windows-only pair is explicit; every Linux/macOS member
+        # must also belong to the exact case ledger, with no cases here.
+        exclusive, _ = self.linux_darwin_catalog_ledger()
         for source in expected_quarantine:
-            with self.subTest(windows_only=source):
+            with self.subTest(platform_exclusion=source):
                 text = (REPO_ROOT / source).read_text(encoding="utf-8")
-                self.assertIn("when defined(windows):", text)
+                if source in exclusive:
+                    self.assertEqual(exclusive[source][host_os], set())
+                    self.assertTrue(exclusive[source]["darwin" if host_os == "linux" else "linux"])
+                else:
+                    self.assertIn("when defined(windows):", text)
 
         # Every quarantine entry carries a machine-readable reason drawn
         # from the declared taxonomy, and every quarantined reason must be
@@ -4746,7 +4909,7 @@ test "incomplete name" and:
                 self.assertEqual(
                     entry["staticCaseCount"], item["staticCaseCount"]
                 )
-        # Both quarantined sources are phantom `when`-branch files, and both
+        # Quarantined sources are phantom `when`-branch files, and their
         # static counts really are the non-zero ones that would leak into the
         # total if the fallback ever came back. Pinned so "0 cases
         # contributed" cannot be satisfied by the static scan quietly also
@@ -4904,18 +5067,9 @@ test "incomplete name" and:
             data["static"]["testEntryCount"],
         )
 
-        # Field completeness of the retained catalog. M2 deliverable 2
-        # requires `bodyHash`, `group`, `threadsRequired`, `xfail`, `tags`
-        # and `deterministic` to survive into this inventory, so the sources
-        # that do NOT supply them are pinned rather than left implicit.
-        #
-        # Reprobuild's `ct_test_unittest_parallel` provider implements a
-        # narrower `--list-json` than the codetracer-nim `std/unittest` fork:
-        # it emits `name`, `suite`, `file` and `line` only. Upstream
-        # a2e203d56 migrated the portable platform gates to that provider, so
-        # their cases correctly join the existing shim smoke in this list.
-        # This is a real provider gap, not an inventory gap; pinning every
-        # source keeps a future migration or provider enrichment explicit.
+        # Only the shim smoke intentionally lacks the std/unittest metadata.
+        # 77b13be3c2 moved the 37 former platform exemptions back onto the
+        # protocol-carrying stdlib; their complete fields are now mandatory.
         incomplete = sorted(
             {
                 item["source"]
@@ -4924,70 +5078,21 @@ test "incomplete name" and:
                 if case.get("bodyHash") is None
             }
         )
-        self.assertEqual(
-            incomplete,
-            [
-                "libs/ct_test_unittest_parallel/tests/"
-                "t_smoke_ct_test_unittest_parallel.nim",
-                "tests/e2e/io-monitor/"
-                "t_debug_io_monitor_reads_monitor_depfile.nim",
-                "tests/e2e/launcher-isolation/"
-                "t_e2e_windows_launcher_isolation.nim",
-                "tests/e2e/m69/t_e2e_repro_home_env_user_path_vm.nim",
-                "tests/e2e/m69/t_e2e_repro_home_fs_managed_block_vm.nim",
-                "tests/e2e/m69/t_e2e_repro_home_fs_user_file_vm.nim",
-                "tests/e2e/m69/t_e2e_repro_home_linux_dconfkey_vm.nim",
-                "tests/e2e/m69/"
-                "t_e2e_repro_home_linux_kdeconfigkey_vm.nim",
-                "tests/e2e/m69/t_e2e_repro_home_shell_integration_vm.nim",
-                "tests/e2e/m69/t_e2e_repro_home_systemd_user_unit_vm.nim",
-                "tests/e2e/m69/"
-                "t_e2e_repro_infra_linux_firewallrule_vm.nim",
-                "tests/e2e/m69/"
-                "t_e2e_repro_infra_linux_nixdaemonsetting_vm.nim",
-                "tests/e2e/m69/"
-                "t_e2e_repro_infra_linux_polkitrule_vm.nim",
-                "tests/e2e/m69/"
-                "t_e2e_repro_infra_linux_sudoersrule_vm.nim",
-                "tests/e2e/m69/t_e2e_repro_infra_linux_sysctl_vm.nim",
-                "tests/e2e/m69/"
-                "t_e2e_repro_infra_linux_tmpfilesrule_vm.nim",
-                "tests/e2e/m69/t_e2e_repro_infra_linux_udevrule_vm.nim",
-                "tests/e2e/m69/"
-                "t_e2e_repro_infra_os_hostname_posix_vm.nim",
-                "tests/e2e/m69/"
-                "t_e2e_repro_infra_os_timezone_posix_vm.nim",
-                "tests/e2e/m69/t_e2e_repro_infra_passwd_group_vm.nim",
-                "tests/e2e/m69/"
-                "t_e2e_repro_infra_plan_apply_convergent.nim",
-                "tests/e2e/m69/"
-                "t_e2e_repro_infra_systemd_system_timer_vm.nim",
-                "tests/e2e/m69/t_e2e_repro_system_command_family.nim",
-                "tests/e2e/m69/"
-                "t_e2e_windows_optional_feature_and_capability.nim",
-                "tests/e2e/m69/t_e2e_windows_registry_system_scope.nim",
-                "tests/e2e/m69/t_e2e_windows_vs_installer.nim",
-                "tests/e2e/m74/"
-                "t_integration_scoop_manifest_bin_resolution.nim",
-                "tests/e2e/m75/"
-                "t_integration_scoop_probe_gui_and_timeout.nim",
-                "tests/e2e/m76/"
-                "t_integration_stow_byte_identical_target_is_cache_hit.nim",
-                "tests/e2e/m77/"
-                "t_integration_scoop_installed_version_survives_bucket_drift.nim",
-                "tests/e2e/m80/"
-                "t_integration_plan_classifier_bucket_drift_is_cache_hit.nim",
-                "tests/e2e/m81/"
-                "t_integration_privileged_broker_single_prompt.nim",
-                "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
-                "tests/e2e/scoop/t_e2e_scoop_adapter_diagnostics.nim",
-                "tests/e2e/scoop/"
-                "t_e2e_scoop_adapter_realize_and_launch.nim",
-                "tests/e2e/scoop/t_e2e_scoop_practical_hardening.nim",
-                "tests/integration/t_r2_iso_boot.nim",
-                "tests/integration/t_r9_systemd_boot.nim",
-            ],
-        )
+        shim_source = "libs/ct_test_unittest_parallel/tests/t_smoke_ct_test_unittest_parallel.nim"
+        self.assertEqual(incomplete, [shim_source])
+        shim_cases = next(item["catalogCases"] for item in data["tests"] if item["source"] == shim_source)
+        self.assertEqual({case["name"] for case in shim_cases}, {
+            "t_smoke_ct_test_unittest_parallel::registry_populated_at_module_init",
+            "t_smoke_ct_test_unittest_parallel::body_runs_under_any_protocol_mode",
+        })
+        # The shim's documented protocol emits these four fields only. Pin
+        # both the retained fields and exact omissions so the exception cannot
+        # hide a new source, lost cases or an unexpected provider regression.
+        for case in shim_cases:
+            for field in ("name", "suite", "file", "line"):
+                self.assertIsNotNone(case[field])
+            for field in ("bodyHash", "group", "threadsRequired", "xfail", "tags", "deterministic"):
+                self.assertIsNone(case[field])
         # Every other catalog-counted case carries the full field set.
         for item in data["tests"]:
             if item["source"] in incomplete:
@@ -5014,7 +5119,7 @@ test "incomplete name" and:
         So the per-case detail goes to a build-local artifact instead, and
         this test is what keeps it there.
 
-        The same argument disqualifies every other host-dependent field,
+        The same argument disqualifies ephemeral host-dependent fields,
         and this test now checks all of them rather than naming a property
         it only partly enforced: no absolute path of ANY kind (not just the
         repo root), no timestamp, and no `footprint` / `host` / `tools` /
@@ -5067,6 +5172,11 @@ test "incomplete name" and:
         # No timestamp, and no absolute repo root.
         self.assertNotIn("generatedAt", tracked["metadata"])
         self.assertEqual(tracked["metadata"]["repoRoot"], ".")
+        # Stable platform identity survives the split so cross-host currency
+        # can select an exact case ledger without retaining machine details.
+        self.assertEqual(
+            tracked["metadata"]["catalogHost"], inventory.current_catalog_host()
+        )
 
         # The host-dependent block is GONE from the tracked half, not
         # merely sanitized in place. Each of these changes on every build
@@ -5194,8 +5304,13 @@ test "incomplete name" and:
         # A second render with unique sentinels below additionally catches a
         # value leaked into prose rather than a table row.
         runtime = detail["runtime"]
+        def environment_row(key, value):
+            # Markdown table cells flatten newlines; the environment JSON
+            # still retains the original value, including every line.
+            return f"| {key} | {str(value).replace(chr(10), ' ')} |"
+
         volatile_rows = [
-            f"| {key} | {block[key]} |"
+            environment_row(key, block[key])
             for block in (
                 runtime["host"],
                 runtime["tools"],
@@ -5218,7 +5333,8 @@ test "incomplete name" and:
             "tools": ("python", "mcl-tool-version-621ad98ce0d04e12"),
             "environment": (
                 "MCL_TEST_RECORDED_ENVIRONMENT",
-                "mcl-recorded-environment-8d29bf9d13e843e8",
+                "mcl-recorded-environment-8d29bf9d13e843e8\n"
+                "mcl-recorded-environment-second-line-b8ea6102",
             ),
         }
         sentinel_input_runtime = sentinel_data["metadata"]["runtime"]
@@ -5239,8 +5355,9 @@ test "incomplete name" and:
         def assert_sentinels_are_untracked(candidate_report):
             for block_name, (key, value) in runtime_sentinels.items():
                 with self.subTest(volatile_sentinel=block_name):
-                    self.assertNotIn(f"| {key} | {value} |", candidate_report)
-                    self.assertNotIn(value, candidate_report)
+                    self.assertNotIn(environment_row(key, value), candidate_report)
+                    for line in value.splitlines():
+                        self.assertNotIn(line, candidate_report)
 
         assert_sentinels_are_untracked(sentinel_report)
         # Architecture names are also suite vocabulary.  On an arm64 host,
@@ -5251,9 +5368,13 @@ test "incomplete name" and:
         for block_name, (key, value) in runtime_sentinels.items():
             with self.subTest(relocated_sentinel=block_name):
                 self.assertIn(
-                    f"| {key} | {value} |", sentinel_environment_report
+                    environment_row(key, value), sentinel_environment_report
                 )
-                self.assertIn(value, sentinel_environment_report)
+                for line in value.splitlines():
+                    self.assertIn(line, sentinel_environment_report)
+                self.assertEqual(
+                    sentinel_detail["runtime"][block_name][key], value
+                )
 
         # (3) No footprint SIZES. Which paths are measured is a property
         # of the script and stays; how big they are is a property of the
@@ -6479,9 +6600,9 @@ test "incomplete name" and:
         tracked artifact nothing compares to anything is a document, not
         evidence.
 
-        `metadata`, `timing`, `runnerSummaries` and `footprint` are excluded:
-        they record the head, the host and the build tree, so they differ on
-        every commit and every machine by design.
+        `timing`, `runnerSummaries`, `footprint` and ephemeral metadata are
+        excluded. `metadata.catalogHost` is retained because it identifies
+        which exact platform cases to subtract before comparing catalogs.
         """
         self.require_fully_built_test_tree()
         live = self.inventory_data()
@@ -6498,39 +6619,27 @@ test "incomplete name" and:
             "scripts/reprobuild_suite_inventory.py",
         )
 
-        # …and the catalog-derived half, which is the part that has no cheap
-        # gate and never can have one.
+        # Resolve platform differences through the SAME exact-name gate this
+        # assertion relies on, so running only currency still validates its
+        # normalization oracle. No platform-conditioned source is exempted.
+        self.assert_linux_darwin_catalog_delta_is_exact(live)
+        exclusive, _ = self.linux_darwin_catalog_ledger()
+        quarantine_by_os = self.catalog_quarantine_by_os()
         self.assertEqual(
-            tracked["static"]["sourceCaseCount"],
-            live["static"]["sourceCaseCount"],
+            inventory.catalog_currency_projection(tracked, exclusive, quarantine_by_os),
+            inventory.catalog_currency_projection(live, exclusive, quarantine_by_os),
+            "the tracked inventory's catalog differs after exact platform "
+            "normalization; regenerate it on a fully built tree",
         )
-        self.assertEqual(
-            tracked["catalogEnumeration"]["countSourceCounts"],
-            live["catalogEnumeration"]["countSourceCounts"],
-        )
-        self.assertEqual(
-            [
-                (item["source"], item["reason"])
-                for item in tracked["catalogEnumeration"]["quarantine"]
-            ],
-            [
-                (item["source"], item["reason"])
-                for item in live["catalogEnumeration"]["quarantine"]
-            ],
-        )
-        # Per ENTRY, not merely in aggregate: two offsetting errors sum to the
-        # same total. This is the surface `expected_nim_total` pins as a
-        # single integer, held here per source instead.
-        self.assertEqual(
-            {
-                item["source"]: (item["countSource"], item["sourceCaseCount"])
-                for item in tracked["tests"]
-            },
-            {
-                item["source"]: (item["countSource"], item["sourceCaseCount"])
-                for item in live["tests"]
-            },
-        )
+        if tracked["metadata"]["catalogHost"] == live["metadata"]["catalogHost"]:
+            # On the recording host, even normalization is unnecessary: keep
+            # the original exact totals, provenance census and quarantine.
+            self.assertEqual(tracked["static"]["sourceCaseCount"], live["static"]["sourceCaseCount"])
+            self.assertEqual(tracked["catalogEnumeration"]["countSourceCounts"], live["catalogEnumeration"]["countSourceCounts"])
+            self.assertEqual(
+                [(item["source"], item["reason"]) for item in tracked["catalogEnumeration"]["quarantine"]],
+                [(item["source"], item["reason"]) for item in live["catalogEnumeration"]["quarantine"]],
+            )
 
     def test_static_inventory_covers_every_declared_test(self):
         self.require_fully_built_test_tree()
@@ -7099,47 +7208,14 @@ compileProfileBinary()
                     break
         return result
 
-    def assert_linux_darwin_catalog_delta_is_exact(self, data):
-        """Pin every qualified identity that differs between Linux and Darwin.
+    @staticmethod
+    def linux_darwin_catalog_ledger():
+        """Exact source-scoped platform cases; Linux expectations are source-derived.
 
-        These are the complete source-scoped symmetric differences from real
-        catalogs built at the same revision on both hosts.  Most are honest
-        real-case/sentinel swaps and therefore cardinality-neutral.  The six
-        asymmetric sources explain the aggregate exactly: NDE0-A contributes
-        eleven extra Linux cases; M9.R.30.2's relocation test one more;
-        loopback and stackable hooks contribute one each; SIP launch, FHS
-        stubs, and watch contribute four, two, and a net six extra Darwin
-        cases.  That made the Linux total exactly TWO greater.
-
-        The 2026-10-14 reconciliation added forty-one asymmetric sources
-        (thirty-four Linux x86_64 HLX gates with a Darwin sentinel, seven
-        Linux-only gates with nothing on Darwin) and dropped one deleted
-        swap, so the Linux total is now FIFTY-TWO greater.  Their Linux
-        names come from the Linux catalog; their Darwin names were read off
-        the literal `else:` branch of each source, NOT from a Darwin catalog
-        -- this host checks only the Linux side, and a Darwin run of this
-        method is what confirms the other.  The arithmetic is asserted at the
-        end of this method rather than only claimed here.
-
-        A lexer-derived census below covers all seventy-three enrolled
-        sources in which a Linux/macOS gate owns a real test declaration.
-        Seventeen gates select the same catalog on both hosts; the remaining
-        fifty-six are exactly the keys of ``exclusive``.  This distinction
-        keeps a new gated source from hiding behind a cardinality-neutral
-        catalog swap -- and it worked: six sources had joined the census at
-        one reconciliation, five of them cardinality-neutral and one not, and
-        forty-seven at the next.
+        Darwin additions are measured through real --list-json binaries at
+        4f7d8624d7; their Linux exclusions are read from explicit when branches.
+        The census and live-name gate below validate both sides on their host.
         """
-        if sys.platform.startswith("linux"):
-            host = "linux"
-        elif sys.platform == "darwin":
-            host = "darwin"
-        else:
-            # This invariant describes the two hosts that publish the exact
-            # suite totals below.  Other hosts retain the aggregate guard and
-            # their own platform-specific catalog assertions.
-            return
-
         exclusive = {
             "libs/repro_build_engine/tests/"
             "t_engine_macos_sip_safe_launch.nim": {
@@ -7157,6 +7233,12 @@ compileProfileBinary()
                     "Portable-Macos-Sandbox-Tools B1: macOS SIP-safe "
                     "monitored launch::resolveNonSipShell prefers the "
                     "CT_SANDBOX_TOOLS_DIR drop-in",
+                    "Portable-Macos-Sandbox-Tools B1: macOS SIP-safe "
+                    "monitored launch::resolveNonSipShell accepts a non-SIP "
+                    "bash when PATH has no `sh`",
+                    "Portable-Macos-Sandbox-Tools B1: macOS SIP-safe "
+                    "monitored launch::nonSipShellSearchReport explains an "
+                    "unresolvable PATH",
                 },
             },
             "libs/repro_dsl_stdlib/tests/t_nde0a_apt_jammy.nim": {
@@ -7313,7 +7395,9 @@ compileProfileBinary()
             "tests/unit/t_m9r14f_2_rpath_patching.nim": {
                 "linux": {
                     "DSL-port M9.R.14f.2 — install-mirror RPATH patching::"
-                    "linux_end_to_end_patchelf_against_synthetic_elf"
+                    "linux_end_to_end_patchelf_against_synthetic_elf",
+                    "DSL-port M9.R.14f.2 — install-mirror RPATH patching::"
+                    "linux_preserves_prelinked_libc_from_matching_link_directory",
                 },
                 "darwin": {
                     "DSL-port M9.R.14f.2 — install-mirror RPATH patching::"
@@ -7926,7 +8010,182 @@ compileProfileBinary()
             },
         }
 
+        # Reconciled at 4f7d8624d7: Darwin names measured from real binaries,
+        # Linux names/exclusions read from each explicit compile-time branch.
+        # The live-name gate below checks the expectations on either host.
+        exclusive.update({
+            "libs/repro_daemon_core/tests/t_daemon_launchd_label.nim": {
+                "linux": set(),
+                "darwin": {
+                    "a launchd label identifies the endpoint, not its basename::cleaning up one endpoint leaves another endpoint's daemon running",
+                    "a launchd label identifies the endpoint, not its basename::cleanup given a relative endpoint stops the job of its absolute form",
+                    "a launchd label identifies the endpoint, not its basename::cleanup leaves a basename-labelled registration for another endpoint",
+                    "a launchd label identifies the endpoint, not its basename::cleanup removes a basename-labelled registration for its own endpoint",
+                    "a launchd label identifies the endpoint, not its basename::launchd keeps two same-basename daemons alive side by side",
+                },
+            },
+            "libs/repro_daemon_core/tests/t_daemon_writer_identity.nim": {
+                "linux": set(),
+                "darwin": {
+                    "writer identity recognises a live writer and only a dead one::a denied process is unknown while a denied Darwin boot probe permits liveness",
+                    "writer identity recognises a live writer and only a dead one::calendar correction still requires evidence of absence or pid reuse",
+                    "writer identity recognises a live writer and only a dead one::calendar corrections in either direction preserve a real live writer",
+                    "writer identity recognises a live writer and only a dead one::legacy writers survive denied boot probes and retain denied process probes",
+                },
+            },
+            "libs/repro_home_apply/tests/t_macos_archives.nim": {
+                "linux": set(),
+                "darwin": {
+                    "GM4c: app bundles out of archives::a APFS disk image yields the intact bundle and is detached",
+                    "GM4c: app bundles out of archives::a HFS+ disk image yields the intact bundle and is detached",
+                    "GM4c: app bundles out of archives::a bundle in an installer package's payload is copied out without running the package",
+                    "GM4c: app bundles out of archives::a busy volume is detached by the forced fallback",
+                    "GM4c: app bundles out of archives::a corrupt disk image fails to attach and nothing is attached",
+                    "GM4c: app bundles out of archives::a disk image with a licence agreement is declined, not accepted",
+                    "GM4c: app bundles out of archives::a gzip tarball yields the intact bundle",
+                    "GM4c: app bundles out of archives::a missing bundle path fails naming what the image holds, and the image is detached",
+                    "GM4c: app bundles out of archives::a package on a disk image is expanded on the way to its bundle",
+                    "GM4c: app bundles out of archives::a path through the image's Applications symlink is refused (it would read the host's /Applications)",
+                    "GM4c: app bundles out of archives::a zip is expanded with ditto and keeps the signature intact",
+                    "GM4c: app bundles out of archives::bundle paths that leave the archive are refused before any work",
+                },
+            },
+            "libs/repro_home_apply/tests/t_macos_installer_app_realize.nim": {
+                "linux": set(),
+                "darwin": {
+                    "installer applications: confined realization::a product whose bundle identifier differs from the record is refused and nothing is published",
+                    "installer applications: confined realization::a stray file in the prefix root is refused",
+                    "installer applications: confined realization::a zip-delivered installer is realized the same way",
+                    "installer applications: confined realization::an installer signed by another team is never run",
+                    "installer applications: confined realization::an installer that exits 0 without installing the product is refused and nothing is published",
+                    "installer applications: confined realization::an installer that exits non-zero is refused, quoting its output",
+                    "installer applications: confined realization::an installer whose product is a single bundle places the bundle",
+                    "installer applications: confined realization::another bundle in the product signed by another team is refused",
+                    "installer applications: confined realization::network access is refused by the sandbox",
+                    "installer applications: confined realization::the installer's arguments are part of the prefix identity",
+                    "installer applications: confined realization::the installer's product is realized as a folder, verified, placed, re-observed and removed",
+                    "installer applications: confined realization::writes outside the prefix and preference writes are refused by the sandbox, and the realization still succeeds",
+                    "installer applications: the confined runner::a host without sandbox-exec refuses to run the installer",
+                    "installer applications: the confined runner::an installer still running at the timeout is killed and fails",
+                    "installer applications: the confined runner::the policy names every writable path resolved and escaped",
+                },
+            },
+            "libs/repro_home_resources/tests/t_macos_app_bundle_placement.nim": {
+                "linux": set(),
+                "darwin": {
+                    "GM4c: macos.appBundle placement::a bundle placed at home scope lands in the scratch home only",
+                    "GM4c: macos.appBundle placement::a bundle placed at system scope lands under the system root",
+                    "GM4c: macos.appBundle placement::a bundle whose executable is named by its directory survives staging",
+                    "GM4c: macos.appBundle placement::a managed bundle is replaced by a new version",
+                    "GM4c: macos.appBundle placement::a pinned identity refuses a different bundle",
+                    "GM4c: macos.appBundle placement::a refused replacement leaves the managed bundle in place",
+                    "GM4c: macos.appBundle placement::a tampered bundle is refused and nothing is placed",
+                    "GM4c: macos.appBundle placement::an unmanaged bundle at the target path is never replaced",
+                    "GM4c: macos.appBundle placement::bundles staged together are committed or discarded without touching their targets until committed",
+                    "GM4c: macos.appBundle placement::home scope is ~/Applications and system scope is /Applications",
+                    "GM4c: macos.appBundle placement::removal removes only the bundle",
+                    "GM4c: macos.appBundle placement::the identity distinguishes versions and survives a copy",
+                    "GM4c: macos.appBundle trust verification::a bundle matching its declarations passes the relaxed policy",
+                    "GM4c: macos.appBundle trust verification::a declared team id that is not a team id is refused",
+                    "GM4c: macos.appBundle trust verification::a team-id mismatch is refused",
+                    "GM4c: macos.appBundle trust verification::an unsigned bundle is refused at the signature check",
+                    "GM4c: macos.appBundle trust verification::bundle identifier and version mismatches are refused",
+                    "GM4c: macos.appBundle trust verification::the strict policy refuses an ad-hoc team id (real codesign -R)",
+                    "GM4c: macos.appBundle trust verification::the strict policy refuses an un-notarized bundle (real spctl)",
+                },
+            },
+            "libs/repro_home_resources/tests/t_macos_app_folder_placement.nim": {
+                "linux": set(),
+                "darwin": {
+                    "installer applications: folder identity and placement::a folder is placed whole and observed with its folder identity",
+                    "installer applications: folder identity and placement::a folder without its product bundle is refused",
+                    "installer applications: folder identity and placement::a pinned folder is re-placed against its recorded identity (rollback) and replaces the managed one",
+                    "installer applications: folder identity and placement::a pinned folder refuses a folder with a different second bundle",
+                    "installer applications: folder identity and placement::a pinned folder whose bundle was tampered with is refused",
+                    "installer applications: folder identity and placement::a product bundle not directly in the folder is refused",
+                    "installer applications: folder identity and placement::a staged folder whose product bundle mismatches is refused and nothing is placed",
+                    "installer applications: folder identity and placement::a tampered second bundle refuses the folder",
+                    "installer applications: folder identity and placement::an unmanaged folder at the target is never replaced",
+                    "installer applications: folder identity and placement::the folder identity lists the top-level bundles in byte order",
+                    "installer applications: folder identity and placement::the installer check needs Contents/Info.plist and the team",
+                },
+            },
+            "libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim": {
+                "linux": set(),
+                "darwin": {
+                    "GM7: running applications::a process started from inside a bundle is found, and only there",
+                    "GM7: what a vendor update is::a downgrade is never a vendor update",
+                    "GM7: what a vendor update is::a newer build of the same application and team is a candidate",
+                    "GM7: what a vendor update is::a tampered newer build is refused (signature check)",
+                    "GM7: what a vendor update is::another application, another team or an unsigned copy is not",
+                    "GM7: what a vendor update is::identity bytes round-trip; a folder identity is not a bundle",
+                    "GM7: what a vendor update is::the bytes must be the bundle's own",
+                    "GM7: what a vendor update is::the relaxed policy accepts the newer build on disk",
+                    "GM7: what a vendor update is::the strict policy refuses an ad-hoc vendor update",
+                },
+            },
+            "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim": {
+                "linux": set(),
+                "darwin": {
+                    "Darwin recipe compilers reach platform frameworks::a cached clang success is invalidated when wrapper header flags change",
+                    "Darwin recipe compilers reach platform frameworks::an unwrapped Nix clang that relies on ambient SDKROOT is refused while its wrapper succeeds",
+                    "Darwin recipe compilers reach platform frameworks::disk probe markers preserve case-sensitive compiler flags",
+                    "Darwin recipe compilers reach platform frameworks::framework-incompatible GCC is refused with compiler SDK and remedy",
+                    "Darwin recipe compilers reach platform frameworks::implicit selection prefers real clang over an earlier nixpkgs gcc cc",
+                },
+            },
+            "tests/e2e/gm4c/t_e2e_dmg_app_bundle_install_and_rollback.nim": {
+                "linux": set(),
+                "darwin": {
+                    "GM4c: e2e_dmg_app_bundle_install_and_rollback::a DMG-realized package installs its app bundle into ~/Applications, upgrades, and rollback restores then removes it",
+                    "GM4c: e2e_dmg_app_bundle_install_and_rollback::a declared command the bundle does not carry is refused at realization; nothing is placed or published",
+                    "GM4c: e2e_dmg_app_bundle_install_and_rollback::a profile `binaries` name the application does not provide is refused at plan time, before anything is realized",
+                    "GM4c: e2e_dmg_app_bundle_install_and_rollback::a rollback whose earlier bundle fails verification fails with a structured error and leaves the current generation intact",
+                    "GM4c: e2e_dmg_app_bundle_install_and_rollback::a staged copy that fails verification fails the apply with a structured error naming package, bundle and check; nothing is placed and nothing is left behind",
+                    "GM4c: e2e_dmg_app_bundle_install_and_rollback::an app the user placed at the same path is never replaced",
+                    "GM4c: e2e_dmg_app_bundle_install_and_rollback::an application's declared command runs from the profile bin directory against the placed bundle, and leaves with it",
+                    "GM4c: e2e_dmg_app_bundle_install_and_rollback::negative control: a DMG whose bundle's signature does not verify is refused, nothing is placed, nothing stays attached",
+                },
+            },
+            "tests/e2e/gm4c/t_e2e_installer_app_install_and_rollback.nim": {
+                "linux": set(),
+                "darwin": {
+                    "installer applications: e2e_installer_app_install_and_rollback::an installer application's product folder is installed into ~/Applications, upgraded, and rollback restores then removes it",
+                    "installer applications: e2e_installer_app_install_and_rollback::the plan names the folder an installer application places",
+                },
+            },
+            "tests/e2e/gm7/t_e2e_app_vendor_update_and_running_app.nim": {
+                "linux": set(),
+                "darwin": {
+                    "GM7: e2e_app_vendor_update_and_running_app::a running application is not replaced until it quits",
+                    "GM7: e2e_app_vendor_update_and_running_app::a vendor update is kept, replaced by a newer declared version, and an older copy is still drift",
+                    "GM7: the profile bin directory the export publishes::is the directory the apply writes launchers into",
+                },
+            },
+            "tests/e2e/gm7/t_e2e_home_apply_applies_declared_concerns.nim": {
+                "linux": set(),
+                "darwin": {
+                    "GM7: e2e_home_apply_applies_declared_concerns::applies: [applications] on a profile every package of which realizes still writes no stow link, user file or block",
+                    "GM7: e2e_home_apply_applies_declared_concerns::applies: [applications] places the application and writes nothing of the other concerns, a package with no realization included",
+                    "GM7: e2e_home_apply_applies_declared_concerns::narrowing releases, rollback restores, and rolling back to the narrowed generation releases instead of removing",
+                    "GM7: e2e_home_apply_applies_declared_concerns::negative control: without the declaration the same profile fails at step 7, and applies every concern once it can",
+                },
+            },
+            "tests/e2e/hcr-linux-threads/t_integration_hcr_linux_concurrent_patch_gate_conditions.nim": {
+                "linux": {
+                    "HLX-M4 fixture: a §6.3 quiescence timeout is retried, counted and writes nothing::a deadline nobody can meet is an abort on every attempt, never a lost write",
+                    "HLX-M4 fixture: a §6.3 quiescence timeout is retried, counted and writes nothing::the host condition is readable",
+                },
+                "darwin": {
+                    "HLX-M4 fixture: a §6.3 quiescence timeout is retried, counted and writes nothing::the HLX-M4 fixture is linux-x86_64-only",
+                },
+            },
+        })
+
         catalog_identical = {
+            "tests/e2e/m83/t_e2e_home_facts_from_isolated_plan.nim",
+            "tests/e2e/m83/t_e2e_nix_reads_data_like_profile.nim",
+            "tests/e2e/m83/t_e2e_nix_reads_intent_like_export.nim",
             "tests/e2e/codetracer-subset/"
             "t_e2e_codetracer_in_place_project_file.nim",
             "tests/e2e/local-build-engine/"
@@ -8000,26 +8259,369 @@ compileProfileBinary()
             "libs/repro_daemon_core/tests/"
             "t_auto_started_daemon_does_not_hold_callers_working_directory.nim",
         }
-        gated_sources = self.platform_gated_test_sources(data)
-        self.assertEqual(gated_sources, set(exclusive) | catalog_identical)
-        # These two sizes are NOT a restatement of the set equality above:
-        # they refuse a disposition that moves a source between the two
-        # tables without saying so. The equality alone is satisfied by any
-        # partition of the census.
-        # 16/11 -> 56/17 at the 2026-10-14 reconciliation: one deleted
-        # source out of `exclusive`, forty-one in, six into
-        # `catalog_identical`.
-        self.assertEqual(len(exclusive), 56)
-        self.assertEqual(len(catalog_identical), 17)
+        return exclusive, catalog_identical
+
+    @staticmethod
+    def source_platform_case_names(source, defines=()):
+        """Derive literal identities selected by each supported host's gates.
+
+        This is independent of the live host: a new Linux-only declaration
+        must invalidate the ledger on Darwin too. Every condition enclosing
+        a platform-owned declaration is evaluated; unknown expressions fail
+        rather than disappear. Other declarations remain catalog-checked.
+        """
+        text = (REPO_ROOT / source).read_text()
+        tokens = inventory.nim_tokens(text)
+        depths = inventory.nim_outer_depths(tokens)
+        declarations = inventory.nim_declarations(tokens)
+
+        def extent(header, colon=None):
+            if colon is None:
+                colon = header + 1
+                while colon < len(tokens) and not (
+                    tokens[colon].value == ":" and depths[colon] == depths[header]
+                ):
+                    colon += 1
+            body = inventory.nim_next_token(tokens, colon)
+            if body is None:
+                raise AssertionError((source, tokens[header], "empty branch"))
+            end = len(tokens)
+            for position in range(body + 1, len(tokens)):
+                token = tokens[position]
+                if (token.kind != "newline" and token.line > tokens[body].line
+                        and token.column <= tokens[header].column
+                        and depths[position] == depths[header]):
+                    end = position
+                    break
+            return colon, body, end
+
+        positions = {id(token): index for index, token in enumerate(tokens)}
+
+        # Bind only lexer-visible literal consts and literal for-loop values.
+        # Fixture strings/comments must never supply an identifier's value.
+        bindings = []
+        constant_positions = set()
+        line_heads = []
+        previous_line = None
+        for index, token in enumerate(tokens):
+            if token.kind != "newline" and token.line != previous_line:
+                line_heads.append(index)
+                previous_line = token.line
+
+        def lexical_scope_end(header):
+            parents = []
+            for position in line_heads:
+                if position >= header:
+                    break
+                if tokens[position].column >= tokens[header].column:
+                    continue
+                end = next((candidate for candidate in line_heads
+                            if candidate > position and
+                            tokens[candidate].column <= tokens[position].column),
+                           len(tokens))
+                if header < end:
+                    parents.append((position, end))
+            return parents[-1][1] if parents else len(tokens)
+
+        for position, token in enumerate(tokens):
+            if inventory.nim_identifier_matches(token, "const"):
+                name = inventory.nim_next_token(tokens, position)
+                if name is None:
+                    continue
+                candidates = [name]
+                if tokens[name].line != token.line:
+                    candidates = []
+                    for cursor in range(name, len(tokens)):
+                        current = tokens[cursor]
+                        if (current.kind != "newline" and current.line > tokens[name].line
+                                and current.column <= token.column):
+                            break
+                        if (current.kind == "identifier"
+                                and cursor + 2 < len(tokens)
+                                and tokens[cursor + 1].value == "="):
+                            candidates.append(cursor)
+                for cursor in candidates:
+                    if (cursor + 2 < len(tokens) and tokens[cursor+1].value == "="
+                            and tokens[cursor+2].kind == "string"):
+                        tail = inventory.nim_next_token(tokens, cursor+2)
+                        if tail is None or tokens[tail].line > tokens[cursor+2].line:
+                            bindings.append((tokens[cursor].value,
+                                             [ast.literal_eval(tokens[cursor+2].value)],
+                                             cursor, lexical_scope_end(position)))
+                            constant_positions.add(cursor)
+            elif inventory.nim_identifier_matches(token, "for"):
+                if position + 4 >= len(tokens):
+                    continue
+                name, keyword, bracket = tokens[position+1:position+4]
+                if (name.kind != "identifier" or keyword.value != "in"
+                        or bracket.value != "["):
+                    continue
+                cursor = position + 4
+                values = []
+                while cursor < len(tokens) and tokens[cursor].value != "]":
+                    item = tokens[cursor]
+                    if item.kind == "string":
+                        values.append(ast.literal_eval(item.value))
+                    elif item.value != "," and item.kind != "newline":
+                        break
+                    cursor += 1
+                if (cursor + 1 < len(tokens) and tokens[cursor].value == "]"
+                        and tokens[cursor+1].value == ":"):
+                    _, body, end = extent(position, cursor+1)
+                    bindings.append((name.value, values, body, end))
+
+        def literal_names(expression, position):
+            values = [""]
+            for index, token in enumerate(expression):
+                if index % 2:
+                    if token.value != "&":
+                        return None
+                    continue
+                if token.kind == "string":
+                    parts = [ast.literal_eval(token.value)]
+                elif token.kind == "identifier":
+                    # An additional nonliteral binding makes lexical name
+                    # resolution ambiguous; never infer its runtime value.
+                    if any(candidate.kind == "identifier"
+                           and candidate.value == token.value
+                           and index + 1 < len(tokens)
+                           and tokens[index+1].value == "="
+                           and index not in constant_positions
+                           for index, candidate in enumerate(tokens)):
+                        return None
+                    matches = [values for name, values, body, end in bindings
+                               if name == token.value and body <= position < end]
+                    if len(matches) != 1:
+                        return None
+                    parts = matches[0]
+                else:
+                    return None
+                values = [prefix + part for prefix in values for part in parts]
+            return values if expression and len(expression) % 2 else None
+
+        suites = []
+        tests = []
+        for declaration in declarations:
+            header = positions[id(declaration.token)]
+            expression = [token for token in
+                          tokens[declaration.expression_start:declaration.colon]
+                          if token.kind != "newline"]
+            names = literal_names(expression, header)
+            _, body, end = extent(header, declaration.colon)
+            if declaration.kind == "suite":
+                suites.append((header, body, end, names))
+            else:
+                enclosing = [suite for suite in suites
+                             if suite[1] <= header < suite[2]]
+                suite_names = enclosing[-1][3] if enclosing else [""]
+                qualified = ([f"{suite}::{name}" for suite in suite_names
+                              for name in names] if suite_names and names else None)
+                # An opaque declaration common to both hosts cancels out;
+                # an opaque exclusive declaration is rejected below.
+                tests.append((header, qualified or [("nonliteral", header)]))
+
+        chains = []
+        for header, token in enumerate(tokens):
+            if not inventory.nim_identifier_matches(token, "when"):
+                continue
+            branches = []
+            cursor = header
+            while True:
+                colon, body, end = extent(cursor)
+                condition = " ".join(token.value for token in tokens[cursor+1:colon]
+                                     if token.kind != "newline")
+                branches.append((condition, body, end))
+                if end == len(tokens) or not any(
+                    inventory.nim_identifier_matches(tokens[end], keyword)
+                    for keyword in ("elif", "else")
+                ):
+                    break
+                cursor = end
+            platform_chain = any(
+                re.search(r"\bdefined\s*\(?\s*(?:linux|macosx)\b", condition)
+                for condition, _, _ in branches)
+            chains.append((platform_chain, branches))
+
+        result = {}
+        # The two audited consumers wrap a platform branch in the shared
+        # literal platform constant. Read its definition rather than assume
+        # that an arbitrary named condition is true on either host.
+        support_tokens = inventory.nim_tokens((REPO_ROOT /
+            "libs/repro_test_support/src/repro_test_support.nim").read_text())
+        support_conditions = []
+        for index, token in enumerate(support_tokens):
+            if token.value != "isNixSupported":
+                continue
+            cursor = index + 1
+            if support_tokens[cursor].value == "*":
+                cursor += 1
+            if support_tokens[cursor].value != "=":
+                continue
+            end = cursor + 1
+            while end < len(support_tokens) and support_tokens[end].kind != "newline":
+                end += 1
+            support_conditions.append(" ".join(token.value for token in
+                                               support_tokens[cursor+1:end]))
+        if len(support_conditions) != 1:
+            raise AssertionError("isNixSupported must retain one literal definition")
+        for host in ("linux", "darwin"):
+            defined = set(defines) | {"posix", "unix"} | (
+                {"linux", "amd64", "x86_64"} if host == "linux"
+                else {"macosx", "arm64", "aarch64"})
+
+            def evaluate(condition, resolving_support=False):
+                expression = re.sub(
+                    r"\bdefined\s*(?:\(\s*(\w+)\s*\)|(\w+))",
+                    lambda match: str((match[1] or match[2]) in defined), condition)
+                expression = re.sub(r"\btrue\b", "True", expression)
+                expression = re.sub(r"\bfalse\b", "False", expression)
+                node = ast.parse(expression, mode="eval")
+                allowed = (ast.Expression, ast.BoolOp, ast.UnaryOp, ast.And,
+                           ast.Or, ast.Not, ast.Constant, ast.Load, ast.Name)
+                if any(not isinstance(item, allowed) for item in ast.walk(node)):
+                    raise AssertionError((source, host, "unsupported gate", condition))
+                def boolean(item):
+                    if isinstance(item, ast.Expression):
+                        return boolean(item.body)
+                    if isinstance(item, ast.Constant) and isinstance(item.value, bool):
+                        return item.value
+                    if isinstance(item, ast.Name):
+                        if item.id == "isNixSupported" and not resolving_support:
+                            return evaluate(support_conditions[0], True)
+                        raise AssertionError((source, host, "unsupported gate", condition))
+                    if isinstance(item, ast.UnaryOp):
+                        return not boolean(item.operand)
+                    values = [boolean(child) for child in item.values]
+                    return all(values) if isinstance(item.op, ast.And) else any(values)
+                return boolean(node)
+
+            selected = set()
+            for position, names in tests:
+                included = True
+                platform_owned = any(
+                    platform_chain and any(body <= position < end
+                                           for _, body, end in branches)
+                    for platform_chain, branches in chains)
+                if not platform_owned:
+                    selected.update(names)
+                    continue
+                for _, branches in chains:
+                    if not any(body <= position < end for _, body, end in branches):
+                        continue
+                    taken = False
+                    for condition, body, end in branches:
+                        active = not taken and (not condition or evaluate(condition))
+                        taken = taken or active
+                        if body <= position < end:
+                            included = included and active
+                if included:
+                    selected.update(names)
+            result[host] = selected
+        if any(not isinstance(name, str) for name in
+               result["linux"] ^ result["darwin"]):
+            raise AssertionError((source, "nonliteral platform-exclusive declaration"))
+        return result
+
+    def assert_platform_catalog_ledger_census(self, data):
+        exclusive, identical = self.linux_darwin_catalog_ledger()
+        self.assertEqual(self.platform_gated_test_sources(data), set(exclusive) | identical)
+        self.assertEqual(len(exclusive), 69)
+        self.assertEqual(len(identical), 20)
+        specs, _ = inventory.parse_repro_tests(REPO_ROOT)
+        defines_by_source = {spec.source: spec.defines for spec in specs}
+        for source in sorted(set(exclusive) | identical):
+            names = self.source_platform_case_names(source, defines_by_source[source])
+            expected = exclusive.get(source, {"linux": set(), "darwin": set()})
+            self.assertEqual(names["linux"] - names["darwin"], expected["linux"], source)
+            self.assertEqual(names["darwin"] - names["linux"], expected["darwin"], source)
+
+    def test_platform_catalog_ledger_covers_every_gated_source(self):
+        """A stale platform ledger fails even before all binaries can be built."""
+        nim_specs, _ = inventory.parse_repro_tests(REPO_ROOT)
+        self.assert_platform_catalog_ledger_census({"tests": [
+            {"source": spec.source, "language": "nim"} for spec in nim_specs
+        ]})
+        # Adversarial source controls: an unknown condition or an unrelated
+        # literal must not manufacture a supposedly exact exclusive name.
+        fixtures = {
+            "unknown_nested_gate": (
+                'suite "scope":\n'
+                '  when defined(linux):\n'
+                '    when compilerOption("threads"):\n'
+                '      test "literal": discard\n', "unsupported gate"),
+            "unrelated_local_constant": (
+                'proc other() =\n'
+                '  const name = "decoy"\n'
+                'let name = runtimeName()\n'
+                'suite "scope":\n'
+                '  when defined(linux):\n'
+                '    test name: discard\n', "nonliteral platform-exclusive"),
+            "shadowed_module_constant": (
+                'const name = "decoy"\n'
+                'suite "scope":\n'
+                '  when defined(linux):\n'
+                '    let name = runtimeName()\n'
+                '    test name: discard\n', "nonliteral platform-exclusive"),
+            "comment_and_fixture_decoy": (
+                'let fixture = "const name = \\"decoy\\""\n'
+                '# const name = "comment"\n'
+                'let name = runtimeName()\n'
+                'suite "scope":\n'
+                '  when defined(linux):\n'
+                '    test name: discard\n', "nonliteral platform-exclusive"),
+        }
+        with tempfile.TemporaryDirectory(prefix="platform-ledger-controls-") as tmp:
+            for label, (text, reason) in fixtures.items():
+                with self.subTest(unsupported_source=label):
+                    source = Path(tmp) / f"{label}.nim"
+                    source.write_text("import std/unittest\n" + text)
+                    with self.assertRaisesRegex(AssertionError, reason):
+                        self.source_platform_case_names(str(source))
+
+    def assert_linux_darwin_catalog_delta_is_exact(self, data):
+        """Validate the ledger against this host's real catalog and source census.
+
+        The ledger currently covers 69 asymmetric sources and 20 sources
+        whose platform gates select identical names. Its 113 Linux-only and
+        155 Darwin-only identities yield a net 42 extra Darwin cases. Newly
+        reconciled Darwin names are measured at 4f7d8624d7; their explicit
+        Linux branches supply expectations checked by a Linux run, rather
+        than a claim that Linux was measured on m1.
+        """
+        if sys.platform.startswith("linux"):
+            host = "linux"
+        elif sys.platform == "darwin":
+            host = "darwin"
+        else:
+            # This invariant describes the two hosts that publish the exact
+            # suite totals below.  Other hosts retain the aggregate guard and
+            # their own platform-specific catalog assertions.
+            return
+
+        exclusive, catalog_identical = self.linux_darwin_catalog_ledger()
+        self.assert_platform_catalog_ledger_census(data)
+
+        expected_quarantine = self.catalog_quarantine_by_os()[host]
+        quarantine = data["catalogEnumeration"]["quarantine"]
+        self.assertEqual({item["source"]: item["reason"] for item in quarantine},
+                         expected_quarantine)
+        self.assertEqual(len(quarantine), len(expected_quarantine))
 
         by_source = {item["source"]: item for item in data["tests"]}
         for source, expected_by_host in exclusive.items():
             all_platform_names = (
                 expected_by_host["linux"] | expected_by_host["darwin"]
             )
-            actual_names = {
-                case["name"] for case in by_source[source]["catalogCases"]
-            }
+            entry = by_source[source]
+            if source in expected_quarantine:
+                self.assertEqual(expected_by_host[host], set(), source)
+                self.assertEqual(entry["countSource"], "quarantined", source)
+                self.assertEqual(entry["sourceCaseCount"], 0, source)
+                self.assertNotIn("catalogCases", entry, source)
+                actual_names = set()
+            else:
+                self.assertEqual(entry["countSource"], "catalog", source)
+                actual_names = {case["name"] for case in entry["catalogCases"]}
             self.assertEqual(
                 actual_names & all_platform_names,
                 expected_by_host[host],
@@ -8028,25 +8630,10 @@ compileProfileBinary()
 
         linux_only = sum(len(item["linux"]) for item in exclusive.values())
         darwin_only = sum(len(item["darwin"]) for item in exclusive.values())
-        # 23/22 -> 24/22. The one added case is M9.R.30.2's ungated-on-Darwin
-        # relocation test, above. Every other newly censused source is a
-        # `linux or macosx` gate and is cardinality-neutral, so the Darwin
-        # side does not move at all.
-        #
-        # 24/22 -> 107/55 at the 2026-10-14 reconciliation. The deleted cache
-        # daemon source took one case from each side (23/21); the thirty-four
-        # HLX gates added their fifty-seven Linux cases and one Darwin
-        # sentinel each (80/55); the seven Linux-only gates without an
-        # `else:` added twenty-seven Linux cases and nothing on Darwin
-        # (107/55).
-        self.assertEqual((linux_only, darwin_only), (107, 55))
-        # The delta is DERIVED here and asserted, not assumed. It used to be
-        # what `expected_nim_total`'s Darwin arm was carried on; that literal
-        # is gone (see the note where it stood), so this line no longer
-        # supports anything but itself — which is the right amount. A reader
-        # who trusts the docstring's old "exactly one greater" over this line
-        # will be wrong by one.
-        self.assertEqual(linux_only - darwin_only, 52)
+        # The net platform difference is derived from source-scoped names,
+        # never used as a substitute for their exact per-source assertions.
+        self.assertEqual((linux_only, darwin_only), (113, 155))
+        self.assertEqual(linux_only - darwin_only, -42)
 
     def test_completed_clean_attempt_requires_one_coherent_three_run_attempt(self):
         fingerprint = "same-source"

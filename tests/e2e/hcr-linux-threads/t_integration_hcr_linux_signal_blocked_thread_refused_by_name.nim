@@ -59,6 +59,15 @@ when defined(linux) and defined(amd64):
     check actual == expected
 
   suite "integration_hcr_linux_signal_blocked_thread_refused_by_name":
+    test "a late handler's implicit signal mask is not permanent blocking":
+      let repoRoot = getCurrentDir()
+      let binary = buildFixture(repoRoot, "hcr_lx_m4_late_census.c", "late_census")
+      let output = runOrFail(shellCommand([binary]), repoRoot)
+      check output.contains("late: blocked=0 read=1")
+      check output.contains("blocked: blocked=1 read=1")
+      check output.contains("before-entry: blocked=0 read=1")
+      check output.contains("begin: signal-blocked reset=1 read=1")
+
     test "a thread that blocks the quiescence signal is refused by NAME, not as a timeout":
       var asserted = 0
       template ck(message: string; condition: untyped) =

@@ -89,9 +89,21 @@ each built binary's own `--list-json`. That artifact went stale six times, and
 every one of the six was an entry-set change — visible to a source scan, but
 fixable only by a four-hour build, so nothing gated it. Splitting the document
 along that line is what lets the entry set be gated at every push while the
-catalog-derived half stays an output of the job that already builds
-everything. **Do not regenerate the full inventory by hand**; `just test`
-produces it.
+catalog-derived half requires a complete build. `just test` checks the tracked
+snapshot; it does not rewrite it before checking. After an intentional suite
+change, refresh the full snapshot from a completely built tree:
+
+```bash
+python3 scripts/reprobuild_suite_inventory.py
+python3 tests/unit/test_reprobuild_suite_inventory.py
+```
+
+Review the generated diff, especially lost cases and quarantine membership.
+Do not hand-edit catalog counts or regenerate from a partially built tree.
+The snapshot records the catalog's OS and CPU. Its built-tree gates compare
+every source across Linux x86_64 and Darwin arm64 using the exact named
+platform-case ledger, while retaining exact raw comparisons on the recording
+host; a platform-conditioned source is never exempted from comparison.
 
 ## Adding a test file in a new place
 

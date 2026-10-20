@@ -52,6 +52,7 @@ import repro_interface_artifacts
 import repro_tool_profiles
 import repro_home_apply
 import repro_home_intent
+from repro_project_dsl/selector_names import isNimIdentifier
 import ./gm4b_contribution_fixture
 
 const FixtureModule = currentSourcePath().parentDir() /
@@ -196,9 +197,9 @@ proc homeOutcomes(scratch: string; target: Target;
       policy.mapIt($it).join(", ") & "]\n\n")
   body.add("  activity default:\n")
   for p in FixturePackages:
-    # ``7zip`` is not a Nim identifier, so the profile names it as a
-    # string; the others stay bare.
-    if p.validIdentifier: body.add("    " & p & "\n")
+    # ``7zip`` is not a Nim identifier (nor is a keyword such as ``nil``),
+    # so the profile names it as a string; the others stay bare.
+    if p.isNimIdentifier: body.add("    " & p & "\n")
     else: body.add("    \"" & p & "\"\n")
   writeFile(dir / "home.nim", body)
   var opts: ApplyOptions
