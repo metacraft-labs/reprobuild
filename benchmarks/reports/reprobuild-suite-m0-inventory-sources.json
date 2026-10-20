@@ -10976,8 +10976,8 @@
       "owner": "libs/repro_core",
       "requiresReproBinary": false,
       "source": "libs/repro_core/tests/t_n51_drain_process_stream.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -16627,7 +16627,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_profile_compile/tests/t_profile_runtime_stderr.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

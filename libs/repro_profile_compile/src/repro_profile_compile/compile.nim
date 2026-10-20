@@ -17,7 +17,7 @@
 
 import std/[os, osproc, streams, strtabs, strutils]
 from repro_core/paths import extendedPath
-from repro_core/process_streams import drainStream
+from repro_core/process_streams import drainStream, drainStdoutAndStderr
 from repro_core/source_root import installedLayoutPrefixOfSourceRoot,
   installedLayoutPackageTrees
 from repro_core/ambient_execution import uncontrolledFindExe
@@ -533,48 +533,27 @@ proc finishProfileNim*(p: Process): tuple[output: string; exitCode: int] =
 # Direct Nim invocation (two-phase: `nim c` then run the binary).
 # ---------------------------------------------------------------------------
 
-type RuntimeStderrCapture = object
-  stream: Stream
-  text: string
-  readError: string
-
-proc captureRuntimeStderr(capture: ptr RuntimeStderrCapture) {.thread.} =
-  # This stream is owned by the reader until joinThread returns. Stream's
-  # virtual methods lack gcsafe annotations; no other thread touches it.
-  {.cast(gcsafe).}:
-    try:
-      capture.text = drainStream(capture.stream)
-    except CatchableError as err:
-      capture.readError = err.msg
-
-proc runProfileBinary(outBinary: string): tuple[
+proc runProfileBinary*(outBinary: string): tuple[
     output, stderrText: string; exitCode: int] =
+  ## Run a compiled profile binary and capture its stdout (the intent JSON)
+  ## and its stderr (diagnostics) separately, draining both at once so a
+  ## profile whose diagnostics outgrow a pipe buffer cannot block before it
+  ## emits its intent. Exported for the regression tests in
+  ## `tests/t_profile_runtime_stderr.nim`.
+  ##
+  ## The concurrent drain is `drainStdoutAndStderr`, whose reader thread
+  ## keeps what it reads off its own heap. This proc used to fill a Nim
+  ## string on its own reader thread and free it here after the thread had
+  ## exited, which wrote into the dead thread's allocator region and crashed
+  ## the profile compile on Windows (see that helper's header comment).
   let p = startProcess(outBinary, args = [], options = {})
-  var capture = RuntimeStderrCapture(stream: p.errorStream)
-  var reader: Thread[ptr RuntimeStderrCapture]
   try:
-    createThread(reader, captureRuntimeStderr, addr capture)
-  except:
-    p.terminate()
-    discard p.waitForExit()
-    p.close()
-    raise
-  try:
-    try:
-      result.output = drainStream(p.outputStream)
-      result.exitCode = p.waitForExit()
-    except:
-      # Stop the writer before joining if stdout capture failed, otherwise
-      # it could remain blocked writing to the pipe we stopped draining.
-      p.terminate()
-      discard p.waitForExit()
-      raise
+    let captured = drainStdoutAndStderr(p)
+    result.output = captured.output
+    result.stderrText = captured.errorOutput
+    result.exitCode = p.waitForExit()
   finally:
-    joinThread(reader)
     p.close()
-  if capture.readError.len > 0:
-    raise newException(IOError, "reading profile stderr: " & capture.readError)
-  result.stderrText = capture.text
 
 proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
                            repoRoot: string;
