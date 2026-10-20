@@ -39,7 +39,10 @@
 ## its cwd in that case's deleted project dir, and this reap stops it. It
 ## restarts on the next request; a concurrent case that is mid-request at
 ## that instant is the cost, and the remedy belongs to the spawn site, not
-## to a narrower witness here.
+## to a narrower witness here. That remedy is in the helper itself: its
+## `main` now leaves the launcher's directory (`os.chdir("/")`) before it
+## serves, so a helper started from a fixture no longer matches the cwd
+## witness and this reap leaves it to the other clients sharing it.
 ##
 ## ONE WITNESS ON macOS: the libproc cwd record, through
 ## `darwin_fixture_processes`. That module states its own reasoning; this

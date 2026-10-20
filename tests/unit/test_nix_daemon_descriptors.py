@@ -1,4 +1,14 @@
-"""A live Nix helper must not retain its launcher's operation locks or pipes."""
+"""A live Nix helper must not retain its launcher's operation locks, pipes or
+working directory.
+
+The helper is shared by every reprobuild process of the user and outlives the
+client that started it, so whatever it inherits from that client stays held
+for the helper's whole idle-exit lifetime. A held cwd pins a test case's temp
+tree (reading ``<path> (deleted)`` once it is removed) and makes a test reaper
+that attributes processes to a fixture by cwd stop a helper other worktrees
+share (reprobuild-pm
+issues/2026-10-20-the-f1-up-case-leaves-its-dev-session-http-processes-running.md).
+"""
 
 import json
 import os
@@ -40,12 +50,19 @@ class DaemonDescriptors(unittest.TestCase):
             process.kill()
             process.communicate(timeout=5)
 
-    def start(self, descriptors=(), lower_limit=False):
+    def start(self, descriptors=(), lower_limit=False, socket_arg=None):
+        # ``socket_arg`` is what the launcher passes as ``--socket-path``; the
+        # helper is always launched from ``self.root``, so a relative value
+        # names a path under it, and ``endpoint`` is where it must bind.
         endpoint = self.root / "daemon.sock"
+        if socket_arg is None:
+            socket_arg = str(endpoint)
+        else:
+            endpoint = self.root / socket_arg
         args = [sys.executable]
         if lower_limit:
             args += ["-c", LOWER_LIMIT]
-        args += [str(DAEMON), "--socket-path", str(endpoint), "--idle-exit-ms=30000"]
+        args += [str(DAEMON), "--socket-path", socket_arg, "--idle-exit-ms=30000"]
         process = subprocess.Popen(args, cwd=self.root, pass_fds=descriptors,
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE)
@@ -117,6 +134,26 @@ class DaemonDescriptors(unittest.TestCase):
 
     def test_releases_descriptor_above_lowered_soft_limit(self):
         self.assert_pipe_released(True)
+
+    def test_leaves_the_launchers_working_directory_while_alive(self):
+        if not Path("/proc/self/cwd").exists():
+            self.skipTest("reading another process's cwd needs Linux /proc")
+        process = self.start()
+        # ``self.start`` launches from ``self.root`` and returns once the
+        # helper answers, i.e. after ``main`` has run up to ``serve``.
+        self.assertEqual(os.readlink(f"/proc/{process.pid}/cwd"), "/",
+                         "the helper pins its launcher's directory")
+        self.assertIsNone(process.poll(), "the check must not depend on daemon exit")
+
+    def test_relative_socket_path_binds_where_the_launcher_meant(self):
+        # Relative to the LAUNCHER's cwd, not to wherever the helper moved:
+        # the client waits on the path it named, so the two must agree.
+        process = self.start(socket_arg="relative/daemon.sock")
+        self.assertTrue((self.root / "relative/daemon.sock").is_socket())
+        self.assertFalse(Path("/relative/daemon.sock").exists())
+        log_text = (self.root / "relative/daemon.sock.log").read_text()
+        self.assertIn(f"serving {self.root / 'relative/daemon.sock'}", log_text)
+        self.assertIsNone(process.poll())
 
     def test_standard_output_and_error_remain_usable(self):
         help_result = subprocess.run([sys.executable, str(DAEMON), "--help"],

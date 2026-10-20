@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 63,
     "pureUnitTests": 676,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2285
+    "testEntries": 2286
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1319,7 +1319,7 @@
       "integration": 1237,
       "platform/destructive": 138,
       "pure unit": 676,
-      "unclassified": 217
+      "unclassified": 218
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1522,8 +1522,8 @@
       }
     ],
     "nimTestBinaryCount": 2255,
-    "pythonTestFileCount": 30,
-    "testEntryCount": 2285
+    "pythonTestFileCount": 31,
+    "testEntryCount": 2286
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -37431,7 +37431,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_nix_daemon_provisioner.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -48323,7 +48323,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_nix_daemon_descriptors.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -48337,6 +48337,21 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/test_nix_daemon_expression_file_is_never_cached.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `importlib.machinery`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_nix_daemon_request_requires_workspace_root.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
