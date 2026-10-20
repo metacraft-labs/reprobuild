@@ -49,6 +49,16 @@
   # source. See ./nim-fork.nix for why the stock nixpkgs `nim` cannot be used.
   nimFork ? callPackage ./nim-fork.nix { },
 
+  # The flake supplies its pinned bundle. A nixpkgs-style build uses the same
+  # shared derivation from the pinned source, without depending on flake APIs.
+  macosTools ? if stdenv.isDarwin then callPackage "${macosToolsSrc}/package.nix" { } else null,
+  # This fixed evaluation-time fetch permits importing the shared recipe
+  # without import-from-derivation; the payload is the same pinned source.
+  macosToolsSrc ? builtins.fetchTarball {
+    url = "https://github.com/metacraft-labs/stackable-hooks-macos-tools/archive/1ad378d58776ec9b6cc73e1c27b8e53c15676f03.tar.gz";
+    sha256 = "sha256-l4rPNg0DzGmaNpBpCFGTM6qFAg2Og0HCA5X/yny0/R0=";
+  },
+
   # ── Sources ────────────────────────────────────────────────────────────────
   # Every entry mirrors a pin of the `flake.lock` of the commit `src` (below)
   # names -- NOT of the tree this file sits in, whose lock moves on every
@@ -85,14 +95,14 @@
   stackableHooksSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-stackable-hooks";
-    rev = "6522766fb87f60efb503550042f4f066e2a86a9e";
-    hash = "sha256-ZHXfSvZwLk4i4i5PwWRRO68kxfdx9WyyXOotxFgGqsw=";
+    rev = "ff7eb18af166f9355c5e62bf1434ba5f9fd2c99e";
+    hash = "sha256-itD4iFoT/HMbY0qbxM7NJmxzBJJIzaWY64NHmd7wC8I=";
   },
   ctTraceFormatSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer-trace-format-nim";
-    rev = "808ffdb4507634c3aba0661d96cbc353420ed856";
-    hash = "sha256-ZKkKNbi9AGJmqPwv6MjbR2EoJm8ytfCikub7r7iAnSg=";
+    rev = "b4794ba69fa7ccb0b568de7c582a576994c63e5b";
+    hash = "sha256-RGX61GRKRYBM/BY4ua/xDpzxwhDo5EQ/CLjqLmBScPU=";
   },
   # THIS DEFAULT HAD DRIFTED 46 COMMITS BEHIND `flake.lock`, and the drift is
   # exactly what the "Every entry mirrors a `flake.lock` pin" note above is
@@ -109,8 +119,8 @@
   ioMonSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "io-mon";
-    rev = "295a2e518325440698de013663dab8deeef1dc19";
-    hash = "sha256-Ra6qEQfxHnYgPGTjz/0wZbSfLdnHy/B/HFdSvw8d+7I=";
+    rev = "091fa26ce03d9dd1ca8cfa6a1d9d46624dc50491";
+    hash = "sha256-pWwTsQZxlkJZFv+7S2aSXpsoLo+26IUYB7cZMBgIEAw=";
   },
   shmGsetSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -121,14 +131,14 @@
   shmQueueSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-shm-queue";
-    rev = "5a8e43b52fa202859658692c9f8432967f3971ea";
-    hash = "sha256-QPYS3OJPza6M2l1FMKa+jt3+mIBHCHWGkLOb9jAKMHs=";
+    rev = "a3564c13e0b7d0c6a092c19c998cd3faee5ce20a";
+    hash = "sha256-vsqb2Ibe+4VqVug6oGJVZqX4d+z4oOY0oWZMHKc2pLk=";
   },
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer";
-    rev = "47eda1fd580a17099541ead32f5528cb2e37bdc0";
-    hash = "sha256-NCo4cE84K6qeuUsJxhjWuMojq20nBmaE/oEmtdcR2UA=";
+    rev = "f1745b89e93179eca20778943bbafae91ebb6dfd";
+    hash = "sha256-ndmzx0UL212fTATeBur6lf+i35exffgv4oBWr8GEiLo=";
   },
   ctTestRunnerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -149,8 +159,8 @@
   runquotaSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "runquota";
-    rev = "86bf4711f6ad4800d739b3e2c402ae657fdc6033";
-    hash = "sha256-2Eeklpwigtf/MnbBPIQqIDUg9BjEUgsd/sl/yPSb5vU=";
+    rev = "416274abe4cda8ec9aef7dca9165cfb8c25a1846";
+    hash = "sha256-A0+DQquMegirVLTJxokjn2Yxs9LWNef9RLUORFwXCUU=";
   },
 }:
 let
@@ -202,7 +212,7 @@ stdenv.mkDerivation (finalAttrs: {
   # forbids. reprobuild's flake overrides it with the value it parses from the
   # nimble manifest, and `checks.nixpkgs-package-version-sync` fails the build
   # if this literal and the manifest disagree, so the two cannot drift silently.
-  version = "0.2.5";
+  version = "0.2.6";
 
   # The default source: a published commit whose `reprobuild.nimble` carries
   # `version` above and whose `flake.lock` pins the `*Src` defaults above
@@ -213,8 +223,8 @@ stdenv.mkDerivation (finalAttrs: {
   src = fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "reprobuild";
-    rev = "0bfb3e41e543965d3d0bd02d41f3b97dccf6928b";
-    hash = "sha256-hfSuxLp0uml4C+AC7yPWGovfX+A2qxzMQOtOKy41owM=";
+    rev = "1f51077433102dc20df1d5a795e9644a08060101";
+    hash = "sha256-Hj/msOaQYzrxH0ETCQ1xmqOUZbJMljCVUswxBs3iLM0=";
   };
 
   strictDeps = true;
@@ -259,6 +269,7 @@ stdenv.mkDerivation (finalAttrs: {
   ];
 
   env = {
+    STACKABLE_HOOKS_BUILT_TOOLS_DIR = if stdenv.isDarwin then "${macosTools}" else "";
     BLAKE3_PREFIX = "${blake3Prefix}";
     NIMCRYPTO_SRC = "${nimcryptoSrc}";
     BEARSSL_SRC = "${bearsslSrc}";
@@ -514,10 +525,10 @@ stdenv.mkDerivation (finalAttrs: {
     license = lib.licenses.mit;
     mainProgram = "repro";
     maintainers = [ ];
+    # nixpkgs 26.11 dropped x86_64-darwin (see flake.nix `systems`).
     platforms = [
       "x86_64-linux"
       "aarch64-linux"
-      "x86_64-darwin"
       "aarch64-darwin"
     ];
   };

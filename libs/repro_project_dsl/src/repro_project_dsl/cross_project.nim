@@ -267,10 +267,12 @@ proc generatedCrossProjectPackageConst(packageName: string;
       template build*(p: `legacyType`): PackageBuild[`packageLit`] =
         PackageBuild[`packageLit`]()
   # A package name is a selector string and need not be a Nim identifier
-  # (``package "7zip":``); such a name gets the same sanitized value
-  # identifier the legacy const path emits (``packageValueIdent``).
+  # (``package "7zip":``, ``package "nil":``); such a name gets the same
+  # sanitized value identifier the legacy const path emits
+  # (``packageValueIdent``). ``isNimIdentifier``, not
+  # ``strutils.validIdentifier``, decides: the latter accepts a keyword.
   let packageIdent =
-    if packageName.validIdentifier: ident(packageName)
+    if packageName.isNimIdentifier: ident(packageName)
     else: ident(packageValueIdent(packageName))
   result = quote do:
     const `packageIdent`* {.inject.}: Package[`packageLit`] =
@@ -457,7 +459,30 @@ proc isKnownPackageSection(stmt: NimNode): bool =
                  # unprovisioned name), which is a different question from
                  # "whose DSL constructors do I import". A package can be
                  # either, both, or neither.
-                 "dsldeps"]
+                 "dsldeps",
+                 # Test-Certificates TC-9b: ``enactCertificatePolicy <p>``,
+                 # the repository's choice of shared branch policy. The
+                 # ``package`` macro lowers it (``emitEnactedCertificatePolicy``);
+                 # left unlisted it would be emitted as a call to nothing.
+                 "enactcertificatepolicy",
+                 # Shared-Development-Services L5 (§6): the package-level
+                 # `environment <name>:` binding set, and the consumer's
+                 # `instanceOverrides <package>.<service>:` block (§6.6).
+                 # Both MUST be listed here. An unlisted head falls into
+                 # the preserved-Nim bucket and is emitted verbatim at
+                 # module top level, where `environment dev:` fails as an
+                 # undeclared identifier -- loud, but pointing at
+                 # generated code rather than at the declaration. Listed,
+                 # the L5 walker owns them and every refusal names the
+                 # author's own line.
+                 "environment", "instanceoverrides",
+                 # Shared-Development-Services L8: `contribute:` is a
+                 # section for the same reason `environment` is -- absent
+                 # from this list it lands in the preserved-Nim bucket
+                 # and fails as `undeclared identifier: contribute`,
+                 # pointing at generated code rather than at the
+                 # author's line.
+                 "contribute"]
 
 proc preservedTopLevelNodes(body: NimNode): NimNode =
   ## Collect everything in `body` that is NOT a recognised DSL section.

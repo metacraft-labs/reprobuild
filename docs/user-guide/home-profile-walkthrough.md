@@ -45,7 +45,10 @@ Open the copied `home.nim` in your editor and:
 
 1. Change the host entry from `m71-test-host` to your real hostname.
    The hostname must match `$env:COMPUTERNAME` (lowercased) — or set
-   `$env:REPRO_HOST=<name>` to pin a chosen identity.
+   `$env:REPRO_HOST=<name>` (or pass `repro home apply --host <name>`) to
+   pin a chosen identity. A profile with a `hosts:` block must name the
+   host: `repro home apply` refuses a host it does not declare rather than
+   applying only the `default` activity.
 
 2. Trim the activities to the languages you actually use. Each
    activity is independent — keeping only `dev` skips the 350 MB JDK,
@@ -97,7 +100,10 @@ That single command:
    after a reprobuild update adds a newer one, until you change the
    policy or pass `--relock`. If a locked realization is no longer
    offered, plan and apply stop and ask for `--relock` rather than
-   picking another one.
+   picking another one. This file is host-local apply state: exclude it from
+   version control and do not share it between machines, even if they use the
+   same profile and target. Export ignores it and classifies packages from
+   policy and the current catalog.
 
 Expected output (abridged):
 
@@ -203,8 +209,9 @@ removed in a milestone post-2026-11-30; until then both paths coexist.
   host realizes it. Check `libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/`
   for the canonical name (some tools are spelled differently for
   historical reasons — e.g. `python3` not `python`, `dotnet-sdk` not
-  `dotnet`). A name that is not a Nim identifier, such as `7zip`, is
-  written as a string: `"7zip"`.
+  `dotnet`). A name that is not a Nim identifier, such as `7zip` or the
+  Nim keyword `nil`, is written as a string: `"7zip"`, `"nil"`. A bare
+  `nil` line is refused, because Nim reads it as the keyword.
 - **`--plan` reports "missing-realization: no realization of package
   '<id>' for <target>"**: the package is defined but offers nothing for
   your platform under your selection policy; the message lists each

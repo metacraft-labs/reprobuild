@@ -46,7 +46,7 @@
 ## workspace; explicit pairs win over it. `workspaceOverrides = false` opts
 ## out when a recipe deliberately needs only its explicit overrides.
 
-import std/[json, os, osproc, streams, strutils]
+import std/[json, os, strutils]
 
 import repro_core/ambient_execution
 import repro_core/paths
@@ -332,16 +332,19 @@ proc workspaceFlakeOverrides*(projectRoot: string; flakeRef = DefaultFlakeRef):
   var probe: tuple[output: string, exitCode: int]
   var stderrText = ""
   try:
-    let process = uncontrolledStartProcess(repro, workingDir = projectRoot,
-      args = @["flake", "override-args", "--all", "--json",
-        "--workspace-root=" & root, "--flake=" & flakeRoot],
-      options = {poUsePath})
-    try:
-      probe.output = process.outputStream.readAll()
-      stderrText = process.errorStream.readAll().strip()
-      probe.exitCode = process.waitForExit()
-    finally:
-      process.close()
+    # Use the foreign-env capture's file-backed runner: reading stdout to EOF
+    # before draining stderr deadlocks when the child fills its stderr pipe.
+    # Per-call scratch also isolates concurrent entries and is removed on every
+    # outcome, so diagnostics cannot become persistent activation inputs.
+    let workDir = flakeForeignEnvWorkDir(projectRoot)
+    createDir(extendedPath(workDir))
+    let scratch = claimCaptureScratch(workDir)
+    defer: removeDir(extendedPath(scratch))
+    let captured = runCaptureCommand(@[repro, "flake", "override-args",
+      "--all", "--json", "--workspace-root=" & root, "--flake=" & flakeRoot],
+      projectRoot, scratch / "resolver.stdout", scratch / "resolver.stderr")
+    probe = (captured.output, captured.exitCode)
+    stderrText = captured.error.strip()
   except CatchableError as err:
     raise newException(ForeignEnvCaptureError,
       "native workspace flake override resolution failed: could not run `" &

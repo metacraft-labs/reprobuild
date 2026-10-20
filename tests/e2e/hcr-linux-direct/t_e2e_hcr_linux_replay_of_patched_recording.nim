@@ -95,6 +95,12 @@ when defined(linux) and defined(amd64):
     RecordedPre = "pre=11"
     RecordedPost = "post=77"
     UnpatchedPost = "post=11"
+    # The graph-built recorder bundle: repro.nim's `hcrCtMcrFixtureRoot` and
+    # `hcrCtMcrBundleActionId`. This module cannot import repro.nim, so
+    # `tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py` holds the two
+    # spellings equal.
+    CtMcrBundleDir = "build/test-fixtures/hcr-ct-mcr"
+    CtMcrBundleEdge = "reprobuild.test_fixtures.hcr_ct_mcr_bundle"
 
   type
     ReplayRun = object
@@ -276,43 +282,66 @@ when defined(linux) and defined(amd64):
       createDir(workDir)
 
       # --- prerequisites, loud ------------------------------------------
+      # The execute edge must leave this recorder's subject free of the
+      # engine's monitor. Check the loaded image as well as child-propagated
+      # environment; the recording/replay assertions below still exercise
+      # the real recorder and its unchanged mapping checks.
+      check "librepro_monitor_shim" notin readFile("/proc/self/maps")
+      check "librepro_monitor_shim" notin getEnv("LD_PRELOAD")
+      check getEnv("REPRO_MONITOR_SHIM_LIB").len == 0
       let gcc = findExe("gcc")
       if gcc.len == 0:
         checkpoint("gcc is not on PATH; this gate compiles a real target and " &
           "a real patch object and cannot be run without it")
       require gcc.len > 0
 
-      # The recorder: `CT_MCR_TEST_BINARY` when set, else the sibling
-      # checkout's.  The recorder's own HX-S-2 gate
+      # The recorder: `CT_MCR_TEST_BINARY` when set, else the graph-built
+      # bundle.  The recorder's own HX-S-2 gate
       # (codetracer-native-recorder tests/test_hx_s2_replay_crosses_the_patch_
       # boundary.sh) replays this recording with ITS ct-mcr and must record
       # with the same one; run from a worktree of that repo (as its full gate
-      # always is) the sibling path names another build, and it refused to
+      # always is) any other path names another build, and it refused to
       # run at all.  It exports its binary here.
+      #
+      # Otherwise the bundle is the one graph edge `CtMcrBundleEdge` builds
+      # into `CtMcrBundleDir` (repro.nim `hcrCtMcrFixtureRoot`): the
+      # recorder's own `just build-ct-mcr`, run in the recorder's own dev
+      # shell and staged here, and a typed input of this test's execute edge.
+      # It used to be the sibling checkout's `ct_cli/ct_cli`, which nothing in
+      # the graph built, so the gate failed on a missing prerequisite on any
+      # host where nobody had built the recorder by hand.
       let ctMcrOverride = getEnv("CT_MCR_TEST_BINARY", "")
+      let ctMcrBundle = repoRoot / CtMcrBundleDir
       let ctMcr =
         if ctMcrOverride.len > 0: ctMcrOverride
-        else: repoRoot / ".." / "codetracer-native-recorder" / "ct_cli" / "ct_cli"
+        else: ctMcrBundle / "ct_cli"
       if not fileExists(ctMcr):
-        checkpoint("ct-mcr not found at " & ctMcr & ". This gate records and " &
-          "replays with the sibling recorder checkout (or CT_MCR_TEST_BINARY " &
-          "when set); build it with `just build-ct-mcr` in " &
-          "codetracer-native-recorder.")
+        if ctMcrOverride.len > 0:
+          checkpoint("ct-mcr not found at " & ctMcr & ", which " &
+            "CT_MCR_TEST_BINARY names.")
+        else:
+          checkpoint("ct-mcr not found at " & ctMcr & ". It is produced by " &
+            "build-graph edge '" & CtMcrBundleEdge & "' (repro.nim; " &
+            "scripts/build_hcr_ct_mcr_fixture.sh), which this test's execute " &
+            "edge depends on. Run `repro build test`, or `just " &
+            "hcr_ct_mcr_fixture`, before this test; or set " &
+            "CT_MCR_TEST_BINARY to a fully built recorder.")
       require fileExists(ctMcr)
 
       # `replay-worker` consults the licensing gate BEFORE it reads the trace,
       # and the free tier caps replays at five a day — so without this the arms
       # below fail on the licence and the verdict silently depends on how many
       # replays this host happened to run today.  HLX-M7's runner learned this
-      # the expensive way; say it up front instead.
-      let licenseFixture = repoRoot / ".." / "codetracer-native-recorder" /
-        "tests" / "fixtures" / "licensing" / "ct-test-license.dat"
+      # the expensive way; say it up front instead.  The recorder's signed
+      # test licence is part of the bundle the same edge stages.
+      let licenseFixture = ctMcrBundle / "ct-test-license.dat"
       if getEnv("CODETRACER_LICENSE_FILE", "").len == 0:
         if not fileExists(licenseFixture):
           checkpoint("CODETRACER_LICENSE_FILE is unset and the recorder's " &
-            "test fixture is not at " & licenseFixture & ". Every replay arm " &
-            "below would fail on the daily free-tier replay cap instead of " &
-            "on the property under test.")
+            "test licence is not at " & licenseFixture & " (built by graph " &
+            "edge '" & CtMcrBundleEdge & "'). Every replay arm below would " &
+            "fail on the daily free-tier replay cap instead of on the " &
+            "property under test.")
         require fileExists(licenseFixture)
         putEnv("CODETRACER_LICENSE_FILE", licenseFixture)
 

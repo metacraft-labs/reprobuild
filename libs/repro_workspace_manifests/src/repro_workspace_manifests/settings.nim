@@ -284,7 +284,8 @@ proc lockingFromTree(c: TreeCtx; n: TomlValueRef): BootstrapLockingBody =
 
 # ---- the shared file --------------------------------------------------------
 
-const settingsTopLevelKeys = ["schema", "workspace", "projects", "records",
+const settingsTopLevelKeys = ["schema", "push_gateway", "workspace",
+  "projects", "records",
   "manifest", "profiles", "branch-roles", "verify", "develop", "locking",
   "foreign_env", "extensions"]
 
@@ -296,6 +297,8 @@ proc decodeSettingsTree(path, content: string): WorkspaceSettings =
   c.checkKeys("", tree, settingsTopLevelKeys)
   result.path = path
   result.schema = schemaWorkspaceSettingsV1
+  result.push_gateway = c.optString("", tree, "push_gateway")
+  checkPushGatewayValue(path, schemaWorkspaceSettingsV1, result.push_gateway)
   let settingsDir = parentDir(absolutePath(path))
 
   let ws = child(tree, "workspace")
@@ -418,6 +421,7 @@ proc settingsFromBootstrap(cfg: WorkspaceBootstrap;
   ## every consumer read from it before (see `WorkspaceSettings`).
   result.path = path
   result.schema = schemaWorkspaceBootstrapV1
+  result.push_gateway = cfg.push_gateway
   result.projects = cfg.projects
   if cfg.manifest.url.len > 0:
     result.records.url = some(cfg.manifest.url)
@@ -596,15 +600,26 @@ proc profileRoles*(s: WorkspaceSettings; name: string): Option[BranchRoleDecls] 
       return some(decls)
   none(BranchRoleDecls)
 
-proc rootMainline*(s: WorkspaceSettings): Option[string] =
+proc rootMainline*(s: WorkspaceSettings;
+                   legacyStoreIsRoot: bool): Option[string] =
   ## The workspace ROOT repository's declared mainline (Branch-Roles §3.4).
   ##
   ## `settings.v1`: `[workspace] mainline`, else the mainline of the profile
   ## `[workspace] profile` names, else of `default_profile` (§3.3's order,
   ## applied to the root). `bootstrap.v1`: `[manifest] branch`, which is what
-  ## the root's mainline was read from before the settings file existed.
+  ## the root's mainline was read from before the settings file existed — but
+  ## only when `legacyStoreIsRoot`, i.e. the caller has established that
+  ## `[manifest] url` is absent or names the root repository itself. Once the
+  ## record store is a separate repository (Workspace-Manifests.md §"Metadata
+  ## and records are separate repositories") that branch is the STORE's, and
+  ## reading it as the root's refuses `mainline_unresolved` on a root that has
+  ## no such branch (CLI/branch.md §"The root workspace repo is cut from its
+  ## mainline too"). Deciding repository identity needs the root's remote, which
+  ## this pure reader does not see, so the caller decides it.
   if s.isLegacySettings:
-    return s.records.branch
+    if legacyStoreIsRoot:
+      return s.records.branch
+    return none(string)
   if s.workspace.roles.mainline.isSome:
     return s.workspace.roles.mainline
   let profile =

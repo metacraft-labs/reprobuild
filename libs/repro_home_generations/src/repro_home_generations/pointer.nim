@@ -238,10 +238,11 @@ proc decodePointerBytes*(bytes: openArray[byte];
     "configurableGraphDigest")
   result.activationManifestDigest = readDigest(bytes, pos, filePath,
     "activationManifestDigest")
-  let prefixCount = int(readU32Le(bytes, pos))
-  if pos + prefixCount * DigestSize > bodyEnd:
+  let prefixCountRaw = readU32Le(bytes, pos)
+  if not elementCountFits(prefixCountRaw, bodyEnd - pos, DigestSize):
     raisePointerCorrupt(filePath, "realizedPrefixIds",
-      "declared realized-prefix count " & $prefixCount & " overflows body")
+      "declared realized-prefix count " & $prefixCountRaw & " overflows body")
+  let prefixCount = int(prefixCountRaw)
   result.realizedPrefixIds = newSeq[Digest256](prefixCount)
   for i in 0 ..< prefixCount:
     result.realizedPrefixIds[i] = readDigest(bytes, pos, filePath,

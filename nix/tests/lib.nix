@@ -115,7 +115,13 @@ let
         };
         case = "readData ${name}: ${e.host} @ ${e.system}";
       in
-      if hasResourceRows dir then
+      if e.undeclaredHost or false then
+        # A host the case's hosts: registry does not declare is refused, as
+        # the planner refuses it (hosts.nix; spec Open question 6).
+        expectTrue "${case} refuses the undeclared host" (
+          contains "host `${e.host}` is not declared in the profile's hosts: registry" (r.error or "")
+        )
+      else if hasResourceRows dir then
         # Resource rows are refused, never ignored (data.nix header).
         expectTrue "${case} refuses the resource rows" (contains resourceRefusal (r.error or ""))
       else
@@ -167,9 +173,13 @@ let
 
   # --- readIntent / evaluateExport -----------------------------------------
   intentRoot = root + "/tests/fixtures/intent-exports";
+  # The order `repro home export` refuses in: an undeclared host first (the
+  # export itself fails), then a target the document does not describe.
   evaluateOrRefuse =
     doc: system: host:
-    if reprobuildLib.internal.refusalReason doc system != null then
+    if reprobuildLib.internal.hostRefusalReason doc host != null then
+      { undeclaredHost = true; }
+    else if reprobuildLib.internal.refusalReason doc system != null then
       { refused = true; }
     else
       reprobuildLib.evaluateExport doc system host;
@@ -197,7 +207,7 @@ let
         expect "intent ${name}: ${host} @ ${system}" want (evaluateOrRefuse doc system host)
         # readIntent refuses (throws) exactly where the evaluation is refused.
         ++ expect "readIntent ${name}: ${host} @ ${system} refuses iff Reprobuild refused" (
-          want ? refused
+          want ? refused || want ? undeclaredHost
         ) viaReadIntent
       ) (attrNames expected.${host})
     ) (attrNames expected)
@@ -216,7 +226,37 @@ let
     );
   refusalTests =
     expectTrue "readIntent refuses an unknown schemaVersion" (
+      refusedSnapshot "schema5" (neutral // { schemaVersion = 5; })
+    )
+    # GM10: a schema-3 document cannot say a host's system is managed
+    # elsewhere, so a reader that acts on the attribute must not take its
+    # silence for "managed here".
+    ++ expectTrue "readIntent refuses the previous schemaVersion (3)" (
       refusedSnapshot "schema3" (neutral // { schemaVersion = 3; })
+    )
+    # GM9: a schema-2 reader would apply activity-scoped resources on every
+    # host, so a document is read by the version it declares only.
+    ++ expectTrue "readIntent refuses the previous schemaVersion (2)" (
+      refusedSnapshot "schema2" (neutral // { schemaVersion = 2; })
+    )
+    ++ expectTrue "readIntent refuses a resource of an undeclared activity" (
+      refusedSnapshot "undeclared-activity" (
+        neutral
+        // {
+          intent = neutral.intent // {
+            resources = neutral.intent.resources ++ [
+              {
+                kind = "fs.userFile";
+                address = "gm9-orphan";
+                fields = { };
+                dependsOn = [ ];
+                guard = null;
+                activity = "gm9_no_such_activity";
+              }
+            ];
+          };
+        }
+      )
     )
     ++ expectTrue "readIntent refuses a document of another format" (
       refusedSnapshot "format" (neutral // { format = "something.else"; })
@@ -341,14 +381,379 @@ let
       )
     );
 
+  # --- brewRealizationOf (GM5b) ---------------------------------------------
+  # The real pinned catalog (reprobuild-brew-packages) for the mappings a
+  # host relies on, and synthetic catalogs for the refusals the real one must
+  # never exhibit (an ambiguous name or token, a develop interface, an
+  # unknown record kind).
+  brewTests =
+    let
+      mkRecord =
+        {
+          target,
+          kind ? "cask",
+          token,
+          file ? "repro.nim",
+          line ? 1,
+          develop ? false,
+        }:
+        {
+          targetPackage = target;
+          contributor = "github:example/brew-${file}";
+          developInterface = develop;
+          location = {
+            inherit file line;
+          };
+          homebrewProvisioning = [
+            {
+              inherit kind token;
+              tap = "";
+              location = {
+                inherit file;
+                line = line + 1;
+              };
+            }
+          ];
+        };
+      catalog = name: records: {
+        inherit name;
+        records = builtins.toFile "${name}.json" (toJSON {
+          format = "repro.provisioning-contributions";
+          schemaVersion = 1;
+          contributions = records;
+        });
+      };
+      synthetic = libFor [
+        (catalog "a" [
+          (mkRecord {
+            target = "twice";
+            token = "twice-a";
+            file = "a.nim";
+          })
+          (mkRecord {
+            target = "shared-a";
+            token = "shared";
+            file = "a.nim";
+            line = 5;
+          })
+          (mkRecord {
+            target = "devpkg";
+            token = "devpkg";
+            develop = true;
+          })
+          (mkRecord {
+            target = "cli";
+            kind = "formula";
+            token = "cli-tool";
+          })
+        ])
+        (catalog "b" [
+          (mkRecord {
+            target = "twice";
+            token = "twice-b";
+            file = "b.nim";
+            line = 2;
+          })
+          (mkRecord {
+            target = "shared-b";
+            token = "shared";
+            file = "b.nim";
+            line = 7;
+          })
+        ])
+      ];
+      badKind = libFor [
+        (catalog "bad" [
+          (mkRecord {
+            target = "x";
+            kind = "tap";
+            token = "x";
+          })
+        ])
+      ];
+      darwin = "aarch64-darwin";
+      linux = "x86_64-linux";
+    in
+    # The real catalog: the application set and the casks a Brewfile names.
+    expect "brewRealizationOf vscode on aarch64-darwin" {
+      kind = "cask";
+      token = "visual-studio-code";
+      tap = "";
+    } (reprobuildLib.brewRealizationOf {
+      name = "vscode";
+      system = darwin;
+    })
+    ++ expect "brewRealizationOf jdk on x86_64-darwin is temurin@21" "temurin@21"
+      (reprobuildLib.brewRealizationOf {
+        name = "jdk";
+        system = "x86_64-darwin";
+      }).token
+    ++ expect "a cask claims nothing on Linux" null (
+      reprobuildLib.brewRealizationOf {
+        name = "vscode";
+        system = linux;
+      }
+    )
+    ++ expect "an unclaimed package is not claimed" null (
+      reprobuildLib.brewRealizationOf {
+        name = "bash";
+        system = darwin;
+      }
+    )
+    ++ expectTrue "an unclaimed package is reported, not guessed" (
+      let
+        r = reprobuildLib.lookupBrewRealization "bash";
+      in
+      !r.found && contains "no Homebrew record claims `bash`" r.reason
+    )
+    ++ expect "lookupBrewToken visual-studio-code" "vscode"
+      (reprobuildLib.lookupBrewToken { token = "visual-studio-code"; }).name
+    ++ expect "lookupBrewToken codex-app is the desktop app" "codex-desktop"
+      (reprobuildLib.lookupBrewToken { token = "codex-app"; }).name
+    ++ expectTrue "an unknown token maps to nothing and is reported" (
+      let
+        r = reprobuildLib.lookupBrewToken { token = "gm5b-no-such-cask"; };
+      in
+      !r.found
+      && !(r ? name)
+      && contains "no canonical package in reprobuild-nix-packages, reprobuild-brew-packages is installed by Homebrew cask `gm5b-no-such-cask`" r.reason
+    )
+    ++ expectTrue "a cask token is not found as a formula" (
+      !(reprobuildLib.lookupBrewToken {
+        kind = "formula";
+        token = "visual-studio-code";
+      }).found
+    )
+    ++ expectTrue "the real catalog maps each name and each token once" (
+      let
+        recs = reprobuildLib.brewRecords;
+        uniq = xs: builtins.length (builtins.attrNames (lib.genAttrs xs (_: true))) == builtins.length xs;
+      in
+      builtins.length recs >= 30
+      && uniq (map (r: r.name) recs)
+      && uniq (map (r: "${r.kind}:${r.token}") recs)
+    )
+    ++ expectTrue "the Nix catalog contributes no Homebrew record" (
+      builtins.all (r: r.catalog == "reprobuild-brew-packages") reprobuildLib.brewRecords
+    )
+    # Synthetic catalogs: the refusals.
+    ++ expectTrue "a formula claims on Linux and darwin" (
+      (synthetic.brewRealizationOf {
+        name = "cli";
+        system = linux;
+      }) == {
+        kind = "formula";
+        token = "cli-tool";
+        tap = "";
+      }
+      && (synthetic.brewRealizationOf {
+        name = "cli";
+        system = darwin;
+      }) != null
+    )
+    ++ expectTrue "two Homebrew records for one package are ambiguous" (
+      let
+        r = synthetic.lookupBrewRealization "twice";
+      in
+      !r.found && contains "2 Homebrew records" r.reason && contains "a a.nim:2" r.reason
+    )
+    ++ expectTrue "brewRealizationOf throws on an ambiguous package" (
+      fails (
+        synthetic.brewRealizationOf {
+          name = "twice";
+          system = darwin;
+        }
+      )
+    )
+    ++ expectTrue "a token two packages claim is ambiguous, not guessed" (
+      let
+        r = synthetic.lookupBrewToken { token = "shared"; };
+      in
+      !r.found && contains "claimed by 2 canonical packages (shared-a, shared-b" r.reason
+    )
+    ++ expectTrue "a develop-interface contribution is refused" (
+      !(synthetic.lookupBrewRealization "devpkg").found
+      && !(synthetic.lookupBrewToken { token = "devpkg"; }).found
+      && fails (
+        synthetic.brewRealizationOf {
+          name = "devpkg";
+          system = darwin;
+        }
+      )
+    )
+    ++ expectTrue "an unknown record kind is refused, not skipped" (fails badKind.brewRecords)
+    ++ expectTrue "an unknown lookup kind is reported" (
+      contains "not a Homebrew record kind" (
+        synthetic.lookupBrewToken {
+          kind = "tap";
+          token = "x";
+        }
+      ).reason
+    );
+
+  # The profile's commands (Gradual-Nix-To-Reprobuild-Migration.md
+  # §Concern-scoped apply): `profileBinPath` resolves the location the export
+  # publishes for a host that leaves `environment` to Nix while Reprobuild
+  # writes launchers; an export without that row is refused for such a host
+  # rather than leaving the commands off PATH unnoticed.
+  concernsDoc = fromJSON (readFile (intentRoot + "/concerns/export.json"));
+  serverOn = system: reprobuildLib.evaluateExport concernsDoc system "server";
+  profileBinTests =
+    expectTrue "profileBinPath: macOS, under the home directory" (
+      reprobuildLib.profileBinPath {
+        evaluation = serverOn "aarch64-darwin";
+        homeDirectory = "/Users/u";
+      } == "/Users/u/Library/Application Support/repro/home/current/bin"
+    )
+    ++ expectTrue "profileBinPath: Linux, under the XDG state directory (default and moved)" (
+      reprobuildLib.profileBinPath {
+        evaluation = serverOn "x86_64-linux";
+        homeDirectory = "/home/u";
+      } == "/home/u/.local/state/repro/home/current/bin"
+      && reprobuildLib.profileBinPath {
+        evaluation = serverOn "x86_64-linux";
+        homeDirectory = "/home/u";
+        xdgStateHome = "/var/state/u";
+      } == "/var/state/u/repro/home/current/bin"
+    )
+    ++ expectTrue "profileBinPath: a Windows location is refused" (
+      fails (
+        reprobuildLib.profileBinPath {
+          evaluation = serverOn "x86_64-windows";
+          homeDirectory = "C:/Users/u";
+        }
+      )
+    )
+    ++ expectTrue "profileBinPath: null where Reprobuild owns the environment or nothing is declared" (
+      reprobuildLib.profileBinPath {
+        evaluation = reprobuildLib.evaluateExport concernsDoc "aarch64-darwin" "m1";
+        homeDirectory = "/Users/u";
+      } == null
+      && reprobuildLib.profileBinPath {
+        evaluation = reprobuildLib.evaluateExport concernsDoc "aarch64-darwin" "home-pc";
+        homeDirectory = "/Users/u";
+      } == null
+    )
+    ++ expectTrue "an export without concerns.profileBin is refused for a host that needs it" (
+      fails (
+        (reprobuildLib.evaluateExport (
+          concernsDoc
+          // {
+            concerns = removeAttrs concernsDoc.concerns [ "profileBin" ];
+          }
+        ) "aarch64-darwin" "server").profileBin
+      )
+      # ...and only for such a host.
+      && !(fails (
+        reprobuildLib.evaluateExport (
+          concernsDoc
+          // {
+            concerns = removeAttrs concernsDoc.concerns [ "profileBin" ];
+          }
+        ) "aarch64-darwin" "m1"
+      ))
+    );
+
+  # GM10: `hostSystemManagement` answers what the evaluation's `system`
+  # says, for every declared host of every intent fixture (whose evaluations
+  # are Reprobuild's own, `evaluations.json`), and refuses what readIntent
+  # refuses. The neutral fixture declares m1's system managed elsewhere
+  # (`example-org/infra`) and home-pc's managed here, so both answers occur.
+  systemManagementTests =
+    concatMap (
+      name:
+      let
+        snapshot = intentRoot + "/${name}/export.json";
+        expected = fromJSON (readFile (intentRoot + "/${name}/evaluations.json"));
+      in
+      concatMap (
+        host:
+        let
+          evaluated = filter (e: e ? system) (map (s: expected.${host}.${s}) (attrNames expected.${host}));
+          undeclared = elem true (map (s: expected.${host}.${s} ? undeclaredHost) (attrNames expected.${host}));
+        in
+        if undeclared then
+          expectTrue "hostSystemManagement ${name}: refuses undeclared host ${host}" (
+            fails (reprobuildLib.hostSystemManagement { inherit snapshot host; })
+          )
+        else if evaluated == [ ] then
+          [ ]
+        else
+          expect "hostSystemManagement ${name}: ${host}" ({ inherit host; } // (builtins.head evaluated).system) (
+            reprobuildLib.hostSystemManagement { inherit snapshot host; }
+          )
+      ) (attrNames expected)
+    ) intentCases
+    ++ expect "hostSystemManagement: the neutral fixture's m1 is managed elsewhere" {
+      host = "m1";
+      managed = "elsewhere";
+      managedBy = "example-org/infra";
+    } (reprobuildLib.hostSystemManagement { document = neutral; host = "m1"; })
+    ++ expect "hostSystemManagement: the neutral fixture's home-pc is managed here" {
+      host = "home-pc";
+      managed = "here";
+      managedBy = null;
+    } (reprobuildLib.hostSystemManagement { document = neutral; host = "home-pc"; })
+    ++ expectTrue "hostSystemManagement refuses the previous schemaVersion (3)" (
+      fails (reprobuildLib.hostSystemManagement {
+        document = neutral // { schemaVersion = 3; };
+        host = "home-pc";
+      })
+    )
+    ++ expectTrue "hostSystemManagement refuses a malformed entry" (
+      fails (reprobuildLib.hostSystemManagement {
+        document = neutral // {
+          intent = neutral.intent // {
+            systemManagedElsewhere = {
+              "home-pc" = "example-org/infra";
+            };
+          };
+        };
+        host = "m1";
+      })
+    )
+    ++ expectTrue "hostSystemManagement refuses an entry for an undeclared host" (
+      fails (reprobuildLib.hostSystemManagement {
+        document = neutral // {
+          intent = neutral.intent // {
+            systemManagedElsewhere = neutral.intent.systemManagedElsewhere // {
+              "gm10-nowhere" = {
+                managedBy = null;
+              };
+            };
+          };
+        };
+        host = "m1";
+      })
+    )
+    # The evaluation refuses the same malformed table rather than reading
+    # the host as managed here.
+    ++ expectTrue "readIntent refuses a malformed systemManagedElsewhere" (
+      refusedSnapshot "malformed-system" (
+        neutral
+        // {
+          intent = neutral.intent // {
+            systemManagedElsewhere = {
+              "m1" = {
+                managedBy = "";
+              };
+            };
+          };
+        }
+      )
+    );
+
   failures =
-    predicateTests
+    systemManagementTests
+    ++ profileBinTests
+    ++ predicateTests
     ++ dataSelectionTests
     ++ dataRejectionTests
     ++ dataThrowTests
     ++ intentTests
     ++ refusalTests
-    ++ realizationTests;
+    ++ realizationTests
+    ++ brewTests;
 
   # Vacuity: the fixture trees were found and compared.
   counts = {

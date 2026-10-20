@@ -159,7 +159,7 @@ proc checkApp(pv: PackagePreview; url, lock, bundleId, teamId,
   check r.selection.tarball.url == url
   check r.selection.lockIdentity == lock
   check r.selection.tarball.archiveType == archiveType
-  check r.archiveRoute == arInstaller
+  check r.archiveRoute == arExtract
   check r.archive.installMethod == imAppBundle
   check r.archive.bundleId == bundleId
   check r.archive.teamId == teamId

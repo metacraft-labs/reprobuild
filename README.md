@@ -53,7 +53,7 @@ putting its `bin/` on your `PATH`:
 
 ```bash
 # Linux x86_64 — adjust the version and platform to taste
-VERSION=0.2.5
+VERSION=0.2.6
 PLATFORM=linux-x86_64   # or darwin-aarch64; Windows ships a .zip
 curl -fsSLO "https://github.com/metacraft-labs/reprobuild/releases/download/v${VERSION}/reprobuild-${VERSION}-${PLATFORM}.tar.gz"
 tar -xzf "reprobuild-${VERSION}-${PLATFORM}.tar.gz"
@@ -66,14 +66,32 @@ Keep `bin/` and `lib/` together — `repro` loads its runtime libraries relative
 to its own location, so moving the executable out of the unpacked tree on its
 own will break it.
 
-> **Not yet available:** a `curl … | sh` installer at `get.reprobuild.com`.
-> That host does not exist yet; do not expect the one-liner you may have seen
-> elsewhere to work. Releases from `v0.1.4` onward also publish a `SHA256SUMS`
-> file next to the archives — verify against it with
-> `sha256sum -c SHA256SUMS` once you have downloaded both. Note that
-> `SHA256SUMS` is served from the same origin as the archive, so it protects
-> against a truncated or corrupted download, not against a compromised
-> release; signed releases are still to come.
+The official installer is served from [get.reprobuild.com](https://get.reprobuild.com/):
+
+```sh
+curl -fsSL https://get.reprobuild.com/sh | sh
+```
+
+Inspect it first with `curl -fsSL https://get.reprobuild.com/sh | less`.
+The [installer source](./scripts/install/repro-install.sh) detects your system.
+On supported apt/dnf systems it requires root access, registers the shared
+Metacraft package repository and its signing key, and installs `reprobuild`
+through the package manager. It checks the keyring against a SHA-256 digest
+pinned in the script; the package manager verifies repository metadata and
+packages and handles subsequent updates. The script itself is fetched over
+HTTPS: its keyring pin does not protect against a compromised installer host.
+On NixOS it prints configuration instructions; `--method nix` installs into a
+Nix profile elsewhere.
+
+> **Archive verification:** releases from `v0.1.4` onward publish
+> `SHA256SUMS` next to the archives. After downloading both, use
+> `sha256sum -c SHA256SUMS`. This detects corruption, but the manifest shares
+> the archive's origin and does not authenticate a compromised release.
+> The installer's tarball fallback (including on macOS) requires a separate
+> release verifier, which `/sh` does not bundle, and fails closed without it.
+> The [release-signing allowlist](./scripts/release-signing/trusted-release-keys.txt)
+> currently contains no release-key fingerprints. Do not assume archives are
+> authenticated by signatures; see [release signing](./docs/release-signing.md).
 
 Prefer to build from source, or on a platform with no published archive? See
 [CONTRIBUTING.md](./CONTRIBUTING.md).
@@ -299,6 +317,16 @@ Reprobuild wraps all development workflows under one CLI.
   `repro-workspace.toml`.
 - `repro workspace status` — audit git status and alignment across all
   workspace repos.
+
+Workspace cloning uses a shared object pool by default. Pass
+`--clone-objects=none` (or `dissociate`) to create self-contained checkouts
+without writing to a clone pool, or `--clone-objects=private=./clone-pool` to
+use a private pool that must outlive its checkouts. The option applies to
+`workspace init`, `sync` (including `--mainline`), `workspace pull`,
+`workspace enable`, and `branch` / `workspace new`. Relative private paths
+resolve from your current directory. `shared` preserves the default, including
+`REPRO_WORKSPACE_CLONES`; a private pool overrides that environment variable
+for this invocation. Existing checkouts keep their current object storage.
 
 ### Local Infrastructure
 

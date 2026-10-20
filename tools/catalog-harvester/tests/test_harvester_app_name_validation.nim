@@ -20,6 +20,8 @@
 ##
 ##   * digit-prefix accepted (``7zip``), and emitted as a quoted package
 ##     name in a ``pkg_``-prefixed module
+##   * a Nim keyword (``nil``) likewise emitted as ``package "nil":`` in
+##     ``pkg_nil.nim``
 ##   * hyphen rejected (``dotnet-sdk``)
 ##   * dot rejected (defensive)
 ##   * empty alias target — caught by the existing
@@ -126,6 +128,31 @@ suite "M8 follow-up — output app name validation":
     let body = readFile(emitted)
     check "\npackage \"7hello\":\n" in body
     check "packageId = \"7hello@" in body
+
+  test "test_harvester_emits_keyword_name_as_quoted_package":
+    # A Nim keyword is accepted as an app name too, and is neither a usable
+    # bare package name nor a module name: aliased to 'nil', the fixture's
+    # 'hello' manifest lands in pkg_nil.nim declaring `package "nil":`
+    # (reprobuild-pm issue
+    # 2026-10-15-package-macro-cannot-declare-a-name-that-is-a-nim-keyword).
+    let outDir = tempOutDir("keyword-emit")
+    let (rc, output) = runHarvester(@[
+      "harvest",
+      "--source", "scoop",
+      "--bucket", FixturesDir / "bucket-simple",
+      "--app", "hello",
+      "--app-alias", "hello=nil",
+      "--output-dir", outDir,
+    ])
+    checkpoint output
+    check rc == 0
+    check (not fileExists(outDir / "nil.nim"))
+    let emitted = outDir / "pkg_nil.nim"
+    check fileExists(emitted)
+    let body = readFile(emitted)
+    check "\npackage \"nil\":\n" in body
+    check (not body.contains("\npackage nil:"))
+    check "packageId = \"nil@" in body
 
   test "test_harvester_rejects_hyphen_in_app_name_without_alias":
     # --app dotnet-sdk (hyphen) without alias → rejected. M67

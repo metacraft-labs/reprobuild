@@ -135,9 +135,6 @@ proc seedAndWire(gitBin: string): Fixture =
 
   # Wire the gateway: cert gate OFF, but the lock gate still runs.
   let cfg = GatewayConfig(
-    gateMode: cgmOff,
-    requiredTargets: @[],
-    requiredPlatforms: @[],
     lockRecordsDir: "",
     registeredKeysPath: "")
   let wired = wirePushGateway(gitBin, result.workPath, result.gatewayBare,
@@ -378,9 +375,9 @@ suite "HL-5 — pre-receive rejects public lock with private ref + " &
           oldSha: "0000000000000000000000000000000000000000",
           newSha: rev, refName: "refs/heads/main")])
 
-      # The baseline first: a lock identical in every field except the checkout
-      # path is ACCEPTED. Without it, a gate that refused everything handed to
-      # it would satisfy every refusal below.
+      # The baseline first: a lock identical in every field except the
+      # dependency name is ACCEPTED. Without it, a gate that refused everything
+      # handed to it would satisfy every refusal below.
       let seedRev = headSha(gitBin, workPath)
       let cleanVerdict = verdictFor(
         publicLock("self", ".", seedRev, gitObjectMultihash(objFmt, seedRev)))
@@ -389,14 +386,18 @@ suite "HL-5 — pre-receive rejects public lock with private ref + " &
       check cleanVerdict.accepted
       check cleanVerdict.diagnostic.len == 0
 
-      # One spelling of each shape the lock boundary knows about: a path that
-      # collapses to the workspace ROOT, and one that collapses to an ANCESTOR
-      # of it. Both parse perfectly; neither is a lock any cloner may act on.
-      for badPath in ["./.", "../.."]:
+      # The lock boundary's question, asked of what a lock can still steer.
+      # Since `reprobuild.solved-graph-lock.v3` a lock records no checkout
+      # path (and a v2 one's is ignored): every checkout is placed from the
+      # dependency NAME, so the name is the lock-supplied string that becomes
+      # a directory segment — of the derived `../<name>` placement and of the
+      # lock-pinned producer cache. One that escapes upward parses perfectly
+      # and is no lock any cloner may act on.
+      for badName in ["..", "a/../.."]:
         let rev = headSha(gitBin, workPath)
         let verdict = verdictFor(
-          publicLock("self", badPath, rev, gitObjectMultihash(objFmt, rev)))
-        checkpoint("(c) path='" & badPath & "' verdict: accepted=" &
+          publicLock(badName, ".", rev, gitObjectMultihash(objFmt, rev)))
+        checkpoint("(c) name='" & badName & "' verdict: accepted=" &
           $verdict.accepted & " diagnostic=" & verdict.diagnostic)
 
         check not verdict.accepted
@@ -405,7 +406,7 @@ suite "HL-5 — pre-receive rejects public lock with private ref + " &
         # look at; and the remedy, which for a machine-written document is the
         # command that rewrites it.
         check "refs/heads/main" in verdict.diagnostic
-        check badPath in verdict.diagnostic
+        check badName in verdict.diagnostic
         check "repro lock refresh" in verdict.diagnostic
         # And W5's half of the branch: this lock PARSED. Saying it "does not
         # parse" would send the author looking for a truncated file.

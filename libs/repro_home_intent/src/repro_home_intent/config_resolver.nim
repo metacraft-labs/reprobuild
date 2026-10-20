@@ -56,13 +56,40 @@ proc collectApplicable(nodes: seq[IntentNode]; leaf: NodeKind;
       raise newException(ValueError, "internal: unexpected " & $node.kind &
         " where a " & $leaf & " or a guarded block was expected")
 
+proc hasActivityScopedResource*(nodes: seq[IntentNode]): bool =
+  ## Whether any `nkResourceEntry` of a `resources:` block body, guarded or
+  ## not, belongs to an activity (GM9) -- i.e. whether selecting the
+  ## resources needs the host's activity selection at all.
+  for node in nodes:
+    case node.kind
+    of nkResourceEntry:
+      if node.resourceActivity.len > 0:
+        return true
+    of nkCondBlock:
+      if hasActivityScopedResource(node.condChildren):
+        return true
+    else:
+      discard
+  false
+
 proc applicableResourceEntries*(nodes: seq[IntentNode]; ctx: HostContext;
+                                activities: HashSet[string];
                                 userEval: UserPredicateEvaluator = nil):
     seq[IntentNode] =
   ## The `nkResourceEntry`s of a `resources:` block body (or of a guarded
   ## block inside one) that apply on `ctx`, in declaration order: an entry
-  ## inside an `nkCondBlock` is included only when the guard holds.
-  collectApplicable(nodes, nkResourceEntry, ctx, userEval, result)
+  ## inside an `nkCondBlock` is included only when the guard holds, and an
+  ## activity-scoped entry (GM9, `resourceActivity`) only when `activities`
+  ## -- the host's enabled activities, `enabledActivitiesFor` in the
+  ## planner -- contains its activity. A profile-wide entry ignores
+  ## `activities`. The parameter is required, not defaulted, so no caller
+  ## can plan an activity-scoped resource without deciding the selection.
+  var guarded: seq[IntentNode]
+  collectApplicable(nodes, nkResourceEntry, ctx, userEval, guarded)
+  for entry in guarded:
+    if entry.resourceActivity.len == 0 or
+        entry.resourceActivity in activities:
+      result.add entry
 
 proc applicableConfigPackages*(cfg: IntentNode; ctx: HostContext;
                                userEval: UserPredicateEvaluator = nil):

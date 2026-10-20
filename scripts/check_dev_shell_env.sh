@@ -30,7 +30,7 @@
 #      fifty-nine commits for `RUNQUOTA_SRC`, which is what made `just lint`
 #      fail for everyone with a spurious `undeclared identifier`.
 #
-#   4. The sources the cached shell was built from are not BEHIND the
+#   4. The live override checkouts are not BEHIND the
 #      revisions `flake.lock` pins for them. Assertion 3 compares the cache
 #      against the override sources, and BOTH SIDES OF THAT COMPARISON ARE THE
 #      SAME LOCAL CHECKOUT — so it is structurally unable to notice that the
@@ -222,6 +222,7 @@ declared_unreached() {
   grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$pinned_siblings" || true
 }
 
+input_parse_complete=0
 if [[ ! -f "$REPO_ROOT/flake.nix" ]]; then
   # Announced, not silent — and not a `fail` either, because the assertion
   # "this repository has a flake.nix" already has an owner:
@@ -252,6 +253,8 @@ else
       check without a word — and dropping out reads exactly like being fine.
       Fix the parser in scripts/lib/dev_shell_overrides.sh; do not adjust the
       count to match it."
+  else
+    input_parse_complete=1
   fi
 
   mapfile -t unreached < <(dev_shell_unreached_siblings \
@@ -399,6 +402,42 @@ profiles=("$REPO_ROOT"/.direnv/flake-profile-*.rc)
 shopt -u nullglob
 fingerprint="$REPO_ROOT/.direnv/flake-override-sources.fingerprint"
 
+# Use the same active provenance in checks 4 and 5. Removed inputs are no
+# longer build inputs; their historic paths and revisions cannot establish
+# either live drift or a missing pin. Never rewrite the on-disk fingerprint:
+# only successful shell regeneration may claim new provenance for its profile.
+declare -A current_inputs=()
+if [[ "$input_parse_complete" -eq 1 ]]; then
+  while IFS= read -r input; do
+    if [[ "$input" == '# incomplete input-name parse' ]]; then
+      input_parse_complete=0
+      fail "flake.nix has an unsupported input declaration; cannot establish
+      which fingerprint rows are obsolete. Fix dev_shell_flake_input_names."
+    elif [[ -n "$input" ]]; then
+      current_inputs["$input"]=1
+    fi
+  done < <(dev_shell_flake_input_names "$REPO_ROOT/flake.nix")
+fi
+fingerprint_rows=()
+if [[ -f "$fingerprint" ]]; then
+  while IFS=$'\t' read -r input dir state; do
+    [[ -n "$input" && "$input" != \#* ]] || continue
+    if [[ "$input_parse_complete" -eq 1 && -z "${current_inputs[$input]+set}" ]]; then
+      printf "dev-shell: ignoring obsolete fingerprint input '%s'; flake.nix no longer declares it.\n" "$input"
+      continue
+    fi
+    fingerprint_rows+=("$input"$'\t'"$dir"$'\t'"$state")
+  done <"$fingerprint"
+fi
+
+# .envrc owns these artifacts, and evaluating another activation path cannot
+# refresh them. Say what actually runs .envrc, including the trust prerequisite.
+cache_remedy="Refreshing this cache requires trusted direnv: review .envrc,
+      run 'direnv allow' if needed, then 'direnv exec . true' to regenerate it.
+      Run 'direnv reload' and let the shell hook reload the calling shell.
+      nix develop does not refresh these .direnv artifacts; neither does
+      Reprobuild's flake activation."
+
 if [[ ${#profiles[@]} -eq 0 ]]; then
   printf 'dev-shell: no .direnv/flake-profile-*.rc on this machine; %s\n' \
     'cache-freshness check has nothing to compare (fresh checkout / CI).'
@@ -420,7 +459,7 @@ else
       from here is built against the inputs the lock named at
       $(date -r "${profiles[0]}" '+%Y-%m-%d %H:%M' 2>/dev/null) and not the
       ones it names now. Remedy: run 'direnv reload', or
-      'rm -f .direnv/flake-profile*' and re-enter the directory."
+      'rm -f .direnv/flake-profile*' and re-enter the directory. $cache_remedy"
     fi
   done
 fi
@@ -433,11 +472,11 @@ elif [[ ! -f "$fingerprint" ]]; then
       override sources were recorded, so nothing can say what it was built
       from — which is precisely the state that let RUNQUOTA_SRC sit fifteen
       days stale. Remedy: rm -f .direnv/flake-profile* and re-enter the
-      directory (or run 'direnv reload')."
+      directory (or run 'direnv reload'). $cache_remedy"
 else
-  drift="$(dev_shell_fingerprint_drift "$fingerprint")"
+  drift="$(dev_shell_fingerprint_drift <(printf '%s\n' "${fingerprint_rows[@]}"))"
   if [[ -n "$drift" ]]; then
-    printf 'FAIL: the cached dev shell was built from sources that have since moved:\n' >&2
+    printf 'FAIL: the cached shell is stale: the cached dev shell was built from sources that have since moved:\n' >&2
     while IFS=$'\t' read -r input dir was now; do
       printf '  %s\n      path:      %s\n      cached at: %s\n      now:       %s\n' \
         "$input" "$dir" "$was" "$now" >&2
@@ -446,13 +485,14 @@ else
       '  The cached .direnv/flake-profile-*.rc still exports the store path' \
       '  each of those was copied to, so every build in this shell compiles' \
       '  against the old source. Remedy: run "direnv reload", or' \
-      '  "rm -f .direnv/flake-profile*" and re-enter the directory.' >&2
+      '  "rm -f .direnv/flake-profile*" and re-enter the directory.' \
+      "  $cache_remedy" >&2
     failures=$((failures + 1))
   else
-    recorded="$(grep -cve '^#' -e '^$' "$fingerprint")"
+    recorded="${#fingerprint_rows[@]}"
     if [[ "$recorded" -eq 0 ]]; then
       printf 'dev-shell: %s\n' \
-        'no sibling overrides configured; the cached shell is built from the pinned inputs, as .envrc declares.'
+        'no active sibling override provenance remains; there are no current override sources to compare.'
     else
       # Deliberately says WHICH comparison passed. The bare sentence this used
       # to print — "cached shell matches all 8 overridden source(s)" — was
@@ -514,12 +554,11 @@ fi
 #   history search in `io-mon` reported that a symbol had never existed when
 #   it plainly had, and the remedy (`git fetch --refetch`) is in the message.
 #
-# WHY IT READS THE FINGERPRINT AND NOT THE WORKING TREE. The subject is the
-# revision the shell WAS BUILT FROM, which is what the fingerprint records;
-# the live working tree is a different question and check 4 above owns it. Use
-# the live tree here and a checkout that has been fast-forwarded to the pin
-# but not yet reloaded would be certified while the shell keeps serving the
-# old store path — the exact fiction this file exists to refuse.
+# The fingerprint identifies candidate inputs, but only the LIVE checkout
+# establishes whether a checkout remedy can help. Check 4 independently refuses
+# stale cached provenance, including when the live checkout already contains
+# the pin. Comparing the recorded revision here would prescribe a no-op merge
+# after the sibling has advanced, while never regenerating the stale profile.
 
 lock="$REPO_ROOT/flake.lock"
 if [[ ! -f "$fingerprint" ]]; then
@@ -536,7 +575,7 @@ elif [[ ! -f "$lock" ]]; then
   # the other checks.
   printf 'dev-shell: no flake.lock here; %s\n' \
     'there are no pins for an overridden source to be behind (check_repo_requirements.sh owns its existence).'
-elif [[ "$(grep -cve '^#' -e '^$' "$fingerprint")" -eq 0 ]]; then
+elif [[ "${#fingerprint_rows[@]}" -eq 0 ]]; then
   # The fingerprint exists and records nothing: this shell overrides no
   # sibling, so every input is built from the revision the lock pins and the
   # question this check asks cannot have a wrong answer. Stated rather than
@@ -575,6 +614,27 @@ else
     [[ -n "$f_input" ]] || continue
     [[ "$f_input" == \#* ]] && continue
 
+    if [[ -z "${lock_pin[$f_input]+set}" ]]; then
+      fail "the dev shell overrides flake input '$f_input' with
+      $f_dir, but $lock lists no such input on its root node. Either the lock
+      is older than the flake.nix that declares the input — in which case the
+      shell is building something the lock cannot describe — or
+      dev_shell_flake_lock_pins stopped parsing this file. Remedy: refresh the
+      lock ('nix flake lock'), or fix the parser; do not drop the input."
+      bad=$((bad + 1))
+      continue
+    fi
+    # This state is queried independently of the recorded snapshot so every
+    # checkout repair below names the checkout it can actually change.
+    live_state="$(dev_shell_source_state "$f_dir")"
+    if [[ "$f_state" == git:* && "$live_state" != git:* ]]; then
+      bad=$((bad + 1))
+      fail "the current checkout for '$f_input' at $f_dir cannot be compared
+      with its pin: source state is $live_state (unknown). Remedy: restore
+      the git checkout, then refresh the shell. $cache_remedy"
+      continue
+    fi
+    f_state="$live_state"
     if [[ "$f_state" != git:* ]]; then
       # A non-git override source (`dev_shell_source_state` falls back to an
       # mtime for those). It has no revision, so "behind a pin" is not a
@@ -586,16 +646,6 @@ else
     f_head="${f_state#git:}"
     f_head="${f_head%%+*}"
 
-    if [[ -z "${lock_pin[$f_input]+set}" ]]; then
-      fail "the dev shell overrides flake input '$f_input' with
-      $f_dir, but $lock lists no such input on its root node. Either the lock
-      is older than the flake.nix that declares the input — in which case the
-      shell is building something the lock cannot describe — or
-      dev_shell_flake_lock_pins stopped parsing this file. Remedy: refresh the
-      lock ('nix flake lock'), or fix the parser; do not drop the input."
-      bad=$((bad + 1))
-      continue
-    fi
     if [[ "${lock_pin[$f_input]}" == "-" ]]; then
       # A `follows`, or an input locked to something with no revision. It
       # carries no pin of its own, so there is nothing for it to be behind —
@@ -618,30 +668,30 @@ else
         ;;
       behind)
         bad=$((bad + 1))
-        fail "the dev shell is built from '$f_input' at $f_head, which is
+        fail "the current checkout for '$f_input' is at $f_head, which is
       $r_behind commit(s) BEHIND the revision $lock pins for it
-      (${lock_pin[$f_input]}). Every build in this shell therefore compiles
-      against a source that is MISSING content this repository's lock says is
+      (${lock_pin[$f_input]}). Regenerating the shell from this checkout
+      would still use a source MISSING content this repository's lock says is
       there, and the compiler will not say so: it reports undeclared
       identifiers and type mismatches in whatever module it reaches first,
       which is routinely a third repository or the standard library. Remedy:
       'git -C $f_dir fetch && git -C $f_dir merge --ff-only
-      ${lock_pin[$f_input]}', then 'direnv reload'. If the older revision is
+      ${lock_pin[$f_input]}', then refresh the shell. $cache_remedy If the older revision is
       deliberate, move the pin instead so the lock and the shell agree."
         ;;
       diverged)
         bad=$((bad + 1))
-        fail "the dev shell is built from '$f_input' at $f_head, which has
+        fail "the current checkout for '$f_input' is at $f_head, which has
       DIVERGED from the revision $lock pins for it (${lock_pin[$f_input]}):
       $r_ahead commit(s) ahead and $r_behind behind. The ahead half is
       ordinary development and is not what this refuses; the BEHIND half is —
       the pin names $r_behind commit(s) this shell is not building, so the
       same missing-symbol failure applies. Remedy: rebase or merge
-      ${lock_pin[$f_input]} into $f_dir, then 'direnv reload'."
+      ${lock_pin[$f_input]} into $f_dir, then refresh the shell. $cache_remedy"
         ;;
       unfetched)
         bad=$((bad + 1))
-        fail "the dev shell is built from '$f_input' at $f_head and $lock
+        fail "the current checkout for '$f_input' is at $f_head and $lock
       pins ${lock_pin[$f_input]}, but the two cannot be compared: $r_detail.
       Reported as a failure and not as a skip, because 'we could not look' is
       the answer that lets a stale checkout through. Remedy: 'git -C $f_dir
@@ -649,7 +699,7 @@ else
         ;;
       unknown | *)
         bad=$((bad + 1))
-        fail "the dev shell is built from '$f_input' at $f_head and $lock
+        fail "the current checkout for '$f_input' is at $f_head and $lock
       pins ${lock_pin[$f_input]}, and git could not place one against the
       other: $r_detail. A repository whose object database has lost objects
       its commit-graph still lists presents EXACTLY like this, and it is not a
@@ -660,7 +710,7 @@ else
       database from the remote; if that fails, re-clone."
         ;;
     esac
-  done <"$fingerprint"
+  done < <(printf '%s\n' "${fingerprint_rows[@]}")
 
   if [[ "$pin_rows" -gt 0 && "$examined" -eq 0 ]]; then
     # The vacuity guard. Everything above can report zero failures by never

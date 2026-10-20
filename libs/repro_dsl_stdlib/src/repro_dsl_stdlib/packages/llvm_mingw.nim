@@ -37,7 +37,9 @@ package `llvm-mingw`:
     tarball url = "https://github.com/mstorsjo/llvm-mingw/releases/download/20260519/llvm-mingw-20260519-ucrt-ubuntu-22.04-x86_64.tar.xz",
       sha256 = "a48f8c2801508272ccde64d87a26747ecc5306623d9a080a42ed80dc61f79fa2",
       archiveType = "tar.xz",
-      executablePath = "bin/clang",
+      # The primary must be a regular file; keep clang as the exposed alias.
+      executablePath = "bin/clang-22",
+      executableAlias = "clang",
       extraExecutable = "bin/clang++",
       extraExecutable = "bin/ld.lld",
       version = "20260519",

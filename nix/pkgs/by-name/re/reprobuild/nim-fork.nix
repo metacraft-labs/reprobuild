@@ -43,8 +43,8 @@
   forkSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim";
-    rev = "1e19cf261413667ef69123a3ef221e239d1f8897";
-    hash = "sha256-q4V7qEJRJGo6f0Wli/aauix78DbIPt4/eu7YQqO8APw=";
+    rev = "fa22200571d36eb8c24c0aaa883940d93c71b397";
+    hash = "sha256-NNeACM2NX9zG/iPCzBJvbAsVJToWDMns1b7cspw7keQ=";
   },
   csourcesSrc ? fetchFromGitHub {
     owner = "nim-lang";
@@ -55,8 +55,8 @@
   traceFormatSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer-trace-format-nim";
-    rev = "808ffdb4507634c3aba0661d96cbc353420ed856";
-    hash = "sha256-ZKkKNbi9AGJmqPwv6MjbR2EoJm8ytfCikub7r7iAnSg=";
+    rev = "b4794ba69fa7ccb0b568de7c582a576994c63e5b";
+    hash = "sha256-RGX61GRKRYBM/BY4ua/xDpzxwhDo5EQ/CLjqLmBScPU=";
   },
   stewSrc ? fetchFromGitHub {
     owner = "status-im";

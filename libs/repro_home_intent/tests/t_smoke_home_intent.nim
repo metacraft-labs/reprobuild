@@ -50,6 +50,47 @@ suite "Home-intent smoke":
     check act.isSome
     check act.get.activityChildren.len == 3  # neovim, tmux, when block
 
+  test "hosts block form: the GM10 system key is read and validated":
+    # The text form of what the `profile` macro accepts
+    # (`repro_profile/host_system`): `managedElsewhere`, optionally with a
+    # one-line string pointer and a trailing comment; anything else is
+    # refused with the host named.
+    let dir = createTempDir("repro-home-smoke-hosts-system-", "")
+    defer: removeDir(dir)
+    let path = dir / "home.nim"
+    proc withHosts(entries: string): string =
+      "import repro/profile\n\nprofile \"x\":\n  activity default:\n" &
+        "    neovim\n\n  hosts:\n" & entries
+    writeFile(extendedPath(path), withHosts(
+      "    \"plain\": [default]\n" &
+      "    \"infra\":\n" &
+      "      activities: [default]\n" &
+      "      system: managedElsewhere(\"example-org/\\\"infra\\\"\")  # c\n" &
+      "    \"distro\":\n" &
+      "      system: managedElsewhere # no pointer\n"))
+    let hostsOpt = findHostsBlock(loadProfile(path))
+    require hostsOpt.isSome
+    var seen: Table[string, (bool, string)]
+    for e in hostsOpt.get.hostsEntries:
+      seen[e.hostName] = (e.hostSystemManagedElsewhere, e.hostSystemManagedBy)
+    check seen["plain"] == (false, "")
+    check seen["infra"] == (true, "example-org/\"infra\"")
+    check seen["distro"] == (true, "")
+    for bad in [
+        "    \"h\":\n      system: managedSomewhere\n",
+        "    \"h\":\n      system: managedElsewhere(infra)\n",
+        "    \"h\":\n      system: managedElsewhere(\"   \")\n",
+        "    \"h\":\n      system: managedElsewhere(\"x\n",
+        "    \"h\":\n      system: managedElsewhere(\"x\") extra\n",
+        "    \"h\":\n      system: managedElsewhere\n      system: managedElsewhere\n"]:
+      writeFile(extendedPath(path), withHosts(bad))
+      try:
+        discard loadProfile(path)
+        checkpoint "accepted: " & bad
+        check false
+      except EUnstructured as e:
+        check "\"h\"" in e.msg
+
   test "rejects unrecognized top-level form":
     let bad = """
 import repro/profile
@@ -165,6 +206,84 @@ profile "x":
       version = "26.01")
     removePackageReference(sample, "7zip", activity = "default")
     check readFile(extendedPath(sample)) == original
+
+  test "a package name that is a Nim keyword is written quoted":
+    # reprobuild-pm issue 2026-10-15-package-macro-cannot-declare-a-name-
+    # that-is-a-nim-keyword: the Nix language server is named `nil`. A
+    # profile names it `"nil"`, `` `nil` `` or `package("nil"[, "<ver>"])`,
+    # and the editor writes the quoted forms. The quoted forms also reach a
+    # control-flow keyword, which only the bare form refuses.
+    let dir = createTempDir("repro-home-smoke-keyword-", "")
+    defer: removeDir(dir)
+    let path = dir / "repro-home-smoke-keyword.nim"
+    writeFile(extendedPath(path), """
+import repro/profile
+
+profile "x":
+  activity default:
+    "nil"
+    `out`
+    package("type")
+    package("method", "1.2.3")
+    "for"
+    `while`
+    nil-ls
+""")
+    let act = findActivity(loadProfile(path), "default")
+    check act.isSome
+    var names: seq[string] = @[]
+    var versions: seq[string] = @[]
+    for child in act.get.activityChildren:
+      names.add child.packageName
+      versions.add child.packageVersion
+    check names == @["nil", "out", "type", "method", "for", "while", "nil-ls"]
+    check versions == @["", "", "", "1.2.3", "", "", ""]
+
+    let sample = writeSample(dir)
+    let original = readFile(extendedPath(sample))
+    addPackageReference(sample, "nil", activity = "default")
+    addPackageReference(sample, "type", activity = "default",
+      version = "26.01")
+    let added = readFile(extendedPath(sample))
+    check "\n    \"nil\"\n" in added
+    check "\n    nil\n" notin added
+    check "\n    package(\"type\", \"26.01\")\n" in added
+    var reread: seq[string] = @[]
+    for child in findActivity(loadProfile(sample), "default").get.activityChildren:
+      if child.kind == nkPackageRef:
+        reread.add child.packageName
+    check "nil" in reread
+    check "type" in reread
+    removePackageReference(sample, "type", activity = "default",
+      version = "26.01")
+    removePackageReference(sample, "nil", activity = "default")
+    check readFile(extendedPath(sample)) == original
+
+  test "a bare Nim keyword is refused, not read as a package":
+    # In the profile macro a bare `nil` line is the `nil` literal, not the
+    # package `nil`; the text parser must not report a package the compiled
+    # profile does not have. Keywords match style-insensitively (`n_il`).
+    let dir = createTempDir("repro-home-smoke-barekw-", "")
+    defer: removeDir(dir)
+    for body in ["nil", "n_il", "out", "package(nil)", "package(type)",
+                 "package(nil, \"1.0\")"]:
+      let path = dir / "bad.nim"
+      writeFile(extendedPath(path), "import repro/profile\n\n" &
+        "profile \"x\":\n  activity default:\n    " & body & "\n")
+      checkpoint body
+      expect EUnstructured:
+        discard loadProfile(path)
+    # The refusal names the quoted form that does reach the name.
+    let path = dir / "bad-nil.nim"
+    writeFile(extendedPath(path), "import repro/profile\n\n" &
+      "profile \"x\":\n  activity default:\n    nil\n")
+    try:
+      discard loadProfile(path)
+      check false
+    except EUnstructured as e:
+      checkpoint e.msg
+      check "keyword `nil`" in e.msg
+      check "\"nil\"" in e.msg
 
   test "a quoted package name must be non-empty and closed":
     let dir = createTempDir("repro-home-smoke-badquote-", "")

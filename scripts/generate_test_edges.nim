@@ -9,6 +9,11 @@
 ##
 ##   nim r scripts/generate_test_edges.nim
 ##
+## IT TAKES NO ARGUMENTS, and refuses any it is given (exit 2) rather than
+## discarding them and printing a success line — see ``argumentRefusal``. In
+## particular the ``--write-*`` / ``--check-*`` suite-artifact flags belong to
+## ``scripts/reprobuild_suite_inventory.py``, not here.
+##
 ## The output (``repro_tests.nim``) is checked into git so the diff is
 ## review-visible.
 ##
@@ -378,6 +383,7 @@ type
     identName: string     # Nim identifier for the let-binding
     needsProviderMode: bool
     needsSsl: bool        # M6: carries --define:ssl (HTTPS transport gate)
+    needsMissingJsonEvidenceTest: bool
     needsSoftwareRootTestTrust: bool
       ## Carries ``--define:reproAttestSoftwareRootTestTrust``. See
       ## ``needsSoftwareRootTestTrustDefine`` below.
@@ -411,6 +417,11 @@ type
     selfInterposes: bool
       ## Bootstrap-And-Self-Build B4: per-test target-OS guard for the
       ## ``extraPassC`` / ``extraPassL`` activation. See ``TargetOs``.
+
+proc needsMissingJsonEvidenceTestDefine(path: string): bool =
+  ## Put the private report-reader seam on the compile edge so it is active
+  ## before any import, and consolidation sees this as a flagged test.
+  path == "tests/unit/t_missing_json_evidence.nim"
 
 proc needsSslDefine(path: string): bool =
   ## Windows-Runner-Binary-Cache-Deploy M6/M7: the HTTPS gates exercise the
@@ -505,6 +516,62 @@ proc isProviderModePath(path: string): bool =
     # Measures the macro's module-init startup pass over a ``build:``
     # body, which the macro emits only under this define.
     "tests/unit/t_provider_startup_body_containment.nim",
+    # Shared-Development-Services L1: drives ``buildPackageFragment`` and
+    # ``buildPackageDevEnv`` directly, and asserts on ``servicePlaceholder``
+    # -- all three exist only under this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_service_lowers_typed_edges_into_the_graph_fragment.nim",
+    # Shared-Development-Services L2: drives ``buildPackageDevEnv`` over a
+    # fixture whose ``devEnv:`` body declares parameterised activities, and
+    # asserts on ``servicePlaceholder`` -- the dev-env ``activity`` surface
+    # itself (``proc activity(name: string)`` included) exists only under
+    # this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_activity_params_reach_the_services_they_declare.nim",
+    # Shared-Development-Services L5: drives ``buildPackageDevEnv`` over a
+    # fixture whose ``devEnv:`` activity reads configurables an
+    # ``environment`` binds, and asserts on the argv of the service the
+    # provider lowered -- ``buildPackageDevEnv`` and the generated
+    # ``devEnv<Pkg>Package`` exist only under this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_l5_environment_reaches_the_service_argv.nim",
+    # Shared-Development-Services L8: both drive ``buildPackageDevEnv``
+    # over a fixture whose ``devEnv:`` activity declares contribution
+    # points, and read the services the provider lowered --
+    # ``buildPackageDevEnv``, ``ProviderGraphRequest`` and the generated
+    # ``devEnv<Pkg>Package`` exist only under this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_l8_contribution_operation_is_a_second_axis.nim",
+    "libs/repro_project_dsl/tests/" &
+      "t_l8_typed_service_facts_reach_the_dev_env_artifact.nim",
+    "libs/repro_project_dsl/tests/" &
+      "t_l9_supervision_facts_reach_the_dev_env_artifact.nim",
+    # Shared-Development-Services D-SS11: drives ``buildPackageDevEnv``
+    # over a fixture whose consumer packages resolve a shared service
+    # through ``<package>.<service>.shared(...)``, and reads the
+    # resolutions the provider lowered -- ``buildPackageDevEnv``,
+    # ``ProviderGraphRequest`` and the generated ``devEnv<Pkg>Package``
+    # exist only under this define.
+    "libs/repro_project_dsl/tests/" &
+      "t_dss11_resolutions_reach_the_dev_env_artifact.nim",
+    # Shared-Development-Services, reprobuild issue #498: drives
+    # ``buildPackageDevEnv`` over a fixture whose two activities
+    # contribute across each other, and reads the argv the provider
+    # lowered -- ``buildPackageDevEnv``, ``ProviderGraphRequest`` and
+    # the generated ``devEnv<Pkg>Package`` exist only under this
+    # define.
+    "libs/repro_project_dsl/tests/" &
+      "t_dss498_cross_activity_contribution_is_order_independent.nim",
+    # Shared-Development-Services F1: drives ``buildPackageDevEnv`` and
+    # reads ``DevEnvResult.actions``, the channel that only exists on
+    # the provider's own return.
+    "libs/repro_project_dsl/tests/" &
+      "t_dssf1_dev_env_actions_reach_the_caller.nim",
+    # Shared-Development-Services J-2: drives ``buildPackageDevEnv``
+    # over a two-owner / two-resolver fixture and reads the resolutions
+    # the provider lowered.
+    "libs/repro_project_dsl/tests/" &
+      "t_dssj2_two_resolvers_do_not_collide.nim",
   ]:
     if p == exact:
       return true
@@ -670,11 +737,15 @@ proc legacySingleFileScan(repoRoot, rel: string): bool =
 const SelfInterposingTestStems = [
   "t_stackable_hooks_extracted_process_tree",
   "t_m9r40_1_probe_clean_env",
-  "test_monitor_finish_is_pooled"
+  "test_monitor_finish_is_pooled",
+  "t_e2e_hcr_linux_replay_of_patched_recording"
 ]
   ## Tests that perform ``LD_PRELOAD`` interposition THEMSELVES, and so cannot
   ## be observed by the engine's io-monitor: two interposers on the same libc
-  ## entry points re-enter each other and livelock. Their execute edges get a
+  ## entry points re-enter each other and livelock. The recorder-backed HCR
+  ## gate also refuses the monitor's modified executable mappings and mutable
+  ## mapped shards. Its execute edge must additionally be non-cacheable because
+  ## the depfile does not observe its runtime input closure. These edges get a
   ## GENERATED DEPFILE (``fs.unmonitorableActionDepfile`` feeding
   ## ``makeDepfilePolicy``) as their dependency evidence instead of monitoring.
   ## See the long note at the execute-edge call site in ``repro.nim`` for the
@@ -883,6 +954,7 @@ proc discoverTests(repoRoot: string): seq[TestEdge] =
       needsProviderMode: isProviderModePath(rel),
       needsSsl: needsSslDefine(rel),
       needsSoftwareRootTestTrust: needsSoftwareRootTestTrustDefine(rel),
+      needsMissingJsonEvidenceTest: needsMissingJsonEvidenceTestDefine(rel),
       requiresReproBinary: detectReproBinaryUsage(reach, repoRoot, rel),
       extraPassC: extraPassC,
       extraPassL: extraPassL,
@@ -1040,6 +1112,8 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
     var definesList: seq[string] = @[]
     if edge.needsProviderMode: definesList.add("reproProviderMode")
     if edge.needsSsl: definesList.add("ssl")
+    if edge.needsMissingJsonEvidenceTest:
+      definesList.add("reproMissingJsonEvidenceTest")
     if edge.needsSoftwareRootTestTrust:
       definesList.add("reproAttestSoftwareRootTestTrust")
     if edge.source in ["tests/unit/t_source_fetch_tool_metadata.nim",
@@ -1158,7 +1232,61 @@ proc renderShapeParity(): string =
     result.add(path & "\t" &
       (if walkAcceptsSource(path): "ACCEPT" else: "REJECT") & "\n")
 
-proc main() =
+const SuiteInventoryScript = "scripts/reprobuild_suite_inventory.py"
+  ## The tool the ``--write-*`` / ``--check-*`` suite-artifact flags belong
+  ## to. Named in the refusal below because the recognised argument set HERE
+  ## is empty, so "unrecognised argument" on its own tells the caller nothing
+  ## they can act on.
+
+proc argumentRefusal*(args: openArray[string]): string =
+  ## "" when there is nothing to refuse; otherwise the full stderr text.
+  ##
+  ## THIS SCRIPT TAKES NO ARGUMENTS. It regenerates two checked-in artifacts
+  ## from the source tree and has nothing to configure. Until this existed,
+  ## every argument was accepted, discarded, and followed by the generator's
+  ## two "is up to date" lines and exit 0 — so a command that did nothing was
+  ## indistinguishable, in a log or a milestone drawer, from one that did the
+  ## work. An agent recorded having regenerated the suite artifacts with
+  ## ``nim r scripts/generate_test_edges.nim --write-static-case-counts``,
+  ## which regenerates neither; the claim was false and was caught only
+  ## because a reviewer re-derived it. See ``reprobuild-pm/issues/
+  ## 2026-10-09-generate-test-edges-accepts-any-flag-and-reports-success.md``.
+  ##
+  ## ``--write-static-case-counts`` and ``--write-inventory-sources`` are the
+  ## arguments most likely to arrive here, and they are REAL flags of a
+  ## DIFFERENT tool, so the message says where they live rather than only
+  ## that they are not understood here.
+  ##
+  ## A ``string`` rather than a ``quit`` so the whole message is testable
+  ## without spawning a process:
+  ## ``tests/integration/
+  ## t_suite_artifact_generator_refuses_arguments_it_cannot_honour.nim``
+  ## calls it directly. ``main`` consults it before any work and exits 2.
+  if args.len == 0:
+    return ""
+  var named: seq[string] = @[]
+  for arg in args:
+    named.add("'" & arg & "'")
+  result = "generate_test_edges: refusing to run: unrecognised argument " &
+    named.join(", ") & "\n"
+  result.add("generate_test_edges: this script takes no arguments. It " &
+    "regenerates " & GeneratedFile & " and " & ShapeParityFile &
+    " from the source tree; there is nothing to select or configure.\n")
+  result.add("generate_test_edges: the --write-* / --check-* suite-artifact " &
+    "flags belong to " & SuiteInventoryScript & ", not to this script. For " &
+    "example:\n")
+  result.add("  python3 " & SuiteInventoryScript &
+    " --write-static-case-counts --write-inventory-sources\n")
+
+proc main(args: openArray[string]) =
+  # The refusal comes FIRST, before `writeBundleSources` and `discoverTests`,
+  # so a refused run writes no file. A generator that rewrote its checked-in
+  # artifacts and then complained would already have done the thing it was
+  # refusing to do.
+  let refusal = argumentRefusal(args)
+  if refusal.len > 0:
+    stderr.write(refusal)
+    quit(2)  # usage error
   let repoRoot = getCurrentDir()
   # Bundle sources must exist before discovery: each one is enrolled as an
   # ordinary TestSpec by path, and ``detectReproBinaryUsage`` reads it.
@@ -1193,4 +1321,9 @@ proc main() =
     $shapeParityCorpus().len & " path shapes")
 
 when isMainModule:
-  main()
+  # `commandLineParams()` is called HERE and never at module scope. This
+  # module is imported by
+  # `tests/integration/t_test_edge_migration_covers_all_test_files.nim`, and
+  # that test binary receives its own arguments; reading argv at module scope
+  # would make the generator's refusal fire on the importer's flags.
+  main(commandLineParams())

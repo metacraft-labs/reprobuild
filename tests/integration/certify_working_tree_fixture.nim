@@ -19,9 +19,12 @@ import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
 import repro_cli_support
+import repro_workspace_manifests
+import repro_lock/certificate_policy
 import ./committed_lock_siblings_fixture
+import ./every_branch_policy
 
-export committed_lock_siblings_fixture
+export committed_lock_siblings_fixture, certificate_policy
 
 include tc5_cert_signing_helpers
 
@@ -36,15 +39,25 @@ type
       ## Every fixture test command appends a line here when it runs, so a
       ## test can tell a run from a no-op.
 
-proc appendProjectToml*(fx: CertifyFixture; text: string) =
-  ## Add a table (``[certificates]`` …) to ``projects/app.toml``, between the
-  ## ``[project]`` table and the first ``[[remote]]``, where the other
-  ## certificate tests put it.
-  let path = fx.sib.ws / "projects" / "app.toml"
-  let body = readFile(path)
-  let at = body.find("[[remote]]")
-  doAssert at > 0, "projects/app.toml has no [[remote]] table"
-  writeFile(path, body[0 ..< at] & text & "\n" & body[at .. ^1])
+proc commitAppPolicySection*(fx: CertifyFixture; section: string) =
+  ## Record ``section`` — a ``[certificate_policy]`` snapshot, "" for none —
+  ## in ``app``'s committed ``repro.lock`` (spliced by the production
+  ## splicer, the layout ``repro lock refresh`` writes), then commit and push
+  ## it. Since TC-9d that snapshot is the only place a certificate policy —
+  ## its ``untracked_inputs`` included — is read from; the project
+  ## manifest's ``[certificates]`` table is refused.
+  let path = fx.sib.app / "repro.lock"
+  writeFile(path, replaceCertificatePolicySection(readFile(path), section))
+  discard fx.sib.git(fx.sib.app, "add repro.lock")
+  discard fx.sib.git(fx.sib.app, "commit -q -m policy")
+  discard fx.sib.git(fx.sib.app, "push -q origin main")
+
+proc offPolicySection*(untrackedInputs = puiReadSet; name = "app"): string =
+  ## A policy snapshot that gates nothing (one rule for every branch, under
+  ## ``off``, requiring nothing) and sets ``untracked_inputs``. The package
+  ## is ``app`` itself, which a committed lock pins as ``path = "."``.
+  everyBranchSnapshot(pmOff, [], [], untrackedInputs = untrackedInputs,
+    name = name, package = name)
 
 proc setupCertifyFixture*(label: string): CertifyFixture =
   result.sib = setupSiblingFixture(label)

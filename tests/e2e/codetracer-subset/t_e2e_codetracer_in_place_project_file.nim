@@ -1,7 +1,9 @@
-import std/[json, os, osproc, sequtils, sets, strutils, tempfiles, unittest]
+import std/[algorithm, json, os, osproc, sequtils, sets, strutils, tempfiles,
+  unittest]
 import repro_test_support/reasoned_skip
 
 import nimcrypto/sha2 as ncSha2
+import repro_project_dsl/install_mirror_resolver
 import repro_tool_profiles
 import repro_test_support
 
@@ -1321,7 +1323,8 @@ proc assertAction(report: JsonNode; id, status: string; launched: bool) =
       action{"status"}.getStr() & " launched=" &
       $action{"launched"}.getBool() & " cacheDecision=" &
       action{"cacheDecision"}.getStr() & " reason=" &
-      action{"reason"}.getStr())
+      action{"reason"}.getStr() & " cacheMissReason=" &
+      action{"cacheMissReason"}.getStr())
     if action{"status"}.getStr() != status or
         action{"launched"}.getBool() != launched:
       checkpoint("action " & id & " diagnostics=" &
@@ -1355,7 +1358,12 @@ proc assertActionCacheEffective(report: JsonNode; id: string) =
       $action{"launched"}.getBool() & " cacheDecision=" &
       action{"cacheDecision"}.getStr())
     if action{"status"}.getStr() notin ["asCacheHit", "asUpToDate"]:
-      checkpoint("cache rejection reason=" & action{"reason"}.getStr() &
+      # `reason` is how the action SETTLED (`builtin`, `exit=0`), not why
+      # the lookup missed; `cacheMissReason` is the lookup's own verdict and
+      # the one that names the input or output it rejected on.
+      checkpoint("cache rejection cacheMissReason=" &
+        action{"cacheMissReason"}.getStr() & " reason=" &
+        action{"reason"}.getStr() &
         " diagnostics=" & $action{"evidence"}{"diagnostics"})
   check action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]
   check action{"launched"}.getBool() == false
@@ -1401,7 +1409,8 @@ proc assertOutputActionCacheEffective(report: JsonNode; output: string) =
     checkpoint("cache-effective output " & output & " action=" &
       action{"id"}.getStr() & " status=" & action{"status"}.getStr() &
       " launched=" & $action{"launched"}.getBool() & " cacheDecision=" &
-      action{"cacheDecision"}.getStr())
+      action{"cacheDecision"}.getStr() & " cacheMissReason=" &
+      action{"cacheMissReason"}.getStr())
   check action{"status"}.getStr() in ["asCacheHit", "asUpToDate"]
   check action{"launched"}.getBool() == false
 
@@ -2686,7 +2695,29 @@ when defined(macosx) or defined(linux):
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
       check first.contains("selectedTarget: frontend")
+      # The pinned recipe's `frontend` aggregate (CodeTracer 222a4a00) is the
+      # 14 `frontendActions` plus the `frontend-styles` target's 6:
+      #   frontend-ui-js, frontend-public-ui-js, frontend-index-js,
+      #   frontend-src-index-js, frontend-server-index-js,
+      #   frontend-subwindow-js, frontend-src-subwindow-js,
+      #   frontend-index-html, frontend-subwindow-html, frontend-helpers-js,
+      #   frontend-src-helpers-js, nim-js-reload-reconnect-test,
+      #   reload-bootstrap-host-js, frontend-public-resources;
+      #   stylus-{default_white_theme_electron, default_dark_theme_electron,
+      #   default_dark_theme_extension, loader, subwindow} and the
+      #   `default_dark_theme.css` copy.
+      # The webpack pair (`frontend-webpack-dist`, `frontend-public-dist`)
+      # is registered only when `webpack.config.js` exists, and this subset
+      # does not copy it. The provenance of each action is listed at
+      # `M52ScheduledActions` below. Nothing has joined or left the
+      # aggregate since this count was written (4dde5bb82).
       check first.contains("scheduler: actions=20")
+      check first.contains(
+        "action: frontend-helpers-js status=asSucceeded launched=true")
+      check first.contains(
+        "action: nim-js-reload-reconnect-test status=asSucceeded launched=true")
+      check first.contains(
+        "action: reload-bootstrap-host-js status=asSucceeded launched=true")
       check first.contains(
         "action: frontend-ui-js status=asSucceeded launched=true")
       check first.contains(
@@ -2891,12 +2922,108 @@ when defined(macosx) or defined(linux):
       let monitorEnv = [
         ("REPRO_MONITOR_SHIM_LIB", monitorTools.shim)
       ]
-      let pathValue = codeTracerPathValue()
+      # `clang` is the compiler proxy here, not the version-answering stub,
+      # because this graph links a native binary: `ct-test` (see the action
+      # list below) is a `nim.c` compile, and on macOS Nim links with
+      # `clang`. With the stub first on PATH that link "succeeded" without
+      # writing anything and `dsymutil` then failed on the missing binary.
+      # The JS cases keep the stub: they compile nothing native.
+      let pathValue = codeTracerPathValue(includeClang = true)
       let first = build(reproBin, projectRoot, repoRoot, pathValue, monitorEnv)
       check first.contains("provisioning-disabled mode active")
       check first.contains("providerCompile:")
       check first.contains("providerGraphSnapshot:")
-      check first.contains("scheduler: actions=28")
+      # THE ACTION COUNT FOLLOWS THE PINNED RECIPE, so it is derived from
+      # `PinnedCodeTracerProjectFile` (CodeTracer 222a4a00) rather than from
+      # the last value that passed. `repro build <projectRoot>` names a
+      # target, so the recipe's `defaultBuildAction` is NOT consulted, and
+      # the unselected lowering (`lowerProviderSnapshot` with no selector)
+      # schedules every emitted edge except members of the `test`, `bench`
+      # and `lint` collections. For this source subset that is the 31
+      # actions of `M52ScheduledActions`, each named with the CodeTracer
+      # change that added it:
+      #
+      #   generate_nim_paths_codeTracer, ensure_ignore_nim_paths_codeTracer,
+      #     ensure_snippet_config_nims_codeTracer
+      #                                 `nim.nimRepropathsConfig()`, 3db8cf5bb
+      #   generate-config-header, nim-js-ipc-registry-test,
+      #     c-sudoku-object-tup, c-sudoku-object-with-generated-header
+      #                                 646826284 (the first project slice)
+      #   build-c-dir                   2af65269c
+      #   nim-js-reload-reconnect-test, reload-bootstrap-host-js,
+      #     frontend-helpers-js         4d9e44d98
+      #   frontend-ui-js, frontend-public-ui-js        851abfc9a
+      #   frontend-index-js, frontend-src-index-js     c0959cb4c
+      #   frontend-server-index-js                     5101931a4
+      #   frontend-subwindow-js, frontend-src-subwindow-js  14d39fd84
+      #   frontend-index-html, frontend-subwindow-html,
+      #     frontend-src-helpers-js                    736819434
+      #   stylus-{default_white_theme_electron, default_dark_theme_electron,
+      #     default_dark_theme_extension, loader, subwindow} and the
+      #     `default_dark_theme.css` copy             f6a5d4203 (the white
+      #     theme's entry point renamed by b7e1d85d7, same count)
+      #   frontend-public-resources                    a74df24c7
+      #   config-default-layout-json, config-default-config-yaml
+      #                                 116983166, registered only when
+      #                                 `src/config/` exists
+      #   ct-test                       84df173fd (2026-08-11)
+      #
+      # Not counted: the ten `codetracer.gate.*` shell gates (996f9b122),
+      # which are members of the `test`/`lint` collections, and every action
+      # whose inputs this subset does not copy (the `fileExists` branches for
+      # webpack, cargo, `db-backend-record`, `ct`, the app bundles and the
+      # docs book).
+      #
+      # The 28 this case asserted from 4dde5bb82 (2026-07-12) is the same
+      # list without three entries. `ct-test` did not exist yet. The two
+      # `config-default-*` copies were not registered, because this copier
+      # did not yet stage `src/config/` (it does since 28ac9d04ce, for the
+      # frontend's `staticRead`s). `auxiliaryActionIds`, which keeps
+      # `ct-test` out of the recipe's `codetracer` aggregate in a source
+      # subset, does not apply here: the aggregate is the DEFAULT target,
+      # and this build names its target.
+      const M52ScheduledActions = [
+        "generate_nim_paths_codeTracer",
+        "ensure_ignore_nim_paths_codeTracer",
+        "ensure_snippet_config_nims_codeTracer",
+        "generate-config-header",
+        "build-c-dir",
+        "nim-js-ipc-registry-test",
+        "nim-js-reload-reconnect-test",
+        "reload-bootstrap-host-js",
+        "frontend-ui-js",
+        "frontend-public-ui-js",
+        "frontend-index-js",
+        "frontend-src-index-js",
+        "frontend-server-index-js",
+        "frontend-subwindow-js",
+        "frontend-src-subwindow-js",
+        "frontend-index-html",
+        "frontend-subwindow-html",
+        "frontend-helpers-js",
+        "frontend-src-helpers-js",
+        "stylus-default_dark_theme_extension",
+        "stylus-default_white_theme_electron",
+        "stylus-default_dark_theme_electron",
+        "stylus-loader",
+        "stylus-subwindow",
+        "fs-copyFile-src-2fbuild-debug-repro-2ffrontend-2fstyles-2f" &
+          "default_dark_theme.css",
+        "frontend-public-resources",
+        "config-default-layout-json",
+        "config-default-config-yaml",
+        "ct-test",
+        "c-sudoku-object-tup",
+        "c-sudoku-object-with-generated-header"
+      ]
+      checkpoint(first.splitLines().filterIt(
+        it.startsWith("scheduler:") or it.startsWith("action:")).join("\n"))
+      check first.contains("scheduler: actions=" & $M52ScheduledActions.len)
+      for id in M52ScheduledActions:
+        check first.contains("action: " & id &
+          " status=asSucceeded launched=true")
+      check not first.contains("action: gate-")
+      check not first.contains("action: codetracer.gate.")
       check first.contains("action: generate-config-header status=asSucceeded launched=true")
       check first.contains("action: build-c-dir status=asSucceeded launched=true")
       check first.contains("action: nim-js-ipc-registry-test status=asSucceeded launched=true")
@@ -2942,16 +3069,59 @@ when defined(macosx) or defined(linux):
       check fileExists(projectRoot / "build" / "c" / "main.tup.o")
       check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
 
+      # THE PATH-ONLY TOOL IDENTITY HOLDS THE TOOLS THE SELECTED ACTIONS
+      # REFERENCE, not every `uses:` entry (External-Package-Catalog-
+      # Adapters.md §"Which Tools A Build Realizes"; `scopedToolArtifact`,
+      # 636d688f2). Among the 31 actions above, the `nim.js` compiles and
+      # `ct-test`'s `nim.c` run `nim`, the five `stylus-*` edges run `node`,
+      # and the two C objects run `gcc`. Every other action is a built-in
+      # and runs no tool. No action's `toolIdentityRefs` or tool sub-tools
+      # name another declared tool, so exactly three profiles are realized.
+      # No selected action references the other declared tools, so they stay
+      # declared and unrealized. The declared set, the denominator of
+      # `selected tool identities:`, has three parts:
+      #   * the recipe's `uses:` tools for this platform, which is
+      #     `CodeTracerDevToolExecutables` (46 on macOS);
+      #   * its six source packages, which are `CodeTracerSourcePackages`
+      #     plus `isonim-tui`;
+      #   * the commands of the generated install-mirror script, which every
+      #     package declares as native tools (`registerInstallMirrorTools`,
+      #     from `typedInstallMirrorShellTools`): `sh rm mkdir cp touch sed
+      #     chmod`, and 14 more on Linux. `sh` is counted again, because its
+      #     dependency kind differs from the `uses:` entry.
+      # Measured on macOS: 46 + 6 + 7 = 59.
+      #
+      # It used to assert one profile per declared tool and source package
+      # (written 2026-07-12, before the scoping). That fails with
+      # `identity.profiles.len was 3`, and the 3 is the intended answer.
+      const M52RealizedTools = ["gcc", "nim", "node"]
+      # `isonim-tui` joined the pinned recipe's `uses:` after
+      # `CodeTracerSourcePackages` was written.
+      let declaredSourcePackages = @CodeTracerSourcePackages & @["isonim-tui"]
+      let declaredToolUses = CodeTracerDevToolExecutables.len +
+        declaredSourcePackages.len +
+        typedInstallMirrorShellTools("codeTracer").len
+      check first.contains("selected tool identities: " &
+        $M52RealizedTools.len & "/" & $declaredToolUses)
       let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
-      check identity.profiles.len == CodeTracerDevToolExecutables.len +
-        CodeTracerSourcePackages.len
-      for executableName in CodeTracerDevToolExecutables:
-        check identity.profiles.anyIt(it.executableName == executableName)
-      for packageName in CodeTracerSourcePackages:
-        check identity.profiles.anyIt(it.packageSelector == packageName)
+      checkpoint("realized tool identities: " &
+        identity.profiles.mapIt(it.packageSelector & "|" &
+          it.executableName).join(", "))
+      check identity.profiles.len == M52RealizedTools.len
+      check identity.profiles.mapIt(it.executableName).sorted() ==
+        @M52RealizedTools
       for profile in identity.profiles:
         check profile.installMethod == "path"
         check profile.cachePortability == cpLocalOnly
+      # Declared, referenced by no selected action, therefore not realized.
+      for executableName in CodeTracerDevToolExecutables:
+        if executableName notin M52RealizedTools:
+          check not identity.profiles.anyIt(
+            it.executableName == executableName)
+      for packageName in declaredSourcePackages:
+        check not identity.profiles.anyIt(it.packageSelector == packageName)
+      for toolName in typedInstallMirrorShellTools("codeTracer"):
+        check not identity.profiles.anyIt(it.executableName == toolName)
       check not identity.profiles.anyIt(it.executableName == "nim-js")
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))

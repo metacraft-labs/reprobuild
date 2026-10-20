@@ -133,9 +133,6 @@ proc seedAndWire(gitBin: string): Fixture =
     "path = \".\"\nrevision = \"0000000000000000000000000000000000000000\"\n")
 
   let cfg = GatewayConfig(
-    gateMode: cgmOff,
-    requiredTargets: @[],
-    requiredPlatforms: @[],
     lockRecordsDir: "",
     registeredKeysPath: "")
   let wired = wirePushGateway(gitBin, result.workPath, result.gatewayBare,

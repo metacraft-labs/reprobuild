@@ -224,12 +224,43 @@ type
 
 # ---------------------------------------------------------------------------
 # Generation-id derivation. A 32-hex-char id over the profile digest +
-# host + commit timestamp — the same shape as the home generation id.
+# host + commit timestamp + the generation that was current at commit.
 # ---------------------------------------------------------------------------
 
-proc deriveGenerationId(profileDigestHex, hostIdentity: string;
-                        ts: int64): string =
-  computePlanId(profileDigestHex & ".generation", hostIdentity, ts)
+proc deriveGenerationId*(profileDigestHex, hostIdentity: string;
+                         ts: int64; previousGenerationId: string): string =
+  ## A system generation is history, not a disposable proposal: every
+  ## commit must name a distinct generation. The timestamp has whole-second
+  ## resolution and the digest is of the RENDERED profile (the empty text
+  ## for every action-edge-only profile), so digest + host + second alone
+  ## collide for two commits within one second, and the second overwrote
+  ## the first (reprobuild-pm issue
+  ## 2026-10-18-system-generation-ids-collide-within-one-second). Chaining
+  ## the previously current generation makes consecutive commits distinct:
+  ## each commit moves `current` to its own id, so the next commit's input
+  ## differs. Every input is recorded in the generation's envelope
+  ## (`profileDigestHex`, `hostIdentity`, `activationTimestamp`,
+  ## `previousGenerationId`), so the id is recomputable from it. The digest
+  ## is fixed-width hex, so joining it with the predecessor is unambiguous.
+  computePlanId(profileDigestHex & ".generation:" & previousGenerationId,
+    hostIdentity, ts)
+
+proc allocateGenerationId(stateDir, profileDigestHex, hostIdentity: string;
+                          previousGenerationId: string;
+                          ts: var int64): string =
+  ## The id the commit will use, never one whose directory already exists.
+  ## The chain above already separates every completed commit; what is
+  ## left is a directory left behind by an apply that died between
+  ## creating it and moving `current` (the apply lock serializes live
+  ## applies). Rather than overwrite that directory, the commit takes the
+  ## next second: `ts` is advanced and is what the envelope records as the
+  ## activation time, so the id stays recomputable from the envelope.
+  result = deriveGenerationId(profileDigestHex, hostIdentity, ts,
+    previousGenerationId)
+  while dirExists(generationDir(stateDir, result)):
+    inc ts
+    result = deriveGenerationId(profileDigestHex, hostIdentity, ts,
+      previousGenerationId)
 
 # ---------------------------------------------------------------------------
 # Convert plan operation records into the broker's PlannedOperation
@@ -472,6 +503,13 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   var env: PlanEnvelope
   if opts.planId.len > 0:
     env = readPlanFile(planPath(opts.stateDir, opts.planId))
+    # The plan is one host's: its id and the generation this apply commits
+    # derive from the host identity, so applying another host's plan -- or
+    # one recorded under the pre-unification identity rule -- would commit a
+    # generation whose plan names a different host. Refused before anything
+    # is touched; a fresh plan is cheap.
+    if env.hostIdentity != opts.hostIdentity:
+      raisePlanHostMismatch(opts.planId, env.hostIdentity, opts.hostIdentity)
     # Stale-detection: the live world must still be consistent with
     # the plan's recorded observations.
     let stale = detectStaleResources(env.operations, profileText)
@@ -590,9 +628,10 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
       result.restartNeeded = true
 
   # --- 4. Commit the generation + write the audit log. ---
-  let commitTs = getTime().toUnix()
-  let generationId = deriveGenerationId(
-    env.profileDigestHex, opts.hostIdentity, commitTs)
+  var commitTs = getTime().toUnix()
+  let previousGenerationId = readCurrentGenerationId(opts.stateDir)
+  let generationId = allocateGenerationId(opts.stateDir,
+    env.profileDigestHex, opts.hostIdentity, previousGenerationId, commitTs)
   result.generationId = generationId
   let genDir = generationDir(opts.stateDir, generationId)
   createDir(genDir)
@@ -618,7 +657,8 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
       profileDigestHex: env.profileDigestHex,
       profileText: profileText,
       appliedCount: result.appliedCount,
-      noOpCount: result.noOpCount))
+      noOpCount: result.noOpCount,
+      previousGenerationId: previousGenerationId))
   # The generation pointer / `current` marker is updated by the
   # NON-elevated parent (this proc), never the broker.
   writeCurrentGenerationId(opts.stateDir, generationId)

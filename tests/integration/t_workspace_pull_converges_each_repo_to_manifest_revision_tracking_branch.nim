@@ -36,7 +36,7 @@
 ##
 ## Skip rule: ``git`` missing on PATH.
 
-import std/[json, os, osproc, strutils, tempfiles, unittest]
+import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_test_support
 
@@ -269,3 +269,71 @@ suite "RA-11 — pull converges to manifest revision on a tracking branch":
       check repoEntry(syncReport, "lib-a")["syncCase"].getStr() in
         ["divergent_feature_branch", "locally_unpublished",
          "clean_at_locked_revision"]
+
+  test "pull warns before leaving published integration branches":
+    let gitBin = findExe("git")
+    require gitBin.len > 0
+    let fx = setupFixture(gitBin, "branch-warning")
+    defer: removeDir(fx.scratch)
+    let warningLog = fx.scratch / "warnings.log"
+    for spec in [("lib-a", fx.aOrigin, "agents"),
+                 ("lib-b", fx.bOrigin, "next")]:
+      let (name, origin, branch) = spec
+      let repo = fx.workspaceRoot / name
+      cloneInto(gitBin, origin, repo)
+      discard requireGit(q(gitBin) & " -C " & q(repo) &
+        " checkout -b " & branch)
+      writeFile(repo / "integration-only.txt", "newer integrated work\n")
+      discard requireGit(q(gitBin) & " -C " & q(repo) & " add integration-only.txt")
+      discard requireGit(q(gitBin) & " -C " & q(repo) & " commit -m integrated")
+      discard requireGit(q(gitBin) & " -C " & q(repo) & " push origin " & branch)
+      let marker = fx.scratch / (name & "-warning-before-checkout")
+      let hook = repo / ".git" / "hooks" / "post-checkout"
+      writeFile(hook, "#!/bin/sh\nif grep -F " &
+        q("workspace pull: WARNING: " & name & " switching from '" & branch & "' to 'dev'") &
+        " " & q(warningLog) & " >/dev/null; then echo observed > " &
+        q(marker) & "; fi\n")
+      setFilePermissions(hook, {fpUserRead, fpUserWrite, fpUserExec})
+    let args = @[fx.reproBin, "workspace", "pull", "--force", "myproject",
+      "--workspace-root=" & fx.workspaceRoot]
+    let pull = runCmd(args.mapIt(q(it)).join(" ") & " 2> " & q(warningLog))
+    checkpoint(pull.output & readFile(warningLog))
+    require pull.code == 0
+    let warnings = readFile(warningLog)
+    check "repro sync" in warnings
+    check "work on the current branch may be absent" in warnings
+    for spec in [("lib-a", "agents"), ("lib-b", "next")]:
+      let (name, branch) = spec
+      let repo = fx.workspaceRoot / name
+      check fileExists(fx.scratch / (name & "-warning-before-checkout"))
+      check currentBranch(gitBin, repo) == "dev"
+      check not fileExists(repo / "integration-only.txt")
+      discard requireGit(q(gitBin) & " -C " & q(repo) &
+        " cat-file -e " & branch & ":integration-only.txt")
+    # Positive control: rerunning on the declared branch does not warn.
+    let repeated = runCmd(args.mapIt(q(it)).join(" ") & " 2> " & q(warningLog))
+    check repeated.code == 0
+    check "workspace pull: WARNING:" notin readFile(warningLog)
+
+  test "pull names detached sources and synthetic pinned targets":
+    let gitBin = findExe("git")
+    require gitBin.len > 0
+    for pinned in [false, true]:
+      let fx = setupFixture(gitBin, "detached-pinned-" & $pinned)
+      defer: removeDir(fx.scratch)
+      let repo = fx.workspaceRoot / "lib-a"
+      cloneInto(gitBin, fx.aOrigin, repo)
+      cloneInto(gitBin, fx.bOrigin, fx.workspaceRoot / "lib-b")
+      let source = if pinned: "dev" else: "detached HEAD"
+      let target = if pinned: "reprobuild/pinned/" & fx.aTip[0 ..< 12] else: "dev"
+      if pinned:
+        writeFile(fx.workspaceRoot / "repos" / "lib-a.toml",
+          libAFragmentToml.replace("revision = \"dev\"", "revision = \"" & fx.aTip & "\""))
+      else:
+        discard requireGit(q(gitBin) & " -C " & q(repo) & " checkout --detach HEAD")
+      let pull = runShell(shellCommand(@[fx.reproBin, "workspace", "pull",
+        "myproject", "--workspace-root=" & fx.workspaceRoot]))
+      checkpoint(pull.output)
+      check pull.code == 0
+      check ("lib-a switching from '" & source & "' to '" & target & "'") in pull.output
+      check currentBranch(gitBin, repo) == target

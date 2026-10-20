@@ -24,6 +24,12 @@ import std/[strutils, tables]
 from repro_core/paths import extendedPath
 from repro_profile/data_refs import dataFilePathProblem
 from repro_profile/catalog_refs import catalogImportPathProblem
+from repro_profile/concerns import concernListProblem
+# The lexer's keyword rule, shared with the `package` macro and the
+# structural editor, so all three agree on which names cannot be bare.
+from repro_project_dsl/selector_names import isNimKeyword
+from repro_profile/host_system import HostSystemKey, ManagedElsewhereKeyword,
+  systemPointerProblem
 
 import ./errors
 import ./model
@@ -35,6 +41,7 @@ const
   ConfigHeader = "config"
   HostsHeader = "hosts"
   ResourcesHeader = "resources"
+  StowHeader = "stow"
   AdapterPreferenceHeader = "adapterPreference"
   DataHeader = "data"
   CatalogsHeader = "catalogs"
@@ -90,6 +97,12 @@ type
     profilePath: string
     lines: seq[string]
     indentStep: int
+    tolerant: bool
+      ## `inspectProfile`: step over the constructs the profile macro
+      ## accepts but a text reader cannot see into (helper calls, an
+      ## activity's `stow:` / `resources:` block, statements before the
+      ## `profile` header), recording each as an `nkOpaque` extent.
+      ## `loadProfile` (false) refuses them, as it always has.
 
 proc lineEnding(src: string): string =
   if src.find("\r\n") >= 0: "\r\n" else: "\n"
@@ -223,7 +236,11 @@ proc findProfileHeader(ctx: ParseCtx): int =
           "exactly one `profile <name>:` block per file")
       found = i
     else:
-      if found < 0:
+      # `inspectProfile` steps over what precedes the `profile` block (a
+      # `const` the profile reads with `staticRead`, a helper `proc`): the
+      # inspector never edits there, and the compiled profile is what
+      # evaluates it.
+      if found < 0 and not ctx.tolerant:
         validateNonProfileTopLevel(ctx, i)
   if found < 0:
     raiseUnstructured(ctx.profilePath, 1, 1,
@@ -287,6 +304,122 @@ const
     "yield", "break", "continue", "try", "except", "finally",
     "static", "block", "asm", "defer", "echo"]
 
+# ---------------------------------------------------------------------------
+# Helper calls (inspectProfile only).
+# ---------------------------------------------------------------------------
+#
+# The profile macro accepts a call statement in an activity body (the
+# helper-proc splat, Profile-Migration-Patterns.md §How do I splat a helper
+# module into an activity body?), in `config:` and in `resources:` (resource
+# constructors and helpers such as `zshShellSetup()`). What such a call
+# contributes is known only once the profile is compiled. `inspectProfile`
+# records its extent -- the call line plus the continuation lines up to the
+# parenthesis that closes it -- so an edit elsewhere can step over it.
+
+proc helperCallName(body: string): string =
+  ## The callee of a call statement `name(...)` / `mod.name(...)` starting
+  ## `body`, or "" when `body` does not start with one. `package(...)` is
+  ## the package constructor, never a helper.
+  var i = 0
+  while i < body.len and (body[i].isAlphaAscii() or body[i].isDigit() or
+                          body[i] in {'_', '.'}):
+    inc i
+  if i == 0 or not (body[0].isAlphaAscii() or body[0] == '_') or
+     body[i - 1] == '.':
+    return ""
+  let name = body[0 ..< i]
+  var j = i
+  while j < body.len and body[j] == ' ':
+    inc j
+  if j >= body.len or body[j] != '(':
+    return ""
+  if name == "package" or name in ["for", "while", "case", "if", "when",
+                                   "elif", "else", "proc", "func", "template",
+                                   "macro", "return", "discard"]:
+    return ""
+  name
+
+proc helperCallEnd(lines: seq[string]; idx: int): int =
+  ## The 0-based index of the last line of the call statement starting on
+  ## line `idx`: the line holding the `)` that closes its first `(`. String
+  ## literals (plain, raw and triple-quoted) and `#` comments are skipped
+  ## when counting parentheses. Continuation lines must be indented deeper
+  ## than the call (or blank / comment). Returns -1 when the statement is
+  ## not one call: it never closes, or text other than a comment follows
+  ## the closing parenthesis.
+  let callIndent = countLeadingSpaces(lines[idx])
+  var depth = 0
+  var started = false
+  var inTriple = false
+  var i = idx
+  while i < lines.len:
+    let line = lines[i]
+    if i > idx and not inTriple:
+      let t = line.strip()
+      if t.len > 0 and not t.startsWith("#") and
+         countLeadingSpaces(line) <= callIndent:
+        return -1
+    var c = 0
+    while c < line.len:
+      let ch = line[c]
+      if inTriple:
+        if ch == '"' and c + 2 < line.len and line[c + 1] == '"' and
+           line[c + 2] == '"':
+          inTriple = false
+          c += 3
+        else:
+          inc c
+        continue
+      if ch == '#':
+        break
+      if ch == '"':
+        if c + 2 < line.len and line[c + 1] == '"' and line[c + 2] == '"':
+          inTriple = true
+          c += 3
+          continue
+        let raw = c > 0 and line[c - 1] in {'r', 'R'}
+        inc c
+        while c < line.len and line[c] != '"':
+          if not raw and line[c] == '\\':
+            inc c
+          inc c
+        inc c
+        continue
+      if ch == '(':
+        inc depth
+        started = true
+      elif ch == ')':
+        dec depth
+        if started and depth == 0:
+          let rest = line[c + 1 .. ^1].strip()
+          if rest.len == 0 or rest.startsWith("#"):
+            return i
+          return -1
+      inc c
+    inc i
+  -1
+
+proc opaqueHelperCall(ctx: ParseCtx; idx, indent: int): IntentNode =
+  ## The `nkOpaque` extent of the helper call starting on line `idx`, or nil
+  ## when the line does not start a complete call statement (or the parse
+  ## is not tolerant).
+  if not ctx.tolerant:
+    return nil
+  let body = stripInlineComment(ctx.lines[idx]).strip()
+  let name = helperCallName(body)
+  if name.len == 0:
+    return nil
+  let last = helperCallEnd(ctx.lines, idx)
+  if last < 0:
+    return nil
+  let shown =
+    if last == idx: body
+    else: name & "(...)"
+  IntentNode(kind: nkOpaque, startLine: idx + 1, endLine: last + 1,
+    indent: indent, opaqueKind: okHelperCall,
+    opaqueConstruct: "helper call `" & shown & "` (" & ctx.profilePath &
+      ":" & $(idx + 1) & ")")
+
 proc isQuotedPackageNameChar(ch: char): bool =
   ch.isAlphaAscii() or ch.isDigit() or ch in {'_', '-'}
 
@@ -307,6 +440,22 @@ proc validateQuotedPackageName(ctx: ParseCtx; idx, column: int;
       raiseUnstructured(ctx.profilePath, idx + 1, column,
         "'" & spelling & "' as a quoted package name",
         "a quoted name containing only letters, digits, `_`, and `-`")
+
+proc refuseBareKeyword(ctx: ParseCtx; idx, column: int;
+                       name, spelling, quotedForm: string) =
+  ## Refuse an unquoted package name that is a Nim keyword (``nil``,
+  ## ``type``; matched style-insensitively, as the lexer does, so ``n_il``
+  ## too). In the profile macro such a line is the keyword, not a package
+  ## reference, so it never names the package ``nil``; reading it as one
+  ## would make the structural editor see a package the compiled profile
+  ## does not have. A keyword-named package is written quoted
+  ## (Home-Profile-Intent-Layer.md §"`package(...)` — explicit constructor
+  ## forms"), as the editor writes it.
+  if isNimKeyword(name):
+    raiseUnstructured(ctx.profilePath, idx + 1, column,
+      spelling & ", the Nim keyword `" & name & "`",
+      "a package named by a Nim keyword written quoted (e.g. " &
+      quotedForm & ")")
 
 proc parsePackageCallForm(ctx: ParseCtx; idx, indent: int;
                           body: string): IntentNode =
@@ -364,11 +513,19 @@ proc parsePackageCallForm(ctx: ParseCtx; idx, indent: int;
     raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
       "'" & pkgId & "' as a `package(...)` id",
       "an identifier starting with a letter or underscore")
-  for ch in pkgId:
-    if not (ch.isAlphaAscii() or ch.isDigit() or ch in {'_', '-'}):
-      raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
-        "'" & pkgId & "' as a `package(...)` id",
-        "an identifier of letters, digits, `_`, and `-`")
+  else:
+    for ch in pkgId:
+      if not (ch.isAlphaAscii() or ch.isDigit() or ch in {'_', '-'}):
+        raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+          "'" & pkgId & "' as a `package(...)` id",
+          "an identifier of letters, digits, `_`, and `-`")
+    # An unquoted id that is a Nim keyword (`package(nil)`) is not a name to
+    # the profile macro: Nim parses it as the keyword (a `nil` literal), so
+    # reading it as the package `nil` here would disagree with what the
+    # compiled profile does. The quoted form reaches such a name.
+    refuseBareKeyword(ctx, idx, indent + 1, pkgId,
+      "'" & pkgId & "' as a `package(...)` id",
+      "package(\"" & pkgId & "\")")
   var version = ""
   if hasVersion:
     let vTrim = versionArg.strip()
@@ -427,6 +584,7 @@ proc parsePackageRefLine(ctx: ParseCtx; idx: int): IntentNode =
   # attributes which we accept and preserve.
   var i = 0
   var pkgName = ""
+  let bareForm = body[0] notin {'"', '`'}
   if body[0] == '"':
     # A quoted name, `"7zip"`: the bare form of a package name that is not
     # a Nim identifier (the profile macro accepts a string literal here).
@@ -469,13 +627,20 @@ proc parsePackageRefLine(ctx: ParseCtx; idx: int): IntentNode =
       raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
         "'" & body & "'",
         "a bare package reference starting with a letter or underscore")
-  # Refuse Nim control-flow keywords — the spec explicitly calls out
-  # `for` loops building an activity body at runtime as the canonical
-  # unstructured case.
-  if pkgName in NimControlFlowKeywords:
-    raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
-      "Nim `" & pkgName & "` keyword used to build an activity body",
-      "a bare package reference (`for` / `while` / etc. are not allowed)")
+  if bareForm:
+    # Refuse Nim control-flow keywords — the spec explicitly calls out
+    # `for` loops building an activity body at runtime as the canonical
+    # unstructured case. Only the bare form: `"type"` and `` `type` `` are
+    # names, which the profile macro reads as the package `type`.
+    if pkgName in NimControlFlowKeywords:
+      raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+        "Nim `" & pkgName & "` keyword used to build an activity body",
+        "a bare package reference (`for` / `while` / etc. are not allowed)")
+    # Any other keyword (`nil`, `out`, ...) is not a package reference
+    # either: refused rather than read as a package of that name.
+    refuseBareKeyword(ctx, idx, indent + 1, pkgName,
+      "'" & pkgName & "' as a bare package reference",
+      "\"" & pkgName & "\"")
   # The package reference may NOT be a Nim assignment or call expression.
   # Reject `=`, `(`, and similar.
   let rest = body[i .. ^1].strip()
@@ -493,10 +658,13 @@ proc parseConditional(ctx: ParseCtx; startIdx: int; indent: int;
                      childIndent: int): IntentNode
 
 proc parseActivityChildren(ctx: ParseCtx; startIdx, endIdxExclusive,
-                           childIndent: int): seq[IntentNode] =
+                           childIndent: int;
+                           activityLevel = false): seq[IntentNode] =
   ## Parse lines [startIdx, endIdxExclusive) as children of an
   ## activity body. Children are package references OR conditional
-  ## blocks.
+  ## blocks. `inspectProfile` also steps over helper calls and -- directly
+  ## in the activity body (`activityLevel`), the only place the profile
+  ## macro accepts them -- `stow:` and `resources:` blocks.
   var i = startIdx
   while i < endIdxExclusive:
     let raw = ctx.lines[i]
@@ -513,6 +681,25 @@ proc parseActivityChildren(ctx: ParseCtx; startIdx, endIdxExclusive,
     # syntactically empty (Phase A macro form requires a body).
     if raw.strip() == "discard":
       inc i
+      continue
+    if ctx.tolerant and activityLevel:
+      let blockName = stripInlineComment(raw).strip()
+      if blockName in [StowHeader & ":", ResourcesHeader & ":"]:
+        let last = lastStructuralIdx(ctx.lines, i + 1,
+          childIndent + ctx.indentStep)
+        let isStow = blockName == StowHeader & ":"
+        result.add IntentNode(kind: nkOpaque, startLine: i + 1,
+          endLine: max(last + 1, i + 1), indent: childIndent,
+          opaqueKind: (if isStow: okActivityStowBlock
+                       else: okActivityResources),
+          opaqueConstruct: "`" & blockName & "` block (" & ctx.profilePath &
+            ":" & $(i + 1) & ")")
+        i = max(last + 1, i + 1)
+        continue
+    let call = opaqueHelperCall(ctx, i, childIndent)
+    if not call.isNil:
+      result.add call
+      i = call.endLine
       continue
     let m = matchAnyHeader(raw)
     if m.ok and m.keyword == WhenHeader:
@@ -589,7 +776,8 @@ proc parseActivity(ctx: ParseCtx; idx, parentIndent,
   let endIdx = lastStructuralIdx(ctx.lines, idx + 1, childIndent)
   let bodyChildren =
     if endIdx >= idx + 1:
-      parseActivityChildren(ctx, idx + 1, endIdx + 1, childIndent)
+      parseActivityChildren(ctx, idx + 1, endIdx + 1, childIndent,
+        activityLevel = true)
     else:
       @[]
   result = IntentNode(kind: nkActivity,
@@ -742,7 +930,13 @@ proc parseGuardedChildren(ctx: ParseCtx; startIdx, endIdxExclusive,
       i = blk.endLine
     else:
       chain = GuardChain()
-      let node = section.leaf(ctx, i, childIndent)
+      # `inspectProfile`: a helper or constructor call (`gitIdentity(...)`
+      # in `config:`, `fsUserFile(...)` / `zshShellSetup()` in `resources:`)
+      # is stepped over; `loadProfile` refuses it through `section.leaf`.
+      let call = opaqueHelperCall(ctx, i, childIndent)
+      let node =
+        if call.isNil: section.leaf(ctx, i, childIndent)
+        else: call
       result.add node
       i = node.endLine
 
@@ -833,6 +1027,52 @@ proc parseConfigBlock(ctx: ParseCtx; idx, parentIndent,
     indent: parentIndent, configHeaderLine: idx + 1,
     configPackages: packages)
 
+proc parseHostSystemText(ctx: ParseCtx; idx: int; raw: string;
+                         startCol: int; hostName: string): string =
+  ## The value of a block-form host entry's `system:` line, the text form of
+  ## what the `profile` macro accepts (`repro_profile/host_system`):
+  ## `managedElsewhere` (returns "") or `managedElsewhere("<pointer>")`
+  ## (returns the pointer), optionally followed by a `#` comment.
+  let expected = "`" & ManagedElsewhereKeyword & "` or `" &
+    ManagedElsewhereKeyword & "(\"<managing repository>\")`"
+  var s = raw.strip()
+  if not s.startsWith(ManagedElsewhereKeyword):
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "'" & s & "' as the `system:` value of hosts entry \"" & hostName &
+      "\"", expected)
+  s = s[ManagedElsewhereKeyword.len .. ^1].strip()
+  if s.len == 0 or s.startsWith("#"):
+    return ""
+  # `("...")`: a plain string literal with `\\` and `\"` escapes.
+  if not s.startsWith("(\""):
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "'" & raw.strip() & "' as the `system:` value of hosts entry \"" &
+      hostName & "\"", expected)
+  var i = 2
+  var pointer = ""
+  while i < s.len and s[i] != '"':
+    if s[i] == '\\' and i + 1 < s.len:
+      pointer.add s[i + 1]
+      inc i, 2
+    else:
+      pointer.add s[i]
+      inc i
+  if i + 1 >= s.len or s[i + 1] != ')':
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "an unterminated `" & ManagedElsewhereKeyword & "(...)` in hosts " &
+      "entry \"" & hostName & "\"", expected)
+  let tail = s[i + 2 .. ^1].strip()
+  if tail.len > 0 and not tail.startsWith("#"):
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "'" & tail & "' after the `system:` value of hosts entry \"" &
+      hostName & "\"", "nothing, or a `#` comment")
+  let problem = systemPointerProblem(pointer)
+  if problem.len > 0:
+    raiseUnstructured(ctx.profilePath, idx + 1, startCol + 1,
+      "system: " & problem & " in hosts entry \"" & hostName & "\"",
+      expected)
+  pointer
+
 proc splitHostList(ctx: ParseCtx; idx: int; raw: string;
                   startCol: int): seq[string] =
   ## Parse a `[a, b, c]` activity list. The brackets are required.
@@ -856,6 +1096,35 @@ proc splitHostList(ctx: ParseCtx; idx: int; raw: string;
           "'" & id & "' inside the activity list",
           "a single identifier")
     result.add id
+
+proc gatherHostList(ctx: ParseCtx; idx: int; first: string;
+                    ownerIndent: int): tuple[text: string; lastIdx: int] =
+  ## The text of the `[...]` activity list that starts on line `idx` with
+  ## `first` (the text after the `:`), and the 0-based index of the line
+  ## holding its `]`. A list may span lines, as any Nim array literal may
+  ## (zah/dotfiles writes its long host entries that way): the continuation
+  ## lines are those indented deeper than `ownerIndent` (the host entry or
+  ## the `activities:` key), comments dropped. When `first` does not open a
+  ## list, or the list never closes, the line's own text is returned with
+  ## `lastIdx = idx`, so `splitHostList` refuses it as before.
+  let head = stripInlineComment(first).strip()
+  if not head.startsWith("[") or head.contains(']'):
+    return (head, idx)
+  var text = head
+  var j = idx + 1
+  while j < ctx.lines.len:
+    let line = ctx.lines[j]
+    if isBlankOrComment(line):
+      inc j
+      continue
+    if countLeadingSpaces(line) <= ownerIndent:
+      break
+    let piece = stripInlineComment(line).strip()
+    text.add " " & piece
+    if piece.contains(']'):
+      return (text, j)
+    inc j
+  (head, idx)
 
 proc parseHostsEntry(ctx: ParseCtx; idx, entryIndent: int): IntentNode =
   let raw = ctx.lines[idx]
@@ -890,11 +1159,74 @@ proc parseHostsEntry(ctx: ParseCtx; idx, entryIndent: int): IntentNode =
   while i < trimmed.len and trimmed[i] in {' ', '\t'}:
     inc i
   let rest = trimmed[i .. ^1]
-  let activities = splitHostList(ctx, idx, rest, i)
+  if rest.len == 0 or rest.startsWith("#"):
+    # Block form (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped
+    # apply): `activities: [...]` and / or `applies: [...]` lines, indented
+    # under the host -- the same surface the `profile` macro accepts, with
+    # the same refusals.
+    result = IntentNode(kind: nkHostsEntry,
+      startLine: idx + 1, endLine: idx + 1, indent: entryIndent,
+      hostName: hostName, hostEntryLine: idx + 1, hostBlockForm: true)
+    let childIndent = entryIndent + ctx.indentStep
+    let endIdx = lastStructuralIdx(ctx.lines, idx + 1, childIndent)
+    var seenKeys: seq[string]
+    var j = idx
+    while j < endIdx:
+      inc j
+      let line = ctx.lines[j]
+      if isBlankOrComment(line):
+        continue
+      let ind = countLeadingSpaces(line)
+      if ind != childIndent:
+        raiseUnstructured(ctx.profilePath, j + 1, ind + 1,
+          "'" & line.strip() & "' at indent " & $ind,
+          "`activities: [...]`, `applies: [...]` or `system: ...` at indent " &
+          $childIndent)
+      let body = trimTrailing(line)[ind .. ^1]
+      let colon = body.find(':')
+      let key = if colon > 0: body[0 ..< colon].strip() else: ""
+      if key notin ["activities", "applies", HostSystemKey]:
+        raiseUnstructured(ctx.profilePath, j + 1, ind + 1,
+          "'" & body & "' in hosts entry \"" & hostName & "\"",
+          "`activities: [...]`, `applies: [...]` or `system: ...`")
+      if key in seenKeys:
+        raiseUnstructured(ctx.profilePath, j + 1, ind + 1,
+          "a second `" & key & ":` in hosts entry \"" & hostName & "\"",
+          "each of `activities:` / `applies:` / `system:` at most once")
+      seenKeys.add key
+      if key == HostSystemKey:
+        result.hostSystemManagedElsewhere = true
+        result.hostSystemManagedBy = parseHostSystemText(ctx, j,
+          body[colon + 1 .. ^1], ind + colon + 1, hostName)
+        continue
+      let keyLine = j
+      let gathered = gatherHostList(ctx, j, body[colon + 1 .. ^1], ind)
+      let list = splitHostList(ctx, j, gathered.text, ind + colon + 1)
+      j = gathered.lastIdx
+      if key == "activities":
+        result.hostActivities = list
+        result.hostActivitiesLine = keyLine + 1
+        result.hostListEndLine = gathered.lastIdx + 1
+      else:
+        let problem = concernListProblem(list)
+        if problem.len > 0:
+          raiseUnstructured(ctx.profilePath, j + 1, ind + 1,
+            "applies: " & problem & " in hosts entry \"" & hostName & "\"",
+            "known concern names, each at most once")
+        result.hostAppliesDeclared = true
+        result.hostApplies = list
+    if seenKeys.len == 0:
+      raiseUnstructured(ctx.profilePath, idx + 1, i + 1,
+        "a host entry with neither a list nor an indented block",
+        "`[activities]` or an indented `activities:` / `applies:` block")
+    result.endLine = max(endIdx + 1, idx + 1)
+    return
+  let gathered = gatherHostList(ctx, idx, rest, entryIndent)
+  let activities = splitHostList(ctx, idx, gathered.text, i)
   result = IntentNode(kind: nkHostsEntry,
-    startLine: idx + 1, endLine: idx + 1, indent: entryIndent,
+    startLine: idx + 1, endLine: gathered.lastIdx + 1, indent: entryIndent,
     hostName: hostName, hostActivities: activities,
-    hostEntryLine: idx + 1)
+    hostEntryLine: idx + 1, hostListEndLine: gathered.lastIdx + 1)
 
 proc parseHostsBlock(ctx: ParseCtx; idx, parentIndent,
                      entryIndent: int): IntentNode =
@@ -910,8 +1242,9 @@ proc parseHostsBlock(ctx: ParseCtx; idx, parentIndent,
       raiseUnstructured(ctx.profilePath, i + 1, ind + 1,
         "'" & line.strip() & "' at indent " & $ind,
         "content at indent " & $entryIndent)
-    entries.add parseHostsEntry(ctx, i, entryIndent)
-    inc i
+    let entry = parseHostsEntry(ctx, i, entryIndent)
+    entries.add entry
+    i = entry.endLine
   result = IntentNode(kind: nkHostsBlock,
     startLine: idx + 1, endLine: max(endIdx + 1, idx + 1),
     indent: parentIndent, hostsHeaderLine: idx + 1,
@@ -1504,14 +1837,17 @@ proc parseProfileBody(ctx: ParseCtx; profileHeaderIdx: int;
 # Public entry points.
 # ---------------------------------------------------------------------------
 
-proc parseProfile*(profilePath, source: string): Profile =
+proc parseProfile*(profilePath, source: string; tolerant = false): Profile =
   ## Parse a profile source string. Raises `EUnstructured` if the
   ## source does not match the recognized shape. Comments and blank
-  ## lines anywhere are preserved.
+  ## lines anywhere are preserved. `tolerant` is `inspectProfile`'s mode:
+  ## the constructs a text reader cannot see into become `nkOpaque`
+  ## extents instead of refusals (see `ParseCtx.tolerant`).
   let ending = lineEnding(source)
   let trailingNewline = source.endsWith(ending)
   let rawLines = splitKeepEmpty(source, ending)
-  var ctx = ParseCtx(profilePath: profilePath, lines: rawLines, indentStep: 2)
+  var ctx = ParseCtx(profilePath: profilePath, lines: rawLines, indentStep: 2,
+    tolerant: tolerant)
   let headerLine = findProfileHeader(ctx)
   ctx.indentStep = detectIndentStep(ctx.lines, headerLine)
   var adapterPreference = initOrderedTable[string, seq[string]]()
@@ -1527,6 +1863,87 @@ proc parseProfile*(profilePath, source: string): Profile =
 
 proc loadProfile*(profilePath: string): Profile =
   ## Read `profilePath` and parse it. `ENoProfile` and `EUnstructured`
-  ## propagate to the caller.
+  ## propagate to the caller. Every construct must be one the text reader
+  ## can read: a helper call, an activity's `stow:` / `resources:` block or
+  ## a statement before the `profile` header is refused. Callers that act on
+  ## the whole profile from its text (the bundle builder, `repro home set` /
+  ## `get`) use this; the structural edits use `inspectProfile`.
   let src = readFile(extendedPath(profilePath))
   result = parseProfile(profilePath, src)
+
+proc inspectProfile*(profilePath: string): Profile =
+  ## Read `profilePath` as the structural editor's inspector: like
+  ## `loadProfile`, but the constructs only the compiled profile can
+  ## evaluate -- helper calls (activity bodies, `config:`, `resources:`),
+  ## an activity's `stow:` and `resources:` blocks, statements before the
+  ## `profile` header -- are recorded as `nkOpaque` extents and stepped
+  ## over (Home-Profile-Intent-Layer.md §Structural Edit Contract). An edit
+  ## that would need to read inside one names it (`opaqueConstruct`).
+  ## Everything else is refused exactly as `loadProfile` refuses it.
+  let src = readFile(extendedPath(profilePath))
+  result = parseProfile(profilePath, src, tolerant = true)
+
+iterator opaqueNodes*(nodes: seq[IntentNode]): IntentNode =
+  ## The `nkOpaque` extents among `nodes` and, recursively, inside their
+  ## guard blocks.
+  var stack = @[nodes]
+  while stack.len > 0:
+    let level = stack.pop()
+    for n in level:
+      case n.kind
+      of nkOpaque: yield n
+      of nkCondBlock: stack.add n.condChildren
+      else: discard
+
+proc inspectHostsBlock*(profilePath: string): Profile =
+  ## Read only what `repro home enable` / `disable` edit: the `profile`
+  ## header and its `hosts:` block. The returned profile's root has the
+  ## parsed `hosts:` block as its only child (none when the profile has no
+  ## `hosts:` block yet) and spans the whole profile body, so a block the
+  ## editor creates goes at its end. Nothing else in the body is read: an
+  ## activity, `config:` or `resources:` construct the inspector cannot read
+  ## does not stop a `hosts:` edit, and keeps its bytes
+  ## (Home-Profile-Intent-Layer.md §CLI Edit Semantics). A `hosts:` block
+  ## the inspector cannot read, or a second one, is refused.
+  let src = readFile(extendedPath(profilePath))
+  let ending = lineEnding(src)
+  var ctx = ParseCtx(profilePath: profilePath,
+    lines: splitKeepEmpty(src, ending), indentStep: 2, tolerant: true)
+  let headerLine = findProfileHeader(ctx)
+  ctx.indentStep = detectIndentStep(ctx.lines, headerLine)
+  let baseIndent = countLeadingSpaces(ctx.lines[headerLine - 1])
+  let childIndent = baseIndent + ctx.indentStep
+  var profileName = matchHeader(ctx.lines[headerLine - 1], ProfileHeader).rest
+  if profileName.startsWith("\"") and profileName.endsWith("\""):
+    profileName = profileName[1 ..< profileName.len - 1]
+  let root = IntentNode(kind: nkProfileRoot, startLine: headerLine,
+    indent: baseIndent, name: profileName, headerLine: headerLine)
+  # The `profile` block is the last thing in the file (`parseProfileBody`
+  # refuses anything after it), so every later line belongs to its body.
+  var lastBodyIdx = headerLine - 1
+  var sawHosts = false
+  var i = headerLine
+  while i < ctx.lines.len:
+    let line = ctx.lines[i]
+    if isBlankOrComment(line):
+      inc i; continue
+    let ind = countLeadingSpaces(line)
+    lastBodyIdx = i
+    if ind == childIndent and matchHeader(line, HostsHeader).matched and
+       matchHeader(line, HostsHeader).rest.len == 0:
+      if sawHosts:
+        raiseUnstructured(profilePath, i + 1, ind + 1,
+          "a second `hosts:` block",
+          "exactly one `hosts:` block per profile")
+      sawHosts = true
+      let blk = parseHostsBlock(ctx, i, childIndent,
+        childIndent + ctx.indentStep)
+      root.children.add blk
+      lastBodyIdx = max(lastBodyIdx, blk.endLine - 1)
+      i = blk.endLine
+      continue
+    inc i
+  root.endLine = lastBodyIdx + 1
+  Profile(path: profilePath, lines: ctx.lines, lineEnding: ending,
+    hasTrailingNewline: src.endsWith(ending), root: root,
+    indentStep: ctx.indentStep)

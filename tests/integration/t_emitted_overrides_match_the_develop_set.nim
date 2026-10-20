@@ -183,7 +183,10 @@ suite "NF-1: the emitted overrides are the develop set":
       skip()
     else:
       let repro = absolutePath(reproBinary)
-      let scratch = createTempDir("nf1-develop-set-", "")
+      # Git spells local file URLs with the physical checkout path; on Darwin
+      # /tmp is a symlink to /private/tmp. Keep the exact URL assertions in
+      # that same frame rather than depending on the temp directory's alias.
+      let scratch = expandFilename(createTempDir("nf1-develop-set-", ""))
       defer: removeDir(scratch)
 
       let repos = ["alpha", "beta", "gamma", "delta", "epsilon"]
@@ -226,13 +229,43 @@ suite "NF-1: the emitted overrides are the develop set":
       # with the sibling checkouts below, so an implementation that had
       # started refreshing would rewrite them.
       let lockPath = app / "flake.lock"
+      # Every declared input has a node: a missing root entry is unknown
+      # source identity, which the coordinate binder must not guess by name.
+      # Indirect originals carry no owner/repo coordinates and preserve this
+      # test's suffix-based binding and selection witnesses.
       let lockBytes = """{
   "nodes": {
     "alpha-src": {
+      "original": { "type": "indirect", "id": "alpha-src" },
       "locked": { "type": "github", "owner": "example", "repo": "alpha",
                   "rev": "0000000000000000000000000000000000000000" }
     },
-    "root": { "inputs": { "alpha-src": "alpha-src" } }
+    "beta-src": {
+      "original": { "type": "indirect", "id": "beta-src" },
+      "locked": { "type": "github", "owner": "example", "repo": "beta",
+                  "rev": "0000000000000000000000000000000000000000" }
+    },
+    "gamma-src": {
+      "original": { "type": "indirect", "id": "gamma-src" },
+      "locked": { "type": "github", "owner": "example", "repo": "gamma",
+                  "rev": "0000000000000000000000000000000000000000" }
+    },
+    "delta-src": {
+      "original": { "type": "indirect", "id": "delta-src" },
+      "locked": { "type": "github", "owner": "example", "repo": "delta",
+                  "rev": "0000000000000000000000000000000000000000" }
+    },
+    "epsilon-src": {
+      "original": { "type": "indirect", "id": "epsilon-src" },
+      "locked": { "type": "github", "owner": "example", "repo": "epsilon",
+                  "rev": "0000000000000000000000000000000000000000" }
+    },
+    "nowhere-src": {
+      "original": { "type": "indirect", "id": "nowhere-src" },
+      "locked": { "type": "github", "owner": "example", "repo": "nowhere",
+                  "rev": "0000000000000000000000000000000000000000" }
+    },
+    "root": { "inputs": { "alpha-src": "alpha-src", "beta-src": "beta-src", "gamma-src": "gamma-src", "delta-src": "delta-src", "epsilon-src": "epsilon-src", "nowhere-src": "nowhere-src" } }
   },
   "root": "root",
   "version": 7
@@ -320,7 +353,12 @@ suite "NF-1: the emitted overrides are the develop set":
         "beta-src=git+file://" & (ws / "beta"),
       ]
       check "gamma" in missing.errText
-      check (ws / "gamma") in missing.errText
+      # Named at the location THIS machine derives for an absent `gamma`: the
+      # lock records no checkout path, so with no checkout beneath the
+      # workspace and no override, the placement rule's default — the
+      # one-level sibling `../gamma` of the lock's directory — is where
+      # `repro develop` would put it, and therefore what is named.
+      check (parentDir(ws) / "gamma") in missing.errText
 
       # ---- (6) the workspace is the OUTER one, not the repo the flake is in.
       #

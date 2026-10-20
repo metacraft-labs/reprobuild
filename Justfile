@@ -522,39 +522,7 @@ lint:
     # silently. Runs here rather than in the suite for the same reason as the
     # gate itself: it compiles nothing.
     bash ./scripts/check_shell_command_strings.sh --self-test 2>&1 | tee -a test-logs/lint.log
-    # The suite case-count gate. Deliberately here and not only in the test
-    # suite: it reads the sources and needs nothing compiled, so it is the
-    # one coverage check that can answer before a six-hour build phase.
-    python3 ./scripts/reprobuild_suite_inventory.py --check-static-case-counts 2>&1 | tee -a test-logs/lint.log
-    # The suite ENTRY-SET gate, its sibling. Same mechanism, same cost class,
-    # same reason for being here rather than in the suite: it is a source
-    # scan. It holds the build-free half of the tracked inventory --
-    # benchmarks/reports/reprobuild-suite-m0-inventory.json -- to the tree it
-    # claims to describe. That document went stale six times while the TSV
-    # above stayed current at every commit, and every one of the six was an
-    # entry-set change this line refuses. It says nothing about the
-    # catalog-derived half, which needs the build; see the flag's help text.
-    python3 ./scripts/reprobuild_suite_inventory.py --check-inventory 2>&1 | tee -a test-logs/lint.log
-    # The UNDECLARED-SOURCE gate, and the reason it is a third line rather
-    # than a third assertion inside either of the two above: both of those
-    # derive the set they compare from repro_tests.nim, so a test file that
-    # was never enrolled is outside both by construction -- not reported as
-    # missing, not reported at all -- and nothing builds or runs it either.
-    # Measured at 6b3f6099: two such files (18 passing cases between them)
-    # while every gate over the suite was green. This one walks the TREE.
-    python3 ./scripts/reprobuild_suite_inventory.py --check-declared-sources 2>&1 | tee -a test-logs/lint.log
-    # The SHAPE-PARITY gate, which is what stops the line above from being a
-    # trap. That gate's rule and the edge generator's are one rule with two
-    # implementations, in two languages; where they disagree, one of two
-    # things is true, and both are bad: either the gate reports an orphan that
-    # `nim r scripts/generate_test_edges.nim` cannot enrol -- a gate demanding
-    # a fix the contributor cannot perform -- or a test is built and run that
-    # the gate never audits. They agreed on the tree as it stood and on
-    # nothing else. This compares them over a synthetic corpus of path SHAPES,
-    # so the disagreement surfaces when the RULE is edited rather than when
-    # the first file of a new shape lands on it.
-    python3 ./scripts/reprobuild_suite_inventory.py --check-shape-parity 2>&1 | tee -a test-logs/lint.log
-    # The vacuous-case gate, sibling to the case-count gate above and for the
+    # The vacuous-case gate, sibling to the case-count gate below and for the
     # same reason: a source scan, no compiler, answers in seconds. It refuses
     # a test case whose only assertion is `check true` -- a shape that reports
     # [OK] and increments the pass count, so running the suite can never
@@ -589,14 +557,39 @@ lint:
     # two are told apart, and scripts/test-body-helper-compilation-dispositions.tsv
     # for the reviewed baseline.
     python3 ./scripts/check_test_body_helper_compilation.py 2>&1 | tee -a test-logs/lint.log
-    # HX-S-10: the HCR lane manifest against the tree. Same class as the three
-    # inventory gates above -- a source scan, no compiler, seconds -- and here
+    # HX-S-10: the HCR lane manifest against the tree. Same class as the
+    # inventory gates at the end of this recipe -- a source scan, no compiler, seconds -- and here
     # for the same reason. What it refuses is an HCR gate added to ONE
     # platform's lane: every gate source in the tree must carry a row declaring
     # what all THREE platforms do with it. The census it holds the manifest to
     # is a live walk of `tests/`, not a list, so a new file cannot be invisible
     # to it (Verification-Harness-Traps.md Sec. 35).
     python3 ./scripts/check_hcr_lane_manifest.py --check 2>&1 | tee -a test-logs/lint.log
+    # The version-literal gate, beside the vacuous-case and bare-skip gates
+    # because it guards the same property from a third side: a case that
+    # PRETENDS to have run, a case that declines to run, and -- this one -- a
+    # case that runs and measures the wrong thing. It refuses an integer
+    # literal standing in for a format version: a number poked into the
+    # version word at byte 4/5, a hand-listed set of version numbers driving
+    # such a poke, or a literal pinned against one, unless the line carries
+    # `# version-literal-ok: <reason>`. Measured at ee229299f: SEVENTEEN
+    # unannotated instances across seven files, ten of them live defects
+    # and three of those a verbatim `[2, 3, 4, 5]` that had silently stopped
+    # covering version 6 when the action-record epoch moved 6 -> 7. Source
+    # scan, no compiler, seconds -- same cost class as its neighbours.
+    python3 ./scripts/check_version_literals.py 2>&1 | tee -a test-logs/lint.log
+    # ...and the proof it still has the power it claims, on the model of the
+    # shell-command-strings self-test above. Every exemption is a licence to
+    # ignore a real defect, so each shape is probed with an instance that
+    # must be caught and each allowance with one that must not be.
+    python3 ./scripts/check_version_literals.py --self-test 2>&1 | tee -a test-logs/lint.log
+    # package.nix's version literal against reprobuild.nimble. The flake check
+    # nixpkgs-package-version-sync runs the same script, but `agents` has no CI
+    # and nobody runs the whole flake check per commit: twice a version moved
+    # in reprobuild.nimble alone (a bump, then a merge bringing a release in)
+    # and the literal sat stale until a full flake check happened to look
+    # (reprobuild-pm issue 2026-10-17). Reads two files, under a second.
+    bash ./scripts/check_package_nix_version.sh 2>&1 | tee -a test-logs/lint.log
     # Every attestation mutation row must still be able to NAME ITS SITE in
     # the tree. Same class as its neighbours -- a source scan, no compiler,
     # under a second -- and here because of what it catches, which nothing
@@ -611,6 +604,57 @@ lint:
     python3 ./tools/attestation-mutations/fixture_lifecycle_mutations.py --verify-rows 2>&1 | tee -a test-logs/lint.log
     python3 ./tools/attestation-mutations/cvm_emulator_mutations.py --verify-rows 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_workflows.sh 2>&1 | tee -a test-logs/lint.log
+    # The CI test job's ceiling and the suite's measured duration, held as a
+    # checked pair: every step of ci.yml's `test` job carries a timeout above
+    # its worst measured duration, `just test` pins run_tests.sh's backstops
+    # below its step limit, and the steps fit the job limit -- so GitHub's
+    # silent job ceiling is never the first limit to fire and a `cancelled`
+    # is not mistaken for a verdict (reprobuild-pm issue 2026-09-30, the six-
+    # hour ceiling). Reads one file, under a second; beside actionlint because
+    # both grade the workflow.
+    python3 ./scripts/check_ci_test_budget.py 2>&1 | tee -a test-logs/lint.log
+    # The four suite-description gates, LAST, and that position is the point.
+    # They hold tracked bookkeeping -- the case-count baseline, the inventory
+    # entry set, the edge table -- to the tree, and bookkeeping goes stale
+    # whenever anyone lands a test without regenerating it: the check can be
+    # red through no fault of the change being linted. This recipe runs under
+    # `bash -e`, so while they ran early a stale baseline aborted every audit
+    # after them, and for five `dev` commits none of the audits that grade the
+    # change itself ran at all (reprobuild-pm issue 2026-10-01). Behind
+    # everything else they still fail the recipe; they no longer silence it.
+    #
+    # The suite case-count gate. Deliberately here and not only in the test
+    # suite: it reads the sources and needs nothing compiled, so it is the
+    # one coverage check that can answer before a six-hour build phase.
+    python3 ./scripts/reprobuild_suite_inventory.py --check-static-case-counts 2>&1 | tee -a test-logs/lint.log
+    # The suite ENTRY-SET gate, its sibling. Same mechanism, same cost class,
+    # same reason for being here rather than in the suite: it is a source
+    # scan. It holds the build-free half of the tracked inventory --
+    # benchmarks/reports/reprobuild-suite-m0-inventory.json -- to the tree it
+    # claims to describe. That document went stale six times while the TSV
+    # above stayed current at every commit, and every one of the six was an
+    # entry-set change this line refuses. It says nothing about the
+    # catalog-derived half, which needs the build; see the flag's help text.
+    python3 ./scripts/reprobuild_suite_inventory.py --check-inventory 2>&1 | tee -a test-logs/lint.log
+    # The UNDECLARED-SOURCE gate, and the reason it is a third line rather
+    # than a third assertion inside either of the two above: both of those
+    # derive the set they compare from repro_tests.nim, so a test file that
+    # was never enrolled is outside both by construction -- not reported as
+    # missing, not reported at all -- and nothing builds or runs it either.
+    # Measured at 6b3f6099: two such files (18 passing cases between them)
+    # while every gate over the suite was green. This one walks the TREE.
+    python3 ./scripts/reprobuild_suite_inventory.py --check-declared-sources 2>&1 | tee -a test-logs/lint.log
+    # The SHAPE-PARITY gate, which is what stops the line above from being a
+    # trap. That gate's rule and the edge generator's are one rule with two
+    # implementations, in two languages; where they disagree, one of two
+    # things is true, and both are bad: either the gate reports an orphan that
+    # `nim r scripts/generate_test_edges.nim` cannot enrol -- a gate demanding
+    # a fix the contributor cannot perform -- or a test is built and run that
+    # the gate never audits. They agreed on the tree as it stood and on
+    # nothing else. This compares them over a synthetic corpus of path SHAPES,
+    # so the disagreement surfaces when the RULE is edited rather than when
+    # the first file of a new shape lands on it.
+    python3 ./scripts/reprobuild_suite_inventory.py --check-shape-parity 2>&1 | tee -a test-logs/lint.log
 
 format:
     bash ./scripts/format_sources.sh
@@ -1014,9 +1058,11 @@ e2e_hcr_linux_x86_64_single_threaded_direct_patch:
 # the events either side of the boundary reproduce the body that produced them.
 # Campaigns: reprobuild-specs/HCR-Linux-ELF-Provider.milestones.org HLX-M7;
 #            reprobuild-specs/HCR-Per-Platform-Handoff.milestones.org HX-S-2.
-# Needs the sibling codetracer-native-recorder checkout built
-# (`just build-ct-mcr` there); the gate fails loudly naming that if it is not.
-e2e_hcr_linux_replay_of_patched_recording:
+# Records and replays with the `ct-mcr` bundle that `hcr_ct_mcr_fixture`
+# (below) builds -- the same script the graph edge
+# `reprobuild.test_fixtures.hcr_ct_mcr_bundle` runs -- so the HCR lane, which
+# runs this recipe, has the recorder without anyone building it by hand.
+e2e_hcr_linux_replay_of_patched_recording: hcr_ct_mcr_fixture
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
         --threads:on \
@@ -1025,6 +1071,15 @@ e2e_hcr_linux_replay_of_patched_recording:
         --out:build/test-bin/e2e_hcr_linux_replay_of_patched_recording \
         tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_replay_of_patched_recording.log
+
+# The `ct-mcr` recorder bundle `e2e_hcr_linux_replay_of_patched_recording`
+# needs, staged into build/test-fixtures/hcr-ct-mcr: the recorder's own
+# `just build-ct-mcr`, run in the recorder's own flake dev shell (sibling from
+# $CT_CODETRACER_NATIVE_RECORDER_SIBLING, else ../codetracer-native-recorder).
+# The graph edge `reprobuild.test_fixtures.hcr_ct_mcr_bundle` runs this same
+# script; see its header. A no-op that says so off Linux x86_64.
+hcr_ct_mcr_fixture:
+    bash ./scripts/build_hcr_ct_mcr_fixture.sh
 
 # HLX-M2 — a function inside a `dlopen`ed shared library is patched.
 # Campaign: reprobuild-specs/HCR-Linux-ELF-Provider.milestones.org, HLX-M2.
@@ -1369,6 +1424,15 @@ e2e_repro_watch_hcr_one_target_agent_inject_failure:
         --out:build/test-bin/e2e_repro_watch_hcr_one_target_agent_inject_failure \
         tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim \
         2>&1 | tee test-logs/e2e_repro_watch_hcr_one_target_agent_inject_failure.log
+
+e2e_repro_watch_refuses_an_over_long_hcr_agent_socket:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_repro_watch_refuses_an_over_long_hcr_agent_socket \
+        --out:build/test-bin/e2e_repro_watch_refuses_an_over_long_hcr_agent_socket \
+        tests/e2e/hcr-watch/t_repro_watch_refuses_an_over_long_hcr_agent_socket.nim \
+        2>&1 | tee test-logs/e2e_repro_watch_refuses_an_over_long_hcr_agent_socket.log
 
 # The one gate in the family with a genuinely mixed body: a structural case
 # that runs on every host and an engine case that is macOS-arm64 only. The lane
@@ -2886,6 +2950,15 @@ e2e_hcr_linux_concurrent_patch_no_torn_instruction:
         tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_concurrent_patch_no_torn_instruction.log
 
+integration_hcr_linux_concurrent_patch_gate_conditions:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_concurrent_patch_gate_conditions \
+        --out:build/test-bin/integration_hcr_linux_concurrent_patch_gate_conditions \
+        tests/e2e/hcr-linux-threads/t_integration_hcr_linux_concurrent_patch_gate_conditions.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_concurrent_patch_gate_conditions.log
+
 e2e_hcr_linux_quiescence_handshake_and_release:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
@@ -2952,3 +3025,7 @@ e2e_hcr_linux_registration_payloads_travel_over_the_production_wire:
         --out:build/test-bin/e2e_hcr_linux_registration_payloads_travel_over_the_production_wire \
         tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.log
+
+# Exercise the actual fork parser and independent script publication guard.
+test-format:
+    bash ./tests/integration/t_format_preserves_meaning.sh

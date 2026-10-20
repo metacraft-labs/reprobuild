@@ -25,7 +25,7 @@
 ## starts from. The CLI and the compiled side of the same contract are
 ## gated by `tests/e2e/m83/t_e2e_home_set_writes_guarded_config.nim`.
 
-import std/[options, os, strutils, tables, unittest]
+import std/[options, os, sets, strutils, tables, unittest]
 
 import repro_home_intent
 
@@ -105,7 +105,10 @@ proc resourcesFor(path: string; ctx: HostContext): seq[string] =
   let res = findResourcesBlock(prof)
   if res.isNone:
     return
-  for entry in applicableResourceEntries(res.get.resourcesEntries, ctx):
+  # A source-text profile has no activity-scoped resources (GM9), so the
+  # selection is irrelevant here; the walker still requires one.
+  for entry in applicableResourceEntries(res.get.resourcesEntries, ctx,
+      initHashSet[string]()):
     for attr in entry.resourceAttrs:
       if attr.resourceAttrKey == "hostFile":
         result.add entry.resourceAddress & "=" & attr.resourceAttrValueSource
@@ -310,11 +313,29 @@ profile "lastWins":
       "      userName = \"Zahary\"\n",
       "      userName = \"Zahary\"\n      elif linux():\n        pager = \"x\"\n"))
     check "`elif` without a preceding `when <pred>:` branch" in dangling
-    let helperInConfig = refusal("helper-config", GuardedProfile.replace(
+    # A helper call in `config:` (Home-Profile-Intent-Layer.md §Constructs
+    # the inspector steps over): `set` reads `config:`, where the call may
+    # assign the very key, so it refuses naming the call; `add` edits an
+    # activity, so it steps over the call and keeps its bytes.
+    let helperProfile = GuardedProfile.replace(
       "    when linux():\n      ripgrep:",
-      "    gitPlatformConfig()\n    when linux():\n      ripgrep:"))
+      "    gitPlatformConfig()\n    when linux():\n      ripgrep:")
+    let helperPath = tmpProfile("helper-config", helperProfile)
+    var helperInConfig = ""
+    try:
+      setConfigurable(helperPath, "git.pager", "less", nil)
+      check false
+    except EUnstructured as e:
+      helperInConfig = e.seen & " | " & e.expected
+    check readFile(helperPath) == helperProfile
     check "gitPlatformConfig()" in helperInConfig
     check "`<package>:` header inside `config:`" in helperInConfig
+    addPackageReference(helperPath, "fd")
+    let added = readFile(helperPath)
+    check added != helperProfile
+    check "    gitPlatformConfig()\n    when linux():\n" in added
+    removePackageReference(helperPath, "fd")
+    check readFile(helperPath) == helperProfile
     let guardedHelper = refusal("helper-resources", GuardedProfile.replace(
       "    when linux:\n      fs.userFile platformRc:",
       "    guarded(targetResources, linux()):\n" &

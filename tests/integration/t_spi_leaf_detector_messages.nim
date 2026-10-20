@@ -53,7 +53,9 @@
 ##     with one put back ``health --fix`` removes it, and with another put
 ##     back ``repro workspace sync`` does, each printing message A; ``health``
 ##     is then ok. The init clone itself must have registered the leaf with
-##     its pool.
+##     its pool. Before losing any ref tips, remove the refetch chain and
+##     require health to report its absence; hold a real config.lock to prove
+##     a failed installation stays a warning, then health --fix recovers it.
 ##
 ## No mocks. Hermetic: one ``createTempDir`` root, a private
 ## ``GIT_CONFIG_GLOBAL``, ``file://`` URLs. Skip rule: ``git`` missing on
@@ -66,6 +68,13 @@ import repro_test_support
 import shared_clones
 
 proc q(value: string): string = quoteShell(value)
+
+proc sharedCloneHealthRow(output: string): tuple[status, detail: string] =
+  for line in output.splitLines():
+    let fields = line.splitWhitespace()
+    if fields.len >= 3 and fields[0] == "shared-clone-leaves":
+      return (fields[1], line)
+
 
 proc run(cwd: string; lazy: bool; args: varargs[string]):
     tuple[code: int; output: string] =
@@ -548,6 +557,34 @@ suite "SPI-3: the detector behind repro health, workspace status and sync":
       check readBorrowers(pool) == @[leaf]
       check must(leaf, "config", "--get-all", "fetch.hideRefs") ==
         LeafHiddenFetchRefs
+      # All ref tips exist, but a pre-migration partial-pool leaf has no
+      # lazy-refetch chain. Health must report it independently of ref tips.
+      discard must(leaf, "remote", "remove", LeafPoolRemoteName)
+      let unmigrated = runShell(shellCommand(@[reproBin, "health", "spiproj",
+        "--workspace-root=" & ws], env))
+      checkpoint("health unmigrated: " & unmigrated.output)
+      let unmigratedRow = sharedCloneHealthRow(unmigrated.output)
+      check unmigratedRow.status == "warn"
+      check "refetch chain" in unmigratedRow.detail
+      check "health --fix" in unmigrated.output
+      check must(leaf, "config", "--get", "remote.repro-pool.promisor") == "true"
+      # A real config lock makes installation fail without mocking git. It
+      # must remain a health warning, rather than a healthy ref-tip report.
+      discard must(leaf, "remote", "remove", LeafPoolRemoteName)
+      writeFile(leaf / ".git" / "config.lock", "held by test\n")
+      let locked = runShell(shellCommand(@[reproBin, "health", "spiproj",
+        "--workspace-root=" & ws], env))
+      checkpoint("health config locked: " & locked.output)
+      let lockedRow = sharedCloneHealthRow(locked.output)
+      check lockedRow.status == "warn"
+      check "could not write" in lockedRow.detail
+      check "health --fix" in locked.output
+      check gitIn(leaf, "config", "--get", "remote.repro-pool.url").code != 0
+      removeFile(leaf / ".git" / "config.lock")
+      let repairedChain = runShell(shellCommand(@[reproBin, "health", "spiproj",
+        "--fix", "--workspace-root=" & ws], env))
+      checkpoint("health chain repaired: " & repairedChain.output)
+      check must(leaf, "config", "--get", "remote.repro-pool.url") == poolFileUrl(pool)
       var tips: seq[string]
       for br in ["f1", "f2", "f3"]:
         tips.add(must(leaf, "rev-parse", "refs/remotes/origin/" & br))

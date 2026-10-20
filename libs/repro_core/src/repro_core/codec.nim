@@ -70,6 +70,23 @@ proc readU64Le*(bytes: openArray[byte]; pos: var int): uint64 =
     result = result or (uint64(bytes[pos + i]) shl (8 * i))
   pos += 8
 
+proc elementCountFits*(count: uint32; remaining: int;
+                       minimumBytes: int = 1): bool =
+  ## Validate untrusted counts before narrowing or allocating. Division avoids
+  ## overflow even when a caller supplies a large encoded element size.
+  remaining >= 0 and minimumBytes > 0 and
+    uint64(count) <= uint64(remaining) div uint64(minimumBytes) and
+    uint64(count) <= uint64(high(int))
+
+proc readElementCount*(bytes: openArray[byte]; pos: var int;
+                       minimumBytes: int = 1): int =
+  ## Each encoded element must consume at least ``minimumBytes`` bytes.
+  ## Callers with their own error type can instead use ``elementCountFits``.
+  let count = readU32Le(bytes, pos)
+  if not elementCountFits(count, bytes.len - pos, minimumBytes):
+    raiseEnvelopeError(eeMalformed, "element count exceeds remaining bytes")
+  int(count)
+
 proc writeString*(outp: var seq[byte]; value: string) =
   outp.writeU32Le(uint32(value.len))
   for ch in value:

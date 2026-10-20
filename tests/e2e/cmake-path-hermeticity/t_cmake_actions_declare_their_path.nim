@@ -152,7 +152,7 @@ proc configure(cmakeBin, sourceDir, buildDir, reproBin: string;
   runShell(shellCommand(args))
 
 proc build(reproBin, buildDir, workRoot, pathValue: string;
-           forceRebuild: bool; target = "all"): CmdResult =
+           forceRebuild: bool; target = "all"; logMode = ""): CmdResult =
   ## THE SHELL IS THE VARIABLE. `PATH` is overlaid per invocation, which
   ## is the whole experiment: two otherwise identical builds, two
   ## different login environments.
@@ -163,6 +163,8 @@ proc build(reproBin, buildDir, workRoot, pathValue: string;
   ]
   if forceRebuild:
     args.add("--force-rebuild")
+  if logMode.len > 0:
+    args.add("--log=" & logMode)
   runShell(shellCommand(args, @[(name: "PATH", value: pathValue)]))
 
 proc censusLine(output: string): string =
@@ -262,9 +264,14 @@ proc modificationEpoch(path: string): float =
 
 suite "CMake-generated actions declare their PATH":
   let repoRoot = getCurrentDir()
-  let reproBin = requireBinary(
-    repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
-    "reprobuild.apps.repro")
+  # The fixture binary is REQUIRED in `setup`, not here. This suite body runs
+  # at registration, in every process this binary starts -- including the
+  # `--list` / `--list-json` enumeration, which is run from a scratch working
+  # directory where `<cwd>/build/bin/repro` cannot exist. Raising here took the
+  # whole case list down with it, so the inventory could only count this
+  # source from a catalog probed elsewhere and its own `--list` cross-check
+  # refused it. Each case still fails fast on a missing `repro`.
+  let reproBin = repoRoot / "build" / "bin" / addFileExt("repro", ExeExt)
   let forkedCMake = findForkedCMake(repoRoot)
 
   # The fixture lives under the repository's build tree, NOT under
@@ -293,6 +300,7 @@ suite "CMake-generated actions declare their PATH":
     (pathDirs(pathB) - pathDirs(pathA))
 
   setup:
+    requireBinary(reproBin, "reprobuild.apps.repro")
     # A stale tree from an earlier run would let an assertion pass on
     # evidence this run did not produce.
     removeDir(testRoot)
@@ -391,10 +399,14 @@ suite "CMake-generated actions declare their PATH":
 
       let workA = testRoot / "work-inherited-A"
       let workB = testRoot / "work-inherited-B"
-      let armA = build(reproBin, buildDir, workA, pathA, forceRebuild = true)
+      # `--log=summary`: arm A's census is read below (see test 4); both
+      # arms get it so they differ in PATH alone.
+      let armA = build(reproBin, buildDir, workA, pathA, forceRebuild = true,
+        logMode = "summary")
       checkpoint(armA.output)
       check armA.code == 0
-      let armB = build(reproBin, buildDir, workB, pathB, forceRebuild = true)
+      let armB = build(reproBin, buildDir, workB, pathB, forceRebuild = true,
+        logMode = "summary")
       checkpoint(armB.output)
       check armB.code == 0
 
@@ -539,8 +551,17 @@ suite "CMake-generated actions declare their PATH":
       check configure(forkedCMake, sourceDir, buildDir, reproBin).code == 0
       # The direct provider must export the same default alias as the
       # generated Nim provider, not just select it for an unnamed build.
+      #
+      # `--log=summary` because the census is a STATUS LINE, and `--log`
+      # is what governs status lines. Without it the line appeared only
+      # when the build happened to be daemon-hosted -- the daemon streams
+      # every diagnostic whatever `--log` says -- while a direct build
+      # (`REPRO_DAEMON=off`, or a daemon that could not be started)
+      # honours the quiet default and prints nothing, and this case
+      # failed with an empty census for a reason unrelated to PATH.
       let built = build(reproBin, buildDir, testRoot / "work-census", pathA,
-        forceRebuild = true, target = "default")
+        forceRebuild = true, target = "default",
+        logMode = "summary")
       checkpoint(built.output)
       check built.code == 0
       let census = censusLine(built.output)

@@ -270,6 +270,18 @@ type
     # the second wave. It is not an ordinary peer edge of the actions it
     # determines; see ``expandGraphInWaves``.
     bakSolveLock
+    # Unified-Locking-And-Hooks HL-10 (§13.3 amended, §13.7.3): the
+    # LOCK-UPDATE NODE of a plan that produces a test certificate. It applies
+    # the commit-time writers (the ``repro.lock`` sibling re-pin and the
+    # ``flake.lock`` refresh) to the attested repository's working tree and
+    # stages what it wrote, so the content the tests run against already
+    # carries the refreshed locks. Every test command of a
+    # certificate-producing node depends on it. Dispatched through the
+    # executor registered by ``repro_cli_support``, which owns the writers.
+    # It never declares an output: the files it may rewrite are the
+    # repository's own tracked sources, not build products the engine may
+    # clean or restore.
+    bakLockUpdate
 
   NetworkMode* = enum
     ## Sandbox-And-Monitoring.md §"The Network Dimension" (NLF-M5
@@ -946,6 +958,28 @@ type
       ## stats but does NOT abort the build. ``nil`` keeps the engine
       ## pure-local (legacy behaviour) — the publish hook becomes a
       ## no-op for every action regardless of the per-action flag.
+    filesystemRoots*: seq[LogicalRoot]
+      ## The workspace's root CLASSIFICATION — the read-only / writable /
+      ## untracked scopes of
+      ## `Filesystem-Policy-And-Observed-Inputs.md` §"Read-Only Versus
+      ## Writable Roots", as the invocation declares them. Consumed by
+      ## `untrackedEnumerationScope`, which is the mandatory
+      ## membership exemption of `Incremental-Invalidation.md`
+      ## §"Validation Criteria" ("A second exemption is mandatory…").
+      ##
+      ## THE SAME SHAPE AS `portableRoots`, AND DELIBERATELY NOT THE SAME
+      ## FIELD. `portableRoots` is opt-in (`REPRO_PORTABLE_CACHE=1`) because
+      ## computing a portable identity costs a BLAKE3 pass; this one carries
+      ## no cost of its own and must be available on every invocation that
+      ## knows where its project is, because the exemption it feeds is
+      ## REQUIRED rather than optional. `declaredFilesystemRoots` builds
+      ## both, so the two can never disagree about what the workspace
+      ## declared.
+      ##
+      ## EMPTY MEANS NOTHING IS EXEMPT, which is the fail-closed direction
+      ## and is why no caller has to be updated to stay correct: an engine
+      ## configuration that declares no roots keeps membership on every
+      ## enumerated directory, exactly as before this field existed.
     portableRoots*: seq[LogicalRoot]
       ## Cache-Scope P3.1: the logical roots against which each recorded
       ## action's PORTABLE fingerprint is computed
@@ -1084,9 +1118,8 @@ type
     origin*: EntropyCallerOrigin
     image*: string
       ## The IMAGE OF THE PROCESS THAT EMITTED THE RECORD, resolved from the
-      ## record's `osPid` against the capture's own `mrProcessExec` records --
-      ## or the EMPTY STRING when no exec record in this capture names that
-      ## pid.
+      ## record's `osPid` against successful exec records and initial child
+      ## images from spawn records, or EMPTY when this capture cannot name it.
       ##
       ## WHY IT IS HERE. `BuildAction.nonDeterminism` is action-scoped and the
       ## evidence is process-tree-scoped; see `repro_core/entropy_blessings`
@@ -1462,6 +1495,21 @@ type
     monitorReads*: ObservedPathChannel
     monitorWrites*: ObservedPathChannel
     monitorProbes*: ObservedPathChannel
+    monitorRemovals*: ObservedPathChannel
+      ## Paths the action REMOVED: io-mon's `mrPathMutation` records whose
+      ## call was an unlink, an rmdir or a remove (`isRemovalMutation`). The
+      ## other namespace changes -- a directory or a symbolic link created --
+      ## are writes and go to `monitorWrites`.
+      ##
+      ## A removal changes the tree as a write does: it reaches the
+      ## read-only-root check (`detectSourceWrites`) and invalidates the
+      ## metadata cache for the path (`invalidateCachedWrites`). It is kept
+      ## apart from `monitorWrites` because a removal is not a creation:
+      ## `transientOwnWrites` treats a written path that is gone at the end as
+      ## the action's own temporary and leaves it out of the portable key.
+      ## Deleting a file is no evidence of having made it, so a removal there
+      ## would drop a file the action READ and then deleted -- a genuine
+      ## input -- from the key, which is a false hit.
     monitorEnvReads*: seq[string]
       ## M10 — the NAMES of the environment variables the monitor observed
       ## this action reading (`mrEnvRead`, io-mon's observed-declared-input
@@ -1760,6 +1808,11 @@ type
     status*: ActionStatus
     exitCode*: int
     launched*: bool
+    rewrittenSources*: seq[string]
+      ## HL-10 ``bakLockUpdate`` only: the tracked source files (absolute
+      ## paths) the lock-update node rewrote. Not dependency evidence: the
+      ## node is no monitored process, and these are files the engine must
+      ## re-stat and re-hash for every action looked up after it.
     wouldLaunch*: bool
     cacheDecision*: CacheDecision
     reason*: string
@@ -2226,8 +2279,8 @@ type
       ## ``toolIdentityRefs`` name this tool (section 3, step 5), so
       ## re-realizing the tool invalidates its consumers through the ordinary
       ## declared-input path. Empty for a tool no provisioning edge realized
-      ## (a host ``PATH`` tool, a Nix realization outside the dev-env graph,
-      ## a from-source build).
+      ## (a host ``PATH`` tool, a from-source build, a Nix realization
+      ## resolved with no tool store).
     # M9.R.14e.3 — auxiliary search-path channels. The engine threads
     # each list onto a dedicated env var at action-launch time (see
     # ``resolvedToolAuxPaths`` / ``applyEnvSearchLists``):
@@ -3177,7 +3230,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              actionCachePolicy = ffpTimestamp;
              depfile = ""; monitorDepfile = "";
              dynamicDepsFile = "";
-             dependencyPolicy = automaticMonitorGatheringPolicy();
+             dependencyPolicy: DependencyGatheringPolicy |
+               Option[DependencyGatheringPolicy] = none(DependencyGatheringPolicy);
              nonDeterminism = ndpUnblessed;
              nonDeterminismJustification = "";
              isolateHostEnvironment = false;
@@ -3194,13 +3248,25 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
   ## is the point. "An action constructed without a governing lock identity is
   ## a build-time error, not a default." A default here would be the
   ## convention §7.2 explicitly refuses to rely on.
+  # An omitted policy alone enables the legacy depfile shorthand. Keep explicit
+  # monitor requests distinguishable even when they equal the default policy;
+  # otherwise a caller that asked for monitoring could publish depfile-only
+  # evidence. Accept the policy object directly for existing callers, or an
+  # Option for forwarding an optional policy without inventing a default.
+  let requestedPolicy =
+    when dependencyPolicy is DependencyGatheringPolicy: some(dependencyPolicy)
+    else: dependencyPolicy
+  if requestedPolicy.isSome and depfile.len > 0 and monitorDepfile.len == 0 and
+      requestedPolicy.get.kind == dgAutomaticMonitor:
+    raise newException(ValueError,
+      "action '" & id & "': depfile conflicts with explicit automatic-monitor " &
+      "dependencyPolicy without monitorDepfile; use monitorValidatedPolicy " &
+      "with a recognized report, or omit dependencyPolicy for depfile-only evidence")
   let effectiveDependencyPolicy =
-    if depfile.len > 0 and monitorDepfile.len == 0 and
-        dependencyPolicy.kind == dgAutomaticMonitor:
-      legacyDepfileGatheringPolicy(depfile,
-        dependencyPolicy.ignoredInputPrefixes)
+    if requestedPolicy.isNone and depfile.len > 0 and monitorDepfile.len == 0:
+      legacyDepfileGatheringPolicy(depfile, [])
     else:
-      dependencyPolicy
+      requestedPolicy.get(automaticMonitorGatheringPolicy())
   BuildAction(
     governingLockIdentity: governingLockIdentity,
     kind: bakProcess,
@@ -3402,6 +3468,25 @@ proc traceCacheIneligibility(result: var BuildRunResult; actionId: string;
     if causeNote.len > 0:
       text.add(". " & causeNote)
     result.results[resultIndex].cachePublishSkipReason = text
+
+proc traceUnreadableInput(result: var BuildRunResult; actionId: string;
+                          resultIndex: int; detail: string) =
+  ## The action succeeded, but one of its observed inputs has content a
+  ## content-keyed record needs and cannot read (`UnreadableInputError`).
+  ##
+  ## This is the "make it non-cacheable" arm of Monitor-Hook-Shim.md
+  ## §"Failure Semantics", taken at publish time: the outputs stand, nothing
+  ## is published, and the edge re-executes next build. It used to be the
+  ## other arm by accident -- the read's `IOError` escaped the publish and
+  ## failed the whole build, so one unreadable path the monitor happened to
+  ## observe (a stale link in a listed directory) broke every build on the
+  ## host. Failing an exit-0 action to punish its evidence is exactly what
+  ## that section rules out.
+  result.trace(actionId, "cache-skip-unreadable-input",
+    "action-cache publication skipped; " & detail)
+  if resultIndex >= 0 and resultIndex < result.results.len:
+    result.results[resultIndex].cachePublishSkipReason =
+      "reasons=unreadable-input; " & detail
 
 proc raiseEngine(message: string) {.noreturn.} =
   raise newException(BuildEngineError, message)
@@ -4061,6 +4146,45 @@ proc cachedResultReusableInPlace(action: BuildAction;
   ## edge with nothing to restore from being treated as one that failed to.
   action.declaresNoOutputs() or declaredOutputsPresent
 
+proc containerDirectoryOutputs*(action: BuildAction): seq[string] =
+  ## The declared outputs of `action` that are CONTAINER directories: a
+  ## directory the action declares only to say it exists, while other
+  ## writers fill it. Incremental-Invalidation.md §"Non-regular outputs",
+  ## "Container directory outputs".
+  ##
+  ## * `bakEnsureDir` — its one output. It creates the directory and writes
+  ##   nothing into it; CodeTracer's C compiles write `build/c/*.o` into its
+  ##   `fs.ensureDir("build/c")`.
+  ## * `bakPreserveTree` — the output ROOT (second line of `builtinText`).
+  ##   Every entry it copies, and its manifest, is declared as an output of
+  ##   its own and keeps its own revalidation; the root's other entries are
+  ##   not its to own (CodeTracer copies `public/ui.js` into the
+  ##   `frontend-public-resources` root).
+  ##
+  ## The classification is a property of the ACTION's kind, so it is decided
+  ## here and handed to every revalidation path (the per-edge lookup, its
+  ## metadata-only hot path, the whole-graph no-op scan, and the restore-mode
+  ## "already in place" check) rather than stored in the record. A process
+  ## action's directory output is never a container: it is opaque, and its
+  ## tree digest is the only check that says anything about it.
+  ##
+  ## The paths are returned as the action spells them; the store resolves
+  ## both sides against the action's cwd (`ownedOutputKey`) before comparing.
+  case action.kind
+  of bakEnsureDir:
+    if action.outputs.len == 1:
+      result.add(action.outputs[0])
+  of bakPreserveTree:
+    # Read directly rather than through `builtinRoots`, which raises on a
+    # malformed text: a lookup is not the place to fail an action the
+    # executor rejects with its own diagnostic. A malformed action simply
+    # has no container.
+    let lines = action.builtinText.splitLines()
+    if lines.len >= 2 and lines[1].len > 0:
+      result.add(lines[1])
+  else:
+    discard
+
 proc restoreWouldOverwriteMatchingOutputs(action: BuildAction;
                                           record: ActionResultRecord): bool =
   ## "Is every declared output already exactly what this record describes?"
@@ -4109,7 +4233,8 @@ proc restoreWouldOverwriteMatchingOutputs(action: BuildAction;
     return false
   if not action.allOutputsExist():
     return false
-  outputStateMismatch(record, action.cwd).len == 0
+  outputStateMismatch(record, action.cwd,
+    action.containerDirectoryOutputs()).len == 0
 
 proc addUnique(values: var seq[string]; value: string) =
   if value.len == 0:
@@ -4681,6 +4806,7 @@ type
     monitorReads*: HashSet[string]
     monitorWrites*: HashSet[string]
     monitorProbes*: HashSet[string]
+    monitorRemovals*: HashSet[string]
     monitorEnvReads*: HashSet[string]
       ## M10 — case-INSENSITIVE membership on Windows, where `PATH` and `Path`
       ## are one variable. The shim already dedupes that way; this is the
@@ -4690,8 +4816,8 @@ type
     monitorDirectoryEnumerations*: HashSet[string]
 
     execImageByPid*: Table[uint64, string]
-      ## pid -> the image that pid was last observed EXEC'ing, built from the
-      ## capture's own `mrProcessExec` records and read by the
+      ## pid -> its initial spawn image or its most recent observed exec, built from the
+      ## capture's successful exec/spawn records and read by the
       ## `mrNonDeterministic` arm to attribute an entropy read to the program
       ## that made it. See `EntropyObservation.image`.
       ##
@@ -6921,6 +7047,35 @@ proc dropNamedPipeOpens(evidence: var PathSetEvidence;
   evidence.monitorReads.dropObserved(pipes)
   evidence.monitorProbes.dropObserved(pipes)
   evidence.monitorWrites.dropObserved(pipes)
+  evidence.monitorRemovals.dropObserved(pipes)
+
+proc sourceWriteOffenders*(action: BuildAction; evidence: PathSetEvidence):
+    seq[tuple[write: string; root: string]] =
+  ## R6: every observed change under one of the action's read-only roots.
+  ## A removal rewrites the source as surely as a write does, so both
+  ## channels are checked (`detectSourceWrites` does the matching).
+  if action.readOnlyRoots.len == 0:
+    return
+  detectSourceWrites(action.readOnlyRoots,
+    evidence.monitorWrites.paths & evidence.monitorRemovals.paths)
+
+proc isRemovalMutation*(detail: string): bool =
+  ## Whether an `mrPathMutation` record is a REMOVAL. io-mon names the call
+  ## first in the record's detail, on Linux (`linux_preload.nim`,
+  ## `repro_linux_observe_mutation`) and on macOS (`macos_interpose.nim`, the
+  ## ROUND-4 RW2 recorders): `unlink`, `unlinkat ...` (with `AT_REMOVEDIR`,
+  ## `rmdir unlinkat ...` on Linux), `rmdir` and `remove` remove a path;
+  ## `mkdir`, `mkdirat ...`, `symlink ...` and `symlinkat ...` create one.
+  ##
+  ## Anything else is treated as a creation, i.e. a write. That is the side
+  ## every write consumer reads conservatively except one: a path written and
+  ## gone at the end counts as the action's own temporary
+  ## (`transientOwnWrites`). An unknown removal read as a creation is
+  ## therefore exactly as safe as the write records already are.
+  for prefix in ["unlink", "rmdir", "remove"]:
+    if detail.startsWith(prefix):
+      return true
+  false
 
 proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
                           evidence: var PathSetEvidence;
@@ -7150,6 +7305,19 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
   of mrFileWrite:
     evidence.monitorWrites.observe(evidence.evidenceProvenance,
       evcMonitorCapture, seen.monitorWrites, materialized)
+  of mrPathMutation:
+    # A namespace change with no open behind it. A directory or a symbolic
+    # link CREATED changes the tree exactly as a write does, so it is one:
+    # without it a symbolic link the action laid down was no product
+    # (`undeclaredSurvivingWrites` could not see it, so a restored hit lacked
+    # it), and a temporary directory it made and removed was not recognised
+    # as its own. A REMOVAL goes to its own channel; see `monitorRemovals`.
+    if record.detail.isRemovalMutation():
+      evidence.monitorRemovals.observe(evidence.evidenceProvenance,
+        evcMonitorCapture, seen.monitorRemovals, materialized)
+    else:
+      evidence.monitorWrites.observe(evidence.evidenceProvenance,
+        evcMonitorCapture, seen.monitorWrites, materialized)
   of mrProcessExec:
     # A binary the action EXECUTED. Its bytes decide what the action
     # computes at least as directly as any file it reads, so it is a
@@ -7217,11 +7385,23 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     # Stays in `monitorProbes` (every existing consumer keeps its set) AND
     # is recorded separately, because membership, not existence, is what
     # an enumeration depends on. See `monitorDirectoryEnumerations`.
+    #
+    # A PATTERN-SCOPED scan (glob(3) matching one pattern component against
+    # the directory's entries, `io_mon.globScanPattern`) depends only on the
+    # entries that match, so it travels under the directory's
+    # pattern-scoped name and every membership digest of it covers those
+    # entries alone (`pattern_scoped_enumeration.nim`). The name stands for
+    # the directory's existence in `monitorProbes` too, so nothing else
+    # about the scan changes.
+    let pattern = globScanPattern(record.detail)
+    let enumerated =
+      if pattern.len > 0: patternScopedEnumerationPath(materialized, pattern)
+      else: materialized
     evidence.monitorProbes.observe(evidence.evidenceProvenance,
-      evcMonitorCapture, seen.monitorProbes, materialized)
+      evcMonitorCapture, seen.monitorProbes, enumerated)
     evidence.monitorDirectoryEnumerations.observe(
       evidence.evidenceProvenance, evcMonitorCapture,
-      seen.monitorDirectoryEnumerations, materialized)
+      seen.monitorDirectoryEnumerations, enumerated)
   else:
     discard
 
@@ -7396,6 +7576,20 @@ proc gradeCaptureScope(profileRecords: openArray[MonitorRecord];
   # requires (`monitorEvidenceRequirement`).
   mesUnknownScopeLoss
 
+proc observeSpawnImage(record: MonitorRecord;
+                       images: var Table[uint64, string]) =
+  ## Canonical captures sort by PID, not wall time. Spawn metadata must be
+  ## read before the child's stream regardless of which PID sorts first.
+  ## Conflicting paths for a recycled child PID cannot establish its initial
+  ## image: keep an empty binding until an explicit exec supplies one.
+  if record.kind != mrProcessSpawn or record.result != 0 or
+      record.childOsPid == 0 or not record.path.isAbsolute:
+    return
+  if not images.hasKey(record.childOsPid):
+    images[record.childOsPid] = record.path
+  elif images[record.childOsPid] != record.path:
+    images[record.childOsPid] = ""
+
 proc foldMonitorDepFileEvidence*(path, cwd: string;
                                  evidence: var PathSetEvidence;
                                  seen: var EvidenceSeenSets;
@@ -7456,6 +7650,10 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
   var profileRecords: seq[MonitorRecord] = @[]
   var pipes = initHashSet[string]()
   try:
+    seen.execImageByPid.clear()
+    for record in streamMonitorDepFileRecords(path,
+        defaultMonitorDepFileReaderOptions()):
+      observeSpawnImage(record, seen.execImageByPid)
     for record in streamMonitorDepFileRecords(path,
         defaultMonitorDepFileReaderOptions()):
       if record.kind == mrBackendProfile:
@@ -7522,6 +7720,9 @@ proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
   result = mesComplete
   var profileRecords: seq[MonitorRecord] = @[]
   var pipes = initHashSet[string]()
+  seen.execImageByPid.clear()
+  for record in records:
+    observeSpawnImage(record, seen.execImageByPid)
   for record in records:
     if record.kind == mrBackendProfile:
       profileRecords.add(record)
@@ -7747,7 +7948,7 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
       else:
         blocking.add(observation.source & " from " &
           (if observation.image.len > 0: observation.image
-           else: "an unattributed process (no `mrProcessExec` record in " &
+           else: "an unattributed process (no unambiguous exec or spawn image in " &
                  "this capture names its pid)") & ", " &
           describeEntropyOrigin(observation.origin))
         if observation.image.len > 0:
@@ -8099,6 +8300,7 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
     if action.cacheable and
         col.monitorObservedNoReads() and
         col.evidence.monitorWrites.len == 0 and
+        col.evidence.monitorRemovals.len == 0 and
         col.evidence.monitorProbes.len == 0 and
         col.evidence.monitorDirectoryEnumerations.len == 0 and
         col.depfileObservedNothing():
@@ -8372,6 +8574,7 @@ proc dropScratchEvidence*(action: BuildAction; evidence: var PathSetEvidence) =
     channel.dropObserved(drop)
   keep(evidence.monitorReads)
   keep(evidence.monitorWrites)
+  keep(evidence.monitorRemovals)
   keep(evidence.monitorProbes)
   keep(evidence.monitorDirectoryEnumerations)
   keep(evidence.depfileInputs)
@@ -8907,9 +9110,10 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # owns the target location" carve-out, so the check no-ops for them.
   # Legacy actions predate the field and also see an empty seq (v21
   # payload compatibility), so they are unaffected.
-  if action.readOnlyRoots.len > 0 and result.evidence.monitorWrites.len > 0:
-    let offenders = detectSourceWrites(action.readOnlyRoots,
-      result.evidence.monitorWrites.paths)
+  if action.readOnlyRoots.len > 0 and
+      (result.evidence.monitorWrites.len > 0 or
+       result.evidence.monitorRemovals.len > 0):
+    let offenders = action.sourceWriteOffenders(result.evidence)
     for offender in offenders:
       result.evidence.diagnostics.add(
         "source-write attempt (R6): action wrote to '" & offender.write &
@@ -8972,6 +9176,11 @@ proc selfWrittenOutputKeys(action: BuildAction): HashSet[string] =
   for output in action.outputs:
     result.incl(materialPath(action.cwd, output).replace('\\', '/'))
 
+proc outputAncestorDirectoryKeys(action: BuildAction;
+                                 evidence: PathSetEvidence): HashSet[string]
+proc isOutputAncestorObservation(ancestors: HashSet[string];
+                                 key: string): bool {.inline.}
+
 proc evidenceInputPaths(action: BuildAction;
                         evidence: PathSetEvidence): seq[string] =
   # Deferred-D4: side-car ``HashSet`` keeps the per-action wrap-up linear
@@ -8981,21 +9190,28 @@ proc evidenceInputPaths(action: BuildAction;
   #
   # S5: the observed channels are filtered against the action's own
   # declared outputs; see ``selfWrittenOutputKeys``. Declared inputs are
-  # never filtered.
+  # never filtered. The directories those outputs sit in are filtered the
+  # same way (``outputAncestorDirectoryKeys``), so this denominator and the
+  # keyed set ``gradeKeyedInputSet`` compares it with subtract the same
+  # self-written paths.
   let selfWritten = action.selfWrittenOutputKeys()
+  let ancestors = action.outputAncestorDirectoryKeys(evidence)
   var seen = initHashSet[string]()
   for input in evidence.declaredInputs:
     result.addUnique(seen, input)
   for input in evidence.depfileInputs:
-    if selfWritten.contains(materialPath(action.cwd, input).replace('\\', '/')):
+    let key = materialPath(action.cwd, input).replace('\\', '/')
+    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
     result.addUnique(seen, input)
   for input in evidence.monitorReads:
-    if selfWritten.contains(materialPath(action.cwd, input).replace('\\', '/')):
+    let key = materialPath(action.cwd, input).replace('\\', '/')
+    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
     result.addUnique(seen, input)
   for probe in evidence.monitorProbes:
-    if selfWritten.contains(materialPath(action.cwd, probe).replace('\\', '/')):
+    let key = materialPath(action.cwd, probe).replace('\\', '/')
+    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
     result.addUnique(seen, probe)
 
@@ -9334,6 +9550,104 @@ proc selfWrittenDirectoryKeys(action: BuildAction): HashSet[string] =
   for root in action.declaredWriteRootPrefixes():
     result.incl(root)
 
+proc outputAncestorDirectoryKeys(action: BuildAction;
+                                 evidence: PathSetEvidence): HashSet[string] =
+  ## The directories every declared output of this action sits beneath: the
+  ## parent of each declared output file and each of ITS ancestors, and each
+  ## declared write root with its ancestors. Keyed in the normalized,
+  ## materialized form (`normalizeWriteRoot`), in both the declared and the
+  ## symlink-resolved spelling, because the monitor reports resolved paths
+  ## (`/private/tmp/...` on macOS) and a declaration need not be spelled so.
+  ##
+  ## What this set is for: an observation of one of these directories'
+  ## EXISTENCE — a probe, or a directory open — is not an input of the action,
+  ## and `cacheInputPaths` drops it from the observed channels. Spec:
+  ## `Filesystem-Policy-And-Observed-Inputs.md` §"A directory an output lives
+  ## in is not an existence input".
+  ##
+  ## Why that is sound, which is the whole argument. After every successful
+  ## run each of these directories exists, because the declared output is in
+  ## it; after every cache HIT it exists too, because restoring the output
+  ## creates its parents. So the state a hit leaves behind is the state a run
+  ## leaves behind, whatever the directory's pre-run state was. And the
+  ## recorder could never have recorded that pre-run state anyway: it
+  ## identifies an input by what is on disk AFTER the run, so a shell that
+  ## probed `build/` before `mkdir -p build` created it was recorded as
+  ## "directory" while what it observed was "absent". No fresh checkout — no
+  ## peer, no portable consumer, no `rm -rf build` of the producing tree —
+  ## could then match the record, and the producer itself only converged
+  ## because its own first run had left the directory behind
+  ## (`issues/2026-10-16-action-created-directories-recorded-as-post-run-
+  ## inputs.md`). Keying on the action's own side effect is the S5 defect
+  ## (`selfWrittenOutputKeys`) one path component up.
+  ##
+  ## The residual is the one S5 accepts and for the same reason: a tool that
+  ## BRANCHES on whether its output directory already existed is not
+  ## hermetic. An incremental tool that genuinely reads prior state declares
+  ## that state as an input, and a declared input is never filtered — the
+  ## callers add `declaredInputs` first and unfiltered.
+  ##
+  ## Deliberately NOT covered, because the soundness argument above does not
+  ## reach them: the MEMBERSHIP of these directories (enumerations, governed
+  ## by `selfWrittenDirectoryKeys` and the graph view — a listing of an
+  ## ancestor names other actions' outputs too), any path BELOW an output's
+  ## parent that is not itself an ancestor of an output (a sibling file is a
+  ## real input; S5's tests pin that), and an undeclared directory the action
+  ## creates and does not declare anything inside (a hit would not recreate
+  ## it, so its existence after a hit differs from after a run).
+  ##
+  ## THE MEMBERSHIP CARVE-OUT IS ENFORCED HERE, NOT MERELY STATED. An
+  ## enumeration is folded into `monitorProbes` as well as into
+  ## `monitorDirectoryEnumerations`, and the record attaches a membership
+  ## digest only to a path that is ALSO in the keyed input list
+  ## (`recordActionResult`'s `enumeratedDirectories`). Dropping an enumerated
+  ## ancestor from the probe channel would therefore silently drop its
+  ## membership: `cat *.txt > build/all.txt` enumerates the project root, an
+  ## ancestor of its output, and a new `*.txt` beside the others would no
+  ## longer invalidate it — a false hit. So an ancestor this action
+  ## ENUMERATED is removed from the set, and keyed exactly as before, unless
+  ## it is one whose membership `cacheEnumeratedDirectories` already treats
+  ## as derived (`selfWrittenDirectoryKeys`: an output's own parent or a
+  ## declared write root), where only existence could have been recorded.
+  result = initHashSet[string]()
+  var parents = initHashSet[string]()
+  for output in action.outputs:
+    parents.incl(normalizeWriteRoot(parentDir(materialPath(action.cwd,
+      output))))
+  for root in action.declaredWriteRootPrefixes():
+    # Already carries both spellings, and is itself a directory the action
+    # writes into.
+    parents.incl(root)
+  var spellings = initHashSet[string]()
+  for parent in parents:
+    if parent.len == 0:
+      continue
+    spellings.incl(parent)
+    if parent.isAbsolute:
+      spellings.incl(canonicalPolicyPath(parent))
+  for spelling in spellings:
+    var dir = spelling
+    while dir.len > 0 and dir notin result:
+      result.incl(dir)
+      let up = normalizeWriteRoot(parentDir(dir))
+      if up.len == 0 or up == dir:
+        break
+      dir = up
+  if result.len == 0 or evidence.monitorDirectoryEnumerations.len == 0:
+    return
+  let derivedMembership = action.selfWrittenDirectoryKeys()
+  for dir in evidence.monitorDirectoryEnumerations:
+    let key = normalizeWriteRoot(materialPath(action.cwd, dir))
+    if key notin derivedMembership:
+      result.excl(key)
+
+proc isOutputAncestorObservation(ancestors: HashSet[string];
+                                 key: string): bool {.inline.} =
+  ## `key` is an observed path in `cacheInputPaths`' normalized form; the
+  ## monitor may report a directory with a trailing `/`, which
+  ## `outputAncestorDirectoryKeys` never carries.
+  ancestors.len > 0 and normalizeWriteRoot(key) in ancestors
+
 proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
   let normalized = path.replace('\\', '/')
   for root in roots:
@@ -9345,6 +9659,335 @@ proc isUnderCanonicalPolicyRoot(path: string; roots: openArray[string]): bool =
   ## Roots have already been canonicalized once by the caller. Avoid any
   ## filesystem resolution when the action has no ignored roots.
   roots.len > 0 and canonicalPolicyPath(path).isUnderAnyRoot(roots)
+
+
+proc normalizedRootSpelling(path: string): string =
+  ## A declared ROOT's spelling: separator-normalized, with every trailing
+  ## `/` stripped — and `/` itself preserved as `/`, because that is a real
+  ## root and not an empty one.
+  ##
+  ## WHY THIS EXISTS BESIDE `isUnderAnyRoot`, which does no stripping. There
+  ## the trailing slash is a PERFORMANCE cliff: a root spelled with one
+  ## matches nothing, so nothing is elided and the key keeps an entry it did
+  ## not need. For `untrackedEnumerationScope` the same cliff points the
+  ## other way — a TRACKED root spelled `"<project>/"` would stop matching
+  ## `"<project>"`, so the project root itself would be classified untracked
+  ## and lose its membership digest. That is the fail-OPEN direction, so it
+  ## is closed here rather than documented as a cliff.
+  ##
+  ## ONLY THE ROOT NEEDS IT, and that was measured by mutation rather than
+  ## assumed: an earlier revision stripped the enumerated PATH here too, and
+  ## removing that strip reddened no test. It cannot, because
+  ## `untrackedEnumerationScope` compares against `root & "/"` — so a path
+  ## already spelled `"<project>/"` matches that prefix as it stands, and
+  ## `"<project>//"` does too. The line was deleted rather than kept with a
+  ## comment, for the reason `reproStoreRootPath` records about its own
+  ## deleted branch: a branch no test can redden is one a later reader takes
+  ## for load-bearing all over again. The trailing slash on the path side is
+  ## real — every ancestor enumeration measured in
+  ## `issues/2026-09-24-dev-env-never-converges-on-a-fresh-project.md`
+  ## arrives as `/`, `/Users/`, `/Users/zahary/` — it is just already
+  ## handled.
+  ##
+  ## AND THE ROOT SIDE IS NOW SUBSUMED TOO, at the one caller that matters,
+  ## which is said here rather than left to be rediscovered. Once
+  ## `trackedFilesystemRootPaths` began adding each root's SYMLINK-RESOLVED
+  ## spelling beside its declared one, the resolved one arrives through
+  ## `canonicalPolicyPath`, which ends in `normalizeWriteRoot` and therefore
+  ## strips the trailing slash itself — so for any root that resolves at all,
+  ## deleting the loop below reddens nothing (measured: both suites stay
+  ## 7/7 and 8/8). It is kept because this helper is also applied to paths
+  ## that never reach a resolver and must be correct on its own terms, the
+  ## same reason `selfWrittenDirectoryKeys` keeps its subsumed write-root
+  ## loop. Do not re-describe the loop as the reddenable half of this
+  ## comment; it was, and it is not any more.
+  result = path.replace('\\', '/')
+  while result.len > 1 and result.endsWith("/"):
+    result.setLen(result.len - 1)
+
+proc trackedFilesystemRootPaths*(roots: openArray[LogicalRoot]): seq[string] =
+  ## The `lrkTracked` roots of a declared classification, normalized.
+  ##
+  ## ONLY THE TRACKED HALF IS READ, AND THAT IS WHAT MAKES THE EXEMPTION
+  ## ENV-PROOF. `Incremental-Invalidation.md` requires that the exemption
+  ## "MUST NOT be configurable from the enumerating process's environment",
+  ## and the hole that clause was written from is recorded on
+  ## `isImmutablePackageStoreRoot`: honouring an ambient `NIX_STORE_DIR` let
+  ## any value nominate a directory as exempt, and clearing the variable did
+  ## not recover, because the record had been written with `mtimeNs = 0` and
+  ## a 0 is never re-listed.
+  ##
+  ## Here an entry can only ADD a tracked root, and `untrackedEnumerationScope`
+  ## exempts what is under NONE of them — so every entry this reads SHRINKS
+  ## the exempt set. There is no value, ambient or declared, that nominates a
+  ## directory exempt; the only way to exempt one is to declare no root above
+  ## it, which is a property of the invocation's project rather than of
+  ## anyone's environment. `lrkUntracked` entries are ignored outright for
+  ## the same reason: `declaredFilesystemRoots` derives one of them from
+  ## `%SystemRoot%` on Windows, and reading it here would be exactly the
+  ## nominate-an-exempt-directory channel the clause forbids. It costs
+  ## nothing to ignore them, because a path under an untracked root is under
+  ## no tracked root and is therefore already exempt by complement.
+  ##
+  ## BOTH SPELLINGS OF EVERY ROOT, declared and symlink-resolved, for the
+  ## reason `ignoredInputRoots` and `declaredWriteRootPrefixes` both already
+  ## emit both: a root's declared spelling and the spelling the kernel
+  ## reports are routinely not the same string, and the comparison below is
+  ## literal. Here the mismatch is a FAIL-OPEN one and so it is closed
+  ## rather than documented as a cliff — the direction is the opposite of
+  ## the one `isImmutablePackageStoreRoot` records about its own spelling
+  ## cliff, where an unexempted store root stays membership-tracked and the
+  ## conservative answer is the one a mismatch gives.
+  ##
+  ## MEASURED, not hypothetical, and live on macOS. A root passed as
+  ## `$TMPDIR/...` is spelled `/var/folders/...` while every enumeration the
+  ## monitor reports under it is spelled `/private/var/folders/...`; `/tmp`
+  ## and `/private/tmp` are the same pair. With one spelling only, such a
+  ## root matched NOTHING, so the whole tree it was declared to track —
+  ## including the project's own source directories — was classified
+  ## untracked and lost its membership digests. That is a false hit inside
+  ## the declared roots, which is strictly worse than the miss this
+  ## exemption exists to fix, and §"Rebuild Decision Model" requires failing
+  ## closed. `/x/.`, `/x//y` and `/x/y/../z` resolve the same way and were
+  ## the same hole.
+  ##
+  ## ADDING the resolved spelling keeps the only-ever-shrinks property this
+  ## proc's argument rests on: both entries are tracked roots, and
+  ## `untrackedEnumerationScope` exempts what is under NONE of them.
+  for root in roots:
+    if root.kind != lrkTracked or root.path.len == 0:
+      continue
+    let declared = normalizedRootSpelling(root.path)
+    result.add(declared)
+    if not declared.isAbsolute:
+      continue
+    # `canonicalPolicyPath` and not `expandFilename`, for the reason its own
+    # comment gives: it resolves the nearest EXISTING ancestor and re-appends
+    # the absent suffix, so a root that does not exist yet still gets its
+    # resolved spelling. A `work` or `out` root is routinely declared before
+    # the directory is created, and `expandFilename` simply raises on those —
+    # which would have left exactly the roots a build is about to write into
+    # single-spelled.
+    let resolved = normalizedRootSpelling(canonicalPolicyPath(declared))
+    if resolved.len > 0 and resolved != declared:
+      result.add(resolved)
+
+proc untrackedEnumerationScope*(trackedRoots: openArray[string];
+                                path: string): bool =
+  ## Is this enumerated directory in an UNTRACKED scope, and so exempt from
+  ## carrying a membership digest?
+  ##
+  ## `Incremental-Invalidation.md` §"Validation Criteria", the second
+  ## mandatory exemption: "Enumerated directories in an UNTRACKED scope --
+  ## including every ancestor above the outermost tracked root -- MUST NOT
+  ## carry a membership digest."
+  ##
+  ## WHY, measured. Tools search UPWARD. A compiler hunting a config or
+  ## module file walks from its working directory to `/`, enumerating
+  ## directories no project declares and none controls. The dev-env
+  ## provider-compile edge recorded 449 directory enumerations, among them
+  ## `/`, `/Users/`, `$HOME`, `$HOME/.cache/` and `/nix/`
+  ## (`issues/2026-09-24-dev-env-never-converges-on-a-fresh-project.md`, the
+  ## fifth cause). Its key therefore depended on the immediate membership of
+  ## the filesystem root and the user's home directory, which any unrelated
+  ## process changes and which on a shared machine change constantly — so
+  ## the edge could not converge at all, and everything downstream of it
+  ## missed too.
+  ##
+  ## WHY IT IS SOUND. The store root's argument, re-applied to a different
+  ## cause: whatever an upward search FINDS is recorded as its own file
+  ## input, and whatever it looks for and does not find is recorded as an
+  ## absent probe. Both survive independently of the enclosing directory's
+  ## membership, so the membership carries no information the record does not
+  ## already hold — and it does carry every unrelated change made above the
+  ## build. The directory also stays in the key as an existence-only entry
+  ## (`cacheInputPaths` still reports it), so its DELETION is still detected.
+  ##
+  ## AND WHAT IT COSTS, stated as a measured cost trade and not as a proof
+  ## that no hole exists. A tool whose behaviour depends on the COUNT of
+  ## entries in such a directory, or on an unrelated sibling in it (a scan
+  ## for "any file matching a pattern" in `$HOME`), IS silently reused across
+  ## a change in it. That is the same residual `isImmutablePackageStoreRoot`
+  ## accepts; it is narrower here only because the exempt region is the part
+  ## of the filesystem the build declared no interest in.
+  ##
+  ## WHAT IT ACTUALLY DROPPED, counted rather than described. The
+  ## `__repro_interface_extract` edge of `examples/hello-world-c` on one
+  ## macOS host, the same tree built twice with the only difference being
+  ## whether this proc ever returns true: 475 directory spellings carried a
+  ## digest without it and 415 with it; 31 distinct directories lost theirs
+  ## and ZERO gained one. They fall in four classes, and only the first two
+  ## are the ancestors this exemption was written for:
+  ##
+  ##   * the ancestor chain from the recipe directory to `/`, plus `$HOME`,
+  ##     `$HOME/Library/Caches` and `$TMPDIR`'s ancestors;
+  ##   * `$HOME/Library/Caches/repro/action-cache` and its
+  ##     `recipe-compiles/interface` subtree — the cache this build WRITES
+  ##     to, which is the self-poisoning pair;
+  ##   * the Nim toolchain's own directories under `/nix/store/…-nim-…/nim/
+  ##     lib/**` and the `~/.nimble/pkgs2` package directories. These are
+  ##     content-addressed and immutable, so their membership cannot change
+  ##     without the path changing — but note which claim that retires:
+  ##     "the individual package directories INSIDE the store stay tracked"
+  ##     holds for the REPRO store, which is a declared root, and does NOT
+  ##     hold for `/nix/store`, which is under no declared root at all. One
+  ##     level deeper than `isImmutablePackageStoreRoot` goes, same argument;
+  ##   * a SIBLING REPOSITORY'S source tree reached through the compiler's
+  ##     search path (`../reprobuild-test-adapters/src/**` here). This is
+  ##     the sharpest residual in the list and the one not to describe as
+  ##     safe: a module ADDED there that shadows one an existing import
+  ##     resolves is a membership change the key no longer sees. Whatever
+  ##     the compile actually reads stays in the key by path, so only the
+  ##     shadowing case is exposed, and closing it means DECLARING those
+  ##     search-path roots rather than narrowing this complement.
+  ##
+  ## A CLASSIFICATION, NOT A LIST. `trackedRoots` comes from the roots the
+  ## invocation declared (`declaredFilesystemRoots`), and the exempt region
+  ## is their COMPLEMENT. There is no table of well-known ancestors here, and
+  ## there must not be: a list of exempt paths has the defect-generating
+  ## shape `Filesystem-Policy-And-Observed-Inputs.md` §"The self-written set
+  ## is derived, never listed" names — correct until the next machine has a
+  ## layout nobody enumerated. The complement needs nothing enumerated: a
+  ## host whose home directory is `/home/x`, `/Users/x` or `C:\Users\x` is
+  ## handled by the same two lines.
+  ##
+  ## EMPTY `trackedRoots` EXEMPTS NOTHING. An engine configuration that
+  ## declares no roots knows of no outermost tracked root, so it cannot say
+  ## which directories are above it, and the answer to "is this untracked"
+  ## is "cannot be established" rather than "yes". §"Rebuild Decision
+  ## Model": "If any required condition cannot be checked, Reprobuild MUST
+  ## fail closed." This is also what keeps every existing caller byte-exact:
+  ## no configuration that does not declare roots changes behaviour.
+  ##
+  ## EXEMPTING IS ONE-DIRECTIONAL, and the direction it cannot be undone in
+  ## is the one a later change will want. A record written under this
+  ## exemption carries `mtimeNs = 0` for the exempt directories;
+  ## `membershipTrackedDirectory` reads that as "existence only", such a
+  ## directory is never re-listed, and the hit path does not re-record. So
+  ## NARROWING the exempt region later — deciding some directory it exempts
+  ## should carry a digest again — does not take effect on any record
+  ## written before the narrowing. That is the same clause
+  ## `Incremental-Invalidation.md` states for ADDING membership tracking in
+  ## the first place ("adding membership tracking does NOT retroactively fix
+  ## records written before it … requires either discarding pre-existing
+  ## records or a writer-identifying discriminator"), and a narrowing is an
+  ## addition in exactly that sense: it needs the cache discarded, not just
+  ## a new binary.
+  ##
+  ## WIDENING, which is what this change itself does, needs nothing. A
+  ## record written BEFORE it holds a live digest for `/` and for `$HOME`,
+  ## so the reader re-lists them, they compare unequal the moment anything
+  ## above the build moves, and the edge MISSES and re-records under the
+  ## exemption. One miss, self-correcting, never a false hit — which is the
+  ## whole reason this is safe to turn on without touching a cache root that
+  ## several installed `repro` binaries share.
+  ##
+  ## A TRACKED ROOT NESTED INSIDE AN EXEMPT REGION STAYS TRACKED, which is
+  ## the spec's "the individual package directories INSIDE the store stay
+  ## tracked" applied here. The default store root is
+  ## `$HOME/.cache/repro/store`, so on the measured host `$HOME` and
+  ## `$HOME/.cache/` are exempt while `$HOME/.cache/repro/store` and
+  ## everything under it keep their digests — a membership-tracked subtree
+  ## under two exempt ancestors.
+  if trackedRoots.len == 0:
+    return false
+  let normalized = path.replace('\\', '/')
+  for root in trackedRoots:
+    if normalized == root or normalized.startsWith(
+        (if root == "/": root else: root & "/")):
+      return false
+  true
+
+proc resolvedStoreRootOrEmpty*(): string =
+  ## `resolveStoreRoot()` with its raise turned into `""`.
+  ##
+  ## The same `try` and the same reason as `reproStoreRootPath`: that call
+  ## RAISES a `StoreError` when it must fall back to the per-user default and
+  ## neither `$XDG_CACHE_HOME` nor `$HOME` is set (`$LOCALAPPDATA` /
+  ## `$USERPROFILE` on Windows). Declaring the root classification is now on
+  ## the path of every build, so letting that escape would turn an unset
+  ## variable into a build failure.
+  try:
+    resolveStoreRoot()
+  except CatchableError:
+    ""
+
+proc declaredFilesystemRoots*(projectRoot, workRoot: string;
+                              storeRoot = ""; repositoryRoot = "";
+                              outRoot = ""): seq[LogicalRoot] =
+  ## The workspace's root classification for ONE invocation:
+  ## `Filesystem-Policy-And-Observed-Inputs.md` §"Read-Only Versus Writable
+  ## Roots" (BuildXL's read-only / writable / untracked mounts), expressed as
+  ## the `LogicalRoot` list `BuildEngineConfig.filesystemRoots` and
+  ## `BuildEngineConfig.portableRoots` both carry.
+  ##
+  ## ONE DERIVATION FOR BOTH FIELDS, deliberately. `portable_cache.nim`'s
+  ## `portableCacheRoots` used to build this list on its own, and it is the
+  ## only thing that knew which roots the workspace declares; the membership
+  ## exemption needs exactly the same answer, and a second list of the same
+  ## roots would be a second thing to forget to update. The portable side
+  ## keeps its own `repositoryRoot` discovery (`repositoryRootOf`, a `.git`
+  ## walk) and passes the result in, because a git walk has no business on
+  ## the dev-env activation path.
+  ##
+  ## EVERY ROOT IS TAKEN LITERALLY, and an empty one is NOT DECLARED rather
+  ## than defaulted. That matters most for `storeRoot`: resolving it here
+  ## would make this function raise, because `resolveStoreRoot` RAISES when
+  ## it must fall back to the per-user default and neither `$XDG_CACHE_HOME`
+  ## nor `$HOME` is set — and this now runs on every build. The callers
+  ## resolve it, each with the fallback its own layer wants, and an
+  ## undeclared root simply leaves more directories membership-tracked.
+  ##
+  ## A RELATIVE ROOT is resolved against THIS PROCESS's working directory,
+  ## which `ignoredInputRoots` records as a real hazard — the engine's cwd is
+  ## not the action's. It is kept, unchanged from the `portableCacheRoots`
+  ## this replaced, because changing it would move every portable
+  ## fingerprint. Every caller in the tree passes an absolute path, and that
+  ## is the whole of the safety here.
+  ##
+  ## DO NOT RESTATE THIS AS "THE FAILURE DIRECTION IS SAFE". An earlier
+  ## revision of this comment argued that a root resolved against the wrong
+  ## base merely ADDS a tracked root and so only shrinks the exempt set, and
+  ## that is false: it adds the wrong root INSTEAD of the right one, so the
+  ## tree the caller meant to track is under no tracked root and becomes
+  ## exempt. That is the fail-OPEN direction. The same mistake in its
+  ## spelling form — a root whose declared spelling is not the spelling the
+  ## kernel reports — was live on macOS and is closed in
+  ## `trackedFilesystemRootPaths`; this one is closed only by every caller
+  ## passing an absolute path.
+  if projectRoot.len > 0:
+    result.add(LogicalRoot(label: "project", path: absolutePath(projectRoot),
+                           kind: lrkTracked))
+  if repositoryRoot.len > 0 and
+      absolutePath(repositoryRoot) != absolutePath(projectRoot):
+    result.add(LogicalRoot(label: "repository",
+                           path: absolutePath(repositoryRoot),
+                           kind: lrkTracked))
+  if workRoot.len > 0:
+    result.add(LogicalRoot(label: "work", path: absolutePath(workRoot),
+                           kind: lrkTracked))
+  if storeRoot.len > 0:
+    result.add(LogicalRoot(label: "store", path: absolutePath(storeRoot),
+                           kind: lrkTracked))
+  # Where this invocation PUBLISHES. Usually inside the project
+  # (`<project>/.repro/...`) and so already covered, but not always: a
+  # dev-env activation may be given an output directory outside the project
+  # it describes, and a directory a build writes into is the last one that
+  # should lose its membership digest by default. An action's OWN write roots
+  # are elided by `cacheEnumeratedDirectories`' derived self-written filter,
+  # which is a per-action statement and the right place for it; this is the
+  # workspace-level statement that the tree is tracked at all.
+  if outRoot.len > 0:
+    result.add(LogicalRoot(label: "out", path: absolutePath(outRoot),
+                           kind: lrkTracked))
+  when defined(windows):
+    let systemRoot = getEnv("SystemRoot", "C:\\Windows")
+    result.add(LogicalRoot(label: "system", path: systemRoot,
+                           kind: lrkUntracked))
+  else:
+    for dir in ["/proc", "/sys", "/dev"]:
+      result.add(LogicalRoot(label: "system" & dir.replace('/', '-'),
+                             path: dir, kind: lrkUntracked))
 
 const
   MonitorSandboxToolsPrefix = "repro-fs-snoop-sandbox-tools-"
@@ -9450,6 +10093,252 @@ proc isMonitorSandboxToolsPath(path: string): bool =
     if allNumeric:
       return true
 
+proc isLowerHex(text: string; first, last: int): bool =
+  ## `text[first .. last]` is non-empty and lowercase hex. Lowercase only:
+  ## git writes object and pack names in lowercase and resolves them that
+  ## way, so an uppercase lookalike is not a name git would ever produce —
+  ## and recognising it would elide something that is not a by-name lookup.
+  if first < 0 or last >= text.len or first > last:
+    return false
+  for i in first .. last:
+    if text[i] notin {'0' .. '9', 'a' .. 'f'}:
+      return false
+  true
+
+proc isGitObjectName(text: string; first, last: int): bool =
+  ## A whole object id in `text[first .. last]`: 40 hex (SHA-1) or 64 hex
+  ## (SHA-256, `extensions.objectFormat = sha256`). Nothing else is a name a
+  ## git object store files anything under.
+  let width = last - first + 1
+  (width == 40 or width == 64) and text.isLowerHex(first, last)
+
+proc isChecksumNamed(name, prefix: string; suffixes: openArray[string]): bool =
+  ## `<prefix><40|64 hex><suffix>` for one of `suffixes`. The shape git uses
+  ## for every file it names after its own trailing checksum: `pack-<h>.idx`,
+  ## `graph-<h>.graph`, `multi-pack-index-<h>.midx`, ….
+  if not name.startsWith(prefix):
+    return false
+  for suffix in suffixes:
+    if name.len > prefix.len + suffix.len and name.endsWith(suffix):
+      return name.isGitObjectName(prefix.len, name.len - suffix.len - 1)
+  false
+
+proc isGitObjectStoreTail(tail: openArray[string]): bool =
+  ## Is `tail` — the segments below an `objects` directory — one of the
+  ## entries a git object store resolves BY NAME, or a derived index over
+  ## those entries? See `isGitObjectStorePath` for why each row is here and
+  ## why the rows that are absent are absent.
+  case tail.len
+  of 0:
+    # `objects/` itself. Its listing is the set of fan-out directories, i.e.
+    # which 2-hex prefixes currently hold a loose object.
+    return true
+  of 1:
+    let name = tail[0]
+    # `objects/<2 hex>`: a loose-object fan-out directory. It is CREATED by
+    # the first loose object under its prefix and REMOVED by
+    # `git prune-packed` once that prefix is packed, so even its existence
+    # churns with the store.
+    if name.len == 2 and name.isLowerHex(0, 1):
+      return true
+    return name == "pack"
+  of 2:
+    let (dir, name) = (tail[0], tail[1])
+    if dir.len == 2 and dir.isLowerHex(0, 1):
+      # A loose object: the remaining 38 (SHA-1) or 62 (SHA-256) hex of its
+      # name. `tmp_obj_*` and every other non-name in the fan-out directory
+      # fall through and stay observed.
+      return (name.len == 38 or name.len == 62) and
+        name.isLowerHex(0, name.high)
+    if dir == "pack":
+      return name == "multi-pack-index" or
+        name == "multi-pack-index.d" or
+        name.isChecksumNamed("pack-",
+          [".pack", ".idx", ".rev", ".bitmap"]) or
+        name.isChecksumNamed("multi-pack-index-", [".bitmap", ".rev"])
+    if dir == "info":
+      return name == "commit-graph" or name == "commit-graphs" or
+        name == "packs"
+    return false
+  of 3:
+    let (dir, sub, name) = (tail[0], tail[1], tail[2])
+    if dir == "pack" and sub == "multi-pack-index.d":
+      return name == "multi-pack-index-chain" or
+        name.isChecksumNamed("multi-pack-index-", [".midx", ".bitmap", ".rev"])
+    if dir == "info" and sub == "commit-graphs":
+      return name == "commit-graph-chain" or
+        name.isChecksumNamed("graph-", [".graph"])
+    return false
+  else:
+    return false
+
+proc isGitDirectory(dir: string; memo: var Table[string, bool]): bool =
+  ## Does `dir` look like a git directory to GIT? Memoized per call site,
+  ## because every object a lookup touches shares one of a handful of git
+  ## directories and the probe is three `stat`s.
+  ##
+  ## The test is a subset of git's own `is_git_directory`
+  ## (https://github.com/git/git/blob/master/setup.c): a `HEAD` file, an
+  ## `objects/` directory, and a `refs/` directory or — for a linked
+  ## worktree's private directory — a `commondir` file. Git additionally
+  ## validates `HEAD`'s content; not doing so here can only make this answer
+  ## `true` for a directory git would refuse, and git refusing it means no
+  ## git process resolved an object through it, so nothing that matters can
+  ## be elided by the difference.
+  ##
+  ## THIS CHECK IS THE SOUNDNESS GATE, NOT AN OPTIMISATION. The path shapes
+  ## in `isGitObjectStoreTail` say what a name WOULD mean in a git store;
+  ## only a git store makes it mean that. A data tree that happens to carry
+  ## `objects/ab/<38 hex>` names nothing by its content, and the paired test
+  ## asserts that such a file keeps invalidating the action that read it.
+  ## It is read at publish time, after the action ran, which is the moment
+  ## the recorded paths describe.
+  if dir.len == 0:
+    return false
+  memo.withValue(dir, cached):
+    return cached[]
+  let normalized = dir.replace('/', DirSep)
+  result =
+    try:
+      fileExists(normalized / "HEAD") and
+        dirExists(normalized / "objects") and
+        (dirExists(normalized / "refs") or
+         fileExists(normalized / "commondir"))
+    except CatchableError:
+      false
+  memo[dir] = result
+
+proc isGitObjectStorePath*(path: string;
+                           gitDirMemo: var Table[string, bool]): bool =
+  ## Is `path` an entry of a git object store that git resolves BY NAME — a
+  ## path whose observation the action cache must not key on?
+  ##
+  ## Issue `2026-09-30-flake-dev-env-invalidated-by-git-loose-object-probes`:
+  ## the dev-env introspection edge runs `nix print-dev-env`, which fetches
+  ## the flake as `git+file` and so reads and probes the repository's object
+  ## store. That store is shared by every worktree of a checkout and written
+  ## concurrently by every agent committing into it. A loose object appearing
+  ## under a name that was probed absent, git FRESHENING an existing object
+  ## (`utime` on rewrite — every `git add` of unchanged content does it), or a
+  ## repack moving objects into a pack, each moved the recorded metadata and
+  ## missed the edge — about 45 s against 13 s for a hit — although nothing
+  ## the action could observe had changed.
+  ##
+  ## ## Why this is attribution, not an exclusion list
+  ##
+  ## Dependency-Observation-Attribution.md §Class 1: "the path names its own
+  ## content". A git object's name IS the hash of its content, so a name
+  ## resolves to the same bytes whether the object is loose, packed,
+  ## freshened, repacked or reachable through an alternate. And rule 9's
+  ## second half — what decides the elided thing must be in the key — holds
+  ## for the reason the issue gives: the NAMES an action resolves are decided
+  ## by what stays observed (`HEAD`, `refs/**`, `packed-refs`, the index, the
+  ## work tree, `objects/info/alternates`) or by the action's own argv/env,
+  ## which are in the weak key by construction. Unchanged names ⇒ unchanged
+  ## bytes. That is a measured, per-shape argument written down here, which
+  ## is the difference from `devEnvIntrospectionIgnoredInputPrefixes`: it
+  ## applies to every edge, and it is checkable against this table.
+  ##
+  ## ## Why NOT through `contentAddressedRoot`
+  ##
+  ## That function means "a tool ROOT whose identity the engine MIXES INTO
+  ## THE KEY" — `keyedOnContentAddressedToolRoot` reads it for `argv[0]`, and
+  ## `toolInputRoots` for `PATH` / `NODE_PATH`. A git store has no identity
+  ## to mix (it is mutable as a whole; only its entries are immutable), and
+  ## routing it through there would make a `git` binary that happened to live
+  ## under a `.git/objects` lookalike key on a ROOT that names nothing. The
+  ## licence here is per ENTRY, with the "in the key" half carried by the
+  ## observed refs, so it is a separate predicate on purpose.
+  ##
+  ## ## Exactly what is recognised, below `<gitdir>/objects/`
+  ##
+  ## | entry | why it is a by-name lookup |
+  ## |---|---|
+  ## | `` (the directory), `<2hex>`, `<2hex>/<38\|62 hex>` | loose objects and their fan-out; the file name is the object name |
+  ## | `pack`, `pack/pack-<h>.{pack,idx,rev,bitmap}` | named after the pack's own checksum; `.idx`/`.rev`/`.bitmap` are derived from that pack |
+  ## | `pack/multi-pack-index`, `pack/multi-pack-index-<h>.{bitmap,rev}`, `pack/multi-pack-index.d/**` | an index over the packs; it changes which FILE answers a name, never the answer |
+  ## | `info/commit-graph`, `info/commit-graphs/**` | a cache of parsed commits; git's results are defined to be identical with or without it |
+  ## | `info/packs` | the dumb-protocol list of packs `git update-server-info` (run by every `git repack`) rewrites |
+  ##
+  ## The derived indexes are in because the issue's Expected says a repack
+  ## must not invalidate, and `git repack` / `git maintenance` rewrite them.
+  ##
+  ## ## What is deliberately NOT recognised, and stays observed
+  ##
+  ## * `objects/info/alternates` and `http-alternates` — they decide WHERE a
+  ##   name is looked up. Not named by content, not a lookup; the paired test
+  ##   asserts an alternates file appearing still invalidates.
+  ## * `objects/info/` itself, and everything outside `objects/` (`HEAD`,
+  ##   `refs`, `packed-refs`, `index`, `config`, `shallow`, `info/grafts`) —
+  ##   they decide WHICH names are looked up.
+  ## * `pack-<h>.keep`, `.promisor`, `.mtimes` — named after a pack, but their
+  ##   CONTENT is not determined by that name (a free-form keep reason,
+  ##   promisor ref lines, per-object mtimes), so the Class-1 premise fails.
+  ## * temporaries and quarantine (`tmp_obj_*`, `tmp_pack_*`,
+  ##   `objects/incoming-*`), uppercase or wrong-length names.
+  ## * any of the above shapes under a directory that is not a git directory
+  ##   (`isGitDirectory`).
+  ##
+  ## ## The limit of the licence — read before widening OR relying on it
+  ##
+  ## The argument covers outputs that are a function of the objects an action
+  ## looked up BY NAME. It does not cover outputs that are a function of the
+  ## store's object SET, because that set is exactly what the elided listings
+  ## and absent-probes carried:
+  ##
+  ## * abbreviated ids (`git describe`, `log --oneline`, `rev-parse --short`):
+  ##   git picks the abbreviation length from an approximate object count and
+  ##   extends it on a prefix collision, so a repack or new objects can change
+  ##   `g1234567` into `g12345678` with every ref unchanged. Bounded: the
+  ##   length only changes at count thresholds (2^13, 2^15, …) or on a
+  ##   collision of the abbreviated prefix, and the next move of a ref the
+  ##   action read re-runs it.
+  ## * whole-store queries (`cat-file --batch-all-objects`, `count-objects`,
+  ##   `fsck`, `prune --dry-run`).
+  ## * a lookup of a name that existed NOWHERE in the store (probed absent,
+  ##   answered "missing") that later arrives. A name the action read from a
+  ##   ref or the index always exists, so this needs a name from argv or from
+  ##   outside git, or a corrupt store.
+  ##
+  ## None of these is how a build or a flake fetch consumes git; all of them
+  ## are maintenance or version-stamping shapes. An edge that depends on one
+  ## of them must not rely on observation of `objects/` to invalidate it — it
+  ## should declare the dependency (a declared input is never elided) or not
+  ## be cacheable.
+  ##
+  ## Rule 3 ("every elision is counted"): there is no per-class elision
+  ## counter in the engine to join — `toolInputRoots` has none either. What
+  ## exists is `gradeKeyedInputSet`, which grades the set `cacheInputPaths`
+  ## returns, so an action whose only inputs were object-store lookups is
+  ## refused publication with `emptyKeyedInputSetDiagnostic` rather than
+  ## keyed on nothing.
+  # Every recognised shape has an `objects` segment. This is asked of every
+  # observed path of every action (tens of thousands for a flake fetch), and
+  # almost none contain the word, so reject them before allocating anything.
+  if "objects" notin path:
+    return false
+  let normalized = path.replace('\\', '/').strip(leading = false,
+    trailing = true, chars = {'/'})
+  let parts = normalized.split('/')
+  # The `objects` segment can occur more than once in a path (a git store
+  # inside a project directory called `objects`, say), so every occurrence
+  # is tried, cheapest test first; the filesystem is asked only once a tail
+  # has the shape of a store entry.
+  for i in countdown(parts.high, 1):
+    if parts[i] != "objects":
+      continue
+    if not isGitObjectStoreTail(parts.toOpenArray(i + 1, parts.high)):
+      continue
+    if isGitDirectory(parts[0 ..< i].join("/"), gitDirMemo):
+      return true
+  false
+
+proc isGitObjectStorePath*(path: string): bool =
+  ## Unmemoized convenience form of the predicate above, for callers that ask
+  ## about one path.
+  var memo = initTable[string, bool]()
+  path.isGitObjectStorePath(memo)
+
 proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[string] =
   ## The action-cache key's input path set: the paths whose content or
   ## metadata a later run compares against to decide ``cdHit`` /
@@ -9471,11 +10360,22 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   ##   directory -- see ``isMonitorSandboxToolsPath``. Like the filter
   ##   above it yields to a declaration, so an action that genuinely
   ##   declares such a path keeps it.
+  ## * the git-object-store filter drops by-name lookups in a git object
+  ##   store (loose objects, checksum-named packs and their derived
+  ##   indexes) -- see ``isGitObjectStorePath`` for the shape table, the
+  ##   soundness argument and its stated limit. Engine-wide rather than in
+  ##   any one edge's ignore list, and applied to every OBSERVED channel
+  ##   (``cacheEnumeratedDirectories`` applies it to the fourth). Like the
+  ##   filters above it yields to a declaration.
   ## * S5's self-write filter drops the action's OWN declared outputs
   ##   from the OBSERVED channels only — see ``selfWrittenOutputKeys``
   ##   for why those are provably not inputs, and for the
   ##   declared-input carve-out that keeps the two filters from
   ##   colliding. Declared inputs are never dropped by either filter.
+  ## * the same filter extends one path component up: an observation of the
+  ##   EXISTENCE of a directory a declared output sits in (a probe of
+  ##   ``build/`` before ``mkdir -p build`` created it) is the action's own
+  ##   side effect, not an input — see ``outputAncestorDirectoryKeys``.
   let toolRoots = action.toolInputRoots()
   # The EXPLICIT prefix set, deliberately not the derived one. The derived
   # self-written set applies to the ENUMERATION channel only — see
@@ -9483,6 +10383,12 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   # recipe that makes the difference load-bearing.
   let ignoredRoots = canonicalPolicyRoots(action.ignoredInputRoots())
   let selfWritten = action.selfWrittenOutputKeys()
+  let ancestors = action.outputAncestorDirectoryKeys(evidence)
+  # One memo for the whole fold: every object an action looks up lives in one
+  # of a handful of git directories, so the `isGitDirectory` stats are paid
+  # once per directory rather than once per object. Local, not global, so
+  # the answer never outlives the run whose recorded paths it describes.
+  var gitDirMemo = initTable[string, bool]()
   var declaredMaterialized = initHashSet[string]()
   # Deferred-D4: side-car ``HashSet`` tracks ``result`` membership; the
   # output ``seq`` retains insertion order because the action-cache key
@@ -9495,37 +10401,40 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   for input in evidence.depfileInputs:
     let path = materialPath(action.cwd, input)
     let key = path.replace('\\', '/')
-    if selfWritten.contains(key):
+    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
     if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or
          path.isUnderCanonicalPolicyRoot(ignoredRoots) or
          path.isMonitorSandboxToolsPath() or
-         path.isCompilerWrapperScratchPath()):
+         path.isCompilerWrapperScratchPath() or
+         path.isGitObjectStorePath(gitDirMemo)):
       continue
     result.addUnique(seen, path)
   for input in evidence.monitorReads:
     let path = materialPath(action.cwd, input)
     let key = path.replace('\\', '/')
-    if selfWritten.contains(key):
+    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
     if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or
          path.isUnderCanonicalPolicyRoot(ignoredRoots) or
          path.isMonitorSandboxToolsPath() or
-         path.isCompilerWrapperScratchPath()):
+         path.isCompilerWrapperScratchPath() or
+         path.isGitObjectStorePath(gitDirMemo)):
       continue
     result.addUnique(seen, path)
   for probe in evidence.monitorProbes:
     let path = materialPath(action.cwd, probe)
     let key = path.replace('\\', '/')
-    if selfWritten.contains(key):
+    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
     if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or
          path.isUnderCanonicalPolicyRoot(ignoredRoots) or
          path.isMonitorSandboxToolsPath() or
-         path.isCompilerWrapperScratchPath()):
+         path.isCompilerWrapperScratchPath() or
+         path.isGitObjectStorePath(gitDirMemo)):
       continue
     result.addUnique(seen, path)
 
@@ -9759,6 +10668,24 @@ proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
       continue
     result.addUnique(seenPrefixes, materialized)
 
+proc transientOwnWrites*(evidence: PathSetEvidence): HashSet[string] =
+  ## Paths the action itself WROTE that no longer exist once it finished:
+  ## its temporaries. npm's delete-by-rename (`x.js.DELETE.<random>`) is
+  ## the case that showed up — written, probed, deleted, under a new random
+  ## name every run. What the action observed there was its own doing, so
+  ## it is not an input; a written file that still EXISTS is kept, because
+  ## an action that read a file and then rewrote it did consume it.
+  ##
+  ## WRITTEN means created or written (`monitorWrites`): a directory or a
+  ## symbolic link the action made counts. A path it only REMOVED does not
+  ## (`monitorRemovals`): deleting a file is no evidence of having made it,
+  ## and a file the action read and then deleted is an input it consumed.
+  for path in evidence.monitorWrites:
+    if not fileExists(extendedPath(path)) and
+        not dirExists(extendedPath(path)) and
+        not symlinkExists(extendedPath(path)):
+      result.incl(path.replace('\\', '/'))
+
 proc undeclaredSurvivingWrites*(action: BuildAction;
                                 evidence: PathSetEvidence): seq[string] =
   ## S7 — the paths this action was OBSERVED to write that its declared
@@ -9782,7 +10709,8 @@ proc undeclaredSurvivingWrites*(action: BuildAction;
   ##   ``ignoredInputPrefixes``: a prefix that overlaps the action's own
   ##   declared product is dropped, because such a prefix is a statement
   ##   about the cache KEY and not about the PRODUCT.
-  ## * writes that no longer exist, or that are DIRECTORIES.
+  ## * writes that no longer exist, or that are DIRECTORIES (but not a
+  ##   symbolic link to one, or a dangling one: a link is itself a product).
   ##
   ## The last one is not an optimization, it is required for the gate to
   ## mean anything. The monitor records a directory creation as a write, so
@@ -9826,12 +10754,17 @@ proc undeclaredSurvivingWrites*(action: BuildAction;
       continue
     if path.isUnderCanonicalPolicyRoot(derivedRoots):
       continue
-    if dirExists(path) or not fileExists(path):
+    # A symbolic link is a product whatever it points at -- a directory,
+    # nothing at all -- so it is tested before the two tests below, which
+    # follow it. Restoring the declared outputs does not create it.
+    if not symlinkExists(path) and (dirExists(path) or not fileExists(path)):
       continue
     result.addUnique(seen, path)
 
 proc cacheEnumeratedDirectories*(action: BuildAction;
-                                 evidence: PathSetEvidence): seq[string] =
+                                 evidence: PathSetEvidence;
+                                 trackedRoots: openArray[string] = []):
+                                 seq[string] =
   ## The subset of this action's recorded inputs that it ENUMERATED, in the
   ## same materialised form `cacheInputPaths` produces, so the record side
   ## can match them by path.
@@ -9840,9 +10773,33 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
   ## path excluded from the inputs must not be handed over as an enumerated
   ## one either, or the record would carry membership for something it does
   ## not record at all.
+  ##
+  ## `trackedRoots` carries the workspace's root classification
+  ## (`trackedFilesystemRootPaths(config.filesystemRoots)`), and a directory
+  ## in an UNTRACKED scope is dropped from this channel —
+  ## `Incremental-Invalidation.md` §"Validation Criteria", second mandatory
+  ## exemption; the whole argument is on `untrackedEnumerationScope`. Dropping
+  ## it here and not in `cacheInputPaths` is the point: the directory stays in
+  ## the key as an existence-only input, so its DELETION is still detected,
+  ## and only its immediate membership leaves. This is the one fold both
+  ## membership consumers read — the local record's `enumeratedDirectories`
+  ## and the portable identity's `pikEnumeration` set — so neither can
+  ## disagree with the other about which directories are membership-tracked.
+  ##
+  ## EMPTY `trackedRoots` IS THE PRE-EXEMPTION BEHAVIOUR, exactly. The
+  ## default is empty so that an engine configuration which declares no roots
+  ## (every unit test that builds a `defaultBuildEngineConfig` and says
+  ## nothing further) keeps membership on every enumerated directory.
+  ##
+  ## A DECLARED INPUT KEEPS ITS MEMBERSHIP whatever its scope, which is the
+  ## same retention the tool/ignored-root filter above already grants and for
+  ## a stronger reason: an author who named a directory as an input of this
+  ## action has stated the interest the classification is otherwise inferring
+  ## the absence of.
   let toolRoots = action.toolInputRoots()
   let ignoredRoots = canonicalPolicyRoots(action.enumerationIgnoredRoots())
   let selfWrittenDirs = action.selfWrittenDirectoryKeys()
+  var gitDirMemo = initTable[string, bool]()
   var declaredMaterialized = initHashSet[string]()
   for input in evidence.declaredInputs:
     declaredMaterialized.incl(
@@ -9853,8 +10810,32 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
     if declaredMaterialized.contains(path.replace('\\', '/')):
       result.addUnique(seen, path)
       continue
-    if path.isUnderAnyRoot(toolRoots) or
-        path.isUnderCanonicalPolicyRoot(ignoredRoots):
+    # A git object store's own directories (`objects/`, `objects/pack`,
+    # `objects/<2 hex>`, …): their MEMBERSHIP is the store's object set,
+    # which a new pack, a new loose object or `git prune-packed` moves with
+    # every name the action resolved unchanged. `cacheInputPaths` drops the
+    # same directories from the probe channel, and the two must agree — a
+    # directory handed over here that is absent there would carry membership
+    # for something the record does not hold. What giving up the membership
+    # costs, and why that is acceptable, is the "limit of the licence"
+    # section of `isGitObjectStorePath`.
+    #
+    # Every test from here on asks WHERE the enumeration is, and a
+    # pattern-scoped one (`patternScopedEnumerationPath`) is in its
+    # directory: the scope narrows what was read there, not where. The name
+    # itself is what is kept, so the record digests the scoped membership.
+    let location = path.patternScopedBase()
+    if location.isUnderAnyRoot(toolRoots) or
+        location.isUnderCanonicalPolicyRoot(ignoredRoots) or
+        location.isGitObjectStorePath(gitDirMemo):
+      continue
+    # An enumerated directory in an UNTRACKED scope — under none of the
+    # roots this workspace declared, which includes every ancestor above
+    # the outermost tracked root. `Incremental-Invalidation.md`
+    # §"Validation Criteria", second mandatory exemption; the whole
+    # argument is on `untrackedEnumerationScope`. A DECLARED input never
+    # reaches here: it was kept by the first test above.
+    if trackedRoots.untrackedEnumerationScope(location):
       continue
     # The action's OWN output directory: its entry list changed because this
     # action added an entry to it, so the membership digest is derived state
@@ -9863,7 +10844,7 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
     # the MEMBERSHIP channel; reads and probes of paths inside it are
     # unaffected, and the exact declared outputs stay excluded by
     # `selfWrittenOutputKeys` as before.
-    if selfWrittenDirs.contains(normalizeWriteRoot(path)):
+    if selfWrittenDirs.contains(normalizeWriteRoot(location)):
       continue
     result.addUnique(seen, path)
 proc evidenceFromRecord*(action: BuildAction;
@@ -9904,7 +10885,23 @@ proc evidenceFromRecord*(action: BuildAction;
   # would otherwise be O(N^2) over the cache-hit reconstructed evidence.
   var seenMonitorReads = initHashSet[string]()
   var seenDepfileInputs = initHashSet[string]()
+  var seenEnumerations = initHashSet[string]()
   for input in record.inputs:
+    # A directory whose MEMBERSHIP the record fingerprinted was an
+    # enumeration of the execution behind it, and the record says so
+    # itself (`membershipTrackedDirectory`), so the replay can say so too.
+    # Without it a hit's evidence was indistinguishable from one in which
+    # every directory had merely been probed, and a consumer that keys on
+    # the difference -- the dev-env prompt watch manifest
+    # (`repro_dev_env_engine.devEnvPromptWatchEntries`), which tracks an
+    # enumerated directory's membership and a probed one's existence --
+    # got a different answer from a hit than from the execution that wrote
+    # the record. Declared inputs included: a declared directory keeps its
+    # membership too (`cacheEnumeratedDirectories`). The path also stays in
+    # `monitorReads` below, as before, so no existing count moves.
+    if membershipTrackedDirectory(input.metadata):
+      result.monitorDirectoryEnumerations.observe(result.evidenceProvenance,
+        evcReplayedCacheRecord, seenEnumerations, input.path)
     if not declaredInputPaths.contains(input.path):
       if action.dependencyPolicy.kind in MonitorPolicyKinds:
         result.monitorReads.observe(result.evidenceProvenance,
@@ -10126,7 +11123,7 @@ func interestConsumer*(category: EventCategory): string =
   of ecPathProbes: "monitorProbes / monitorDirectoryEnumerations"
   of ecFileWrites: "monitorWrites (and undeclaredSurvivingWrites)"
   of ecProcessTree:
-    "seen.execImageByPid (pid->image attribution) and the mrProcessExec " &
+    "seen.execImageByPid (exec/spawn pid->image attribution) and the mrProcessExec " &
       "content-dependency arm of the fold"
   of ecLibraryLoads: "the mrLibraryLoad arm of the fold (monitorReads)"
   of ecEnvReads: "cacheEnvInputs — the ACTION CACHE KEY"
@@ -11452,7 +12449,7 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
 proc shellScriptArgIndex(argv: openArray[string]): int =
   ## Return the script argument consumed by a POSIX shell's ``-c`` option.
   ## Monitored actions carry ``repro internal io monitor ... --`` before the
-  ## real command, so use the same last-separator rule as ``applyNimPathArgs``.
+  ## real command.
   if argv.len < 3:
     return -1
   var base = 0
@@ -11662,8 +12659,141 @@ proc deferRuntimeLibraryEnvForShell*(argv: seq[string];
         result = wrapMonitoredPayloadWithRuntimeEnv(argv, payloadIndex,
           prefix)
 
+const NimStandardLibrarySubdirs = ["", "deprecated/core", "deprecated/pure",
+  "pure/collections", "pure/concurrency", "impure", "wrappers",
+  "wrappers/linenoise", "windows", "posix", "js", "pure/unidecode",
+  "arch", "core", "pure"]
+  ## Import aliases supplied by Nim's config/nim.cfg and compiler stdlibDirs.
+
+const NimLibraryMetadataArgs* = ["dump", "--dump.format:json", "--skipCfg:on",
+  "--skipUserCfg:on", "--skipParentCfg:on", "--skipProjCfg:on",
+  "--verbosity:0", "--eval:discard"]
+  ## Only the compiler installation is inspected. In particular, discovering
+  ## its library must not evaluate the consumer's config.nims a second time.
+
+proc nimCompilerLibraryRoot(command, searchPath, cwd: string;
+                            env: seq[string]): tuple[libraryRoot, compilerPrefix: string] =
+  var executable = command
+  if not command.isAbsolute:
+    if command.contains(DirSep) or command.contains(AltSep):
+      executable = absolutePath(command, cwd)
+    else:
+      executable = ""
+      for dir in searchPath.split(PathSep):
+        let candidate = absolutePath(dir / addFileExt(command, ExeExt), cwd)
+        if isExecutableFile(candidate):
+          executable = candidate
+          break
+  if executable.len == 0 or not fileExists(executable):
+    raiseEngine("cannot validate Nim producer modules: compiler not found: " & command)
+  let physicalExecutable = expandFilename(executable)
+  let prefix = physicalExecutable.parentDir.parentDir
+  var image = open(physicalExecutable, fmRead)
+  var magic: array[2, char]
+  let magicLength = image.readChars(magic)
+  image.close()
+  let scriptWrapper = magicLength == 2 and magic[0] == '#' and magic[1] == '!'
+  if not scriptWrapper:
+    for candidate in [prefix / "lib", prefix / "lib/nim/lib"]:
+      if fileExists(candidate / "system.nim"):
+        return (candidate, prefix)
+  # A wrapper need not share its directory with the compiler's library. This
+  # is a bounded tool-metadata query, not a build action: absolute executable,
+  # fixed arguments, no shell, no project/config evaluation, no emitted files.
+  var childEnv: StringTableRef
+  if env.len > 0:
+    childEnv = newStringTable(modeCaseSensitive)
+    for entry in env:
+      let separator = entry.find('=')
+      if separator >= 0:
+        childEnv[entry[0 ..< separator]] = entry[separator + 1 .. ^1]
+  let child = startProcess(executable, args = NimLibraryMetadataArgs,
+    workingDir = cwd, env = childEnv, options = {poStdErrToStdOut})
+  let output = drainStream(child.outputStream)
+  let code = child.waitForExit()
+  closeProcessOnce(child)
+  if code == 0:
+    try:
+      let metadata = parseJson(output)
+      let root = metadata{"libpath"}.getStr()
+      let compilerPrefix = metadata{"prefixdir"}.getStr()
+      if root.isAbsolute and compilerPrefix.isAbsolute and
+          fileExists(root / "system.nim"):
+        return (root, compilerPrefix)
+    except ValueError, JsonParsingError:
+      discard
+  raiseEngine("cannot validate Nim producer modules: cannot locate standard library for " &
+    executable & ": " & output.strip())
+
+proc validateNimProducerRoots(argv: openArray[string]; base: int;
+                              nimPathDirs: openArray[string];
+                              compilerEnv: seq[string]; cwd: string) =
+  var modules: seq[tuple[root, relative: string]]
+  for root in nimPathDirs:
+    if root.len == 0:
+      continue
+    let absoluteRoot = absolutePath(root, cwd)
+    if dirExists(absoluteRoot / "std") or fileExists(absoluteRoot / "std.nim"):
+      raiseEngine("Nim producer source root " & root &
+        " uses the reserved standard-library module namespace std")
+    var pending = @[(directory: absoluteRoot, ancestors: newSeq[string]())]
+    while pending.len > 0:
+      let entry = pending.pop()
+      if not dirExists(entry.directory):
+        continue
+      # Stop ancestor cycles, but visit distinct import aliases to the same
+      # directory: harmless/os and pure/os have different collision semantics.
+      let physical = expandFilename(entry.directory)
+      if physical in entry.ancestors:
+        continue
+      let ancestors = entry.ancestors & @[physical]
+      for kind, path in walkDir(entry.directory):
+        case kind
+        of pcDir, pcLinkToDir:
+          pending.add((directory: path, ancestors: ancestors))
+        of pcFile, pcLinkToFile:
+          if path.splitFile.ext.toLowerAscii == ".nim":
+            modules.add((absoluteRoot, relativePath(path, absoluteRoot)))
+  if modules.len == 0:
+    return
+  let searchPath = if compilerEnv.len > 0:
+    lookupEnv(compilerEnv, "PATH").value else: getEnv("PATH")
+  let compiler = nimCompilerLibraryRoot(argv[base], searchPath, cwd, compilerEnv)
+  var libraries = @[compiler.libraryRoot]
+  var explicitLibrary = ""
+  for i in base + 2 ..< argv.len:
+    let option = argv[i].toLowerAscii
+    if option.startsWith("--lib:") or option.startsWith("--lib="):
+      explicitLibrary = argv[i][6 .. ^1]
+  if explicitLibrary.len > 0:
+    var root = ""
+    var position = 0
+    while position < explicitLibrary.len:
+      if explicitLibrary[position] != '$':
+        root.add(explicitLibrary[position])
+        inc position
+      elif explicitLibrary.substr(position, position + 3) == "$nim" and
+          (position + 4 == explicitLibrary.len or
+           explicitLibrary[position + 4] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}):
+        # Match the complete variable, so $nimble is never mistaken for $nim.
+        root.add(compiler.compilerPrefix)
+        position += 4
+      else:
+        raiseEngine("cannot validate Nim producer modules: unsupported --lib substitution: " &
+          explicitLibrary)
+    libraries.add(absolutePath(root.expandTilde(), cwd))
+  for module in modules:
+    for library in libraries:
+      for subdir in NimStandardLibrarySubdirs:
+        let standardModule = library / subdir / module.relative
+        if fileExists(standardModule):
+          raiseEngine("Nim producer module " & (module.root / module.relative) &
+            " collides with standard-library module " & standardModule)
+
 proc applyNimPathArgs*(argv: openArray[string];
-                       nimPathDirs: openArray[string]): seq[string] =
+                       nimPathDirs: openArray[string];
+                       compilerEnv: seq[string] = @[];
+                       cwd = getCurrentDir()): seq[string] =
   ## Cross-Repo-Source-Consumption SC-11 (§4.2a.3) — the Nim library-source
   ## channel's argv projection. Where the C/C++ channels prepend an ENV VAR,
   ## the Nim channel prepends a compiler FLAG: for each sibling Nim library
@@ -11678,30 +12808,27 @@ proc applyNimPathArgs*(argv: openArray[string];
   ## ``compile``/``compileToC``/``c++``/``cpp``/``js``/``e``) appears at
   ## ``argv[base+1]``. The flags are inserted immediately AFTER that subcommand
   ## token (Nim accepts options anywhere after the command, so this is
-  ## order-safe against the trailing ``--out:``/positional source). An empty
+  ## order-safe against the trailing ``--out:``/positional source). Producer
+  ## roots are checked for reserved standard module names before insertion;
+  ## valid producer paths outrank configuration fallbacks while explicit
+  ## consumer paths retain their original ordering and precedence. An empty
   ## ``nimPathDirs`` or a non-Nim argv is the identity transform, so every
   ## non-Nim-library-consumer action is byte-for-byte unchanged.
   ##
   ## The engine wraps a monitored action's argv in an io-monitor prefix
   ## (``<repro> internal io monitor --depfile <f> -- <real argv>``,
-  ## ``maybeWrapWithMonitor``). ``base`` is the index just past that ``--``
-  ## separator when present, so the Nim compile is recognised whether or not
+  ## ``maybeWrapWithMonitor``). The shared executed-image parser identifies
+  ## the payload, so the Nim compile is recognised whether or not
   ## the action was monitor-wrapped; the ``--path:`` flags are always inserted
   ## into the REAL ``nim c`` argv, never into the monitor prefix.
   result = @[]
   for a in argv: result.add(a)
   if nimPathDirs.len == 0 or argv.len < 2:
     return
-  # Locate the real command start, skipping a leading io-monitor wrapper by
-  # finding the LAST ``--`` argument separator (the monitor CLI ends its own
-  # options with ``--``; a plain ``nim c`` argv has none). ``base`` is the
-  # first token after it, else 0.
-  var base = 0
-  for i in countdown(argv.len - 1, 0):
-    if argv[i] == "--":
-      base = i + 1
-      break
-  if base >= argv.len - 1:
+  # Use the canonical monitor-prefix parser: a -- in the compiled program's
+  # runtime arguments must not be mistaken for the monitor's separator.
+  let base = executedImageArgvIndex(argv)
+  if base < 0 or base >= argv.len - 1:
     return
   let exeBase = extractFilename(argv[base])
   let stem =
@@ -11716,18 +12843,42 @@ proc applyNimPathArgs*(argv: openArray[string];
     "c++", "cpp", "js", "e"]
   if argv[base + 1].toLowerAscii notin compileSubcommands:
     return
+  validateNimProducerRoots(argv, base, nimPathDirs, compilerEnv, cwd)
   var flags: seq[string] = @[]
   for d in nimPathDirs:
     if d.len > 0:
       flags.add("--path:" & d)
   if flags.len == 0:
     return
-  # Insert the ``--path:`` flags right after the subcommand token
-  # (``base + 1``), preserving the monitor prefix (if any) and the trailing
-  # ``--out:``/positional source.
+  # Nim reads CLI paths before configuration, then parses the CLI again.
+  # Repeated paths are not moved, so merely adding --path lets config.nims
+  # prepend an older library over the selected producer. Clear all paths we
+  # are about to replay before either pass: producer roots first, then the
+  # original consumer arguments. Replaying the originals verbatim preserves
+  # their precedence AND duplicate semantics (A, B, A still leaves B first).
+  var resetPaths: seq[string] = @[]
+  for root in nimPathDirs:
+    if root.len > 0 and root notin resetPaths:
+      resetPaths.add(root)
+  for i in base + 2 ..< argv.len:
+    # Tokens after the project filename belong to the compiled program, even
+    # when they resemble compiler options. Never reset paths from that tail.
+    if argv[i].len == 0 or argv[i][0] != '-':
+      break
+    let separator = argv[i].find({':', '='})
+    if separator < 0:
+      continue
+    let option = argv[i][0 ..< separator].normalize()
+    if option notin ["--path", "-p"]:
+      continue
+    let path = argv[i][separator + 1 .. ^1]
+    if path.len > 0 and path notin resetPaths:
+      resetPaths.add(path)
   result = @[]
   for i in 0 .. base + 1:
     result.add(argv[i])
+  for path in resetPaths:
+    result.add("--excludePath:" & path)
   for f in flags:
     result.add(f)
   for i in base + 2 ..< argv.len:
@@ -12244,13 +13395,16 @@ when defined(macosx):
     ##    ``<shell> -c "umask 022 && <argv> > out 2> err"`` — plain POSIX that
     ##    bash, dash, ash and zsh all honour.
     ##
-    ## Returns ``""`` when only SIP-protected shells are available — the caller
+    ## 3. The shared propagation resolver uses configured or build-embedded
+    ##    shipped tools when the caller has no shell on PATH.
+    ##
+    ## Returns ``""`` when no valid replacement is available — the caller
     ## then enforces the Monitor-Hook-Shim.md:501 fail-safe for monitored
     ## actions (injection failure MUST fail the action / make it non-cacheable).
     let sandboxDir = getEnv("CT_SANDBOX_TOOLS_DIR")
     if sandboxDir.len > 0:
       let dropInSh = sip_propagation.rewriteSipPath("/bin/sh", sandboxDir)
-      if fileExists(dropInSh) or symlinkExists(dropInSh):
+      if sip_propagation.resolveSipReplacement("/bin/sh") == dropInSh:
         return dropInSh
     let pathEnv = getEnv("PATH")
     for name in nonSipShellCandidateNames:
@@ -12258,11 +13412,12 @@ when defined(macosx):
         if entry.len == 0:
           continue
         let candidate = entry / name
-        if not fileExists(candidate):
-          continue
-        if sip_propagation.isSipProtected(candidate):
+        if not sip_propagation.isValidSipReplacement(candidate):
           continue
         return candidate
+    let replacement = sip_propagation.resolveSipReplacement("/bin/sh")
+    if replacement != "/bin/sh":
+      return replacement
     ""
 
   proc nonSipShellSearchReport*(): string =
@@ -12291,6 +13446,7 @@ when defined(macosx):
         let candidate = entry / name
         if fileExists(candidate) and sip_propagation.isSipProtected(candidate):
           rejected.add(candidate)
+    parts.add("shipped tools=" & sip_propagation.StackableHooksBuiltToolsDir)
     parts.add("searched " & $pathDirs & " PATH dir(s) for " &
       nonSipShellCandidateNames.join("/"))
     if rejected.len == 0:
@@ -12472,7 +13628,8 @@ proc preparedRunQuotaCommand(action: BuildAction;
         "[" & nonSipShellSearchReport() & "]")
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
   let threadedEnv = preparedActionEnv(action, config, auxPaths)
-  let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
+  let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs,
+    threadedEnv, action.cwd)
   let includePaths = partitionCompilerIncludePaths(auxPaths)
   let adjustedArgv = applyCompilerSystemIncludeArgs(nimAdjustedArgv,
     includePaths.systemDirs)
@@ -14275,7 +15432,16 @@ type
     ## realizer (download, verify, extract, seal into the tool store) lives
     ## above the engine, and the engine must not depend on it.
 
+  LockUpdateExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
+    ## HL-10: hook installed by the certifying ``repro test`` / ``repro
+    ## certify`` run for the ``bakLockUpdate`` node of its plan. Indirect for
+    ## the usual layering reason: the commit-time lock writers live in
+    ## ``repro_cli_support``, above the engine. The executor reports the paths
+    ## it rewrote in ``rewrittenSources`` so the engine drops any stat or
+    ## digest it cached for them earlier in the run.
+
 var workspaceVcsExecutor {.threadvar.}: WorkspaceVcsExecutor
+var lockUpdateExecutor {.threadvar.}: LockUpdateExecutor
 var foreignProvisionExecutors {.threadvar.}: Table[string, ForeignProvisionExecutor]
 var binaryCacheSubstituteExecutor {.threadvar.}: BinaryCacheSubstituteExecutor
 var metadataFetchExecutor {.threadvar.}: MetadataFetchExecutor
@@ -14287,6 +15453,15 @@ proc registerWorkspaceVcsExecutor*(executor: WorkspaceVcsExecutor) =
   ## that exercise the engine in-process call it explicitly to install
   ## a fresh executor bound to a resolved ``GitToolIdentity``.
   workspaceVcsExecutor = executor
+
+proc registerLockUpdateExecutor*(executor: LockUpdateExecutor) =
+  ## Register the per-thread executor for ``bakLockUpdate`` actions (HL-10).
+  ## The certifying run installs one bound to its own state for the duration
+  ## of its build and clears it afterwards.
+  lockUpdateExecutor = executor
+
+proc clearLockUpdateExecutor*() =
+  lockUpdateExecutor = nil
 
 proc clearWorkspaceVcsExecutor*() =
   ## Clear the registered executor. Tests use this to assert the
@@ -15339,6 +16514,25 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
       result.runQuotaBackend = if mdRes.runQuotaBackend.len > 0:
         mdRes.runQuotaBackend else: "metadata-fetch"
       return
+    of bakLockUpdate:
+      # HL-10. Fail CLOSED when nothing is registered: a lock-update node
+      # that quietly no-ops would let the tests run against a lock the
+      # commit-time hook is about to rewrite, which is the uncovered commit
+      # the node exists to prevent.
+      if lockUpdateExecutor.isNil:
+        raiseEngine(
+          "bakLockUpdate action requires registerLockUpdateExecutor " &
+          "before runBuild: " & action.id)
+      let luRes = lockUpdateExecutor(action)
+      result.status = luRes.status
+      result.exitCode = luRes.exitCode
+      result.stdout = luRes.stdout
+      result.stderr = luRes.stderr
+      result.reason = luRes.reason
+      result.launched = luRes.launched
+      result.rewrittenSources = luRes.rewrittenSources
+      result.runQuotaBackend = "lock-update"
+      return
     of bakSolveLock:
       if solveLockExecutor.isNil:
         raiseEngine(
@@ -15402,7 +16596,43 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
           "selector": selector,
           "workspaceRoot": action.cwd
         }
-        let exchange = requestNixDaemon($req, action.cwd)
+        # An edge MAY carry a JSON object in ``builtinText``
+        # (``repro_tool_profiles``' ``nixToolProvisioningEdges``) naming
+        #   * ``workspaceRoot``: the directory the selector is resolved
+        #     against, when it is not the edge's ``cwd``. A tool edge's
+        #     ``cwd`` is its tool store, so that the run ledger (keyed by id
+        #     and ``cwd``) keeps ONE manifest per tool request and releases a
+        #     superseded realization's GC root, while a ``.#…`` selector
+        #     still names the project's flake;
+        #   * ``expressionFile``: the Nix expression file the selector is
+        #     realized from (a ``nixPackage`` declared with
+        #     ``expressionFile``); the helper builds that file instead.
+        # An edge with no text -- the dev-env and extractor edges -- sends
+        # the request it always sent.
+        #
+        # The helper itself is resolved against the same directory the
+        # selector is (``requestNixDaemon``'s ``cwd`` anchors the candidates
+        # for a build run from the reprobuild tree): a tool edge's ``cwd``,
+        # its tool store, is no place to look for one, and before the edge
+        # existed tool resolution resolved it from the project directory.
+        var helperRoot = action.cwd
+        if action.builtinText.len > 0:
+          let spec =
+            try: parseJson(action.builtinText)
+            except CatchableError as err:
+              raiseEngine("bakForeignProvision: the nix edge's text is not " &
+                "a JSON object (" & err.msg & "): " & action.id)
+          if spec.kind != JObject:
+            raiseEngine("bakForeignProvision: the nix edge's text is not " &
+              "a JSON object: " & action.id)
+          let workspaceRoot = spec{"workspaceRoot"}.getStr()
+          if workspaceRoot.len > 0:
+            req["workspaceRoot"] = %workspaceRoot
+            helperRoot = workspaceRoot
+          let expressionFile = spec{"expressionFile"}.getStr()
+          if expressionFile.len > 0:
+            req["expressionFile"] = %expressionFile
+        let exchange = requestNixDaemon($req, helperRoot)
         if not exchange.connected:
           raiseEngine("Failed to connect or spawn reprobuild-nix-daemon at " &
             exchange.socketPath & ": " & exchange.diagnostic)
@@ -15421,10 +16651,25 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         if paths.len == 0:
           raiseEngine("Daemon returned no materialized paths for selector: " & selector)
         
-        let outPath = paths[0].getStr()
+        # THE RECEIPT NAMES EVERY REALIZED OUTPUT, one store path per line,
+        # in the helper's order: its first line is the output carrying the
+        # package's executable (``put_executable_output_first``), which is
+        # all this receipt used to hold. A tool's other outputs (a split
+        # ``-dev`` or ``-lib``) feed its consumers' include and library
+        # paths, so a receipt that dropped them could not stand for the
+        # realization. A single-output realization writes the same bytes as
+        # before, so no existing edge's record changes.
+        var outPaths: seq[string] = @[]
+        for pathNode in paths:
+          let outPath = pathNode.getStr()
+          if outPath.len > 0:
+            outPaths.add(outPath)
+        if outPaths.len == 0:
+          raiseEngine("Daemon returned no materialized paths for selector: " &
+            selector)
         createDir(extendedPath(receiptPath.splitPath.head))
         prepareBuiltinFileOutput(receiptPath)
-        writeFile(extendedPath(receiptPath), outPath)
+        writeFile(extendedPath(receiptPath), outPaths.join("\n"))
         
         # DA-1f — THE DAEMON'S REPORT IS KEPT AND IS NAMED. It used to be
         # assigned to `monitorReads`, the MONITOR's channel, which is the
@@ -15445,10 +16690,15 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         # channel that says who filled it is attribution.
         var provisionerReads: seq[string] = @[]
         if resp.hasKey("dependencies"):
+          # The helper resolves symlinks in every reported path. Resolve the
+          # base too, so a cwd under /var (or any directory alias) yields
+          # the same relative inputs as its canonical spelling.
+          let reportCwd = expandFilename(
+            if action.cwd.len > 0: action.cwd else: getCurrentDir())
           for depNode in resp["dependencies"]:
             let depPath = depNode.getOrDefault("path").getStr()
             if depPath.len > 0:
-              provisionerReads.add(relativePath(depPath, action.cwd))
+              provisionerReads.add(relativePath(depPath, reportCwd))
 
         result.status = asSucceeded
         result.exitCode = 0
@@ -15702,6 +16952,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # Process-global accumulators; zero them so this build reports its own cost
   # rather than its own plus every earlier build in this process.
   resetOutputStateCheckStats()
+  # The workspace's root classification, flattened once per build rather than
+  # once per recorded action. `Incremental-Invalidation.md` §"Validation
+  # Criteria", second mandatory exemption: an enumerated directory in an
+  # UNTRACKED scope carries no membership digest. EMPTY when the invocation
+  # declared no roots, which exempts nothing — see
+  # `untrackedEnumerationScope`.
+  let membershipTrackedRoots = trackedFilesystemRootPaths(config.filesystemRoots)
   var stats: BuildStats
   proc statStart(): float =
     if config.statsEnabled:
@@ -15711,6 +16968,28 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   proc finishStat(name: string; started: float) =
     if config.statsEnabled:
       stats.addMetric(name, (epochTime() - started) * 1_000_000.0)
+
+  proc enumeratedDirectoriesForKey(action: BuildAction;
+                                   evidence: PathSetEvidence): seq[string] =
+    ## The membership-tracked enumerations this action's record carries, plus
+    ## the one counter that says the untracked-scope exemption fired.
+    ##
+    ## EMITTED ONLY WHEN SOMETHING WAS ACTUALLY EXEMPTED, so a build on which
+    ## the mechanism does nothing reports exactly the rows it reported before
+    ## the mechanism existed — and a row that is present is a measurement
+    ## rather than a zero. It is also the only way to read the exemption off a
+    ## build instead of off a record: the record shows which directories kept
+    ## a digest (`membershipTrackedDirectory`), and this shows how many were
+    ## dropped on the way there.
+    ##
+    ## The second fold runs only under `--stats`, and only to produce the
+    ## difference. Nothing in the key depends on it.
+    result = action.cacheEnumeratedDirectories(evidence, membershipTrackedRoots)
+    if config.statsEnabled and membershipTrackedRoots.len > 0:
+      let exempted = action.cacheEnumeratedDirectories(evidence).len -
+        result.len
+      if exempted > 0:
+        stats.addCounterMetric("repro enumeration membership exempt", exempted)
 
   proc finishOutputStateCheckStats() =
     ## Emit the TOTAL cost of output revalidation, counted inside
@@ -16346,8 +17625,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## process on the machine writes into it, so its membership changes
     ## between any two runs; gemini-cli's bundle step enumerates it. Files
     ## BENEATH it stay ordinary inputs: projects and test fixtures do live
-    ## under temp, and their contents are real.
-    var key = path.replace('\\', '/')
+    ## under temp, and their contents are real. A pattern-scoped listing of
+    ## it is still a listing of it.
+    var key = path.patternScopedBase().replace('\\', '/')
     while key.len > 1 and key.endsWith("/"):
       key.setLen(key.len - 1)
     when defined(windows):
@@ -16563,6 +17843,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## false -- keep the disk's identity -- for a directory with no declared
     ## path beneath it, and for one at or inside a declared path (an
     ## output's own contents are its record's business).
+    ##
+    ## A PATTERN-SCOPED name (`patternScopedEnumerationPath`) is viewed as
+    ## its directory, keeping only the names that may match its pattern,
+    ## which is what `membershipHex` reads from disk for the same name.
+    let (base, scope) = splitPatternScopedEnumeration(dir)
+    if scope.len > 0:
+      result = graphDirView(base, selfId, ancestors, ancestorOutput)
+      result.names = result.names.namesMatchingScope(scope)
+      return
     refreshGraphPathIndex()
     let key = scratchKey(dir)
     if key notin graphPathsBeneath:
@@ -16681,18 +17970,6 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if not view.applies:
         return none(string)
       some(graphViewIdentity(view, kind))
-
-  proc transientOwnWrites(evidence: PathSetEvidence): HashSet[string] =
-    ## Paths the action itself WROTE that no longer exist once it finished:
-    ## its temporaries. npm's delete-by-rename (`x.js.DELETE.<random>`) is
-    ## the case that showed up — written, probed, deleted, under a new random
-    ## name every run. What the action observed there was its own doing, so
-    ## it is not an input; a written file that still EXISTS is kept, because
-    ## an action that read a file and then rewrote it did consume it.
-    for path in evidence.monitorWrites:
-      if not fileExists(extendedPath(path)) and
-          not dirExists(extendedPath(path)):
-        result.incl(path.replace('\\', '/'))
 
   proc determinismProbeAdmits(action: BuildAction;
                               evidence: EvidenceCollection): bool =
@@ -16955,7 +18232,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## hit cannot recover from the record, and the only way the record that
     ## hit derives is the record this run produced (P3.4b).
     var enumerated = initHashSet[string]()
-    for path in action.cacheEnumeratedDirectories(evidence):
+    for path in action.cacheEnumeratedDirectories(evidence,
+        membershipTrackedRoots):
       enumerated.incl(path)
       if not isHostTempListing(path) and not isOwnOutput(action, path):
         result.enumerations.add(path)
@@ -17367,7 +18645,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # makes: a record of another location's outputs is not this
           # action's record. See `recordOutputsNotOwnedBy`.
           enforceOwnedOutputs: true,
-          ownedOutputs: action.outputs))
+          ownedOutputs: action.outputs,
+          # A built-in's container directory is checked for existence, not
+          # by tree digest, on this path exactly as on the per-edge lookup.
+          # See `containerDirectoryOutputs`.
+          containerOutputs: action.containerDirectoryOutputs()))
         hotEnvResolvers.add(action.actionEnvResolver(unsafeAddr config))
       let lookupStart = statStart()
       let navigatorStart = statStart()
@@ -17432,8 +18714,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       # Step 3.3). Fall back to the full scheduler when it is not.
       # Timing is accumulated inside `outputStateMismatch` and reported once
       # as "repro output revalidate"; a timer here would have measured this
-      # call site only.
-      if outputStateMismatch(hotRecord.get(), action.cwd).len > 0:
+      # call site only. Container directories are checked for existence
+      # only, as on the probe arm above (`containerDirectoryOutputs`).
+      if outputStateMismatch(hotRecord.get(), action.cwd,
+          action.containerDirectoryOutputs()).len > 0:
         return none(BuildRunResult)
       # The other whole-graph arm, and the same reason as the probe field
       # above: reaching `hmssHit` here also means the scheduler never runs, so
@@ -17664,6 +18948,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   proc invalidateCachedWrites(action: BuildAction; evidence: PathSetEvidence) =
     for output in evidence.monitorWrites:
       invalidateCachedPath(materialPath(action.cwd, output))
+    # A path the action removed has changed too; a cached fact about it
+    # would describe a file that no longer exists.
+    for removed in evidence.monitorRemovals:
+      invalidateCachedPath(materialPath(action.cwd, removed))
 
   proc storeOutputBlobsFor(action: BuildAction;
                            evidence: PathSetEvidence): bool =
@@ -18421,7 +19709,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           let name = entry.path["env:".len .. ^1]
           let (present, value) = launchEnv(name)
           return some(envIdentity(portableRecordRoots(), present, value))
-        let path = entry.path
+        # A PATTERN-SCOPED name (`patternScopedEnumerationPath`) is answered
+        # for its directory, listing only the names that may match its
+        # pattern, which is what the recorder's `membershipHex` and
+        # `graphDirView` computed for the same name. Looked up as written, it
+        # named no produced path or manifest entry, so a scoped listing of a
+        # produced directory could never resolve.
+        let (path, scope) = splitPatternScopedEnumeration(entry.path)
         if path in producer:
           if path notin producedOutputs:
             return some(Unresolved)
@@ -18434,7 +19728,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             return some("present")
           of pikEnumeration:
             if o.directory:
-              return some(membershipHexOfNames(childNames(o.entries, "")))
+              return some(membershipHexOfNames(
+                childNames(o.entries, "").namesMatchingScope(scope)))
             return some(Unresolved)
           of pikEnvironment:
             return some(Unresolved)   # answered above
@@ -18461,7 +19756,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               return some(if at >= 0: "present" else: "absent")
             of pikEnumeration:
               if at >= 0 and o.entries[at].kind == tekDirectory:
-                return some(membershipHexOfNames(childNames(o.entries, rel)))
+                return some(membershipHexOfNames(
+                  childNames(o.entries, rel).namesMatchingScope(scope)))
               return some(Unresolved)
             of pikEnvironment:
               return some(Unresolved)   # answered above
@@ -18469,7 +19765,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # Above produced paths: the rule the recorder and the determinism
         # probe apply -- this host's undeclared entries plus what this
         # action's ancestors produce, from their records.
-        let physical = toPhysicalPath(roots, path)
+        # The scoped name itself: `graphDirView` applies its scope.
+        let physical = toPhysicalPath(roots, entry.path)
         if physical.isSome:
           let view = graphDirView(physical.get(), action.id, ancestors,
             proc (output: GraphPathEntry): AncestorOutputState =
@@ -18633,6 +19930,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     action: BuildAction
     resultPath: string
 
+  # The exception unwinding out of the scheduling loop, if any, recorded by
+  # the ``except`` clause at the end of this ``try`` as it passes through.
+  #
+  # It has to be RECORDED, not read back with ``getCurrentException()`` in the
+  # ``finally``, and the ``finally`` has to put it back before it ends. Under
+  # Nim's goto-based exceptions an exception raised inside a cleanup's own
+  # ``finally`` -- ``cancelAndWait``'s lease release after its lease finish
+  # failed, say -- is pushed on top of the one it supersedes, and when that
+  # cleanup's error is handled the current exception falls back to the
+  # SUPERSEDED one, not to ours. Propagation then resumes with whatever is
+  # current, so the build used to surface a teardown ``Broken pipe`` in place
+  # of the error that started the unwinding, even with every teardown step
+  # guarded. The same leftover makes ``getCurrentException()`` unreliable for
+  # telling "unwinding" from "ended normally".
+  var unwinding: ref Exception = nil
   try:
     while completed < buildGraph.actions.len:
       raiseIfCancelled()
@@ -18815,7 +20127,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             outputRoot = action.cwd,
             retention = action.effectiveRetention,
             nowUnix = config.nowUnix,
-            buildEpoch = config.buildEpoch)
+            buildEpoch = config.buildEpoch,
+            containerOutputs = action.containerDirectoryOutputs())
           finishStat("repro cache lookup", lookupStart)
           # Peer-Cache M1: on local miss, consult the LAN peer cache.
           # `peerCacheActionFetcher` is nil when ``--peer-cache=…`` was
@@ -18850,7 +20163,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                   outputRoot = action.cwd,
                   retention = action.effectiveRetention,
                   nowUnix = config.nowUnix,
-                  buildEpoch = config.buildEpoch)
+                  buildEpoch = config.buildEpoch,
+                  containerOutputs = action.containerDirectoryOutputs())
                 finishStat("repro peer-cache lookup-retry", retryStart)
                 runResult.trace(id, "peer-cache-hit", $lookup.status)
               else:
@@ -19194,37 +20508,40 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # Cache ineligibility withholds publication, not successful outputs.
             if action.cacheable and (not evidence.disableCacheHits or
                 determinismProbeAdmits(action, evidence)):
-              let recordStart = statStart()
-              let storeOutputBlobs =
-                storeOutputBlobsFor(action, evidence.evidence)
-              let record = cache.recordActionResult(cas.inner,
-                action.weakFingerprint,
-                action.actionCachePolicy,
-                action.recordedInputNames(
-                  action.cacheInputPaths(evidence.evidence)),
-                action.outputs, action.cwd,
-                storeOutputBlobs = storeOutputBlobs,
-                metadataCache = addr fileMetadataCache,
-                envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
-                # An elevated edge reaches this site instead of the
-                # monitored one, and it used to record every directory
-                # input with NO membership digest. That is not "less
-                # precise": a recorded `mtimeNs = 0` means "not
-                # membership-tracked", such a directory is never
-                # re-listed, and the hit path does not re-record — so the
-                # record was PERMANENTLY existence-only
-                # (Incremental-Invalidation.md:814-821). The evidence was
-                # already collected two lines up; only the hand-off was
-                # missing.
-                enumeratedDirectories = action.recordedInputNames(
-                  action.cacheEnumeratedDirectories(evidence.evidence)),
-                determinism = entryDeterminismFor(config, action))
-              finishStat("repro cache record", recordStart)
-              writeActionResultRecordFile(
-                dependencyEvidencePath(cacheRoot, action.id), record)
-              recordPortableFingerprint(idx, action, evidence.evidence, record)
-              publishPeerCacheBundle(action.weakFingerprint, record)
-              publishBinaryCacheBundle(action, record)
+              try:
+                let recordStart = statStart()
+                let storeOutputBlobs =
+                  storeOutputBlobsFor(action, evidence.evidence)
+                let record = cache.recordActionResult(cas.inner,
+                  action.weakFingerprint,
+                  action.actionCachePolicy,
+                  action.recordedInputNames(
+                    action.cacheInputPaths(evidence.evidence)),
+                  action.outputs, action.cwd,
+                  storeOutputBlobs = storeOutputBlobs,
+                  metadataCache = addr fileMetadataCache,
+                  envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
+                  # An elevated edge reaches this site instead of the
+                  # monitored one, and it used to record every directory
+                  # input with NO membership digest. That is not "less
+                  # precise": a recorded `mtimeNs = 0` means "not
+                  # membership-tracked", such a directory is never
+                  # re-listed, and the hit path does not re-record — so the
+                  # record was PERMANENTLY existence-only
+                  # (Incremental-Invalidation.md:814-821). The evidence was
+                  # already collected two lines up; only the hand-off was
+                  # missing.
+                  enumeratedDirectories = action.recordedInputNames(
+                    enumeratedDirectoriesForKey(action, evidence.evidence)),
+                  determinism = entryDeterminismFor(config, action))
+                finishStat("repro cache record", recordStart)
+                writeActionResultRecordFile(
+                  dependencyEvidencePath(cacheRoot, action.id), record)
+                recordPortableFingerprint(idx, action, evidence.evidence, record)
+                publishPeerCacheBundle(action.weakFingerprint, record)
+                publishBinaryCacheBundle(action, record)
+              except UnreadableInputError as err:
+                runResult.traceUnreadableInput(id, idToIndex.resultIndex(id), err.msg)
             elif action.cacheable and evidence.disableCacheHits:
               runResult.traceCacheIneligibility(id, evidence,
                 idToIndex.resultIndex(id),
@@ -19362,6 +20679,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           statuses[id] = finished.status
           if finished.status == asSucceeded:
             invalidateCachedOutputs(plan.action)
+            if plan.action.kind == bakLockUpdate:
+              # HL-10: the node rewrites tracked sources (``repro.lock``,
+              # ``flake.lock``) that no action declares as an output, so
+              # nothing else would drop a stat or digest this run cached for
+              # them before it ran. Its dependents are looked up after this.
+              for written in finished.rewrittenSources:
+                invalidateCachedPath(materialPath(plan.action.cwd, written))
             let evidenceStart = statStart()
             var evidence = collectEvidence(plan.action, strict = true,
               config = addr config)
@@ -19400,45 +20724,48 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # Cache ineligibility withholds publication, not successful outputs.
             if plan.action.cacheable and (not evidence.disableCacheHits or
                 determinismProbeAdmits(plan.action, evidence)):
-              let recordStart = statStart()
-              # Peer-Cache M1: when a publisher closure is set, force
-              # output-blob retention so the publisher can read the
-              # blob payloads back out of the local CAS. The
-              # publisher-less path (legacy CLI default) keeps the
-              # ``deferLocalOutputBlobs`` knob honoured byte-for-byte.
-              # M9.L.4-refactor Step A: ALSO force retention when the
-              # binary-cache publisher is configured AND this action
-              # opted into publishing — the publish hook guards on
-              # ``outputPayloadKind == opkCasBlobs`` and would
-              # silently skip otherwise.
-              let storeOutputBlobs =
-                storeOutputBlobsFor(plan.action, evidence.evidence)
-              let record = cache.recordActionResult(cas.inner,
-                plan.action.weakFingerprint,
-                plan.action.actionCachePolicy,
-                plan.action.recordedInputNames(
-                  plan.action.cacheInputPaths(evidence.evidence)),
-                plan.action.outputs, plan.action.cwd,
-                storeOutputBlobs = storeOutputBlobs,
-                metadataCache = addr fileMetadataCache,
-                envInputs = plan.action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
-                # Same omission as the elevated site above, reached by
-                # builtin edges and by anything whose plan is not a
-                # `bakProcess`. A builtin cannot be wrapped in the
-                # io-monitor, so its enumeration evidence arrives either
-                # from a converter path set or from a monitor depfile a
-                # direct engine caller prewired — both of which
-                # `collectEvidence` has already folded by this point.
-                enumeratedDirectories = plan.action.recordedInputNames(
-                  plan.action.cacheEnumeratedDirectories(evidence.evidence)),
-                determinism = entryDeterminismFor(config, plan.action))
-              finishStat("repro cache record", recordStart)
-              writeActionResultRecordFile(
-                dependencyEvidencePath(cacheRoot, plan.action.id), record)
-              recordPortableFingerprint(idx, plan.action, evidence.evidence,
-                record)
-              publishPeerCacheBundle(plan.action.weakFingerprint, record)
-              publishBinaryCacheBundle(plan.action, record)
+              try:
+                let recordStart = statStart()
+                # Peer-Cache M1: when a publisher closure is set, force
+                # output-blob retention so the publisher can read the
+                # blob payloads back out of the local CAS. The
+                # publisher-less path (legacy CLI default) keeps the
+                # ``deferLocalOutputBlobs`` knob honoured byte-for-byte.
+                # M9.L.4-refactor Step A: ALSO force retention when the
+                # binary-cache publisher is configured AND this action
+                # opted into publishing — the publish hook guards on
+                # ``outputPayloadKind == opkCasBlobs`` and would
+                # silently skip otherwise.
+                let storeOutputBlobs =
+                  storeOutputBlobsFor(plan.action, evidence.evidence)
+                let record = cache.recordActionResult(cas.inner,
+                  plan.action.weakFingerprint,
+                  plan.action.actionCachePolicy,
+                  plan.action.recordedInputNames(
+                    plan.action.cacheInputPaths(evidence.evidence)),
+                  plan.action.outputs, plan.action.cwd,
+                  storeOutputBlobs = storeOutputBlobs,
+                  metadataCache = addr fileMetadataCache,
+                  envInputs = plan.action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
+                  # Same omission as the elevated site above, reached by
+                  # builtin edges and by anything whose plan is not a
+                  # `bakProcess`. A builtin cannot be wrapped in the
+                  # io-monitor, so its enumeration evidence arrives either
+                  # from a converter path set or from a monitor depfile a
+                  # direct engine caller prewired — both of which
+                  # `collectEvidence` has already folded by this point.
+                  enumeratedDirectories = plan.action.recordedInputNames(
+                    enumeratedDirectoriesForKey(plan.action, evidence.evidence)),
+                  determinism = entryDeterminismFor(config, plan.action))
+                finishStat("repro cache record", recordStart)
+                writeActionResultRecordFile(
+                  dependencyEvidencePath(cacheRoot, plan.action.id), record)
+                recordPortableFingerprint(idx, plan.action, evidence.evidence,
+                  record)
+                publishPeerCacheBundle(plan.action.weakFingerprint, record)
+                publishBinaryCacheBundle(plan.action, record)
+              except UnreadableInputError as err:
+                runResult.traceUnreadableInput(finished.id, idToIndex.resultIndex(finished.id), err.msg)
             elif plan.action.cacheable and evidence.disableCacheHits:
               runResult.traceCacheIneligibility(finished.id, evidence,
                 idToIndex.resultIndex(finished.id),
@@ -20022,28 +21349,31 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # Cache ineligibility withholds publication, not successful outputs.
         if action.cacheable and (not evidence.disableCacheHits or
             determinismProbeAdmits(action, evidence)):
-          let recordStart = statStart()
-          # M9.L.4-refactor Step A: force output-blob retention when
-          # either the peer-cache publisher OR the binary-cache
-          # publisher (with this action opted in) needs to read the
-          # blob payloads back out of the local CAS.
-          let storeOutputBlobs = storeOutputBlobsFor(action, evidence.evidence)
-          let record = cache.recordActionResult(cas.inner, action.weakFingerprint,
-            action.actionCachePolicy,
-            action.recordedInputNames(action.cacheInputPaths(evidence.evidence)),
-            action.outputs, action.cwd,
-            storeOutputBlobs = storeOutputBlobs,
-            metadataCache = addr fileMetadataCache,
-            envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
-            enumeratedDirectories = action.recordedInputNames(
-              action.cacheEnumeratedDirectories(evidence.evidence)),
-            determinism = entryDeterminismFor(config, action))
-          finishStat("repro cache record", recordStart)
-          writeActionResultRecordFile(
-            dependencyEvidencePath(cacheRoot, action.id), record)
-          recordPortableFingerprint(idx, action, evidence.evidence, record)
-          publishPeerCacheBundle(action.weakFingerprint, record)
-          publishBinaryCacheBundle(action, record)
+          try:
+            let recordStart = statStart()
+            # M9.L.4-refactor Step A: force output-blob retention when
+            # either the peer-cache publisher OR the binary-cache
+            # publisher (with this action opted in) needs to read the
+            # blob payloads back out of the local CAS.
+            let storeOutputBlobs = storeOutputBlobsFor(action, evidence.evidence)
+            let record = cache.recordActionResult(cas.inner, action.weakFingerprint,
+              action.actionCachePolicy,
+              action.recordedInputNames(action.cacheInputPaths(evidence.evidence)),
+              action.outputs, action.cwd,
+              storeOutputBlobs = storeOutputBlobs,
+              metadataCache = addr fileMetadataCache,
+              envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
+              enumeratedDirectories = action.recordedInputNames(
+                enumeratedDirectoriesForKey(action, evidence.evidence)),
+              determinism = entryDeterminismFor(config, action))
+            finishStat("repro cache record", recordStart)
+            writeActionResultRecordFile(
+              dependencyEvidencePath(cacheRoot, action.id), record)
+            recordPortableFingerprint(idx, action, evidence.evidence, record)
+            publishPeerCacheBundle(action.weakFingerprint, record)
+            publishBinaryCacheBundle(action, record)
+          except UnreadableInputError as err:
+            runResult.traceUnreadableInput(finished.id, idx, err.msg)
         elif action.cacheable and evidence.disableCacheHits:
           runResult.traceCacheIneligibility(finished.id, evidence, idx,
             unobservableRootImageNote(action, unsafeAddr config))
@@ -20067,6 +21397,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate,
             asWouldRun, asFailed, asBlocked}:
           inc completed
+  except Exception as err:
+    # Recorded and re-raised unchanged; see ``unwinding``. ``Exception``
+    # rather than ``CatchableError`` so a ``Defect`` (``--panics:off``) keeps
+    # its place as the cause too. This widens no raises effect: ``runBuild``
+    # already calls the unannotated ``progressCallback``.
+    unwinding = err
+    raise
   finally:
     # Engine-Threadpool TP-2 — every handed-off finish comes back BEFORE the
     # teardown below touches a slot. A worker owns a ``MonitorHandle`` for the
@@ -20078,31 +21415,54 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var pendingFinishes = awaitMonitorFinishes()
     for outcome in pendingFinishes.mitems:
       applyMonitorFinishOutcome(monitorHosts, outcome)
+    # Each teardown step below is guarded on its own and its failure
+    # collected, rather than allowed to raise out of this ``finally``. Two
+    # reasons (RunQuota-Protocol-And-Client-Libraries.md, "Ownership Across a
+    # Batched Client Launch"): a step that raised used to skip every step
+    # after it -- the remaining children, the session close, the drains below
+    # -- and, when the build was already unwinding, it REPLACED the exception
+    # that started the unwinding, so the build reported a cleanup symptom
+    # (a broken pipe, ``session still owns leases``) instead of its cause.
+    # What is collected is raised, or appended to the in-flight exception, at
+    # the very end of this block.
+    var teardownFailures: seq[string]
+    var firstTeardownError: ref CatchableError = nil
     for item in running.mitems:
-      case item.processKind
-      of rpkInlineRunQuotaPending:
-        if item.queuedRunQuotaProcess.active:
-          item.queuedRunQuotaProcess.cancelQueued()
-      of rpkInlineRunQuota:
-        if item.runQuotaProcess.active and not item.runQuotaProcess.completed:
-          discard item.runQuotaProcess.cancelAndWait()
-      of rpkInlineRunQuotaFailed:
-        discard
-      of rpkMonitorHost:
-        # HM-4 — kill the monitored root, then let the handle go. Dropping it
-        # reaps the root before releasing the consumer, so no producer is ever
-        # left publishing into a released set (LF-2); killing first is what
-        # keeps that reap from blocking shutdown indefinitely.
-        abandonMonitorHost(monitorHosts, item.monitorSlot)
-      of rpkBypassProcess:
-        if item.directProcess.active and not item.directProcess.completed:
-          discard item.directProcess.cancelAndWait()
-      of rpkHelperProcess:
-        terminateRunningAction(item)
-        closeProcessOnce(item.process)
+      try:
+        case item.processKind
+        of rpkInlineRunQuotaPending:
+          if item.queuedRunQuotaProcess.active:
+            item.queuedRunQuotaProcess.cancelQueued()
+        of rpkInlineRunQuota:
+          if item.runQuotaProcess.active and not item.runQuotaProcess.completed:
+            discard item.runQuotaProcess.cancelAndWait()
+        of rpkInlineRunQuotaFailed:
+          discard
+        of rpkMonitorHost:
+          # HM-4 — kill the monitored root, then let the handle go. Dropping it
+          # reaps the root before releasing the consumer, so no producer is ever
+          # left publishing into a released set (LF-2); killing first is what
+          # keeps that reap from blocking shutdown indefinitely.
+          abandonMonitorHost(monitorHosts, item.monitorSlot)
+        of rpkBypassProcess:
+          if item.directProcess.active and not item.directProcess.completed:
+            discard item.directProcess.cancelAndWait()
+        of rpkHelperProcess:
+          terminateRunningAction(item)
+          closeProcessOnce(item.process)
+      except CatchableError as err:
+        if firstTeardownError.isNil: firstTeardownError = err
+        teardownFailures.add("stopping action " & item.id & ": " & err.msg)
     if inlineRunQuotaSessionOpen:
       emitActionExtensionRows(inlineRunQuotaSession, runResult, actionsById)
-      inlineRunQuotaSession.close()
+      # The daemon refuses to close a session that still owns leases, and
+      # that refusal is correct: it is kept verbatim in the collected text,
+      # never swallowed, so the build stays failed and says why.
+      try:
+        inlineRunQuotaSession.close()
+      except CatchableError as err:
+        if firstTeardownError.isNil: firstTeardownError = err
+        teardownFailures.add("closing the RunQuota session: " & err.msg)
     # HM-5 — the build does not end while a depfile publication is still in
     # flight. Not for correctness of the build (the evidence was folded from
     # memory and every cacheable action already waited for its own
@@ -20150,6 +21510,29 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         removeFile(extendedPath(capture))
       except CatchableError as err:
         runResult.trace("", "monitor-capture-cleanup-failed", err.msg)
+    # Only now, with every drain above done, does a teardown failure leave
+    # this block. With the build already unwinding, the exception in flight
+    # stays the one raised -- same object, same type, its message first -- and
+    # the teardown failures are appended to it as additional lifecycle
+    # failures. With nothing in flight the build was otherwise complete, and
+    # the teardown failure is itself the build's failure, as it always was.
+    if unwinding != nil:
+      if teardownFailures.len > 0:
+        unwinding.msg.add("\nbuild teardown also failed: " &
+          teardownFailures.join("; "))
+      # Make it current again, whatever a cleanup's own exception handling
+      # left there, so propagation resumes with the build's real cause.
+      if getCurrentException() != unwinding:
+        setCurrentException(unwinding)
+    elif teardownFailures.len > 0:
+      # The first failure is raised as the error object it was, so its type
+      # and its text -- the daemon's refusal verbatim, when that is what it
+      # is -- reach the caller exactly as they did before teardown was
+      # guarded; any later ones ride along in its message.
+      if teardownFailures.len > 1:
+        firstTeardownError.msg.add("\nbuild teardown also failed: " &
+          teardownFailures[1 .. ^1].join("; "))
+      raise firstTeardownError
   maintainNixLedger()
   finishStat("repro scheduler total", totalStart)
   finishChildCpuStat()

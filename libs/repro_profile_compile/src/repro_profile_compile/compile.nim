@@ -22,12 +22,18 @@ from repro_core/source_root import installedLayoutPrefixOfSourceRoot,
   installedLayoutPackageTrees
 from repro_core/ambient_execution import uncontrolledFindExe
 from repro_core/c_compiler import CCompilerUnusableError, explicitCCompiler,
-  fallbackCCompiler, nimCCompilerFlags, clangNoTempFileCFlags
+  fallbackCCompiler, nimCCompilerFlags, clangNoTempFileCFlags,
+  cCompilerAcceptsFlags, cCompilerFamily
 
 import repro_profile
 import repro_profile_intent
 
 import ./sources
+
+const nullDevice = when defined(windows): "NUL" else: "/dev/null"
+const ProfileDepfileTarget* = "repro-profile"
+  ## The `-MT` target of the profile compile's dependency report, which goes
+  ## to the null device (`profileCompileCFlags`); clang requires one.
 
 # ---------------------------------------------------------------------------
 # Errors.
@@ -130,7 +136,7 @@ proc profileCompileCFlags*(cCompiler, scratchDir: string): seq[string] =
   ## `resolveProfileCCompiler`), or Nim's default (`NimDefaultCCompilerExe`
   ## on `PATH`) when that is "".
   ##
-  ## Today one flag: clang's `-fno-temp-file`
+  ## Clang's `-fno-temp-file`
   ## (`repro_core/c_compiler.clangNoTempFileCFlags`). Without it clang calls
   ## `arc4random` to name the temporary file it renames onto each `-o`
   ## object, io-mon reports the call, and this edge -- which carries no
@@ -151,7 +157,30 @@ proc profileCompileCFlags*(cCompiler, scratchDir: string): seq[string] =
   let effective =
     if cCompiler.len > 0: cCompiler
     else: uncontrolledFindExe(NimDefaultCCompilerExe)
-  clangNoTempFileCFlags(effective, scratchDir)
+  result = clangNoTempFileCFlags(effective, scratchDir)
+  # Apple clang uses a second random temporary for -MF, even when object
+  # output is direct. Route the unused report to the null device instead,
+  # which clang writes directly. Empty filenames are unsafe here: Nim and
+  # compiler wrappers can drop an empty argument and make cc1 consume the
+  # next option as a report path. The action's monitor owns header freshness.
+  #
+  # The flags carry their own `-MD -MT`: cc1 refuses `-dependency-file`
+  # without a target ("-dependency-file requires at least one -MT or -MQ
+  # option", upstream and Apple clang alike), and whether the driver supplies
+  # one depends on the Nim that runs. The fork in reprobuild's dev shell and
+  # Nix package passes `-MD -MF <file>.d`; the official 2.2.10 archive the
+  # recipe bootstrap provisions passes neither, and with it every clang
+  # profile compile failed (measured on m1, 2026-10-15). With the target here
+  # the flags are self-contained: in either order against the fork's
+  # `-MD -MF`, and without it, the compile succeeds and no `.d` is written.
+  # The probe is the same shape, so it answers for exactly what is passed.
+  if cCompilerFamily(effective) == "clang":
+    let depsToNull = @["-MD", "-MT", ProfileDepfileTarget, "-Xclang",
+      "-dependency-file", "-Xclang", nullDevice]
+    # Direct object output is retained, so the probe itself does not
+    # introduce the entropy the real compile is being changed to avoid.
+    if cCompilerAcceptsFlags(effective, result & depsToNull, scratchDir):
+      result.add depsToNull.join(" ")
 
 proc requireReprobuildSources*(repoRoot: string) =
   ## Refuse a source root that holds no reprobuild libs, naming the
@@ -205,7 +234,10 @@ proc profileCompileArgv*(nimExe, profileRoot, nimcacheDir, outBinary,
   ## linker Nim uses (`nimCCompilerFlags`); "" leaves Nim's default.
   ## `cFlags` (from `profileCompileCFlags`) each become one `--passC:`,
   ## applied to every C compile and not to the link.
-  result = @[nimExe, "c", "--hints:off", "--warnings:off",
+  # The action cache supplies the incremental boundary. On an executed
+  # edge, force C compilation so headers are both current and observed,
+  # including {.compile.} sources when no compiler depfile was produced.
+  result = @[nimExe, "c", "--hints:off", "--warnings:off", "--forceBuild:on",
     "--nimcache:" & nimcacheDir,
     "--out:" & outBinary]
   result.add nimCCompilerFlags(cCompiler)
@@ -336,13 +368,25 @@ proc profileCompileChildEnv*(repoRoot: string): StringTableRef =
   env
 
 # ---------------------------------------------------------------------------
-# What every Nim invocation over a profile needs: the profile directory's
-# staged `config.nims` and the child environment. Shared by the compile
-# (`compileProfileBinary`) and the platform probe (`platforms.nim`), so the
-# probe checks the profile in exactly the configuration it is compiled in.
+# What every Nim invocation over a profile needs: the files staged in the
+# profile directory (`stageProfileFiles`) and the child environment. Shared
+# by the compile (`compileProfileBinary`) and the platform probe
+# (`platforms.nim`), so the probe checks the profile in exactly the
+# configuration it is compiled in.
 # ---------------------------------------------------------------------------
 
-proc stageProfileConfig*(profileRoot, repoRootAbs: string): string =
+const StagedProfilePackageName* = "repro_staged_profile"
+  ## The package name the staged `.nimble` gives a profile directory that has
+  ## none (`stageProfilePackageFile`). Nim takes a package's name from its
+  ## `.nimble` file NAME, and uses it to keep module names unique per package
+  ## and in symbol mangling, so it must not be the name of a package a
+  ## profile can import: not `repro_profile` (the library every profile
+  ## imports) nor any other reprobuild library or Nimble package. The
+  ## `repro_staged_` prefix is reserved for exactly this file.
+
+const StagedProfilePackageFile* = StagedProfilePackageName & ".nimble"
+
+proc stageProfileConfig(profileDir, repoRootAbs: string): string =
   ## Stage a wrapper config.nims next to the profile so nim's parent-walk
   ## picks it up and pulls in reprobuild's config.nims (which resolves
   ## sibling-repo paths from env vars: NIMCRYPTO_SRC, BEARSSL_SRC, IO_MON_SRC,
@@ -350,10 +394,8 @@ proc stageProfileConfig*(profileRoot, repoRootAbs: string): string =
   ## never sees reprobuild's config.nims, and transitive imports of
   ## repro_project_dsl -> nimcrypto/sha2 fail with "cannot open file".
   ##
-  ## Returns the path it staged (the caller removes it with
-  ## `unstageProfileConfig`), or "" when the profile directory already has a
-  ## `config.nims` of its own or reprobuild has none.
-  let profileDir = profileRoot.parentDir
+  ## Returns the path it staged, or "" when the profile directory already has
+  ## a `config.nims` of its own or reprobuild has none.
   let stagedConfig = profileDir / "config.nims"
   let upstreamConfig = repoRootAbs / "config.nims"
   if fileExists(extendedPath(upstreamConfig)) and
@@ -363,10 +405,106 @@ proc stageProfileConfig*(profileRoot, repoRootAbs: string): string =
     return stagedConfig
   ""
 
-proc unstageProfileConfig*(staged: string) =
-  if staged.len > 0:
-    try: removeFile(extendedPath(staged))
-    except OSError: discard
+const StagedProfilePackageBody = """
+# Staged by reprobuild while it runs Nim over this profile, and removed when
+# Nim is done. If you can see it while no repro command is running, a compile
+# was interrupted; it is then safe to delete.
+#
+# Nim never reads this file's contents, only its name: it looks for a
+# `*.nimble` in each directory above a module it compiles, stopping at the
+# first directory that holds one (`getNimbleFile`,
+# https://github.com/nim-lang/Nim/blob/devel/compiler/packagehandling.nim).
+# Without this file that search lists every directory above your profile up
+# to `/`, and reprobuild records what each listing returned, so creating any
+# file in your home directory would recompile your profile.
+"""
+
+proc stageProfilePackageFile(profileDir: string): string =
+  ## Stage `StagedProfilePackageFile` in a profile directory that holds no
+  ## `*.nimble`, so Nim's package lookup ends there.
+  ##
+  ## WHY. Nim looks for a `.nimble` in every ancestor of each module it
+  ## compiles (`compiler/packagehandling.nim`, `getNimbleFile`:
+  ## `walkFiles(dir / "*.nimble")` up the parent chain until one matches).
+  ## For a profile directory that holds none, the walk lists `$HOME`,
+  ## `/private/tmp`, `/` and everything between. On macOS the monitor records
+  ## each glob as a directory enumeration, and the action cache keys the edge
+  ## on every listed directory's FULL membership: any new file in the user's
+  ## home directory recompiled the profile (reprobuild-pm issue
+  ## 2026-10-14-macos-profile-compile-is-keyed-on-the-membership-of-every-ancestor-directory).
+  ## On Linux the listings are real reads the shim does not see (glibc's
+  ## `glob` uses calls it does not interpose); this ends them there too.
+  ##
+  ## WHY THIS IS NOT AN EXEMPTION. The ancestors stop being inputs because
+  ## Nim no longer reads them, not because the engine is told to ignore what
+  ## it read. Whether a file is staged is decided here, from the profile
+  ## directory's own listing -- which the monitor records, so the profile
+  ## directory's membership stays an input -- and from this code, which the
+  ## helper binary in the edge's weak fingerprint carries. Do not replace
+  ## this with an ignored-prefix or declared-dependency rule for the
+  ## ancestor directories (`docs/user-guide/idiomatic-reprobuild.md`).
+  ##
+  ## WHEN NOT. A directory that already holds a `*.nimble` is left alone: the
+  ## user's file ends the walk already, and a second one would make Nim's
+  ## answer (the first glob match) depend on directory order. A file of
+  ## OUR name and no other is the leftover of an interrupted run; it is
+  ## rewritten and removed like a fresh one, so it does not stay behind for
+  ## good. The glob below is Nim's own pattern, so "holds a `.nimble`" means
+  ## exactly what it means to Nim.
+  ##
+  ## Nim reads only the file's NAME (the package name), never its contents
+  ## during `nim c` / `nim check` / `nim dump`, so the body is an
+  ## explanation for a user who finds a leftover.
+  ##
+  ## Returns the path it staged, or "". Failing to write it is not fatal: the
+  ## walk then continues upward as it did before, which costs cache answers
+  ## and never correctness, since every listing it makes is recorded.
+  ##
+  ## Covers modules under the profile directory. A profile module imported
+  ## from OUTSIDE it (`import ../shared/x`) still has its own ancestors
+  ## walked: the walk starts at each module's directory.
+  var matches: seq[string]
+  for path in walkFiles(profileDir / "*.nimble"):
+    matches.add path.extractFilename
+  if matches.len > 0 and matches != @[StagedProfilePackageFile]:
+    return ""
+  let staged = profileDir / StagedProfilePackageFile
+  try:
+    writeFile(extendedPath(staged), StagedProfilePackageBody)
+  except IOError, OSError:
+    return ""
+  staged
+
+proc unstageProfileFiles*(staged: openArray[string]) =
+  ## Remove what `stageProfileFiles` staged. Never raises: it runs in
+  ## `finally` blocks, where an error would replace the real one.
+  for path in staged:
+    if path.len > 0:
+      try: removeFile(extendedPath(path))
+      except OSError: discard
+
+proc stageProfileFiles*(profileRoot, repoRootAbs: string): seq[string] =
+  ## Stage, in the directory of the profile root `profileRoot`, the files
+  ## every Nim invocation over a profile needs -- the `config.nims` wrapper
+  ## (`stageProfileConfig`) and the package-lookup stop
+  ## (`stageProfilePackageFile`) -- and return the paths staged. The caller
+  ## removes them with `unstageProfileFiles` on EVERY path out, exceptions
+  ## included, as `compileProfileBinary` and `runProfilePlatformProbes` do in
+  ## a `finally`. The files are created and deleted inside the monitored
+  ## edge, so the engine sees them as transient writes, not inputs or
+  ## outputs.
+  let profileDir = profileRoot.parentDir
+  try:
+    let config = stageProfileConfig(profileDir, repoRootAbs)
+    if config.len > 0:
+      result.add config
+    let package = stageProfilePackageFile(profileDir)
+    if package.len > 0:
+      result.add package
+  except CatchableError:
+    # Nothing is returned on a raise, so remove what was staged before it.
+    unstageProfileFiles(result)
+    raise
 
 proc startProfileNim*(argv: seq[string]; repoRootAbs: string;
                       env: StringTableRef): Process =
@@ -455,12 +593,12 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
 
   # The probe compile runs in the nimcache: the edge ignores it as an input.
   let cFlags = profileCompileCFlags(cCompiler, nimcacheDir)
-  let stagedConfig = stageProfileConfig(profileRoot, repoRootAbs)
   let nimArgv = profileCompileArgv(nimExe, profileRoot, nimcacheDir,
     outBinary, repoRootAbs, cCompiler, cFlags)
   if verbose:
     stderr.writeLine("repro profile compile: " & nimArgv.join(" "))
 
+  let staged = stageProfileFiles(profileRoot, repoRootAbs)
   try:
     let childEnv = profileCompileChildEnv(repoRootAbs)
     # `err.stderrText` below is the ONLY thing a user sees when a profile
@@ -489,7 +627,7 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
     result.jsonOutput = runRes.output
     result.stderrText = compileRes.output & runRes.stderrText
   finally:
-    unstageProfileConfig(stagedConfig)
+    unstageProfileFiles(staged)
 
 proc rbpiBytesFromJson*(jsonText: string): seq[byte] =
   ## Parse the JSON ProfileIntent emitted by the compiled profile and

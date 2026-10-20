@@ -16,6 +16,12 @@
 ## second identical run, so the unchanged profile hit on run 3. Measured
 ## before the fix (home-pc, clang 21): miss, miss, hit. The fix passes clang
 ## `-fno-temp-file` (`profileCompileCFlags`).
+## Apple clang independently names its dependency-file temporary with entropy.
+## The edge now routes that unused report to the OS null device. A second
+## control restores just dependency-file output and must block publication;
+## the primary also requires real objects and no dependency files. The C
+## header case changes only a header under the same warm Nim cache and asserts
+## the new value in the actual resource intent. No monitor records are ignored.
 ##
 ## Vacuity guards: the compile really ran clang with the flag -- the `nim c`
 ## argv the spy logged names `--cc:clang`, the chosen clang as
@@ -68,6 +74,8 @@ import ./profile_compile_edge_harness
 from ./exec_without_arg import ExecWithoutArgConfName
 from repro_test_support import requireBinary
 
+const nullDevice = when defined(windows): "NUL" else: "/dev/null"
+
 proc execWithoutArgBinary(): string =
   ## The graph-built argument-dropping wrapper (`exec_without_arg.nim`).
   requireBinary(ProjectRoot / "build" / "test-bin" /
@@ -88,12 +96,20 @@ profile "clangFirstRunPublished":
 """
 
 proc findClang(): string =
-  ## The first clang on `PATH` (`clang`, else a `cc` that is clang).
-  for name in ["clang", "cc"]:
-    let exe = findExe(name)
-    if exe.len > 0 and cCompilerFamily(exe) == "clang":
-      return exe
-  ""
+  ## Apple clang must exercise macOS's dependency-file implementation;
+  ## a Nix clang would silently miss the regression on this platform.
+  when defined(macosx):
+    let apple = "/Library/Developer/CommandLineTools/usr/bin/clang"
+    doAssert fileExists(apple) and cCompilerFamily(apple) == "clang",
+      "this macOS gate needs Apple CommandLineTools clang"
+    return apple
+  else:
+    ## Else the first clang on PATH (clang, else a cc that is clang).
+    for name in ["clang", "cc"]:
+      let exe = findExe(name)
+      if exe.len > 0 and cCompilerFamily(exe) == "clang":
+        return exe
+    ""
 
 proc checkIntent(art: ProfileCompileArtifact) =
   let intent = decodeRbpi(art.rbpiBytes)
@@ -157,6 +173,15 @@ suite "profile compile edge: a clang compile is published on its first run":
         check ("--cc:clang") in compileLine
         check ("--clang.exe:" & clang) in compileLine
         check ("--passC:" & clangNoTempFileFlag) in compileLine
+        check ("--passC:-MD -MT " & ProfileDepfileTarget &
+          " -Xclang -dependency-file -Xclang " & nullDevice) in compileLine
+        check "--forceBuild:on" in compileLine
+        var objectCount = 0
+        for path in walkDirRec(sb.stateDir / "profile-cache"):
+          check not path.endsWith(".d")
+          check not path.endsWith(".d.tmp")
+          if path.endsWith(".o"): inc objectCount
+        check objectCount > 0
         # Whatever else macOS monitoring may refuse, clang's entropy draw is
         # not a reason any more.
         check "entropy" notin first.cachePublishSkipReason
@@ -216,3 +241,68 @@ suite "profile compile edge: a clang compile is published on its first run":
         check second.cacheDecision != cdHit
         check second.edgeLaunched
         checkIntent(second)
+
+  test "Apple clang dependency temporaries are independently observable":
+    when defined(macosx):
+      let clang = findClang()
+      doAssert clang == "/Library/Developer/CommandLineTools/usr/bin/clang",
+        "this macOS regression requires Apple CommandLineTools clang"
+      let sb = newProfileSandbox("clang-depfile-control", ClangProfile)
+      defer: sb.dispose()
+      let wrapperDir = sb.root / "cc-bin"
+      createDir(wrapperDir)
+      let wrapper = wrapperDir / "clang-with-depfiles"
+      copyFileWithPermissions(execWithoutArgBinary(), wrapper)
+      writeFile(wrapperDir / ExecWithoutArgConfName,
+        clang & "\n-Xclang\n-dependency-file\n" & nullDevice & "\n")
+      let opts = ProfileCompileOptions(stateDir: sb.stateDir,
+        publicCliPath: reproBinary(), repoRoot: ProjectRoot)
+      withCompileEnv(sb, wrapper):
+        let first = compileProfileToRbpi(sb.profilePath, opts)
+        check first.edgeLaunched
+        checkIntent(first)
+        check "unblessed-entropy" in first.cachePublishSkipReason
+        check ("--passC:" & clangNoTempFileFlag) in sb.lastCompileLine()
+    else:
+      skip("[platform N/A] dependency-file temporary entropy is Apple clang's " &
+        "macOS behavior; this control runs against Apple clang on m1")
+
+  test "C header changes reach intent with a warm Nim cache":
+    let compiler = when defined(windows): findExe("gcc") else: findClang()
+    doAssert compiler.len > 0, "needs the dev shell's real C compiler"
+    let profileText = """
+import repro_profile
+{.compile: "value.c".}
+proc currentValue(): cint {.importc: "current_value".}
+template publishedFile(targetResources: var seq[ResourceIntent]) =
+  fsUserFile(targetResources, hostFile = "~/header-value.txt",
+    content = $currentValue())
+profile "headerValue":
+  resources:
+    publishedFile()
+"""
+    let sb = newProfileSandbox("clang-header-warm", profileText)
+    defer: sb.dispose()
+    sb.writeProfileFile("value.c", "#include \"value.h\"\nint current_value(void) { return PROFILE_VALUE; }\n")
+    sb.writeProfileFile("value.h", "#define PROFILE_VALUE 11\n")
+    let opts = ProfileCompileOptions(stateDir: sb.stateDir,
+      publicCliPath: reproBinary(), repoRoot: ProjectRoot)
+    withCompileEnv(sb, compiler):
+      let first = compileProfileToRbpi(sb.profilePath, opts)
+      check first.edgeLaunched
+      check decodeRbpi(first.rbpiBytes).resources[0].fields["content"].s == "11"
+      var firstObservedHeader = false
+      for path in first.observedInputs:
+        if path.endsWith("value.h"): firstObservedHeader = true
+      check firstObservedHeader
+      let spawnCount = sb.nimSpawnCount()
+      sb.writeProfileFile("value.h", "#define PROFILE_VALUE 22\n")
+      let changed = compileProfileToRbpi(sb.profilePath, opts)
+      check changed.edgeLaunched
+      check sb.nimSpawnCount() > spawnCount
+      check decodeRbpi(changed.rbpiBytes).resources[0].fields["content"].s == "22"
+      var changedObservedHeader = false
+      for path in changed.observedInputs:
+        if path.endsWith("value.h"): changedObservedHeader = true
+      check changedObservedHeader
+      check "--forceBuild:on" in sb.lastCompileLine()

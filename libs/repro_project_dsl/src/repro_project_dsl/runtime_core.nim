@@ -976,6 +976,82 @@ proc registeredResourceTypeInterfaces*(): seq[ResourceTypeInterfaceDef]
   ## declaration order. Consumed by ``toProjectInterface``.
   resourceTypeInterfaceRegistry
 
+var activityInterfaceRegistry: seq[ActivityInterfaceDef] = @[]
+  ## Shared-Development-Services L3: module-global set of exported dev-env
+  ## activity SIGNATURES, collected for interface lifting. Shape taken
+  ## from ``resourceTypeInterfaceRegistry`` above, with one deliberate
+  ## difference: each record carries its own ``packageName``, because
+  ## activities ARE declared lexically inside a ``package`` block and the
+  ## extractor can therefore attribute them exactly rather than folding
+  ## the whole registry into whichever project is being lifted.
+  ##
+  ## Populated at MODULE INIT, outside the ``when defined(reproProviderMode)``
+  ## guard that wraps ``devEnv<Pkg>Package()``. That placement is
+  ## load-bearing and was measured: in interface mode the dev-env proc is
+  ## not even compiled, so a registration emitted inside its body would
+  ## never run and the lift would carry nothing.
+
+var serviceInterfaceRegistry: seq[ServiceInterfaceDef] = @[]
+  ## Shared-Development-Services L3: the service half of the same lift.
+  ## See ``activityInterfaceRegistry``.
+
+proc resetActivityInterfaceRegistry*() {.dynOrStatic.} =
+  activityInterfaceRegistry.setLen(0)
+
+proc registerActivityInterface*(packageName: string;
+                                def: ActivityInterfaceDef) {.dynOrStatic.} =
+  ## Append one activity signature. Emitted by the ``package`` macro's
+  ## dev-env walker at module scope, once per constructor-shaped
+  ## ``activity``. Re-registration of the same (package, name) pair
+  ## REPLACES the earlier record rather than appending a second one: a
+  ## module whose ``package`` block is expanded twice (``include``d by a
+  ## sibling shim, which is how ``usesImportCode`` consumes a workspace
+  ## producer) would otherwise lift every activity twice and move the
+  ## interface fingerprint for a reason that has nothing to do with the
+  ## producer's contract.
+  for existing in activityInterfaceRegistry.mitems:
+    if existing.packageName == packageName and existing.name == def.name:
+      existing = def
+      existing.packageName = packageName
+      return
+  var entry = def
+  entry.packageName = packageName
+  activityInterfaceRegistry.add(entry)
+
+proc registeredActivityInterfaces*(): seq[ActivityInterfaceDef]
+    {.dynOrStatic.} =
+  ## The activity signatures collected so far, in declaration order.
+  ## Consumed by ``toProjectInterface``, which filters on
+  ## ``packageName``.
+  activityInterfaceRegistry
+
+proc resetServiceInterfaceRegistry*() {.dynOrStatic.} =
+  serviceInterfaceRegistry.setLen(0)
+
+proc registerServiceInterface*(packageName: string;
+                               def: ServiceInterfaceDef) {.dynOrStatic.} =
+  ## Append one service signature. Same replace-on-duplicate rule, and
+  ## the same reason, as ``registerActivityInterface``; the identity is
+  ## (package, activity, service) because two activities may each declare
+  ## a service of the same bare name.
+  for existing in serviceInterfaceRegistry.mitems:
+    if existing.packageName == packageName and
+        existing.activityName == def.activityName and
+        existing.name == def.name:
+      existing = def
+      existing.packageName = packageName
+      return
+  var entry = def
+  entry.packageName = packageName
+  serviceInterfaceRegistry.add(entry)
+
+proc registeredServiceInterfaces*(): seq[ServiceInterfaceDef]
+    {.dynOrStatic.} =
+  ## The service signatures collected so far, in declaration order.
+  ## Consumed by ``toProjectInterface``, which filters on
+  ## ``packageName``.
+  serviceInterfaceRegistry
+
 proc resetWorkspaceDepRegistry*() {.dynOrStatic.} =
   ## Reset the Mode 3 ``depends_on`` registry. Test helpers call this
   ## between scenarios so registry entries don't leak across cases.
@@ -1569,6 +1645,72 @@ when defined(reproProviderMode):
           identity: dependency,
           digest: result))
         return
+
+  proc selectableActivityNames(): seq[string] =
+    ## Every activity name a selection can name and have an effect: the
+    ## activities the `devEnv:` body declared (`activity "x"` and the
+    ## `activity x:` block form, which goes through the same proc), every
+    ## name a shell op, tool, task or service record requires (a record
+    ## gated on an undeclared name is still switched on by selecting it),
+    ## and `default`, the implicit selection of every surface. Read after
+    ## the `devEnv:` body ran.
+    result = @["default"]
+    template addName(name: string) =
+      if name.len > 0 and result.find(name) < 0:
+        result.add(name)
+    for name in devEnvActivityRegistry: addName(name)
+    for op in devEnvShellOpsRegistry:
+      for name in op.activityRequirements: addName(name)
+    for tool in devEnvToolRegistry:
+      for name in tool.activityRequirements: addName(name)
+    for task in devEnvTaskRegistry:
+      for name in task.activityRequirements: addName(name)
+    for service in devEnvServiceRegistry:
+      for name in service.activityRequirements: addName(name)
+
+  proc reportUnknownActivitySelection(packageName: string;
+                                      selected: openArray[string]) =
+    ## Record an ERROR diagnostic for every selected activity no record of
+    ## this dev-env can be switched on by (reprobuild-pm issue
+    ## 2026-10-13-unknown-activity-selector-is-silently-ignored).
+    ##
+    ## A selector that names nothing used to be accepted, written into the
+    ## session record and then select nothing -- the declared-looks-wired-
+    ## silently-dropped shape Shared-Development-Services.md §7.2 removes,
+    ## and §10's first criterion refuses for the analogous misspelled
+    ## service reference. Every activating surface (`exec`, `run`,
+    ## `shell`, `tasks`, `dev-env export`, `up`, `dev`) exits non-zero on
+    ## an error diagnostic before it starts anything, and the diagnostic
+    ## travels in the dev-env artifact, so a cached edge refuses too.
+    ##
+    ## THE COMPARISON IS THE GATE'S OWN: verbatim. `activityRecordIsActive`
+    ## and the typed-service gate compare names exactly, and the provider
+    ## runtime checks that the result's selection is the request's, so a
+    ## normalizing comparison here would accept `--activity SSO` and then
+    ## let it select nothing -- the `desktopkind` trap of the L5 binding
+    ## guard, which compared one way and looked up another. A name equal to
+    ## a selectable one under Nim's identifier normalization is named as
+    ## the likely intent instead.
+    let known = selectableActivityNames()
+    var listed: seq[string] = @[]
+    for candidate in known:
+      listed.add("`" & candidate & "`")
+    for name in selected:
+      if known.find(name) >= 0:
+        continue
+      var hint = ""
+      for candidate in known:
+        if candidate.normalize == name.normalize:
+          hint = " (did you mean `" & candidate & "`? activity names " &
+            "are compared exactly)"
+          break
+      diagnostic(
+        "activity `" & name & "` is not declared by package `" &
+        packageName & "`" & hint & "; the activities it declares are: " &
+        listed.join(", ") & ". Refused rather " &
+        "than ignored: an activity selector that names nothing would " &
+        "start nothing and still record the session as selecting it.",
+        dedsError)
 
   proc activityRecordIsActive(requirements, selected: openArray[string]): bool =
     if requirements.len == 0:
@@ -2633,6 +2775,73 @@ proc resolveCertificateExports*(owningPackage: string;
     if implicitEntry.name.len > 0:
       result.entries.add(implicitEntry)
 
+# ---------------------------------------------------------------------------
+# Test-Certificates TC-9b — ``enactCertificatePolicy <policy>``.
+#
+# Test-Certificates.md §"The policy declaration": a repository adopts a shared
+# branch policy by enacting it in its ``repro.nim``. The ``package`` macro
+# lowers the statement to ``registerEnactedCertificatePolicy`` at module
+# initialisation (and checks the policy's literal requirements at compile
+# time, ``emitEnactedCertificatePolicy``). What is registered here reaches the
+# CLI two ways, both carrying ``renderCertificatePolicyEmission``'s text:
+#
+# * written to ``$REPRO_EMIT_CERTIFICATE_POLICY`` when the recipe runs as the
+#   main module of a provider, which is how ``repro lock refresh`` and the
+#   staleness checks read it without building anything;
+# * as a ``reprobuild.certificate-policy.v1`` metadata node of the package's
+#   graph fragment (``buildPackageFragment``), which is how a certifying run's
+#   lock-update node reads it from the graph it already evaluated.
+# ---------------------------------------------------------------------------
+
+var enactedCertificatePolicies: seq[tuple[packageName: string;
+                                          policy: BranchCertificatePolicy]]
+  ## Every policy enacted by a package compiled into this provider, keyed by
+  ## the enacting package.
+var emittedCertificatePolicyPackage = ""
+  ## The main-module package whose policy was written to the emission file.
+
+proc registerEnactedCertificatePolicy*(packageName: string;
+                                       policy: BranchCertificatePolicy;
+                                       mainModule: bool) {.dynOrStatic.} =
+  ## Record ``packageName``'s enacted policy and, for the provider's main
+  ## module only, write it to ``$REPRO_EMIT_CERTIFICATE_POLICY``. A recipe
+  ## imported from a sibling (``uses:``) is not the main module, so a
+  ## sibling's own policy never reaches this repository's lock.
+  ##
+  ## The write is EAGER, at registration, for the reason
+  ## ``LockFilesEmitEnvVar`` documents: an exit proc that reads module
+  ## globals runs after they are destroyed.
+  for entry in enactedCertificatePolicies:
+    if entry.packageName == packageName:
+      raise newException(ValueError, "package '" & packageName &
+        "' enacts a certificate policy twice")
+  enactedCertificatePolicies.add((packageName: packageName, policy: policy))
+  if not mainModule:
+    return
+  let path = getEnv(CertificatePolicyEmitEnvVar)
+  if path.len == 0:
+    return
+  if emittedCertificatePolicyPackage.len > 0 and
+      emittedCertificatePolicyPackage != packageName:
+    # repro.lock carries one policy per repository; two enacting packages
+    # in one recipe would make which one it records an accident of order.
+    raise newException(ValueError, "packages '" &
+      emittedCertificatePolicyPackage & "' and '" & packageName &
+      "' both enact a certificate policy in one recipe; repro.lock " &
+      "records one policy per repository, so enact it in one package")
+  emittedCertificatePolicyPackage = packageName
+  writeFile(path, renderCertificatePolicyEmission(policy, packageName))
+
+proc enactedCertificatePolicy*(packageName: string;
+                               policy: var BranchCertificatePolicy): bool
+    {.dynOrStatic.} =
+  ## The policy ``packageName`` enacts, if any.
+  for entry in enactedCertificatePolicies:
+    if entry.packageName == packageName:
+      policy = entry.policy
+      return true
+  false
+
 proc resetStateGroupRegistry*() {.dynOrStatic.} =
   ## Named-Runnable-Edges N0: test / re-evaluation seam — clear the
   ## collected named resource subgraphs.
@@ -3280,10 +3489,16 @@ proc unmonitorableActionDepfile*(tool: ReproFs; output: string;
   ## children either. The only dependency evidence the edge then has is this
   ## file.
   ##
-  ## WHY AN ACTION MIGHT NOT BE MONITORABLE. Today exactly one reason
-  ## qualifies: the action performs library interposition ITSELF, so the
+  ## WHY AN ACTION MIGHT NOT BE MONITORABLE. The action may perform library
+  ## interposition ITSELF, so the
   ## engine's interposer and the action's re-enter each other on the same libc
-  ## entry points and the pair livelocks. "Monitoring is inconvenient", "the
+  ## entry points and the pair livelocks. A recorder-backed test can also
+  ## require an unchanged recorded address space: injecting the monitor
+  ## changes executable mappings and maps mutable shared-memory files, which
+  ## the recorder must refuse. Such a test must additionally be non-cacheable,
+  ## since this declaration-derived depfile cannot observe its runtime input
+  ## closure (Sandbox-And-Monitoring.md, "Tests that record their own children").
+  ## "Monitoring is inconvenient", "the
   ## action is slow", and "the evidence looks noisy" are NOT reasons — those
   ## keep ``automaticMonitorPolicy()``, which is the baseline and the thing
   ## that keeps the action cache sound.

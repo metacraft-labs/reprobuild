@@ -78,10 +78,13 @@
 ##     fork's `upstream` lands on a different path than its `origin`.
 ##   - `branch` takes precedence over `revision` when both are present.
 
-import std/[algorithm, options, os, strutils, tables]
+import std/[options, os, strutils, tables]
 import types
 import diagnostics
 import reader
+import manifest_source
+
+export manifest_source
 
 type
   WorkspaceVisibility* = enum
@@ -213,12 +216,12 @@ type
       ## the key is safe to leave in a fragment forever.
 
   CertificateGateMode* = enum
-    ## TC-3 / TC-6 / RA-32 — the resolved `[certificates] gate_mode`.
-    ## `cgmOff` is the DEFAULT (and the value for a project that declares no
-    ## `[certificates]` table at all): the pre-push gate runs exactly as it
-    ## did before test certificates existed, so a newcomer's first push is
-    ## never cert-walled. `cgmAdvisory` records the coverage result in the
-    ## gate report (a warning when uncovered) but NEVER blocks the push.
+    ## A gate's mode, as a certificate policy rule's `gate_mode` /
+    ## `commit_gate` resolves for it (TC-9c). `cgmOff` is the DEFAULT (and
+    ## the value where no policy rule applies): the pre-push gate runs
+    ## exactly as it did before test certificates existed. `cgmAdvisory`
+    ## records the coverage result in the gate report (a warning when
+    ## uncovered) but NEVER blocks the push.
     ## `cgmRequired` refuses the push unless the submitted certificates cover
     ## the pushed commit for the required targets on each required platform.
     cgmOff = "off"
@@ -226,7 +229,7 @@ type
     cgmRequired = "required"
 
   CertificateCiTrust* = enum
-    ## TC-4 — the resolved `[certificates] ci_trust`, the project's EXPLICIT
+    ## TC-4 — the policy's `ci_trust`, the EXPLICIT
     ## decision about whether CI fast-tracks certified work. `cctAdvisory` is
     ## the DEFAULT (and the value for a project that declares no `ci_trust`):
     ## CI re-runs every required target authoritatively but surfaces a valid
@@ -240,7 +243,7 @@ type
     cctSkip = "skip"
 
   CertificateUntrackedInputs* = enum
-    ## The resolved `[certificates] untracked_inputs`: what issuance does
+    ## The policy's `untracked_inputs`: what issuance does
     ## about untracked, non-ignored files in the tested repository. They are
     ## not part of the content a certificate names, so a test that read one
     ## ran against something the certificate does not identify
@@ -252,25 +255,6 @@ type
     cuiStrict = "strict"
       ## Withhold whenever any untracked, non-ignored file exists.
 
-  CertificatePolicy* = object
-    ## The resolved test-certificate gating policy for a project. The DEFAULT
-    ## (every field zero / `cgmOff`) is what a project with no `[certificates]`
-    ## table resolves to, so the policy is a strict no-op until a project opts
-    ## in. `requiredTargets` are the targets a certificate set must cover;
-    ## `requiredPlatforms` are the platforms each of which must be covered
-    ## (the union of submitted certificates is checked per platform).
-    gateMode*: CertificateGateMode
-    requiredTargets*: seq[string]
-    requiredPlatforms*: seq[string]
-    ciTrust*: CertificateCiTrust
-      ## TC-4 — whether CI skips certified targets (`cctSkip`) or re-runs them
-      ## while surfacing the certificate as advisory (`cctAdvisory`, the
-      ## default). Independent of `gateMode`: a project can require coverage on
-      ## push yet still re-run in CI (advisory), or run advisory pushes yet
-      ## fast-track CI (skip). Defaults to `cctAdvisory` (no trust by omission).
-    untrackedInputs*: CertificateUntrackedInputs
-      ## What issuance does about untracked files. Defaults to `cuiReadSet`.
-
   ResolvedProject* = object
     ## A flat view of one `projects/<project>.toml` after include
     ## expansion and default application.
@@ -279,10 +263,11 @@ type
     trunk*: string
     repos*: seq[ResolvedRepo]
     projectFile*: string
-    certificatePolicy*: CertificatePolicy
-      ## TC-3 / TC-6 / RA-32 — resolved from the project manifest's
-      ## `[certificates]` table; defaults to `cgmOff` (no enforcement) when
-      ## the table is absent or omits `gate_mode`.
+    # Test-Certificates TC-9d: no certificate policy is resolved here any
+    # more. The policy is the `[certificate_policy]` snapshot in the
+    # `repro.lock` of the content a gate judges, and a project manifest that
+    # still carries the old `[certificates]` table does not resolve
+    # (`refuseLegacyCertificatesTable`).
 
 const
   defaultRepoVcs* = "git"
@@ -313,23 +298,59 @@ type
     ## cannot be resolved at all), whereas an unresolvable or
     ## not-yet-materialized manifest may simply be a workspace whose manifest
     ## checkout has not landed yet.
+    ##
+    ## The structured fields below carry the same evidence the message
+    ## spells out, so a caller that reports the refusal AS DATA
+    ## (`repro workspace sets resolve --json`) does not have to parse prose.
+    ## Both raise sites populate them; the message text is unchanged.
+    checkoutPath*: string
+      ## The workspace-relative checkout path the two sources disagree about.
+    sources*: seq[string]
+      ## The two sources, in order: the one whose declaration was kept
+      ## (first-seen) and the one that contradicted it. Project / repo-set
+      ## names, as the message names them.
+    fields*: seq[string]
+      ## The identifiers of the differing facts — the stable keys of
+      ## `conflictingFieldIds`, in comparison order.
 
-proc conflictingFields*(existing, candidate: ResolvedRepo): seq[string] =
+proc conflictingFieldIds*(existing, candidate: ResolvedRepo): seq[string] =
   ## The load-bearing facts of a checkout: what would be cloned, from where,
   ## at which revision, with which VCS. Two sources may reach these through
   ## differently-NAMED remotes (`origin` vs `metacraft-labs` pointing at the
   ## same fetch base) without disagreeing about anything real, so the remote
   ## KEY is deliberately not compared — the resolved fetch URL is.
+  ##
+  ## Returns the short, stable identifier of each differing fact (`name`,
+  ## `fetchUrl`, `revision`, `vcs` — the `ResolvedRepo` field names, which
+  ## are also the keys a resolve report uses). `conflictingFields` renders
+  ## the same comparison for a human, so the two can never disagree about
+  ## WHICH facts differ.
   if existing.name != candidate.name:
-    result.add("name (" & existing.name & " vs " & candidate.name & ")")
+    result.add("name")
   if existing.fetchUrl != candidate.fetchUrl:
-    result.add("fetch url (" & existing.fetchUrl & " vs " &
-      candidate.fetchUrl & ")")
+    result.add("fetchUrl")
   if existing.revision != candidate.revision:
-    result.add("revision (" & existing.revision & " vs " &
-      candidate.revision & ")")
+    result.add("revision")
   if existing.vcs != candidate.vcs:
-    result.add("vcs (" & existing.vcs & " vs " & candidate.vcs & ")")
+    result.add("vcs")
+
+proc conflictingFields*(existing, candidate: ResolvedRepo): seq[string] =
+  ## `conflictingFieldIds`, rendered for a diagnostic: each differing fact
+  ## with both values ("revision (main vs v2)").
+  for id in conflictingFieldIds(existing, candidate):
+    case id
+    of "name":
+      result.add("name (" & existing.name & " vs " & candidate.name & ")")
+    of "fetchUrl":
+      result.add("fetch url (" & existing.fetchUrl & " vs " &
+        candidate.fetchUrl & ")")
+    of "revision":
+      result.add("revision (" & existing.revision & " vs " &
+        candidate.revision & ")")
+    of "vcs":
+      result.add("vcs (" & existing.vcs & " vs " & candidate.vcs & ")")
+    else:
+      discard
 
 proc validatePreviousIdentities*(repos: openArray[ResolvedRepo];
                                  ownerFile, ownerSchema: string) =
@@ -388,71 +409,95 @@ proc validatePreviousIdentities*(repos: openArray[ResolvedRepo];
             "reached first would win by accident")
       claimedPrior[priorKey] = repo.name
 
-# ---- TC-3 / TC-6 / RA-32 certificate policy resolution --------------------
+# ---- the retired `[certificates]` table ------------------------------------
+#
+# Test-Certificates TC-9d (operator decision D18): a test-certificate
+# requirement is a certificate policy — declared with `certificatePolicy`
+# (`repro_certificates`), enacted by a repository's `repro.nim` with
+# `enactCertificatePolicy`, and recorded by `repro lock refresh` as the
+# `[certificate_policy]` snapshot in that repository's `repro.lock`, which is
+# what every gate reads. The per-project `[certificates]` table of
+# `projects/<project>.toml` is not read anywhere. A manifest that still
+# carries one is refused, never ignored: ignoring it would silently turn a
+# `required` into `off`.
 
-proc resolveCertificatePolicy*(body: CertificatesBody;
-                               projectFile: string): CertificatePolicy =
-  ## Resolve a manifest `[certificates]` table into a `CertificatePolicy`.
-  ## The DEFAULT — an absent table, or one that omits `gate_mode` — is
-  ## `cgmOff`: a project that never opts in is never cert-gated (the RA-32
-  ## default-off / advisory-first onboarding guarantee). A `gate_mode` value
-  ## outside {off, advisory, required} is a structural error: a typo must
-  ## fail LOUD rather than silently fall back to `off` (which would mask an
-  ## intended `required`).
-  result.gateMode = cgmOff
-  if body.gate_mode.isSome:
-    let raw = body.gate_mode.get().strip()
-    case raw
-    of "", "off": result.gateMode = cgmOff
-    of "advisory": result.gateMode = cgmAdvisory
-    of "required": result.gateMode = cgmRequired
-    else:
-      raiseManifestError(projectFile, "certificates.gate_mode",
-        schemaProjectManifestV1, schemaProjectManifestV1,
-        "invalid `certificates.gate_mode` value '" & raw &
-          "' (expected: off | advisory | required)")
-  result.requiredTargets = body.required_targets
-  result.requiredPlatforms = body.required_platforms
-  # Agents-Push-Gate.md §4.2: ``"*"`` (any one platform) is a requirement of
-  # its own kind. Mixed with concrete platforms it has no single meaning, so
-  # it is refused rather than guessed at.
-  if "*" in result.requiredPlatforms and result.requiredPlatforms.len != 1:
-    raiseManifestError(projectFile, "certificates.required_platforms",
+const LegacyCertificatesKeyPath* = "certificates"
+  ## The ``keyPath`` of the error a manifest carrying ``[certificates]``
+  ## raises, so a caller that must not fail on it (the pre-commit gate) can
+  ## still recognise it and say so out loud.
+
+const LegacyCertificatesRemedy* =
+  "remove the [certificates] table; declare the requirement as a " &
+  "certificate policy (`certificatePolicy` from the repro_certificates " &
+  "module), enact it in each repository's repro.nim with " &
+  "`enactCertificatePolicy`, and run `repro lock refresh` to record it in " &
+  "that repository's repro.lock (see the repro_certificates module " &
+  "documentation)"
+  ## What to do instead, in the terms of the policy design.
+
+proc carriesLegacyCertificatesTableIn*(project: ProjectManifest;
+                                       content: string): bool =
+  ## Whether the manifest whose text is ``content`` (already decoded as
+  ## ``project``) carries a ``[certificates]`` table. A set field is enough;
+  ## an EMPTY table is found by its header, so even a table that sets nothing
+  ## is reported rather than tolerated. Content-level, so a manifest read from
+  ## a git revision is checked exactly like one read from disk.
+  let c = project.certificates
+  if c.gate_mode.isSome or c.ci_trust.isSome or c.untracked_inputs.isSome or
+      c.required_targets.len > 0 or c.required_platforms.len > 0:
+    return true
+  for raw in content.splitLines():
+    let line = raw.strip()
+    if line.startsWith("[") and not line.startsWith("[["):
+      # The header ends at its first `]`: a trailing comment
+      # (`[certificates] # ...`) and a quoted key (`["certificates"]`)
+      # name the same table.
+      let close = line.find(']')
+      if close < 0: continue
+      let header = line[1 ..< close].strip().replace("\"", "")
+      if header == "certificates" or header.startsWith("certificates."):
+        return true
+  false
+
+proc carriesLegacyCertificatesTable*(project: ProjectManifest;
+                                     projectFile: string): bool =
+  ## ``carriesLegacyCertificatesTableIn`` over the text of ``projectFile``.
+  ## An unreadable file contributes no header (the decoded fields still
+  ## count), as before.
+  var content = ""
+  try:
+    content = readFile(projectFile)
+  except IOError:
+    discard
+  carriesLegacyCertificatesTableIn(project, content)
+
+proc legacyCertificatesTableMessage*(projectFile: string): string =
+  ## The diagnostic for a manifest that carries ``[certificates]``.
+  "the [certificates] table in " & projectFile & " is not supported: " &
+    "test-certificate requirements come from a certificate policy that each " &
+    "repository enacts and records in its repro.lock, which is what every " &
+    "gate reads. It is refused rather than ignored, because ignoring it " &
+    "would silently turn its gate_mode into off. Remedy: " &
+    LegacyCertificatesRemedy
+
+proc refuseLegacyCertificatesTable*(project: ProjectManifest;
+                                    projectFile: string) =
+  ## Raise ``WorkspaceManifestParseError`` (key path
+  ## ``LegacyCertificatesKeyPath``) when the project manifest carries a
+  ## ``[certificates]`` table.
+  if carriesLegacyCertificatesTable(project, projectFile):
+    raiseManifestError(projectFile, LegacyCertificatesKeyPath,
       schemaProjectManifestV1, schemaProjectManifestV1,
-      "`certificates.required_platforms` may contain \"*\" (any one " &
-        "platform) only on its own; it was combined with " &
-        $result.requiredPlatforms)
-  # TC-4 — resolve the CI-trust decision. The DEFAULT — an absent / omitted
-  # `ci_trust` — is `cctAdvisory`: CI never fast-tracks on trust unless the
-  # project explicitly opts in, so a forged certificate can never cause a skip
-  # in a project that did not ask for it. As with `gate_mode`, an out-of-range
-  # value is a structural error (a typo must fail LOUD, never silently grant
-  # the higher-trust `skip`).
-  result.ciTrust = cctAdvisory
-  if body.ci_trust.isSome:
-    let raw = body.ci_trust.get().strip()
-    case raw
-    of "", "advisory": result.ciTrust = cctAdvisory
-    of "skip": result.ciTrust = cctSkip
-    else:
-      raiseManifestError(projectFile, "certificates.ci_trust",
-        schemaProjectManifestV1, schemaProjectManifestV1,
-        "invalid `certificates.ci_trust` value '" & raw &
-          "' (expected: advisory | skip)")
-  # The untracked-inputs mode. An unknown value is an error, never the
-  # default: a misspelt "strict" that silently became "read-set" would issue
-  # certificates the project asked to withhold.
-  result.untrackedInputs = cuiReadSet
-  if body.untracked_inputs.isSome:
-    let raw = body.untracked_inputs.get().strip()
-    case raw
-    of "read-set": result.untrackedInputs = cuiReadSet
-    of "strict": result.untrackedInputs = cuiStrict
-    else:
-      raiseManifestError(projectFile, "certificates.untracked_inputs",
-        schemaProjectManifestV1, schemaProjectManifestV1,
-        "invalid `certificates.untracked_inputs` value '" & raw &
-          "' (expected: read-set | strict)")
+      legacyCertificatesTableMessage(projectFile))
+
+proc refuseLegacyCertificatesTableIn(project: ProjectManifest;
+                                     content, displayPath: string) =
+  ## ``refuseLegacyCertificatesTable`` for a manifest already read as
+  ## ``content``; ``displayPath`` is what the diagnostic names.
+  if carriesLegacyCertificatesTableIn(project, content):
+    raiseManifestError(displayPath, LegacyCertificatesKeyPath,
+      schemaProjectManifestV1, schemaProjectManifestV1,
+      legacyCertificatesTableMessage(displayPath))
 
 # ---- RA-18 subset tags -----------------------------------------------------
 #
@@ -492,8 +537,11 @@ proc repoSelectedByTags*(repo: ResolvedRepo;
 # ---- helpers --------------------------------------------------------------
 
 proc normalizeIncludePath(projectFile, raw: string): string =
-  ## Validate an include path string and return the absolute filesystem
-  ## path of the referenced fragment.
+  ## Validate an include path string and return it as a path relative to the
+  ## manifest-repo root (`normalizeRelPath`), for the `ManifestSource` the
+  ## project is resolved from to read. `projectFile` is the project's display
+  ## path; it only frames diagnostics. The checks are purely lexical: whether
+  ## the target exists is the source's question, asked by the caller.
   ##
   ## Include paths in the TOML are written with forward slashes and are
   ## interpreted relative to the manifest-repo root — i.e. the directory
@@ -518,7 +566,6 @@ proc normalizeIncludePath(projectFile, raw: string): string =
       schemaProjectManifestV1, schemaProjectManifestV1,
       "include path uses backslash separators (must be forward slashes): '" &
         raw & "'")
-  let manifestRoot = parentDir(parentDir(absolutePath(projectFile)))
   # Walk the path components manually so we reject any `..` segment
   # before the OS resolves it. Even if `..` would land back inside the
   # manifest root (e.g. `projects/../repos/foo.toml`), we reject it as
@@ -528,7 +575,7 @@ proc normalizeIncludePath(projectFile, raw: string): string =
       raiseManifestError(projectFile, "includes",
         schemaProjectManifestV1, schemaProjectManifestV1,
         "include path escapes the manifest root via '..': '" & raw & "'")
-  result = manifestRoot / raw.replace('/', DirSep)
+  result = normalizeRelPath(raw)
 
 # ---- fetch-URL construction -----------------------------------------------
 
@@ -875,8 +922,9 @@ proc planRepoUrlPrefix*(prefixes: Table[string, string];
 
 # ---- Workspace-Membership-Model.md: url prefixes ---------------------------
 
-proc loadUrlPrefixes*(manifestRoot: string): Table[string, string] =
-  ## Every `url-prefixes/<name>.toml` under `manifestRoot`, as name -> url.
+proc loadUrlPrefixesAt*(source: ManifestSource): Table[string, string] =
+  ## Every `url-prefixes/<name>.toml` of `source`, as name -> url, read in
+  ## sorted file-name order.
   ##
   ## Declared ONCE for the workspace rather than per project: a label like
   ## `metacraft-labs` is a fact about where an org's repos live, not a fact
@@ -888,16 +936,10 @@ proc loadUrlPrefixes*(manifestRoot: string): Table[string, string] =
   ## none, and every fragment in it resolves through the project's
   ## `[[remote]]` table instead.
   result = initTable[string, string]()
-  let dir = manifestRoot / urlPrefixesDirName
-  if not dirExists(dir):
-    return
-  var files: seq[string]
-  for kind, path in walkDir(dir):
-    if kind in {pcFile, pcLinkToFile} and path.splitFile.ext == ".toml":
-      files.add(path)
-  sort(files)
-  for file in files:
-    let manifest = readUrlPrefix(file)
+  for rel in source.listTomlFiles(urlPrefixesDirName):
+    let file = source.displayPath(rel)
+    let manifest = readUrlPrefixFromContent(
+      source.readManifestText(rel, schemaUrlPrefixV1), file)
     let name = manifest.`url-prefix`.name
     let url = manifest.`url-prefix`.url
     if name in result and result[name] != url:
@@ -907,6 +949,10 @@ proc loadUrlPrefixes*(manifestRoot: string): Table[string, string] =
           result[name] & "' vs '" & url &
           "'); a prefix is workspace-wide, so the name has to mean one place")
     result[name] = url
+
+proc loadUrlPrefixes*(manifestRoot: string): Table[string, string] =
+  ## `loadUrlPrefixesAt` over the directory `manifestRoot`.
+  loadUrlPrefixesAt(newDirectorySource(manifestRoot))
 
 # ---- shared per-fragment resolution ---------------------------------------
 #
@@ -928,6 +974,9 @@ type
     ownerLabel: string
       ## How a diagnostic refers to the manifest carrying the remote table —
       ## "the project" for M6, "the base project" for M7's variant composer.
+    source: ManifestSource
+      ## Where every fragment and repo-set is read from — the one route by
+      ## which resolution reaches the metadata (`manifest_source.nim`).
 
 proc resolveUrlPrefix(ctx: FragmentContext; ownerFile, ownerSchema, keyPath,
                       reference, prefixName: string): string =
@@ -952,15 +1001,19 @@ proc composePrefixedUrl(prefixUrl, suffix: string): string =
     base.setLen(base.len - 1)
   base & "/" & suffix
 
-proc resolveFragment(ctx: FragmentContext; fragmentAbs: string;
+proc resolveFragment(ctx: FragmentContext; fragmentRel: string;
                      ownerFile, ownerSchema, keyPath, reference: string):
     ResolvedRepo =
-  ## Read one `repos/<r>.toml` and resolve it against `ctx`.
+  ## Read one `repos/<r>.toml` (`fragmentRel`, relative to the source root)
+  ## from `ctx.source` and resolve it against `ctx`. `fragmentPath` is the
+  ## source's display path for it: the absolute file for a directory source.
   ##
   ## `reference` is how the owning manifest named this fragment — an include
   ## PATH (`repos/foo.toml`) or a member NAME (`foo`) — and appears verbatim in
   ## every diagnostic, so the operator is pointed at what they actually wrote.
-  let fragment = readRepoFragment(fragmentAbs)
+  let fragmentAbs = ctx.source.displayPath(fragmentRel)
+  let fragment = readRepoFragmentFromContent(
+    ctx.source.readManifestText(fragmentRel, schemaRepoFragmentV2), fragmentAbs)
 
   result.name = fragment.repo.name
   result.path =
@@ -1192,7 +1245,7 @@ type
 
 proc raiseMemberConflict(ownerFile, ownerSchema, keyPath, checkoutPath,
                          owningSource, otherSource: string;
-                         differences: seq[string]) {.noreturn.} =
+                         differences, fieldIds: seq[string]) {.noreturn.} =
   ## The dedup refusal. Nothing shadows anything here: identical declarations
   ## merge silently (the common case — two sets both pulling in
   ## `metacraft-dev-guidelines`), and a genuine disagreement is a decision the
@@ -1209,6 +1262,9 @@ proc raiseMemberConflict(ownerFile, ownerSchema, keyPath, checkoutPath,
   e.expectedSchema = ownerSchema
   e.observedSchema = ownerSchema
   e.innerMessage = inner
+  e.checkoutPath = checkoutPath
+  e.sources = @[owningSource, otherSource]
+  e.fields = fieldIds
   e.msg = "[" & e.path & "] at key '" & keyPath & "': " & inner
   raise e
 
@@ -1217,7 +1273,7 @@ proc chainSuffix(chain: openArray[string]): string =
   ## says how resolution got there, not just where it stopped.
   if chain.len == 0: "" else: " (reached via " & chain.join(" -> ") & ")"
 
-proc expandMembers(ctx: FragmentContext; manifestRoot: string;
+proc expandMembers(ctx: FragmentContext;
                    ownerFile, ownerSchema: string;
                    memberSets, memberRepos: openArray[string];
                    chain: seq[string]; acc: var MemberAccumulator) =
@@ -1240,53 +1296,74 @@ proc expandMembers(ctx: FragmentContext; manifestRoot: string;
   ## in would make the resolved repo order an implementation accident.
   for idx, member in memberSets.pairs:
     let keyPath = "member_sets[" & $idx & "]"
-    let setAbs = manifestRoot / repoSetsDirName / (member & ".toml")
-    if not fileExists(setAbs):
+    let setRel = repoSetsDirName & "/" & member & ".toml"
+    let setAbs = ctx.source.displayPath(setRel)
+    if not ctx.source.hasFile(setRel):
       raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
         "member set '" & member & "' does not exist (looked for '" &
-          repoSetsDirName / (member & ".toml") & "' under '" & manifestRoot &
-          "')" & chainSuffix(chain))
+          repoSetsDirName / (member & ".toml") & "' under '" &
+          ctx.source.displayRoot & "')" & chainSuffix(chain))
     if member in chain:
       raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
         "repo-set cycle: " & (chain & @[member]).join(" -> ") &
           "; a set that contains itself has no expansion")
-    let setManifest = readRepoSet(setAbs)
-    expandMembers(ctx, manifestRoot, setAbs, schemaRepoSetV1,
+    let setManifest = readRepoSetFromContent(
+      ctx.source.readManifestText(setRel, schemaRepoSetV1), setAbs)
+    expandMembers(ctx, setAbs, schemaRepoSetV1,
       setManifest.member_sets, setManifest.member_repos,
       chain & @[member], acc)
 
   for idx, member in memberRepos.pairs:
     let keyPath = "member_repos[" & $idx & "]"
-    let fragmentAbs = manifestRoot / reposDirName / (member & ".toml")
-    if not fileExists(fragmentAbs):
+    let fragmentRel = reposDirName & "/" & member & ".toml"
+    if not ctx.source.hasFile(fragmentRel):
       raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
         "member repo '" & member & "' does not exist (looked for '" &
-          reposDirName / (member & ".toml") & "' under '" & manifestRoot &
-          "')" & chainSuffix(chain))
-    let resolved = resolveFragment(ctx, fragmentAbs, ownerFile, ownerSchema,
+          reposDirName / (member & ".toml") & "' under '" &
+          ctx.source.displayRoot & "')" & chainSuffix(chain))
+    let resolved = resolveFragment(ctx, fragmentRel, ownerFile, ownerSchema,
       keyPath, member)
     let owner =
       if chain.len > 0: chain[^1] else: ownerFile.splitFile.name
     if resolved.path in acc.byPath:
-      let differences =
-        conflictingFields(acc.repos[acc.byPath[resolved.path]], resolved)
+      let existing = acc.repos[acc.byPath[resolved.path]]
+      let differences = conflictingFields(existing, resolved)
       if differences.len > 0:
         raiseMemberConflict(ownerFile, ownerSchema, keyPath, resolved.path,
-          acc.declaredBy.getOrDefault(resolved.path, owner), owner, differences)
+          acc.declaredBy.getOrDefault(resolved.path, owner), owner, differences,
+          conflictingFieldIds(existing, resolved))
       # Identical declaration — one checkout, one entry.
       continue
     acc.byPath[resolved.path] = acc.repos.len
     acc.declaredBy[resolved.path] = owner
     acc.repos.add(resolved)
 
-# ---- on-disk entry point --------------------------------------------------
+# ---- entry points -----------------------------------------------------------
+#
+# Each resolver has a SOURCE entry point (`…At(source, relPath)`) that does the
+# work, and the historical PATH entry point, which is the source entry point
+# over a directory source rooted at the file's grandparent (the manifest-repo
+# root, since manifests live one directory below it). A directory source's
+# display paths are the absolute paths the path entry points always reported,
+# so `projectFile`, `fragmentPath` and every diagnostic are unchanged for
+# them; a git-revision source reports `<git dir>@<commit>:<path>` instead.
 
-proc resolveProject*(projectFile: string): ResolvedProject =
-  ## Resolve `projectFile` (a `projects/<project>.toml`) into a
-  ## `ResolvedProject`. Raises `WorkspaceManifestParseError` on any
-  ## malformed input — see the module-level "Error policy" comment.
-  let absProject = absolutePath(projectFile)
-  let project = readProjectManifest(absProject)
+proc manifestRootOf(manifestFile: string): string =
+  ## The manifest-repo root a path entry point resolves against: the parent of
+  ## the directory holding `manifestFile` (`projects/`, `variants/`, …).
+  parentDir(parentDir(absolutePath(manifestFile)))
+
+proc resolveProjectAt*(source: ManifestSource;
+                       projectRel: string): ResolvedProject =
+  ## Resolve the project manifest at `projectRel` (relative to the root of
+  ## `source`, normally `projects/<project>.toml`) into a `ResolvedProject`,
+  ## reading it and everything it references from `source` only. Raises
+  ## `WorkspaceManifestParseError` on any malformed input — see the
+  ## module-level "Error policy" comment.
+  let absProject = source.displayPath(projectRel)
+  let projectContent = source.readManifestText(projectRel,
+    schemaProjectManifestV1)
+  let project = readProjectManifestFromContent(projectContent, absProject)
 
   result.projectFile = absProject
   result.projectName = project.project.name
@@ -1294,9 +1371,10 @@ proc resolveProject*(projectFile: string): ResolvedProject =
     result.defaultRevision = project.project.default_revision.get()
   if project.project.trunk.isSome:
     result.trunk = project.project.trunk.get()
-  # TC-3 / TC-6 / RA-32 — resolve the certificate gating policy (default off).
-  result.certificatePolicy =
-    resolveCertificatePolicy(project.certificates, absProject)
+  # Test-Certificates TC-9d — the `[certificates]` table is no longer read.
+  # Ignoring it would turn a `required` into `off` without a word, so a
+  # manifest that still carries it does not load.
+  refuseLegacyCertificatesTableIn(project, projectContent, absProject)
 
   # Build remote name -> fetch URL lookup. The M5 reader already enforces
   # non-empty `name` and `fetch` on each remote entry, so we can index
@@ -1317,13 +1395,13 @@ proc resolveProject*(projectFile: string): ResolvedProject =
     else:
       ""
 
-  let manifestRoot = parentDir(parentDir(absProject))
   let ctx = FragmentContext(
     remotes: remotes,
-    urlPrefixes: loadUrlPrefixes(manifestRoot),
+    urlPrefixes: loadUrlPrefixesAt(source),
     defaultRemote: defaultRemoteName,
     defaultRevision: result.defaultRevision,
-    ownerLabel: "the project")
+    ownerLabel: "the project",
+    source: source)
 
   # Track `(name, path, projectRemote)` triples to detect genuine duplicates.
   # Two distinct fragments with the same `repo.name` but different `path`
@@ -1332,14 +1410,14 @@ proc resolveProject*(projectFile: string): ResolvedProject =
   var seen = initTable[string, int]()
 
   for incIdx, rawInclude in project.includes:
-    let fragmentAbs = normalizeIncludePath(absProject, rawInclude)
-    if not fileExists(fragmentAbs):
+    let fragmentRel = normalizeIncludePath(absProject, rawInclude)
+    if not source.hasFile(fragmentRel):
       raiseManifestError(absProject,
         "includes[" & $incIdx & "]",
         schemaProjectManifestV1, schemaProjectManifestV1,
         "include target does not exist: '" & rawInclude &
-          "' (resolved to '" & fragmentAbs & "')")
-    let resolved = resolveFragment(ctx, fragmentAbs, absProject,
+          "' (resolved to '" & source.displayPath(fragmentRel) & "')")
+    let resolved = resolveFragment(ctx, fragmentRel, absProject,
       schemaProjectManifestV1, "includes[" & $incIdx & "]", rawInclude)
 
     # Duplicate check on the `(name, path, projectRemote)` triple. We use
@@ -1376,14 +1454,24 @@ proc resolveProject*(projectFile: string): ResolvedProject =
         acc.byPath[repo.path] = i
         acc.declaredBy[repo.path] = project.project.name
     acc.repos = result.repos
-    expandMembers(ctx, manifestRoot, absProject, schemaProjectManifestV1,
+    expandMembers(ctx, absProject, schemaProjectManifestV1,
       project.member_sets, project.member_repos, @[], acc)
     result.repos = acc.repos
 
   validatePreviousIdentities(result.repos, absProject,
     schemaProjectManifestV1)
 
-proc resolveRepoSet*(setFile: string): ResolvedProject =
+proc resolveProject*(projectFile: string): ResolvedProject =
+  ## Resolve `projectFile` (a `projects/<project>.toml` on disk) into a
+  ## `ResolvedProject`: `resolveProjectAt` over a directory source rooted at
+  ## the manifest-repo root. Raises `WorkspaceManifestParseError` on any
+  ## malformed input — see the module-level "Error policy" comment.
+  let root = manifestRootOf(projectFile)
+  resolveProjectAt(newDirectorySource(root),
+    relPathFor(root, absolutePath(projectFile)))
+
+proc resolveRepoSetAt*(source: ManifestSource;
+                       setRel: string): ResolvedProject =
   ## Resolve a `repo-sets/<set>.toml` into the SAME `ResolvedProject` a project
   ## resolves to.
   ##
@@ -1397,30 +1485,55 @@ proc resolveRepoSet*(setFile: string): ResolvedProject =
   ## own branch. That is the invariant the model rests on: a repo fragment
   ## fully determines its own checkout, and nothing about which set referenced
   ## it can change where it lands.
-  let absSet = absolutePath(setFile)
-  let manifest = readRepoSet(absSet)
-  let manifestRoot = parentDir(parentDir(absSet))
+  ##
+  ## `setRel` is relative to the root of `source`, which every member is read
+  ## from.
+  let absSet = source.displayPath(setRel)
+  let manifest = readRepoSetFromContent(
+    source.readManifestText(setRel, schemaRepoSetV1), absSet)
 
   result.projectFile = absSet
   result.projectName = manifest.`repo-set`.name
 
   let ctx = FragmentContext(
     remotes: initTable[string, string](),
-    urlPrefixes: loadUrlPrefixes(manifestRoot),
+    urlPrefixes: loadUrlPrefixesAt(source),
     defaultRemote: "",
     defaultRevision: "",
-    ownerLabel: "the repo-set")
+    ownerLabel: "the repo-set",
+    source: source)
   var acc = MemberAccumulator(
     byPath: initTable[string, int](),
     declaredBy: initTable[string, string]())
-  expandMembers(ctx, manifestRoot, absSet, schemaRepoSetV1,
+  expandMembers(ctx, absSet, schemaRepoSetV1,
     manifest.member_sets, manifest.member_repos,
     @[manifest.`repo-set`.name], acc)
   result.repos = acc.repos
 
   validatePreviousIdentities(result.repos, absSet, schemaRepoSetV1)
 
+proc resolveRepoSet*(setFile: string): ResolvedProject =
+  ## `resolveRepoSetAt` over a directory source rooted at the manifest-repo
+  ## root that holds `setFile` (a `repo-sets/<set>.toml` on disk).
+  let root = manifestRootOf(setFile)
+  resolveRepoSetAt(newDirectorySource(root),
+    relPathFor(root, absolutePath(setFile)))
+
 # ---- string-based entry point --------------------------------------------
+
+proc stringOverlay(content, basePath, schema: string):
+    tuple[source: ManifestSource; rel: string] =
+  ## The source a `…FromString` entry point resolves against: the directory
+  ## holding `basePath`'s manifest-repo root, with `basePath` reading as
+  ## `content` IN MEMORY. Nothing is written — not `basePath`, not its
+  ## directory — so resolving a string body never touches the tree, and a
+  ## file already at `basePath` is neither consulted nor replaced.
+  if not isAbsolute(basePath):
+    raiseManifestError(basePath, "", schema, schema,
+      "basePath must be an absolute path")
+  let root = manifestRootOf(basePath)
+  let rel = relPathFor(root, basePath)
+  (source: newOverlaySource(newDirectorySource(root), rel, content), rel: rel)
 
 proc resolveProjectFromString*(content: string;
                                basePath: string): ResolvedProject =
@@ -1428,31 +1541,28 @@ proc resolveProjectFromString*(content: string;
   ##
   ## `basePath` plays the role the on-disk project file would: include
   ## paths are resolved relative to `parentDir(parentDir(basePath))`,
-  ## and any diagnostic carries `basePath` as the `path` field. The
-  ## referenced fragment files MUST exist on disk under that root
-  ## (this proc does not provide a virtual filesystem for fragments —
-  ## fragments are always read by `readRepoFragment`).
+  ## `projectFile` and every diagnostic carry `basePath`, and the referenced
+  ## fragments are read from disk under that root. The body itself is NOT
+  ## written to `basePath`: it is served from memory by an overlay source
+  ## (`newOverlaySource`), so the call leaves the tree untouched and a file
+  ## already at `basePath` is neither read nor overwritten. The body still
+  ## passes the same reader (`readProjectManifestFromContent`) as a file.
   ##
   ## This is the seam tests use to build inline-TOML project fixtures
   ## without rewriting `resolveProject` itself. Production code uses
   ## `resolveProject(projectFile)` directly.
-  if not isAbsolute(basePath):
-    raiseManifestError(basePath, "",
-      schemaProjectManifestV1, schemaProjectManifestV1,
-      "basePath must be an absolute path")
-
-  # Round-trip through a temp project file so we exercise the same M5
-  # reader the on-disk path uses. This keeps the validation contract
-  # uniform across the two entry points.
-  writeFile(basePath, content)
-  result = resolveProject(basePath)
+  let overlay = stringOverlay(content, basePath, schemaProjectManifestV1)
+  result = resolveProjectAt(overlay.source, overlay.rel)
 
 # ---- M7: variant composer -------------------------------------------------
 
 proc normalizeVariantPath(variantFile, raw, keyPath, label: string): string =
   ## Validate a path string that appears inside a variant manifest
   ## (`[variant].base`, `includes[]`, or `[[override]].fragment`) and
-  ## return its absolute on-disk form under the manifest-repo root.
+  ## return it relative to the manifest-repo root (`normalizeRelPath`), for
+  ## the variant's `ManifestSource` to read or display. `variantFile` is the
+  ## variant's display path and only frames diagnostics; the checks are
+  ## lexical, and existence is the caller's question to the source.
   ##
   ## Mirrors M6's `normalizeIncludePath` rejection rules: empty,
   ## absolute, backslash-bearing, and any `..`-bearing path is rejected
@@ -1461,10 +1571,9 @@ proc normalizeVariantPath(variantFile, raw, keyPath, label: string): string =
   ## short noun ("variant base path", "include path", …) used in the
   ## human-readable message.
   ##
-  ## The manifest root is computed the same way as for projects:
-  ## `parentDir(parentDir(absolutePath(variantFile)))`. That is the
-  ## directory holding `projects/`, `repos/`, and `variants/`, because
-  ## variants live in a sibling directory at the same depth as projects.
+  ## The manifest root is the source's root, the directory holding
+  ## `projects/`, `repos/`, and `variants/` — variants live in a sibling
+  ## directory at the same depth as projects.
   if raw.len == 0:
     raiseManifestError(variantFile, keyPath,
       schemaVariantManifestV1, schemaVariantManifestV1,
@@ -1484,10 +1593,10 @@ proc normalizeVariantPath(variantFile, raw, keyPath, label: string): string =
       raiseManifestError(variantFile, keyPath,
         schemaVariantManifestV1, schemaVariantManifestV1,
         label & " escapes the manifest root via '..': '" & raw & "'")
-  let manifestRoot = parentDir(parentDir(absolutePath(variantFile)))
-  result = manifestRoot / raw.replace('/', DirSep)
+  result = normalizeRelPath(raw)
 
-proc resolveVariant*(variantFile: string): ResolvedProject =
+proc resolveVariantAt*(source: ManifestSource;
+                       variantRel: string): ResolvedProject =
   ## Resolve a `variants/<v>.toml` into a `ResolvedProject` by composing:
   ##
   ## 1. The base project (read via M5's `readProjectManifest` and
@@ -1510,26 +1619,32 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
   ## from a non-variant resolution except for two fields where it
   ## legitimately differs:
   ##   - `projectName` carries the variant's `[variant].name`.
-  ##   - `projectFile` carries the absolute path of the variant file.
+  ##   - `projectFile` carries the display path of the variant file (its
+  ##     absolute path for a directory source).
   ## All other fields (`defaultRevision`, `trunk`, `repos[*]`) are
   ## inherited from the base, mutated only where an override or extra
   ## include explicitly touches them.
   ##
+  ## `variantRel` is relative to the root of `source`; the base project and
+  ## every fragment are read from `source` too.
+  ##
   ## Raises `WorkspaceManifestParseError` on any malformed input —
   ## same diagnostic policy as M6. See the module-level "Error policy"
   ## comment.
-  let absVariant = absolutePath(variantFile)
-  let variant = readVariantManifest(absVariant)
+  let absVariant = source.displayPath(variantRel)
+  let variant = readVariantManifestFromContent(
+    source.readManifestText(variantRel, schemaVariantManifestV1), absVariant)
 
   # ---- step 1: resolve the base project ---------------------------------
-  let baseAbs = normalizeVariantPath(
+  let baseRel = normalizeVariantPath(
     absVariant, variant.variant.base, "variant.base", "variant base path")
-  if not fileExists(baseAbs):
+  let baseAbs = source.displayPath(baseRel)
+  if not source.hasFile(baseRel):
     raiseManifestError(absVariant, "variant.base",
       schemaVariantManifestV1, schemaVariantManifestV1,
       "variant base project does not exist: '" & variant.variant.base &
         "' (resolved to '" & baseAbs & "')")
-  result = resolveProject(baseAbs)
+  result = resolveProjectAt(source, baseRel)
 
   # Override the two fields the variant legitimately owns. Everything
   # else flows through from the base resolver unchanged.
@@ -1545,7 +1660,8 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
   # honour any [[remote]] table the variant might carry — the M5
   # schema doesn't declare one, and the spec explicitly says variants
   # don't declare their own remotes.
-  let baseProject = readProjectManifest(baseAbs)
+  let baseProject = readProjectManifestFromContent(
+    source.readManifestText(baseRel, schemaProjectManifestV1), baseAbs)
   var remotes = initTable[string, string]()
   for r in baseProject.remote:
     remotes[r.name] = r.fetch
@@ -1556,10 +1672,11 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
       ""
   let variantCtx = FragmentContext(
     remotes: remotes,
-    urlPrefixes: loadUrlPrefixes(parentDir(parentDir(absVariant))),
+    urlPrefixes: loadUrlPrefixesAt(source),
     defaultRemote: defaultRemoteName,
     defaultRevision: result.defaultRevision,
-    ownerLabel: "the base project")
+    ownerLabel: "the base project",
+    source: source)
 
   # ---- step 2: apply the variant's extra includes ------------------------
   #
@@ -1572,16 +1689,16 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
     seen[triple] = i
 
   for incIdx, rawInclude in variant.includes:
-    let fragmentAbs = normalizeVariantPath(
+    let fragmentRel = normalizeVariantPath(
       absVariant, rawInclude,
       "includes[" & $incIdx & "]", "include path")
-    if not fileExists(fragmentAbs):
+    if not source.hasFile(fragmentRel):
       raiseManifestError(absVariant,
         "includes[" & $incIdx & "]",
         schemaVariantManifestV1, schemaVariantManifestV1,
         "include target does not exist: '" & rawInclude &
-          "' (resolved to '" & fragmentAbs & "')")
-    let resolved = resolveFragment(variantCtx, fragmentAbs, absVariant,
+          "' (resolved to '" & source.displayPath(fragmentRel) & "')")
+    let resolved = resolveFragment(variantCtx, fragmentRel, absVariant,
       schemaVariantManifestV1, "includes[" & $incIdx & "]", rawInclude)
 
     let triple = resolved.name & "\t" & resolved.path & "\t" & resolved.projectRemote
@@ -1602,9 +1719,11 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
   # matched against the `fragmentPath` field of existing `ResolvedRepo`
   # entries AFTER the same path-normalization the loader applied.
   for ovIdx, ov in variant.`override`:
-    let targetAbs = normalizeVariantPath(
+    # Both sides of the comparison are display paths of the same source, so
+    # the match is the same for a directory and a revision.
+    let targetAbs = source.displayPath(normalizeVariantPath(
       absVariant, ov.fragment,
-      "override[" & $ovIdx & "].fragment", "override fragment path")
+      "override[" & $ovIdx & "].fragment", "override fragment path"))
     var matchedIdx = -1
     for i in 0 ..< result.repos.len:
       if result.repos[i].fragmentPath == targetAbs:
@@ -1670,6 +1789,13 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
   validatePreviousIdentities(result.repos, absVariant,
     schemaVariantManifestV1)
 
+proc resolveVariant*(variantFile: string): ResolvedProject =
+  ## `resolveVariantAt` over a directory source rooted at the manifest-repo
+  ## root that holds `variantFile` (a `variants/<v>.toml` on disk).
+  let root = manifestRootOf(variantFile)
+  resolveVariantAt(newDirectorySource(root),
+    relPathFor(root, absolutePath(variantFile)))
+
 proc resolveVariantFromString*(content: string;
                                basePath: string): ResolvedProject =
   ## Resolve a variant manifest whose body is supplied as a TOML string.
@@ -1679,13 +1805,8 @@ proc resolveVariantFromString*(content: string;
   ## `basePath` plays the role the on-disk variant file would: the
   ## variant's `[variant].base` and `includes[]` are resolved relative
   ## to `parentDir(parentDir(basePath))`, and any diagnostic carries
-  ## `basePath` as the `path` field. The referenced base project and
-  ## fragment files MUST exist on disk under that root (this proc does
-  ## not provide a virtual filesystem — the M5 readers always read from
-  ## the real filesystem).
-  if not isAbsolute(basePath):
-    raiseManifestError(basePath, "",
-      schemaVariantManifestV1, schemaVariantManifestV1,
-      "basePath must be an absolute path")
-  writeFile(basePath, content)
-  result = resolveVariant(basePath)
+  ## `basePath` as the `path` field. The base project and fragments are
+  ## read from disk under that root; the variant body is served from
+  ## memory and never written to `basePath` (see `resolveProjectFromString`).
+  let overlay = stringOverlay(content, basePath, schemaVariantManifestV1)
+  result = resolveVariantAt(overlay.source, overlay.rel)

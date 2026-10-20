@@ -48,8 +48,9 @@
 ##      answered by the cache and the read set comes from its record, which
 ##      still names the file, so it is withheld again.
 ##
-## Not covered here: the lock-update node a plain ``repro test`` is to run
-## before its tests does not exist yet (Unified-Locking-And-Hooks HL-10).
+## The lock-update node a plain ``repro test`` runs before its tests
+## (Unified-Locking-And-Hooks HL-10) finds nothing to re-pin here; its effect
+## is pinned by ``t_certifying_run_refreshes_the_lock_before_testing``.
 ##
 ## NO MOCKS: real repositories and manifest, the built ``repro``, the real
 ## provider, engine and monitor, the production verifier. Step 3b installs a

@@ -155,6 +155,32 @@ the next scheduler tick re-offers it.
 A denied candidate must never be turned into an `asFailed` ActionResult
 solely because of the denial.
 
+**A batch that fails part-way gives back everything it accepted.** The
+batch owns every decision the daemon returned until it hands the whole
+result to the scheduler. If anything fails before then -- a launch the
+parent cannot perform, a missing decision, a static-capacity deadlock on
+a re-offered denial -- it rolls back before raising: queued leases are
+cancelled, leases granted to candidates it had not started yet are
+released, and every child it already launched is cancelled and reaped
+through its own process handle, which finishes and releases its lease.
+Each step is attempted even when an earlier one fails. The raised error
+keeps the initiating failure's text and kind (a deadlock stays a
+`ReproRunQuotaDeadlockError`), then says what was rolled back, and names
+the lease ids and child pids of anything it could not resolve. The
+scheduler marks the staged actions failed with that text, and the
+session close at the end of the build succeeds instead of being refused
+with `session still owns leases`.
+
+The engine's teardown follows the same rule. Each per-action cleanup and
+the session close is guarded on its own; when the build is already
+unwinding, the exception that started it stays the one raised and the
+teardown failures are appended to its message. A close the daemon
+refuses is never swallowed: with nothing else in flight it is the
+build's failure, exactly as the daemon worded it. The governing text is
+`RunQuota-Protocol-And-Client-Libraries.md`, "Ownership Across a Batched
+Client Launch"; `tests/integration/t_batched_launch_partial_failure_keeps_ownership.nim`
+pins both halves against a real `runquotad`.
+
 ### Static capacity exceeded forever
 
 If the request statically exceeds the daemon's machine budget (for example a

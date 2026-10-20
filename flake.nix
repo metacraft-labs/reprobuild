@@ -2,6 +2,10 @@
   description = "Reprobuild development environment";
 
   inputs = {
+    # Keep the shipped SIP replacements available when a child has an empty PATH.
+    stackable-hooks-macos-tools = {
+      url = "github:metacraft-labs/stackable-hooks-macos-tools/1ad378d58776ec9b6cc73e1c27b8e53c15676f03";
+    };
     nixos-modules.url = "github:metacraft-labs/devops-modules";
     # This module input supplies the toolchain, not another Repro release.
     # Follow this flake itself so consumers retain one Reprobuild pin while
@@ -208,7 +212,72 @@
         # identity where it touches the descriptor instead of once per record,
         # and the Linux close hook lets a tracee's close of a replaced
         # descriptor number reach the kernel.
-      url = "github:metacraft-labs/io-mon/2a354db93e60f165e2d9feb86396b7e3950aae65";
+        # Bumped to 51228b5 (2026-10-15), io-mon's `agents` tip; 6e7d2cf is an
+        # ancestor. 51228b5 lets small-stack threads start and run under the
+        # Linux shim; the macOS and Windows capture paths are unchanged.
+        # Bumped to 6453936 (2026-10-15), io-mon's `agents` tip; 51228b5 is an
+        # ancestor. Under full action monitoring Node 24 started (51228b5) but
+        # Chromium 143 headless still hung: recording a call the host made
+        # under its allocator lock allocated from that same allocator.
+        # cb1db14 moved the shim's private heap to glibc's allocator, which
+        # broke every nixpkgs gcc-wrapper (bash 5.2's bundled sbrk malloc and
+        # glibc's main arena both moved the program break, and the exec hooks
+        # handed bash an `environ` from the shim's heap), so it is not pinned
+        # on its own. 6453936 gives the shim its own mmap-backed allocator that
+        # touches neither the break nor `environ`, makes execvp search PATH only
+        # (never `./name`), and keeps raw-clone children of multi-threaded
+        # hosts off shim locks. cb1db14 also adds the probe/enumeration entry
+        # points Node and Chromium call and per-architecture raw-syscall
+        # numbers.
+        # Bumped to 9576b79 (2026-10-15), io-mon's `agents` tip; 6453936 is an
+        # ancestor. On macOS, re-propagates capture seed variables across
+        # clean-env spawns, keeps only the last co-loaded shim image active
+        # while routing internal forwarders and raw syscalls past sibling shim
+        # wrappers, and reads `syscall(2)` variadic arguments from the stack per
+        # the arm64 Apple Darwin ABI.
+        # Bumped to 3ccdd4b (2026-10-15), io-mon's `agents` tip; 9576b79 is an
+        # ancestor. On Linux, children of an inline `syscall` clone and of
+        # glibc's clone(3) reclaim inherited shim locks; a vfork child's
+        # successful exec no longer leaks the prepared environment into the
+        # parent; and realpath, canonicalize_file_name and the readlink family
+        # record every symbolic link they follow and the path they end at.
+        # Bumped to 414a3de (2026-10-15), io-mon's `agents` tip; 3ccdd4b is an
+        # ancestor. On Linux, that replay also records each directory it walks
+        # through, the first absent component, and the link the readlink
+        # family reads with its target, so a directory replaced by a link and
+        # a retargeted link change a recorded input.
+        # Bumped to 527368e (2026-10-16), io-mon's `agents` tip; 414a3de is an
+        # ancestor. Test-only: the macOS nesting fixtures give their second
+        # shim its own install name, so they run two distinct shim images.
+        # Bumped to 2801e94 (2026-10-16), io-mon's `agents` tip; 527368e is an
+        # ancestor. Linux records path mutations, the directories glob(3)
+        # scans, and the files and directories mkstemp and mkdtemp create;
+        # the writer closes a byte-capped fragment once on a key change.
+        # Trapped inline syscalls are classified from what they named when
+        # they trapped; the engine folds the new records (`monitorRemovals`).
+        # Bumped to a4378d9 (2026-10-16), io-mon's `agents` tip; 2801e94 is an
+        # ancestor. Trapped inline syscalls that cannot be classified before
+        # the image ends (an exit or exec from inside a hook, a fork child
+        # before exec, a thread trapping after the exit drain) are reported as
+        # event-loss instead of vanishing; execveat and fexecve run the exec
+        # hook, so their child is monitored and the exec is recorded.
+        # Bumped to f33311e (2026-10-16), io-mon's `agents` tip; a4378d9 is an
+        # ancestor. A fork child of a multi-threaded process records what it
+        # reads before exec when no shim lock was held at the fork; otherwise
+        # (and after a raw clone or _Fork) it reports the evidence it skips
+        # as event-loss instead of grading complete without it.
+        # Bumped to 3f8788c (2026-10-17), io-mon's `agents` tip; f33311e is an
+        # ancestor. Each directory a glob(3) scan opens is recorded with the
+        # pattern component matched there, when it can be named with
+        # certainty, so the engine keys the scan on the matching entries.
+      # macOS and Windows now fail incomplete when descendant quiescence
+      # cannot be established; keep the host and its capture tests in sync.
+      # Bumped to 091fa26 (2026-10-18), io-mon's `agents` tip; 45773f6 is an
+      # ancestor. The macOS shim records a relative path anchored on the
+      # directory it resolved against when the call was made, so a tool that
+      # chdir()s (`git -C <repo>`) is no longer keyed on phantom paths under
+      # the action's cwd.
+      url = "github:metacraft-labs/io-mon/091fa26ce03d9dd1ca8cfa6a1d9d46624dc50491";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -239,9 +308,10 @@
       # build + override-free CI jobs have no sibling, so seed it from here.
       # repro_shm_index consumes ONLY Layer 1 (pure std/posix, no serialization).
       #
-      # Pinned to the nim-shm-queue rev that adds the Layer-1 EmbeddedRing
-      # (repro_shm_index's action-cache ring embeds it in the control region).
-      url = "github:metacraft-labs/nim-shm-queue/5a8e43b52fa202859658692c9f8432967f3971ea";
+      # Includes the Layer-1 EmbeddedRing (repro_shm_index's action-cache ring
+      # embeds it in the control region). 91451f22 aligns the workspace agent
+      # landing branch and its complete compiler source closure.
+      url = "github:metacraft-labs/nim-shm-queue/91451f2250beb89d1d221f0a77be0841c19b182e";
       flake = false;
     };
     nimcrypto-src = {
@@ -346,7 +416,12 @@
       # 600f2a8 additionally carries caller/target Windows injection diagnostics.
       # Keep this pin aligned with the synced, published workspace dependency;
       # the pre-push gate rejects a pin that lags that checkout.
-      url = "github:metacraft-labs/nim-stackable-hooks/600f2a80c9e582e860d36be20c04b9c74263458d";
+      # ff7eb18 (2026-10-16, the published `agents`/`dev` tip; 3af63afc is an
+      # ancestor) brings ab71ccb (2026-10-15), which rejects protected symlink
+      # hops in SIP tool resolution; only ``propagation.nim`` changes.
+      # 4f8f7e60 aligns this pin with the workspace's agent landing branch;
+      # its additions since ff7eb18 affect Windows hook freezing only.
+      url = "github:metacraft-labs/nim-stackable-hooks/4f8f7e60af74dc94efbff05159d9b3f6084ca5df";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -399,7 +474,15 @@
       # moved together with it: the incremental-test seam this input supplies
       # is compiled against that trace-format source, so the two must name a
       # CodeTracer revision built against the same trace-format revision. A
-      # branch ref would let either side move alone.
+      # branch ref would let either side move alone. "The same" is exact:
+      # ``ct-trace-format-src`` is the revision THIS input's ``repro.lock``
+      # names for codetracer-trace-format-nim, and the
+      # ``ct-trace-format-pin-coherence`` check below refuses any other pair
+      # when it is evaluated (``nix flake check``, or ``nix build
+      # .#checks.<system>.ct-trace-format-pin-coherence``). Nothing else
+      # evaluates it, so run it whenever either input moves. Before that check
+      # the pairing was kept by hand only, and drifted (reprobuild-pm issue
+      # 2026-10-04).
       #
       # ``flake = false`` — we want the source tree only. CodeTracer's own
       # flake drags in the Electron/frontend/db-backend toolchain, none of
@@ -445,7 +528,43 @@
       # the incremental adapter and trace-format resolution are unchanged.
       # 47eda1fd adds native recording navigation; ct-test and the incremental
       # adapter are unchanged. Align the pin with the published workspace.
-      url = "github:metacraft-labs/codetracer/47eda1fd580a17099541ead32f5528cb2e37bdc0";
+      # At 272a09ad5 (2026-10-15, the published `agents` tip; 47eda1fd is an
+      # ancestor) ``repro.nim``, ``config.nims``, ``src/Tuprules.tup`` and
+      # ``src/ct_incremental_adapter.nim`` are unchanged; the ``repro.lock``
+      # now names trace-format 5b32588b, so ``ct-trace-format-src`` moves
+      # with it.
+      #
+      # At 23d5af70f (2026-10-15, the published `agents` tip; 272a09ad5 is an
+      # ancestor) ``config.nims``, ``src/Tuprules.tup``, ``src/ct_test/ct_test.nim``
+      # and ``src/ct_incremental_adapter.nim`` are unchanged. ``repro.nim`` does
+      # change -- it declares the Zstandard headers through the new ``zstd-dev``
+      # selector -- and that revision's ``repro.lock`` names trace-format d8cd2ed5,
+      # so ``ct-trace-format-src`` moves to it in the same step.
+      #
+      # At 6b6d05a08 (2026-10-15, the published `agents` tip; 23d5af70f is its
+      # parent) only ``flake.lock`` and ``repro.lock`` change, and the latter
+      # still names trace-format d8cd2ed5, so ``ct-trace-format-src`` stays.
+      #
+      # At 2097ae648 (2026-10-16, the published `agents` tip; 6b6d05a08 is an
+      # ancestor) ``src/ct_test/`` and ``src/ct_incremental_adapter.nim`` are
+      # unchanged; ``repro.nim``, ``config.nims`` and ``src/Tuprules.tup`` each
+      # add the vendored ``libs/nim-regex/src`` search path (a new submodule,
+      # absent from this submodule-less input and unused by ``ct-test``; the
+      # ``addPathIfDir`` form skips it). Its ``repro.lock``
+      # still names trace-format d8cd2ed5, so ``ct-trace-format-src`` stays
+      # (``checks.<system>.ct-trace-format-pin-coherence`` confirms it).
+      #
+      # At f1745b89e (2026-10-17, the published `agents` tip; 2097ae648 is an
+      # ancestor) ``src/ct_test/``, ``src/ct_incremental_adapter.nim``,
+      # ``config.nims`` and ``src/Tuprules.tup`` are unchanged. ``repro.nim``
+      # does change: it declares ``dsymutil`` for the macOS debug-info pass,
+      # the sub-tool ``nim c`` shells out to by bare name after the link, so
+      # the hermetic native edge needs it declared the way ``clang`` is. That
+      # declaration resolves against the ``dsymutil`` selector this very
+      # revision of reprobuild adds. Its ``repro.lock`` names trace-format
+      # b4794ba6, so ``ct-trace-format-src`` moves with it in the same step
+      # (``checks.<system>.ct-trace-format-pin-coherence`` confirms the pair).
+      url = "github:metacraft-labs/codetracer/f1745b89e93179eca20778943bbafae91ebb6dfd";
       flake = false;
     };
 
@@ -528,7 +647,7 @@
     # destructor takes it, and VM/NimScript trace recording changes (exact I/O
     # event kinds, one value-carrying step per recorded position).
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=1e19cf261413667ef69123a3ef221e239d1f8897";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=fa22200571d36eb8c24c0aaa883940d93c71b397";
       flake = false;
     };
     nim-csources-src = {
@@ -536,6 +655,12 @@
       flake = false;
     };
     ct-trace-format-src = {
+      # Moves only with ``codetracer-src``, to exactly the revision that
+      # CodeTracer revision's ``repro.lock`` names; the
+      # ``ct-trace-format-pin-coherence`` check fails on any other revision
+      # when it is evaluated (see ``codetracer-src`` above). The history below
+      # records each such move.
+      #
       # CodeTracer 632fdceed imports codetracer_trace_writer/span_stream. Keep
       # this past the span-stream writer, cumulative-index, and encoder fixes;
       # the older c2f3dfc3 pin does not contain that module at all.
@@ -546,7 +671,18 @@
       # 17c111fb2's ``repro.lock`` names (7b8b587c is an ancestor; adds the ten
       # exact I/O event kinds of trace format version 7 and a step count that
       # counts step records only).
-      url = "github:metacraft-labs/codetracer-trace-format-nim/808ffdb4507634c3aba0661d96cbc353420ed856";
+      # Moved with ``codetracer-src`` to 5b32588b, the revision CodeTracer
+      # 272a09ad5's ``repro.lock`` names (808ffdb4 is an ancestor; refuses a
+      # container that carries only some of the interning tables).
+      # Moved with ``codetracer-src`` to d8cd2ed5, the revision CodeTracer
+      # 23d5af70f's ``repro.lock`` names (5b32588b is an ancestor; extends the
+      # partial-interning-table refusal to every container writer and reads a
+      # MaxRootEntries of 0 as the auto-filled root in every reader).
+      # Moved with ``codetracer-src`` to b4794ba6, the revision CodeTracer
+      # f1745b89e's ``repro.lock`` names (d8cd2ed5 is an ancestor; fails the
+      # writer when a write fails in the final flush or close, and retries the
+      # managed finalize with a timeout sized to the upload).
+      url = "github:metacraft-labs/codetracer-trace-format-nim/b4794ba69fa7ccb0b568de7c582a576994c63e5b";
       flake = false;
     };
     nim-stew-src = {
@@ -591,7 +727,25 @@
     # `--override-input reprobuild-nix-packages-src git+file:<checkout>`.
     # Move the pin when the catalog's records change.
     reprobuild-nix-packages-src = {
-      url = "github:metacraft-labs/reprobuild-nix-packages/842fd4718fa2381e17f32b1b4eeeec1735538d3c";
+      url = "github:metacraft-labs/reprobuild-nix-packages/507bffbe53673caebb686017e76910e321fd9175";
+      flake = false;
+    };
+
+    # The Homebrew contribution catalog `reprobuild.lib.brewRealizationOf`
+    # reads (milestone GM5b): which Homebrew cask or formula installs a
+    # canonical package, for hosts whose Home Manager still installs macOS
+    # applications through Homebrew, and the reverse map the equivalence
+    # report needs. Same arrangement as `reprobuild-nix-packages-src` above,
+    # for the same reasons: the library's pin, inherited by consumers through
+    # their one reprobuild pin; `flake = false` (only the published
+    # `provisioning-contributions.json` is read); the catalog is flake-free,
+    # so a sibling checkout is tried with `--override-input
+    # reprobuild-brew-packages-src git+file:<checkout>` (declared in
+    # scripts/dev-shell-pinned-siblings.tsv). Reprobuild never realizes a
+    # Homebrew record (Provisioning-Contributions.md §"Homebrew bridge
+    # records"). Move the pin when the catalog's records change.
+    reprobuild-brew-packages-src = {
+      url = "github:metacraft-labs/reprobuild-brew-packages/49f4057f05b2ebd69d764208279ad5c8b1379fab";
       flake = false;
     };
   };
@@ -618,6 +772,7 @@
       nim-checksums-src,
       nim-nimony-src,
       reprobuild-nix-packages-src,
+      reprobuild-brew-packages-src,
       bundlers,
       ...
     }:
@@ -634,19 +789,43 @@
           pkgsFor = system: inputs.nixpkgs.legacyPackages.${system};
           reproFor = system: inputs.self.packages.${system}.repro;
         };
+      nixCatalog = {
+        name = "reprobuild-nix-packages";
+        records = "${reprobuild-nix-packages-src}/provisioning-contributions.json";
+      };
       reprobuildLib = reprobuildLibFor [
+        nixCatalog
         {
-          name = "reprobuild-nix-packages";
-          records = "${reprobuild-nix-packages-src}/provisioning-contributions.json";
+          name = "reprobuild-brew-packages";
+          records = "${reprobuild-brew-packages-src}/provisioning-contributions.json";
         }
       ];
       intentHomeManagerModule = import ./nix/modules/home-manager-intent.nix { inherit reprobuildLib; };
+      # The same module over the Nix catalog plus a fixture Homebrew catalog
+      # whose records claim packages of the neutral export fixture
+      # (tests/fixtures/brew-catalog), so `lib-home-manager` sees the module's
+      # DEFAULT `homebrew.realizationOf` hook move them into the token lists.
+      brewFixtureHomeManagerModule = import ./nix/modules/home-manager-intent.nix {
+        reprobuildLib = reprobuildLibFor [
+          nixCatalog
+          {
+            name = "gm5b-brew-fixture";
+            records = ./tests/fixtures/brew-catalog/provisioning-contributions.json;
+          }
+        ];
+      };
     in
     flake-parts.lib.mkFlake { inherit inputs; } {
+      # No x86_64-darwin: the pinned nixpkgs (26.11) dropped it, so no package,
+      # dev shell or check can be built or even evaluated there ("Nixpkgs 26.11
+      # has dropped support for x86_64-darwin";
+      # https://nixos.org/manual/nixpkgs/unstable/release-notes#x86_64-darwin-26.11),
+      # and the macOS fleet is Apple-silicon only. Profiles may still TARGET
+      # x86_64-darwin: the Nix helper library (nix/lib/platforms.nix) and
+      # `repro home export --target` describe it without nixpkgs.
       systems = [
         "x86_64-linux"
         "aarch64-linux"
-        "x86_64-darwin"
         "aarch64-darwin"
       ];
 
@@ -1141,6 +1320,11 @@
               nimcryptoSrc = nimcrypto-src;
               bearsslSrc = bearssl-src;
               stackableHooksSrc = nim-stackable-hooks-src;
+              macosTools =
+                if pkgs.stdenv.isDarwin then
+                  inputs.stackable-hooks-macos-tools.packages.${system}.default
+                else
+                  null;
               ctTraceFormatSrc = ct-trace-format-src;
               ioMonSrc = io-mon-src;
               shmGsetSrc = nim-shm-gset-src;
@@ -1158,10 +1342,12 @@
                 # note at the top of package.nix.
                 inherit version;
                 src = reprobuildSource;
-                # The commit the binaries are built from, embedded by
-                # scripts/build_apps.sh (`ReprobuildSourceRevision`). The
-                # sandbox has no .git, so the flake supplies it; a dirty tree
-                # reports `dirtyRev` (`<sha>-dirty`).
+                # The commit the binaries are built from, embedded as
+                # `ReprobuildSourceRevision` by scripts/build_apps.sh, which
+                # asks scripts/source_revision.sh (the one derivation; the
+                # variable wins over git there). The sandbox has no .git, so
+                # the flake supplies it; a dirty tree reports `dirtyRev`
+                # (`<sha>-dirty`).
                 env = old.env // {
                   REPROBUILD_SOURCE_REVISION = inputs.self.rev or inputs.self.dirtyRev or "";
                 };
@@ -1765,33 +1951,24 @@
             # Without it the fork would happily ship a `reprobuild-0.1.0`
             # derivation built from 0.1.3 sources.
             #
-            # The grep is COUNTED, not merely run: a `version ? "..."` line that
-            # stops matching (renamed argument, reformatted file) makes the
-            # count 0 and fails here, rather than passing vacuously on an empty
-            # match the way a bare `grep | sed` pipeline would.
+            # The comparison is scripts/check_package_nix_version.sh, the same
+            # script `just lint` runs on the tree -- one implementation, so the
+            # local gate (the only one the CI-less `agents` branch has) and
+            # this check cannot disagree. Here it is given the version this
+            # flake parsed and builds with. The script COUNTS its matches: a
+            # literal line that stops matching (renamed argument, reformatted
+            # file) fails rather than passing vacuously on an empty match.
             nixpkgs-package-version-sync =
               pkgs.runCommand "reprobuild-nixpkgs-package-version-sync"
                 {
                   packageNix = ./nix/pkgs/by-name/re/reprobuild/package.nix;
+                  checkScript = ./scripts/check_package_nix_version.sh;
                   nimbleVersion = version;
                 }
                 ''
                   set -eu
-                  matches=$(grep -c '^  version = "' "$packageNix" || true)
-                  if [ "$matches" != 1 ]; then
-                    echo "package.nix: expected exactly 1 version-default line, found $matches"
-                    exit 1
-                  fi
-                  literal=$(sed -n 's/^  version = "\(.*\)";$/\1/p' "$packageNix")
-                  if [ -z "$literal" ]; then
-                    echo "package.nix: could not extract the version literal"
-                    exit 1
-                  fi
-                  if [ "$literal" != "$nimbleVersion" ]; then
-                    echo "package.nix version literal ($literal) != reprobuild.nimble version ($nimbleVersion)"
-                    exit 1
-                  fi
-                  echo "package.nix and reprobuild.nimble agree on version $literal"
+                  bash "$checkScript" --package-nix "$packageNix" \
+                    --nimble-version "$nimbleVersion"
                   mkdir -p "$out"
                 '';
             # The sibling of the version check for the source arguments.
@@ -1910,6 +2087,69 @@
                 )
               else
                 throw "reprobuild nixpkgs-package-src-sync: package.nix defaults are not the snapshot of their `src` commit ${defaultSrc.rev}:\n${builtins.concatStringsSep "\n" found}";
+            # The two CodeTracer-family inputs are one dependency, pinned
+            # twice. `codetracer-src` is a CodeTracer revision; that
+            # revision's own `repro.lock` names the codetracer-trace-format-nim
+            # revision it was solved -- and therefore compiled -- against.
+            # `ct-trace-format-src` is what this flake actually hands the
+            # CodeTracer sources it builds (the incremental adapter, `ct-test`,
+            # the CodeTracer e2e fixture) and vendors into the Nim fork. So
+            # the project policy recorded on both inputs above is: the
+            # trace-format pin moves with `codetracer-src`, to exactly the
+            # revision that CodeTracer revision's `repro.lock` names.
+            #
+            # That is reprobuild-pm `spec/Cross-Repo-Source-Consumption.md`
+            # §6 "Corrected lock semantics": "the executable's solve -- its
+            # `repro.lock` -- governs the complete transitive pinned
+            # solution." The consumer is CodeTracer, so ITS lock decides the
+            # trace-format revision; a second, independently moved pin here
+            # is a different solution, and one in which the pinned consumer
+            # need not compile. It did not, once: codetracer 704bf164 called
+            # a reader routine the then-pinned trace-format bc7c5d2 lacked
+            # (reprobuild-pm issue 2026-10-04 "reprobuild pins a trace-format
+            # older than its own CodeTracer pin calls"). Before this check
+            # the policy was kept by hand, and had drifted.
+            #
+            # It compares the inputs AS PASSED to this evaluation, not
+            # ./flake.lock's text, so an `--override-input` of either one is
+            # checked too. A source with no `rev` (a `path:` override of a
+            # working tree) cannot be shown to be the named revision and
+            # fails rather than passes. A `repro.lock` with no
+            # codetracer-trace-format-nim entry fails as well: a check that
+            # passes because there is nothing to compare is vacuous. Decided
+            # at evaluation time, like `nixpkgs-package-src-sync`, so it
+            # builds nothing and runs for every system.
+            ct-trace-format-pin-coherence =
+              let
+                fail = msg: throw "reprobuild ct-trace-format-pin-coherence: ${msg}";
+                ctLockPath = "${codetracer-src}/repro.lock";
+                ctRev = codetracer-src.rev or "<no rev: not a locked revision>";
+                # repro.lock is TOML (schema reprobuild.solved-graph-lock.v3, or v2);
+                # the source deps sit in the `[lock]` table's `deps` array.
+                ctLock = builtins.fromTOML (builtins.readFile ctLockPath);
+                named = builtins.filter (dep: (dep.name or null) == "codetracer-trace-format-nim") (
+                  ctLock.lock.deps or [ ]
+                );
+                wanted = (builtins.head named).revision or null;
+                pinned = ct-trace-format-src.rev or null;
+              in
+              if !(builtins.pathExists ctLockPath) then
+                fail "codetracer-src (${ctRev}) has no repro.lock, so the trace-format revision it was built against is unknown"
+              else if builtins.length named != 1 then
+                fail "codetracer-src (${ctRev}) repro.lock has ${toString (builtins.length named)} `deps` entries named codetracer-trace-format-nim, expected exactly 1"
+              else if wanted == null then
+                fail "codetracer-src (${ctRev}) repro.lock's codetracer-trace-format-nim entry has no `revision`"
+              else if pinned == null then
+                fail "ct-trace-format-src has no `rev` (overridden by a path?), so it cannot be shown to be ${wanted}, the revision codetracer-src (${ctRev}) repro.lock names"
+              else if pinned != wanted then
+                fail "ct-trace-format-src is pinned at ${pinned}, but codetracer-src (${ctRev}) was built against codetracer-trace-format-nim ${wanted} (its repro.lock). Move ct-trace-format-src in flake.nix to ${wanted} -- the revision the pinned CodeTracer's repro.lock names -- and refresh flake.lock; or move codetracer-src to a CodeTracer revision whose repro.lock names ${pinned}."
+              else
+                pkgs.writeText "reprobuild-ct-trace-format-pin-coherence" (
+                  builtins.toJSON {
+                    codetracer = ctRev;
+                    trace-format = pinned;
+                  }
+                );
             packaged-runtime-compile = packagedRuntimeCompileCheck;
 
             # ── The Nix helper library (GM5) ──────────────────────────────
@@ -1935,6 +2175,7 @@
               inherit (pkgs) lib;
               homeManager = inputs.nixos-modules.inputs.home-manager-unstable;
               intentModule = intentHomeManagerModule;
+              brewIntentModule = brewFixtureHomeManagerModule;
               root = ./.;
             };
             # readIntent's IFD mode: the packaged `repro` exports the fixture
@@ -1950,6 +2191,26 @@
               buildSystem = builtins.currentSystem or system;
               root = ./.;
             };
+            # ── Host facts (GM6) ──────────────────────────────────────────
+            # `homeManagerFacts` over a real Home Manager configuration:
+            # its evaluated half is decided at evaluation time, its
+            # digests when built on this check's system.
+            lib-host-facts = import ./nix/tests/host-facts.nix {
+              inherit pkgs system reprobuildLib;
+              inherit (pkgs) lib;
+              homeManager = inputs.nixos-modules.inputs.home-manager-unstable;
+              root = ./.;
+            };
+            # `homeEquivalenceCheck` end to end: the packaged `repro home
+            # facts` / `repro home compare` against `homeManagerFacts`, an
+            # equivalent pair that must pass and a diverged one that must
+            # fail.
+            lib-home-equivalence = import ./nix/tests/home-equivalence.nix {
+              inherit pkgs system reprobuildLib;
+              inherit (pkgs) lib;
+              homeManager = inputs.nixos-modules.inputs.home-manager-unstable;
+              root = ./.;
+            };
             repo-requirements =
               pkgs.runCommand "reprobuild-repo-requirements" { nativeBuildInputs = [ pkgs.just ]; }
                 ''
@@ -1962,6 +2223,11 @@
           };
 
           devShells.default = pkgs.mkShell {
+            STACKABLE_HOOKS_BUILT_TOOLS_DIR =
+              if pkgs.stdenv.isDarwin then
+                "${inputs.stackable-hooks-macos-tools.packages.${system}.default}"
+              else
+                "";
             # Framework regression uses a real GCC without putting its cc ahead
             # of the shell's clang. /usr/bin/gcc on Darwin is Apple clang.
             REPRO_TEST_DARWIN_GCC = if pkgs.stdenv.isDarwin
@@ -2022,6 +2288,12 @@
               pkgs.openssl
               pkgs.pcre
             ];
+            # The source bootstrap (`config.nims`) and the helpers Reprobuild
+            # compiles for itself (`externalHashFlags`) both bake an OpenSSL
+            # directory into `-L` and RPATH. Name this shell's own target
+            # OpenSSL so neither falls back to a store glob, whose first match
+            # on a mixed-architecture store was a 32-bit build.
+            OPENSSL_LIBDIR = "${pkgs.openssl.out}/lib";
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;

@@ -63,6 +63,10 @@ type
                                        ## when --accept-overwrite was
                                        ## passed and the executor
                                        ## clobbered a drifted record
+    released*: seq[string]             ## GM7: records of concerns the
+                                       ## target generation does not
+                                       ## apply, left in place rather
+                                       ## than removed (`<kind> <name>`)
 
 # ---------------------------------------------------------------------------
 # Option resolution.
@@ -188,6 +192,138 @@ proc loadManifestFor(stateDir: string; generationId: string;
 # Drift-checking pass.
 # ---------------------------------------------------------------------------
 
+proc restoreDrift(op: FileOp): FileDriftReport =
+  ## A restore writes a file the CURRENT generation does not record, so
+  ## whatever sits at its path now is someone else's: the user's, or (for a
+  ## concern the current generation released) the other tool's. It may only
+  ## be replaced when it is absent or already what the target generation
+  ## recorded (Home-Profile-Resource-Lifecycle.md §Drift Handling: "when
+  ## observed state differs from recorded, do not overwrite").
+  let rec = op.targetRecord
+  let path = rec.absoluteOutputPath
+  if not symlinkExists(extendedPath(path)) and
+      not fileExists(extendedPath(path)) and not dirExists(extendedPath(path)):
+    return
+  case rec.ownershipPolicy
+  of gfoStowSymlink, gfoStowJunction:
+    var same = false
+    try:
+      same = rec.stowSource.len > 0 and
+        fileExists(extendedPath(rec.stowSource)) and
+        sameFile(path, rec.stowSource)
+    except OSError, IOError:
+      same = false
+    if not same:
+      result.drifted = true
+      result.expectedHex = "link -> " & rec.stowSource
+      result.observedHex = "<another object>"
+  else:
+    result = verifyFileAgainstCurrent(rec)
+
+proc restoreDrift(op: BlockOp): FileDriftReport =
+  ## See the `FileOp` overload. An absent block (or host file) is not drift:
+  ## there is nothing to replace.
+  let r = verifyManagedBlockAgainstCurrent(op.targetRecord)
+  if r.drifted and not r.missing:
+    result = r
+
+proc restoreDrift(op: ResourceOp): FileDriftReport =
+  ## See the `FileOp` overload, observed through the resource's own driver
+  ## and compared with the target's recorded post-write digest (the test the
+  ## apply's lifecycle uses for "we wrote this"). Not observed: application
+  ## bundles, which have their own refusal (`refuseUnmanagedAppBundleRestores`),
+  ## and `vscode.extension`, whose observation of a recorded binding is taken
+  ## against an empty desired set and so carries nothing about the object
+  ## (`observeRecorded`).
+  let rec = op.targetRecord
+  if rec.resourceKind in [$rkMacosAppBundle, $rkVscodeExtension] or
+      isZeroDigest(rec.postWriteDigest):
+    return
+  let observed = observeRecorded(op.address, toRecorded(rec))
+  if observed.present and observed.digest != rec.postWriteDigest:
+    result.drifted = true
+    result.expectedHex = digestHex(rec.postWriteDigest)
+    result.observedHex = digestHex(observed.digest)
+
+proc restoresAbsentObject(op: ResourceOp): bool =
+  ## A resource op that writes where the CURRENT generation owns nothing: a
+  ## restore (no current record), or an update over a current record of a
+  ## destroyed resource (zero post-write digest -- the generation that
+  ## dropped it records the destruction).
+  op.kind == rokRestoreResource or
+    (op.kind == rokUpdateResource and
+      (not op.hasCurrentRecord or isZeroDigest(op.currentRecord.postWriteDigest)))
+
+proc unobservedKind(rec: ResourceBinding): bool =
+  ## Kinds whose observation of a recorded binding says nothing about the
+  ## object: `vscode.extension` (`observeRecorded` observes it against an
+  ## empty desired set) and application bundles (`macos.appBundle`, which
+  ## have their own refusal and accept vendor updates).
+  rec.resourceKind in [$rkMacosAppBundle, $rkVscodeExtension]
+
+proc removesResource(op: ResourceOp): bool =
+  ## The op takes the resource away: a remove (the target does not have it),
+  ## or an update or restore to a target record of a destroyed resource
+  ## (zero post-write digest: the target generation records the object as
+  ## absent, so rolling back to it removes the object rather than writing
+  ## the destroy record's payload -- the bytes that generation destroyed;
+  ## reprobuild-pm issues 2026-10-18-home-rollback-recreates-a-resource-the-
+  ## target-generation-records-as-destroyed (update) and 2026-10-20-home-
+  ## rollback-restores-the-bytes-of-a-resource-the-target-generation-
+  ## destroyed (restore: the current generation has no record of the
+  ## address, e.g. its host is narrowed to a concern set without it)).
+  ## Application bundles apply the same rule (`appBundleOpIsRemoval`).
+  op.kind == rokRemoveResource or
+    (op.kind in {rokUpdateResource, rokRestoreResource} and
+      op.hasTargetRecord and isZeroDigest(op.targetRecord.postWriteDigest))
+
+proc removesNothingOwned(op: ResourceOp): bool =
+  ## A removal (`removesResource`) whose current record is a destroyed
+  ## resource as well (zero post-write digest -- the generation that dropped
+  ## it records the destruction): the current generation owns nothing at the
+  ## object, so there is nothing of Reprobuild's to remove, and whatever is
+  ## there now is someone else's. The executor skips it.
+  removesResource(op) and
+    (not op.hasCurrentRecord or isZeroDigest(op.currentRecord.postWriteDigest))
+
+proc currentDrift(op: ResourceOp): FileDriftReport =
+  ## A REMOVE or UPDATE of a resource the CURRENT generation holds destroys
+  ## or overwrites the object that generation wrote, so it obeys the rule
+  ## the apply's lifecycle applies to a destroy or update
+  ## (Home-Profile-Resource-Lifecycle.md §Drift Handling: "when observed
+  ## state differs from recorded, do not overwrite"; reprobuild-pm issue
+  ## 2026-10-16-home-rollback-removes-and-updates-resources-without-a-drift-
+  ## check): observed through the resource's own driver, the object must be
+  ## absent (a remove has nothing to do, an update converges), or hold what the
+  ## current generation recorded writing. Matching the target does not attest
+  ## ownership of an edit to the current object. Anything else is a user edit.
+  ## Not observed:
+  ## `unobservedKind`, and a current record of a destroyed resource
+  ## (`removesNothingOwned`; an update over one is a restore,
+  ## `restoresAbsentObject`).
+  if not op.hasCurrentRecord:
+    return
+  let rec = op.currentRecord
+  if unobservedKind(rec) or isZeroDigest(rec.postWriteDigest):
+    return
+  let observed = observeRecorded(op.address, toRecorded(rec))
+  if not observed.present or observed.digest == rec.postWriteDigest:
+    return
+  result.drifted = true
+  result.expectedHex = digestHex(rec.postWriteDigest)
+  result.observedHex = digestHex(observed.digest)
+
+proc resourceDrift(op: ResourceOp): FileDriftReport =
+  ## The drift test for one resource op: a restore against the target's
+  ## record (`restoreDrift`), a remove or update against the current one
+  ## (`currentDrift`).
+  if restoresAbsentObject(op):
+    restoreDrift(op)
+  elif op.kind in {rokRemoveResource, rokUpdateResource}:
+    currentDrift(op)
+  else:
+    FileDriftReport()
+
 proc checkPlanForDrift*(plan: RollbackPlan; stateDir, currentGenIdHex: string):
     seq[string] =
   ## Walk every destructive op and verify the on-disk state matches
@@ -195,11 +331,13 @@ proc checkPlanForDrift*(plan: RollbackPlan; stateDir, currentGenIdHex: string):
   ## list of paths that drifted, in operation order.
   ##
   ## "Destructive" = `rokRemove*` (we're about to delete the live
-  ## bytes) and `rokUpdate*` (we're about to overwrite them).
-  ## `rokRestore*` is not destructive — it writes a file that the
-  ## current manifest does not claim to own, so any pre-existing
-  ## bytes there are user-owned and rollback refuses to clobber them
-  ## anyway (handled at execution time).
+  ## bytes) and `rokUpdate*` (we're about to overwrite them), checked
+  ## against the current record; and `rokRestore*` (files, blocks and
+  ## resources), which writes where the current manifest records nothing, so
+  ## any object there now is someone else's and only an absent one, or one
+  ## already equal to the target's record, may be replaced (`restoreDrift`).
+  ## Resource removes and updates are checked against the current record
+  ## through the resource's driver (`currentDrift`).
   for op in plan.fileOps:
     case op.kind
     of rokRemoveFile, rokUpdateFile:
@@ -207,6 +345,9 @@ proc checkPlanForDrift*(plan: RollbackPlan; stateDir, currentGenIdHex: string):
         continue
       let r = verifyFileAgainstCurrent(op.currentRecord)
       if r.drifted:
+        result.add(op.absoluteOutputPath)
+    of rokRestoreFile:
+      if restoreDrift(op).drifted:
         result.add(op.absoluteOutputPath)
     else:
       discard
@@ -217,6 +358,9 @@ proc checkPlanForDrift*(plan: RollbackPlan; stateDir, currentGenIdHex: string):
         continue
       let r = verifyManagedBlockAgainstCurrent(op.currentRecord)
       if r.drifted:
+        result.add(op.hostFilePath & "#" & op.blockId)
+    of rokRestoreBlock:
+      if restoreDrift(op).drifted:
         result.add(op.hostFilePath & "#" & op.blockId)
     else:
       discard
@@ -231,6 +375,9 @@ proc checkPlanForDrift*(plan: RollbackPlan; stateDir, currentGenIdHex: string):
         result.add("launcher:" & op.commandName)
     else:
       discard
+  for op in plan.resourceOps:
+    if resourceDrift(op).drifted:
+      result.add("resource:" & op.address)
 
 proc raiseFirstDrift*(plan: RollbackPlan;
                      stateDir, currentGenIdHex: string) =
@@ -245,12 +392,22 @@ proc raiseFirstDrift*(plan: RollbackPlan;
       if r.drifted:
         raiseUserEditDetected(op.absoluteOutputPath, "generated-file",
           r.expectedHex, r.observedHex)
+    of rokRestoreFile:
+      let r = restoreDrift(op)
+      if r.drifted:
+        raiseUserEditDetected(op.absoluteOutputPath, "generated-file",
+          r.expectedHex, r.observedHex)
     else: discard
   for op in plan.blockOps:
     case op.kind
     of rokRemoveBlock, rokUpdateBlock:
       if not op.hasCurrentRecord: continue
       let r = verifyManagedBlockAgainstCurrent(op.currentRecord)
+      if r.drifted:
+        raiseUserEditDetected(op.hostFilePath & "#" & op.blockId,
+          "managed-block", r.expectedHex, r.observedHex)
+    of rokRestoreBlock:
+      let r = restoreDrift(op)
       if r.drifted:
         raiseUserEditDetected(op.hostFilePath & "#" & op.blockId,
           "managed-block", r.expectedHex, r.observedHex)
@@ -265,6 +422,11 @@ proc raiseFirstDrift*(plan: RollbackPlan;
         raiseUserEditDetected("launcher:" & op.commandName, "launcher",
           r.expectedHex, r.observedHex)
     else: discard
+  for op in plan.resourceOps:
+    let r = resourceDrift(op)
+    if r.drifted:
+      raiseUserEditDetected(op.address, "resource", r.expectedHex,
+        r.observedHex)
 
 # ---------------------------------------------------------------------------
 # Execution helpers.
@@ -482,7 +644,8 @@ proc appBundleSourceInGeneration(store: var Store;
                                  rec: ResourceBinding): string =
   ## The store bundle a generation placed at ``rec``'s path: the generation
   ## roots the prefix of the package the resource address names, and the
-  ## prefix holds the bundle at its root under the placed name.
+  ## prefix holds the placed item -- the bundle, or an installer
+  ## application's product folder -- at its root under the placed name.
   let packageId = packageIdOfAppBundleAddress(rec.resourceAddress)
   if packageId.len == 0:
     raise newException(ValueError, "rollback: " & rec.resourceAddress &
@@ -537,7 +700,10 @@ proc stageAppBundleRestores(store: var Store; target: ActivationManifest;
   ## Step 6b: copy every bundle the target generation re-places from its
   ## store prefix to a staging directory beside its target and verify the
   ## staged copy against the identity the target generation recorded
-  ## (``verifyPinnedAppBundle``: intact signature, identical identity).
+  ## (``verifyPinnedPlacedItem``: intact signature, identical identity; for
+  ## a folder, every bundle directly in it intact and the folder identity
+  ## identical -- Store-And-Installation-Layout.md § Installer
+  ## applications, "Activation").
   ##
   ## This runs before ANY rollback operation, and none of it touches a
   ## target: a refusal (tampered or damaged store copy, a store copy that is
@@ -647,6 +813,7 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
 
       # ---- Step 5: build plan ----
       let plan = buildRollbackPlan(cur.manifest, tgt.manifest, tgt.envelope)
+      result.released = plan.released
 
       # ---- Step 6: digest-check ----
       if not opts.acceptOverwrite:
@@ -699,11 +866,22 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
         inc result.launcherOpsApplied
       # M68 resources.
       for op in plan.resourceOps:
+        if removesNothingOwned(op):
+          # The current generation records the resource as destroyed: it
+          # owns nothing there, so a destroy would remove whatever someone
+          # else has put at the object since.
+          inc result.resourceOpsApplied
+          continue
+        if op.kind notin {rokRemoveResource, rokRestoreResource,
+                          rokUpdateResource}:
+          continue
+        # A removal (`removesResource`) undoes what the current generation
+        # wrote, so it works from the current record; a restore or update
+        # writes the target's.
+        let removal = removesResource(op)
         let rec =
-          case op.kind
-          of rokRemoveResource: op.currentRecord
-          of rokRestoreResource, rokUpdateResource: op.targetRecord
-          else: continue
+          if removal: op.currentRecord
+          else: op.targetRecord
         let kindEnum =
           try: resourceKindFromString(rec.resourceKind)
           except ValueError: rkFsManagedBlock
@@ -718,11 +896,11 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
             removeAppBundle(rec.realWorldIdentity)
           inc result.resourceOpsApplied
           continue
-        case op.kind
+        case (if removal: rokRemoveResource else: op.kind)
         of rokRemoveResource:
           # The current generation had this resource; the target
-          # didn't. Reverse the write: delete the value / strip
-          # the managed block / etc.
+          # didn't (or records it destroyed). Reverse the write: delete
+          # the value / strip the managed block / etc.
           case kindEnum
           of rkWindowsRegistryValue:
             when defined(windows):

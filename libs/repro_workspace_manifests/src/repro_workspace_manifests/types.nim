@@ -71,8 +71,11 @@ type
 
 const
   schemaRepoFragmentV1*     = "reprobuild.workspace.repo.v1"
-    ## The fragment schema whose one branch key is `branch`. Still read — it
-    ## maps `branch` onto the mainline — but no writer emits it any more.
+    ## The fragment schema whose one branch key is `branch`, read as the
+    ## mainline. Still WRITTEN for every fragment it can express — one that
+    ## declares no role but the mainline, no `profile` and no custom role —
+    ## because a `repro` that predates v2 refuses the whole workspace on a v2
+    ## fragment (Workspace-Branch-Roles.md §6; `repoFragmentText`).
   schemaRepoFragmentV2*     = "reprobuild.workspace.repo.v2"
     ## Workspace-Branch-Roles.md §3.1 / §3.6 — `branch` renamed `mainline`,
     ## plus the five optional built-in role keys, `profile`, and a
@@ -113,6 +116,10 @@ const
     ## The schema of the OLD host bootstrap config `.repro-workspace.toml`
     ## (and of its `.repro-workspace-private.toml` companion). Still read;
     ## never written.
+  pushGatewayOptOutValues* = ["off"]
+    ## The values the settings files' top-level `push_gateway` key may take:
+    ## Push-Gateway-Wiring-And-Policy.md §7.4 defines exactly one, the
+    ## per-workspace opt-out `push_gateway = "off"`. Absent means the default.
   schemaWorkspaceSettingsV1* = "reprobuild.workspace.settings.v1"
     ## Workspace-Settings-Files.md §3 — the shared, committed workspace
     ## settings file `repro-workspace.toml`.
@@ -509,38 +516,11 @@ type
     revision*: Option[string]
 
   CertificatesBody* = object
-    ## TC-3 / TC-6 / RA-32 — the project's test-certificate gating policy
-    ## (Test-Certificates.md §"Per-project configuration"). Authored as a
-    ## top-level `[certificates]` table in `projects/<project>.toml`:
-    ##
-    ##   [certificates]
-    ##   gate_mode = "required"            # off (default) | advisory | required
-    ##   required_targets = ["t-unit"]    # targets a cert must cover
-    ##   required_platforms = ["linux/amd64", "macos/arm64"]
-    ##
-    ## Every field is OPTIONAL. A missing `[certificates]` table — or a table
-    ## that omits `gate_mode` — resolves to `off`, so a project that never
-    ## opts in is never cert-gated (the default-off onboarding guarantee:
-    ## RA-32). `gate_mode` ∈ {off, advisory, required}; `advisory` records
-    ## coverage without ever blocking the push; `required` refuses the push
-    ## unless the submitted certificates cover the pushed commit for the
-    ## required targets on each required platform.
-    ##
-    ## TC-4 — `ci_trust` controls whether CI fast-tracks (skips) targets a
-    ## valid certificate already covers, or treats the certificate as purely
-    ## informational and re-runs everything. `skip` is the high-trust
-    ## fast-track ("trust the certificate, don't re-run"); `advisory` (the
-    ## DEFAULT, the SAFER choice) re-runs everything but surfaces the
-    ## certificate as a signal. Trust is an EXPLICIT project decision: an
-    ## absent / omitted `ci_trust` never silently fast-tracks
-    ## (Test-Certificates.md §"CI integration — skipping certified work").
-    ##
-    ## `untracked_inputs` chooses what certificate issuance does about
-    ## untracked, non-ignored files, which are outside the content a
-    ## certificate names (test-certificates Standard §3.2). `read-set` (the
-    ## default) withholds only when a read set captured from the run shows it
-    ## read one, and otherwise issues with `untracked = true`; `strict`
-    ## withholds whenever any exists.
+    ## A `[certificates]` table in `projects/<project>.toml`, which is NOT
+    ## supported (Test-Certificates TC-9d, operator decision D18). It is
+    ## decoded only so ``resolveProject`` can recognise it and refuse the
+    ## manifest with a remedy (``refuseLegacyCertificatesTable``) instead of
+    ## the strict decoder's generic unknown-key error. No field is read.
     gate_mode*: Option[string]
     required_targets*: seq[string]
     required_platforms*: seq[string]
@@ -565,11 +545,8 @@ type
       ## dependencies; backward-compatible with manifests authored before
       ## RA-22.
     certificates*: CertificatesBody
-      ## TC-3 / TC-6 / RA-32 — the project's test-certificate gating policy.
-      ## A missing `[certificates]` table leaves every field at its zero
-      ## value (`gate_mode` = none ⇒ resolved `off`), so enforcement is
-      ## strictly opt-in and backward-compatible with manifests authored
-      ## before this milestone.
+      ## The retired `[certificates]` table (see `CertificatesBody`). A
+      ## manifest that carries it does not resolve (TC-9d).
     extensions*: Extensions
 
   # --- variants/<...>.toml ---------------------------------------------------
@@ -886,6 +863,9 @@ type
 
   WorkspaceBootstrap* = object
     schema*: string
+    push_gateway*: Option[string]
+      ## Push-Gateway-Wiring-And-Policy.md §7.4's per-WORKSPACE opt-out, a
+      ## top-level key; see `WorkspaceSettings.push_gateway`.
     manifest*: BootstrapManifestBody
     projects*: BootstrapProjectsBody
     verify*: BootstrapVerifyBody
@@ -968,6 +948,11 @@ type
       ## `[[manifest]]` of the shared file, in file order.
     localLayers*: seq[SettingsManifestLayer]
       ## `[[manifest]]` of the local file, in file order.
+    push_gateway*: Option[string]
+      ## Push-Gateway-Wiring-And-Policy.md §7.4's per-WORKSPACE opt-out: the
+      ## top-level `push_gateway = "off"` (the one value §7.4 defines; any
+      ## other is refused naming the file and key). Same key, same meaning in
+      ## both schemas. Shared policy, so the local file may not set it (§4).
     profiles*: seq[(string, BranchRoleDecls)]
       ## `[profiles.<name>]`, sorted by name (TOML tables are unordered).
     customRoles*: seq[CustomRoleDecl]

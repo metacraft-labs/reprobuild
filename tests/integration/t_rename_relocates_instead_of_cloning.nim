@@ -251,3 +251,42 @@ suite "declared rename — relocate instead of cloning":
       # The clone ran, and the skipped directory was left EXACTLY where it is.
       check dirExists(fx.workspaceRoot / "widget-pm" / ".git")
       check dirExists(oldPath / ".git")
+
+  test "clone policies isolate rename evidence and recovery clones":
+    let gitBin = findExe("git")
+    require gitBin.len > 0
+    for policy in ["none", "private"]:
+      for existing in [false, true]:
+        let fx = newRenameFixture(gitBin, "policy-" & policy & $existing)
+        defer: removeDir(fx.scratch)
+        discard fx.seedOrigin(gitBin, "widget-pm")
+        fx.writeFragment("widget-pm", "widget-pm", "widget-pm",
+          previously = "[{ name = \"widget-specs\", path = \"widget-specs\" }]")
+        fx.writeProject(["widget-pm"])
+        if existing:
+          let oldPath = fx.workspaceRoot / "widget-specs"
+          fx.cloneInto(gitBin, "widget-pm", oldPath)
+          discard requireGit(q(gitBin) & " -C " & q(oldPath) &
+            " remote set-url origin " & q(fx.originUrl("widget-specs")))
+        let privatePool = fx.scratch / "private-pool"
+        let selected = if policy == "private": "private=" &
+            privatePool else: "none"
+        let res = fx.invokeSync(["--clone-objects=" & selected, "--jobs=1"])
+        checkpoint(res.output)
+        require res.code == 0
+        # The fixture's shared pool root must remain empty, including under
+        # relocation evidence collection before the ordinary sync phases.
+        var hostEntries = 0
+        for kind, path in walkDir(fx.clonesDir): inc hostEntries
+        check hostEntries == 0
+        let entry = fx.readReport().entryFor("widget-pm")
+        let target = fx.workspaceRoot / "widget-pm"
+        check requireGit(q(gitBin) & " -C " & q(target) &
+          " remote get-url origin").strip() == fx.originUrl("widget-pm")
+        if existing:
+          check entry.field("relocation") == "relocated"
+        else:
+          check entry.field("cloneObjects") == selected
+          check entry.field("relocation") == "no_previous_checkout"
+        if policy == "none":
+          check not fileExists(target / ".git/objects/info/alternates")

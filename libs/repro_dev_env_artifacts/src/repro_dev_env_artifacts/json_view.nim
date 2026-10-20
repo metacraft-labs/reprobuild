@@ -53,12 +53,86 @@ proc taskJson(task: DevEnvTaskSummary): string =
     ",\"commandRef\":" & digestJson(task.commandRef) &
     ",\"command\":" & q(task.command) & "}"
 
+proc actionJson(action: DevEnvActionSummary): string =
+  ## Shared-Development-Services F1. `repro dev-env --json` is the only
+  ## view an operator has of what a recipe declared, and an action
+  ## invisible there is one nobody can check before `repro up` acts on
+  ## it -- which is exactly how F1's missing `etc/sso/` went unnoticed
+  ## until the service failed to start.
+  ##
+  ## The PAYLOAD BYTE COUNT rather than the payload. The payload is an
+  ## opaque versioned record; printing it would put binary into a JSON
+  ## string, and printing nothing would leave a reader unable to tell an
+  ## action that carries a command from one that does not.
+  "{\"nodeId\":" & q(action.nodeId) &
+    ",\"actionId\":" & q(action.actionId) &
+    ",\"payloadBytes\":" & $action.payload.len & "}"
+
+proc sharedResolutionJson(resolution: DevEnvSharedResolutionSummary): string =
+  ## Shared-Development-Services D-SS11 (§4.6). `repro dev-env --json`
+  ## is the only view an operator has of what a recipe declared, and a
+  ## resolver whose contributions are invisible there is one nobody can
+  ## check before `repro up` acts on it.
+  "{\"ownerPackage\":" & q(resolution.ownerPackage) &
+    ",\"serviceName\":" & q(resolution.serviceName) &
+    ",\"activityName\":" & q(resolution.activityName) &
+    ",\"ownerRecipeDir\":" & q(resolution.ownerRecipeDir) &
+    ",\"consumerPackage\":" & q(resolution.consumerPackage) &
+    ",\"environment\":" & q(resolution.environment) &
+    ",\"sourceFile\":" & q(resolution.sourceFile) &
+    ",\"sourceLine\":" & $resolution.sourceLine &
+    ",\"contributionPoints\":" & stringsJson(resolution.contributionPoints) &
+    ",\"contributionOperations\":" &
+      stringsJson(resolution.contributionOperations) &
+    ",\"contributionPrecedences\":" &
+      stringsJson(resolution.contributionPrecedences) &
+    ",\"contributionSites\":" & stringsJson(resolution.contributionSites) &
+    ",\"contributionMemberPoints\":" &
+      stringsJson(resolution.contributionMemberPoints) &
+    ",\"contributionMembers\":" &
+      stringsJson(resolution.contributionMembers) & "}"
+
 proc serviceJson(service: DevEnvServiceSummary): string =
   "{\"name\":" & q(service.name) &
     ",\"activityRequirements\":" & stringsJson(service.activityRequirements) &
     ",\"hasSupervisorPlanRef\":" & (if service.hasSupervisorPlanRef: "true" else: "false") &
     ",\"supervisorPlanRef\":" & digestJson(service.supervisorPlanRef) &
-    ",\"metadata\":" & toJson(service.metadata) & "}"
+    ",\"metadata\":" & toJson(service.metadata) &
+    # Shared-Development-Services L8: the typed `service` block's facts.
+    # In the JSON view as well as in the record, because `repro dev-env
+    # --json` is how an operator sees what a recipe declared, and a
+    # field that reaches the artifact but not this view is invisible at
+    # exactly the moment someone is debugging why an instance was not
+    # shared.
+    ",\"identityKind\":" & q(service.identityKind) &
+    ",\"identityStableId\":" & q(service.identityStableId) &
+    ",\"scope\":" & q(service.scope) &
+    ",\"compatibilityMajor\":" & $service.compatibilityMajor &
+    ",\"typedCommand\":" & stringsJson(service.typedCommand) &
+    ",\"registrationPoints\":" & stringsJson(service.registrationPoints) &
+    ",\"registrationMembers\":" & stringsJson(service.registrationMembers) &
+    ",\"registrationContributors\":" &
+      stringsJson(service.registrationContributors) &
+    # Shared-Development-Services L9: in the JSON view for L8's reason
+    # -- `repro dev-env --json` is how an operator sees what a recipe
+    # declared, and a readiness probe that reaches the artifact but not
+    # this view is invisible at exactly the moment someone is debugging
+    # why a session hung waiting for one.
+    ",\"readinessKind\":" & q(service.readinessKind) &
+    ",\"readinessPath\":" & q(service.readinessPath) &
+    ",\"readinessUrl\":" & q(service.readinessUrl) &
+    ",\"readinessTimeoutMs\":" & $service.readinessTimeoutMs &
+    ",\"workingDirectory\":" & q(service.workingDirectory) &
+    ",\"stateDirectories\":" & stringsJson(service.stateDirectories) &
+    ",\"instanceDeclared\":" &
+      (if service.instanceDeclared: "true" else: "false") &
+    ",\"instanceLeaseTtlSeconds\":" & $service.instanceLeaseTtlSeconds &
+    ",\"instanceEnvironment\":" & q(service.instanceEnvironment) &
+    # Shared-Development-Services F1's second half, in the JSON view for
+    # L8's and L9's reason: this is the field that says which action the
+    # session builds before this service, so an operator debugging "the
+    # file the service names is not there" has to be able to read it.
+    ",\"consumedActionIds\":" & stringsJson(service.consumedActionIds) & "}"
 
 proc diagnosticJson(diagnostic: DevEnvDiagnostic): string =
   "{\"severity\":" & q($diagnostic.severity) &
@@ -115,9 +189,12 @@ proc toJsonInspection*(artifact: DevEnvArtifact): string =
     ",\"toolProfiles\":" & listJson(artifact.toolProfiles, toolProfileJson) &
     ",\"tasks\":" & listJson(artifact.tasks, taskJson) &
     ",\"services\":" & listJson(artifact.services, serviceJson) &
+    ",\"sharedResolutions\":" &
+      listJson(artifact.sharedResolutions, sharedResolutionJson) &
     ",\"resourcePrerequisites\":" & digestsJson(artifact.resourcePrerequisites) &
     ",\"diagnostics\":" & listJson(artifact.diagnostics, diagnosticJson) &
     ",\"evaluationInputs\":" & listJson(artifact.evaluationInputs, inputJson) &
     ",\"sourceFingerprints\":" & listJson(artifact.sourceFingerprints, sourceFingerprintJson) &
     ",\"evaluationEvidenceRef\":" & digestJson(artifact.evaluationEvidenceRef) &
-    ",\"providerMetadata\":" & toJson(artifact.providerMetadata) & "}"
+    ",\"providerMetadata\":" & toJson(artifact.providerMetadata) &
+    ",\"actions\":" & listJson(artifact.actions, actionJson) & "}"

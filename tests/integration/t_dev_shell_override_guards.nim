@@ -1419,3 +1419,193 @@ suite "dev-shell override guards":
       writeFile(sibling / "src.txt", "two\n")
       gitCommitAll(gitBin, sibling, "advance")
       check renderFor("git+file://" & sibling) != viaGit
+
+  test "t_dev_shell_stale_fingerprint_names_the_cache_not_a_current_sibling":
+    # Real commits model a cached revision, its pin, then an ahead checkout.
+    # The gate and git are real; only the shell profile is a provenance fixture.
+    let scratch = createTempDir("repro-devshell-stale-pin-", "")
+    defer: removeDirEventually(scratch)
+    let gitBin = findExe("git")
+    let bash = findExe("bash")
+    require gitBin.len > 0
+    require bash.len > 0
+    let sibling = scratch / "runquota"
+    seedGitTree(gitBin, sibling, "old\n")
+    proc head(): string =
+      runShell(shellCommand(@[gitBin, "-C", sibling,
+        "rev-parse", "HEAD"])).output.strip()
+    let oldHead = head()
+    writeFile(sibling / "src.txt", "pin\n")
+    gitCommitAll(gitBin, sibling, "pin")
+    let pin = head()
+    writeFile(sibling / "src.txt", "ahead\n")
+    gitCommitAll(gitBin, sibling, "ahead")
+    let liveHead = head()
+    require oldHead != pin
+    require pin != liveHead
+
+    let root = scratch / "repo"
+    createDir(root / "scripts" / "lib")
+    copyFile(libPath(), root / "scripts" / "lib" / "dev_shell_overrides.sh")
+    copyFile(repoRoot() / "scripts" / "lib" / "preloaded_shim_loader.sh",
+      root / "scripts" / "lib" / "preloaded_shim_loader.sh")
+    copyFile(checkScript(), root / "scripts" / "check_dev_shell_env.sh")
+    copyFile(repoRoot() / ".envrc", root / ".envrc")
+    writeFile(root / "flake.nix", "{\n  inputs = {\n" &
+      "    runquota-src.url = \"github:example/runquota\";\n  };\n}\n")
+    writeFile(sibling / "flake.nix", "{}\n")
+    writeFile(root / "flake.lock", "{\n  \"nodes\": {\n" &
+      "    \"runquota-src\": {\n      \"locked\": {\n" &
+      "        \"rev\": \"" & pin & "\"\n      }\n    },\n" &
+      "    \"root\": {\n      \"inputs\": {\n" &
+      "        \"runquota-src\": \"runquota-src\"\n      }\n    }\n" &
+      "  },\n  \"root\": \"root\"\n}\n")
+    createDir(root / ".direnv")
+    let fp = root / ".direnv" / "flake-override-sources.fingerprint"
+    let profile = root / ".direnv" / "flake-profile-test.rc"
+    proc record(revision: string; extra = "") =
+      writeFile(fp, "# reprobuild dev-shell override-source fingerprint v1\n" &
+        "runquota-src\t" & sibling & "\tgit:" & revision & "+old-digest\n" & extra)
+      writeFile(profile, "export RUNQUOTA_SRC=/nix/store/stale-source\n")
+    proc gate(): CmdResult =
+      runShell(hermeticBash(@[bash,
+        root / "scripts" / "check_dev_shell_env.sh"]), cwd = root)
+
+    record(oldHead)
+    let staleBytes = readFile(fp)
+    let stale = gate()
+    check readFile(fp) == staleBytes
+    checkpoint("stale fingerprint, ahead checkout:\n" & stale.output)
+    check stale.code != 0
+    check stale.output.contains("cached shell is stale")
+    check stale.output.contains(liveHead)
+    check stale.output.contains("requires trusted direnv")
+    check stale.output.contains("direnv exec . true")
+    check stale.output.contains("nix develop does not refresh")
+    check not stale.output.contains("merge --ff-only")
+    discard runShell(shellCommand(@[gitBin, "-C", sibling, "reset", "--hard", pin]))
+    let atPin = gate()
+    checkpoint("stale fingerprint, checkout at pin:\n" & atPin.output)
+    check atPin.code != 0
+    check atPin.output.contains("cached shell is stale")
+    check atPin.output.contains(pin)
+    check not atPin.output.contains("merge --ff-only")
+    discard runShell(shellCommand(@[gitBin, "-C", sibling, "reset", "--hard", liveHead]))
+    # No profile means no cached shell to diagnose, while live pin checks remain.
+    removeFile(profile)
+    let unused = gate()
+    checkpoint("unused fingerprint:\n" & unused.output)
+    check unused.code == 0
+
+    # A removed input must not create either a drift or missing-pin failure.
+    discard runBash("source " & quoteShell(libPath()) & "\n" &
+      "printf 'runquota-src\\t%s\\n' " & quoteShell(sibling) &
+      " | dev_shell_render_fingerprint > " & quoteShell(fp), root)
+    let freshBody = readFile(fp)
+    writeFile(fp, freshBody & "removed-src\t" & (scratch / "gone") &
+      "\tgit:" & oldHead & "+old-digest\n")
+    writeFile(profile, "export RUNQUOTA_SRC=/nix/store/current-source\n")
+    let removed = gate()
+    checkpoint("obsolete fingerprint input:\n" & removed.output)
+    check removed.code == 0
+    check removed.output.contains("ignoring obsolete fingerprint input 'removed-src'")
+    check not removed.output.contains("no such input on its root node")
+
+    let obsoleteBody = "# reprobuild dev-shell override-source fingerprint v1\n" &
+      "removed-src\t" & (scratch / "gone") & "\tgit:" & oldHead & "+old-digest\n"
+    writeFile(fp, obsoleteBody)
+    let obsoleteOnly = gate()
+    checkpoint("only obsolete provenance:\n" & obsoleteOnly.output)
+    check obsoleteOnly.code == 0
+    check obsoleteOnly.output.contains("ignoring obsolete fingerprint input")
+    check readFile(fp) == obsoleteBody
+
+    # Unsupported formatting must fail the independent parse count and must
+    # not turn absence from a partial name parse into permission to erase rows.
+    let flake = readFile(root / "flake.nix")
+    writeFile(root / "flake.nix", flake.replace("    runquota", "     runquota"))
+    writeFile(profile, "profile\n")
+    let malformed = gate()
+    checkpoint("incomplete input parse:\n" & malformed.output)
+    check malformed.code != 0
+    check malformed.output.contains("dev_shell_flake_input_repos matched 0") or
+      malformed.output.contains("no flake input with an upstream url")
+    check not malformed.output.contains("ignoring obsolete fingerprint input")
+    writeFile(root / "flake.nix", flake)
+
+    # A declared input absent from the lock is still refused, even when a
+    # different, valid input makes the pin classification nonempty.
+    writeFile(root / "flake.nix", flake.replace("  };",
+      "    declared-src.url = \"path:/declared\";\n  };"))
+    writeFile(fp, freshBody & "declared-src\t" & sibling &
+      "\tgit:" & liveHead & "+old-digest\n")
+    writeFile(profile, "profile\n")
+    let missingPin = gate()
+    checkpoint("declared input without lock entry:\n" & missingPin.output)
+    check missingPin.code != 0
+    check missingPin.output.contains("no such input on its root node")
+    check not missingPin.output.contains("ignoring obsolete fingerprint input 'declared-src'")
+    writeFile(root / "flake.nix", flake)
+
+    let lockBeforeFollows = readFile(root / "flake.lock")
+    # Pure follows inputs still exist, including quoted names and alternate
+    # indentation. Their stale provenance must never be discarded as removed.
+    writeFile(root / "flake.nix", flake.replace("  };",
+      "       alias.follows = \"runquota-src\";\n" &
+      "       \"quoted-alias\".follows = \"runquota-src\";\n  };"))
+    writeFile(root / "flake.lock", readFile(root / "flake.lock").replace(
+      "        \"runquota-src\": \"runquota-src\"",
+      "        \"runquota-src\": \"runquota-src\",\n" &
+      "        \"alias\": [\n          \"runquota-src\"\n        ],\n" &
+      "        \"quoted-alias\": [\n          \"runquota-src\"\n        ]"))
+    writeFile(fp, freshBody & "alias\t" & sibling & "\tgit:" & liveHead &
+      "+stale\nquoted-alias\t" & sibling & "\tgit:" & liveHead & "+stale\n")
+    writeFile(profile, "profile\n")
+    let follows = gate()
+    checkpoint("retained pure follows declarations:\n" & follows.output)
+    check follows.code != 0
+    check follows.output.contains("cached shell is stale")
+    check follows.output.contains("alias (no revision pinned")
+    check follows.output.contains("quoted-alias (no revision pinned")
+    check not follows.output.contains("ignoring obsolete fingerprint input")
+    writeFile(root / "flake.nix", flake)
+
+    writeFile(root / "flake.lock", lockBeforeFollows)
+    # Real behind checkout remains a failure, with a remedy that can move it.
+    discard runShell(shellCommand(@[gitBin, "-C", sibling,
+      "reset", "--hard", oldHead]))
+    writeFile(sibling / "flake.nix", "{}\n")
+    record(oldHead)
+    let behind = gate()
+    checkpoint("genuinely behind checkout:\n" & behind.output)
+    check behind.code != 0
+    check behind.output.contains("BEHIND")
+    check behind.output.contains("merge --ff-only")
+    check not behind.output.contains("checkout already contains the pin")
+
+    # A sibling on a different child of the old revision really diverges.
+    writeFile(sibling / "src.txt", "different branch\n")
+    gitCommitAll(gitBin, sibling, "diverge")
+    record(head())
+    let diverged = gate()
+    checkpoint("diverged live checkout:\n" & diverged.output)
+    check diverged.code != 0
+    check diverged.output.contains("DIVERGED")
+    check diverged.output.contains("rebase or merge")
+
+    let originalLock = readFile(root / "flake.lock")
+    writeFile(root / "flake.lock", originalLock.replace(pin, repeat('1', 40)))
+    writeFile(profile, "profile\n")
+    let unfetched = gate()
+    checkpoint("unfetched pin:\n" & unfetched.output)
+    check unfetched.code != 0
+    check unfetched.output.contains("is not an object")
+    check unfetched.output.contains("fetch --all")
+    writeFile(root / "flake.lock", originalLock)
+
+    # An absent live tree is unknown, even if a snapshot once described it.
+    moveDir(sibling, scratch / "temporarily-away")
+    let unknown = gate()
+    checkpoint("unknown live checkout:\n" & unknown.output)
+    check unknown.code != 0
+    check unknown.output.contains("source state is absent (unknown)")

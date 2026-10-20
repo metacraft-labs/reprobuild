@@ -63,9 +63,11 @@
 ## GM0m). Windows has no Nix package; the release bundle's equivalent is
 ## GM1w's `t_e2e_windows_bundle_compiles_profile.nim`, run on eli-pc.
 ##
-## Mocks: none. A real `nix build`, the real wrapped package, the real build
-## engine and io-mon monitor, a real `nim c`, a real C compiler and the real
-## planner.
+## Mocks: none. A real `nix build` of this tree (run once by the fixture edge
+## `reprobuild.test_fixtures.nix_package`, which each case checks against its
+## own `nix eval`; see `nix_package_support.nixPackageUnderTest`), the real
+## wrapped package, the real build engine and io-mon monitor, a real `nim c`,
+## a real C compiler and the real planner.
 
 import std/[algorithm, json, os, sets, strtabs, strutils, tempfiles, unittest]
 from repro_core/paths import extendedPath
@@ -197,7 +199,7 @@ else:
 
     test "e2e_nix_package_compiles_profile_linux: the installed package " &
         "plans a profile in a clean environment, from directories with spaces":
-      let pkg = buildNixPackage()
+      let pkg = nixPackageUnderTest()
       let repro = pkg / "bin" / "repro"
       let sourceRoot = wrapperDefault(repro, "REPROBUILD_SOURCE_ROOT")
       let nimCompiler = wrapperDefault(repro, "REPRO_NIM_COMPILER")
@@ -267,21 +269,23 @@ else:
       check plannedResources(again.res.output) ==
         plannedResources(plan.res.output)
       check again.rec.rbpiCount == 1
-      when defined(macosx):
-        # macOS may fail closed (a complete re-run) until GM0m settles what
-        # its monitoring vouches for -- the rule `profile_compile_edge_harness
-        # .cacheAnswered` applies to every profile-compile gate. Announced so
-        # the m1 run records which arm it took.
-        if again.rec.cCommands.len > 0:
-          echo "    [fail-closed, GM0m] clean-env second plan: the edge " &
-            "re-ran (", again.rec.cCommands.len, " C command(s)) instead " &
-            "of being answered from the action cache"
-      else:
-        check again.rec.cCommands.len == 0
+      # Packaged replacements preserve Nim shell children on macOS too.
+      check again.rec.cCommands.len == 0
+
+      # A cache hit must still depend on the profile source. Change it after
+      # the unchanged hit and require a fresh compile and the same plan.
+      writeFile(extendedPath(box.profileDir / "home.nim"),
+        ProfileBody & "\n# source changed after the unchanged cache hit\n")
+      let changed = planClean(repro, box)
+      checkpoint(changed.res.output)
+      check changed.res.exitCode == 0
+      check changed.rec.cCommands.len > 0
+      check plannedResources(changed.res.output) ==
+        plannedResources(plan.res.output)
 
     test "e2e_nix_package_compiles_profile_linux: negative control - the " &
         "unwrapped engine in the same environment has no sources and refuses":
-      let pkg = buildNixPackage()
+      let pkg = nixPackageUnderTest()
       let engine = pkg / "bin" / ".reprobuild-wrapped"
       doAssert fileExists(engine), "the package has no unwrapped engine at " &
         engine & "; makeWrapper's hidden-name convention changed"
@@ -301,7 +305,7 @@ else:
 
     test "e2e_nix_package_compiles_profile_linux: negative control - a " &
         "REPRO_BOOTSTRAP_CC naming no file is refused by the profile compile":
-      let pkg = buildNixPackage()
+      let pkg = nixPackageUnderTest()
       let repro = pkg / "bin" / "repro"
       let box = newSandbox()
       defer: removeSandbox(box)

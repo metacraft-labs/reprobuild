@@ -11,8 +11,10 @@
 ## (reprobuild-pm/issues/
 ## 2026-09-24-no-conformance-check-runs-against-stdlib-tarball-arms.md).
 ##
-## This is the sweep that decides it, for the realizer that owns a plain
-## archive: the `uses:` provisioning edge. Per arm, through
+## This sweep checks every tarball shape through the shared provisioning
+## edge, for recipe and home consumers alike. It is the single exhaustive
+## sweep; home API equivalence is covered by local fixtures in
+## libs/repro_home_apply/tests/t_archive_conformance_shared.nim. Per arm, through
 ## ``conformTarballArm`` — which realizes with ``resolveTarballTool``, the same
 ## path `repro` uses — it requires that
 ##
@@ -38,7 +40,8 @@
 ## five arms, all of them live in production recipes, none reachable by any
 ## text check: ``npm`` and ``npx`` declared ``bin/npm`` / ``bin/npx``, which
 ## are symlinks in every POSIX Node tarball; ``perl`` and ``swig`` carried
-## pinned digests matching no bytes upstream has ever served; and ``nim``
+## pinned digests matching no bytes upstream has ever served (those source-tree
+## arms have since been replaced by Windows-only binary arms); and ``nim``
 ## exported ``bin/nimgrab``, which upstream's linux_x64 bundle does not
 ## contain.
 ##
@@ -46,21 +49,13 @@
 ##
 ## An arm declares the platform it is for, and only a host of that platform
 ## can realize it. A Linux run therefore decides nothing about a Windows arm —
-## and 134 of the catalog's 227 arms are Windows ones, including the ten core
+## and 138 of the catalog's 229 arms are Windows ones, including the ten core
 ## shell tools that point by hand-written path into one PortableGit archive.
 ## Full catalog coverage needs the suite to run on each supported platform;
 ## where it does not, those arms are unverified and the gap belongs to that
 ## platform's CI (``issues/
 ## 2026-10-07-reprobuilds-full-suite-has-no-windows-run.md``). This file says
 ## so rather than letting a green Linux run read as a green catalog.
-##
-## Arms the HOME ARCHIVE REALIZER owns (an ``extractPath`` flatten, an
-## installer, an MSYS2 merge, a non-SHA-256 digest) are reported here and
-## checked by ``libs/repro_home_apply/tests/
-## t_stdlib_catalog_archive_arms_realize.nim``, which applies that realizer's
-## own rule. Ownership is read structurally from
-## ``archiveInstallerFeatures``, so neither sweep decides it by parsing a
-## refusal.
 ##
 ## No mocks. A network test: it fetches each arm's archive once, keyed by the
 ## pinned digest. Point ``REPRO_CONFORMANCE_STORE`` at a directory that
@@ -75,14 +70,13 @@
 ## Falsifiable: restore ``executablePath = "bin/npm"`` on npm's POSIX arms and
 ## this sweep reports ``realize-failed`` for that arm with "extracted tarball
 ## declares executable bin/npm, which is present but reached through a
-## symlink"; revert perl's digest and it reports "all tarball archive URLs
-## failed for perl".
+## symlink"; change one hex digit of the sha256 on python3's Linux x86_64 arm
+## and it reports "all tarball archive URLs failed for python3".
 
 import std/[os, strutils, tempfiles, unittest]
 
 import repro_project_dsl
 import repro_interface_artifacts
-import repro_tool_profiles
 import repro_tool_profiles/tarball_conformance
 # The WHOLE catalog's arms, not the part some other consumer links. See that
 # module: an arm nothing imports reaches no sweep, and an offline gate
@@ -119,10 +113,11 @@ suite "stdlib catalog tarball arms realize on this host":
   # Run from a scratch directory, because resolving a profile RUNS the
   # package's configured probe (``collectConfiguredProbes`` -> ``runProbe``,
   # typically ``<exe> --version``) and a probe's working directory is the
-  # caller's. Measured: ``perl``'s arm declares the source tree's
-  # ``Configure`` as its executable, and ``Configure --version`` answers by
-  # creating a ``UU/`` scratch directory in the CWD — which, run from the
-  # repo root, lands an untracked directory in the checkout. The store root
+  # caller's. Measured while ``perl``'s arm still declared the source tree's
+  # ``Configure`` as its executable (it is now a Windows-only binary arm):
+  # ``Configure --version`` answered by creating a ``UU/`` scratch directory
+  # in the CWD — which, run from the repo root, landed an untracked directory
+  # in the checkout. Any probe may write where it stands. The store root
   # is resolved to an absolute path above, so nothing else here depends on
   # where this process stands.
   let originalDir = getCurrentDir()
@@ -135,7 +130,6 @@ suite "stdlib catalog tarball arms realize on this host":
 
     var totalArms = 0
     var hostArms = 0
-    var homeRealizerArms = 0
     var failures: seq[string] = @[]
     var seenPackages: seq[string] = @[]
 
@@ -163,17 +157,16 @@ suite "stdlib catalog tarball arms realize on this host":
         let verdict = conformTarballArm(useDef, arm, storeRoot)
         case verdict.verdict
         of acvOk:
-          discard
-        of acvOwnedByHomeRealizer:
-          inc homeRealizerArms
+          # A note here means the arm conforms but this host cannot start
+          # it (NixOS); the realizer refuses it at resolution instead.
+          if verdict.detail.len > 0:
+            checkpoint(label & ": " & verdict.detail)
         else:
           failures.add(label & "\n      " & $verdict.verdict & ": " &
             verdict.detail)
 
     checkpoint("arms on the interface: " & $totalArms)
     checkpoint("arms for this host: " & $hostArms)
-    checkpoint("of those, owned by the home archive realizer: " &
-      $homeRealizerArms)
     for failure in failures:
       checkpoint("NOT CONFORMANT: " & failure)
 

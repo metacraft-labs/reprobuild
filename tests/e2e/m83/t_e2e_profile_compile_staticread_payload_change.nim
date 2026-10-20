@@ -136,6 +136,18 @@ suite "profile compile edge: staticRead payload change":
     let savedPath = getEnv("PATH")
     putEnv("PATH", sb.spyDir & $PathSep & savedPath)
     defer: putEnv("PATH", savedPath)
+    # The edge takes `$REPRO_NIM_COMPILER` over `PATH`, so with it set the
+    # spy is bypassed and every spawn count below reads 0. `repro build`
+    # publishes it to every test it runs (`ensureBootstrapToolchainEnv`), so
+    # under the suite route this case used to fail at the cold compile's
+    # spawn check (measured on m1, 2026-10-14). Removed here exactly as
+    # `sandboxEnv` removes it for the CLI case; the spy forwards to that
+    # compiler (`realNimCompiler`), so the compile itself is unchanged.
+    let hadNimCompiler = existsEnv(ProfileNimCompilerEnvVar)
+    let savedNimCompiler = getEnv(ProfileNimCompilerEnvVar)
+    delEnv(ProfileNimCompilerEnvVar)
+    defer:
+      if hadNimCompiler: putEnv(ProfileNimCompilerEnvVar, savedNimCompiler)
     let opts = ProfileCompileOptions(stateDir: sb.stateDir,
       publicCliPath: reproBinary(), repoRoot: ProjectRoot)
 

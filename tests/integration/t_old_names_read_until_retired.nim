@@ -43,6 +43,7 @@ proc reproBinary(): string =
     "reprobuild.apps.repro")
 
 const newSettings = """schema = "reprobuild.workspace.settings.v1"
+push_gateway = "off"
 
 [projects]
 default = ["beta"]
@@ -64,6 +65,7 @@ auto_load_flake = true
 """
 
 const oldSettings = """schema = "reprobuild.workspace.bootstrap.v1"
+push_gateway = "off"
 
 [manifest]
 url = "https://git.example.invalid/acme/records.git"
@@ -138,6 +140,10 @@ proc enabledSet(root: string): seq[string] =
       result.add(line.strip().split('\t')[0])
 
 proc sameSettings(a, b: WorkspaceSettings) =
+  # Both fixtures declare the per-workspace push-gateway opt-out, so equality
+  # here proves it is read from (and carried over from) either file.
+  check a.push_gateway == some("off")
+  check a.push_gateway == b.push_gateway
   check a.projects == b.projects
   check a.records == b.records
   check a.develop == b.develop
@@ -170,8 +176,11 @@ suite "old names are read until retired":
     check s.schema == schemaWorkspaceSettingsV1
     check o.schema == schemaWorkspaceBootstrapV1
     sameSettings(s, o)
-    # The old `[manifest] branch` is also what the root mainline was read from.
-    check o.rootMainline == some("latest")
+    # The old `[manifest] branch` is also what the root mainline was read
+    # from — but only while that `[manifest]` store IS the root repo. When it
+    # names a separate record store the branch is the store's, not the root's.
+    check o.rootMainline(legacyStoreIsRoot = true) == some("latest")
+    check o.rootMainline(legacyStoreIsRoot = false) == none(string)
 
     # Both in one directory: the new name wins.
     writeFile(legacy / "repro-workspace.toml",
@@ -296,7 +305,10 @@ suite "old names are read until retired":
     check f1.repo.mainlineBranch == f2.repo.mainlineBranch
     check f1.repo.roleDecls == f2.repo.roleDecls
 
-    # A write after reading the v1 spelling produces the v2 spelling.
+    # Writing either record back produces the v1 spelling: neither declares
+    # anything repo.v1 cannot say (Workspace-Branch-Roles.md §6).
     let rewritten = scratch / "rewritten.toml"
     writeWorkspaceManifestFile(rewritten, repoFragmentText(f1))
-    check readFile(rewritten) == readFile(v2)
+    check readFile(rewritten) == readFile(v1)
+    writeWorkspaceManifestFile(rewritten, repoFragmentText(f2))
+    check readFile(rewritten) == readFile(v1)

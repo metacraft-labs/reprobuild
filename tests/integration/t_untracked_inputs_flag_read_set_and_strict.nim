@@ -1,5 +1,7 @@
-## TC-8d — the untracked-inputs flag (operator decision D5):
-## ``[certificates] untracked_inputs`` in ``projects/<project>.toml``.
+## TC-8d — the untracked-inputs flag (operator decision D5): the certificate
+## policy's ``untracked_inputs`` (``untrackedInputs`` in its declaration),
+## read from the ``[certificate_policy]`` snapshot in the tested content's
+## ``repro.lock`` (TC-9d; it was the project's ``[certificates]`` table).
 ##
 ## Untracked files are outside the content a certificate names, so a test that
 ## read one ran against something the certificate does not identify
@@ -18,8 +20,9 @@
 ##      runs ``cat`` on the scratch file, and ``readSetFromMonitorDepFile``
 ##      reads the depfile it wrote. The same capture of a command that read
 ##      only a tracked file withholds in neither mode.
-##   4. An invalid value (``"sometimes"``) → a loud error naming the key and
-##      the accepted values, and no certificate — never a silent default.
+##   4. An invalid value (``"sometimes"``) in the snapshot → a loud error
+##      naming the key and the accepted values, and no certificate — never a
+##      silent default. The pre-push gate refuses the commit carrying it too.
 ##
 ## Falsifiability: a "strict" that fell back to "read-set" issues in case 2;
 ## a judgement that ignored the read set issues in case 3.
@@ -61,8 +64,12 @@ suite "TC-8d — the untracked-inputs flag":
       removeDir(fx.certStore)
 
       # ---- 2. strict → withheld; without the file → issued ----------------
-      let projectToml = readFile(fx.sib.ws / "projects" / "app.toml")
-      fx.appendProjectToml("[certificates]\nuntracked_inputs = \"strict\"\n")
+      let strictSection = offPolicySection(puiStrict)
+      check "untracked_inputs = \"strict\"" in strictSection
+      fx.commitAppPolicySection(strictSection)
+      # The snapshot is part of the content: the certified content moved.
+      let strictContent = fx.workingTreeContentId(app)
+      check strictContent != content
       let res2 = fx.certify(fixtureJson)
       checkpoint(res2.output)
       check res2.code == 0
@@ -74,7 +81,7 @@ suite "TC-8d — the untracked-inputs flag":
       let res2b = fx.certify(fixtureJson)
       checkpoint(res2b.output)
       check res2b.code == 0
-      let strictIssued = fx.issuedFor(content)
+      let strictIssued = fx.issuedFor(strictContent)
       check strictIssued.len == 1
       if strictIssued.len == 1:
         check not strictIssued[0].vcs.untracked
@@ -113,16 +120,21 @@ suite "TC-8d — the untracked-inputs flag":
       check "no read set was captured" in none.note
 
       # ---- 4. an invalid value is a loud error ------------------------------
-      writeFile(fx.sib.ws / "projects" / "app.toml", projectToml)
-      fx.appendProjectToml("[certificates]\nuntracked_inputs = \"sometimes\"\n")
+      # Not renderable (the renderer only writes valid values), so the
+      # valid snapshot is edited by hand, as a hand-edited lock would be.
+      let bogus = offPolicySection().replace(
+        "untracked_inputs = \"read-set\"", "untracked_inputs = \"sometimes\"")
+      check "sometimes" in bogus
+      fx.commitAppPolicySection(bogus)
       let res4 = fx.certify(fixtureJson)
       checkpoint(res4.output)
       check not fx.anyCertificateIssued()
       check "no certificate" in res4.output
       check "untracked_inputs" in res4.output
       check "sometimes" in res4.output
-      check "read-set | strict" in res4.output
-      # The pre-push gate, which resolves the same table, refuses loudly too.
+      check "read-set, strict" in res4.output
+      # The pre-push gate, which reads the same snapshot out of the pushed
+      # commit, refuses loudly too (a malformed policy is never "off").
       let gate = runCmd(q(fx.sib.repro) & " check --mode=pre-push" &
         " --workspace-root=" & q(fx.sib.ws) & " --current-repo=" & q(app))
       checkpoint(gate.output)

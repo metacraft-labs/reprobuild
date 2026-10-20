@@ -78,6 +78,13 @@ when defined(reproProviderMode):
     namespace & ":output:" & sanitizeNodePart(actionId) & ":" &
       sanitizeNodePart(output)
 
+  proc serviceNode(namespace, serviceName: string): string =
+    ## Shared-Development-Services L1 — the ``gnkService`` node id.
+    ## Mirrors ``actionNode`` / ``outputNode``: namespace-scoped and
+    ## sanitised, so two packages in one namespace with the same service
+    ## name collide loudly rather than silently sharing a node.
+    namespace & ":service:" & sanitizeNodePart(serviceName)
+
   proc defaultBuildActionNode(namespace: string): string =
     namespace & ":metadata:default-build-action"
 
@@ -127,6 +134,29 @@ when defined(reproProviderMode):
     finally:
       currentProviderProjectRoot = ""
       clearCurrentOwningPackageOverride()
+    # Shared-Development-Services L1 — re-evaluate this package's
+    # ``service <ident>:`` bodies now that ``buildProc`` has run.
+    #
+    # A service's rendered configuration is a BUILD OUTPUT, and in
+    # provider mode the ``build:`` body does not execute at module-init
+    # time (``emitM4BuildActions`` gates the splice on ``not
+    # defined(reproProviderMode)``) — it runs in the line above. So a
+    # service body evaluated only at module init would read an unassigned
+    # handle and record an empty path with no diagnostic. The re-run
+    # replaces this package's registry bucket; packages that declared no
+    # service keep theirs untouched.
+    # Root fragment only, for the same reason the emission below is: a
+    # structural-iterator MEMBER's ``buildProc`` is that member's lift, not
+    # the package's ``build:`` body, so re-running the service bodies there
+    # would re-record them against whatever the last ROOT invocation left in
+    # the module-level handles.
+    let isRootFragment = request.entryPointId == rootEntryPointId(pkg)
+    if isRootFragment:
+      rerunServiceDeclarators(pkg.packageName)
+      # #498: the build lane folds the deferred argv slots too, so the
+      # two lanes cannot disagree about one service's command line. The
+      # re-run above rebuilt the templates; this fills them.
+      discard foldDeferredServiceArgv(pkg.packageName)
     let actions = inferDeclaredActionDeps(
       registeredBuildActions(), request.arguments)
     var targets = registeredBuildTargets()
@@ -206,6 +236,29 @@ when defined(reproProviderMode):
         kind: gnkMetadata,
         stableName: "reprobuild.certificate-export-table.v1",
         payload: certificateExportTablePayload(certificateExports)))
+    # Test-Certificates TC-9b: the enacted branch policy. Every name it
+    # requires must be one this package's table now holds: the compile-time
+    # check covered the literal declarations, and this one covers `test`
+    # (possibly the implicit marking) and names computed by the body. The
+    # policy then travels as a metadata node carrying the same emission the
+    # lock writer reads, so a reader holding this graph (the certifying
+    # run's lock-update node) needs no second provider run. Root fragment
+    # only: a structural member is not the package.
+    var enactedPolicy: BranchCertificatePolicy
+    if isRootFragment and
+        enactedCertificatePolicy(pkg.packageName, enactedPolicy):
+      var certificateNames: seq[string]
+      for entry in certificateExports.entries:
+        certificateNames.add(entry.name)
+      let undeclared = undeclaredRequirement(enactedPolicy, certificateNames)
+      if undeclared.len > 0:
+        raise newException(ValueError, undeclared)
+      result.nodes.add(GraphNode(
+        id: request.namespace & ":metadata:certificate-policy",
+        kind: gnkMetadata,
+        stableName: CertificatePolicyGraphStableName,
+        payload: renderCertificatePolicyEmission(enactedPolicy,
+          pkg.packageName)))
     # Named-Runnable-Edges N2: carry the resource-lane graph (the
     # ``stateGroup`` resource subgraph + membership) that this package's
     # ``buildProc()`` collected to the CLI, so the ``repro run`` leased-
@@ -268,7 +321,355 @@ when defined(reproProviderMode):
           identity: output,
           cleanupPolicy: cplDeleteWhenUnclaimed,
           payload: action.id))
+    # Shared-Development-Services L1 — the service lane.
+    #
+    # ``GraphNodeKind.gnkService`` existed from the start of the provider
+    # protocol and nothing had ever emitted one: a service reached the
+    # engine only as ``DevEnvServiceMetadata.metadata``, the opaque JSON
+    # string ``Shared-Development-Services.md`` §1 names as the defect
+    # ("a name, an activity list and an **opaque metadata string** the
+    # engine interprets. There is no composition, no typed reference").
+    #
+    # Each service now travels as a TYPED record plus real edges:
+    #
+    #   * ``gekDependsOn`` service -> producing action, once per distinct
+    #     producer, so the service orders after everything it reads;
+    #   * ``gekConsumes`` service -> generated output, once per declared
+    #     output path it references on argv, declares as a
+    #     ``runtimeFile`` or watches with ``on change``.
+    #
+    # An edge is emitted only when the fragment actually contains the
+    # producing action; a service whose handle came from another package
+    # records the producer in its payload and is left to L3's interface
+    # lift rather than being given a dangling edge here.
+    # ROOT FRAGMENT ONLY. ``foreachDispatch`` also routes through this proc,
+    # once per structural-iterator MEMBER (``foreachDispatchCode`` in
+    # ``macros_b.nim``), and every member fragment shares the root's
+    # namespace -- so emitting here unconditionally would put N+1 copies of
+    # the same service node, under the same node id, into one snapshot. A
+    # service belongs to the PACKAGE, not to a member of one of its
+    # iterations, so it is emitted exactly where the package's own build is.
+    var fragmentActionIds: seq[string] = @[]
+    for action in actions:
+      fragmentActionIds.add(action.id)
+    for service in (if isRootFragment:
+                      registeredServices(pkg.packageName)
+                    else:
+                      @[]):
+      if service.serviceName.len == 0:
+        continue
+      let svcNodeId = serviceNode(request.namespace, service.serviceName)
+      result.nodes.add(GraphNode(
+        id: svcNodeId,
+        kind: gnkService,
+        stableName: service.serviceName,
+        payload: servicePayload(service)))
+      for producer in service.serviceProducerActionIds():
+        if fragmentActionIds.find(producer) < 0:
+          continue
+        result.edges.add(GraphEdge(
+          id: request.namespace & ":service-depends:" &
+            sanitizeNodePart(service.serviceName) & ":" &
+            sanitizeNodePart(producer),
+          kind: gekDependsOn,
+          fromNode: svcNodeId,
+          toNode: actionNode(request.namespace, producer)))
+      for consumed in service.serviceConsumedOutputs():
+        if fragmentActionIds.find(consumed.actionId) < 0:
+          continue
+        result.edges.add(GraphEdge(
+          id: request.namespace & ":service-consumes:" &
+            sanitizeNodePart(service.serviceName) & ":" &
+            sanitizeNodePart(consumed.actionId) & ":" &
+            sanitizeNodePart(consumed.path),
+          kind: gekConsumes,
+          fromNode: svcNodeId,
+          toNode: outputNode(request.namespace, consumed.actionId,
+            consumed.path)))
     result.fragmentDigest = computeGraphFragmentDigest(result)
+
+
+  proc typedServiceScopeWord(scope: ServiceScope): string =
+    ## The scope's recipe spelling.
+    ##
+    ## DERIVED FROM THE ENUM NAME, by the same formula
+    ## `repro_resources/service_identity.nim`'s `scopeWord` uses, and
+    ## NOT by a `case` listing the four words. A `case` here would be a
+    ## second spelling of one fact and would read as correct while
+    ## disagreeing; the derivation cannot. `repro_resources` DEPENDS ON
+    ## this library so its proc cannot be imported, which is why the
+    ## formula is repeated rather than the call -- and
+    ## `t_l8_typed_service_facts_reach_the_dev_env_artifact.nim` asserts
+    ## the two agree for every value of the enum, which a test can do
+    ## because a test may import both.
+    ($scope)[3 .. ^1].normalize
+
+  proc typedServiceIdentityKindWord(kind: ServiceIdentityKind): string =
+    ## `derived` / `stable`. Same derivation, same reason.
+    ($kind)[3 .. ^1].normalize
+
+  proc typedServiceCommand(service: DslServiceDef): seq[string] =
+    ## The typed `service` block's own command line: its `executable`
+    ## followed by its `args`, one token per element.
+    ##
+    ## Empty when the service declared no executable. An executable with
+    ## an empty path contributes NO token rather than an empty one: a
+    ## supervisor handed `["", "--flag"]` would try to exec the empty
+    ## string, which is a worse failure than "this service declares no
+    ## command".
+    if service.executableTyped.path.len > 0:
+      result.add(service.executableTyped.path)
+    elif service.executableTyped.executableName.len > 0:
+      result.add(service.executableTyped.executableName)
+    else:
+      return @[]
+    for arg in service.typedArgs:
+      result.add(arg.value)
+
+  proc typedServiceConsumedActionIds(service: DslServiceDef): seq[string] =
+    ## Shared-Development-Services F1 (§4.8) — the ids of the build
+    ## actions whose outputs THIS service names, which is the edge the
+    ## dev session orders on.
+    ##
+    ## ONE DERIVATION OF "CONSUMES", READ FROM THE TYPED EDGE. `args
+    ## <output>.path` and `runtimeFile <output>` each record the
+    ## producing action's id on the service record, so this is an
+    ## identifier match rather than a search for a path in argv text.
+    ## `buildPackageDevEnv`'s PRODUCED-AND-NEVER-CONSUMED check reads
+    ## this same proc over every service of the package: the diagnostic
+    ## that refuses an unconsumed action and the ordering that builds a
+    ## consumed one must not be able to disagree about what consumption
+    ## is, and two derivations of it is exactly how they would.
+    ##
+    ## Order is `args` first then `runtimeFile`, each in declaration
+    ## order, deduplicated -- a stable order so the field is a function
+    ## of the recipe and not of a table's iteration.
+    for arg in service.typedArgs:
+      if arg.producerActionId.len > 0 and
+         arg.producerActionId notin result:
+        result.add(arg.producerActionId)
+    for runtimeFile in service.runtimeFiles:
+      if runtimeFile.producerActionId.len > 0 and
+         runtimeFile.producerActionId notin result:
+        result.add(runtimeFile.producerActionId)
+
+  proc typedServiceReadinessWord(kind: ServiceReadinessKind): string =
+    ## Shared-Development-Services L9: the wire word for a typed
+    ## `readiness` probe, or `""` when the body declared none.
+    ##
+    ## The words are the ones `readinessOk` in
+    ## `repro_cli_support/dev_session.nim` switches on, normalized by
+    ## that proc, which is why `fileExists` can be written here in the
+    ## author's camelCase and still match. There is deliberately no
+    ## `else` arm that invents a word: a kind this proc did not expect
+    ## reports UNDECLARED, which sends the supervisor to the
+    ## placeholder's probe rather than to a probe that can never pass.
+    case kind
+    of srkUnset: ""
+    of srkNone: "none"
+    of srkFileExists: "fileExists"
+    of srkHttpGet: "httpGet"
+
+  proc providerSharedResolutions(packageName: string):
+      seq[DevEnvSharedResolution] =
+    ## Shared-Development-Services D-SS11 (§4.6): project this package's
+    ## resolver calls onto the provider wire.
+    ##
+    ## FILTERED ON THE CONSUMING PACKAGE, for the reason
+    ## `toProjectInterface`'s service fold is: one process may lower
+    ## several `package` blocks (a sibling shim `include`), and a
+    ## resolution recorded by one package must not travel on another's
+    ## result. The filter is the `consumerPackage` the dev-env lowering's
+    ## own ambient set, so it names the package whose `enable` site wrote
+    ## the resolver.
+    ##
+    ## THE ENUMS CROSS AS THEIR OWN NAMES (`$`), not as ordinals: a
+    ## reordered enum would silently re-map an ordinal, and the reading
+    ## side refuses an unknown name rather than defaulting it. `coReplace`
+    ## is ordinal 0 and is the one operation a consumer may not use, so a
+    ## dropped ordinal would decode to a destructive contribution.
+    for resolution in registeredSharedServiceResolutions():
+      if resolution.consumerPackage != packageName:
+        continue
+      var row = DevEnvSharedResolution(
+        ownerPackage: resolution.declaration.ownerPackage,
+        serviceName: resolution.declaration.serviceName,
+        activityName: resolution.declaration.activityName,
+        ownerRecipeDir: resolution.declaration.ownerRecipeDir,
+        consumerPackage: resolution.consumerPackage,
+        # Derived here from the SAME proc `setActiveServiceInstance`
+        # derives the owner's instance environment from, so the two
+        # sides of one instance key cannot be read differently.
+        environment: selectedEnvironmentName(),
+        sourceFile: resolution.sourceFile,
+        sourceLine: int64(resolution.sourceLine))
+      for c in resolution.contributions:
+        row.contributionPoints.add(c.point)
+        row.contributionOperations.add($c.operation)
+        row.contributionPrecedences.add($c.precedence)
+        row.contributionSites.add(
+          if c.sourceFile.len == 0: ""
+          else: c.sourceFile & ":" & $c.sourceLine)
+        for member in c.members:
+          row.contributionMemberPoints.add(c.point)
+          row.contributionMembers.add(member)
+      result.add(row)
+
+  proc mergeTypedServiceFacts(packageName: string;
+                              selected: openArray[string];
+                              services: seq[DevEnvServiceMetadata]):
+                              seq[DevEnvServiceMetadata] =
+    ## Shared-Development-Services L8 — CLOSE THE PLUMBING GAP L7's
+    ## review assigned here.
+    ##
+    ## Before this, the typed `service` block and the `devEnv:`
+    ## `servicePlaceholder` were two disjoint channels joined by nothing
+    ## but a NAME, and only the second reached `DevEnvArtifact.services`
+    ## -- the one channel the dev-session supervisor reads. So a recipe
+    ## that wanted a shared instance declared its service twice.
+    ##
+    ## This proc is the join, and it joins ON THE NAME because the name
+    ## is what both channels already agree on: `servicePlaceholder
+    ## "zitadel"` and `service zitadel:` are the same service by the
+    ## author's reckoning, and nothing else in either record could
+    ## identify the other.
+    ##
+    ## TYPED FACTS WIN, AND A PLACEHOLDER CANNOT RESTATE THEM. The typed
+    ## block is the declaration; a placeholder carries command and
+    ## readiness. `dev_session.nim` already REFUSES `identity` and
+    ## `scope` keys inside the placeholder's JSON by name, so there is
+    ## no second source for either to disagree with.
+    ##
+    ## A TYPED SERVICE WITH NO PLACEHOLDER IS APPENDED rather than
+    ## dropped, which is the half that makes "declared once" true: the
+    ## summary then carries the typed command and the supervisor can
+    ## launch it. Appended AFTER the placeholders, in declaration order,
+    ## so an existing recipe's service list keeps its order.
+    result = services
+    for typed in registeredServices(packageName):
+      if typed.serviceName.len == 0:
+        continue
+      var compatibility = 0'u32
+      var declaringActivity = ""
+      for iface in registeredServiceInterfaces():
+        if iface.packageName == packageName and iface.name == typed.serviceName:
+          compatibility = iface.compatibilityMajor
+          declaringActivity = iface.activityName
+      # THE ACTIVITY GATE, and it is not optional: a typed `service`
+      # declared inside an activity reaches this record only when that
+      # activity is SELECTED.
+      #
+      # `DslServiceDef` carries no activity name -- L2 extracted the
+      # service emitter precisely so the package-level and the dev-env
+      # walkers share it, and only the second knows one -- so the
+      # activity is read from the LIFTED row, which has carried
+      # `activityName` since L3. One reading, not a second copy.
+      #
+      # WHY IT CANNOT BE LEFT TO `registeredServices` BEING EMPTY. It is
+      # not empty: `rerunServiceDeclarators` re-runs every declarator
+      # registered in this process, so a process that resolved activity
+      # `api` and then resolved activity `worker` has BOTH services in
+      # the registry on the second resolve. Measured as a real regression
+      # against `da3916089`: without this gate,
+      # `t_activity_params_reach_the_services_they_declare`'s "an
+      # unselected activity still gates its placeholder out" saw 3
+      # services where it declares 0, because three typed services from
+      # earlier resolutions were appended. A placeholder's gate is its
+      # `activityRequirements`; this is the typed lane's equivalent.
+      if declaringActivity.len == 0:
+        # A PACKAGE-LEVEL `service` is not a dev-env session service and
+        # does not belong on this channel at all.
+        #
+        # `devEnv:` is where a session's services are declared; a
+        # package-level `service` block is the deployment lane (its
+        # `execStart` / `wantedBy` / `restart` setters are systemd's) and
+        # the supervisor must not be handed one to run. Measured as a
+        # real regression against `da3916089`: appending them made
+        # `t_service_lowers_typed_edges_into_the_graph_fragment`'s "a
+        # placeholder is activity-gated exactly as before" see 1 service
+        # where it declares 0 -- a package-level `sso` with no activity
+        # requirement, i.e. ungated, which the supervisor would have
+        # started on every `repro up`.
+        #
+        # So the facts this proc routes are an ACTIVITY's typed
+        # services, and that is also exactly the set §4 keys an instance
+        # over. The L1 claim that "the typed service lane and the
+        # placeholder lane are disjoint" therefore still holds at
+        # package level and no longer holds inside an activity, which is
+        # what L8 set out to change.
+        continue
+      if not activityRecordIsActive(@[declaringActivity], selected):
+        continue
+      # Shared-Development-Services L8: resolve and FOLD every
+      # `converge <point>` now, so the members this service must
+      # register travel on the record that reaches the CLI. Folding here
+      # rather than at `repro up` time is the point of §7's split: the
+      # member SET is configuration, resolved at evaluation; only the
+      # minted identifier is a resource attribute computed later.
+      var points: seq[string] = @[]
+      var registrationMembers: seq[string] = @[]
+      var registrationContributors: seq[string] = @[]
+      for bareName in typed.convergePoints:
+        let key = resolveServiceConvergePoint(packageName, bareName)
+        points.add(key)
+        for pair in contributionMemberAttribution(key):
+          registrationMembers.add(pair.member)
+          registrationContributors.add(pair.package)
+      var landed = false
+      for existing in result.mitems:
+        if existing.name != typed.serviceName:
+          continue
+        existing.identityKind = typedServiceIdentityKindWord(typed.identity.kind)
+        existing.identityStableId = typed.identity.stableId
+        existing.scope = typedServiceScopeWord(typed.scope)
+        existing.compatibilityMajor = compatibility
+        existing.typedCommand = typedServiceCommand(typed)
+        existing.registrationPoints = points
+        existing.registrationMembers = registrationMembers
+        existing.registrationContributors = registrationContributors
+        # Shared-Development-Services L9. The same ONE-WAY shape L8
+        # gave the command: the typed facts are written onto the
+        # record, and `serviceSpecFromSummary` prefers whatever the
+        # PLACEHOLDER stated and falls back to these. A recipe carrying
+        # both is mid-migration, and silently preferring the typed side
+        # would change what an existing recipe supervises.
+        existing.readinessKind =
+          typedServiceReadinessWord(typed.readiness.kind)
+        existing.readinessPath = typed.readiness.path
+        existing.readinessUrl = typed.readiness.url
+        existing.readinessTimeoutMs = int64(typed.readiness.timeoutMs)
+        existing.workingDirectory = typed.workingDirectory
+        existing.stateDirectories = typed.stateDirectories
+        existing.instanceDeclared = typed.instance.declared
+        existing.instanceLeaseTtlSeconds = typed.instance.leaseTtlSeconds
+        existing.instanceEnvironment = typed.instance.environment
+        # F1 (§4.8): the edge to the actions this service consumes.
+        existing.consumedActionIds = typedServiceConsumedActionIds(typed)
+        landed = true
+      if landed:
+        continue
+      result.add(DevEnvServiceMetadata(
+        name: typed.serviceName,
+        activityRequirements: @[],
+        metadata: "",
+        identityKind: typedServiceIdentityKindWord(typed.identity.kind),
+        identityStableId: typed.identity.stableId,
+        scope: typedServiceScopeWord(typed.scope),
+        compatibilityMajor: compatibility,
+        typedCommand: typedServiceCommand(typed),
+        registrationPoints: points,
+        registrationMembers: registrationMembers,
+        registrationContributors: registrationContributors,
+        readinessKind: typedServiceReadinessWord(typed.readiness.kind),
+        readinessPath: typed.readiness.path,
+        readinessUrl: typed.readiness.url,
+        readinessTimeoutMs: int64(typed.readiness.timeoutMs),
+        workingDirectory: typed.workingDirectory,
+        stateDirectories: typed.stateDirectories,
+        instanceDeclared: typed.instance.declared,
+        instanceLeaseTtlSeconds: typed.instance.leaseTtlSeconds,
+        instanceEnvironment: typed.instance.environment,
+        consumedActionIds: typedServiceConsumedActionIds(typed)))
 
   proc buildPackageDevEnv*(pkg: PackageDef; request: ProviderGraphRequest;
                            devEnvProc: proc ()): DevEnvResult {.dynOrStatic.} =
@@ -282,6 +683,12 @@ when defined(reproProviderMode):
     # case.
     resetProviderEvaluationInputRegistry()
     resetDevEnvRegistry()
+    # Shared-Development-Services F1: the action registry is reset HERE
+    # for the same reason `buildPackageFragment` resets it at its own
+    # start -- so the actions this evaluation reports are exactly the
+    # ones this `devEnv:` body registered, and not a previous request's
+    # in the same provider process.
+    resetBuildActionRegistry()
     currentProviderProjectRoot = request.arguments
     try:
       if devEnvProc != nil:
@@ -289,7 +696,112 @@ when defined(reproProviderMode):
     finally:
       currentProviderProjectRoot = ""
 
+    # Shared-Development-Services, reprobuild issue #498 —
+    # FINALIZATION, and it must be HERE: after every activity body in
+    # the package has run and before anything reads a service's argv.
+    #
+    # `args <contributionPoint>` records a deferred slot rather than the
+    # point's folded members, because a contribution made by one
+    # activity's body to another activity's point lands at a moment
+    # decided by source order. Folding it here puts the argv fold at the
+    # same instant as `mergeTypedServiceFacts`' fold of
+    # `registrationMembers` below, so one artifact cannot state two
+    # different member sets for one point -- which is what #498
+    # measured, with the launcher started without a member the converge
+    # lane simultaneously handed to the registrar.
+    #
+    # Unconditional and not gated on the SELECTED activity: an
+    # unselected activity's service is gated out of `result.services` by
+    # `mergeTypedServiceFacts`' activity gate, and a registry row whose
+    # argv was left half-folded is a row a later re-resolution in the
+    # same process would read.
+    discard foldDeferredServiceArgv(pkg.packageName)
+
+    # ── Shared-Development-Services F1 — THE ACTIONS CHANNEL ─────────
+    #
+    # L9's F1: `renderConfigFile` registers a build ACTION, and
+    # `DevEnvResult` had no actions field, "so an action registered
+    # while the `devEnv:` body runs reaches nothing". Observed end to
+    # end: the session came up, the daemon reported `Materialise ok`,
+    # and `etc/sso/` did not exist -- the path reached argv and the file
+    # never did. F1's own closing sentence names the fix: "an actions
+    # channel on the dev-env entry point".
+    #
+    # The actions travel as the `gnkAction` nodes the BUILD lane already
+    # produces, from the same `actionPayload` codec and the same
+    # `actionNode` id derivation, so there is one representation of an
+    # action and nothing for a second one to drift from.
+    let devEnvActions = registeredBuildActions()
+    var devEnvActionNodes: seq[GraphNode] = @[]
+    for action in devEnvActions:
+      devEnvActionNodes.add(GraphNode(
+        id: actionNode(request.namespace, action.id),
+        kind: gnkAction,
+        stableName: action.id,
+        payload: actionPayload(action)))
+    # AN ACTION NOTHING CONSUMES IS AN ERROR, NAMED. This campaign's
+    # dominant failure is a construct declared, apparently wired and
+    # silently dropped, and carrying the actions without this check
+    # would move that failure one hop downstream instead of closing it:
+    # a recipe would declare a `renderConfigFile`, the node would reach
+    # the caller, nothing would reference its output, and the file would
+    # again not be there at launch.
+    #
+    # CONSUMPTION IS READ FROM THE TYPED EDGE, not from a path string.
+    # `args <buildOutput>.path` and `runtimeFile <buildOutput>` both
+    # record the producing action's id on the service record
+    # (`ServiceArgDef.producerActionId` /
+    # `ServiceRuntimeFileDef.producerActionId`), so "consumed" is an
+    # identifier match and a renamed output cannot satisfy it by
+    # accident.
+    #
+    # EVERY SERVICE THIS PACKAGE REGISTERED COUNTS, not only those of
+    # the selected activity. That direction is deliberate: it
+    # OVER-counts consumption, so the diagnostic cannot fire for an
+    # action that some other activity of the same package legitimately
+    # consumes. Narrowing it to the selected activity would make the
+    # error depend on `--activity`, which is a different claim than the
+    # one this check makes.
+    #
+    # AND IT IS THE SAME DERIVATION THE SERVICE RECORD CARRIES.
+    # `typedServiceConsumedActionIds` is read here and at the two sites
+    # in `mergeTypedServiceFacts` that fill
+    # `DevEnvServiceMetadata.consumedActionIds`, so the diagnostic that
+    # refuses an unconsumed action and the ordering the dev session
+    # derives from the same field cannot disagree about what
+    # consumption is. It was open-coded here before F1's second half,
+    # and two copies of this loop is precisely the drift this campaign
+    # keeps finding.
+    var consumedActionIds: seq[string] = @[]
+    for typed in registeredServices(pkg.packageName):
+      for id in typedServiceConsumedActionIds(typed):
+        if id notin consumedActionIds:
+          consumedActionIds.add(id)
+    for action in devEnvActions:
+      if action.id in consumedActionIds:
+        continue
+      diagnostic(
+        "dev-env action `" & action.id & "` of package `" &
+        pkg.packageName & "` is PRODUCED AND NEVER CONSUMED: nothing " &
+        "this dev-env declares reaches it. A build action registered " &
+        "inside a `devEnv:` body exists to produce a file something " &
+        "else then uses -- a service's `args <output>.path` or its " &
+        "`runtimeFile <output>` -- and no service of this package " &
+        "names it, so the file would be built for nobody or (before " &
+        "Shared-Development-Services F1's actions channel existed) not " &
+        "built at all while its path still reached argv. Refused as an " &
+        "ERROR rather than reported as information: this is the " &
+        "declared-looks-wired-silently-dropped shape, and an `info` " &
+        "line in a log is how it stayed invisible. Pass the output on " &
+        "a service's argv, declare it as a `runtimeFile`, or delete " &
+        "the action.",
+        dedsError)
+
     let selectedActivities = selectedActivityList(request.activity)
+    # An activity selector naming nothing this dev-env declares is an
+    # ERROR, recorded before `diagnostics:` below reads the registry (see
+    # `reportUnknownActivitySelection`).
+    reportUnknownActivitySelection(pkg.packageName, selectedActivities)
     result = DevEnvResult(
       schemaVersion: 1'u32,
       providerArtifactId: request.providerArtifactId,
@@ -302,8 +814,14 @@ when defined(reproProviderMode):
       shellOps: activeShellOps(selectedActivities),
       toolRequirements: activeToolRequirements(selectedActivities),
       tasks: activeTasks(selectedActivities),
-      services: activeServices(selectedActivities),
-      diagnostics: devEnvDiagnosticRegistry)
+      services: mergeTypedServiceFacts(pkg.packageName,
+        selectedActivities, activeServices(selectedActivities)),
+      diagnostics: devEnvDiagnosticRegistry,
+      sharedResolutions: providerSharedResolutions(pkg.packageName),
+      # F1: the actions channel. Collected above -- before this
+      # constructor, because the unconsumed-action check RECORDS A
+      # DIAGNOSTIC and `diagnostics:` above reads the registry.
+      actions: devEnvActionNodes)
     if fileExists(extendedPath(pkg.sourceFile)):
       let input = fileReadInput(pkg.sourceFile)
       result.evaluationInputs.add(input)

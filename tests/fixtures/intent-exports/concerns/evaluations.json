@@ -1,0 +1,2064 @@
+{
+  "m1": {
+    "x86_64-linux": {
+      "target": "x86_64-linux",
+      "host": "m1",
+      "activities": [
+        "default",
+        "desktop"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "packages",
+          "resolved": true
+        },
+        {
+          "name": "busybox",
+          "version": "",
+          "binaries": [],
+          "activity": "desktop",
+          "concern": "packages",
+          "resolved": false
+        },
+        {
+          "name": "patchelf",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "packages",
+          "resolved": false
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm7/app.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "gm7 = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm7/app.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM7_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM7_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm7",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm7"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM7=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "store"
+          },
+          "guard": null
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      },
+      "applies": [
+        "applications",
+        "environment"
+      ]
+    },
+    "aarch64-linux": {
+      "target": "aarch64-linux",
+      "host": "m1",
+      "activities": [
+        "default",
+        "desktop"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "packages",
+          "resolved": true
+        },
+        {
+          "name": "busybox",
+          "version": "",
+          "binaries": [],
+          "activity": "desktop",
+          "concern": "packages",
+          "resolved": false
+        },
+        {
+          "name": "patchelf",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "packages",
+          "resolved": false
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm7/app.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "gm7 = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm7/app.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM7_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM7_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm7",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm7"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM7=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "store"
+          },
+          "guard": null
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      },
+      "applies": [
+        "applications",
+        "environment"
+      ]
+    },
+    "x86_64-darwin": {
+      "target": "x86_64-darwin",
+      "host": "m1",
+      "activities": [
+        "default",
+        "desktop"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "packages",
+          "resolved": true
+        },
+        {
+          "name": "busybox",
+          "version": "",
+          "binaries": [],
+          "activity": "desktop",
+          "concern": "packages",
+          "resolved": false
+        },
+        {
+          "name": "gm7app",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "applications",
+          "resolved": true
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm7/app.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "gm7 = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm7/app.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM7_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM7_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm7",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm7"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM7=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "store"
+          },
+          "guard": null
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      },
+      "applies": [
+        "applications",
+        "environment"
+      ]
+    },
+    "aarch64-darwin": {
+      "target": "aarch64-darwin",
+      "host": "m1",
+      "activities": [
+        "default",
+        "desktop"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "packages",
+          "resolved": true
+        },
+        {
+          "name": "busybox",
+          "version": "",
+          "binaries": [],
+          "activity": "desktop",
+          "concern": "packages",
+          "resolved": false
+        },
+        {
+          "name": "gm7app",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "applications",
+          "resolved": true
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm7/app.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "gm7 = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm7/app.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM7_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM7_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm7",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm7"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM7=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "store"
+          },
+          "guard": null
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      },
+      "applies": [
+        "applications",
+        "environment"
+      ]
+    },
+    "x86_64-windows": {
+      "target": "x86_64-windows",
+      "host": "m1",
+      "activities": [
+        "default",
+        "desktop"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "packages",
+          "resolved": true
+        },
+        {
+          "name": "busybox",
+          "version": "",
+          "binaries": [],
+          "activity": "desktop",
+          "concern": "packages",
+          "resolved": false
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm7/app.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "gm7 = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm7/app.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM7_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM7_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm7",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm7"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM7=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "store"
+          },
+          "guard": null
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      },
+      "applies": [
+        "applications",
+        "environment"
+      ]
+    },
+    "aarch64-windows": {
+      "target": "aarch64-windows",
+      "host": "m1",
+      "activities": [
+        "default",
+        "desktop"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "packages",
+          "resolved": true
+        },
+        {
+          "name": "busybox",
+          "version": "",
+          "binaries": [],
+          "activity": "desktop",
+          "concern": "packages",
+          "resolved": false
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm7/app.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "gm7 = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm7/app.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM7_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM7_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm7",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm7"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM7=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "store"
+          },
+          "guard": null
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      },
+      "applies": [
+        "applications",
+        "environment"
+      ]
+    }
+  },
+  "home-pc": {
+    "x86_64-linux": {
+      "target": "x86_64-linux",
+      "host": "home-pc",
+      "activities": [
+        "default",
+        "desktop"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "busybox",
+          "version": "",
+          "binaries": [],
+          "activity": "desktop"
+        },
+        {
+          "name": "patchelf",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm7/app.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "gm7 = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm7/app.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM7_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM7_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm7",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm7"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM7=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "store"
+          },
+          "guard": null
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
+    },
+    "aarch64-linux": {
+      "target": "aarch64-linux",
+      "host": "home-pc",
+      "activities": [
+        "default",
+        "desktop"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "busybox",
+          "version": "",
+          "binaries": [],
+          "activity": "desktop"
+        },
+        {
+          "name": "patchelf",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm7/app.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "gm7 = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm7/app.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM7_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM7_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm7",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm7"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM7=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "store"
+          },
+          "guard": null
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
+    },
+    "x86_64-darwin": {
+      "target": "x86_64-darwin",
+      "host": "home-pc",
+      "activities": [
+        "default",
+        "desktop"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "busybox",
+          "version": "",
+          "binaries": [],
+          "activity": "desktop"
+        },
+        {
+          "name": "gm7app",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm7/app.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "gm7 = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm7/app.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM7_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM7_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm7",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm7"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM7=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "store"
+          },
+          "guard": null
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
+    },
+    "aarch64-darwin": {
+      "target": "aarch64-darwin",
+      "host": "home-pc",
+      "activities": [
+        "default",
+        "desktop"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "busybox",
+          "version": "",
+          "binaries": [],
+          "activity": "desktop"
+        },
+        {
+          "name": "gm7app",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm7/app.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "gm7 = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm7/app.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM7_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM7_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm7",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm7"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM7=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "store"
+          },
+          "guard": null
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
+    },
+    "x86_64-windows": {
+      "target": "x86_64-windows",
+      "host": "home-pc",
+      "activities": [
+        "default",
+        "desktop"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "busybox",
+          "version": "",
+          "binaries": [],
+          "activity": "desktop"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm7/app.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "gm7 = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm7/app.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM7_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM7_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm7",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm7"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM7=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "store"
+          },
+          "guard": null
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
+    },
+    "aarch64-windows": {
+      "target": "aarch64-windows",
+      "host": "home-pc",
+      "activities": [
+        "default",
+        "desktop"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default"
+        },
+        {
+          "name": "busybox",
+          "version": "",
+          "binaries": [],
+          "activity": "desktop"
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm7/app.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "gm7 = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm7/app.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM7_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM7_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm7",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm7"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM7=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "store"
+          },
+          "guard": null
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      }
+    }
+  },
+  "server": {
+    "x86_64-linux": {
+      "target": "x86_64-linux",
+      "host": "server",
+      "activities": [
+        "default"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "packages",
+          "resolved": true
+        },
+        {
+          "name": "patchelf",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "packages",
+          "resolved": false
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm7/app.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "gm7 = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm7/app.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM7_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM7_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm7",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm7"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM7=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "store"
+          },
+          "guard": null
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      },
+      "applies": [
+        "packages"
+      ],
+      "profileBin": {
+        "base": "xdgStateHome",
+        "path": "repro/home/current/bin"
+      }
+    },
+    "aarch64-linux": {
+      "target": "aarch64-linux",
+      "host": "server",
+      "activities": [
+        "default"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "packages",
+          "resolved": true
+        },
+        {
+          "name": "patchelf",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "packages",
+          "resolved": false
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm7/app.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "gm7 = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm7/app.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM7_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM7_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm7",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm7"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM7=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "store"
+          },
+          "guard": null
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      },
+      "applies": [
+        "packages"
+      ],
+      "profileBin": {
+        "base": "xdgStateHome",
+        "path": "repro/home/current/bin"
+      }
+    },
+    "x86_64-darwin": {
+      "target": "x86_64-darwin",
+      "host": "server",
+      "activities": [
+        "default"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "packages",
+          "resolved": true
+        },
+        {
+          "name": "gm7app",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "applications",
+          "resolved": true
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm7/app.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "gm7 = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm7/app.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM7_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM7_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm7",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm7"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM7=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "store"
+          },
+          "guard": null
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      },
+      "applies": [
+        "packages"
+      ],
+      "profileBin": {
+        "base": "home",
+        "path": "Library/Application Support/repro/home/current/bin"
+      }
+    },
+    "aarch64-darwin": {
+      "target": "aarch64-darwin",
+      "host": "server",
+      "activities": [
+        "default"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "packages",
+          "resolved": true
+        },
+        {
+          "name": "gm7app",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "applications",
+          "resolved": true
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm7/app.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "gm7 = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm7/app.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM7_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM7_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm7",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm7"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM7=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "store"
+          },
+          "guard": null
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      },
+      "applies": [
+        "packages"
+      ],
+      "profileBin": {
+        "base": "home",
+        "path": "Library/Application Support/repro/home/current/bin"
+      }
+    },
+    "x86_64-windows": {
+      "target": "x86_64-windows",
+      "host": "server",
+      "activities": [
+        "default"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "packages",
+          "resolved": true
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm7/app.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "gm7 = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm7/app.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM7_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM7_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm7",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm7"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM7=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "store"
+          },
+          "guard": null
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      },
+      "applies": [
+        "packages"
+      ],
+      "profileBin": {
+        "base": "localAppData",
+        "path": "repro/home/bin"
+      }
+    },
+    "aarch64-windows": {
+      "target": "aarch64-windows",
+      "host": "server",
+      "activities": [
+        "default"
+      ],
+      "packages": [
+        {
+          "name": "bash",
+          "version": "",
+          "binaries": [],
+          "activity": "default",
+          "concern": "packages",
+          "resolved": true
+        }
+      ],
+      "resources": [
+        {
+          "kind": "fs.userFile",
+          "address": "fs.userFile:~/.config/gm7/app.conf",
+          "fields": {
+            "content": {
+              "kind": "string",
+              "value": "gm7 = 1\n"
+            },
+            "executable": {
+              "kind": "bool",
+              "value": false
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.config/gm7/app.conf"
+            },
+            "mode": {
+              "kind": "string",
+              "value": "0644"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "env.userVariable",
+          "address": "env.userVariable:GM7_EDITOR",
+          "fields": {
+            "name": {
+              "kind": "string",
+              "value": "GM7_EDITOR"
+            },
+            "value": {
+              "kind": "string",
+              "value": "nvim"
+            },
+            "valueKind": {
+              "kind": "string",
+              "value": "string"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        },
+        {
+          "kind": "fs.managedBlock",
+          "address": "fs.managedBlock:~/.bashrc:gm7",
+          "fields": {
+            "blockId": {
+              "kind": "string",
+              "value": "gm7"
+            },
+            "content": {
+              "kind": "string",
+              "value": "export GM7=1"
+            },
+            "hostFile": {
+              "kind": "string",
+              "value": "~/.bashrc"
+            }
+          },
+          "dependsOn": [],
+          "guard": null,
+          "activity": null
+        }
+      ],
+      "configOverrides": [
+        {
+          "pkg": "git",
+          "key": "credentialHelper",
+          "value": {
+            "kind": "string",
+            "value": "store"
+          },
+          "guard": null
+        }
+      ],
+      "system": {
+        "managed": "here",
+        "managedBy": null
+      },
+      "applies": [
+        "packages"
+      ],
+      "profileBin": {
+        "base": "localAppData",
+        "path": "repro/home/bin"
+      }
+    }
+  }
+}

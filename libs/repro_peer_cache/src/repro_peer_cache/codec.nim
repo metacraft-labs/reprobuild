@@ -15,6 +15,7 @@
 ## debuggable byte-for-byte under cross-platform fuzzing.
 
 import std/strutils
+from repro_core/codec import elementCountFits
 
 import ./types
 
@@ -195,11 +196,17 @@ proc decodeAdvertise*(data: openArray[byte]): Advertise =
     raise newException(PeerCacheCodecError,
       "Advertise mode tag out of range: " & $modeRaw)
   result.mode = AdvertiseMode(modeRaw)
-  let addedLen = int(readU32(data, pos))
+  let addedCount = readU32(data, pos)
+  if not elementCountFits(addedCount, data.len - pos, 32):
+    raise newException(PeerCacheCodecError, "added digest count exceeds payload")
+  let addedLen = int(addedCount)
   result.added = newSeq[BlobDigest](addedLen)
   for i in 0 ..< addedLen:
     result.added[i] = readDigest(data, pos)
-  let removedLen = int(readU32(data, pos))
+  let removedCount = readU32(data, pos)
+  if not elementCountFits(removedCount, data.len - pos, 32):
+    raise newException(PeerCacheCodecError, "removed digest count exceeds payload")
+  let removedLen = int(removedCount)
   result.removed = newSeq[BlobDigest](removedLen)
   for i in 0 ..< removedLen:
     result.removed[i] = readDigest(data, pos)
@@ -280,7 +287,10 @@ proc decodeWant*(data: openArray[byte]): Want =
     raise newException(PeerCacheCodecError,
       "Want kind tag out of range: " & $kindRaw)
   result.kind = WantKind(kindRaw)
-  let count = int(readU32(data, pos))
+  let rawCount = readU32(data, pos)
+  if not elementCountFits(rawCount, data.len - pos, 32):
+    raise newException(PeerCacheCodecError, "element count exceeds payload")
+  let count = int(rawCount)
   result.digests = newSeq[BlobDigest](count)
   for i in 0 ..< count:
     result.digests[i] = readDigest(data, pos)
@@ -398,7 +408,10 @@ proc writeGossip(buf: var seq[byte]; gossip: seq[SwimMember]) =
     buf.writeSwimMember(member)
 
 proc readGossip(data: openArray[byte]; pos: var int): seq[SwimMember] =
-  let count = int(readU32(data, pos))
+  let rawCount = readU32(data, pos)
+  if not elementCountFits(rawCount, data.len - pos, 47):
+    raise newException(PeerCacheCodecError, "element count exceeds payload")
+  let count = int(rawCount)
   result = newSeq[SwimMember](count)
   for i in 0 ..< count:
     result[i] = readSwimMember(data, pos)

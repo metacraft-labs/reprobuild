@@ -16,10 +16,10 @@
 ## project file, and serializes the SOLVER output (``UnifiedSolution``),
 ## not workspace VCS state.
 ##
-## ## On-disk format (``reprobuild.solved-graph-lock.v2``)
+## ## On-disk format (``reprobuild.solved-graph-lock.v3``)
 ##
 ## ```toml
-## schema = "reprobuild.solved-graph-lock.v2"
+## schema = "reprobuild.solved-graph-lock.v3"
 ##
 ## [lock]
 ## platform = "amd64-linux"
@@ -27,17 +27,37 @@
 ## inputs_digest = "fnv1a64:0123abcd..."
 ## variants = [{ name = "compiler", value = "clang" }]
 ## packages = [{ name = "nim", version = "2.2.0", source = "nim", selection = "selected" }]
-## deps = []
+## deps = [{ name = "app", self = "true", coord_kind = "vcs", url = "...", ref = "main", revision = "<sha>", integrity = "git-sha1:<sha>", ... }, { name = "lib", coord_kind = "vcs", ... }]
 ## ```
 ##
-## **There is exactly one on-disk schema, and every writer in this module
-## emits it.** ``serializeSolvedGraphLock`` and ``serializeLockedDependencies``
-## both produce ``…v2`` documents that ``parseSolvedGraphLock`` and
+## **There is exactly one schema every writer emits, and it is v3.**
+## ``serializeSolvedGraphLock`` and ``serializeLockedDependencies`` both
+## produce ``…v3`` documents that ``parseSolvedGraphLock`` and
 ## ``parseLockedDependencies`` accept; a document this module writes is a
 ## document this module reads back. The regression that pins the invariant is
-## ``tests/t_lock_writer_output_reads_back.nim``. The historical ``…v1``
-## tag is rejected on read (regenerate with ``repro lock refresh``); nothing
-## writes it.
+## ``tests/t_lock_writer_output_reads_back.nim``.
+##
+## **A ``deps`` record pins an IDENTITY, never a materialization**
+## (Workspace-Manifests.md §"The locked-dependency model", §"Mode-agnostic"):
+## name, coordinates, integrity, solved version and metadata. It carries NO
+## filesystem ``path``. Where a dependency is checked out is a fact about the
+## machine reading the lock, so it is derived there, from the dependency's
+## NAME (``repro_cli_support``'s ``lockedDepCheckoutPath``: the develop
+## overrides, then the workspace membership, then a checkout present beneath
+## the lock's directory, then the one-level sibling ``../<name>``). The one entry that needs a marker — the
+## lock's OWN repository — carries ``self = "true"``, which is metadata about
+## the record, not a location.
+##
+## ``…v2`` is still READ, so every lock committed before v3 keeps working, and
+## its ``path`` key is NOT authoritative: ``"."`` (or an empty value on a VCS
+## entry) identifies the self entry, exactly as v2 consumers recognized it,
+## and every other recorded path is discarded and derived locally as for v3.
+## A recorded path is the one field of a v2 record that goes stale while the
+## dependency is unchanged — issue
+## ``2026-10-14-committed-lock-records-a-filesystem-path-per-dependency`` —
+## so believing it is what the v3 reader exists to stop. The historical
+## ``…v1`` tag is rejected on read (regenerate with ``repro lock refresh``);
+## nothing writes v1 or v2.
 ##
 ## The ``variants`` / ``packages`` arrays are **inline-table arrays**
 ## (``field = [{...}, {...}]``), not nested ``[[array.of.tables]]`` — the
@@ -67,6 +87,7 @@ import repro_solver
 import repro_multihash
 import repro_lock/identity
 import repro_lock/toml_subset
+import repro_lock/certificate_policy
 
 export UnifiedSolution
 export SelectionStatus
@@ -83,19 +104,34 @@ const SolvedGraphLockSchemaV1* = "reprobuild.solved-graph-lock.v1"
   ## ``solutionToLock`` / ``solvedPartOf`` stamped on a freshly built
   ## ``SolvedGraphLock``, and ``serializeSolvedGraphLock`` wrote it to disk —
   ## producing documents ``parseSolvedGraphLock`` refused to read. Both now
-  ## stamp ``SolvedGraphLockSchemaV2``, which is the only schema in play.
+  ## stamp ``SolvedGraphLockSchemaV3``, the schema every writer emits.
 
 const SolvedGraphLockSchemaV2* = "reprobuild.solved-graph-lock.v2"
-  ## Workspace-Manifest-Optional MO-8 — the self-describing committed lock and
-  ## the ONLY committed-lock schema the reader accepts. It preserves the
-  ## solved-graph payload (``variants`` / ``packages`` / ``optimal`` /
-  ## ``platform`` / ``inputs_digest``) as a sub-part AND adds the unified
-  ## ``deps`` set — each locked dependency with checkout COORDINATES (a sum
-  ## over VCS / repro-store / registry) and a self-describing INTEGRITY
-  ## multihash. This is what makes a lock-file-only workspace fully
-  ## self-describing (populated from the lock's content, not from live
-  ## ``git HEAD``). The reader is LOUD on any schema other than v2 (including
-  ## the old ``…v1``).
+  ## Workspace-Manifest-Optional MO-8 — the self-describing committed lock. It
+  ## preserves the solved-graph payload (``variants`` / ``packages`` /
+  ## ``optimal`` / ``platform`` / ``inputs_digest``) as a sub-part AND adds the
+  ## unified ``deps`` set — each locked dependency with checkout COORDINATES
+  ## (a sum over VCS / repro-store / registry) and a self-describing INTEGRITY
+  ## multihash.
+  ##
+  ## READ-ONLY now. A v2 ``deps`` record also carried a workspace-relative
+  ## ``path``; v3 drops it (see ``SolvedGraphLockSchemaV3``), and the reader
+  ## takes from a v2 path only whether the entry is the lock's own repository
+  ## (``"."``) — every other recorded path is ignored.
+
+const SolvedGraphLockSchemaV3* = "reprobuild.solved-graph-lock.v3"
+  ## The committed-lock schema every writer emits. Identical to v2 except that
+  ## a ``deps`` record carries no ``path``: a lock pins identity, never a
+  ## materialization (Workspace-Manifests.md §"The locked-dependency model").
+  ## The lock's own repository is marked ``self = "true"`` instead of
+  ## ``path = "."``. The reader accepts v3 and v2 and is LOUD on any other
+  ## schema (including the old ``…v1``).
+
+const SelfLockedDepPath* = "."
+  ## The in-memory ``LockedDep.path`` of the lock's OWN repository: the
+  ## directory holding the lock, relative to itself. It is what
+  ## ``isSelfLockedDep`` tests and what ``serializeLockedDependencies`` turns
+  ## into ``self = "true"`` on disk.
 
 type
   LockedVariant* = object
@@ -219,8 +255,24 @@ type
     ## packages are both just dependencies with coordinates + integrity; the
     ## "workspace repos vs solved graph" split is not a real boundary.
     name*: string             ## identity.
-    path*: string             ## workspace-relative path (``.`` = the root
-                              ## repo) for a VCS workspace dep; empty otherwise.
+    path*: string
+      ## Where THIS machine has the dependency checked out, relative to the
+      ## directory the lock is read against (``committedLockPathBase`` in
+      ## ``repro_cli_support``) — a LOCAL MATERIALIZATION, never part of the
+      ## lock. It is NEVER SERIALIZED and never read from a lock document:
+      ## ``parseLockedDependencies`` sets ``SelfLockedDepPath`` (``.``) on the
+      ## lock's own repository, the one-level sibling default
+      ## (``defaultLockedDepCheckoutPath``) on every other VCS entry, and ""
+      ## on a non-VCS one; ``repro_cli_support``'s ``localizeLockedDeps``
+      ## then replaces the default with what this machine actually declares
+      ## (develop overrides, workspace membership, a nested checkout). A
+      ## writer that builds a ``LockedDep`` from a checkout sets it to where
+      ## it observed the checkout, for its own use; the serializer drops it.
+      ##
+      ## So no code may compare a ``path`` against another lock's or treat it
+      ## as recorded: two locks that name one dependency agree or disagree on
+      ## its IDENTITY (name, coordinates, integrity), not on where some writer
+      ## once found it. Use ``isSelfLockedDep`` for the self test.
     coordinates*: Coordinates
     integrity*: string        ## self-describing multihash (``<alg>:<digest>``).
     version*: string          ## solved version/option assignment where
@@ -247,6 +299,18 @@ type
     variants*: seq[LockedVariant]
     packages*: seq[LockedPackage]
     deps*: seq[LockedDep]
+    certificatePolicySection*: string
+      ## Test-Certificates TC-9b: the ``[certificate_policy]`` snapshot,
+      ## VERBATIM as the lock carries it (``""`` when it carries none).
+      ##
+      ## Kept as text, not parsed here, on purpose. Only the writers that
+      ## evaluate the provider (``repro lock refresh`` and the certifying
+      ## run's lock-update node) may change it; every other writer -- the
+      ## commit-time re-pin above all -- must carry it through byte for byte,
+      ## hand edits included. The strict reader in
+      ## ``repro_lock/certificate_policy`` is what the gates judge it with, so
+      ## a malformed snapshot does not make the lock unreadable to a build; it
+      ## makes the GATES refuse.
 
 const
   LockedArchiveBinary* = "binary"
@@ -294,7 +358,7 @@ proc solutionToLock*(sol: UnifiedSolution; platform: string;
   ## deterministic regardless of the (unordered) ``Table`` iteration
   ## order — two solves of the same graph produce byte-identical locks.
   result = SolvedGraphLock(
-    schema: SolvedGraphLockSchemaV2,
+    schema: SolvedGraphLockSchemaV3,
     platform: platform,
     optimal: sol.optimal,
     inputsDigest: inputsDigestOf(inputsText),
@@ -464,10 +528,12 @@ proc parseSolvedGraphLock*(content: string): SolvedGraphLock =
   ## ``serializeLockedDependencies`` writes, ignoring the ``deps`` array —
   ## ``parseLockedDependencies`` is the reader that keeps it). Raises
   ## ``SolvedGraphLockParseError`` on a missing/mismatched schema. Unknown keys
-  ## are ignored (forward-compatible within the v2 schema).
+  ## are ignored (forward-compatible within the v2 and v3 schemas).
   result = SolvedGraphLock(schema: "", variants: @[], packages: @[])
   var sawSchema = false
-  for rawLine in content.splitLines():
+  # The policy snapshot's keys (``schema``, ``name``, ...) are not lock keys,
+  # so only the lines outside it are read.
+  for rawLine in splitCertificatePolicySection(content).lockPart.splitLines():
     let line = rawLine.strip()
     if line.len == 0 or line.startsWith("#"):
       continue
@@ -518,22 +584,24 @@ proc parseSolvedGraphLock*(content: string): SolvedGraphLock =
           # `t_lock_from_a_v3_host_resolves_on_a_v2_host` exists to forbid.
           target: fields.getOrDefault("target", "")))
     else: discard
-  if not sawSchema or result.schema != SolvedGraphLockSchemaV2:
+  if not sawSchema or result.schema notin
+      [SolvedGraphLockSchemaV3, SolvedGraphLockSchemaV2]:
     # A ``…v1`` tag is named specifically: it is not a typo but a lock
     # committed by an older Reprobuild (or, before the writer was brought to
     # v2, printed by ``repro build --print-solved-graph``), and "regenerate"
     # is the whole of the fix. Anything else is a genuinely unknown schema.
     let detail =
       if result.schema == SolvedGraphLockSchemaV1:
-        "the superseded MO-1 schema; " & SolvedGraphLockSchemaV2 & " is current"
+        "the superseded MO-1 schema; " & SolvedGraphLockSchemaV3 & " is current"
       else:
-        "expected " & SolvedGraphLockSchemaV2
+        "expected " & SolvedGraphLockSchemaV3 & " (or the still-readable " &
+          SolvedGraphLockSchemaV2 & ")"
     raise newException(SolvedGraphLockParseError,
       "unsupported lock schema '" & result.schema & "' (" & detail &
       "); regenerate with `repro lock refresh`")
 
 # ---------------------------------------------------------------------------
-# MO-8 — the unified LockedDependencies model: v2 serialize / parse
+# MO-8 — the unified LockedDependencies model: v3 serialize, v3/v2 parse
 # ---------------------------------------------------------------------------
 
 proc joinNames(names: seq[string]): string =
@@ -572,7 +640,7 @@ proc solvedPartOf*(ld: LockedDependencies): SolvedGraphLock =
   ## Project the solved-graph sub-part out of a ``LockedDependencies`` (so the
   ## existing solution<->lock helpers keep working unchanged).
   SolvedGraphLock(
-    schema: SolvedGraphLockSchemaV2, platform: ld.platform,
+    schema: SolvedGraphLockSchemaV3, platform: ld.platform,
     optimal: ld.optimal, inputsDigest: ld.inputsDigest,
     variants: ld.variants, packages: ld.packages)
 
@@ -586,7 +654,7 @@ proc canonicalSolvedGraph*(ld: LockedDependencies): CanonicalSolvedGraph =
   canonicalSolvedGraph(solvedPartOf(ld))
 
 proc lockIdentityOf*(ld: LockedDependencies): LockIdentity =
-  ## §6.2's key for a committed `…lock.v2` document. The lock-file NAME is
+  ## §6.2's key for a committed `…lock.v3` (or v2) document. The lock-file NAME is
   ## not a parameter and cannot become one.
   lockIdentityOf(canonicalSolvedGraph(ld))
 
@@ -720,6 +788,39 @@ proc lockedDepsFromPackages*(packages: seq[LockedPackage];
         version: p.version, visibility: "public", participation: "",
         depends: @[], tags: @[]))
 
+proc defaultLockedDepCheckoutPath*(name: string): string =
+  ## The checkout location a non-self dependency is given when nothing local
+  ## says otherwise: the one-level sibling ``../<name>`` (CLI/develop.md
+  ## §"Checkout Placement"), relative to the directory holding the lock.
+  ## "" for an empty name, which names nothing that could be placed.
+  if name.len == 0: "" else: "../" & name
+
+proc isSelfLockedDep*(d: LockedDep): bool =
+  ## Is ``d`` the lock's OWN repository — the consumer the lock describes,
+  ## not a dependency of it? The one spelling of that test: on disk the entry
+  ## carries ``self = "true"`` (v3) or ``path = "."`` (v2), and both read
+  ## into ``path == SelfLockedDepPath`` (see ``LockedDep.path``).
+  d.path == SelfLockedDepPath
+
+proc validateV3Deps(deps: openArray[LockedDep]) =
+  ## Names are the serialized identity, and only one VCS record can describe
+  ## the repository holding the lock.
+  var names = initTable[string, bool]()
+  var hasSelf = false
+  for dep in deps:
+    if dep.name in names:
+      raise newException(SolvedGraphLockParseError,
+        "duplicate locked dependency name '" & dep.name & "'")
+    names[dep.name] = true
+    if isSelfLockedDep(dep):
+      if dep.coordinates.kind != ckVcs:
+        raise newException(SolvedGraphLockParseError,
+          "self dependency '" & dep.name & "' must have VCS coordinates")
+      if hasSelf:
+        raise newException(SolvedGraphLockParseError,
+          "a committed lock may carry only one self dependency")
+      hasSelf = true
+
 proc coordKindString(k: CoordKind): string =
   case k
   of ckVcs: "vcs"
@@ -730,8 +831,15 @@ proc coordKindString(k: CoordKind): string =
 proc serializeDepInline(d: LockedDep): string =
   ## One ``{ ... }`` inline table for a ``LockedDep``. Key order is FIXED so
   ## two writes of the same model are byte-identical.
+  ##
+  ## ``d.path`` is deliberately NOT written: it is where the writing machine
+  ## has the dependency checked out, and a lock pins identity only (see
+  ## ``SolvedGraphLockSchemaV3``). The self entry is marked instead, with a
+  ## quoted value because every value in these inline tables is a quoted
+  ## string (``toml_subset.inlineTables`` reads nothing else).
   result = "{ name = \"" & tomlEscape(d.name) & "\""
-  result.add(", path = \"" & tomlEscape(d.path) & "\"")
+  if isSelfLockedDep(d):
+    result.add(", self = \"true\"")
   result.add(", coord_kind = \"" & coordKindString(d.coordinates.kind) & "\"")
   case d.coordinates.kind
   of ckVcs:
@@ -765,13 +873,15 @@ proc serializeDepInline(d: LockedDep): string =
   result.add(" }")
 
 proc serializeLockedDependencies*(ld: LockedDependencies): string =
-  ## Render the unified model to canonical ``reprobuild.solved-graph-lock.v2``
+  ## Render the unified model to canonical ``reprobuild.solved-graph-lock.v3``
   ## TOML. The solved-graph payload is preserved verbatim as a sub-part;
-  ## the ``deps`` set (sorted by name then path) carries each dependency's
-  ## coordinates + self-describing integrity. Deterministic: a write -> read
-  ## -> write round-trip is byte-identical.
+  ## the ``deps`` set (sorted by unique name) carries each dependency's
+  ## coordinates + self-describing integrity, and no checkout path.
+  ## Deterministic: a write -> read -> write
+  ## round-trip is byte-identical.
+  validateV3Deps(ld.deps)
   result = newStringOfCap(1024)
-  result.add("schema = \"" & tomlEscape(SolvedGraphLockSchemaV2) & "\"\n\n")
+  result.add("schema = \"" & tomlEscape(SolvedGraphLockSchemaV3) & "\"\n\n")
   result.add("[lock]\n")
   result.add("platform = \"" & tomlEscape(ld.platform) & "\"\n")
   result.add("optimal = " & (if ld.optimal: "true" else: "false") & "\n")
@@ -802,13 +912,19 @@ proc serializeLockedDependencies*(ld: LockedDependencies): string =
   # deps — the MO-8 unified set (coordinates + integrity per dependency).
   var sorted = ld.deps
   sorted.sort(proc(a, b: LockedDep): int =
-    result = cmp(a.name, b.name)
-    if result == 0: result = cmp(a.path, b.path))
+    cmp(a.name, b.name))
   result.add("deps = [")
   for i, d in sorted:
     if i > 0: result.add(", ")
     result.add(serializeDepInline(d))
   result.add("]\n")
+  # TC-9b: the certificate-policy snapshot, last and verbatim. Absent from
+  # every lock that enacts no policy, so those re-serialize byte-identically.
+  if ld.certificatePolicySection.len > 0:
+    result.add("\n")
+    result.add(ld.certificatePolicySection)
+    if not ld.certificatePolicySection.endsWith("\n"):
+      result.add("\n")
 
 proc serializeSolvedGraphLock*(lock: SolvedGraphLock): string =
   ## Render a ``SolvedGraphLock`` to a canonical committed-lock document.
@@ -835,15 +951,26 @@ proc serializeSolvedGraphLock*(lock: SolvedGraphLock): string =
   serializeLockedDependencies(lockedDepsFromSolved(lock))
 
 proc parseLockedDependencies*(content: string): LockedDependencies =
-  ## Parse a committed lock into the unified model. Accepts ONLY the v2
-  ## schema; a v1-tagged (or any other) lock is rejected LOUDLY by
+  ## Parse a committed lock into the unified model. Accepts the v3 and v2
+  ## schemas; a v1-tagged (or any other) lock is rejected LOUDLY by
   ## ``parseSolvedGraphLock`` (raises ``SolvedGraphLockParseError`` —
   ## regenerate with ``repro lock refresh``). The solved-graph keys reuse
-  ## ``parseSolvedGraphLock``'s grammar; the ``deps`` array is the v2 addition.
+  ## ``parseSolvedGraphLock``'s grammar; the ``deps`` array is the MO-8
+  ## addition.
+  ##
+  ## No checkout location is read from the document. Each dep's in-memory
+  ## ``path`` is set as ``LockedDep.path`` describes — ``.`` for the self
+  ## entry, ``defaultLockedDepCheckoutPath`` for any other VCS entry, "" for
+  ## a non-VCS one — and a v2 record's ``path`` value is consulted only to
+  ## recognize the self entry. A caller that knows which directory the lock
+  ## belongs to refines the default with ``repro_cli_support``'s
+  ## ``localizeLockedDeps``.
   let solved = parseSolvedGraphLock(content)  # validates schema + solved part
   result = lockedDepsFromSolved(solved)
-  # Pull the v2 ``deps`` array (empty when the lock carries no deps).
-  for rawLine in content.splitLines():
+  let split = splitCertificatePolicySection(content)
+  result.certificatePolicySection = split.policySection
+  # Pull the ``deps`` array (empty when the lock carries no deps).
+  for rawLine in split.lockPart.splitLines():
     let line = rawLine.strip()
     if line.len == 0 or line.startsWith("#") or line.startsWith("["):
       continue
@@ -871,9 +998,25 @@ proc parseLockedDependencies*(content: string): LockedDependencies =
           url: f.getOrDefault("url", ""),
           gitRef: f.getOrDefault("ref", ""),
           revision: f.getOrDefault("revision", ""))
+      let name = f.getOrDefault("name", "")
+      # The self entry: v3 marks it; v2 spelled it as the path `.` — or left
+      # the path empty, which v2 consumers read as the root too — and only a
+      # VCS entry can be a repository's own record. No other v2 path value
+      # means anything here (see the module's on-disk format notes).
+      let isSelf =
+        if solved.schema == SolvedGraphLockSchemaV2:
+          let recorded = f.getOrDefault("path", "")
+          coords.kind == ckVcs and
+            (recorded.len == 0 or recorded == SelfLockedDepPath)
+        else:
+          f.getOrDefault("self", "") == "true"
+      let localPath =
+        if isSelf: SelfLockedDepPath
+        elif coords.kind == ckVcs: defaultLockedDepCheckoutPath(name)
+        else: ""
       result.deps.add(LockedDep(
-        name: f.getOrDefault("name", ""),
-        path: f.getOrDefault("path", ""),
+        name: name,
+        path: localPath,
         coordinates: coords,
         integrity: f.getOrDefault("integrity", ""),
         version: f.getOrDefault("version", ""),
@@ -886,3 +1029,5 @@ proc parseLockedDependencies*(content: string): LockedDependencies =
           sha256: f.getOrDefault("archive_sha256", ""),
           archiveType: f.getOrDefault("archive_type", ""),
           build: f.getOrDefault("archive_build", ""))))
+  if solved.schema == SolvedGraphLockSchemaV3:
+    validateV3Deps(result.deps)

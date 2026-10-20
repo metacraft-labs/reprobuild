@@ -336,6 +336,10 @@ proc run*(self: NimUnittestBinary; filter = "";
   ## re-enter each other. Such a test passes ``makeDepfilePolicy(...)`` naming
   ## a depfile that describes its inputs, which resolves to a kind outside the
   ## engine's ``MonitorPolicyKinds``, so no wrap and no shim injection happen.
+  ## A recorder-backed test can likewise require a subject free of the
+  ## monitor's modified code and mutable mapped shards. Such a test must use
+  ## ``cacheable = false`` when a generated depfile does not observe its
+  ## complete runtime input closure.
   ## Where no step in the graph already emits such a file,
   ## ``fs.unmonitorableActionDepfile`` generates one as a graph output; read
   ## its docstring before reaching for it.

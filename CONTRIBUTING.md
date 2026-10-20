@@ -89,9 +89,21 @@ each built binary's own `--list-json`. That artifact went stale six times, and
 every one of the six was an entry-set change — visible to a source scan, but
 fixable only by a four-hour build, so nothing gated it. Splitting the document
 along that line is what lets the entry set be gated at every push while the
-catalog-derived half stays an output of the job that already builds
-everything. **Do not regenerate the full inventory by hand**; `just test`
-produces it.
+catalog-derived half requires a complete build. `just test` checks the tracked
+snapshot; it does not rewrite it before checking. After an intentional suite
+change, refresh the full snapshot from a completely built tree:
+
+```bash
+python3 scripts/reprobuild_suite_inventory.py
+python3 tests/unit/test_reprobuild_suite_inventory.py
+```
+
+Review the generated diff, especially lost cases and quarantine membership.
+Do not hand-edit catalog counts or regenerate from a partially built tree.
+The snapshot records the catalog's OS and CPU. Its built-tree gates compare
+every source across Linux x86_64 and Darwin arm64 using the exact named
+platform-case ledger, while retaining exact raw comparisons on the recording
+host; a platform-conditioned source is never exempted from comparison.
 
 ## Adding a test file in a new place
 
@@ -136,6 +148,36 @@ is the defect — do not work around it by renaming the file out of the gate's
 view. A test that needs its own `--path` or `-d:` flag carries it in a
 sibling `<test>.nim.cfg`; `TestSpec` has no field for either, and every build
 route honours the `.cfg`.
+
+## Test fixtures: one process per case
+
+The suite runner probes every test binary with `--list-json` and then runs each
+case in a process of its own (`<binary> --run "<suite>::<test>"`). Every one of
+those processes executes the file's module-level code, and none of them sees
+what another one did. So:
+
+- **Acquire a fixture lazily, from inside the case that needs it** — not at
+  module scope, where the `--list-json` probe and every unrelated case pay for
+  it.
+- **Release it in the process that acquired it**, with
+  `repro_test_support/process_fixtures`: `releaseDirAtProcessExit(path)` for a
+  scratch directory (register it before creating the directory),
+  `terminateAtProcessExit(pid)` for a daemon you started. Never in a final
+  "teardown" case: that case runs in one process and releases only what that
+  process acquired, so every other case's fixture is leaked for good.
+- **Do not release through an `addExitProc` closure over module globals.**
+  Under ORC the compiler destroys every heap-backed global (strings, seqs,
+  refs, closures) when the main module's top-level code ends, before any exit
+  hook runs; such a closure reads freed memory, usually works, and sometimes
+  crashes or silently removes nothing. `process_fixtures` keeps its state
+  outside the Nim heap for that reason.
+
+`tests/integration/t_when_each_case_runs_alone_no_fixture_outlives_its_process.nim`
+runs files that once had the teardown-as-a-case shape exactly as the runner
+does and fails when anything they created survives; add a file there when it
+acquires fixtures the gate can attribute (under `$TMPDIR`/`$HOME`, or named
+with the pid). `repro_test_support/per_case_runs` is the runner emulation it
+uses.
 
 ## Why these refreshes are enforced
 

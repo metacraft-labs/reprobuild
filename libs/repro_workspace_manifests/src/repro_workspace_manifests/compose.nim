@@ -525,15 +525,20 @@ proc composeManifestLayersWithOptions*(
     try:
       layerResolved = resolveProject(projectFile)
     except WorkspaceManifestParseError as err:
-      # Re-raise with the layer's provenance prepended to the inner
-      # message so the user can tell WHICH layer's project resolution
-      # failed.
-      raiseManifestError(workspaceTomlPath,
-        "manifest[" & $layerIdx & "]",
-        schemaWorkspaceStateV1, schemaWorkspaceStateV1,
+      # Re-raise with the layer's provenance added so the user can tell
+      # WHICH layer's project resolution failed — but still ABOUT the file
+      # that failed. The failure is in the layer's project manifest or one
+      # of its fragments, and the state file that lists the layer is
+      # usually fine (and, for a settings-file layer or the implicit root
+      # layer, is not even where the layer is declared): framing it as
+      # ``[<state file>] at key 'manifest[N]'`` named the wrong file and
+      # hid the key.
+      let failedFile = if err.path.len > 0: err.path else: workspaceTomlPath
+      raiseManifestError(failedFile, err.keyPath,
+        err.expectedSchema, err.observedSchema,
         "manifest layer '" & provenance &
           "' failed to resolve project '" & projectName & "': " &
-          err.msg)
+          err.innerMessage)
 
     # First successfully-acquired layer establishes the project-level
     # fields. With ``skipInaccessibleLayers`` the first layer in source

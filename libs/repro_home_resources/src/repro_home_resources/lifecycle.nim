@@ -12,7 +12,8 @@
 ##      - desired present + observed absent             -> create
 ##      - desired present + observed matches desired    -> no_op (cache-hit)
 ##      - desired present + observed differs:
-##          no recorded binding (first apply)           -> update (converge)
+##          no record + whole object                    -> drift_blocked
+##          no record + set contribution                -> update (converge)
 ##          recorded postWrite == observed              -> update (safe)
 ##          recorded postWrite != observed              -> drift_blocked
 ##      - desired absent + observed present:
@@ -302,6 +303,9 @@ proc summarize*(action: ResourceActionKind; address: string;
 # Decision.
 # ---------------------------------------------------------------------------
 
+proc decideActionIgnoringBusy(state: ResourceState;
+                  options: DecisionOptions): ResourceAction
+
 proc decideAction*(state: ResourceState;
                   options: DecisionOptions = DecisionOptions(
                     reconcile: rpFailClosed,
@@ -309,6 +313,23 @@ proc decideAction*(state: ResourceState;
   ## Pure decision: given the composite state (desired + observed +
   ## recorded), return the typed action. Does NOT mutate anything;
   ## the executor consumes the action and performs the I/O.
+  ##
+  ## A live object that is in use (`state.busy`, e.g. a running
+  ## application) is never changed: an update, replace or destroy is
+  ## DEFERRED -- a no-op whose summary says so, and which the executor
+  ## records as `deferred` so the next apply decides again. Drift is still
+  ## drift.
+  result = decideActionIgnoringBusy(state, options)
+  if state.busy.len > 0 and
+      result.kind in {rakUpdate, rakReplace, rakDestroy}:
+    let wanted = result.kind
+    result.kind = rakNoOp
+    result.deferred = true
+    result.summary = summarize(rakNoOp, state.address, result.resourceKind) &
+      " [" & $wanted & " deferred: in use by " & state.busy & "]"
+
+proc decideActionIgnoringBusy(state: ResourceState;
+                  options: DecisionOptions): ResourceAction =
   result.address = state.address
   result.driftExpectedHex = ""
   result.driftObservedHex = ""
@@ -345,39 +366,51 @@ proc decideAction*(state: ResourceState;
       result.kind = rakUpdate
       result.summary = summarize(rakUpdate, state.address, result.resourceKind)
       return
-    # First-apply (no recorded binding) is NOT drift. "Drift" is
-    # defined as the operator mutating state we PREVIOUSLY wrote.
-    # If we have no record of ever writing this resource, the
-    # observed-vs-desired diff is just the initial-convergence
-    # delta — drive an `rakUpdate` (the apply executor converges
-    # observed -> desired through the same code path as a regular
-    # update). Hit by drivers whose `observe` returns `present=true`
-    # with the empty-set hash on a system that has nothing matching
-    # the desired set yet — e.g. `vscode.extension` on a fresh
-    # install where no extensions are installed and the canonical
-    # observed = the empty intersection of (installed ∩ desired).
-    if not state.hasRecorded:
+    # A collection can observe a partial/empty contribution on first
+    # apply (e.g. installed VS Code extensions intersected with desired).
+    # Whole objects have no such exception: without a recorded write,
+    # differing existing content belongs to someone else. Let the ordinary
+    # drift policy below require explicit reconciliation before replacing it.
+    if not state.hasRecorded and
+        lookupResourceType($state.desired.kind).ownership == roSetContribution:
       result.kind = rakUpdate
       result.summary = summarize(rakUpdate, state.address, result.resourceKind)
       return
-    # Drift.
+    # A vendor update of what we recorded (an application that updated
+    # itself): not drift. Kept unless the desired version is newer.
+    if state.vendorUpdate:
+      if state.desiredSupersedesObserved:
+        result.kind = rakUpdate
+        result.summary = summarize(rakUpdate, state.address,
+          result.resourceKind) & " [replaces a vendor update with the " &
+          "newer declared version]"
+      else:
+        result.kind = rakNoOp
+        result.keptVendorUpdate = true
+        result.summary = summarize(rakNoOp, state.address,
+          result.resourceKind) & " [vendor update kept]"
+      return
+    # Drift, including a differing whole object we have never managed.
     let expectedHex =
       if state.hasRecorded: digestHex(state.recorded.postWriteDigest)
       else: ""
     let observedHex = digestHex(state.observed.digest)
+    let unrecorded =
+      if state.hasRecorded: ""
+      else: " [an existing object no generation records]"
     if options.reconcile == rpReconcileDrift or
        options.reconcile == rpAcceptOverwrite:
       result.kind = rakUpdate
       result.driftExpectedHex = expectedHex
       result.driftObservedHex = observedHex
       result.summary = summarize(rakUpdate, state.address, result.resourceKind) &
-        " [drift reconciled]"
+        " [drift reconciled]" & unrecorded
       return
     result.kind = rakDriftBlocked
     result.driftExpectedHex = expectedHex
     result.driftObservedHex = observedHex
     result.summary = summarize(rakDriftBlocked, state.address,
-      result.resourceKind)
+      result.resourceKind) & unrecorded
     return
 
   # Branch 3: desired absent, observed present.
@@ -396,6 +429,7 @@ proc decideAction*(state: ResourceState;
   # references this address; the world still has the bytes.
   # Safe destroy iff observed matches recorded postWrite.
   if state.recorded.postWriteDigest == state.observed.digest or
+     state.vendorUpdate or
      options.reconcile == rpAcceptOverwrite:
     if options.enforcePreventDestroy and
        state.recorded.lifecyclePolicy == lpPreventDestroy:

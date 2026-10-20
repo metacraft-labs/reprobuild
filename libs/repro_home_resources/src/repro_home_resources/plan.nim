@@ -160,9 +160,11 @@ proc observeHomebrewCaskR*(r: Resource): ObservedState {.nimcall.} =
 
 proc observeAppBundleAt*(targetPath: string): ObservedState =
   ## GM4c: what is at an Applications-directory path. Absent when nothing
-  ## is there; otherwise its identity bytes (`appBundleCanonicalBytes`), or
-  ## a marker for a path that is not a readable bundle, so any such object
-  ## differs from every recorded bundle and is never mistaken for one.
+  ## is there; otherwise its identity bytes (`readPlacedItemIdentityBytes`:
+  ## a bundle's `appBundleCanonicalBytes`, or a folder's identity for an
+  ## installer application's product folder), or a marker for a path that
+  ## is not a readable bundle or folder, so any such object differs from
+  ## every recorded item and is never mistaken for one.
   if not (symlinkExists(targetPath) or fileExists(targetPath) or
       dirExists(targetPath)):
     result.present = false
@@ -171,7 +173,7 @@ proc observeAppBundleAt*(targetPath: string): ObservedState =
   result.present = true
   var bytes: seq[byte]
   try:
-    bytes = appBundleCanonicalBytes(readAppBundleIdentity(targetPath))
+    bytes = readPlacedItemIdentityBytes(targetPath)
   except EAppBundleRefused:
     let marker = AppBundleIdentityFormat & "\nnot-a-bundle\n"
     bytes = newSeq[byte](marker.len)
@@ -359,6 +361,46 @@ proc observeRecorded*(address: string; binding: RecordedBinding):
 # Plan composition.
 # ---------------------------------------------------------------------------
 
+proc appBundleFacts*(state: var ResourceState) =
+  ## The facts the lifecycle needs about a placed application beyond its
+  ## identity (Store-And-Installation-Layout.md § macOS Application
+  ## Bundles, "Vendor updates", "Running applications"): whether what is
+  ## there is its vendor's update of the recorded bundle, and whether it is
+  ## running. Only the observation is read; nothing is changed.
+  let kind =
+    if state.hasDesired: state.desired.kind
+    elif state.hasRecorded: state.recorded.kind
+    else: return
+  if kind != rkMacosAppBundle or not state.observed.present:
+    return
+  let path =
+    if state.hasDesired: realWorldIdentity(state.desired)
+    else: state.recorded.resourceId
+  if state.hasRecorded and
+      state.observed.digest != state.recorded.postWriteDigest and
+      (not state.hasDesired or
+       state.observed.digest != digestOfResource(state.desired)):
+    let policy =
+      if state.hasDesired: state.desired.appBundleTrust
+      else: {}
+    if isAcceptedVendorUpdate(state.recorded.payloadBytes,
+        state.observed.rawBytes, path, policy):
+      state.vendorUpdate = true
+      if state.hasDesired:
+        var desiredId, observedId: AppBundleIdentity
+        if parseAppBundleIdentityBytes(state.desired.appBundleIdentity,
+              desiredId) and
+            parseAppBundleIdentityBytes(state.observed.rawBytes, observedId):
+          state.desiredSupersedesObserved =
+            compareBundleVersions(desiredId, observedId) > 0
+  let pids = processesRunningFrom(path)
+  if pids.len > 0:
+    var ids: seq[string]
+    for pid in pids:
+      ids.add $pid
+    state.busy = "running process" & (if pids.len == 1: " " else: "es ") &
+      ids.join(", ")
+
 proc composePlan*(desired: DesiredSet;
                  recorded: OrderedTable[string, RecordedBinding];
                  options: DecisionOptions = DecisionOptions(
@@ -380,6 +422,7 @@ proc composePlan*(desired: DesiredSet;
     if addr1 in recorded:
       state.recorded = recorded[addr1]
       state.hasRecorded = true
+    appBundleFacts(state)
     let action = decideAction(state, options)
     result.actions.add(action)
     seen[addr1] = true
@@ -394,6 +437,7 @@ proc composePlan*(desired: DesiredSet;
     state.recorded = binding
     state.hasRecorded = true
     state.observed = observeRecorded(addr1, binding)
+    appBundleFacts(state)
     let action = decideAction(state, options)
     result.actions.add(action)
 

@@ -204,6 +204,16 @@ type
       ## so a test can serve the release tree from a loopback listener and
       ## an air-gapped site from its own mirror; whatever base is used, the
       ## URL it resolved to is what the lock records.
+    recordCertificatePolicy*: bool
+      ## Test-Certificates TC-9b: whether this generation records the
+      ## ``[certificate_policy]`` snapshot (``certificatePolicySection``) in
+      ## the document it writes. Set by the CLI for the writing doors, which
+      ## are the ones that evaluated the provider for it; false keeps every
+      ## other caller's document exactly as it was.
+    certificatePolicySection*: string
+      ## The snapshot to record when ``recordCertificatePolicy``: rendered
+      ## from the policy the recipe enacts, "" when it enacts none (so the
+      ## snapshot of a policy that was removed leaves the lock).
 
   MetadataFetchPlanEntry* = object
     ## One planned `bakMetadataFetch` edge — one retrieved object.
@@ -743,7 +753,7 @@ proc attachUpstreamArchives(deps: var seq[LockedDep];
 proc renderLockDocument(req: LockGenerationRequest;
                         sol: UnifiedSolution;
                         plan: seq[MetadataFetchPlanEntry]): string =
-  ## The rule-set artifact: a canonical `reprobuild.solved-graph-lock.v2`
+  ## The rule-set artifact: a canonical `reprobuild.solved-graph-lock.v3`
   ## document.
   ##
   ## Produced through the SAME writer `repro lock refresh` uses
@@ -764,7 +774,7 @@ proc renderLockDocument(req: LockGenerationRequest;
     if s.len > 0:
       solved.packages[i].source = s
   var ld = lockedDepsFromSolved(solved)
-  ld.schema = SolvedGraphLockSchemaV2
+  ld.schema = SolvedGraphLockSchemaV3
   ld.deps = req.extraDeps
   var lifted = lockedDepsFromPackages(ld.packages, req.platform)
   attachUpstreamArchives(lifted, plan)
@@ -1084,6 +1094,31 @@ proc generateLock*(req: LockGenerationRequest): LockGenerationResult =
 # The four doors
 # ---------------------------------------------------------------------------
 
+proc withCertificatePolicy(req: LockGenerationRequest; document: string):
+    string =
+  ## Test-Certificates TC-9b: `document` with the request's policy snapshot
+  ## recorded, when the request records one. Applied to the finished document
+  ## rather than inside the solve edge, so a solve served from a recorded path
+  ## set (§5.7) records the CURRENT policy too, and the lock identity -- which
+  ## the policy is not part of -- is untouched.
+  if not req.recordCertificatePolicy:
+    return document
+  var ld = parseLockedDependencies(document)
+  ld.certificatePolicySection = req.certificatePolicySection
+  serializeLockedDependencies(ld)
+
+proc landLockDocument(writeTo, document: string) =
+  ## Write the committed lock only when its bytes change, so a refresh that
+  ## finds nothing new leaves the file -- and its mtime -- alone.
+  if fileExists(writeTo):
+    try:
+      if readFile(writeTo) == document:
+        return
+    except IOError:
+      discard
+  createDir(parentDir(writeTo))
+  writeFile(writeTo, document)
+
 proc runLockSolve*(req: LockGenerationRequest; writeTo: string):
     LockGenerationResult =
   ## `repro lock solve [--write]` — generate, then land the lock at the
@@ -1091,9 +1126,9 @@ proc runLockSolve*(req: LockGenerationRequest; writeTo: string):
   var r = req
   r.entryPoint = lgeLockSolve
   result = generateLock(r)
+  result.lockDocument = withCertificatePolicy(r, result.lockDocument)
   if writeTo.len > 0:
-    createDir(parentDir(writeTo))
-    writeFile(writeTo, result.lockDocument)
+    landLockDocument(writeTo, result.lockDocument)
     result.lockPath = writeTo
 
 proc runImplicitBuildSolve*(req: LockGenerationRequest):
@@ -1133,9 +1168,254 @@ proc runLockRefresh*(req: LockGenerationRequest; writeTo: string):
   var r = req
   r.entryPoint = lgeLockRefresh
   result = generateLock(r)
+  result.lockDocument = withCertificatePolicy(r, result.lockDocument)
   if writeTo.len > 0:
-    createDir(parentDir(writeTo))
-    writeFile(writeTo, result.lockDocument)
+    landLockDocument(writeTo, result.lockDocument)
+    result.lockPath = writeTo
+
+# ---------------------------------------------------------------------------
+# The targeted re-pin (`repro lock refresh --repin=<package>[,<package>…]`)
+# ---------------------------------------------------------------------------
+#
+# `Locking-And-Solver.md` §"Targeted re-pin", settled by reprobuild-pm issue
+# 2026-10-14 ("declaring a sibling producer imports its toolchain floor into
+# the consumer's committed-lock solve"). A NEW constraint — a `uses:` added to
+# the project or to a sibling it consumes after the lock was written — makes
+# the committed lock contradict the recipe, and the build refuses. Admitting
+# one new floor by re-solving the whole lock re-solves every version pin and
+# every sibling revision pin and publishes the result; the issue records the
+# narrow alternative being performed BY HAND three times in one lock. This is
+# that narrow alternative, done by the tool that owns the file.
+#
+# Three pieces, each a library proc so the rules are testable without a CLI:
+#
+#   * `holdCommittedPins` turns every committed version and variant value,
+#     except the named packages', into a HARD pin on the request — the same
+#     pins a build applies — after checking that none of them contradicts a
+#     declared range (a held pin that does is reported, never widened);
+#   * the solve runs exactly as a full refresh's does (`generateLock`);
+#   * `mergeRepinnedLock` writes back ONLY what the spec allows to move: the
+#     named packages' entries, and additions for packages the committed lock
+#     does not record.
+
+proc repinVariantConflict(lockDescription, name, value: string;
+                          decl: VariantDecl): string =
+  ## A held variant value outside the universe the recipe now declares. The
+  ## build refuses the same lock with the same finding
+  ## (`variants.lockedValueFor`); without this check the held value would
+  ## reach the solve as a fact and come back as an unexplained UNSAT.
+  "the " & lockDescription & " pins variant '" & name & "' to '" & value &
+    "', which is outside the values the recipe now declares for it" &
+    (if decl.kind == vkBool: " (true, false)"
+     else: " (" & decl.allowedValues.join(", ") & ")") &
+    ". `repro lock refresh --repin` holds every variant the lock records; " &
+    "re-solve it with a full `repro lock refresh`."
+
+proc heldVariantFits(decl: VariantDecl; value: string): bool =
+  case decl.kind
+  of vkBool: value in ["true", "false"]
+  else: decl.allowedValues.len == 0 or value in decl.allowedValues
+
+proc holdVariant(v: var VariantDecl; pins: LockPins;
+                 lockDescription: string) =
+  ## Hold ``v`` at the value the committed lock records, if it records one
+  ## and nothing (a develop sibling's own pin) already decided it.
+  if v.pinnedValue.len > 0 or v.name notin pins.variants: return
+  let value = pins.variants[v.name]
+  if not heldVariantFits(v, value):
+    raise newException(ELockConflict,
+      repinVariantConflict(lockDescription, v.name, value, v))
+  v.pinnedValue = value
+
+proc holdCommittedPins*(req: var LockGenerationRequest;
+                        committed: LockedDependencies;
+                        repin: openArray[string];
+                        lockPath: string;
+                        crossRepoProducer: proc (pkg: string): bool) =
+  ## Pin every package version and variant value ``committed`` records, other
+  ## than the packages named in ``repin``, onto ``req`` as hard pins, so the
+  ## solve answers only for the named packages (and for packages the lock does
+  ## not record at all, which have no pin to hold).
+  ##
+  ## Raises ``ELockConflict`` — the build's own diagnostic, rendered by the
+  ## same `lockConflictDiagnostic` — when a held version contradicts an
+  ## unconditional declared range, and for a held variant value outside its
+  ## declared universe. Spec: "When a held pin also contradicts a declared
+  ## range, the re-pin fails with that pin's `ELockConflict`, writes nothing,
+  ## and the caller adds the package to `--repin`. The flag never silently
+  ## re-solves a package it does not name."
+  ##
+  ## The checks mirror the build's (`variants.assertLockedVersionsSatisfy
+  ## DeclaredRanges`): only UNCONDITIONAL edges bind (a gated arm may be off
+  ## precisely because of the pin), a package whose version is already OBSERVED
+  ## (a develop checkout, `pinned` on arrival) is neither checked nor
+  ## re-pinned (develop overrides layer above the lock), and a side that is
+  ## not semver-shaped proves nothing.
+  ##
+  ## ``crossRepoProducer`` answers whether a declaring package is another
+  ## repository's, for the diagnostic only.
+  let solution = lockToSolution(solvedPartOf(committed))
+  var pins = initLockPins()
+  pins.packages = solution.packages
+  pins.variants = solution.variants
+  pins.lockPath = lockPath
+  let lockDescription = lockSourceDescription(pins)
+  var observed: seq[string] = @[]
+  for decl in req.packages:
+    if decl.pinned: observed.add(decl.name)
+  # Sorted so that, of several conflicts, the one reported does not depend on
+  # the fold's arrival order.
+  var order: seq[(string, int)] = @[]
+  for i in 0 ..< req.packages.len: order.add((req.packages[i].name, i))
+  order.sort()
+  for (_, i) in order:
+    let decl = req.packages[i]
+    for dep in decl.depends:
+      if dep.conditional.isSome: continue
+      if dep.name in repin or dep.name in observed: continue
+      if dep.name notin pins.packages: continue
+      let locked = pins.packages[dep.name]
+      var satisfied = true
+      try:
+        satisfied = satisfies(parseSemver(locked), parseSemverRange(dep.range))
+      except ESemverParse:
+        continue
+      if not satisfied:
+        raise newException(ELockConflict, lockConflictDiagnostic(
+          lockDescription, dep.name, locked, decl.name, dep.range,
+          declarerRecorded = pins.lockRecordsPackage(decl.name),
+          crossRepoProducer = crossRepoProducer(decl.name)))
+  for v in req.variants.mitems: holdVariant(v, pins, lockDescription)
+  for decl in req.packages.mitems:
+    for v in decl.variants.mitems: holdVariant(v, pins, lockDescription)
+    if decl.pinned or decl.name in repin: continue
+    if decl.name notin pins.packages: continue
+    decl.pinned = true
+    decl.versions = @[pins.packages[decl.name]]
+
+proc isLiftedPackageDep(d: LockedDep): bool =
+  ## A `deps` entry the MO-11 lift derived from a solved PACKAGE (store or
+  ## registry coordinates), as opposed to a repository the lock pins.
+  d.coordinates.kind in {ckStore, ckRegistry}
+
+proc mergeRepinnedLock*(committed, generated: LockedDependencies;
+                        repin: openArray[string]): LockedDependencies =
+  ## The lock a targeted re-pin writes: ``committed`` with only the changes
+  ## `Locking-And-Solver.md` §"Targeted re-pin" permits taken from
+  ## ``generated`` (the pinned solve's output).
+  ##
+  ##   * ``packages``: a named package's entry is the generated one; a package
+  ##     the committed lock does not record is ADDED; every other committed
+  ##     entry is kept verbatim — never changed, never removed, even when the
+  ##     current solve no longer has it.
+  ##   * ``variants``: kept verbatim (they were held); a variant the committed
+  ##     lock does not record is added.
+  ##   * ``deps``: carried forward. Two exceptions, both derived from entries
+  ##     the re-pin is allowed to write: the lifted store/registry entry of a
+  ##     re-pinned or added package follows that package, and the ROOT's own
+  ##     entry (``path = "."``) is the freshly observed one. The root entry is
+  ##     not a sibling revision pin: it records the revision of the tree the
+  ##     lock was solved from, which this solve has just re-read, and keeping a
+  ##     stale one would make `repro lock validate` refuse the lock for source
+  ##     drift the re-pin itself observed. Every sibling revision pin the
+  ##     committed lock records is carried byte-for-byte; a sibling it does NOT
+  ##     record is ADDED from the solve, by the same rule as a package. That is
+  ##     the issue's own case: a newly declared producer has no revision pin to
+  ##     hold, and leaving it out would write a lock whose lock-pinned mode
+  ##     cannot fetch the producer whose floor the re-pin just admitted.
+  ##   * ``inputsDigest`` / ``optimal``: the generated ones — they describe the
+  ##     solve that produced the written lock, and a digest of the OLD inputs
+  ##     would mark the lock stale against the recipe it was just solved from.
+  ##   * the certificate-policy snapshot and ``platform``: the committed ones.
+  result = committed
+  result.inputsDigest = generated.inputsDigest
+  result.optimal = generated.optimal
+  var changed: seq[string] = @[]
+  var committedNames: seq[string] = @[]
+  for p in committed.packages: committedNames.add(p.name)
+  result.packages = @[]
+  for p in committed.packages:
+    if p.name notin repin:
+      result.packages.add(p)
+      continue
+    for g in generated.packages:
+      if g.name == p.name:
+        result.packages.add(g)
+        changed.add(g.name)
+        break
+  for g in generated.packages:
+    if g.name notin committedNames:
+      result.packages.add(g)
+      changed.add(g.name)
+  result.packages.sort(proc (a, b: LockedPackage): int = cmp(a.name, b.name))
+  var committedVariants: seq[string] = @[]
+  for v in committed.variants: committedVariants.add(v.name)
+  for g in generated.variants:
+    if g.name notin committedVariants:
+      result.variants.add(g)
+  result.variants.sort(proc (a, b: LockedVariant): int = cmp(a.name, b.name))
+  result.deps = @[]
+  for d in committed.deps:
+    if isSelfLockedDep(d):
+      var fresh = d
+      for g in generated.deps:
+        if isSelfLockedDep(g): fresh = g
+      result.deps.add(fresh)
+    elif isLiftedPackageDep(d) and d.name in changed:
+      for g in generated.deps:
+        if isLiftedPackageDep(g) and g.name == d.name:
+          result.deps.add(g)
+          break
+    else:
+      result.deps.add(d)
+  for g in generated.deps:
+    if isLiftedPackageDep(g):
+      if g.name notin changed: continue
+      var present = false
+      for d in result.deps:
+        if isLiftedPackageDep(d) and d.name == g.name: present = true
+      if not present: result.deps.add(g)
+    else:
+      # A repository pin is matched by NAME — the identity a lock records,
+      # unique in `deps` — OR by where THIS machine has it checked out:
+      # either one already recorded means the committed lock pins that
+      # sibling, and its entry was carried above (or, for the root,
+      # refreshed). The location is never one a lock recorded: the committed
+      # entries are placed locally by the caller (`parseLockedDepsAt`) and
+      # the generated ones were observed by this run, so a sibling the
+      # committed lock names one way and this machine observed under another
+      # name is still one checkout. Matching against the entries written so
+      # far rather than the committed ones also keeps a sibling the solve
+      # lists twice from being added twice.
+      var present = false
+      for d in result.deps:
+        if not isLiftedPackageDep(d) and (d.name == g.name or
+            (g.path.len > 0 and d.path == g.path)):
+          present = true
+      if not present: result.deps.add(g)
+
+proc runLockRepin*(req: LockGenerationRequest;
+                   committed: LockedDependencies;
+                   repin: openArray[string]; writeTo: string):
+    LockGenerationResult =
+  ## `repro lock refresh --repin=<package>[,<package>…]`: generate through the
+  ## same one path every door uses, from a request whose unnamed pins the
+  ## caller has already held (`holdCommittedPins`), then write the merged
+  ## lock (`mergeRepinnedLock`).
+  ##
+  ## The certificate-policy snapshot is CARRIED, not re-evaluated: the spec
+  ## carries it forward unchanged, so ``req.recordCertificatePolicy`` is
+  ## ignored here.
+  var r = req
+  r.entryPoint = lgeLockRefresh
+  r.recordCertificatePolicy = false
+  result = generateLock(r)
+  let merged = mergeRepinnedLock(committed,
+    parseLockedDependencies(result.lockDocument), repin)
+  result.lockDocument = serializeLockedDependencies(merged)
+  result.lockIdentity = lockIdentityOf(merged)
+  if writeTo.len > 0:
+    landLockDocument(writeTo, result.lockDocument)
     result.lockPath = writeTo
 
 # ---------------------------------------------------------------------------

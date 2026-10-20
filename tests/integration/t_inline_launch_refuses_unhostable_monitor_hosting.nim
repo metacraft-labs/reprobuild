@@ -78,11 +78,12 @@
 ## NO MOCKS. A real ``runquotad`` over a real unix socket, the real engine,
 ## real child processes, and the filesystem as the oracle.
 
-import std/[exitprocs, os, osproc, sets, streams, strutils, tempfiles, unittest]
+import std/[os, osproc, sets, streams, strutils, tempfiles, unittest]
 
 import repro_build_engine
 import repro_core
 import repro_test_support
+import repro_test_support/process_fixtures
 
 when defined(linux) or defined(macosx):
   proc statExists(path: string): bool =
@@ -149,15 +150,6 @@ when defined(linux) or defined(macosx):
       (if died: " (it exited first)" else: " (timed out)") &
       (if output.len > 0: "; it said: " & output else: "; it said nothing"))
 
-  proc stop(handle: var DaemonHandle) =
-    if not handle.started: return
-    handle.process.terminate()
-    discard handle.process.waitForExit()
-    handle.process.close()
-    removeFile(handle.socket)
-    delEnv("RUNQUOTA_SOCKET")
-    handle.started = false
-
   proc requiredHostingConfig(repoRoot, cacheRoot: string;
                              path: MonitorLaunchPath): BuildEngineConfig =
     ## ``mhmRequired`` on every case here: the point is to ask for hosting
@@ -184,6 +176,25 @@ when defined(linux) or defined(macosx):
   const ProducedName = "produced.txt"
   const MarkerName = "marker.txt"
 
+  proc rootShell(): string =
+    ## The action's ROOT process. Not ``/bin/sh`` on macOS: a SIP-protected
+    ## root strips ``DYLD_INSERT_LIBRARIES``, the shim never loads in it, and
+    ## io-mon (correctly) fails closed with "spawn child missing
+    ## process-start parent=0" and no reads — so the L1 control below would
+    ## fail on the marker for a reason unrelated to hosting. Measured at
+    ## reprobuild 8a61fb6963 on aarch64-darwin. io-mon rewrites a SIP
+    ## SHEBANG interpreter for the root, not a SIP root executable, so the
+    ## fixture takes the engine's own non-SIP resolution
+    ## (``resolveNonSipShell``; spec/MacOS-Monitoring.md §"Packaged SIP
+    ## replacements without an ambient shell") and refuses to run without one.
+    when defined(macosx):
+      result = resolveNonSipShell()
+      doAssert result.len > 0,
+        "no non-SIP shell resolves on this host (" & nonSipShellSearchReport() &
+        "); a /bin/sh root would be uninjectable and capture nothing"
+    else:
+      result = "/bin/sh"
+
   proc monitoredShellAction(id, workRoot: string): BuildAction =
     ## Reads a marker and writes an output, both inside the case's own work
     ## tree. The OUTPUT is the oracle for "did this action run at all"; the
@@ -196,7 +207,7 @@ when defined(linux) or defined(macosx):
     ## perfectly well. Measured, not guessed — the first version of this
     ## file used the relative form and recorded fifteen shared objects and
     ## no marker.
-    action(id, ["/bin/sh", "-c",
+    action(id, [rootShell(), "-c",
                 "cat " & quoteShell(expandFilename(workRoot) / MarkerName) &
                 " > " & quoteShell(expandFilename(workRoot) / ProducedName)],
       cwd = workRoot,
@@ -239,24 +250,31 @@ when defined(linux) or defined(macosx):
   var fixtureUp = false
 
   proc ensureFixture() =
-    ## THE DAEMON STARTS INSIDE THE CASE THAT NEEDS IT, NOT AT MODULE LEVEL.
-    ## Module-level code also runs for the runner's ``--list-json`` probe and
-    ## for every case process, and only the "teardown" case stopped a daemon
-    ## (its own process's), so each probe and each other case left a
-    ## ``runquotad`` and a scratch tree behind for good — dozens accumulated
-    ## on a dev host over a week of runs. Called from a ``test`` body, the
-    ## exit proc is registered after the protocol hook and so runs before
-    ## that hook's ``quit``, which skips anything registered earlier.
+    ## THE DAEMON STARTS INSIDE THE CASE THAT NEEDS IT, NOT AT MODULE LEVEL,
+    ## AND STOPS WITH THE PROCESS THAT STARTED IT. Module-level code also runs
+    ## for the runner's ``--list-json`` probe and for every case process, and
+    ## a "teardown" case stopped only its own process's daemon, so each probe
+    ## and each other case left a ``runquotad`` and a scratch tree behind for
+    ## good — dozens accumulated on a dev host over a week of runs.
+    ##
+    ## The release is ``repro_test_support/process_fixtures``, not an
+    ## ``addExitProc`` closure over ``daemon`` and ``tempRoot``: ORC destroys
+    ## those globals when the module's top-level code ends, before any exit
+    ## hook runs, so such a closure reads freed memory. Measured at
+    ## reprobuild 6aa91f75 with that closure in place: one per-case run left
+    ## four ``repro-p3-refusal*`` trees behind and the next left none — the
+    ## outcome depends on whether the freed memory had been reused yet.
     if fixtureUp: return
     fixtureUp = true
     tempRoot = createTempDir("repro-p3-refusal", "")
+    releaseDirAtProcessExit(tempRoot)
     try:
       daemon = startRunQuotaDaemon(repoRoot, tempRoot)
+      # Registered after the directory, so it runs first: the daemon is
+      # stopped before the tree holding its socket is removed.
+      terminateAtProcessExit(daemon.process.processID)
     except CatchableError as err:
       runQuotaError = err.msg
-    addExitProc(proc() =
-      daemon.stop()
-      if tempRoot.len > 0: removeDir(tempRoot))
 
   ## A template so a failed ``check`` names the caller's line. It no longer
   ## has to be one for the verdict: the ``unittest`` in use routes a ``check``
@@ -452,13 +470,3 @@ when defined(linux) or defined(macosx):
         if name notin executed:
           echo "case '", name, "' did not run to the end of its assertions"
         check name in executed
-
-    test "teardown":
-      ensureFixture()
-      daemon.stop()
-      removeDir(tempRoot)
-      # ``check true`` could not fail, so a teardown that silently left the
-      # daemon running or the scratch tree on disk would still report [OK].
-      # Assert the post-state the teardown exists to produce.
-      check not dirExists(tempRoot)
-      check not daemon.started

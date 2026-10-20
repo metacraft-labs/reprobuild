@@ -17,8 +17,9 @@
 ##   ``ensureArrayTableEntry`` adds one ``[[table]]`` entry. Every edit
 ##   rewrites only the lines of the span it changes, so comments, key order,
 ##   blank lines and line endings (LF or CRLF) outside that span survive byte
-##   for byte. ``saveManifestDoc`` writes the result back only when something
-##   changed.
+##   for byte — except the file END of an edited document, which is
+##   normalised to exactly one line terminator (see ``manifestDocText``).
+##   ``saveManifestDoc`` writes the result back only when something changed.
 ##
 ## Why a document model and not a serializer: a manifest is authored by
 ## people. A writer that decoded the file and re-emitted it would delete every
@@ -364,23 +365,46 @@ proc customRoleBlock(header: string;
   if e.len > 0:
     result.add(RenderBlock(header: header, entries: e))
 
+proc needsRepoFragmentV2*(body: RepoBody): bool =
+  ## Whether ``body`` declares something only ``reprobuild.workspace.repo.v2``
+  ## can say: a role other than the mainline (a branch name or ``false``),
+  ## a ``profile``, or a custom role. The mainline alone does not count —
+  ## v1 says it as ``branch``.
+  body.profile.isSome or body.`branch-roles`.entries.len > 0 or
+    body.unstable.isDeclared or body.staging.isDeclared or
+    body.stable.isDeclared or body.production.isDeclared or
+    body.lts.isDeclared
+
 proc repoFragmentText*(fragment: RepoFragment): string =
-  ## ``repos/<repo>.toml`` from a typed value, ALWAYS as
-  ## ``reprobuild.workspace.repo.v2`` (Workspace-Branch-Roles.md §3.1): the
-  ## mainline is written as ``mainline`` — taken from ``mainline``, or from a
-  ## v1-style ``branch`` on the record — and never as ``branch``. Keys under
-  ## ``[repo]`` are written in a fixed order — identity (``name``, ``path``),
-  ## where it comes from (``remote``), what it follows (``profile``, the
-  ## roles, ``revision``), then the URL split, then every optional key — so
-  ## two fragments written by two verbs read alike. Custom roles go in a
-  ## ``[repo.branch-roles]`` block after ``[repo]``.
+  ## ``repos/<repo>.toml`` from a typed value, in the OLDEST schema that can
+  ## say it (Workspace-Branch-Roles.md §6): ``reprobuild.workspace.repo.v1``,
+  ## with the mainline as ``branch``, unless the fragment declares something
+  ## only v2 can say (``needsRepoFragmentV2``) — then ``repo.v2``, with the
+  ## mainline as ``mainline``. The mainline is taken from ``mainline`` or from
+  ## a v1-style ``branch`` on the record, whichever is set; the record's own
+  ## ``schema`` is ignored.
+  ##
+  ## Why not always v2: a ``repro`` that predates v2 refuses the WHOLE
+  ## workspace on the first v2 fragment it reads, so one new fragment written
+  ## by a newer ``repro`` would break every pre-push gate run by a host still
+  ## on the older pin. A v1 fragment is read identically by both.
+  ##
+  ## Keys under ``[repo]`` are written in a fixed order — identity (``name``,
+  ## ``path``), where it comes from (``remote``), what it follows
+  ## (``profile``, the roles, ``revision``), then the URL split, then every
+  ## optional key — so two fragments written by two verbs read alike. Custom
+  ## roles go in a ``[repo.branch-roles]`` block after ``[repo]``.
   let r = fragment.repo
+  let v2 = r.needsRepoFragmentV2
   var e: seq[RenderEntry]
   e.add(entry("name", tomlStr(r.name)))
   e.add(entry("path", tomlStr(r.path)))
   e.addOpt("remote", r.remote)
   e.addOpt("profile", r.profile)
-  for re in roleEntries(r.roleDecls): e.add(re)
+  if v2:
+    for re in roleEntries(r.roleDecls): e.add(re)
+  else:
+    e.addOpt("branch", r.mainlineBranch)
   e.addOpt("revision", r.revision)
   e.addOpt("url_prefix", r.url_prefix)
   e.addOpt("url_suffix", r.url_suffix)
@@ -402,7 +426,7 @@ proc repoFragmentText*(fragment: RepoFragment): string =
   e.addNonEmpty("depends", r.depends)
   var blocks = @[RenderBlock(header: "[repo]", entries: e)]
   blocks.add(customRoleBlock("[repo.branch-roles]", r.`branch-roles`.entries))
-  assemble(schemaRepoFragmentV2, @[], blocks,
+  assemble(if v2: schemaRepoFragmentV2 else: schemaRepoFragmentV1, @[], blocks,
     extensionsBlock(fragment.extensions))
 
 proc repoSetText*(manifest: RepoSetManifest): string =
@@ -545,7 +569,9 @@ proc workspaceSettingsText*(cfg: WorkspaceSettings): string =
   f.addOpt("auto_load_envrc", cfg.foreign_env.auto_load_envrc)
   f.addOpt("auto_load_flake", cfg.foreign_env.auto_load_flake)
   if f.len > 0: blocks.add(RenderBlock(header: "[foreign_env]", entries: f))
-  assemble(schemaWorkspaceSettingsV1, @[], blocks,
+  var top: seq[RenderEntry]
+  top.addOpt("push_gateway", cfg.push_gateway)
+  assemble(schemaWorkspaceSettingsV1, top, blocks,
     extensionsBlock(cfg.extensions))
 
 proc stateWorkspaceEntries(body: WorkspaceBody): seq[RenderEntry] =
@@ -590,6 +616,11 @@ proc writeWorkspaceManifestFile*(path, text: string) =
   ## Write ``text`` to ``path`` (creating the parent directory) through a
   ## sibling temporary file and a rename, so a reader never observes a
   ## half-written manifest.
+  ##
+  ## ``text`` is written verbatim. The typed ``*Text`` renderers and
+  ## ``manifestDocText`` of an edited document already end in exactly one
+  ## line terminator, and this proc is also used to snapshot a legacy state
+  ## file's bytes exactly (``workspace_branch``), so it must not reshape them.
   let dir = parentDir(path)
   if dir.len > 0:
     createDir(dir)
@@ -626,12 +657,40 @@ proc loadManifestDoc*(path: string): ManifestDoc =
   manifestDocFromText(readFile(path), path)
 
 proc manifestDocText*(doc: ManifestDoc): string =
-  for i, line in doc.lines:
-    result.add(line)
-    result.add(doc.terms[i])
+  ## The document's text. An unchanged document is reproduced byte for byte.
+  ##
+  ## A CHANGED document additionally ends in exactly one line terminator: an
+  ## unterminated last line gets the document's ``eol``, and trailing EMPTY
+  ## lines are dropped (a line holding only spaces is content and stays). That
+  ## is ``end-of-file-fixer``'s rule, and the manifest repo's managed
+  ## pre-commit set runs it: a staged file it rewrites makes the commit a
+  ## ``repro ws`` verb then attempts fail with the edit left staged
+  ## (CLI/workspace.md, "Every file a verb writes ends in exactly one line
+  ## terminator"). Keeping each line's own terminator would otherwise carry a
+  ## defective file end through every edit — the editor replaces an
+  ## unterminated last line with one that keeps "its" empty terminator, and
+  ## appends after content but before blank lines that close the file.
+  ##
+  ## The normalisation is applied here, on output, rather than to ``lines``,
+  ## so the line numbers later edits and diagnostics use are not disturbed,
+  ## and so ``blankTable`` (which blanks lines without marking the document
+  ## changed) keeps every line. An empty document stays empty; one left with
+  ## only empty lines becomes empty, as ``end-of-file-fixer`` would make it.
+  var last = doc.lines.len - 1
+  if doc.changed:
+    while last >= 0 and doc.lines[last].len == 0:
+      dec last
+  for i in 0 .. last:
+    result.add(doc.lines[i])
+    if i == last and doc.changed and doc.terms[i].len == 0:
+      result.add(doc.eol)
+    else:
+      result.add(doc.terms[i])
 
 proc saveManifestDoc*(doc: ManifestDoc) =
-  ## Write the document back when an edit changed it.
+  ## Write the document back when an edit changed it. Only then is its end
+  ## normalised (``manifestDocText``): a file the verb did not edit is not
+  ## rewritten at all.
   if doc.changed:
     writeWorkspaceManifestFile(doc.path, doc.manifestDocText)
 
@@ -1218,13 +1277,17 @@ proc upgradeRepoFragmentToV2*(doc: var ManifestDoc): bool =
   discard doc.renameKey("repo", "branch", "mainline")
   true
 
-proc guardFragmentSchema(doc: var ManifestDoc; table, key: string) =
+proc guardFragmentSchema(doc: var ManifestDoc; table, key: string): string =
   ## The one-schema rule for repo fragments, enforced HERE rather than by
-  ## callers (Workspace-Branch-Roles.md §3.6; the reader refuses a mixed
-  ## fragment):
+  ## callers (Workspace-Branch-Roles.md §3.6, §6; the reader refuses a mixed
+  ## fragment). Returns the key to write, which differs from ``key`` only
+  ## when a v1 file spells it differently:
   ##
-  ## * writing a ``repo.v2``-only key (``mainline``, a role, ``profile``, a
-  ##   custom role) into a v1 fragment first upgrades the WHOLE file to v2;
+  ## * writing ``mainline`` into a v1 fragment writes ``branch`` — the same
+  ##   meaning in the v1 spelling — and leaves the file v1;
+  ## * writing a key only ``repo.v2`` can say (a role other than the
+  ##   mainline, ``profile``, a custom role) into a v1 fragment first upgrades
+  ##   the WHOLE file to v2;
   ## * writing ``branch`` into a v2 fragment is refused.
   ##
   ## Why an edit of a key both schemas share (``depends``, ``tags`` …) does
@@ -1232,12 +1295,16 @@ proc guardFragmentSchema(doc: var ManifestDoc; table, key: string) =
   ## refuse the file ("unknown major schema version"). Upgrading every
   ## fragment a verb happens to touch would turn an unrelated ``repro add``
   ## into an outage for every machine still on an older pin; a workspace's
-  ## fragments move to v2 when it migrates, deliberately and all at once.
+  ## fragments move to v2 when it migrates, deliberately and all at once. The
+  ## same reason keeps ``mainline`` in the v1 spelling: a v1 file can say it.
+  result = key
   let schema = doc.repoFragmentSchema
   if schema.len == 0:
     return
+  if schema == schemaRepoFragmentV1 and table == "repo" and key == "mainline":
+    return "branch"
   let v2Only =
-    (table == "repo" and key in ["mainline", "unstable", "staging", "stable",
+    (table == "repo" and key in ["unstable", "staging", "stable",
                                  "production", "lts", "profile",
                                  "branch-roles"]) or
     table == "repo.branch-roles"
@@ -1263,9 +1330,10 @@ proc setKey*(doc: var ManifestDoc; table, key: string; value: TomlEditValue;
   ##   (first in the table when none is present), or after the table's last
   ##   key when ``after`` is empty. A new top-level key goes above the first
   ##   table header. A missing table is appended to the file.
-  ## * In a repo fragment, a ``repo.v2``-only key upgrades a v1 file first and
-  ##   ``branch`` is refused in a v2 file (``guardFragmentSchema``).
-  doc.guardFragmentSchema(table, key)
+  ## * In a repo fragment, ``mainline`` is written as ``branch`` in a v1 file,
+  ##   a key only ``repo.v2`` can say upgrades a v1 file first, and ``branch``
+  ##   is refused in a v2 file (``guardFragmentSchema``).
+  let key = doc.guardFragmentSchema(table, key)
   let s = doc.scan
   let idx = doc.findEntry(s, table, key)
   if idx >= 0:

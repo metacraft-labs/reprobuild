@@ -135,10 +135,16 @@ proc advance*(fx: SiblingFixture; name: string): string =
   discard fx.git(work, "push -q origin main")
   fx.headOf(work)
 
-proc depEntry*(lockBody, path: string): string =
-  ## The inline table of the `deps` entry whose `path` is `path`, or "".
-  let key = "path = \"" & path & "\""
-  let at = lockBody.find(key)
+proc depEntry*(lockBody, name: string): string =
+  ## The inline table of the `deps` entry named `name`, or "". `"."` names
+  ## the lock's OWN entry, the one marked `self = "true"` — the spelling a
+  ## lock reader holds it at. Entries are found by name because a lock records
+  ## no checkout path (Workspace-Manifests.md §"The committed lock carries the
+  ## full set (schema v3)").
+  let at =
+    if name == ".": lockBody.find("self = \"true\"")
+    # After `deps = [`: a `packages` entry starts with the same prefix.
+    else: lockBody.find("{ name = \"" & name & "\"", max(0, lockBody.find("deps = [")))
   if at < 0: return ""
   let open = lockBody.rfind('{', 0, at)
   let close = lockBody.find('}', at)

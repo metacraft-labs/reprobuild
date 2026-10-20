@@ -7,10 +7,9 @@
 ## References"). This module realizes the SELECTION with the realizer of its
 ## kind:
 ##
-##   * ``tarball``, plain archive — the ``uses:`` provisioning edge
-##     (``repro_tool_profiles.resolveTarballTool``), the realizer recipes use;
-##   * ``tarball``, installer / MSYS2 / pre-install / launcher emission — the
-##     home archive realizer (``builtin_adapter.realizeBuiltinPackage``);
+##   * ``tarball`` — the same ``resolveTarballTool`` provisioning edge a
+##     recipe uses, including installation, MSYS2 and launcher operations;
+##     ``builtin_adapter`` only projects its activation metadata;
 ##   * ``nix`` — ``repro_tool_profiles.resolveNixTool``, then a store prefix
 ##     recording the Nix store path;
 ##   * ``scoop`` — ``repro_tool_profiles.resolveScoopTool`` (Windows);
@@ -55,9 +54,8 @@ type
     akScoop = "scoop"
     akTarball = "tarball"
     akBuiltin = "builtin"
-      ## A ``tarball`` selection realized by the home archive realizer
-      ## (``builtin_adapter.realizeBuiltinPackage``): installers, MSYS2
-      ## packages, pre-install steps, launcher emission.
+      ## Legacy adapter label retained for decoding existing generations.
+      ## New archive realizations are produced by the tarball edge.
     akNix = "nix"
       ## GM4b: a ``nixPackage`` selection realized by
       ## ``repro_tool_profiles.resolveNixTool``.
@@ -66,14 +64,21 @@ type
     ## GM4c: a realized macOS application bundle — what activation copies
     ## into the Applications directory (``app_activation``).
     storeBundlePath*: string
-      ## The verified bundle at the prefix root.
+      ## The verified placed item at the prefix root: the bundle, or -- for
+      ## an installer application whose product lives in a folder -- that
+      ## folder (Store-And-Installation-Layout.md § Installer applications).
     bundleName*: string
-      ## ``<Name>.app``; the name it is placed under.
+      ## ``<Name>.app`` or the folder's name; the name it is placed under.
+    mainBundlePath*: string
+      ## For a folder, the product bundle's path inside it; "" when the
+      ## placed item is the bundle.
     expectation*: AppBundleExpectation
-      ## The record's declarations, re-checked on the placed copy.
+      ## The record's declarations, re-checked on the placed copy (its
+      ## product bundle, for a folder).
     identity*: seq[byte]
-      ## ``appBundleCanonicalBytes`` of the store bundle; the placed copy
-      ## must carry exactly this identity.
+      ## ``readPlacedItemIdentityBytes`` of the store item (a bundle's
+      ## ``appBundleCanonicalBytes``, or the folder identity); the placed
+      ## copy must carry exactly this identity.
     trust*: AppTrustPolicy
       ## The trust policy the realization ran under (``{}`` in production).
 
@@ -323,8 +328,8 @@ proc realizeScoopAdapter(store: var Store; packageId: string;
 proc realizeBuiltinAdapter(store: var Store;
                            resolution: ArchiveRealization;
                            appTrust: AppTrustPolicy = {}): RealizedRecord =
-  ## Run the home archive realizer on a projected ``tarball`` selection and
-  ## pack the result into the ``RealizedRecord`` the pipeline consumes.
+  ## Project the shared tarball edge's result into home activation metadata.
+  ## This compatibility wrapper owns no realization or store mutation.
   ## A macOS application that fails its archive handling or a trust check
   ## fails the apply at step 7, naming the package and the check.
   let outcome =
@@ -333,6 +338,8 @@ proc realizeBuiltinAdapter(store: var Store;
     except EAppBundleRefused as err:
       raiseRealizeFailed(resolution.packageId, "builtin", err.msg)
     except EAppArchive as err:
+      raiseRealizeFailed(resolution.packageId, "builtin", err.msg)
+    except EInstallerApp as err:
       raiseRealizeFailed(resolution.packageId, "builtin", err.msg)
   result.packageId = resolution.packageId
   result.adapter = akBuiltin
@@ -347,64 +354,22 @@ proc realizeBuiltinAdapter(store: var Store;
   result.digestValue = outcome.digestValue
   result.archiveFormat = outcome.archiveFormat
   result.envBindings = outcome.envBindings
-  # Provenance: a typed `builtin:<algorithm>:<digest>` blob so cross-
-  # adapter callers can identify which adapter realized the prefix.
-  result.provenance = bytesOfText("builtin:" & outcome.digestAlgorithm & ":" &
+  # The prefix and provenance identify the one tarball provisioning edge.
+  result.provenance = bytesOfText("tarball:" & outcome.digestAlgorithm & ":" &
     outcome.digestValue)
   if outcome.appBundlePath.len > 0:
     result.appBundle = AppBundleRealization(
       storeBundlePath: outcome.appBundlePath,
       bundleName: extractFilename(outcome.appBundlePath),
+      mainBundlePath: outcome.appBundleMainPath,
       expectation: appBundleExpectationOf(resolution),
       identity: outcome.appBundleIdentity,
       trust: appTrust)
 
 
 # ---------------------------------------------------------------------------
-# Extract-route tarball and Nix realization
+# Nix realization
 # ---------------------------------------------------------------------------
-
-proc substitutedEnv(record: InterfaceTarballProvisioning;
-                    prefixAbs: string): seq[tuple[name, value: string]] =
-  ## A plain archive's ``env`` bindings with ``${prefix}`` substituted —
-  ## what the home archive realizer computes for its own records, so an
-  ## env-declaring package binds the same variables whichever realizer ran.
-  var raw: seq[tuple[name, value: string]] = @[]
-  for binding in record.detail.env:
-    let eq = binding.find('=')
-    if eq > 0:
-      raw.add((name: binding[0 ..< eq], value: binding[eq + 1 .. ^1]))
-  for i in 0 ..< raw.len:
-    for j in i + 1 ..< raw.len:
-      if raw[j].name < raw[i].name:
-        swap(raw[i], raw[j])
-  substituteEnv(raw, prefixAbs)
-
-proc realizeExtractTarball(store: var Store;
-                           resolution: ProfilePackageResolution):
-    RealizedRecord =
-  ## A plain archive: realized by the ``uses:`` provisioning edge
-  ## (``resolveTarballTool``), the realizer a recipe's ``uses:`` of the same
-  ## package runs. ``resolution.useDef`` carries only the selected record,
-  ## so the edge cannot select a different one.
-  let packageId = resolution.packageId
-  let record = resolution.selection.tarball
-  let profile =
-    try:
-      resolveTarballTool(resolution.useDef, store.root)
-    except CatchableError as err:
-      raiseRealizeFailed(packageId, "tarball", err.msg)
-  result = recordFromStorePrefix(store, packageId, akTarball, "tarball",
-    profile.selectedStorePath, profile.resolvedExecutablePath,
-    "tarball:" & resolution.selection.lockIdentity)
-  result.resolvedVersion = record.detail.version
-  result.urlUsed = profile.tarballSelectedUrl
-  result.digestAlgorithm = "sha256"
-  result.digestValue = profile.tarballSha256
-  let format = parseArchiveFormatToken(record.archiveType)
-  if format.ok:
-    result.archiveFormat = format.format
-  result.envBindings = substitutedEnv(record, profile.selectedStorePath)
 
 proc realizeNixSelection(store: var Store;
                          resolution: ProfilePackageResolution):
@@ -550,11 +515,9 @@ proc realizeResolution*(store: var Store;
   let selection = resolution.selection
   case selection.kind
   of rkTarball:
-    case resolution.archiveRoute
-    of arExtract:
-      result = realizeExtractTarball(store, resolution)
-    of arInstaller:
-      result = realizeBuiltinAdapter(store, resolution.archive, appTrust)
+    result = realizeBuiltinAdapter(store,
+      archiveRealizationOf(resolution.packageId, selection.tarball), appTrust)
+    result.adapter = akTarball
   of rkNix:
     result = realizeNixSelection(store, resolution)
   of rkScoop:
@@ -600,6 +563,11 @@ type
       ## The policy steps consulted — the selection's trace, or the failed
       ## selection's ``steps``.
     resolvedVersion*: string
+    unknownDefinition*: bool
+      ## The reference is unresolved because no package definition this
+      ## process can see names it at all (`unknown-package`), as opposed to a
+      ## known definition that offers nothing for the target. A catalog that
+      ## was not reachable might define it.
 
 proc contributorSuffix(selection: RealizationSelection): string =
   if selection.contributor.len > 0:
@@ -618,8 +586,12 @@ proc describeResolution*(resolution: ProfilePackageResolution):
       if record.sha256.len > 0: "sha256"
       elif record.detail.sha512.len > 0: "sha512"
       else: "sha1"
+    # Name the install shape when the record asks for work beyond download,
+    # verify and extract (an app bundle, an installer, a non-sha256 digest).
+    # The shared provisioning edge realizes every record, so the route no
+    # longer carries this distinction; the record's requested operations do.
     let route =
-      if resolution.archiveRoute == arInstaller:
+      if archiveInstallerFeatures(record).len > 0:
         ", " & (if record.detail.installMethod.len > 0:
                   record.detail.installMethod else: "extract")
       else: ""
@@ -699,6 +671,8 @@ proc previewPackageResolutions*(packages: seq[PlannedPackage];
         preview.resolvedVersion = resolution.selection.version
       except CatchableError as err:
         let failure = previewResolutionFailure(err)
+        preview.unknownDefinition = err of EMissingRealization and
+          not (ref EMissingRealization)(err).definitionKnown
         preview.kind = ppkMissing
         preview.detail = failure.detail
         preview.steps = failure.steps
