@@ -16599,10 +16599,16 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         if provisioner != "nix":
           raiseEngine("Unsupported provisioner: " & provisioner)
         
+        # The helper refuses a missing or relative ``workspaceRoot``: it is
+        # shared, runs from ``/``, and has no directory of its own to
+        # resolve one against. A relative (or empty) ``cwd`` means what it
+        # means for every other edge here (``builtinPath``): relative to
+        # this process, so the root is made absolute here, where that is
+        # still known.
         let req = %*{
           "action": "resolve",
           "selector": selector,
-          "workspaceRoot": action.cwd
+          "workspaceRoot": absolutePath(action.cwd)
         }
         # An edge MAY carry a JSON object in ``builtinText``
         # (``repro_tool_profiles``' ``nixToolProvisioningEdges``) naming
@@ -16623,7 +16629,8 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         # for a build run from the reprobuild tree): a tool edge's ``cwd``,
         # its tool store, is no place to look for one, and before the edge
         # existed tool resolution resolved it from the project directory.
-        var helperRoot = action.cwd
+        var helperRoot =
+          if action.cwd.len > 0: absolutePath(action.cwd) else: ""
         if action.builtinText.len > 0:
           let spec =
             try: parseJson(action.builtinText)
@@ -16635,8 +16642,8 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
               "a JSON object: " & action.id)
           let workspaceRoot = spec{"workspaceRoot"}.getStr()
           if workspaceRoot.len > 0:
-            req["workspaceRoot"] = %workspaceRoot
-            helperRoot = workspaceRoot
+            helperRoot = absolutePath(workspaceRoot)
+            req["workspaceRoot"] = %helperRoot
           let expressionFile = spec{"expressionFile"}.getStr()
           if expressionFile.len > 0:
             req["expressionFile"] = %expressionFile

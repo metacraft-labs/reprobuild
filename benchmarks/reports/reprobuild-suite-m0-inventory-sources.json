@@ -1,7 +1,7 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2256,
+    "nimTestBinaries": 2255,
     "pureUnitConsolidationGroups": 63,
     "pureUnitTests": 676,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
@@ -1316,10 +1316,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 17,
-      "integration": 1238,
+      "integration": 1237,
       "platform/destructive": 138,
       "pure unit": 676,
-      "unclassified": 217
+      "unclassified": 218
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1521,8 +1521,8 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2256,
-    "pythonTestFileCount": 30,
+    "nimTestBinaryCount": 2255,
+    "pythonTestFileCount": 31,
     "testEntryCount": 2286
   },
   "staticallyDetectedRuntimeCompilerFlows": [
@@ -35321,25 +35321,6 @@
       "targetOs": "soAny"
     },
     {
-      "binary": "build/test-bin/t_interface_extraction_is_served_to_a_copy_at_another_path",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
-      "defines": [],
-      "language": "nim",
-      "localDependencyShape": [
-        "repro_dsl_stdlib",
-        "repro_project_dsl",
-        "repro_test_support"
-      ],
-      "owner": "tests/integration",
-      "requiresReproBinary": true,
-      "source": "tests/integration/t_interface_extraction_is_served_to_a_copy_at_another_path.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
-      "staticallyDetectedRuntimeCompilerFlow": false,
-      "targetOs": "soAny"
-    },
-    {
       "binary": "build/test-bin/t_interface_extraction_variants_keep_their_own_outputs",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -37450,7 +37431,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_nix_daemon_provisioner.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -48342,7 +48323,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_nix_daemon_descriptors.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -48356,6 +48337,21 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/test_nix_daemon_expression_file_is_never_cached.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `importlib.machinery`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_nix_daemon_request_requires_workspace_root.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,

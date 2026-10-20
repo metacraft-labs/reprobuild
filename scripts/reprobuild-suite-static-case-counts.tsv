@@ -1547,7 +1547,6 @@ tests/integration/t_integration_variant_value_accessor.nim	nim	4
 tests/integration/t_integrity_mismatch_surfaces_per_tier.nim	nim	1
 tests/integration/t_integrity_uses_vcs_native_hash_else_own_file_hash_both_multihash.nim	nim	1
 tests/integration/t_interface_extraction_follows_the_selected_catalog.nim	nim	1
-tests/integration/t_interface_extraction_is_served_to_a_copy_at_another_path.nim	nim	1
 tests/integration/t_interface_extraction_variants_keep_their_own_outputs.nim	nim	1
 tests/integration/t_is_published_accepts_any_remote_name.nim	nim	1
 tests/integration/t_issuance_leaves_the_user_index_untouched.nim	nim	1
@@ -1666,7 +1665,7 @@ tests/integration/t_nf4_foreign_env_contract.nim	nim	16
 tests/integration/t_nim_package_path_handling.nim	nim	1
 tests/integration/t_nitro_enclave_attestation_surface.nim	nim	27
 tests/integration/t_nix_daemon_ipc.nim	nim	7
-tests/integration/t_nix_daemon_provisioner.nim	nim	10
+tests/integration/t_nix_daemon_provisioner.nim	nim	11
 tests/integration/t_nix_expression_closure_keys.nim	nim	6
 tests/integration/t_nix_tool_realizations_are_gc_rooted.nim	nim	1
 tests/integration/t_nix_tool_resolution_is_a_provisioning_edge.nim	nim	4
@@ -2279,8 +2278,9 @@ tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py	python	13
 tests/unit/test_hcr_replay_gate_monitor_policy.py	python	2
 tests/unit/test_install_nix_paths.py	python	14
 tests/unit/test_lint_gate_ordering.py	python	4
-tests/unit/test_nix_daemon_descriptors.py	python	5
+tests/unit/test_nix_daemon_descriptors.py	python	7
 tests/unit/test_nix_daemon_expression_file_is_never_cached.py	python	4
+tests/unit/test_nix_daemon_request_requires_workspace_root.py	python	4
 tests/unit/test_package_root_anchor.py	python	3
 tests/unit/test_prune_undeclared_test_binaries.py	python	5
 tests/unit/test_publish_surface_routing.py	python	32

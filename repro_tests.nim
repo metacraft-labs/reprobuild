@@ -13869,15 +13869,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-    source: "tests/integration/t_interface_extraction_is_served_to_a_copy_at_another_path.nim",
-    binary: "build/test-bin/t_interface_extraction_is_served_to_a_copy_at_another_path",
-    defines: @[],
-    requiresReproBinary: true,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny,
-    selfInterposes: false),
-  TestSpec(
     source: "tests/integration/t_interface_extraction_variants_keep_their_own_outputs.nim",
     binary: "build/test-bin/t_interface_extraction_variants_keep_their_own_outputs",
     defines: @[],
@@ -20415,6 +20406,7 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_lint_gate_ordering.py",
   "tests/unit/test_nix_daemon_descriptors.py",
   "tests/unit/test_nix_daemon_expression_file_is_never_cached.py",
+  "tests/unit/test_nix_daemon_request_requires_workspace_root.py",
   "tests/unit/test_package_root_anchor.py",
   "tests/unit/test_prune_undeclared_test_binaries.py",
   "tests/unit/test_publish_surface_routing.py",

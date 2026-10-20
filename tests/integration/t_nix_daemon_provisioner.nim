@@ -584,6 +584,27 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
       check res.status == asSucceeded
       check dirExists(readFile(receipt).strip())
 
+    test "an edge with a relative or empty cwd sends an absolute root":
+      # The helper is shared and runs from ``/``, so it refuses a missing or
+      # relative ``workspaceRoot`` instead of resolving one against its own
+      # directory. A relative edge ``cwd`` is relative to the engine, as it
+      # is for every other builtin edge, so the engine must make the root
+      # absolute before it asks; otherwise the helper's refusal is what the
+      # edge reports.
+      var f = openSharedHelperFixture()
+      defer: f.close()
+      let relativeRoot = relativePath(f.root, getCurrentDir())
+      require not relativeRoot.isAbsolute
+      for (label, cwd) in [("relative", relativeRoot), ("empty", "")]:
+        let receipt = f.root / ("receipt-" & label & "-cwd")
+        let res = executeBuiltinAction(foreignProvisionAction(
+          "fake#" & label & "-cwd", receipt, cwd))
+        checkpoint(label & ": " & res.stderr)
+        check res.status == asSucceeded
+        check "not an absolute path" notin res.stderr
+        check "missing workspaceRoot" notin res.stderr
+        check fileExists(receipt)
+
     test "the helper socket is keyed by the helper's identity":
       # Every worktree, package and CI checkout resolves its own helper file,
       # and one socket per user let whichever started first answer for all
