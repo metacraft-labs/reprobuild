@@ -136,6 +136,17 @@ else:
     CodeTracerCommonDevToolExecutables & CodeTracerTupToolExecutables &
       CodeTracerMacDevToolExecutables
 
+# Tool `uses:` entries no PATH fixture provides, because the native edges that
+# reference them resolve them themselves: `zstd-dev` is a header/library
+# channel, not an executable (CodeTracer 01d8b6e54), and `dsymutil` is the
+# macOS debug-info pass (CodeTracer 3be367fc1). They count toward the declared
+# tool total but are not in `CodeTracerDevToolExecutables`, whose members must
+# each resolve to a fixture.
+when defined(macosx):
+  const CodeTracerNonFixtureToolUses: seq[string] = @["zstd-dev", "dsymutil"]
+else:
+  const CodeTracerNonFixtureToolUses: seq[string] = @["zstd-dev"]
+
 const CodeTracerSourcePackages = [
   "isonim",
   "nim-everywhere",
@@ -1094,9 +1105,17 @@ proc codeTracerPathDirs(includeClang = false): seq[string] =
   # clang is unsigned and injectable). The ``nim`` script likewise forwards
   # to the test's own Nim (see its header for why not CodeTracer's bundled
   # one). Both must exist, as they had to when they were baked in per case.
-  check findExe(
+  let realCompiler = findExe(
     when defined(macosx): "clang"
-    else: "gcc").len > 0
+    else: "gcc")
+  check realCompiler.len > 0
+  # Where the PATH search cannot find it, because the edge's PATH is hermetic.
+  # CodeTracer's native edges declare their backend compiler (CodeTracer
+  # 23d5af70f), so their PATH is only the directories their declared tools
+  # resolved into, and the proxy's is the only compiler directory among them.
+  # The proxy then execs the compiler this names (see `gcc-proxy.c`). It is the
+  # same compiler the PATH search finds on the inherited-PATH edges.
+  putEnv("REPROBUILD_CODETRACER_REAL_COMPILER", realCompiler)
   check findExe("nim").len > 0
   let gcc = codeTracerToolBinary("bin/gcc",
     "reprobuild.test_fixtures.codetracer_tool_gcc")
@@ -1160,6 +1179,9 @@ proc codeTracerHybridNimPathValue(codeTracerRoot: string): string =
   # on PATH for native targets.
   let localNim = codeTracerNimPath(codeTracerRoot)
   check findExe("nim").len > 0
+  # The native edges' PATH is hermetic, so the appended directory never
+  # reaches them; `hybrid-nim/nim` falls back to this.
+  putEnv("REPROBUILD_CODETRACER_NATIVE_NIM", localNim)
   (@[codeTracerToolDir("hybrid-nim")] &
     codeTracerPathDirs(includeClang = true) &
     @[getEnv("PATH"), localNim.parentDir]).join($PathSep)
@@ -3081,15 +3103,15 @@ when defined(macosx) or defined(linux):
       # declared and unrealized. The declared set, the denominator of
       # `selected tool identities:`, has three parts:
       #   * the recipe's `uses:` tools for this platform, which is
-      #     `CodeTracerDevToolExecutables` (46 on macOS);
-      #   * its six source packages, which are `CodeTracerSourcePackages`
-      #     plus `isonim-tui`;
+      #     `CodeTracerDevToolExecutables` plus `CodeTracerNonFixtureToolUses`;
+      #   * its seven source packages, which are `CodeTracerSourcePackages`
+      #     plus `isonim-tui` and `codetracer-trace-format-nim`;
       #   * the commands of the generated install-mirror script, which every
       #     package declares as native tools (`registerInstallMirrorTools`,
       #     from `typedInstallMirrorShellTools`): `sh rm mkdir cp touch sed
       #     chmod`, and 14 more on Linux. `sh` is counted again, because its
       #     dependency kind differs from the `uses:` entry.
-      # Measured on macOS: 46 + 6 + 7 = 59.
+      # Measured on macOS before CodeTracer 01d8b6e54: 46 + 6 + 7 = 59.
       #
       # It used to assert one profile per declared tool and source package
       # (written 2026-07-12, before the scoping). That fails with
@@ -3097,10 +3119,16 @@ when defined(macosx) or defined(linux):
       const M52RealizedTools = ["gcc", "nim", "node"]
       # `isonim-tui` joined the pinned recipe's `uses:` after
       # `CodeTracerSourcePackages` was written.
-      let declaredSourcePackages = @CodeTracerSourcePackages & @["isonim-tui"]
+      # `codetracer-trace-format-nim` joined it at CodeTracer 01d8b6e54.
+      let declaredSourcePackages = @CodeTracerSourcePackages &
+        @["isonim-tui", "codetracer-trace-format-nim"]
       let declaredToolUses = CodeTracerDevToolExecutables.len +
+        CodeTracerNonFixtureToolUses.len +
         declaredSourcePackages.len +
         typedInstallMirrorShellTools("codeTracer").len
+      for line in first.splitLines:
+        if line.startsWith("selected tool identities: "):
+          checkpoint(line)
       check first.contains("selected tool identities: " &
         $M52RealizedTools.len & "/" & $declaredToolUses)
       let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
