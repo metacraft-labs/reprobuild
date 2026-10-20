@@ -9,6 +9,7 @@
 
 import std/[asyncdispatch, atomics, os]
 
+import repro_remix
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 
 import ./boundary
@@ -23,6 +24,8 @@ type
     tickMs: int
     ratePerMinute: int
     extraReserved: seq[string]
+    policyKeys: seq[Digest32]
+    policyThreshold: int
     ports: ptr Channel[(int, int)]
     stop: ptr Atomic[bool]
 
@@ -35,6 +38,7 @@ type
 
 proc dirs*(root: string): RegistrarConfig =
   RegistrarConfig(dataDir: root / "interior" / "data",
+    policyInbox: root / "interior" / "policy-inbox",
     publishDir: root / "edge-read" / "published",
     spoolDir: root / "boundary" / "spool",
     captureDir: root / "evidence")
@@ -44,6 +48,8 @@ proc doubleMain(a: DoubleArgs) {.thread.} =
     var cfg = dirs(a.root)
     cfg.ratePerMinute = a.ratePerMinute
     cfg.extraReserved = a.extraReserved
+    cfg.policyKeys = a.policyKeys
+    cfg.policyThreshold = a.policyThreshold
     let key = PeerKeypair(privateKey: a.privateKey, publicKey: a.publicKey)
     let reg = newRegistrar(cfg, key)
     let intake = newIntake(initSpool(cfg.spoolDir), "intake-0")
@@ -65,7 +71,8 @@ proc doubleMain(a: DoubleArgs) {.thread.} =
     rf.close()
 
 proc startDouble*(root: string; logKey: PeerKeypair; tickMs = 20;
-                  ratePerMinute = 0; extraReserved: seq[string] = @[]): DoubleHandle =
+                  ratePerMinute = 0; extraReserved: seq[string] = @[];
+                  policyKeys: seq[Digest32] = @[]; policyThreshold = 1): DoubleHandle =
   result.root = root
   result.ports = cast[ptr Channel[(int, int)]](allocShared0(sizeof(Channel[(int, int)])))
   result.ports[].open()
@@ -74,10 +81,23 @@ proc startDouble*(root: string; logKey: PeerKeypair; tickMs = 20;
   createThread(result.thread[], doubleMain, DoubleArgs(root: root,
     privateKey: logKey.privateKey, publicKey: logKey.publicKey,
     tickMs: tickMs, ratePerMinute: ratePerMinute, extraReserved: extraReserved,
+    policyKeys: policyKeys, policyThreshold: policyThreshold,
     ports: result.ports, stop: result.stop))
   let (i, r) = result.ports[].recv()
   result.intakePort = i
   result.readPort = r
+
+proc dropPolicy*(h: DoubleHandle; env: Envelope) =
+  ## What the policy service does: drop a quorum-signed statement into the
+  ## Interior-only inbox. Atomic: written aside, then renamed in.
+  let inbox = dirs(h.root).policyInbox
+  createDir(inbox)
+  let bytes = encodeEnvelope(env)
+  var s = newString(bytes.len)
+  for i, b in bytes: s[i] = char(b)
+  let name = toHex(statementId(env))
+  writeFile(inbox / (name & ".tmp"), s)
+  moveFile(inbox / (name & ".tmp"), inbox / (name & ".stmt"))
 
 proc intakeBase*(h: DoubleHandle): string = "http://127.0.0.1:" & $h.intakePort
 proc readBase*(h: DoubleHandle): string = "http://127.0.0.1:" & $h.readPort

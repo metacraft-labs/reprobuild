@@ -128,8 +128,11 @@ proc deliver*(s: Spool; intake: string; message: openArray[byte]): string =
   ## Edge side. Write under `tmp/`, fsync-free rename into `new/`. Returns
   ## the unique name. Never reads, lists or removes anything.
   inc deliveryCounter
-  let name = $getTime().toUnix & "." & $getCurrentProcessId() & "." &
-             $deliveryCounter & "." & intake
+  # Fixed-width fields, so lexical order (what `pending` sorts by) is
+  # delivery order within one writer.
+  let name = align($getTime().toUnix, 12, '0') & "." &
+             align($deliveryCounter, 12, '0') & "." &
+             $getCurrentProcessId() & "." & intake
   let tmpPath = s.root / "tmp" / name
   var f: File
   if not open(f, tmpPath, fmWrite):

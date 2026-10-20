@@ -33,14 +33,20 @@ const
   BlobExpiryTicks* = 1000
   KeptGenerations = 3
   MaxDeferTicks* = 250
-    ## How long a release waiting for its blobs is held before it is
-    ## refused. Uploads race; a release may reach the spool first.
+    ## How long a release waiting for its blobs or its author's key log is
+    ## held before it is refused. Uploads race; a release may reach the
+    ## spool first.
   MaxDeferred* = 4096
     ## Ticks an unreferenced blob is held before it is dropped.
 
 type
   RegistrarConfig* = object
     dataDir*, publishDir*, spoolDir*, captureDir*: string
+    policyInbox*: string
+      ## Interior-only directory the policy service drops quorum-signed
+      ## policy statements into. Never reachable from the Edge.
+    policyKeys*: seq[Digest32]
+    policyThreshold*: int
     ratePerMinute*: int
     extraReserved*: seq[string]
     validate*: proc (payload: seq[byte]): seq[byte]
@@ -78,6 +84,8 @@ type
     publishedSizes: seq[uint64]
     genDir: string
     generations: seq[string]
+    policyIds: seq[Digest32]
+    policyRecords: seq[int]
     deferred: seq[(string, seq[byte], int)]
       ## Releases waiting for blobs: (message name, frame bytes, first tick).
       ## Interior-held, bounded by `MaxDeferred` and `MaxDeferTicks`.
@@ -250,9 +258,12 @@ proc publish(r: Registrar) =
   r.genDir = r.cfg.publishDir / genName
   removeDir(r.genDir)
   createDir(r.genDir)
+  # The checkpoint commits to every policy statement logged so far and
+  # says, under the log's signature, when it was current.
   var cp = newStatementEnvelope(Statement(kind: skLogCheckpoint,
     subjectKind: sbLog, subject: r.logKeyId, treeSize: uint64(size),
-    rootHash: r.log.root()))
+    rootHash: r.log.root(), scope: @[policyScope(r.policyIds)],
+    issuedAt: uint64(getTime().toUnix)))
   cp.signEnvelope(r.logKey)
   let cpBytes = encodeEnvelope(cp)
   for prev in r.publishedSizes:
@@ -286,6 +297,11 @@ proc publish(r: Registrar) =
     r.publishFile("v1/key-log/" & toHex(principal), encodeKeyLogFile(items))
   for name, ids in r.names:
     r.publishFile("v1/name/" & name, encodeNameFile(ids))
+  var policyEnvs: seq[seq[byte]]
+  for j in r.policyRecords: policyEnvs.add r.records[j]
+  let policyBytes = encodeEnvelopeList(policyEnvs)
+  r.publishFile("v1/policy/" & $size, policyBytes)
+  r.publishFile("v1/policy/latest", policyBytes)
   let indexBytes = encodeIndex(index)
   r.publishFile("v1/index/" & $size, indexBytes)
   r.publishFile("v1/index/latest", indexBytes)
@@ -295,7 +311,7 @@ proc publish(r: Registrar) =
   let prevCurrent = r.cfg.publishDir / "current"
   if symlinkExists(prevCurrent):
     let prevGen = r.cfg.publishDir / expandSymlink(prevCurrent)
-    for sub in ["v1/checkpoint", "v1/consistency", "v1/index"]:
+    for sub in ["v1/checkpoint", "v1/consistency", "v1/index", "v1/policy"]:
       if dirExists(prevGen / sub):
         for kind, f in walkDir(prevGen / sub):
           let dst = r.genDir / sub / f.extractFilename
@@ -325,6 +341,8 @@ proc newRegistrar*(cfg: RegistrarConfig; logKey: PeerKeypair): Registrar =
       encodeVerdict(validateSubmission(payload))
   for d in [c.dataDir, c.publishDir, c.captureDir]:
     createDir(d)
+  if c.policyInbox.len > 0:
+    createDir(c.policyInbox)
   Registrar(cfg: c, spool: initSpool(c.spoolDir), logKey: logKey)
 
 proc appendRecord(r: Registrar; env: Envelope): uint64 =
@@ -500,12 +518,38 @@ proc process(r: Registrar; name: string; bytes: seq[byte]): Outcome =
     result.refusal = e.reason
     result.detail = e.msg
 
+proc addPolicyStatement*(r: Registrar; env: Envelope): bool =
+  ## Interior-only: log a quorum-signed policy statement. Returns false if
+  ## it was already logged. Refuses anything that does not meet the
+  ## configured quorum.
+  discard verifyQuorum(env, r.cfg.policyKeys, r.cfg.policyThreshold)
+  let id = statementId(env)
+  if id in r.byIdentity: return false
+  let pos = r.appendRecord(env)
+  r.policyIds.add id
+  r.policyRecords.add int(pos)
+  true
+
+proc drainPolicyInbox(r: Registrar) =
+  if r.cfg.policyInbox.len == 0 or not dirExists(r.cfg.policyInbox): return
+  var names: seq[string]
+  for kind, path in walkDir(r.cfg.policyInbox):
+    if kind == pcFile and path.endsWith(".stmt"): names.add path
+  names.sort(cmp)
+  for path in names:
+    try:
+      discard r.addPolicyStatement(decodeEnvelope(bytesOf(readFile(path))))
+    except RemixError as e:
+      r.capture("policy-refused", $e.reason, bytesOf(readFile(path)))
+    removeFile(path)
+
 proc tick*(r: Registrar): seq[Outcome] =
   ## Claim and process every delivered message, then publish once.
   ## Releases still waiting for blobs are retried first, then new
   ## messages; a release that only lacks blobs is deferred, not refused,
   ## until `MaxDeferTicks` pass.
   inc r.ticks
+  r.drainPolicyInbox()
   var waiting = r.deferred
   r.deferred = @[]
   var work: seq[(string, seq[byte], int)]
@@ -524,7 +568,8 @@ proc tick*(r: Registrar): seq[Outcome] =
     if w notin ordered: ordered.add w
   for (name, bytes, firstTick) in waiting & ordered:
     let o = r.process(name, bytes)
-    if not o.admitted and o.refusal == rrMissingBlob and
+    # Blobs and key logs may race the release that needs them.
+    if not o.admitted and o.refusal in {rrMissingBlob, rrMissingAuthorSignature} and
        r.ticks - firstTick < MaxDeferTicks and r.deferred.len < MaxDeferred:
       r.deferred.add (name, bytes, firstTick)
       continue

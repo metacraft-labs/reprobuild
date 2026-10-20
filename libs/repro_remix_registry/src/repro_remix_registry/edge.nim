@@ -59,7 +59,8 @@ proc routeToFile*(path: string): (bool, string) =
   case parts[1]
   of "checkpoint":
     if parts.len == 2: return (true, "v1/checkpoint/latest")
-    if parts.len == 3 and parts[2].isDecimal: return (true, "v1/checkpoint/" & parts[2])
+    if parts.len == 3 and (parts[2] == "latest" or parts[2].isDecimal):
+      return (true, "v1/checkpoint/" & parts[2])
   of "consistency":
     if parts.len == 4 and parts[2].isDecimal and parts[3].isDecimal:
       return (true, "v1/consistency/" & parts[2] & "-" & parts[3])
@@ -72,9 +73,9 @@ proc routeToFile*(path: string): (bool, string) =
   of "name":
     if parts.len == 4 and parts[2].isNamePart and parts[3].isNamePart:
       return (true, "v1/name/" & parts[2] & "/" & parts[3])
-  of "index":
+  of "index", "policy":
     if parts.len == 3 and (parts[2] == "latest" or parts[2].isDecimal):
-      return (true, "v1/index/" & parts[2])
+      return (true, "v1/" & parts[1] & "/" & parts[2])
   else: discard
   (false, "")
 

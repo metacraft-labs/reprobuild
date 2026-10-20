@@ -5805,6 +5805,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_remix_registry/tests/t_remix_federation_mirror_and_offline_install.nim",
+    binary: "build/test-bin/t_remix_federation_mirror_and_offline_install",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_remix_registry/tests/t_remix_registry_boundary_and_authorship.nim",
     binary: "build/test-bin/t_remix_registry_boundary_and_authorship",
     defines: @[],
