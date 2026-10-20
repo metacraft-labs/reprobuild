@@ -97,3 +97,43 @@ suite "Remix registry — restart and crash recovery":
     let o = reg.tick()
     check o.len == 1
     check o[0].admitted
+
+suite "Remix registry — checkpoint cadence and refusal capture":
+
+  test "an index update does not make the log key sign again; a quiet log is refreshed":
+    let root = createTempDir("remix-cadence-", "")
+    defer: removeDir(root)
+    var cfg = dirs(root)
+    cfg.checkpointRefreshSeconds = 2
+    let reg = newRegistrar(cfg, logKey)
+    let spool = initSpool(cfg.spoolDir)
+    discard spool.deliver("i", frame(mtSubmitRelease, genesis(generateKeypair())))
+    discard reg.tick()
+    let first = latestCheckpoint(root)
+    discard spool.deliver("i", frame(mtRequestIndexUpdate, @[]))
+    discard reg.tick()
+    check latestCheckpoint(root).issuedAt == first.issuedAt    # reused, not re-signed
+    sleep(3100)
+    discard reg.tick()
+    check latestCheckpoint(root).issuedAt > first.issuedAt     # refreshed on the timer
+    check latestCheckpoint(root).rootHash == first.rootHash
+
+  test "a refused submission is captured with its reason":
+    let root = createTempDir("remix-cadence-", "")
+    defer: removeDir(root)
+    let reg = newRegistrar(dirs(root), logKey)
+    let spool = initSpool(dirs(root).spoolDir)
+    let alice = generateKeypair()
+    let mallory = generateKeypair()
+    for k in [alice, mallory]:
+      discard spool.deliver("i", frame(mtSubmitRelease, genesis(k)))
+    let (a, ab) = manifest("alice/one", alice)
+    discard spool.deliver("i", frame(mtSubmitBlob, ab))
+    discard spool.deliver("i", frame(mtSubmitRelease, a))
+    discard reg.tick()
+    let (m, mb) = manifest("alice/two", mallory)
+    discard spool.deliver("i", frame(mtSubmitBlob, mb))
+    discard spool.deliver("i", frame(mtSubmitRelease, m))
+    discard reg.tick()
+    check capturedEvents(dirs(root).captureDir).anyIt(
+      it[1] == "admission-refused" and it[2] == $rrForbiddenContent)

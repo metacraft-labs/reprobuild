@@ -52,6 +52,11 @@ type
       ## policy statements into. Never reachable from the Edge.
     policyKeys*: seq[Digest32]
     policyThreshold*: int
+    checkpointRefreshSeconds*: int64
+      ## A checkpoint is re-signed when the tree grows, the policy set
+      ## changes, or it is older than this (default one hour), so a quiet
+      ## log stays fresh for clients' freshness bound and an Edge-triggered
+      ## republish cannot make the log key sign at will.
     ratePerMinute*: int
     extraReserved*: seq[string]
     validate*: proc (payload: seq[byte]): seq[byte]
@@ -90,6 +95,8 @@ type
     publishedSizes: seq[uint64]
     genDir: string
     generations: seq[string]
+    lastCheckpoint: (uint64, string, int64, seq[byte])
+      ## (tree size, policy scope, signed at, envelope bytes).
     policyIds: seq[Digest32]
     policyRecords: seq[int]
     deferred: seq[(string, seq[byte], int)]
@@ -285,12 +292,20 @@ proc publish(r: Registrar) =
   createDir(r.genDir)
   # The checkpoint commits to every policy statement logged so far and
   # says, under the log's signature, when it was current.
-  var cp = newStatementEnvelope(Statement(kind: skLogCheckpoint,
-    subjectKind: sbLog, subject: r.logKeyId, treeSize: uint64(size),
-    rootHash: r.log.root(), scope: @[policyScope(r.policyIds)],
-    issuedAt: uint64(getTime().toUnix)))
-  cp.signEnvelope(r.logKey)
-  let cpBytes = encodeEnvelope(cp)
+  let scope = policyScope(r.policyIds)
+  let now = getTime().toUnix
+  var cpBytes: seq[byte]
+  let (lastSize, lastScope, lastAt, lastBytes) = r.lastCheckpoint
+  if lastBytes.len > 0 and lastSize == uint64(size) and lastScope == scope and
+     now - lastAt < r.cfg.checkpointRefreshSeconds:
+    cpBytes = lastBytes                  # nothing new to commit to
+  else:
+    var cp = newStatementEnvelope(Statement(kind: skLogCheckpoint,
+      subjectKind: sbLog, subject: r.logKeyId, treeSize: uint64(size),
+      rootHash: r.log.root(), scope: @[scope], issuedAt: uint64(now)))
+    cp.signEnvelope(r.logKey)
+    cpBytes = encodeEnvelope(cp)
+    r.lastCheckpoint = (uint64(size), scope, now, cpBytes)
   for prev in r.publishedSizes:
     if prev < uint64(size):
       r.publishFile("v1/consistency/" & $prev & "-" & $size,
@@ -432,6 +447,7 @@ proc reload(r: Registrar) =
 proc newRegistrar*(cfg: RegistrarConfig; logKey: PeerKeypair): Registrar =
   var c = cfg
   if c.ratePerMinute <= 0: c.ratePerMinute = DefaultRatePerMinute
+  if c.checkpointRefreshSeconds <= 0: c.checkpointRefreshSeconds = 3600
   if c.validate.isNil:
     c.validate = proc (payload: seq[byte]): seq[byte] =
       encodeVerdict(validateSubmission(payload))
@@ -785,6 +801,11 @@ proc tick*(r: Registrar): seq[Outcome] =
     # Retired only once it has a final outcome: a crash before this point
     # leaves the message in `cur/`, and `recoverClaimed` replays it.
     r.spool.retire(name)
+    # Every final refusal of a submitted record is evidence (DET/EVID):
+    # revoked keys, namespace conflicts and role refusals are the
+    # highest-signal ones.
+    if not o.admitted and o.msgType == mtSubmitRelease:
+      r.capture("admission-refused", $o.refusal, bytes)
     result.add o
   var expired: seq[Digest32]
   for id, age in r.blobAge:
@@ -794,6 +815,9 @@ proc tick*(r: Registrar): seq[Outcome] =
     removeFile(r.blobPath(id))
     r.blobSizes.del id
     r.blobAge.del id
+  let (_, _, signedAt, cpb) = r.lastCheckpoint
+  if cpb.len > 0 and getTime().toUnix - signedAt >= r.cfg.checkpointRefreshSeconds:
+    r.dirty = true                       # refresh a quiet log's checkpoint
   if r.dirty:
     try:
       r.publish()

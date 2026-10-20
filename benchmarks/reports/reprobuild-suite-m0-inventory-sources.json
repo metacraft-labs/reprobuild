@@ -19436,8 +19436,8 @@
       "owner": "libs/repro_remix_registry",
       "requiresReproBinary": false,
       "source": "libs/repro_remix_registry/tests/t_remix_registry_restart.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
