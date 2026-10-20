@@ -439,7 +439,12 @@ line of the sibling's history, is spelled out:
 contains the pinned commit (`agents` first, then `dev`, then the
 checkout's branch, the remote's default, or any other published branch
 containing it) and is empty when no published branch contains it; a
-local-only branch name is never recorded.
+local-only branch name is never recorded. Neither is a branch the
+branching policy deletes after use: a stabilisation branch
+`agents-to-dev-<date>` is skipped, so a refresh run on one records the
+next durable branch containing the commit, or an empty `ref` when only
+the stabilisation branch contains it, and a lock that already records
+one has it replaced on the next refresh or commit.
 
 `repro lock refresh` also **refuses to write a lock from an incomplete
 solve**. A recipe's `uses:` pulls sibling recipes into the solve
