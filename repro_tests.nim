@@ -13005,6 +13005,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_health_reports_forge_repository_renames.nim",
+    binary: "build/test-bin/t_health_reports_forge_repository_renames",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_health_vcs_hooks_digest_output.nim",
     binary: "build/test-bin/t_health_vcs_hooks_digest_output",
     defines: @[],

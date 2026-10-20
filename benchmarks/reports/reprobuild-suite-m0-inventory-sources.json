@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2209,
+    "nimTestBinaries": 2210,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 662,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2236
+    "testEntries": 2237
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1280,7 +1280,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 17,
-      "integration": 1219,
+      "integration": 1220,
       "platform/destructive": 134,
       "pure unit": 662,
       "unclassified": 204
@@ -1485,9 +1485,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2209,
+    "nimTestBinaryCount": 2210,
     "pythonTestFileCount": 27,
-    "testEntryCount": 2236
+    "testEntryCount": 2237
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -33546,6 +33546,23 @@
       "source": "tests/integration/t_health_reports_each_layer_status_with_remedy.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_health_reports_forge_repository_renames",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_health_reports_forge_repository_renames.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
