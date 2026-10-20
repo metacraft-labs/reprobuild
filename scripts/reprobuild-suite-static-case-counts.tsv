@@ -1444,6 +1444,7 @@ tests/integration/t_health_reports_a_refusing_hook_as_not_ok.nim	nim	3
 tests/integration/t_health_reports_a_worktree_unsafe_hooks_path.nim	nim	5
 tests/integration/t_health_reports_disjoint_local_branches.nim	nim	1
 tests/integration/t_health_reports_each_layer_status_with_remedy.nim	nim	6
+tests/integration/t_health_reports_forge_repository_renames.nim	nim	1
 tests/integration/t_health_vcs_hooks_digest_output.nim	nim	1
 tests/integration/t_highest_satisfied_floor_wins.nim	nim	1
 tests/integration/t_hook_protocol_v2_mixed_version_fails_closed.nim	nim	6

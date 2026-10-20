@@ -10,6 +10,7 @@ else:
   from std/posix import sigaction, sigemptyset, Sigaction, SIGPIPE, SIG_IGN
 import repro_core
 import repro_cli_support/workspace_restore
+import repro_cli_support/repository_identities
 # W8-R1/R2 — the one canonicalization the deleting consumers in this file ask
 # their containment question under. Imported by MODULE rather than folded into
 # `repro_core`'s re-exports on purpose: it is wanted at four named sites here
@@ -70447,6 +70448,8 @@ type
       ## sentence.
 
   HealthArgs = object
+    forgeCache: RepositoryIdentityCache
+    offline: bool
     workspaceRoot: string
     projectName: string
     json: bool
@@ -70470,6 +70473,7 @@ type
       ## ``shared-clone-leaves``: the detector's report-only pass.
 
 proc parseHealthArgs(args: openArray[string]): HealthArgs =
+  result.forgeCache = newRepositoryIdentityCache()
   result.workspaceRoot = ""
   var i = 0
   while i < args.len:
@@ -70478,6 +70482,8 @@ proc parseHealthArgs(args: openArray[string]): HealthArgs =
       result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
     elif arg == "--json":
       result.json = true
+    elif arg == "--offline":
+      result.offline = true
     elif arg == "--fix":
       result.fix = true
     elif arg == "--verbose" or arg == "-v":
@@ -71434,6 +71440,32 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         detail: "no usable git tool: " & err.msg,
         remedy: self & " hooks ensure --vcs",
         fixKind: hfNone))
+
+  # Forge redirects are transparent to Git. Ask the forge about the
+  # composed URL independently of checkout/pool state; a mismatch remains
+  # advisory and never authorizes a doctor to migrate anything.
+  block repositoryIdentitiesCheck:
+    if not ctx.resolvedOk:
+      checks.add(HealthCheck(name: "repository-identities", status: hsWarn,
+        detail: "skipped: manifest unresolved", remedy: self & " workspace sync",
+        fixKind: hfNone))
+    else:
+      let report = inspectRepositoryIdentities(ctx.resolved.repos, parsed.offline, parsed.forgeCache)
+      let prefix = $report.checked & " confirmed forge identities; " &
+        $report.skipped & " skipped or unconfirmed"
+      let summary = if report.findings.len == 0:
+          prefix & (if report.checked == 0: "; no forge identities to check" else: "; all match")
+        else: prefix & ": " & formatFindingList(report.findings, parsed.verbose)
+      checks.add(HealthCheck(name: "repository-identities",
+        status: (if report.findings.len == 0: hsOk else: hsWarn),
+        detail: summary,
+        fullDetail: (if report.findings.len == 0: "" else: prefix & ": " & report.findings.join(", ")),
+        remedy: (if report.remedies.len == 0: ""
+          elif parsed.verbose or parsed.json: report.remedies.join("; ")
+          else: report.remedies[0] &
+            (if report.remedies.len > 1: "; inspect other findings with --verbose for their remedies" else: "")),
+        fixKind: hfNone,
+        data: %*{"checked": report.checked, "skipped": report.skipped, "repos": report.repos, "remedies": report.remedies}))
 
   # 8b. Managed VCS hooks in every participating repo.
   #
@@ -72780,11 +72812,15 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
         result.add("fix: failed generating workspace-projects.md: " & err.msg)
 
 proc runHealthCommand*(args: openArray[string]): int =
-  ## ``repro health [<project>] [--workspace-root=PATH] [--fix] [--json]``.
+  ## ``repro health [<project>] [--workspace-root=PATH] [--fix] [--json] [--offline]``.
   ##
   ## Diagnose every layer and pair each failure with the exact remedy
   ## command. Exit non-zero (1) if any check is ``fail`` so CI / agents
   ## can gate on a healthy environment.
+  if "--help" in args or "-h" in args:
+    stdout.writeLine("Usage: repro health [<project>] [--workspace-root=PATH] [--fix] [--json] [--verbose] [--offline]")
+    stdout.writeLine("  --offline  Skip forge identity API probes; other checks retain their existing fetch behavior.")
+    return 0
   let parsed = parseHealthArgs(args)
   var (checks, ctx) = gatherHealthChecks(parsed)
 
