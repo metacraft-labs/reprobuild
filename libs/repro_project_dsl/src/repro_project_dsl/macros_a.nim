@@ -4294,7 +4294,7 @@ proc unresolvedMovedPackageDiagnostic(pkg: PackageDef;
         useDef.rawConstraint,
         if useDef.sourceFile.len > 0: useDef.sourceFile
         else: consumerSourceFile,
-        useDef.sourceLine, listName)
+        useDef.sourceLine, listName, lookupSourceFile = consumerSourceFile)
       if diagnostic.len > 0:
         reported.add(selector)
         if result.len > 0:
