@@ -16732,6 +16732,7 @@ proc supervisorConfig(parsed: ParsedDevSessionCommand;
                       publicCliPath: string;
                       mode: DevSessionMode): DevSessionSupervisorConfig =
   DevSessionSupervisorConfig(
+    sessionId: "dev-session-launch-" & $getCurrentProcessId() & "-" & $epochTime(),
     mode: mode,
     foreground: parsed.foreground,
     projectRoot: parsed.selection.projectRoot,
@@ -16751,6 +16752,7 @@ proc supervisorConfig(parsed: ParsedDevSessionCommand;
 proc supervisorCliArgs(config: DevSessionSupervisorConfig): seq[string] =
   result = @[
     "__repro-dev-session-supervisor",
+    "--session-id", config.sessionId,
     "--mode", config.mode.modeName,
     "--project-root", config.projectRoot,
     "--module", config.modulePath,
@@ -18276,26 +18278,19 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
     # a required parameter precisely so these two arms cannot drift again.
     return runDevSessionSupervisor(config,
       devEnvProducerOpsResolver(parsed.selection.projectRoot))
-  let budget = config.readyBudget(parsed.readyTimeoutMs)
-  # The previous session's published control-API bind is removed BEFORE the
-  # supervisor is launched, so that neither this process's wait nor the
-  # supervisor's own can read a port that closed when the last session
-  # ended. Doing it here rather than only in the supervisor is what closes
-  # the window: the supervisor is a detached child, so between the launch
-  # below and its own removal the file is still on disk and this process is
-  # already polling. See ``discardStaleControlApiBind``.
-  config.discardStaleControlApiBind()
-  config.startBackgroundSupervisor()
-  # Announced BEFORE the wait, and on stderr beside the dev-env
-  # announcement, for two reasons: a `repro up` that sits for minutes should
-  # say what it is waiting for and for how long, and the number it is about
-  # to hold itself to should be visible on the SUCCESS path too -- not only
-  # in the diagnostic nobody sees when things work.
-  stderr.writeLine("repro " & commandName & ": waiting up to " &
-    budget.describe() & " for the session to report `session.up`")
-  let status =
+  # Shared declarations and contributions converged above even on a repeat
+  # invocation. Reuse the admitted live session instead of spawning a child
+  # that must refuse its already-held supervisor lock.
+  var status = reusableDevSession(config)
+  if status.isNil:
+    let budget = config.readyBudget(parsed.readyTimeoutMs)
+    # Only the locked supervisor may clear an old bind; the parent accepts
+    # a ready marker only for this new launch's session ID.
+    config.startBackgroundSupervisor()
+    stderr.writeLine("repro " & commandName & ": waiting up to " &
+      budget.describe() & " for the session to report `session.up`")
     try:
-      waitForDevSessionReady(config, budget)
+      status = waitForDevSessionReady(config, budget)
     except DevSessionStillStartingError as err:
       stderr.writeLine("repro " & commandName & ": " & err.msg)
       return DevSessionStillStartingExitCode
@@ -18425,6 +18420,7 @@ proc runDevSessionSupervisorHelper(args: openArray[string];
   let debounceText = valueAfterFlag(args, "--debounce-ms")
   let sessionProjectRoot = valueAfterFlag(args, "--project-root")
   let config = DevSessionSupervisorConfig(
+    sessionId: valueAfterFlag(args, "--session-id"),
     mode: mode,
     foreground: args.find("--foreground") >= 0,
     projectRoot: sessionProjectRoot,
@@ -18452,6 +18448,9 @@ proc runDevSessionSupervisorHelper(args: openArray[string];
 proc runDevSessionHttpHelper(args: openArray[string]): int =
   let portText = valueAfterFlag(args, "--port")
   runDevSessionHttpServer(DevSessionHttpConfig(
+    parentPid: parseInt(valueAfterFlag(args, "--parent-pid")),
+    supervised: args.find("--supervised") >= 0,
+    sessionId: valueAfterFlag(args, "--session-id"),
     sessionDir: valueAfterFlag(args, "--session-dir"),
     host: valueAfterFlag(args, "--host"),
     port: if portText.len > 0: parseInt(portText) else: 0))
