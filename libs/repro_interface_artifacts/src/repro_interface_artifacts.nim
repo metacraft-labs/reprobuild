@@ -4159,7 +4159,6 @@ proc runCommand*(command: openArray[string];
     cwd = ""; raiseOnFailure = true): ProviderCompileExecutionResult =
   if command.len == 0:
     raise newException(OSError, "runCommand requires a non-empty argv")
-  var launcher = ""
   when defined(windows):
     # Capture the child's merged stdout+stderr through a temp-file sink
     # rather than draining an inherited OS pipe. The pipe variant deadlocks
