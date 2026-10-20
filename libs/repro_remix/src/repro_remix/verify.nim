@@ -44,12 +44,12 @@ proc signEnvelope*(env: var Envelope; kp: PeerKeypair) =
   sortSignatures(kept)
   env.signatures = kept
 
-proc verifySignatures*(env: Envelope; required: seq[Digest32]) =
-  ## Check every signature on any envelope against its record identity and
-  ## require exactly the `required` signer set: each required key signed,
-  ## and nobody else did. Shared by manifests and compositions.
+proc verifiedSigners*(env: Envelope): seq[Digest32] =
+  ## Cryptographically check every signature on any envelope against its
+  ## record identity and return the signer key ids, ascending. Refuses on
+  ## the first signature whose key does not hash to its id or that does not
+  ## verify. Policy (who must or may sign) is the caller's.
   let msg = signingMessage(envelopeIdentity(env))
-  var signed: seq[Digest32]
   for s in env.signatures:
     if Digest32(keyId(s.algorithm, s.publicKey)) != s.keyId:
       refuse(rrKeyMismatch, "signature key does not hash to its keyId")
@@ -61,9 +61,22 @@ proc verifySignatures*(env: Envelope; required: seq[Digest32]) =
       for i in 0 ..< sv.len: sv[i] = s.value[i]
       if not peerAuth.verifySignature(pk, msg, sv):
         refuse(rrBadSignature, "signature by " & $KeyId(s.keyId) & " does not verify")
-    if s.keyId notin required:
+    result.add s.keyId
+
+proc signerKey*(env: Envelope; id: Digest32): seq[byte] =
+  ## The public key a signer carried, for callers that record keys.
+  for s in env.signatures:
+    if s.keyId == id:
+      return s.publicKey
+  refuse(rrMissingAuthorSignature, "no signature by " & $KeyId(id))
+
+proc verifySignatures*(env: Envelope; required: seq[Digest32]) =
+  ## Require exactly the `required` signer set: each required key signed,
+  ## and nobody else did. Shared by manifests and compositions.
+  let signed = verifiedSigners(env)
+  for s in signed:
+    if s notin required:
       refuse(rrForbiddenContent, "signature by a key the record does not require")
-    signed.add s.keyId
   for a in required:
     if a notin signed:
       refuse(rrMissingAuthorSignature, "required signer " & $KeyId(a) & " has not signed")

@@ -86,6 +86,10 @@ type
     rrDigestMismatch = "digest-mismatch"
     rrMissingBlob = "missing-blob"
     rrSizeMismatch = "size-mismatch"
+    rrNotLogged = "not-logged"
+    rrRevokedKey = "revoked-key"
+    rrInactiveKey = "inactive-key"
+    rrBlockedByPolicy = "blocked-by-policy"
 
   RecordKind* = enum
     ## §"Envelope". Only `rkManifest` has a body codec in this build; the

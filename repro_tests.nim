@@ -5769,6 +5769,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_remix/tests/t_remix_signature_transparency_and_revocation.nim",
+    binary: "build/test-bin/t_remix_signature_transparency_and_revocation",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_resources/tests/t_attr_missing_interface_diagnostic.nim",
     binary: "build/test-bin/t_attr_missing_interface_diagnostic",
     defines: @[],

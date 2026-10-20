@@ -647,6 +647,7 @@ libs/repro_remix/tests/t_malicious_remix_bundle_parser_bounds.nim	nim	12
 libs/repro_remix/tests/t_remix_composition_is_order_independent.nim	nim	10
 libs/repro_remix/tests/t_remix_export_bundle.nim	nim	7
 libs/repro_remix/tests/t_remix_manifest_canonical_roundtrip_and_identity.nim	nim	6
+libs/repro_remix/tests/t_remix_signature_transparency_and_revocation.nim	nim	7
 libs/repro_resources/tests/t_attr_missing_interface_diagnostic.nim	nim	1
 libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim	nim	3
 libs/repro_resources/tests/t_converge_does_not_attach_to_a_dead_instance.nim	nim	6
