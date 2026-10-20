@@ -16895,6 +16895,23 @@ proc readSharedInstanceLedger(outDir: string):
         keyJson: item{"keyJson"}.getStr(""),
         address: item{"address"}.getStr("")))
 
+proc recordSharedInstanceAcquisition(outDir, holderId, serviceName,
+                                    keyJson, address: string) =
+  ## Keep every acquired holder until down releases it. A later up can
+  ## change the recipe or fail before reaching its old references, but those
+  ## leases still exist. Owners and consumers therefore share one ledger,
+  ## deduplicated by address just like the daemon's per-project holder set.
+  var ledger = readSharedInstanceLedger(outDir)
+  if ledger.entries.len > 0 and ledger.holderId != holderId:
+    raise newException(ValueError,
+      "the shared-instance ledger belongs to another holder: " & ledger.holderId)
+  for entry in ledger.entries:
+    if entry.address == address:
+      return
+  ledger.entries.add((serviceName: serviceName, keyJson: keyJson,
+    address: address))
+  writeSharedInstanceLedger(outDir, holderId, ledger.entries)
+
 proc liftedServiceDeclaration(interfacePath, serviceName: string):
     tuple[snapshot: ServiceInterfaceSnapshot;
           identity: ServiceIdentityDef; scope: ServiceScope] =
@@ -17305,6 +17322,11 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
         "it (Shared-Development-Services.md §4.6).")
       inc refused
       continue
+    # The daemon has acquired the lease already. Persist it before reading
+    # contributions or minted attributes: either can refuse after attachment,
+    # and down must still be able to release the acquired holder.
+    recordSharedInstanceAcquisition(parsed.selection.outDir, holderId,
+      resolution.serviceName, encodeServiceInstanceKey(key), response.address)
     if response.diagnostic.len > 0:
       # §4.3 row 2's warning, AT THE RESOLVER'S OWN CALL SITE, which is
       # the property §4.6 asks for by name.
@@ -17543,17 +17565,10 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
     if declaration.declared:
       declarations.add((declaration: declaration, service: service))
   if declarations.len == 0:
-    # No shared services. The ledger is removed rather than left behind:
-    # a stale ledger from a previous `repro up` of a recipe that has since
-    # dropped its `instance` block would make the next `repro down`
-    # release a holder this session never took.
-    try:
-      removeFile(extendedPath(
-        parsed.selection.outDir.sharedInstanceLedgerPath))
-    except OSError, IOError:
-      discard
-    # Shared-Development-Services L8: and the MINTED record, for exactly
-    # the reason above one level over. A stale registration record from
+    # Keep the lease ledger: an earlier up may have acquired instances
+    # that the changed recipe no longer declares. Only down releases them.
+    # Shared-Development-Services L8: remove the MINTED record. A stale
+    # registration record from
     # a previous `repro up` of a recipe that has since dropped its
     # `converge` (or its whole `instance` block) would let the
     # supervisor concretize a `@minted:` token the recipe no longer
@@ -17576,7 +17591,6 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
   # named once so the §4.3 generation check below and
   # `liftedServiceDeclaration` cannot be pointed at two different files.
   let interfacePathForGeneration = edge.interfacePath
-  var ledger: seq[tuple[serviceName, keyJson, address: string]] = @[]
   var minted: seq[tuple[serviceName, member, mintedId: string;
                         provenance: RegistrarProvenance]] = @[]
   # Shared-Development-Services §7.3: what each instance reported ABOUT
@@ -17680,8 +17694,8 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
       " at " & response.address & " pid " & $response.pid &
       " with " & $response.holders.len & " holder" &
       (if response.holders.len == 1: "" else: "s"))
-    ledger.add((serviceName: item.declaration.serviceName,
-      keyJson: encodeServiceInstanceKey(key), address: response.address))
+    recordSharedInstanceAcquisition(parsed.selection.outDir, holderId,
+      item.declaration.serviceName, encodeServiceInstanceKey(key), response.address)
     # Shared-Development-Services L8 -- RECONCILE THE REGISTRATIONS, now
     # that the instance is LIVE.
     #
@@ -18054,11 +18068,6 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
   # hazard rather than a defect; it is cleared because the alternative is
   # to rely on nobody adding one.
   clearReadinessEdgeCollaborators()
-  # The ledger records what was CONVERGED, including on a run where
-  # another declaration refused: this project really does hold those
-  # instances, and a `repro down` that did not release them would leave
-  # them held forever.
-  writeSharedInstanceLedger(parsed.selection.outDir, holderId, ledger)
   # And what was MINTED, for the supervisor child to concretize argv
   # from. Written unconditionally, including empty: a stale file from a
   # previous run would otherwise resolve a token the recipe no longer
@@ -18090,10 +18099,9 @@ proc releaseSharedServiceInstances(outDir: string): int =
   # that window costs when someone reads it.
   #
   # BEFORE the `ledger.entries.len == 0` early return, and that placement is
-  # the whole point: a PURE CONSUMER -- the F5 case, a project that resolves
-  # another's service and declares none of its own -- takes no holder and so
-  # has NO LEDGER. A removal placed after that return would be dead code for
-  # exactly the sessions this reader was built for.
+  # the whole point: a session with no shared instances can still have a
+  # stale minted record. Pure consumers do take holders, and their resolver
+  # records those in the same ledger as owned declarations.
   try:
     removeFile(extendedPath(outDir.sharedInstanceMintedPath))
   except OSError, IOError:
@@ -18304,6 +18312,11 @@ proc runDownCommand(args: openArray[string]): int =
     acceptStopTimeout = true)
   let metadataPath = parsed.selection.outDir.sessionMetadataPath()
   if not fileExists(extendedPath(metadataPath)):
+    # A resolver can fail after acquiring a holder but before launching the
+    # supervisor. Its ledger is authoritative even without session metadata;
+    # there is no session-owned process to stop before releasing these leases.
+    if readSharedInstanceLedger(parsed.selection.outDir).entries.len > 0:
+      return releaseSharedServiceInstances(parsed.selection.outDir)
     raise newException(IOError,
       "no authoritative Reprobuild dev session metadata at " & metadataPath)
   # readJsonFileResilient retries past the brief `writeFile(O_TRUNC)`
@@ -18313,6 +18326,10 @@ proc runDownCommand(args: openArray[string]): int =
   # observes a zero-byte file and raises `session.json(1, 0) Error: {
   # expected`. See readJsonFileResilient for the race rationale.
   let metadata = readJsonFileResilient(metadataPath)
+  # A failed repeat up can acquire leases while the prior session is already
+  # down. Its stopped supervisor need not be contacted to release them.
+  if metadata{"status"}.getStr("") == "down":
+    return releaseSharedServiceInstances(parsed.selection.outDir)
   let httpBindValue = metadata{"httpBind"}.getStr()
   if httpBindValue.len == 0:
     raise newException(ValueError,
