@@ -14049,6 +14049,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_lock_refresh_provider_compile_finds_the_consumers_catalog.nim",
+    binary: "build/test-bin/t_lock_refresh_provider_compile_finds_the_consumers_catalog",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_lock_refresh_reads_solver_inputs_from_compiled_provider.nim",
     binary: "build/test-bin/t_lock_refresh_reads_solver_inputs_from_compiled_provider",
     defines: @[],

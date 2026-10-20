@@ -4431,6 +4431,11 @@ proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
   for name in ReprobuildLibsOverrideEnvVars:
     if name notin seenRoots:
       seenRoots.add(name)
+  # Catalog selection is source selection too. Both recipe extraction and
+  # provider compilation must see the caller's explicit choice, including an
+  # unusable choice: silently falling back can compile a different interface.
+  if ReprobuildPackagesRootEnv notin seenRoots:
+    seenRoots.add(ReprobuildPackagesRootEnv)
   for name in seenRoots:
     if existsEnv(name):
       result.add(name & "=" & getEnv(name))
