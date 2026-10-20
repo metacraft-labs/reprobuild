@@ -81,6 +81,40 @@ proc fixtureDependencyHash(resp: JsonNode; path: string): string =
 proc requireFixtureDependency(resp: JsonNode; path, expectedHash: string) =
   check fixtureDependencyHash(resp, path) == expectedHash
 
+const HelperShutdownGraceMs = 10_000
+  ## How long a SIGTERMed helper gets to finish its own shutdown before it is
+  ## SIGKILLed. Far above the milliseconds it takes on an idle host; the bound
+  ## exists so that a wedged helper costs the case seconds instead of hanging
+  ## it.
+
+proc stopHelperAndWait(p: Process) =
+  ## Stop a helper this case started and RETURN ONLY ONCE IT HAS EXITED.
+  ##
+  ## On SIGTERM the helper is not gone yet: ``serve`` logs
+  ## ``signal 15; released <socket>`` and runs ``give_up_path()``, which
+  ## re-opens ``<socket>.lock`` with ``O_CREAT`` -- so for as long as it is
+  ## shutting down it writes entries beside its socket. A case that removed
+  ## the socket's directory right after ``terminate()`` raced those writes and
+  ## failed in ``removeDir`` with ``Directory not empty`` whenever the helper
+  ## was slow to handle the signal, as it is under suite load (reprobuild-pm
+  ## issue 2026-10-20, "the loader-env case of `t_nix_daemon_ipc` removes its
+  ## fixture root while the helper is still writing to it"). Waiting for the
+  ## exit orders the helper's last write before the case's cleanup.
+  ##
+  ## Bounded: a helper still running after ``HelperShutdownGraceMs`` is
+  ## SIGKILLed, which cannot be caught, and then reaped.
+  try:
+    if p.running:
+      p.terminate()
+      let deadline = epochTime() + HelperShutdownGraceMs.float / 1000.0
+      while p.peekExitCode() == -1 and epochTime() < deadline:
+        sleep(10)
+      if p.peekExitCode() == -1:
+        p.kill()
+    discard p.waitForExit()
+  finally:
+    p.close()
+
 suite "Python Nix Evaluation Daemon IPC Integration Tests":
 
   when defined(posix):
@@ -128,10 +162,12 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
       let daemonProcess = startProcess(daemonPath,
         args = ["--idle-exit-ms=30000", "--socket-path=" & socketPath],
         env = childEnv, options = {})
+      # Runs before the ``removeDir(fixtureRoot)`` above (defers unwind in
+      # reverse), and the socket, its ``.lock`` and its ``.log`` all live in
+      # that root -- so the helper must have EXITED, not merely been
+      # signalled, before the root is removed. See ``stopHelperAndWait``.
       defer:
-        if daemonProcess.running:
-          daemonProcess.terminate()
-        daemonProcess.close()
+        stopHelperAndWait(daemonProcess)
         removeFile(socketPath)
 
       var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
@@ -178,8 +214,18 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
     discard execCmd("pkill -f -u $USER reprobuild-nix-daemon-ipc.sock || true")
     removeFile(socketPath)
     
-    # Spawn daemon process detached
-    discard startProcess(daemonPath, args = ["--idle-exit-ms=30000", "--socket-path=" & socketPath], options = {})
+    # Spawn the daemon, keeping its handle so this case stops and reaps the
+    # helper it started, also when an exception ends the case early. This
+    # helper's socket, `.lock` and `.log` are under /tmp, not in a fixture
+    # root, so its shutdown writes do not race the fixture removal the way
+    # the loader-env case's did; waiting still means no helper of this case
+    # outlives it. See ``stopHelperAndWait``.
+    let daemonProcess = startProcess(daemonPath,
+      args = ["--idle-exit-ms=30000", "--socket-path=" & socketPath],
+      options = {})
+    defer:
+      stopHelperAndWait(daemonProcess)
+      removeFile(socketPath)
     
     # Connect to the UNIX domain socket
     var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
@@ -312,10 +358,6 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
     let mutatedHash = fixtureDependencyHash(mutatedResp,
       mutableFixture / "flake.nix")
     check mutatedHash != originalMutableHash
-    
-    # Clean up daemon
-    discard execCmd("pkill -f -u $USER reprobuild-nix-daemon-ipc.sock || true")
-    removeFile(socketPath)
 
   test "Scenario 1.6: Self-Reaping Timeout":
     let repoRoot = findRepoRoot()
