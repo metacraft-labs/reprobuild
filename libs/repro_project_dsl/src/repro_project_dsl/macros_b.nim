@@ -10704,7 +10704,7 @@ macro depends_on*(packageName: untyped; deps: untyped): untyped =
   ## deferred to a follow-on milestone, per
   ## ``reprobuild-specs/Three-Mode-Convention-System.md`` §"Honest scope".
   # A package name, spelled as ``package`` spells it: an identifier or, for
-  # a name that is not one (``7zip``), a string literal.
+  # a name that is not one (``7zip``, the keyword ``nil``), a string literal.
   let pkgName = packageNameText(packageName)
   if pkgName.len == 0:
     error("depends_on expects a package identifier as its first argument",

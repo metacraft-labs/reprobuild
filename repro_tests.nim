@@ -4815,6 +4815,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_package_name_that_is_a_nim_keyword.nim",
+    binary: "build/test-bin/t_dsl_package_name_that_is_a_nim_keyword",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_provisioning_expression_setters.nim",
     binary: "build/test-bin/t_dsl_provisioning_expression_setters",
     defines: @[],

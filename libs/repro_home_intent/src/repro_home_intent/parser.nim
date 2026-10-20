@@ -25,6 +25,9 @@ from repro_core/paths import extendedPath
 from repro_profile/data_refs import dataFilePathProblem
 from repro_profile/catalog_refs import catalogImportPathProblem
 from repro_profile/concerns import concernListProblem
+# The lexer's keyword rule, shared with the `package` macro and the
+# structural editor, so all three agree on which names cannot be bare.
+from repro_project_dsl/selector_names import isNimKeyword
 from repro_profile/host_system import HostSystemKey, ManagedElsewhereKeyword,
   systemPointerProblem
 
@@ -438,6 +441,22 @@ proc validateQuotedPackageName(ctx: ParseCtx; idx, column: int;
         "'" & spelling & "' as a quoted package name",
         "a quoted name containing only letters, digits, `_`, and `-`")
 
+proc refuseBareKeyword(ctx: ParseCtx; idx, column: int;
+                       name, spelling, quotedForm: string) =
+  ## Refuse an unquoted package name that is a Nim keyword (``nil``,
+  ## ``type``; matched style-insensitively, as the lexer does, so ``n_il``
+  ## too). In the profile macro such a line is the keyword, not a package
+  ## reference, so it never names the package ``nil``; reading it as one
+  ## would make the structural editor see a package the compiled profile
+  ## does not have. A keyword-named package is written quoted
+  ## (Home-Profile-Intent-Layer.md §"`package(...)` — explicit constructor
+  ## forms"), as the editor writes it.
+  if isNimKeyword(name):
+    raiseUnstructured(ctx.profilePath, idx + 1, column,
+      spelling & ", the Nim keyword `" & name & "`",
+      "a package named by a Nim keyword written quoted (e.g. " &
+      quotedForm & ")")
+
 proc parsePackageCallForm(ctx: ParseCtx; idx, indent: int;
                           body: string): IntentNode =
   ## M69: parse the new `package(<id>[, "<version>"])` call form used
@@ -494,11 +513,19 @@ proc parsePackageCallForm(ctx: ParseCtx; idx, indent: int;
     raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
       "'" & pkgId & "' as a `package(...)` id",
       "an identifier starting with a letter or underscore")
-  for ch in pkgId:
-    if not (ch.isAlphaAscii() or ch.isDigit() or ch in {'_', '-'}):
-      raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
-        "'" & pkgId & "' as a `package(...)` id",
-        "an identifier of letters, digits, `_`, and `-`")
+  else:
+    for ch in pkgId:
+      if not (ch.isAlphaAscii() or ch.isDigit() or ch in {'_', '-'}):
+        raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+          "'" & pkgId & "' as a `package(...)` id",
+          "an identifier of letters, digits, `_`, and `-`")
+    # An unquoted id that is a Nim keyword (`package(nil)`) is not a name to
+    # the profile macro: Nim parses it as the keyword (a `nil` literal), so
+    # reading it as the package `nil` here would disagree with what the
+    # compiled profile does. The quoted form reaches such a name.
+    refuseBareKeyword(ctx, idx, indent + 1, pkgId,
+      "'" & pkgId & "' as a `package(...)` id",
+      "package(\"" & pkgId & "\")")
   var version = ""
   if hasVersion:
     let vTrim = versionArg.strip()
@@ -557,6 +584,7 @@ proc parsePackageRefLine(ctx: ParseCtx; idx: int): IntentNode =
   # attributes which we accept and preserve.
   var i = 0
   var pkgName = ""
+  let bareForm = body[0] notin {'"', '`'}
   if body[0] == '"':
     # A quoted name, `"7zip"`: the bare form of a package name that is not
     # a Nim identifier (the profile macro accepts a string literal here).
@@ -599,13 +627,20 @@ proc parsePackageRefLine(ctx: ParseCtx; idx: int): IntentNode =
       raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
         "'" & body & "'",
         "a bare package reference starting with a letter or underscore")
-  # Refuse Nim control-flow keywords — the spec explicitly calls out
-  # `for` loops building an activity body at runtime as the canonical
-  # unstructured case.
-  if pkgName in NimControlFlowKeywords:
-    raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
-      "Nim `" & pkgName & "` keyword used to build an activity body",
-      "a bare package reference (`for` / `while` / etc. are not allowed)")
+  if bareForm:
+    # Refuse Nim control-flow keywords — the spec explicitly calls out
+    # `for` loops building an activity body at runtime as the canonical
+    # unstructured case. Only the bare form: `"type"` and `` `type` `` are
+    # names, which the profile macro reads as the package `type`.
+    if pkgName in NimControlFlowKeywords:
+      raiseUnstructured(ctx.profilePath, idx + 1, indent + 1,
+        "Nim `" & pkgName & "` keyword used to build an activity body",
+        "a bare package reference (`for` / `while` / etc. are not allowed)")
+    # Any other keyword (`nil`, `out`, ...) is not a package reference
+    # either: refused rather than read as a package of that name.
+    refuseBareKeyword(ctx, idx, indent + 1, pkgName,
+      "'" & pkgName & "' as a bare package reference",
+      "\"" & pkgName & "\"")
   # The package reference may NOT be a Nim assignment or call expression.
   # Reject `=`, `(`, and similar.
   let rest = body[i .. ^1].strip()

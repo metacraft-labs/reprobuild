@@ -1079,8 +1079,10 @@ proc packageNameText(name: NimNode): string =
   ## selector string, like a ``uses:`` selector, so besides the identifier
   ## form (``package just:``) it may be written as a string literal
   ## (``package "7zip":``) — the only spelling of a name that is not a Nim
-  ## identifier, such as one starting with a digit. Every Nim identifier the
-  ## macro emits is derived from it through ``selectorModuleName``.
+  ## identifier, such as one starting with a digit. A Nim keyword may also
+  ## be written backtick-quoted (`` package `nil`: ``). Every Nim identifier
+  ## the macro emits is derived from it through ``selectorModuleName``, which
+  ## escapes a digit-led or keyword name (``pkg_7zip``, ``pkg_nil``).
   case name.kind
   of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
     if name.strVal.strip().len == 0:
