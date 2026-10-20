@@ -17,6 +17,10 @@
 ##
 ## Digest matches the ``TMUX_LIBEVENT_SHA256_X86_64`` pin its consumer
 ## harvested independently.
+##
+## ``LibeventVersion`` is MSYS2's ``pkgver-pkgrel``; the record's ``version``
+## is libevent's own, 2.1.12, since a ``-<pkgrel>`` suffix would read as a
+## pre-release in a ``uses:`` range.
 
 import repro_project_dsl
 
@@ -29,6 +33,7 @@ package `msys2-libevent`:
       sha256 = "c2f087afa1718f5015086bd24afebe21423dbfce2525fd0b3a6b179825ee7904",
       archiveType = "tar.zst",
       executablePath = "usr/bin/event_rpcgen.py",
+      version = "2.1.12",
       packageId = "msys2-libevent@" & LibeventVersion,
       cpu = "x86_64",
       os = "windows",

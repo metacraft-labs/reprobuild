@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2251,
-    "pureUnitConsolidationGroups": 62,
-    "pureUnitTests": 675,
+    "nimTestBinaries": 2252,
+    "pureUnitConsolidationGroups": 63,
+    "pureUnitTests": 676,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2281
+    "testEntries": 2282
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -212,6 +212,22 @@
       "sources": [
         "libs/repro_dsl_stdlib/tests/t_doc_comment_position_from_first_line.nim",
         "libs/repro_dsl_stdlib/tests/t_doc_comment_reaches_listing_and_diagnostic.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "sources": [
+        "libs/repro_dsl_stdlib/tests/t_every_catalog_tarball_arm_declares_a_version.nim",
+        "libs/repro_dsl_stdlib/tests/t_sevenzip_bootstrap_matches_stdlib_catalog.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1302,7 +1318,7 @@
       "graph-fixture": 17,
       "integration": 1235,
       "platform/destructive": 137,
-      "pure unit": 675,
+      "pure unit": 676,
       "unclassified": 217
     },
     "graphOwnedTestArtifacts": [
@@ -1505,9 +1521,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2251,
+    "nimTestBinaryCount": 2252,
     "pythonTestFileCount": 30,
-    "testEntryCount": 2281
+    "testEntryCount": 2282
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -11845,6 +11861,26 @@
       "source": "libs/repro_dsl_stdlib/tests/t_entropy_image_blessings.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 11,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_every_catalog_tarball_arm_declares_a_version",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_every_catalog_tarball_arm_declares_a_version.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

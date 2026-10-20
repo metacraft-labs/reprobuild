@@ -61,6 +61,7 @@ package zstd:
       archiveType = "zip",
       stripComponents = 1,
       executablePath = "zstd.exe",
+      version = "1.5.6",
       packageId = "zstd@1.5.6",
       cpu = "x86_64",
       os = "windows",

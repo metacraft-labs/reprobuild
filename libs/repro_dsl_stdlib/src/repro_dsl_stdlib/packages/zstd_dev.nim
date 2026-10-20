@@ -106,6 +106,7 @@ package `zstd-dev`:
       archiveType = "zip",
       stripComponents = 1,
       executablePath = "include/zstd.h",
+      version = "1.5.6",
       packageId = "zstd-dev@1.5.6",
       cpu = "x86_64",
       os = "windows",

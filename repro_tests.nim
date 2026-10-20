@@ -2151,6 +2151,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_every_catalog_tarball_arm_declares_a_version.nim",
+    binary: "build/test-bin/t_every_catalog_tarball_arm_declares_a_version",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_every_catalog_tarball_arm_is_enrolled_for_conformance.nim",
     binary: "build/test-bin/t_every_catalog_tarball_arm_is_enrolled_for_conformance",
     defines: @[],
