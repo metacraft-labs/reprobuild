@@ -76,8 +76,6 @@
 
 import std/[httpclient, json, os, osproc, strtabs, streams, strutils,
     tempfiles, times, unittest]
-when defined(linux):
-  import std/posix          # kill / SIGTERM / SIGKILL for the teardown reap
 
 import repro_cli_support/dev_session      # the three argv token families
 import repro_cli_support/service_registrar  # the declared-program protocol
@@ -85,6 +83,7 @@ import repro_resources/readiness_edge    # IssuerAttributeName, the provenance
 import repro_resources/service_registry  # the DURABLE record, read directly
 import repro_resources/state_store       # ...through the real state store
 import repro_test_support
+import repro_test_support/fixture_processes
 
 const
   IssuerPackage = "dss73issuer"
@@ -394,71 +393,6 @@ proc closeDaemon(c: Dss73Case; daemon: var owned(Process)) =
       discard daemon.waitForExit()
     daemon.close()
 
-proc belongsToThisCase(pid: int; tempRoot: string): bool =
-  ## Does this pid still look like something THIS CASE started?
-  ##
-  ## Asked before every signal, for the reason the §7.2 sibling file's
-  ## twin of this proc gives at length: a pid is a HISTORICAL RECORD, not
-  ## a handle, and between a process exiting and this teardown running
-  ## the number can be reissued. Killing by number alone turns a reap of
-  ## a dead fixture into an attack on a live stranger.
-  ##
-  ## TWO WITNESSES: the daemon and the session's HTTP child carry this
-  ## case's directories in their argv, while a declared SERVICE instance
-  ## is `sh scripts/idp.sh`, whose only link to the case is its working
-  ## directory. Either is conclusive.
-  ##
-  ## LINUX ONLY, and the `else` is a decision rather than a gap: both
-  ## witnesses come from `/proc`.
-  when defined(linux):
-    let cmdline =
-      try: readFile("/proc/" & $pid & "/cmdline")
-      except CatchableError: ""
-    if cmdline.len > 0 and cmdline.contains(tempRoot):
-      return true
-    try:
-      let cwd = expandSymlink("/proc/" & $pid & "/cwd")
-      cwd == tempRoot or cwd.startsWith(tempRoot & "/")
-    except CatchableError:
-      false
-  else:
-    false
-
-proc reapCaseProcesses(c: Dss73Case) =
-  ## Reap whatever this case started and `repro down` did not stop.
-  ##
-  ## `repro down` is not enough, and that is measured rather than
-  ## assumed: `reapSession` signals only the pids a session PUBLISHED,
-  ## so a service's grandchild (this case's `python3`, forked from
-  ## `sh scripts/idp.sh`) is not among them.
-  ##
-  ## WHAT THIS IS NOT: a structural guarantee. It reads a process table
-  ## at one instant, so a process that forks after the scan is missed.
-  ## SIGTERM first, then a RE-CHECK, then SIGKILL -- the re-check is not
-  ## belt-and-braces: a pid that exited under the SIGTERM needs no
-  ## SIGKILL, and if its number has been reissued the second signal is
-  ## exactly the one that must not be sent.
-  when defined(linux):
-    proc caseOwnedPids(): seq[int] =
-      result = @[]
-      for kind, path in walkDir("/proc"):
-        if kind != pcDir:
-          continue
-        var pid = 0
-        try: pid = parseInt(path.extractFilename)
-        except ValueError: continue
-        if pid <= 0 or pid == getCurrentProcessId():
-          continue
-        if belongsToThisCase(pid, c.tempRoot):
-          result.add(pid)
-    for signal in [SIGTERM, SIGKILL]:
-      let pids = caseOwnedPids()   # re-read before EACH round
-      if pids.len == 0:
-        break
-      for pid in pids:
-        discard posix.kill(Pid(pid), signal)
-      sleep(300)
-
 proc sessionDirOf(project: string): string =
   project / ".repro" / "dev-env" / Activity / "session"
 
@@ -588,12 +522,19 @@ suite "§7.3 — the instance's issuer URL reaches a consuming service's argv":
       discard c.runRepro(c.offlineProject,
         @["down", "--activity=" & Activity])
       c.closeDaemon(daemon)
-      # REAP AFTER `closeDaemon` -- the daemon's own argv names this case's
+      # REAP WHAT `repro down` DID NOT STOP: it does not stop everything a
+      # session started. `repro_test_support/fixture_processes` records the
+      # measured leak and the witnesses that decide what is signalled.
+      # After `closeDaemon` -- the daemon's own argv names this case's
       # tempRoot, so the sweep would otherwise kill it out from under the
       # graceful `repro down` calls above -- and BEFORE the tree is removed,
       # because the path is the identity witness.
-      c.reapCaseProcesses()
-      try: removeDir(c.tempRoot) except OSError, IOError: discard
+      # The reap raises when something outlives SIGKILL; the tree is
+      # removed either way.
+      try:
+        reapFixtureProcesses(c.tempRoot)
+      finally:
+        try: removeDir(c.tempRoot) except OSError, IOError: discard
 
   # ONE PROCESS PER CASE. The suite runner executes every case in a process
   # of its own (`--run "<suite>::<case>"`), and each such process prepares a

@@ -3,6 +3,7 @@ import std/[algorithm, base64, hashes, json, options, os, osproc, sequtils,
 
 when defined(windows):
   import std/winlean
+  import repro_daemon_core/windows_detached_spawn
 else:
   # Only these names, and only for the pipe-feeding guard in
   # ``runFeedingStdin`` — `from … import` keeps the rest of `std/posix` out of
@@ -54211,9 +54212,10 @@ proc parsePostCommitArgs(args: openArray[string]):
 #
 #   * POSIX: a new session via ``setsid ... &`` with stdio to /dev/null.
 #   * Windows (W4): a SHELL-FREE detached child — ``CreateProcessW`` with
-#     ``DETACHED_PROCESS`` and stdio bound to ``NUL``. No ``cmd.exe``, no
-#     ``start /b``. See ``spawnDetachedNoShell`` below for why the shell
-#     route is not merely inelegant but unusable here.
+#     a hidden console, stdio bound to ``NUL`` and no other handle
+#     inherited. No ``cmd.exe``, no ``start /b``. See
+#     ``spawnDetachedNoShell`` below for why the shell route is not merely
+#     inelegant but unusable here.
 #
 # The DECISION (which detach mechanism + child argv for a given OS) is
 # factored into the pure ``cachePushSpawnCommand`` below so it is
@@ -54259,8 +54261,8 @@ proc cachePushSpawnCommand*(targetOs: WorkspaceTargetOs;
   ##                    ``sh`` quoting convention, so the round trip is
   ##                    lossless and the shell earns its place.
   ##   * ``wtWindows``→ NO shell string at all: the caller spawns ``argv``
-  ##                    directly with ``CreateProcessW`` +
-  ##                    ``DETACHED_PROCESS`` (``spawnDetachedNoShell``).
+  ##                    directly with ``CreateProcessW``
+  ##                    (``spawnDetachedNoShell``).
   ##                    ``cmd.exe`` cannot round-trip a ``quoteShell``ed
   ##                    command line — see W4 and the long comment on
   ##                    ``spawnDetachedNoShell``.
@@ -54441,9 +54443,10 @@ proc runCachePushCommand*(args: openArray[string]): int =
 
 when defined(windows):
   proc spawnDetachedNoShell*(argv: openArray[string]): bool =
-    ## Launch ``argv`` as a fully detached Windows child — no console, no
-    ## window, no shell, stdio bound to ``NUL`` — and return WITHOUT
-    ## waiting for it. Returns false when the child could not be started.
+    ## Launch ``argv`` as a detached Windows child — no visible window, no
+    ## shell, stdio bound to ``NUL``, no other handle of this process — and
+    ## return WITHOUT waiting for it. Returns false when the child could not
+    ## be started.
     ##
     ## WHY THIS EXISTS AND WHY IT DOES NOT USE ``cmd.exe`` (W4)
     ## -------------------------------------------------------
@@ -54467,75 +54470,51 @@ when defined(windows):
     ## Dropping the ``quoteShell`` would have fixed the one observed hang
     ## and left the rest of the class armed.
     ##
-    ## So the fix is to stop asking a shell to re-parse a command line:
+    ## So the fix is to stop asking a shell to re-parse a command line.
+    ## ``spawnWithOwnStdio`` calls ``CreateProcessW`` directly:
     ##
     ##   * ``CreateProcessW`` consumes ``quoteShellWindows``'s convention,
     ##     which is ITS OWN convention — correct by construction, for
     ##     spaces (``C:\Program Files\…``) and metacharacters alike.
-    ##   * ``DETACHED_PROCESS`` gives a child with no console and no
-    ##     window, which is what ``start /b`` was being asked for.
-    ##   * Three inheritable ``NUL`` handles give the stdio redirection
+    ##     ``lpApplicationName`` is passed as well as ``argv[0]`` in the
+    ##     command line, so its space-probing search of an unquoted first
+    ##     token never applies.
+    ##   * ``NUL`` stdin, stdout and stderr give the stdio redirection
     ##     ``>NUL 2>&1`` was there for, so the child cannot write into the
     ##     commit's output and cannot die on a broken pipe.
     ##
-    ## ``lpApplicationName`` is passed explicitly as well as ``argv[0]`` in
-    ## the command line, so ``CreateProcessW``'s space-probing search of an
-    ## unquoted first token never applies.
+    ## ONLY THE ``NUL`` HANDLES ARE INHERITED. ``bInheritHandles`` has to be
+    ## TRUE for them to reach the child, and on its own it also hands the
+    ## child every OTHER inheritable handle of this process. In the hook
+    ## those include the hook's own stdout and stderr, which git passed on
+    ## from its caller: when that caller reads ``git commit``'s output from
+    ## a pipe (``$(…)`` in a shell, a test runner, an agent's command tool),
+    ## the write end is inheritable, and a cache push holding it kept the
+    ## caller from seeing EOF until the push and any shared-bare gc after it
+    ## had finished, long after the hook returned (reprobuild-pm issue
+    ## 2026-10-20). ``spawnWithOwnStdio`` narrows inheritance to the ``NUL``
+    ## handles with a ``PROC_THREAD_ATTRIBUTE_HANDLE_LIST``, as it does for
+    ## the per-user daemon, which leaked a caller's pipe the same way.
     ##
-    ## Handle inheritance is left at the process-wide default (the NUL
-    ## handles must be inherited, which requires ``bInheritHandles``).
-    ## That matches what ``osproc.startProcess`` — every other child spawn
-    ## in this codebase — already does, and what the ``cmd`` route did
-    ## before it; narrowing it would need a ``PROC_THREAD_ATTRIBUTE_``
-    ## ``HANDLE_LIST`` here and nowhere else, which is inconsistency
-    ## without safety.
+    ## A HIDDEN CONSOLE, NOT ``DETACHED_PROCESS``. The child runs ``git``
+    ## (the push, then possibly gc/repack), a console program, through
+    ## ``osproc`` without ``poDaemon``. Started from a process with NO
+    ## console, each of those git processes would get a console window of
+    ## its own. ``CREATE_NO_WINDOW`` gives the child a console that is never
+    ## shown and that its git children share. It is still not the hook's
+    ## console, so a Ctrl+C or a closed window at the caller's end does not
+    ## reach the push.
+    ##
+    ## The working directory and the environment are this process's: the
+    ## child resolves a relative ``REPRO_WORKSPACE_CLONES`` against its
+    ## working directory, as ``runCachePushCommand`` documents.
     if argv.len == 0:
       return false
-
-    var commandLine = ""
-    for i, arg in argv:
-      if i > 0:
-        commandLine.add(' ')
-      commandLine.add(quoteShellWindows(arg))
-
-    var inheritable = SECURITY_ATTRIBUTES(
-      nLength: int32(sizeof(SECURITY_ATTRIBUTES)),
-      lpSecurityDescriptor: nil,
-      bInheritHandle: 1)
-    let nulName = newWideCString("NUL")
-    let shareMode = DWORD(FILE_SHARE_READ or FILE_SHARE_WRITE)
-    let nulIn = createFileW(nulName, DWORD(GENERIC_READ), shareMode,
-      addr inheritable, DWORD(OPEN_EXISTING), 0, 0)
-    let nulOut = createFileW(nulName, DWORD(GENERIC_WRITE), shareMode,
-      addr inheritable, DWORD(OPEN_EXISTING), 0, 0)
-    let nulErr = createFileW(nulName, DWORD(GENERIC_WRITE), shareMode,
-      addr inheritable, DWORD(OPEN_EXISTING), 0, 0)
-    defer:
-      for handle in [nulIn, nulOut, nulErr]:
-        if handle != INVALID_HANDLE_VALUE and handle != Handle(0):
-          discard closeHandle(handle)
-    if nulIn == INVALID_HANDLE_VALUE or nulOut == INVALID_HANDLE_VALUE or
-        nulErr == INVALID_HANDLE_VALUE:
+    try:
+      discard spawnWithOwnStdio(argv[0], argv.toOpenArray(1, argv.high),
+        env = [], inheritEnvironment = true, logPath = "", workingDir = "")
+    except OSError:
       return false
-
-    var startup = STARTUPINFO()
-    startup.cb = int32(sizeof(STARTUPINFO))
-    startup.dwFlags = STARTF_USESTDHANDLES
-    startup.hStdInput = nulIn
-    startup.hStdOutput = nulOut
-    startup.hStdError = nulErr
-
-    var spawned = PROCESS_INFORMATION()
-    var applicationName = newWideCString(argv[0])
-    var mutableCommandLine = newWideCString(commandLine)
-    let created = createProcessW(applicationName, mutableCommandLine,
-      nil, nil, 1, DETACHED_PROCESS, nil, nil, startup, spawned)
-    if created == 0:
-      return false
-    # Neither handle is waited on: the point is detachment. Closing them
-    # releases OUR references; the child keeps running.
-    discard closeHandle(spawned.hThread)
-    discard closeHandle(spawned.hProcess)
     true
 
 proc spawnAsyncCachePush(repoRoot, workspaceName: string) =
@@ -54550,8 +54529,8 @@ proc spawnAsyncCachePush(repoRoot, workspaceName: string) =
   ##     ``quoteShell`` on POSIX IS ``sh``'s own quoting convention, so
   ##     the shell round trip is lossless and the shell is doing real work
   ##     (``setsid`` + the ``&`` background fork).
-  ##   * Windows (W4): ``CreateProcessW`` + ``DETACHED_PROCESS`` with
-  ##     stdio to ``NUL``, straight from ``spec.argv``. No shell is
+  ##   * Windows (W4): ``CreateProcessW`` with stdio to ``NUL`` and no
+  ##     other handle inherited, straight from ``spec.argv``. No shell is
   ##     involved, so no quoting convention has to survive a second
   ##     parser. See ``spawnDetachedNoShell``.
   if workspaceName.len == 0:

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2253,
+    "nimTestBinaries": 2255,
     "pureUnitConsolidationGroups": 63,
     "pureUnitTests": 676,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2283
+    "testEntries": 2285
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1316,7 +1316,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 17,
-      "integration": 1236,
+      "integration": 1238,
       "platform/destructive": 137,
       "pure unit": 676,
       "unclassified": 217
@@ -1521,9 +1521,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2253,
+    "nimTestBinaryCount": 2255,
     "pythonTestFileCount": 30,
-    "testEntryCount": 2283
+    "testEntryCount": 2285
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -33560,6 +33560,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_fixture_processes_are_reaped_by_witness",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_fixture_processes_are_reaped_by_witness.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_flake_inputs_match_original_coordinates",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -37806,6 +37823,24 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_policy_snapshot_rejects_unknown_keys_and_mixed_platforms.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_post_commit_cache_push_does_not_hold_callers_pipe",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_post_commit_cache_push_does_not_hold_callers_pipe.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

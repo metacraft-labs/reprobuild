@@ -12969,6 +12969,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_fixture_processes_are_reaped_by_witness.nim",
+    binary: "build/test-bin/t_fixture_processes_are_reaped_by_witness",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_flake_inputs_match_original_coordinates.nim",
     binary: "build/test-bin/t_flake_inputs_match_original_coordinates",
     defines: @[],
@@ -15122,6 +15131,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_policy_snapshot_rejects_unknown_keys_and_mixed_platforms.nim",
     binary: "build/test-bin/t_policy_snapshot_rejects_unknown_keys_and_mixed_platforms",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_post_commit_cache_push_does_not_hold_callers_pipe.nim",
+    binary: "build/test-bin/t_post_commit_cache_push_does_not_hold_callers_pipe",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
