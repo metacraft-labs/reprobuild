@@ -704,7 +704,12 @@ proc checkoutLockPath*(repoPath: string): string {.gcsafe.} =
         let gd = firstLine["gitdir:".len .. ^1].strip()
         let absGd = if gd.isAbsolute: gd else: absolutePath(gd, absolutePath(repoPath))
         if dirExists(absGd):
-          return absGd / "repro-vcs-lock"
+          var commonDir = absGd
+          if fileExists(absGd / "commondir"):
+            let common = readFile(absGd / "commondir").strip()
+            commonDir = if common.isAbsolute: common
+              else: absolutePath(common, absGd)
+          return commonDir / "repro-vcs-lock"
     except CatchableError:
       discard
   if dirExists(repoPath / "objects") and fileExists(repoPath / "HEAD"):
@@ -1368,10 +1373,19 @@ proc gitObjectDir(repoPath: string): string =
   ## Return the object-store dir for ``repoPath`` whether it is a normal
   ## working tree (``<repo>/.git/objects``) or a bare repo
   ## (``<repo>/objects``).
-  if dirExists(repoPath / ".git"):
-    repoPath / ".git" / "objects"
-  else:
-    repoPath / "objects"
+  var gitDir = repoPath / ".git"
+  if fileExists(gitDir):
+    let text = readFile(gitDir).strip()
+    if not text.startsWith("gitdir:"):
+      raise newException(IOError, "invalid gitdir file: " & gitDir)
+    let target = text["gitdir:".len .. ^1].strip()
+    gitDir = if target.isAbsolute: target else: absolutePath(target, absolutePath(repoPath))
+  elif not dirExists(gitDir):
+    gitDir = repoPath
+  if fileExists(gitDir / "commondir"):
+    let common = readFile(gitDir / "commondir").strip()
+    gitDir = if common.isAbsolute: common else: absolutePath(common, absolutePath(gitDir))
+  gitDir / "objects"
 
 proc alternatesFilePath*(repoPath: string): string =
   ## Path of the alternates file for ``repoPath`` (normal or bare).
@@ -3248,6 +3262,40 @@ type
     wired*: bool
     verdict*: string
 
+proc alternateObjectDirs*(leaf: string): seq[string] =
+  ## Resolve relative alternates against the object directory, including a
+  ## linked worktree's common store. Keep missing targets visible to health.
+  for entry in readAlternates(leaf):
+    result.add(if entry.isAbsolute: entry
+      else: absolutePath(entry, absolutePath(gitObjectDir(leaf))))
+
+proc sameObjectDirectory(a, b: string): bool =
+  ## Existing stores have filesystem identity: a symlink spelling is not a
+  ## foreign pool. Missing stores still need the lexical comparison so health
+  ## can name them instead of silently omitting their borrowers.
+  if dirExists(a) and dirExists(b):
+    try:
+      return sameFile(a, b)
+    except OSError:
+      discard
+  samePathOnDisk(a, b)
+
+proc borrowsFromPool*(leaf, canonicalPool: string): bool =
+  ## Whether any resolved alternate names this object store, including relative
+  ## entries and symlink aliases. Share the classifier with foreign detection:
+  ## otherwise health can skip a canonical leaf while reporting it as healthy.
+  for objects in alternateObjectDirs(leaf):
+    if sameObjectDirectory(objects, canonicalPool / "objects"):
+      return true
+  false
+
+proc foreignAlternates*(leaf, canonicalPool: string): seq[string] =
+  ## A former URL key in our own cache is foreign just like another tool's
+  ## cache. Only this manifest URL's canonical objects directory is retained.
+  for objects in alternateObjectDirs(leaf):
+    if not sameObjectDirectory(objects, canonicalPool / "objects"):
+      result.add(objects)
+
 proc inspectRepoWiring*(workspaceRoot, cacheRoot, repoRelPath,
                         fetchUrl: string): SharedCloneRepoInfo =
   ## Build the wiring view for a single repo without touching the network.
@@ -3258,6 +3306,172 @@ proc inspectRepoWiring*(workspaceRoot, cacheRoot, repoRelPath,
     fetchUrl: fetchUrl,
     sharedBarePath: bare,
     barePresent: looksLikeGitDir(bare),
-    wired: isWiredTo(repoAbs, bare),
+    wired: borrowsFromPool(repoAbs, bare),
     verdict: inspectSharedBareVerdict(bare))
 
+proc leafConnectivityDiagnostic*(gitBin, leaf: string; full = false): string =
+  ## Observation only: no registration, configuration, lazy fetch or repair.
+  ## fsck includes dangling symbolic refs, which for-each-ref silently omits.
+  let checked = runGitEnv(gitBin, ["-C", leaf, "fsck",
+    (if full: "--full" else: "--connectivity-only")], lazyFetch = false)
+  if checked.code != 0 or "warning:" in checked.output or
+      "error:" in checked.output:
+    return checked.output.strip()
+  ""
+
+proc leafMissingObjects(gitBin, leaf, commonDir: string): tuple[missing: seq[string], diagnostic: string] =
+  # Promisor fsck deliberately tolerates missing objects. Traverse explicitly
+  # instead: retiring a promisor remote must not silently lose readable data.
+  var args = @["-C", leaf, "rev-list", "--objects", "--all", "--reflog",
+    "--indexed-objects", "--no-object-names", "--missing=print"]
+  for target in listLeafTargets(gitBin, leaf, commonDir):
+    args.add(target.id)
+  let walked = runGitEnv(gitBin, args, lazyFetch = false)
+  if walked.code != 0:
+    result.diagnostic = walked.output.strip()
+    return
+  for line in walked.output.splitLines():
+    if line.startsWith("?"):
+      result.missing.add(line[1 .. ^1].strip())
+
+proc consolidateLeafPool*(gitBin, leaf, canonicalPool: string): SharedCloneResult =
+  ## Materialize the leaf before retiring any of its alternate stores. This
+  ## never prunes a shared pool or deletes a ref. A replacement graph is built
+  ## as a non-split file with NO alternates, so it is entirely local. Until final
+  ## verification succeeds the original wiring/config/graphs are rollback state.
+  result.sharedBarePath = canonicalPool
+  let (_, commonDir) = gitDirOf(gitBin, leaf)
+  if commonDir.len == 0:
+    result.diagnostic = "not a git checkout: " & leaf
+    return
+  var lock = acquireVcsFileLock(checkoutLockPath(leaf))
+  if not lock.acquired:
+    result.diagnostic = "could not lock checkout: " & leaf
+    return
+  defer: releaseVcsFileLock(lock)
+  let altPath = alternatesFilePath(leaf)
+  let hadAlt = fileExists(altPath)
+  let configPath = commonDir / "config"
+  let graphDir = commonDir / "objects/info/commit-graphs"
+  let graphFile = commonDir / "objects/info/commit-graph"
+  let backupSuffix = ".repro-consolidate-backup"
+  let savedDir = graphDir & backupSuffix
+  let savedFile = graphFile & backupSuffix
+  var oldAlt, oldConfig: string
+  var changedAlt, changedConfig, movedDir, movedFile, replacedGraph: bool
+  try:
+    oldAlt = if hadAlt: readFile(altPath) else: ""
+    oldConfig = readFile(configPath)
+    if dirExists(savedDir) or fileExists(savedFile):
+      result.diagnostic = "previous consolidation graph backup exists; inspect " & savedDir
+      return
+    # Refuse existing corruption before modifying the leaf's metadata. In
+    # particular no repair is permitted to erase a dangling symbolic ref.
+    let before = leafConnectivityDiagnostic(gitBin, leaf, full = true)
+    if before.len > 0:
+      result.diagnostic = "consolidation refused: " & before
+      return
+    if not dirExists(canonicalPool / "objects") or
+        not registerBorrower(canonicalPool, leaf):
+      result.diagnostic = "cannot register checkout with canonical pool " & canonicalPool
+      return
+    var recoveryUrls: seq[string]
+    # rewire may already have repointed repro-pool. Read the former pools'
+    # upstream URLs, then fetch directly INTO THE LEAF, never into a foreign
+    # bare whose gc/retention policy this process does not own.
+    for objects in alternateObjectDirs(leaf):
+      let origin = runGit(gitBin,
+        ["-C", objects.parentDir, "config", "--get", "remote.origin.url"])
+      let url = origin.output.strip()
+      if origin.code == 0 and url.len > 0 and url notin recoveryUrls:
+        recoveryUrls.add(url)
+    # Hydrate promised objects while the old refetch chain is still usable.
+    # Each pass can reveal deeper missing trees; stop when a pass cannot heal
+    # an object, rather than trusting fsck's intentional promisor omissions.
+    while true:
+      let walked = leafMissingObjects(gitBin, leaf, commonDir)
+      if walked.diagnostic.len > 0:
+        result.diagnostic = "consolidation object traversal failed: " & walked.diagnostic
+        return
+      if walked.missing.len == 0: break
+      for id in walked.missing:
+        if refill(gitBin, leaf, id): continue
+        var recovered = false
+        for url in recoveryUrls:
+          discard runGitEnv(gitBin,
+            ["-C", leaf, "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+            "-c", "fetch.writeCommitGraph=false", "fetch", "--no-tags",
+            "--no-write-fetch-head", "--no-auto-maintenance",
+            "--no-recurse-submodules", url, id], lazyFetch = false)
+          if objectPresent(gitBin, leaf, id):
+            recovered = true
+            break
+        if not recovered:
+          result.diagnostic = "consolidation cannot materialize promised object " & id
+          return
+    # No --local: objects borrowed from every old pool must be copied. Normal
+    # repack retains reflog and linked-worktree roots as well as all refs.
+    let packed = runGitEnv(gitBin,
+      ["-C", leaf, "-c", "gc.auto=0", "repack", "-a", "-d"], lazyFetch = false)
+    if packed.code != 0:
+      result.diagnostic = "consolidation repack failed: " & packed.output.strip()
+      return
+    changedAlt = true
+    writeFile(altPath, "")
+    # Checking without ANY alternate also prevents a promised foreign-only
+    # object being mistaken for one supplied by the canonical pool.
+    let targets = listLeafTargets(gitBin, leaf, commonDir)
+    for target in targets:
+      if not objectPresent(gitBin, leaf, target.id):
+        result.diagnostic = "consolidation did not materialize " & target.refName & " " & target.id
+        return
+    let materialized = leafMissingObjects(gitBin, leaf, commonDir)
+    if materialized.diagnostic.len > 0 or materialized.missing.len > 0:
+      result.diagnostic = "consolidation left missing local objects: " &
+        materialized.diagnostic & " " & materialized.missing.join(", ")
+      return
+    if dirExists(graphDir):
+      moveDir(graphDir, savedDir)
+      movedDir = true
+    if fileExists(graphFile):
+      moveFile(graphFile, savedFile)
+      movedFile = true
+    replacedGraph = true
+    let graphFault = writeNonSplitCommitGraph(gitBin, leaf)
+    if graphFault.len > 0:
+      result.diagnostic = "consolidation graph rebuild failed: " & graphFault
+      return
+    let disconnected = leafConnectivityDiagnostic(gitBin, leaf, full = true)
+    if disconnected.len > 0:
+      result.diagnostic = "consolidation verification failed: " & disconnected
+      return
+    writeFile(altPath, canonicalPool / "objects" & "\n")
+    changedConfig = true
+    let configured = ensureLeafPoolConfig(gitBin, leaf, canonicalPool)
+    if configured.len > 0:
+      result.diagnostic = configured
+      return
+    let verified = leafConnectivityDiagnostic(gitBin, leaf, full = true)
+    if verified.len > 0:
+      result.diagnostic = "consolidation verification failed: " & verified
+      return
+    result.ok = true
+  except CatchableError as error:
+    result.diagnostic = "consolidation failed: " & error.msg
+  finally:
+    if not result.ok:
+      try:
+        if changedAlt:
+          if hadAlt: writeFile(altPath, oldAlt)
+          elif fileExists(altPath): removeFile(altPath)
+        if changedConfig: writeFile(configPath, oldConfig)
+        if replacedGraph:
+          if dirExists(graphDir): removeDir(graphDir)
+          if fileExists(graphFile): removeFile(graphFile)
+        if movedDir: moveDir(savedDir, graphDir)
+        if movedFile: moveFile(savedFile, graphFile)
+      except CatchableError as error:
+        result.diagnostic.add("; rollback failed: " & error.msg)
+    else:
+      if movedDir: removeDir(savedDir)
+      if movedFile: removeFile(savedFile)

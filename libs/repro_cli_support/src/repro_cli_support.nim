@@ -41020,7 +41020,7 @@ proc renderSyncTextLines*(report: WorkspaceSyncReport;
         result.add("    | borrows objects from " &
           $entry.relocationAlternates.len & " shared bares (" &
           entry.relocationAlternates.join(", ") &
-          ") — consolidate with `repro ws shared-clones rewire`")
+          ") — consolidate with `repro ws shared-clones consolidate`")
     if verbose and entry.executionDiagnostic.len > 0:
       # RA-27 ``--verbose``: surface the raw tool diagnostic behind the flag
       # so the default output stays a legible digest.
@@ -46977,7 +46977,7 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
     #    independently (the pre-push gate, and the refusal to push a branch
     #    sharing no history with its remote). The cost is a checkout alternated
     #    to two bares; it is reported as such, and
-    #    `repro ws shared-clones rewire` is the consolidation step.
+    #    `repro ws shared-clones consolidate` is the consolidation step.
     for entry in readAlternates(destination):
       outcome.alternates.add(entry)
     if cacheRoot.len > 0 and newCloneUrl.len > 0:
@@ -72472,19 +72472,38 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       break sharedCloneLeavesCheck
     let cacheRoot = defaultCacheRoot(parsed.workspaceRoot)
     var leaves = 0
+    var total = 0
+    var foreignPools: seq[string]
     var stale: seq[string]
     var broken: seq[string]
     var chains: seq[string]
     var diagnostics: seq[string]
     for repo in ctx.resolved.repos:
       let abs = parsed.workspaceRoot / repo.path
-      if not dirExists(abs / ".git"):
+      if not dirExists(abs / ".git") and not fileExists(abs / ".git"):
+        continue
+      inc total
+      try:
+        let entries = alternateObjectDirs(abs)
+        if entries.len == 0: continue
+        inc leaves
+        let canonical = sharedBarePath(cacheRoot, cloneUrlFor(repo))
+        let foreign = foreignAlternates(abs, canonical)
+        if foreign.len > 0:
+          foreignPools.add(repo.path & " borrows from foreign pool(s): " &
+            foreign.join(", "))
+        let connectivity = leafConnectivityDiagnostic(ctx.gitIdentity.binaryPath, abs)
+        if connectivity.len > 0:
+          diagnostics.add(repo.path & ": " & connectivity)
+      except CatchableError as error:
+        diagnostics.add(repo.path & ": cannot inspect alternates: " & error.msg)
+        continue
+      if not borrowsFromPool(abs, sharedBarePath(cacheRoot, cloneUrlFor(repo))):
         continue
       let lr = checkLeaf(ctx.gitIdentity.binaryPath, abs, lcmReport,
-        cacheRoot)
+        cacheRoot, pool = sharedBarePath(cacheRoot, cloneUrlFor(repo)))
       if lr.pool.len == 0:
         continue
-      inc leaves
       ctx.leafReports.add(lr)
       if lr.diagnostic.len > 0:
         diagnostics.add(repo.path & ": " & lr.diagnostic)
@@ -72499,15 +72518,18 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         else:
           discard
     if stale.len == 0 and broken.len == 0 and chains.len == 0 and
-        diagnostics.len == 0:
+        diagnostics.len == 0 and foreignPools.len == 0:
       checks.add(HealthCheck(
         name: "shared-clone-leaves",
         status: hsOk,
-        detail: $leaves & " checkout(s) borrow from shared clones; every " &
+        detail: "examined " & $leaves & " of " & $total & " checkout(s); every " &
           "object they name is present",
         remedy: "", fixKind: hfNone))
     else:
-      var detail: seq[string]
+      var detail = @["examined " & $leaves & " of " & $total & " checkout(s)"]
+      if foreignPools.len > 0:
+        detail.add(foreignPools.join("; ") &
+          "; migrate with `repro ws shared-clones consolidate`")
       if chains.len > 0:
         detail.add($chains.len & " checkout(s) lacked a working refetch chain " &
           "to a partial shared clone: " & chains.join(", "))
@@ -73143,7 +73165,7 @@ proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
       stdout.writeLine(line)
   report.exitCode
 
-# ---- RA-5: `repro workspace shared-clones [list|rewire|root|gc|migrate]` ----
+# ---- RA-5: `repro workspace shared-clones` inspection and repair ----
 #
 # Inspection / repair surface for the shared object-cache (per-upstream bare
 # clones + per-repo ``objects/info/alternates`` wiring). The accelerator is
@@ -73160,6 +73182,9 @@ proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
 #                  already-checked-out repo that is missing it. Best-effort
 #                  per repo — a failure to populate one bare is reported but
 #                  does not abort the others.
+#   * ``consolidate`` — copy each checkout's needed objects locally, verify
+#                  independence from its old alternates and replace them with
+#                  the canonical pool. Failed verification restores its wiring.
 #   * ``migrate`` — Shared-Clone-Pool-Integrity §5 over the WHOLE cache
 #                  root in one pass: every pool gets the retention hook and
 #                  its config, every leaf found (this workspace's repos, the
@@ -73178,10 +73203,12 @@ proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
 #
 # Exit codes:
 #   * 0 — verb completed (``list``/``root`` always 0 on success; ``rewire``
-#         0 when every wiring step that had a present bare succeeded).
+#         0 when every wiring step that had a present bare succeeded, and
+#         ``consolidate`` 0 when every selected checkout migrated safely).
 #   * 1 — bad usage, resolve/IO failure, or a ``rewire`` that could not wire
 #         a repo whose bare WAS present (a genuine failure, distinct from a
-#         best-effort cache miss which is only reported).
+#         best-effort cache miss which is only reported), or a failed
+#         consolidation whose original alternates are retained.
 
 type
   SharedClonesArgs = object
@@ -73339,10 +73366,10 @@ proc parseSharedClonesArgs(args: openArray[string]): SharedClonesArgs =
   # ``gc`` and ``maintenance`` are aliases for the RA-15 maintenance pass.
   if result.verb == "maintenance":
     result.verb = "gc"
-  if result.verb notin ["list", "rewire", "root", "gc", "migrate"]:
+  if result.verb notin ["list", "rewire", "consolidate", "root", "gc", "migrate"]:
     raise newException(ValueError,
       "`repro workspace shared-clones` verb must be " &
-        "list|rewire|root|gc|maintenance|migrate, got: " & result.verb)
+        "list|rewire|consolidate|root|gc|maintenance|migrate, got: " & result.verb)
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
@@ -73393,7 +73420,7 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
   # ``rewire`` and ``gc`` do live VCS work. ``list`` is read-only. Resolve
   # git only when we will use it.
   var identity: GitToolIdentity
-  if parsed.verb in ["rewire", "gc", "migrate"]:
+  if parsed.verb in ["rewire", "consolidate", "gc", "migrate"]:
     identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
 
   if parsed.verb == "migrate":
@@ -73442,7 +73469,30 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
     entry.wired = info.wired
     entry.verdict = info.verdict
 
-    if parsed.verb == "rewire":
+    if parsed.verb == "consolidate":
+      let repoAbs = parsed.workspaceRoot / repo.path
+      if not dirExists(repoAbs / ".git") and not fileExists(repoAbs / ".git"):
+        entry.diagnostic = "repo not checked out; nothing to consolidate"
+      else:
+        # Refresh only the canonical pool; foreign pools remain read-only.
+        let refreshed =
+          if info.barePresent:
+            SharedCloneResult(ok: true, sharedBarePath: info.sharedBarePath,
+              diagnostic: prepareSharedBare(identity.binaryPath, info.sharedBarePath))
+          else:
+            refreshSharedBare(identity.binaryPath, result.cacheRoot, cloneUrl)
+        if not refreshed.ok or refreshed.diagnostic.len > 0:
+          entry.diagnostic = refreshed.diagnostic
+          result.exitCode = 1
+        else:
+          let consolidated = consolidateLeafPool(identity.binaryPath,
+            repoAbs, refreshed.sharedBarePath)
+          entry.diagnostic = consolidated.diagnostic
+          entry.barePresent = true
+          entry.wired = consolidated.ok
+          entry.rewired = consolidated.ok
+          if not consolidated.ok: result.exitCode = 1
+    elif parsed.verb == "rewire":
       let repoAbs = parsed.workspaceRoot / repo.path
       if not dirExists(repoAbs):
         # Nothing to retrofit for a repo that isn't checked out yet.
@@ -73512,6 +73562,19 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
         if not m.ok:
           entry.diagnostic = "maintenance failed: " & m.diagnostic
           result.exitCode = 1
+    # Additive wiring is not migration: the old pool can still own safety
+    # refs, tags and graph bases even when wired=true. Name the dependency.
+    if parsed.verb in ["list", "rewire"]:
+      try:
+        let foreign = foreignAlternates(parsed.workspaceRoot / repo.path,
+          entry.sharedBarePath)
+        if foreign.len > 0:
+          if entry.diagnostic.len > 0: entry.diagnostic.add("; ")
+          entry.diagnostic.add("migration incomplete; still borrows from " &
+            foreign.join(", ") &
+            "; complete with `repro ws shared-clones consolidate`")
+      except CatchableError as error:
+        entry.diagnostic.add("; cannot inspect alternates: " & error.msg)
     result.repos.add(entry)
 
 proc writeSharedClonesReport(report: SharedClonesReport;
@@ -73523,7 +73586,7 @@ proc writeSharedClonesReport(report: SharedClonesReport;
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc runWorkspaceSharedClonesCommand*(args: openArray[string]): int =
-  ## ``repro workspace shared-clones [list|rewire|root|gc|migrate] [<project>]
+  ## ``repro workspace shared-clones <verb> [<project>]
   ## [--workspace-root=PATH] [--json] [--force]``. ``maintenance`` is an alias
   ## for ``gc``; ``--force`` bypasses the gc budget gate.
   let parsed = parseSharedClonesArgs(args)
@@ -95683,7 +95746,7 @@ proc runThinAppDispatch(programName: string): int =
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "shared-clones":
-    # RA-5 — `repro workspace shared-clones [list|rewire|root|gc|migrate]`. Inspect
+    # RA-5 — `repro workspace shared-clones`. Inspect
     # or repair the shared object-cache wiring. Same dispatch convention
     # as the M9–M12 family: the implementation lives in
     # ``repro_cli_support`` as ``runWorkspaceSharedClonesCommand``.
