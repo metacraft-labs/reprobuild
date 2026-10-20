@@ -659,6 +659,7 @@ libs/repro_remix_registry/tests/t_remix_federation_mirror_and_offline_install.ni
 libs/repro_remix_registry/tests/t_remix_fixture_ecosystem_states.nim	nim	1
 libs/repro_remix_registry/tests/t_remix_registry_boundary_and_authorship.nim	nim	5
 libs/repro_remix_registry/tests/t_remix_registry_publish_search_fetch.nim	nim	3
+libs/repro_remix_registry/tests/t_remix_registry_restart.nim	nim	2
 libs/repro_remix_registry/tests/t_remix_registry_statements.nim	nim	2
 libs/repro_resources/tests/t_attr_missing_interface_diagnostic.nim	nim	1
 libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim	nim	3

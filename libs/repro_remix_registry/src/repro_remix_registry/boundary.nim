@@ -166,3 +166,12 @@ proc claim*(s: Spool; name: string): seq[byte] =
 proc retire*(s: Spool; name: string) =
   ## Interior side: drop a fully processed message.
   removeFile(s.root / "cur" / name)
+
+proc recoverClaimed*(s: Spool) =
+  ## Interior side, at start: messages claimed before a crash and never
+  ## retired go back to `new/` to be processed again. Admission is
+  ## idempotent by identity, so a message that was in fact admitted before
+  ## the crash is answered from the log, not logged twice.
+  for kind, path in walkDir(s.root / "cur"):
+    if kind == pcFile:
+      moveFile(path, s.root / "new" / path.extractFilename)

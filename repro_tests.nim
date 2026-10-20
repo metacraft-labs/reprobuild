@@ -5877,6 +5877,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_remix_registry/tests/t_remix_registry_restart.nim",
+    binary: "build/test-bin/t_remix_registry_restart",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_remix_registry/tests/t_remix_registry_statements.nim",
     binary: "build/test-bin/t_remix_registry_statements",
     defines: @[],

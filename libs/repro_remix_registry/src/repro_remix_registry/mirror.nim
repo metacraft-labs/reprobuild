@@ -42,6 +42,9 @@ type
       ## dishonest one whose omission clients must detect.
     lastCheckpoint*: Envelope
     haveLast: bool
+    statePath: string
+      ## The last accepted upstream checkpoint, kept on disk so that a
+      ## restarted mirror still demands consistency with it.
     delivered: Table[Digest32, bool]
     evidence*: seq[(Envelope, Envelope)]
       ## Checkpoint pairs that failed consistency.
@@ -51,9 +54,15 @@ proc newMirrorSync*(upstream: Fetch; upstreamTrust: TrustConfig;
   let cfg = registrar.RegistrarConfig(spoolDir: mirrorRoot / "boundary" / "spool",
     policyInbox: mirrorRoot / "interior" / "policy-inbox")
   createDir(cfg.policyInbox)
-  MirrorSync(upstream: upstream, upstreamTrust: upstreamTrust,
-             spool: initSpool(cfg.spoolDir), policyInbox: cfg.policyInbox,
-             copyPolicy: true)
+  result = MirrorSync(upstream: upstream, upstreamTrust: upstreamTrust,
+    spool: initSpool(cfg.spoolDir), policyInbox: cfg.policyInbox,
+    copyPolicy: true, statePath: mirrorRoot / "interior" / "mirror-upstream-checkpoint")
+  if fileExists(result.statePath):
+    let s = readFile(result.statePath)
+    var b = newSeq[byte](s.len)
+    for i, c in s: b[i] = byte(ord(c))
+    result.lastCheckpoint = decodeEnvelope(b)
+    result.haveLast = true
 
 proc deliver(m: MirrorSync; t: MessageType; payload: seq[byte]) =
   discard m.spool.deliver("mirror-sync", encodeMessage(BoundaryMessage(
@@ -145,4 +154,9 @@ proc sync*(m: MirrorSync): SyncOutcome =
       pending = rest
   m.lastCheckpoint = cpEnv
   m.haveLast = true
+  let bytes = encodeEnvelope(cpEnv)
+  var s = newString(bytes.len)
+  for i, b in bytes: s[i] = char(b)
+  writeFile(m.statePath & ".tmp", s)
+  moveFile(m.statePath & ".tmp", m.statePath)
   soSynced

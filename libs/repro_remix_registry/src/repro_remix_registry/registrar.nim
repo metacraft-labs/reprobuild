@@ -32,6 +32,11 @@ const
     ## unadvertised ones through `RegistrarConfig.extraReserved`.
   BlobExpiryTicks* = 1000
   KeptGenerations = 3
+  MaxTickMessages* = 256
+  MaxTickBytes* = 64 * 1024 * 1024
+    ## A tick claims at most this many messages / bytes; the rest wait in
+    ## the spool for the next tick, so a flood cannot exhaust Interior
+    ## memory in one pass.
   MaxDeferTicks* = 250
     ## How long a release waiting for its blobs or its author's key log is
     ## held before it is refused. Uploads race; a release may reach the
@@ -72,7 +77,8 @@ type
     byIdentity: Table[Digest32, int]
     manifests: Table[Digest32, Manifest]
     statements: Table[Digest32, seq[int]]
-    blobs: Table[Digest32, seq[byte]]
+    blobSizes: Table[Digest32, uint64]
+      ## Blobs live on disk under `dataDir/blobs`; only sizes are in memory.
     blobAge: Table[Digest32, int]
     referenced: Table[Digest32, bool]
     chains: Table[Digest32, seq[(Envelope, uint64)]]
@@ -218,6 +224,22 @@ proc publishFile(r: Registrar; rel: string; data: openArray[byte]) =
   createDir(path.parentDir)
   writeFile(path, strOf(data))
 
+proc blobPath(r: Registrar; id: Digest32): string =
+  r.cfg.dataDir / "blobs" / toHex(id)
+
+proc hasBlob(r: Registrar; id: Digest32): bool = id in r.blobSizes
+
+proc blobBytes(r: Registrar; id: Digest32): seq[byte] =
+  bytesOf(readFile(r.blobPath(id)))
+
+proc storeBlob(r: Registrar; id: Digest32; data: openArray[byte]) =
+  ## Write aside, then rename, so a crash never leaves a partial blob.
+  createDir(r.cfg.dataDir / "blobs")
+  let tmp = r.blobPath(id) & ".tmp"
+  writeFile(tmp, strOf(data))
+  moveFile(tmp, r.blobPath(id))
+  r.blobSizes[id] = uint64(data.len)
+
 proc bundleFor(r: Registrar; id: Digest32): seq[byte] =
   ## The release, its whole lineage, every blob they reference, their
   ## authors' key logs and their statements: everything a client needs to
@@ -236,7 +258,7 @@ proc bundleFor(r: Registrar; id: Digest32): seq[byte] =
     for c in m.configuration: refs.add c.value
     refs.add m.graphFragments
     refs.add m.assets
-    for b in refs: entries.add (bekBlob, r.blobs[b.id])
+    for b in refs: entries.add (bekBlob, r.blobBytes(b.id))
     for j in r.statements.getOrDefault(cur):
       entries.add (bekStatementEnvelope, r.records[j])
     for a in m.authors:
@@ -254,7 +276,10 @@ proc publish(r: Registrar) =
   ## proof without its checkpoint.
   let size = r.log.size
   if size == 0: return
-  let genName = "gen-" & $size & "-" & $r.ticks
+  # Unique across restarts: a repeated name would make `removeDir` below
+  # delete a generation readers may still be using.
+  let genName = "gen-" & $size & "-" & $getTime().toUnix & "-" &
+                $getTime().nanosecond & "-" & $getCurrentProcessId()
   r.genDir = r.cfg.publishDir / genName
   removeDir(r.genDir)
   createDir(r.genDir)
@@ -272,9 +297,9 @@ proc publish(r: Registrar) =
         encodeProof(prev, uint64(size), r.log.consistencyProof(int(prev), size)))
   # Blobs first, then records and proofs, then the checkpoint last, so a
   # client that sees a checkpoint finds everything it commits to.
-  for id, data in r.blobs:
+  for id, _ in r.blobSizes:
     if r.referenced.getOrDefault(id):
-      r.publishFile("v1/blob/" & toHex(id), data)
+      r.publishFile("v1/blob/" & toHex(id), r.blobBytes(id))
   var index = IndexSnapshot(treeSize: uint64(size))
   for i, bytes in r.records:
     let id = envelopeIdentity(decodeEnvelope(bytes))
@@ -333,6 +358,77 @@ proc publish(r: Registrar) =
 # Construction and persistence.
 # ---------------------------------------------------------------------------
 
+proc reload(r: Registrar) =
+  ## Rebuild every piece of state from the registrar's own persisted log,
+  ## in log order, so a restarted registrar signs a checkpoint that extends
+  ## the history it signed before rather than a different one, and keeps
+  ## its namespace claims. Records were admitted before they were written,
+  ## so nothing here re-validates; a record that no longer decodes is a
+  ## corrupt store and stops the registrar rather than being skipped.
+  let logDir = r.cfg.dataDir / "log"
+  if not dirExists(logDir): return
+  var files: seq[string]
+  for kind, path in walkDir(logDir):
+    if kind == pcFile: files.add path
+  files.sort(cmp)
+  for i, path in files:
+    if path.extractFilename != align($i, 12, '0'):
+      raise newException(IOError, "registrar log is not contiguous at " & $i)
+    let bytes = bytesOf(readFile(path))
+    let env = decodeEnvelope(bytes)
+    let id = envelopeIdentity(env)
+    let pos = r.log.append(logLeaf(env.recordKind, id, bytes))
+    r.records.add bytes
+    r.kinds.add env.recordKind
+    r.byIdentity[id] = pos
+    case env.recordKind
+    of rkKeyLogEntry:
+      let e = decodeKeyLogEntry(env.body)
+      let principal =
+        if e.operation == klGenesis: Digest32(keyId(e.algorithm, e.publicKey))
+        else: e.principal
+      r.chains.mgetOrPut(principal, @[]).add (env, uint64(pos))
+      for k in replayKeyLog(r.chains[principal]).keys.keys:
+        r.keyOwner[k] = principal
+    of rkManifest:
+      let m = decodeManifest(env.body)
+      r.manifests[id] = m
+      r.names.mgetOrPut(m.remixName, @[]).insert(id, 0)
+      for p in m.patches: r.referenced[p.blob.id] = true
+      for c in m.configuration: r.referenced[c.value.id] = true
+      for b in m.graphFragments: r.referenced[b.id] = true
+      for b in m.assets: r.referenced[b.id] = true
+    of rkStatement:
+      let st = decodeStatement(env.body)
+      case st.kind
+      of skPublication:
+        r.statements.mgetOrPut(st.subject, @[]).add pos
+        for item in st.scope:
+          if item.startsWith("namespace:"):
+            let ns = item["namespace:".len .. ^1]
+            if ns notin r.namespaces and st.subject in r.manifests:
+              let a = r.manifests[st.subject].authors[0]
+              r.namespaces[ns] = r.keyOwner.getOrDefault(a, a)
+      of skVerdict, skRevocation, skModeration:
+        r.policyIds.add id
+        r.policyRecords.add pos
+        if st.subjectKind == sbRelease:
+          r.statements.mgetOrPut(st.subject, @[]).add pos
+      else:
+        if st.subjectKind == sbRelease:
+          r.statements.mgetOrPut(st.subject, @[]).add pos
+    else: discard
+  let blobDir = r.cfg.dataDir / "blobs"
+  if dirExists(blobDir):
+    for kind, path in walkDir(blobDir):
+      let name = path.extractFilename
+      if kind != pcFile or name.endsWith(".tmp") or name.len != 64: continue
+      var d: Digest32
+      for j in 0 ..< 32: d[j] = byte(parseHexInt(name[2 * j .. 2 * j + 1]))
+      r.blobSizes[d] = uint64(getFileSize(path))
+      r.blobAge[d] = 0
+  r.dirty = r.records.len > 0
+
 proc newRegistrar*(cfg: RegistrarConfig; logKey: PeerKeypair): Registrar =
   var c = cfg
   if c.ratePerMinute <= 0: c.ratePerMinute = DefaultRatePerMinute
@@ -343,7 +439,9 @@ proc newRegistrar*(cfg: RegistrarConfig; logKey: PeerKeypair): Registrar =
     createDir(d)
   if c.policyInbox.len > 0:
     createDir(c.policyInbox)
-  Registrar(cfg: c, spool: initSpool(c.spoolDir), logKey: logKey)
+  result = Registrar(cfg: c, spool: initSpool(c.spoolDir), logKey: logKey)
+  result.reload()
+  result.spool.recoverClaimed()
 
 proc appendRecord(r: Registrar; env: Envelope): uint64 =
   let bytes = encodeEnvelope(env)
@@ -432,7 +530,7 @@ proc admitManifest(r: Registrar; env: Envelope; v: Verdict; payload: seq[byte];
     r.capture("canary", token, payload)
     refuse(rrForbiddenContent, "namespace " & ns & " is reserved")
   for b in v.blobs:
-    if b.id notin r.blobs or uint64(r.blobs[b.id].len) != b.size:
+    if not r.hasBlob(b.id) or r.blobSizes[b.id] != b.size:
       refuse(rrMissingBlob, "blob " & toHex(b.id) & " has not been submitted")
   for p in v.parents:
     if p notin r.byIdentity:
@@ -561,8 +659,8 @@ proc process(r: Registrar; name: string; bytes: seq[byte]): Outcome =
     case msg.msgType
     of mtSubmitBlob:
       let id = blobId(msg.payload)
-      if id notin r.blobs:
-        r.blobs[id] = msg.payload
+      if not r.hasBlob(id):
+        r.storeBlob(id, msg.payload)
         r.blobAge[id] = r.ticks
       result.identity = id
       result.admitted = true
@@ -655,10 +753,19 @@ proc tick*(r: Registrar): seq[Outcome] =
   var waiting = r.deferred
   r.deferred = @[]
   var work: seq[(string, seq[byte], int)]
+  var used = 0
   for name in r.spool.pending:
+    if work.len >= MaxTickMessages or used >= MaxTickBytes: break
     let bytes = r.spool.claim(name)
-    r.spool.retire(name)
+    used += bytes.len
     work.add (name, bytes, r.ticks)
+  # Forget rate windows that have closed, so the table stays bounded by
+  # the senders of the last minute.
+  let now = getTime().toUnix
+  var stale: seq[string]
+  for k, (start, _) in r.rate:
+    if now - start >= 60: stale.add k
+  for k in stale: r.rate.del k
   # New blobs in this batch must be seen before the releases that wait on
   # them, wherever they sit in the spool order.
   var ordered: seq[(string, seq[byte], int)]
@@ -675,13 +782,17 @@ proc tick*(r: Registrar): seq[Outcome] =
        r.ticks - firstTick < MaxDeferTicks and r.deferred.len < MaxDeferred:
       r.deferred.add (name, bytes, firstTick)
       continue
+    # Retired only once it has a final outcome: a crash before this point
+    # leaves the message in `cur/`, and `recoverClaimed` replays it.
+    r.spool.retire(name)
     result.add o
   var expired: seq[Digest32]
   for id, age in r.blobAge:
     if not r.referenced.getOrDefault(id) and r.ticks - age > BlobExpiryTicks:
       expired.add id
   for id in expired:
-    r.blobs.del id
+    removeFile(r.blobPath(id))
+    r.blobSizes.del id
     r.blobAge.del id
   if r.dirty:
     try:
