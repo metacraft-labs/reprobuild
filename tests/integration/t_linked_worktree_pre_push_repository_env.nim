@@ -650,12 +650,15 @@ suite "linked-worktree pre-push repository-local environment isolation":
 
       # Make both a real dependency and an ambient-only checkout disagree with
       # the lock. The dependency's dirty file gives the gate a deterministic
-      # refusal before any lock publication; the advisory pass must mention
-      # dep but must not even observe unrelated.
+      # refusal before publication; its unpublished HEAD is a second blocker.
+      # Both gate failures and advisory observations must include dep and
+      # exclude unrelated.
       writeFile(fx.dep / "new-dep.txt", "new dependency revision\n")
       discard require(q(gitBin) & " -C " & q(fx.dep) & " add new-dep.txt")
       discard require(q(gitBin) & " -C " & q(fx.dep) &
         " commit -m 'advance dependency after lock'")
+      let unpublishedDepSha = require(q(gitBin) & " -C " & q(fx.dep) &
+        " rev-parse HEAD").strip()
       writeFile(fx.dep / "dirty-dep.txt", "legitimate closure blocker\n")
       writeFile(fx.unrelated / "new-unrelated.txt", "ambient drift\n")
       discard require(q(gitBin) & " -C " & q(fx.unrelated) &
@@ -684,9 +687,15 @@ suite "linked-worktree pre-push repository-local environment isolation":
       check checked["project"].getStr() == "ambient"
       check expandFilename(checked["currentRepo"].getStr()) ==
         expandFilename(fx.linked)
-      check checked["failures"].len == 1
-      check checked["failures"][0]["repo"].getStr() == "dep"
-      check checked["failures"][0]["property"].getStr() == "dirty"
+      # Both independent blockers belong to the dependency closure. An
+      # ambient-only checkout must contribute neither kind of refusal.
+      check checked["failures"].len == 2
+      if checked["failures"].len == 2:
+        for i, property in ["dirty", "unpublished"]:
+          check checked["failures"][i]["repo"].getStr() == "dep"
+          check checked["failures"][i]["property"].getStr() == property
+          check ("dep: " & property) in dispatched.output
+        check unpublishedDepSha in checked["failures"][1]["evidence"].getStr()
       let notices = noticesText(checked)
       check "dep: checked out" in notices
       check "unrelated: checked out" notin notices

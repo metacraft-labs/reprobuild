@@ -1758,7 +1758,7 @@ tests/integration/t_provisioning_contributions.nim	nim	6
 tests/integration/t_public_committed_team_manifest_personal_db_mixed.nim	nim	2
 tests/integration/t_pull_refuses_to_rewind_unpublished_work.nim	nim	2
 tests/integration/t_push_gateway_opt_out_is_a_settings_key.nim	nim	1
-tests/integration/t_push_refuses_when_the_lock_disagrees_with_the_siblings.nim	nim	1
+tests/integration/t_push_refuses_when_the_lock_disagrees_with_the_siblings.nim	nim	3
 tests/integration/t_r2_iso_boot.nim	nim	2
 tests/integration/t_r9_systemd_boot.nim	nim	2
 tests/integration/t_recertify_is_noop_when_no_executed_function_changed.nim	nim	1

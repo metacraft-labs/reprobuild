@@ -66194,9 +66194,9 @@ proc headPublicationOf*(identity: GitToolIdentity;
   result.diagnostic = evidence & " (every configured remote was fetched first)"
 
 proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
-  ## Drive the five-stage gate. Each stage short-circuits on the first
-  ## failure — the spec is explicit that the gate names ONE failure at
-  ## a time so the operator's next step is unambiguous. RA-3 removed the
+  ## Collect independent read-only refusals before attempting lock writes.
+  ## Identity, scope and protocol failures still stop checks that need them.
+  ## Each reported blocker names its own offender and remedy. RA-3 removed the
   ## former branch-mismatch stage (no branch-name enforcement); the gate
   ## now starts at the sibling-repo cleanliness check. M23 inserted
   ## the develop-override cleanliness stage between the sibling-repo
@@ -66467,9 +66467,8 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     discard
 
   # Walk the participating repos for the cleanliness + publication
-  # passes. We gather the M4 evidence triple for every repo so the
-  # second / third stages can short-circuit cleanly while preserving
-  # the full observed state for the lock stage. Repos OUTSIDE the pushed
+  # passes. Gather the M4 evidence triple for every repo so independent
+  # checks share the same observations and the lock stage sees the full state. Repos OUTSIDE the pushed
   # repo's dependency closure are skipped entirely (RA-21).
   type
     RepoObs = object
@@ -66544,8 +66543,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
             resolved.projectName, obs.name, obs.headSha)))
         break
   # M4 evidence records are intentionally not folded into the gate
-  # report yet — the gate carries its own short-circuiting structure
-  # and the unified evidence is already exposed by ``repro workspace
+  # report yet — unified evidence is already exposed by ``repro workspace
   # status`` for general inspection. ``toolDigest`` and ``observedAt``
   # are retained in scope so a future caller wishing to fold the
   # observation triple into ``WorkspaceVcsEvidence`` can do so without
@@ -66573,52 +66571,52 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   #
   # The stage is a strict no-op when no private repo is unreadable, so every
   # all-public / fully-cloned workspace (the existing gate tests) is unchanged.
-  if unreadablePrivate.len > 0:
-    let routing = loadLockingRouting(parsed.workspaceRoot)
-    var assignments: seq[RepoBackendAssignment]
-    var routingFailed = false
-    try:
-      assignments = resolveRepoBackends(
-        routing, resolved.repos, parsed.workspaceRoot, identity,
-        identity.binaryPath)
-    except StoreRoutingError as err:
-      routingFailed = true
-      result.failures.add(CheckFailure(
-        repo: "",
-        property: "evidence-only-no-backend",
-        remediation: "declare a `[[locking.route]]` backend for the private " &
-          "repo so its participation evidence has a store to read",
-        evidence: err.msg))
-      result.exitCode = 2
-    if routingFailed:
-      return
-    var byName = initTable[string, RepoBackendAssignment]()
-    for asg in assignments:
-      byName[asg.repoName] = asg
-    for repo in unreadablePrivate:
-      let asg = byName.getOrDefault(repo.name)
-      let outcome = gateDecideUnreadableRepo(
-        repo, asg.store, resolved.projectName)
-      # HL-6 (§7.3): Decision 2's loud-vs-warn applies to the evidence READ of an
-      # unreachable backend. ``decideEvidenceReadTierPolicy`` is the single shared
-      # decision (the integration test drives the SAME proc): a PERSONAL-tier
-      # unreachable evidence read WARNS but ALLOWS; a team/public (shared) tier —
-      # or an evidence-proven violation — REFUSES.
-      case decideEvidenceReadTierPolicy(outcome, asg.visibility)
-      of ergdSatisfied:
-        result.notices.add(outcome.notice)
-      of ergdWarnAllow:
-        result.notices.add(
-          evidenceReadUnreachableWarning(repo.path, asg.backendKind,
-            parsed.workspaceRoot))
-      of ergdRefuse:
-        result.failures.add(outcome.failure)
+  block privateEvidenceChecks:
+    if unreadablePrivate.len > 0:
+      let routing = loadLockingRouting(parsed.workspaceRoot)
+      var assignments: seq[RepoBackendAssignment]
+      var routingFailed = false
+      try:
+        assignments = resolveRepoBackends(
+          routing, resolved.repos, parsed.workspaceRoot, identity,
+          identity.binaryPath)
+      except StoreRoutingError as err:
+        routingFailed = true
+        result.failures.add(CheckFailure(
+          repo: "",
+          property: "evidence-only-no-backend",
+          remediation: "declare a `[[locking.route]]` backend for the private " &
+            "repo so its participation evidence has a store to read",
+          evidence: err.msg))
         result.exitCode = 2
-        return
+      if routingFailed:
+        break privateEvidenceChecks
+      var byName = initTable[string, RepoBackendAssignment]()
+      for asg in assignments:
+        byName[asg.repoName] = asg
+      for repo in unreadablePrivate:
+        let asg = byName.getOrDefault(repo.name)
+        let outcome = gateDecideUnreadableRepo(
+          repo, asg.store, resolved.projectName)
+        # HL-6 (§7.3): Decision 2's loud-vs-warn applies to the evidence READ of an
+        # unreachable backend. ``decideEvidenceReadTierPolicy`` is the single shared
+        # decision (the integration test drives the SAME proc): a PERSONAL-tier
+        # unreachable evidence read WARNS but ALLOWS; a team/public (shared) tier —
+        # or an evidence-proven violation — REFUSES.
+        case decideEvidenceReadTierPolicy(outcome, asg.visibility)
+        of ergdSatisfied:
+          result.notices.add(outcome.notice)
+        of ergdWarnAllow:
+          result.notices.add(
+            evidenceReadUnreachableWarning(repo.path, asg.backendKind,
+              parsed.workspaceRoot))
+        of ergdRefuse:
+          result.failures.add(outcome.failure)
+          result.exitCode = 2
 
   # ---- TC-3 / RA-32: certificate-coverage gate (opt-in per project) ------
   # This nested stage runs ONLY after every other stage has passed (the gate
-  # short-circuits on the first failure, so by the time we reach it the
+  # refuses before entering lock stages, so by the time we invoke it the
   # closure is clean + published + at the locked revisions and the lock is
   # current). It is invoked from EACH exit point of stage 5 (and the final
   # fall-through) via ``applyCertificateGate`` so it sees a resolved lock.
@@ -66717,7 +66715,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   # the working tree holds; that is also what lets `repro check` answer it in
   # a tree with work in progress.
   #
-  # FIRST, before any stage that compares a lock with a sibling checkout: an
+  # Report this before comparisons with a sibling checkout: an
   # inconsistency inside the pushed revision is a fact about the revision, and
   # reporting it as a stale sibling (`flake_lock_stale`) would send the
   # operator to move a checkout that is not the problem. The `pre-commit` hook
@@ -66748,8 +66746,6 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         evidence: consistencyFailureEvidence(vs),
         source: vs[0].recipeFile))
       result.exitCode = 2
-    if result.exitCode != 0:
-      return
 
   # ---- 1. dirty ----------------------------------------------------------
   for obs in observations:
@@ -66780,7 +66776,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           obs.path & " stash') then 'repro push'",
         evidence: evidence))
       result.exitCode = 2
-      return
+
 
   # ---- 2. unpublished ----------------------------------------------------
   for obs in observations:
@@ -66836,7 +66832,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         remediation: remediation,
         evidence: evidence))
       result.exitCode = 2
-      return
+
 
   # ---- 2b. outgoing history rewrite --------------------------------------
   # A push that names one ref, whose local object is the independently
@@ -66858,88 +66854,91 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   #
   # Refusals here never say the repository is unpublished — it is being
   # published by this very push — and each names what would be lost.
-  if outgoing.outgoingCurrent and
-      outgoing.updateShape in {ouRewrite, ouRewriteOpaque}:
-    let pushedBranch =
-      if outgoing.remoteRef.startsWith("refs/heads/"):
-        outgoing.remoteRef["refs/heads/".len .. ^1]
-      else: outgoing.remoteRef
-    let repoLabel =
-      if currentRepoPath.len > 0: currentRepoPath else: parsed.currentRepo
-    let remoteLabel =
-      if outgoing.remoteName.len > 0: outgoing.remoteName else: "the remote"
-    if outgoing.updateShape == ouRewriteOpaque:
-      # The old tip is not a commit in this checkout, so what the update
-      # discards cannot be enumerated. "Nothing is discarded" and "what is
-      # discarded cannot be seen" are different answers and only the first is
-      # safe to act on, so refuse — but say which one this is.
-      result.failures.add(CheckFailure(
-        repo: repoLabel,
-        property: "history-rewrite-unverifiable",
-        remediation: "run 'git -C " & parsed.currentRepo & " fetch " &
-          remoteLabel & " " & pushedBranch & "' so the commits this update " &
-          "would replace are present locally, then retry the push — HEAD " &
-          outgoing.headOid & " is publishable; this is refused only because " &
-          "the gate cannot see what the update would discard",
-        evidence: "'" & remoteLabel & "/" & pushedBranch & "' is at " &
-          outgoing.remoteOldOid & ", which is not a commit object in this " &
-          "checkout, so the commits this non-fast-forward update would make " &
-          "unreachable cannot be enumerated"))
-      result.exitCode = 2
-      return
-    let orphanedCommits = commitsMadeUnreachable(identity.binaryPath,
-      parsed.currentRepo, outgoing.remoteOldOid, outgoing.headOid)
-    var orphans = initHashSet[string]()
-    orphans.incl(outgoing.remoteOldOid.toLowerAscii())
-    for oid in orphanedCommits:
-      orphans.incl(oid)
-    # A declared MAINLINE is refused regardless of what is pinned. The
-    # asymmetry is the justification: feature branches are rebased constantly
-    # and a rewrite there costs nothing, whereas mainline is what every other
-    # checkout tracks, so rewriting it invalidates teammates' working state —
-    # which no lock records and the check below therefore cannot see. The rule
-    # fires only on a branch the MANIFEST declares, never on an inferred one,
-    # so its false-refusal rate is the rate at which mainline is deliberately
-    # rewritten: near zero, which is what keeps a blanket rule from becoming
-    # a bypass lesson.
-    let mainline = declaredMainlineBranch(resolved, currentRepoName)
-    if mainline.len > 0 and pushedBranch == mainline:
-      result.failures.add(CheckFailure(
-        repo: repoLabel,
-        property: "mainline-history-rewrite",
-        remediation: "do not rewrite the shared mainline '" & pushedBranch &
-          "' — put this work on top of " & outgoing.remoteOldOid &
-          " (rebase onto it, or revert), or push this history to a " &
-          "different branch. HEAD " & outgoing.headOid & " is publishable; " &
-          "only discarding '" & pushedBranch & "' history is refused",
-        evidence: "'" & pushedBranch & "' is the mainline branch the " &
-          "manifest declares for " & currentRepoName &
-          ", and this update is not a fast-forward: it would make " &
-          $orphans.len & " commit(s) unreachable there, including " &
-          outgoing.remoteOldOid))
-      result.exitCode = 2
-      return
-    let pinned = findLockPinningOrphan(identity,
-      workspaceLockRoots(parsed.workspaceRoot, layerLocations), orphans)
-    if pinned.orphanOid.len > 0:
-      result.failures.add(CheckFailure(
-        repo: repoLabel,
-        property: "orphans-locked-commit",
-        remediation: "push this history to a different branch, or keep " &
-          pinned.orphanOid & " reachable from '" & pushedBranch &
-          "' — discarding it makes that lock record unresolvable, and " &
-          "re-pinning it is a coordinated change to shared lock history " &
-          "that this push must not make implicitly. HEAD " & outgoing.headOid &
-          " is publishable; only discarding " & pinned.orphanOid &
-          " is refused",
-        evidence: "lock record " & pinned.lockRelPath & " (keyed at " &
-          pinned.lockTriggerSha & ", which this push does NOT discard) pins " &
-          pinned.lockedPath & " at " & pinned.orphanOid &
-          ", and this non-fast-forward update to '" & pushedBranch &
-          "' would make that commit unreachable",
-        source: pinned.lockRoot / pinned.lockRelPath.replace('/', DirSep)))
-      result.exitCode = 2
-      return
+  block historyRewriteChecks:
+    if outgoing.outgoingCurrent and
+        outgoing.updateShape in {ouRewrite, ouRewriteOpaque}:
+      let pushedBranch =
+        if outgoing.remoteRef.startsWith("refs/heads/"):
+          outgoing.remoteRef["refs/heads/".len .. ^1]
+        else: outgoing.remoteRef
+      let repoLabel =
+        if currentRepoPath.len > 0: currentRepoPath else: parsed.currentRepo
+      let remoteLabel =
+        if outgoing.remoteName.len > 0: outgoing.remoteName else: "the remote"
+      if outgoing.updateShape == ouRewriteOpaque:
+        # The old tip is not a commit in this checkout, so what the update
+        # discards cannot be enumerated. "Nothing is discarded" and "what is
+        # discarded cannot be seen" are different answers and only the first is
+        # safe to act on, so refuse — but say which one this is.
+        result.failures.add(CheckFailure(
+          repo: repoLabel,
+          property: "history-rewrite-unverifiable",
+          remediation: "run 'git -C " & parsed.currentRepo & " fetch " &
+            remoteLabel & " " & pushedBranch & "' so the commits this update " &
+            "would replace are present locally, then retry the push — HEAD " &
+            outgoing.headOid & " is publishable; this is refused only because " &
+            "the gate cannot see what the update would discard",
+          evidence: "'" & remoteLabel & "/" & pushedBranch & "' is at " &
+            outgoing.remoteOldOid & ", which is not a commit object in this " &
+            "checkout, so the commits this non-fast-forward update would make " &
+            "unreachable cannot be enumerated"))
+        result.exitCode = 2
+        break historyRewriteChecks
+
+      let orphanedCommits = commitsMadeUnreachable(identity.binaryPath,
+        parsed.currentRepo, outgoing.remoteOldOid, outgoing.headOid)
+      var orphans = initHashSet[string]()
+      orphans.incl(outgoing.remoteOldOid.toLowerAscii())
+      for oid in orphanedCommits:
+        orphans.incl(oid)
+      # A declared MAINLINE is refused regardless of what is pinned. The
+      # asymmetry is the justification: feature branches are rebased constantly
+      # and a rewrite there costs nothing, whereas mainline is what every other
+      # checkout tracks, so rewriting it invalidates teammates' working state —
+      # which no lock records and the check below therefore cannot see. The rule
+      # fires only on a branch the MANIFEST declares, never on an inferred one,
+      # so its false-refusal rate is the rate at which mainline is deliberately
+      # rewritten: near zero, which is what keeps a blanket rule from becoming
+      # a bypass lesson.
+      let mainline = declaredMainlineBranch(resolved, currentRepoName)
+      if mainline.len > 0 and pushedBranch == mainline:
+        result.failures.add(CheckFailure(
+          repo: repoLabel,
+          property: "mainline-history-rewrite",
+          remediation: "do not rewrite the shared mainline '" & pushedBranch &
+            "' — put this work on top of " & outgoing.remoteOldOid &
+            " (rebase onto it, or revert), or push this history to a " &
+            "different branch. HEAD " & outgoing.headOid & " is publishable; " &
+            "only discarding '" & pushedBranch & "' history is refused",
+          evidence: "'" & pushedBranch & "' is the mainline branch the " &
+            "manifest declares for " & currentRepoName &
+            ", and this update is not a fast-forward: it would make " &
+            $orphans.len & " commit(s) unreachable there, including " &
+            outgoing.remoteOldOid))
+        result.exitCode = 2
+
+      let pinned = findLockPinningOrphan(identity,
+        workspaceLockRoots(parsed.workspaceRoot, layerLocations), orphans)
+      if pinned.orphanOid.len > 0:
+        result.failures.add(CheckFailure(
+          repo: repoLabel,
+          property: "orphans-locked-commit",
+          remediation: "push this history to a different branch, or keep " &
+            pinned.orphanOid & " reachable from '" & pushedBranch &
+            "' — discarding it makes that lock record unresolvable, and " &
+            "re-pinning it is a coordinated change to shared lock history " &
+            "that this push must not make implicitly. HEAD " & outgoing.headOid &
+            " is publishable; only discarding " & pinned.orphanOid &
+            " is refused",
+          evidence: "lock record " & pinned.lockRelPath & " (keyed at " &
+            pinned.lockTriggerSha & ", which this push does NOT discard) pins " &
+            pinned.lockedPath & " at " & pinned.orphanOid &
+            ", and this non-fast-forward update to '" & pushedBranch &
+            "' would make that commit unreachable",
+          source: pinned.lockRoot / pinned.lockRelPath.replace('/', DirSep)))
+        result.exitCode = 2
+        break historyRewriteChecks
+
 
   # ---- 3. develop-mode override cleanliness (M23) ------------------------
   # The blocking condition reproduces
@@ -66965,7 +66964,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         evidence: err.msg,
         source: developOverridesPath(parsed.workspaceRoot)))
       result.exitCode = 2
-      return
+      none(DevelopOverrides)
   # The declared repo an override's source path names, and whether THIS repo is
   # itself one of the overrides: the inputs to ``overrideAwaitsThisPush``.
   # Asked of the declared checkout paths, which is what ``repro develop``
@@ -67000,7 +66999,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           evidence: "override source path does not exist",
           source: sourcePath))
         result.exitCode = 2
-        return
+        continue
       # Skip non-git overrides — the M20 schema accepts overrides that
       # point at any directory (the CLI even has a "register-only" arm
       # that does not require a VCS root). Treat the absence of ``.git``
@@ -67026,8 +67025,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           evidence: "clean-probe-failed: " & cleanRes.diagnostic,
           source: sourcePath))
         result.exitCode = 2
-        return
-      if not cleanRes.isClean:
+      elif not cleanRes.isClean:
         result.failures.add(CheckFailure(
           repo: entry.package,
           property: "develop_override_dirty",
@@ -67035,7 +67033,6 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           evidence: "working tree has uncommitted changes",
           source: sourcePath))
         result.exitCode = 2
-        return
       # Accept ANY remote-tracking branch. A develop-override is an arbitrary
       # local path, not a manifest repo, so there is no `ResolvedRepo` to feed
       # `gitRemoteNameFor` and no configured expectation of which remote it
@@ -67055,7 +67052,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           evidence: "publish-probe-failed: " & pubRes.diagnostic,
           source: sourcePath))
         result.exitCode = 2
-        return
+        continue
       if not pubRes.isPublished:
         let headRes = queryGitState(headShaQuery(sourcePath), identity)
         let headSha =
@@ -67124,7 +67121,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
           evidence: evidence,
           source: sourcePath))
         result.exitCode = 2
-        return
+        continue
 
   # ---- 3b. NF-3: the IN-TREE lock is VERIFIED, never produced ------------
   #
@@ -67178,7 +67175,7 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         evidence: verdict.evidence,
         source: parsed.currentRepo / "flake.lock"))
       result.exitCode = 2
-      return
+
     # A verified-and-agreeing flake is NOT announced. §NF-3's own test
     # (`a_clean_workspace_pushes_without_a_diagnostic`) is the reason: a gate
     # that says something on every clean push trains people to scroll past the
@@ -67218,7 +67215,12 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         evidence: pins.evidence,
         source: parsed.currentRepo / CommittedLockFileName))
       result.exitCode = 2
-      return
+
+
+  # Refusals are collected above using read-only observations. Never let a
+  # failed independent check reach lock creation or publication below.
+  if result.exitCode != 0:
+    return
 
   # ---- 4. lock currency --------------------------------------------------
   # Pick the manifest-layer root the way M11 / M12 do, then read the
