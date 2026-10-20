@@ -29,6 +29,36 @@ import ./type_registry
 import ./lifecycle
 import ./plan
 
+proc builtinResourceOwnership*(kind: ResourceKind): ResourceOwnership =
+  ## What a first apply of `kind` may do over an existing, differing object
+  ## no generation records (`ResourceOwnership`). Every kind is a whole
+  ## object -- drift -- except the ones whose observation of "nothing of
+  ## ours yet" is not anyone's object, which converge:
+  ##
+  ## * `env.userPath`, `vscode.extension`: contributions to a shared
+  ##   collection (the user `Path` / the rc file's PATH block; the installed
+  ##   extensions, observed as their intersection with the desired set).
+  ## * `linux.gsettings`: `gsettings get` answers the schema default for a
+  ##   key nobody set, so the observation cannot tell a default (nobody's)
+  ##   from a value someone chose; as drift, every gsettings resource on a
+  ##   fresh host would need `--reconcile-drift`. (`linux.dconfKey` and
+  ##   `linux.kdeConfigKey` observe an unset key as absent, so they are whole
+  ##   objects.)
+  ## * `pkg.homebrewFormula` / `pkg.homebrewCask`: the installation is
+  ##   Homebrew's and moving it to the declared version is what `brew` itself
+  ##   does; no user content is replaced. As drift, every cask a Brewfile
+  ##   installed would need `--reconcile-drift` when a host's `applications`
+  ##   concern takes it over from Home Manager.
+  case kind
+  of rkEnvUserPath, rkVscodeExtension, rkLinuxGsettings, rkHomebrewFormula,
+     rkHomebrewCask:
+    roSetContribution
+  of rkFsManagedBlock, rkWindowsRegistryValue, rkEnvUserVariable,
+     rkWindowsStartup, rkShellIntegration, rkSystemdUserUnit,
+     rkMacosUserDefault, rkLaunchdUserAgent, rkFsUserFile, rkLinuxDconfKey,
+     rkLinuxKdeConfigKey, rkMacosAppBundle:
+    roWholeObject
+
 proc registerBuiltinResourceTypes*() =
   ## Register a `ResourceTypeDef` for every built-in `ResourceKind`.
   ## Idempotent: re-registering a `typeId` replaces the prior entry
@@ -90,6 +120,5 @@ proc registerBuiltinResourceTypes*() =
     registerResourceType(ResourceTypeDef(
       typeId: $kind,
       determinism: rdHostBound,
-      ownership: (if kind in {rkEnvUserPath, rkVscodeExtension}:
-        roSetContribution else: roWholeObject),
+      ownership: builtinResourceOwnership(kind),
       driver: driver))

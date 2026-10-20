@@ -1861,16 +1861,54 @@ proc verifyManifestDigests(stateDir: string; store: var Store;
 # M72 Deliverable 2: `repro home apply --plan` dry-run
 # ---------------------------------------------------------------------------
 
+proc bindingOfLiveObject(address: string; desired: Resource;
+                         observed: ObservedState): ResourceBinding =
+  ## The binding that records a live object as it is, without a driver
+  ## write: pre- == post-write == the observation. Used by `repro home
+  ## adopt` (an existing object claimed) and by a first apply whose object
+  ## already holds the declared state.
+  let payloadKind =
+    case desired.kind
+    of rkWindowsRegistryValue: $desired.registryPayload.kind
+    of rkEnvUserVariable: $desired.envVarPayload.kind
+    of rkEnvUserPath: "joined-entries"
+    of rkWindowsStartup: "string"
+    of rkShellIntegration: "shell-block"
+    of rkFsManagedBlock: "managed-block"
+    of rkLinuxGsettings: "gvariant-literal"
+    of rkSystemdUserUnit: "unit-content"
+    of rkMacosUserDefault: "defaults-literal"
+    of rkLaunchdUserAgent: "plist-content"
+    of rkFsUserFile: "user-file"
+    of rkVscodeExtension: "vscode-extensions"
+    of rkLinuxDconfKey: "gvariant-literal"
+    of rkLinuxKdeConfigKey: "kde-config-value"
+    of rkHomebrewFormula: "homebrew-formula-version"
+    of rkHomebrewCask: "homebrew-cask-version"
+    of rkMacosAppBundle: "app-bundle-identity"
+  toResourceBinding(address, desired.kind, realWorldIdentity(desired),
+    observed, observed.rawBytes, payloadKind, desired.lifecyclePolicy)
+
 proc previewStowItem(profileDir, homeDir: string;
-                     entry: StowEntry): PlanItem =
+                     entry: StowEntry;
+                     recordedStow: Table[string, GeneratedFile]): PlanItem =
   ## Read-only classification of one stow entry: would it create a
   ## link, cache-hit (target already correct), or hit a conflict
   ## (target exists as a regular file / wrong link)? Performs ONLY
-  ## reads — never touches the filesystem.
+  ## reads — never touches the filesystem. `recordedStow` is the current
+  ## generation's stow records by target path: a target that is still the
+  ## link (or copy) recorded there from another source is replaced, as the
+  ## apply does (`stow.isRecordedStowTarget`).
   result.category = "stow"
   result.name = entry.targetAbsolutePath
   let target = entry.targetAbsolutePath
   let source = entry.sourceAbsolutePath
+  if target in recordedStow and
+      isRecordedStowTarget(target, source, recordedStow[target]):
+    result.action = piaLink
+    result.detail = "would replace what the current generation " &
+      "recorded (-> " & recordedStow[target].stowSource & ") with -> " & source
+    return
   if not fileExists(extendedPath(target)) and not symlinkExists(extendedPath(target)) and
      not dirExists(extendedPath(target)):
     result.action = piaLink
@@ -2378,6 +2416,8 @@ proc planDesiredState*(rawOpts: ApplyOptions): PlannedDesiredState =
   result.stowDiscovery = selectStowEntries(
     discoverStowEntries(opts.profileDir, opts.homeDir), result.profile,
     opts.targetContext)
+  # Two packages on one path: refused before anything is written.
+  refuseStowPackagesOnOnePath(result.stowDiscovery.entries)
   if result.stowDiscovery.entries.len > 0:
     for sp in stowEntriesToPlanned(result.stowDiscovery.entries):
       result.plan.generatedFiles.add(sp)
@@ -2551,10 +2591,37 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
           address & ")"
       result.items.add(item)
 
+  # ---- The current generation's file records -----------------------------
+  # Read once, for the stow preview (a link the current generation recorded
+  # is its own, `stow.isRecordedStowTarget`) and the generated-file preview
+  # (cache-hit digests).
+  var prevFileDigests = initTable[string, Digest256]()
+  var recordedStow = initTable[string, GeneratedFile]()
+  if activeGenIdHex.len > 0:
+    let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
+    if fileExists(extendedPath(prevPointerFile)):
+      try:
+        let prevEnv = readPointerFile(prevPointerFile)
+        var prevKey: PrefixIdBytes
+        for i in 0 ..< 32:
+          prevKey[i] = prevEnv.activationManifestDigest[i]
+        var store = openStore(opts.storeRoot)
+        defer:
+          try: store.close() except CatchableError: discard
+        let prevBytes = readCasBlob(store, prevKey)
+        let prevManifest = decodeManifestBytes(prevBytes)
+        for gf in prevManifest.generatedFiles:
+          prevFileDigests[gf.absoluteOutputPath] = gf.postWriteDigest
+          if gf.ownershipPolicy in {gfoStowSymlink, gfoStowCopy}:
+            recordedStow[gf.absoluteOutputPath] = gf
+      except CatchableError:
+        discard
+
   # ---- Stow preview -----------------------------------------------------
   let filesApplied = GeneratedFileConcern in owned
   for entry in stowEntries:
-    var item = previewStowItem(opts.profileDir, opts.homeDir, entry)
+    var item = previewStowItem(opts.profileDir, opts.homeDir, entry,
+      recordedStow)
     item.concern = GeneratedFileConcern
     item.notApplied = not filesApplied
     if item.action == piaConflictDrift and filesApplied:
@@ -2571,24 +2638,6 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
         "package; skipped (IStowLooseFile)"))
 
   # ---- Generated files / managed blocks / launchers preview -------------
-  var prevFileDigests = initTable[string, Digest256]()
-  if activeGenIdHex.len > 0:
-    let prevPointerFile = pointerPath(opts.stateDir, activeGenIdHex)
-    if fileExists(extendedPath(prevPointerFile)):
-      try:
-        let prevEnv = readPointerFile(prevPointerFile)
-        var prevKey: PrefixIdBytes
-        for i in 0 ..< 32:
-          prevKey[i] = prevEnv.activationManifestDigest[i]
-        var store = openStore(opts.storeRoot)
-        defer:
-          try: store.close() except CatchableError: discard
-        let prevBytes = readCasBlob(store, prevKey)
-        let prevManifest = decodeManifestBytes(prevBytes)
-        for gf in prevManifest.generatedFiles:
-          prevFileDigests[gf.absoluteOutputPath] = gf.postWriteDigest
-      except CatchableError:
-        discard
   for g in applyPlan.generatedFiles:
     if g.sourceKind != pgfsPackageOutput:
       continue
@@ -2889,6 +2938,9 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
     let stowDiscovery = selectStowEntries(
       discoverStowEntries(opts.profileDir, opts.homeDir), profile,
       opts.targetContext)
+    # Two packages on one path: refused here, before the commit marker
+    # (`planDesiredState` applies the same rule for `--plan` and facts).
+    refuseStowPackagesOnOnePath(stowDiscovery.entries)
     var stowEntries = stowDiscovery.entries
     if stowEntries.len > 0:
       let stowPlanned = stowEntriesToPlanned(stowEntries)
@@ -3138,7 +3190,19 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
           let recorded = toRecorded(rb)
           if handedToStow(recorded, handoverDesired, stowIds, opts.homeDir):
             discard removeUnchangedUserFile(recorded)
+      # A path whose stow file now comes from another package: the link (or
+      # copy) the current generation recorded there, if still unchanged, is
+      # its own and is replaced, not refused as drift
+      # (`stow.isRecordedStowTarget`).
+      var recordedStow = initTable[string, GeneratedFile]()
+      if prevManifest.isSome:
+        for gf in prevManifest.get.generatedFiles:
+          if gf.ownershipPolicy in {gfoStowSymlink, gfoStowCopy}:
+            recordedStow[gf.absoluteOutputPath] = gf
       for entry in materializedStowEntries:
+        if entry.targetAbsolutePath in recordedStow:
+          discard releaseRecordedStowTarget(entry.targetAbsolutePath,
+            entry.sourceAbsolutePath, recordedStow[entry.targetAbsolutePath])
         let rec = materializeStowEntry(opts.profileDir, opts.homeDir, entry,
           stowReconcile)
         var staged: StagedFileRecord
@@ -3473,34 +3537,12 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         # as-is from the live observation.
         if action.address in adoptSet:
           let desired = desiredResources.resources[action.address]
-          let identity = realWorldIdentity(desired)
           let observed = observeResource(desired)
           var rb: ResourceBinding
           if observed.present:
             # Adopt the live bytes verbatim: preWrite == postWrite
             # == digest(observed). No driver write happened.
-            let adoptPayloadKind =
-              case desired.kind
-              of rkWindowsRegistryValue: $desired.registryPayload.kind
-              of rkEnvUserVariable: $desired.envVarPayload.kind
-              of rkEnvUserPath: "joined-entries"
-              of rkWindowsStartup: "string"
-              of rkShellIntegration: "shell-block"
-              of rkFsManagedBlock: "managed-block"
-              of rkLinuxGsettings: "gvariant-literal"
-              of rkSystemdUserUnit: "unit-content"
-              of rkMacosUserDefault: "defaults-literal"
-              of rkLaunchdUserAgent: "plist-content"
-              of rkFsUserFile: "user-file"
-              of rkVscodeExtension: "vscode-extensions"
-              of rkLinuxDconfKey: "gvariant-literal"
-              of rkLinuxKdeConfigKey: "kde-config-value"
-              of rkHomebrewFormula: "homebrew-formula-version"
-              of rkHomebrewCask: "homebrew-cask-version"
-              of rkMacosAppBundle: "app-bundle-identity"
-            rb = toResourceBinding(action.address, desired.kind,
-              identity, observed, observed.rawBytes,
-              adoptPayloadKind, desired.lifecyclePolicy)
+            rb = bindingOfLiveObject(action.address, desired, observed)
             # `toResourceBinding` sets preWriteDigest from the
             # observed state when present — for adopt the pre- and
             # post-write digests are intentionally equal.
@@ -3544,6 +3586,21 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               let observed = observeRecorded(action.address, prev)
               result.keptVendorUpdates.add(action.address & " " &
                 describeIdentityVersion(observed.rawBytes))
+          elif action.address in desiredResources.resources and
+              not action.deferred:
+            # A first apply that found the object already holding the
+            # declared state: record it as written (pre- == post-write ==
+            # the observation, as `repro home adopt` does), so the next
+            # apply knows the object is this generation's -- a later change
+            # of the declared content is then an ordinary update, and
+            # removing the resource destroys it. Without the record, the
+            # next apply would see an unrecorded object, which for a whole
+            # object is drift (`lifecycle.decideAction`).
+            let desired = desiredResources.resources[action.address]
+            let observed = observeResource(desired)
+            if observed.present and desired.kind != rkMacosAppBundle:
+              appliedResourceBindings.add(
+                bindingOfLiveObject(action.address, desired, observed))
         of rakCreate, rakUpdate, rakReplace:
           let desired = desiredResources.resources[action.address]
           let identity = realWorldIdentity(desired)

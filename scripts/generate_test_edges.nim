@@ -383,6 +383,7 @@ type
     identName: string     # Nim identifier for the let-binding
     needsProviderMode: bool
     needsSsl: bool        # M6: carries --define:ssl (HTTPS transport gate)
+    needsMissingJsonEvidenceTest: bool
     needsSoftwareRootTestTrust: bool
       ## Carries ``--define:reproAttestSoftwareRootTestTrust``. See
       ## ``needsSoftwareRootTestTrustDefine`` below.
@@ -416,6 +417,11 @@ type
     selfInterposes: bool
       ## Bootstrap-And-Self-Build B4: per-test target-OS guard for the
       ## ``extraPassC`` / ``extraPassL`` activation. See ``TargetOs``.
+
+proc needsMissingJsonEvidenceTestDefine(path: string): bool =
+  ## Put the private report-reader seam on the compile edge so it is active
+  ## before any import, and consolidation sees this as a flagged test.
+  path == "tests/unit/t_missing_json_evidence.nim"
 
 proc needsSslDefine(path: string): bool =
   ## Windows-Runner-Binary-Cache-Deploy M6/M7: the HTTPS gates exercise the
@@ -944,6 +950,7 @@ proc discoverTests(repoRoot: string): seq[TestEdge] =
       needsProviderMode: isProviderModePath(rel),
       needsSsl: needsSslDefine(rel),
       needsSoftwareRootTestTrust: needsSoftwareRootTestTrustDefine(rel),
+      needsMissingJsonEvidenceTest: needsMissingJsonEvidenceTestDefine(rel),
       requiresReproBinary: detectReproBinaryUsage(reach, repoRoot, rel),
       extraPassC: extraPassC,
       extraPassL: extraPassL,
@@ -1101,6 +1108,8 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
     var definesList: seq[string] = @[]
     if edge.needsProviderMode: definesList.add("reproProviderMode")
     if edge.needsSsl: definesList.add("ssl")
+    if edge.needsMissingJsonEvidenceTest:
+      definesList.add("reproMissingJsonEvidenceTest")
     if edge.needsSoftwareRootTestTrust:
       definesList.add("reproAttestSoftwareRootTestTrust")
     if edge.source in ["tests/unit/t_source_fetch_tool_metadata.nim",

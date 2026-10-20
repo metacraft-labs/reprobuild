@@ -101,14 +101,26 @@ type
 # ---------------------------------------------------------------------------
 
 proc raiseDrift*(address, kind, expectedHex, observedHex: string) {.noreturn.} =
+  ## An empty `expectedHex` means no generation records the object: the
+  ## first apply of a whole-object resource found someone else's object
+  ## where it would write (`lifecycle.decideAction`).
+  let observedShort =
+    if observedHex.len >= 12: observedHex[0 ..< 12] else: observedHex
+  let what =
+    if expectedHex.len == 0:
+      "an object already exists (observed " & observedShort &
+        ") and differs from the declared one, and no generation records " &
+        "it, so it is not Reprobuild's to replace. Pass --reconcile-drift " &
+        "to overwrite it, or `repro home adopt " & address &
+        "` to claim it as it is."
+    else:
+      "expected " &
+        (if expectedHex.len >= 12: expectedHex[0 ..< 12] else: expectedHex) &
+        " but observed " & observedShort &
+        ". Pass --reconcile-drift to overwrite, or `repro home adopt " &
+        address & "` to accept the user's edits."
   var e = newException(EDrift,
-    "repro home: drift detected at " & address & " (" & kind &
-    "): expected " &
-    (if expectedHex.len >= 12: expectedHex[0 ..< 12] else: expectedHex) &
-    " but observed " &
-    (if observedHex.len >= 12: observedHex[0 ..< 12] else: observedHex) &
-    ". Pass --reconcile-drift to overwrite, or `repro home adopt " &
-    address & "` to accept the user's edits.")
+    "repro home: drift detected at " & address & " (" & kind & "): " & what)
   e.resourceAddress = address
   e.resourceKind = kind
   e.expectedDigestHex = expectedHex
