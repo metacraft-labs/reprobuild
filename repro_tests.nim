@@ -5778,6 +5778,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_remix/tests/t_remix_interest_and_popularity_event_integrity.nim",
+    binary: "build/test-bin/t_remix_interest_and_popularity_event_integrity",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_remix/tests/t_remix_manifest_canonical_roundtrip_and_identity.nim",
     binary: "build/test-bin/t_remix_manifest_canonical_roundtrip_and_identity",
     defines: @[],

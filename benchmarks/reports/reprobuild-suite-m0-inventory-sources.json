@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2276,
+    "nimTestBinaries": 2277,
     "pureUnitConsolidationGroups": 63,
-    "pureUnitTests": 678,
+    "pureUnitTests": 679,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2307
+    "testEntries": 2308
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1320,7 +1320,7 @@
       "graph-fixture": 17,
       "integration": 1244,
       "platform/destructive": 138,
-      "pure unit": 678,
+      "pure unit": 679,
       "unclassified": 230
     },
     "graphOwnedTestArtifacts": [
@@ -1523,9 +1523,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2276,
+    "nimTestBinaryCount": 2277,
     "pythonTestFileCount": 31,
-    "testEntryCount": 2307
+    "testEntryCount": 2308
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -19206,6 +19206,23 @@
       "source": "libs/repro_remix/tests/t_remix_export_bundle.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_remix_interest_and_popularity_event_integrity",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_remix"
+      ],
+      "owner": "libs/repro_remix",
+      "requiresReproBinary": false,
+      "source": "libs/repro_remix/tests/t_remix_interest_and_popularity_event_integrity.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
