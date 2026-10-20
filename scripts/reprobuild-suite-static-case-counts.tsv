@@ -266,6 +266,7 @@ libs/repro_dsl_stdlib/tests/t_nim_c_ssl_link_path.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_nim_c_windows_exe_output.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_nim_entropy_blessing.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_nim_ssl_dependency.nim	nim	3
+libs/repro_dsl_stdlib/tests/t_no_catalog_tarball_arm_declares_a_source_build_driver.nim	nim	1
 libs/repro_dsl_stdlib/tests/t_one_toolchain_resolution_path.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_openssl_windows_link_channel.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_packaging_appimage_authoring.nim	nim	19
@@ -2095,7 +2096,7 @@ tests/unit/t_m9r10a_cycle_break.nim	nim	7
 tests/unit/t_m9r10a_exec_name_audit.nim	nim	5
 tests/unit/t_m9r10b_synthesis_wiring.nim	nim	8
 tests/unit/t_m9r11_runquota_daemon_recovery.nim	nim	11
-tests/unit/t_m9r11_stub_provisioning_widening.nim	nim	11
+tests/unit/t_m9r11_stub_provisioning_widening.nim	nim	13
 tests/unit/t_m9r12_3_runquota_standard_pools.nim	nim	5
 tests/unit/t_m9r12_4_autotools_emits_fetch.nim	nim	3
 tests/unit/t_m9r12_sh_inline_exec_and_typed_tool_fallback.nim	nim	15
