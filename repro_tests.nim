@@ -5787,6 +5787,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_remix/tests/t_remix_negative_safety_blocks_all_install_paths.nim",
+    binary: "build/test-bin/t_remix_negative_safety_blocks_all_install_paths",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_remix/tests/t_remix_signature_transparency_and_revocation.nim",
     binary: "build/test-bin/t_remix_signature_transparency_and_revocation",
     defines: @[],
