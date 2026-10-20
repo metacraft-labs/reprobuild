@@ -47922,6 +47922,21 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
         stderr.writeLine("workspace sync: [restored] " & repo.path &
           " @ locked " & lockedSha)
 
+  # Commit-pinned first clones use pull's attached parking convention. Do this
+  # before workspace branch attachment, which must never override the pin.
+  for repoIdx in cloneRepoIdx:
+    if not checkoutStatus.hasKey(repoIdx) or
+        checkoutStatus[repoIdx][0] != "cloned": continue
+    let repo = resolved.repos[repoIdx]
+    if not looksLikeSha(repo.revision): continue
+    let shortSha = repo.revision[0 ..< min(12, repo.revision.len)]
+    let parked = gitRunPlain(identity, ["-C", args.workspaceRoot / repo.path,
+      "checkout", "--quiet", "-B", "reprobuild/pinned/" & shortSha, repo.revision])
+    if parked.code != 0:
+      checkoutStatus[repoIdx] = ("failed",
+        "could not park cloned '" & repo.path & "' at pinned revision " &
+        repo.revision & ": " & parked.output.strip())
+
   # When a workspace feature branch is active, attach newly cloned repos to that branch.
   let wsBranchOpt = readWorkspaceBranch(args.workspaceRoot)
   if wsBranchOpt.isSome and wsBranchOpt.get().len > 0:
@@ -47929,6 +47944,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
     for repoIdx in cloneRepoIdx:
       if checkoutStatus.hasKey(repoIdx) and checkoutStatus[repoIdx][0] == "cloned":
         let repo = resolved.repos[repoIdx]
+        if looksLikeSha(repo.revision): continue
         let repoAbs = args.workspaceRoot / repo.path
         if dirExists(repoAbs / ".git"):
           let rName = gitRemoteNameFor(repo)
@@ -94235,7 +94251,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         # a half-converted manifest repo shows what is there rather than a
         # blank column for every converted fragment.
         remote = m.repo.url_prefix.get(m.repo.remote.get(""))
-        revision = m.repo.mainlineBranch.get(m.repo.revision.get(""))
+        revision = m.repo.revision.get(m.repo.mainlineBranch.get(""))
       except CatchableError as err:
         # Still listed — this listing is the remedy other diagnostics point
         # at for a fragment the reader refuses (an escaping checkout path) —
