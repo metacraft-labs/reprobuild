@@ -31,8 +31,10 @@
 ## By `scripts/release/package_windows_release.ps1 -Zip`, the script the
 ## release job (`.github/workflows/release.yml`, "Package release assets
 ## (Windows)") runs: runtime-DLL staging into `build\bin`, the `bin\` and
-## `lib\` copy, `stage_release_sources.sh` for `share\repro`, and the zip. It
-## is unzipped with `Expand-Archive` into a directory whose path has a space.
+## `lib\` copy, `stage_release_runquota.sh` for `bin\runquotad.exe` and
+## `bin\runquota.exe`, `stage_release_sources.sh` for `share\repro`, and the
+## zip. It is unzipped with `Expand-Archive` into a directory whose path has a
+## space.
 ## One deviation from the release: the binaries are this checkout's
 ## `build\bin` (`bash scripts/build_apps.sh`), not the output of the release
 ## job's `repro build .#release`; the packaging steps are identical. The DLL
@@ -181,7 +183,7 @@ else:
     for kind, path in walkDir(extractRoot):
       entries.add path.extractFilename
     doAssert entries == @[pkgName], $entries
-    for rel in ["bin\\repro.exe", "bin\\reprobuild.exe",
+    for rel in ["bin\\repro.exe", "bin\\reprobuild.exe", "bin\\runquotad.exe",
                 "share\\repro\\source\\config.nims",
                 "share\\repro\\source\\libs\\repro_profile\\src\\repro_profile.nim",
                 "share\\repro\\src\\reprobuild-test-adapters\\src\\" &
