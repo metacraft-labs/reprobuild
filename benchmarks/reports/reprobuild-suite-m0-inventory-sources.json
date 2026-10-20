@@ -39094,7 +39094,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_push_refuses_when_the_lock_disagrees_with_the_siblings.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
