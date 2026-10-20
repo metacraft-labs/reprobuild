@@ -18,6 +18,19 @@ const
   VariantContext* = "reproos.remix.variant.v1"
   StatementContext* = "reproos.remix.statement.v1"
   InstallLockContext* = "reproos.remix.install-lock.v1"
+  KeyLogContext* = "reproos.remix.key-log.v1"
+  BundleIndexContext* = "reproos.remix.bundle-index.v1"
+
+proc contextFor*(kind: RecordKind): string =
+  ## The identity context of each record kind, so one helper computes any
+  ## envelope's identity and a signature is bound to its record kind.
+  case kind
+  of rkManifest: ReleaseContext
+  of rkComposition: CompositionContext
+  of rkStatement: StatementContext
+  of rkKeyLogEntry: KeyLogContext
+  of rkInstallLock: InstallLockContext
+  of rkBundleIndex: BundleIndexContext
 
 proc toDigest32(d: Blake3Digest): Digest32 =
   for i in 0 ..< 32:
@@ -63,6 +76,11 @@ proc recordIdentity*(context: string; schemaVersion: uint16;
     result = toDigest32(h.finalize())
   finally:
     h.close()
+
+proc envelopeIdentity*(env: Envelope): Digest32 =
+  ## Identity of any envelope under its record kind's context.
+  recordIdentity(contextFor(env.recordKind), env.schemaVersion,
+                 env.requiredFeatures, env.recordKind, env.body)
 
 proc releaseId*(env: Envelope): ReleaseId =
   ## `ReleaseId` of a manifest envelope (Invariant I-1).

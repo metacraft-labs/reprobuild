@@ -32,8 +32,7 @@ proc keyIdOf*(kp: PeerKeypair): KeyId =
 
 proc signEnvelope*(env: var Envelope; kp: PeerKeypair) =
   ## Add (or replace) this key's signature over the record identity.
-  let id = recordIdentity(ReleaseContext, env.schemaVersion,
-                          env.requiredFeatures, env.recordKind, env.body)
+  let id = envelopeIdentity(env)
   let sig = peerAuth.signMessage(kp, signingMessage(id))
   let kid = Digest32(keyIdOf(kp))
   var kept: seq[Signature]
@@ -45,17 +44,11 @@ proc signEnvelope*(env: var Envelope; kp: PeerKeypair) =
   sortSignatures(kept)
   env.signatures = kept
 
-proc verifyManifestEnvelope*(env: Envelope): VerifiedManifest =
-  ## Decode the body and check every signature. Refuses when a signature's
-  ## key does not hash to its `keyId`, when a signature does not verify,
-  ## when a signer is not a listed author, or when a listed author has not
-  ## signed. A non-author signature is refused rather than ignored so that
-  ## one set of bytes has one meaning.
-  if env.recordKind != rkManifest:
-    refuse(rrUnknownRecordKind, "not a manifest envelope")
-  let m = decodeManifest(env.body)
-  let id = releaseId(env)
-  let msg = signingMessage(Digest32(id))
+proc verifySignatures*(env: Envelope; required: seq[Digest32]) =
+  ## Check every signature on any envelope against its record identity and
+  ## require exactly the `required` signer set: each required key signed,
+  ## and nobody else did. Shared by manifests and compositions.
+  let msg = signingMessage(envelopeIdentity(env))
   var signed: seq[Digest32]
   for s in env.signatures:
     if Digest32(keyId(s.algorithm, s.publicKey)) != s.keyId:
@@ -68,12 +61,24 @@ proc verifyManifestEnvelope*(env: Envelope): VerifiedManifest =
       for i in 0 ..< sv.len: sv[i] = s.value[i]
       if not peerAuth.verifySignature(pk, msg, sv):
         refuse(rrBadSignature, "signature by " & $KeyId(s.keyId) & " does not verify")
-    if s.keyId notin m.authors:
-      refuse(rrForbiddenContent, "signature by a key the manifest does not list as author")
+    if s.keyId notin required:
+      refuse(rrForbiddenContent, "signature by a key the record does not require")
     signed.add s.keyId
-  for a in m.authors:
+  for a in required:
     if a notin signed:
-      refuse(rrMissingAuthorSignature, "author " & $KeyId(a) & " has not signed")
+      refuse(rrMissingAuthorSignature, "required signer " & $KeyId(a) & " has not signed")
+
+proc verifyManifestEnvelope*(env: Envelope): VerifiedManifest =
+  ## Decode the body and check every signature. Refuses when a signature's
+  ## key does not hash to its `keyId`, when a signature does not verify,
+  ## when a signer is not a listed author, or when a listed author has not
+  ## signed. A non-author signature is refused rather than ignored so that
+  ## one set of bytes has one meaning.
+  if env.recordKind != rkManifest:
+    refuse(rrUnknownRecordKind, "not a manifest envelope")
+  let m = decodeManifest(env.body)
+  let id = releaseId(env)
+  verifySignatures(env, m.authors)
   result.id = id
   result.manifest = m
   for a in m.authors:

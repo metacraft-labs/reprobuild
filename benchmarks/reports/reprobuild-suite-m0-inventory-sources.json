@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2268,
+    "nimTestBinaries": 2269,
     "pureUnitConsolidationGroups": 63,
     "pureUnitTests": 678,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2299
+    "testEntries": 2300
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1321,7 +1321,7 @@
       "integration": 1242,
       "platform/destructive": 138,
       "pure unit": 678,
-      "unclassified": 224
+      "unclassified": 225
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1523,9 +1523,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2268,
+    "nimTestBinaryCount": 2269,
     "pythonTestFileCount": 31,
-    "testEntryCount": 2299
+    "testEntryCount": 2300
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -19130,6 +19130,24 @@
       "source": "libs/repro_remix/tests/t_malicious_remix_bundle_parser_bounds.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_remix_composition_is_order_independent",
+      "class": "unclassified",
+      "classificationReason": "binds a fixed OS-global port (through `libs/repro_peer_cache/src/repro_peer_cache/types.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_peer_cache",
+        "repro_remix"
+      ],
+      "owner": "libs/repro_remix",
+      "requiresReproBinary": false,
+      "source": "libs/repro_remix/tests/t_remix_composition_is_order_independent.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

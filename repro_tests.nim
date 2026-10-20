@@ -5742,6 +5742,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_remix/tests/t_remix_composition_is_order_independent.nim",
+    binary: "build/test-bin/t_remix_composition_is_order_independent",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_remix/tests/t_remix_export_bundle.nim",
     binary: "build/test-bin/t_remix_export_bundle",
     defines: @[],
