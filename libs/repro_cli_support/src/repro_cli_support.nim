@@ -26964,6 +26964,33 @@ const PublishedRefPreference* = ["agents", "dev"]
   ## order, when more than one published branch contains the pinned commit:
   ## the shared agent integration branch, then the product mainline.
 
+const PolicyEphemeralBranchPrefixes* = ["agents-to-dev-"]
+  ## Branch-name prefixes of the classes the branching policy DELETES once
+  ## they have served their purpose, so a committed lock's ``ref`` must never
+  ## name one. ``agents-to-dev-<YYYY-MM-DD>`` is the stabilisation branch of
+  ## one ``agents`` -> ``dev`` promotion: published while the promotion is in
+  ## progress, then "Deleted after it lands" (metacraft-dev-guidelines
+  ## ``policies/branching-policy.md`` §"Product Repository Branches",
+  ## https://github.com/metacraft-labs/metacraft-dev-guidelines/blob/latest/policies/branching-policy.md#product-repository-branches).
+  ##
+  ## WHY a published branch is not good enough: ``ref`` is read on other
+  ## machines and in CI long after the refresh that wrote it. A lock refreshed
+  ## while the checkout sat on a stabilisation branch recorded that branch (the
+  ## checkout's own name is a ``ref`` candidate), and once the promotion landed
+  ## the ``ref`` named nothing — ``runquota``'s self-record carried
+  ## ``agents-to-dev-2026-10-12`` after that branch was gone (reprobuild-pm
+  ## issue 2026-10-17). Published is not durable; this list is the difference
+  ## (Unified-Locking-And-Hooks.md §14.2).
+
+proc isPolicyEphemeralBranch*(name: string): bool =
+  ## Whether ``name`` (a branch name without any ``refs/…`` or remote prefix)
+  ## belongs to a class the branching policy deletes — see
+  ## `PolicyEphemeralBranchPrefixes`. Such a branch is never selected as a
+  ## committed lock's ``ref`` and never kept as one.
+  for prefix in PolicyEphemeralBranchPrefixes:
+    if name.startsWith(prefix): return true
+  false
+
 proc committedLockRepoFacts(repoRoot: string):
     tuple[headSha, branch, publishedRef, originUrl: string] =
   ## Read the repo-local facts the committed-lock-derived model needs: the
@@ -26979,9 +27006,11 @@ proc committedLockRepoFacts(repoRoot: string):
   ## branch of a remote whose remote-tracking ref contains ``HEAD``:
   ## `PublishedRefPreference` first, then the checked-out branch's own name,
   ## then the remote's default branch, then any other published branch
-  ## containing it (`main` / `master` first). Empty when no published branch
-  ## contains the commit, and a lock then records no ``ref`` rather than an
-  ## unpublished one.
+  ## containing it (`main` / `master` first). A branch the policy deletes
+  ## (`isPolicyEphemeralBranch`, e.g. a stabilisation branch) is skipped at
+  ## every one of those stages, so selection falls through to the next
+  ## candidate. Empty when no other published branch contains the commit, and
+  ## a lock then records no ``ref`` rather than an unpublished or doomed one.
   ## Best-effort: a missing ``git`` or a non-git directory yields empty fields
   ## (sync's plan and the gate's own per-repo probes still work without them).
   ##
@@ -27053,13 +27082,20 @@ proc committedLockRepoFacts(repoRoot: string):
       if r notin ordered: ordered.add(r)
     var candidates: seq[string] = @[]
     for name in PublishedRefPreference: candidates.add(name)
-    if branch.len > 0 and branch notin candidates: candidates.add(branch)
+    # The checkout's own branch and the remote's default are candidates only
+    # when they are durable: on a stabilisation branch the own name is exactly
+    # the one the policy is about to delete.
+    if branch.len > 0 and branch notin candidates and
+        not isPolicyEphemeralBranch(branch):
+      candidates.add(branch)
     for r in ordered:
       let default = run(["-C", repoRoot, "symbolic-ref", "-q", "--short",
         "refs/remotes/" & r & "/HEAD"])
       if default.startsWith(r & "/"):
         let name = default[r.len + 1 .. ^1]
-        if name.len > 0 and name notin candidates: candidates.add(name)
+        if name.len > 0 and name notin candidates and
+            not isPolicyEphemeralBranch(name):
+          candidates.add(name)
     for name in candidates:
       for r in ordered:
         let tracking = "refs/remotes/" & r & "/" & name
@@ -27083,6 +27119,7 @@ proc committedLockRepoFacts(repoRoot: string):
         if not full.startsWith(prefix): continue
         let name = full[prefix.len .. ^1]
         if name.len == 0 or name == "HEAD": continue
+        if isPolicyEphemeralBranch(name): continue
         names.add(name)
       if names.len == 0: continue
       for preferred in ["main", "master"]:
@@ -27098,8 +27135,14 @@ proc committedLockRepoFacts(repoRoot: string):
 proc publishedRefContains(repoRoot, refName, revision: string): bool =
   ## Whether ``refName`` is a branch of some remote of ``repoRoot`` whose
   ## remote-tracking ref contains ``revision`` — the property a committed
-  ## lock's ``ref`` must have.
+  ## lock's ``ref`` must have. A branch the policy deletes
+  ## (`isPolicyEphemeralBranch`) never has it, however many remotes still
+  ## carry it today: both callers use this to decide whether an
+  ## already-recorded ``ref`` may be KEPT (`keptPublishedRef`, and
+  ## `repro lock update` moving a pin), and keeping a stabilisation branch
+  ## would preserve exactly the ``ref`` that is about to dangle.
   if refName.len == 0 or revision.len == 0: return false
+  if isPolicyEphemeralBranch(refName): return false
   let gitBin = findExe("git")
   if gitBin.len == 0: return false
   proc code(extra: openArray[string]): tuple[code: int; output: string] =
@@ -55971,7 +56014,9 @@ proc keptPublishedRef(depAbs: string; pinned, fresh: LockedDep): string =
   ## published branch containing the revision, so a later fetch that makes a
   ## preferred branch contain it too does not churn the lock. Anything else —
   ## a moved revision, or a recorded ``ref`` that names no published branch
-  ## containing it (a local-only name) — takes the freshly observed
+  ## containing it (a local-only name) or names a branch the policy deletes
+  ## (`isPolicyEphemeralBranch`, via `publishedRefContains`) — takes the
+  ## freshly observed
   ## published ``ref``, which is empty when no published branch contains the
   ## commit.
   if pinned.coordinates.revision == fresh.coordinates.revision and
@@ -92333,6 +92378,9 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
               not publishedRefContains(gitDir, d.coordinates.gitRef, target):
             # A `ref` is a published branch containing the revision; one
             # that does not contain the target names nothing true any more.
+            # A branch the policy deletes (`isPolicyEphemeralBranch`) never
+            # qualifies, so a recorded stabilisation branch is dropped here
+            # too rather than carried onto the new pin.
             d.coordinates.gitRef = ""
         ld.deps[i] = d
         moved = true

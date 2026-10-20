@@ -14220,6 +14220,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_lock_ref_skips_policy_ephemeral_branches.nim",
+    binary: "build/test-bin/t_lock_ref_skips_policy_ephemeral_branches",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_lock_refresh_and_validate_without_building.nim",
     binary: "build/test-bin/t_lock_refresh_and_validate_without_building",
     defines: @[],
