@@ -12078,6 +12078,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_darwin_fixture_processes_are_reaped_by_cwd.nim",
+    binary: "build/test-bin/t_darwin_fixture_processes_are_reaped_by_cwd",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_declared_daemon_ipc_trust.nim",
     binary: "build/test-bin/t_declared_daemon_ipc_trust",
     defines: @[],

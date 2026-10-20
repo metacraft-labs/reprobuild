@@ -88,6 +88,8 @@ import repro_cli_support/dev_session      # the two argv token families
 import repro_cli_support/service_registrar  # the declared-program protocol
 import repro_resources/readiness_edge    # the §7.2 provenance vocabulary
 import repro_test_support
+when defined(macosx):
+  import repro_test_support/darwin_fixture_processes
 
 const
   OfflinePackage = "dss72offline"
@@ -374,10 +376,9 @@ proc belongsToThisCase(pid: int; tempRoot: string): bool =
   ## directory. Either is conclusive — no process outside this case can
   ## mention its `createTempDir` path.
   ##
-  ## LINUX ONLY, and the `else` is a decision rather than a gap: both
-  ## witnesses come from `/proc`. Answering `true` elsewhere would reap by
-  ## unverified pid; this answers `false`, so on such a platform the
-  ## teardown does what it did before and says so.
+  ## This predicate uses Linux's /proc witnesses. The macOS reap below
+  ## instead uses the shared native libproc cwd witness; an unqueryable
+  ## process is never signalled on either platform.
   when defined(linux):
     let cmdline =
       try: readFile("/proc/" & $pid & "/cmdline")
@@ -399,7 +400,8 @@ proc reapCaseProcesses(c: Dss72Case) =
   ## assumed: the sibling D-SS11 integration file leaked its fixture
   ## shells on every run until this sweep was added there, because
   ## `reapSession` signals only the pids a session PUBLISHED. The sweep
-  ## is over `/proc`, so it also sees a grandchild a service forked.
+  ## reads the live process table (/proc on Linux, libproc on macOS), so it
+  ## also sees a grandchild a service forked.
   ##
   ## WHAT THIS IS NOT: a structural guarantee. It reads a process table
   ## at one instant, so a process that forks after the scan is missed.
@@ -427,6 +429,8 @@ proc reapCaseProcesses(c: Dss72Case) =
       for pid in pids:
         discard posix.kill(Pid(pid), signal)
       sleep(300)
+  elif defined(macosx):
+    reapDarwinFixtureProcesses(c.tempRoot)
 
 proc sessionDirOf(project: string): string =
   project / ".repro" / "dev-env" / Activity / "session"
@@ -477,28 +481,29 @@ proc isLowerHex(value: string): bool =
     if ch notin {'0' .. '9', 'a' .. 'f'}:
       return false
 
+template checkPrerequisite(condition: untyped) =
+  # Unlike unittest.require (which calls quit), an exception unwinds the
+  # case's deferred cleanup and lets the whole binary report later cases.
+  # Check the boolean so unittest never stringifies a nil JsonNode while
+  # reporting a failed comparison; json.$ itself dereferences that node.
+  # Preserve the predicate text here and the safe context in the preceding
+  # up/argv/event checkpoints.
+  let prerequisiteHolds = condition
+  checkpoint("prerequisite: " & astToStr(condition))
+  check prerequisiteHolds
+  if not prerequisiteHolds:
+    raise newException(AssertionDefect,
+      "Cannot continue this case: " & astToStr(condition))
+
 suite "§7.2 / F4 — the registrar's identifier reaches a consuming service's argv":
-  # Prepared on the first case's `setup`, NOT in the suite body. The suite
-  # body runs at registration, in every process this binary starts --
-  # including `--list` / `--list-json`, which only enumerates and is run
-  # from a scratch working directory. Preparing here made enumeration
-  # resolve `<cwd>/build/bin/repro` (raising from any other directory, so
-  # no case was listed) and start a daemon just to print case names. The
-  # runner executes each case in its own process, so a case still prepares
-  # the fixture and starts the daemon exactly once, and the deferred
-  # cleanup below still runs in that process -- only if a case prepared.
-  var prepared = false
-  var c: Dss72Case
-  var daemon: owned(Process)
-
+  # Every case owns a fresh workspace and daemon, whether run alone or as
+  # part of the whole binary. Setup stays lazy so --list/--list-json never
+  # resolves the engine or starts a daemon. Register cleanup before daemon
+  # startup so a startup failure also removes this case's fixture.
   setup:
-    if not prepared:
-      c = prepareCase()
-      prepared = true
-      daemon = c.startDaemon()
-
-  defer:
-    if prepared:
+    let c = prepareCase()
+    var daemon: owned(Process)
+    defer:
       discard c.runRepro(c.offlineProject,
         @["down", "--activity=" & Activity])
       discard c.runRepro(c.issuerProject,
@@ -511,16 +516,12 @@ suite "§7.2 / F4 — the registrar's identifier reaches a consuming service's a
       c.reapCaseProcesses()
       try: removeDir(c.tempRoot) except OSError, IOError: discard
 
-  # ONE PROCESS PER CASE. The suite runner executes every case in a process
-  # of its own (`--run "<suite>::<case>"`), and each such process prepares a
-  # FRESH fixture and daemon in `setup` above. The cases below are one
-  # scenario told in steps, and a later step asserts on state an earlier
-  # step created -- so each step is a template, and a case first REPLAYS the
-  # earlier steps its state depends on, assertions and all, then runs its
-  # own. Run alone, a case therefore measures exactly what it measured as
-  # part of the sequence; a prerequisite step that fails fails the dependent
-  # case too, at that step's own assertion, rather than letting it pass or
-  # fail on a fixture it never built.
+    daemon = c.startDaemon()
+
+  # Each scenario replays every prerequisite against its own fresh fixture,
+  # retaining the prerequisite's assertions. Whole-binary and isolated runs
+  # therefore test the same transitions without inheriting an earlier case's
+  # registrations, edited recipes or event log.
 
   template offlineStackGetsMarkedDevelopmentId() =
     # The steps of case "A: with NO issuer configured the stack comes up on a MARKED development id".
@@ -528,13 +529,13 @@ suite "§7.2 / F4 — the registrar's identifier reaches a consuming service's a
     # default, so this must still work -- and it must no longer be silent.
     let up = c.runRepro(c.offlineProject, @["up", "--activity=" & Activity])
     checkpoint("offline up:\n" & up.output)
-    check up.exitCode == 0
+    checkPrerequisite up.exitCode == 0
 
     # 1. THE STACK CAME UP, and the consuming service really ran: this is
     #    its own argv, written by the process itself.
     let argv = argvOf(c.offlineProject)
     checkpoint("argv: " & $argv)
-    check argv.len == 2
+    checkPrerequisite argv.len == 2
     check argv[0] == "--client-id"
     # 2. IT RECEIVED THE DEVELOPMENT REGISTRAR'S IDENTIFIER -- 24 lower
     #    hex characters, which is what `blake3DomainDigest(...)[0 ..< 24]`
@@ -548,7 +549,7 @@ suite "§7.2 / F4 — the registrar's identifier reaches a consuming service's a
     #    well-formed identifier that no issuer has ever heard of",
     #    indistinguishable from the real thing.
     let row = mintedRowFor(c.offlineProject, Member)
-    check row != nil
+    checkPrerequisite row != nil
     check row{"mintedId"}.getStr("") == argv[1]
     check row{"provenance"}.getStr("") == $rprDevelopment
 
@@ -557,7 +558,7 @@ suite "§7.2 / F4 — the registrar's identifier reaches a consuming service's a
     #    are one question rather than two.
     let installed = eventDetails(c.offlineProject, RegistrarInstalledEventKind)
     checkpoint("registrar.installed: " & $installed)
-    check installed.len == 1
+    checkPrerequisite installed.len == 1
     check installed[0].contains("registrar=" & DevelopmentRegistrarName)
     check installed[0].contains("provenance=" & $rprDevelopment)
     # ...and `repro up` said so on its own output too.
@@ -573,11 +574,11 @@ suite "§7.2 / F4 — the registrar's identifier reaches a consuming service's a
     let up = c.runRepro(c.issuerProject, @["up", "--activity=" & Activity],
       registrarProgram = program)
     checkpoint("issuer up:\n" & up.output)
-    check up.exitCode == 0
+    checkPrerequisite up.exitCode == 0
 
     let argv = argvOf(c.issuerProject)
     checkpoint("argv: " & $argv)
-    check argv.len == 2
+    checkPrerequisite argv.len == 2
     # THE ASSERTION F4 ASKS FOR: the id on the consuming service's argv is
     # byte-for-byte the one the issuer's descriptor carries.
     check argv[1] == IssuerClientId
@@ -586,13 +587,13 @@ suite "§7.2 / F4 — the registrar's identifier reaches a consuming service's a
     check argv[1].len != DevIdLength
 
     let row = mintedRowFor(c.issuerProject, Member)
-    check row != nil
+    checkPrerequisite row != nil
     check row{"mintedId"}.getStr("") == IssuerClientId
     check row{"provenance"}.getStr("") == $rprIssuer
 
     let installed = eventDetails(c.issuerProject, RegistrarInstalledEventKind)
     checkpoint("registrar.installed: " & $installed)
-    check installed.len == 1
+    checkPrerequisite installed.len == 1
     check installed[0].contains("provenance=" & $rprIssuer)
     check installed[0].contains(program)
     # NOT the development registrar: a log that named both would leave the
@@ -603,7 +604,7 @@ suite "§7.2 / F4 — the registrar's identifier reaches a consuming service's a
     # request is still on disk for a developer to read.
     let request = sessionDirOf(c.issuerProject) / "registrar" /
       "registrar-request.json"
-    check fileExists(request)
+    checkPrerequisite fileExists(request)
     let asked = parseJson(readFile(request))
     check asked{"schemaId"}.getStr("") == ServiceRegistrarRequestSchemaId
     check asked{"members"}[0].getStr("") == Member
@@ -623,7 +624,7 @@ suite "§7.2 / F4 — the registrar's identifier reaches a consuming service's a
     # row. Rewriting the descriptor is what an operator does at the issuer
     # without telling this workspace.
     let descriptor = c.issuerProject / "state" / "sso-dev.json"
-    check fileExists(descriptor)
+    checkPrerequisite fileExists(descriptor)
     writeFile(descriptor, readFile(descriptor).replace(IssuerClientId,
       ChangedIssuerClientId))
     let program = c.issuerProject / "scripts" / "registrar.sh"
@@ -657,9 +658,9 @@ suite "§7.2 / F4 — the registrar's identifier reaches a consuming service's a
     let up = c.runRepro(c.issuerProject, @["up", "--activity=" & Activity],
       registrarProgram = program)
     checkpoint("issuer up after the id was put back:\n" & up.output)
-    check up.exitCode == 0
+    checkPrerequisite up.exitCode == 0
     let row = mintedRowFor(c.issuerProject, Member)
-    check row != nil
+    checkPrerequisite row != nil
     check row{"mintedId"}.getStr("") == IssuerClientId
     check row{"provenance"}.getStr("") == $rprIssuer
 
