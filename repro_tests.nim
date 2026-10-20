@@ -20360,6 +20360,7 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_install_nix_paths.py",
   "tests/unit/test_lint_gate_ordering.py",
   "tests/unit/test_nix_daemon_descriptors.py",
+  "tests/unit/test_nix_daemon_expression_file_is_never_cached.py",
   "tests/unit/test_package_root_anchor.py",
   "tests/unit/test_prune_undeclared_test_binaries.py",
   "tests/unit/test_publish_surface_routing.py",

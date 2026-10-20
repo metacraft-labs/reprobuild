@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 62,
     "pureUnitTests": 675,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2279
+    "testEntries": 2280
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1303,7 +1303,7 @@
       "integration": 1234,
       "platform/destructive": 137,
       "pure unit": 675,
-      "unclassified": 216
+      "unclassified": 217
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1506,8 +1506,8 @@
       }
     ],
     "nimTestBinaryCount": 2250,
-    "pythonTestFileCount": 29,
-    "testEntryCount": 2279
+    "pythonTestFileCount": 30,
+    "testEntryCount": 2280
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -48218,6 +48218,21 @@
       "source": "tests/unit/test_nix_daemon_descriptors.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `hashlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_nix_daemon_expression_file_is_never_cached.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
