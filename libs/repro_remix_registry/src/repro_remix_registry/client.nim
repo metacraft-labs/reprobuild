@@ -64,6 +64,7 @@ proc fetchAndAccept*(fetch: Fetch; release: Digest32; trust: TrustConfig): Accep
   let cp = verifyCheckpoint(cpEnv, trust.logKeys)
   let bundle = readBundle(fetch.must("/v1/bundle/" & hex))
   let v = decodeAndVerify(envBytes)
+  result.manifest = v.manifest
   if Digest32(v.id) != release:
     refuse(rrDigestMismatch, "served release is not the requested identity")
   # Principals: every genesis key-log entry in the bundle names one. Their
@@ -239,3 +240,50 @@ proc planFromOffline*(bundleBytes: openArray[byte]; release: Digest32;
         if e.kind == bekBlob and e.digest == id: return (true, e.bytes)
       (false, newSeq[byte]()),
     grantedPermissions = grantedPermissions, admittedLicenses = admittedLicenses)
+
+# ---------------------------------------------------------------------------
+# Release views: registry API data -> the shared visible-state input.
+# ---------------------------------------------------------------------------
+
+proc viewFor*(fetch: Fetch; release: Digest32; trust: TrustConfig;
+              localPlatform: string): ReleaseView =
+  ## Everything a surface needs to call `deriveStates` for one release:
+  ## the gate's verdict (acceptance plus quorum-checked policy), the
+  ## release's statements, supersession from its name's history, and
+  ## platform compatibility. Both desktop and web build views only here.
+  let accepted = fetchAndAccept(fetch, release, trust)
+  if not accepted.decision.accepted:
+    result.refused = true
+    result.refusal = accepted.decision.reason
+  for b in decodeEnvelopeList(fetch.must("/v1/release/" & toHex(release) & "/statements")):
+    let env = decodeEnvelope(b)
+    let st = decodeStatement(env.body)
+    case st.kind
+    of skVerdict, skRevocation, skModeration:
+      # Policy counts only under quorum, exactly as at the gate.
+      try:
+        discard verifyQuorum(env, trust.policyKeys, trust.policyThreshold)
+      except RemixError:
+        continue
+      if "block" in st.scope and not result.refused:
+        result.refused = true
+        result.refusal = rrBlockedByPolicy
+    of skPublication, skLogCheckpoint:
+      continue
+    else:
+      # Personal statements were role-checked at admission and are
+      # verified here again before they influence what a user sees.
+      try:
+        if verifiedSigners(env) != @[st.issuer]: continue
+      except RemixError:
+        continue
+    result.statements.add st
+  let m = accepted.manifest
+  let slash = m.remixName.find('/')
+  let (status, names) = fetch("/v1/name/" & m.remixName[0 ..< slash] & "/" &
+                              m.remixName[slash + 1 .. ^1])
+  if status == 200:
+    let history = decodeNameFile(names)
+    result.superseded = history.len > 0 and history[0] != release
+  if m.platforms.len > 0 and localPlatform notin m.platforms:
+    result.incompatibleAxis = "platform"

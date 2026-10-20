@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2279,
+    "nimTestBinaries": 2280,
     "pureUnitConsolidationGroups": 64,
     "pureUnitTests": 680,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2310
+    "testEntries": 2311
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1330,7 +1330,7 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 17,
+      "graph-fixture": 18,
       "integration": 1244,
       "platform/destructive": 138,
       "pure unit": 680,
@@ -1536,9 +1536,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2279,
+    "nimTestBinaryCount": 2280,
     "pythonTestFileCount": 31,
-    "testEntryCount": 2310
+    "testEntryCount": 2311
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -19326,6 +19326,24 @@
       "source": "libs/repro_remix_registry/tests/t_remix_federation_mirror_and_offline_install.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_remix_fixture_ecosystem_states",
+      "class": "graph-fixture",
+      "classificationReason": "fixture path or fixture-oriented test",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_remix",
+        "repro_remix_registry"
+      ],
+      "owner": "libs/repro_remix_registry",
+      "requiresReproBinary": false,
+      "source": "libs/repro_remix_registry/tests/t_remix_fixture_ecosystem_states.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
