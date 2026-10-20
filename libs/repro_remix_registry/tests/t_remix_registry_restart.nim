@@ -110,10 +110,13 @@ suite "Remix registry — checkpoint cadence and refusal capture":
     discard spool.deliver("i", frame(mtSubmitRelease, genesis(generateKeypair())))
     discard reg.tick()
     let first = latestCheckpoint(root)
+    # Past the one-second resolution of `issuedAt`, so a re-signature would
+    # be visible, but well inside the two-second refresh interval.
+    sleep(1100)
     discard spool.deliver("i", frame(mtRequestIndexUpdate, @[]))
     discard reg.tick()
     check latestCheckpoint(root).issuedAt == first.issuedAt    # reused, not re-signed
-    sleep(3100)
+    sleep(2100)
     discard reg.tick()
     check latestCheckpoint(root).issuedAt > first.issuedAt     # refreshed on the timer
     check latestCheckpoint(root).rootHash == first.rootHash
