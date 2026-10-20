@@ -2157,6 +2157,7 @@ tests/unit/t_manifest_editor_keeps_a_fragment_in_one_schema.nim	nim	5
 tests/unit/t_manifest_editor_member_edits_target_the_named_array.nim	nim	3
 tests/unit/t_manifest_editor_preserves_unrelated_text.nim	nim	5
 tests/unit/t_measurement_axes.nim	nim	21
+tests/unit/t_missing_json_evidence.nim	nim	6
 tests/unit/t_msi_archive_type.nim	nim	2
 tests/unit/t_nimcache_is_worktree_local.nim	nim	4
 tests/unit/t_nix_daemon_spawn_wait.nim	nim	3

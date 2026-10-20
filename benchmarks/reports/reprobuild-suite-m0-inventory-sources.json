@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2205,
+    "nimTestBinaries": 2206,
     "pureUnitConsolidationGroups": 61,
-    "pureUnitTests": 660,
+    "pureUnitTests": 661,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2232
+    "testEntries": 2233
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1281,7 +1281,7 @@
       "graph-fixture": 17,
       "integration": 1217,
       "platform/destructive": 134,
-      "pure unit": 660,
+      "pure unit": 661,
       "unclassified": 204
     },
     "graphOwnedTestArtifacts": [
@@ -1484,9 +1484,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2205,
+    "nimTestBinaryCount": 2206,
     "pythonTestFileCount": 27,
-    "testEntryCount": 2232
+    "testEntryCount": 2233
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -46089,6 +46089,25 @@
       "source": "tests/unit/t_measurement_axes.nim",
       "sourceSuiteCount": 5,
       "staticCaseCount": 21,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_missing_json_evidence",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [
+        "reproMissingJsonEvidenceTest"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_missing_json_evidence.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

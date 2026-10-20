@@ -13060,6 +13060,16 @@ proc addWatchCandidate(paths: var HashSet[string]; projectRoot, path: string) =
     if parent.len > 0 and not isNonSourceOrIgnoredPath(parent):
       paths.incl(parent)
 
+proc jsonStringSeqField(node: JsonNode; key: string): seq[string] =
+  ## Optional report fields use `{}`, whose missing-key sentinel is nil.
+  ## Check that sentinel before inspecting the array's kind.
+  let values = node{key}
+  if values.isNil or values.kind != JArray:
+    return
+  for value in values:
+    if value.kind == JString and value.getStr().len > 0:
+      result.add value.getStr()
+
 proc watchPathsFromOutcome(outcome: BuildCommandOutcome): seq[string] =
   ## The path set ``repro watch`` arms its filesystem watcher over: the
   ## project file plus every input the run observed. The in-memory
@@ -13072,12 +13082,14 @@ proc watchPathsFromOutcome(outcome: BuildCommandOutcome): seq[string] =
     addWatchCandidate(paths, outcome.projectRoot, item)
   if outcome.buildReportPath.len > 0 and fileExists(extendedPath(outcome.buildReportPath)):
     let report = parseFile(outcome.buildReportPath)
-    for action in report{"actions"}:
-      let evidence = action{"evidence"}
-      for key in ["declaredInputs", "depfileInputs", "monitorReads",
-          "monitorProbes"]:
-        for item in evidence{key}:
-          addWatchCandidate(paths, outcome.projectRoot, item.getStr())
+    let actions = report{"actions"}
+    if not actions.isNil and actions.kind == JArray:
+      for action in actions:
+        let evidence = action{"evidence"}
+        for key in ["declaredInputs", "depfileInputs", "monitorReads",
+            "monitorProbes"]:
+          for path in evidence.jsonStringSeqField(key):
+            addWatchCandidate(paths, outcome.projectRoot, path)
   result = toSeq(paths)
   result.sort()
 
@@ -31668,7 +31680,9 @@ proc shortestActionPath(actions: openArray[BuildAction];
         queue.add(dep)
 
 proc jsonArrayLength(node: JsonNode; key: string): int =
-  if node.kind == JObject and node.hasKey(key) and node[key].kind == JArray:
+  ## Absent evidence contributes zero, just like a missing array category.
+  if not node.isNil and node.kind == JObject and node.hasKey(key) and
+      not node[key].isNil and node[key].kind == JArray:
     node[key].len
   else:
     0
@@ -32445,13 +32459,17 @@ proc readHcrWatchPatchMetadata(projectRoot, metadataPath: string):
         oldSize: uint32(entry.requiredJsonInt("oldSize", "HCR patch metadata")),
         newSize: uint32(entry.requiredJsonInt("newSize", "HCR patch metadata")))
 
-proc jsonStringSeqField(node: JsonNode; key: string): seq[string] =
-  let values = node{key}
-  if values.kind != JArray:
-    return
-  for value in values:
-    if value.kind == JString and value.getStr().len > 0:
-      result.add value.getStr()
+when defined(reproMissingJsonEvidenceTest):
+  proc evidenceCountsJsonFromReportForTest*(action: JsonNode): JsonNode =
+    evidenceCountsJsonFromReport(action)
+
+  proc jsonStringSeqFieldForTest*(node: JsonNode; key: string): seq[string] =
+    jsonStringSeqField(node, key)
+
+  proc watchPathsFromReportForTest*(projectRoot, modulePath,
+      reportPath: string): seq[string] =
+    watchPathsFromOutcome(BuildCommandOutcome(projectRoot: projectRoot,
+      modulePath: modulePath, buildReportPath: reportPath))
 
 proc materialReportPath(projectRoot, path: string): string =
   if path.len == 0:
@@ -32484,9 +32502,12 @@ proc hcrWatchObjectCandidatesFromReport*(projectRoot, buildReportPath: string):
     raise newException(ValueError,
       "HCR watch inference requires a build report")
   let report = parseFile(buildReportPath)
-  for action in report{"actions"}:
+  let actions = report{"actions"}
+  if actions.isNil or actions.kind != JArray:
+    return
+  for action in actions:
     let evidence = action{"evidence"}
-    if evidence.kind != JObject:
+    if evidence.isNil or evidence.kind != JObject:
       continue
 
     var inputs: seq[string]
@@ -32544,9 +32565,9 @@ proc hcrWatchObjectCandidatesFromReport*(projectRoot, buildReportPath: string):
   # measured, `defaultBuiltinActionId("hcr-prepareObject", …)` is overridden by
   # the target name, so the edge appears as `patchable-object`.
   var objectSuccessor = initTable[string, string]()
-  for action in report{"actions"}:
+  for action in actions:
     let evidence = action{"evidence"}
-    if evidence.kind != JObject:
+    if evidence.isNil or evidence.kind != JObject:
       continue
     var producedObject = ""
     for path in evidence.jsonStringSeqField("declaredOutputs"):

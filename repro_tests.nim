@@ -19341,6 +19341,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_missing_json_evidence.nim",
+    binary: "build/test-bin/t_missing_json_evidence",
+    defines: @["reproMissingJsonEvidenceTest"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_msi_archive_type.nim",
     binary: "build/test-bin/t_msi_archive_type",
     defines: @[],
