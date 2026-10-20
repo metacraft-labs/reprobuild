@@ -10,6 +10,7 @@ else:
   from std/posix import sigaction, sigemptyset, Sigaction, SIGPIPE, SIG_IGN
 import repro_core
 import repro_cli_support/workspace_restore
+import repro_cli_support/repository_identities
 # W8-R1/R2 — the one canonicalization the deleting consumers in this file ask
 # their containment question under. Imported by MODULE rather than folded into
 # `repro_core`'s re-exports on purpose: it is wanted at four named sites here
@@ -13430,6 +13431,16 @@ proc addWatchCandidate(paths: var HashSet[string]; projectRoot, path: string) =
     if parent.len > 0 and not isNonSourceOrIgnoredPath(parent):
       paths.incl(parent)
 
+proc jsonStringSeqField(node: JsonNode; key: string): seq[string] =
+  ## Optional report fields use `{}`, whose missing-key sentinel is nil.
+  ## Check that sentinel before inspecting the array's kind.
+  let values = node{key}
+  if values.isNil or values.kind != JArray:
+    return
+  for value in values:
+    if value.kind == JString and value.getStr().len > 0:
+      result.add value.getStr()
+
 proc watchPathsFromOutcome(outcome: BuildCommandOutcome): seq[string] =
   ## The path set ``repro watch`` arms its filesystem watcher over: the
   ## project file plus every input the run observed. The in-memory
@@ -13442,12 +13453,14 @@ proc watchPathsFromOutcome(outcome: BuildCommandOutcome): seq[string] =
     addWatchCandidate(paths, outcome.projectRoot, item)
   if outcome.buildReportPath.len > 0 and fileExists(extendedPath(outcome.buildReportPath)):
     let report = parseFile(outcome.buildReportPath)
-    for action in report{"actions"}:
-      let evidence = action{"evidence"}
-      for key in ["declaredInputs", "depfileInputs", "monitorReads",
-          "monitorProbes"]:
-        for item in evidence{key}:
-          addWatchCandidate(paths, outcome.projectRoot, item.getStr())
+    let actions = report{"actions"}
+    if not actions.isNil and actions.kind == JArray:
+      for action in actions:
+        let evidence = action{"evidence"}
+        for key in ["declaredInputs", "depfileInputs", "monitorReads",
+            "monitorProbes"]:
+          for path in evidence.jsonStringSeqField(key):
+            addWatchCandidate(paths, outcome.projectRoot, path)
   result = toSeq(paths)
   result.sort()
 
@@ -32080,7 +32093,9 @@ proc shortestActionPath(actions: openArray[BuildAction];
         queue.add(dep)
 
 proc jsonArrayLength(node: JsonNode; key: string): int =
-  if node.kind == JObject and node.hasKey(key) and node[key].kind == JArray:
+  ## Absent evidence contributes zero, just like a missing array category.
+  if not node.isNil and node.kind == JObject and node.hasKey(key) and
+      not node[key].isNil and node[key].kind == JArray:
     node[key].len
   else:
     0
@@ -32857,13 +32872,17 @@ proc readHcrWatchPatchMetadata(projectRoot, metadataPath: string):
         oldSize: uint32(entry.requiredJsonInt("oldSize", "HCR patch metadata")),
         newSize: uint32(entry.requiredJsonInt("newSize", "HCR patch metadata")))
 
-proc jsonStringSeqField(node: JsonNode; key: string): seq[string] =
-  let values = node{key}
-  if values.kind != JArray:
-    return
-  for value in values:
-    if value.kind == JString and value.getStr().len > 0:
-      result.add value.getStr()
+when defined(reproMissingJsonEvidenceTest):
+  proc evidenceCountsJsonFromReportForTest*(action: JsonNode): JsonNode =
+    evidenceCountsJsonFromReport(action)
+
+  proc jsonStringSeqFieldForTest*(node: JsonNode; key: string): seq[string] =
+    jsonStringSeqField(node, key)
+
+  proc watchPathsFromReportForTest*(projectRoot, modulePath,
+      reportPath: string): seq[string] =
+    watchPathsFromOutcome(BuildCommandOutcome(projectRoot: projectRoot,
+      modulePath: modulePath, buildReportPath: reportPath))
 
 proc materialReportPath(projectRoot, path: string): string =
   if path.len == 0:
@@ -32896,9 +32915,12 @@ proc hcrWatchObjectCandidatesFromReport*(projectRoot, buildReportPath: string):
     raise newException(ValueError,
       "HCR watch inference requires a build report")
   let report = parseFile(buildReportPath)
-  for action in report{"actions"}:
+  let actions = report{"actions"}
+  if actions.isNil or actions.kind != JArray:
+    return
+  for action in actions:
     let evidence = action{"evidence"}
-    if evidence.kind != JObject:
+    if evidence.isNil or evidence.kind != JObject:
       continue
 
     var inputs: seq[string]
@@ -32956,9 +32978,9 @@ proc hcrWatchObjectCandidatesFromReport*(projectRoot, buildReportPath: string):
   # measured, `defaultBuiltinActionId("hcr-prepareObject", …)` is overridden by
   # the target name, so the edge appears as `patchable-object`.
   var objectSuccessor = initTable[string, string]()
-  for action in report{"actions"}:
+  for action in actions:
     let evidence = action{"evidence"}
-    if evidence.kind != JObject:
+    if evidence.isNil or evidence.kind != JObject:
       continue
     var producedObject = ""
     for path in evidence.jsonStringSeqField("declaredOutputs"):
@@ -63977,7 +63999,7 @@ type
     blobId*: string      ## the git object id of the blob that was read
     diagnostic*: string  ## why, when ``glrUnreadable``
 
-proc gatewayReadPushedLock(gitBin, gatewayBareDir, commit: string;
+proc gatewayReadPushedLock*(gitBin, gatewayBareDir, commit: string;
                            received = ReceivedObjectStore()): GatewayLockRead =
   ## Read the committed ``repro.lock`` blob out of the pushed COMMIT's tree in
   ## the bare repo. In pre-receive the commit object is already present (the
@@ -63994,21 +64016,24 @@ proc gatewayReadPushedLock(gitBin, gatewayBareDir, commit: string;
   ##   3. ``cat-file blob <id>``       — read it.
   ##
   ## A failure at any step is ``glrUnreadable`` and names the step.
-  let typ = gitNoteRun(gitBin,
+  ## CLI/gateway.md's query contract requires stdout alone as the answer:
+  ## successful git warnings must not change a commit's type or the blob's
+  ## bytes. Keep stderr only in a failed step's diagnostic, like note reads.
+  let typ = gitNoteQuery(gitBin,
     ["-C", gatewayBareDir, "cat-file", "-t", commit], received)
   if typ.code != 0 or typ.output.strip() != "commit":
     return GatewayLockRead(status: glrUnreadable,
       diagnostic: "the pushed commit " & commit & " cannot be read out of '" &
         gatewayBareDir & "' (git cat-file -t exit " & $typ.code & ": " &
-        typ.output.strip() & ")")
-  let entry = gitNoteRun(gitBin,
+        typ.diagnostic & ")")
+  let entry = gitNoteQuery(gitBin,
     ["-C", gatewayBareDir, "ls-tree", commit, "--",
      committedLockPathInTree], received)
   if entry.code != 0:
     return GatewayLockRead(status: glrUnreadable,
       diagnostic: "the tree of the pushed commit " & commit &
         " cannot be listed in '" & gatewayBareDir & "' (git ls-tree exit " &
-        $entry.code & ": " & entry.output.strip() & ")")
+        $entry.code & ": " & entry.diagnostic & ")")
   var blobId = ""
   for rawLine in entry.output.splitLines():
     let line = rawLine.strip()
@@ -64021,14 +64046,14 @@ proc gatewayReadPushedLock(gitBin, gatewayBareDir, commit: string;
     blobId = meta[2]
   if blobId.len == 0:
     return GatewayLockRead(status: glrAbsent)
-  let blob = gitNoteRun(gitBin,
+  let blob = gitNoteQuery(gitBin,
     ["-C", gatewayBareDir, "cat-file", "blob", blobId], received)
   if blob.code != 0:
     return GatewayLockRead(status: glrUnreadable, blobId: blobId,
       diagnostic: "the tree of the pushed commit " & commit & " names " &
         committedLockPathInTree & " as blob " & blobId &
         " but it cannot be read (git cat-file exit " & $blob.code & ": " &
-        blob.output.strip() & ")")
+        blob.diagnostic & ")")
   if blob.output.strip().len == 0:
     return GatewayLockRead(status: glrEmpty, blob: blob.output,
       blobId: blobId)
@@ -64251,11 +64276,11 @@ proc gatewayRatchetAnchor*(gitBin, gatewayBareDir, upstreamUrl: string;
     result.source = "no anchor: the gateway config names no upstream"
     return
   let refName = "refs/heads/" & target.name
-  let listed = gitNoteRun(gitBin, ["ls-remote", upstreamUrl, refName])
+  let listed = gitNoteQuery(gitBin, ["ls-remote", upstreamUrl, refName])
   if listed.code != 0:
     result.source = "no anchor: 'git ls-remote " & upstreamUrl & " " &
       refName & "' failed (exit " & $listed.code & "): " &
-      listed.output.strip()
+      listed.diagnostic
     return
   var sha = ""
   for line in listed.output.splitLines():
@@ -65042,7 +65067,7 @@ proc observeWorkspaceGateways*(workspaceRoot: string; cacheRoot = "";
       continue
 
     proc cfg(key: string): string =
-      let res = gitNoteRun(gitBin, ["-C", repoPath, "config", "--get", key])
+      let res = gitNoteQuery(gitBin, ["-C", repoPath, "config", "--get", key])
       if res.code == 0: res.output.strip() else: ""
 
     one.pushurl = cfg("remote." & remoteName & ".pushurl")
@@ -70862,6 +70887,8 @@ type
       ## sentence.
 
   HealthArgs = object
+    forgeCache: RepositoryIdentityCache
+    offline: bool
     workspaceRoot: string
     projectName: string
     json: bool
@@ -70885,6 +70912,7 @@ type
       ## ``shared-clone-leaves``: the detector's report-only pass.
 
 proc parseHealthArgs(args: openArray[string]): HealthArgs =
+  result.forgeCache = newRepositoryIdentityCache()
   result.workspaceRoot = ""
   var i = 0
   while i < args.len:
@@ -70893,6 +70921,8 @@ proc parseHealthArgs(args: openArray[string]): HealthArgs =
       result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
     elif arg == "--json":
       result.json = true
+    elif arg == "--offline":
+      result.offline = true
     elif arg == "--fix":
       result.fix = true
     elif arg == "--verbose" or arg == "-v":
@@ -71849,6 +71879,32 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         detail: "no usable git tool: " & err.msg,
         remedy: self & " hooks ensure --vcs",
         fixKind: hfNone))
+
+  # Forge redirects are transparent to Git. Ask the forge about the
+  # composed URL independently of checkout/pool state; a mismatch remains
+  # advisory and never authorizes a doctor to migrate anything.
+  block repositoryIdentitiesCheck:
+    if not ctx.resolvedOk:
+      checks.add(HealthCheck(name: "repository-identities", status: hsWarn,
+        detail: "skipped: manifest unresolved", remedy: self & " workspace sync",
+        fixKind: hfNone))
+    else:
+      let report = inspectRepositoryIdentities(ctx.resolved.repos, parsed.offline, parsed.forgeCache)
+      let prefix = $report.checked & " confirmed forge identities; " &
+        $report.skipped & " skipped or unconfirmed"
+      let summary = if report.findings.len == 0:
+          prefix & (if report.checked == 0: "; no forge identities to check" else: "; all match")
+        else: prefix & ": " & formatFindingList(report.findings, parsed.verbose)
+      checks.add(HealthCheck(name: "repository-identities",
+        status: (if report.findings.len == 0: hsOk else: hsWarn),
+        detail: summary,
+        fullDetail: (if report.findings.len == 0: "" else: prefix & ": " & report.findings.join(", ")),
+        remedy: (if report.remedies.len == 0: ""
+          elif parsed.verbose or parsed.json: report.remedies.join("; ")
+          else: report.remedies[0] &
+            (if report.remedies.len > 1: "; inspect other findings with --verbose for their remedies" else: "")),
+        fixKind: hfNone,
+        data: %*{"checked": report.checked, "skipped": report.skipped, "repos": report.repos, "remedies": report.remedies}))
 
   # 8b. Managed VCS hooks in every participating repo.
   #
@@ -73195,11 +73251,15 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
         result.add("fix: failed generating workspace-projects.md: " & err.msg)
 
 proc runHealthCommand*(args: openArray[string]): int =
-  ## ``repro health [<project>] [--workspace-root=PATH] [--fix] [--json]``.
+  ## ``repro health [<project>] [--workspace-root=PATH] [--fix] [--json] [--offline]``.
   ##
   ## Diagnose every layer and pair each failure with the exact remedy
   ## command. Exit non-zero (1) if any check is ``fail`` so CI / agents
   ## can gate on a healthy environment.
+  if "--help" in args or "-h" in args:
+    stdout.writeLine("Usage: repro health [<project>] [--workspace-root=PATH] [--fix] [--json] [--verbose] [--offline]")
+    stdout.writeLine("  --offline  Skip forge identity API probes; other checks retain their existing fetch behavior.")
+    return 0
   let parsed = parseHealthArgs(args)
   var (checks, ctx) = gatherHealthChecks(parsed)
 

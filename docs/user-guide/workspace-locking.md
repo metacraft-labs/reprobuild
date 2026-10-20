@@ -946,3 +946,37 @@ verified commit for each checkout. Other VCS members are refused. The
 source workspace is preserved. Use an absent or empty destination outside the
 local source workspace and input repositories, with an existing parent directory. Failed restores
 remove staging and preserve an initially empty destination.
+
+## Detecting a repository renamed on GitHub
+
+GitHub redirects an old repository URL after a rename or transfer. Git can
+clone and fetch successfully while your manifest still names the old owner
+or repository. `repro health` reports these redirects in its
+`repository-identities` row, using the composed manifest fetch URL and the
+canonical name returned by `gh api`. It compares GitHub names without regard
+to case and reports both identities when they differ.
+
+Update the declaration's URL composition to the canonical owner/repository.
+If you also change the manifest repo name or checkout path, record the old
+values so sync can recognize the existing checkout:
+
+```toml
+[extensions]
+previously = [{ name = "old-name", path = "old-path" }]
+```
+
+Keeping the checkout path is valid; `previously` does not by itself change
+the fetch URL. Health only reports the finding, including under `--fix`.
+It never migrates a checkout or shared clone for this row.
+
+The check supports public `github.com` HTTP(S), SSH, Git and SCP URLs. Other
+forges and nonstandard ports are explicitly unconfirmed; local repositories
+need no forge check. Install and authenticate GitHub CLI (`gh auth login
+--hostname github.com`) to enable resolution. API/authentication failures and
+timeouts are reported as unconfirmed warnings. Each query has a five-second
+deadline; after a timeout, remaining queries are explicitly unconfirmed.
+
+`repro health --offline` skips these API queries and reports that identities
+were not confirmed. This flag applies to forge identity queries; other health
+checks retain their existing fetch behavior. Use `--verbose` for every
+finding and its remedy, or `--json` for complete structured results.

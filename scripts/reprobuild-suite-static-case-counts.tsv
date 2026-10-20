@@ -353,7 +353,8 @@ libs/repro_home_resources/tests/t_macos_app_folder_placement.nim	nim	11
 libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim	nim	19
 libs/repro_home_resources/tests/t_registry_root_override.nim	nim	12
 libs/repro_home_resources/tests/t_resource_type_registry.nim	nim	6
-libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	164
+libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	166
+libs/repro_home_rollback/tests/t_resource_drift.nim	nim	5
 libs/repro_home_rollback/tests/t_rollback_releases_unowned_concerns.nim	nim	3
 libs/repro_home_rollback/tests/t_smoke_home_rollback.nim	nim	2
 libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	nim	65
@@ -1033,6 +1034,8 @@ tests/e2e/home-apply/t_e2e_repro_home_apply_fresh_install.nim	nim	2
 tests/e2e/home-apply/t_e2e_repro_home_apply_noop.nim	nim	2
 tests/e2e/home-apply/t_e2e_repro_home_apply_partial_recovery.nim	nim	2
 tests/e2e/home-apply/t_e2e_stow_auto_discovery_and_materialization.nim	nim	3
+tests/e2e/home-apply/t_e2e_stow_discovery_order_is_deterministic.nim	nim	3
+tests/e2e/home-apply/t_e2e_stow_file_moved_to_another_package.nim	nim	2
 tests/e2e/home-apply/t_e2e_stow_suppression_and_warnings.nim	nim	2
 tests/e2e/home-generations/t_integration_activation_manifest_dedup_in_cas.nim	nim	3
 tests/e2e/home-generations/t_integration_apply_lock_serializes.nim	nim	2
@@ -1046,12 +1049,15 @@ tests/e2e/home-intent/t_e2e_repro_home_intent_commands.nim	nim	18
 tests/e2e/home-intent/t_integration_intent_layer_config_section.nim	nim	7
 tests/e2e/home-intent/t_integration_intent_layer_guarded_edits.nim	nim	9
 tests/e2e/home-intent/t_integration_intent_layer_round_trip.nim	nim	7
+tests/e2e/home-resources/t_e2e_home_apply_refuses_an_unrecorded_object.nim	nim	6
 tests/e2e/home-resources/t_e2e_home_registry_typed_value_kinds.nim	nim	2
 tests/e2e/home-resources/t_e2e_home_resource_lifecycle.nim	nim	2
 tests/e2e/home-resources/t_e2e_home_resource_rollback_preserves_unrelated.nim	nim	2
 tests/e2e/home-resources/t_e2e_macos_user_default_restart_target.nim	nim	1
 tests/e2e/home-resources/t_integration_prevent_destroy.nim	nim	3
 tests/e2e/home-resources/t_integration_resource_move.nim	nim	3
+tests/e2e/home-rollback/t_e2e_repro_home_rollback_resource_drift.nim	nim	4
+tests/e2e/home-rollback/t_e2e_repro_home_rollback_resource_removes_and_updates_respect_drift.nim	nim	8
 tests/e2e/home-rollback/t_e2e_repro_home_rollback_restore_respects_drift.nim	nim	4
 tests/e2e/home-rollback/t_e2e_repro_home_rollback_round_trip.nim	nim	1
 tests/e2e/home-rollback/t_e2e_repro_home_rollback_user_edit_protection.nim	nim	1
@@ -1446,6 +1452,7 @@ tests/integration/t_gate_reports_unverifiable_apart_from_uncovered.nim	nim	1
 tests/integration/t_gate_runs_after_the_chained_hook.nim	nim	1
 tests/integration/t_gateway_accepts_one_ref_push_certified_before_push.nim	nim	4
 tests/integration/t_gateway_finds_certificates_by_the_pushed_tree.nim	nim	1
+tests/integration/t_gateway_lock_read_keeps_git_stderr_apart.nim	nim	2
 tests/integration/t_gateway_ratchets_the_anchor_requirements.nim	nim	7
 tests/integration/t_gateway_reads_the_policy_from_the_pushed_tree_by_destination_branch.nim	nim	2
 tests/integration/t_genuine_tier_policy_refuses_emulated_cvm_evidence.nim	nim	9
@@ -1460,6 +1467,7 @@ tests/integration/t_health_reports_a_refusing_hook_as_not_ok.nim	nim	3
 tests/integration/t_health_reports_a_worktree_unsafe_hooks_path.nim	nim	5
 tests/integration/t_health_reports_disjoint_local_branches.nim	nim	1
 tests/integration/t_health_reports_each_layer_status_with_remedy.nim	nim	6
+tests/integration/t_health_reports_forge_repository_renames.nim	nim	1
 tests/integration/t_health_vcs_hooks_digest_output.nim	nim	1
 tests/integration/t_hermetic_published_catalog_fixture.nim	nim	7
 tests/integration/t_highest_satisfied_floor_wins.nim	nim	1
@@ -1483,7 +1491,7 @@ tests/integration/t_inference_commitment_is_hiding_and_binding.nim	nim	15
 tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim	nim	3
 tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim	nim	5
 tests/integration/t_install_mirror_atomic_patching.nim	nim	9
-tests/integration/t_installed_engine_read_only_source_tree.nim	nim	2
+tests/integration/t_installed_engine_read_only_source_tree.nim	nim	5
 tests/integration/t_installed_reprobuild_resolves_moved_packages_from_its_own_catalog.nim	nim	3
 tests/integration/t_installer_tarball_shared_cache.nim	nim	2
 tests/integration/t_integration_build_engine_api_ready_queue.nim	nim	18
@@ -1644,7 +1652,7 @@ tests/integration/t_negative_chain_fixtures.nim	nim	14
 tests/integration/t_nested_bootstrap_runtime_closure.nim	nim	1
 tests/integration/t_nested_lock_push_capability_security.nim	nim	10
 tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim	nim	1
-tests/integration/t_nf4_foreign_env_contract.nim	nim	15
+tests/integration/t_nf4_foreign_env_contract.nim	nim	16
 tests/integration/t_nim_package_path_handling.nim	nim	1
 tests/integration/t_nitro_enclave_attestation_surface.nim	nim	27
 tests/integration/t_nix_daemon_ipc.nim	nim	7
@@ -2174,6 +2182,7 @@ tests/unit/t_manifest_editor_keeps_a_fragment_in_one_schema.nim	nim	5
 tests/unit/t_manifest_editor_member_edits_target_the_named_array.nim	nim	3
 tests/unit/t_manifest_editor_preserves_unrelated_text.nim	nim	5
 tests/unit/t_measurement_axes.nim	nim	21
+tests/unit/t_missing_json_evidence.nim	nim	6
 tests/unit/t_msi_archive_type.nim	nim	2
 tests/unit/t_nimcache_is_worktree_local.nim	nim	4
 tests/unit/t_nix_daemon_spawn_wait.nim	nim	3

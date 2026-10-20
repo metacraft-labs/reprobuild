@@ -395,19 +395,22 @@ proc decideActionIgnoringBusy(state: ResourceState;
       if state.hasRecorded: digestHex(state.recorded.postWriteDigest)
       else: ""
     let observedHex = digestHex(state.observed.digest)
+    let unrecorded =
+      if state.hasRecorded: ""
+      else: " [an existing object no generation records]"
     if options.reconcile == rpReconcileDrift or
        options.reconcile == rpAcceptOverwrite:
       result.kind = rakUpdate
       result.driftExpectedHex = expectedHex
       result.driftObservedHex = observedHex
       result.summary = summarize(rakUpdate, state.address, result.resourceKind) &
-        " [drift reconciled]"
+        " [drift reconciled]" & unrecorded
       return
     result.kind = rakDriftBlocked
     result.driftExpectedHex = expectedHex
     result.driftObservedHex = observedHex
     result.summary = summarize(rakDriftBlocked, state.address,
-      result.resourceKind)
+      result.resourceKind) & unrecorded
     return
 
   # Branch 3: desired absent, observed present.

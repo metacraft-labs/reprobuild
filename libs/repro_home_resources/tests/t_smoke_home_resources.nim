@@ -1396,6 +1396,44 @@ vscodevim.vim@1.27.0
       state.recorded.postWriteDigest = state.observed.digest
       check decideAction(state).kind == rakUpdate
 
+  test "lifecycle: an unrecorded-object drift says no generation records it":
+    # The plan summary and the EDrift message name the case (there is no
+    # recorded digest to quote) and both remedies.
+    let desired = Resource(kind: rkFsUserFile, address: "file:first-apply",
+      userFileHostPath: "/tmp/host-file", userFileContent: "desired\n",
+      userFileMode: "0644")
+    var state = ResourceState(address: desired.address, desired: desired,
+      hasDesired: true)
+    state.observed.present = true
+    state.observed.digest = digestOfBytes(@[byte('o'), byte('l'), byte('d')])
+    let action = decideAction(state)
+    check action.kind == rakDriftBlocked
+    check "no generation records" in action.summary
+    try:
+      raiseIfDriftBlocked(action)
+      check false
+    except EDrift as e:
+      check "no generation records it" in e.msg
+      check "--reconcile-drift" in e.msg
+      check ("repro home adopt " & desired.address) in e.msg
+    check "[drift reconciled]" in decideAction(state,
+      DecisionOptions(reconcile: rpReconcileDrift)).summary
+
+  test "lifecycle: every built-in kind declares its first-apply ownership":
+    # The per-kind table `decideAction` consults on a first apply. Pinned
+    # whole, so a kind added later must be classified on purpose.
+    for kind in ResourceKind:
+      checkpoint($kind)
+      let want =
+        case kind
+        of rkEnvUserPath, rkVscodeExtension, rkLinuxGsettings,
+           rkHomebrewFormula, rkHomebrewCask:
+          roSetContribution
+        else:
+          roWholeObject
+      check lookupResourceType($kind).ownership == want
+      check builtinResourceOwnership(kind) == want
+
   test "realWorldIdentity is the singleton vscode:extensions":
     let r = Resource(kind: rkVscodeExtension, address: "ve",
       vscodeExtensions: @["vscodevim.vim"])
