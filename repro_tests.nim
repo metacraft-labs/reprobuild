@@ -15453,6 +15453,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_provider_link_never_puts_a_host_lib_dir_in_rpath.nim",
+    binary: "build/test-bin/t_provider_link_never_puts_a_host_lib_dir_in_rpath",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_provision_binding.nim",
     binary: "build/test-bin/t_provision_binding",
     defines: @[],

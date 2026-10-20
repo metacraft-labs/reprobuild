@@ -1723,6 +1723,7 @@ tests/integration/t_provider_file_driven_fanout_cleanup.nim	nim	1
 tests/integration/t_provider_library_c_abi_memory_ownership.nim	nim	3
 tests/integration/t_provider_library_c_abi_reconcile.nim	nim	2
 tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim	nim	1
+tests/integration/t_provider_link_never_puts_a_host_lib_dir_in_rpath.nim	nim	4
 tests/integration/t_provision_binding.nim	nim	19
 tests/integration/t_provision_policy_gate.nim	nim	9
 tests/integration/t_provision_roundtrip.nim	nim	8
