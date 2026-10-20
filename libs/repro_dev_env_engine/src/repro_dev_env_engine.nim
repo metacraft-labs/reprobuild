@@ -780,7 +780,13 @@ proc devEnvNixProvisioningActions*(toolUses: openArray[InterfaceToolUse];
         outputs: @[receiptFile],
         cwd: workDir,
         commandStatsId: "repro dev-env nix provision edge",
-        cacheable: true,
+        # Owner decision, 2026-10-14 (Edge-Derived-Identities.md §7 rider):
+        # a Nix tool use with an ``expressionFile`` is never served from a
+        # cache until the ``nix-eval`` / ``nix-realise`` edges (campaign
+        # M19) exist. This edge is keyed by the selector alone and does not
+        # bind the expression (campaign M7 open item (vii)), so for such a
+        # use it runs on every activation.
+        cacheable: plan.nixExpressionFile.len == 0,
         weakFingerprint: fingerprintText([
           "reprobuild.dev-env.nix-provision.v1",
           useDef.packageSelector,
