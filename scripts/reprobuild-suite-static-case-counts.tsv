@@ -368,6 +368,7 @@ libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	206
 libs/repro_infra/tests/t_system_generations_distinct_within_one_second.nim	nim	4
 libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim	nim	12
+libs/repro_interface_artifacts/tests/t_consumer_compile_paths_carry_the_shm_packages.nim	nim	2
 libs/repro_interface_artifacts/tests/t_contribution_records.nim	nim	3
 libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim	nim	10
 libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim	nim	5

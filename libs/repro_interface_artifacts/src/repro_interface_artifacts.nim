@@ -6375,6 +6375,12 @@ proc addExternalPackagePath(flags: var seq[string]; workDir, envName: string;
     if fileExists(extendedPath(resolved / marker)):
       flags.add("--path:" & resolved)
       return
+  # Last, the root captured when `repro` was built, as
+  # `resolveBootstrapPackagePath` does: a compile whose environment is
+  # allowlisted, beside no sibling checkout, still finds the pinned source.
+  let built = builtSourcePackageRoot(envName)
+  if built.len > 0 and fileExists(extendedPath(built / marker)):
+    flags.add("--path:" & built)
 
 proc reproPackagePathFlags(workDir: string): seq[string] =
   ## Replay the third-party / sibling-repo package ``--path`` switches that
@@ -6439,6 +6445,16 @@ proc reproPackagePathFlags(workDir: string): seq[string] =
   result.addExternalPackagePath(workDir, "STINT_SRC", [
     "libs" / "stint" / "src",
   ], "stint.nim")
+  # `repro_local_store/action_index` imports `shm_gset` directly, and io-mon
+  # pulls both rings, so every DSL compile needs them. Without these a
+  # foreign project's interface extraction failed with `cannot open file:
+  # shm_gset` whenever the env was scrubbed and no sibling checkout existed.
+  result.addExternalPackagePath(workDir, "SHM_QUEUE_SRC", [
+    ".." / "nim-shm-queue" / "src",
+  ], "shm_queue.nim")
+  result.addExternalPackagePath(workDir, "SHM_GSET_SRC", [
+    ".." / "nim-shm-gset" / "src",
+  ], "shm_gset.nim")
   result.addExternalPackagePath(workDir, "REPRO_TEST_ADAPTERS_SRC", [
     ".." / "reprobuild-test-adapters" / "src",
   ], "repro_test_adapters" / "test_runner.nim")
