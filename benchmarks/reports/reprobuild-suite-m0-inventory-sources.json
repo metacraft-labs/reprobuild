@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2256,
+    "nimTestBinaries": 2257,
     "pureUnitConsolidationGroups": 63,
     "pureUnitTests": 676,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2287
+    "testEntries": 2288
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1316,7 +1316,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 17,
-      "integration": 1238,
+      "integration": 1239,
       "platform/destructive": 138,
       "pure unit": 676,
       "unclassified": 218
@@ -1521,9 +1521,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2256,
+    "nimTestBinaryCount": 2257,
     "pythonTestFileCount": 31,
-    "testEntryCount": 2287
+    "testEntryCount": 2288
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -4661,7 +4661,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1341,
+          "line": 1345,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -30122,6 +30122,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_auto_runquota_daemon_ends_with_its_invocation",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_auto_runquota_daemon_ends_with_its_invocation.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_autotools_configure_cache",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -42649,7 +42668,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_when_each_case_runs_alone_no_fixture_outlives_its_process.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 25,
+      "staticCaseCount": 26,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

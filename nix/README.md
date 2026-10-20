@@ -85,11 +85,23 @@ branch, and a moving ref inside a fixed-output fetch), and named three
 of the thirteen source inputs the build actually needs. Two derivations
 for one package do not stay in step.
 
-Build it outside a flake with:
+The canonical derivation requires `runquotaTools`, the RunQuota runtime package
+matching its `runquotaSrc` revision. Nix wrappers default `RUNQUOTAD_BIN` and
+`RUNQUOTA_BIN` to that package's executables, preserving explicit caller
+overrides. A source-only pin cannot supply the daemon's parent-death behavior;
+there is no implicit fallback to an ambient runtime package.
+
+Build it outside a flake by setting `RUNQUOTA_RUNTIME_STORE` to that runtime's
+store path and supplying it explicitly:
 
 ```sh
-nix-build -E '(import <nixpkgs> {}).callPackage ./nix/pkgs/by-name/re/reprobuild/package.nix {}'
+nix-build --arg runquotaTools "$RUNQUOTA_RUNTIME_STORE" \
+  -E 'runquotaTools: (import <nixpkgs> {}).callPackage ./nix/pkgs/by-name/re/reprobuild/package.nix { inherit runquotaTools; }'
 ```
+
+The flake supplies this argument from its exact `runquota-src` input. Standalone
+consumers must build or otherwise supply the matching runtime package; changing
+the source argument also requires changing the runtime argument.
 
 `version` is the one value `package.nix` cannot derive for itself:
 reading `${src}/reprobuild.nimble` at eval time is

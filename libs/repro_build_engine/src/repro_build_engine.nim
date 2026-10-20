@@ -16,16 +16,18 @@ when defined(windows):
     MAXIMUM_WAIT_OBJECTS, WOHandleArray, openProcess, closeHandle,
     waitForMultipleObjects
 elif defined(posix):
-  # ``Mode`` / ``umask`` / ``dup2`` / ``close`` / ``fcntl`` and the four
-  # descriptor-flag constants are the In-Process-Monitor-Hosting HM-4 spawn
-  # context and nothing else. io-mon spawns with ``poParentStreams``, so a
-  # monitored child inherits THIS process's descriptors — 0, 1 and 2, and any
+  # ``Mode`` / ``umask`` / ``dup2`` / ``close`` / ``fcntl`` and
+  # ``F_DUPFD_CLOEXEC`` are the In-Process-Monitor-Hosting HM-4 spawn context
+  # and nothing else (marking the other descriptors close-on-exec across the
+  # spawn lives in ``repro_core/descriptor_inheritance``, shared with the
+  # CLI). io-mon spawns with ``poParentStreams``, so a monitored child
+  # inherits THIS process's descriptors — 0, 1 and 2, and any
   # other one not marked close-on-exec — and the canonical 0022 file-creation
   # mask used to arrive through the ``/bin/sh -c 'umask 022 && …'`` wrapper
   # the monitor CLI ran under. All of it is re-established across the spawn
   # instead — see ``beginMonitorSpawnContext``. None of them starts a child.
   from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid, Mode, umask,
-    dup2, close, fcntl, F_GETFD, F_SETFD, FD_CLOEXEC, F_DUPFD_CLOEXEC
+    dup2, close, fcntl, F_DUPFD_CLOEXEC
   # Endpoint ownership for Dev-Env-Warm-Entry.md §3 (`endpointRootOwned`).
   # Metadata reads only; nothing here starts a child.
   from std/posix import Stat, lstat, S_ISDIR, S_ISLNK, S_ISSOCK
@@ -114,6 +116,12 @@ from repro_core/process_streams import drainStream
 # child it starts — converters, RunQuota helpers — is released through
 # ``closeProcessOnce``. See ``repro_core/process_close``.
 from repro_core/process_close import closeProcessOnce
+# Every descriptor above 2 close-on-exec across io-mon's in-process spawn
+# (``beginMonitorSpawnContext``). Shared with ``repro_cli_support``, which
+# applies the same rule around the ``runquotad`` an invocation owns.
+when defined(posix):
+  from repro_core/descriptor_inheritance import
+    markInheritableDescriptorsCloseOnExec, restoreInheritableDescriptors
 import repro_depfile
 import repro_hash
 import repro_local_store
@@ -14667,38 +14675,6 @@ when defined(posix):
     madeCloseOnExec: seq[cint]
     active: bool
 
-  proc markInheritableDescriptorsCloseOnExec(): seq[cint] =
-    ## Every descriptor above 2 that THIS process holds without
-    ## ``FD_CLOEXEC`` is given it, and the ones changed are returned so
-    ## ``endMonitorSpawnContext`` can put them back exactly as they were.
-    ##
-    ## Only the flag moves; no descriptor is closed, so nothing the engine
-    ## itself is using changes under it. The descriptor table is ENUMERATED
-    ## (``/proc/self/fd`` on Linux, ``/dev/fd`` elsewhere) rather than
-    ## scanned numerically, for the reason ``runquota_process.nim`` gives: a
-    ## loop bounded by ``RLIMIT_NOFILE`` is a million ``fcntl`` calls on hosts
-    ## that raise it. A descriptor that vanishes between the listing and the
-    ## ``fcntl`` (the listing's own directory handle, for one) fails the
-    ## ``F_GETFD`` and is skipped.
-    let listing = when defined(linux): "/proc/self/fd" else: "/dev/fd"
-    var candidates: seq[cint] = @[]
-    try:
-      for kind, path in walkDir(listing, relative = true):
-        try:
-          let fd = parseInt(path)
-          if fd > 2:
-            candidates.add(cint(fd))
-        except ValueError:
-          discard
-    except OSError:
-      return
-    for fd in candidates:
-      let flags = fcntl(fd, F_GETFD)
-      if flags < 0 or (flags and FD_CLOEXEC) != 0:
-        continue
-      if fcntl(fd, F_SETFD, flags or FD_CLOEXEC) == 0:
-        result.add(fd)
-
   proc beginMonitorSpawnContext(outPath, errPath: string): MonitorSpawnContext =
     ## Re-establish, across io-mon's spawn, the three things the retired
     ## ``/bin/sh -c 'umask 022 && <repro> internal io monitor …'`` wrapper and
@@ -14808,10 +14784,7 @@ when defined(posix):
     if not ctx.active:
       return
     ctx.active = false
-    for fd in ctx.madeCloseOnExec:
-      let flags = fcntl(fd, F_GETFD)
-      if flags >= 0:
-        discard fcntl(fd, F_SETFD, flags and not FD_CLOEXEC)
+    restoreInheritableDescriptors(ctx.madeCloseOnExec)
     discard umask(ctx.savedMask)
     flushFile(stdout)
     flushFile(stderr)

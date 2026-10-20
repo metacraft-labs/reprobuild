@@ -1254,6 +1254,7 @@ tests/integration/t_attestation_module_census.nim	nim	9
 tests/integration/t_attestation_report.nim	nim	3
 tests/integration/t_attested_image_manifest.nim	nim	4
 tests/integration/t_authenticated_inference_binding_mutations.nim	nim	26
+tests/integration/t_auto_runquota_daemon_ends_with_its_invocation.nim	nim	10
 tests/integration/t_autotools_configure_cache.nim	nim	1
 tests/integration/t_b0_develop_mode_uses_local_source.nim	nim	1
 tests/integration/t_b0_repro_build_runquota_daemon.nim	nim	2
@@ -1958,7 +1959,7 @@ tests/integration/t_v3_artifact_refused_on_a_v2_host.nim	nim	1
 tests/integration/t_vcs_private_metadata_dir_resolves_worktree_safe.nim	nim	1
 tests/integration/t_verdict_enumerates_checks.nim	nim	29
 tests/integration/t_verify_e2e_mock.nim	nim	14
-tests/integration/t_when_each_case_runs_alone_no_fixture_outlives_its_process.nim	nim	25
+tests/integration/t_when_each_case_runs_alone_no_fixture_outlives_its_process.nim	nim	26
 tests/integration/t_working_tree_certificate_covers_the_commit_made_from_it.nim	nim	1
 tests/integration/t_workspace_bootstrap_provisions_toolchain_on_windows.nim	nim	6
 tests/integration/t_workspace_bootstrap_reads_host_repo_config_no_hardcoded_defaults.nim	nim	1

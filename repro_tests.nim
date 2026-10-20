@@ -11232,6 +11232,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_auto_runquota_daemon_ends_with_its_invocation.nim",
+    binary: "build/test-bin/t_auto_runquota_daemon_ends_with_its_invocation",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_autotools_configure_cache.nim",
     binary: "build/test-bin/t_autotools_configure_cache",
     defines: @[],

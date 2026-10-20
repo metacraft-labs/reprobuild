@@ -44,6 +44,10 @@
   openssl,
   zstd,
   clingo,
+  # Runtime package from the same RunQuota revision as runquotaSrc. Required
+  # explicitly for standalone callPackage consumers: an absent default must
+  # not silently select an older ambient daemon without parent-death support.
+  runquotaTools,
 
   # The Nim toolchain: the metacraft-labs/nim fork (Nim 2.3.1 devel), built from
   # source. See ./nim-fork.nix for why the stock nixpkgs `nim` cannot be used.
@@ -153,9 +157,8 @@
     hash = "sha256-bDuj7DYj2nZtvG0em05EMy6/hK/RWIE917GHHZPq62Y=";
   },
   # Source only. reprobuild compiles `runquota_client`/`_codec`/`_core`/`_ipc`/
-  # `_process`/`_protocol` out of this tree; it does not build or ship
-  # runquota's own binaries, so none of runquota's build-time dependencies
-  # (nim-shm-lease and friends) are needed here.
+  # `_process`/`_protocol` out of this tree. The separate runquotaTools package
+  # owns compilation of its binaries and their build-time dependencies.
   runquotaSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "runquota";
@@ -400,11 +403,11 @@ stdenv.mkDerivation (finalAttrs: {
     # wrappers because arbitrary user build actions inherit the wrapper
     # environment.
     #
-    # THE NAME LIST IS A CONTRACT. `runtime_contract.ReprobuildWrapperVariables`
-    # re-derives it and `t_packaging_wrapper_vars_match_flake.nim` fails if the
-    # two disagree, because a `--set-default` the native packaging layer does
-    # not know about produces a working Nix build and a `.deb` whose binary dies
-    # on the user's machine.
+    # THE NAME LIST IS A CONTRACT. The native packaging layer shares
+    # `ReprobuildWrapperVariables`; `ReprobuildNixRuntimeToolVariables` adds the
+    # two RunQuota executables supplied only by the Nix runtime closure.
+    # `t_packaging_wrapper_vars_match_flake.nim` checks both, so common source
+    # defaults cannot drift and native wrappers never name unbundled tools.
     for b in "$out"/bin/*; do
       test -x "$b" || continue
       wrapProgram "$b" \
@@ -424,6 +427,8 @@ stdenv.mkDerivation (finalAttrs: {
         --set-default REPROBUILD_USE_SYSTEM_HASH_LIBS 1 \
         --set-default REPROBUILD_NIX_DAEMON_BIN "$out/libexec/reprobuild-nix-daemon" \
         --set-default RUNQUOTA_SRC ${runquotaSrc} \
+        --set-default RUNQUOTAD_BIN ${runquotaTools}/bin/runquotad \
+        --set-default RUNQUOTA_BIN ${runquotaTools}/bin/runquota \
         --set-default SQLITE_PREFIX ${sqlite.out} \
         --set-default XXHASH_PREFIX ${xxhash} \
         --set-default CLINGO_PREFIX ${clingo} \

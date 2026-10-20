@@ -307,6 +307,7 @@ const
     "libs/repro_fs_facts/tests/t_fs_facts_conformance.nim",
     "libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim",
     "libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim",
+    "tests/integration/t_auto_runquota_daemon_ends_with_its_invocation.nim",
     "tests/integration/t_cloud_adapter_launches_nothing_in_ci.nim",
     "tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim",
     "tests/integration/t_leaked_instance_is_reaped.nim",

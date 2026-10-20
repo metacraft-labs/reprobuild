@@ -137,6 +137,14 @@ import repro_elevation
 import repro_cli_support/watch
 import repro_cli_support/dev_session
 import repro_cli_support/push_hook_protocol
+# The `runquotad` an invocation owns must not outlive it, however it ends:
+# terminating signals are forwarded to it, and it holds no descriptor of ours
+# above 2. See `spawnOwnedRunQuotaDaemon`.
+import repro_cli_support/owned_daemon_signals
+when not defined(windows):
+  from repro_core/descriptor_inheritance import
+    markInheritableDescriptorsCloseOnExec, restoreInheritableDescriptors,
+    setCloseOnExec
 import repro_cli_support/cmake_direct
 import repro_cli_support/daemon_working_directory
 # TC-8b: the certificate verifier matches by CONTENT (Verification §4.1.1), so
@@ -24585,6 +24593,102 @@ proc forgetMachineDeclaredDaemonTrust*() =
   ## more than once in a process; production calls it nowhere.
   machineDaemonTrustApplied = false
 
+when not defined(windows):
+  const runQuotaExitWithParentEnvVar = "RUNQUOTA_EXIT_WITH_PARENT"
+    ## Read by `runquotad` (runquota `runquota_daemon/parent_watch`): `1`
+    ## makes the daemon stop, through its orderly SIGTERM shutdown, when its
+    ## parent is gone. Spelled here rather than imported so reprobuild does
+    ## not need a runquota new enough to define it -- an older `runquotad`
+    ## ignores the variable, which costs the SIGKILL half of the lifetime
+    ## rule and nothing else.
+
+  proc spawnOwnedRunQuotaDaemon(runquotad: string;
+                                args: seq[string]): owned(Process) =
+    ## Starts the `runquotad` this invocation OWNS, so that it cannot outlive
+    ## the invocation however the invocation ends and holds nothing of the
+    ## invocation's but its own 0, 1 and 2 (reprobuild-pm
+    ## `spec/RunQuota-Host-Configuration.md`, "\"Terminated when the
+    ## top-level build ends\" means however it ends"). Three things, each
+    ## covering what the others cannot:
+    ##
+    ## 1. NO DESCRIPTOR ABOVE 2 CROSSES THE SPAWN. `osproc` creates its pipes
+    ##    without `O_CLOEXEC` and leaves the originals open in the child after
+    ##    `dup2`ing them onto 0/1/2, and offers no hook between `fork` and
+    ##    `exec` to close them. So an invocation started that way -- as
+    ##    `e2e_repro_dev_watch_and_service_events` started `repro dev` --
+    ##    holds copies of its own stdout pipe above 2, and a daemon spawned
+    ##    with them open kept that pipe alive after the invocation died: the
+    ##    caller's `readAll()` waited 30 minutes for an end of file. Every
+    ##    descriptor above 2 is therefore close-on-exec for the duration of
+    ##    the spawn (`markInheritableDescriptorsCloseOnExec`, the rule
+    ##    RunQuota's process backend applies with `closeInheritedChildFds`),
+    ##    and the flags are restored afterwards. The window is one
+    ##    `startProcess`. A spawn another thread makes inside it loses only
+    ##    descriptors above 2 that it did not `dup2` into place -- and the
+    ##    build's own launch paths already give every child 0, 1 and 2 and
+    ##    nothing else (RunQuota's `closeInheritedChildFds`, the engine's
+    ##    `beginMonitorSpawnContext`), so none of them relies on one.
+    ##
+    ##    And afterwards OUR ends of the daemon's own stdio pipes are marked
+    ##    close-on-exec for good, so that no later child of this invocation
+    ##    -- a build action, a provider, a nested `repro` -- holds a copy of a
+    ##    pipe to the daemon it did not create.
+    ##
+    ## 2. A TERMINATING SIGNAL IS FORWARDED. The pid is registered with
+    ##    `owned_daemon_signals` right after the spawn and before the
+    ##    readiness wait, so a SIGTERM/SIGINT/SIGHUP/SIGQUIT that ends this
+    ##    invocation at any point from here on sends the daemon SIGTERM first.
+    ##    `releaseAutoRunQuotaProcess`, and the failure path of
+    ##    `startAutoRunQuotaIfNeeded`, unregister it.
+    ##
+    ## 3. THE DAEMON WATCHES ITS PARENT. `RUNQUOTA_EXIT_WITH_PARENT=1` is put
+    ##    in the DAEMON's environment only -- never into ours, where every
+    ##    later child would inherit a request addressed to one process. It is
+    ##    the only half that covers SIGKILL and the OOM killer, which no
+    ##    handler here can see.
+    # SIGCHLD auto-reaping can recycle a child pid while the signal registry
+    # still owns it. Refuse BEFORE fork or descriptor/environment mutation;
+    # changing the caller's disposition would change unrelated child behavior.
+    ensureOwnedDaemonReaping()
+    let env = newStringTable(modeCaseSensitive)
+    for key, value in envPairs():
+      env[key] = value
+    env[runQuotaExitWithParentEnvVar] = "1"
+    # Recorded before the spawn: a SIGKILL before the daemon reaches main
+    # must not let it adopt a subreaper as its apparent owner.
+    env["RUNQUOTA_EXIT_WITH_PARENT_PID"] = $getCurrentProcessId()
+    let madeCloseOnExec = markInheritableDescriptorsCloseOnExec()
+    try:
+      result = startProcess(runquotad, args = args, env = env,
+        options = {poUsePath})
+    finally:
+      restoreInheritableDescriptors(madeCloseOnExec)
+    setCloseOnExec(cint(result.inputHandle))
+    setCloseOnExec(cint(result.outputHandle))
+    setCloseOnExec(cint(result.errorHandle))
+    if not registerOwnedDaemon(processID(result)):
+      let registrationError = osLastError()
+      var stillOurChild = false
+      var live = false
+      try:
+        live = ownedDaemonStillRunning(result)
+        stillOurChild = true
+      except OSError:
+        # In particular ECHILD: an externally reaped pid is no longer ours
+        # to terminate, even if another process now has the same number.
+        discard
+      if stillOurChild:
+        if live:
+          try: result.terminate()
+          except CatchableError: discard
+        try: discard result.waitForExit()
+        except CatchableError: discard
+      try: result.close()
+      except CatchableError: discard
+      result = nil
+      raiseOSError(registrationError,
+        "cannot own auto-started runquotad: signal-forwarding registration failed")
+
 proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
   ## Exported for `tests/integration/t_derived_daemon_ipc_trust.nim` and
   ## `tests/integration/t_declared_daemon_ipc_trust.nim`, which grade the
@@ -24761,7 +24865,19 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     var args = @["--socket", socket]
     args.add(budget.args)
     putEnv("RUNQUOTA_SOCKET", socket)
-  result = startProcess(runquotad, args = args, options = {poUsePath})
+  # THE DAEMON'S LIFETIME. On Windows it binds the shared per-user pipe and is
+  # deliberately left running for invocations that adopt it (see
+  # `releaseAutoRunQuotaProcess`), so it is started plainly. On POSIX it is
+  # OWNED by this invocation and ends with it however the invocation ends:
+  # `releaseAutoRunQuotaProcess` stops it on a normal return or a raise, a
+  # terminating signal is forwarded to it, and the daemon itself stops when
+  # it is re-parented (the SIGKILL case) -- and it inherits none of this
+  # invocation's descriptors above 2. `spawnOwnedRunQuotaDaemon` says how.
+  when defined(windows):
+    result = startProcess(runquotad, args = args, options = {poUsePath})
+  else:
+    result = spawnOwnedRunQuotaDaemon(runquotad, args)
+  var readinessError = ""
   for _ in 0 ..< 300:
     if isRunQuotaDaemonReachable():
       # DA-2 — DERIVED class-3 IPC trust. We spawned this daemon, so its pid is
@@ -24798,10 +24914,13 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
       # on a given host is exactly the set of builds that take THIS branch:
       #
       #   * LINUX, unprovisioned host: every top-level `repro build` spawns,
-      #     because the socket is per-PID (`reprobuild-runquota-<pid>`) and
-      #     `releaseAutoRunQuotaProcess` terminates and reaps the daemon at end
-      #     of build. DA-2 is live on every such build — and this is the ONLY
-      #     topology on which it is.
+      #     because the socket is per-PID (`reprobuild-runquota-<pid>`) and the
+      #     daemon ends with the invocation that started it, however that
+      #     invocation ends (`releaseAutoRunQuotaProcess` on a return or a
+      #     raise, signal forwarding and the daemon's own parent watch
+      #     otherwise; see `spawnOwnedRunQuotaDaemon`), so no daemon survives
+      #     for the next build to adopt. DA-2 is live on every such build — and
+      #     this is the ONLY topology on which it is.
       #   * macOS: INERT, spawn arm or not. Reaching this line is not the same
       #     as registering: `trustDaemonWeSpawned` refuses a peer it cannot
       #     re-validate, and `processStartIdentity` is `when defined(linux)`
@@ -24834,12 +24953,29 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
       # spawn arm registers, and that the warm arm provably does not.
       trustDaemonWeSpawned(result, "runquotad", tdcNoContent)
       return
-    if not result.running:
+    try:
+      if not ownedDaemonStillRunning(result):
+        break
+    except OSError as error:
+      when defined(posix):
+        unregisterOwnedDaemon(processID(result))
+      readinessError = error.msg
       break
     sleep(50)
+  # THE SPAWN FAILED, so the daemon is no longer ours to forward signals to.
+  # Unregistered BEFORE it is terminated and reaped, so the forwarder can never
+  # signal its pid after the kernel has handed it to another process.
+  when not defined(windows):
+    unregisterOwnedDaemon(processID(result))
   try:
-    result.terminate()
-    discard result.waitForExit()
+    # Only inspect/reap after unregistering. ECHILD means ownership was lost;
+    # running then raises, so no signal is sent to a possibly reused pid.
+    if result.running:
+      result.terminate()
+      discard result.waitForExit()
+  except CatchableError:
+    discard
+  try:
     result.close()
   except CatchableError:
     discard
@@ -24849,7 +24985,8 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     when defined(windows): "default per-user named pipe"
     else: socket
   raise newException(OSError,
-    "runquotad did not become reachable at " & endpointHint)
+    "runquotad did not become reachable at " & endpointHint &
+    (if readinessError.len > 0: ": " & readinessError else: ""))
 
 proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
   ## Release this invocation's handle to an automatically started RunQuota
@@ -24857,8 +24994,18 @@ proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
   ## invocation may already have adopted the daemon; terminating it here would
   ## break that client's live session. POSIX auto-daemons use invocation-local
   ## socket paths and remain owned by their spawning process.
+  ##
+  ## On POSIX this is the NORMAL end of the daemon -- a return or a raise
+  ## through the caller's `defer`. It is no longer the only one: a terminating
+  ## signal is forwarded to the daemon, and the daemon stops by itself when
+  ## this process is gone (`spawnOwnedRunQuotaDaemon`). The forwarding is
+  ## withdrawn FIRST, before the terminate and the reap, so the handler can
+  ## never signal the pid once it may belong to another process; the last
+  ## release restores the signal dispositions the invocation had before.
   if process == nil:
     return
+  when not defined(windows):
+    unregisterOwnedDaemon(processID(process))
   try:
     when not defined(windows):
       process.terminate()
