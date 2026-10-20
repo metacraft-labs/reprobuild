@@ -115,7 +115,8 @@ suite "the provider compile follows the recipe":
     else:
       # A short root, and A and B at the same depth: the relocatable record
       # is keyed on the depth of its working directory.
-      let tempRoot = "/tmp/rb-provreloc-" & $getCurrentProcessId()
+      let tempRoot = expandFilename("/tmp") /
+        ("rb-provreloc-" & $getCurrentProcessId())
       removeDir(tempRoot)
       createDir(tempRoot)
       defer: removeDir(tempRoot)
@@ -194,7 +195,8 @@ suite "the provider compile follows the recipe":
       checkpoint("missing " & reproBin & " or nim; run `just build` first")
       fail()
     else:
-      let tempRoot = "/tmp/rb-provbaked-" & $getCurrentProcessId()
+      let tempRoot = expandFilename("/tmp") /
+        ("rb-provbaked-" & $getCurrentProcessId())
       removeDir(tempRoot)
       createDir(tempRoot)
       defer: removeDir(tempRoot)
