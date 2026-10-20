@@ -83,6 +83,9 @@ type
     rrLineageCycle = "lineage-cycle"
     rrLineageTooDeep = "lineage-too-deep"
     rrIncompleteLineage = "incomplete-lineage"
+    rrDigestMismatch = "digest-mismatch"
+    rrMissingBlob = "missing-blob"
+    rrSizeMismatch = "size-mismatch"
 
   RecordKind* = enum
     ## §"Envelope". Only `rkManifest` has a body codec in this build; the

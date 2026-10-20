@@ -3,5 +3,5 @@
 ##
 ## Normative source: `reprobuild-pm/spec/Remix-Protocol.md`.
 
-import ./repro_remix/[types, wire, identity, codec, verify, lineage]
-export types, wire, identity, codec, verify, lineage
+import ./repro_remix/[types, wire, identity, codec, verify, lineage, bundle]
+export types, wire, identity, codec, verify, lineage, bundle
