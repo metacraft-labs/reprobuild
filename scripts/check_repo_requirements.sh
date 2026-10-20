@@ -70,6 +70,14 @@ for path in README.md LICENSE flake.nix flake.lock .envrc .gitignore Justfile re
   require_file "${path}"
 done
 
+# The official install channel must be discoverable from the public README
+# (repository requirements §7.1). Keep this offline: channel availability is
+# deployment evidence, not something a local documentation gate can promise.
+require_contains README.md 'curl -fsSL https://get.reprobuild.com/sh | sh'
+if grep -Fq 'That host does not exist yet' README.md; then
+  fail 'README.md must not deny the official get.reprobuild.com install channel'
+fi
+
 for path in .github .github/workflows nix docs libs apps tests benchmarks scripts examples tools references vendor; do
   require_dir "${path}"
 done

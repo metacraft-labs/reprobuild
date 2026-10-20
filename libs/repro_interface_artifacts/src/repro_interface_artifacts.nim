@@ -91,6 +91,7 @@ import repro_core/paths as corepaths
 import repro_core/relocation
 import repro_core/source_root
 import repro_core/c_compiler
+import repro_core/nix_store_roots
 import repro_domain_types
 import repro_hash
 import repro_project_dsl
@@ -1469,7 +1470,7 @@ proc writeStringSeq(outp: var seq[byte]; values: openArray[string]) =
     outp.writeString(value)
 
 proc readStringSeq(bytes: openArray[byte]; pos: var int): seq[string] =
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result = newSeq[string](count)
   for i in 0 ..< count:
     result[i] = readString(bytes, pos)
@@ -1667,7 +1668,7 @@ proc readCommand(bytes: openArray[byte]; pos: var int): InterfaceCommand =
   result.name = readString(bytes, pos)
   result.providerEntrypointId = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result.params = newSeq[InterfaceParam](count)
   for i in 0 ..< count:
     result.params[i] = readParam(bytes, pos)
@@ -1685,7 +1686,7 @@ proc readExecutable(bytes: openArray[byte]; pos: var int): InterfaceExecutable =
   result.exportName = readString(bytes, pos)
   result.binaryName = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result.commands = newSeq[InterfaceCommand](count)
   for i in 0 ..< count:
     result.commands[i] = readCommand(bytes, pos)
@@ -1741,7 +1742,7 @@ proc readResource(bytes: openArray[byte]; pos: var int): InterfaceResource =
   result.entrypoints.plan = readString(bytes, pos)
   result.entrypoints.apply = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
-  let attrCount = int(readU32Le(bytes, pos))
+  let attrCount = readElementCount(bytes, pos, 4)
   result.attributes = newSeq[InterfaceResourceAttr](attrCount)
   for i in 0 ..< attrCount:
     result.attributes[i] = InterfaceResourceAttr(
@@ -1816,7 +1817,7 @@ proc readService(bytes: openArray[byte]; pos: var int;
   # described. A consumer resolving it is then told, by name at compile
   # time, that it converges no points at all, which is true.
   if version >= 26'u16:
-    let pointCount = int(readU32Le(bytes, pos))
+    let pointCount = readElementCount(bytes, pos, 4)
     result.contributionPoints = newSeq[string](pointCount)
     for i in 0 ..< pointCount:
       result.contributionPoints[i] = readString(bytes, pos)
@@ -1852,14 +1853,14 @@ proc readActivity(bytes: openArray[byte]; pos: var int): InterfaceActivity =
   result.name = readString(bytes, pos)
   result.handleType = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
-  let paramCount = int(readU32Le(bytes, pos))
+  let paramCount = readElementCount(bytes, pos, 4)
   result.params = newSeq[InterfaceActivityParam](paramCount)
   for i in 0 ..< paramCount:
     result.params[i] = InterfaceActivityParam(
       name: readString(bytes, pos),
       nimType: readString(bytes, pos),
       location: readLocation(bytes, pos))
-  let configCount = int(readU32Le(bytes, pos))
+  let configCount = readElementCount(bytes, pos, 4)
   result.config = newSeq[InterfaceConfigKey](configCount)
   for i in 0 ..< configCount:
     var key = InterfaceConfigKey(
@@ -1870,7 +1871,7 @@ proc readActivity(bytes: openArray[byte]; pos: var int): InterfaceActivity =
     key.description = readString(bytes, pos)
     key.location = readLocation(bytes, pos)
     result.config[i] = key
-  let serviceCount = int(readU32Le(bytes, pos))
+  let serviceCount = readElementCount(bytes, pos, 4)
   result.services = newSeq[string](serviceCount)
   for i in 0 ..< serviceCount:
     result.services[i] = readString(bytes, pos)
@@ -2121,20 +2122,20 @@ proc readToolUse(bytes: openArray[byte]; pos: var int;
   if version >= 15'u16:
     result.depKind = readString(bytes, pos)
   if version >= 2'u16:
-    let provisioningCount = int(readU32Le(bytes, pos))
+    let provisioningCount = readElementCount(bytes, pos, 4)
     result.nixProvisioning = newSeq[InterfaceNixProvisioning](
       provisioningCount)
     for i in 0 ..< provisioningCount:
       result.nixProvisioning[i] = readNixProvisioning(bytes, pos, version)
   if version >= 4'u16:
-    let tarballCount = int(readU32Le(bytes, pos))
+    let tarballCount = readElementCount(bytes, pos, 4)
     result.tarballProvisioning = newSeq[InterfaceTarballProvisioning](
       tarballCount)
     for i in 0 ..< tarballCount:
       result.tarballProvisioning[i] = readTarballProvisioning(bytes, pos,
         version)
   if version >= 5'u16:
-    let scoopCount = int(readU32Le(bytes, pos))
+    let scoopCount = readElementCount(bytes, pos, 4)
     result.scoopProvisioning = newSeq[InterfaceScoopProvisioning](scoopCount)
     for i in 0 ..< scoopCount:
       result.scoopProvisioning[i] = readScoopProvisioning(bytes, pos, version)
@@ -2181,23 +2182,23 @@ proc readProvisioningContribution(bytes: openArray[byte]; pos: var int;
         "invalid provisioning contribution ownership flag")
     result.imported = imported == 1'u8
   result.location = readLocation(bytes, pos)
-  let nixCount = int(readU32Le(bytes, pos))
+  let nixCount = readElementCount(bytes, pos, 4)
   result.nixProvisioning = newSeq[InterfaceNixProvisioning](nixCount)
   for i in 0 ..< nixCount:
     result.nixProvisioning[i] = readNixProvisioning(bytes, pos, version)
-  let tarballCount = int(readU32Le(bytes, pos))
+  let tarballCount = readElementCount(bytes, pos, 4)
   result.tarballProvisioning =
     newSeq[InterfaceTarballProvisioning](tarballCount)
   for i in 0 ..< tarballCount:
     result.tarballProvisioning[i] =
       readTarballProvisioning(bytes, pos, version)
-  let scoopCount = int(readU32Le(bytes, pos))
+  let scoopCount = readElementCount(bytes, pos, 4)
   result.scoopProvisioning = newSeq[InterfaceScoopProvisioning](scoopCount)
   for i in 0 ..< scoopCount:
     result.scoopProvisioning[i] =
       readScoopProvisioning(bytes, pos, version)
   if version >= 27'u16:
-    let homebrewCount = int(readU32Le(bytes, pos))
+    let homebrewCount = readElementCount(bytes, pos, 4)
     result.homebrewProvisioning =
       newSeq[InterfaceHomebrewProvisioning](homebrewCount)
     for i in 0 ..< homebrewCount:
@@ -2400,46 +2401,46 @@ proc decodeInterfacePayload*(bytes: openArray[byte];
     result.defaultToolProvisioning = readString(bytes, pos)
   result.publicSignatureDependencies = readStringSeq(bytes, pos)
   result.location = readLocation(bytes, pos)
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result.publicExecutables = newSeq[InterfaceExecutable](count)
   for i in 0 ..< count:
     result.publicExecutables[i] = readExecutable(bytes, pos)
   # v9 added publicLibraries between executables and toolUses. v<9
   # envelopes have no library block — leave the seq empty.
   if version >= 9'u16:
-    let libCount = int(readU32Le(bytes, pos))
+    let libCount = readElementCount(bytes, pos, 4)
     result.publicLibraries = newSeq[InterfaceLibrary](libCount)
     for i in 0 ..< libCount:
       result.publicLibraries[i] = readLibrary(bytes, pos, version)
   # v12 added publicResources between libraries and toolUses. v<12
   # envelopes have no resource block — leave the seq empty.
   if version >= 12'u16:
-    let resCount = int(readU32Le(bytes, pos))
+    let resCount = readElementCount(bytes, pos, 4)
     result.publicResources = newSeq[InterfaceResource](resCount)
     for i in 0 ..< resCount:
       result.publicResources[i] = readResource(bytes, pos)
   # v23 added publicServices + publicActivities between resources and
   # toolUses. v<23 envelopes have neither block — leave both seqs empty.
   if version >= 23'u16:
-    let svcCount = int(readU32Le(bytes, pos))
+    let svcCount = readElementCount(bytes, pos, 4)
     result.publicServices = newSeq[InterfaceService](svcCount)
     for i in 0 ..< svcCount:
       result.publicServices[i] = readService(bytes, pos, version)
-    let actCount = int(readU32Le(bytes, pos))
+    let actCount = readElementCount(bytes, pos, 4)
     result.publicActivities = newSeq[InterfaceActivity](actCount)
     for i in 0 ..< actCount:
       result.publicActivities[i] = readActivity(bytes, pos)
-  let useCount = int(readU32Le(bytes, pos))
+  let useCount = readElementCount(bytes, pos, 4)
   result.toolUses = newSeq[InterfaceToolUse](useCount)
   for i in 0 ..< useCount:
     result.toolUses[i] = readToolUse(bytes, pos, version)
   if version >= 14'u16:
-    let runtimeUseCount = int(readU32Le(bytes, pos))
+    let runtimeUseCount = readElementCount(bytes, pos, 4)
     result.runtimeToolUses = newSeq[InterfaceToolUse](runtimeUseCount)
     for i in 0 ..< runtimeUseCount:
       result.runtimeToolUses[i] = readToolUse(bytes, pos, version)
   if version >= 13'u16:
-    let contributionCount = int(readU32Le(bytes, pos))
+    let contributionCount = readElementCount(bytes, pos, 4)
     result.provisioningContributions =
       newSeq[InterfaceProvisioningContribution](contributionCount)
     for i in 0 ..< contributionCount:
@@ -2669,7 +2670,7 @@ proc writeFileStamps(outp: var seq[byte]; stamps: openArray[FileStamp]) =
     outp.writeFileStamp(stamp)
 
 proc readFileStamps(bytes: openArray[byte]; pos: var int): seq[FileStamp] =
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result = newSeq[FileStamp](count)
   for i in 0 ..< count:
     result[i] = readFileStamp(bytes, pos)
@@ -4636,7 +4637,20 @@ proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
   ##   * `TERM=dumb`, `LANG=C`: diagnostics only, pinned so a terminal or a
   ##     locale is not a cache key;
   ##   * `HOME`: a directory owned by this edge, so a user-level
-  ##     `~/.config/nim` cannot change the compile without being an input.
+  ##     `~/.config/nim` cannot change the compile without being an input;
+  ##   * `NIX_STORE`: the store directory, when the C compiler lives in it.
+  ##     Nix's ld-wrapper turns every `-L<dir>` holding a library the link
+  ##     uses into `-rpath <dir>`, skipping only directories outside
+  ##     `$NIX_STORE`; with the variable unset that test matches every
+  ##     directory. A `-L/usr/lib` then became the provider's RPATH ahead
+  ##     of the Nix glibc, and the provider loaded the host's `libc.so.6`
+  ##     under the Nix loader and crashed before `main` (reprobuild-pm issue
+  ##     2026-10-14-project-provider-rpath-puts-usr-lib-ahead-of-the-nix-glibc).
+  ##     Keeping host directories out of `config.nims`'s own `-L` flags does
+  ##     not avoid this: on a host that has `/usr/lib`, the clang driver adds
+  ##     `-L/usr/lib` to the link itself, after every flag the compile
+  ##     passed. Every Nix shell sets `NIX_STORE` (stdenv's `setup.sh`); the
+  ##     wrapper assumes it.
   ##
   ## WHAT THIS DOES NOT DO. The launcher layers declared values OVER the
   ## inherited environment (`EnvironmentInheritanceCensus`), so this pins the
@@ -4658,6 +4672,13 @@ proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
     result.add("REPRO_NIM_COMPILER=" & nim)
   if cc.len > 0 and cc.isAbsolute:
     result.add(bootstrapCCompilerEnv & "=" & cc)
+    # A profile symlink (`~/.nix-profile/bin/cc`) names a store wrapper too.
+    let store = nixStoreDir()
+    let resolvedCc =
+      try: expandFilename(cc)
+      except OSError: cc
+    if cc.startsWith(store & "/") or resolvedCc.startsWith(store & "/"):
+      result.add("NIX_STORE=" & store)
   let sdk = getEnv(bootstrapSdkRootEnv)
   if sdk.len > 0:
     result.add(bootstrapSdkRootEnv & "=" & sdk)
@@ -4690,6 +4711,11 @@ proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
   for name in ReprobuildLibsOverrideEnvVars:
     if name notin seenRoots:
       seenRoots.add(name)
+  # Catalog selection is source selection too. Both recipe extraction and
+  # provider compilation must see the caller's explicit choice, including an
+  # unusable choice: silently falling back can compile a different interface.
+  if ReprobuildPackagesRootEnv notin seenRoots:
+    seenRoots.add(ReprobuildPackagesRootEnv)
   for name in seenRoots:
     if existsEnv(name):
       result.add(name & "=" & getEnv(name))
@@ -6272,9 +6298,10 @@ proc nixLibDirIn*(storeRoot, namePattern: string;
   ## path matching `namePattern` whose libdir holds one of `dylibNames` built
   ## for the host target.
   ##
-  ## Candidates are visited in sorted order — `config.nims` sorts its `find`
-  ## output, and an unsorted `walkDir` would make the choice depend on
-  ## directory order — and each is filtered by `soMatchesHostArch`. Without
+  ## Candidates are visited in sorted order — `config.nims` sorts its store
+  ## listing (`nixStorePrefixes`), and an unsorted `walkDir` would make the
+  ## choice depend on directory order — and each is filtered by
+  ## `soMatchesHostArch`. Without
   ## the filter "the first sorted match" is an arbitrary architecture on a
   ## mixed store: CI's first `*-openssl-*` was a 32-bit build, baked into a
   ## 64-bit helper's RPATH. `storeRoot` is a parameter so the selection can be
@@ -6696,7 +6723,11 @@ proc externalHashFlags(workDir = ""): seq[string] =
   # written into RPATH: this edge runs with an allowlisted environment, so
   # the dev shell's SQLITE_PREFIX is not visible here, and a `/usr/lib`
   # RPATH made a Nix-linked provider load the host's libc under Nix's
-  # loader and die with SIGSEGV before reading the recipe.
+  # loader and die with SIGSEGV before reading the recipe. Leaving it out
+  # here is not sufficient on its own: Nix's ld-wrapper writes an RPATH
+  # entry for any `-L` directory, including the ones the C driver adds,
+  # unless `NIX_STORE` tells it which are outside the store, which is why
+  # `providerCompileLaunchEnv` declares it.
   when not defined(macosx):
     let sqliteNames = ["libsqlite3.so", "libsqlite3.a"]
     let nixInPlay = dirExists("/nix/store")

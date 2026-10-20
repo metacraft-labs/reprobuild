@@ -111,7 +111,7 @@ proc decodeResourceInstance*(bytes: openArray[byte]): ResourceInstance =
   # without linking the driver's attrs codec. A provider process that DOES have
   # the codec still gets the typed box via the same registered path.
   result.attrs = unmarshalAttrsOrRaw(attrsTypeId, attrsJson)
-  let deps = int(readU32Le(bytes, pos))
+  let deps = readElementCount(bytes, pos, 4)
   result.dependsOn = newSeq[string](deps)
   for i in 0 ..< deps:
     result.dependsOn[i] = readString(bytes, pos)

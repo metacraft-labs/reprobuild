@@ -4,12 +4,26 @@
 ## The bounded source-archive set must not expose configure/configure.sh
 ## as a ready-to-run package tool. Real catalog checks precede resolution
 ## so restoring an invalid channel fails without a network download.
+##
+## ``perl`` is the case that slipped past the lower-case ``configure``
+## check: its one tarball arm was the cpan.org SOURCE release, declared
+## ``os = "any"`` with perl's capitalised ``Configure`` as the executable, so
+## tarball mode handed every host a configure script where a perl was
+## expected and never fell through to the from-source recipe
+## (reprobuild-pm/issues/
+## 2026-10-20-stdlib-perl-tarball-realization-is-a-source-tree-not-a-perl.md).
+## ``swig`` had the same defect with ``autogen.sh``. Both packages' tarball
+## arms are now Windows-only binaries; the cases below pin both halves of
+## that for each: what Windows selects, and that Linux and macOS select
+## nothing and fall through.
 
 import std/[os, strutils, tempfiles, unittest]
 
 import repro_project_dsl
 import repro_interface_artifacts
 import repro_tool_profiles
+import repro_tool_profiles/tarball_conformance
+import repro_dsl_stdlib/packages_schema
 # Pull every package whose provisioning we want to inspect into module
 # init so ``registeredPackages()`` carries the widened
 # ``nixProvisioning`` / ``scoopProvisioning`` / ``tarballProvisioning``
@@ -36,12 +50,70 @@ proc bisonConsumerInterface(): ProjectInterface =
       rawConstraint: "bison >=3.0", packageSelector: "bison",
       executableName: "bison", depKind: "native")]), registeredPackages())
 
+type
+  WindowsBinaryTarball = object
+    ## What a package whose only tarball arms are one Windows binary archive
+    ## (declared for x86_64 and, emulated, aarch64) must declare.
+    package, constraint: string
+    url, sha256, executablePath, packageId, version: string
+    stripComponents: int
+    nixExecutablePath, scoopExecutablePath: string
+
+const
+  WindowsOnlyBinaryTarballs = [
+    WindowsBinaryTarball(package: "perl", constraint: "perl >=5",
+      url: "https://github.com/StrawberryPerl/Perl-Dist-Strawberry/" &
+        "releases/download/SP_54231_64bit/" &
+        "strawberry-perl-5.42.3.1-64bit-portable.zip",
+      sha256:
+        "6a081a811781c30aca51dbc036afd93092af91e3297901f02c17043795a10690",
+      executablePath: "perl/bin/perl.exe",
+      packageId: "strawberry-perl@5.42.3.1", version: "5.42.3",
+      stripComponents: 0,
+      nixExecutablePath: "bin/perl",
+      scoopExecutablePath: "perl/bin/perl.exe"),
+    WindowsBinaryTarball(package: "swig", constraint: "swig >=4",
+      url: "https://downloads.sourceforge.net/project/swig/swigwin/" &
+        "swigwin-4.5.1/swigwin-4.5.1.zip",
+      sha256:
+        "6a8662c063ba4d1e72beaecef24da4af3d631d73ffdde958fb42aa50fdefb962",
+      executablePath: "swig.exe",
+      packageId: "swigwin@4.5.1", version: "4.5.1",
+      stripComponents: 1,
+      nixExecutablePath: "bin/swig",
+      scoopExecutablePath: "swig.exe"),
+  ]
+  # Hosts with no binary tarball for those packages: tarball mode must fall
+  # through to the from-source recipe on each of them rather than select an
+  # arm.
+  FallThroughTargets = [("linux", "x86_64"), ("linux", "aarch64"),
+    ("macos", "x86_64"), ("macos", "aarch64")]
+  # Basenames that mark a source tree's build driver; a tarball arm
+  # declaring one is a source release posing as the tool.
+  SourceBuildDriverNames = ["Configure", "configure", "configure.sh",
+    "autogen.sh", "Makefile.SH"]
+
+proc consumerInterface(expected: WindowsBinaryTarball): ProjectInterface =
+  ## A consumer declaring ``uses: "<package> >=N"`` — for perl, the
+  ## declaration Agent Harbor's ``repro.nim`` wants to make — built from the
+  ## registered stdlib definition so the arms under test are the package's
+  ## own.
+  toProjectInterface(PackageDef(
+    packageName: expected.package & "ToolConsumer",
+    nativeBuildDeps: @[PackageUseDef(
+      rawConstraint: expected.constraint,
+      packageSelector: expected.package,
+      executableName: expected.package, depKind: "native")]),
+    registeredPackages())
+
 const
   WaylandChainStubs = [
     "texinfo", "perl", "m4", "bison", "flex",
     "gperf", "bc", "file", "rsync", "swig",
     "gmp", "mpfr", "mpc",
   ]
+  # Packages that must keep at least one tarball arm. Both now carry only
+  # Windows binary arms (see ``WindowsOnlyBinaryTarballs``).
   WaylandChainStubsRequiringTarball = ["perl", "swig"]
   FormerConfigurePlaceholderPackages = [
     "autoconf", "automake", "bc", "bison", "file", "flex", "gmp",
@@ -113,6 +185,100 @@ suite "DSL-port M9.R.11 — stub provisioning widening":
           "realization for this host")
         check exc.msg.contains(recipes / "bison" / "repro.nim")
       check not dirExists(storeRoot)
+
+  test "perl's and swig's tarball arms are Windows binaries only":
+    for expected in WindowsOnlyBinaryTarballs:
+      checkpoint("package: " & expected.package)
+      let iface = consumerInterface(expected)
+      require iface.toolUses.len == 1
+      let useDef = iface.toolUses[0]
+      check useDef.packageSelector == expected.package
+      # The Nix and Scoop channels are untouched by the tarball change.
+      require useDef.nixProvisioning.len == 1
+      check useDef.nixProvisioning[0].executablePath ==
+        expected.nixExecutablePath
+      require useDef.scoopProvisioning.len == 1
+      check useDef.scoopProvisioning[0].executablePath ==
+        expected.scoopExecutablePath
+
+      for arm in useDef.tarballProvisioning:
+        checkpoint(describeArm(expected.package, arm))
+        # A source tree is not the tool: no arm may hand back its driver.
+        check extractFilename(arm.executablePath.replace('\\', '/')) notin
+          SourceBuildDriverNames
+
+      for (os, cpu) in FallThroughTargets:
+        var matching = 0
+        for arm in useDef.tarballProvisioning:
+          if armMatchesTarget(arm, os, cpu): inc matching
+        checkpoint(os & "/" & cpu & " arms: " & $matching)
+        check matching == 0
+
+      for (cpu, cpuToken) in [(pcX86_64, "x86_64"), (pcAArch64, "aarch64")]:
+        var matching: seq[InterfaceTarballProvisioning] = @[]
+        for arm in useDef.tarballProvisioning:
+          if armMatchesTarget(arm, "windows", cpuToken): matching.add(arm)
+        checkpoint("windows/" & cpuToken & " arms: " & $matching.len)
+        require matching.len == 1
+        # The selection `repro` itself makes for that target, with the
+        # consumer's version range applied, lands on an arm of the same
+        # shape.
+        let selected = selectTarballProvisioning(useDef,
+          target = realizationTargetFor(cpu, poWindows))
+        for arm in [matching[0], selected]:
+          check arm.url == expected.url
+          check arm.sha256 == expected.sha256
+          check arm.archiveType == "zip"
+          check arm.stripComponents == expected.stripComponents
+          check arm.executablePath == expected.executablePath
+          check arm.os == "windows"
+          check arm.cpu == cpuToken
+          check arm.detail.version == expected.version
+          check arm.packageId == expected.packageId
+          check arm.lockIdentity == "tarball:" & expected.packageId &
+            ":windows-" & cpuToken & ":sha256:" & expected.sha256
+
+  test "forced perl and swig tarball provisioning falls through off Windows":
+    for expected in WindowsOnlyBinaryTarballs:
+      checkpoint("package: " & expected.package)
+      let iface = consumerInterface(expected)
+      require iface.toolUses.len == 1
+      let useDef = iface.toolUses[0]
+      when defined(windows):
+        # Windows HAS these tarballs; this case is about the hosts that do
+        # not.
+        check not tarballModeFallsThroughToFromSource(useDef)
+      else:
+        # The pure planning predicate first, so restoring a host-matching
+        # source-tree arm fails here without attempting a network download.
+        require tarballModeFallsThroughToFromSource(useDef)
+
+        # With the recipe root pinned to an empty scratch tree there is no
+        # from-source recipe to fall through to, so the refusal is the
+        # fall-through's own (Dependency-Provisioning-In-Build-Graph.md 4.3
+        # rule 3): it names the host and the recipe path probed, and nothing
+        # reaches the tool store.
+        let scratch = createTempDir("repro-" & expected.package &
+          "-no-tarball-", "")
+        defer: removeDir(scratch)
+        let storeRoot = scratch / "tool-store"
+        let recipes = scratch / "recipes"
+        createDir(recipes)
+        let savedRoot = getEnv(FromSourceRootEnvVar)
+        putEnv(FromSourceRootEnvVar, recipes)
+        defer:
+          if savedRoot.len > 0: putEnv(FromSourceRootEnvVar, savedRoot)
+          else: delEnv(FromSourceRootEnvVar)
+        try:
+          discard toolBuildIdentity(artifactFor(iface), tpmTarball,
+            pathValue = "", storeRoot = storeRoot)
+          check false
+        except OSError as exc:
+          checkpoint exc.msg
+          check exc.msg.contains("package \"" & expected.package &
+            "\" has no tarball realization for this host")
+          check exc.msg.contains(recipes / expected.package / "repro.nim")
+        check not dirExists(storeRoot)
 
   when defined(posix):
     test "bison already on PATH remains a path-resolved executable":

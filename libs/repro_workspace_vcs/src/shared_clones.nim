@@ -12,8 +12,8 @@
 ##   - Each unique upstream fetch URL → a stable filesystem slug → ONE
 ##     bare clone under a per-user cache root. The shared bare is
 ##     refreshed clone-if-missing / fetch-if-present
-##     (``git fetch --all --prune``), never rewrites its commit-graph
-##     (``SharedBareSafetyConfig``), and expires only objects no registered
+##     (``git fetch --all --prune``), rewrites non-split commit-graphs only
+##     after migrating borrowers, and expires only objects no registered
 ##     borrower names (``poolIntegrityConfig``, see
 ##     ``reprobuild-specs/spec/Shared-Clone-Pool-Integrity.md``): other
 ##     checkouts borrow from it.
@@ -704,7 +704,12 @@ proc checkoutLockPath*(repoPath: string): string {.gcsafe.} =
         let gd = firstLine["gitdir:".len .. ^1].strip()
         let absGd = if gd.isAbsolute: gd else: absolutePath(gd, absolutePath(repoPath))
         if dirExists(absGd):
-          return absGd / "repro-vcs-lock"
+          var commonDir = absGd
+          if fileExists(absGd / "commondir"):
+            let common = readFile(absGd / "commondir").strip()
+            commonDir = if common.isAbsolute: common
+              else: absolutePath(common, absGd)
+          return commonDir / "repro-vcs-lock"
     except CatchableError:
       discard
   if dirExists(repoPath / "objects") and fileExists(repoPath / "HEAD"):
@@ -982,15 +987,10 @@ const SharedBareSafetyConfig* = [
   ##      sets ``gc.pruneExpire`` and the retention hook that tells gc what
   ##      the registered borrowers still name
   ##      (``reprobuild-specs/spec/Shared-Clone-Pool-Integrity.md`` §3).
-  ##   2. Commit-graph rewrites. A borrower that writes a split commit-graph
-  ##      chains its layer onto the bare's layers. ``fetch.writeCommitGraph``
-  ##      MERGES the bare's split chain on every fetch, and gc replaces it; each
-  ##      leaves every chained borrower printing ``unable to find all
-  ##      commit-graph files`` on every command. Measured on git 2.54 under both
-  ##      the ``gc`` and ``geometric`` maintenance strategies: disabling
-  ##      automatic maintenance alone does NOT prevent this -- the fetch-time
-  ##      write does it by itself -- so ``fetch.writeCommitGraph=false`` is
-  ##      required in addition, and ``gc.writeCommitGraph=false`` covers gc.
+  ##   2. Automatic split commit-graph rewrites can remove layers still used
+  ##      by a borrower. Keep those writers off. ``maintainSharedBare`` first
+  ##      converts registered borrowers to independent non-split graphs, then
+  ##      rebuilds the pool graph after gc so expired commits leave it too.
   ##
   ## Persisted in the bare's own config (not only passed per command) so the
   ## property holds for whoever touches the cache: an operator's hand-run
@@ -1373,10 +1373,19 @@ proc gitObjectDir(repoPath: string): string =
   ## Return the object-store dir for ``repoPath`` whether it is a normal
   ## working tree (``<repo>/.git/objects``) or a bare repo
   ## (``<repo>/objects``).
-  if dirExists(repoPath / ".git"):
-    repoPath / ".git" / "objects"
-  else:
-    repoPath / "objects"
+  var gitDir = repoPath / ".git"
+  if fileExists(gitDir):
+    let text = readFile(gitDir).strip()
+    if not text.startsWith("gitdir:"):
+      raise newException(IOError, "invalid gitdir file: " & gitDir)
+    let target = text["gitdir:".len .. ^1].strip()
+    gitDir = if target.isAbsolute: target else: absolutePath(target, absolutePath(repoPath))
+  elif not dirExists(gitDir):
+    gitDir = repoPath
+  if fileExists(gitDir / "commondir"):
+    let common = readFile(gitDir / "commondir").strip()
+    gitDir = if common.isAbsolute: common else: absolutePath(common, absolutePath(gitDir))
+  gitDir / "objects"
 
 proc alternatesFilePath*(repoPath: string): string =
   ## Path of the alternates file for ``repoPath`` (normal or bare).
@@ -1724,6 +1733,95 @@ rm -rf "$work" && mkdir "$work" || exit 1
 trap 'rm -rf "$work"' EXIT
 git --git-dir="$pool" for-each-ref --format='^%(objectname)' > "$work/pooltips" || exit 1
 
+# Snapshot the registry for this invocation. Discovery is repeated on every gc.
+# Git for Windows accepts forward-slash drive paths; dirname and shell globs
+# also need that spelling when Nim wrote native separators to the registry.
+tr '\\' '/' < "$registry" > "$work/leaves" || exit 1
+[ -s "$work/leaves" ] || exit 1
+while IFS= read -r leaf || [ -n "$leaf" ]; do
+  [ -n "$leaf" ] || continue
+  # A registered leaf may be the workspace checkout itself, or a nested repo.
+  # Prefer the workspace's marker; plain-git trees retain the sibling fallback.
+  workspace=$leaf
+  marked=0
+  while [ "$workspace" != / ] && [ "$workspace" != . ]; do
+    if [ -f "$workspace/.repro-workspace.toml" ] ||
+       [ -f "$workspace/.repro/workspace.toml" ]; then
+      dirname "$workspace"
+      marked=1
+      break
+    fi
+    ancestor=$(dirname "$workspace")
+    [ "$ancestor" != "$workspace" ] || break
+    workspace=$ancestor
+  done
+  [ "$marked" = 1 ] || dirname "$(dirname "$leaf")"
+done < "$work/leaves" | sort -u > "$work/parents" || exit 1
+
+# Bound the walk to the sibling-workspace layout, including nested repos and
+# .git files (linked worktrees). Do not inspect objects or trigger lazy fetches.
+discover_leaf() {
+  candidate=$1
+  [ -e "$candidate/.git" ] || return 0
+  common=$(git -C "$candidate" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  objects="$common/objects"
+  # An inaccessible parent makes test -e report absence too. Establish access
+  # before interpreting a missing alternates file as a standalone checkout.
+  [ -r "$objects" ] && [ -x "$objects" ] || return 1
+  if [ -d "$objects/info" ]; then
+    [ -r "$objects/info" ] && [ -x "$objects/info" ] || return 1
+  fi
+  alternates="$objects/info/alternates"
+  [ -e "$alternates" ] || return 0
+  [ -r "$alternates" ] || return 1
+  while IFS= read -r alternate || [ -n "$alternate" ]; do
+    [ -n "$alternate" ] || continue
+    alternate=$(printf '%s' "$alternate" | tr '\\' '/') || return 1
+    case $alternate in /* | [A-Za-z]:/*) ;; *) alternate="$objects/$alternate" ;; esac
+    resolved=$(cd "$alternate" && pwd -P) || return 1
+    if [ "$resolved" = "$poolobjects" ]; then
+      printf '%s\n' "$candidate" >> "$work/found" || return 1
+      break
+    fi
+  done < "$alternates"
+}
+scan_dir() {
+  directory=$1
+  depth=$2
+  [ -r "$directory" ] && [ -x "$directory" ] || return 1
+  discover_leaf "$directory" || return 1
+  [ "$depth" -gt 0 ] || return 0
+  for child in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
+    [ -d "$child" ] || continue
+    # A subshell keeps recursive calls from changing this call's variables.
+    (scan_dir "$child" "$((depth - 1))") || return 1
+  done
+}
+poolobjects=$(cd "$pool/objects" && pwd -P) || exit 1
+: > "$work/found"
+while IFS= read -r parent || [ -n "$parent" ]; do
+  [ -d "$parent" ] || continue
+  [ -r "$parent" ] && [ -x "$parent" ] || exit 1
+  for workspace in "$parent"/* "$parent"/.[!.]* "$parent"/..?*; do
+    [ -d "$workspace" ] || continue
+    (scan_dir "$workspace" 2) || exit 1
+  done
+done < "$work/parents"
+sort -u "$work/found" > "$work/discovered" || exit 1
+incomplete=0
+while IFS= read -r leaf || [ -n "$leaf" ]; do
+  if ! grep -F -x -e "$leaf" "$work/leaves" >/dev/null; then
+    # One append per record, matching registerBorrower's append-only protocol.
+    printf '%s\n' "$leaf" >> "$registry" || exit 1
+    printf '%s\n' "$leaf" >> "$work/leaves" || exit 1
+    incomplete=1
+  fi
+done < "$work/discovered"
+if [ "${1-}" = --discover ]; then
+  [ "$incomplete" = 0 ] || exit 2
+  exit 0
+fi
+
 status=0
 while IFS= read -r leaf || [ -n "$leaf" ]; do
   [ -n "$leaf" ] || continue
@@ -1759,7 +1857,7 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
     cat "$work/foreign" "$work/pooltips" |
       git -C "$leaf" rev-list --objects --no-object-names --missing=allow-any --ignore-missing --stdin || status=1
   fi
-done < "$registry"
+done < "$work/leaves"
 exit $status
 """
   ## The script ``ensureRetentionHook`` writes. POSIX ``sh`` plus ``git``
@@ -1789,13 +1887,17 @@ proc retentionHookConfigValue*(pool: string): string =
   quoteShellPosix(retentionHookPath(pool).replace('\\', '/'))
 
 proc poolRetentionReady*(gitBin, pool: string): bool =
-  ## True when expiring unreachable objects in ``pool`` is safe for its
-  ## registered leaves: git runs the hook, the hook is in place, and the
-  ## registry names at least one leaf. Anything else keeps ``never`` (§3.6,
-  ## §5): a pool must never expire objects on the strength of an empty
-  ## registry or a hook git will not run.
-  gitSupportsRetentionHook(gitBin) and
-    fileExists(retentionHookPath(pool)) and readBorrowers(pool).len > 0
+  ## The hook and readiness share one discovery implementation. A newly
+  ## found borrower is registered, but this pass still keeps ``never``; only
+  ## a later complete pass can enable expiry. Discovery errors fail closed.
+  if not gitSupportsRetentionHook(gitBin) or
+      not fileExists(retentionHookPath(pool)) or readBorrowers(pool).len == 0:
+    return false
+  let env = scrubbedGitRepositoryEnv()
+  env["PATH"] = gitBin.parentDir & $PathSep & getEnv("PATH")
+  let discovered = execCmdExCloseOnce("sh " &
+    quoteShell(retentionHookPath(pool)) & " --discover", env = env)
+  discovered.exitCode == 0
 
 proc poolIntegrityConfig*(gitBin, pool: string): seq[(string, string)] =
   ## The pool-specific rows of §3.1, beyond the static
@@ -1841,6 +1943,82 @@ proc gitDirOf(gitBin, leaf: string): tuple[gitDir, commonDir: string] =
   if lines.len < 2:
     return ("", "")
   (lines[0], lines[1])
+
+proc commitGraphWriteRefusal(gitBin, repo: string): string =
+  ## Git silently skips commit-graph writes for shallow or grafted histories.
+  ## Refuse those repositories before expiry rather than trust a successful
+  ## exit that can leave a borrower's old split base or a stale pool graph.
+  let shallow = runGitEnv(gitBin, ["-C", repo, "rev-parse",
+    "--is-shallow-repository"], lazyFetch = false)
+  if shallow.code != 0 or shallow.output.strip() != "false":
+    return "cannot rebuild the commit-graph in shallow or unreadable repository " &
+      repo & ": " & shallow.output.strip()
+  let dirs = gitDirOf(gitBin, repo)
+  if dirs.commonDir.len == 0:
+    return "could not locate the commit-graph directory in " & repo
+  if fileExists(dirs.commonDir / "info/grafts"):
+    return "cannot rebuild the commit-graph with legacy grafts in " & repo
+  ""
+
+proc writeNonSplitCommitGraph(gitBin, repo: string): string =
+  ## A non-split write walks reachable objects afresh, including when the old
+  ## graph is stale or its split base is missing. ``core.commitGraph=false``
+  ## cannot be used here: Git then returns success without writing anything.
+  ## Force it on for this explicit write, even if global config disables it.
+  let refusal = commitGraphWriteRefusal(gitBin, repo)
+  if refusal.len > 0:
+    return refusal
+  # Git leaves an old graph untouched when there are no reachable commits.
+  # That graph may name exactly the objects gc has just expired. A repository
+  # without commits reachable from refs needs no commit-graph. Like Git's
+  # --reachable writer, exclude a detached HEAD from that set. Disable graph
+  # reads for the probe so broken-chain warnings cannot impersonate a commit.
+  # Remove both legacy representations when the set is empty.
+  let refs = runGitEnv(gitBin, ["--no-replace-objects", "-C", repo,
+    "-c", "core.commitGraph=false",
+    "rev-list", "--exclude=HEAD", "--all", "--max-count=1"], lazyFetch = false)
+  if refs.code != 0:
+    return "could not enumerate commits before rebuilding the commit-graph in " &
+      repo & ": " & refs.output.strip()
+  if refs.output.strip().len == 0:
+    let dirs = gitDirOf(gitBin, repo)
+    if dirs.commonDir.len == 0:
+      return "could not locate the commit-graph directory in " & repo
+    let info = dirs.commonDir / "objects/info"
+    if fileExists(info / "commit-graph.lock") or
+        fileExists(info / "commit-graphs/commit-graph-chain.lock"):
+      return "could not remove the empty commit-graph in " & repo &
+        ": commit-graph is locked"
+    try:
+      removeFile(info / "commit-graph")
+      if dirExists(info / "commit-graphs"):
+        removeDir(info / "commit-graphs")
+    except IOError, OSError:
+      return "could not remove the empty commit-graph in " & repo & ": " &
+        getCurrentExceptionMsg()
+    return ""
+  let graph = runGitEnv(gitBin, ["--no-replace-objects", "-C", repo,
+    "-c", "core.commitGraph=true",
+    "commit-graph", "write", "--reachable"], lazyFetch = false)
+  if graph.code != 0:
+    return "could not rebuild the non-split commit-graph in " & repo &
+      " (" & $graph.code & "): " & graph.output.strip()
+  let dirs = gitDirOf(gitBin, repo)
+  if dirs.commonDir.len == 0 or
+      not fileExists(dirs.commonDir / "objects/info/commit-graph") or
+      fileExists(dirs.commonDir / "objects/info/commit-graphs/commit-graph-chain"):
+    return "git did not create an independent non-split commit-graph in " & repo
+  ""
+
+proc migrateLeafCommitGraph(gitBin, leaf: string): string =
+  let dirs = gitDirOf(gitBin, leaf)
+  if dirs.commonDir.len == 0:
+    return "could not locate the shared object directory in " & leaf
+  # Do not create a graph on every on-touch configuration. Only a split chain
+  # can depend on the pool; an existing monolithic graph is already independent.
+  if fileExists(dirs.commonDir / "objects/info/commit-graphs/commit-graph-chain"):
+    return writeNonSplitCommitGraph(gitBin, leaf)
+  ""
 
 proc leafPoolConfigRows(pool: string): seq[(string, string)] =
   @[("remote." & LeafPoolRemoteName & ".url", poolFileUrl(pool)),
@@ -1917,7 +2095,7 @@ proc ensureLeafPoolConfig*(gitBin, leaf, pool: string): string =
       "extensions.partialClone"])
   if failedKeys.len > 0:
     return "could not write " & failedKeys.join(", ") & " in " & leaf
-  ""
+  migrateLeafCommitGraph(gitBin, leaf)
 
 proc poolsOfLeaf*(leaf: string; cacheRoot = ""): seq[string] =
   ## The pools ``leaf`` borrows from: every alternates entry whose parent is
@@ -3003,6 +3181,29 @@ proc maintainSharedBare*(gitBin, barePath: string;
       result.diagnostic = "could not install the shared-bare safety config on " &
         barePath & "; gc skipped so nothing a borrower uses can be expired"
       return
+    # Old leaves may have chained onto the pool's split layers. Convert all
+    # registered leaves before gc can expire anything or the pool's graph write
+    # removes those layers. A failed migration must leave object retention intact.
+    let borrowers = readBorrowers(barePath)
+    for leaf in borrowers:
+      let migrated = ensureLeafPoolConfig(gitBin, leaf, barePath)
+      if migrated.len > 0:
+        result.ok = false
+        result.diagnostic = migrated & "; gc skipped before borrower graph migration"
+        result.looseAfter = result.looseBefore
+        return
+    let preserveLegacyChain = borrowers.len == 0 and fileExists(
+      barePath / "objects/info/commit-graphs/commit-graph-chain")
+    if not preserveLegacyChain:
+      let refusal = commitGraphWriteRefusal(gitBin, barePath)
+      if refusal.len > 0:
+        result.ok = false
+        result.looseAfter = result.looseBefore
+        result.diagnostic = refusal & "; gc skipped before pool graph rebuild"
+        return
+    let packDir = barePath / "objects/pack"
+    let hadMultiPackIndex = fileExists(packDir / "multi-pack-index") or
+      dirExists(packDir / "multi-pack-index.d")
     var gcArgs = sharedBareSafetyArgs()
     gcArgs.add(["-C", barePath, "gc", "--quiet"])
     let gc = runGit(gitBin, gcArgs)
@@ -3013,6 +3214,28 @@ proc maintainSharedBare*(gitBin, barePath: string;
       result.diagnostic = "git gc failed (" & $gc.code & "): " &
         gc.output.strip()
       return
+    # gc deliberately leaves graph writes disabled. Rebuild explicitly, after
+    # expiry, so no cached graph can still name a commit gc just removed.
+    # With no registered borrowers expiry is disabled. Preserve a legacy split
+    # graph: unknown borrowers may still chain onto it and cannot be migrated.
+    let graphFault = if preserveLegacyChain: "" else:
+      writeNonSplitCommitGraph(gitBin, barePath)
+    if graphFault.len > 0:
+      result.ok = false
+      result.ran = true
+      result.looseAfter = looseObjectCount(gitBin, barePath)
+      result.diagnostic = graphFault
+      return
+    if hadMultiPackIndex:
+      let midx = runGitEnv(gitBin, ["-C", barePath, "multi-pack-index", "write"],
+        lazyFetch = false)
+      if midx.code != 0:
+        result.ok = false
+        result.ran = true
+        result.looseAfter = looseObjectCount(gitBin, barePath)
+        result.diagnostic = "could not rebuild the multi-pack-index in " &
+          barePath & " (" & $midx.code & "): " & midx.output.strip()
+        return
     result.ran = true
     result.looseAfter = looseObjectCount(gitBin, barePath)
     touchMaintenanceStamp(barePath)
@@ -3132,6 +3355,40 @@ type
     wired*: bool
     verdict*: string
 
+proc alternateObjectDirs*(leaf: string): seq[string] =
+  ## Resolve relative alternates against the object directory, including a
+  ## linked worktree's common store. Keep missing targets visible to health.
+  for entry in readAlternates(leaf):
+    result.add(if entry.isAbsolute: entry
+      else: absolutePath(entry, absolutePath(gitObjectDir(leaf))))
+
+proc sameObjectDirectory(a, b: string): bool =
+  ## Existing stores have filesystem identity: a symlink spelling is not a
+  ## foreign pool. Missing stores still need the lexical comparison so health
+  ## can name them instead of silently omitting their borrowers.
+  if dirExists(a) and dirExists(b):
+    try:
+      return sameFile(a, b)
+    except OSError:
+      discard
+  samePathOnDisk(a, b)
+
+proc borrowsFromPool*(leaf, canonicalPool: string): bool =
+  ## Whether any resolved alternate names this object store, including relative
+  ## entries and symlink aliases. Share the classifier with foreign detection:
+  ## otherwise health can skip a canonical leaf while reporting it as healthy.
+  for objects in alternateObjectDirs(leaf):
+    if sameObjectDirectory(objects, canonicalPool / "objects"):
+      return true
+  false
+
+proc foreignAlternates*(leaf, canonicalPool: string): seq[string] =
+  ## A former URL key in our own cache is foreign just like another tool's
+  ## cache. Only this manifest URL's canonical objects directory is retained.
+  for objects in alternateObjectDirs(leaf):
+    if not sameObjectDirectory(objects, canonicalPool / "objects"):
+      result.add(objects)
+
 proc inspectRepoWiring*(workspaceRoot, cacheRoot, repoRelPath,
                         fetchUrl: string): SharedCloneRepoInfo =
   ## Build the wiring view for a single repo without touching the network.
@@ -3142,6 +3399,172 @@ proc inspectRepoWiring*(workspaceRoot, cacheRoot, repoRelPath,
     fetchUrl: fetchUrl,
     sharedBarePath: bare,
     barePresent: looksLikeGitDir(bare),
-    wired: isWiredTo(repoAbs, bare),
+    wired: borrowsFromPool(repoAbs, bare),
     verdict: inspectSharedBareVerdict(bare))
 
+proc leafConnectivityDiagnostic*(gitBin, leaf: string; full = false): string =
+  ## Observation only: no registration, configuration, lazy fetch or repair.
+  ## fsck includes dangling symbolic refs, which for-each-ref silently omits.
+  let checked = runGitEnv(gitBin, ["-C", leaf, "fsck",
+    (if full: "--full" else: "--connectivity-only")], lazyFetch = false)
+  if checked.code != 0 or "warning:" in checked.output or
+      "error:" in checked.output:
+    return checked.output.strip()
+  ""
+
+proc leafMissingObjects(gitBin, leaf, commonDir: string): tuple[missing: seq[string], diagnostic: string] =
+  # Promisor fsck deliberately tolerates missing objects. Traverse explicitly
+  # instead: retiring a promisor remote must not silently lose readable data.
+  var args = @["-C", leaf, "rev-list", "--objects", "--all", "--reflog",
+    "--indexed-objects", "--no-object-names", "--missing=print"]
+  for target in listLeafTargets(gitBin, leaf, commonDir):
+    args.add(target.id)
+  let walked = runGitEnv(gitBin, args, lazyFetch = false)
+  if walked.code != 0:
+    result.diagnostic = walked.output.strip()
+    return
+  for line in walked.output.splitLines():
+    if line.startsWith("?"):
+      result.missing.add(line[1 .. ^1].strip())
+
+proc consolidateLeafPool*(gitBin, leaf, canonicalPool: string): SharedCloneResult =
+  ## Materialize the leaf before retiring any of its alternate stores. This
+  ## never prunes a shared pool or deletes a ref. A replacement graph is built
+  ## as a non-split file with NO alternates, so it is entirely local. Until final
+  ## verification succeeds the original wiring/config/graphs are rollback state.
+  result.sharedBarePath = canonicalPool
+  let (_, commonDir) = gitDirOf(gitBin, leaf)
+  if commonDir.len == 0:
+    result.diagnostic = "not a git checkout: " & leaf
+    return
+  var lock = acquireVcsFileLock(checkoutLockPath(leaf))
+  if not lock.acquired:
+    result.diagnostic = "could not lock checkout: " & leaf
+    return
+  defer: releaseVcsFileLock(lock)
+  let altPath = alternatesFilePath(leaf)
+  let hadAlt = fileExists(altPath)
+  let configPath = commonDir / "config"
+  let graphDir = commonDir / "objects/info/commit-graphs"
+  let graphFile = commonDir / "objects/info/commit-graph"
+  let backupSuffix = ".repro-consolidate-backup"
+  let savedDir = graphDir & backupSuffix
+  let savedFile = graphFile & backupSuffix
+  var oldAlt, oldConfig: string
+  var changedAlt, changedConfig, movedDir, movedFile, replacedGraph: bool
+  try:
+    oldAlt = if hadAlt: readFile(altPath) else: ""
+    oldConfig = readFile(configPath)
+    if dirExists(savedDir) or fileExists(savedFile):
+      result.diagnostic = "previous consolidation graph backup exists; inspect " & savedDir
+      return
+    # Refuse existing corruption before modifying the leaf's metadata. In
+    # particular no repair is permitted to erase a dangling symbolic ref.
+    let before = leafConnectivityDiagnostic(gitBin, leaf, full = true)
+    if before.len > 0:
+      result.diagnostic = "consolidation refused: " & before
+      return
+    if not dirExists(canonicalPool / "objects") or
+        not registerBorrower(canonicalPool, leaf):
+      result.diagnostic = "cannot register checkout with canonical pool " & canonicalPool
+      return
+    var recoveryUrls: seq[string]
+    # rewire may already have repointed repro-pool. Read the former pools'
+    # upstream URLs, then fetch directly INTO THE LEAF, never into a foreign
+    # bare whose gc/retention policy this process does not own.
+    for objects in alternateObjectDirs(leaf):
+      let origin = runGit(gitBin,
+        ["-C", objects.parentDir, "config", "--get", "remote.origin.url"])
+      let url = origin.output.strip()
+      if origin.code == 0 and url.len > 0 and url notin recoveryUrls:
+        recoveryUrls.add(url)
+    # Hydrate promised objects while the old refetch chain is still usable.
+    # Each pass can reveal deeper missing trees; stop when a pass cannot heal
+    # an object, rather than trusting fsck's intentional promisor omissions.
+    while true:
+      let walked = leafMissingObjects(gitBin, leaf, commonDir)
+      if walked.diagnostic.len > 0:
+        result.diagnostic = "consolidation object traversal failed: " & walked.diagnostic
+        return
+      if walked.missing.len == 0: break
+      for id in walked.missing:
+        if refill(gitBin, leaf, id): continue
+        var recovered = false
+        for url in recoveryUrls:
+          discard runGitEnv(gitBin,
+            ["-C", leaf, "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+            "-c", "fetch.writeCommitGraph=false", "fetch", "--no-tags",
+            "--no-write-fetch-head", "--no-auto-maintenance",
+            "--no-recurse-submodules", url, id], lazyFetch = false)
+          if objectPresent(gitBin, leaf, id):
+            recovered = true
+            break
+        if not recovered:
+          result.diagnostic = "consolidation cannot materialize promised object " & id
+          return
+    # No --local: objects borrowed from every old pool must be copied. Normal
+    # repack retains reflog and linked-worktree roots as well as all refs.
+    let packed = runGitEnv(gitBin,
+      ["-C", leaf, "-c", "gc.auto=0", "repack", "-a", "-d"], lazyFetch = false)
+    if packed.code != 0:
+      result.diagnostic = "consolidation repack failed: " & packed.output.strip()
+      return
+    changedAlt = true
+    writeFile(altPath, "")
+    # Checking without ANY alternate also prevents a promised foreign-only
+    # object being mistaken for one supplied by the canonical pool.
+    let targets = listLeafTargets(gitBin, leaf, commonDir)
+    for target in targets:
+      if not objectPresent(gitBin, leaf, target.id):
+        result.diagnostic = "consolidation did not materialize " & target.refName & " " & target.id
+        return
+    let materialized = leafMissingObjects(gitBin, leaf, commonDir)
+    if materialized.diagnostic.len > 0 or materialized.missing.len > 0:
+      result.diagnostic = "consolidation left missing local objects: " &
+        materialized.diagnostic & " " & materialized.missing.join(", ")
+      return
+    if dirExists(graphDir):
+      moveDir(graphDir, savedDir)
+      movedDir = true
+    if fileExists(graphFile):
+      moveFile(graphFile, savedFile)
+      movedFile = true
+    replacedGraph = true
+    let graphFault = writeNonSplitCommitGraph(gitBin, leaf)
+    if graphFault.len > 0:
+      result.diagnostic = "consolidation graph rebuild failed: " & graphFault
+      return
+    let disconnected = leafConnectivityDiagnostic(gitBin, leaf, full = true)
+    if disconnected.len > 0:
+      result.diagnostic = "consolidation verification failed: " & disconnected
+      return
+    writeFile(altPath, canonicalPool / "objects" & "\n")
+    changedConfig = true
+    let configured = ensureLeafPoolConfig(gitBin, leaf, canonicalPool)
+    if configured.len > 0:
+      result.diagnostic = configured
+      return
+    let verified = leafConnectivityDiagnostic(gitBin, leaf, full = true)
+    if verified.len > 0:
+      result.diagnostic = "consolidation verification failed: " & verified
+      return
+    result.ok = true
+  except CatchableError as error:
+    result.diagnostic = "consolidation failed: " & error.msg
+  finally:
+    if not result.ok:
+      try:
+        if changedAlt:
+          if hadAlt: writeFile(altPath, oldAlt)
+          elif fileExists(altPath): removeFile(altPath)
+        if changedConfig: writeFile(configPath, oldConfig)
+        if replacedGraph:
+          if dirExists(graphDir): removeDir(graphDir)
+          if fileExists(graphFile): removeFile(graphFile)
+        if movedDir: moveDir(savedDir, graphDir)
+        if movedFile: moveFile(savedFile, graphFile)
+      except CatchableError as error:
+        result.diagnostic.add("; rollback failed: " & error.msg)
+    else:
+      if movedDir: removeDir(savedDir)
+      if movedFile: removeFile(savedFile)

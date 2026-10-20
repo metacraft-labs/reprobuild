@@ -61,11 +61,11 @@ proc recordProblems*(name: string; r: InterfaceTarballProvisioning):
   for encoded in r.detail.launcherEmit:
     try: discard decodeLauncherEmitSpec(encoded)
     except ValueError as e: result.add(at & "launcherEmit: " & e.msg)
-  # Some realizer performs everything the record asks for; an installer-
-  # route record must also project into the home archive realizer's input.
+  # The shared provisioning edge performs everything the record asks for:
+  # the record must project into its archive-realization input.
   try:
-    if archiveRouteFor(name, r) == arInstaller:
-      discard archiveRealizationOf(name, r)
+    discard archiveRouteFor(name, r)
+    discard archiveRealizationOf(name, r)
   except ValueError as e:
     result.add(at & "no realizer: " & e.msg)
 

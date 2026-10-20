@@ -266,10 +266,10 @@ suite "manifest editor edge cases":
     let f = readRepoFragment(dir / "repos" / "llvm-project.toml")
     check f.repo.name == "llvm-project"
     check f.repo.url_suffix == some("llvm/llvm-project")
-    # Every writer emits repo.v2: the v1-style `branch` lands as `mainline`.
-    check f.schema == schemaRepoFragmentV2
-    check f.repo.mainline == some("main")
-    check f.repo.branch.isNone
+    # Nothing here needs repo.v2, so the writer keeps v1 and `branch`.
+    check f.schema == schemaRepoFragmentV1
+    check f.repo.branch == some("main")
+    check f.repo.mainline.isNone
     check f.repo.tags == @["refs"]
     check f.repo.depends == @["mold"]
     check f.repo.copyfile.len == 1 and f.repo.copyfile[0].dest == "b"
@@ -324,7 +324,7 @@ suite "manifest editor edge cases":
   test "the renderers reproduce the layouts the CLI stubs used to write":
     check repoFragmentText(RepoFragment(repo: RepoBody(name: "r", path: "r",
       remote: some("origin"), revision: some("main")))) ==
-      "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\nname = \"r\"\n" &
+      "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\nname = \"r\"\n" &
       "path = \"r\"\nremote = \"origin\"\nrevision = \"main\"\n"
     check urlPrefixText(UrlPrefixManifest(`url-prefix`: UrlPrefixBody(
       name: "gh", url: "https://github.com/o"))) ==

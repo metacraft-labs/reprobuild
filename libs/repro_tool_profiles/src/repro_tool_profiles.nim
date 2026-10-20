@@ -416,7 +416,7 @@ proc writeStringSeq(outp: var seq[byte]; values: openArray[string]) =
     outp.writeString(value)
 
 proc readStringSeq(bytes: openArray[byte]; pos: var int): seq[string] =
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result = newSeq[string](count)
   for i in 0 ..< count:
     result[i] = readString(bytes, pos)
@@ -9423,7 +9423,7 @@ proc writeProbeResults(outp: var seq[byte]; probes: openArray[
 
 proc readProbeResults(bytes: openArray[byte]; pos: var int): seq[
     ToolProbeResult] =
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result = newSeq[ToolProbeResult](count)
   for i in 0 ..< count:
     result[i] = readProbeResult(bytes, pos)
@@ -9729,11 +9729,11 @@ proc decodePathOnlyBuildIdentity*(bytes: openArray[
     raiseEnvelopeError(eeMalformed, "path-only tool payload length mismatch")
   result.projectName = readString(bytes, pos)
   result.interfaceFingerprint = readDigest(bytes, pos)
-  let profileCount = int(readU32Le(bytes, pos))
+  let profileCount = readElementCount(bytes, pos, 4)
   result.profiles = newSeq[PathOnlyToolProfile](profileCount)
   for i in 0 ..< profileCount:
     result.profiles[i] = readProfile(bytes, pos, version)
-  let actionCount = int(readU32Le(bytes, pos))
+  let actionCount = readElementCount(bytes, pos, 4)
   result.actionIdentities = newSeq[ToolActionIdentity](actionCount)
   for i in 0 ..< actionCount:
     result.actionIdentities[i] = readActionIdentity(bytes, pos, version)

@@ -267,10 +267,12 @@ proc generatedCrossProjectPackageConst(packageName: string;
       template build*(p: `legacyType`): PackageBuild[`packageLit`] =
         PackageBuild[`packageLit`]()
   # A package name is a selector string and need not be a Nim identifier
-  # (``package "7zip":``); such a name gets the same sanitized value
-  # identifier the legacy const path emits (``packageValueIdent``).
+  # (``package "7zip":``, ``package "nil":``); such a name gets the same
+  # sanitized value identifier the legacy const path emits
+  # (``packageValueIdent``). ``isNimIdentifier``, not
+  # ``strutils.validIdentifier``, decides: the latter accepts a keyword.
   let packageIdent =
-    if packageName.validIdentifier: ident(packageName)
+    if packageName.isNimIdentifier: ident(packageName)
     else: ident(packageValueIdent(packageName))
   result = quote do:
     const `packageIdent`* {.inject.}: Package[`packageLit`] =

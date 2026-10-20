@@ -980,3 +980,24 @@ deadline; after a timeout, remaining queries are explicitly unconfirmed.
 were not confirmed. This flag applies to forge identity queries; other health
 checks retain their existing fetch behavior. Use `--verbose` for every
 finding and its remedy, or `--json` for complete structured results.
+
+## Moving a checkout between shared clone pools
+
+`repro ws shared-clones rewire` adds the canonical pool for each manifest URL.
+It preserves existing alternates, and reports an incomplete migration when a
+checkout still borrows from another pool (including an old organisation or
+repository name under the same cache root).
+
+Run `repro ws shared-clones consolidate [<project>]` to finish the migration.
+It copies the checkout's reachable and reflog objects into its own store,
+hydrates promised objects through the available upstreams, replaces its local
+commit graph, and verifies connectivity before removing the old alternates.
+Tags, safety refs, linked worktrees, reflogs, the index and working files are
+preserved. `repro-pool` then points at the canonical pool. An unresolved object
+or dangling symbolic ref refuses migration and preserves the old wiring;
+repair the reported corruption and rerun the command. The command never deletes
+refs or changes a foreign shared pool.
+
+`repro health` reports how many checkouts with alternates it examined out of
+all checked-out participating repositories. It names foreign pools and reports
+broken connectivity even when the checkout does not yet use reprobuild's pool.

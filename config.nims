@@ -1,4 +1,4 @@
-import std/[os, strutils, compilesettings]
+import std/[algorithm, os, strutils, compilesettings]
 
 # The directory holding THIS file, resolved independently of whatever project
 # nim happens to be compiling.
@@ -936,16 +936,42 @@ proc firstExistingPrefix(candidates: openArray[string]; header: string;
       return prefix
   ""
 
+proc nixStorePrefixes(namePattern: string): seq[string] =
+  ## The `/nix/store` directories matching the glob `namePattern`
+  ## (`*-sqlite-*`, ...), sorted bytewise.
+  ##
+  ## Expanded by the shell's own glob and `printf` builtin, with no external
+  ## tool. This used to be `find ... | sort`, but the provider-compile and
+  ## interface-extraction edges run this file with `PATH` set to the Nim and
+  ## C compilers' directories only (`providerCompileLaunchEnv`): neither tool
+  ## was found, every store lookup came back empty, and the SQLite search
+  ## fell through to the host's `/usr/lib` -- which then ended up in the
+  ## provider's RPATH ahead of the Nix glibc (reprobuild-pm issue
+  ## 2026-10-14-project-provider-rpath-puts-usr-lib-ahead-of-the-nix-glibc).
+  ## Listing the store in NimScript instead (`listDirs`) exceeds the VM's
+  ## iteration limit on a store of ~100k entries.
+  ##
+  ## The pattern is this file's own literal, never user input; a pattern
+  ## that matches nothing leaves the glob unexpanded, which `-d` rejects.
+  ## A symlink is skipped, as `find -type d` did and as `nixLibDirIn`'s
+  ## `walkDir` does. The shell's glob order follows the locale, so the
+  ## result is sorted here, as `nixLibDirIn` in `repro_interface_artifacts`
+  ## sorts its own.
+  if not dirExists("/nix/store"):
+    return @[]
+  let listing = gorgeEx("for d in /nix/store/" & namePattern &
+    "; do [ -d \"$d\" ] && [ ! -L \"$d\" ] && printf '%s\\n' \"$d\"; " &
+    "done; true")
+  if listing.exitCode != 0:
+    return @[]
+  for line in listing.output.splitLines:
+    let path = line.strip()
+    if path.len > 0:
+      result.add(path)
+  result.sort()
+
 proc nixPrefix(namePattern, header: string; dylibNames: openArray[string]): string =
-  let cmd = "find /nix/store -maxdepth 1 -type d -name '" & namePattern &
-    "' 2>/dev/null | sort"
-  let result = gorgeEx(cmd)
-  if result.exitCode != 0:
-    return ""
-  for line in result.output.splitLines:
-    let prefix = line.strip()
-    if prefix.len == 0:
-      continue
+  for prefix in nixStorePrefixes(namePattern):
     # Same architecture filter as `nixLibDir` (and as the library's
     # `nixPrefix`): the store holds every architecture under one name.
     if fileExists(prefix / header) and
@@ -983,15 +1009,7 @@ proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
   ## holds one of `dylibNames` built for the compilation's target. Mirrored
   ## by `nixLibDirIn` in `repro_interface_artifacts`; the architecture filter
   ## is what keeps "first sorted" from meaning "arbitrary architecture".
-  let cmd = "find /nix/store -maxdepth 1 -type d -name '" & namePattern &
-    "' 2>/dev/null | sort"
-  let result = gorgeEx(cmd)
-  if result.exitCode != 0:
-    return ""
-  for line in result.output.splitLines:
-    let prefix = line.strip()
-    if prefix.len == 0:
-      continue
+  for prefix in nixStorePrefixes(namePattern):
     let libDir = firstExistingLibDir([prefix], dylibNames, targetArchOnly = true)
     if libDir.len > 0:
       return libDir
@@ -1101,7 +1119,14 @@ when not defined(windows) and not defined(macosx):
   # (NIX_LDFLAGS) or a Nix store sqlite built for the target architecture
   # (`nixLibDir` filters the glob); only on a host with no Nix at all the
   # distribution's directories. A host directory is used for `-L` but is
-  # never baked into RPATH (see `isHostSystemLibDir`).
+  # never baked into RPATH (see `isHostSystemLibDir`) -- by this file. Nix's
+  # ld-wrapper adds its own `-rpath` for every `-L` directory holding a
+  # library the link uses, and skips only directories outside `$NIX_STORE`;
+  # with `NIX_STORE` unset that test matches nothing. The isolated
+  # provider-compile launch therefore declares `NIX_STORE`
+  # (`providerCompileLaunchEnv`), and the store lookups above must not depend
+  # on the shell `PATH` (`nixStorePrefixes`), or a Nix host falls through to
+  # `/usr/lib` here.
   let sqliteNames = ["libsqlite3.so", "libsqlite3.a"]
   let nixInPlay = getEnv("NIX_CC").len > 0 or
     getEnv("IN_NIX_SHELL").len > 0 or dirExists("/nix/store")

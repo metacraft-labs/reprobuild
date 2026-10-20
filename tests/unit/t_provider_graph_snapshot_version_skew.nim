@@ -229,10 +229,13 @@ suite "the version this build writes, and the v1 snapshot it supersedes":
     # `actions` list and the provider RESPONSE payload is positional,
     # so a v1 response decoded as v2 would be read past its end rather
     # than refused -- which is what the loud-but-unnamed `trailing
-    # provider response payload bytes` was. This line is meant to fail
-    # and name itself on the next bump so the move is confirmed on
+    # provider response payload bytes` was. F1's second half (§4.8 /
+    # D-SS15) moved it 2 -> 3 when `DevEnvServiceMetadata` grew
+    # `consumedActionIds`, for the same positional-payload reason one
+    # record deeper; this pin confirms that move. This line is meant to
+    # fail and name itself on the next bump so the move is confirmed on
     # purpose.
-    check providerGraphEnvelopeVersion() == 2'u16
+    check providerGraphEnvelopeVersion() == 3'u16
 
   test "a BYTE-EXACT pre-bump v1 snapshot is recomputed":
     # The strongest form of the rule, and the one that is about the

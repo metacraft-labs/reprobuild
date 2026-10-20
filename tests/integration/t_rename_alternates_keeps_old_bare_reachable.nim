@@ -108,7 +108,7 @@ suite "declared rename — alternates keep the old bare reachable":
       check (if "relocationAlternates" in entry:
                entry["relocationAlternates"].len
              else: 0) == 2
-      check "shared-clones rewire" in second.output
+      check "shared-clones consolidate" in second.output
 
       # 3. Every object the working tree needs resolves.
       check run(q(gitBin) & " -C " & q(newPath) & " cat-file -e " &

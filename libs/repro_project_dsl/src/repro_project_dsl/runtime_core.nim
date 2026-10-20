@@ -3489,10 +3489,16 @@ proc unmonitorableActionDepfile*(tool: ReproFs; output: string;
   ## children either. The only dependency evidence the edge then has is this
   ## file.
   ##
-  ## WHY AN ACTION MIGHT NOT BE MONITORABLE. Today exactly one reason
-  ## qualifies: the action performs library interposition ITSELF, so the
+  ## WHY AN ACTION MIGHT NOT BE MONITORABLE. The action may perform library
+  ## interposition ITSELF, so the
   ## engine's interposer and the action's re-enter each other on the same libc
-  ## entry points and the pair livelocks. "Monitoring is inconvenient", "the
+  ## entry points and the pair livelocks. A recorder-backed test can also
+  ## require an unchanged recorded address space: injecting the monitor
+  ## changes executable mappings and maps mutable shared-memory files, which
+  ## the recorder must refuse. Such a test must additionally be non-cacheable,
+  ## since this declaration-derived depfile cannot observe its runtime input
+  ## closure (Sandbox-And-Monitoring.md, "Tests that record their own children").
+  ## "Monitoring is inconvenient", "the
   ## action is slow", and "the evidence looks noisy" are NOT reasons — those
   ## keep ``automaticMonitorPolicy()``, which is the baseline and the thing
   ## that keeps the action cache sound.

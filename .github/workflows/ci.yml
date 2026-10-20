@@ -197,6 +197,7 @@ jobs:
         with:
           name: lint-logs
           path: test-logs/
+          if-no-files-found: error
           retention-days: 1
       - name: Mirror logs to S3 (non-blocking)
         if: always()
@@ -637,32 +638,37 @@ jobs:
             github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token_bootstrap.outputs.token }}
         run: |
           set -euo pipefail
-          repro_root="${{ github.workspace }}"
-          repro_bin="$repro_root/build/bin/repro"
-          # Materialise reprobuild's own `repro` binary (idempotent bootstrap).
-          dev-exec just bootstrap
-          # The bootstrapped `repro` carries bare dlopen()s for its runtime
-          # libraries (libclingo.so is lazy; libzstd.so.1 loads at module init for
-          # the binary-cache client) because build_apps.sh strips rpath per the
-          # .rodata-bake guard, relying on a runtime LD_LIBRARY_PATH. The build below
-          # runs it inside CODETRACER's dev shell, which does not carry those libs,
-          # so bake reprobuild's own dev-shell library dirs into repro's RPATH.
-          # Mirrors the flake's zstd DT_RPATH postFixup for the package build.
-          repro_ld="$(dev-exec sh -c 'printf %s "${LD_LIBRARY_PATH:-}"')"
-          echo "ct-build: reprobuild dev-shell lib dirs = ${repro_ld:-<EMPTY>}"
-          if [ -n "$repro_ld" ]; then
-            # `repro build ct` self-spawns a repro-daemon and other helper
-            # binaries; patch every bootstrapped binary, not just `repro`.
-            for b in "$repro_root"/build/bin/*; do
-              [ -f "$b" ] && dev-exec patchelf --print-rpath "$b" >/dev/null 2>&1 || continue
-              cur_rpath="$(dev-exec patchelf --print-rpath "$b" 2>/dev/null || true)"
-              dev-exec patchelf --force-rpath --set-rpath "${cur_rpath:+$cur_rpath:}$repro_ld" "$b" \
-                || echo "ct-build: patchelf failed for $b"
-            done
-            echo "ct-build: repro RPATH now = $(dev-exec patchelf --print-rpath "$repro_bin" 2>/dev/null)"
-          else
-            echo "ct-build: WARNING dev-shell LD_LIBRARY_PATH empty; cannot bake RPATH" >&2
-          fi
+          mkdir -p test-logs
+          # Keep evidence even when dev-exec fails before just creates its log.
+          # Use a separate file: just bootstrap owns test-logs/bootstrap.log.
+          {
+            repro_root="${{ github.workspace }}"
+            repro_bin="$repro_root/build/bin/repro"
+            # Materialise reprobuild's own `repro` binary (idempotent bootstrap).
+            dev-exec just bootstrap
+            # The bootstrapped `repro` carries bare dlopen()s for its runtime
+            # libraries (libclingo.so is lazy; libzstd.so.1 loads at module init for
+            # the binary-cache client) because build_apps.sh strips rpath per the
+            # .rodata-bake guard, relying on a runtime LD_LIBRARY_PATH. The build below
+            # runs it inside CODETRACER's dev shell, which does not carry those libs,
+            # so bake reprobuild's own dev-shell library dirs into repro's RPATH.
+            # Mirrors the flake's zstd DT_RPATH postFixup for the package build.
+            repro_ld="$(dev-exec sh -c 'printf %s "${LD_LIBRARY_PATH:-}"')"
+            echo "ct-build: reprobuild dev-shell lib dirs = ${repro_ld:-<EMPTY>}"
+            if [ -n "$repro_ld" ]; then
+              # `repro build ct` self-spawns a repro-daemon and other helper
+              # binaries; patch every bootstrapped binary, not just `repro`.
+              for b in "$repro_root"/build/bin/*; do
+                [ -f "$b" ] && dev-exec patchelf --print-rpath "$b" >/dev/null 2>&1 || continue
+                cur_rpath="$(dev-exec patchelf --print-rpath "$b" 2>/dev/null || true)"
+                dev-exec patchelf --force-rpath --set-rpath "${cur_rpath:+$cur_rpath:}$repro_ld" "$b" \
+                  || echo "ct-build: patchelf failed for $b"
+              done
+              echo "ct-build: repro RPATH now = $(dev-exec patchelf --print-rpath "$repro_bin" 2>/dev/null)"
+            else
+              echo "ct-build: WARNING dev-shell LD_LIBRARY_PATH empty; cannot bake RPATH" >&2
+            fi
+          } 2>&1 | tee test-logs/ci-bootstrap.log
 
       # Reconcile CodeTracer's lock-pinned source siblings, after preparing
       # the freshly bootstrapped binaries.
@@ -1119,6 +1125,7 @@ jobs:
         with:
           name: test-logs
           path: test-logs/
+          if-no-files-found: error
           retention-days: 1
       - name: Mirror logs to S3 (non-blocking)
         timeout-minutes: 50

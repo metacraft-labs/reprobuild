@@ -737,11 +737,15 @@ proc legacySingleFileScan(repoRoot, rel: string): bool =
 const SelfInterposingTestStems = [
   "t_stackable_hooks_extracted_process_tree",
   "t_m9r40_1_probe_clean_env",
-  "test_monitor_finish_is_pooled"
+  "test_monitor_finish_is_pooled",
+  "t_e2e_hcr_linux_replay_of_patched_recording"
 ]
   ## Tests that perform ``LD_PRELOAD`` interposition THEMSELVES, and so cannot
   ## be observed by the engine's io-monitor: two interposers on the same libc
-  ## entry points re-enter each other and livelock. Their execute edges get a
+  ## entry points re-enter each other and livelock. The recorder-backed HCR
+  ## gate also refuses the monitor's modified executable mappings and mutable
+  ## mapped shards. Its execute edge must additionally be non-cacheable because
+  ## the depfile does not observe its runtime input closure. These edges get a
   ## GENERATED DEPFILE (``fs.unmonitorableActionDepfile`` feeding
   ## ``makeDepfilePolicy``) as their dependency evidence instead of monitoring.
   ## See the long note at the execute-edge call site in ``repro.nim`` for the

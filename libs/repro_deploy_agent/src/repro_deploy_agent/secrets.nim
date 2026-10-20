@@ -63,6 +63,8 @@
 
 import std/[os, strutils]
 
+from repro_core/codec import elementCountFits
+
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 
 import bearssl/abi/consttypes as bsslConst
@@ -174,7 +176,14 @@ proc decodeSecretFiles*(buf: openArray[byte]): seq[SecretFile] =
   ## Inverse of `encodeSecretFiles`. Rejects trailing bytes: a decoder that
   ## silently ignores them would accept a payload the producer did not mean.
   var pos = 0
-  let count = int(readU32LE(buf, pos))
+  let countRaw = readU32LE(buf, pos)
+  # Each file carries at least its path length, mode and content length
+  # (three u32 fields), so a count the remaining bytes cannot hold is refused
+  # before it sizes the result.
+  if not elementCountFits(countRaw, buf.len - pos, 12):
+    raise newException(SecretsError,
+      "secret payload element count exceeds remaining bytes")
+  let count = int(countRaw)
   result = newSeqOfCap[SecretFile](count)
   for _ in 0 ..< count:
     var f = SecretFile()

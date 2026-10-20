@@ -5333,7 +5333,7 @@ proc writeStringSeq(outp: var seq[byte]; values: openArray[string]) =
     outp.writeString(value)
 
 proc readStringSeq(bytes: openArray[byte]; pos: var int): seq[string] =
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, 4)
   result = newSeq[string](count)
   for i in 0 ..< count:
     result[i] = readString(bytes, pos)
@@ -5370,7 +5370,7 @@ proc readProcessSpec(bytes: openArray[byte]; pos: var int): ProcessSpec =
   result.kind = CommandKind(kind)
   result.executable = NormalizedPath(kind: npRelative, value: readString(bytes, pos))
   result.args = readStringSeq(bytes, pos)
-  let envCount = int(readU32Le(bytes, pos))
+  let envCount = readElementCount(bytes, pos, 4)
   result.env = newSeq[EnvVar](envCount)
   for i in 0 ..< envCount:
     result.env[i].name = readString(bytes, pos)
@@ -5431,29 +5431,29 @@ proc readDependencyPolicy(bytes: openArray[byte]; pos: var int):
     raiseEnvelopeError(eeMalformed, "invalid dependency gathering kind")
   result.kind = DependencyGatheringKind(kind)
   result.completeness = readCompleteness(bytes, pos)
-  let reportCount = int(readU32Le(bytes, pos))
+  let reportCount = readElementCount(bytes, pos, 4)
   result.recognizedReports = newSeq[RecognizedDependencyReportSpec](reportCount)
   for i in 0 ..< reportCount:
     result.recognizedReports[i].formatName =
       DependencyFormatName(readString(bytes, pos))
-    let outputCount = int(readU32Le(bytes, pos))
+    let outputCount = readElementCount(bytes, pos, 4)
     result.recognizedReports[i].outputs = newSeq[ExpectedDependencyFile](outputCount)
     for j in 0 ..< outputCount:
       result.recognizedReports[i].outputs[j] =
         readExpectedDependencyFile(bytes, pos)
     result.recognizedReports[i].completeness = readCompleteness(bytes, pos)
-  let converterCount = int(readU32Le(bytes, pos))
+  let converterCount = readElementCount(bytes, pos, 4)
   result.postBuildConverters =
     newSeq[PostBuildDependencyConverterSpec](converterCount)
   for i in 0 ..< converterCount:
     result.postBuildConverters[i].converterProcess = readProcessSpec(bytes, pos)
-    let inputCount = int(readU32Le(bytes, pos))
+    let inputCount = readElementCount(bytes, pos, 4)
     result.postBuildConverters[i].inputs =
       newSeq[ExpectedDependencyFile](inputCount)
     for j in 0 ..< inputCount:
       result.postBuildConverters[i].inputs[j] =
         readExpectedDependencyFile(bytes, pos)
-    let outputCount = int(readU32Le(bytes, pos))
+    let outputCount = readElementCount(bytes, pos, 4)
     result.postBuildConverters[i].outputs =
       newSeq[ExpectedDependencyFile](outputCount)
     for j in 0 ..< outputCount:
@@ -5513,7 +5513,7 @@ proc readCacheEntryIdentity(bytes: openArray[byte]; pos: var int):
   result.packageName = readString(bytes, pos)
   result.packageVersion = readString(bytes, pos)
   result.selectedOptions = newTable[string, string]()
-  let optionCount = int(readU32Le(bytes, pos))
+  let optionCount = readElementCount(bytes, pos, 4)
   for _ in 0 ..< optionCount:
     let name = readString(bytes, pos)
     result.selectedOptions[name] = readString(bytes, pos)
@@ -5619,7 +5619,7 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result.builtinText = readString(bytes, pos)
   result.builtinEntries = readStringSeq(bytes, pos)
   result.targetNames = readStringSeq(bytes, pos)
-  let typedOutputCount = int(readU32Le(bytes, pos))
+  let typedOutputCount = readElementCount(bytes, pos, 4)
   result.typedOutputs = newSeq[EngineTypedOutput](typedOutputCount)
   for i in 0 ..< typedOutputCount:
     result.typedOutputs[i].fieldName = readString(bytes, pos)
@@ -5642,7 +5642,7 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
       "invalid lowered action fixedOutput sentinel")
   result.fixedOutput = fixedByte == 1'u8
   result.toolIdentityRefs = readStringSeq(bytes, pos)
-  let refKindCount = int(readU32Le(bytes, pos))
+  let refKindCount = readElementCount(bytes, pos, 1)
   result.toolIdentityRefKinds = newSeq[DepKind](refKindCount)
   for i in 0 ..< refKindCount:
     let rawKind = readByteValue(bytes, pos)
@@ -5689,12 +5689,12 @@ proc decodeLoweredGraphCache(bytes: openArray[byte]): LoweredGraphCacheRecord =
   result.selectedActionId = readString(bytes, pos)
   result.pathEnv = readString(bytes, pos)
   result.cacheKey = readString(bytes, pos)
-  let poolCount = int(readU32Le(bytes, pos))
+  let poolCount = readElementCount(bytes, pos, 4)
   result.pools = newSeq[BuildPool](poolCount)
   for i in 0 ..< poolCount:
     result.pools[i].name = readString(bytes, pos)
     result.pools[i].capacity = readU32Le(bytes, pos)
-  let actionCount = int(readU32Le(bytes, pos))
+  let actionCount = readElementCount(bytes, pos, 4)
   result.actions = newSeq[BuildAction](actionCount)
   for i in 0 ..< actionCount:
     result.actions[i] = readBuildAction(bytes, pos)
@@ -11257,9 +11257,22 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
 
   template logSummary(line: string) =
     appendDiagnostic(line)
-    if eventSink != nil:
+    # ``--log`` selects the same status lines on both routes (CLI/build.md
+    # §"Daemon Mode"). A daemon worker always sets ``eventSink`` and both
+    # clients print every diagnostic event they receive, so the filter is
+    # applied here, at the source, rather than in each client: the worker
+    # re-parses the client's own ``rawArgs`` and ``REPROBUILD_LOG`` crosses in
+    # ``daemonCarriedEnvironment``, so this ``logMode`` IS the client's
+    # selection. Filtering in the thin client (``apps/repro-client``) instead
+    # would mean a second copy of the ``--log`` parse there. This used to
+    # forward before consulting ``logMode``, so a daemon-hosted build printed
+    # every line even under ``--log=quiet`` (reprobuild-pm issues/2026-10-17-
+    # daemon-hosted-build-ignores-log-and-direct-fallback-is-silent.md).
+    if logMode == blmQuiet:
+      discard
+    elif eventSink != nil:
       eventSink("diagnostic", line, "{}")
-    elif logMode != blmQuiet:
+    else:
       # Terminate any in-flight progress line on stderr before the stdout
       # echo so captured output (execCmdEx merges stderr+stdout) keeps each
       # diagnostic line on its own physical line. Without this, the
@@ -17119,6 +17132,7 @@ proc supervisorConfig(parsed: ParsedDevSessionCommand;
                       publicCliPath: string;
                       mode: DevSessionMode): DevSessionSupervisorConfig =
   DevSessionSupervisorConfig(
+    sessionId: "dev-session-launch-" & $getCurrentProcessId() & "-" & $epochTime(),
     mode: mode,
     foreground: parsed.foreground,
     projectRoot: parsed.selection.projectRoot,
@@ -17138,6 +17152,7 @@ proc supervisorConfig(parsed: ParsedDevSessionCommand;
 proc supervisorCliArgs(config: DevSessionSupervisorConfig): seq[string] =
   result = @[
     "__repro-dev-session-supervisor",
+    "--session-id", config.sessionId,
     "--mode", config.mode.modeName,
     "--project-root", config.projectRoot,
     "--module", config.modulePath,
@@ -17279,6 +17294,23 @@ proc readSharedInstanceLedger(outDir: string):
         serviceName: item{"serviceName"}.getStr(""),
         keyJson: item{"keyJson"}.getStr(""),
         address: item{"address"}.getStr("")))
+
+proc recordSharedInstanceAcquisition(outDir, holderId, serviceName,
+                                    keyJson, address: string) =
+  ## Keep every acquired holder until down releases it. A later up can
+  ## change the recipe or fail before reaching its old references, but those
+  ## leases still exist. Owners and consumers therefore share one ledger,
+  ## deduplicated by address just like the daemon's per-project holder set.
+  var ledger = readSharedInstanceLedger(outDir)
+  if ledger.entries.len > 0 and ledger.holderId != holderId:
+    raise newException(ValueError,
+      "the shared-instance ledger belongs to another holder: " & ledger.holderId)
+  for entry in ledger.entries:
+    if entry.address == address:
+      return
+  ledger.entries.add((serviceName: serviceName, keyJson: keyJson,
+    address: address))
+  writeSharedInstanceLedger(outDir, holderId, ledger.entries)
 
 proc liftedServiceDeclaration(interfacePath, serviceName: string):
     tuple[snapshot: ServiceInterfaceSnapshot;
@@ -17690,6 +17722,11 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
         "it (Shared-Development-Services.md §4.6).")
       inc refused
       continue
+    # The daemon has acquired the lease already. Persist it before reading
+    # contributions or minted attributes: either can refuse after attachment,
+    # and down must still be able to release the acquired holder.
+    recordSharedInstanceAcquisition(parsed.selection.outDir, holderId,
+      resolution.serviceName, encodeServiceInstanceKey(key), response.address)
     if response.diagnostic.len > 0:
       # §4.3 row 2's warning, AT THE RESOLVER'S OWN CALL SITE, which is
       # the property §4.6 asks for by name.
@@ -17928,17 +17965,10 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
     if declaration.declared:
       declarations.add((declaration: declaration, service: service))
   if declarations.len == 0:
-    # No shared services. The ledger is removed rather than left behind:
-    # a stale ledger from a previous `repro up` of a recipe that has since
-    # dropped its `instance` block would make the next `repro down`
-    # release a holder this session never took.
-    try:
-      removeFile(extendedPath(
-        parsed.selection.outDir.sharedInstanceLedgerPath))
-    except OSError, IOError:
-      discard
-    # Shared-Development-Services L8: and the MINTED record, for exactly
-    # the reason above one level over. A stale registration record from
+    # Keep the lease ledger: an earlier up may have acquired instances
+    # that the changed recipe no longer declares. Only down releases them.
+    # Shared-Development-Services L8: remove the MINTED record. A stale
+    # registration record from
     # a previous `repro up` of a recipe that has since dropped its
     # `converge` (or its whole `instance` block) would let the
     # supervisor concretize a `@minted:` token the recipe no longer
@@ -17961,7 +17991,6 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
   # named once so the §4.3 generation check below and
   # `liftedServiceDeclaration` cannot be pointed at two different files.
   let interfacePathForGeneration = edge.interfacePath
-  var ledger: seq[tuple[serviceName, keyJson, address: string]] = @[]
   var minted: seq[tuple[serviceName, member, mintedId: string;
                         provenance: RegistrarProvenance]] = @[]
   # Shared-Development-Services §7.3: what each instance reported ABOUT
@@ -18065,8 +18094,8 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
       " at " & response.address & " pid " & $response.pid &
       " with " & $response.holders.len & " holder" &
       (if response.holders.len == 1: "" else: "s"))
-    ledger.add((serviceName: item.declaration.serviceName,
-      keyJson: encodeServiceInstanceKey(key), address: response.address))
+    recordSharedInstanceAcquisition(parsed.selection.outDir, holderId,
+      item.declaration.serviceName, encodeServiceInstanceKey(key), response.address)
     # Shared-Development-Services L8 -- RECONCILE THE REGISTRATIONS, now
     # that the instance is LIVE.
     #
@@ -18439,11 +18468,6 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
   # hazard rather than a defect; it is cleared because the alternative is
   # to rely on nobody adding one.
   clearReadinessEdgeCollaborators()
-  # The ledger records what was CONVERGED, including on a run where
-  # another declaration refused: this project really does hold those
-  # instances, and a `repro down` that did not release them would leave
-  # them held forever.
-  writeSharedInstanceLedger(parsed.selection.outDir, holderId, ledger)
   # And what was MINTED, for the supervisor child to concretize argv
   # from. Written unconditionally, including empty: a stale file from a
   # previous run would otherwise resolve a token the recipe no longer
@@ -18475,10 +18499,9 @@ proc releaseSharedServiceInstances(outDir: string): int =
   # that window costs when someone reads it.
   #
   # BEFORE the `ledger.entries.len == 0` early return, and that placement is
-  # the whole point: a PURE CONSUMER -- the F5 case, a project that resolves
-  # another's service and declares none of its own -- takes no holder and so
-  # has NO LEDGER. A removal placed after that return would be dead code for
-  # exactly the sessions this reader was built for.
+  # the whole point: a session with no shared instances can still have a
+  # stale minted record. Pure consumers do take holders, and their resolver
+  # records those in the same ledger as owned declarations.
   try:
     removeFile(extendedPath(outDir.sharedInstanceMintedPath))
   except OSError, IOError:
@@ -18663,26 +18686,19 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
     # a required parameter precisely so these two arms cannot drift again.
     return runDevSessionSupervisor(config,
       devEnvProducerOpsResolver(parsed.selection.projectRoot))
-  let budget = config.readyBudget(parsed.readyTimeoutMs)
-  # The previous session's published control-API bind is removed BEFORE the
-  # supervisor is launched, so that neither this process's wait nor the
-  # supervisor's own can read a port that closed when the last session
-  # ended. Doing it here rather than only in the supervisor is what closes
-  # the window: the supervisor is a detached child, so between the launch
-  # below and its own removal the file is still on disk and this process is
-  # already polling. See ``discardStaleControlApiBind``.
-  config.discardStaleControlApiBind()
-  config.startBackgroundSupervisor()
-  # Announced BEFORE the wait, and on stderr beside the dev-env
-  # announcement, for two reasons: a `repro up` that sits for minutes should
-  # say what it is waiting for and for how long, and the number it is about
-  # to hold itself to should be visible on the SUCCESS path too -- not only
-  # in the diagnostic nobody sees when things work.
-  stderr.writeLine("repro " & commandName & ": waiting up to " &
-    budget.describe() & " for the session to report `session.up`")
-  let status =
+  # Shared declarations and contributions converged above even on a repeat
+  # invocation. Reuse the admitted live session instead of spawning a child
+  # that must refuse its already-held supervisor lock.
+  var status = reusableDevSession(config)
+  if status.isNil:
+    let budget = config.readyBudget(parsed.readyTimeoutMs)
+    # Only the locked supervisor may clear an old bind; the parent accepts
+    # a ready marker only for this new launch's session ID.
+    config.startBackgroundSupervisor()
+    stderr.writeLine("repro " & commandName & ": waiting up to " &
+      budget.describe() & " for the session to report `session.up`")
     try:
-      waitForDevSessionReady(config, budget)
+      status = waitForDevSessionReady(config, budget)
     except DevSessionStillStartingError as err:
       stderr.writeLine("repro " & commandName & ": " & err.msg)
       return DevSessionStillStartingExitCode
@@ -18696,6 +18712,11 @@ proc runDownCommand(args: openArray[string]): int =
     acceptStopTimeout = true)
   let metadataPath = parsed.selection.outDir.sessionMetadataPath()
   if not fileExists(extendedPath(metadataPath)):
+    # A resolver can fail after acquiring a holder but before launching the
+    # supervisor. Its ledger is authoritative even without session metadata;
+    # there is no session-owned process to stop before releasing these leases.
+    if readSharedInstanceLedger(parsed.selection.outDir).entries.len > 0:
+      return releaseSharedServiceInstances(parsed.selection.outDir)
     raise newException(IOError,
       "no authoritative Reprobuild dev session metadata at " & metadataPath)
   # readJsonFileResilient retries past the brief `writeFile(O_TRUNC)`
@@ -18705,6 +18726,10 @@ proc runDownCommand(args: openArray[string]): int =
   # observes a zero-byte file and raises `session.json(1, 0) Error: {
   # expected`. See readJsonFileResilient for the race rationale.
   let metadata = readJsonFileResilient(metadataPath)
+  # A failed repeat up can acquire leases while the prior session is already
+  # down. Its stopped supervisor need not be contacted to release them.
+  if metadata{"status"}.getStr("") == "down":
+    return releaseSharedServiceInstances(parsed.selection.outDir)
   let httpBindValue = metadata{"httpBind"}.getStr()
   if httpBindValue.len == 0:
     raise newException(ValueError,
@@ -18812,6 +18837,7 @@ proc runDevSessionSupervisorHelper(args: openArray[string];
   let debounceText = valueAfterFlag(args, "--debounce-ms")
   let sessionProjectRoot = valueAfterFlag(args, "--project-root")
   let config = DevSessionSupervisorConfig(
+    sessionId: valueAfterFlag(args, "--session-id"),
     mode: mode,
     foreground: args.find("--foreground") >= 0,
     projectRoot: sessionProjectRoot,
@@ -18839,6 +18865,9 @@ proc runDevSessionSupervisorHelper(args: openArray[string];
 proc runDevSessionHttpHelper(args: openArray[string]): int =
   let portText = valueAfterFlag(args, "--port")
   runDevSessionHttpServer(DevSessionHttpConfig(
+    parentPid: parseInt(valueAfterFlag(args, "--parent-pid")),
+    supervised: args.find("--supervised") >= 0,
+    sessionId: valueAfterFlag(args, "--session-id"),
     sessionDir: valueAfterFlag(args, "--session-dir"),
     host: valueAfterFlag(args, "--host"),
     port: if portText.len > 0: parseInt(portText) else: 0))
@@ -24300,11 +24329,26 @@ const DaemonRequestAuthoritativeEnvPrefixes* = ["REPROBUILD_", "REPRO_"]
   ## Reprobuild's own control namespace, over which a build REQUEST is
   ## authoritative and the daemon's start environment is not.
 
+const DaemonRequestAuthoritativeEnvNames* = ["IN_AGENT_SHELL"]
+  ## Variables OUTSIDE that namespace that reprobuild nevertheless reads to
+  ## pick a user-facing default, so the caller's value must govern a hosted
+  ## build exactly as a ``REPROBUILD_`` knob does. ``IN_AGENT_SHELL`` selects
+  ## the progress default (``configuredBuildProgressMode``), and quiet progress
+  ## makes the ``--log`` default quiet; spec/CLI/build.md §"Daemon Mode"
+  ## requires the client's own selection to apply on both routes. Without the
+  ## entry, a daemon auto-started from an agent shell silenced the status
+  ## lines of every later caller that was not in one. Exact names only: list
+  ## a variable here only when reprobuild itself consults it, never one a
+  ## project merely passes through to its actions.
+
 proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
                             currentEnv: openArray[string]): seq[string] =
   ## Variables the daemon process carries that the REQUEST does not, limited
-  ## to reprobuild's own control namespace. The worker must unset these before
-  ## running a hosted build.
+  ## to reprobuild's own control namespace
+  ## (``DaemonRequestAuthoritativeEnvPrefixes``) plus the few variables
+  ## outside it that reprobuild reads to pick a default
+  ## (``DaemonRequestAuthoritativeEnvNames``). The worker must unset these
+  ## before running a hosted build.
   ##
   ## Without this the request environment was applied as an OVERLAY: every
   ## `KEY=VALUE` the client sent was installed, but a variable the daemon had
@@ -24333,6 +24377,9 @@ proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
       continue
     let key = item[0 ..< split]
     if carried.contains(key):
+      continue
+    if key in DaemonRequestAuthoritativeEnvNames:
+      result.add(key)
       continue
     for prefix in DaemonRequestAuthoritativeEnvPrefixes:
       if key.startsWith(prefix):
@@ -29028,9 +29075,15 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       raise newException(ValueError,
         "daemon-hosted stats capture requested but repro-daemon cannot " &
           "execute builds: " & err.msg)
-    if logMode != blmQuiet:
-      stderr.writeLine("repro build: daemon build unsupported; falling " &
-        "back to direct mode: " & err.msg)
+    # The route switch is reported whatever ``--log`` says, as ``repro watch``
+    # reports its own. ``--log`` governs the build's status lines, which the
+    # direct route then prints or not exactly as the daemon route would; the
+    # switch itself is not one of them. Gated on ``logMode`` it was invisible
+    # under the quiet default, so a daemon that had gone away turned every
+    # later build direct without a word (reprobuild-pm issues/2026-10-17-
+    # daemon-hosted-build-ignores-log-and-direct-fallback-is-silent.md).
+    stderr.writeLine("repro build: daemon build unsupported; falling " &
+      "back to direct mode: " & err.msg)
     if statsCapture.enabled:
       raise newException(ValueError,
         "daemon-hosted stats capture requested but repro-daemon is unavailable: " &
@@ -29044,9 +29097,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       raise newException(ValueError,
         "daemon-hosted stats capture requested but repro-daemon is unavailable: " &
           err.msg)
-    if logMode != blmQuiet:
-      stderr.writeLine("repro build: daemon unavailable; falling back to " &
-        "direct mode: " & err.msg)
+    # Reported unconditionally for the reason given in the arm above.
+    stderr.writeLine("repro build: daemon unavailable; falling back to " &
+      "direct mode: " & err.msg)
     return runDirectBuild()
 
 proc parseGraphOutputFormat(value: string; allowDot: bool): GraphOutputFormat =
@@ -39457,12 +39510,13 @@ proc probeGitOperationInProgress*(identity: GitToolIdentity;
       return
 
   # TC-8g — ``consultReflog = false`` is for a caller that runs only while a
-  # commit is being FORMED (the pre-commit certificate gate). Git creates the
-  # state paths above before it replays anything, so every replayed commit
-  # finds them; the reflog tail below would instead keep saying "rebase" on
-  # the first ordinary commit after a rebase FINISHED (its last entry is
-  # `rebase (finish)`), and a gate that stood down there would let that
-  # commit through unjudged.
+  # commit is being FORMED (the pre-commit lock refresh and certificate gate,
+  # and the lock-update node that stands in for them). Git creates the state
+  # paths above before it replays anything, so every replayed commit finds
+  # them; the reflog tail below would instead keep saying "rebase" on the
+  # first ordinary commit after a rebase FINISHED (its last entry is
+  # `rebase (finish)`), and a hook that stood down there would let that
+  # commit through unjudged and un-re-pinned.
   if not consultReflog:
     result.state = gosIdle
     return
@@ -41436,7 +41490,7 @@ proc renderSyncTextLines*(report: WorkspaceSyncReport;
         result.add("    | borrows objects from " &
           $entry.relocationAlternates.len & " shared bares (" &
           entry.relocationAlternates.join(", ") &
-          ") — consolidate with `repro ws shared-clones rewire`")
+          ") — consolidate with `repro ws shared-clones consolidate`")
     if verbose and entry.executionDiagnostic.len > 0:
       # RA-27 ``--verbose``: surface the raw tool diagnostic behind the flag
       # so the default output stays a legible digest.
@@ -47393,7 +47447,7 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
     #    independently (the pre-push gate, and the refusal to push a branch
     #    sharing no history with its remote). The cost is a checkout alternated
     #    to two bares; it is reported as such, and
-    #    `repro ws shared-clones rewire` is the consolidation step.
+    #    `repro ws shared-clones consolidate` is the consolidation step.
     for entry in readAlternates(destination):
       outcome.alternates.add(entry)
     if cacheRoot.len > 0 and newCloneUrl.len > 0:
@@ -48337,6 +48391,21 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
         stderr.writeLine("workspace sync: [restored] " & repo.path &
           " @ locked " & lockedSha)
 
+  # Commit-pinned first clones use pull's attached parking convention. Do this
+  # before workspace branch attachment, which must never override the pin.
+  for repoIdx in cloneRepoIdx:
+    if not checkoutStatus.hasKey(repoIdx) or
+        checkoutStatus[repoIdx][0] != "cloned": continue
+    let repo = resolved.repos[repoIdx]
+    if not looksLikeSha(repo.revision): continue
+    let shortSha = repo.revision[0 ..< min(12, repo.revision.len)]
+    let parked = gitRunPlain(identity, ["-C", args.workspaceRoot / repo.path,
+      "checkout", "--quiet", "-B", "reprobuild/pinned/" & shortSha, repo.revision])
+    if parked.code != 0:
+      checkoutStatus[repoIdx] = ("failed",
+        "could not park cloned '" & repo.path & "' at pinned revision " &
+        repo.revision & ": " & parked.output.strip())
+
   # When a workspace feature branch is active, attach newly cloned repos to that branch.
   let wsBranchOpt = readWorkspaceBranch(args.workspaceRoot)
   if wsBranchOpt.isSome and wsBranchOpt.get().len > 0:
@@ -48344,6 +48413,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
     for repoIdx in cloneRepoIdx:
       if checkoutStatus.hasKey(repoIdx) and checkoutStatus[repoIdx][0] == "cloned":
         let repo = resolved.repos[repoIdx]
+        if looksLikeSha(repo.revision): continue
         let repoAbs = args.workspaceRoot / repo.path
         if dirExists(repoAbs / ".git"):
           let rName = gitRemoteNameFor(repo)
@@ -49575,9 +49645,24 @@ proc branchConvergenceBlockers(identity: GitToolIdentity;
       remoteName))
   result.add(stashBlocker(identity, repoDir))
 
+proc warnPullBranchTransition(identity: GitToolIdentity;
+                              repoPath, repoName, targetBranch: string): string =
+  let current = gitRunPlainQuery(identity,
+    ["-C", repoPath, "symbolic-ref", "--short", "-q", "HEAD"])
+  if current.code notin [0, 1]:
+    return "could not determine the current branch before convergence: " &
+      current.diagnostic
+  let source = if current.code == 0: current.output.strip() else: "detached HEAD"
+  if source != targetBranch:
+    stderr.writeLine("workspace pull: WARNING: " & repoName &
+      " switching from '" & source & "' to '" & targetBranch &
+      "'; work on the current branch may be absent from the manifest revision. " &
+      "Use `repro sync` to update while retaining the current branch.")
+    stderr.flushFile()
+
 proc convergeRepoToManifestRevision(
     identity: GitToolIdentity;
-    repoPath, revision: string;
+    repoPath, repoName, revision: string;
     remoteName: string = "origin"): tuple[ok: bool; branch, headSha, diag: string] =
   ## ``ensureRepoTrackingBranches`` core (RA-11). Put the existing
   ## checkout at ``repoPath`` onto a LOCAL TRACKING BRANCH matching the
@@ -49617,6 +49702,9 @@ proc convergeRepoToManifestRevision(
     let shortSha =
       if revision.len > 12: revision[0 ..< 12] else: revision
     let branch = "reprobuild/pinned/" & shortSha
+    let warningError = warnPullBranchTransition(identity, repoPath, repoName, branch)
+    if warningError.len > 0:
+      return (false, "", "", warningError)
     # Create or move the synthetic branch to the pinned SHA, then check
     # it out. ``branch -f`` is idempotent across reruns.
     let mk = gitRunPlain(identity, ["-C", repoPath, "branch", "-f",
@@ -49639,6 +49727,9 @@ proc convergeRepoToManifestRevision(
   if remoteTip.len == 0:
     return (false, "", "",
       "no remote-tracking branch '" & rName & "/" & revision & "' after fetch")
+  let warningError = warnPullBranchTransition(identity, repoPath, repoName, revision)
+  if warningError.len > 0:
+    return (false, "", "", warningError)
   # Create the local branch tracking <remoteName>/<revision> if it does not yet
   # exist; ``checkout -B`` resets it to the remote tip and attaches HEAD.
   let co = gitRunPlain(identity, ["-C", repoPath, "checkout", "--quiet",
@@ -49789,7 +49880,7 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
     var converged: tuple[ok: bool; branch, headSha, diag: string]
     withDrivenOperationContext:
       converged = convergeRepoToManifestRevision(
-        identity, absPath, repo.revision, remoteName = gitRemoteNameFor(repo))
+        identity, absPath, repo.name, repo.revision, remoteName = gitRemoteNameFor(repo))
     if not converged.ok:
       entry.outcome = pullOutcomeTag(ppoFailed)
       entry.diagnostic = converged.diag
@@ -58413,8 +58504,10 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
     #
     # H1 and H2 (§16.3) still apply: they are rules for every repo that has
     # the locks, and they need only the recipe and the locks in the commit.
-    # A history-rewriting operation stands down here as it does below.
-    let standDown = managedHookStandDown("pre-commit", repoRoot)
+    # A history-rewriting operation stands down here as it does below, and
+    # only while one is in flight (see there).
+    let standDown = managedHookStandDown("pre-commit", repoRoot,
+      consultReflog = false)
     if standDown.standDown:
       if standDown.loud:
         stderr.writeLine("repro " & standDown.report)
@@ -58439,7 +58532,14 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
   # here because this hook also STAGES what it writes. It also stands down
   # BEFORE the regression rule: replaying commits that already exist must not
   # be refused (§13.3).
-  let standDown = managedHookStandDown("pre-commit", repoRoot)
+  #
+  # Only the in-flight state paths count, never the HEAD reflog tail
+  # (``consultReflog = false``): git creates those paths before it replays
+  # anything, so every commit an operation forms finds them, while the reflog
+  # tail still reads `rebase (finish)` on the first ORDINARY commit after a
+  # rebase completed, and that commit would skip its re-pin.
+  let standDown = managedHookStandDown("pre-commit", repoRoot,
+    consultReflog = false)
   if standDown.standDown:
     appendPreCommitLog(workspaceRoot, timestamp &
       (if hasFlake: " flake-lock" else: "") &
@@ -72888,19 +72988,38 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       break sharedCloneLeavesCheck
     let cacheRoot = defaultCacheRoot(parsed.workspaceRoot)
     var leaves = 0
+    var total = 0
+    var foreignPools: seq[string]
     var stale: seq[string]
     var broken: seq[string]
     var chains: seq[string]
     var diagnostics: seq[string]
     for repo in ctx.resolved.repos:
       let abs = parsed.workspaceRoot / repo.path
-      if not dirExists(abs / ".git"):
+      if not dirExists(abs / ".git") and not fileExists(abs / ".git"):
+        continue
+      inc total
+      try:
+        let entries = alternateObjectDirs(abs)
+        if entries.len == 0: continue
+        inc leaves
+        let canonical = sharedBarePath(cacheRoot, cloneUrlFor(repo))
+        let foreign = foreignAlternates(abs, canonical)
+        if foreign.len > 0:
+          foreignPools.add(repo.path & " borrows from foreign pool(s): " &
+            foreign.join(", "))
+        let connectivity = leafConnectivityDiagnostic(ctx.gitIdentity.binaryPath, abs)
+        if connectivity.len > 0:
+          diagnostics.add(repo.path & ": " & connectivity)
+      except CatchableError as error:
+        diagnostics.add(repo.path & ": cannot inspect alternates: " & error.msg)
+        continue
+      if not borrowsFromPool(abs, sharedBarePath(cacheRoot, cloneUrlFor(repo))):
         continue
       let lr = checkLeaf(ctx.gitIdentity.binaryPath, abs, lcmReport,
-        cacheRoot)
+        cacheRoot, pool = sharedBarePath(cacheRoot, cloneUrlFor(repo)))
       if lr.pool.len == 0:
         continue
-      inc leaves
       ctx.leafReports.add(lr)
       if lr.diagnostic.len > 0:
         diagnostics.add(repo.path & ": " & lr.diagnostic)
@@ -72915,15 +73034,18 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         else:
           discard
     if stale.len == 0 and broken.len == 0 and chains.len == 0 and
-        diagnostics.len == 0:
+        diagnostics.len == 0 and foreignPools.len == 0:
       checks.add(HealthCheck(
         name: "shared-clone-leaves",
         status: hsOk,
-        detail: $leaves & " checkout(s) borrow from shared clones; every " &
+        detail: "examined " & $leaves & " of " & $total & " checkout(s); every " &
           "object they name is present",
         remedy: "", fixKind: hfNone))
     else:
-      var detail: seq[string]
+      var detail = @["examined " & $leaves & " of " & $total & " checkout(s)"]
+      if foreignPools.len > 0:
+        detail.add(foreignPools.join("; ") &
+          "; migrate with `repro ws shared-clones consolidate`")
       if chains.len > 0:
         detail.add($chains.len & " checkout(s) lacked a working refetch chain " &
           "to a partial shared clone: " & chains.join(", "))
@@ -73559,7 +73681,7 @@ proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
       stdout.writeLine(line)
   report.exitCode
 
-# ---- RA-5: `repro workspace shared-clones [list|rewire|root|gc|migrate]` ----
+# ---- RA-5: `repro workspace shared-clones` inspection and repair ----
 #
 # Inspection / repair surface for the shared object-cache (per-upstream bare
 # clones + per-repo ``objects/info/alternates`` wiring). The accelerator is
@@ -73576,6 +73698,9 @@ proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
 #                  already-checked-out repo that is missing it. Best-effort
 #                  per repo — a failure to populate one bare is reported but
 #                  does not abort the others.
+#   * ``consolidate`` — copy each checkout's needed objects locally, verify
+#                  independence from its old alternates and replace them with
+#                  the canonical pool. Failed verification restores its wiring.
 #   * ``migrate`` — Shared-Clone-Pool-Integrity §5 over the WHOLE cache
 #                  root in one pass: every pool gets the retention hook and
 #                  its config, every leaf found (this workspace's repos, the
@@ -73594,10 +73719,12 @@ proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
 #
 # Exit codes:
 #   * 0 — verb completed (``list``/``root`` always 0 on success; ``rewire``
-#         0 when every wiring step that had a present bare succeeded).
+#         0 when every wiring step that had a present bare succeeded, and
+#         ``consolidate`` 0 when every selected checkout migrated safely).
 #   * 1 — bad usage, resolve/IO failure, or a ``rewire`` that could not wire
 #         a repo whose bare WAS present (a genuine failure, distinct from a
-#         best-effort cache miss which is only reported).
+#         best-effort cache miss which is only reported), or a failed
+#         consolidation whose original alternates are retained.
 
 type
   SharedClonesArgs = object
@@ -73755,10 +73882,10 @@ proc parseSharedClonesArgs(args: openArray[string]): SharedClonesArgs =
   # ``gc`` and ``maintenance`` are aliases for the RA-15 maintenance pass.
   if result.verb == "maintenance":
     result.verb = "gc"
-  if result.verb notin ["list", "rewire", "root", "gc", "migrate"]:
+  if result.verb notin ["list", "rewire", "consolidate", "root", "gc", "migrate"]:
     raise newException(ValueError,
       "`repro workspace shared-clones` verb must be " &
-        "list|rewire|root|gc|maintenance|migrate, got: " & result.verb)
+        "list|rewire|consolidate|root|gc|maintenance|migrate, got: " & result.verb)
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
@@ -73809,7 +73936,7 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
   # ``rewire`` and ``gc`` do live VCS work. ``list`` is read-only. Resolve
   # git only when we will use it.
   var identity: GitToolIdentity
-  if parsed.verb in ["rewire", "gc", "migrate"]:
+  if parsed.verb in ["rewire", "consolidate", "gc", "migrate"]:
     identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
 
   if parsed.verb == "migrate":
@@ -73858,7 +73985,30 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
     entry.wired = info.wired
     entry.verdict = info.verdict
 
-    if parsed.verb == "rewire":
+    if parsed.verb == "consolidate":
+      let repoAbs = parsed.workspaceRoot / repo.path
+      if not dirExists(repoAbs / ".git") and not fileExists(repoAbs / ".git"):
+        entry.diagnostic = "repo not checked out; nothing to consolidate"
+      else:
+        # Refresh only the canonical pool; foreign pools remain read-only.
+        let refreshed =
+          if info.barePresent:
+            SharedCloneResult(ok: true, sharedBarePath: info.sharedBarePath,
+              diagnostic: prepareSharedBare(identity.binaryPath, info.sharedBarePath))
+          else:
+            refreshSharedBare(identity.binaryPath, result.cacheRoot, cloneUrl)
+        if not refreshed.ok or refreshed.diagnostic.len > 0:
+          entry.diagnostic = refreshed.diagnostic
+          result.exitCode = 1
+        else:
+          let consolidated = consolidateLeafPool(identity.binaryPath,
+            repoAbs, refreshed.sharedBarePath)
+          entry.diagnostic = consolidated.diagnostic
+          entry.barePresent = true
+          entry.wired = consolidated.ok
+          entry.rewired = consolidated.ok
+          if not consolidated.ok: result.exitCode = 1
+    elif parsed.verb == "rewire":
       let repoAbs = parsed.workspaceRoot / repo.path
       if not dirExists(repoAbs):
         # Nothing to retrofit for a repo that isn't checked out yet.
@@ -73928,6 +74078,19 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
         if not m.ok:
           entry.diagnostic = "maintenance failed: " & m.diagnostic
           result.exitCode = 1
+    # Additive wiring is not migration: the old pool can still own safety
+    # refs, tags and graph bases even when wired=true. Name the dependency.
+    if parsed.verb in ["list", "rewire"]:
+      try:
+        let foreign = foreignAlternates(parsed.workspaceRoot / repo.path,
+          entry.sharedBarePath)
+        if foreign.len > 0:
+          if entry.diagnostic.len > 0: entry.diagnostic.add("; ")
+          entry.diagnostic.add("migration incomplete; still borrows from " &
+            foreign.join(", ") &
+            "; complete with `repro ws shared-clones consolidate`")
+      except CatchableError as error:
+        entry.diagnostic.add("; cannot inspect alternates: " & error.msg)
     result.repos.add(entry)
 
 proc writeSharedClonesReport(report: SharedClonesReport;
@@ -73939,7 +74102,7 @@ proc writeSharedClonesReport(report: SharedClonesReport;
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc runWorkspaceSharedClonesCommand*(args: openArray[string]): int =
-  ## ``repro workspace shared-clones [list|rewire|root|gc|migrate] [<project>]
+  ## ``repro workspace shared-clones <verb> [<project>]
   ## [--workspace-root=PATH] [--json] [--force]``. ``maintenance`` is an alias
   ## for ``gc``; ``--force`` bypasses the gc budget gate.
   let parsed = parseSharedClonesArgs(args)
@@ -76798,7 +76961,6 @@ proc executeAdd(parsed: AddArgs): AddReport =
       parsed.revision.len > 0 or resolved.defaultRevision.len == 0
     if not fileExists(fragmentAbs):
       writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
-        schema: schemaRepoFragmentV2,
         repo: RepoBody(name: parsed.target, path: repoPath,
           remote: some(remoteName),
           revision: (if pinRevision: some(revision) else: none(string))))))
@@ -94694,7 +94856,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         # a half-converted manifest repo shows what is there rather than a
         # blank column for every converted fragment.
         remote = m.repo.url_prefix.get(m.repo.remote.get(""))
-        revision = m.repo.mainlineBranch.get(m.repo.revision.get(""))
+        revision = m.repo.revision.get(m.repo.mainlineBranch.get(""))
       except CatchableError as err:
         # Still listed — this listing is the remedy other diagnostics point
         # at for a fragment the reader refuses (an escaping checkout path) —
@@ -94935,8 +95097,9 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         if not fragmentExisted:
           createDir(manifestRoot / "repos")
           writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
-            schema: schemaRepoFragmentV2,
-            # `--branch` is written as the v2 `mainline` (Branch-Roles §3.1).
+            # `--branch` is the mainline. The writer picks the schema: v1
+            # (`branch`) unless the fragment needs v2 (Branch-Roles §6), so a
+            # `repro` that predates v2 keeps reading the workspace.
             repo: RepoBody(name: repo, path: effectivePath,
               mainline: (if branch.len > 0: some(branch) else: none(string)),
               revision: (if branch.len == 0 and revision.len > 0: some(revision)
@@ -94985,7 +95148,6 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         if not fragmentExisted:
           createDir(manifestRoot / "repos")
           writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
-            schema: schemaRepoFragmentV2,
             repo: RepoBody(name: plan.repoName, path: effectivePath,
               remote: some(plan.remoteName),
               mainline: (if branch.len > 0: some(branch) else: none(string)),
@@ -96215,7 +96377,7 @@ proc runThinAppDispatch(programName: string): int =
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "shared-clones":
-    # RA-5 — `repro workspace shared-clones [list|rewire|root|gc|migrate]`. Inspect
+    # RA-5 — `repro workspace shared-clones`. Inspect
     # or repair the shared object-cache wiring. Same dispatch convention
     # as the M9–M12 family: the implementation lives in
     # ``repro_cli_support`` as ``runWorkspaceSharedClonesCommand``.
