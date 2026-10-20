@@ -15129,6 +15129,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_post_commit_cache_push_does_not_hold_callers_pipe.nim",
+    binary: "build/test-bin/t_post_commit_cache_push_does_not_hold_callers_pipe",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_post_commit_cache_push_propagates_objects_to_sibling_workspace.nim",
     binary: "build/test-bin/t_post_commit_cache_push_propagates_objects_to_sibling_workspace",
     defines: @[],
