@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2270,
+    "nimTestBinaries": 2272,
     "pureUnitConsolidationGroups": 63,
     "pureUnitTests": 678,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2301
+    "testEntries": 2303
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1318,7 +1318,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 17,
-      "integration": 1242,
+      "integration": 1244,
       "platform/destructive": 138,
       "pure unit": 678,
       "unclassified": 226
@@ -1523,9 +1523,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2270,
+    "nimTestBinaryCount": 2272,
     "pythonTestFileCount": 31,
-    "testEntryCount": 2301
+    "testEntryCount": 2303
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9050,6 +9050,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_run_build_returns_its_results_without_copying",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_run_build_returns_its_results_without_copying.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_scratch_dirs",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -9936,6 +9954,28 @@
       "source": "libs/repro_cli_support/tests/t_action_cache_root_resolution.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_build_report_is_streamed_not_held_in_memory",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_build_report_is_streamed_not_held_in_memory.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

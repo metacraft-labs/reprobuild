@@ -792,6 +792,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_run_build_returns_its_results_without_copying.nim",
+    binary: "build/test-bin/t_run_build_returns_its_results_without_copying",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_scratch_dirs.nim",
     binary: "build/test-bin/t_scratch_dirs",
     defines: @[],
@@ -1199,6 +1208,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_cli_support/tests/t_action_cache_root_resolution.nim",
     binary: "build/test-bin/t_action_cache_root_resolution",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_cli_support/tests/t_build_report_is_streamed_not_held_in_memory.nim",
+    binary: "build/test-bin/t_build_report_is_streamed_not_held_in_memory",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

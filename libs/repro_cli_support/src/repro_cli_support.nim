@@ -136,6 +136,7 @@ import repro_hcr_linkgraph
 import repro_elevation
 import repro_cli_support/watch
 import repro_cli_support/dev_session
+from repro_cli_support/session_process_owner import sessionProcessAlive
 import repro_cli_support/push_hook_protocol
 # The `runquotad` an invocation owns must not outlive it, however it ends:
 # terminating signals are forwarded to it, and it holds no descriptor of ours
@@ -6183,6 +6184,298 @@ proc loweredGraphCacheReportContext*(cachePath: string):
   BuildReportProviderContext(kind: brpkLoweredGraphCache,
     route: "lowered-graph-cache", loweredGraphCachePath: cachePath)
 
+type
+  BuildReportSink = object
+    ## Where the members of a build report go: into a ``JsonNode`` tree
+    ## (``buildReportJson``, for in-process readers and tests) or straight
+    ## into a file (``writeBuildReport`` / ``writeBuildFailureReport``).
+    ##
+    ## WHY THE FILE ROUTE NEVER BUILDS THE TREE. A ``.#test-builds`` report
+    ## is gigabytes of ``actions[].evidence`` path strings — 7.7 GB over
+    ## 2,180 actions, ~85M paths, on the run in reprobuild-pm
+    ## ``issues/2026-10-18-full-suite-run-dies-at-the-build-action-payload-cache-policy-case.md``.
+    ## Holding that document as a ``JsonNode`` tree and then as one ``$root``
+    ## string cost about 4.5x its size in RSS, AFTER every build had finished:
+    ## the engine grew to 16 GB plus ~29 GB of swap writing a post-mortem.
+    ## Streamed, the writer holds one action's subtree at a time, so its peak
+    ## no longer scales with the build.
+    ##
+    ## WHY ONE MEMBER LIST FOR BOTH. ``emitBuildReport`` is the only place
+    ## that knows the members and their order, and both destinations are fed
+    ## by it, so the streamed bytes cannot drift from ``$buildReportJson(...)``
+    ## — the exact compact text readers of the file rely on (the suite's
+    ## ``scripts/lib/build_report_attribution.sh`` greps the single line and
+    ## reads ``targetResolution`` from its tail).
+    case streamed: bool
+    of false:
+      root: JsonNode
+        ## The document being assembled.
+      currentArray: JsonNode
+        ## The array member currently receiving ``element``s. Already
+        ## inserted into ``root``, so the member keeps its position.
+    of true:
+      file: File
+      fileOpen: bool
+      partialPath: string
+        ## Written here and renamed onto ``finalPath`` only once complete, so
+        ## a reader never sees a truncated document under the final name and
+        ## a failed write leaves any earlier report as it was.
+      finalPath: string
+      committed: bool
+        ## Set once the partial has been renamed onto ``finalPath``; until
+        ## then ``abandonStreamedReport`` deletes it.
+      firstMember: bool
+      firstElement: bool
+      scratch: string
+        ## Reused serialisation buffer: it grows to the largest single member
+        ## or element, never to the document.
+
+proc treeReportSink(): BuildReportSink =
+  BuildReportSink(streamed: false, root: newJObject())
+
+proc reclaimAbandonedReportPartials(path: string) =
+  ## Delete the ``<name>.partial-<pid>`` files of earlier writers of
+  ## ``path`` that died before renaming them into place.
+  ##
+  ## A writer killed mid-write — the out-of-memory kill, a signal, a suite
+  ## timeout — never reaches ``abandonStreamedReport``, and for a
+  ## ``.#test-builds`` report the file it leaves is gigabytes. Nothing else
+  ## ever looks at these names, so without this they would accumulate, one
+  ## per killed run. The next writer of the same report is the one place
+  ## that both knows the name and runs routinely.
+  ##
+  ## Only what is provably abandoned is removed: the exact name of THIS
+  ## report followed by a decimal pid that is no longer alive. A live pid
+  ## is a concurrent writer and is left to finish; a name that does not
+  ## parse, or belongs to another report, is not ours to judge. A pid
+  ## reused by an unrelated live process only makes us keep a stale
+  ## partial one more time, never delete a live one.
+  let prefix = extractFilename(path) & ".partial-"
+  let ownPid = getCurrentProcessId()
+  try:
+    for kind, entry in walkDir(extendedPath(parentDir(path))):
+      if kind != pcFile:
+        continue
+      let name = extractFilename(entry)
+      if not name.startsWith(prefix) or name.len == prefix.len:
+        continue
+      let pidText = name[prefix.len .. ^1]
+      if not pidText.allCharsInSet(Digits):
+        continue
+      var pid: int
+      try:
+        pid = parseInt(pidText)
+      except ValueError:
+        continue
+      if pid == ownPid or sessionProcessAlive(pid):
+        continue
+      try:
+        removeFile(entry)
+      except OSError:
+        # Best effort: a partial that cannot be removed now (permissions,
+        # a racing writer of the same name) is retried by the next write
+        # and must not fail this one.
+        discard
+  except OSError:
+    discard
+
+proc stdioFlush(f: File): cint {.importc: "fflush", header: "<stdio.h>".}
+  ## ``fflush(3)`` with its result. ``flushFile`` and ``close`` both discard
+  ## it, and the last buffer of the document (up to the 1 MiB ``bufSize``) is
+  ## only written by that flush: a full disk there would otherwise go
+  ## unnoticed and a truncated report would be renamed into place.
+
+proc abandonStreamedReport(sink: var BuildReportSink) =
+  ## Cleanup for a write that raised before ``commitStreamedReport``
+  ## renamed it into place: close and delete the partial file. Harmless
+  ## after a commit.
+  if sink.fileOpen:
+    sink.file.close()
+    sink.fileOpen = false
+  if not sink.committed:
+    try:
+      removeFile(extendedPath(sink.partialPath))
+    except OSError:
+      discard
+
+proc openStreamedReportSink(path: string): BuildReportSink =
+  ## Create ``path``'s directory and open a partial file beside it. The
+  ## partial name is per process so two concurrent writers of one report
+  ## path cannot interleave into a single file.
+  createDir(extendedPath(parentDir(path)))
+  reclaimAbandonedReportPartials(path)
+  result = BuildReportSink(streamed: true, finalPath: path,
+    partialPath: path & ".partial-" & $getCurrentProcessId(),
+    firstMember: true)
+  result.file = open(extendedPath(result.partialPath), fmWrite,
+    bufSize = 1 shl 20)
+  result.fileOpen = true
+  try:
+    result.file.write('{')
+  except CatchableError:
+    abandonStreamedReport(result)
+    raise
+
+proc commitStreamedReport(sink: var BuildReportSink) =
+  ## Close the document, flush it with the result checked, and move it onto
+  ## its final name. Any failure raises with the partial still unrenamed, so
+  ## the caller's ``abandonStreamedReport`` deletes it.
+  sink.file.write('}')
+  if stdioFlush(sink.file) != 0:
+    raiseOSError(osLastError(), "flush build report " & sink.partialPath)
+  sink.file.close()
+  sink.fileOpen = false
+  moveFile(extendedPath(sink.partialPath), extendedPath(sink.finalPath))
+  sink.committed = true
+
+proc writeStreamedKey(sink: var BuildReportSink; key: string) =
+  if not sink.firstMember:
+    sink.file.write(',')
+  sink.firstMember = false
+  sink.scratch.setLen(0)
+  escapeJson(key, sink.scratch)
+  sink.scratch.add(':')
+  sink.file.write(sink.scratch)
+
+proc writeStreamedValue(sink: var BuildReportSink; value: JsonNode) =
+  # ``toUgly`` is exactly what ``$`` on a ``JsonNode`` produces, which is
+  # what keeps the streamed file byte-identical to ``$buildReportJson``.
+  sink.scratch.setLen(0)
+  toUgly(sink.scratch, value)
+  sink.file.write(sink.scratch)
+
+proc member(sink: var BuildReportSink; key: string; value: JsonNode) =
+  ## One top-level member whose value is small and fixed-shape.
+  if sink.streamed:
+    sink.writeStreamedKey(key)
+    sink.writeStreamedValue(value)
+  else:
+    sink.root[key] = value
+
+proc beginArrayMember(sink: var BuildReportSink; key: string) =
+  ## Open a top-level array member whose length scales with the build; its
+  ## elements are handed over one at a time with ``element``.
+  if sink.streamed:
+    sink.writeStreamedKey(key)
+    sink.file.write('[')
+    sink.firstElement = true
+  else:
+    sink.currentArray = newJArray()
+    sink.root[key] = sink.currentArray
+
+proc element(sink: var BuildReportSink; value: JsonNode) =
+  if sink.streamed:
+    if not sink.firstElement:
+      sink.file.write(',')
+    sink.firstElement = false
+    sink.writeStreamedValue(value)
+  else:
+    sink.currentArray.add(value)
+
+proc endArrayMember(sink: var BuildReportSink) =
+  if sink.streamed:
+    sink.file.write(']')
+  else:
+    sink.currentArray = nil
+
+template arrayMember(sink: var BuildReportSink; key: string;
+                     body: untyped) =
+  sink.beginArrayMember(key)
+  body
+  sink.endArrayMember()
+
+proc emitBuildReport(sink: var BuildReportSink;
+                     context: BuildReportProviderContext;
+                     cmakeRegenerationResult, buildResult: BuildRunResult;
+                     workspaceVcs: Option[seq[
+                         workspaceVcsEvidence.WorkspaceVcsEvidence]];
+                     targetResolutions: Option[seq[TargetResolutionRecord]]) =
+  ## The full build report's members, in order, into ``sink``. See
+  ## ``buildReportJson`` for what each member means and
+  ## ``BuildReportSink`` for why this is the only list of them.
+  sink.member("schemaId", %BuildReportSchemaId)
+  sink.member("providerRoute", %context.route)
+  case context.kind
+  of brpkCompiled:
+    # The compiled-provider members, unchanged in name and meaning from the
+    # report before routes were distinguished.
+    sink.member("providerBinary", %context.compiled.outputBinaryPath)
+    sink.member("providerArtifact", %context.artifactId)
+    sink.member("providerFingerprint",
+      %digestHex(context.compiled.providerFingerprint))
+    sink.member("providerCompileOutput",
+      %context.compiled.executionResult.output)
+    sink.arrayMember("providerCompileActions"):
+      for item in context.providerCompileResult.results:
+        sink.element(actionResultJson(item))
+    sink.member("providerSnapshot", %context.snapshotPath)
+    sink.member("providerInvocations", %context.invocations)
+  of brpkPrebuilt:
+    # A prebuilt provider reports "its actual binary/content identity,
+    # snapshot and invocations rather than an invented compile
+    # fingerprint/output" (CLI/build.md). So the compile members are ABSENT,
+    # not empty: an empty ``providerFingerprint`` would read as "a compile
+    # whose fingerprint was the empty digest". The digest is the same
+    # ``fileContentDigest`` the Tier 2b artifact id is built from (see
+    # ``standardProviderArtifactIdForBinary``), taken here from the bytes on
+    # disk, so on that route it equals the artifact id's suffix.
+    sink.member("providerBinary", %context.binaryPath)
+    sink.member("providerArtifact", %context.artifactId)
+    sink.member("providerBinaryContentDigest",
+      %fileContentDigest(context.binaryPath))
+    sink.member("providerSnapshot", %context.snapshotPath)
+    sink.member("providerInvocations", %context.invocations)
+  of brpkLoweredGraphCache:
+    # No provider ran. The route and the cache file are what is known; the
+    # validated content key that admitted the entry is not handed to the
+    # writer, so it is stated as unavailable rather than calling the path a
+    # key (CLI/build.md: "state ``keyAvailable: false``").
+    sink.member("loweredGraphCache", %*{
+      "path": context.loweredGraphCachePath,
+      "keyAvailable": false
+    })
+    sink.member("providerInvocations", %0)
+  # The interface-extraction edges this invocation ran, and their trace (see
+  # ``interfaceExtractActionJson``).
+  sink.arrayMember("interfaceExtractActions"):
+    for item in interfaceExtractReportItems:
+      sink.element(interfaceExtractActionJson(item))
+  sink.arrayMember("interfaceExtractTrace"):
+    for event in interfaceExtractReportTrace:
+      sink.element(%*{"actionId": event.actionId,
+        "event": event.event, "detail": event.detail})
+  # The three members that scale with the build — one element per action or
+  # trace event — are handed over an element at a time, so the streamed
+  # writer holds a single action's evidence at once.
+  sink.arrayMember("cmakeRegenerationActions"):
+    for item in cmakeRegenerationResult.results:
+      sink.element(actionResultJson(item))
+  sink.arrayMember("actions"):
+    for item in buildResult.results:
+      sink.element(actionResultJson(item))
+  sink.arrayMember("trace"):
+    for event in buildResult.trace:
+      sink.element(%*{
+        "seq": event.seq,
+        "actionId": event.actionId,
+        "event": event.event,
+        "detail": event.detail
+      })
+  let vcsRecords =
+    if workspaceVcs.isSome: workspaceVcs.get()
+    else: newSeq[workspaceVcsEvidence.WorkspaceVcsEvidence]()
+  sink.member("workspaceVcs", workspaceVcsEvidence.toJson(vcsRecords))
+  sink.member("workspaceVcsObserved", %workspaceVcs.isSome)
+  sink.arrayMember("targetResolution"):
+    if targetResolutions.isSome:
+      for record in targetResolutions.get():
+        sink.element(targetResolutionJson(record))
+  sink.member("targetResolutionObserved", %targetResolutions.isSome)
+  # RA-13: machine-readable resource-authority status (see
+  # ``runQuotaReportJson``).
+  sink.member("runQuota", runQuotaReportJson(buildResult.runQuotaBypassed))
+  sink.member("stats", statsJson(buildResult.stats))
+
 proc buildReportJson*(context: BuildReportProviderContext;
                       cmakeRegenerationResult,
                       buildResult: BuildRunResult;
@@ -6195,6 +6488,8 @@ proc buildReportJson*(context: BuildReportProviderContext;
   ## the full report: the compiled-provider route and the lowered-graph
   ## routes used to differ in whether they wrote anything at all, and a
   ## second serializer is how they would start differing in what they write.
+  ## ``writeBuildReport`` streams the same members (``emitBuildReport``) to
+  ## disk instead of building this tree; this form is for in-process readers.
   ##
   ## M4: ``workspaceVcs`` carries the unified Workspace-VCS evidence
   ## seq accumulated by ``repro workspace status`` / ``repro check``
@@ -6215,105 +6510,31 @@ proc buildReportJson*(context: BuildReportProviderContext;
   ## beside the (then empty) member; ``some(@[])`` is a real observation
   ## that found nothing. The members themselves keep their array shape on
   ## every route, which is the contract existing readers rely on.
-  var cmakeRegenerationActions = newJArray()
-  for item in cmakeRegenerationResult.results:
-    cmakeRegenerationActions.add(actionResultJson(item))
-  var actions = newJArray()
-  for item in buildResult.results:
-    actions.add(actionResultJson(item))
-  var trace = newJArray()
-  for event in buildResult.trace:
-    trace.add(%*{
-      "seq": event.seq,
-      "actionId": event.actionId,
-      "event": event.event,
-      "detail": event.detail
-    })
-  var targetResolutionArr = newJArray()
-  if targetResolutions.isSome:
-    for record in targetResolutions.get():
-      targetResolutionArr.add(targetResolutionJson(record))
-  let vcsRecords =
-    if workspaceVcs.isSome: workspaceVcs.get()
-    else: newSeq[workspaceVcsEvidence.WorkspaceVcsEvidence]()
-  result = %*{
-    "schemaId": BuildReportSchemaId,
-    "providerRoute": context.route
-  }
-  case context.kind
-  of brpkCompiled:
-    # The compiled-provider members, unchanged in name and meaning from the
-    # report before routes were distinguished.
-    var providerCompileActions = newJArray()
-    for item in context.providerCompileResult.results:
-      providerCompileActions.add(actionResultJson(item))
-    result["providerBinary"] = %context.compiled.outputBinaryPath
-    result["providerArtifact"] = %context.artifactId
-    result["providerFingerprint"] =
-      %digestHex(context.compiled.providerFingerprint)
-    result["providerCompileOutput"] =
-      %context.compiled.executionResult.output
-    result["providerCompileActions"] = providerCompileActions
-    result["providerSnapshot"] = %context.snapshotPath
-    result["providerInvocations"] = %context.invocations
-  of brpkPrebuilt:
-    # A prebuilt provider reports "its actual binary/content identity,
-    # snapshot and invocations rather than an invented compile
-    # fingerprint/output" (CLI/build.md). So the compile members are ABSENT,
-    # not empty: an empty ``providerFingerprint`` would read as "a compile
-    # whose fingerprint was the empty digest". The digest is the same
-    # ``fileContentDigest`` the Tier 2b artifact id is built from (see
-    # ``standardProviderArtifactIdForBinary``), taken here from the bytes on
-    # disk, so on that route it equals the artifact id's suffix.
-    result["providerBinary"] = %context.binaryPath
-    result["providerArtifact"] = %context.artifactId
-    result["providerBinaryContentDigest"] =
-      %fileContentDigest(context.binaryPath)
-    result["providerSnapshot"] = %context.snapshotPath
-    result["providerInvocations"] = %context.invocations
-  of brpkLoweredGraphCache:
-    # No provider ran. The route and the cache file are what is known; the
-    # validated content key that admitted the entry is not handed to the
-    # writer, so it is stated as unavailable rather than calling the path a
-    # key (CLI/build.md: "state ``keyAvailable: false``").
-    result["loweredGraphCache"] = %*{
-      "path": context.loweredGraphCachePath,
-      "keyAvailable": false
-    }
-    result["providerInvocations"] = %0
-  var interfaceExtractActions = newJArray()
-  for item in interfaceExtractReportItems:
-    interfaceExtractActions.add(interfaceExtractActionJson(item))
-  result["interfaceExtractActions"] = interfaceExtractActions
-  var interfaceExtractTrace = newJArray()
-  for event in interfaceExtractReportTrace:
-    interfaceExtractTrace.add(%*{"actionId": event.actionId,
-      "event": event.event, "detail": event.detail})
-  result["interfaceExtractTrace"] = interfaceExtractTrace
-  result["cmakeRegenerationActions"] = cmakeRegenerationActions
-  result["actions"] = actions
-  result["trace"] = trace
-  result["workspaceVcs"] = workspaceVcsEvidence.toJson(vcsRecords)
-  result["workspaceVcsObserved"] = %workspaceVcs.isSome
-  result["targetResolution"] = targetResolutionArr
-  result["targetResolutionObserved"] = %targetResolutions.isSome
-  # RA-13: machine-readable resource-authority status (see
-  # ``runQuotaReportJson``).
-  result["runQuota"] = runQuotaReportJson(buildResult.runQuotaBypassed)
-  result["stats"] = statsJson(buildResult.stats)
+  var sink = treeReportSink()
+  emitBuildReport(sink, context, cmakeRegenerationResult, buildResult,
+    workspaceVcs, targetResolutions)
+  sink.root
 
-proc writeBuildReport(path: string; context: BuildReportProviderContext;
+proc writeBuildReport*(path: string; context: BuildReportProviderContext;
                        cmakeRegenerationResult,
                        buildResult: BuildRunResult;
                        workspaceVcs = none(seq[
                            workspaceVcsEvidence.WorkspaceVcsEvidence]);
                        targetResolutions =
                            none(seq[TargetResolutionRecord])) =
-  ## Persist ``buildReportJson`` at ``path``, creating its directory.
-  let root = buildReportJson(context, cmakeRegenerationResult, buildResult,
-    workspaceVcs, targetResolutions)
-  createDir(extendedPath(parentDir(path)))
-  writeFile(extendedPath(path), $root)
+  ## Persist the report ``buildReportJson`` describes at ``path``, creating
+  ## its directory — byte-for-byte ``$buildReportJson(...)``, but streamed,
+  ## so writing it costs one action's subtree of memory rather than the
+  ## document twice over (see ``BuildReportSink``). Errors propagate as
+  ## before; a write that fails leaves no partial file and does not touch an
+  ## earlier report at ``path``.
+  var sink = openStreamedReportSink(path)
+  try:
+    emitBuildReport(sink, context, cmakeRegenerationResult, buildResult,
+      workspaceVcs, targetResolutions)
+    commitStreamedReport(sink)
+  finally:
+    abandonStreamedReport(sink)
 
 proc resolveSnapshotTargetSelectors*(snapshot: ProviderGraphSnapshot;
                                      userSelectors: openArray[string]):
@@ -6375,11 +6596,13 @@ proc writeBuildFailureReport*(path: string; buildResult: BuildRunResult;
   ## waiting behind a failure. Successful actions are deliberately NOT
   ## enumerated — a 4000-action build with one broken compile must produce a
   ## document a person can read top to bottom.
+  ##
+  ## Written unasked on every failed build, so it is streamed through the
+  ## same ``BuildReportSink`` as the full report: a build in which most
+  ## actions fail still writes one action's subtree at a time.
   var byId = initTable[string, int]()
   for i, action in actions:
     byId[action.id] = i
-  var failed = newJArray()
-  var blocked = newJArray()
   var counts = (total: 0, succeeded: 0, failed: 0, blocked: 0, cacheHit: 0)
   for item in buildResult.results:
     inc counts.total
@@ -6395,57 +6618,58 @@ proc writeBuildFailureReport*(path: string; buildResult: BuildRunResult;
       inc counts.succeeded
     else:
       discard
-  for item in buildResult.results:
-    if item.status == asBlocked:
-      blocked.add(%*{
-        "id": item.id,
-        "blockedBy": item.blockedBy,
-        "reason": item.reason
-      })
-      continue
-    if item.status != asFailed:
-      continue
-    var node = %*{
-      "id": item.id,
-      "status": $item.status,
-      "exitCode": item.exitCode,
-      "reason": item.reason,
-      "blockedBy": item.blockedBy,
-      "cacheDecision": $item.cacheDecision,
-      "dependencyPolicyKind": $item.dependencyPolicyKind,
-      "runQuotaBackend": item.runQuotaBackend,
-      "leaseId": item.leaseId,
-      "stdout": item.stdout,
-      "stderr": item.stderr
-    }
-    if byId.hasKey(item.id):
-      let action = actions[byId[item.id]]
-      node["argv"] = %action.argv
-      node["cwd"] = %action.cwd
-      node["inputs"] = %action.inputs
-      node["outputs"] = %action.outputs
-      node["cacheable"] = %action.cacheable
-      node["weakFingerprint"] = %digestHex(action.weakFingerprint)
-    failed.add(node)
-  let root = %*{
-    "schemaId": BuildFailureReportSchemaId,
-    "target": target,
-    "projectRoot": projectRoot,
-    "outDir": outDir,
-    "exitCode": exitCode,
-    "counts": {
+  var sink = openStreamedReportSink(path)
+  try:
+    sink.member("schemaId", %BuildFailureReportSchemaId)
+    sink.member("target", %target)
+    sink.member("projectRoot", %projectRoot)
+    sink.member("outDir", %outDir)
+    sink.member("exitCode", %exitCode)
+    sink.member("counts", %*{
       "total": counts.total,
       "succeeded": counts.succeeded,
       "failed": counts.failed,
       "blocked": counts.blocked,
       "cacheHit": counts.cacheHit
-    },
-    "failedActions": failed,
-    "blockedActions": blocked,
-    "runQuota": runQuotaReportJson(buildResult.runQuotaBypassed)
-  }
-  createDir(extendedPath(parentDir(path)))
-  writeFile(extendedPath(path), $root)
+    })
+    sink.arrayMember("failedActions"):
+      for item in buildResult.results:
+        if item.status != asFailed:
+          continue
+        var node = %*{
+          "id": item.id,
+          "status": $item.status,
+          "exitCode": item.exitCode,
+          "reason": item.reason,
+          "blockedBy": item.blockedBy,
+          "cacheDecision": $item.cacheDecision,
+          "dependencyPolicyKind": $item.dependencyPolicyKind,
+          "runQuotaBackend": item.runQuotaBackend,
+          "leaseId": item.leaseId,
+          "stdout": item.stdout,
+          "stderr": item.stderr
+        }
+        if byId.hasKey(item.id):
+          let action = actions[byId[item.id]]
+          node["argv"] = %action.argv
+          node["cwd"] = %action.cwd
+          node["inputs"] = %action.inputs
+          node["outputs"] = %action.outputs
+          node["cacheable"] = %action.cacheable
+          node["weakFingerprint"] = %digestHex(action.weakFingerprint)
+        sink.element(node)
+    sink.arrayMember("blockedActions"):
+      for item in buildResult.results:
+        if item.status == asBlocked:
+          sink.element(%*{
+            "id": item.id,
+            "blockedBy": item.blockedBy,
+            "reason": item.reason
+          })
+    sink.member("runQuota", runQuotaReportJson(buildResult.runQuotaBypassed))
+    commitStreamedReport(sink)
+  finally:
+    abandonStreamedReport(sink)
 
 proc renderBuildTrace*(buildResult: BuildRunResult): string =
   ## ``--show=trace`` presenter for the scheduler trace.
@@ -11511,13 +11735,20 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         selectedActionId)
 
   proc collectInputEvidence(buildResult: BuildRunResult) =
-    if not wantEvidencePaths:
+    if not wantsInputEvidencePaths:
       # Nobody will read ``BuildCommandOutcome.inputEvidencePaths`` on this
-      # invocation — that is the same statement that told the engine not to
-      # build the strings in the first place — so there is nothing to
-      # harvest. The two are ONE decision, made once above and read here and
-      # by the engine config, which is what keeps the empty seq below from
-      # ever being an accident.
+      # invocation, so there is nothing to harvest. The engine may still have
+      # built the strings — ``--write-report`` turns them on — but the report
+      # reads them off ``buildResult`` directly, never off this seq.
+      #
+      # Gated on the CALLER's demand alone, not on ``wantEvidencePaths``,
+      # because the report half of that union made this a second full copy
+      # of every read and probe path for no reader: ``repro build
+      # --write-report .#test-builds`` held ~85M path strings twice over
+      # after its builds were done (reprobuild-pm
+      # ``issues/2026-10-18-full-suite-run-dies-at-the-build-action-payload-cache-policy-case.md``).
+      # When the caller does want them, ``wantEvidencePaths`` is true too, so
+      # the engine has built every string harvested below.
       return
     for item in buildResult.results:
       # An ELIDED result's path seqs are empty because nobody asked for them,

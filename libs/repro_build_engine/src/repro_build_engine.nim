@@ -21779,4 +21779,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   finishChildCpuStat()
   finishMetadataCacheStats(fileMetadataCache)
   runResult.stats = stats
-  result = runResult
+  # MOVED, not assigned. ``runResult`` is captured by the closures above, so
+  # the compiler cannot treat this last use as a move by itself, and a plain
+  # assignment deep-copies every ``ActionResult`` and every evidence path in
+  # it. For a cold ``.#test-builds`` that was gigabytes, allocated after
+  # every build had finished. Nothing reads ``runResult`` after this line:
+  # the ``finally`` above has drained the engine pool, so no closure can run.
+  result = move(runResult)
