@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2228,
+    "nimTestBinaries": 2229,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 666,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2257
+    "testEntries": 2258
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1283,7 +1283,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 17,
-      "integration": 1225,
+      "integration": 1226,
       "platform/destructive": 134,
       "pure unit": 666,
       "unclassified": 215
@@ -1488,9 +1488,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2228,
+    "nimTestBinaryCount": 2229,
     "pythonTestFileCount": 29,
-    "testEntryCount": 2257
+    "testEntryCount": 2258
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -16345,7 +16345,8 @@
         "repro_home_intent",
         "repro_local_store",
         "repro_profile",
-        "repro_profile_compile"
+        "repro_profile_compile",
+        "repro_test_support"
       ],
       "owner": "libs/repro_profile_compile",
       "requiresReproBinary": true,
@@ -20270,6 +20271,23 @@
       "source": "libs/repro_system_rollback/tests/t_b3_rollback_unit.nim",
       "sourceSuiteCount": 7,
       "staticCaseCount": 14,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_home_apply_guard",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_test_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_test_support/tests/t_home_apply_guard.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -27418,7 +27436,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_home_generations",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": true,
