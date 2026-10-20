@@ -36646,7 +36646,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_nf4_foreign_env_contract.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 15,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
