@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2257,
+    "nimTestBinaries": 2259,
     "pureUnitConsolidationGroups": 63,
     "pureUnitTests": 676,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2288
+    "testEntries": 2290
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1319,7 +1319,7 @@
       "integration": 1239,
       "platform/destructive": 138,
       "pure unit": 676,
-      "unclassified": 218
+      "unclassified": 220
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1521,9 +1521,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2257,
+    "nimTestBinaryCount": 2259,
     "pythonTestFileCount": 31,
-    "testEntryCount": 2288
+    "testEntryCount": 2290
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -18988,6 +18988,42 @@
       "source": "libs/repro_project_dsl/tests/test_library_macro.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_malicious_remix_bundle_parser_bounds",
+      "class": "unclassified",
+      "classificationReason": "imports `ssz_serialization`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_peer_cache",
+        "repro_remix"
+      ],
+      "owner": "libs/repro_remix",
+      "requiresReproBinary": false,
+      "source": "libs/repro_remix/tests/t_malicious_remix_bundle_parser_bounds.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_remix_manifest_canonical_roundtrip_and_identity",
+      "class": "unclassified",
+      "classificationReason": "binds a fixed OS-global port (through `libs/repro_peer_cache/src/repro_peer_cache/types.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_peer_cache",
+        "repro_remix"
+      ],
+      "owner": "libs/repro_remix",
+      "requiresReproBinary": false,
+      "source": "libs/repro_remix/tests/t_remix_manifest_canonical_roundtrip_and_identity.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

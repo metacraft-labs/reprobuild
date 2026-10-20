@@ -377,6 +377,9 @@ for libName in [
   # Windows-Runner-Binary-Cache-Deploy M5: the signed desired-state
   # manifest pull agent (reprobuild-native analog of mcl-deploy-agent).
   "repro_deploy_agent",
+  # ReproOS-Remix-Protocol-And-Registry M1: the Remix manifest codec,
+  # identities, signatures and lineage.
+  "repro_remix",
   "repro_home_generations",
   "repro_home_apply",
   "repro_home_rollback",
