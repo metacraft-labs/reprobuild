@@ -12,11 +12,13 @@ package sh:
     scoopApp(bucket = "main", app = "git",
       preferredVersion = ">=2", executablePath = "bin/sh.exe",
       requiresExecutionProfileChecksum = false)
-    # Direct-download: PortableGit ships sh.exe at `bin/sh.exe`.
+    # Direct-download: PortableGit ships sh.exe at `bin/sh.exe`. `version`
+    # is the shell's, not Git's: `bin/sh.exe --version` reports bash 5.3.9.
     tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
       sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
       archiveType = "7z.exe",
       executablePath = "bin/sh.exe",
+      version = "5.3.9",
       packageId = "git@2.54.0",
       cpu = "x86_64",
       os = "windows",

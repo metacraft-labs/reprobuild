@@ -103,6 +103,7 @@ package clingo:
       sha256 = "a9e5eb699dd8de3dcc555c28f47a46ca0b3005f784f76aadf70f47267e5afee9",
       archiveType = "conda",
       executablePath = binDir(plConda) & "/clingo.exe",
+      version = "5.8.0",
       packageId = "clingo@5.8.0",
       cpu = "x86_64",
       os = "windows",

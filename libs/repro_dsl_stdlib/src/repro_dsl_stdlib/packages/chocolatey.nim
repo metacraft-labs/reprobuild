@@ -79,6 +79,7 @@ package chocolatey:
       sha256 = "d4998ca928a85a484507dcaa39c30948a6516de0d1469b0511931d44a53456c3",
       archiveType = "zip",
       executablePath = "tools/chocolateyInstall/choco.exe",
+      version = "2.4.3",
       packageId = "chocolatey@2.4.3",
       cpu = "x86_64",
       os = "windows",

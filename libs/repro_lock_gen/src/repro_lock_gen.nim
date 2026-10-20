@@ -1119,6 +1119,27 @@ proc landLockDocument(writeTo, document: string) =
   createDir(parentDir(writeTo))
   writeFile(writeTo, document)
 
+proc landCommittedLock(generated: var LockGenerationResult;
+                       writeTo: string) =
+  ## Land a generated lock at the COMMITTED path, carrying forward the
+  ## locked provisioning realizations (ReproOS-Campaign-Completion M7 D2)
+  ## of the lock it replaces -- and its catalog import pins (ReproOS M6
+  ## D1), which only ``repro lock refresh --provisioning`` re-resolves.
+  ## The solve knows nothing about provisioning, so
+  ## writing ``generated.lockDocument`` as it stands would silently drop a
+  ## pinned contributor. ``withProvisioningCarriedForward`` raises -- BEFORE
+  ## anything is written -- when the incumbent carries a ``provisioning``
+  ## array it cannot read. With no array to carry, the bytes written are
+  ## exactly the generated document, as before.
+  if fileExists(writeTo):
+    let carried = withProvisioningCarriedForward(
+      parseLockedDependencies(generated.lockDocument), readFile(writeTo))
+    if carried.provisioningRealizationCount > 0 or
+        carried.catalogImportPinCount > 0:
+      generated.lockDocument = serializeLockedDependencies(carried)
+  landLockDocument(writeTo, generated.lockDocument)
+  generated.lockPath = writeTo
+
 proc runLockSolve*(req: LockGenerationRequest; writeTo: string):
     LockGenerationResult =
   ## `repro lock solve [--write]` — generate, then land the lock at the
@@ -1128,8 +1149,7 @@ proc runLockSolve*(req: LockGenerationRequest; writeTo: string):
   result = generateLock(r)
   result.lockDocument = withCertificatePolicy(r, result.lockDocument)
   if writeTo.len > 0:
-    landLockDocument(writeTo, result.lockDocument)
-    result.lockPath = writeTo
+    landCommittedLock(result, writeTo)
 
 proc runImplicitBuildSolve*(req: LockGenerationRequest):
     LockGenerationResult =
@@ -1170,8 +1190,7 @@ proc runLockRefresh*(req: LockGenerationRequest; writeTo: string):
   result = generateLock(r)
   result.lockDocument = withCertificatePolicy(r, result.lockDocument)
   if writeTo.len > 0:
-    landLockDocument(writeTo, result.lockDocument)
-    result.lockPath = writeTo
+    landCommittedLock(result, writeTo)
 
 # ---------------------------------------------------------------------------
 # The targeted re-pin (`repro lock refresh --repin=<package>[,<package>…]`)

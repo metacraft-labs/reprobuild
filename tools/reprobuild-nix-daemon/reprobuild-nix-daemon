@@ -226,6 +226,19 @@ def response_for(line: bytes, cache: "ResolveCache", cached_only: bool = False):
                 "error": f"Nix expression file does not exist: {expression_file}",
             }
     dependencies = dependencies_for(workspace_root, expression_file)
+    if expression_file is not None:
+        # NEVER CACHED (owner decision 2026-10-14, Edge-Derived-Identities.md
+        # §7 rider): until the monitored ``nix-eval`` / ``nix-realise`` edges
+        # of campaign M19 exist, a Nix tool use with an ``expressionFile`` is
+        # uncacheable everywhere. The key below sees only the top-level file
+        # and the flake files, not what the expression imports, so a cached
+        # answer would serve the previous evaluation's store paths after an
+        # imported ``.nix`` file changed. The inline fast path has nothing to
+        # serve; a full request evaluates every time.
+        if cached_only:
+            return None
+        return resolve_selector(selector, workspace_root, dependencies,
+                                expression_file)
     key = (
         selector,
         str(workspace_root),

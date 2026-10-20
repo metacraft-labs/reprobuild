@@ -15,6 +15,11 @@ import repro_dsl_stdlib/nixpkgs_pin
 import ./gzip
 export gzip
 
+# The PortableGit arms below declare the version of the tool they expose,
+# not Git's: in that archive `usr/bin/sed.exe --version` reports GNU sed 4.9
+# and every coreutils binary used here (`sha256sum`, `chmod`, `mv`, `cp`,
+# `rm`, `mkdir`, `sleep`, `touch`, `printf`) reports coreutils 8.32.
+
 package xz:
   provisioning:
     nixPackage "nixpkgs#xz", executablePath = "bin/xz",
@@ -49,6 +54,7 @@ package sed:
       sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
       archiveType = "7z.exe",
       executablePath = "usr/bin/sed.exe",
+      version = "4.9",
       packageId = "git@2.54.0",
       cpu = "x86_64",
       os = "windows",
@@ -250,6 +256,7 @@ package `sha256sum`:
       sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
       archiveType = "7z.exe",
       executablePath = "usr/bin/sha256sum.exe",
+      version = "8.32",
       packageId = "git@2.54.0",
       cpu = "x86_64",
       os = "windows",
@@ -283,6 +290,7 @@ package `chmod`:
       sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
       archiveType = "7z.exe",
       executablePath = "usr/bin/chmod.exe",
+      version = "8.32",
       packageId = "git@2.54.0",
       cpu = "x86_64",
       os = "windows",
@@ -304,6 +312,7 @@ package `mv`:
       sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
       archiveType = "7z.exe",
       executablePath = "usr/bin/mv.exe",
+      version = "8.32",
       packageId = "git@2.54.0",
       cpu = "x86_64",
       os = "windows",
@@ -325,6 +334,7 @@ package `cp`:
       sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
       archiveType = "7z.exe",
       executablePath = "usr/bin/cp.exe",
+      version = "8.32",
       packageId = "git@2.54.0",
       cpu = "x86_64",
       os = "windows",
@@ -346,6 +356,7 @@ package `rm`:
       sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
       archiveType = "7z.exe",
       executablePath = "usr/bin/rm.exe",
+      version = "8.32",
       packageId = "git@2.54.0",
       cpu = "x86_64",
       os = "windows",
@@ -385,6 +396,7 @@ package `mkdir`:
       sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
       archiveType = "7z.exe",
       executablePath = "usr/bin/mkdir.exe",
+      version = "8.32",
       packageId = "git@2.54.0",
       cpu = "x86_64",
       os = "windows",
@@ -416,6 +428,7 @@ package `sleep`:
       sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
       archiveType = "7z.exe",
       executablePath = "usr/bin/sleep.exe",
+      version = "8.32",
       packageId = "git@2.54.0",
       cpu = "x86_64",
       os = "windows",
@@ -443,6 +456,7 @@ package `touch`:
       sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
       archiveType = "7z.exe",
       executablePath = "usr/bin/touch.exe",
+      version = "8.32",
       packageId = "git@2.54.0",
       cpu = "x86_64",
       os = "windows",
@@ -486,6 +500,7 @@ package `printf`:
       sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
       archiveType = "7z.exe",
       executablePath = "usr/bin/printf.exe",
+      version = "8.32",
       packageId = "git@2.54.0",
       cpu = "x86_64",
       os = "windows",

@@ -147,6 +147,8 @@ import repro_cli_support/content_id
 # local certificate store (test-certificates Transport §2).
 import repro_cli_support/certificate_store
 export certificate_store
+import repro_cli_support/provisioning_lock_selection
+import repro_cli_support/catalog_publication
 # HL-11: the recipe-constraint reader. What a `flake.nix` input URL and a
 # `repro.nim` `uses:` entry state about a dependency's revision, and the
 # canonical repository each names (Unified-Locking-And-Hooks.md §16.2).
@@ -287,6 +289,8 @@ export home.runHomeCommand, home.setPackageCatalogLookup,
        home.PackageCatalogLookup, home.CatalogEnvVar,
        home.ConfigurableSchemaEnvVar
 export infra.runInfraCommand, infra.runSystemCommand
+export provisioning_lock_selection
+export catalog_publication
 export cli_hardware.runHardwareCommand
 export cli_disk.runDiskCommand, cli_disk.parseDiskArgs,
        cli_disk.loadDiskoFromSource, cli_disk.renderPlan,
@@ -2807,6 +2811,92 @@ proc governingLockIdentityFor*(projectRoot, lockFileName: string):
   recordLockBinding(name, identity)
   identity
 
+proc committedProvisioningLockPath*(projectRoot: string): string =
+  ## The committed lock whose ``provisioning`` records govern a build of the
+  ## project at ``projectRoot`` (ReproOS M7 deliverable 3): the SAME file
+  ## ``governingLockIdentityFor`` reads for ``default`` -- an explicit
+  ## ``--lock`` binding for ``default``, else ``<projectRoot>/repro.lock``.
+  ## Empty when there is neither a binding nor a project root.
+  let bound = activeLockFilePath(DefaultLockFileName)
+  if bound.len > 0:
+    return absolutePath(bound)
+  if projectRoot.len == 0:
+    return ""
+  projectRoot / CommittedLockFileNameForIdentity
+
+proc buildProvisioningPins*(artifact: ProjectInterfaceArtifact;
+                            projectRoot: string;
+                            lockPath = ""): seq[ProvisioningPin] =
+  ## The provisioning pins a build of ``artifact`` provisions under: the
+  ## committed lock (``lockPath``, default ``committedProvisioningLockPath``)
+  ## resolved against the composed catalogs by
+  ## ``provisioning_lock_selection.lockSelectedProvisioningPins``, in THIS
+  ## process, on every call. ``@[]`` when the lock governs no provisioning
+  ## (no lock, or no ``provisioning`` record for this platform pair) -- the
+  ## unpinned behaviour, unchanged. Raises ``ProvisioningSelectionRefused``
+  ## with the resolver's message otherwise; callers let it fail the build
+  ## and never retry unpinned.
+  ##
+  ## A lock NAMED for the build (a ``--lock`` binding for ``default``, or a
+  ## declared ``path =``) that is missing or not a file refuses: the user
+  ## asked for that lock, so its absence is missing evidence, not "no
+  ## lock". Only the implicit ``<project>/repro.lock`` may be absent.
+  let named = lockPath.len == 0 and
+    activeLockFilePath(DefaultLockFileName).len > 0
+  let path =
+    if lockPath.len > 0: lockPath
+    else: committedProvisioningLockPath(projectRoot)
+  lockSelectedProvisioningPins(artifact, projectRoot, path,
+    lockRequired = named)
+
+proc reproBuildErrorText*(message: string): string =
+  ## What ``repro build`` prints on stderr for a failure it reports with
+  ## exit 1 -- among them a provisioning refusal
+  ## (``ProvisioningSelectionRefused``), whose message is printed whole.
+  "repro build: error: " & message
+
+proc devEnvProvisioningRefusalText*(refusal: string): string =
+  ## What dev-env activation prints on stderr when the committed lock's
+  ## provisioning selection is refused. Activation is never fatal: it
+  ## provisions NOTHING (nothing is provisioned unpinned) and the shell
+  ## keeps the ambient PATH.
+  "repro dev-env: error: " & refusal & "\n" &
+    "repro dev-env: no declared tool is provisioned (nothing is " &
+    "provisioned unpinned); the activated shell will resolve tools from " &
+    "the ambient PATH."
+
+proc carriesContributedRealization(pi: ProjectInterface): bool =
+  ## True when some tool use carries a realization from a provisioning
+  ## CONTRIBUTION (a non-empty contributor) -- the only realizations a
+  ## contributor selection can apply to.
+  for useDef in pi.toolUses:
+    for r in useDef.nixProvisioning:
+      if r.contributor.len > 0: return true
+    for r in useDef.tarballProvisioning:
+      if r.contributor.len > 0: return true
+    for r in useDef.scoopProvisioning:
+      if r.contributor.len > 0: return true
+  false
+
+proc producerRuntimeProvisioningPins*(runtimeArtifact: ProjectInterfaceArtifact;
+                                      producerRoot: string):
+    seq[ProvisioningPin] =
+  ## The pins for a cross-repo PRODUCER's runtime tools. The producer is
+  ## built from its OWN committed ``repro.lock``, so that lock -- never the
+  ## consumer's ``--lock`` binding -- governs its provisioning.
+  ##
+  ## ``toProjectInterface`` appends contributed realizations to ``toolUses``
+  ## only, never to ``runtimeToolUses``, so a runtime artifact normally
+  ## carries none and there is no contributor to select: ``@[]``, the
+  ## behaviour this site always had, and no refusal for a lock whose records
+  ## concern the producer's other tools. Should a runtime use ever carry a
+  ## contributed realization, the producer's lock is resolved and enforced
+  ## exactly as for a build.
+  if not carriesContributedRealization(runtimeArtifact.projectInterface):
+    return @[]
+  buildProvisioningPins(runtimeArtifact, producerRoot,
+    lockPath = producerRoot / CommittedLockFileNameForIdentity)
+
 proc workspaceGoverningLockIdentity*(projectRoot: string): LockIdentity =
   ## The identity governing an edge that designated nothing — §4.3's final
   ## rung, which is `default`.
@@ -4552,6 +4642,24 @@ var warmToolIdentities = initTable[string, WarmToolIdentity]()
 var warmProviderSnapshots = initTable[string, WarmProviderSnapshot]()
 var warmLoweredGraphs = initTable[string, WarmLoweredGraph]()
 
+proc dropWarmEntriesWithPrefix[T](table: var Table[string, T];
+                                  prefix: string) =
+  ## Drop every entry whose table key starts with ``prefix`` -- the entries
+  ## for one persisted file (a lowered-graph record, a mode's stable identity
+  ## file) under OTHER cache keys. That file is rewritten whenever the key
+  ## changes, so such an entry's file evidence is already stale and it can
+  ## never hit again; keeping it only grows a long-lived process (the Windows
+  ## daemon builds in-process; the POSIX daemon parent re-prewarms after
+  ## every build). An uncacheable Nix expression (ReproOS M7 sibling (6))
+  ## changes the key on EVERY build, so without this each build added one
+  ## identity and one whole lowered graph that nothing could read.
+  var stale: seq[string] = @[]
+  for key in table.keys:
+    if key.startsWith(prefix):
+      stale.add(key)
+  for key in stale:
+    table.del(key)
+
 type
   WarmBuildCacheCounters* = object
     ## Dependency-Attribution MAC-2 — how often the three warm tables above
@@ -5654,6 +5762,7 @@ proc warmReadFreshLoweredGraphCache(path, modulePath, projectRoot,
     selectedActionId, pathEnv, cacheKey)
   if result.isSome:
     let lowered = result.get()
+    warmLoweredGraphs.dropWarmEntriesWithPrefix(path & "\0")
     warmLoweredGraphs[tableKey] = WarmLoweredGraph(
       populatedByPid: getCurrentProcessId(), cachePath: path,
       modulePath: modulePath, projectRoot: projectRoot,
@@ -5675,6 +5784,7 @@ proc writeLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
     actions: lowered.actions,
     pools: lowered.pools)
   writeFile(extendedPath(path), fromBytes(encodeLoweredGraphCache(record)))
+  warmLoweredGraphs.dropWarmEntriesWithPrefix(path & "\0")
   warmLoweredGraphs[path & "\0" & cacheKey] = WarmLoweredGraph(
     populatedByPid: getCurrentProcessId(), cachePath: path,
     modulePath: modulePath, projectRoot: projectRoot,
@@ -6778,19 +6888,103 @@ proc pathModeResolutionSignature(artifact: ProjectInterfaceArtifact;
     payload.addCacheField(signatures[index])
   payload
 
-proc toolIdentityCacheKey*(artifact: ProjectInterfaceArtifact;
-                           mode: ToolProvisioningMode;
-                           pathValue = getEnv("PATH")): string =
+proc toolIdentityCacheKeyInfo*(artifact: ProjectInterfaceArtifact;
+                               mode: ToolProvisioningMode;
+                               pathValue = getEnv("PATH");
+                               pins: openArray[ProvisioningPin] = []):
+    tuple[key: string; cacheable: bool] =
+  ## ``toolIdentityCacheKey`` plus whether the key is CACHEABLE: false when
+  ## some tool use carries a Nix ``expressionFile`` (see v7 below and
+  ## ``uncacheableNixExpressionKey``), in which case the key carries a fresh
+  ## nonce -- it never equals a stored key, so every lookup misses -- and
+  ## the callers skip writing keyed cache files nobody can ever read.
+  ##
   ## Exported so ``tests/unit/t_tool_identity_key_resolves_before_it_keys.nim``
   ## can assert both directions of the ``$PATH`` contract against the real
   ## key rather than against a stand-in. ``pathValue`` defaults to the
   ## process ``$PATH``; every production call site takes the default.
+  ##
+  ## ``pins`` (ReproOS M7 deliverable 3): the provisioning pins the identity
+  ## is resolved under -- ``buildProvisioningPins`` over the committed lock,
+  ## resolved in THIS process. Every field of every pin is bound, so an
+  ## identity resolved under one lock selection is never served under
+  ## another (a lock moved from contributor A to B, or to another
+  ## contribution or realization of A, re-resolves). The key is a digest:
+  ## the pins are never recoverable from it, and nothing turns a cached key
+  ## or identity back into a pin (see ``provisioning_lock_selection``'s
+  ## trust boundary). With no pins -- every build whose lock has no
+  ## ``provisioning`` record -- the pins add nothing to the key.
+  ##
+  ## ``importedProvisioningMetadataDigest`` (M7 deliverable 4): the
+  ## realization metadata of IMPORTED contribution records, which
+  ## ``interfaceFingerprint`` no longer carries. The tool identity is
+  ## resolved FROM that metadata, so it is bound here; empty (and absent
+  ## from the key) when the artifact imports no contribution.
+  ##
+  ## v5 (ReproOS M7): each tool use's realizations are bound WHOLE, through
+  ## ``toolUseRealizationDigest`` (the codec's fingerprint-mode bytes of
+  ## every Nix / tarball / Scoop entry, in declaration order, location
+  ## normalised away), instead of through a list of fields. The v4 list
+  ## missed ``packageName``, ``nixpkgsRef`` / ``nixpkgsRev`` /
+  ## ``nixpkgsNarHash``, ``executableAlias``, ``prunePaths``, ``cpu`` and
+  ## ``os``, and ``interfaceFingerprint`` omits tool-use realizations
+  ## entirely, so for a tool package's OWN realization (no contribution
+  ## record, so no ``importedProvisioningMetadataDigest`` either) a change
+  ## of only one of them was served the stale identity: another entry
+  ## selected by ``cpu`` / ``os`` was never realized, an alias never
+  ## created, a prune never applied. Every v4 key changes once (a one-time
+  ## miss, approved); nothing else about the key did.
+  ##
+  ## v6 (ReproOS M7 sibling (6)): every Nix ``expressionFile`` a tool use
+  ## carries is bound by its CONTENT CLOSURE (``nixExpressionClosureKey``:
+  ## the file, every file and directory it names -- ``../nixpkgs.nix``,
+  ## ``src = ./.`` -- recursively), in a framed, counted section after the
+  ## uses. v5 bound the expression by its PATH only (through the codec
+  ## bytes), so bumping the nixpkgs pin or editing a lock file the
+  ## expression reads served the stale identity. Bound in EVERY mode: Nix is
+  ## reached from path mode (the Linux/macOS fallback) and from-source mode
+  ## (the stdlib fall-through) as well as nix mode. Every v5 key changes
+  ## once (a one-time miss, approved).
+  ##
+  ## v7 (owner decision, 2026-10-14; Edge-Derived-Identities.md §7 rider):
+  ## the expression-closure scanner behind v6 PREDICTED what the Nix
+  ## evaluator reads, and was dropped before its replacement (campaign M19,
+  ## whose key binds the ``nix-realise`` output) exists. Until then any tool
+  ## use carrying a Nix ``expressionFile`` makes the key UNCACHEABLE, in
+  ## every mode, exactly as v6 already treated an uncacheable closure: a
+  ## fresh nonce in the key (and so in the lowered-graph key), no keyed
+  ## cache file written, no warm entry kept. Without an ``expressionFile``
+  ## the key binds what v5 bound. The tag moves forward, so no key written
+  ## under v6 (the scanner's) or earlier is ever looked up again. M19's key
+  ## binding the realise output is therefore v8, not v7.
   var payload = ""
-  payload.addCacheField("reprobuild.toolIdentityCache.v4")
+  payload.addCacheField("reprobuild.toolIdentityCache.v7")
   payload.addCacheField(mode.modeName)
   payload.addCacheField(artifact.projectInterface.projectName)
   payload.addCacheField(artifact.projectInterface.packageName)
   payload.addCacheField(digestHex(artifact.interfaceFingerprint))
+  let importedMetadata =
+    importedProvisioningMetadataDigest(artifact.projectInterface)
+  if importedMetadata.len > 0:
+    payload.addCacheField("imported-provisioning-metadata")
+    payload.addCacheField(importedMetadata)
+  if pins.len > 0:
+    # Sorted on the full field tuple so pin order is not observable; not
+    # de-duplicated, so the key is a function of exactly what was passed.
+    var framed: seq[string] = @[]
+    for pin in pins:
+      var one = ""
+      one.addCacheField(pin.packageName)
+      one.addCacheField(pin.contributor)
+      one.addCacheField(pin.contributionFingerprint)
+      one.addCacheField(pin.contributionRecordDigest)
+      one.addCacheField(pin.realizationLockIdentity)
+      framed.add(one)
+    framed.sort(cmp)
+    payload.addCacheField("provisioning-pins.v1")
+    payload.addCacheField($framed.len)
+    for one in framed:
+      payload.addCacheField(one)
   if mode == tpmPathOnly:
     payload.addCacheField(pathModeResolutionSignature(artifact, pathValue))
   # Cross-Repo-Source-Consumption SC-6 (§5.2 "a changed pin invalidates the
@@ -6825,36 +7019,27 @@ proc toolIdentityCacheKey*(artifact: ProjectInterfaceArtifact;
     payload.addCacheField(useDef.packageSelector)
     payload.addCacheField(useDef.executableName)
     payload.addCacheField(useDef.policyPath.join("/"))
-    for nix in useDef.nixProvisioning:
-      payload.addCacheField(nix.contributor)
-      payload.addCacheField(nix.selector)
-      payload.addCacheField(nix.executablePath)
-      payload.addCacheField(nix.expressionFile)
-      payload.addCacheField(nix.packageId)
-      payload.addCacheField(nix.lockIdentity)
-    for tarball in useDef.tarballProvisioning:
-      payload.addCacheField(tarball.contributor)
-      payload.addCacheField(tarball.url)
-      payload.addCacheField(tarball.mirrors.join("\n"))
-      payload.addCacheField(tarball.sha256)
-      payload.addCacheField(tarball.archiveType)
-      payload.addCacheField($tarball.stripComponents)
-      payload.addCacheField(tarball.executablePath)
-      payload.addCacheField(tarball.packageId)
-      payload.addCacheField(tarball.lockIdentity)
-    for scoop in useDef.scoopProvisioning:
-      payload.addCacheField(scoop.contributor)
-      payload.addCacheField(scoop.bucket)
-      payload.addCacheField(scoop.app)
-      payload.addCacheField(scoop.version)
-      payload.addCacheField(scoop.preferredVersion)
-      payload.addCacheField(scoop.manifestChecksum)
-      payload.addCacheField(scoop.manifestUrl)
-      payload.addCacheField(scoop.executablePath)
-      payload.addCacheField($scoop.requiresExecutionProfileChecksum)
-      payload.addCacheField(scoop.packageId)
-      payload.addCacheField(scoop.lockIdentity)
-  digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
+    # Every realization the use carries, whole (see the v5 note above).
+    payload.addCacheField(toolUseRealizationDigest(useDef))
+  # v7: a Nix ``expressionFile`` anywhere makes the key uncacheable (see
+  # above). The nonce is the LAST field, so nothing after it could make two
+  # such keys equal.
+  result.cacheable = true
+  for useDef in artifact.projectInterface.toolUses:
+    for entry in useDef.nixProvisioning:
+      if entry.expressionFile.len > 0:
+        result.cacheable = false
+  if not result.cacheable:
+    payload.addCacheField("uncacheable-nix-expression-file")
+    payload.addCacheField(uncacheableNixExpressionKey())
+  result.key = digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
+
+proc toolIdentityCacheKey*(artifact: ProjectInterfaceArtifact;
+                           mode: ToolProvisioningMode;
+                           pathValue = getEnv("PATH");
+                           pins: openArray[ProvisioningPin] = []): string =
+  ## See ``toolIdentityCacheKeyInfo``.
+  toolIdentityCacheKeyInfo(artifact, mode, pathValue, pins).key
 
 proc toolIdentityRealizationsUsable(identity: PathOnlyBuildIdentity): bool =
   # The cache is usable when the artifacts the identity points at are
@@ -6925,12 +7110,55 @@ proc writeKeyedToolIdentity(outDir: string; key: string;
     writePathOnlyBuildIdentity(staged, identity))
   writeKeyedInspection(keyed.inspectionPath, identity)
 
+proc toolIdentityServable(identity: var PathOnlyBuildIdentity):
+    tuple[servable: bool; refreshed: bool] =
+  ## What EVERY tool-identity cache hit -- the warm table, the stable
+  ## identity file, the keyed cache file, and so a daemon-parent prewarm --
+  ## must establish before serving: the realizations still exist
+  ## (``toolIdentityRealizationsUsable``) AND every resolved executable is
+  ## still the bytes whose digest the identity records
+  ## (``verifyIdentityExecutables``: one stat per tool, a re-hash only on a
+  ## stat-evidence mismatch or racy evidence). ReproOS M7 sibling (7): the
+  ## existence check alone served a tool rewritten in place with its OLD
+  ## ``resolvedExecutableDigest``, warm and cold, and the typed-tool action
+  ## fingerprints never moved. A changed digest is a miss (the identity is
+  ## re-resolved, so the new digest reaches the fingerprints and, through
+  ## ``resolvedToolIdentityDigest``, the lowered-graph key); an unchanged
+  ## one after a touch is a hit with ``refreshed`` set, and the caller
+  ## writes the refreshed evidence back so the next hit is a stat again.
+  if not identity.toolIdentityRealizationsUsable():
+    return (servable: false, refreshed: false)
+  let executables = verifyIdentityExecutables(identity)
+  (servable: executables.current, refreshed: executables.refreshed)
+
+proc rewriteRefreshedIdentity(paths: openArray[string];
+                              identity: PathOnlyBuildIdentity) =
+  ## Persist refreshed executable evidence into every identity file that
+  ## exists. Best effort: a failed write only means the next hit re-hashes.
+  for path in paths:
+    if path.len == 0 or not fileExists(extendedPath(path)):
+      continue
+    try:
+      # Staged and renamed (``replaceFile``), like every keyed write: a
+      # concurrent reader sees the old identity or the refreshed one.
+      replaceFile(path, proc (staged: string) =
+        writePathOnlyBuildIdentity(staged, identity))
+    except CatchableError:
+      discard
+
 proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
                         artifact: ProjectInterfaceArtifact;
                         stableIdentityPath,
-                        stableInspectionPath: string):
+                        stableInspectionPath: string;
+                        keyInfo: tuple[key: string; cacheable: bool]):
     tuple[hit: bool; identity: PathOnlyBuildIdentity] =
-  let key = toolIdentityCacheKey(artifact, mode)
+  ## ``keyInfo`` is computed ONCE by the caller, before any resolution, and
+  ## the same value keys the write (``writeToolIdentityCache``) and the
+  ## ``current-key`` stamp: an input edited while the identity resolves is
+  ## then stored under the OLDER key, which the next build misses.
+  if not keyInfo.cacheable:
+    return
+  let key = keyInfo.key
   let cacheDir = outDir / "tool-identity-cache"
   let keyed = keyedToolIdentityPaths(outDir, key)
   let stableKeyPath = cacheDir / (mode.modeName & ".current-key")
@@ -6943,11 +7171,14 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
   if not fileExists(extendedPath(keyed.identityPath)):
     return
   try:
-    let identity = readPathOnlyBuildIdentity(keyed.identityPath)
+    var identity = readPathOnlyBuildIdentity(keyed.identityPath)
     if identity.interfaceFingerprint != artifact.interfaceFingerprint:
       return
-    if not identity.toolIdentityRealizationsUsable():
+    let served = identity.toolIdentityServable()
+    if not served.servable:
       return
+    if served.refreshed:
+      rewriteRefreshedIdentity([keyed.identityPath], identity)
     if not fileExists(extendedPath(keyed.inspectionPath)):
       writeKeyedInspection(keyed.inspectionPath, identity)
     let alreadyCurrent =
@@ -6955,6 +7186,11 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
         fileExists(extendedPath(stableIdentityPath)) and
         fileExists(extendedPath(stableInspectionPath)) and
         readFile(extendedPath(stableKeyPath)).strip() == key
+    if alreadyCurrent and served.refreshed:
+      # The stable copy names this key, so it is this identity: give it the
+      # refreshed evidence too, or a reader of the path this call returns
+      # (and the next warm hit, which re-checks it) sees the stale stamp.
+      rewriteRefreshedIdentity([stableIdentityPath], identity)
     if not alreadyCurrent:
       writePathOnlyBuildIdentity(stableIdentityPath, identity)
       createDir(extendedPath(parentDir(stableInspectionPath)))
@@ -6968,9 +7204,13 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
 
 proc writeToolIdentityCache(outDir: string; mode: ToolProvisioningMode;
                             artifact: ProjectInterfaceArtifact;
-                            identity: PathOnlyBuildIdentity) =
-  writeKeyedToolIdentity(outDir, toolIdentityCacheKey(artifact, mode),
-    identity)
+                            identity: PathOnlyBuildIdentity;
+                            keyInfo: tuple[key: string; cacheable: bool]) =
+  ## An uncacheable key (a nonce) is never looked up again, so nothing is
+  ## written under it.
+  if not keyInfo.cacheable:
+    return
+  writeKeyedToolIdentity(outDir, keyInfo.key, identity)
 
 proc providerSnapshotInputsFresh(snapshot: ProviderGraphSnapshot): bool =
   if snapshot.fragments.len == 0:
@@ -7113,11 +7353,30 @@ proc providerGraphStoreRoot(base: string): string =
       slug.add('_')
   base / ("variants-" & slug)
 
-proc loweredGraphCacheKey(artifact: ProjectInterfaceArtifact;
+proc resolvedToolIdentityDigest*(identity: PathOnlyBuildIdentity): string =
+  ## 64 hex over the fingerprints of a RESOLVED tool identity: every
+  ## profile's ``profileFingerprint`` and every action identity's
+  ## ``actionFingerprint``, in order, counted. Both bind
+  ## ``resolvedExecutableDigest``; neither binds the stat evidence, so a
+  ## touch that leaves the bytes alone does not move it.
+  var payload = ""
+  payload.addCacheField("reprobuild.resolvedToolIdentity.v1")
+  payload.addCacheField($identity.profiles.len)
+  for profile in identity.profiles:
+    payload.addCacheField(digestHex(profile.profileFingerprint))
+  payload.addCacheField($identity.actionIdentities.len)
+  for action in identity.actionIdentities:
+    payload.addCacheField(digestHex(action.actionFingerprint))
+  digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
+
+proc loweredGraphCacheKey*(artifact: ProjectInterfaceArtifact;
                           mode: ToolProvisioningMode;
                           providerArtifactId, providerSnapshotPath,
                           pathEnv: string;
-                          extensionSignature = ""): string =
+                          extensionSignature = "";
+                          pins: openArray[ProvisioningPin] = [];
+                          resolvedIdentity = PathOnlyBuildIdentity()):
+    string =
   ## ``extensionSignature`` (Workspace-Manifest-Optional MO-13, correcting
   ## MO-6) folds the ACTIVE ``projectExtension`` set into the key. The disk
   ## cache is otherwise keyed on the BASE snapshot's content digest, so an
@@ -7135,7 +7394,19 @@ proc loweredGraphCacheKey(artifact: ProjectInterfaceArtifact;
   payload.addCacheField(artifact.projectInterface.projectName)
   payload.addCacheField(artifact.projectInterface.packageName)
   payload.addCacheField(digestHex(artifact.interfaceFingerprint))
-  payload.addCacheField(toolIdentityCacheKey(artifact, mode))
+  # ``pins``: the same provisioning pins the tool identity was resolved
+  # under, so a lowered graph cached under one lock selection is not served
+  # under another (see ``toolIdentityCacheKey``).
+  payload.addCacheField(toolIdentityCacheKey(artifact, mode, pins = pins))
+  # ``resolvedIdentity`` (ReproOS M7 sibling (7)): the identity the graph is
+  # lowered AGAINST. Every typed-tool action's weak fingerprint embeds its
+  # profile's fingerprint, and the tool-identity KEY above does not move
+  # when a tool is rewritten in place -- only the resolved identity does
+  # (the stat-guarded hit check re-resolves it). Without this a graph
+  # lowered against the old executable was served with the old action
+  # fingerprints, and the action cache with them. Both production call
+  # sites pass the identity they just resolved.
+  payload.addCacheField(resolvedToolIdentityDigest(resolvedIdentity))
   payload.addCacheField(providerArtifactId)
   payload.addCacheField(canonicalVariantAssignments())
   # Shared-Development-Services L5 (§6.4): the selected environment.
@@ -7162,12 +7433,21 @@ proc loweredGraphCacheKey(artifact: ProjectInterfaceArtifact;
     payload.addCacheField(pathEnv)
   digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
 
-proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
-                             outDir: string;
-                             mode: ToolProvisioningMode;
-                             storeRootOverride = ""):
+proc resolveAndWriteIdentityKeyed(artifact: ProjectInterfaceArtifact;
+                                  outDir: string;
+                                  mode: ToolProvisioningMode;
+                                  storeRootOverride: string;
+                                  pins: seq[ProvisioningPin];
+                                  keyInfo: tuple[key: string;
+                                    cacheable: bool]):
     tuple[identity: PathOnlyBuildIdentity; identityPath: string;
       inspectionPath: string] =
+  ## ``pins``: the provisioning pins ``buildProvisioningPins`` resolved from
+  ## the committed lock in THIS process (empty when the lock governs no
+  ## provisioning). They reach ``toolBuildIdentity`` and are bound into the
+  ## tool-identity cache key, so a cached identity is only ever served for
+  ## the selection it was resolved under.
+  ##
   ## ``storeRootOverride`` names the tool store the realizations land in.
   ##
   ## Empty keeps the historical behaviour — a store under ``outDir`` — which
@@ -7185,7 +7465,7 @@ proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
   ## is keyed on the archive digest, which is not.
   let paths = identityPaths(outDir, mode)
   let cached = cachedToolIdentity(outDir, mode, artifact,
-    paths.identityPath, paths.inspectionPath)
+    paths.identityPath, paths.inspectionPath, keyInfo)
   if cached.hit:
     return (identity: cached.identity, identityPath: paths.identityPath,
       inspectionPath: paths.inspectionPath)
@@ -7212,44 +7492,111 @@ proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
       (if storeRootOverride.len > 0: storeRootOverride
        else: outDir / "tool-store"),
     producerExecutableSelectors = producerExecutableSelectors,
-    producerAuxSelectors = producerAuxSelectors)
+    producerAuxSelectors = producerAuxSelectors,
+    pins = pins)
   writePathOnlyBuildIdentity(paths.identityPath, identity)
   writeInspectionJson(paths.inspectionPath, identity)
-  writeToolIdentityCache(outDir, mode, artifact, identity)
+  writeToolIdentityCache(outDir, mode, artifact, identity, keyInfo)
   createDir(extendedPath(outDir / "tool-identity-cache"))
+  # The key computed BEFORE resolution (see ``cachedToolIdentity``), not a
+  # fresh one: re-deriving it here would stamp an identity resolved from
+  # the old inputs with the key of inputs edited meanwhile.
   writeFile(extendedPath(outDir / "tool-identity-cache" / (mode.modeName & ".current-key")),
-    toolIdentityCacheKey(artifact, mode) & "\n")
+    keyInfo.key & "\n")
   (identity: identity, identityPath: paths.identityPath,
     inspectionPath: paths.inspectionPath)
 
-proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
-                                 outDir: string;
-                                 mode: ToolProvisioningMode):
+proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
+                             outDir: string;
+                             mode: ToolProvisioningMode;
+                             storeRootOverride = "";
+                             pins: seq[ProvisioningPin] = @[]):
     tuple[identity: PathOnlyBuildIdentity; identityPath: string;
       inspectionPath: string] =
-  let key = toolIdentityCacheKey(artifact, mode)
+  ## ``resolveAndWriteIdentityKeyed`` with the key computed here, once.
+  resolveAndWriteIdentityKeyed(artifact, outDir, mode, storeRootOverride,
+    pins, toolIdentityCacheKeyInfo(artifact, mode, pins = pins))
+
+proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
+                                  outDir: string;
+                                  mode: ToolProvisioningMode;
+                                  pins: seq[ProvisioningPin];
+                                  keyInfo: tuple[key: string; cacheable: bool]):
+    tuple[identity: PathOnlyBuildIdentity; identityPath: string;
+      inspectionPath: string] =
+  ## The warm resolver under a key computed ONCE by the caller (see the
+  ## exported overloads below).
+  let key = keyInfo.key
   let paths = identityPaths(outDir, mode)
   let tableKey = outDir & "\0" & mode.modeName & "\0" & key
   let stableKeyPath = outDir / "tool-identity-cache" /
     (mode.modeName & ".current-key")
-  if warmToolIdentities.hasKey(tableKey):
+  if keyInfo.cacheable and warmToolIdentities.hasKey(tableKey):
     let warm = warmToolIdentities[tableKey]
     if warm.key == key and warm.identity.interfaceFingerprint ==
         artifact.interfaceFingerprint and
         evidenceFresh(warm.identityPath, warm.identityEvidence) and
-        evidenceFresh(stableKeyPath, warm.keyEvidence) and
-        warm.identity.toolIdentityRealizationsUsable():
-      if warm.populatedByPid != getCurrentProcessId():
-        inc warmBuildCacheCounters.inheritedWarmHits
-      return (identity: warm.identity, identityPath: warm.identityPath,
-        inspectionPath: warm.inspectionPath)
+        evidenceFresh(stableKeyPath, warm.keyEvidence):
+      # The executables are checked on the warm hit too (ReproOS M7
+      # sibling (7)): a warm entry is as old as the process that decoded
+      # it, and a tool rewritten since must not be served from it.
+      let served = warm.identity.toolIdentityServable()
+      if served.servable:
+        if served.refreshed:
+          # Into the KEYED entry, the authoritative copy, and into the stable
+          # file this entry was warmed from: ``evidenceFresh`` above has just
+          # shown that file unchanged since, so it still holds this identity.
+          rewriteRefreshedIdentity([keyedToolIdentityPaths(outDir,
+            key).identityPath, warm.identityPath], warm.identity)
+          warm.identityEvidence = durableFileEvidence(warm.identityPath)
+        if warm.populatedByPid != getCurrentProcessId():
+          inc warmBuildCacheCounters.inheritedWarmHits
+        return (identity: warm.identity, identityPath: warm.identityPath,
+          inspectionPath: warm.inspectionPath)
   inc warmBuildCacheCounters.toolIdentityResolves
-  result = resolveAndWriteIdentity(artifact, outDir, mode)
-  warmToolIdentities[tableKey] = WarmToolIdentity(
-    populatedByPid: getCurrentProcessId(), key: key,
-    identityPath: result.identityPath, inspectionPath: result.inspectionPath,
-    identityEvidence: durableFileEvidence(result.identityPath),
-    keyEvidence: durableFileEvidence(stableKeyPath), identity: result.identity)
+  result = resolveAndWriteIdentityKeyed(artifact, outDir, mode, "", pins,
+    keyInfo)
+  warmToolIdentities.dropWarmEntriesWithPrefix(
+    outDir & "\0" & mode.modeName & "\0")
+  # An uncacheable key (a nonce) is never looked up again: nothing is kept
+  # under it.
+  if keyInfo.cacheable:
+    warmToolIdentities[tableKey] = WarmToolIdentity(
+      populatedByPid: getCurrentProcessId(), key: key,
+      identityPath: result.identityPath, inspectionPath: result.inspectionPath,
+      identityEvidence: durableFileEvidence(result.identityPath),
+      keyEvidence: durableFileEvidence(stableKeyPath), identity: result.identity)
+
+
+proc warmResolveAndWriteIdentity*(artifact: ProjectInterfaceArtifact;
+                                  outDir: string;
+                                  mode: ToolProvisioningMode;
+                                  pins: seq[ProvisioningPin] = @[]):
+    tuple[identity: PathOnlyBuildIdentity; identityPath: string;
+      inspectionPath: string] =
+  ## The build path's tool-identity resolution: the in-process warm table,
+  ## then the on-disk cache, then ``toolBuildIdentity``. Exported so the M7
+  ## end-to-end test drives THIS cache rather than a stand-in. ``pins`` as
+  ## for ``resolveAndWriteIdentity``; the warm table is keyed on the same
+  ## key, so it cannot serve an identity resolved under other pins either.
+  warmResolveAndWriteIdentity(artifact, outDir, mode, pins,
+    toolIdentityCacheKeyInfo(artifact, mode, pins = pins))
+
+proc warmResolveAndWriteIdentityKeyed*(artifact: ProjectInterfaceArtifact;
+                                       outDir: string;
+                                       mode: ToolProvisioningMode;
+                                       pins: seq[ProvisioningPin] = @[]):
+    tuple[resolved: tuple[identity: PathOnlyBuildIdentity;
+      identityPath: string; inspectionPath: string];
+      keyInfo: tuple[key: string; cacheable: bool]] =
+  ## ``warmResolveAndWriteIdentity``, also returning the key the identity was
+  ## resolved and stored under -- computed ONCE, before resolution -- so a
+  ## caller reporting the keyed entry names the one actually written rather
+  ## than re-deriving a key that may differ (other pins, an input edited
+  ## meanwhile, or the nonce of an uncacheable key).
+  result.keyInfo = toolIdentityCacheKeyInfo(artifact, mode, pins = pins)
+  result.resolved = warmResolveAndWriteIdentity(artifact, outDir, mode, pins,
+    result.keyInfo)
 
 # ---------------------------------------------------------------------------
 # Dependency-Attribution MAC-2 — the daemon-parent prewarm.
@@ -7362,6 +7709,7 @@ proc prewarmLoweredGraphsFrom(outDir: string; stamps: var seq[PrewarmStamp]):
       let evidence = durableFileEvidence(path)
       if not evidence.exists:
         continue
+      warmLoweredGraphs.dropWarmEntriesWithPrefix(path & "\0")
       warmLoweredGraphs[path & "\0" & record.cacheKey] = WarmLoweredGraph(
         populatedByPid: getCurrentProcessId(),
         cachePath: path,
@@ -7456,6 +7804,11 @@ proc prewarmToolIdentitiesFrom(outDir: string;
       if not fileExists(extendedPath(keyed.identityPath)):
         continue
       let identity = readPathOnlyBuildIdentity(keyed.identityPath)
+      # ReproOS M7 sibling (6): the stamp is rewritten in place under a new
+      # key on every build whose key carries a nonce; the warm table keeps
+      # ONE entry per mode, not one per key the stamp ever named.
+      warmToolIdentities.dropWarmEntriesWithPrefix(
+        outDir & "\0" & mode.modeName & "\0")
       warmToolIdentities[outDir & "\0" & mode.modeName & "\0" & key] =
         WarmToolIdentity(
           populatedByPid: getCurrentProcessId(),
@@ -7553,6 +7906,8 @@ when defined(reproDaemonParentPrewarmTest):
       selectedActionId, pathEnv, cacheKey)
 
   proc warmLoweredGraphCountForTest*(): int = warmLoweredGraphs.len
+
+  proc warmToolIdentityCountForTest*(): int = warmToolIdentities.len
 
 proc shouldEnterBuildPipeline*(mode: ToolProvisioningMode): bool =
   ## M9.R.8 Part 1 — extracted predicate for the build-pipeline dispatch
@@ -12197,7 +12552,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             producerArtifact.projectInterface.runtimeToolUses
           runtimeArtifact.projectInterface.runtimeToolUses = @[]
           producerRuntimeIdentity = toolBuildIdentity(runtimeArtifact,
-            effectiveMode, storeRoot = producerOutDirBase / "runtime-tool-store")
+            effectiveMode, storeRoot = producerOutDirBase / "runtime-tool-store",
+            pins = producerRuntimeProvisioningPins(runtimeArtifact,
+              producerRootAbs))
         # Decide whether the producer sub-build is required for the CONSUMED
         # artifact. A build is needed only when the producer exposes a
         # COMPILED artifact on disk:
@@ -12418,6 +12775,17 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         "per-project provider compile")
 
   if shouldEnterBuildPipeline(effectiveMode):
+    # ReproOS M7 deliverable 3: the committed lock's ``provisioning`` records
+    # select each package's contribution. Resolved HERE, in this process,
+    # from the lock as it is on disk now, and handed to the tool-identity
+    # resolution below and to the lowered-graph cache key further down --
+    # never persisted. A refusal (``ProvisioningSelectionRefused``, the
+    # resolver's own message) fails the build; nothing retries unpinned. A
+    # materialized publication/substitution provisions no tool, so it selects
+    # nothing and needs no pins.
+    let provisioningPins =
+      if materializedOnly: newSeq[ProvisioningPin]()
+      else: buildProvisioningPins(buildArtifact, result.projectRoot)
     let identityStart = statStart(statsEnabled)
     let resolved =
       if materializedOnly:
@@ -12430,7 +12798,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           inspectionPath: "")
       else:
         progressRenderer.renderPhase("resolving tool identities")
-        warmResolveAndWriteIdentity(buildArtifact, outDir, effectiveMode)
+        warmResolveAndWriteIdentity(buildArtifact, outDir, effectiveMode,
+          pins = provisioningPins)
     finishStat(buildStats, statsEnabled, "repro tool identity resolve",
       identityStart)
     let identity = resolved.identity
@@ -12746,7 +13115,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
 
     let graphCacheKey = loweredGraphCacheKey(buildArtifact, effectiveMode,
       providerArtifactId, refresh.persistedSnapshotPath, pathEnv,
-      extensionSignature)
+      extensionSignature, pins = provisioningPins,
+      resolvedIdentity = identity)
     let graphCacheReadStart = statStart(statsEnabled)
     progressRenderer.renderPhase("reading lowered graph cache")
     let cachedLowered =
@@ -14895,6 +15265,19 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
       "REPRO_TOOL_PROVISIONING (for example REPRO_TOOL_PROVISIONING=nix).")
     return
 
+  # ReproOS M7 deliverable 3: select from the committed lock exactly as a
+  # build does. This surface is never fatal (above), but a lock refusal is
+  # NOT one of the failures the per-tool retry below may paper over: that
+  # retry would provision the locked packages UNPINNED. So a refusal
+  # provisions nothing, says why with the resolver's own message, and leaves
+  # the shell on the ambient PATH the way every other failure here does.
+  var provisioningPins: seq[ProvisioningPin] = @[]
+  try:
+    provisioningPins = buildProvisioningPins(interfaceArtifact,
+      selection.projectRoot)
+  except ProvisioningSelectionRefused as refusal:
+    stderr.writeLine(devEnvProvisioningRefusalText(refusal.msg))
+    return
   let storeRoot = resolveStoreRoot() / "tool-store"
   var binDirs: seq[string] = @[]
   var prefixOps: seq[DevEnvShellOp] = @[]
@@ -14906,7 +15289,8 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
       result.profiles = identity.profiles.filterIt(it.installMethod != "path")
   try:
     let identity = contributed(resolveAndWriteIdentity(interfaceArtifact,
-      selection.outDir, mode, storeRootOverride = storeRoot).identity)
+      selection.outDir, mode, storeRootOverride = storeRoot,
+      pins = provisioningPins).identity)
     binDirs = binDirsForDevelop(identity, storeRoot = storeRoot)
     prefixOps = prefixEnvOpsForDevelop(identity)
   except CatchableError as batchErr:
@@ -14927,8 +15311,11 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
       var single = interfaceArtifact
       single.projectInterface.toolUses = @[useDef]
       try:
+        # The SAME pins as the batch: a single-tool artifact keeps every
+        # contribution record, so a pin for another package is accepted and
+        # stamped nowhere, and this package stays pinned.
         let singleIdentity = contributed(toolBuildIdentity(single, mode,
-          storeRoot = storeRoot))
+          storeRoot = storeRoot, pins = provisioningPins))
         for dir in binDirsForDevelop(singleIdentity, storeRoot = storeRoot):
           if dir notin binDirs:
             binDirs.add(dir)
@@ -23574,6 +23961,10 @@ proc runCMakeDevelopCommand(target: string; mode: ToolProvisioningMode;
   let interfacePath = outDir / "cmake-develop-interface.rbsz"
   let artifact = cmakeDevelopArtifact(sourceRoot)
   writeInterfaceArtifact(interfacePath, artifact)
+  # No provisioning pins (ReproOS M7 deliverable 3), by construction: this
+  # synthetic artifact carries no provisioning contribution record, so there
+  # is no contributor to select -- ``applyProvisioningPins`` would refuse any
+  # pin against it -- and a CMake source tree has no committed repro.lock.
   let resolved = warmResolveAndWriteIdentity(artifact, outDir, mode)
   let toolchainPath = outDir / "reprobuild-cmake-toolchain.cmake"
   # Windows: filename includes .ps1 so PowerShell will execute it directly.
@@ -29126,7 +29517,9 @@ proc recordMaterializedProducersForInspection(
         producerArtifact.projectInterface.runtimeToolUses
       runtimeArtifact.projectInterface.runtimeToolUses = @[]
       runtimeIdentity = toolBuildIdentity(runtimeArtifact, mode,
-        storeRoot = producerOutDir / "runtime-tool-store")
+        storeRoot = producerOutDir / "runtime-tool-store",
+        pins = producerRuntimeProvisioningPins(runtimeArtifact,
+          sourceRootAbs))
     if not recordProducerMaterialization(selector, sourceRootAbs,
         producerArtifact, runtimeIdentity, binding):
       raise newException(IOError,
@@ -29205,22 +29598,40 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   var identity = PathOnlyBuildIdentity(
     projectName: artifact.projectInterface.projectName,
     interfaceFingerprint: artifact.interfaceFingerprint)
+  # ReproOS M7 deliverable 3: inspection lowers the SAME graph a build
+  # would, so it resolves the same lock-selected provisioning pins (and
+  # refuses the same way). Only needed when a tool identity is resolved.
+  let provisioningPins =
+    if lowerGraph and shouldEnterBuildPipeline(effectiveMode):
+      buildProvisioningPins(artifact, projectRoot)
+    else: newSeq[ProvisioningPin]()
   if lowerGraph and shouldEnterBuildPipeline(effectiveMode):
     recordMaterializedProducersForInspection(artifact, projectRoot, outDir,
       publicCliPath, effectiveMode)
-    let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
+    let keyedResolution = warmResolveAndWriteIdentityKeyed(artifact, outDir,
+      effectiveMode, pins = provisioningPins)
+    let resolved = keyedResolution.resolved
     identity = resolved.identity
     # Report the KEYED memo entry, not the stable files: those are rewritten
     # by every later invocation in this outDir with another key (a narrower
     # target, another $PATH), so the path this payload names would describe
     # whatever ran last by the time a caller opens it — not this graph.
-    let key = toolIdentityCacheKey(artifact, effectiveMode)
-    let keyed = keyedToolIdentityPaths(outDir, key)
-    if not fileExists(extendedPath(keyed.identityPath)) or
-        not fileExists(extendedPath(keyed.inspectionPath)):
-      writeKeyedToolIdentity(outDir, key, identity)
-    result.toolIdentityPath = keyed.identityPath
-    result.toolInspectionPath = keyed.inspectionPath
+    # The key is the one the identity was resolved under, pins included: a
+    # key re-derived here without them would store a lock-selected identity
+    # where an unpinned resolution looks it up. An uncacheable key (a Nix
+    # expressionFile: a nonce) has no keyed entry and none is written under
+    # it; the stable files this resolution just wrote are reported instead.
+    if keyedResolution.keyInfo.cacheable:
+      let key = keyedResolution.keyInfo.key
+      let keyed = keyedToolIdentityPaths(outDir, key)
+      if not fileExists(extendedPath(keyed.identityPath)) or
+          not fileExists(extendedPath(keyed.inspectionPath)):
+        writeKeyedToolIdentity(outDir, key, identity)
+      result.toolIdentityPath = keyed.identityPath
+      result.toolInspectionPath = keyed.inspectionPath
+    else:
+      result.toolIdentityPath = resolved.identityPath
+      result.toolInspectionPath = resolved.inspectionPath
 
   let hasBuildBlock = moduleHasBuildBlock(modulePath)
   if not hasBuildBlock and
@@ -29389,7 +29800,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   let pathEnv = getEnv("PATH")
   let graphCacheKey = loweredGraphCacheKey(artifact, effectiveMode,
     result.providerArtifactId, refresh.persistedSnapshotPath, pathEnv,
-    extensionSignature)
+    extensionSignature, pins = provisioningPins,
+    resolvedIdentity = identity)
   let cachePath = loweredGraphCachePath(outDir, selectedActionId)
   result.loweredGraphCachePath = cachePath
   let cachedLowered =
@@ -36968,7 +37380,10 @@ proc runDevelopCommand*(args: openArray[string]): int =
     raise newException(ValueError,
       "unsupported develop tool provisioning mode: " & effectiveMode.modeName)
 
-  let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode)
+  # ReproOS M7 deliverable 3: a develop session provisions the same tools a
+  # build does, so it selects them from the same committed lock.
+  let resolved = warmResolveAndWriteIdentity(artifact, outDir, effectiveMode,
+    pins = buildProvisioningPins(artifact, projectRootForModule(modulePath)))
   echo "repro develop: compatibility dev-env path active (provider-driven " &
     "artifact integration pending, tool-provisioning=" & effectiveMode.modeName & ")"
   echo "project: " & artifact.projectInterface.projectName
@@ -83036,6 +83451,10 @@ type
     write: bool
     allowRegression: seq[string]
       ## ``--allow-pin-regression=<sibling>[,<sibling>…]`` (refresh only)
+    reselectProvisioning: bool
+      ## ReproOS M7 deliverable 5 — ``repro lock refresh --provisioning``:
+      ## re-select the lock's provisioning records instead of carrying them
+      ## forward (``reselectCommittedProvisioning``). ``refresh`` only.
     repin: seq[string]
       ## ``--repin=<package>[,<package>…]`` (refresh only): the targeted
       ## re-pin of `Locking-And-Solver.md` §"Targeted re-pin". Empty is the
@@ -83089,6 +83508,17 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
       gen.registries.add(valueFromFlag(rest, i, "--registry"))
     elif arg == "--write":
       gen.write = true
+    elif arg == "--provisioning":
+      # ReproOS M7 deliverable 5. Re-selection rewrites the committed lock's
+      # provisioning records, so it belongs to the verb that writes the
+      # committed lock by definition; `solve --write` keeps carrying them
+      # forward, and `validate` writes nothing.
+      if verb != "refresh":
+        stderr.writeLine("repro lock " & verb & ": --provisioning " &
+          "re-selects the committed lock's provisioning records and is " &
+          "accepted only by `repro lock refresh`")
+        return 2
+      gen.reselectProvisioning = true
     elif arg == "--json":
       asJson = true
     elif verb == "refresh" and (arg == "--allow-pin-regression" or
@@ -84699,6 +85129,31 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
     defer:
       try: removeDir(extendedPath(request.workDir))
       except CatchableError: discard
+    if gen.reselectProvisioning and entryPoint == lgeLockRefresh:
+      # ReproOS M7 deliverable 5 — EXPLICIT re-selection. Re-solve exactly
+      # as a refresh does, but land nothing until the provisioning records
+      # are re-selected: any refusal leaves the committed lock untouched,
+      # never half-refreshed.
+      var generated = runLockRefresh(request, "")
+      let incumbentExists = fileExists(extendedPath(lockP))
+      let incumbentText =
+        if incumbentExists: readFile(extendedPath(lockP)) else: ""
+      let platform =
+        if platformOverride.len > 0: platformOverride
+        else: currentPlatformId()
+      let outcome = reselectCommittedProvisioning(projectDir, lockP,
+        incumbentExists, incumbentText, generated.lockDocument, platform,
+        platform)
+      if not outcome.reselected:
+        stderr.writeLine(renderReselectionRefusal(verb, lockP,
+          outcome.refusals))
+        return 1
+      stdout.writeLine(outcome.report)
+      createDir(parentDir(lockP))
+      writeFile(lockP, outcome.document)
+      generated.lockDocument = outcome.document
+      generated.lockPath = lockP
+      return reportGeneratedLock(verb, lockP, generated)
     let generated =
       if gen.repin.len > 0:
         runLockRepin(request, committedForRepin, gen.repin, writeTo)
@@ -84724,6 +85179,13 @@ proc runReproLockRefresh(rest: openArray[string]): int =
   ## name it. Exits 5 (``IncompleteSolveExitCode``), writing nothing, when a
   ## ``uses:`` names a develop-set sibling whose recipe the solve could not
   ## read (``unreachedDevelopSiblings``).
+  ##
+  ## The lock's ``provisioning`` records (ReproOS M7) are CARRIED FORWARD
+  ## unchanged: a refresh never re-selects a contributor as a side effect
+  ## of re-solving versions. ``--provisioning`` re-selects them explicitly
+  ## (``provisioning_lock_selection.reselectCommittedProvisioning``) and
+  ## prints the provisioning diff; it refuses, writing nothing, when the
+  ## selection cannot be made in full.
   runLockGenerationVerb(rest, "refresh", lgeLockRefresh,
     writeByDefault = true)
 
@@ -85285,6 +85747,73 @@ proc runReproLockList(rest: openArray[string]): int =
     lockFileDeclarationsFromCompiledProvider(absolutePath(projectDir))))
   0
 
+proc lockDiffReport*(oldPath, newPath: string): tuple[rc: int; text: string] =
+  ## ``repro lock diff <old-lock> <new-lock>`` (ReproOS M7 deliverable 5):
+  ## the provisioning-level diff of two committed locks, each change with
+  ## why it changed (``provisioning_lock_diff``). ``rc`` follows ``diff``:
+  ## 0 = no provisioning selection changed, 1 = changes, 2 = a lock cannot
+  ## be read (a refused diff is never reported as "no change").
+  for path in [oldPath, newPath]:
+    if not fileExists(extendedPath(path)):
+      return (2, "repro lock diff: cannot read " & path & ": " &
+        (if dirExists(extendedPath(path)): "it is a directory"
+         else: "no such file"))
+  var oldText, newText: string
+  try:
+    oldText = readFile(extendedPath(oldPath))
+    newText = readFile(extendedPath(newPath))
+  except CatchableError as err:
+    return (2, "repro lock diff: " & err.msg)
+  # ReproOS M6 D2: evidence for a field-level explanation, read from each
+  # record's OWN catalog coordinate (remote + revision) in the workspace's
+  # shared clones, where readable. Optional by construction: evidence is
+  # used only if it reproduces a recorded fingerprint, and a catalog that
+  # cannot be read leaves the cause "not determinable from the records".
+  var evidence = ProvisioningDiffEvidence()
+  var oldRecords, newRecords: seq[LockedRealization]
+  var oldFailures, newFailures: seq[CatalogEvidenceFailure]
+  let anchor = parentDir(absolutePath(newPath))
+  if provisioningRecordsOf(oldText, "the old lock", oldRecords).len == 0:
+    evidence.previous = catalogEvidenceForRecords(oldRecords, anchor,
+      oldFailures)
+  if provisioningRecordsOf(newText, "the new lock", newRecords).len == 0:
+    evidence.current = catalogEvidenceForRecords(newRecords, anchor,
+      newFailures)
+  let diff = diffProvisioningLockDocuments(oldText, newText, evidence)
+  if diff.refused:
+    return (2, "repro lock diff: " & renderProvisioningDiff(diff))
+  if diff.unchanged:
+    return (0, "repro lock diff: no provisioning selection changed")
+  var text = renderProvisioningDiff(diff)
+  # ReproOS M6 D4: a cause the diff could not determine says WHY -- the
+  # catalogs that could not be read at the recorded revisions, each with
+  # its cause and the command that makes it readable -- rather than only
+  # "not determinable". Only for those records: an explained change, or a
+  # change that needs no evidence, adds nothing.
+  let failures = relevantEvidenceFailures(diff.changes,
+    oldRecords & newRecords, oldFailures & newFailures)
+  if failures.len > 0:
+    for line in renderEvidenceFailures(failures):
+      text.add("\n" & line)
+  (1, text)
+
+proc runReproLockDiff(rest: openArray[string]): int =
+  var paths: seq[string] = @[]
+  for arg in rest:
+    if arg.startsWith("--"):
+      stderr.writeLine("repro lock diff: unknown flag " & arg)
+      return 2
+    paths.add(arg)
+  if paths.len != 2:
+    stderr.writeLine("usage: repro lock diff <old-lock> <new-lock>")
+    return 2
+  let report = lockDiffReport(paths[0], paths[1])
+  if report.rc == 2:
+    stderr.writeLine(report.text)
+  else:
+    stdout.writeLine(report.text)
+  report.rc
+
 proc runReproLockUpdate*(args: openArray[string]): int
   ## HL-11 M4 — ``repro lock update <dependency> [--to <rev>]``. Forward
   ## declaration: the implementation lives beside the `flake.lock` refresh
@@ -85304,7 +85833,7 @@ proc runReproLockCommand*(args: openArray[string]): int =
   ## ``visualize`` (Locking-And-Solver.md §"CLI Surface") remain future work.
   if args.len == 0:
     stderr.writeLine("repro lock: error: missing verb " &
-      "(one of: list, solve, refresh, update, validate, explain)")
+      "(one of: list, solve, refresh, update, validate, explain, diff)")
     return 2
   let rest =
     if args.len > 1: args[1 .. ^1]
@@ -85320,6 +85849,8 @@ proc runReproLockCommand*(args: openArray[string]): int =
     return runReproLockSolve(rest)
   of "validate":
     return runReproLockValidate(rest)
+  of "diff":
+    return runReproLockDiff(rest)
   of "explain":
     var variantName = ""
     var fixturePath = ""
@@ -95259,7 +95790,7 @@ proc runThinAppDispatch(programName: string): int =
       stderr.write(renderUnknownTargetDiagnostic(err[]))
       return 2
     except CatchableError as err:
-      stderr.writeLine("repro build: error: " & err.msg)
+      stderr.writeLine(reproBuildErrorText(err.msg))
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "test":
     # CI-Sharding M2 — ``repro test --shard k/N [...]``.  Implementation

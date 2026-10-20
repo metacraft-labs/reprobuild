@@ -74,9 +74,11 @@ type
     version*: string
       ## Exact version pin, "" for none.
     contributor*: Option[string]
-      ## Contributor pin (from a lock, a policy or
-      ## ``REPRO_PROVISIONING_CONTRIBUTOR``). ``some("")`` pins the canonical
-      ## package provider; ``none`` lets a unique contributor select.
+      ## Contributor pin (from a lock or an explicit curator policy; the
+      ## ``REPRO_PROVISIONING_CONTRIBUTOR`` environment selector was removed
+      ## by ReproOS M7 deliverable 3 and refuses while set). ``some("")`` pins
+      ## the canonical package provider; ``none`` lets a unique contributor
+      ## select.
     lockIdentity*: string
       ## Lock-identity pin, "" for none: the ``lockIdentity`` a previous
       ## selection recorded (``contributorLockIdentity`` form). When set, a

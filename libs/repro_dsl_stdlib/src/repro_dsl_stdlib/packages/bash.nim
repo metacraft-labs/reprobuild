@@ -24,11 +24,14 @@ package bash:
       preferredVersion = ">=2", executablePath = "bin/bash.exe",
       requiresExecutionProfileChecksum = false)
     # Direct-download: same PortableGit archive as `git.nim`; bash.exe
-    # ships at `bin/bash.exe` in the SFX-extracted tree.
+    # ships at `bin/bash.exe` in the SFX-extracted tree. `version` is
+    # bash's, not Git's: `bin/bash.exe --version` in this archive reports
+    # 5.3.9 (`etc/package-versions.txt`: bash 5.3.009-1).
     tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
       sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
       archiveType = "7z.exe",
       executablePath = "bin/bash.exe",
+      version = "5.3.9",
       packageId = "git@2.54.0",
       cpu = "x86_64",
       os = "windows",

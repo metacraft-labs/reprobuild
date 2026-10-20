@@ -620,6 +620,64 @@ type
     lockIdentity*: string
     location*: SourceLocation
 
+  ProvisioningPin* = object
+    ## M7 deliverable 3 -- the provisioning contribution the resolver
+    ## (``repro_interface_artifacts/contribution_selection``) selected for a
+    ## package, from the committed lock or an explicit curator policy, after
+    ## verifying it against the composed catalogs.
+    ##
+    ## RESOLUTION-TIME ONLY. It is never written by the artifact codec and
+    ## never enters ``interfaceFingerprint``: it is stamped onto a decoded
+    ## ``InterfaceToolUse`` by ``provisioning_pins.applyProvisioningPins``
+    ## immediately before tool resolution, and the acquisition planners in
+    ## ``repro_tool_profiles`` select ONLY the pinned contributor's
+    ## realizations and fold ``contributionFingerprint`` into the plan's
+    ## lock identity -- which keys the realized prefix, the tool profile
+    ## fingerprint and the typed-tool action fingerprint (deliverable 4).
+    ##
+    ## The zero value means "no pin". ANY non-zero field makes it a pin, and
+    ## a pin with a missing or malformed field REFUSES -- it never degrades
+    ## to "unpinned".
+    ##
+    ## TRUST BOUNDARY. A pin is trusted input: the engine checks it against
+    ## the consumer's artifact (contributor, record digest, realization) but
+    ## CANNOT recompute ``contributionFingerprint`` -- that needs the
+    ## provider identity, which no artifact carries -- nor re-check the
+    ## lock. A hand-built pin with the right record digest and an arbitrary
+    ## fingerprint, or naming a contributor the lock does not, is ACCEPTED
+    ## (measured). That is safe only while the one producer is
+    ## ``contribution_selection.pinOf`` over a resolution made in the SAME
+    ## process. The CLI build path now builds pins
+    ## (``repro_cli_support.buildProvisioningPins``), and it keeps that
+    ## rule: every call re-reads the committed lock and re-runs the resolver
+    ## in the calling process, and passes the result straight down the
+    ## stack. Nothing persists a pin: the codec does not encode it, and the
+    ## CLI tool-identity cache key binds the pins only as a DIGEST -- an
+    ## entry is looked up with a key recomputed from freshly resolved pins,
+    ## and no cached key, identity or lock-identity string is ever turned
+    ## back into a pin. Any future route that persists, transmits or caches
+    ## a pin -- or reads one back -- MUST add verification the engine can
+    ## check (re-running the resolver, or a binding to the verified lock
+    ## record) before it passes that pin on.
+    packageName*: string
+    contributor*: string
+    contributionFingerprint*: string
+      ## The M7 D1 contribution fingerprint, 64 lower-case hex.
+    contributionRecordDigest*: string
+      ## ``interfaceContributionRecordDigest`` of the selected contribution
+      ## record, 64 lower-case hex -- what ties the pin to the record the
+      ## consumer's interface artifact actually carries.
+    realizationLockIdentity*: string
+      ## For a selection made BY THE COMMITTED LOCK: the declared lock
+      ## identity of the realization the lock record pins
+      ## (``realization_lock_identity``). The planners provision exactly
+      ## that realization of the contributor and refuse rather than take
+      ## another one -- a contributor may declare several (one per
+      ## platform, or a specific entry plus a catch-all), and without this
+      ## the planner's declaration-order pick could differ from the
+      ## realization the lock pins. Empty for a curator-policy or
+      ## unique-eligible selection, which pins the contributor only.
+
   InterfaceHomebrewProvisioning* = object
     ## A Homebrew bridge record (``HomebrewProvisioningDef``): the cask or
     ## formula that installs the target package outside Reprobuild. Carried
@@ -646,6 +704,9 @@ type
     tarballProvisioning*: seq[InterfaceTarballProvisioning]
     scoopProvisioning*: seq[InterfaceScoopProvisioning]
     location*: SourceLocation
+    provisioningPin*: ProvisioningPin
+      ## Resolution-time contribution selection; see ``ProvisioningPin``.
+      ## NOT encoded, NOT fingerprinted.
 
   InterfaceProvisioningContribution* = object
     targetPackage*: string
@@ -658,6 +719,32 @@ type
     homebrewProvisioning*: seq[InterfaceHomebrewProvisioning]
       ## Bridge records (v27); never realization candidates.
     location*: SourceLocation
+    imported*: bool
+      ## M7 deliverable 4 (v29): the record was IMPORTED -- declared by
+      ## another project's catalog and carried here only because this
+      ## project's compilation registered it -- rather than declared by the
+      ## project this artifact describes. Set by
+      ## ``markImportedContributions`` at extraction; ``false`` (the default,
+      ## and every v<29 artifact) means "this project's own record".
+      ##
+      ## It decides how the record enters ``interfaceFingerprint``
+      ## (Provisioning-Contributions.md, Interface Artifacts: records
+      ## "participate in the catalog project's interface fingerprint. They
+      ## do not participate in the target package's"): an OWN record enters
+      ## in full, exactly as before, so a catalog project's fingerprint --
+      ## and ``catalogArtifactIdentity`` -- still moves with its realization
+      ## metadata; an IMPORTED record enters only as its coordinate
+      ## (package, target interface fingerprint, contributor,
+      ## ``developInterface``), so a realization-only change of an imported
+      ## contribution does not move the consumer's typecheck identity, while
+      ## an interface change of its target still does. The realization
+      ## metadata left out is bound by ``importedProvisioningMetadataDigest``
+      ## wherever this artifact's realizations are read and cached, and by
+      ## the contribution fingerprint for a locked selection.
+      ##
+      ## NOT an input of ``interfaceContributionRecordDigest``: a record is
+      ## the same record in the catalog that declares it and in every
+      ## consumer that imports it.
 
   ProjectInterface* = object
     projectName*: string
@@ -1080,8 +1167,20 @@ static:
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 28'u16
-    ## v28 (current): ``TarballArchiveDetail`` also retains
+  EnvelopeVersion = 29'u16
+    ## v29 (current): retains ``InterfaceProvisioningContribution.imported``
+    ##                (one byte after ``developInterface``; ReproOS M7
+    ##                deliverable 4). Introduced as "v18" on the campaign
+    ##                line, it was renumbered at the landing on ``agents``
+    ##                above everything ``agents`` had published (v18-v28),
+    ##                for the reason the v23 note gives. v28 and older
+    ##                payloads decode every record as the project's own,
+    ##                which is what their stored fingerprint was computed
+    ##                over. The fingerprint projection of an OWN record is
+    ##                unchanged, so every artifact without an imported
+    ##                record keeps its v28 ``interfaceFingerprint`` to the
+    ##                byte.
+    ## v28: ``TarballArchiveDetail`` also retains
     ##                ``installerApp``, the installer application of a macOS
     ##                ``installer-silent`` record (Store-And-Installation-
     ##                Layout.md § Installer applications), encoded after
@@ -1281,6 +1380,14 @@ const
     ##     at the tail of the interface payload (outside the fingerprint).
     ##     v7 readers reject v8; v8 readers accept v7 by defaulting the
     ##     flag to false.
+  ImportedContributionCoordinatesTag =
+    "reprobuild.imported-contribution-coordinates.v1"
+    ## Opens the imported-coordinate section of a v29 fingerprint payload.
+  ImportedContributionMetadataTag =
+    "reprobuild.imported-contribution-metadata.v1"
+    ## Domain tag of ``importedProvisioningMetadataDigest``.
+  ToolUseRealizationsTag = "reprobuild.tool-use-realizations.v1"
+    ## Domain tag of ``toolUseRealizationDigest``.
   InterfaceExtractionCacheRecordMagic =
     "reprobuild.interfaceExtractionCache.v2"
   ProviderFreshnessCacheRecordMagic =
@@ -2041,6 +2148,12 @@ proc writeProvisioningContribution(outp: var seq[byte];
   outp.writeString(contribution.targetInterfaceFingerprint)
   outp.writeString(contribution.contributor)
   outp.writeByte(byte(ord(contribution.developInterface)))
+  # v29: the ownership flag is part of the ARTIFACT, never of a fingerprint
+  # payload -- an own record's fingerprint bytes are the v28 bytes, and an
+  # imported record does not reach this writer in fingerprint mode at all
+  # (``encodeInterfacePayload`` projects it to its coordinate instead).
+  if version >= 29'u16 and not forFingerprint:
+    outp.writeByte(byte(ord(contribution.imported)))
   outp.writeLocation(contribution.location, forFingerprint)
   outp.writeU32Le(uint32(contribution.nixProvisioning.len))
   for provisioning in contribution.nixProvisioning:
@@ -2062,6 +2175,12 @@ proc readProvisioningContribution(bytes: openArray[byte]; pos: var int;
   result.targetInterfaceFingerprint = readString(bytes, pos)
   result.contributor = readString(bytes, pos)
   result.developInterface = readByte(bytes, pos) != 0
+  if version >= 29'u16:
+    let imported = readByte(bytes, pos)
+    if imported > 1'u8:
+      raiseEnvelopeError(eeMalformed,
+        "invalid provisioning contribution ownership flag")
+    result.imported = imported == 1'u8
   result.location = readLocation(bytes, pos)
   let nixCount = readElementCount(bytes, pos, 4)
   result.nixProvisioning = newSeq[InterfaceNixProvisioning](nixCount)
@@ -2084,6 +2203,12 @@ proc readProvisioningContribution(bytes: openArray[byte]; pos: var int;
       newSeq[InterfaceHomebrewProvisioning](homebrewCount)
     for i in 0 ..< homebrewCount:
       result.homebrewProvisioning[i] = readHomebrewProvisioning(bytes, pos)
+
+proc bytesAsKey(bytes: openArray[byte]): string =
+  ## Bytes as a string, so byte sequences sort with ``cmp``.
+  result = newString(bytes.len)
+  for i, b in bytes:
+    result[i] = char(b)
 
 proc encodeInterfacePayload*(value: ProjectInterface;
                              version = EnvelopeVersion;
@@ -2155,10 +2280,117 @@ proc encodeInterfacePayload*(value: ProjectInterface;
     for useDef in value.runtimeToolUses:
       result.writeToolUse(useDef, version, forFingerprint)
   if version >= 13'u16:
-    result.writeU32Le(uint32(value.provisioningContributions.len))
-    for contribution in value.provisioningContributions:
-      result.writeProvisioningContribution(contribution, version,
-        forFingerprint)
+    if forFingerprint and version >= 29'u16:
+      # M7 deliverable 4. OWN records enter the fingerprint in full, with
+      # exactly their v28 bytes; IMPORTED records enter only as their
+      # coordinate, in a separately tagged, sorted section that is written
+      # only when there is one -- so an artifact with no imported record
+      # hashes to its v28 fingerprint, and no own record can be confused
+      # with an imported coordinate (the two sections are self-delimiting
+      # and the second one starts with its own tag). See
+      # ``InterfaceProvisioningContribution.imported``.
+      var own: seq[InterfaceProvisioningContribution] = @[]
+      var coordinates: seq[string] = @[]
+      for contribution in value.provisioningContributions:
+        if contribution.imported:
+          var coordinate: seq[byte] = @[]
+          coordinate.writeString(contribution.targetPackage)
+          coordinate.writeString(contribution.targetInterfaceFingerprint)
+          coordinate.writeString(contribution.contributor)
+          coordinate.writeByte(byte(ord(contribution.developInterface)))
+          coordinates.add(bytesAsKey(coordinate))
+        else:
+          own.add(contribution)
+      result.writeU32Le(uint32(own.len))
+      for contribution in own:
+        result.writeProvisioningContribution(contribution, version,
+          forFingerprint)
+      if coordinates.len > 0:
+        # Sorted, NOT de-duplicated: two imports of one coordinate stay
+        # two, and import order is not observable.
+        coordinates.sort(cmp)
+        result.writeString(ImportedContributionCoordinatesTag)
+        result.writeU32Le(uint32(coordinates.len))
+        for coordinate in coordinates:
+          for ch in coordinate:
+            result.add(byte(ord(ch)))
+    else:
+      result.writeU32Le(uint32(value.provisioningContributions.len))
+      for contribution in value.provisioningContributions:
+        result.writeProvisioningContribution(contribution, version,
+          forFingerprint)
+
+proc importedProvisioningMetadataDigest*(value: ProjectInterface): string =
+  ## The realization metadata of the IMPORTED contribution records that
+  ## ``interfaceFingerprint`` leaves out (M7 deliverable 4): 64 lower-case
+  ## hex over each imported record's full fingerprint-mode encoding --
+  ## exactly the bytes the v28 fingerprint hashed for it -- sorted; empty
+  ## when the artifact carries no imported record.
+  ##
+  ## Anything that READS this artifact's realizations and caches the result
+  ## keyed on ``interfaceFingerprint`` must also key on this, or a
+  ## realization-only change of an imported contribution would be served
+  ## the stale result. ``repro_cli_support``'s tool-identity cache key is
+  ## such a reader and binds it. The tool uses' OWN realization lists are
+  ## bound there by ``toolUseRealizationDigest``.
+  var blobs: seq[string] = @[]
+  for contribution in value.provisioningContributions:
+    if contribution.imported:
+      var blob: seq[byte] = @[]
+      blob.writeProvisioningContribution(contribution, EnvelopeVersion,
+        forFingerprint = true)
+      blobs.add(bytesAsKey(blob))
+  if blobs.len == 0:
+    return ""
+  blobs.sort(cmp)
+  var payload: seq[byte] = @[]
+  payload.writeString(ImportedContributionMetadataTag)
+  payload.writeU32Le(uint32(blobs.len))
+  for blob in blobs:
+    payload.writeString(blob)
+  toHex(blake3DomainDigest(payload, hdMetadataEnvelope).bytes).toLowerAscii()
+
+proc toolUseRealizationDigest*(useDef: InterfaceToolUse): string =
+  ## Every realization ``useDef`` carries, as 64 lower-case hex: the Nix,
+  ## then the tarball, then the Scoop entries, each list in declaration
+  ## order, each entry in the codec's fingerprint-mode encoding -- every
+  ## field the artifact serialises, with the source location normalised
+  ## away.
+  ##
+  ## ``interfaceFingerprint`` leaves tool-use realizations out (since v13:
+  ## a realization change is not an interface change), so anything that
+  ## RESOLVES a use and caches the result keyed on the fingerprint must bind
+  ## this as well, or a realization-only change of the tool package --
+  ## its own ``provisioning``, with no contribution record behind it -- is
+  ## served the stale result. ``repro_cli_support``'s tool-identity cache
+  ## key is such a reader and binds it (and through it the lowered-graph
+  ## key).
+  ##
+  ## Taken from the encoding rather than from a list of fields so a field
+  ## the codec gains is bound without anyone remembering to add it here:
+  ## the list this replaces had missed eight (``packageName``, the nixpkgs
+  ## ref / rev / NAR hash, ``executableAlias``, ``prunePaths``, ``cpu`` and
+  ## ``os``). Declaration order IS bound: the planners take the first
+  ## eligible entry of a family, so two orders can realize different
+  ## archives. The location is not: moving a declaration realizes nothing
+  ## different. The resolution-time ``provisioningPin`` is not either -- it
+  ## is not part of the artifact, and callers that pin bind the pins
+  ## themselves.
+  var payload: seq[byte] = @[]
+  payload.writeString(ToolUseRealizationsTag)
+  payload.writeU32Le(uint32(useDef.nixProvisioning.len))
+  for provisioning in useDef.nixProvisioning:
+    payload.writeNixProvisioning(provisioning, EnvelopeVersion,
+      forFingerprint = true)
+  payload.writeU32Le(uint32(useDef.tarballProvisioning.len))
+  for provisioning in useDef.tarballProvisioning:
+    payload.writeTarballProvisioning(provisioning, EnvelopeVersion,
+      forFingerprint = true)
+  payload.writeU32Le(uint32(useDef.scoopProvisioning.len))
+  for provisioning in useDef.scoopProvisioning:
+    payload.writeScoopProvisioning(provisioning, EnvelopeVersion,
+      forFingerprint = true)
+  toHex(blake3DomainDigest(payload, hdMetadataEnvelope).bytes).toLowerAscii()
 
 proc decodeInterfacePayload*(bytes: openArray[byte];
                              version = EnvelopeVersion): ProjectInterface =
@@ -3174,6 +3406,27 @@ proc mergeProjectInterfaces(matches: openArray[PackageDef];
         pkg.defaultToolProvisioning.len > 0:
       result.defaultToolProvisioning = pkg.defaultToolProvisioning
 
+proc markImportedContributions*(pi: var ProjectInterface;
+                                rootSourceFile: string) =
+  ## M7 deliverable 4: mark each contribution record this project did NOT
+  ## declare -- one whose declaring source file is neither the root recipe
+  ## nor below the root recipe's directory, the same "within the project"
+  ## rule that decides which PACKAGE modules belong to it -- as
+  ## ``imported``. See ``InterfaceProvisioningContribution.imported`` for
+  ## what that changes in ``interfaceFingerprint``.
+  ##
+  ## Fail-safe direction: a record whose source file is unknown (empty), or
+  ## an artifact extracted with no root hint, stays OWN, which keeps its
+  ## realization metadata in the fingerprint -- over-invalidation, never a
+  ## stale typecheck.
+  if rootSourceFile.len == 0:
+    return
+  for contribution in pi.provisioningContributions.mitems:
+    let file = contribution.location.file
+    contribution.imported = file.len > 0 and
+      not sameSourceFile(file, rootSourceFile) and
+      not sourceFileWithinProject(file, rootSourceFile)
+
 proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =
   let packages = registeredPackages()
   let contributions = registeredProvisioningContributions()
@@ -3188,11 +3441,16 @@ proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =
     let matches =
       if rootPackages.len > 0: rootPackages & localPackageModules
       else: newSeq[PackageDef]()
+    proc rootedArtifact(pi: var ProjectInterface): ProjectInterfaceArtifact =
+      # M7 deliverable 4: a rooted extraction knows which contribution
+      # records its project declared; the rest are imported.
+      markImportedContributions(pi, rootSourceFile)
+      artifactFor(pi)
     if matches.len == 1:
       var pi = toProjectInterface(matches[0], packages, contributions)
       pi.standardBuildEligible =
         detectStandardBuildEligible(rootSourceFile, matches[0])
-      return artifactFor(pi)
+      return rootedArtifact(pi)
     if matches.len > 1:
       # Root packages own the project identity and default provisioning;
       # imported local modules contribute public members and tool requirements.
@@ -3203,7 +3461,7 @@ proc artifactFromRegisteredDsl*(rootSourceFile = ""): ProjectInterfaceArtifact =
           allEligible = false
           break
       pi.standardBuildEligible = allEligible
-      return artifactFor(pi)
+      return rootedArtifact(pi)
   if packages.len != 1:
     # Same multi-package fallback as the rootSourceFile branch above,
     # for callers that don't pass a root hint. The merge preserves the

@@ -286,11 +286,38 @@ suite "envelope lanes -- the installer application begins at v28":
       "zed"
     check back.publicServices[0].contributionPoints ==
       @[PointRelyingParties, PointUsers]
-    # v28 is the default.
-    # version-literal-ok: a pin that must fail when the envelope moves past v28, so this matrix is extended
-    check interfaceEnvelopeVersion() == 28'u16
     let dflt = decodeInterfacePayload(encodeInterfacePayload(pi))
     check tarballOf(dflt).detail == tarballOf(back).detail
+
+suite "envelope lanes -- the imported-contribution flag begins at v29":
+
+  test "v29 adds the ownership flag; v21..v28 decode every record as own " &
+      "and with every other block intact":
+    # ReproOS M7 deliverable 4's ``imported`` flag was developed as "v18" on
+    # the campaign line, where v18 was free; on ``agents`` v18..v28 were
+    # already taken. A gate left anywhere below 29 would make a reader of
+    # that version take one byte of the following location as the flag and
+    # desynchronize every later field.
+    var pi = bothLanesInterface()
+    pi.provisioningContributions[0].imported = true
+    for v in 21'u16 .. 28'u16:
+      checkpoint "v" & $v
+      let back = atVersion(pi, v)
+      check not back.provisioningContributions[0].imported
+      check tarballOf(back).closureManifest == ClosureManifest
+      check tarballOf(back).location.line == 22
+      if v >= 27'u16:
+        check back.provisioningContributions[0].homebrewProvisioning.len == 1
+    let back = atVersion(pi, 29'u16)
+    check back.provisioningContributions[0].imported
+    check tarballOf(back).location.line == 22
+    check back.provisioningContributions[0].homebrewProvisioning[0].token ==
+      "zed"
+    check back.publicServices[0].contributionPoints ==
+      @[PointRelyingParties, PointUsers]
+    # v29 is the default.
+    # version-literal-ok: a pin that must fail when the envelope moves past v29, so this matrix is extended
+    check interfaceEnvelopeVersion() == 29'u16
 
 suite "envelope lanes -- the version is the ONLY thing that varies":
 

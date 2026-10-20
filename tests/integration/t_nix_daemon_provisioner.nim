@@ -228,6 +228,31 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
     check devEnvNixProvisioningActions([useDef], tpmPathOnly,
       fixtureRoot, fixtureRoot).len == 0
 
+  when not defined(windows):
+    # Nix provisions nothing for a Windows host, so there is no edge to
+    # inspect there.
+    test "a provision edge for a Nix expressionFile is never cacheable":
+      # Owner decision, 2026-10-14 (Edge-Derived-Identities.md §7 rider):
+      # until the M19 edges exist, a Nix tool use with an expressionFile is
+      # never served from a cache. This edge is keyed by the selector alone,
+      # so for such a use it must run every time; a selector-only use stays
+      # cacheable.
+      let fixtureRoot = prepareFixtureRoot(findRepoRoot())
+      defer: removeDir(fixtureRoot)
+      let selectorOnly = InterfaceToolUse(packageSelector: "sh",
+        rawConstraint: "sh",
+        nixProvisioning: @[InterfaceNixProvisioning(
+          selector: FixtureSelector, executablePath: FixtureExecutable)])
+      var withExpression = selectorOnly
+      withExpression.nixProvisioning = @[InterfaceNixProvisioning(
+        selector: ".#expression-sh", executablePath: FixtureExecutable,
+        expressionFile: fixtureRoot / "default.nix")]
+      let actions = devEnvNixProvisioningActions(
+        [selectorOnly, withExpression], tpmNix, fixtureRoot, fixtureRoot)
+      check actions.len == 2
+      check actions[0].cacheable
+      check not actions[1].cacheable
+
   when defined(posix):
     test "production provisioner rejects non-executable REPROBUILD_NIX_DAEMON_BIN":
       let repoRoot = findRepoRoot()

@@ -38,6 +38,7 @@ package `electron-builder-nsis-resources`:
       sha256 = "593a9a92ef958321293ac6a2ee61e64bf1bd543142a5bd6b3d310709cc924103",
       archiveType = "7z",
       executablePath = "plugins/x86-unicode/nsis7z.dll",
+      version = ElectronBuilderNsisResourcesTag,
       packageId = "electron-builder-nsis-resources@" &
         ElectronBuilderNsisResourcesTag,
       cpu = "x86_64",
