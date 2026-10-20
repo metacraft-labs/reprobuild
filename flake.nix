@@ -277,7 +277,11 @@
       # directory it resolved against when the call was made, so a tool that
       # chdir()s (`git -C <repo>`) is no longer keyed on phantom paths under
       # the action's cwd.
-      url = "github:metacraft-labs/io-mon/091fa26ce03d9dd1ca8cfa6a1d9d46624dc50491";
+      # Bumped to 71b4d7c (2026-10-21), io-mon's `agents` tip; 091fa26 is an
+      # ancestor. The Linux shim records a directory enumeration anchored on
+      # the cwd at the time of the opendir, so `git -C <repo>` is no longer
+      # keyed on phantom enumerated directories under the action's cwd.
+      url = "github:metacraft-labs/io-mon/71b4d7ce8ea7346700bbd86ee2e7cbf1a95482b1";
       flake = false;
     };
     nim-shm-gset-src = {
