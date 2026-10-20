@@ -72,7 +72,7 @@ let genesis = entrySigned(KeyLogEntry(operation: klGenesis, algorithm: saEcdsaP2
   publicKey: @(author.publicKey), roles: {roleAuthor}), @[author])
 let addBackup = entrySigned(KeyLogEntry(principal: kid(author), sequence: 1,
   previous: envelopeIdentity(genesis), operation: klAddKey, algorithm: saEcdsaP256,
-  publicKey: @(backup.publicKey), roles: {roleAuthor}), @[author])
+  publicKey: @(backup.publicKey), roles: {roleAuthor}), @[author, backup])
 var chain = @[(genesis, w.logRecord(genesis)), (addBackup, w.logRecord(addBackup))]
 let goodPos = w.logRecord(release("good", author))
 let badPos = w.logRecord(release("bad", author))

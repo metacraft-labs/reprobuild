@@ -95,7 +95,7 @@ proc seedEcosystem*(h: DoubleHandle; logKey: PeerKeypair): FixtureEcosystem =
   let addBackup = entrySigned(KeyLogEntry(principal: kid(mallory), sequence: 1,
     previous: envelopeIdentity(genesisOf["mallory"]), operation: klAddKey,
     algorithm: saEcdsaP256, publicKey: @(malloryBackup.publicKey),
-    roles: {roleAuthor}), @[mallory])
+    roles: {roleAuthor}), @[mallory, malloryBackup])
   post("release", encodeEnvelope(addBackup))
   fetch.waitFor200("/v1/key-log/" & toHex(kid(mallory)))
 
@@ -153,7 +153,7 @@ proc seedEcosystem*(h: DoubleHandle; logKey: PeerKeypair): FixtureEcosystem =
 
   add("original, reviewed twice", publish("compact-tabs-1.0", "alice/compact-tabs", "1.0.0", alice), @[vsReviewed, vsSuperseded])
   add("newer release", publish("compact-tabs-1.1", "alice/compact-tabs", "1.1.0", alice), @[vsUnknown])
-  add("original, one review", publish("dark-menus", "alice/dark-menus", "1.0.0", alice), @[vsEmbargoedClaim, vsLowConfidence])
+  add("original, one review", publish("dark-menus", "alice/dark-menus", "1.0.0", alice), @[vsLowConfidence])
   add("fork of a fork", publish("tabs-dark", "bob/compact-tabs-dark", "1.0.0", bob, @["newer release"]), @[vsCertifiedReview])
   add("composition", publish("tabs-and-menus", "bob/tabs-and-menus", "1.0.0", bob, @["newer release", "original, one review"]), @[vsUnknown])
   add("withdrawn", publish("old-toolbar", "alice/old-toolbar", "1.0.0", alice), @[vsYanked, vsUnknown])
@@ -166,7 +166,9 @@ proc seedEcosystem*(h: DoubleHandle; logKey: PeerKeypair): FixtureEcosystem =
   say(skReview, r.releases["original, reviewed twice"], rita)
   say(skReview, r.releases["original, reviewed twice"], ray)
   say(skReview, r.releases["original, one review"], rita)
-  say(skVulnerabilityClaim, r.releases["original, one review"], ray, @["embargoed"])
+  # No vulnerability claim: the registry refuses claims until a protected
+  # claim vault exists (threat model T18), so `embargoed-claim` is covered
+  # by the client-side state check instead.
   say(skAttestedInference, r.releases["fork of a fork"], ivy)
   say(skBuildEvidence, r.releases["fork of a fork"], bea)
   say(skYank, r.releases["withdrawn"], alice)

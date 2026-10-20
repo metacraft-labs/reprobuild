@@ -19343,7 +19343,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_remix/tests/t_remix_signature_transparency_and_revocation.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -19399,7 +19399,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_remix_registry/tests/t_remix_registry_boundary_and_authorship.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -19437,7 +19437,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_remix_registry/tests/t_remix_registry_statements.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -39,7 +39,7 @@ suite "Remix fixture ecosystem — every state from shared API data":
     # situation and are covered by the state-coverage check.
     for s in VisibleState:
       if s notin {vsStalePolicy, vsEvidenceUnavailable, vsIncompleteLineage,
-                  vsUnverifiable}:
+                  vsUnverifiable, vsEmbargoedClaim}:
         checkpoint $s
         check s in seen
     check eco.releases.len == 10

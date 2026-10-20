@@ -154,3 +154,24 @@ suite "Remix M3a — author identity is decided by the Interior":
     check not o[0].admitted
     check o[0].refusal == rrForbiddenContent
     check capturedEvents(dirs(root).captureDir).anyIt(it[1] == "validator-author-mismatch")
+
+  test "a lying validator cannot launder a namespace, lineage or blob set":
+    let root = createTempDir("remix-authorship-", "")
+    defer: removeDir(root)
+    let mallory = generateKeypair()
+    # The compromised validator renames every manifest into mallory's own
+    # namespace, hiding a reserved-namespace (canary) publication.
+    let liar = proc (p: seq[byte]): seq[byte] =
+      var v = validateSubmission(p)
+      if v.ok and v.recordKind == rkManifest:
+        v.remixName = "mallory/innocent"
+      encodeVerdict(v)
+    let (reg, spool) = newDouble(root, validate = liar)
+    discard spool.deliver("intake-0", frame(mtSubmitRelease, genesis(mallory)))
+    discard reg.tick()
+    discard spool.deliver("intake-0", frame(mtSubmitRelease,
+      manifestBytes("reproos/core", mallory, @[kid(mallory)])))
+    let o = reg.tick()
+    check not o[0].admitted
+    check o[0].refusal == rrForbiddenContent
+    check capturedEvents(dirs(root).captureDir).anyIt(it[1] == "validator-verdict-mismatch")

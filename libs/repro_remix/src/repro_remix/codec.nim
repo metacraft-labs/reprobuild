@@ -413,7 +413,12 @@ proc validateManifest*(m: Manifest) =
                            "tests")
 
   for i, h in m.healthChecks:
-    checkIdent(h.target, "healthChecks[" & $i & "].target")
+    # A command check carries its arguments (single spaces, printable
+    # ASCII); every other kind names one unit, socket or path.
+    if h.kind == hcCommandExitZero:
+      checkSpacedAscii(h.target, "healthChecks[" & $i & "].target")
+    else:
+      checkIdent(h.target, "healthChecks[" & $i & "].target")
     if h.timeoutSeconds == 0 or h.timeoutSeconds > MaxHealthTimeoutSeconds:
       refuse(rrBound, "healthChecks[" & $i & "] timeout outside 1.." &
                       $MaxHealthTimeoutSeconds)

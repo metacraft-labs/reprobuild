@@ -59,11 +59,13 @@ type
     subject: Digest32
 
 const
-  SubmittableStatements* = {skYank, skReview, skVouch, skVulnerabilityClaim,
+  SubmittableStatements* = {skYank, skReview, skVouch,
                             skBuildEvidence, skTestEvidence, skAttestedInference}
     ## Statements an author, reviewer, builder or verifier submits through
     ## the Boundary. Verdicts, revocations and moderation are policy and
-    ## arrive only through the Interior policy inbox.
+    ## arrive only through the Interior policy inbox. Vulnerability claims
+    ## are refused until a protected claim vault exists: published here,
+    ## an embargoed claim would be public (threat model T18).
 
 proc bytesOf(s: string): seq[byte] =
   result = newSeq[byte](s.len)
@@ -140,6 +142,8 @@ proc decodeVerdict*(bytes: openArray[byte]): Verdict =
     w = SSZ.decode(bytes, VerdictW)
   except SerializationError as e:
     refuse(rrMalformed, "validator verdict: " & e.msg)
+  if w.statementKind > uint8(ord(StatementKind.high)):
+    refuse(rrUnknownVocabulary, "verdict statement kind")
   if w.refusal > uint8(ord(RemixRefusal.high)):
     refuse(rrUnknownVocabulary, "verdict refusal code")
   if w.ok and (w.recordKind < 1 or w.recordKind > uint8(ord(RecordKind.high))):

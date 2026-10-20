@@ -380,6 +380,12 @@ proc admitKeyLog(r: Registrar; env: Envelope; o: var Outcome) =
   var chain = r.chains.getOrDefault(principal)
   chain.add (env, pos)
   let p = replayKeyLog(chain)            # refuses an invalid extension
+  # A key belongs to one principal. Without this, a thief holding a key
+  # its owner revoked could add it to a log of their own and keep
+  # publishing with it (threat model T7).
+  for k in p.keys.keys:
+    if k in r.keyOwner and r.keyOwner[k] != principal:
+      refuse(rrForbiddenContent, "key " & toHex(k) & " already belongs to another principal")
   o.logIndex = r.appendRecord(env)
   r.chains[principal] = chain
   for k in p.keys.keys:
@@ -388,6 +394,27 @@ proc admitKeyLog(r: Registrar; env: Envelope; o: var Outcome) =
 
 proc admitManifest(r: Registrar; env: Envelope; v: Verdict; payload: seq[byte];
                    o: var Outcome) =
+  # Every fact the registrar acts on comes from the manifest it decodes
+  # itself, never from the validator's verdict: the validator is in the
+  # Edge zone, and a verdict that disagrees with the bytes is captured as
+  # an attack (threat model T13). The decoder is bounded and fail-closed;
+  # running it here is the residual the threat model records.
+  let manifest = decodeManifest(env.body)
+  var verdictBlobs, manifestBlobs: seq[Digest32]
+  for b in v.blobs: verdictBlobs.add b.id
+  var refs: seq[BlobRef]
+  for p in manifest.patches: refs.add p.blob
+  for c in manifest.configuration: refs.add c.value
+  refs.add manifest.graphFragments
+  refs.add manifest.assets
+  for b in refs:
+    if b.id notin manifestBlobs: manifestBlobs.add b.id
+  verdictBlobs.sort(cmpD)
+  manifestBlobs.sort(cmpD)
+  if v.remixName != manifest.remixName or v.parents != manifest.parents or
+     verdictBlobs != manifestBlobs:
+    r.capture("validator-verdict-mismatch", "", payload)
+    refuse(rrForbiddenContent, "the validator's verdict does not match the manifest")
   # Authorship is decided here, from signatures the registrar verifies.
   var signers = verifiedSigners(env)
   var authors = v.authors
@@ -428,9 +455,6 @@ proc admitManifest(r: Registrar; env: Envelope; v: Verdict; payload: seq[byte];
       refuse(rrForbiddenContent, "namespace " & ns & " belongs to another principal")
   else:
     r.namespaces[ns] = owners[0]
-  # The manifest body is decoded here only to build the index and the
-  # bundle after admission; the validator has already checked it.
-  let manifest = decodeManifest(env.body)
   o.logIndex = r.appendRecord(env)
   r.manifests[v.identity] = manifest
   var pub = newStatementEnvelope(Statement(kind: skPublication,
@@ -465,9 +489,17 @@ proc admitStatement(r: Registrar; env: Envelope; v: Verdict; o: var Outcome) =
   claimed.sort(cmpD)
   if signers != claimed:
     refuse(rrForbiddenContent, "statement signers differ from the validator's list")
-  if v.subject notin r.manifests:
+  # Kind, subject and issuer come from the statement the registrar decodes
+  # itself (a small fixed-schema record), not from the verdict.
+  let st = decodeStatement(env.body)
+  if st.kind notin SubmittableStatements or st.subjectKind != sbRelease or
+     uint8(ord(st.kind)) != v.statementKind or st.subject != v.subject:
+    refuse(rrForbiddenContent, "the statement is not what the validator reported")
+  if signers != @[st.issuer]:
+    refuse(rrForbiddenContent, "a personal statement is signed by its issuer alone")
+  if st.subject notin r.manifests:
     refuse(rrDanglingReference, "statement about a release this registry does not hold")
-  let kind = StatementKind(v.statementKind)
+  let kind = st.kind
   let pos = uint64(r.log.size)
   let lineageAuthors = r.lineageAuthorPrincipals(v.subject)
   for s in signers:
@@ -575,6 +607,13 @@ proc process(r: Registrar; name: string; bytes: seq[byte]): Outcome =
     result.admitted = false
     result.refusal = e.reason
     result.detail = e.msg
+  except CatchableError as e:
+    # Anything else is a registrar fault on hostile input: capture it and
+    # refuse the message, never let it stop the registrar.
+    r.capture("registrar-fault", $e.name, bytes)
+    result.admitted = false
+    result.refusal = rrMalformed
+    result.detail = "registrar fault: " & e.msg
 
 proc addPolicyStatement*(r: Registrar; env: Envelope): bool =
   ## Interior-only: log a quorum-signed policy statement. Returns false if
@@ -645,5 +684,9 @@ proc tick*(r: Registrar): seq[Outcome] =
     r.blobs.del id
     r.blobAge.del id
   if r.dirty:
-    r.publish()
-    r.dirty = false
+    try:
+      r.publish()
+      r.dirty = false
+    except CatchableError as e:
+      # The previous generation stays current; the fault is evidence.
+      r.capture("publish-fault", $e.name, @[])

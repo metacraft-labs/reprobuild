@@ -208,13 +208,24 @@ proc replayKeyLog*(entries: openArray[(Envelope, uint64)]): Principal =
         refuse(rrNonCanonical, "key-log entry does not extend this principal's chain")
       # Authorised by an active key, or by a recovery quorum.
       var active, recovery = 0
+      # An added key proves possession by co-signing the entry that adds it;
+      # without that, a principal could claim someone else's key, and a key
+      # revoked in one log could be grafted into another and keep signing.
+      let addedKey =
+        if e.operation == klAddKey: Digest32(keyId(e.algorithm, e.publicKey))
+        else: default(Digest32)
+      var possession = false
       for s in signers:
-        if result.keys.hasKey(s) and result.keys[s].activeAt(pos):
+        if e.operation == klAddKey and s == addedKey:
+          possession = true
+        elif result.keys.hasKey(s) and result.keys[s].activeAt(pos):
           inc active
         elif s in result.recoveryKeys:
           inc recovery
         else:
           refuse(rrForbiddenContent, "key-log entry signed by a key the principal does not control")
+      if e.operation == klAddKey and not possession:
+        refuse(rrMissingAuthorSignature, "an added key must co-sign the entry that adds it")
       if active == 0 and (result.recoveryThreshold == 0 or recovery < result.recoveryThreshold):
         refuse(rrMissingAuthorSignature, "key-log entry lacks an active key or recovery quorum")
       case e.operation

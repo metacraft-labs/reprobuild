@@ -98,3 +98,25 @@ suite "Remix registry — role-checked statements":
     check submit(encodeEnvelope(forged)).refusal == rrForbiddenContent
     # A statement about a release the registry does not hold.
     check submit(statement(skReview, d32(99), reviewer)).refusal == rrDanglingReference
+
+  test "a key already held by one principal cannot be grafted into another":
+    let root = createTempDir("remix-statements-", "")
+    defer: removeDir(root)
+    let reg = newRegistrar(dirs(root), logKey)
+    let spool = initSpool(dirs(root).spoolDir)
+    let victim = generateKeypair()
+    let thief = generateKeypair()
+    let vg = genesis(victim, {roleAuthor})
+    let tgEnv = entrySigned(KeyLogEntry(operation: klGenesis, algorithm: saEcdsaP256,
+      publicKey: @(thief.publicKey), roles: {roleAuthor}), @[thief])
+    discard spool.deliver("i", frame(vg))
+    discard spool.deliver("i", frame(encodeEnvelope(tgEnv)))
+    discard reg.tick()
+    # The thief holds the victim's key and co-signs it into their own log.
+    let graft = entrySigned(KeyLogEntry(principal: kid(thief), sequence: 1,
+      previous: envelopeIdentity(tgEnv), operation: klAddKey, algorithm: saEcdsaP256,
+      publicKey: @(victim.publicKey), roles: {roleAuthor}), @[thief, victim])
+    discard spool.deliver("i", frame(encodeEnvelope(graft)))
+    let o = reg.tick()
+    check not o[0].admitted
+    check o[0].refusal == rrForbiddenContent

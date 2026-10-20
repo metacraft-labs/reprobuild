@@ -100,7 +100,7 @@ suite "Remix M3 — signatures, transparency and revocation":
     # Rotate: add k2 (signed by k1), then remove k1 (signed by k2).
     let add2 = entrySigned(KeyLogEntry(principal: kid(k1), sequence: 1,
       previous: envelopeIdentity(genesis), operation: klAddKey,
-      algorithm: saEcdsaP256, publicKey: @(k2.publicKey), roles: {roleAuthor}), @[k1])
+      algorithm: saEcdsaP256, publicKey: @(k2.publicKey), roles: {roleAuthor}), @[k1, k2])
     chain.add w.keyEntries(@[add2])
     let rm1 = entrySigned(KeyLogEntry(principal: kid(k1), sequence: 2,
       previous: envelopeIdentity(add2), operation: klRemoveKey, target: kid(k1)), @[k2])
@@ -124,7 +124,7 @@ suite "Remix M3 — signatures, transparency and revocation":
     var chain = w.keyEntries(@[genesis])
     let addB = entrySigned(KeyLogEntry(principal: kid(k), sequence: 1,
       previous: envelopeIdentity(genesis), operation: klAddKey,
-      algorithm: saEcdsaP256, publicKey: @(backup.publicKey), roles: {roleAuthor}), @[k])
+      algorithm: saEcdsaP256, publicKey: @(backup.publicKey), roles: {roleAuthor}), @[k, backup])
     chain.add w.keyEntries(@[addB])
     let before = w.logRecord(release("before", k))
     let compromisedFrom = uint64(w.log.size)
@@ -155,7 +155,8 @@ suite "Remix M3 — signatures, transparency and revocation":
     proc addFresh(signers: seq[PeerKeypair]): Envelope =
       entrySigned(KeyLogEntry(principal: kid(lost), sequence: 1,
         previous: envelopeIdentity(genesis), operation: klAddKey,
-        algorithm: saEcdsaP256, publicKey: @(fresh.publicKey), roles: {roleAuthor}), signers)
+        algorithm: saEcdsaP256, publicKey: @(fresh.publicKey), roles: {roleAuthor}),
+        signers & @[fresh])
     let one = addFresh(@[r1])
     check refusal(proc () = discard replayKeyLog(base & @[(one, 5'u64)])) == $rrMissingAuthorSignature
     let two = addFresh(@[r1, r3])
@@ -230,6 +231,34 @@ suite "Remix M3 — signatures, transparency and revocation":
     # An author cannot add their own signature to a policy statement.
     verdict.signEnvelope(k)
     check refusal(proc () = discard w.decide(pos, @[p], @[verdict])) == $rrForbiddenContent
+
+  test "a key cannot be added without proving possession, nor grafted between principals":
+    var w: World
+    let victim = generateKeypair()
+    let thief = generateKeypair()
+    let stranger = generateKeypair()
+    let vg = entrySigned(KeyLogEntry(operation: klGenesis, algorithm: saEcdsaP256,
+      publicKey: @(victim.publicKey), roles: {roleAuthor}), @[victim])
+    let tg = entrySigned(KeyLogEntry(operation: klGenesis, algorithm: saEcdsaP256,
+      publicKey: @(thief.publicKey), roles: {roleAuthor}), @[thief])
+    let vChain = w.keyEntries(@[vg])
+    let tChain = w.keyEntries(@[tg])
+    # Without the added key's signature, an add-key is refused.
+    let claim = entrySigned(KeyLogEntry(principal: kid(thief), sequence: 1,
+      previous: envelopeIdentity(tg), operation: klAddKey, algorithm: saEcdsaP256,
+      publicKey: @(stranger.publicKey), roles: {roleAuthor}), @[thief])
+    check refusal(proc () = discard replayKeyLog(tChain & @[(claim, 9'u64)])) ==
+      $rrMissingAuthorSignature
+    # A thief holding the victim's key can co-sign it into their own log,
+    # but a release by that key is refused once both logs are known.
+    let graft = entrySigned(KeyLogEntry(principal: kid(thief), sequence: 1,
+      previous: envelopeIdentity(tg), operation: klAddKey, algorithm: saEcdsaP256,
+      publicKey: @(victim.publicKey), roles: {roleAuthor}), @[thief, victim])
+    let tChain2 = tChain & w.keyEntries(@[graft])
+    let pos = w.logRecord(release("grafted", victim))
+    let d = w.decide(pos, @[replayKeyLog(vChain), replayKeyLog(tChain2)])
+    check not d.accepted
+    check d.reason == rrForbiddenContent
 
 suite "Remix M3 — RFC 9162 proofs over many tree shapes":
 

@@ -68,6 +68,12 @@ proc acceptRelease*(input: AcceptanceInput; trust: TrustConfig): Decision =
 
   # 3 and 4. Author keys active at that position, not revoked over it.
   for author in v.manifest.authors:
+    var holders = 0
+    for p in input.principals:
+      if p.keys.hasKey(author): inc holders
+    if holders > 1:
+      deny(rrForbiddenContent, "author key " & $KeyId(author) &
+           " appears in more than one principal's key log")
     var found = false
     for p in input.principals:
       if p.keys.hasKey(author):
