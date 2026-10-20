@@ -36,11 +36,15 @@ suite "slice 1: resource-type registry":
       inc enumCount
     check registeredResourceTypeIds().len == enumCount
 
-  test "ownership is whole-object by default and contribution only for collections":
+  test "ownership is whole-object by default and converges only where nothing of anyone's is observed":
+    # Collections, plus `linux.gsettings` (an unset key observes as its
+    # schema default) and the Homebrew kinds (the installation is
+    # Homebrew's); `builtinResourceOwnership` gives the reasons.
     check ResourceTypeDef().ownership == roWholeObject
     for kind in ResourceKind:
       let expected =
-        if kind in {rkEnvUserPath, rkVscodeExtension}: roSetContribution
+        if kind in {rkEnvUserPath, rkVscodeExtension, rkLinuxGsettings,
+            rkHomebrewFormula, rkHomebrewCask}: roSetContribution
         else: roWholeObject
       check lookupResourceType($kind).ownership == expected
 

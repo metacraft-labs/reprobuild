@@ -48,8 +48,19 @@ type
   ResourceOwnership* = enum
     ## The unit a driver owns. The default fails closed for an existing
     ## unrecorded object; collection drivers explicitly opt into convergence.
+    ## (Home-Profile-Resource-Lifecycle.md §Lifecycle Decision Algorithm.)
     roWholeObject
+      ## A file, a variable, a block, a unit, a key the user set: an
+      ## existing object no generation records is someone else's (the
+      ## user's, Home Manager's, a lost state directory's), so a first apply
+      ## that finds it differing is drift.
     roSetContribution
+      ## The observation of "nothing of ours yet" is not someone else's
+      ## object, so a first apply converges it: a contribution to a shared
+      ## collection (PATH entries, extensions), and by the same rule a value
+      ## whose observation cannot tell an unset default from a chosen one
+      ## (`linux.gsettings`) or an installation the package manager owns
+      ## (the Homebrew kinds; see `builtinResourceOwnership`).
 
   ResourceDriver* = object
     ## The native analog of a Terraform provider's Read/Plan/Apply

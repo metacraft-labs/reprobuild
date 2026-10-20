@@ -351,7 +351,7 @@ libs/repro_home_resources/tests/t_macos_app_folder_placement.nim	nim	11
 libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim	nim	19
 libs/repro_home_resources/tests/t_registry_root_override.nim	nim	12
 libs/repro_home_resources/tests/t_resource_type_registry.nim	nim	6
-libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	164
+libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	166
 libs/repro_home_rollback/tests/t_rollback_releases_unowned_concerns.nim	nim	3
 libs/repro_home_rollback/tests/t_smoke_home_rollback.nim	nim	2
 libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	nim	65
@@ -1020,6 +1020,8 @@ tests/e2e/home-apply/t_e2e_repro_home_apply_fresh_install.nim	nim	2
 tests/e2e/home-apply/t_e2e_repro_home_apply_noop.nim	nim	2
 tests/e2e/home-apply/t_e2e_repro_home_apply_partial_recovery.nim	nim	2
 tests/e2e/home-apply/t_e2e_stow_auto_discovery_and_materialization.nim	nim	3
+tests/e2e/home-apply/t_e2e_stow_discovery_order_is_deterministic.nim	nim	3
+tests/e2e/home-apply/t_e2e_stow_file_moved_to_another_package.nim	nim	2
 tests/e2e/home-apply/t_e2e_stow_suppression_and_warnings.nim	nim	2
 tests/e2e/home-generations/t_integration_activation_manifest_dedup_in_cas.nim	nim	3
 tests/e2e/home-generations/t_integration_apply_lock_serializes.nim	nim	2
@@ -1033,12 +1035,14 @@ tests/e2e/home-intent/t_e2e_repro_home_intent_commands.nim	nim	18
 tests/e2e/home-intent/t_integration_intent_layer_config_section.nim	nim	7
 tests/e2e/home-intent/t_integration_intent_layer_guarded_edits.nim	nim	9
 tests/e2e/home-intent/t_integration_intent_layer_round_trip.nim	nim	7
+tests/e2e/home-resources/t_e2e_home_apply_refuses_an_unrecorded_object.nim	nim	6
 tests/e2e/home-resources/t_e2e_home_registry_typed_value_kinds.nim	nim	2
 tests/e2e/home-resources/t_e2e_home_resource_lifecycle.nim	nim	2
 tests/e2e/home-resources/t_e2e_home_resource_rollback_preserves_unrelated.nim	nim	2
 tests/e2e/home-resources/t_e2e_macos_user_default_restart_target.nim	nim	1
 tests/e2e/home-resources/t_integration_prevent_destroy.nim	nim	3
 tests/e2e/home-resources/t_integration_resource_move.nim	nim	3
+tests/e2e/home-rollback/t_e2e_repro_home_rollback_resource_removes_and_updates_respect_drift.nim	nim	8
 tests/e2e/home-rollback/t_e2e_repro_home_rollback_restore_respects_drift.nim	nim	4
 tests/e2e/home-rollback/t_e2e_repro_home_rollback_round_trip.nim	nim	1
 tests/e2e/home-rollback/t_e2e_repro_home_rollback_user_edit_protection.nim	nim	1

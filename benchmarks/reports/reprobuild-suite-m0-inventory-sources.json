@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2201,
+    "nimTestBinaries": 2205,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 660,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2228
+    "testEntries": 2232
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1279,7 +1279,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 17,
-      "integration": 1213,
+      "integration": 1217,
       "platform/destructive": 134,
       "pure unit": 660,
       "unclassified": 204
@@ -1484,9 +1484,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2201,
+    "nimTestBinaryCount": 2205,
     "pythonTestFileCount": 27,
-    "testEntryCount": 2228
+    "testEntryCount": 2232
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -13816,7 +13816,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_home_resources/tests/t_smoke_home_resources.nim",
       "sourceSuiteCount": 12,
-      "staticCaseCount": 164,
+      "staticCaseCount": 166,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25868,6 +25868,44 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_stow_discovery_order_is_deterministic",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_home_generations",
+        "repro_profile"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/home-apply/t_e2e_stow_discovery_order_is_deterministic.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_stow_file_moved_to_another_package",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_home_generations",
+        "repro_profile"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/home-apply/t_e2e_stow_file_moved_to_another_package.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_stow_suppression_and_warnings",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -26102,6 +26140,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_home_apply_refuses_an_unrecorded_object",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_home_generations"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/home-resources/t_e2e_home_apply_refuses_an_unrecorded_object.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_home_registry_typed_value_kinds",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -26212,6 +26268,24 @@
       "source": "tests/e2e/home-resources/t_integration_resource_move.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_repro_home_rollback_resource_removes_and_updates_respect_drift",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_home_generations"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/home-rollback/t_e2e_repro_home_rollback_resource_removes_and_updates_respect_drift.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

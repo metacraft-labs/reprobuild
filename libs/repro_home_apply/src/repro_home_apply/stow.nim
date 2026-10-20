@@ -67,7 +67,7 @@
 ##   comparison is raw bytes via `readFile` (which follows links, so a
 ##   wrong-link target's *resolved* content is what is compared).
 
-import std/[algorithm, os, sets, strutils]
+import std/[algorithm, os, sets, strutils, tables]
 from repro_core/paths import extendedPath
 
 import blake3
@@ -150,6 +150,15 @@ proc discoverStowEntries*(profileDir, homeDir: string): StowDiscovery =
   ## directly under `stow/` is not valid GNU `stow` layout and is
   ## returned in `looseFiles` for the caller to diagnose; it is never
   ## materialized. An empty package directory contributes nothing.
+  ##
+  ## The result depends only on the tree's contents, never on the order
+  ## the filesystem enumerates it (reprobuild-pm issue
+  ## 2026-10-13-stow-discovery-order-follows-directory-enumeration):
+  ## `looseFiles` and `packages` are sorted, and `entries` are ordered by
+  ## package name, then by within-package path (`/`-separated), both
+  ## compared bytewise. Everything downstream -- the `[stow]` section of
+  ## `repro home apply --plan`, the host facts, the order files are
+  ## materialized in -- inherits that order.
   let stowRoot = profileDir / StowSubdirName
   if not dirExists(extendedPath(stowRoot)):
     return StowDiscovery()
@@ -157,25 +166,56 @@ proc discoverStowEntries*(profileDir, homeDir: string): StowDiscovery =
   for kind, path in walkDir(extendedPath(stowRoot), relative = true):
     if kind in {pcFile, pcLinkToFile}:
       result.looseFiles.add path.replace('\\', '/')
+  result.looseFiles.sort(system.cmp[string])
   # Packages: each immediate subdirectory of `stow/`. The package
   # name is the directory name; it is STRIPPED on materialization.
+  var packageDirs: seq[tuple[name, native: string]]
   for kind, pkgPath in walkDir(extendedPath(stowRoot), relative = true):
-    if kind notin {pcDir, pcLinkToDir}:
-      continue
+    if kind in {pcDir, pcLinkToDir}:
+      packageDirs.add((name: pkgPath.replace('\\', '/'), native: pkgPath))
+  packageDirs.sort(proc (a, b: tuple[name, native: string]): int =
+    system.cmp(a.name, b.name))
+  for (pkgName, pkgPath) in packageDirs:
     let packageDir = stowRoot / pkgPath
-    result.packages.add pkgPath.replace('\\', '/')
-    for filePath in walkDirRec(extendedPath(packageDir), yieldFilter = {pcFile, pcLinkToFile},
-        relative = true):
-      # `filePath` is the within-package relative path — the path
-      # that maps verbatim under `$HOME` with the package stripped.
-      let withinPackage = filePath.replace('\\', '/')
+    result.packages.add pkgName
+    # `filePath` is the within-package relative path — the path that maps
+    # verbatim under `$HOME` with the package stripped. Kept native for the
+    # joins, sorted by its `/` spelling so every platform orders alike.
+    var files: seq[tuple[rel, native: string]]
+    for filePath in walkDirRec(extendedPath(packageDir),
+        yieldFilter = {pcFile, pcLinkToFile}, relative = true):
+      files.add((rel: filePath.replace('\\', '/'), native: filePath))
+    files.sort(proc (a, b: tuple[rel, native: string]): int =
+      system.cmp(a.rel, b.rel))
+    for (withinPackage, filePath) in files:
       var entry: StowEntry
       entry.sourceAbsolutePath = packageDir / filePath
       entry.homeRelativePath = withinPackage
       entry.targetAbsolutePath = homeDir / filePath
-      entry.package = pkgPath.replace('\\', '/')
+      entry.package = pkgName
       result.entries.add entry
-  result.packages.sort()
+
+proc refuseStowPackagesOnOnePath*(entries: seq[StowEntry]) =
+  ## Two stow packages that map a file to one `$HOME` path cannot both be
+  ## materialized there: a link names one source, so even identical files
+  ## would leave the path to whichever package was linked last. Raises
+  ## `EApplyPlanFailed` naming every such path and its packages, before
+  ## anything is written (reprobuild-pm issue
+  ## 2026-10-18-two-stow-packages-on-one-home-path-are-not-refused;
+  ## Home-Profile-Intent-Layer.md §Stow-Style Dotfile Support, Discovery).
+  ## `entries` is what the host gets (`selectStowEntries`), so packages no
+  ## host gets together are not a pair. Paths compare exactly.
+  var byPath = initOrderedTable[string, seq[string]]()
+  for e in entries:
+    byPath.mgetOrPut(e.homeRelativePath, @[]).add e.package
+  var clashes: seq[string]
+  for rel, packages in byPath:
+    if packages.len > 1:
+      clashes.add "`~/" & rel & "` (packages " & packages.join(", ") & ")"
+  if clashes.len > 0:
+    raisePlanFailed("two stow packages map a file to the same $HOME " &
+      "path, and a path has one writer; keep the file in one package " &
+      "only: " & clashes.join("; "))
 
 proc selectStowEntries*(discovery: StowDiscovery; profile: Profile;
                         ctx: HostContext): StowDiscovery =
@@ -295,6 +335,57 @@ proc readLinkTargetBestEffort(linkPath: string): string =
     result = expandSymlink(extendedPath(linkPath))
   except OSError, IOError:
     result = ""
+
+proc isRecordedStowTarget*(target, desiredSource: string;
+                           rec: GeneratedFile): bool =
+  ## True when `target` still holds exactly the stow file the CURRENT
+  ## generation recorded materializing there (`rec`, its `generatedFiles`
+  ## record for the path) from a source other than `desiredSource`: a link
+  ## to the recorded `stowSource` (`stow-symlink`; by file identity, or by
+  ## the link text when the recorded source has moved away and the link
+  ## dangles), or a regular file whose bytes are the recorded post-write
+  ## digest (`stow-copy`). Such a target is Reprobuild's own, unchanged
+  ## since it was written -- not drift -- so the apply replaces it with the
+  ## new link without `--reconcile-drift` (a stow file moved to another
+  ## package, or a path a host's activity selection hands from one package
+  ## to another; reprobuild-pm issue
+  ## 2026-10-19-home-apply-refuses-a-stow-file-moved-to-another-package).
+  ## Anything else at the path stays drift. Read-only; junctions are not
+  ## considered (their identity is the directory, not the file).
+  if rec.stowSource.len == 0 or rec.stowSource == desiredSource:
+    return false
+  try:
+    case rec.ownershipPolicy
+    of gfoStowSymlink:
+      if not symlinkExists(extendedPath(target)):
+        return false
+      return linkPointsAtSource(target, rec.stowSource) or
+        readLinkTargetBestEffort(target) == rec.stowSource
+    of gfoStowCopy:
+      if symlinkExists(extendedPath(target)) or
+          not fileExists(extendedPath(target)):
+        return false
+      let raw = readFile(extendedPath(target))
+      var buf = newSeq[byte](raw.len)
+      for i, ch in raw:
+        buf[i] = byte(ord(ch))
+      return digestBytes(buf) == rec.postWriteDigest
+    else:
+      return false
+  except OSError, IOError:
+    return false
+
+proc releaseRecordedStowTarget*(target, desiredSource: string;
+                                rec: GeneratedFile): bool =
+  ## Remove `target` when `isRecordedStowTarget` holds, so the materializer
+  ## links the new source there; returns whether it did.
+  if not isRecordedStowTarget(target, desiredSource, rec):
+    return false
+  try:
+    removeFile(extendedPath(target))
+    true
+  except OSError:
+    false
 
 proc stowTargetMatchesSource*(target, desiredSource: string): bool =
   ## M76: the ONE byte-identical predicate shared by the apply path.
