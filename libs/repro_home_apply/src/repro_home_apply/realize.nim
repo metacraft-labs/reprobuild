@@ -586,8 +586,12 @@ proc describeResolution*(resolution: ProfilePackageResolution):
       if record.sha256.len > 0: "sha256"
       elif record.detail.sha512.len > 0: "sha512"
       else: "sha1"
+    # Name the install shape when the record asks for work beyond download,
+    # verify and extract (an app bundle, an installer, a non-sha256 digest).
+    # The shared provisioning edge realizes every record, so the route no
+    # longer carries this distinction; the record's requested operations do.
     let route =
-      if resolution.archiveRoute == arInstaller:
+      if archiveInstallerFeatures(record).len > 0:
         ", " & (if record.detail.installMethod.len > 0:
                   record.detail.installMethod else: "extract")
       else: ""

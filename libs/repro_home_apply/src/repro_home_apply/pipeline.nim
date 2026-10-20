@@ -2031,8 +2031,11 @@ proc placesApplication*(pp: PackagePreview): bool =
   ## § Installer applications). The ONE test for the `applications` concern
   ## of a package: the plan's app-bundle section, the apply's realization
   ## filter and its activation all derive from it.
+  ##
+  ## The install shape alone decides it, not ``archiveRoute``: every tarball
+  ## record is realized by the shared provisioning edge (``arExtract``), so
+  ## the route no longer distinguishes an application from a plain archive.
   pp.resolved and pp.resolution.selection.kind == rkTarball and
-    pp.resolution.archiveRoute == arInstaller and
     (pp.resolution.archive.installMethod == imAppBundle or
      isMacosInstallerApp(pp.resolution.archive))
 
