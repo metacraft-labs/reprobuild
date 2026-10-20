@@ -1447,6 +1447,7 @@ tests/integration/t_f5_two_sessions_read_one_instances_minted_id.nim	nim	7
 tests/integration/t_federated_catalog_diagnostics_are_actionable.nim	nim	16
 tests/integration/t_finish_outcome_reaches_the_spine.nim	nim	1
 tests/integration/t_first_commit_of_a_repository_is_certifiable.nim	nim	1
+tests/integration/t_fixture_processes_are_reaped_by_witness.nim	nim	4
 tests/integration/t_flake_inputs_match_original_coordinates.nim	nim	4
 tests/integration/t_flake_override_resolution_uses_the_invoking_engine.nim	nim	3
 tests/integration/t_framework_field_is_present_and_filtering_works.nim	nim	1

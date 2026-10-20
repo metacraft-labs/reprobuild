@@ -12969,6 +12969,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_fixture_processes_are_reaped_by_witness.nim",
+    binary: "build/test-bin/t_fixture_processes_are_reaped_by_witness",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_flake_inputs_match_original_coordinates.nim",
     binary: "build/test-bin/t_flake_inputs_match_original_coordinates",
     defines: @[],
