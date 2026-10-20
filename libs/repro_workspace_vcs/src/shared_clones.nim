@@ -1733,6 +1733,95 @@ rm -rf "$work" && mkdir "$work" || exit 1
 trap 'rm -rf "$work"' EXIT
 git --git-dir="$pool" for-each-ref --format='^%(objectname)' > "$work/pooltips" || exit 1
 
+# Snapshot the registry for this invocation. Discovery is repeated on every gc.
+# Git for Windows accepts forward-slash drive paths; dirname and shell globs
+# also need that spelling when Nim wrote native separators to the registry.
+tr '\\' '/' < "$registry" > "$work/leaves" || exit 1
+[ -s "$work/leaves" ] || exit 1
+while IFS= read -r leaf || [ -n "$leaf" ]; do
+  [ -n "$leaf" ] || continue
+  # A registered leaf may be the workspace checkout itself, or a nested repo.
+  # Prefer the workspace's marker; plain-git trees retain the sibling fallback.
+  workspace=$leaf
+  marked=0
+  while [ "$workspace" != / ] && [ "$workspace" != . ]; do
+    if [ -f "$workspace/.repro-workspace.toml" ] ||
+       [ -f "$workspace/.repro/workspace.toml" ]; then
+      dirname "$workspace"
+      marked=1
+      break
+    fi
+    ancestor=$(dirname "$workspace")
+    [ "$ancestor" != "$workspace" ] || break
+    workspace=$ancestor
+  done
+  [ "$marked" = 1 ] || dirname "$(dirname "$leaf")"
+done < "$work/leaves" | sort -u > "$work/parents" || exit 1
+
+# Bound the walk to the sibling-workspace layout, including nested repos and
+# .git files (linked worktrees). Do not inspect objects or trigger lazy fetches.
+discover_leaf() {
+  candidate=$1
+  [ -e "$candidate/.git" ] || return 0
+  common=$(git -C "$candidate" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  objects="$common/objects"
+  # An inaccessible parent makes test -e report absence too. Establish access
+  # before interpreting a missing alternates file as a standalone checkout.
+  [ -r "$objects" ] && [ -x "$objects" ] || return 1
+  if [ -d "$objects/info" ]; then
+    [ -r "$objects/info" ] && [ -x "$objects/info" ] || return 1
+  fi
+  alternates="$objects/info/alternates"
+  [ -e "$alternates" ] || return 0
+  [ -r "$alternates" ] || return 1
+  while IFS= read -r alternate || [ -n "$alternate" ]; do
+    [ -n "$alternate" ] || continue
+    alternate=$(printf '%s' "$alternate" | tr '\\' '/') || return 1
+    case $alternate in /* | [A-Za-z]:/*) ;; *) alternate="$objects/$alternate" ;; esac
+    resolved=$(cd "$alternate" && pwd -P) || return 1
+    if [ "$resolved" = "$poolobjects" ]; then
+      printf '%s\n' "$candidate" >> "$work/found" || return 1
+      break
+    fi
+  done < "$alternates"
+}
+scan_dir() {
+  directory=$1
+  depth=$2
+  [ -r "$directory" ] && [ -x "$directory" ] || return 1
+  discover_leaf "$directory" || return 1
+  [ "$depth" -gt 0 ] || return 0
+  for child in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
+    [ -d "$child" ] || continue
+    # A subshell keeps recursive calls from changing this call's variables.
+    (scan_dir "$child" "$((depth - 1))") || return 1
+  done
+}
+poolobjects=$(cd "$pool/objects" && pwd -P) || exit 1
+: > "$work/found"
+while IFS= read -r parent || [ -n "$parent" ]; do
+  [ -d "$parent" ] || continue
+  [ -r "$parent" ] && [ -x "$parent" ] || exit 1
+  for workspace in "$parent"/* "$parent"/.[!.]* "$parent"/..?*; do
+    [ -d "$workspace" ] || continue
+    (scan_dir "$workspace" 2) || exit 1
+  done
+done < "$work/parents"
+sort -u "$work/found" > "$work/discovered" || exit 1
+incomplete=0
+while IFS= read -r leaf || [ -n "$leaf" ]; do
+  if ! grep -F -x -e "$leaf" "$work/leaves" >/dev/null; then
+    # One append per record, matching registerBorrower's append-only protocol.
+    printf '%s\n' "$leaf" >> "$registry" || exit 1
+    printf '%s\n' "$leaf" >> "$work/leaves" || exit 1
+    incomplete=1
+  fi
+done < "$work/discovered"
+if [ "${1-}" = --discover ]; then
+  [ "$incomplete" = 0 ] || exit 2
+  exit 0
+fi
+
 status=0
 while IFS= read -r leaf || [ -n "$leaf" ]; do
   [ -n "$leaf" ] || continue
@@ -1768,7 +1857,7 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
     cat "$work/foreign" "$work/pooltips" |
       git -C "$leaf" rev-list --objects --no-object-names --missing=allow-any --ignore-missing --stdin || status=1
   fi
-done < "$registry"
+done < "$work/leaves"
 exit $status
 """
   ## The script ``ensureRetentionHook`` writes. POSIX ``sh`` plus ``git``
@@ -1798,13 +1887,17 @@ proc retentionHookConfigValue*(pool: string): string =
   quoteShellPosix(retentionHookPath(pool).replace('\\', '/'))
 
 proc poolRetentionReady*(gitBin, pool: string): bool =
-  ## True when expiring unreachable objects in ``pool`` is safe for its
-  ## registered leaves: git runs the hook, the hook is in place, and the
-  ## registry names at least one leaf. Anything else keeps ``never`` (§3.6,
-  ## §5): a pool must never expire objects on the strength of an empty
-  ## registry or a hook git will not run.
-  gitSupportsRetentionHook(gitBin) and
-    fileExists(retentionHookPath(pool)) and readBorrowers(pool).len > 0
+  ## The hook and readiness share one discovery implementation. A newly
+  ## found borrower is registered, but this pass still keeps ``never``; only
+  ## a later complete pass can enable expiry. Discovery errors fail closed.
+  if not gitSupportsRetentionHook(gitBin) or
+      not fileExists(retentionHookPath(pool)) or readBorrowers(pool).len == 0:
+    return false
+  let env = scrubbedGitRepositoryEnv()
+  env["PATH"] = gitBin.parentDir & $PathSep & getEnv("PATH")
+  let discovered = execCmdExCloseOnce("sh " &
+    quoteShell(retentionHookPath(pool)) & " --discover", env = env)
+  discovered.exitCode == 0
 
 proc poolIntegrityConfig*(gitBin, pool: string): seq[(string, string)] =
   ## The pool-specific rows of §3.1, beyond the static
