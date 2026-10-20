@@ -19170,13 +19170,19 @@ proc isReprobuildVcsHook(path, hookName: string): bool =
 #                                   the pre-push one publishes locks by
 #                                   committing and pushing into the manifest
 #                                   repository
-#   <hook>.repo-workspaces-local    the USER's previous hook, which the
-#                                   DISPATCHER ran first
+#   <hook>.repo-workspaces-local    the USER's previous hook, which only the
+#                                   DISPATCHER ran first (neither the wrapper
+#                                   nor the managed body runs it)
 #   <hook>.original                 the USER's previous hook as the WRAPPER
 #                                   preserved it; the wrapper ran it first
 #                                   (`"$REPO_HOOKS_DIR/<hook>.original" "$@"`,
-#                                   when executable). A dispatcher does not
-#                                   run it: the later release moved it into
+#                                   when executable, with REPO_HOOKS_DIR
+#                                   `.git/hooks` relative to the top level, so
+#                                   only from the directory that spelling
+#                                   reaches —
+#                                   `retiredWrapperRanOriginalIn`). A
+#                                   dispatcher does not run it: the later
+#                                   release moved it into
 #                                   `<hook>.repo-workspaces-local` when it
 #                                   replaced a wrapper
 #                                   (`migrateLegacyBackupIfSafe`), and a copy
@@ -19252,6 +19258,65 @@ proc isRetiredRepoWorkspacesWrapper(path, hookName: string): bool =
   ## not its later dispatcher or that dispatcher's body.
   headerCarriesRetiredMarker(path,
     [retiredRepoWorkspacesWrapperMarker(hookName)])
+
+proc isRetiredRepoWorkspacesDispatcher(path: string): bool =
+  ## True when ``path`` is specifically the retired tool's DISPATCHER — the
+  ## one generation that ran ``<hook>.repo-workspaces-local`` first (it
+  ## resolves it beside itself, ``$(dirname "$0")``). Neither the wrapper nor
+  ## the dispatcher's body ``<hook>.repo-workspaces-managed`` ever ran it.
+  headerCarriesRetiredMarker(path, [RetiredRepoWorkspacesDispatcherMarker])
+
+proc retiredWrapperRanOriginalIn(hooksDir, repoRoot: string): bool =
+  ## True when ``hooksDir`` is the directory the retired WRAPPER ran
+  ## ``<hook>.original`` from: the one its ``.git/hooks`` spelling reaches
+  ## from a top level whose ``.git`` is a directory. The wrapper executed
+  ## ``.git/hooks/<hook>.original`` relative to the directory Git runs a hook
+  ## in (the worktree's top level), whatever directory the wrapper itself sat
+  ## in. So a wrapper in a ``core.hooksPath`` directory never ran the
+  ## ``.original`` beside it — unless that directory IS this repository's
+  ## ``.git/hooks``.
+  ##
+  ## Compared by FILE IDENTITY (``sameFile``), never by spelling: Git's own
+  ## answer for the hooks directory (``--path-format=absolute``) resolves
+  ## symlinks, so with ``.git`` or ``.git/hooks`` a symlink it names a path
+  ## that does not end in ``.git/hooks`` although the wrapper reached it
+  ## through that spelling; and a ``core.hooksPath`` naming ANOTHER
+  ## repository's ``.git/hooks`` ends in it although the wrapper, fired from
+  ## this repository, resolved a different directory.
+  ##
+  ## The tops considered are ``repoRoot``'s own and its main worktree's. A
+  ## linked worktree's ``.git`` is a file, so the wrapper ran no
+  ## ``.original`` from there — but the main worktree did, on every commit
+  ## made in it, and that is the hook ``ensure`` aimed at a linked worktree
+  ## must not strand. (The main worktree is found through Git; with a
+  ## symlinked ``.git`` Git itself mis-names it from a linked worktree, so
+  ## that one layout is recognised only when ``ensure`` is aimed at the main
+  ## worktree.) A submodule's or a ``--separate-git-dir`` checkout's ``.git``
+  ## is a file too: a wrapper there never ran an ``.original``.
+  ##
+  ## Called only once a retired wrapper is present: it spawns ``git``, and
+  ## the self-heal runs on every commit.
+  if not dirExists(extendedPath(hooksDir)):
+    return false
+  let anchor = if repoRoot.len > 0: repoRoot
+    else: parentDir(parentDir(hooksDir))
+  var tops: seq[string]
+  for top in [gitTopLevel(anchor), gitMainWorktreeTop(anchor)]:
+    if top.len > 0 and top notin tops:
+      tops.add(top)
+  for top in tops:
+    let reached = top / ".git" / "hooks"
+    if not dirExists(extendedPath(top / ".git")) or
+        not dirExists(extendedPath(reached)):
+      continue
+    try:
+      if sameFile(extendedPath(reached), extendedPath(hooksDir)):
+        return true
+    except OSError:
+      # Unreadable for identity: not proved to be the directory the wrapper
+      # ran from, so nothing is migrated on its account.
+      discard
+  false
 
 proc retiredRepoWorkspacesManagedPath(hooksDir, hookName: string): string =
   hooksDir / (hookName & ".repo-workspaces-managed")
@@ -20933,8 +20998,8 @@ type
       ## and/or its ``<hook>.repo-workspaces-managed`` body — and DELETED. The
       ## user hook it had preserved and run first —
       ## ``<hook>.repo-workspaces-local`` for the dispatcher,
-      ## ``<hook>.original`` for the wrapper — was moved to
-      ## ``<hook>.repro-local`` (see ``isRetiredRepoWorkspacesHook``).
+      ## ``<hook>.original`` for the wrapper where it ran it —
+      ## was moved to ``<hook>.repro-local`` (see ``retiredPreservedHooks``).
       ##
       ## Its own state, and not ``chained-user-hook``, because chaining is
       ## exactly the wrong repair that used to be reported under that name:
@@ -21142,16 +21207,20 @@ proc retiredPreservedHooks(hooksDir, hookName: string;
                            dispatcherRuns, wrapperRuns: bool):
                              seq[RetiredPreservedHook] =
   ## The user hooks the retired generations preserved that a retired file
-  ## still present would run, and so must keep running once it is gone:
+  ## still present actually runs, and so must keep running once it is gone:
   ##
-  ##   * ``<hook>.repo-workspaces-local`` when ``dispatcherRuns`` (a retired
-  ##     file is present) and it is not itself a generated file;
+  ##   * ``<hook>.repo-workspaces-local`` when ``dispatcherRuns`` (the
+  ##     DISPATCHER specifically is present, ``isRetiredRepoWorkspacesDispatcher``:
+  ##     a lone wrapper or managed body never ran it) and it is not itself a
+  ##     generated file;
   ##   * ``<hook>.original`` when ``wrapperRuns`` (the WRAPPER specifically is
-  ##     present: no dispatcher ever ran it) and it is neither a retired
-  ##     generated file nor a Reprobuild hook.
+  ##     present — no dispatcher ever ran it — in the one directory it ran
+  ##     it from, ``retiredWrapperRanOriginalIn``) and it is neither a
+  ##     retired generated file nor a Reprobuild hook.
   ##
-  ## An orphaned preserved hook — its runner already gone — runs in no chain
-  ## today, and nothing here starts running it. Order is the preference when
+  ## Anything else — an orphaned preserved hook whose runner is already gone,
+  ## or one beside a retired file that never ran it — runs in no chain today,
+  ## and nothing here starts running it. Order is the preference when
   ## two copies are the same hook: the dispatcher's is the newer one.
   let retiredLocal = retiredRepoWorkspacesLocalPath(hooksDir, hookName)
   let retiredOriginal = retiredRepoWorkspacesOriginalPath(hooksDir, hookName)
@@ -21289,14 +21358,24 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
   #          executed `.git/hooks/<hook>.original`). Removing the wrapper
   #          without moving it would silently stop the user's hook.
   #
-  #      Each is moved only when a retired file that would run it is present:
-  #      an orphaned one (its runner already deleted by hand) runs today in no
-  #      chain, and `ensure` does not start running something nobody runs.
-  #      For `<hook>.original` that runner is the WRAPPER specifically: a
-  #      dispatcher never ran it (the later release moved it into
-  #      `<hook>.repo-workspaces-local` when it replaced a wrapper, and a copy
-  #      it could not move stayed behind unrun), so with only a dispatcher
-  #      present `<hook>.original` is the user's and is left alone.
+  #      Each is moved only when the retired file present actually RAN it: an
+  #      orphaned one (its runner already deleted by hand), or one beside a
+  #      retired file that never ran it, runs today in no chain, and `ensure`
+  #      does not start running something nobody runs. Exactly:
+  #
+  #        * `<hook>.repo-workspaces-local` only under the DISPATCHER (at the
+  #          canonical path, `.repro-local` or `.legacy`). A lone wrapper or
+  #          a lone `.repo-workspaces-managed` body never ran it.
+  #        * `<hook>.original` only under the WRAPPER (same three places),
+  #          and only where the wrapper's spelling reaches
+  #          (`retiredWrapperRanOriginalIn`): the wrapper ran
+  #          `.git/hooks/<hook>.original` relative to the top level, so a
+  #          wrapper in any other `core.hooksPath` directory never ran the
+  #          `.original` beside it — that wrapper is removed and the
+  #          `.original` left alone. A dispatcher never ran it either (the
+  #          later release moved it into `<hook>.repo-workspaces-local` when it
+  #          replaced a wrapper, and a copy it could not move stayed behind
+  #          unrun).
   let retiredLegacy = hooksDir / (hookName & ".legacy")
   let retiredManaged = retiredRepoWorkspacesManagedPath(hooksDir, hookName)
   let retiredLocal = retiredRepoWorkspacesLocalPath(hooksDir, hookName)
@@ -21304,11 +21383,16 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
   let retiredAtLocal = isRetiredRepoWorkspacesHook(local, hookName)
   let retiredAtLegacy = isRetiredRepoWorkspacesHook(retiredLegacy, hookName)
   let retiredDispatcherRuns =
-    retiredAtStandard or retiredAtLocal or retiredAtLegacy
-  let retiredWrapperRuns =
+    isRetiredRepoWorkspacesDispatcher(standard) or
+    isRetiredRepoWorkspacesDispatcher(local) or
+    isRetiredRepoWorkspacesDispatcher(retiredLegacy)
+  # The wrapper test first: the directory test spawns `git`, and this runs
+  # from the self-heal on every commit.
+  let retiredWrapperRuns = (
     isRetiredRepoWorkspacesWrapper(standard, hookName) or
     isRetiredRepoWorkspacesWrapper(local, hookName) or
-    isRetiredRepoWorkspacesWrapper(retiredLegacy, hookName)
+    isRetiredRepoWorkspacesWrapper(retiredLegacy, hookName)) and
+    retiredWrapperRanOriginalIn(hooksDir, repoRoot)
   let retiredLocalIsGenerated =
     isRetiredRepoWorkspacesHook(retiredLocal, hookName)
   let preserved = retiredPreservedHooks(hooksDir, hookName,
@@ -22046,7 +22130,9 @@ proc writeHooksEnsureReport(report: HooksEnsureReport; destination: string) =
   createDir(parentDir(destination))
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
-proc uninstallVcsHook(hooksDir, hookName: string): bool =
+proc uninstallVcsHook(hooksDir, hookName: string; repoRoot = ""): bool =
+  ## ``repoRoot`` as for ``ensureVcsHookDetailed``: the repository the hooks
+  ## serve, default the parent of ``.git/hooks``.
   let standard = hookPath(hooksDir, hookName)
   let local = localHookPath(hooksDir, hookName)
   let managed = managedHookPath(hooksDir, hookName)
@@ -22060,12 +22146,16 @@ proc uninstallVcsHook(hooksDir, hookName: string): bool =
       # publication on every fire. What IS restored is the user hook it
       # preserved and ran first (`retiredPreservedHooks`, the qualification
       # `ensure` uses) — deleting the retired file without it would strand
-      # that hook where nothing runs it. Decided before anything is deleted:
-      # two different preserved hooks for the one canonical slot are refused,
-      # leaving the chain exactly as it was.
+      # that hook where nothing runs it. Only the hook THIS file ran: under a
+      # dispatcher `.repo-workspaces-local`, under a wrapper `.original`
+      # (only where it ran it, `retiredWrapperRanOriginalIn`); the other, if
+      # present, was never run and stays where it is. One file thus restores
+      # at most one hook, and the refusal below is a guard decided before
+      # anything is deleted, leaving the chain exactly as it was.
       let preserved = retiredPreservedHooks(hooksDir, hookName,
-        dispatcherRuns = true,
-        wrapperRuns = isRetiredRepoWorkspacesWrapper(local, hookName))
+        dispatcherRuns = isRetiredRepoWorkspacesDispatcher(local),
+        wrapperRuns = isRetiredRepoWorkspacesWrapper(local, hookName) and
+          retiredWrapperRanOriginalIn(hooksDir, repoRoot))
       refuseCompetingRetiredPreserved(hooksDir, hookName, "uninstall",
         "uninstall",
         standard, preserved, @[])
@@ -22134,7 +22224,8 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
   var retired: seq[string]
   if action == hakReinstall:
     for hookName in VcsHookNames:
-      changed = uninstallVcsHook(hooksDir, hookName) or changed
+      changed = uninstallVcsHook(hooksDir, hookName,
+        resolveHooksTarget(targetPath)) or changed
   case action
   of hakEnsure, hakReinstall:
     let guard = newHookWriteGuard()
@@ -22154,7 +22245,8 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
         retired.add(hookName)
   of hakUninstall:
     for hookName in VcsHookNames:
-      changed = uninstallVcsHook(hooksDir, hookName) or changed
+      changed = uninstallVcsHook(hooksDir, hookName,
+        resolveHooksTarget(targetPath)) or changed
   # PG-14 deliverable 2 — a contract-less body is NOT "already current" and is
   # not merely "updated": it says a build that predates the handshake has been
   # writing into this hooks directory, and that it will do so again from the

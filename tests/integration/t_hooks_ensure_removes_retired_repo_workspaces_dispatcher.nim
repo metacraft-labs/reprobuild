@@ -66,9 +66,46 @@
 ##       first — `.original` under a wrapper, `.repo-workspaces-local` under a
 ##       dispatcher — to the canonical path, bytes and mode intact, and a real
 ##       commit runs it. **The unfixed build deletes the retired file and
-##       strands the user hook where nothing runs it.** Two different
-##       preserved hooks for the one slot are REFUSED naming both files, with
-##       nothing of that hook deleted.
+##       strands the user hook where nothing runs it.** One retired file ran
+##       at most one preserved hook, so uninstall has nothing to choose
+##       between: what the file did not run stays where it is ((l)).
+##   (l) A preserved hook is migrated only when the retired file present
+##       actually RAN it. `<hook>.repo-workspaces-local` was run only by the
+##       DISPATCHER: beside a lone WRAPPER (at the canonical path for
+##       `ensure`, chained at `.repro-local` for `uninstall`) the wrapper is
+##       removed and `.repo-workspaces-local` is left exactly as found, run by
+##       no real commit, and nothing of it reaches the chain or the canonical
+##       path. **The unfixed build migrates it into the chain under `ensure`,
+##       so a commit starts running a hook nothing ran before, and refuses the
+##       `uninstall` as a conflict with the wrapper's `.original`.**
+##   (m) The same for a lone `<hook>.repo-workspaces-managed` (the
+##       dispatcher's body, which never ran `.repo-workspaces-local` itself):
+##       the body is removed, `.repo-workspaces-local` is left alone. A
+##       regression guard, not a reproduction: the unfixed build already
+##       left it, because a lone body was never at one of the three places
+##       its dispatcher test looked.
+##   (n) `<hook>.original` was run by the wrapper as `.git/hooks/<hook>.original`
+##       relative to the repository's top level, so only from the default
+##       hooks directory. In a repository whose `core.hooksPath` names another
+##       directory holding a wrapper and a `.original`, the wrapper is removed
+##       and `.original` is left untouched and unrun. A real commit through
+##       the wrapper there is the positive control: it does not run
+##       `.original`. **The unfixed build migrates it into the chain.**
+##   (o)-(s) "The default hooks directory" means the directory the wrapper's
+##       `.git/hooks` spelling REACHES from the top level, compared by file
+##       identity — not a path that happens to end in `.git/hooks`. Git
+##       resolves symlinks when it names the hooks directory, so with `.git`
+##       a symlink (o) or `.git/hooks` a symlink (p) the directory is spelled
+##       elsewhere and the wrapper still ran the `.original` in it: migrated.
+##       A `core.hooksPath` naming this repository's own `.git/hooks` (q) is
+##       that directory: migrated. One naming ANOTHER repository's
+##       `.git/hooks` (r) is spelled like a default directory, but the
+##       wrapper fired from this repository never ran the `.original` there:
+##       left alone. `ensure` aimed at a linked worktree (s), whose `.git` is
+##       a file, still migrates the main worktree's `.original`, which the
+##       wrapper ran on every commit made there. Each case's control commit
+##       shows what Git really ran. **A name-only test strands the user's hook
+##       in (o) and (p) and starts running a never-run hook in (r).**
 ##
 ## TEST DOUBLES, and why each is justified. The retired DISPATCHER is embedded
 ## verbatim (both variants, from `repo-workspaces`' `hookDispatcherContent`),
@@ -89,7 +126,9 @@
 ## Hermetic: one `createTempDir`, local bares only, no network; the
 ## Reprobuild cache is redirected into the scratch directory so the managed
 ## post-commit hook writes nowhere outside it.
-## Skip rule: `git` missing on PATH.
+## Skip rule: `git` missing on PATH; (o) and (p) additionally on Windows,
+## where creating a directory symlink needs a privilege only some accounts
+## hold.
 
 import std/[algorithm, json, os, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
@@ -517,6 +556,65 @@ proc commit(fx: Fixture; message: string): CmdResult =
   writeFile(fx.repoPath / "change.txt", message & "\n")
   discard fx.mustRun(["git", "add", "change.txt"], fx.repoPath)
   fx.run(["git", "commit", "-q", "-m", message], fx.repoPath)
+
+# Helpers for (o)-(s), which differ only in how the hooks directory is
+# reached; see the header.
+
+proc plantWrapperAndOriginal(fx: Fixture): string =
+  ## The wrapper at the canonical post-commit path and the user's hook it
+  ## preserved as `.original`; returns the user hook's bytes.
+  fx.plantRetiredFramework()
+  result = userHook("original", fx.userRan)
+  plant(fx.slot("post-commit.original"), result)
+  plant(fx.slot("post-commit"), retiredWrapperFor("post-commit"))
+
+proc controlCommit(fx: Fixture; originalRuns: bool) =
+  ## POSITIVE CONTROL: a real commit through the wrapper runs the retired
+  ## check, and runs the user's `.original` exactly when ``originalRuns`` —
+  ## the fixture is the state the case claims, so what `ensure` does with
+  ## `.original` below is judged against what Git really ran.
+  let c0 = fx.commit("through the retired wrapper")
+  checkpoint("control commit: " & c0.output)
+  check c0.code == 0
+  check linesOf(fx.retiredRan) == @["post-commit"]
+  if originalRuns:
+    check linesOf(fx.userRan) == @["original"]
+  else:
+    check not fileExists(fx.userRan)
+  if fileExists(fx.retiredRan): removeFile(fx.retiredRan)
+  if fileExists(fx.userRan): removeFile(fx.userRan)
+
+proc checkOriginalMigrated(fx: Fixture; original: string) =
+  check fx.retiredFilesLeft().len == 0
+  check readFile(fx.slot("post-commit")).contains(
+    "reprobuild hook dispatcher")
+  check not fileExists(fx.slot("post-commit.original"))
+  check fileExists(fx.slot("post-commit.repro-local"))
+  if fileExists(fx.slot("post-commit.repro-local")):
+    check readFile(fx.slot("post-commit.repro-local")) == original
+  let c = fx.commit("after ensure")
+  checkpoint("commit: " & c.output)
+  check c.code == 0
+  check linesOf(fx.userRan) == @["original"]
+  check not fileExists(fx.retiredRan)
+
+proc checkOriginalLeft(fx: Fixture; original: string) =
+  check fx.retiredFilesLeft().len == 0
+  check readFile(fx.slot("post-commit")).contains(
+    "reprobuild hook dispatcher")
+  check not fileExists(fx.slot("post-commit.repro-local"))
+  check fileExists(fx.slot("post-commit.original"))
+  if fileExists(fx.slot("post-commit.original")):
+    check readFile(fx.slot("post-commit.original")) == original
+  let c = fx.commit("after ensure")
+  checkpoint("commit: " & c.output)
+  check c.code == 0
+  check not fileExists(fx.userRan)
+  check not fileExists(fx.retiredRan)
+
+proc refreshHooks(fx: var Fixture) =
+  fx.hooks = fx.mustRun(["git", "-C", fx.repoPath, "rev-parse",
+    "--path-format=absolute", "--git-path", "hooks"]).strip()
 
 suite "hooks ensure removes the retired repo-workspaces dispatcher":
 
@@ -946,37 +1044,298 @@ suite "hooks ensure removes the retired repo-workspaces dispatcher":
       check linesOf(fx.userRan) == @["post-commit"]
       check not fileExists(fx.retiredRan)
 
-  test "uninstall with two different preserved hooks: refused, nothing deleted":
+  test "uninstall under a lone wrapper restores .original, not .repo-workspaces-local":
     if findExe("git").len == 0:
-      skip("git not on PATH")
+      skip("git not on PATH; this case needs a real repository whose hooks " &
+        "a real commit fires")
     else:
-      let fx = setupFixture("uninstall-conflict")
+      let fx = setupFixture("uninstall-wrapper-only")
       defer: removeDir(fx.scratch)
 
       check fx.ensureJson().code == 0
-      # (k) A wrapper chained at `.repro-local`, with a `.original` it ran and
-      # a DIFFERENT `.repo-workspaces-local` beside it — the qualification
-      # `ensure` uses lets both claim the canonical slot. Neither may win
-      # silently, and the refusal comes before anything is deleted.
+      # (l) A wrapper chained at `.repro-local`, the `.original` it ran, and a
+      # `.repo-workspaces-local` beside them that no file present ever ran
+      # (only a dispatcher runs it). Uninstall restores the wrapper's hook and
+      # leaves the other where it is.
+      fx.plantRetiredFramework()
+      let original = userHook("original", fx.userRan)
       plant(fx.slot("post-commit.repro-local"),
         retiredWrapperFor("post-commit"))
-      plant(fx.slot("post-commit.original"), userHook("original", fx.userRan))
-      plant(fx.slot("post-commit.repo-workspaces-local"),
-        userHook("rw-local", fx.userRan))
-      let snap = fx.snapshot()
+      plant(fx.slot("post-commit.original"), original)
+      let rwLocalRan = fx.scratch / "rw-local-ran.txt"
+      let rwLocal = userHook("rw-local", rwLocalRan)
+      plant(fx.slot("post-commit.repo-workspaces-local"), rwLocal)
 
       let res = fx.run([fx.reproBin, "hooks", "uninstall", "--vcs",
         fx.repoPath], fx.repoPath)
       checkpoint("uninstall: " & res.output)
-      check res.code != 0
-      check "post-commit.original" in res.output
-      check "post-commit.repo-workspaces-local" in res.output
-      # post-commit's files are untouched. Hooks uninstalled before
-      # post-commit in the same call are gone; compare post-commit's only.
-      var after: seq[(string, string)]
-      var before: seq[(string, string)]
-      for item in fx.snapshot():
-        if item[0].startsWith("post-commit"): after.add(item)
-      for item in snap:
-        if item[0].startsWith("post-commit"): before.add(item)
-      check after == before
+      check res.code == 0
+      check fx.retiredFilesLeft().len == 0
+      check not fileExists(fx.slot("post-commit.repro-local"))
+      check not fileExists(fx.slot("post-commit.original"))
+      check fileExists(fx.slot("post-commit"))
+      if fileExists(fx.slot("post-commit")):
+        check readFile(fx.slot("post-commit")) == original
+      check fileExists(fx.slot("post-commit.repo-workspaces-local"))
+      if fileExists(fx.slot("post-commit.repo-workspaces-local")):
+        check readFile(fx.slot("post-commit.repo-workspaces-local")) == rwLocal
+
+      let c = fx.commit("after uninstall")
+      checkpoint("commit: " & c.output)
+      check c.code == 0
+      check linesOf(fx.userRan) == @["original"]
+      check not fileExists(rwLocalRan)
+      check not fileExists(fx.retiredRan)
+
+  test "lone wrapper beside a .repo-workspaces-local: wrapper removed, local left":
+    if findExe("git").len == 0:
+      skip("git not on PATH; this case needs a real repository whose hooks " &
+        "a real commit fires")
+    else:
+      let fx = setupFixture("wrapper-rw-local")
+      defer: removeDir(fx.scratch)
+
+      # (l) The wrapper at the canonical path with no `.original`, and a
+      # `.repo-workspaces-local` the wrapper never ran (it runs only
+      # `.original`; only the dispatcher runs `.repo-workspaces-local`).
+      fx.plantRetiredFramework()
+      plant(fx.slot("post-commit"), retiredWrapperFor("post-commit"))
+      let rwLocal = userHook("rw-local", fx.userRan)
+      plant(fx.slot("post-commit.repo-workspaces-local"), rwLocal)
+
+      # POSITIVE CONTROL: through the wrapper the retired check runs and
+      # `.repo-workspaces-local` does not, so "not run" below means something.
+      let c0 = fx.commit("through the retired wrapper")
+      checkpoint("control commit: " & c0.output)
+      check c0.code == 0
+      check linesOf(fx.retiredRan) == @["post-commit"]
+      check not fileExists(fx.userRan)
+      if fileExists(fx.retiredRan): removeFile(fx.retiredRan)
+
+      let e1 = fx.ensureJson()
+      check e1.code == 0
+      check e1.outcomes{"post-commit"}.getStr() == "removed-retired-dispatcher"
+      check fx.retiredFilesLeft().len == 0
+      check readFile(fx.slot("post-commit")).contains(
+        "reprobuild hook dispatcher")
+      check not fileExists(fx.slot("post-commit.repro-local"))
+      check fileExists(fx.slot("post-commit.repo-workspaces-local"))
+      if fileExists(fx.slot("post-commit.repo-workspaces-local")):
+        check readFile(fx.slot("post-commit.repo-workspaces-local")) == rwLocal
+
+      let c = fx.commit("after ensure")
+      checkpoint("commit: " & c.output)
+      check c.code == 0
+      check not fileExists(fx.userRan)
+      check not fileExists(fx.retiredRan)
+
+      let snap = fx.snapshot()
+      let e2 = fx.ensureJson()
+      check e2.code == 0
+      for hook, outcome in e2.outcomes:
+        checkpoint(hook & ": " & outcome.getStr())
+        check outcome.getStr() == "already-up-to-date"
+      check fx.snapshot() == snap
+
+  test "lone .repo-workspaces-managed beside a .repo-workspaces-local: local left":
+    if findExe("git").len == 0:
+      skip("git not on PATH; this case needs a real repository whose hooks " &
+        "a real commit fires")
+    else:
+      let fx = setupFixture("managed-rw-local")
+      defer: removeDir(fx.scratch)
+
+      check fx.ensureJson().code == 0
+      # (m) The dispatcher already deleted by hand: its body and the user's
+      # preserved hook remain, and nothing runs either.
+      plant(fx.slot("post-commit.repo-workspaces-managed"),
+        retiredManagedStub("post-commit", fx.retiredRan))
+      let rwLocal = userHook("rw-local", fx.userRan)
+      plant(fx.slot("post-commit.repo-workspaces-local"), rwLocal)
+
+      let e1 = fx.ensureJson()
+      check e1.code == 0
+      check e1.outcomes{"post-commit"}.getStr() == "removed-retired-dispatcher"
+      check fx.retiredFilesLeft().len == 0
+      check not fileExists(fx.slot("post-commit.repro-local"))
+      check fileExists(fx.slot("post-commit.repo-workspaces-local"))
+      if fileExists(fx.slot("post-commit.repo-workspaces-local")):
+        check readFile(fx.slot("post-commit.repo-workspaces-local")) == rwLocal
+
+      let c = fx.commit("after ensure")
+      checkpoint("commit: " & c.output)
+      check c.code == 0
+      check not fileExists(fx.userRan)
+      check not fileExists(fx.retiredRan)
+
+  test "wrapper in a non-default core.hooksPath: .original left untouched":
+    if findExe("git").len == 0:
+      skip("git not on PATH; this case needs a real repository whose hooks " &
+        "a real commit fires")
+    else:
+      var fx = setupFixture("hooks-path")
+      defer: removeDir(fx.scratch)
+
+      # (n) Hooks served from an absolute directory outside `.git`. The
+      # wrapper runs `.git/hooks/<hook>.original` relative to the top level,
+      # which is not this directory, so the `.original` beside it never ran.
+      let shared = fx.scratch / "shared-hooks"
+      createDir(shared)
+      discard fx.mustRun(["git", "-C", fx.repoPath, "config",
+        "core.hooksPath", shared])
+      fx.hooks = fx.mustRun(["git", "-C", fx.repoPath, "rev-parse",
+        "--path-format=absolute", "--git-path", "hooks"]).strip()
+      check fx.hooks == shared
+      fx.plantRetiredFramework()
+      plant(fx.slot("post-commit"), retiredWrapperFor("post-commit"))
+      let original = userHook("original", fx.userRan)
+      plant(fx.slot("post-commit.original"), original)
+
+      # POSITIVE CONTROL: git runs the wrapper from this directory (the
+      # retired check runs), and the wrapper does not run `.original`.
+      let c0 = fx.commit("through the retired wrapper")
+      checkpoint("control commit: " & c0.output)
+      check c0.code == 0
+      check linesOf(fx.retiredRan) == @["post-commit"]
+      check not fileExists(fx.userRan)
+      if fileExists(fx.retiredRan): removeFile(fx.retiredRan)
+
+      let e1 = fx.ensureJson()
+      check e1.code == 0
+      check e1.outcomes{"post-commit"}.getStr() == "removed-retired-dispatcher"
+      check fx.retiredFilesLeft().len == 0
+      check readFile(fx.slot("post-commit")).contains(
+        "reprobuild hook dispatcher")
+      check not fileExists(fx.slot("post-commit.repro-local"))
+      check fileExists(fx.slot("post-commit.original"))
+      if fileExists(fx.slot("post-commit.original")):
+        check readFile(fx.slot("post-commit.original")) == original
+
+      let c = fx.commit("after ensure")
+      checkpoint("commit: " & c.output)
+      check c.code == 0
+      check not fileExists(fx.userRan)
+      check not fileExists(fx.retiredRan)
+
+  test "wrapper in a repository whose .git is a symlink: .original migrated":
+    if findExe("git").len == 0:
+      skip("git not on PATH; this case needs a real repository whose hooks " &
+        "a real commit fires")
+    elif defined(windows):
+      skip("creating a directory symlink needs a privilege Windows grants " &
+        "only to some accounts; the layout is POSIX-only here")
+    else:
+      var fx = setupFixture("symlinked-git")
+      defer: removeDir(fx.scratch)
+
+      # (o) The retired installer accepted it (`[[ -d "$repo/.git" ]]`
+      # follows the link) and the wrapper's `.git/hooks/post-commit.original`
+      # reaches the file through it. Git spells the hooks directory by the
+      # link's target.
+      let store = fx.scratch / "git-store" / "lib-a.git"
+      createDir(parentDir(store))
+      moveDir(fx.repoPath / ".git", store)
+      createSymlink(store, fx.repoPath / ".git")
+      fx.refreshHooks()
+      check fx.hooks == store / "hooks"
+      let original = fx.plantWrapperAndOriginal()
+      fx.controlCommit(originalRuns = true)
+
+      let e1 = fx.ensureJson()
+      check e1.code == 0
+      check e1.outcomes{"post-commit"}.getStr() == "removed-retired-dispatcher"
+      fx.checkOriginalMigrated(original)
+
+  test "wrapper in a symlinked .git/hooks: .original migrated":
+    if findExe("git").len == 0:
+      skip("git not on PATH; this case needs a real repository whose hooks " &
+        "a real commit fires")
+    elif defined(windows):
+      skip("creating a directory symlink needs a privilege Windows grants " &
+        "only to some accounts; the layout is POSIX-only here")
+    else:
+      var fx = setupFixture("symlinked-hooks")
+      defer: removeDir(fx.scratch)
+
+      # (p) `.git/hooks` itself a link to a directory outside `.git`.
+      let target = fx.scratch / "hooks-store"
+      moveDir(fx.repoPath / ".git" / "hooks", target)
+      createSymlink(target, fx.repoPath / ".git" / "hooks")
+      fx.refreshHooks()
+      check fx.hooks == target
+      let original = fx.plantWrapperAndOriginal()
+      fx.controlCommit(originalRuns = true)
+
+      let e1 = fx.ensureJson()
+      check e1.code == 0
+      check e1.outcomes{"post-commit"}.getStr() == "removed-retired-dispatcher"
+      fx.checkOriginalMigrated(original)
+
+  test "core.hooksPath naming this repository's own .git/hooks: .original migrated":
+    if findExe("git").len == 0:
+      skip("git not on PATH; this case needs a real repository whose hooks " &
+        "a real commit fires")
+    else:
+      var fx = setupFixture("hooks-path-self")
+      defer: removeDir(fx.scratch)
+
+      # (q) A `core.hooksPath` that names the default directory is the
+      # default directory: the wrapper there runs the `.original` beside it.
+      discard fx.mustRun(["git", "-C", fx.repoPath, "config",
+        "core.hooksPath", fx.repoPath / ".git" / "hooks"])
+      fx.refreshHooks()
+      let original = fx.plantWrapperAndOriginal()
+      fx.controlCommit(originalRuns = true)
+
+      let e1 = fx.ensureJson()
+      check e1.code == 0
+      check e1.outcomes{"post-commit"}.getStr() == "removed-retired-dispatcher"
+      fx.checkOriginalMigrated(original)
+
+  test "core.hooksPath naming ANOTHER repository's .git/hooks: .original left":
+    if findExe("git").len == 0:
+      skip("git not on PATH; this case needs a real repository whose hooks " &
+        "a real commit fires")
+    else:
+      var fx = setupFixture("hooks-path-other")
+      defer: removeDir(fx.scratch)
+
+      # (r) The directory is SPELLED `<x>/.git/hooks`, but the wrapper in it,
+      # fired from this repository, resolves `.git/hooks/post-commit.original`
+      # against THIS top level and so never runs the `.original` beside it.
+      let other = fx.scratch / "other"
+      discard fx.mustRun(["git", "init", "-q", other])
+      createDir(other / ".git" / "hooks")
+      discard fx.mustRun(["git", "-C", fx.repoPath, "config",
+        "core.hooksPath", other / ".git" / "hooks"])
+      fx.refreshHooks()
+      check fx.hooks == other / ".git" / "hooks"
+      let original = fx.plantWrapperAndOriginal()
+      fx.controlCommit(originalRuns = false)
+
+      let e1 = fx.ensureJson()
+      check e1.code == 0
+      check e1.outcomes{"post-commit"}.getStr() == "removed-retired-dispatcher"
+      fx.checkOriginalLeft(original)
+
+  test "ensure run from a linked worktree: the main worktree's .original migrated":
+    if findExe("git").len == 0:
+      skip("git not on PATH; this case needs a real repository whose hooks " &
+        "a real commit fires")
+    else:
+      let fx = setupFixture("linked-worktree")
+      defer: removeDir(fx.scratch)
+
+      # (s) The hooks directory is the main worktree's `.git/hooks`, and the
+      # wrapper ran its `.original` on every commit made THERE. `ensure`
+      # aimed at a linked worktree (whose `.git` is a file) still sees that.
+      let original = fx.plantWrapperAndOriginal()
+      fx.controlCommit(originalRuns = true)
+      let linked = fx.scratch / "linked"
+      discard fx.mustRun(["git", "-C", fx.repoPath, "worktree", "add", "-q",
+        "--detach", linked])
+      let res = fx.run([fx.reproBin, "hooks", "ensure", "--vcs", linked],
+        linked)
+      checkpoint("hooks ensure (linked): " & res.output)
+      check res.code == 0
+      fx.checkOriginalMigrated(original)
