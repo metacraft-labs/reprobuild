@@ -36,6 +36,10 @@ type
     parents*: seq[Digest32]
     blobs*: seq[VerdictBlob]
       ## Every blob the manifest references, deduplicated.
+    statementKind*: uint8
+      ## For a statement: its kind tag (0 otherwise).
+    subject*: Digest32
+      ## For a statement: what it is about.
 
   VerdictBlobW = object
     id: Digest32
@@ -51,6 +55,15 @@ type
     authors: List[Digest32, MaxSignatures]
     parents: List[Digest32, MaxParents]
     blobs: List[VerdictBlobW, MaxVerdictBlobs]
+    statementKind: uint8
+    subject: Digest32
+
+const
+  SubmittableStatements* = {skYank, skReview, skVouch, skVulnerabilityClaim,
+                            skBuildEvidence, skTestEvidence, skAttestedInference}
+    ## Statements an author, reviewer, builder or verifier submits through
+    ## the Boundary. Verdicts, revocations and moderation are policy and
+    ## arrive only through the Interior policy inbox.
 
 proc bytesOf(s: string): seq[byte] =
   result = newSeq[byte](s.len)
@@ -88,8 +101,19 @@ proc validateSubmission*(payload: openArray[byte]): Verdict =
       # replays the chain itself. Here: canonical form and signatures.
       discard decodeKeyLogEntry(env.body)
       discard verifiedSigners(env)
+    of rkStatement:
+      let st = decodeStatement(env.body)
+      if st.kind notin SubmittableStatements:
+        refuse(rrForbiddenContent, $st.kind & " is not submitted through the Boundary")
+      if st.subjectKind != sbRelease:
+        refuse(rrForbiddenContent, "submitted statements are about releases")
+      result.statementKind = uint8(ord(st.kind))
+      result.subject = st.subject
+      result.authors = verifiedSigners(env)
+      if result.authors != @[st.issuer]:
+        refuse(rrForbiddenContent, "a personal statement is signed by its issuer alone")
     else:
-      refuse(rrForbiddenContent, "only manifests and key-log entries are submitted")
+      refuse(rrForbiddenContent, "only manifests, key-log entries and statements are submitted")
     result.ok = true
   except RemixError as e:
     result.ok = false
@@ -105,7 +129,8 @@ proc encodeVerdict*(v: Verdict): seq[byte] =
     remixName: List[byte, MaxNameBytes].init(bytesOf(v.remixName)),
     authors: List[Digest32, MaxSignatures].init(v.authors),
     parents: List[Digest32, MaxParents].init(v.parents),
-    blobs: List[VerdictBlobW, MaxVerdictBlobs].init(bs)))
+    blobs: List[VerdictBlobW, MaxVerdictBlobs].init(bs),
+    statementKind: v.statementKind, subject: v.subject))
 
 proc decodeVerdict*(bytes: openArray[byte]): Verdict =
   ## What the registrar runs on the validator's output: a bounded,
@@ -122,7 +147,7 @@ proc decodeVerdict*(bytes: openArray[byte]): Verdict =
   result = Verdict(ok: w.ok, refusal: RemixRefusal(w.refusal),
     detail: strOf(asSeq(w.detail)), identity: w.identity,
     remixName: strOf(asSeq(w.remixName)), authors: asSeq(w.authors),
-    parents: asSeq(w.parents))
+    parents: asSeq(w.parents), statementKind: w.statementKind, subject: w.subject)
   if w.ok:
     result.recordKind = RecordKind(w.recordKind)
   for b in asSeq(w.blobs):

@@ -5850,6 +5850,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_remix_registry/tests/t_remix_registry_statements.nim",
+    binary: "build/test-bin/t_remix_registry_statements",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_resources/tests/t_attr_missing_interface_diagnostic.nim",
     binary: "build/test-bin/t_attr_missing_interface_diagnostic",
     defines: @[],

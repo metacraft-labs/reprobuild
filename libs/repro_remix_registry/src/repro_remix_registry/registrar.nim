@@ -443,6 +443,63 @@ proc admitManifest(r: Registrar; env: Envelope; v: Verdict; payload: seq[byte];
     r.referenced[b.id] = true
   o.admitted = true
 
+proc lineageAuthorPrincipals(r: Registrar; release: Digest32): seq[Digest32] =
+  ## Principals that authored the release or any ancestor.
+  var todo = @[release]
+  var seen: seq[Digest32]
+  while todo.len > 0:
+    let cur = todo.pop()
+    if cur in seen or cur notin r.manifests: continue
+    seen.add cur
+    for a in r.manifests[cur].authors:
+      let (known, p) = r.principalOf(a)
+      if known and p notin result: result.add p
+    for p in r.manifests[cur].parents: todo.add p
+
+proc admitStatement(r: Registrar; env: Envelope; v: Verdict; o: var Outcome) =
+  ## Statements from the Boundary, each kind gated on its signer's role at
+  ## the position it would be logged.
+  var signers = verifiedSigners(env)
+  signers.sort(cmpD)
+  var claimed = v.authors
+  claimed.sort(cmpD)
+  if signers != claimed:
+    refuse(rrForbiddenContent, "statement signers differ from the validator's list")
+  if v.subject notin r.manifests:
+    refuse(rrDanglingReference, "statement about a release this registry does not hold")
+  let kind = StatementKind(v.statementKind)
+  let pos = uint64(r.log.size)
+  let lineageAuthors = r.lineageAuthorPrincipals(v.subject)
+  for s in signers:
+    let (known, principal) = r.principalOf(s)
+    if not known:
+      refuse(rrMissingAuthorSignature, "no key log for signer " & toHex(s))
+    let p = replayKeyLog(r.chains[principal])
+    case kind
+    of skYank:
+      if s notin r.manifests[v.subject].authors or
+         not p.keyActiveAt(s, pos, {roleAuthor, roleMaintainer}):
+        refuse(rrForbiddenContent, "only an active author of the release may yank it")
+    of skReview, skVouch:
+      if not p.keyActiveAt(s, pos, {roleReviewer}):
+        refuse(rrInactiveKey, "reviews need an active reviewer key")
+      if principal in lineageAuthors:
+        refuse(rrForbiddenContent, "authors cannot review their own lineage")
+    of skVulnerabilityClaim:
+      if not p.keyActiveAt(s, pos, {roleReviewer, roleVulnerabilityVerifier}):
+        refuse(rrInactiveKey, "claims need an active reviewer or verifier key")
+    of skBuildEvidence, skTestEvidence:
+      if not p.keyActiveAt(s, pos, {roleBuilder}):
+        refuse(rrInactiveKey, "evidence needs an active builder key")
+    of skAttestedInference:
+      if not p.keyActiveAt(s, pos, {roleAttestedInference}):
+        refuse(rrInactiveKey, "attested inference needs its role")
+    else:
+      refuse(rrForbiddenContent, $kind & " is not submitted through the Boundary")
+  o.logIndex = r.appendRecord(env)
+  r.statements.mgetOrPut(v.subject, @[]).add int(o.logIndex)
+  o.admitted = true
+
 proc rateLimited(r: Registrar; key: string): bool =
   let now = getTime().toUnix
   var (start, count) = r.rate.getOrDefault(key, (now, 0))
@@ -497,6 +554,7 @@ proc process(r: Registrar; name: string; bytes: seq[byte]): Outcome =
       case env.recordKind
       of rkKeyLogEntry: r.admitKeyLog(env, result)
       of rkManifest: r.admitManifest(env, verdict, msg.payload, result)
+      of rkStatement: r.admitStatement(env, verdict, result)
       else: refuse(rrForbiddenContent, "record kind not accepted here")
     of mtRequestIndexUpdate:
       r.dirty = true
@@ -528,6 +586,11 @@ proc addPolicyStatement*(r: Registrar; env: Envelope): bool =
   let pos = r.appendRecord(env)
   r.policyIds.add id
   r.policyRecords.add int(pos)
+  # Also list it with the release it is about, so a surface reading a
+  # release's statements sees the verdict.
+  let st = decodeStatement(env.body)
+  if st.subjectKind == sbRelease:
+    r.statements.mgetOrPut(st.subject, @[]).add int(pos)
   true
 
 proc drainPolicyInbox(r: Registrar) =

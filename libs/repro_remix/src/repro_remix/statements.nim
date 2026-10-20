@@ -51,6 +51,11 @@ type
     kind*: StatementKind
     subjectKind*: SubjectKind
     subject*: Digest32
+    issuer*: Digest32
+      ## `KeyId` of the single key that issues a personal statement (review,
+      ## vouch, yank, claim, evidence). Part of the identity, so two people's
+      ## identical judgements are two statements. Zero for statements a set
+      ## of keys co-signs (policy under quorum, log checkpoints).
     scope*: seq[string]
       ## Kind-specific scope items (reviewed surfaces, platform, lock id),
       ## identifiers, ascending, unique.
@@ -69,6 +74,7 @@ type
     kind: uint8
     subjectKind: uint8
     subject: Digest32
+    issuer: Digest32
     scope: List[SszName, MaxScopeItems]
     policy: Digest32
     supersedes: Digest32
@@ -137,7 +143,7 @@ proc encodeStatement*(st: Statement): seq[byte] =
     refuse(rrBound, "statement list exceeds its bound")
   SSZ.encode(StatementW(kind: uint8(ord(st.kind)),
     subjectKind: uint8(ord(st.subjectKind)), subject: st.subject,
-    scope: List[SszName, MaxScopeItems].init(scope), policy: st.policy,
+    issuer: st.issuer, scope: List[SszName, MaxScopeItems].init(scope), policy: st.policy,
     supersedes: st.supersedes, issuedAt: st.issuedAt,
     evidence: List[BlobRefW, MaxEvidence].init(ev), treeSize: st.treeSize,
     rootHash: st.rootHash, extensions: List[ExtensionW, MaxExtensions].init(ex)))
@@ -154,7 +160,7 @@ proc decodeStatement*(body: openArray[byte]): Statement =
     refuse(rrUnknownVocabulary, "subject kind " & $w.subjectKind)
   result = Statement(kind: StatementKind(w.kind),
     subjectKind: SubjectKind(w.subjectKind), subject: w.subject,
-    policy: w.policy, supersedes: w.supersedes, issuedAt: w.issuedAt,
+    issuer: w.issuer, policy: w.policy, supersedes: w.supersedes, issuedAt: w.issuedAt,
     treeSize: w.treeSize, rootHash: w.rootHash)
   for s in asSeq(w.scope): result.scope.add strOf(asSeq(s))
   for b in asSeq(w.evidence):
