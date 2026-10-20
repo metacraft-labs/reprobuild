@@ -12852,6 +12852,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_gateway_lock_read_keeps_git_stderr_apart.nim",
+    binary: "build/test-bin/t_gateway_lock_read_keeps_git_stderr_apart",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_gateway_ratchets_the_anchor_requirements.nim",
     binary: "build/test-bin/t_gateway_ratchets_the_anchor_requirements",
     defines: @[],
