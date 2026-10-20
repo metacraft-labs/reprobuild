@@ -1606,6 +1606,8 @@ suite "e2e_local_reprobuild_project_build":
       # Guarded: a failed length check must not abort the whole binary with an
       # IndexDefect and take every later test in the suite with it.
       if providerCompileActions.len > 0:
+        checkpoint("warm provider compile cacheMissReason=" &
+          providerCompileActions[0]{"cacheMissReason"}.getStr())
         check not providerCompileActions[0]{"launched"}.getBool()
 
     test "graph why and debug artifact inspect the materialized build graph":
@@ -1733,6 +1735,8 @@ suite "e2e_local_reprobuild_project_build":
       check secondProviderActions.len == 1
       # Guarded for the same reason as the sibling assertion above.
       if secondProviderActions.len > 0:
+        checkpoint("second provider compile cacheMissReason=" &
+          secondProviderActions[0]{"cacheMissReason"}.getStr())
         check not secondProviderActions[0]{"launched"}.getBool()
 
       writeFile(projectRoot / "provider_salt.nim",

@@ -214,6 +214,10 @@ suite "e2e_dev_env_provider_compile_edge":
       createDir(c.projectRoot / "src")
       writeFile(c.projectRoot / "unused.nim", "const unused = true\n")
       let afterBuildDirectories = computeDevEnvEdge(cfg)
+      # Name the input when this misses, rather than leaving the reader a
+      # bare `cdMiss`: the engine's own reason is the diagnosis.
+      checkpoint("after build directories: cacheMissReason=" &
+        afterBuildDirectories.providerCompileAction.cacheMissReason)
       check not afterBuildDirectories.stats.providerBuildLaunched
       check afterBuildDirectories.stats.providerBuildSkippedFresh
       check afterBuildDirectories.providerCompileAction.cacheDecision == cdHit
