@@ -3150,6 +3150,7 @@
             "invalidRoot",
             "loweredGraphCachePath",
             "missingRoot",
+            "path",
             "pathValue",
             "projectEnv",
             "projectRoot",
@@ -3163,7 +3164,7 @@
             "toolPath",
             "traceEnv"
           ],
-          "line": 315,
+          "line": 317,
           "path": "tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim",
           "patterns": [
             "cc"
@@ -3183,6 +3184,7 @@
             "invalidRoot",
             "loweredGraphCachePath",
             "missingRoot",
+            "path",
             "pathValue",
             "projectEnv",
             "projectRoot",
@@ -3196,7 +3198,7 @@
             "toolPath",
             "traceEnv"
           ],
-          "line": 763,
+          "line": 765,
           "path": "tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim",
           "patterns": [
             "cc"
@@ -3216,6 +3218,7 @@
             "invalidRoot",
             "loweredGraphCachePath",
             "missingRoot",
+            "path",
             "pathValue",
             "projectEnv",
             "projectRoot",
@@ -3229,7 +3232,7 @@
             "toolPath",
             "traceEnv"
           ],
-          "line": 1300,
+          "line": 1302,
           "path": "tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim",
           "patterns": [
             "nim-argv"
