@@ -57,7 +57,9 @@ class ReleaseSmokeDevExecTests(unittest.TestCase):
         self.addCleanup(self.work_dir.cleanup)
         self.work = Path(self.work_dir.name)
 
-        # Mock package layout with bin/repro
+        # Mock package layout with bin/repro and bin/runquotad. The mock's
+        # `build` behaves like the engine under --tool-provisioning=tarball:
+        # it is refused unless it can find a runquotad on PATH.
         self.pkg = self.work / "mock-package"
         bin_dir = self.pkg / "bin"
         bin_dir.mkdir(parents=True)
@@ -66,6 +68,9 @@ class ReleaseSmokeDevExecTests(unittest.TestCase):
             "#!/bin/sh\n"
             "here=$(CDPATH= cd -- \"$(dirname -- \"$0\")/..\" && pwd)\n"
             "export REPROBUILD_SOURCE_ROOT=\"$here/share/repro/source\"\n"
+            "if [ \"$1\" = \"build\" ]; then\n"
+            f"{self.BUILD_BODY}"
+            "fi\n"
             "if [ \"$1\" = \"exec\" ] && [ \"$2\" = \"--\" ]; then\n"
             "  shift 2\n"
             "fi\n"
@@ -73,6 +78,15 @@ class ReleaseSmokeDevExecTests(unittest.TestCase):
             encoding="utf-8",
         )
         repro_bin.chmod(0o755)
+        self.runquotad = bin_dir / "runquotad"
+        self.runquotad.write_text("#!/bin/sh\n", encoding="utf-8")
+        self.runquotad.chmod(0o755)
+
+    BUILD_BODY = (
+        "  command -v runquotad >/dev/null 2>&1 && exit 0\n"
+        "  echo 'runquota daemon unreachable and bypass is disabled.' >&2\n"
+        "  exit 1\n"
+    )
 
     def _run_smoke(self, bash_binary: str, env: dict) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -98,6 +112,7 @@ class ReleaseSmokeDevExecTests(unittest.TestCase):
         self.assertNotIn("unbound variable", res.stdout + res.stderr)
         self.assertEqual(0, res.returncode, f"stdout:\n{res.stdout}\nstderr:\n{res.stderr}")
         self.assertIn("=== repro exec smoke test PASSED", res.stdout)
+        self.assertIn("=== repro build smoke test PASSED", res.stdout)
 
     def test_smoke_dev_exec_under_path_bash_without_timeout(self):
         """Default bash on PATH without timeout must succeed."""
@@ -119,6 +134,7 @@ class ReleaseSmokeDevExecTests(unittest.TestCase):
         self.assertNotIn("unbound variable", res.stdout + res.stderr)
         self.assertEqual(0, res.returncode, f"stdout:\n{res.stdout}\nstderr:\n{res.stderr}")
         self.assertIn("=== repro exec smoke test PASSED", res.stdout)
+        self.assertIn("=== repro build smoke test PASSED", res.stdout)
 
     def test_smoke_dev_exec_with_timeout(self):
         """When timeout is available on PATH, smoke execution succeeds with bounded command."""
@@ -132,6 +148,38 @@ class ReleaseSmokeDevExecTests(unittest.TestCase):
         res = self._run_smoke(bash_path, env)
         self.assertEqual(0, res.returncode, f"stdout:\n{res.stdout}\nstderr:\n{res.stderr}")
         self.assertIn("=== repro exec smoke test PASSED", res.stdout)
+        self.assertIn("=== repro build smoke test PASSED", res.stdout)
+
+    def _env_with(self, *dirs: Path) -> dict:
+        path = os.pathsep.join([str(d) for d in dirs] + [os.environ.get("PATH", "")])
+        return {"PATH": path, "TMPDIR": str(self.work)}
+
+    def test_build_fails_when_the_archive_has_no_runquotad(self):
+        """v0.2.12's archives: no daemon in bin/ is a failed smoke."""
+        self.runquotad.unlink()
+        res = self._run_smoke(shutil.which("bash") or "/bin/bash", self._env_with())
+        self.assertNotEqual(0, res.returncode, res.stdout)
+        self.assertIn("no bin/runquotad", res.stderr)
+
+    def test_a_runquotad_elsewhere_on_path_is_not_reached(self):
+        """Another runquotad on PATH must not answer for the archive."""
+        foreign = self.work / "foreign-bin"
+        foreign.mkdir()
+        (foreign / "runquotad").write_text("#!/bin/sh\n", encoding="utf-8")
+        (foreign / "runquotad").chmod(0o755)
+        res = self._run_smoke(shutil.which("bash") or "/bin/bash", self._env_with(foreign))
+        self.assertEqual(0, res.returncode, f"stdout:\n{res.stdout}\nstderr:\n{res.stderr}")
+        self.assertIn("=== repro build smoke test PASSED", res.stdout)
+
+    def test_a_build_that_is_never_refused_fails_the_control(self):
+        """If the hidden-daemon build still succeeds, something else served it."""
+        repro_bin = self.pkg / "bin" / "repro"
+        repro_bin.write_text(
+            repro_bin.read_text(encoding="utf-8").replace(self.BUILD_BODY, "  exit 0\n"),
+            encoding="utf-8")
+        res = self._run_smoke(shutil.which("bash") or "/bin/bash", self._env_with())
+        self.assertNotEqual(0, res.returncode, res.stdout)
+        self.assertIn("was not refused", res.stderr)
 
 
 if __name__ == "__main__":

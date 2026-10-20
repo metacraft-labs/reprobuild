@@ -119,6 +119,12 @@ class PackagerOutputTests(unittest.TestCase):
         real.write_text("real binary stand-in\n", encoding="utf-8")
         real.chmod(0o755)
         (root / "bin" / "macro_sourcemap_repro.json").write_text("{}\n", encoding="utf-8")
+        # The RunQuota daemon and CLI every archive carries; runquota's own
+        # packages own /usr/bin/runquotad and /usr/bin/runquota.
+        for name in ("runquotad", "runquota"):
+            stand_in = root / "bin" / name
+            stand_in.write_text("#!/bin/sh\n", encoding="utf-8")
+            stand_in.chmod(0o755)
         (root / "lib" / "marker").write_text("ran\n", encoding="utf-8")
         # The sources an installed repro compiles recipes against (#428):
         # found at <prefix>/share/repro/source from the binary's location.
@@ -180,11 +186,26 @@ class PackagerOutputTests(unittest.TestCase):
         self.assertTrue((tree / "bin" / "repro").is_file())
         self.assertTrue((tree / "bin" / ".repro.real").is_file())
         self.assertTrue((tree / "lib" / "marker").is_file())
-        # PATH gets the public command, and nothing else from bin/.
+        # PATH gets the public command, and nothing else from bin/: not the
+        # runquota commands, whose /usr/bin paths runquota's packages own.
         on_path = sorted(os.listdir(root / "usr" / "bin"))
         self.assertEqual(["repro"], on_path)
+        self.assertTrue((tree / "bin" / "runquotad").is_file())
         wrapper = (root / "usr" / "bin" / "repro").read_text(encoding="utf-8")
         self.assertIn("exec /usr/lib/reprobuild/bin/repro", wrapper)
+        # The engine finds the bundled daemon through RUNQUOTAD_BIN instead,
+        # and a caller's own choice still wins.
+        self.assertIn('${RUNQUOTAD_BIN:=/usr/lib/reprobuild/bin/runquotad}', wrapper)
+        named = subprocess.run(
+            ["sh", "-c", wrapper.splitlines()[1] + '; printf %s "$RUNQUOTAD_BIN"'],
+            capture_output=True, text=True, check=True,
+            env={k: v for k, v in os.environ.items() if k != "RUNQUOTAD_BIN"})
+        self.assertEqual("/usr/lib/reprobuild/bin/runquotad", named.stdout)
+        kept = subprocess.run(
+            ["sh", "-c", wrapper.splitlines()[1] + '; printf %s "$RUNQUOTAD_BIN"'],
+            capture_output=True, text=True, check=True,
+            env={**os.environ, "RUNQUOTAD_BIN": "/opt/runquotad"})
+        self.assertEqual("/opt/runquotad", kept.stdout)
         # Run the installed launcher from its installed place: it must find
         # its lib/ where the archive put it.
         ran = subprocess.run([str(tree / "bin" / "repro")], capture_output=True,
