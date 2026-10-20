@@ -61,6 +61,11 @@
 ##     that commits a `repro.lock` is its own manifest-optional workspace
 ##     (MO-2), so a repo with both locks, which H2 needs, always takes the
 ##     workspace path, where M2 already runs H1 and H2.
+##   * `t_h1_h2_run_outside_a_workspace_after_a_finished_rebase` — the same
+##     standalone H1 refusal on the first ordinary commit after a rebase ran
+##     to completion (§13.3 stands down only while one is in progress). The
+##     HEAD reflog tail still reads `rebase (finish)`; a stand-down that
+##     consulted it accepted the inconsistent commit unjudged.
 ##
 ## Falsifiability: against the tree before this change, (b) passes, (c)'s
 ## commit is REFUSED as an H2 disagreement the hook itself produced, (d) is
@@ -629,6 +634,66 @@ suite "HL-11 H1 / H2 outside a workspace":
       check ("`nix flake update beta-src --flake " & fx.app & "`") in c.output
       # The repo is outside any workspace: nothing was re-pinned or logged.
       check not fileExists(fx.app / ".repro")
+
+  test "t_h1_h2_run_outside_a_workspace_after_a_finished_rebase":
+    # §13.3: the hook stands down only while a rebase is IN PROGRESS. A
+    # finished one leaves no state path, but its HEAD reflog tail still reads
+    # `rebase (finish)`; a stand-down that consulted the reflog let the first
+    # ordinary commit after it through with H1 unchecked.
+    if not nf3Prerequisites(
+        "t_h1_h2_run_outside_a_workspace_after_a_finished_rebase"):
+      skip("needs git on PATH and a built ./build/bin/repro (named above)")
+    else:
+      let base = setupNf2Fixture("h12-standalone-rebase",
+        revPinned = ["beta-src"])
+      defer: removeDir(base.scratch)
+      isolateNf2Config(base)
+      defer: releaseNf2Config()
+      publishAll(base)
+      var fx = base
+      fx.app = base.scratch / "standalone"
+      discard requireCmd(q(base.gitBin) & " clone -q " &
+        q(originUrl(base, "app")) & " " & q(fx.app))
+      discard gitIn(fx, fx.app, "config user.email tester@example.invalid")
+      discard gitIn(fx, fx.app, "config user.name \"NF2 Tester\"")
+      installPreCommitDispatch(fx)
+      let pinned = base.seedSha[1]
+
+      # ---- a feature branch rebased onto a moved base, to completion. -----
+      let baseBranch = gitIn(fx, fx.app, "rev-parse --abbrev-ref HEAD").strip()
+      discard requireCmd(q(fx.gitBin) & " -C " & q(fx.app) &
+        " checkout -q -b feature")
+      check tryCommitInApp(fx, "feature").code == 0
+      discard requireCmd(q(fx.gitBin) & " -C " & q(fx.app) &
+        " checkout -q " & q(baseBranch))
+      check tryCommitInApp(fx, "moved base").code == 0
+      discard requireCmd(q(fx.gitBin) & " -C " & q(fx.app) &
+        " checkout -q feature")
+      let rebase = run(q(fx.gitBin) & " -C " & q(fx.app) & " rebase " &
+        q(baseBranch))
+      checkpoint(rebase.output)
+      check rebase.code == 0
+      # Precondition: nothing in flight, but the reflog tail names the rebase.
+      check not dirExists(fx.app / ".git" / "rebase-merge")
+      check not dirExists(fx.app / ".git" / "rebase-apply")
+      check gitIn(fx, fx.app, "reflog show --format=%gs -1 HEAD").strip().
+        startsWith("rebase (finish)")
+
+      # ---- locked.rev moves alone: H1 still judges the next commit. -------
+      let other = moveAndPublishSibling(base, "beta", "revision 2")
+      let lock = readFile(lockPath(fx))
+      let node = nodeText(lock, "beta-src")
+      let lockedEnd = node.find("\"original\"")
+      check lockedEnd > 0
+      writeFile(lockPath(fx), lock.replace(node,
+        node[0 ..< lockedEnd].replace(pinned, other) & node[lockedEnd .. ^1]))
+      let headBefore = headOf(fx, fx.app)
+      let c = tryCommitInApp(fx, "standalone lock disagrees after a rebase")
+      checkpoint(c.output)
+      check c.code != 0
+      check c.head == headBefore
+      check "H1 (the lock satisfies the recipe)" in c.output
+      check "a git operation is in progress" notin c.output
 
   test "t_h1_h2_run_outside_a_workspace_at_push":
     if not nf3Prerequisites("t_h1_h2_run_outside_a_workspace_at_push"):

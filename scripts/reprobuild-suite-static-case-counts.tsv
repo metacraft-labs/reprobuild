@@ -1310,7 +1310,7 @@ tests/integration/t_cmake_install_mirror_tools.nim	nim	1
 tests/integration/t_commit_gate_defaults_to_gate_mode.nim	nim	1
 tests/integration/t_commit_records_the_sibling_revision_the_shell_actually_used.nim	nim	3
 tests/integration/t_commit_refuses_a_backward_sibling_pin.nim	nim	10
-tests/integration/t_commit_repin_plans_both_locks.nim	nim	6
+tests/integration/t_commit_repin_plans_both_locks.nim	nim	7
 tests/integration/t_commit_repins_committed_lock_siblings.nim	nim	2
 tests/integration/t_committed_lock_carries_coordinates_and_self_describing_integrity_per_dep.nim	nim	1
 tests/integration/t_committed_lock_folds_sibling_develop_deps.nim	nim	1
@@ -1677,6 +1677,7 @@ tests/integration/t_pre_commit_gate_names_the_re_pin_as_the_cause.nim	nim	1
 tests/integration/t_pre_commit_gate_requires_what_the_branch_rule_names.nim	nim	1
 tests/integration/t_pre_commit_gate_stands_down_during_replay.nim	nim	1
 tests/integration/t_pre_commit_hook_keeps_unstaged_work_when_interrupted.nim	nim	3
+tests/integration/t_pre_commit_lock_refresh_runs_after_a_finished_rebase.nim	nim	1
 tests/integration/t_pre_migration_certificate_is_rejected_with_a_reissue_remedy.nim	nim	1
 tests/integration/t_pre_push_accepts_source_expression_local_ref.nim	nim	2
 tests/integration/t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks.nim	nim	5
@@ -2219,6 +2220,7 @@ tests/unit/t_windows_system_hash_mode.nim	nim	2
 tests/unit/t_workspace_root_for_repo_managed_worktree.nim	nim	1
 tests/unit/t_workspace_settings_v1_decode.nim	nim	3
 tests/unit/test_build_report_attribution.py	python	20
+tests/unit/test_ci_bootstrap_logs.py	python	5
 tests/unit/test_ci_reconcile_lock_credentials.py	python	25
 tests/unit/test_ci_suite_coverage.py	python	19
 tests/unit/test_ci_test_budget.py	python	26

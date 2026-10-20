@@ -39041,12 +39041,13 @@ proc probeGitOperationInProgress*(identity: GitToolIdentity;
       return
 
   # TC-8g — ``consultReflog = false`` is for a caller that runs only while a
-  # commit is being FORMED (the pre-commit certificate gate). Git creates the
-  # state paths above before it replays anything, so every replayed commit
-  # finds them; the reflog tail below would instead keep saying "rebase" on
-  # the first ordinary commit after a rebase FINISHED (its last entry is
-  # `rebase (finish)`), and a gate that stood down there would let that
-  # commit through unjudged.
+  # commit is being FORMED (the pre-commit lock refresh and certificate gate,
+  # and the lock-update node that stands in for them). Git creates the state
+  # paths above before it replays anything, so every replayed commit finds
+  # them; the reflog tail below would instead keep saying "rebase" on the
+  # first ordinary commit after a rebase FINISHED (its last entry is
+  # `rebase (finish)`), and a hook that stood down there would let that
+  # commit through unjudged and un-re-pinned.
   if not consultReflog:
     result.state = gosIdle
     return
@@ -57997,8 +57998,10 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
     #
     # H1 and H2 (§16.3) still apply: they are rules for every repo that has
     # the locks, and they need only the recipe and the locks in the commit.
-    # A history-rewriting operation stands down here as it does below.
-    let standDown = managedHookStandDown("pre-commit", repoRoot)
+    # A history-rewriting operation stands down here as it does below, and
+    # only while one is in flight (see there).
+    let standDown = managedHookStandDown("pre-commit", repoRoot,
+      consultReflog = false)
     if standDown.standDown:
       if standDown.loud:
         stderr.writeLine("repro " & standDown.report)
@@ -58023,7 +58026,14 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
   # here because this hook also STAGES what it writes. It also stands down
   # BEFORE the regression rule: replaying commits that already exist must not
   # be refused (§13.3).
-  let standDown = managedHookStandDown("pre-commit", repoRoot)
+  #
+  # Only the in-flight state paths count, never the HEAD reflog tail
+  # (``consultReflog = false``): git creates those paths before it replays
+  # anything, so every commit an operation forms finds them, while the reflog
+  # tail still reads `rebase (finish)` on the first ORDINARY commit after a
+  # rebase completed, and that commit would skip its re-pin.
+  let standDown = managedHookStandDown("pre-commit", repoRoot,
+    consultReflog = false)
   if standDown.standDown:
     appendPreCommitLog(workspaceRoot, timestamp &
       (if hasFlake: " flake-lock" else: "") &

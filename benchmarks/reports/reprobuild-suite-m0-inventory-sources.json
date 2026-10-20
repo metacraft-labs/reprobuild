@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2211,
+    "nimTestBinaries": 2212,
     "pureUnitConsolidationGroups": 61,
     "pureUnitTests": 662,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2238
+    "testEntries": 2240
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1280,10 +1280,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 17,
-      "integration": 1221,
+      "integration": 1222,
       "platform/destructive": 134,
       "pure unit": 662,
-      "unclassified": 204
+      "unclassified": 205
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1485,9 +1485,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2211,
-    "pythonTestFileCount": 27,
-    "testEntryCount": 2238
+    "nimTestBinaryCount": 2212,
+    "pythonTestFileCount": 28,
+    "testEntryCount": 2240
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -31060,7 +31060,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_commit_repin_plans_both_locks.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -37547,6 +37547,23 @@
       "source": "tests/integration/t_pre_commit_hook_keeps_unstaged_work_when_interrupted.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_pre_commit_lock_refresh_runs_after_a_finished_rebase",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_pre_commit_lock_refresh_runs_after_a_finished_rebase.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -47213,6 +47230,21 @@
       "source": "tests/unit/test_build_report_attribution.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 20,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `__future__`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_ci_bootstrap_logs.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
