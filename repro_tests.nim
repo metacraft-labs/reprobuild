@@ -3411,6 +3411,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_sqlite_lib_dir_prefers_the_toolchain_sqlite.nim",
+    binary: "build/test-bin/t_sqlite_lib_dir_prefers_the_toolchain_sqlite",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_windows_dynlib_staging.nim",
     binary: "build/test-bin/t_windows_dynlib_staging",
     defines: @[],
