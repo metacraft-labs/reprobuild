@@ -23938,11 +23938,26 @@ const DaemonRequestAuthoritativeEnvPrefixes* = ["REPROBUILD_", "REPRO_"]
   ## Reprobuild's own control namespace, over which a build REQUEST is
   ## authoritative and the daemon's start environment is not.
 
+const DaemonRequestAuthoritativeEnvNames* = ["IN_AGENT_SHELL"]
+  ## Variables OUTSIDE that namespace that reprobuild nevertheless reads to
+  ## pick a user-facing default, so the caller's value must govern a hosted
+  ## build exactly as a ``REPROBUILD_`` knob does. ``IN_AGENT_SHELL`` selects
+  ## the progress default (``configuredBuildProgressMode``), and quiet progress
+  ## makes the ``--log`` default quiet; spec/CLI/build.md §"Daemon Mode"
+  ## requires the client's own selection to apply on both routes. Without the
+  ## entry, a daemon auto-started from an agent shell silenced the status
+  ## lines of every later caller that was not in one. Exact names only: list
+  ## a variable here only when reprobuild itself consults it, never one a
+  ## project merely passes through to its actions.
+
 proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
                             currentEnv: openArray[string]): seq[string] =
   ## Variables the daemon process carries that the REQUEST does not, limited
-  ## to reprobuild's own control namespace. The worker must unset these before
-  ## running a hosted build.
+  ## to reprobuild's own control namespace
+  ## (``DaemonRequestAuthoritativeEnvPrefixes``) plus the few variables
+  ## outside it that reprobuild reads to pick a default
+  ## (``DaemonRequestAuthoritativeEnvNames``). The worker must unset these
+  ## before running a hosted build.
   ##
   ## Without this the request environment was applied as an OVERLAY: every
   ## `KEY=VALUE` the client sent was installed, but a variable the daemon had
@@ -23971,6 +23986,9 @@ proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
       continue
     let key = item[0 ..< split]
     if carried.contains(key):
+      continue
+    if key in DaemonRequestAuthoritativeEnvNames:
+      result.add(key)
       continue
     for prefix in DaemonRequestAuthoritativeEnvPrefixes:
       if key.startsWith(prefix):
