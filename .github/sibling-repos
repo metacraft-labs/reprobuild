@@ -204,7 +204,14 @@ io-mon=091fa26ce03d9dd1ca8cfa6a1d9d46624dc50491
 # Match the shared SIP resolver used by the engine and monitor shim.
 # Moved 3af63afc -> ff7eb18 (2026-10-16) with `nim-stackable-hooks-src`.
 nim-stackable-hooks=ff7eb18af166f9355c5e62bf1434ba5f9fd2c99e
-runquota=dev
+# Must match `runquota-src` in flake.lock, for the reason the
+# nim-stackable-hooks note above gives: `release.yml` overrides that input to
+# THIS clone. The release also builds the `runquotad` and `runquota` every
+# archive ships from the pinned revision
+# (scripts/release/stage_release_runquota.sh), which it exports from this
+# clone, so the clone has to contain it. It was `dev` until 2026-10-20, 14
+# commits behind the pin.
+runquota=4962e37106e318c88626040fbdce4aa0832ff82a
 nim-shm-queue=5a8e43b52fa202859658692c9f8432967f3971ea
 nim-shm-gset=c9048e9a7e0ba2b11c1ec137acc5fc2c0bcfec27
 
@@ -215,7 +222,10 @@ nim-shm-gset=c9048e9a7e0ba2b11c1ec137acc5fc2c0bcfec27
 # that leg sets). Without it that build stops at `cannot open file:
 # shm_lease/anchor`. Pinned to the revision runquota's own `flake.lock` pins
 # (`nodes.nim-shm-lease.locked.rev`); move it when runquota moves that pin.
-nim-shm-lease=e3254b7ba1c501de6e64dbb41c96306be5ca6058
+# stage_release_runquota.sh exports the same revision from this clone.
+# Moved e3254b7 -> 22e3100 (2026-10-20) with the runquota pin above, whose
+# flake.lock names it; e3254b7 is an ancestor.
+nim-shm-lease=22e3100cdb4fbc374689ddac55b4b32c90654140
 # `main` retired in the org branch-rename sweep; mainline is now `dev`.
 repo-workspaces=dev
 

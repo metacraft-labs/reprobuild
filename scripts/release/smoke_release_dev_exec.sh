@@ -20,7 +20,12 @@
 # from" below; check_release_source_closure.sh proves those trees are complete
 # without the host).
 #
-# Needs a Nim compiler on PATH (the release legs have one).
+# It then runs `repro build --tool-provisioning=tarball` in a second fresh
+# project with no `runquotad` in reach but the archive's, which is the first
+# thing a from-source recipe needs and which `repro exec` never exercises (see
+# "repro build with the archive's own lease coordinator" below).
+#
+# Needs a Nim compiler and a C compiler on PATH (the release legs have both).
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -149,3 +154,139 @@ if [[ $rc -ne 0 ]] || ! grep -q "^${marker}" "$out"; then
   exit 1
 fi
 echo "=== repro exec smoke test PASSED (sources: the archive copy at $pkg) ==="
+
+# ---- repro build with the archive's own lease coordinator --------------------
+#
+# Under `--tool-provisioning=tarball` (and `nix`) the engine will not run an
+# action without a RunQuota lease, and it starts `runquotad` itself only when it
+# can find one: `$RUNQUOTAD_BIN`, PATH, or `../runquota/build/bin` above its
+# image. v0.2.12 shipped no daemon in any archive and every from-source build of
+# the unpacked release stopped before its first action:
+#
+#   runquota daemon unreachable and bypass is disabled.
+#
+# `repro exec` above never asks for a lease, so it cannot see that. This builds
+# a fresh project under `tarball` with the archive's bin/ on PATH, as an
+# installed prefix puts it, and every other `runquotad` removed from reach.
+#
+# The project carries a token unique to this run, so no action cache can
+# answer its first leased edge (interface extraction) and skip the lease.
+# REPRO_NIM_COMPILER and REPRO_BOOTSTRAP_CC name the toolchain this leg already
+# has, when the caller has not; without them `tarball` would download the
+# pinned Nim and C compiler, which is not what this checks.
+build_project="$work/build-project"
+mkdir -p "$build_project"
+cat > "$build_project/repro.nim" <<EOF
+import repro_project_dsl
+
+const smokeRun {.used.} = "$(date +%s)-$$-${RANDOM}"
+
+package releaseRunquotaSmoke:
+  build:
+    let outDir = fs.ensureDir(path = "out", actionId = "out-dir")
+    defaultTarget(outDir)
+EOF
+
+exe=""
+[[ -f "$pkg/bin/runquotad.exe" ]] && exe=".exe"
+[[ -f "$pkg/bin/runquotad$exe" ]] || {
+  echo "smoke_release_dev_exec: ERROR: no bin/runquotad$exe in the archive (scripts/release/stage_release_runquota.sh)." >&2
+  exit 1
+}
+native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
+
+if [[ -z "${REPRO_NIM_COMPILER:-}" ]] && nim_exe=$(command -v nim); then
+  REPRO_NIM_COMPILER=$(native "$nim_exe")
+  export REPRO_NIM_COMPILER
+fi
+if [[ -z "${REPRO_BOOTSTRAP_CC:-}" ]] && cc_exe=$(command -v cc || command -v gcc); then
+  REPRO_BOOTSTRAP_CC=$(native "$cc_exe")
+  export REPRO_BOOTSTRAP_CC
+fi
+
+# Nothing but the archive may supply a daemon: drop every PATH entry holding
+# one (the Windows leg puts ../runquota/build/bin there, the dev shell its
+# runquota package), the variables that name one, and the binary-cache
+# configuration, so this build neither substitutes nor publishes.
+unset RUNQUOTAD_BIN RUNQUOTA_BIN RUNQUOTA_SOCKET REPROBUILD_NO_RUNQUOTA
+for v in $(env | sed -n 's/^\(REPRO_BINARY_CACHE_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
+kept_path=""
+IFS=: read -r -a path_entries <<< "$PATH"
+for d in ${path_entries[@]+"${path_entries[@]}"}; do
+  [[ -n "$d" && ( -e "$d/runquotad" || -e "$d/runquotad.exe" ) ]] && continue
+  kept_path="${kept_path:+$kept_path:}$d"
+done
+PATH="$pkg/bin:$kept_path"
+export PATH
+
+# On Linux and macOS a socket path of this run's own makes the check hermetic:
+# with RUNQUOTA_SOCKET set the engine adopts only a daemon answering there, so a
+# host-wide daemon cannot serve the build. A Windows build always meets its
+# daemon on the per-user pipe, and the engine leaves the daemon it started
+# running there for later builds. The `repro exec` above has already started
+# one out of this copy; stop it, and any other this copy started, so the pipe
+# is free again and no daemon outlives the copy it runs from. A daemon still
+# answering after that is not this archive's, and then the check below cannot
+# tell whose daemon granted the lease.
+stop_copy_daemons() {
+  [[ -n "$exe" ]] && command -v powershell >/dev/null 2>&1 || return 0
+  powershell -NoProfile -NonInteractive -Command \
+    "Get-CimInstance Win32_Process -Filter \"Name='runquotad.exe'\" | Where-Object { \$_.ExecutablePath -and \$_.ExecutablePath.StartsWith('$(native "$pkg")', [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }" \
+    > /dev/null 2>&1 || true
+}
+trap 'stop_copy_daemons; rm -rf "$work" 2>/dev/null || true' EXIT
+attributable=yes
+if [[ -n "$exe" ]]; then
+  stop_copy_daemons
+  if "$pkg/bin/runquota$exe" daemon status > /dev/null 2>&1; then
+    attributable=no
+    echo "smoke_release_dev_exec: WARNING: a runquotad already answers on this user's pipe; the" >&2
+    echo "  build below may take its lease from it, so it cannot show that the archive's" >&2
+    echo "  runquotad is found. Skipping the control run; PATH resolves runquotad to:" >&2
+    echo "  $(command -v runquotad)" >&2
+  fi
+else
+  RUNQUOTA_SOCKET="$work/runquota-smoke.sock"
+  export RUNQUOTA_SOCKET
+fi
+
+run_build() { # run_build <log>
+  set +e
+  (cd "$build_project" && ${bound[@]+"${bound[@]}"} "$repro_bin" build \
+    --daemon=off --tool-provisioning=tarball) > "$1" 2>&1 < /dev/null
+  local rc=$?
+  set -e
+  return $rc
+}
+
+if [[ "$attributable" == yes ]]; then
+  # The control: with the archive's daemon hidden the same build must be
+  # refused. If it is not, something other than the archive answered, and the
+  # run below would prove nothing.
+  echo "=== repro build --tool-provisioning=tarball, archive runquotad hidden (must be refused) ==="
+  mv "$pkg/bin/runquotad$exe" "$pkg/bin/runquotad$exe.hidden"
+  control_rc=0
+  run_build "$work/build-control.log" || control_rc=$?
+  mv "$pkg/bin/runquotad$exe.hidden" "$pkg/bin/runquotad$exe"
+  cat "$work/build-control.log"
+  if [[ $control_rc -eq 0 ]] || ! grep -q "runquota daemon unreachable" "$work/build-control.log"; then
+    echo "smoke_release_dev_exec: ERROR: with the archive's runquotad hidden, the build was not refused" >&2
+    echo "  for want of a daemon (exit $control_rc), so the build below could not show that the" >&2
+    echo "  archive's runquotad is the one found." >&2
+    exit 1
+  fi
+fi
+
+echo "=== repro build --tool-provisioning=tarball in a fresh project, runquotad from $pkg/bin ==="
+build_rc=0
+run_build "$work/build.log" || build_rc=$?
+cat "$work/build.log"
+if [[ $build_rc -ne 0 ]]; then
+  echo "smoke_release_dev_exec: ERROR: the packaged repro could not build a project under --tool-provisioning=tarball (exit $build_rc)." >&2
+  if grep -q "runquota daemon unreachable" "$work/build.log"; then
+    echo "  It found no runquotad to start: the archive's bin/runquotad$exe was not found or" >&2
+    echo "  did not start. See scripts/release/stage_release_runquota.sh." >&2
+  fi
+  exit 1
+fi
+echo "=== repro build smoke test PASSED (runquotad: the archive copy at $pkg/bin) ==="

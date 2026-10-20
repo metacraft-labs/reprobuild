@@ -604,6 +604,14 @@ jobs:
             # cannot open file: repro_interface_artifacts.
             bash scripts/release/stage_release_sources.sh "${pkg_name}"
 
+            # The RunQuota daemon and CLI, at the revision flake.lock pins.
+            # Under --tool-provisioning=tarball or nix the engine will not run
+            # an action without a lease, and up to v0.2.12 no archive carried
+            # a daemon to take one from. Staged BEFORE the relocation below,
+            # which bundles their runtime closure and wraps them like every
+            # other image in bin/.
+            bash scripts/release/stage_release_runquota.sh "${pkg_name}"
+
             # Make the tree run OFF nix: raw-copied release binaries carry a
             # nix-store ELF interpreter (linux) / install names (darwin) and do
             # not bundle their runtime libs, so the tarball fails the ubuntu
@@ -622,10 +630,12 @@ jobs:
       # into build\bin (`.#release` rewrites build\bin, so the DLLs staged
       # before it may not survive; stage-release-dlls.ps1 is idempotent and
       # skips the pinned downloads when a DLL is already present), copies bin/
-      # and lib/, stages the installed-compile sources into share\repro with
-      # Git for Windows' bash (never WSL's -- v0.2.0 shipped without them and
-      # every `repro exec` from the unpacked zip died at its first compile:
-      # cannot open file: repro_interface_artifacts), and zips the tree. The
+      # and lib/, builds runquotad.exe and runquota.exe into bin/ at the
+      # revision flake.lock pins, stages the installed-compile sources into
+      # share\repro with Git for Windows' bash (never WSL's -- v0.2.0 shipped
+      # without them and every `repro exec` from the unpacked zip died at its
+      # first compile: cannot open file: repro_interface_artifacts), and zips
+      # the tree. The
       # GM1w gate tests/e2e/m83/t_e2e_windows_bundle_compiles_profile.nim runs
       # the same script, so the archive it tests is the archive shipped here.
       # The siblings resolve from the checkouts setup-dev-env cloned beside

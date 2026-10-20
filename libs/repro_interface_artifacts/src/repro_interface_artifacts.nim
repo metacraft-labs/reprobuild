@@ -174,6 +174,14 @@ const BuiltLibraryPrefixes = [
   ("BLAKE3_PREFIX", compileTimeSourceRoot("BLAKE3_PREFIX")),
   ("XXHASH_PREFIX", compileTimeSourceRoot("XXHASH_PREFIX")),
   ("CLINGO_PREFIX", compileTimeSourceRoot("CLINGO_PREFIX")),
+  # SQLite has a second reason to be here. A store holds SQLite builds from
+  # several nixpkgs revisions, each linked against that revision's glibc, so
+  # the store-scan fallback can hand the provider link a SQLite built for a
+  # NEWER glibc than the toolchain's (`undefined reference to
+  # 'sinh@GLIBC_2.44'`). The prefix the building shell exported is the one
+  # `repro` itself linked against, and therefore one the toolchain can link.
+  # Both the flake dev shell and the package derivation export it.
+  ("SQLITE_PREFIX", compileTimeSourceRoot("SQLITE_PREFIX")),
 ]
 
 proc builtLibraryPrefix(envName: string): string =
@@ -6278,18 +6286,24 @@ proc firstExistingLibDir(candidates: openArray[string];
       return resolved
   ""
 
-proc nixLdflagsLibDir(dylibNames: openArray[string]): string =
+proc nixLdflagsLibDirIn(nixLdflags: string;
+                        dylibNames: openArray[string]): string =
   ## Mirror of `config.nims`'s `nixLdflagsLibDir`: the first `-L<dir>` in
-  ## `NIX_LDFLAGS` (the active Nix dev shell's own link inputs) that carries
-  ## one of `dylibNames`. Unlike a store glob this is the shell's deliberate
-  ## choice for its target, so it needs no architecture filter.
-  for token in getEnv("NIX_LDFLAGS").splitWhitespace():
+  ## `nixLdflags` (the active Nix dev shell's own link inputs, normally the
+  ## value of `NIX_LDFLAGS`) that carries one of `dylibNames`. Unlike a store
+  ## glob this is the shell's deliberate choice for its target, so it needs no
+  ## architecture filter. The value is a parameter so a resolver built on it
+  ## can be tested without mutating the process environment.
+  for token in nixLdflags.splitWhitespace():
     if token.startsWith("-L") and token.len > 2:
       let dir = token[2 .. ^1]
       for dylibName in dylibNames:
         if fileExists(extendedPath(dir / dylibName)):
           return dir
   ""
+
+proc nixLdflagsLibDir(dylibNames: openArray[string]): string =
+  nixLdflagsLibDirIn(getEnv("NIX_LDFLAGS"), dylibNames)
 
 proc nixLibDirIn*(storeRoot, namePattern: string;
                   dylibNames: openArray[string]): string =
@@ -6540,6 +6554,60 @@ proc isHostSystemLibDir(dir: string): bool =
   d == "/usr" or d.startsWith("/usr/") or d == "/lib" or
     d.startsWith("/lib/") or d == "/lib64" or d.startsWith("/lib64/")
 
+const
+  SqliteLibraryNames* = ["libsqlite3.so", "libsqlite3.a"]
+    ## The files that make a directory a SQLite link directory.
+  HostSqliteLibDirCandidates* = [
+    "/usr", "/usr/local", "/usr/lib", "/usr/lib64", "/usr/lib/x86_64-linux-gnu"]
+    ## The distribution's directories, the last resort of
+    ## `resolveSqliteLibDir` (which says when it reaches them).
+
+proc resolveSqliteLibDir*(explicitLibDir, explicitPrefix, builtPrefix,
+                          nixLdflags, storeRoot: string;
+                          hostDirs: openArray[string] =
+                            HostSqliteLibDirCandidates): string =
+  ## The directory the provider / interface-extract link takes SQLite from,
+  ## or "" when none is found. Every input is a parameter — production passes
+  ## `SQLITE_LIBDIR`, `SQLITE_PREFIX`, the build-time `SQLITE_PREFIX` baked into
+  ## `BuiltLibraryPrefixes`, `NIX_LDFLAGS` and `/nix/store` — so the order can
+  ## be tested against a store-shaped directory.
+  ##
+  ## Order, first hit wins:
+  ##
+  ## 1. `explicitLibDir` / `explicitPrefix`: a caller who names a SQLite owns
+  ##    that choice, so it is taken without an architecture check.
+  ## 2. `builtPrefix`: the SQLite the shell that built `repro` exported, and
+  ##    the one `repro` itself links. It is checked for existence only, so a
+  ##    relocated binary whose baked store path is absent falls through.
+  ## 3. `nixLdflags`: the `-L` inputs of the active Nix shell, as in
+  ##    `config.nims`.
+  ## 4. The store glob over `storeRoot`, filtered by host architecture.
+  ## 5. `hostDirs`, only when there is no store at `storeRoot`, or when the
+  ##    store holds no SQLite (`config.nims` falls through the same way).
+  ##
+  ## Steps 2 and 3 come before the glob because the glob's "first sorted
+  ## match" is arbitrary with respect to glibc: a store holds SQLite builds
+  ## from several nixpkgs revisions, and the first one can need a newer glibc
+  ## than the toolchain links against. That failed every provider link on a
+  ## host with `undefined reference to 'sinh@GLIBC_2.44'`. The provider edge
+  ## runs with an allowlisted environment, so step 1 is usually empty there
+  ## and, before step 2 existed, the glob decided.
+  let explicit = firstExistingLibDir([explicitLibDir, explicitPrefix],
+    SqliteLibraryNames)
+  if explicit.len > 0:
+    return explicit
+  let built = firstExistingLibDir([builtPrefix], SqliteLibraryNames)
+  if built.len > 0:
+    return built
+  if dirExists(extendedPath(storeRoot)):
+    let shellChoice = nixLdflagsLibDirIn(nixLdflags, SqliteLibraryNames)
+    if shellChoice.len > 0:
+      return shellChoice
+    let stored = nixLibDirIn(storeRoot, "*-sqlite-*", SqliteLibraryNames)
+    if stored.len > 0:
+      return stored
+  firstExistingLibDir(hostDirs, SqliteLibraryNames)
+
 proc externalHashFlags(workDir = ""): seq[string] =
   # Windows: there is no homebrew/nix prefix that ships libblake3 or libxxhash.
   # The reprobuild repo vendors portable C sources for both inside the
@@ -6707,46 +6775,29 @@ proc externalHashFlags(workDir = ""): seq[string] =
   # `repro_project_dsl` drags in) and adds the resolving `-L` + `-rpath`.
   # The provider-compile / interface-extract edge emits the `-lsqlite3`
   # via those transitive deps but, before this block, added no `-L`, so the
-  # link failed with `ld: cannot find -lsqlite3` (RP5c1). Mirror config.nims's
-  # exact resolution (SQLITE_LIBDIR / SQLITE_PREFIX / standard system libdirs /
-  # nix store) so any provider the normal build links, this edge links too.
-  # The Windows branch above has already returned; guard only macOS, which
-  # ships libsqlite3 in the SDK and needs no explicit `-L` (matching
-  # config.nims's `when not defined(windows) and not defined(macosx)`).
+  # link failed with `ld: cannot find -lsqlite3` (RP5c1). The Windows branch
+  # above has already returned; guard only macOS, which ships libsqlite3 in
+  # the SDK and needs no explicit `-L` (matching config.nims's
+  # `when not defined(windows) and not defined(macosx)`).
   #
-  # Resolution order and the RPATH rule match `config.nims` exactly: an
-  # explicit SQLITE_LIBDIR/SQLITE_PREFIX, then a Nix store SQLite built for
-  # the host target (`nixLibDir` filters the glob by architecture) whenever a
-  # Nix toolchain is present, and the distribution's directories only on a
-  # host with no Nix at all. A HOST directory is used for `-L` but never
-  # written into RPATH: this edge runs with an allowlisted environment, so
-  # the dev shell's SQLITE_PREFIX is not visible here, and a `/usr/lib`
-  # RPATH made a Nix-linked provider load the host's libc under Nix's
-  # loader and die with SIGSEGV before reading the recipe. Leaving it out
-  # here is not sufficient on its own: Nix's ld-wrapper writes an RPATH
-  # entry for any `-L` directory, including the ones the C driver adds,
-  # unless `NIX_STORE` tells it which are outside the store, which is why
-  # `providerCompileLaunchEnv` declares it.
+  # The resolution order is `resolveSqliteLibDir`'s, which documents it. It is
+  # `config.nims`'s order with one step added: this edge runs with an
+  # allowlisted environment, so the dev shell's SQLITE_PREFIX is not visible
+  # here, and the prefix baked in when `repro` was built stands in for it
+  # ahead of the store glob. Without it the glob picked a SQLite built against
+  # a newer glibc than the toolchain's.
+  #
+  # The RPATH rule: a HOST directory is used for `-L` but never written into
+  # RPATH. A `/usr/lib` RPATH made a Nix-linked provider load the host's libc
+  # under Nix's loader and die with SIGSEGV before reading the recipe.
+  # Leaving it out here is not sufficient on its own: Nix's ld-wrapper writes
+  # an RPATH entry for any `-L` directory, including the ones the C driver
+  # adds, unless `NIX_STORE` tells it which are outside the store, which is
+  # why `providerCompileLaunchEnv` declares it.
   when not defined(macosx):
-    let sqliteNames = ["libsqlite3.so", "libsqlite3.a"]
-    let nixInPlay = dirExists("/nix/store")
-    let sqliteLibDir = block:
-      let explicit = firstExistingLibDir(
-        [getEnv("SQLITE_LIBDIR"), getEnv("SQLITE_PREFIX")], sqliteNames)
-      if explicit.len > 0:
-        explicit
-      elif nixInPlay and nixLibDir("*-sqlite-*", sqliteNames).len > 0:
-        nixLibDir("*-sqlite-*", sqliteNames)
-      else:
-        firstExistingLibDir(
-          [
-            "/usr",
-            "/usr/local",
-            "/usr/lib",
-            "/usr/lib64",
-            "/usr/lib/x86_64-linux-gnu",
-          ],
-          sqliteNames)
+    let sqliteLibDir = resolveSqliteLibDir(getEnv("SQLITE_LIBDIR"),
+      getEnv("SQLITE_PREFIX"), builtLibraryPrefix("SQLITE_PREFIX"),
+      getEnv("NIX_LDFLAGS"), "/nix/store")
     if sqliteLibDir.len > 0:
       result.add("--passL:-L" & sqliteLibDir)
       if not isHostSystemLibDir(sqliteLibDir):

@@ -8,7 +8,9 @@
 # Produces <OutDir>\reprobuild-<version>-<platform>-<arch>\ holding
 #
 #   bin\     build\bin\* (repro.exe, reprobuild.exe, the other images and the
-#            runtime DLLs windows\stage-release-dlls.ps1 stages beside them)
+#            runtime DLLs windows\stage-release-dlls.ps1 stages beside them),
+#            plus runquotad.exe and runquota.exe, built by
+#            scripts/release/stage_release_runquota.sh
 #   lib\     build\lib\*
 #   share\repro\{source,src,reprobuild-packages}
 #            the sources an installed reprobuild compiles against, staged by
@@ -29,6 +31,8 @@
 # job's equivalent): stage-release-dlls.ps1 reads the toolchain locations it
 # exports, and stage_release_sources.sh resolves the source-only inputs from
 # the variables it sets and the sibling checkouts beside this repository.
+# stage_release_runquota.sh compiles with the Nim and gcc env.ps1 puts on PATH,
+# from the pinned commits of ../runquota and ../nim-shm-lease.
 # Windows PowerShell 5.1 compatible.
 
 param(
@@ -87,6 +91,15 @@ Copy-Item -Path (Join-Path $repoRoot "build\bin\*") -Destination (Join-Path $pkg
 $libSrc = Join-Path $repoRoot "build\lib"
 if (Test-Path -LiteralPath $libSrc) {
   Copy-Item -Path (Join-Path $libSrc "*") -Destination (Join-Path $pkgDir "lib") -Recurse
+}
+
+# runquotad.exe and runquota.exe, built at the revision flake.lock pins. Under
+# --tool-provisioning=tarball the engine will not run an action without a
+# lease, and v0.2.12's zip, which carried no daemon, could not build a
+# from-source recipe: "runquota daemon unreachable and bypass is disabled".
+& $bash ./scripts/release/stage_release_runquota.sh ($pkgDir -replace '\\', '/') | Out-Host
+if ($LASTEXITCODE -ne 0) {
+  throw "package_windows_release: stage_release_runquota.sh failed (exit $LASTEXITCODE)"
 }
 
 # The sources an installed reprobuild compiles every project against

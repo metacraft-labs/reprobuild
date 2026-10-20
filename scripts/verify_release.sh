@@ -126,6 +126,34 @@ if (( ${#missing_sources[@]} > 0 )); then
   exit 1
 fi
 
+# ── All platforms: the RunQuota daemon the engine starts for a build ─────────
+#
+# Under `--tool-provisioning=tarball` and `nix` the engine will not run an
+# action unleased, and it starts `runquotad` itself only when it can find one:
+# on PATH, which is where an installed bin/ goes. Up to v0.2.12 no archive
+# carried it, and an unpacked release could not build a from-source recipe
+# ("runquota daemon unreachable and bypass is disabled"). Staged by
+# scripts/release/stage_release_runquota.sh; smoke_release_dev_exec.sh proves
+# a build finds it.
+exe_suffix=""
+[[ "$archive_name" == *.zip ]] && exe_suffix=".exe"
+required_bins=(runquotad runquota)
+echo "=== Checking the RunQuota executables in $pkg_dir/bin ==="
+missing_bins=()
+for b in "${required_bins[@]}"; do
+  if [[ -f "$pkg_dir/bin/$b$exe_suffix" ]]; then
+    echo "  ok      bin/$b$exe_suffix"
+  else
+    echo "  MISSING bin/$b$exe_suffix"
+    missing_bins+=("$b$exe_suffix")
+  fi
+done
+if (( ${#missing_bins[@]} > 0 )); then
+  echo "ERROR: $archive_name cannot build a from-source recipe: missing from bin/: ${missing_bins[*]}" >&2
+  echo "       Staged by scripts/release/stage_release_runquota.sh." >&2
+  exit 1
+fi
+
 if [[ "$archive_name" != *.zip ]]; then
   echo "=== Verifying the packaged Nix helper and Python runtime ==="
   # A real short-lived Unix socket server exercises its imports and runtime
@@ -222,6 +250,12 @@ run_repro "$repro_bin" --help > /dev/null
 capabilities=$(run_repro "$repro_bin" capabilities 2>&1)
 echo "Capabilities: $capabilities"
 
+# The RunQuota images must start from the archive alone too (on Windows, under
+# the scrubbed PATH above).
+for b in "${required_bins[@]}"; do
+  run_repro "$pkg_dir/bin/$b$exe_suffix" --version
+done
+
 # On Linux, run docker tests across multiple distros.
 #
 # This sweep is the glibc-compatibility gate: it is the only check that the
@@ -274,7 +308,7 @@ if [[ "$(uname -s)" == Linux* ]]; then
       docker run --rm \
         -v "${pkg_dir}:/reprobuild:ro" \
         "$distro" \
-        /reprobuild/bin/repro --version
+        sh -c '/reprobuild/bin/repro --version && /reprobuild/bin/runquotad --version'
     done
     echo "=== All Linux distros passed! ==="
   fi
