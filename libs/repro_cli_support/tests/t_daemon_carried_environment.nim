@@ -331,3 +331,21 @@ suite "daemon request environment authority":
     check getEnv(Key) == "/from-request"
     restoreDaemonRequestEnvironment(saved)
     check not existsEnv(Key)
+
+  test "the caller's IN_AGENT_SHELL governs the progress default, not the daemon's":
+    # `IN_AGENT_SHELL` is outside reprobuild's namespace, but reprobuild reads
+    # it: `configuredBuildProgressMode` falls back to quiet progress when it is
+    # set, and quiet progress makes the `--log` default quiet. A daemon started
+    # from an agent shell must not silence the status lines of a later caller
+    # that is not in one (reprobuild-pm issue
+    # 2026-10-20-daemon-worker-reads-in-agent-shell-from-the-daemon-not-the-caller).
+    const Key = "IN_AGENT_SHELL"
+    let current = @[Key & "=1", "PATH=/daemon-path"]
+    check Key in daemonWorkerEnvUnsets(@["PATH=/client-path"], current)
+    # A caller in an agent shell carries the variable; the overlay installs it.
+    check Key notin daemonWorkerEnvUnsets(@[Key & "=1"], current)
+    withEnv({Key: "1"}):
+      let saved = applyDaemonRequestEnvironment(@["PATH=" & getEnv("PATH")])
+      check not existsEnv(Key)
+      restoreDaemonRequestEnvironment(saved)
+      check getEnv(Key) == "1"

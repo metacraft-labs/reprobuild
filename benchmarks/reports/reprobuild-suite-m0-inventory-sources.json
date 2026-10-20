@@ -9863,7 +9863,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_daemon_carried_environment.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 13,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
