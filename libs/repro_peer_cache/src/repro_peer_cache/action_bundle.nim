@@ -25,6 +25,7 @@
 ##     blobBytes blobLen bytes — raw CAS payload, digest validated by
 ##                        the reader on decode
 
+from repro_core/codec import elementCountFits
 import repro_hash
 import repro_local_store
 import repro_cas_store
@@ -113,7 +114,13 @@ proc decodeActionBundle*(payload: openArray[byte]): ActionBundle =
     recordBytes[i] = payload[pos + i]
   pos += recordLen
   result.record = decodeActionResultRecord(recordBytes)
-  let blobCount = int(readU32Le(payload, pos))
+  let blobCountRaw = readU32Le(payload, pos)
+  # Every blob is at least its u32 length prefix; refuse a count the
+  # remaining bytes cannot hold before it sizes the blob list.
+  if not elementCountFits(blobCountRaw, payload.len - pos, 4):
+    raise newException(ValueError,
+      "action bundle element count exceeds remaining bytes")
+  let blobCount = int(blobCountRaw)
   result.blobs = newSeq[seq[byte]](blobCount)
   for i in 0 ..< blobCount:
     let blobLen = int(readU32Le(payload, pos))

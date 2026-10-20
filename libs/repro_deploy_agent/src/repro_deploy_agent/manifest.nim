@@ -66,6 +66,7 @@
 ## and reviewers can byte-trace it. The signed payload is everything UP TO
 ## ``signature``.
 
+from repro_core import elementCountFits
 import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 import repro_profile as reproProfile
 import ./secrets as reproSecrets
@@ -199,7 +200,10 @@ proc readString(buf: openArray[byte]; pos: var int): string =
   inc pos, n
 
 proc readStrSeq(buf: openArray[byte]; pos: var int): seq[string] =
-  let n = int(readU32LE(buf, pos))
+  let nRaw = readU32LE(buf, pos)
+  if not elementCountFits(nRaw, buf.len - pos, 4):
+    raise newException(DeployManifestCodecError, "element count exceeds remaining bytes")
+  let n = int(nRaw)
   result = newSeqOfCap[string](n)
   for _ in 0 ..< n:
     result.add(readString(buf, pos))
@@ -326,7 +330,10 @@ proc decodeManifest*(buf: openArray[byte]): DeployManifest =
   result.sequence = readU64LE(buf, pos)
   result.deploymentId = readString(buf, pos)
   result.profileText = readString(buf, pos)
-  let actionCount = int(readU32LE(buf, pos))
+  let actionCountRaw = readU32LE(buf, pos)
+  if not elementCountFits(actionCountRaw, buf.len - pos, 4):
+    raise newException(DeployManifestCodecError, "element count exceeds remaining bytes")
+  let actionCount = int(actionCountRaw)
   result.buildActions = newSeqOfCap[reproProfile.ProfileBuildAction](actionCount)
   for _ in 0 ..< actionCount:
     result.buildActions.add(decodeBuildAction(buf, pos))
