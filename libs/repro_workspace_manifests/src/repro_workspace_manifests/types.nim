@@ -71,8 +71,11 @@ type
 
 const
   schemaRepoFragmentV1*     = "reprobuild.workspace.repo.v1"
-    ## The fragment schema whose one branch key is `branch`. Still read — it
-    ## maps `branch` onto the mainline — but no writer emits it any more.
+    ## The fragment schema whose one branch key is `branch`, read as the
+    ## mainline. Still WRITTEN for every fragment it can express — one that
+    ## declares no role but the mainline, no `profile` and no custom role —
+    ## because a `repro` that predates v2 refuses the whole workspace on a v2
+    ## fragment (Workspace-Branch-Roles.md §6; `repoFragmentText`).
   schemaRepoFragmentV2*     = "reprobuild.workspace.repo.v2"
     ## Workspace-Branch-Roles.md §3.1 / §3.6 — `branch` renamed `mainline`,
     ## plus the five optional built-in role keys, `profile`, and a

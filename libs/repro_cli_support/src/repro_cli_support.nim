@@ -76546,7 +76546,6 @@ proc executeAdd(parsed: AddArgs): AddReport =
       parsed.revision.len > 0 or resolved.defaultRevision.len == 0
     if not fileExists(fragmentAbs):
       writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
-        schema: schemaRepoFragmentV2,
         repo: RepoBody(name: parsed.target, path: repoPath,
           remote: some(remoteName),
           revision: (if pinRevision: some(revision) else: none(string))))))
@@ -94567,8 +94566,9 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         if not fragmentExisted:
           createDir(manifestRoot / "repos")
           writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
-            schema: schemaRepoFragmentV2,
-            # `--branch` is written as the v2 `mainline` (Branch-Roles §3.1).
+            # `--branch` is the mainline. The writer picks the schema: v1
+            # (`branch`) unless the fragment needs v2 (Branch-Roles §6), so a
+            # `repro` that predates v2 keeps reading the workspace.
             repo: RepoBody(name: repo, path: effectivePath,
               mainline: (if branch.len > 0: some(branch) else: none(string)),
               revision: (if branch.len == 0 and revision.len > 0: some(revision)
@@ -94617,7 +94617,6 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         if not fragmentExisted:
           createDir(manifestRoot / "repos")
           writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
-            schema: schemaRepoFragmentV2,
             repo: RepoBody(name: plan.repoName, path: effectivePath,
               remote: some(plan.remoteName),
               mainline: (if branch.len > 0: some(branch) else: none(string)),

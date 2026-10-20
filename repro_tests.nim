@@ -6228,6 +6228,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_test_support/tests/t_home_apply_guard.nim",
+    binary: "build/test-bin/t_home_apply_guard",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_tool_profiles/tests/t_a_declared_alias_is_never_served_from_a_prefix_without_it.nim",
     binary: "build/test-bin/t_a_declared_alias_is_never_served_from_a_prefix_without_it",
     defines: @[],
@@ -19694,6 +19703,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_repo_fragment_role_keys.nim",
     binary: "build/test-bin/t_repo_fragment_role_keys",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_repo_fragment_writer_emits_v1_when_v1_can_say_it.nim",
+    binary: "build/test-bin/t_repo_fragment_writer_emits_v1_when_v1_can_say_it",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

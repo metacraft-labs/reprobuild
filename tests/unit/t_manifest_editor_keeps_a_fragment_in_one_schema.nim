@@ -10,11 +10,15 @@
 ##   file v1 — byte for byte outside the edited span. Upgrading on every
 ##   unrelated edit would make an older pinned `repro` refuse the file
 ##   ("unknown major schema version") because someone ran `repro add`;
-## * writing a v2-only key into a v1 file upgrades the WHOLE file first —
-##   schema line and `branch` -> `mainline` together — in one save;
+## * setting `mainline` on a v1 file writes `branch`, the v1 spelling of the
+##   same key, and the file stays v1;
+## * writing a key only v2 can say (a role, `profile`, a custom role) into a
+##   v1 file upgrades the WHOLE file first — schema line and `branch` ->
+##   `mainline` together — in one save;
 ## * writing `branch` into a v2 file is refused;
-## * a NEW fragment is always written as v2 with `mainline`, whatever the
-##   typed value said.
+## * a NEW fragment that declares a key only v2 can say is written as v2
+##   with `mainline`, whatever spelling the typed value used. (One that does
+##   not is written as v1: t_repo_fragment_writer_emits_v1_when_v1_can_say_it.)
 ##
 ## Every result is read back through the strict reader, so "one schema" is
 ## checked by the component that would refuse a mix.
@@ -73,7 +77,7 @@ suite "the manifest editor keeps a fragment in one schema":
     check f.repo.mainline == some("dev")
     check f.repo.unstable == roleBranch("agents")
 
-  test "setting mainline on a v1 file upgrades it rather than adding a second key":
+  test "setting mainline on a v1 file rewrites branch rather than adding a second key":
     let dir = createTempDir("repro-editor-schema-", "")
     defer: removeDir(dir)
     let path = dir / "widget.toml"
@@ -82,9 +86,10 @@ suite "the manifest editor keeps a fragment in one schema":
     check doc.setKey("repo", "mainline", tomlStr("main"))
     doc.saveManifestDoc()
     let f = readRepoFragment(path)
-    check f.schema == schemaRepoFragmentV2
-    check f.repo.mainline == some("main")
-    check readFile(path).count("mainline =") == 1
+    check f.schema == schemaRepoFragmentV1
+    check f.repo.mainlineBranch == some("main")
+    check readFile(path).count("branch =") == 1
+    check "mainline =" notin readFile(path)
 
   test "branch is refused in a v2 fragment":
     let dir = createTempDir("repro-editor-schema-", "")
@@ -96,7 +101,7 @@ suite "the manifest editor keeps a fragment in one schema":
     expect ManifestEditError:
       discard doc.setKey("repo", "branch", tomlStr("dev"))
 
-  test "a new fragment is written as repo.v2 with mainline":
+  test "a new fragment declaring a role is written as repo.v2 with mainline":
     let dir = createTempDir("repro-editor-schema-", "")
     defer: removeDir(dir)
     let path = dir / "new.toml"
