@@ -15,9 +15,10 @@
 ##   wrote; the rollback exits non-zero as a user edit naming the address and
 ##   `--accept-overwrite`, and changes nothing (the edit, the other objects,
 ##   the current generation). `--accept-overwrite` then rolls back.
-## * `e2e_rollback_resource_positive_controls`: with no edit, with an edit that
-##   already holds A's content, and with the removed object already gone, the
-##   rollback runs without `--accept-overwrite` and leaves A's state.
+## * `e2e_rollback_resource_positive_controls`: unchanged resources roll back
+##   without `--accept-overwrite`. An edit that already holds A's content is
+##   still checked against B's record and requires the explicit override;
+##   the removed object being absent does not waive that check.
 ## * `e2e_rollback_keeps_an_object_the_current_generation_destroyed`: A has no
 ##   `~/.rb-only-b`, B creates it, C (A plus `~/.rb-only-c`) destroys it, and
 ##   the user then puts their own file there. Rolling back from C to A has the
@@ -186,15 +187,22 @@ suite "rollback: resource removes and updates respect drift":
       check ok.exitCode == 0
       sb.checkInA(gens)
     block alreadyTarget:
-      # The updated file already holds A's bytes, and the removed one is
-      # already gone: neither is someone else's object.
+      # A's bytes differ from the current generation's record, so they are
+      # still a user edit. The absent removed object is safe independently.
       let sb = newProfileSandbox("rb-control-target", ProfileA)
       defer: sb.dispose()
       let gens = sb.twoGenerations()
       writeFile(extendedPath(sb.homeDir / ".rb-x"), "a\n")
       removeFile(extendedPath(sb.homeDir / ".rb-only-b"))
-      let ok = sb.rollback()
-      check ok.exitCode == 0
+      let before = treeFingerprint(sb.homeDir)
+      let refused = sb.rollback()
+      check refused.exitCode != 0
+      check "user edit detected" in refused.both
+      check "rbX" in refused.both
+      check readCurrentGenerationId(sb.stateDir) == gens.b
+      check treeFingerprint(sb.homeDir) == before
+      let accepted = sb.rollback("--accept-overwrite")
+      check accepted.exitCode == 0
       sb.checkInA(gens)
 
   test "e2e_rollback_keeps_an_object_the_current_generation_destroyed":

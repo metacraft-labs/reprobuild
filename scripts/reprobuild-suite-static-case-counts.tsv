@@ -352,6 +352,7 @@ libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim	nim	19
 libs/repro_home_resources/tests/t_registry_root_override.nim	nim	12
 libs/repro_home_resources/tests/t_resource_type_registry.nim	nim	6
 libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	166
+libs/repro_home_rollback/tests/t_resource_drift.nim	nim	5
 libs/repro_home_rollback/tests/t_rollback_releases_unowned_concerns.nim	nim	3
 libs/repro_home_rollback/tests/t_smoke_home_rollback.nim	nim	2
 libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	nim	65
@@ -1042,6 +1043,7 @@ tests/e2e/home-resources/t_e2e_home_resource_rollback_preserves_unrelated.nim	ni
 tests/e2e/home-resources/t_e2e_macos_user_default_restart_target.nim	nim	1
 tests/e2e/home-resources/t_integration_prevent_destroy.nim	nim	3
 tests/e2e/home-resources/t_integration_resource_move.nim	nim	3
+tests/e2e/home-rollback/t_e2e_repro_home_rollback_resource_drift.nim	nim	4
 tests/e2e/home-rollback/t_e2e_repro_home_rollback_resource_removes_and_updates_respect_drift.nim	nim	8
 tests/e2e/home-rollback/t_e2e_repro_home_rollback_restore_respects_drift.nim	nim	4
 tests/e2e/home-rollback/t_e2e_repro_home_rollback_round_trip.nim	nim	1

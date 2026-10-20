@@ -3114,6 +3114,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_home_rollback/tests/t_resource_drift.nim",
+    binary: "build/test-bin/t_resource_drift",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_home_rollback/tests/t_rollback_releases_unowned_concerns.nim",
     binary: "build/test-bin/t_rollback_releases_unowned_concerns",
     defines: @[],
@@ -9317,6 +9326,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/e2e/home-resources/t_integration_resource_move.nim",
     binary: "build/test-bin/t_integration_resource_move",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/e2e/home-rollback/t_e2e_repro_home_rollback_resource_drift.nim",
+    binary: "build/test-bin/t_e2e_repro_home_rollback_resource_drift",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

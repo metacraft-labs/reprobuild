@@ -294,9 +294,10 @@ proc currentDrift(op: ResourceOp): FileDriftReport =
   ## state differs from recorded, do not overwrite"; reprobuild-pm issue
   ## 2026-10-16-home-rollback-removes-and-updates-resources-without-a-drift-
   ## check): observed through the resource's own driver, the object must be
-  ## absent (a remove has nothing to do, an update converges), hold what the
-  ## current generation recorded writing, or -- for an update -- already hold
-  ## what the target recorded. Anything else is a user edit. Not observed:
+  ## absent (a remove has nothing to do, an update converges), or hold what the
+  ## current generation recorded writing. Matching the target does not attest
+  ## ownership of an edit to the current object. Anything else is a user edit.
+  ## Not observed:
   ## `unobservedKind`, and a current record of a destroyed resource
   ## (`removesNothingOwned`; an update over one is a restore,
   ## `restoresAbsentObject`).
@@ -307,10 +308,6 @@ proc currentDrift(op: ResourceOp): FileDriftReport =
     return
   let observed = observeRecorded(op.address, toRecorded(rec))
   if not observed.present or observed.digest == rec.postWriteDigest:
-    return
-  if op.kind == rokUpdateResource and op.hasTargetRecord and
-      not isZeroDigest(op.targetRecord.postWriteDigest) and
-      observed.digest == op.targetRecord.postWriteDigest:
     return
   result.drifted = true
   result.expectedHex = digestHex(rec.postWriteDigest)
