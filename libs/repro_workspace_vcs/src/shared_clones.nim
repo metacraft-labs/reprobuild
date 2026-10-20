@@ -12,8 +12,8 @@
 ##   - Each unique upstream fetch URL → a stable filesystem slug → ONE
 ##     bare clone under a per-user cache root. The shared bare is
 ##     refreshed clone-if-missing / fetch-if-present
-##     (``git fetch --all --prune``), never rewrites its commit-graph
-##     (``SharedBareSafetyConfig``), and expires only objects no registered
+##     (``git fetch --all --prune``), rewrites non-split commit-graphs only
+##     after migrating borrowers, and expires only objects no registered
 ##     borrower names (``poolIntegrityConfig``, see
 ##     ``reprobuild-specs/spec/Shared-Clone-Pool-Integrity.md``): other
 ##     checkouts borrow from it.
@@ -982,15 +982,10 @@ const SharedBareSafetyConfig* = [
   ##      sets ``gc.pruneExpire`` and the retention hook that tells gc what
   ##      the registered borrowers still name
   ##      (``reprobuild-specs/spec/Shared-Clone-Pool-Integrity.md`` §3).
-  ##   2. Commit-graph rewrites. A borrower that writes a split commit-graph
-  ##      chains its layer onto the bare's layers. ``fetch.writeCommitGraph``
-  ##      MERGES the bare's split chain on every fetch, and gc replaces it; each
-  ##      leaves every chained borrower printing ``unable to find all
-  ##      commit-graph files`` on every command. Measured on git 2.54 under both
-  ##      the ``gc`` and ``geometric`` maintenance strategies: disabling
-  ##      automatic maintenance alone does NOT prevent this -- the fetch-time
-  ##      write does it by itself -- so ``fetch.writeCommitGraph=false`` is
-  ##      required in addition, and ``gc.writeCommitGraph=false`` covers gc.
+  ##   2. Automatic split commit-graph rewrites can remove layers still used
+  ##      by a borrower. Keep those writers off. ``maintainSharedBare`` first
+  ##      converts registered borrowers to independent non-split graphs, then
+  ##      rebuilds the pool graph after gc so expired commits leave it too.
   ##
   ## Persisted in the bare's own config (not only passed per command) so the
   ## property holds for whoever touches the cache: an operator's hand-run
@@ -1842,6 +1837,82 @@ proc gitDirOf(gitBin, leaf: string): tuple[gitDir, commonDir: string] =
     return ("", "")
   (lines[0], lines[1])
 
+proc commitGraphWriteRefusal(gitBin, repo: string): string =
+  ## Git silently skips commit-graph writes for shallow or grafted histories.
+  ## Refuse those repositories before expiry rather than trust a successful
+  ## exit that can leave a borrower's old split base or a stale pool graph.
+  let shallow = runGitEnv(gitBin, ["-C", repo, "rev-parse",
+    "--is-shallow-repository"], lazyFetch = false)
+  if shallow.code != 0 or shallow.output.strip() != "false":
+    return "cannot rebuild the commit-graph in shallow or unreadable repository " &
+      repo & ": " & shallow.output.strip()
+  let dirs = gitDirOf(gitBin, repo)
+  if dirs.commonDir.len == 0:
+    return "could not locate the commit-graph directory in " & repo
+  if fileExists(dirs.commonDir / "info/grafts"):
+    return "cannot rebuild the commit-graph with legacy grafts in " & repo
+  ""
+
+proc writeNonSplitCommitGraph(gitBin, repo: string): string =
+  ## A non-split write walks reachable objects afresh, including when the old
+  ## graph is stale or its split base is missing. ``core.commitGraph=false``
+  ## cannot be used here: Git then returns success without writing anything.
+  ## Force it on for this explicit write, even if global config disables it.
+  let refusal = commitGraphWriteRefusal(gitBin, repo)
+  if refusal.len > 0:
+    return refusal
+  # Git leaves an old graph untouched when there are no reachable commits.
+  # That graph may name exactly the objects gc has just expired. A repository
+  # without commits reachable from refs needs no commit-graph. Like Git's
+  # --reachable writer, exclude a detached HEAD from that set. Disable graph
+  # reads for the probe so broken-chain warnings cannot impersonate a commit.
+  # Remove both legacy representations when the set is empty.
+  let refs = runGitEnv(gitBin, ["--no-replace-objects", "-C", repo,
+    "-c", "core.commitGraph=false",
+    "rev-list", "--exclude=HEAD", "--all", "--max-count=1"], lazyFetch = false)
+  if refs.code != 0:
+    return "could not enumerate commits before rebuilding the commit-graph in " &
+      repo & ": " & refs.output.strip()
+  if refs.output.strip().len == 0:
+    let dirs = gitDirOf(gitBin, repo)
+    if dirs.commonDir.len == 0:
+      return "could not locate the commit-graph directory in " & repo
+    let info = dirs.commonDir / "objects/info"
+    if fileExists(info / "commit-graph.lock") or
+        fileExists(info / "commit-graphs/commit-graph-chain.lock"):
+      return "could not remove the empty commit-graph in " & repo &
+        ": commit-graph is locked"
+    try:
+      removeFile(info / "commit-graph")
+      if dirExists(info / "commit-graphs"):
+        removeDir(info / "commit-graphs")
+    except IOError, OSError:
+      return "could not remove the empty commit-graph in " & repo & ": " &
+        getCurrentExceptionMsg()
+    return ""
+  let graph = runGitEnv(gitBin, ["--no-replace-objects", "-C", repo,
+    "-c", "core.commitGraph=true",
+    "commit-graph", "write", "--reachable"], lazyFetch = false)
+  if graph.code != 0:
+    return "could not rebuild the non-split commit-graph in " & repo &
+      " (" & $graph.code & "): " & graph.output.strip()
+  let dirs = gitDirOf(gitBin, repo)
+  if dirs.commonDir.len == 0 or
+      not fileExists(dirs.commonDir / "objects/info/commit-graph") or
+      fileExists(dirs.commonDir / "objects/info/commit-graphs/commit-graph-chain"):
+    return "git did not create an independent non-split commit-graph in " & repo
+  ""
+
+proc migrateLeafCommitGraph(gitBin, leaf: string): string =
+  let dirs = gitDirOf(gitBin, leaf)
+  if dirs.commonDir.len == 0:
+    return "could not locate the shared object directory in " & leaf
+  # Do not create a graph on every on-touch configuration. Only a split chain
+  # can depend on the pool; an existing monolithic graph is already independent.
+  if fileExists(dirs.commonDir / "objects/info/commit-graphs/commit-graph-chain"):
+    return writeNonSplitCommitGraph(gitBin, leaf)
+  ""
+
 proc leafPoolConfigRows(pool: string): seq[(string, string)] =
   @[("remote." & LeafPoolRemoteName & ".url", poolFileUrl(pool)),
     ("remote." & LeafPoolRemoteName & ".promisor", "true"),
@@ -1917,7 +1988,7 @@ proc ensureLeafPoolConfig*(gitBin, leaf, pool: string): string =
       "extensions.partialClone"])
   if failedKeys.len > 0:
     return "could not write " & failedKeys.join(", ") & " in " & leaf
-  ""
+  migrateLeafCommitGraph(gitBin, leaf)
 
 proc poolsOfLeaf*(leaf: string; cacheRoot = ""): seq[string] =
   ## The pools ``leaf`` borrows from: every alternates entry whose parent is
@@ -3003,6 +3074,29 @@ proc maintainSharedBare*(gitBin, barePath: string;
       result.diagnostic = "could not install the shared-bare safety config on " &
         barePath & "; gc skipped so nothing a borrower uses can be expired"
       return
+    # Old leaves may have chained onto the pool's split layers. Convert all
+    # registered leaves before gc can expire anything or the pool's graph write
+    # removes those layers. A failed migration must leave object retention intact.
+    let borrowers = readBorrowers(barePath)
+    for leaf in borrowers:
+      let migrated = ensureLeafPoolConfig(gitBin, leaf, barePath)
+      if migrated.len > 0:
+        result.ok = false
+        result.diagnostic = migrated & "; gc skipped before borrower graph migration"
+        result.looseAfter = result.looseBefore
+        return
+    let preserveLegacyChain = borrowers.len == 0 and fileExists(
+      barePath / "objects/info/commit-graphs/commit-graph-chain")
+    if not preserveLegacyChain:
+      let refusal = commitGraphWriteRefusal(gitBin, barePath)
+      if refusal.len > 0:
+        result.ok = false
+        result.looseAfter = result.looseBefore
+        result.diagnostic = refusal & "; gc skipped before pool graph rebuild"
+        return
+    let packDir = barePath / "objects/pack"
+    let hadMultiPackIndex = fileExists(packDir / "multi-pack-index") or
+      dirExists(packDir / "multi-pack-index.d")
     var gcArgs = sharedBareSafetyArgs()
     gcArgs.add(["-C", barePath, "gc", "--quiet"])
     let gc = runGit(gitBin, gcArgs)
@@ -3013,6 +3107,28 @@ proc maintainSharedBare*(gitBin, barePath: string;
       result.diagnostic = "git gc failed (" & $gc.code & "): " &
         gc.output.strip()
       return
+    # gc deliberately leaves graph writes disabled. Rebuild explicitly, after
+    # expiry, so no cached graph can still name a commit gc just removed.
+    # With no registered borrowers expiry is disabled. Preserve a legacy split
+    # graph: unknown borrowers may still chain onto it and cannot be migrated.
+    let graphFault = if preserveLegacyChain: "" else:
+      writeNonSplitCommitGraph(gitBin, barePath)
+    if graphFault.len > 0:
+      result.ok = false
+      result.ran = true
+      result.looseAfter = looseObjectCount(gitBin, barePath)
+      result.diagnostic = graphFault
+      return
+    if hadMultiPackIndex:
+      let midx = runGitEnv(gitBin, ["-C", barePath, "multi-pack-index", "write"],
+        lazyFetch = false)
+      if midx.code != 0:
+        result.ok = false
+        result.ran = true
+        result.looseAfter = looseObjectCount(gitBin, barePath)
+        result.diagnostic = "could not rebuild the multi-pack-index in " &
+          barePath & " (" & $midx.code & "): " & midx.output.strip()
+        return
     result.ran = true
     result.looseAfter = looseObjectCount(gitBin, barePath)
     touchMaintenanceStamp(barePath)

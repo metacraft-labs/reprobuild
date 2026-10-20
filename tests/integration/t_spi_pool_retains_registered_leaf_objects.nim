@@ -67,7 +67,14 @@
 ## Hermetic: everything lives under one ``createTempDir`` root; git config
 ## comes from a private ``GIT_CONFIG_GLOBAL``; probes run with
 ## ``GIT_NO_LAZY_FETCH=1`` so a probe can never heal the fixture by fetching.
-## Skip rule: ``git`` missing on PATH, or older than 2.42 (the hook needs it).
+## Index integrity regressions also seed real split chains and a multi-pack-index
+## over two packs. They verify expired objects leave the pool's active indexes,
+## registered borrowers migrate before pool layers disappear, and real graph
+## locks fail maintenance without a success stamp. Broken chains and a pool
+## with no reachable commits exercise migration and Git's empty-write no-op.
+##
+## Skip rule: legacy cases skip when ``git`` is missing or older than 2.42;
+## index integrity regressions require the supported Git toolchain.
 
 import std/[os, osproc, strutils, tempfiles, times, unittest]
 import repro_test_support/reasoned_skip
@@ -121,7 +128,7 @@ proc ageObjects(pool: string) =
   for f in walkDirRec(pool / "objects"):
     setLastModificationTime(f, past)
 
-proc setUp(root: string): Fixture =
+proc setUp(root: string; splitGraphs = false): Fixture =
   result.root = root
   result.gitBin = findExe("git")
   result.up = root / "up"
@@ -142,6 +149,8 @@ proc setUp(root: string): Fixture =
   let created = refreshSharedBare(result.gitBin, result.cache, url)
   doAssert created.ok, created.diagnostic
   result.pool = created.sharedBarePath
+  if splitGraphs:
+    discard must(result.pool, "commit-graph", "write", "--reachable", "--split")
   result.a = root / "ws-a" / "up"
   result.b = root / "ws-b" / "up"
   for leaf in [result.a, result.b]:
@@ -174,6 +183,12 @@ proc setUp(root: string): Fixture =
   discard must(result.a, "update-ref", "-d", "refs/remotes/origin/feat3")
   removeDir(result.a / ".git" / "logs")
 
+  if splitGraphs:
+    discard must(result.a, "commit-graph", "write", "--reachable", "--split")
+    let chain = readFile(result.a / ".git/objects/info/commit-graphs/commit-graph-chain")
+    let poolChain = readFile(result.pool / "objects/info/commit-graphs/commit-graph-chain")
+    doAssert chain.startsWith(poolChain), "leaf must really chain onto the pool"
+
   # Upstream deletes all three branches; the pool's refresh prunes them.
   discard must(result.up, "branch", "-q", "-D", "feat", "feat2", "feat3")
   let refreshed = refreshSharedBare(result.gitBin, result.cache, url)
@@ -198,6 +213,27 @@ proc mutateHook(pool, dropFrom, dropTo: string) =
   let j = script.find(dropTo, i + 1)
   doAssert i >= 0 and j > i, "mutation anchors not found in the hook"
   writeFile(retentionHookPath(pool), script[0 ..< i] & script[j .. ^1])
+
+proc seedMultiPackIndex(f: Fixture) =
+  # A second real pack, overlapping the first, makes MIDX verification exercise
+  # an actual index which gc must update when replacing the original packs.
+  let ids = f.root / "pack-ids"
+  writeFile(ids, must(f.pool, "rev-parse", "main") & "\n")
+  let packed = execCmdEx("git -C " & q(f.pool) & " pack-objects " &
+    q(f.pool / "objects/pack/pack") & " < " & q(ids))
+  doAssert packed.exitCode == 0, packed.output
+  var packs = 0
+  for path in walkFiles(f.pool / "objects/pack/*.pack"):
+    inc packs
+  doAssert packs >= 2
+  discard must(f.pool, "multi-pack-index", "write")
+  doAssert fileExists(f.pool / "objects/pack/multi-pack-index")
+
+proc seedBorrowerSplit(f: Fixture) =
+  removeFile(f.a / ".git/objects/info/commit-graph")
+  discard must(f.a, "commit-graph", "write", "--reachable", "--split")
+  doAssert readFile(f.a / ".git/objects/info/commit-graphs/commit-graph-chain").startsWith(
+    readFile(f.pool / "objects/info/commit-graphs/commit-graph-chain"))
 
 suite "SPI-1: the pool retains what registered leaves name":
 
@@ -226,6 +262,173 @@ suite "SPI-1: the pool retains what registered leaves name":
       check fsck.code == 0
       # B is not registered: its commit expired, so expiry really ran.
       check not has(f.pool, f.bFeat)
+
+  test "gc_expires_objects_without_stale_pool_or_borrower_indexes":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi-graph-expiry-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root, splitGraphs = true)
+      seedMultiPackIndex(f)
+      seedBorrowerSplit(f)
+      let m = maintainSharedBare(f.gitBin, f.pool, ["ws-a", "ws-b"], force = true)
+      checkpoint(m.diagnostic)
+      check m.ok and m.ran
+      check not has(f.pool, f.bFeat) # expiry must really happen
+      check has(f.pool, f.aBase)
+      for repo in [f.pool, f.a]:
+        let fsck = gitIn(repo, "fsck", "--connectivity-only")
+        checkpoint(repo & " fsck: " & $fsck.code & " " & fsck.output)
+        check fsck.code == 0
+        check "commit-graph" notin fsck.output
+      check fileExists(f.pool / "objects/pack/multi-pack-index")
+      let midx = gitIn(f.pool, "multi-pack-index", "verify")
+      checkpoint(midx.output)
+      check midx.code == 0
+      check fileExists(f.pool / "objects/info/commit-graph")
+      check fileExists(f.a / ".git/objects/info/commit-graph")
+      check not fileExists(f.pool / "objects/info/commit-graphs/commit-graph-chain")
+      check not fileExists(f.a / ".git/objects/info/commit-graphs/commit-graph-chain")
+
+  test "borrower_graph_lock_aborts_gc_before_expiry":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi-graph-locked-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root, splitGraphs = true)
+      seedBorrowerSplit(f)
+      writeFile(f.a / ".git/objects/info/commit-graph.lock", "locked\n")
+      let m = maintainSharedBare(f.gitBin, f.pool, ["ws-a"], force = true)
+      checkpoint(m.diagnostic)
+      check not m.ok and not m.ran
+      check "commit-graph" in m.diagnostic
+      check has(f.pool, f.bFeat)
+      check not fileExists(f.pool / MaintenanceStampRelPath)
+
+  test "shallow_borrower_cannot_silently_skip_graph_migration":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi-graph-shallow-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root, splitGraphs = true)
+      seedBorrowerSplit(f)
+      writeFile(f.a / ".git/shallow", must(f.a, "rev-parse", "HEAD~1") & "\n")
+      # Git silently returns success without converting a shallow graph. The
+      # migration must refuse instead of replacing the pool below that chain.
+      let skipped = gitIn(f.a, "-c", "core.commitGraph=true",
+        "commit-graph", "write", "--reachable")
+      doAssert skipped.code == 0
+      doAssert fileExists(f.a / ".git/objects/info/commit-graphs/commit-graph-chain")
+      doAssert not fileExists(f.a / ".git/objects/info/commit-graph")
+      let m = maintainSharedBare(f.gitBin, f.pool, ["ws-a"], force = true)
+      checkpoint(m.diagnostic)
+      check not m.ok and not m.ran
+      check "commit-graph" in m.diagnostic
+      check has(f.pool, f.bFeat)
+      check not fileExists(f.pool / MaintenanceStampRelPath)
+
+  test "pool_graph_noop_conditions_abort_before_expiry":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      for blocker in ["shallow", "grafts"]:
+        block:
+          let root = createTempDir("repro-spi-pool-graph-noop-", "")
+          defer:
+            tearDown()
+            removeDir(root)
+          let f = setUp(root)
+          discard must(f.pool, "commit-graph", "write", "--reachable")
+          doAssert fileExists(f.pool / "objects/info/commit-graph")
+          if blocker == "shallow":
+            writeFile(f.pool / "shallow", must(f.pool, "rev-parse", "main~1") & "\n")
+          else:
+            writeFile(f.pool / "info/grafts", must(f.pool, "rev-parse", "main") & "\n")
+          # A preexisting monolithic file cannot prove that a successful Git
+          # exit refreshed the index. Both real Git conditions skip its write.
+          doAssert gitIn(f.pool, "-c", "core.commitGraph=true",
+            "commit-graph", "write", "--reachable").code == 0
+          let m = maintainSharedBare(f.gitBin, f.pool, ["ws-a"], force = true)
+          checkpoint(blocker & ": " & m.diagnostic)
+          check not m.ok and not m.ran
+          check "commit-graph" in m.diagnostic
+          check has(f.pool, f.bFeat)
+          check not fileExists(f.pool / MaintenanceStampRelPath)
+
+  test "broken_borrower_chain_is_rebuilt_on_touch":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi-graph-broken-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root, splitGraphs = true)
+      seedBorrowerSplit(f)
+      let chainDir = f.a / ".git/objects/info/commit-graphs"
+      for path in walkFiles(chainDir / "graph-*.graph"):
+        removeFile(path)
+      let broken = gitIn(f.a, "fsck", "--connectivity-only")
+      doAssert broken.code != 0 and "commit-graph" in broken.output
+      check ensureLeafPoolConfig(f.gitBin, f.a, f.pool) == ""
+      check fileExists(f.a / ".git/objects/info/commit-graph")
+      let healed = gitIn(f.a, "fsck", "--connectivity-only")
+      checkpoint(healed.output)
+      check healed.code == 0
+
+  test "empty_pool_drops_graph_for_expired_commits":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi-graph-empty-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root, splitGraphs = true)
+      discard must(f.pool, "commit-graph", "write", "--reachable")
+      let tree = must(f.pool, "rev-parse", "main^{tree}")
+      let head = must(f.pool, "rev-parse", "main")
+      discard must(f.pool, "update-ref", "--no-deref", "HEAD", head)
+      for line in must(f.pool, "for-each-ref", "--format=%(refname)").splitLines():
+        discard must(f.pool, "update-ref", "-d", line)
+      # Non-commit refs and a detached HEAD do not make --reachable write a
+      # graph. Neither may leave the stale graph masquerading as a fresh one.
+      discard must(f.pool, "update-ref", "refs/tags/tree-only", tree)
+      # A remains registered, so expiry runs. Main and A's history are retained
+      # through the hook even though the pool has no refs of its own.
+      let m = maintainSharedBare(f.gitBin, f.pool, ["ws-a"], force = true)
+      checkpoint(m.diagnostic)
+      check m.ok and m.ran
+      check not has(f.pool, f.bFeat)
+      for repo in [f.pool, f.a]:
+        let fsck = gitIn(repo, "fsck", "--connectivity-only")
+        checkpoint(fsck.output)
+        check fsck.code == 0
+
+  test "pool_graph_lock_reports_failed_pass_without_stamp":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi-pool-graph-locked-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      writeFile(f.pool / "objects/info/commit-graph.lock", "locked\n")
+      let m = maintainSharedBare(f.gitBin, f.pool, ["ws-a"], force = true)
+      checkpoint(m.diagnostic)
+      check not m.ok and m.ran
+      check "commit-graph" in m.diagnostic
+      check not fileExists(f.pool / MaintenanceStampRelPath)
 
   test "mutation_hook_without_env_reset_protects_nothing":
     if findExe("git").len == 0 or not gitAtLeast(2, 42):
