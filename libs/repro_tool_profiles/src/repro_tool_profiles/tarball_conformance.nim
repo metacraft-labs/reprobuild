@@ -139,8 +139,9 @@ proc armMatchesTarget*(arm: InterfaceTarballProvisioning;
   ## Whether ``arm`` is declared for the (os, cpu) target.
   ##
   ## An empty field and ``any`` are both wildcards — a package with one arm
-  ## for every host leaves them off (`perl`, `swig`) and one that spells it
-  ## out writes ``any``. The CPU side also accepts the ``amd64`` / ``x64``
+  ## for every host leaves them off (`whisper_ggml_base`, the piper voice
+  ## models) and one that spells it out writes ``any`` (`meson`'s Python
+  ## source distribution). The CPU side also accepts the ``amd64`` / ``x64``
   ## spellings of x86_64, which catalog entries use interchangeably.
   let armOs = arm.os.toLowerAscii
   let armCpu = arm.cpu.toLowerAscii

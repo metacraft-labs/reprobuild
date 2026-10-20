@@ -49212,9 +49212,24 @@ proc branchConvergenceBlockers(identity: GitToolIdentity;
       remoteName))
   result.add(stashBlocker(identity, repoDir))
 
+proc warnPullBranchTransition(identity: GitToolIdentity;
+                              repoPath, repoName, targetBranch: string): string =
+  let current = gitRunPlainQuery(identity,
+    ["-C", repoPath, "symbolic-ref", "--short", "-q", "HEAD"])
+  if current.code notin [0, 1]:
+    return "could not determine the current branch before convergence: " &
+      current.diagnostic
+  let source = if current.code == 0: current.output.strip() else: "detached HEAD"
+  if source != targetBranch:
+    stderr.writeLine("workspace pull: WARNING: " & repoName &
+      " switching from '" & source & "' to '" & targetBranch &
+      "'; work on the current branch may be absent from the manifest revision. " &
+      "Use `repro sync` to update while retaining the current branch.")
+    stderr.flushFile()
+
 proc convergeRepoToManifestRevision(
     identity: GitToolIdentity;
-    repoPath, revision: string;
+    repoPath, repoName, revision: string;
     remoteName: string = "origin"): tuple[ok: bool; branch, headSha, diag: string] =
   ## ``ensureRepoTrackingBranches`` core (RA-11). Put the existing
   ## checkout at ``repoPath`` onto a LOCAL TRACKING BRANCH matching the
@@ -49254,6 +49269,9 @@ proc convergeRepoToManifestRevision(
     let shortSha =
       if revision.len > 12: revision[0 ..< 12] else: revision
     let branch = "reprobuild/pinned/" & shortSha
+    let warningError = warnPullBranchTransition(identity, repoPath, repoName, branch)
+    if warningError.len > 0:
+      return (false, "", "", warningError)
     # Create or move the synthetic branch to the pinned SHA, then check
     # it out. ``branch -f`` is idempotent across reruns.
     let mk = gitRunPlain(identity, ["-C", repoPath, "branch", "-f",
@@ -49276,6 +49294,9 @@ proc convergeRepoToManifestRevision(
   if remoteTip.len == 0:
     return (false, "", "",
       "no remote-tracking branch '" & rName & "/" & revision & "' after fetch")
+  let warningError = warnPullBranchTransition(identity, repoPath, repoName, revision)
+  if warningError.len > 0:
+    return (false, "", "", warningError)
   # Create the local branch tracking <remoteName>/<revision> if it does not yet
   # exist; ``checkout -B`` resets it to the remote tip and attaches HEAD.
   let co = gitRunPlain(identity, ["-C", repoPath, "checkout", "--quiet",
@@ -49426,7 +49447,7 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
     var converged: tuple[ok: bool; branch, headSha, diag: string]
     withDrivenOperationContext:
       converged = convergeRepoToManifestRevision(
-        identity, absPath, repo.revision, remoteName = gitRemoteNameFor(repo))
+        identity, absPath, repo.name, repo.revision, remoteName = gitRemoteNameFor(repo))
     if not converged.ok:
       entry.outcome = pullOutcomeTag(ppoFailed)
       entry.diagnostic = converged.diag

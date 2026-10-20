@@ -2340,6 +2340,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_no_catalog_tarball_arm_declares_a_source_build_driver.nim",
+    binary: "build/test-bin/t_no_catalog_tarball_arm_declares_a_source_build_driver",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_one_toolchain_resolution_path.nim",
     binary: "build/test-bin/t_one_toolchain_resolution_path",
     defines: @[],

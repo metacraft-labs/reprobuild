@@ -196,8 +196,9 @@ suite "F1 §4.8 — `repro up` builds the rendered configuration first":
   var upOutput = ""
   var upExit = -1
 
-  defer:
+  teardown:
     if prepared:
+      prepared = false
       try:
         discard c.runRepro(@["down", "--activity", ActivityName])
       finally:
@@ -209,12 +210,48 @@ suite "F1 §4.8 — `repro up` builds the rendered configuration first":
   setup:
     # Registration also runs for --list/--list-json from a scratch cwd.
     # Only executing a case may allocate the project or start a daemon.
-    if not prepared:
-      c = prepareCase()
-      prepared = true
-      daemon = c.startDaemon()
+    #
+    # PREPARED PER CASE, not once per process. The step the four later
+    # cases replay opens by asserting that NEITHER rendered file exists
+    # yet, so a case that inherited the previous case's tree would assert
+    # that against a tree already rendered. One case per process -- what
+    # the runner does -- prepares exactly once either way; one process
+    # running every case now gets a fresh project and daemon per case, and
+    # `teardown` above returns each one.
+    c = prepareCase()
+    prepared = true
+    daemon = c.startDaemon()
+    upOutput = ""
+    upExit = -1
 
-  test "the state F1 measured: nothing is on disk before the session runs":
+  # ONE PROCESS PER CASE. The suite runner executes every case in a process
+  # of its own, and `setup` above prepares a fresh project and daemon in
+  # each. The cases below are one scenario told in steps: the first runs
+  # `repro up`, and every later one asserts on what that run produced --
+  # `upOutput` for the announcement, the project tree for the rendered file
+  # and the consumer's own copy of it.
+  #
+  # Run alone, a dependent case therefore read an EMPTY `upOutput` and an
+  # unrendered tree, and failed on a fixture it never built. The full-suite
+  # run of 2026-10-19/20 measured that at 8f8e5e553: cases 2-5 FAILED --
+  # case 2 on `upOutput.contains("built 1 dev-env action(s) ...")`, cases
+  # 3-5 on a file that was never written -- while case 1 passed, and the
+  # same binary passed 5 of 5 whenever one process ran every case in order.
+  # The suite indices show the split: the passing case ran at 2634, three
+  # of the failures at 2591-2593.
+  #
+  # So each step is a template, and a dependent case REPLAYS the step its
+  # state comes from, assertions and all, before running its own -- the
+  # pattern `t_dss11_cross_process_contribution_reaches_the_instance` and
+  # its four shared-instance siblings already carry. Case names, order and
+  # every assertion are unchanged; a failing prerequisite now fails the
+  # dependent case at the PREREQUISITE's own assertion rather than at a
+  # missing file that says nothing about why.
+
+  template nothingIsOnDiskAndThenUpRuns() =
+    # The step of case "the state F1 measured: nothing is on disk before
+    # the session runs".
+    #
     # POSITIVE CONTROL FOR EVERY EXTRACTION BELOW. Both files are
     # absent, so neither "the rendered file is there" nor "the service
     # saw it" can be satisfied by something this harness left behind.
@@ -226,15 +263,20 @@ suite "F1 §4.8 — `repro up` builds the rendered configuration first":
     checkpoint(upOutput)
     check upExit == 0
 
+  test "the state F1 measured: nothing is on disk before the session runs":
+    nothingIsOnDiskAndThenUpRuns()
+
   test "`repro up` reports building the action BEFORE starting anything":
     # Read off the CLI's own stderr. Not the only evidence -- the two
     # cases below read the filesystem and the consumer's own copy -- but
     # it is what attributes the file to this pass rather than to some
     # other writer.
+    nothingIsOnDiskAndThenUpRuns()
     check upOutput.contains("built 1 dev-env action(s) before starting")
     check upOutput.contains(ActionId)
 
   test "the rendered file is on disk with the bytes the recipe declared":
+    nothingIsOnDiskAndThenUpRuns()
     check fileExists(c.project / ConfigRel)
     check readFile(c.project / ConfigRel) == ConfigText
 
@@ -245,6 +287,7 @@ suite "F1 §4.8 — `repro up` builds the rendered configuration first":
     ## marker the session waited on. Its existence is proof that the
     ## file was there when the service started; its CONTENT is proof
     ## that it was the rendered file and not an empty placeholder.
+    nothingIsOnDiskAndThenUpRuns()
     check fileExists(c.project / ObservedRel)
     check readFile(c.project / ObservedRel) == ConfigText
     check fileExists(c.project / ReadyRel)
@@ -256,6 +299,7 @@ suite "F1 §4.8 — `repro up` builds the rendered configuration first":
     ## that lived only on the provider wire would work once and
     ## silently never again. Measured by deleting both files and
     ## running `repro up` again.
+    nothingIsOnDiskAndThenUpRuns()
     check c.runRepro(@["down", "--activity", ActivityName]).exitCode == 0
     removeFile(c.project / ConfigRel)
     removeFile(c.project / ObservedRel)
