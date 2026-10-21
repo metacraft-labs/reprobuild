@@ -5,8 +5,8 @@
 # Two gates live here:
 #
 #   1. actionlint over .github/workflows -- a workflow GitHub cannot LOAD.
-#   2. sibling-repo pins -- a `.github/sibling-repos` entry naming a branch
-#      that does not exist in the repo it names.
+#   2. sibling-repo pins -- explicit commit pins must agree with committed
+#      locks; named refs must exist in the repository they name.
 #
 # WHY GATE 1 EXISTS
 #
@@ -106,7 +106,7 @@ echo "== actionlint: .github/workflows =="
 echo "ok: all workflow files load"
 
 # =============================================================================
-# GATE 2 -- every explicit `.github/sibling-repos` pin names a ref that EXISTS.
+# GATE 2 -- explicit sibling pins agree with locks and named refs EXIST.
 #
 # WHY THIS EXISTS
 #
@@ -138,15 +138,16 @@ echo "ok: all workflow files load"
 # sed is a snapshot of a moment; this gate is the rule, so a branch that pins a
 # dead or abandoned ref fails lint ON THAT BRANCH instead of after it lands.
 #
-# WHAT THIS GATE IS *NOT* FOR. It would not have caught the
+# The ref-existence check alone would not have caught the
 # `undeclared identifier: 'testExecutionDeclaration'` compile error of the same
 # week, and it must not be trusted to. `config.nims` resolves
 # `repro_test_adapters` from `REPRO_TEST_ADAPTERS_SRC` -- exported by the dev
 # shell from the `reprobuild-test-adapters-src` FLAKE INPUT -- in preference to
 # the sibling checkout, so for that module the sibling set is never consulted at
 # all. That failure was a stale `flake.lock` pin and was fixed there. Two stale
-# pins of the same package, in two different mechanisms, at the same time; do
-# not let this gate's green light stand in for the other one.
+# pins of the same package, in two different mechanisms, at the same time.
+# The offline lock-consistency check below now catches explicit SHA drift
+# between these mechanisms; ref resolution still does not validate APIs.
 #
 # WHY IT RESOLVES REFS INSTEAD OF DEMANDING `dev`
 #
@@ -165,12 +166,18 @@ echo "ok: all workflow files load"
 # ACCEPTED
 #
 #   name                -- lock-resolved; no explicit ref to verify.
-#   name=<40-hex sha>   -- a commit pin, stronger than any branch.
+#   name=<40-hex sha>   -- must agree with applicable repro/flake lock pins.
 #   name=<ref>          -- must exist as a branch or tag in that repo, now;
 #                          and if <ref> is `main`, that repo's default branch
 #                          must still be `main`.
 # =============================================================================
 echo "== .github/sibling-repos pins =="
+
+# Run offline and before remote lookups: an existing SHA can still be unusable
+# when the consumer lock requires another revision. Both = and != forms must
+# agree; acknowledging an override cannot waive the build's source check.
+python3 scripts/test_sibling_lock_pins.py
+python3 scripts/check_sibling_lock_pins.py
 
 sibling_repos_file=".github/sibling-repos"
 if [ ! -f "${sibling_repos_file}" ]; then
