@@ -335,5 +335,36 @@ proc emitInstallMirrorReadOnlyEnforcement*(mirrorRoot: string;
   result.add("chmod -R a-w \"" & escapedRoot & "\"; ")
   result.add("fi; ")
 
+proc emitInstallMirrorClearPrevious*(mirrorRoot: string;
+                                     mode = currentInstallMirrorMode()):
+    string =
+  ## The shell snippet that removes the mirror a previous hashed-mode build
+  ## left read-only (`emitInstallMirrorReadOnlyEnforcement`), so a rebuild of
+  ## the same recipe can lay out a new one.
+  ##
+  ## The whole previous mirror goes, not just its `usr/`: the mirror action
+  ## also rewrites files at its root (the stamp, the propagated-libdirs
+  ## manifest), and a read-only file cannot be rewritten. Removing a
+  ## directory entry needs write permission on the DIRECTORY, not on the
+  ## file, so this restores `u+w` on the mirror's directories only, never on
+  ## its files: the store may realize the published prefix by hardlinking
+  ## the mirror's files, and a file's mode belongs to the shared inode, so
+  ## making a mirror file writable would make the store prefix's file
+  ## writable too. Symlinked directories are not followed.
+  ##
+  ## Only `chmod`, `rm` and shell builtins, which the mirror action already
+  ## declares; empty in legacy mode, where the mirror is never made
+  ## read-only and the legacy action stays byte-for-byte as it was.
+  if mode == immLegacy or mirrorRoot.len == 0:
+    return ""
+  let escapedRoot = mirrorRoot.replace("\\", "/").replace("\"", "\\\"")
+  result.add("_repro_unlock_dirs() { chmod u+w \"$1\"; ")
+  result.add("for _e in \"$1\"/* \"$1\"/.[!.]* \"$1\"/..?*; do ")
+  result.add("if [ -d \"$_e\" ] && [ ! -L \"$_e\" ]; then ")
+  result.add("_repro_unlock_dirs \"$_e\"; fi; done; }; ")
+  result.add("if [ -d \"" & escapedRoot & "\" ]; then ")
+  result.add("_repro_unlock_dirs \"" & escapedRoot & "\"; ")
+  result.add("rm -rf \"" & escapedRoot & "\"; fi; ")
+
 proc installMirrorEnforcesReadOnly*(mode = currentInstallMirrorMode()): bool =
   mode != immLegacy

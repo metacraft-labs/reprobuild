@@ -19242,6 +19242,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_install_mirror_rebuild_after_hashed_publish.nim",
+    binary: "build/test-bin/t_install_mirror_rebuild_after_hashed_publish",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_install_mirror_relocation.nim",
     binary: "build/test-bin/t_install_mirror_relocation",
     defines: @[],
