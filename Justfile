@@ -3029,3 +3029,14 @@ e2e_hcr_linux_registration_payloads_travel_over_the_production_wire:
 # Exercise the actual fork parser and independent script publication guard.
 test-format:
     bash ./tests/integration/t_format_preserves_meaning.sh
+
+# Materialize the graph-owned C helper before the lane executes its Nim gate.
+integration_hcr_linux_stack_mapping_changes_do_not_fault:
+    ./build/bin/repro build --tool-provisioning=path --daemon=off --no-runquota .#hcr-linux-stack-access-fixture
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_stack_mapping_changes_do_not_fault \
+        --out:build/test-bin/integration_hcr_linux_stack_mapping_changes_do_not_fault \
+        tests/e2e/hcr-linux-threads/t_integration_hcr_linux_stack_mapping_changes_do_not_fault.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_stack_mapping_changes_do_not_fault.log

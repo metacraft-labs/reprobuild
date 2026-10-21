@@ -483,6 +483,12 @@ const
         TestGraphArtifact(path: codeTracerToolFixtureRoot & "/clang-bin/clang",
           actionId: "reprobuild.test_fixtures.codetracer_tool_clang")])]
     else: @[]) & (when defined(linux) and defined(amd64): @[
+    TestGraphArtifacts(
+      source: "tests/e2e/hcr-linux-threads/" &
+        "t_integration_hcr_linux_stack_mapping_changes_do_not_fault.nim",
+      artifacts: @[TestGraphArtifact(
+        path: "build/test-fixtures/hcr-linux-stack-access/stack-access",
+        actionId: "reprobuild.test_fixtures.hcr_linux_stack_access")]),
     # Linux x86-64 only, exactly where the gate records (its body is
     # `when defined(linux) and defined(amd64)`) and where the producing edge
     # is declared. EVERY bundle file is a typed input, not only `ct_cli`: the
@@ -3084,6 +3090,25 @@ package reprobuild:
     # this symbol (that module must not import ``repro.nim``), so a test asserts
     # the two agree instead. See
     # ``tests/unit/test_graph_owned_test_artifacts.py``.
+    # The stack mapping regression executes one checked-in C fixture. Its
+    # compilation is materialization; page protection and signal handshakes
+    # are exercised by the test after this artifact has been built.
+    when defined(linux) and defined(amd64):
+      let hcrStackDir = dslfs.ensureDir(
+        "build/test-fixtures/hcr-linux-stack-access",
+        actionId = "reprobuild.test_fixtures.hcr_linux_stack_access_dir")
+      let hcrStackFixture = gcc(
+        source = "tests/e2e/hcr-linux-threads/hcr_lx_m4_stack_access.c",
+        output = "build/test-fixtures/hcr-linux-stack-access/stack-access",
+        includeDirs = @["libs/repro_hcr_agent/c"],
+        optimization = "2", debug3 = true, libs = @["pthread", "dl"],
+        after = @[hcrStackDir],
+        actionId = "reprobuild.test_fixtures.hcr_linux_stack_access")
+      reprobuildTestFixturesActions.add(hcrStackDir)
+      reprobuildTestFixturesActions.add(hcrStackFixture)
+      discard collect("hcr-linux-stack-access-fixture",
+        @[hcrStackDir, hcrStackFixture])
+
     let ctShimFixtureDir = ctShimFixtureRoot
     when defined(linux):
       let mirrorFixtureDir = dslfs.ensureDir(installMirrorFixtureRoot,

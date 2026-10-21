@@ -429,7 +429,9 @@
       # hops in SIP tool resolution; only ``propagation.nim`` changes.
       # 4f8f7e60 aligns this pin with the workspace's agent landing branch;
       # its additions since ff7eb18 affect Windows hook freezing only.
-      url = "github:metacraft-labs/nim-stackable-hooks/4f8f7e60af74dc94efbff05159d9b3f6084ca5df";
+      # 6082ee94 keeps the graph build aligned with the synced landing branch;
+      # its source change assigns injected Windows roots to the caller's job.
+      url = "github:metacraft-labs/nim-stackable-hooks/6082ee94203a5937d3dffe99e5098f644c4799b2";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
