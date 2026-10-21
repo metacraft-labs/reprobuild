@@ -62,6 +62,22 @@ type
     # stand-in. `tmTls` runs a real BearSSL TLS 1.2 mutual-auth
     # handshake under the framing layer; no in-protocol auth frames are
     # carried any more.
+    #
+    #
+    # Distributed-Execution M0: the two-phase MEMOIZATION messages
+    # (BuildXL `Public/Src/Cache/README.md`: WeakFingerprint -> Selector
+    # -> StrongFingerprint -> ContentHashList). The tags reuse 17..20 so
+    # the enum stays contiguous (`decodeFrame` range-checks the raw tag
+    # against `high(MessageKind)`; a holey enum would let 17/18 decode to
+    # an invalid value). The deleted auth frames existed only under the
+    # removed `tmMtls` trust mode, which no current peer negotiates.
+    mkGetSelectorsRequest = 17     ## "Which (PathSet, StrongFingerprint)
+                                   ## selectors do you hold for this
+                                   ## WeakFingerprint?"
+    mkGetSelectorsResponse = 18    ## Selector list (possibly empty).
+    mkGetActionRecordRequest = 19  ## "Send the memo entry for this
+                                   ## (WeakFingerprint, StrongFingerprint)."
+    mkGetActionRecordResponse = 20 ## Memo entry bytes, or `found = false`.
 
   AdvertiseMode* = enum
     amSnapshot = 0
@@ -130,6 +146,59 @@ type
     digest*: BlobDigest
     truncated*: bool
     payload*: seq[byte]
+
+  # ---------------------------------------------------------------------------
+  # Distributed-Execution M0: two-phase memoization records.
+  #
+  # The peer cache has two planes and they are deliberately kept apart:
+  #
+  #   * the CONTENT plane — `mkFetchRequest` / `mkFetchResponse` — is
+  #     strictly content-addressed: the requester names `BLAKE3-256(payload)`
+  #     and rejects (and marks the peer suspect on) any payload that does not
+  #     hash to it. Output blobs and PathSet blobs travel here.
+  #   * the MEMOIZATION plane — the four messages below — answers "which
+  #     executions of this action do you know about?". Its keys are NOT
+  #     content digests of the reply (a selector list or a memo entry is
+  #     looked up by fingerprint), so these replies are never checked with
+  #     the content rule and can never trip it. Overloading the content
+  #     plane with a fingerprint key is precisely what made every bundle
+  #     fetch fail verification and mark an honest peer suspect.
+  #
+  # Lookup follows BuildXL's two-phase cache lookup
+  # (`Documentation/Wiki/Advanced-Features/Two-Phase-Cache-Lookup.md`):
+  # WeakFingerprint -> selectors {PathSet digest, StrongFingerprint} ->
+  # memo entry (the action result record) -> output blobs by digest.
+  # ---------------------------------------------------------------------------
+
+  MemoSelector* = object
+    ## One candidate execution of an action: the content digest of the
+    ## PathSet it observed (fetchable over the content plane) and the
+    ## StrongFingerprint `H(WeakFingerprint || PathSetDigest ||
+    ## ObservedInputDigests)` that execution produced.
+    pathSetDigest*: BlobDigest
+    strongFingerprint*: BlobDigest
+
+  GetSelectorsRequest* = object
+    weakFingerprint*: BlobDigest
+
+  GetSelectorsResponse* = object
+    weakFingerprint*: BlobDigest
+      ## Echoes the request so the requester can correlate the reply.
+    selectors*: seq[MemoSelector]
+
+  GetActionRecordRequest* = object
+    weakFingerprint*: BlobDigest
+    strongFingerprint*: BlobDigest
+
+  GetActionRecordResponse* = object
+    weakFingerprint*: BlobDigest
+    strongFingerprint*: BlobDigest
+    found*: bool
+    entry*: seq[byte]
+      ## The encoded memo entry (`memo_store.encodeMemoEntry`); empty when
+      ## `found` is false. The requester re-derives the entry's identity
+      ## (weak, PathSet digest, strong) from the decoded bytes and drops a
+      ## reply that does not describe what it asked for.
 
   Ping* = object
   Pong* = object
@@ -270,6 +339,19 @@ type
     ## BLAKE3-256 verification. The writer is idempotent — repeated
     ## writes for the same digest are a no-op.
 
+  MemoSelectorReader* = proc(weakFingerprint: BlobDigest): seq[MemoSelector]
+    {.gcsafe, closure.}
+    ## Distributed-Execution M0: server-side seam answering
+    ## `mkGetSelectorsRequest`. Returns every selector the local memo
+    ## store holds for `weakFingerprint` (empty on miss). MUST NOT raise;
+    ## store errors surface as an empty list.
+
+  MemoEntryReader* = proc(weakFingerprint, strongFingerprint: BlobDigest):
+    Option[seq[byte]] {.gcsafe, closure.}
+    ## Distributed-Execution M0: server-side seam answering
+    ## `mkGetActionRecordRequest` with the encoded memo entry for one
+    ## selector, or `none`. MUST NOT raise.
+
   ResponseInterceptor* = proc(payload: seq[byte]): seq[byte]
     {.gcsafe, closure.}
     ## Server-side seam injected by tests. Called on the
@@ -396,6 +478,16 @@ type
       ## Peer-Cache-Scale M4: bind spec for the Prometheus metrics
       ## scrape endpoint (e.g. `127.0.0.1:9456`). Empty string disables
       ## the metrics HTTP server.
+    listenPort*: uint16
+      ## Distributed-Execution M0: TCP port the peer-cache server binds
+      ## (`peer_cache.listen_addr`'s port). 0 asks the OS for an ephemeral
+      ## port, which is what every transient CLI runtime uses; a daemon a
+      ## fleet seeds against wants a stable one.
+    multicastDisabled*: bool
+      ## Distributed-Execution M0: `true` keeps a `pdmMulticast` node off the
+      ## multicast group (no join, no broadcast) so it discovers peers only
+      ## through `seedPeers`. Negative-sense so every existing config keeps
+      ## multicast on. Set by `lan://...?multicast=0`.
 
 const
   DefaultMulticastAddress* = "224.0.0.123"

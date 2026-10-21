@@ -331,6 +331,106 @@ proc decodeFetchResponse*(data: openArray[byte]): FetchResponse =
     raise newException(PeerCacheCodecError,
       "trailing bytes after FetchResponse payload: " & $(data.len - pos))
 
+# ---------------------------------------------------------------------------
+# Distributed-Execution M0: two-phase memoization payloads.
+#
+#   GetSelectorsRequest       weak[32]
+#   GetSelectorsResponse      weak[32] u32 count {pathSet[32] strong[32]}*
+#   GetActionRecordRequest    weak[32] strong[32]
+#   GetActionRecordResponse   weak[32] strong[32] bool found u32 len entry
+# ---------------------------------------------------------------------------
+
+const MaxSelectorsPerResponse* = 4096
+  ## Upper bound a decoder accepts for one selector list. A weak
+  ## fingerprint with thousands of distinct path sets is already a
+  ## pathological action; the bound keeps a hostile count field from
+  ## turning one frame into a multi-gigabyte allocation before the
+  ## per-element length checks run.
+
+proc encodeGetSelectorsRequest*(msg: GetSelectorsRequest): seq[byte] =
+  result = @[]
+  result.writeDigest(msg.weakFingerprint)
+
+proc decodeGetSelectorsRequest*(data: openArray[byte]): GetSelectorsRequest =
+  var pos = 0
+  result.weakFingerprint = readDigest(data, pos)
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after GetSelectorsRequest payload: " & $(data.len - pos))
+
+proc encodeGetSelectorsResponse*(msg: GetSelectorsResponse): seq[byte] =
+  result = @[]
+  result.writeDigest(msg.weakFingerprint)
+  result.writeU32(uint32(msg.selectors.len))
+  for sel in msg.selectors:
+    result.writeDigest(sel.pathSetDigest)
+    result.writeDigest(sel.strongFingerprint)
+
+proc decodeGetSelectorsResponse*(data: openArray[byte]): GetSelectorsResponse =
+  var pos = 0
+  result.weakFingerprint = readDigest(data, pos)
+  let rawCount = readU32(data, pos)
+  if not elementCountFits(rawCount, data.len - pos, 64):
+    raise newException(PeerCacheCodecError,
+      "GetSelectorsResponse selector count exceeds remaining bytes")
+  let count = int(rawCount)
+  if count > MaxSelectorsPerResponse:
+    raise newException(PeerCacheCodecError,
+      "GetSelectorsResponse selector count " & $count & " exceeds " &
+      $MaxSelectorsPerResponse)
+  ensureBytes(data.len - pos, count * 64, "GetSelectorsResponse selectors")
+  result.selectors = newSeq[MemoSelector](count)
+  for i in 0 ..< count:
+    result.selectors[i].pathSetDigest = readDigest(data, pos)
+    result.selectors[i].strongFingerprint = readDigest(data, pos)
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after GetSelectorsResponse payload: " & $(data.len - pos))
+
+proc encodeGetActionRecordRequest*(msg: GetActionRecordRequest): seq[byte] =
+  result = @[]
+  result.writeDigest(msg.weakFingerprint)
+  result.writeDigest(msg.strongFingerprint)
+
+proc decodeGetActionRecordRequest*(data: openArray[byte]):
+    GetActionRecordRequest =
+  var pos = 0
+  result.weakFingerprint = readDigest(data, pos)
+  result.strongFingerprint = readDigest(data, pos)
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after GetActionRecordRequest payload: " &
+      $(data.len - pos))
+
+proc encodeGetActionRecordResponse*(msg: GetActionRecordResponse): seq[byte] =
+  result = @[]
+  result.writeDigest(msg.weakFingerprint)
+  result.writeDigest(msg.strongFingerprint)
+  result.writeBool(msg.found)
+  result.writeU32(uint32(msg.entry.len))
+  for b in msg.entry:
+    result.add(b)
+
+proc decodeGetActionRecordResponse*(data: openArray[byte]):
+    GetActionRecordResponse =
+  var pos = 0
+  result.weakFingerprint = readDigest(data, pos)
+  result.strongFingerprint = readDigest(data, pos)
+  result.found = readBool(data, pos)
+  let entryLen = int(readU32(data, pos))
+  ensureBytes(data.len - pos, entryLen, "GetActionRecordResponse entry bytes")
+  result.entry = newSeq[byte](entryLen)
+  for i in 0 ..< entryLen:
+    result.entry[i] = data[pos + i]
+  inc pos, entryLen
+  if not result.found and entryLen != 0:
+    raise newException(PeerCacheCodecError,
+      "GetActionRecordResponse carries entry bytes but found = false")
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after GetActionRecordResponse payload: " &
+      $(data.len - pos))
+
 proc encodePing*(msg: Ping): seq[byte] =
   result = @[]
 
@@ -615,6 +715,14 @@ type
   SwimSuspectHandler*   = proc (msg: SwimMember)    {.gcsafe, closure.}
   SwimConfirmHandler*   = proc (msg: SwimMember)    {.gcsafe, closure.}
   SwimRefuteHandler*    = proc (msg: SwimMember)    {.gcsafe, closure.}
+  GetSelectorsRequestHandler* =
+    proc (msg: GetSelectorsRequest) {.gcsafe, closure.}
+  GetSelectorsResponseHandler* =
+    proc (msg: GetSelectorsResponse) {.gcsafe, closure.}
+  GetActionRecordRequestHandler* =
+    proc (msg: GetActionRecordRequest) {.gcsafe, closure.}
+  GetActionRecordResponseHandler* =
+    proc (msg: GetActionRecordResponse) {.gcsafe, closure.}
 
 proc dispatch*(frame: Frame;
                onHello: HelloHandler = nil;
@@ -633,7 +741,12 @@ proc dispatch*(frame: Frame;
                onSwimProbeAckIndirect: SwimProbeAckIndirectHandler = nil;
                onSwimSuspect: SwimSuspectHandler = nil;
                onSwimConfirm: SwimConfirmHandler = nil;
-               onSwimRefute: SwimRefuteHandler = nil) =
+               onSwimRefute: SwimRefuteHandler = nil;
+               onGetSelectorsRequest: GetSelectorsRequestHandler = nil;
+               onGetSelectorsResponse: GetSelectorsResponseHandler = nil;
+               onGetActionRecordRequest: GetActionRecordRequestHandler = nil;
+               onGetActionRecordResponse: GetActionRecordResponseHandler =
+                 nil) =
   ## Decodes the frame's payload to the concrete record type and invokes
   ## the matching handler. Handlers default to `nil`, in which case the
   ## frame for that kind is silently dropped — useful for the test
@@ -691,6 +804,18 @@ proc dispatch*(frame: Frame;
   of mkSwimRefute:
     if not onSwimRefute.isNil:
       onSwimRefute(decodeSwimRefute(frame.payload))
+  of mkGetSelectorsRequest:
+    if not onGetSelectorsRequest.isNil:
+      onGetSelectorsRequest(decodeGetSelectorsRequest(frame.payload))
+  of mkGetSelectorsResponse:
+    if not onGetSelectorsResponse.isNil:
+      onGetSelectorsResponse(decodeGetSelectorsResponse(frame.payload))
+  of mkGetActionRecordRequest:
+    if not onGetActionRecordRequest.isNil:
+      onGetActionRecordRequest(decodeGetActionRecordRequest(frame.payload))
+  of mkGetActionRecordResponse:
+    if not onGetActionRecordResponse.isNil:
+      onGetActionRecordResponse(decodeGetActionRecordResponse(frame.payload))
 
 # ---------------------------------------------------------------------------
 # Hex helpers — useful for diagnostics + test failure messages.

@@ -7,6 +7,7 @@
 
 import ./repro_peer_cache/types
 import ./repro_peer_cache/codec
+import ./repro_peer_cache/memo_store
 import ./repro_peer_cache/cuckoo
 import ./repro_peer_cache/multicast
 import ./repro_peer_cache/registry
@@ -19,6 +20,8 @@ import ./repro_peer_cache/client
 import ./repro_peer_cache/swim
 import ./repro_peer_cache/loopback
 import ./repro_peer_cache/engine_seam
+import ./repro_peer_cache/workspace_paths
+import ./repro_peer_cache/two_phase
 import ./repro_peer_cache/action_bundle
 import ./repro_peer_cache/disk_store
 import ./repro_peer_cache/tier2
@@ -26,6 +29,7 @@ import ./repro_peer_cache/sim
 
 export types
 export codec
+export memo_store
 export cuckoo
 export multicast
 export registry
@@ -38,6 +42,8 @@ export client
 export swim
 export loopback
 export engine_seam
+export workspace_paths
+export two_phase
 export action_bundle
 export disk_store
 export tier2

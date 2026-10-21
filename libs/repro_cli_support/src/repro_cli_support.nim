@@ -1,5 +1,6 @@
 import std/[algorithm, base64, hashes, json, options, os, osproc, sequtils,
-    sets, streams, strtabs, strutils, tables, tempfiles, terminal, times]
+    sets, streams, strtabs, strutils, sysrand, tables, tempfiles, terminal,
+    times]
 
 when defined(windows):
   import std/winlean
@@ -234,6 +235,9 @@ import repro_home_resources/drivers/managed_block
 # concrete configuration and start the peer-cache services so the
 # partition planner has a multicast-discovered registry to lean on.
 import repro_peer_cache
+# Distributed-Execution M0: the disk-backed peer-cache engine hooks and the
+# long-lived peer-cache host `repro-daemon` runs (`peer_cache_wiring.nim`).
+import repro_cli_support/peer_cache_wiring
 # Incremental-Test-Runner: the skip/re-run seam (``watchTestEdgeDecision``) the
 # ``--ct-incremental`` watch hook calls on each filesystem-change cycle, and the
 # post-run cache refresh (``recordWatchTestEdge``), are provided by CodeTracer's
@@ -322,27 +326,37 @@ export cli_attest.runAttestCommand, cli_attest.parseAttestArgs,
 # (`peerCacheFetcher` / `peerCachePublisher` / `peerCacheInstaller`) the
 # build path threads through `executeBuildTarget`. The type lives near
 # the top of the file so `runBuildCommand` (defined further down, around
-# line 8900) can reference it; the bodies of
-# `newBuildPeerCacheWiring` / `buildPeerCacheWiringFor` are with the
-# other peer-cache helpers around line 20000, after `parsePeerCache`
+# line 8900) can reference it; the body of `buildPeerCacheWiringFor` is
+# with the other peer-cache helpers further down, after `parsePeerCache`
 # and `startPeerCacheServices` are in scope.
 # ---------------------------------------------------------------------------
 
 type
   BuildPeerCacheWiring* = object
-    reader*: PeerCacheActionCacheReader
+    ## Engine closures for one `repro build` with a peer cache attached, and
+    ## the counters they keep. Distributed-Execution M0: the closures run the
+    ## two-phase lookup/publish against real disk stores
+    ## (`peer_cache_wiring.newPeerCacheEngineHooks`).
     fetcher*: PeerCacheActionFetcher
     publisher*: PeerCacheActionPublisher
     installer*: PeerCacheActionBundleInstaller
+    stats*: PeerCacheWiringStats
+    ownedHost*: PeerCacheHost
+      ## The transient host a direct (non-daemon) build started; stopped when
+      ## the build ends. Nil when the build used the daemon's peer cache.
+    workerClient*: PeerCacheClient
+      ## The short-lived client a daemon build worker dials peers with.
 
 proc buildPeerCacheWiringFor*(spec: string): BuildPeerCacheWiring
   ## Forward declaration; body lives near the other peer-cache helpers.
 
-proc newBuildPeerCacheWiring*(reader: PeerCacheActionCacheReader;
-                               cas: LocalCas;
-                               cache: ptr ActionCache;
-                               localPeerRegistry: PeerRegistry = nil):
-                               BuildPeerCacheWiring
+proc releaseBuildPeerCacheWiring*(wiring: BuildPeerCacheWiring)
+  ## Forward declaration; body lives near the other peer-cache helpers.
+
+proc peerCacheWorkspaceRootFor*(projectRoot: string): string
+  ## Forward declaration; body lives near the other peer-cache helpers.
+
+proc releaseInheritedDaemonPeerCacheHost*()
   ## Forward declaration; body lives near the other peer-cache helpers.
 
 proc wantsVersion*(args: openArray[string]): bool =
@@ -364,7 +378,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota|--runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota|--runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--peer-cache=none|lan://CIDR[:port][?seeds=HOST:PORT,...&listen=PORT&multicast=0&tls=1]] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
@@ -12010,6 +12024,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       bcCachesConfig.publishTargetScope() == bcCachesConfig.csIntermediate
     # Cache-Scope P3.4: portable (cross-host) caching, when opted in.
     wirePortableCache(engineConfig, reportProjectRoot, outDir)
+    if peerCacheFetcher != nil or peerCachePublisher != nil:
+      # Distributed-Execution M0: what `$WORKSPACE` stands for.
+      engineConfig.peerCacheWorkspaceRoot =
+        peerCacheWorkspaceRootFor(reportProjectRoot)
     # M9.N Batch B: attach the tool-identity resolver closure once
     # the outer scope has resolved the build identity. ``nil`` is
     # the legitimate fast-path-no-identity value — the engine then
@@ -13603,7 +13621,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       stdoutLimit: 1024 * 1024,
       stderrLimit: 1024 * 1024,
       rebuildMissingOutputsOnCacheHit: true,
-      deferLocalOutputBlobs: true,
+      deferLocalOutputBlobs: peerCachePublisher == nil,
       bypassRunQuota: bypassRunQuota,
       fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
       inlineRunQuota: true,
@@ -13676,6 +13694,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       bcCachesConfig.publishTargetScope() == bcCachesConfig.csIntermediate
     # Cache-Scope P3.4: portable (cross-host) caching, when opted in.
     wirePortableCache(engineConfig, projectRoot, outDir)
+    # Distributed-Execution M0: the peer cache rides BOTH build configs (it
+    # used to ride only `runLoweredGraphBuild`'s, so whether ``--peer-cache``
+    # did anything depended on which path the graph took). A publisher
+    # serves output blobs by digest, hence `deferLocalOutputBlobs` above.
+    engineConfig.peerCacheActionFetcher = peerCacheFetcher
+    engineConfig.peerCacheActionPublisher = peerCachePublisher
+    engineConfig.peerCacheActionInstaller = peerCacheInstaller
+    if peerCacheFetcher != nil or peerCachePublisher != nil:
+      engineConfig.peerCacheWorkspaceRoot = peerCacheWorkspaceRootFor(projectRoot)
     # M9.N Batch B: attach the tool-identity resolver closure here
     # too. ``identity`` is in scope at this site (the main inline
     # build path resolves it before reaching here); the closure
@@ -29516,6 +29543,17 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       except CatchableError as exc:
         stderr.writeLine("repro build: error: " & exc.msg)
         return 2
+    defer:
+      # Distributed-Execution M0: say what the peer cache did, then end the
+      # build-scoped peer-cache pieces (a daemon's own node keeps running).
+      let summary = peerCacheSummaryLine(peerCacheBuildWiring.stats)
+      if summary.len > 0 and logMode != blmQuiet:
+        if eventSink != nil:
+          try: eventSink("diagnostic", summary & "\n", "{}")
+          except CatchableError: discard
+        else:
+          stdout.writeLine(summary)
+      releaseBuildPeerCacheWiring(peerCacheBuildWiring)
     try:
       result = executeBuildTarget(target, mode, publicCliPath,
         selectDefaultAction = targetWasOmitted,
@@ -38353,7 +38391,7 @@ proc runUserDaemonCliCommand(args: seq[string]): int =
   if args.len == 0:
     echo "usage: repro daemon {status | start | stop | restart | logs | sessions} " &
       "[--foreground] [--dev] [--endpoint PATH] [--state-dir PATH] " &
-      "[--log PATH]"
+      "[--log PATH] [--peer-cache lan://CIDR[:port][?seeds=HOST:PORT,...&listen=PORT]]"
     return 2
   let action = args[0]
   let rest = if args.len > 1: args[1 .. ^1] else: @[]
@@ -39052,6 +39090,9 @@ proc installUserDaemonBuildExecutor() =
   setUserDaemonBuildExecutor(proc(request: UserDaemonBuildRequest;
       emit: UserDaemonBuildEmit;
       cancelCheck: UserDaemonBuildCancelCheck): int =
+    # Distributed-Execution M0: a forked worker must not drive the daemon's
+    # peer-cache sockets or its async dispatcher; let go of both first.
+    releaseInheritedDaemonPeerCacheHost()
     let previousCwd = enterDaemonRequestDirectory(request.workingDir)
     var previousEnv: seq[tuple[key: string; value: string; present: bool]] = @[]
     try:
@@ -39204,6 +39245,7 @@ proc installUserDaemonWatchExecutor() =
   setUserDaemonWatchExecutor(proc(request: UserDaemonWatchRequest;
       emit: UserDaemonWatchEmit;
       cancelCheck: UserDaemonWatchCancelCheck): int =
+    releaseInheritedDaemonPeerCacheHost()
     let previousCwd = enterDaemonRequestDirectory(request.workingDir)
     var previousEnv: seq[tuple[key: string; value: string; present: bool]] = @[]
     try:
@@ -79650,16 +79692,58 @@ proc parsePeerCache*(spec: string): PeerCacheSpecResult =
     # from ``XDG_STATE_HOME/repro-peer-cache/tls/`` and flip the trust
     # mode to ``tmTls``. Any other query knob is rejected.
     var enableTls = false
+    # Distributed-Execution M0 knobs:
+    #   ``seeds=host:port[,host:port…]`` — unicast seed peers, dialled in
+    #     addition to (or, with ``multicast=0``, instead of) multicast
+    #     discovery (`Peer-Cache.md` §"Discovery model" mode 1);
+    #   ``listen=PORT`` — fixed TCP listen port (default 0 = ephemeral);
+    #   ``multicast=0`` — do not join or broadcast on the multicast group.
+    var seeds: seq[Endpoint] = @[]
+    var listenPort = 0'u16
+    var multicastDisabled = false
     let queryIdx = arg.find('?')
     if queryIdx >= 0:
       let query = arg[queryIdx + 1 .. ^1]
       arg = arg[0 ..< queryIdx]
       for piece in query.split('&'):
+        if piece.startsWith("seeds="):
+          for item in piece[len("seeds=") .. ^1].split(','):
+            if item.len == 0:
+              continue
+            let colon = item.rfind(':')
+            if colon <= 0:
+              result.ok = false
+              return
+            try:
+              let port = parseInt(item[colon + 1 .. ^1])
+              if port < 1 or port > 65535:
+                result.ok = false
+                return
+              seeds.add(initEndpoint(item[0 ..< colon], Port(uint16(port))))
+            except ValueError:
+              result.ok = false
+              return
+          continue
+        if piece.startsWith("listen="):
+          try:
+            let port = parseInt(piece[len("listen=") .. ^1])
+            if port < 0 or port > 65535:
+              result.ok = false
+              return
+            listenPort = uint16(port)
+          except ValueError:
+            result.ok = false
+            return
+          continue
         case piece
         of "tls=1":
           enableTls = true
         of "tls=0", "":
           discard
+        of "multicast=0":
+          multicastDisabled = true
+        of "multicast=1":
+          multicastDisabled = false
         else:
           result.ok = false
           return
@@ -79705,7 +79789,10 @@ proc parsePeerCache*(spec: string): PeerCacheSpecResult =
       cidrAllowlistRaw: @[cidrPart],
       advertiseIntervalMs: DefaultAdvertiseIntervalMs,
       pingIntervalMs: DefaultPingIntervalMs,
-      maxBlobBytes: DefaultMaxBlobBytes)
+      maxBlobBytes: DefaultMaxBlobBytes,
+      listenPort: listenPort,
+      multicastDisabled: multicastDisabled)
+    cfg.seedPeers = seeds
     if enableTls:
       let envState = getEnv("XDG_STATE_HOME")
       let stateRoot =
@@ -79740,6 +79827,8 @@ type
     server*: PeerCacheServer
     client*: PeerCacheClient
     registry*: PeerRegistry
+    host*: PeerCacheHost
+      ## Distributed-Execution M0: the node the three fields above belong to.
 
 var lastStartedPeerCacheRuntime*: PeerCacheRuntime
   ## Peer-Cache M2 test seam: the most recent `PeerCacheRuntime` started
@@ -79749,219 +79838,207 @@ var lastStartedPeerCacheRuntime*: PeerCacheRuntime
   ## production code path doesn't read this variable; it exists purely
   ## for in-process introspection from the verification harness.
 
+proc runtimeOf(host: PeerCacheHost): PeerCacheRuntime =
+  PeerCacheRuntime(server: host.server, client: host.client,
+                   registry: host.registry, host: host)
+
 proc startPeerCacheServices*(config: PeerCacheConfig;
                             selfPeerId: PeerId;
                             listenAddr: string = "0.0.0.0"):
                             PeerCacheRuntime =
-  ## Boots the peer-cache TCP server + multicast receiver and the
-  ## client-side multicast broadcaster from a parsed `PeerCacheConfig`.
-  ## The CIDR allowlist is converted from the parser's raw strings to
-  ## typed `CidrV4` values here so any drift between the parser and
-  ## the server's matcher surfaces as a single diagnostic at start
-  ## time.
-  let endpoint = initEndpoint(listenAddr, Port(0))
-  result.registry = newPeerRegistry(selfPeerId, endpoint)
-  var allowlist: seq[CidrV4] = @[]
-  for cidrStr in config.cidrAllowlistRaw:
-    allowlist.add(parseCidrV4(cidrStr))
-  result.server = newPeerCacheServer(
-    selfPeerId = selfPeerId,
-    listenAddr = listenAddr,
-    listenPort = Port(0),
-    registry = result.registry,
-    cidrAllowlist = allowlist,
-    maxBlobBytes = config.maxBlobBytes)
-  result.server.start()
-  if config.discoveryMode == pdmMulticast:
-    result.server.multicastListen(config.multicastGroup)
-  result.client = newPeerCacheClient(
-    selfPeerId = selfPeerId,
-    listenPort = uint16(result.server.actualPort),
-    registry = result.registry,
-    seedPeers = config.seedPeers,
-    cidrAllowlist = allowlist,
-    advertiseIntervalMs = config.advertiseIntervalMs)
-  if config.discoveryMode == pdmMulticast:
-    result.client.multicastBroadcast(config.multicastGroup)
-
-# ---------------------------------------------------------------------------
-# Peer-Cache M1 build wiring (Linux-Distro-Recipe-Validation M5,
-# 2026-06-12).
-#
-# Given a `PeerCacheActionCacheReader` (wired to a `PeerCacheClient` for
-# the LAN-discovered peer pool) and a local CAS + ActionCache pair, the
-# three procs below produce the engine closures the `BuildEngineConfig`
-# peer-cache fields accept. The reader's own counters
-# (`peerHits`/`peerMisses`/`localHits`) survive the wrap so verification
-# tests can assert against them.
-#
-# The closures are pure value-capturing — no daemon round-trip happens
-# here; `PeerCacheActionCacheReader.readActionOutput` already drives the
-# blocking `waitFor` for the `mkFetchRequest` round trip, and the
-# publisher closure dispatches an async `peerCacheServer.serveLocalBlob`
-# equivalent via the registry's `selfAddBlob` hook plus a local store
-# writer call.
-# ---------------------------------------------------------------------------
-
-proc newBuildPeerCacheWiring*(reader: PeerCacheActionCacheReader;
-                               cas: LocalCas;
-                               cache: ptr ActionCache;
-                               localPeerRegistry: PeerRegistry = nil):
-                               BuildPeerCacheWiring =
-  ## Returns a wiring bundle the engine can adopt. `cas` and `cache` are
-  ## the same handles the engine uses internally — the installer closure
-  ## writes peer-fetched bundles into them so the engine's next
-  ## `lookupActionResult` call hits locally.
+  ## Boots a peer-cache node from a parsed `PeerCacheConfig`.
   ##
-  ## `localPeerRegistry`, when non-nil, receives `selfAddBlob(digest)`
-  ## calls on every publish so the local peer's advertise plane learns
-  ## the new blob immediately (otherwise the next advertise tick
-  ## propagates it). Tests typically pass the loopback peer's registry
-  ## here so the second peer's `requestFetch` finds the bundle without
-  ## waiting for an advertise round.
-  result.reader = reader
-  # `cas` and `cache` are retained for API stability but the active
-  # install path uses the engine-supplied handles (the engine pushes
-  # its own `CasStore` and `ptr ActionCache` into the installer
-  # closure). Earlier drafts of this helper closed over them locally;
-  # we keep the parameters so existing callers don't break.
-  discard cas
-  discard cache
-  let registryRef = localPeerRegistry
-  let readerRef = reader
-  result.fetcher = proc(weakFingerprint: ContentDigest):
-      Option[seq[byte]] {.gcsafe, closure.} =
-    let key = actionBundleKey(weakFingerprint)
-    readerRef.readActionOutput(key)
-  result.installer = proc(weakFingerprint: ContentDigest;
-                          bundleBytes: seq[byte];
-                          engineCas: var CasStore;
-                          engineCache: ptr ActionCache):
-                          tuple[ok: bool; reason: string]
-      {.gcsafe, closure.} =
-    let bundle =
-      try:
-        decodeActionBundle(bundleBytes)
-      except CatchableError as exc:
-        return (false, "decode failed: " & exc.msg)
-    installActionBundle(engineCas, engineCache[], bundle)
-  result.publisher = proc(weakFingerprint: ContentDigest;
-                          bundleBytes: seq[byte]) {.gcsafe, closure.} =
-    let key = actionBundleKey(weakFingerprint)
-    # Push the bundle bytes into the reader's local-write closure so a
-    # subsequent `readActionOutput(key)` from any peer that picks up the
-    # advertise (or from the same reader on the next lookup) gets a
-    # cache hit. Mirrors how `PeerCacheClient.requestFetch` writes a
-    # verified `mkFetchResponse` payload to the local store before
-    # returning.
-    if readerRef.localWrite != nil:
-      readerRef.localWrite(key, bundleBytes)
-    if registryRef != nil:
-      registryRef.selfAddBlob(key)
+  ## Distributed-Execution M0 Catch #2: the server binds ``0.0.0.0`` (a LAN
+  ## peer cache that listens on loopback serves nobody), and its content
+  ## and memo readers are the REAL disk stores of this process's action-cache
+  ## root — the CAS that builds write output blobs into and the memo store
+  ## the two-phase publisher writes selectors into — not a constant miss.
+  ## The CIDR allowlist is converted from the parser's raw strings to typed
+  ## `CidrV4` values at start so a bad entry surfaces as one diagnostic.
+  runtimeOf(startPeerCacheHost(config, selfPeerId,
+    cacheRoot = currentActionCacheRoot(), listenAddr = listenAddr))
 
 var lastStartedBuildPeerCacheRuntime*: PeerCacheRuntime
   ## Peer-Cache M1 / LDRV M5 test seam: the most recent `PeerCacheRuntime`
-  ## started by ``runBuildCommand`` is captured here so verification tests
-  ## can assert against the runtime's counters or stop the services
-  ## after a build run. Production code does not consume this variable.
+  ## started by a direct (non-daemon) ``repro build --peer-cache=…`` is
+  ## captured here so verification tests can assert against its counters.
+
+var activeDaemonPeerCacheHost*: PeerCacheHost
+  ## Distributed-Execution M0 Catch #3: the long-lived peer-cache node of
+  ## THIS `repro-daemon` process (nil everywhere else). A daemon-hosted
+  ## build worker is a fork of the daemon and inherits this object; see
+  ## `releaseInheritedDaemonPeerCacheHost`.
+
+proc randomPeerIdBytes(tag: char): array[32, byte] =
+  ## A fresh random peer id; byte 0 tags the role for log triage.
+  try:
+    let random = urandom(32)
+    for i in 0 ..< 32:
+      result[i] = random[i]
+  except CatchableError:
+    let nowNs = uint64(epochTime() * 1e9)
+    for k in 0 ..< 8:
+      result[1 + k] = byte((nowNs shr uint64(k * 8)) and 0xff'u64)
+    let pid = uint64(getCurrentProcessId())
+    for k in 0 ..< 8:
+      result[9 + k] = byte((pid shr uint64(k * 8)) and 0xff'u64)
+  result[0] = byte(ord(tag))
+
+proc peerCacheWorkspaceRootFor*(projectRoot: string): string =
+  ## What ``$WORKSPACE`` stands for in a portable peer-cache record: the
+  ## repository holding the project when there is one (a recipe's inputs
+  ## reach sibling packages of that repository), else the project itself.
+  let repo = repositoryRootOf(projectRoot)
+  if repo.len > 0: repo else: projectRoot
+
+proc releaseInheritedDaemonPeerCacheHost*() =
+  ## In a forked daemon worker: drop the inherited copies of the daemon's
+  ## peer-cache sockets and give the worker its own async dispatcher BEFORE
+  ## anything in the worker uses asyncdispatch. A no-op in the daemon
+  ## itself and in any process without a daemon host.
+  if not activeDaemonPeerCacheHost.isNil and
+      activeDaemonPeerCacheHost.isForkedChild:
+    activeDaemonPeerCacheHost.releaseInheritedHost()
 
 proc buildPeerCacheWiringFor*(spec: string): BuildPeerCacheWiring =
-  ## CLI-side ``--peer-cache=<spec>`` wiring helper for ``repro build``.
-  ## Empty / ``none`` spec returns a zero-valued wiring (all closures
-  ## nil) so the engine falls through to its legacy local-only path.
-  ## Structural-parse failures raise `ValueError`; runtime-start
-  ## failures raise `IOError` / `OSError` with the underlying message.
-  if spec.len == 0:
+  ## CLI-side peer-cache wiring for ``repro build``.
+  ##
+  ## * Inside `repro-daemon` with a daemon peer cache configured, every
+  ##   hosted build uses it (an explicit ``--peer-cache=none`` opts out):
+  ##   the worker publishes into its action-cache root, registers that root
+  ##   with the daemon so the daemon's long-lived server serves it after the
+  ##   build (and the CLI) are gone, and looks peers up through a short-lived
+  ##   client seeded with the daemon's membership view.
+  ## * A direct build with ``--peer-cache=lan://…`` starts its own node for
+  ##   the duration of the build.
+  ## * Empty / ``none`` / ``remote://`` (not wired yet) return a zero-valued
+  ##   wiring, so the engine runs its local-only path.
+  ##
+  ## Structural-parse failures raise `ValueError`; runtime-start failures
+  ## raise with the underlying message.
+  let daemonHost = activeDaemonPeerCacheHost
+  if spec == "none":
     return BuildPeerCacheWiring()
-  let parsed = parsePeerCache(spec)
-  if not parsed.ok:
-    raise newException(ValueError,
-      "invalid --peer-cache spec: " & spec &
-      " (expected ``none``, ``lan://<CIDR>``, or ``remote://<URL>``)")
-  case parsed.kind
-  of pcsNone:
+  if spec.len == 0 and daemonHost.isNil:
     return BuildPeerCacheWiring()
-  of pcsRemote:
-    # ``remote://`` is parsed for forward-compatibility but the action-
-    # cache reader bridge for it lands in a follow-up milestone.
-    # Returning a no-op wiring keeps `--peer-cache=remote://...` from
-    # crashing existing harnesses that pass it speculatively.
-    return BuildPeerCacheWiring()
-  of pcsLan:
-    var raw: array[32, byte]
-    raw[0] = byte(ord('B'))  # ``B`` for repro build, distinct from
-                             # the loopback helper's ``L`` and the
-                             # repro-test path's ``R``.
-    let nowSeconds = uint64(epochTime())
-    for k in 0 ..< 8:
-      raw[1 + k] = byte((nowSeconds shr uint64(k * 8)) and 0xff'u64)
-    let cliPeerId = peerIdFromBytes(raw)
-    lastStartedBuildPeerCacheRuntime = startPeerCacheServices(
-      parsed.config, cliPeerId, listenAddr = "127.0.0.1")
-    # The CLI doesn't have the engine's CAS + ActionCache in scope (the
-    # engine opens them lazily inside ``runBuild``). Close over the
-    # spec'd root paths instead so the installer closure re-opens
-    # them on demand. Tests that need direct access to the engine's
-    # internal handles call ``newBuildPeerCacheWiring`` instead.
-    let runtime = lastStartedBuildPeerCacheRuntime
-    let actionCacheRoot = currentActionCacheRoot()
-    let casRoot =
-      if actionCacheRoot.len > 0: actionCacheRoot / "cas"
-      else: getCurrentDir() / ".repro" / "build-engine-cache" / "cas"
-    let cacheDir =
-      if actionCacheRoot.len > 0: actionCacheRoot / "action-cache"
-      else: getCurrentDir() / ".repro" / "build-engine-cache" /
-            "action-cache"
-    let peerCasReader: LocalStoreReader =
-      proc(digest: BlobDigest): Option[seq[byte]] {.gcsafe.} =
-        # The CLI path doesn't keep a process-local map of bundle
-        # digests — every bundle hit goes through the engine's
-        # installer closure and the next `lookupActionResult`. The
-        # peer-cache reader's "local-read" branch is therefore a
-        # constant miss; the fall-through to `peerCacheClient.
-        # requestFetch` is the active code path.
-        none(seq[byte])
-    let peerCasWriter: LocalStoreWriter =
-      proc(digest: BlobDigest; payload: seq[byte]) {.gcsafe.} =
-        # The fetched bundle is written to the local CAS + ActionCache
-        # by the engine's installer closure on the lookup retry; we
-        # intentionally do not double-write here.
-        discard
-    result.reader = newPeerCacheActionCacheReader(
-      localRead = peerCasReader,
-      localWrite = peerCasWriter,
-      peerCacheClient = runtime.client)
-    let readerRef = result.reader
-    let registryRef = runtime.registry
-    result.fetcher = proc(weakFingerprint: ContentDigest):
-        Option[seq[byte]] {.gcsafe, closure.} =
-      let key = actionBundleKey(weakFingerprint)
-      readerRef.readActionOutput(key)
-    result.installer = proc(weakFingerprint: ContentDigest;
-                            bundleBytes: seq[byte];
-                            engineCas: var CasStore;
-                            engineCache: ptr ActionCache):
-                            tuple[ok: bool; reason: string]
-        {.gcsafe, closure.} =
-      let bundle =
-        try:
-          decodeActionBundle(bundleBytes)
-        except CatchableError as exc:
-          return (false, "decode failed: " & exc.msg)
-      installActionBundle(engineCas, engineCache[], bundle)
-    # `casRoot` / `cacheDir` are unused now — the engine threads its
-    # own opened handles into the installer. Keep the local
-    # declarations so the build path doesn't drift from earlier
-    # drafts; the compiler folds the unused locals out.
-    discard casRoot
-    discard cacheDir
-    result.publisher = proc(weakFingerprint: ContentDigest;
-                            bundleBytes: seq[byte]) {.gcsafe, closure.} =
-      let key = actionBundleKey(weakFingerprint)
-      if readerRef.localWrite != nil:
-        readerRef.localWrite(key, bundleBytes)
-      if registryRef != nil:
-        registryRef.selfAddBlob(key)
+  var parsed: PeerCacheSpecResult
+  if spec.len > 0:
+    parsed = parsePeerCache(spec)
+    if not parsed.ok:
+      raise newException(ValueError,
+        "invalid --peer-cache spec: " & spec &
+        " (expected ``none``, ``lan://<CIDR>``, or ``remote://<URL>``)")
+    if parsed.kind == pcsRemote:
+      # ``remote://`` is parsed for forward-compatibility; its reader
+      # bridge lands in a follow-up milestone.
+      return BuildPeerCacheWiring()
+  let cacheRoot = currentActionCacheRoot()
+  if not daemonHost.isNil:
+    let storage = openPeerCacheStorage(cacheRoot)
+    if daemonHost.isForkedChild:
+      let members = daemonHost.membershipEndpoints()
+      let config = daemonHost.config
+      releaseInheritedDaemonPeerCacheHost()
+      registerServedRoot(daemonHost.stateDir, cacheRoot)
+      let client = startWorkerPeerCacheClient(config, members,
+        peerIdFromBytes(randomPeerIdBytes('W')),
+        daemonListenPort = uint16(daemonHost.actualPort))
+      let hooks = newPeerCacheEngineHooks(client, storage, nil)
+      return BuildPeerCacheWiring(fetcher: hooks.fetcher,
+        publisher: hooks.publisher, installer: hooks.installer,
+        stats: hooks.stats, workerClient: client)
+    # Non-POSIX daemons run the build in-process: use the host directly.
+    daemonHost.addStorage(cacheRoot)
+    let hooks = newPeerCacheEngineHooks(daemonHost.client, storage,
+      daemonHost.registry)
+    return BuildPeerCacheWiring(fetcher: hooks.fetcher,
+      publisher: hooks.publisher, installer: hooks.installer,
+      stats: hooks.stats)
+  # Direct build: a node of our own for the build's lifetime.
+  let cliPeerId = peerIdFromBytes(randomPeerIdBytes('B'))
+  let host = startPeerCacheHost(parsed.config, cliPeerId,
+    cacheRoot = cacheRoot, listenAddr = "0.0.0.0")
+  lastStartedBuildPeerCacheRuntime = runtimeOf(host)
+  let hooks = newPeerCacheEngineHooks(host.client,
+    openPeerCacheStorage(cacheRoot), host.registry)
+  BuildPeerCacheWiring(fetcher: hooks.fetcher, publisher: hooks.publisher,
+    installer: hooks.installer, stats: hooks.stats, ownedHost: host)
+
+proc releaseBuildPeerCacheWiring*(wiring: BuildPeerCacheWiring) =
+  ## Ends what `buildPeerCacheWiringFor` started for one build. The daemon's
+  ## own host is never stopped here — outliving the build is its job.
+  if not wiring.workerClient.isNil:
+    stopPeerCacheClient(wiring.workerClient)
+  if not wiring.ownedHost.isNil:
+    wiring.ownedHost.stop()
+
+proc daemonPeerIdFor(stateDir: string): PeerId =
+  ## `Peer-Cache.md` §"Configuration surface" `peer_cache.peer_id_path`: a
+  ## daemon keeps one peer id across restarts in `<state>/peer-id`.
+  let path = stateDir / "peer-id"
+  try:
+    if fileExists(path):
+      let raw = readFile(path)
+      if raw.len == 32:
+        var bytes: array[32, byte]
+        for i in 0 ..< 32:
+          bytes[i] = byte(ord(raw[i]))
+        return peerIdFromBytes(bytes)
+  except CatchableError:
+    discard
+  let bytes = randomPeerIdBytes('D')
+  try:
+    createDir(stateDir)
+    var text = newString(32)
+    for i in 0 ..< 32:
+      text[i] = char(bytes[i])
+    let tmp = path & ".tmp." & $getCurrentProcessId()
+    writeFile(tmp, text)
+    moveFile(tmp, path)
+  except CatchableError:
+    discard
+  peerIdFromBytes(bytes)
+
+proc installUserDaemonPeerCacheService*() =
+  ## Distributed-Execution M0 Catch #3: registers the peer cache as the
+  ## daemon's background service. Enabled by ``repro daemon serve
+  ## --peer-cache=lan://…`` (or ``REPRO_DAEMON_PEER_CACHE``); serves the
+  ## daemon's action-cache root plus every root its build workers register.
+  setUserDaemonBackgroundService(UserDaemonBackgroundService(
+    pollIntervalMs: 10,
+    start: proc(config: UserDaemonConfig): string =
+      let spec =
+        if config.peerCacheSpec.len > 0: config.peerCacheSpec
+        else: getEnv("REPRO_DAEMON_PEER_CACHE")
+      if spec.len == 0 or spec == "none":
+        return ""
+      let parsed = parsePeerCache(spec)
+      if not parsed.ok or parsed.kind != pcsLan:
+        raise newException(ValueError,
+          "invalid daemon --peer-cache spec (expected lan://<CIDR>…): " & spec)
+      let host = startPeerCacheHost(parsed.config,
+        daemonPeerIdFor(config.stateDir), cacheRoot = currentActionCacheRoot(),
+        listenAddr = "0.0.0.0", stateDir = config.stateDir)
+      activeDaemonPeerCacheHost = host
+      var seeds: seq[string] = @[]
+      for seed in parsed.config.seedPeers:
+        seeds.add(seed.host & ":" & $int(seed.port))
+      "peer-cache started trust=" &
+        (if parsed.config.trustMode == tmTls: "tls" else: "cidr") &
+        " listen=0.0.0.0:" & $int(host.actualPort) &
+        " root=" & currentActionCacheRoot() & " seeds=" & seeds.join(",") &
+        " connected=" & $host.client.connectedPeers().len,
+    tick: proc(maxWaitMs: int) =
+      if not activeDaemonPeerCacheHost.isNil:
+        activeDaemonPeerCacheHost.tick(maxWaitMs),
+    stop: proc() =
+      if not activeDaemonPeerCacheHost.isNil:
+        activeDaemonPeerCacheHost.stop()
+        activeDaemonPeerCacheHost = nil,
+    active: proc(): bool =
+      not activeDaemonPeerCacheHost.isNil and
+        activeDaemonPeerCacheHost.running and
+        not activeDaemonPeerCacheHost.isForkedChild))
 
 proc parseShardSpec(value: string): tuple[ok: bool; k, n: int] =
   let parts = value.split('/')
@@ -82846,8 +82923,7 @@ proc runReproTestCommand*(args: openArray[string];
     let cliPeerId = peerIdFromBytes(raw)
     try:
       lastStartedPeerCacheRuntime =
-        startPeerCacheServices(peer.config, cliPeerId,
-                              listenAddr = "127.0.0.1")
+        startPeerCacheServices(peer.config, cliPeerId)
     except CatchableError as exc:
       emitShardDiagnostic(
         "failed to start peer-cache services: " & exc.msg)
@@ -96207,6 +96283,7 @@ proc runThinAppDispatch(programName: string): int =
     installUserDaemonParentPrewarmer()
     installUserDaemonBuildExecutor()
     installUserDaemonWatchExecutor()
+    installUserDaemonPeerCacheService()
     return runUserDaemonCommand(args)
   # Documented ``repro internal …`` namespace (Executable-Consolidation M1).
   # ``internal <helper>`` spellings for the role helpers were already rewritten
@@ -97455,6 +97532,7 @@ proc runThinAppDispatch(programName: string): int =
       installUserDaemonParentPrewarmer()
       installUserDaemonBuildExecutor()
       installUserDaemonWatchExecutor()
+      installUserDaemonPeerCacheService()
       return runUserDaemonCommand(daemonArgs[1 .. ^1])
     return runUserDaemonCliCommand(daemonArgs)
   if programName == "repro" and args.len > 0 and args[0] == "launch-plan":

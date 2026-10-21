@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2305,
+    "nimTestBinaries": 2310,
     "pureUnitConsolidationGroups": 66,
-    "pureUnitTests": 686,
+    "pureUnitTests": 687,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2336
+    "testEntries": 2341
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1359,10 +1359,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1253,
+      "integration": 1256,
       "platform/destructive": 142,
-      "pure unit": 686,
-      "unclassified": 237
+      "pure unit": 687,
+      "unclassified": 238
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1564,9 +1564,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2305,
+    "nimTestBinaryCount": 2310,
     "pythonTestFileCount": 31,
-    "testEntryCount": 2336
+    "testEntryCount": 2341
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9643,8 +9643,7 @@
         "io_mon",
         "repro_build_engine",
         "repro_core",
-        "repro_local_store",
-        "repro_test_support"
+        "repro_local_store"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": true,
@@ -10836,6 +10835,27 @@
       "owner": "libs/repro_cli_support",
       "requiresReproBinary": true,
       "source": "libs/repro_cli_support/tests/t_path_mode_dev_env_provides_realized_tools.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_peer_cache_tls_wiring_round_trip",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_hash",
+        "repro_local_store",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cli_support/tests/t_peer_cache_tls_wiring_round_trip.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -16377,6 +16397,41 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_peer_cache_memo_codec_round_trip",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_peer_cache",
+      "requiresReproBinary": false,
+      "source": "libs/repro_peer_cache/tests/t_peer_cache_memo_codec_round_trip.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_peer_cache_memo_store_and_workspace_rebase",
+      "class": "unclassified",
+      "classificationReason": "imports `asyncdispatch`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_local_store",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_peer_cache",
+      "requiresReproBinary": false,
+      "source": "libs/repro_peer_cache/tests/t_peer_cache_memo_store_and_workspace_rebase.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 13,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_peer_cache_metrics_prometheus_format",
       "class": "unclassified",
       "classificationReason": "binds an OS-global endpoint",
@@ -16815,6 +16870,27 @@
       "owner": "libs/repro_peer_cache",
       "requiresReproBinary": false,
       "source": "libs/repro_peer_cache/tests/t_peer_cache_tls_signed_advertisement_round_trip.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_peer_cache_two_phase_lan_roundtrip",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_hash",
+        "repro_local_store",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_peer_cache",
+      "requiresReproBinary": true,
+      "source": "libs/repro_peer_cache/tests/t_peer_cache_two_phase_lan_roundtrip.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -32928,6 +33004,23 @@
       "source": "tests/integration/t_daemon_parent_prewarm_e2e.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_daemon_peer_cache_survives_cli_exit",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_daemon_peer_cache_survives_cli_exit.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

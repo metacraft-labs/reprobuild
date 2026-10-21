@@ -7,13 +7,16 @@
 ## (one per peer) so subsequent fetch requests and advertisements
 ## reuse them; `stop` sends `mkGoodbye` to each peer and closes.
 
-import std/[asyncdispatch, asyncnet, monotimes, nativesockets, options, sets,
-            tables, times]
+import std/[algorithm, asyncdispatch, asyncnet, monotimes, nativesockets,
+            options, sets, tables, times]
+when defined(posix):
+  from std/posix import nil
 
 import blake3
 
 import ./auth
 import ./codec
+import ./memo_store
 import ./metrics
 import ./multicast
 import ./pki
@@ -72,6 +75,11 @@ type
       ## Optional shared metrics shell. Pool counters are mirrored into
       ## the gauges (`poolConnsActive`, `poolConnsIdle`) after every
       ## acquire/release/reap.
+
+const DefaultSelectorFanout* = 16
+  ## Distributed-Execution M0: how many connected peers `requestSelectors`
+  ## asks directly when no peer's advertisement names the weak fingerprint
+  ## (an advertisement can lag a publish by one refresh interval).
 
 const DefaultFetchTimeoutMs* = 5_000
   ## Per-candidate fetch timeout for `requestFetch`. The spec
@@ -158,6 +166,30 @@ type
     metrics*: PeerCacheMetrics
       ## Peer-Cache-Scale M4: optional shared metrics shell.
       ## `requestFetch`'s increment sites are no-ops when nil.
+    pendingSelectors: Table[string, Future[Option[seq[MemoSelector]]]]
+      ## Distributed-Execution M0: outstanding `mkGetSelectorsRequest`s,
+      ## keyed by `<peerId>/<weak>`. A selector reply arrives on the
+      ## connection to the peer that was asked, so the reader loop knows
+      ## which peer answered and the key needs no extra correlation id.
+    pendingMemoEntries: Table[string, Future[Option[seq[byte]]]]
+      ## Outstanding `mkGetActionRecordRequest`s, keyed by
+      ## `<peerId>/<weak>/<strong>`.
+    memoRoundTripCount*: int
+      ## Instrumentation: memo requests (selector + entry) sent.
+    suspectMarks*: int
+      ## Instrumentation: how many times this client marked a peer suspect
+      ## because a content-plane reply failed `BLAKE3(payload) == digest`.
+      ## Unlike the registry's `suspect` flag, which the next advertise
+      ## snapshot clears, this counter is monotonic, so a test can assert
+      ## that an honest exchange produced NO suspect marks at all.
+    maxSelectorFanout*: int
+      ## Upper bound on peers asked for selectors when none of them
+      ## advertises the weak fingerprint (see `requestSelectors`).
+
+  PeerSelector* = object
+    ## A selector together with the peer that vouched for it.
+    peerId*: PeerId
+    selector*: MemoSelector
 
   PeerCacheClientError* = object of CatchableError
 
@@ -223,7 +255,12 @@ proc newPeerCacheClient*(selfPeerId: PeerId;
     signatureRejectedPeers: initHashSet[PeerId](),
     tlsHandshakeRejectedCount: 0,
     pool: newPeerConnPool(poolMaxPerPeer, poolIdleTimeoutMs, metrics),
-    metrics: metrics)
+    metrics: metrics,
+    pendingSelectors: initTable[string, Future[Option[seq[MemoSelector]]]](),
+    pendingMemoEntries: initTable[string, Future[Option[seq[byte]]]](),
+    memoRoundTripCount: 0,
+    suspectMarks: 0,
+    maxSelectorFanout: DefaultSelectorFanout)
 
 # ---------------------------------------------------------------------------
 # Connection-pool ops — Peer-Cache-Scale M4.
@@ -557,6 +594,82 @@ proc completePending(client: PeerCacheClient;
   if not fut.finished:
     fut.complete(value)
 
+proc selectorKey(peerId: PeerId; weak: BlobDigest): string =
+  $peerId & "/" & $weak
+
+proc memoEntryKey(peerId: PeerId; weak, strong: BlobDigest): string =
+  $peerId & "/" & $weak & "/" & $strong
+
+proc completeSelectors(client: PeerCacheClient; key: string;
+                       value: Option[seq[MemoSelector]]) =
+  if not client.pendingSelectors.hasKey(key):
+    return
+  let fut = client.pendingSelectors[key]
+  client.pendingSelectors.del(key)
+  if not fut.finished:
+    fut.complete(value)
+
+proc completeMemoEntry(client: PeerCacheClient; key: string;
+                       value: Option[seq[byte]]) =
+  if not client.pendingMemoEntries.hasKey(key):
+    return
+  let fut = client.pendingMemoEntries[key]
+  client.pendingMemoEntries.del(key)
+  if not fut.finished:
+    fut.complete(value)
+
+proc handleContentReply(client: PeerCacheClient; peerId: PeerId;
+                        resp: FetchResponse) =
+  ## The content-plane rule, applied identically on both transports:
+  ## `BLAKE3-256(payload) == digest` or the reply is dropped and the peer
+  ## marked suspect (`Peer-Cache.md` §"Fetch semantics" step 3).
+  if resp.truncated:
+    client.completePending(resp.digest, none(seq[byte]))
+    return
+  let observed = blake3.digest(resp.payload)
+  let expected = bytes(resp.digest)
+  if observed != expected:
+    # Mismatch is always the *peer's* fault: the digest was supplied by
+    # the receiver, the payload was supplied by the peer.
+    client.registry.markSuspect(peerId)
+    inc client.suspectMarks
+    client.completePending(resp.digest, none(seq[byte]))
+  else:
+    client.completePending(resp.digest, some(resp.payload))
+
+proc handleMemoReply(client: PeerCacheClient; peerId: PeerId;
+                     frame: Frame) =
+  ## Memoization-plane replies. These are looked up by FINGERPRINT, not by
+  ## content digest, so the content rule does not apply to them and a
+  ## memo reply can never mark a peer suspect. The entry reply is checked
+  ## for identity (its header must name the selector that was asked for)
+  ## by `two_phase.fetchTwoPhase`, which decodes it.
+  case frame.messageKind
+  of mkGetSelectorsResponse:
+    let resp = decodeGetSelectorsResponse(frame.payload)
+    client.completeSelectors(selectorKey(peerId, resp.weakFingerprint),
+      some(resp.selectors))
+  of mkGetActionRecordResponse:
+    let resp = decodeGetActionRecordResponse(frame.payload)
+    let key = memoEntryKey(peerId, resp.weakFingerprint,
+      resp.strongFingerprint)
+    if resp.found:
+      client.completeMemoEntry(key, some(resp.entry))
+    else:
+      client.completeMemoEntry(key, none(seq[byte]))
+  else:
+    discard
+
+proc dropConnection(client: PeerCacheClient; peerId: PeerId;
+                    sock: AsyncSocket) =
+  ## Forget a connection whose reader loop ended (peer closed it or sent
+  ## garbage), so later requests do not write into a dead socket and a
+  ## membership refresh can re-dial the peer. Only removes the entry when
+  ## it still names THIS socket — a re-dial may already have replaced it.
+  if client.connections.hasKey(peerId) and
+      client.connections[peerId] == sock:
+    client.connections.del(peerId)
+
 proc readerLoop(client: PeerCacheClient; sock: AsyncSocket;
                 peerId: PeerId) {.async.} =
   ## After the handshake, keep reading framed messages — applying
@@ -605,23 +718,12 @@ proc readerLoop(client: PeerCacheClient; sock: AsyncSocket;
         # mismatch, and complete the future with `some(payload)` or
         # `none`. The spec's fetch semantics
         # (`Peer-Cache.md` §"Fetch semantics" step 3) live here.
-        let resp = decodeFetchResponse(frame.payload)
-        if resp.truncated:
-          client.completePending(resp.digest, none(seq[byte]))
-        else:
-          let observed = blake3.digest(resp.payload)
-          let expected = bytes(resp.digest)
-          if observed != expected:
-            # BLAKE3 mismatch — drop the response, mark the peer
-            # suspect, and fall through (the caller's `requestFetch`
-            # loop tries the next candidate). Per spec, mismatch is
-            # always the *peer's* fault: the digest was supplied by
-            # the receiver, the payload was supplied by the peer.
-            client.registry.markSuspect(peerId)
-            client.completePending(resp.digest, none(seq[byte]))
-          else:
-            client.completePending(resp.digest,
-              some(resp.payload))
+        client.handleContentReply(peerId, decodeFetchResponse(frame.payload))
+      of mkGetSelectorsResponse, mkGetActionRecordResponse:
+        client.handleMemoReply(peerId, frame)
+      of mkGetSelectorsRequest, mkGetActionRecordRequest:
+        # Requests travel client -> server; a server never asks.
+        discard
       of mkWant, mkHello, mkHelloOk, mkFetchRequest:
         # The client is a fetch *requester*; servers send these.
         # Discard silently — the spec lets either side dispatch any
@@ -635,6 +737,7 @@ proc readerLoop(client: PeerCacheClient; sock: AsyncSocket;
         discard
   except CatchableError:
     discard
+  client.dropConnection(peerId, sock)
 
 # ---------------------------------------------------------------------------
 # Peer-Cache-BearSSL M3: TLS-side frame I/O + handshake + reader loop.
@@ -749,23 +852,20 @@ proc readerLoopTls(client: PeerCacheClient; conn: TlsConn;
       of mkGoodbye:
         break
       of mkFetchResponse:
-        let resp = decodeFetchResponse(frame.payload)
-        if resp.truncated:
-          client.completePending(resp.digest, none(seq[byte]))
-        else:
-          let observed = blake3.digest(resp.payload)
-          let expected = bytes(resp.digest)
-          if observed != expected:
-            client.registry.markSuspect(peerId)
-            client.completePending(resp.digest, none(seq[byte]))
-          else:
-            client.completePending(resp.digest, some(resp.payload))
+        client.handleContentReply(peerId, decodeFetchResponse(frame.payload))
+      of mkGetSelectorsResponse, mkGetActionRecordResponse:
+        client.handleMemoReply(peerId, frame)
+      of mkGetSelectorsRequest, mkGetActionRecordRequest:
+        discard
       of mkWant, mkHello, mkHelloOk, mkFetchRequest,
          mkSwimProbe, mkSwimAck, mkSwimProbeReq, mkSwimProbeAckIndirect,
          mkSwimSuspect, mkSwimConfirm, mkSwimRefute:
         discard
   except CatchableError:
     discard
+  if client.tlsConnsByPeerId.hasKey(peerId) and
+      client.tlsConnsByPeerId[peerId] == conn:
+    client.tlsConnsByPeerId.del(peerId)
 
 proc dialPeer(client: PeerCacheClient;
               endpoint: Endpoint): Future[void] {.async.} =
@@ -1016,6 +1116,233 @@ proc fetchBlobFrom*(client: PeerCacheClient;
       inc client.metrics.fetchMissesTotal
   return result0
 
+# ---------------------------------------------------------------------------
+# Distributed-Execution M0: peer-addressed requests and the memoization plane.
+# ---------------------------------------------------------------------------
+
+proc connectedPeers*(client: PeerCacheClient): seq[PeerId] =
+  ## Peers this client currently holds a live connection to (either
+  ## transport), in stable lexicographic order.
+  for peerId in client.tlsConnsByPeerId.keys:
+    result.add(peerId)
+  for peerId in client.connections.keys:
+    if peerId notin result:
+      result.add(peerId)
+  result.sort do (a, b: PeerId) -> int:
+    cmp($a, $b)
+
+proc isConnected*(client: PeerCacheClient; peerId: PeerId): bool =
+  client.tlsConnsByPeerId.hasKey(peerId) or client.connections.hasKey(peerId)
+
+proc sendToPeer(client: PeerCacheClient; peerId: PeerId;
+                messageKind: MessageKind;
+                payload: seq[byte]): Future[bool] {.async.} =
+  ## Writes one frame on the live connection to `peerId`. Returns `false`
+  ## (and forgets the connection) when there is none or the write fails.
+  try:
+    if client.tlsConnsByPeerId.hasKey(peerId):
+      await sendFrameTls(client.tlsConnsByPeerId[peerId], messageKind, payload)
+      return true
+    if client.connections.hasKey(peerId):
+      let sock = client.connections[peerId]
+      try:
+        await sendFrame(sock, messageKind, payload)
+        return true
+      except CatchableError:
+        client.dropConnection(peerId, sock)
+        return false
+  except CatchableError:
+    discard
+  return false
+
+proc requestFetchFrom*(client: PeerCacheClient; peerId: PeerId;
+                       digest: BlobDigest): Future[Option[seq[byte]]]
+                       {.async.} =
+  ## Content-plane fetch from ONE named peer — the peer that just vouched
+  ## for a selector naming `digest` — rather than from whoever advertises
+  ## it. Same verification as `requestFetch` (the reader loop enforces
+  ## `BLAKE3-256(payload) == digest` and marks the peer suspect otherwise),
+  ## same write-through to `localStoreWriter`.
+  var fut: Future[Option[seq[byte]]]
+  if client.pendingFetches.hasKey(digest):
+    fut = client.pendingFetches[digest]
+  else:
+    fut = newFuture[Option[seq[byte]]]("peer_cache.requestFetchFrom")
+    client.pendingFetches[digest] = fut
+    let sent = await client.sendToPeer(peerId, mkFetchRequest,
+      encodeFetchRequest(FetchRequest(digest: digest)))
+    if not sent:
+      client.completePending(digest, none(seq[byte]))
+      return none(seq[byte])
+    inc client.fetchRoundTripCount
+  let timeoutOk = await withTimeout(fut, client.fetchTimeoutMs)
+  if not timeoutOk:
+    client.completePending(digest, none(seq[byte]))
+    return none(seq[byte])
+  let outcome = fut.read()
+  if outcome.isSome and not client.localStoreWriter.isNil:
+    client.localStoreWriter(digest, outcome.get())
+    client.registry.selfAddBlob(digest)
+  return outcome
+
+proc requestSelectorsFrom*(client: PeerCacheClient; peerId: PeerId;
+                           weakFingerprint: BlobDigest):
+                           Future[Option[seq[MemoSelector]]] {.async.} =
+  ## Phase one of the two-phase lookup against one peer:
+  ## `mkGetSelectorsRequest{weak}` -> the selectors it holds. `none` means
+  ## the peer did not answer (no connection, write failure, timeout);
+  ## `some(@[])` is an honest memo miss.
+  let key = selectorKey(peerId, weakFingerprint)
+  var fut: Future[Option[seq[MemoSelector]]]
+  if client.pendingSelectors.hasKey(key):
+    fut = client.pendingSelectors[key]
+  else:
+    fut = newFuture[Option[seq[MemoSelector]]]("peer_cache.requestSelectors")
+    client.pendingSelectors[key] = fut
+    let sent = await client.sendToPeer(peerId, mkGetSelectorsRequest,
+      encodeGetSelectorsRequest(
+        GetSelectorsRequest(weakFingerprint: weakFingerprint)))
+    if not sent:
+      client.completeSelectors(key, none(seq[MemoSelector]))
+      return none(seq[MemoSelector])
+    inc client.memoRoundTripCount
+  let timeoutOk = await withTimeout(fut, client.fetchTimeoutMs)
+  if not timeoutOk:
+    client.completeSelectors(key, none(seq[MemoSelector]))
+    return none(seq[MemoSelector])
+  return fut.read()
+
+proc requestSelectors*(client: PeerCacheClient;
+                       weakFingerprint: BlobDigest): Future[seq[PeerSelector]]
+                       {.async.} =
+  ## Phase one across the fleet. Asks, in parallel, every connected peer
+  ## whose advertisement carries `memoAdvertKey(weak)`; when none does, asks
+  ## up to `maxSelectorFanout` connected peers directly, because an
+  ## advertisement can lag a publish by one refresh interval and a memo miss
+  ## reply is cheap. Returns every (peer, selector) pair, de-duplicated,
+  ## advertised peers first.
+  var candidates: seq[PeerId] = @[]
+  for peerId in sortTier2First(client.registry,
+      client.registry.findPeersWithBlob(memoAdvertKey(weakFingerprint))):
+    if client.isConnected(peerId):
+      candidates.add(peerId)
+  if candidates.len == 0:
+    let fanout =
+      if client.maxSelectorFanout > 0: client.maxSelectorFanout
+      else: DefaultSelectorFanout
+    for peerId in client.connectedPeers():
+      if candidates.len >= fanout:
+        break
+      candidates.add(peerId)
+  var futures: seq[Future[Option[seq[MemoSelector]]]] = @[]
+  for peerId in candidates:
+    futures.add(client.requestSelectorsFrom(peerId, weakFingerprint))
+  for i, fut in futures:
+    let answer = await fut
+    if answer.isNone:
+      continue
+    for sel in answer.get():
+      var dup = false
+      for existing in result:
+        if existing.peerId == candidates[i] and existing.selector == sel:
+          dup = true
+          break
+      if not dup:
+        result.add(PeerSelector(peerId: candidates[i], selector: sel))
+
+proc requestMemoEntryFrom*(client: PeerCacheClient; peerId: PeerId;
+                           weakFingerprint, strongFingerprint: BlobDigest):
+                           Future[Option[seq[byte]]] {.async.} =
+  ## Phase two against the peer that offered the selector:
+  ## `mkGetActionRecordRequest{weak, strong}` -> the encoded memo entry, or
+  ## `none` (not found, no answer). The bytes are NOT trusted here; the
+  ## caller decodes them and checks they describe the selector it asked for.
+  let key = memoEntryKey(peerId, weakFingerprint, strongFingerprint)
+  var fut: Future[Option[seq[byte]]]
+  if client.pendingMemoEntries.hasKey(key):
+    fut = client.pendingMemoEntries[key]
+  else:
+    fut = newFuture[Option[seq[byte]]]("peer_cache.requestMemoEntry")
+    client.pendingMemoEntries[key] = fut
+    let sent = await client.sendToPeer(peerId, mkGetActionRecordRequest,
+      encodeGetActionRecordRequest(GetActionRecordRequest(
+        weakFingerprint: weakFingerprint,
+        strongFingerprint: strongFingerprint)))
+    if not sent:
+      client.completeMemoEntry(key, none(seq[byte]))
+      return none(seq[byte])
+    inc client.memoRoundTripCount
+  let timeoutOk = await withTimeout(fut, client.fetchTimeoutMs)
+  if not timeoutOk:
+    client.completeMemoEntry(key, none(seq[byte]))
+    return none(seq[byte])
+  return fut.read()
+
+proc requestAdvertisementRefresh*(client: PeerCacheClient):
+    Future[int] {.async.} =
+  ## Asks every connected peer for a fresh advertisement snapshot
+  ## (`mkWant{wkSnapshotRequest}`, `Peer-Cache.md` §"Advertisement index").
+  ## The snapshot is applied by the reader loop when it arrives. Returns how
+  ## many peers were asked. A long-lived membership loop calls this on its
+  ## advertise interval so blobs a peer published after the handshake
+  ## become findable.
+  for peerId in client.connectedPeers():
+    if await client.sendToPeer(peerId, mkWant,
+        encodeWant(Want(kind: wkSnapshotRequest, digests: @[]))):
+      inc result
+
+proc connectKnownPeers*(client: PeerCacheClient): Future[int] {.async.} =
+  ## Dials every peer the registry knows about (seed, multicast or SWIM
+  ## discovery all land there) but this client holds no connection to, and
+  ## every configured seed that is not connected. Returns the number of
+  ## dials attempted. Discovery fills the registry; only a connection makes
+  ## a peer fetchable, so a membership loop runs this periodically.
+  client.running = true
+  var targets: seq[Endpoint] = @[]
+  for peerId, entry in client.registry.entries.pairs:
+    if peerId == client.selfPeerId or client.isConnected(peerId):
+      continue
+    if entry.endpoint.port == Port(0):
+      continue
+    targets.add(entry.endpoint)
+  for seed in client.seedPeers:
+    var known = false
+    for peerId, entry in client.registry.entries.pairs:
+      if entry.endpoint == seed and client.isConnected(peerId):
+        known = true
+        break
+    if not known and seed notin targets:
+      targets.add(seed)
+  var futures: seq[Future[void]] = @[]
+  for endpoint in targets:
+    futures.add(dialPeer(client, endpoint))
+  if futures.len > 0:
+    await all(futures)
+  targets.len
+
+proc abandonAfterFork*(client: PeerCacheClient) =
+  ## Distributed-Execution M0: the forked-child counterpart of `stop` (see
+  ## `server.abandonAfterFork`). Closes the child's copies of every
+  ## descriptor raw, sends nothing (the connections belong to the parent,
+  ## which keeps using them) and leaves the client unusable.
+  client.running = false
+  client.multicastRunning = false
+  when defined(posix):
+    if not client.multicastSocket.isNil:
+      discard posix.close(cint(client.multicastSocket.getFd()))
+    for _, sock in client.connections.pairs:
+      discard posix.close(cint(sock.getFd()))
+    for _, lst in client.pool.conns.pairs:
+      for c in lst:
+        if c.valid:
+          discard posix.close(cint(c.socket.getFd()))
+  # TLS tunnels wrap sockets the parent owns as well; drop the references
+  # without running a close-notify through the inherited dispatcher.
+  client.multicastSocket = nil
+  client.connections.clear()
+  client.tlsConnsByPeerId.clear()
+  client.pool.conns.clear()
+
 proc stop*(client: PeerCacheClient) {.async.} =
   ## Sends Goodbye to each connected peer and closes the connections.
   ## Also stops any in-flight multicast broadcast loop.
@@ -1024,20 +1351,29 @@ proc stop*(client: PeerCacheClient) {.async.} =
   if not client.multicastSocket.isNil:
     try: client.multicastSocket.close() except CatchableError: discard
     client.multicastSocket = nil
-  for peerId, sock in client.connections.pairs:
+  # Snapshot and clear the tables BEFORE awaiting anything: closing a
+  # connection ends its reader loop, which forgets the connection
+  # (`dropConnection`), and that must not mutate a table being iterated.
+  var plain: seq[AsyncSocket] = @[]
+  for _, sock in client.connections.pairs:
+    plain.add(sock)
+  client.connections.clear()
+  var tunnels: seq[TlsConn] = @[]
+  for _, conn in client.tlsConnsByPeerId.pairs:
+    tunnels.add(conn)
+  client.tlsConnsByPeerId.clear()
+  for sock in plain:
     try:
       await sendFrame(sock, mkGoodbye, encodeGoodbye(Goodbye()))
     except CatchableError:
       discard
     try: sock.close() except CatchableError: discard
-  client.connections.clear()
-  for peerId, conn in client.tlsConnsByPeerId.pairs:
+  for conn in tunnels:
     try:
       await sendFrameTls(conn, mkGoodbye, encodeGoodbye(Goodbye()))
     except CatchableError:
       discard
     try: await tls.close(conn) except CatchableError: discard
-  client.tlsConnsByPeerId.clear()
   closeAll(client.pool)
 
 # ---------------------------------------------------------------------------

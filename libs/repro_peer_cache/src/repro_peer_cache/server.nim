@@ -19,6 +19,8 @@
 
 import std/[asyncdispatch, asyncnet, nativesockets, net, options, sets,
             strutils, tables]
+when defined(posix):
+  from std/posix import nil
 
 import ./auth
 import ./codec
@@ -53,6 +55,16 @@ type
       ## Peer-Cache M1: optional test seam. When non-nil, the proc is
       ## called on the `mkFetchResponse` payload bytes just before
       ## encoding. Production code leaves this `nil`.
+    memoSelectorReader*: MemoSelectorReader
+      ## Distributed-Execution M0: answers `mkGetSelectorsRequest` from the
+      ## local two-phase memo store. `nil` answers every request with an
+      ## empty selector list (a memo miss), which is what a peer that only
+      ## serves content blobs honestly knows.
+    memoEntryReader*: MemoEntryReader
+      ## Distributed-Execution M0: answers `mkGetActionRecordRequest`.
+      ## `nil` answers `found = false`.
+    memoRequestsServed*: int
+      ## Instrumentation: memo requests (selector + record) answered.
     listener: AsyncSocket
     running: bool
     activeConnections: seq[AsyncSocket]
@@ -223,9 +235,13 @@ proc newPeerCacheServer*(selfPeerId: PeerId;
                          trustMode: TrustMode = tmCidr;
                          ourCert: CertAndKey = CertAndKey();
                          trustAnchorSet: TrustAnchorSet = TrustAnchorSet();
-                         metrics: PeerCacheMetrics = nil):
+                         metrics: PeerCacheMetrics = nil;
+                         memoSelectorReader: MemoSelectorReader = nil;
+                         memoEntryReader: MemoEntryReader = nil):
                          PeerCacheServer =
   result = PeerCacheServer(
+    memoSelectorReader: memoSelectorReader,
+    memoEntryReader: memoEntryReader,
     selfPeerId: selfPeerId,
     listenAddr: listenAddr,
     listenPort: listenPort,
@@ -298,6 +314,47 @@ proc sendFrame(sock: AsyncSocket; messageKind: MessageKind;
 # protocol challenge/response) was deleted in this milestone. The
 # `tmTls` branch in `acceptLoop` now wraps the accepted socket via
 # `wrapServerSocket` from `tls.nim`. Real TLS owns the auth surface.
+
+# ---------------------------------------------------------------------------
+# Distributed-Execution M0: memoization request handling, shared by the
+# plain-TCP and TLS connection handlers so the two transports cannot drift.
+# ---------------------------------------------------------------------------
+
+proc memoReply*(server: PeerCacheServer; frame: Frame):
+    tuple[kind: MessageKind; payload: seq[byte]] =
+  ## Builds the reply for a memo request frame. Raises
+  ## `PeerCacheServerError` for a frame that is not a memo request; codec
+  ## errors propagate (the caller closes the connection, as for any
+  ## malformed frame).
+  case frame.messageKind
+  of mkGetSelectorsRequest:
+    let req = decodeGetSelectorsRequest(frame.payload)
+    var selectors: seq[MemoSelector] = @[]
+    if not server.memoSelectorReader.isNil:
+      selectors = server.memoSelectorReader(req.weakFingerprint)
+      if selectors.len > MaxSelectorsPerResponse:
+        selectors.setLen(MaxSelectorsPerResponse)
+    inc server.memoRequestsServed
+    (mkGetSelectorsResponse, encodeGetSelectorsResponse(
+      GetSelectorsResponse(weakFingerprint: req.weakFingerprint,
+                           selectors: selectors)))
+  of mkGetActionRecordRequest:
+    let req = decodeGetActionRecordRequest(frame.payload)
+    var resp = GetActionRecordResponse(
+      weakFingerprint: req.weakFingerprint,
+      strongFingerprint: req.strongFingerprint,
+      found: false, entry: @[])
+    if not server.memoEntryReader.isNil:
+      let entry = server.memoEntryReader(req.weakFingerprint,
+                                         req.strongFingerprint)
+      if entry.isSome and uint64(entry.get().len) <= server.maxBlobBytes:
+        resp.found = true
+        resp.entry = entry.get()
+    inc server.memoRequestsServed
+    (mkGetActionRecordResponse, encodeGetActionRecordResponse(resp))
+  else:
+    raise newException(PeerCacheServerError,
+      "not a memo request frame: " & $frame.messageKind)
 
 # ---------------------------------------------------------------------------
 # Connection handler.
@@ -452,6 +509,17 @@ proc handleConnection(server: PeerCacheServer; client: AsyncSocket;
             inc server.metrics.advertisementsSentTotal
         of wkBlobs:
           discard
+      of mkGetSelectorsRequest, mkGetActionRecordRequest:
+        # Distributed-Execution M0: memoization plane. Answered whether or
+        # not the peer said Hello first: the reply carries only what the
+        # memo store would tell any CIDR-admitted peer, exactly like a
+        # content fetch.
+        let reply = server.memoReply(frame)
+        await sendFrame(client, reply.kind, reply.payload)
+      of mkGetSelectorsResponse, mkGetActionRecordResponse:
+        # Replies are the client's business; a server receiving one drops
+        # it, as it does a stray `mkFetchResponse`.
+        discard
       of mkSwimProbe, mkSwimAck, mkSwimProbeReq, mkSwimProbeAckIndirect,
          mkSwimSuspect, mkSwimConfirm, mkSwimRefute:
         # Peer-Cache-Scale M0: SWIM frames are handled by the SWIM
@@ -634,6 +702,11 @@ proc handleConnectionTls(server: PeerCacheServer; conn: TlsConn;
             inc server.metrics.advertisementsSentTotal
         of wkBlobs:
           discard
+      of mkGetSelectorsRequest, mkGetActionRecordRequest:
+        let reply = server.memoReply(frame)
+        await sendFrameTls(conn, reply.kind, reply.payload)
+      of mkGetSelectorsResponse, mkGetActionRecordResponse:
+        discard
       of mkSwimProbe, mkSwimAck, mkSwimProbeReq, mkSwimProbeAckIndirect,
          mkSwimSuspect, mkSwimConfirm, mkSwimRefute:
         discard
@@ -714,6 +787,29 @@ proc stop*(server: PeerCacheServer) =
 
 proc actualPort*(server: PeerCacheServer): Port =
   server.listenPort
+
+proc abandonAfterFork*(server: PeerCacheServer) =
+  ## Distributed-Execution M0: called in a FORKED CHILD of the process that
+  ## owns this server (a `repro-daemon` build worker). Releases the child's
+  ## copies of the listening and multicast descriptors WITHOUT going through
+  ## the async dispatcher: the dispatcher the child inherited is the
+  ## parent's (on Linux the epoll instance is literally shared), so
+  ## unregistering through it would disturb the parent, which keeps serving.
+  ## The server object is unusable afterwards.
+  server.running = false
+  server.started = false
+  server.multicastRunning = false
+  when defined(posix):
+    if not server.listener.isNil:
+      discard posix.close(cint(server.listener.getFd()))
+    if not server.multicastSocket.isNil:
+      discard posix.close(cint(server.multicastSocket.getFd()))
+    for conn in server.activeConnections:
+      if not conn.isNil:
+        discard posix.close(cint(conn.getFd()))
+  server.listener = nil
+  server.multicastSocket = nil
+  server.activeConnections.setLen(0)
 
 proc sampleMetrics*(server: PeerCacheServer) =
   ## Peer-Cache-Scale M4: mirrors registry size + counter snapshots
