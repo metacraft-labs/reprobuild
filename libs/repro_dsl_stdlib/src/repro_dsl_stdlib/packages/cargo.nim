@@ -169,6 +169,11 @@ package cargo:
           role = input
         flag targetDir is string,
           alias = "--target-dir"
+        # Package / binary selectors: let a recipe restrict a virtual
+        # workspace build to one member crate + binary (a granular
+        # per-artifact edge) instead of building every member.
+        flag package is string, alias = "--package"
+        flag bin is string, alias = "--bin"
 
       subcmd "install":
         ## The canonical way to land a built binary in an FHS-shaped tree:
@@ -222,6 +227,10 @@ package cargo:
           role = input
         flag targetDir is string,
           alias = "--target-dir"
+        # Same selectors as `build`: a test edge has to be able to target
+        # the member crate / binary its build edge built.
+        flag package is string, alias = "--package"
+        flag bin is string, alias = "--bin"
         flag testBinaryPath is string,
           alias = "--test",
           role = output

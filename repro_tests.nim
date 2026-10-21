@@ -2169,6 +2169,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_cargo_package_bin_selectors.nim",
+    binary: "build/test-bin/t_cargo_package_bin_selectors",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_cargo_test_no_default_features.nim",
     binary: "build/test-bin/t_cargo_test_no_default_features",
     defines: @[],

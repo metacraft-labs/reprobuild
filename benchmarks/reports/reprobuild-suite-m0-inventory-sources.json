@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2302,
+    "nimTestBinaries": 2303,
     "pureUnitConsolidationGroups": 66,
-    "pureUnitTests": 685,
+    "pureUnitTests": 686,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2333
+    "testEntries": 2334
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -174,7 +174,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 31,
+      "count": 32,
       "defines": [],
       "dependencyShape": [
         "repro_dsl_stdlib",
@@ -182,6 +182,7 @@
       ],
       "owner": "libs/repro_dsl_stdlib",
       "sources": [
+        "libs/repro_dsl_stdlib/tests/t_cargo_package_bin_selectors.nim",
         "libs/repro_dsl_stdlib/tests/t_cargo_test_no_default_features.nim",
         "libs/repro_dsl_stdlib/tests/t_create_dmg_removes_its_image_before_running.nim",
         "libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim",
@@ -1360,7 +1361,7 @@
       "graph-fixture": 18,
       "integration": 1253,
       "platform/destructive": 141,
-      "pure unit": 685,
+      "pure unit": 686,
       "unclassified": 236
     },
     "graphOwnedTestArtifacts": [
@@ -1563,9 +1564,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2302,
+    "nimTestBinaryCount": 2303,
     "pythonTestFileCount": 31,
-    "testEntryCount": 2333
+    "testEntryCount": 2334
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -11939,6 +11940,24 @@
       "source": "libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cargo_package_bin_selectors",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_cargo_package_bin_selectors.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
