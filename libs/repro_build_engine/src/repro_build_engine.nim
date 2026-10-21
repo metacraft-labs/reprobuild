@@ -105,6 +105,7 @@ else:
 
 import repro_core
 import repro_core/relocation
+from repro_core/path_identity import resolveExistingTraversal, prsResolved
 # Nix GC roots for the store paths working-tree outputs name; see the ledger
 # note in `runBuild`.
 import repro_core/nix_store_roots
@@ -3554,13 +3555,85 @@ proc writeRootsOverlap(a, b: string): bool =
     return b.startsWith(a & "/")
   return a.startsWith(b & "/")
 
+proc lastParentComponent(path: string): int =
+  ## End offset of the last parent component, without folding its prefix.
+  result = -1
+  if ".." notin path:
+    return
+  var start = 0
+  for stop in 0 .. path.len:
+    if stop == path.len or path[stop] == '/':
+      if path[start ..< stop] == "..":
+        result = stop
+      start = stop + 1
+
+proc existingContainmentPath(path: string): string =
+  let resolved = resolveExistingTraversal(path)
+  if resolved.status != prsResolved:
+    raise newException(OSError, resolved.reason)
+  resolved.path
+
+proc containmentLocation(path: string; parentEnd: int): Option[string] =
+  ## A parent walk must be resolved by the filesystem THROUGH the last `..`.
+  ## The remaining suffix may be absent (a probe, removal or new output), so
+  ## it is appended without requiring the final object to exist. Failure to
+  ## resolve that mandatory prefix is unknown, never lexical containment.
+  if parentEnd >= 0:
+    try:
+      return some(normalizeWriteRoot(os.normalizedPath(
+        existingContainmentPath(path[0 ..< parentEnd]) & path.substr(parentEnd))))
+    except CatchableError:
+      return none(string)
+  # Resolve the other side too: `/var` and `/private/var`, or a declared
+  # symlink root, must compare in the same namespace as the resolved walk.
+  var ancestor = normalizeWriteRoot(path)
+  var suffix = ""
+  while ancestor.len > 0:
+    try:
+      return some(normalizeWriteRoot(os.normalizedPath(
+        existingContainmentPath(ancestor) & suffix)))
+    except CatchableError:
+      let slash = ancestor.rfind('/')
+      if slash < 0 or ancestor == "/":
+        return none(string)
+      suffix = ancestor.substr(slash) & suffix
+      ancestor = if slash == 0: "/" else: ancestor[0 ..< slash]
+  none(string)
+
+proc recordedPathUnderRoot(path, root: string; unresolved = false): bool =
+  ## Keep ordinary monitor spellings cheap. Only parent walks need physical
+  ## resolution. Callers choose the conservative answer for unknown walks:
+  ## exclusions retain inputs; source-write enforcement reports the write.
+  if path.len == 0 or root.len == 0:
+    return false
+  var key = path.replace('\\', '/')
+  var rootKey = root.replace('\\', '/')
+  let parentEnd = lastParentComponent(key)
+  let rootParentEnd = lastParentComponent(rootKey)
+  if parentEnd >= 0 or rootParentEnd >= 0:
+    # A relative policy root has no action cwd here. Preserve its inert
+    # relationship to absolute observations rather than resolving it against
+    # the engine's unrelated cwd. Action-owned roots are materialized first.
+    if key.isAbsolute != rootKey.isAbsolute:
+      return unresolved
+    let physical = containmentLocation(key, parentEnd)
+    let physicalRoot = containmentLocation(rootKey, rootParentEnd)
+    if physical.isNone or physicalRoot.isNone:
+      return unresolved
+    key = physical.get()
+    rootKey = physicalRoot.get()
+    when defined(windows):
+      key = key.toLowerAscii()
+      rootKey = rootKey.toLowerAscii()
+    if rootKey == "/":
+      return key.startsWith("/")
+  key == rootKey or key.startsWith(rootKey & "/")
+
 proc pathAtOrUnderRoot(path, root: string): bool =
   ## Directional containment predicate for R6: ``path`` must be equal
   ## to ``root`` or be a descendant of it. A write to a parent of the
   ## read-only root is not a source write.
-  if path.len == 0 or root.len == 0:
-    return false
-  path == root or path.startsWith(root & "/")
+  recordedPathUnderRoot(path, root, unresolved = true)
 
 proc detectSourceWrites*(readOnlyRoots, monitorWrites: openArray[string]):
     seq[tuple[write: string; root: string]] =
@@ -4497,6 +4570,17 @@ proc materialPath(root, path: string): string =
     path
   else:
     root / path
+
+proc materialContainmentPath(root, path: string): string =
+  ## `joinPath` folds relative parent walks before the filesystem sees them.
+  ## Recorded paths and containment roots must retain that traversal.
+  if path.isAbsolute or root.len == 0:
+    path
+  elif lastParentComponent(path.replace('\\', '/')) < 0 and
+      lastParentComponent(root.replace('\\', '/')) < 0:
+    materialPath(root, path)
+  else:
+    root & "/" & path
 
 proc selfConsumedDeclaredPaths*(action: BuildAction): seq[string] =
   ## S5 — the materialized paths this action declares as BOTH an input and
@@ -8579,14 +8663,60 @@ proc scratchKey(path: string): string =
   when defined(windows):
     result = result.toLowerAscii()
 
+proc isOwnOutput*(action: BuildAction; path: string): bool =
+  ## `path` is, or lies inside, one of the action's own outputs -- what it
+  ## PRODUCES. BuildXL: a pip's accesses to its own outputs are not inputs.
+  ## An action that writes its declared output directory observes it while
+  ## doing so (`cp` probes the tree it is filling, `mkdir -p` each parent
+  ## below it), and the portable lookup can never answer such an entry: on
+  ## any host, before the action runs, its own outputs are by definition
+  ## not there to be identified. Left in, they made gemini-cli's bundle
+  ## step unresolvable everywhere (1701 entries of 8408).
+  ##
+  ## For the PORTABLE record and the determinism probe only. The local key
+  ## keeps its narrower exact-path rule (`selfWrittenOutputKeys`).
+  var key = withoutExtendedLengthPrefix(
+    materialContainmentPath(action.cwd, path)).replace('\\', '/')
+  when defined(windows):
+    key = key.toLowerAscii()
+  # `outputs` plus `declaredOutputs`, as `portablePhysicalOutputsOf`
+  # (defined further down) names them.
+  for output in action.outputs & action.declaredOutputs:
+    var root = materialContainmentPath(action.cwd, output).replace('\\', '/')
+    while root.len > 1 and root.endsWith("/"):
+      root.setLen(root.len - 1)
+    when defined(windows):
+      root = root.toLowerAscii()
+    if recordedPathUnderRoot(key, root):
+      return true
+    when defined(windows):
+      # The absent .exe/.lnk compatibility probe is still an observation:
+      # an unresolvable parent walk cannot acquire this exemption either.
+      let parentEnd = lastParentComponent(key)
+      let rootParentEnd = lastParentComponent(root)
+      if (parentEnd >= 0 or rootParentEnd >= 0) and
+          (containmentLocation(key, parentEnd).isNone or
+           containmentLocation(root, rootParentEnd).isNone):
+        continue
+      # MSYS/Cygwin resolve a path that is missing by trying `<path>.exe`
+      # and `<path>.lnk`: gemini-cli's bundle step, `rm -rf dist`, probed
+      # `dist.exe` only on a cold run, when its own `dist` was not there
+      # yet. While such a sibling does not exist, probing it is resolving
+      # the action's own output. One that exists stays an input: the
+      # runtime would have used it.
+      if root.len > 0 and (key == root & ".exe" or key == root & ".lnk") and
+          not fileExists(extendedPath(path)) and
+          not dirExists(extendedPath(path)):
+        return true
+
 proc scratchRoots*(action: BuildAction): seq[string] =
   for dir in action.scratchDirs:
     if dir.len > 0:
-      result.add(scratchKey(materialPath(action.cwd, dir)))
+      result.add(scratchKey(materialContainmentPath(action.cwd, dir)))
 
 proc isUnderScratch(key: string; roots: openArray[string]): bool =
   for root in roots:
-    if key == root or key.startsWith(root & "/"):
+    if recordedPathUnderRoot(key, root):
       return true
 
 proc dropScratchEvidence*(action: BuildAction; evidence: var PathSetEvidence) =
@@ -8602,7 +8732,7 @@ proc dropScratchEvidence*(action: BuildAction; evidence: var PathSetEvidence) =
     ## `dropObserved` keeps the entries it does not drop, in place.
     var drop = initHashSet[string]()
     for path in channel:
-      if isUnderScratch(scratchKey(path), roots):
+      if isUnderScratch(scratchKey(materialContainmentPath(action.cwd, path)), roots):
         drop.incl(path)
     channel.dropObserved(drop)
   keep(evidence.monitorReads)
@@ -9409,6 +9539,12 @@ proc canonicalPolicyPath(path: string): string =
   ## gate materializes them against the action's cwd before calling this.
   if not path.isAbsolute:
     return normalizeWriteRoot(path)
+  let parentEnd = lastParentComponent(path.replace('\\', '/'))
+  if parentEnd >= 0:
+    let physical = containmentLocation(path.replace('\\', '/'), parentEnd)
+    # Leave an unknown parent walk intact, so the containment predicate
+    # retains the input rather than recovering an ancestor above the walk.
+    return if physical.isSome: physical.get() else: normalizeWriteRoot(path)
   var ancestor = normalizeWriteRoot(path)
   var suffix: seq[string] = @[]
   while ancestor.len > 0:
@@ -9477,7 +9613,10 @@ proc ignoredInputRoots(action: BuildAction): seq[string] =
     if not expanded.isAbsolute:
       continue
     try:
-      let resolved = expandFilename(expanded)
+      let resolved =
+        if lastParentComponent(expanded.replace('\\', '/')) >= 0:
+          canonicalPolicyPath(expanded)
+        else: expandFilename(expanded)
       if resolved.len > 0 and resolved != expanded:
         result.add(resolved)
     except CatchableError:
@@ -9519,14 +9658,17 @@ proc declaredWriteRootPrefixes(action: BuildAction): seq[string] =
   ## derived from a `/tmp/...` declaration would never fire.
   for root in action.declaredOutputs:
     let expanded = normalizeWriteRoot(
-      materialPath(action.cwd, action.expandPolicyPath(root)))
+      materialContainmentPath(action.cwd, action.expandPolicyPath(root)))
     if expanded.len == 0:
       continue
     result.add(expanded)
     if not expanded.isAbsolute:
       continue
     try:
-      let resolved = normalizeWriteRoot(expandFilename(expanded))
+      let resolved = normalizeWriteRoot(
+        if lastParentComponent(expanded.replace('\\', '/')) >= 0:
+          canonicalPolicyPath(expanded)
+        else: expandFilename(expanded))
       if resolved.len > 0 and resolved != expanded:
         result.add(resolved)
     except CatchableError:
@@ -9741,10 +9883,8 @@ proc isOutputAncestorObservation(ancestors: HashSet[string];
   ancestors.len > 0 and normalizeWriteRoot(key) in ancestors
 
 proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
-  let normalized = path.replace('\\', '/')
   for root in roots:
-    let normalizedRoot = root.replace('\\', '/')
-    if normalized == normalizedRoot or normalized.startsWith(normalizedRoot & "/"):
+    if recordedPathUnderRoot(path, root):
       return true
 
 proc isUnderCanonicalPolicyRoot(path: string; roots: openArray[string]): bool =
@@ -10487,11 +10627,11 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   # construction downstream is order-sensitive.
   var seen = initHashSet[string]()
   for input in evidence.declaredInputs:
-    let path = materialPath(action.cwd, input)
+    let path = materialContainmentPath(action.cwd, input)
     declaredMaterialized.incl(path.replace('\\', '/'))
     result.addUnique(seen, path)
   for input in evidence.depfileInputs:
-    let path = materialPath(action.cwd, input)
+    let path = materialContainmentPath(action.cwd, input)
     let key = path.replace('\\', '/')
     if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
@@ -10504,7 +10644,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
       continue
     result.addUnique(seen, path)
   for input in evidence.monitorReads:
-    let path = materialPath(action.cwd, input)
+    let path = materialContainmentPath(action.cwd, input)
     let key = path.replace('\\', '/')
     if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
@@ -10517,7 +10657,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
       continue
     result.addUnique(seen, path)
   for probe in evidence.monitorProbes:
-    let path = materialPath(action.cwd, probe)
+    let path = materialContainmentPath(action.cwd, probe)
     let key = path.replace('\\', '/')
     if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
@@ -10895,10 +11035,10 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
   var declaredMaterialized = initHashSet[string]()
   for input in evidence.declaredInputs:
     declaredMaterialized.incl(
-      materialPath(action.cwd, input).replace('\\', '/'))
+      materialContainmentPath(action.cwd, input).replace('\\', '/'))
   var seen = initHashSet[string]()
   for dir in evidence.monitorDirectoryEnumerations:
-    let path = materialPath(action.cwd, dir)
+    let path = materialContainmentPath(action.cwd, dir)
     if declaredMaterialized.contains(path.replace('\\', '/')):
       result.addUnique(seen, path)
       continue
@@ -17870,43 +18010,6 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   proc portableRecordRoots(): seq[LogicalRoot] =
     ## `portableRoots` plus the launch machinery, untracked.
     config.portableRoots & launchMachineryRoots()
-
-  proc isOwnOutput(action: BuildAction; path: string): bool =
-    ## `path` is, or lies inside, one of the action's own outputs -- what it
-    ## PRODUCES. BuildXL: a pip's accesses to its own outputs are not inputs.
-    ## An action that writes its declared output directory observes it while
-    ## doing so (`cp` probes the tree it is filling, `mkdir -p` each parent
-    ## below it), and the portable lookup can never answer such an entry: on
-    ## any host, before the action runs, its own outputs are by definition
-    ## not there to be identified. Left in, they made gemini-cli's bundle
-    ## step unresolvable everywhere (1701 entries of 8408).
-    ##
-    ## For the PORTABLE record and the determinism probe only. The local key
-    ## keeps its narrower exact-path rule (`selfWrittenOutputKeys`).
-    var key = withoutExtendedLengthPrefix(path).replace('\\', '/')
-    when defined(windows):
-      key = key.toLowerAscii()
-    # `outputs` plus `declaredOutputs`, as `portablePhysicalOutputsOf`
-    # (defined further down) names them.
-    for output in action.outputs & action.declaredOutputs:
-      var root = materialPath(action.cwd, output).replace('\\', '/')
-      while root.len > 1 and root.endsWith("/"):
-        root.setLen(root.len - 1)
-      when defined(windows):
-        root = root.toLowerAscii()
-      if root.len > 0 and (key == root or key.startsWith(root & "/")):
-        return true
-      when defined(windows):
-        # MSYS/Cygwin resolve a path that is missing by trying `<path>.exe`
-        # and `<path>.lnk`: gemini-cli's bundle step, `rm -rf dist`, probed
-        # `dist.exe` only on a cold run, when its own `dist` was not there
-        # yet. While such a sibling does not exist, probing it is resolving
-        # the action's own output. One that exists stays an input: the
-        # runtime would have used it.
-        if root.len > 0 and (key == root & ".exe" or key == root & ".lnk") and
-            not fileExists(extendedPath(path)) and
-            not dirExists(extendedPath(path)):
-          return true
 
   # The graph view of a directory above build outputs (BuildXL's graph
   # file-system view). Such a directory's listing on disk says which OTHER

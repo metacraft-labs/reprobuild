@@ -95,7 +95,7 @@ libs/repro_build_engine/tests/t_preserve_tree_rerun_never_writes_through_links.n
 libs/repro_build_engine/tests/t_relocatable_record_follows_the_working_tree.nim	nim	8
 libs/repro_build_engine/tests/t_remove_before_run.nim	nim	5
 libs/repro_build_engine/tests/t_run_build_returns_its_results_without_copying.nim	nim	1
-libs/repro_build_engine/tests/t_scratch_dirs.nim	nim	4
+libs/repro_build_engine/tests/t_scratch_dirs.nim	nim	8
 libs/repro_build_engine/tests/t_self_written_set_is_derived.nim	nim	8
 libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
 libs/repro_build_engine/tests/t_untracked_ancestor_change_does_not_re_run_an_edge.nim	nim	8
