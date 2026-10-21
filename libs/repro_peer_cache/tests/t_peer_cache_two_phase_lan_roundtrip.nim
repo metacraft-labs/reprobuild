@@ -2,8 +2,11 @@
 ## TCP between two workspace checkouts at different roots.
 ##
 ## Two separate OS PROCESSES, each a full peer-cache node (`PeerCacheHost`,
-## the same object `repro-daemon` hosts) bound to `0.0.0.0` on its own port
-## and backed by its own disk stores, build the same C program from two
+## the same object `repro-daemon` hosts) bound to the interface its policy
+## declares — loopback here, as no `bind=` is given; never a wildcard
+## (Distributed-Execution M7, FLOW-6) — on its own port, authenticated by
+## its own host CA over TLS (M7: the memoization plane only accepts entries
+## whose issuer attestation verifies), and backed by its own disk stores, build the same C program from two
 ## checkouts of one workspace that sit under DIFFERENT parent directories at
 ## different depths (`.../pa/x/ws-a`, `.../pb/ws-b`). `main.c` includes
 ## `config.h`, which the compiler's depfile reports — a DYNAMIC input the
@@ -34,6 +37,11 @@
 ## Throughout, no content-plane reply fails verification, so no peer is
 ## ever marked suspect.
 ##
+## TRUST PROFILES (Distributed-Execution M7): the gate runs twice — with
+## hardened nodes (one-hour host-CA leaves) and with trusted nodes (pinned
+## long-lived host keys, the product default) — every node of a run in the
+## same profile.
+##
 ## MOCK POLICY — none. Real sockets (no in-process `TableRef` peer table),
 ## real processes, the real build engine, a real C compiler, real CAS /
 ## action-cache / memo stores on disk. The roots are unique per run under
@@ -49,6 +57,8 @@ import repro_hash
 import repro_local_store
 import repro_peer_cache
 import repro_cli_support/peer_cache_wiring
+
+import ./m7_test_pki
 
 const
   ConfigV1 = "#define GREETING \"hello from config v1\"\n"
@@ -145,16 +155,6 @@ proc byId(res: BuildRunResult; id: string): ActionResult =
       return item
   raise newException(ValueError, "missing result " & id)
 
-proc loopbackSeedConfig(seeds: seq[Endpoint]): PeerCacheConfig =
-  PeerCacheConfig(
-    discoveryMode: pdmUnicastSeed,
-    seedPeers: seeds,
-    cidrAllowlistRaw: @["127.0.0.0/8"],
-    advertiseIntervalMs: 200,
-    maxBlobBytes: DefaultMaxBlobBytes,
-    listenPort: 0,
-    multicastDisabled: true)
-
 proc nodePeerId(tag: char): PeerId =
   var raw: array[32, byte]
   raw[0] = byte(ord(tag))
@@ -167,15 +167,18 @@ proc nodePeerId(tag: char): PeerId =
 # Node A: the producer process.
 # ---------------------------------------------------------------------------
 
-proc runProducerNode(ws, cacheRoot, stateDir, readyFile, stopFile: string):
-    int =
+proc runProducerNode(ws, cacheRoot, stateDir, readyFile, stopFile: string;
+                     profile: TrustProfile): int =
   ## Child-process entry. Starts a node serving `cacheRoot`, builds in `ws`
-  ## (publishing through the hooks), reports its port, then serves until
-  ## the parent drops `stopFile`.
-  let host = startPeerCacheHost(loopbackSeedConfig(@[]), nodePeerId('A'),
-    cacheRoot = cacheRoot, listenAddr = "0.0.0.0", stateDir = stateDir)
+  ## (publishing attested entries through the hooks), reports its port, then
+  ## serves until the parent drops `stopFile`. Its host CA was minted by the
+  ## parent under `<base>/a` (the base is `stateDir`'s parent).
+  let node = newTestNode(stateDir.parentDir, "a")
+  let host = startPeerCacheHost(tlsConfig(node, profile = profile),
+    nodePeerId('A'),
+    cacheRoot = cacheRoot, stateDir = stateDir)
   let hooks = newPeerCacheEngineHooks(host.client,
-    openPeerCacheStorage(cacheRoot), host.registry)
+    openPeerCacheStorage(cacheRoot), host.registry, host.attestorFor())
   let res = runBuild(helloGraph(ws), nodeEngineConfig(cacheRoot, ws, hooks))
   let item = res.byId(ActionId)
   if item.status != asSucceeded or hooks.stats.publishes != 1:
@@ -192,13 +195,13 @@ proc runProducerNode(ws, cacheRoot, stateDir, readyFile, stopFile: string):
   host.stop()
   0
 
-if paramCount() >= 7 and paramStr(1) == "--producer-node":
+if paramCount() >= 8 and paramStr(1) == "--producer-node":
   # The child's output goes to a log file the parent reads on failure; a
   # pipe nobody drains could block the child mid-build.
   discard reopen(stdout, paramStr(7), fmWrite)
   discard reopen(stderr, paramStr(7), fmAppend)
   quit(runProducerNode(paramStr(2), paramStr(3), paramStr(4), paramStr(5),
-    paramStr(6)))
+    paramStr(6), (if paramStr(8) == $tpTrusted: tpTrusted else: tpHardened)))
 
 # ---------------------------------------------------------------------------
 # Node B (this process) + assertions.
@@ -227,221 +230,266 @@ proc waitForFile(path: string; process: Process; timeoutSeconds: float): bool =
     sleep(50)
   false
 
+proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
+  ## The gate, run once per trust profile (Distributed-Execution M7): the
+  ## producer child, node B and the third-party querier all run `profile`.
+  ## Every step `check`s its own property; true once the whole round trip
+  ## ran to its end.
+  if ccPath().len == 0:
+    # The gate is about a real C build; without a compiler it proves
+    # nothing, so it fails rather than skipping into a vacuous pass.
+    checkpoint("no C compiler (cc or clang) on PATH")
+    fail()
+  else:
+    let base = normalizedRoot(getTempDir() / ("repro-m0-two-phase-" &
+      $profile & "-" & $getCurrentProcessId()))
+    if dirExists(base):
+      removeDir(base)
+    # Different parents AT DIFFERENT DEPTHS: the cross-host shape, where
+    # every ancestor of the workspace differs between the two checkouts.
+    let wsA = base / "pa" / "x" / "ws-a"
+    let wsB = base / "pb" / "ws-b"
+    let cacheA = base / "node-a-cache"
+    let cacheB = base / "node-b-cache"
+    let stateA = base / "node-a-state"
+    let readyFile = base / "node-a.ready"
+    let stopFile = base / "node-a.stop"
+    let logA = base / "node-a.log"
+    createDir(base)
+    # Host CAs for A, B and the third-party querier Q, all pinning each
+    # other (M7: authenticated peers, attested memo entries).
+    let nodeA = newTestNode(base, "a")
+    let nodeB = newTestNode(base, "b")
+    let nodeQ = newTestNode(base, "q")
+    mutualTrust([nodeA, nodeB, nodeQ])
+    writeWorkspace(wsA, ConfigV1)
+    writeWorkspace(wsB, ConfigV1)
+    check wsA != wsB
+
+    # -- Node A: a separate process --------------------------------------
+    let producer = startProcess(getAppFilename(),
+      args = ["--producer-node", wsA, cacheA, stateA, readyFile, stopFile,
+              logA, $profile],
+      options = {})
+    var hostB: PeerCacheHost = nil
+    var hostQ: PeerCacheHost = nil
+    var queryClient: PeerCacheClient = nil
+    defer:
+      writeFile(stopFile, "stop\n")
+      if not hostQ.isNil:
+        hostQ.stop()
+      elif not queryClient.isNil:
+        try: waitFor queryClient.stop() except CatchableError: discard
+      if not hostB.isNil:
+        hostB.stop()
+      let exitDeadline = epochTime() + 30.0
+      while producer.running and epochTime() < exitDeadline:
+        sleep(50)
+      if producer.running:
+        producer.terminate()
+      discard producer.waitForExit()
+      producer.close()
+      if fileExists(logA):
+        checkpoint("node A log:\n" & readFile(logA))
+      removeDir(base)
+
+    let producerReady = waitForFile(readyFile, producer, 240.0)
+    if not producerReady:
+      checkpoint("node A output: " &
+        (if fileExists(logA): readFile(logA) else: "<no log>"))
+    ensure producerReady
+    let portA = Port(parseInt(readFile(readyFile).strip()))
+    check fileExists(wsA / "out" / "hello")
+    # Node A's build REPORTED its checkout's ancestors (the build script
+    # appends the parent walk to the depfile), so the evidence the engine
+    # folded names them by absolute path — the shape that made checkouts
+    # under different parents miss. Whether the LOCAL record keeps them is
+    # the engine's business (it drops existence probes of an output's
+    # ancestors, `outputAncestorDirectoryKeys`); what the gate needs is that
+    # they were observed and that the PUBLISHED record (checked below)
+    # carries none of them.
+    var reportedAncestors = 0
+    for token in readFile(wsA / "out" / "hello.d").splitWhitespace():
+      if token.isAbsolute and isWorkspaceAncestor(token, wsA):
+        inc reportedAncestors
+    checkpoint("node A depfile ancestor entries: " & $reportedAncestors)
+    check reportedAncestors >= 3
+    # Cross-host, node A's checkout path does not exist on node B's machine
+    # at all. Both nodes share one filesystem here, so make that true: hide
+    # A's checkout (A keeps serving from its cache root, outside it). B
+    # evaluating any of A's ancestor paths now sees them ABSENT, which is
+    # what a consumer on another host sees.
+    let wsAResolved = expandFilename(wsA)
+    moveDir(base / "pa", base / "pa-hidden")
+    check not dirExists(wsA)
+
+    # -- Node B: this process, seeded with A ------------------------------
+    hostB = startPeerCacheHost(
+      tlsConfig(nodeB, seeds = @[initEndpoint("127.0.0.1", portA)],
+        profile = profile),
+      nodePeerId('B'), cacheRoot = cacheB)
+    # The declared interface (none given: loopback), never a wildcard.
+    check hostB.server.listenAddr == "127.0.0.1"
+    check hostB.bindResolution.isLoopback
+    ensure hostB.client.connectedPeers().len == 1
+    let peerA = hostB.client.connectedPeers()[0]
+    let storageB = openPeerCacheStorage(cacheB)
+    let hooksB = newPeerCacheEngineHooks(hostB.client, storageB,
+      hostB.registry, hostB.attestorFor())
+    let configB = nodeEngineConfig(cacheB, wsB, hooksB)
+
+    # ---- (2) peer hit across roots ---------------------------------------
+    check not fileExists(wsB / "out" / "hello")
+    let first = runBuild(helloGraph(wsB), configB)
+    let hit = first.byId(ActionId)
+    checkpoint("first B build: status=" & $hit.status & " reason=" &
+      hit.reason & " fetch=" & hooksB.stats.lastFetchReason & " install=" &
+      hooksB.stats.lastInstallReason & traceOf(first))
+    check hooksB.stats.hits == 1
+    check hooksB.stats.installs == 1
+    check hit.cacheDecision == cdHit
+    check not hit.launched
+    check fileExists(wsB / "out" / "hello")
+    check execProcess(wsB / "out" / "hello").strip() == "hello from config v1"
+    # Both blobs (PathSet + binary) crossed the wire, content-addressed.
+    check hostB.client.fetchRoundTripCount >= 2
+    check hostB.client.memoRoundTripCount >= 2
+
+    # The weak fingerprint peers agreed on, and what A served for it.
+    let weaks = storageB.memo.weakFingerprints()
+    ensure weaks.len == 1
+    let weak = weaks[0]
+    let selectorsAfterHit = storageB.memo.listSelectors(weak)
+    ensure selectorsAfterHit.len == 1
+    let selectorA = selectorsAfterHit[0]
+    let entryA = storageB.memo.readMemoEntry(weak,
+      selectorA.strongFingerprint).get()
+    # The entry B re-serves still carries A's attestation (M7): who
+    # computed it survives the hop.
+    check entryA.issuerHostId == nodeA.identity.hostId
+    # The published record is workspace-normalized: it names
+    # `$WORKSPACE/...`, never node A's checkout path.
+    let recordA = decodeActionResultRecord(entryA.recordBytes)
+    check recordA.outputs.len == 1
+    check recordA.outputs[0].path == WorkspaceMarker & "/out/hello"
+    var sawWorkspaceInput = false
+    for input in recordA.inputs:
+      check not input.path.contains(wsA)
+      if input.path == WorkspaceMarker & "/config.h":
+        sawWorkspaceInput = true
+    check sawWorkspaceInput
+    # The PUBLISHED record carries none of A's ancestors.
+    for input in recordA.inputs:
+      check not (input.path.isAbsolute and
+        isWorkspaceAncestor(input.path, wsAResolved))
+      check not input.path.contains(base)
+      check not input.path.contains(expandFilename(base))
+    # A advertised both its selector set (memo key) and its CAS blobs.
+    check peerA in hostB.registry.findPeersWithBlob(memoAdvertKey(weak))
+    check peerA in hostB.registry.findPeersWithBlob(entryA.pathSetDigest)
+    check peerA in hostB.registry.findPeersWithBlob(entryA.outputDigests[0])
+
+    # ---- (3) dynamic header edit: strong-fingerprint miss ---------------
+    sleep(20)  # a fresh mtime for the timestamp policy
+    writeFile(wsB / "config.h", ConfigV2)
+    let missesBefore = hooksB.stats.strongMisses
+    let hitsBefore = hooksB.stats.hits
+    let second = runBuild(helloGraph(wsB), configB)
+    let rebuilt = second.byId(ActionId)
+    checkpoint("second B build: status=" & $rebuilt.status & " reason=" &
+      rebuilt.reason & " fetch=" & hooksB.stats.lastFetchReason &
+      " publish=" & hooksB.stats.lastPublishReason & traceOf(second))
+    check hooksB.stats.strongMisses > missesBefore
+    check hooksB.stats.hits == hitsBefore           # no false hit
+    check rebuilt.status == asSucceeded
+    check rebuilt.launched
+    check execProcess(wsB / "out" / "hello").strip() == "hello from config v2"
+    check hooksB.stats.publishes == 1
+
+    # Two selectors under ONE weak fingerprint on B; A's is byte-identical.
+    let selectorsB = storageB.memo.listSelectors(weak)
+    check selectorsB.len == 2
+    check selectorA in selectorsB
+    var selectorBOwn: MemoSelector
+    for sel in selectorsB:
+      if sel != selectorA:
+        selectorBOwn = sel
+    check selectorBOwn.strongFingerprint != selectorA.strongFingerprint
+    check storageB.memo.readMemoEntryBytes(weak,
+      selectorA.strongFingerprint).get() == encodeMemoEntry(entryA)
+    # A's own store still holds exactly its one entry.
+    let storageA = openPeerCacheStorage(cacheA)
+    check storageA.memo.listSelectors(weak) == @[selectorA]
+
+    # Both nodes serve their selector sets over TCP to a third party.
+    if profile == tpHardened:
+      let queryLeaf = mintLeaf(nodeQ.identity, lrDaemon)
+      queryClient = newPeerCacheClient(nodeQ.identity.hostId, 0'u16,
+        newPeerRegistry(nodeQ.identity.hostId,
+          initEndpoint("127.0.0.1", Port(0))),
+        @[initEndpoint("127.0.0.1", portA),
+          initEndpoint("127.0.0.1", hostB.actualPort)],
+        @[parseCidrV4("127.0.0.0/8")], trustMode = tmTls,
+        ourCert = queryLeaf.cert,
+        trustAnchorSet = loadTrustAnchorDir(nodeQ.anchorsDir))
+      queryClient.leafProvider = proc(): LeafCredential {.gcsafe.} =
+        queryLeaf
+      queryClient.requireShortLivedLeaves = true
+      waitFor queryClient.start()
+    else:
+      # Trusted (the default profile): the third party is a trusted node
+      # presenting its pinned long-lived host key.
+      hostQ = startPeerCacheHost(tlsConfig(nodeQ,
+        seeds = @[initEndpoint("127.0.0.1", portA),
+                  initEndpoint("127.0.0.1", hostB.actualPort)],
+        profile = tpTrusted), nodeQ.identity.hostId,
+        cacheRoot = base / "node-q-cache")
+      queryClient = hostQ.client
+    check queryClient.connectedPeers().len == 2
+    var servedCounts: seq[int] = @[]
+    for peerId in queryClient.connectedPeers():
+      let answer = waitFor queryClient.requestSelectorsFrom(peerId, weak)
+      check answer.isSome
+      if answer.isSome:
+        check selectorA in answer.get()
+        servedCounts.add(answer.get().len)
+    servedCounts.sort()
+    check servedCounts == @[1, 2]
+
+    # ---- (4) revert: the original execution is served again ------------
+    sleep(20)
+    writeFile(wsB / "config.h", ConfigV1)
+    let third = runBuild(helloGraph(wsB), configB)
+    let again = third.byId(ActionId)
+    checkpoint("third B build: status=" & $again.status & " reason=" &
+      again.reason & traceOf(third))
+    check again.cacheDecision in {cdHit, cdHybridCutoff}
+    check not again.launched
+    check execProcess(wsB / "out" / "hello").strip() == "hello from config v1"
+
+    # ---- no markSuspect false positives, and A really served -------------
+    check hostB.client.suspectMarks == 0
+    check queryClient.suspectMarks == 0
+    check not hostB.registry.entries[peerA].suspect
+    # A writes its counters on its store-scan interval; give it a moment.
+    var statusA = readStatus(stateA)
+    let statusDeadline = epochTime() + 10.0
+    while (statusInt(statusA, "memo_requests_served") < 3 or
+        statusInt(statusA, "fetch_hits_served") < 2) and
+        epochTime() < statusDeadline:
+      sleep(50)
+      statusA = readStatus(stateA)
+    checkpoint("node A status: " & $statusA)
+    check statusInt(statusA, "memo_requests_served") >= 3
+    check statusInt(statusA, "fetch_hits_served") >= 2
+    result = true
+
 suite "Distributed-Execution M0: two-phase peer cache over real LAN sockets":
 
   test "t_peer_cache_two_phase_lan_roundtrip":
-    if ccPath().len == 0:
-      # The gate is about a real C build; without a compiler it proves
-      # nothing, so it fails rather than skipping into a vacuous pass.
-      checkpoint("no C compiler (cc or clang) on PATH")
-      fail()
-    else:
-      let base = normalizedRoot(getTempDir() / ("repro-m0-two-phase-" &
-        $getCurrentProcessId()))
-      if dirExists(base):
-        removeDir(base)
-      # Different parents AT DIFFERENT DEPTHS: the cross-host shape, where
-      # every ancestor of the workspace differs between the two checkouts.
-      let wsA = base / "pa" / "x" / "ws-a"
-      let wsB = base / "pb" / "ws-b"
-      let cacheA = base / "node-a-cache"
-      let cacheB = base / "node-b-cache"
-      let stateA = base / "node-a-state"
-      let readyFile = base / "node-a.ready"
-      let stopFile = base / "node-a.stop"
-      let logA = base / "node-a.log"
-      createDir(base)
-      writeWorkspace(wsA, ConfigV1)
-      writeWorkspace(wsB, ConfigV1)
-      check wsA != wsB
+    # Hardened nodes (one-hour host-CA leaves).
+    check runTwoPhaseRoundtrip(tpHardened)
 
-      # -- Node A: a separate process --------------------------------------
-      let producer = startProcess(getAppFilename(),
-        args = ["--producer-node", wsA, cacheA, stateA, readyFile, stopFile,
-                logA],
-        options = {})
-      var hostB: PeerCacheHost = nil
-      var queryClient: PeerCacheClient = nil
-      defer:
-        writeFile(stopFile, "stop\n")
-        if not queryClient.isNil:
-          try: waitFor queryClient.stop() except CatchableError: discard
-        if not hostB.isNil:
-          hostB.stop()
-        let exitDeadline = epochTime() + 30.0
-        while producer.running and epochTime() < exitDeadline:
-          sleep(50)
-        if producer.running:
-          producer.terminate()
-        discard producer.waitForExit()
-        producer.close()
-        if fileExists(logA):
-          checkpoint("node A log:\n" & readFile(logA))
-        removeDir(base)
-
-      let producerReady = waitForFile(readyFile, producer, 240.0)
-      if not producerReady:
-        checkpoint("node A output: " &
-          (if fileExists(logA): readFile(logA) else: "<no log>"))
-      ensure producerReady
-      let portA = Port(parseInt(readFile(readyFile).strip()))
-      check fileExists(wsA / "out" / "hello")
-      # Node A's build REPORTED its checkout's ancestors (the build script
-      # appends the parent walk to the depfile), so the evidence the engine
-      # folded names them by absolute path — the shape that made checkouts
-      # under different parents miss. Whether the LOCAL record keeps them is
-      # the engine's business (it drops existence probes of an output's
-      # ancestors, `outputAncestorDirectoryKeys`); what the gate needs is that
-      # they were observed and that the PUBLISHED record (checked below)
-      # carries none of them.
-      var reportedAncestors = 0
-      for token in readFile(wsA / "out" / "hello.d").splitWhitespace():
-        if token.isAbsolute and isWorkspaceAncestor(token, wsA):
-          inc reportedAncestors
-      checkpoint("node A depfile ancestor entries: " & $reportedAncestors)
-      check reportedAncestors >= 3
-      # Cross-host, node A's checkout path does not exist on node B's machine
-      # at all. Both nodes share one filesystem here, so make that true: hide
-      # A's checkout (A keeps serving from its cache root, outside it). B
-      # evaluating any of A's ancestor paths now sees them ABSENT, which is
-      # what a consumer on another host sees.
-      let wsAResolved = expandFilename(wsA)
-      moveDir(base / "pa", base / "pa-hidden")
-      check not dirExists(wsA)
-
-      # -- Node B: this process, seeded with A ------------------------------
-      hostB = startPeerCacheHost(
-        loopbackSeedConfig(@[initEndpoint("127.0.0.1", portA)]),
-        nodePeerId('B'), cacheRoot = cacheB, listenAddr = "0.0.0.0")
-      check hostB.server.listenAddr == "0.0.0.0"
-      ensure hostB.client.connectedPeers().len == 1
-      let peerA = hostB.client.connectedPeers()[0]
-      let storageB = openPeerCacheStorage(cacheB)
-      let hooksB = newPeerCacheEngineHooks(hostB.client, storageB,
-        hostB.registry)
-      let configB = nodeEngineConfig(cacheB, wsB, hooksB)
-
-      # ---- (2) peer hit across roots ---------------------------------------
-      check not fileExists(wsB / "out" / "hello")
-      let first = runBuild(helloGraph(wsB), configB)
-      let hit = first.byId(ActionId)
-      checkpoint("first B build: status=" & $hit.status & " reason=" &
-        hit.reason & " fetch=" & hooksB.stats.lastFetchReason & " install=" &
-        hooksB.stats.lastInstallReason & traceOf(first))
-      check hooksB.stats.hits == 1
-      check hooksB.stats.installs == 1
-      check hit.cacheDecision == cdHit
-      check not hit.launched
-      check fileExists(wsB / "out" / "hello")
-      check execProcess(wsB / "out" / "hello").strip() == "hello from config v1"
-      # Both blobs (PathSet + binary) crossed the wire, content-addressed.
-      check hostB.client.fetchRoundTripCount >= 2
-      check hostB.client.memoRoundTripCount >= 2
-
-      # The weak fingerprint peers agreed on, and what A served for it.
-      let weaks = storageB.memo.weakFingerprints()
-      ensure weaks.len == 1
-      let weak = weaks[0]
-      let selectorsAfterHit = storageB.memo.listSelectors(weak)
-      ensure selectorsAfterHit.len == 1
-      let selectorA = selectorsAfterHit[0]
-      let entryA = storageB.memo.readMemoEntry(weak,
-        selectorA.strongFingerprint).get()
-      # The published record is workspace-normalized: it names
-      # `$WORKSPACE/...`, never node A's checkout path.
-      let recordA = decodeActionResultRecord(entryA.recordBytes)
-      check recordA.outputs.len == 1
-      check recordA.outputs[0].path == WorkspaceMarker & "/out/hello"
-      var sawWorkspaceInput = false
-      for input in recordA.inputs:
-        check not input.path.contains(wsA)
-        if input.path == WorkspaceMarker & "/config.h":
-          sawWorkspaceInput = true
-      check sawWorkspaceInput
-      # The PUBLISHED record carries none of A's ancestors.
-      for input in recordA.inputs:
-        check not (input.path.isAbsolute and
-          isWorkspaceAncestor(input.path, wsAResolved))
-        check not input.path.contains(base)
-        check not input.path.contains(expandFilename(base))
-      # A advertised both its selector set (memo key) and its CAS blobs.
-      check peerA in hostB.registry.findPeersWithBlob(memoAdvertKey(weak))
-      check peerA in hostB.registry.findPeersWithBlob(entryA.pathSetDigest)
-      check peerA in hostB.registry.findPeersWithBlob(entryA.outputDigests[0])
-
-      # ---- (3) dynamic header edit: strong-fingerprint miss ---------------
-      sleep(20)  # a fresh mtime for the timestamp policy
-      writeFile(wsB / "config.h", ConfigV2)
-      let missesBefore = hooksB.stats.strongMisses
-      let hitsBefore = hooksB.stats.hits
-      let second = runBuild(helloGraph(wsB), configB)
-      let rebuilt = second.byId(ActionId)
-      checkpoint("second B build: status=" & $rebuilt.status & " reason=" &
-        rebuilt.reason & " fetch=" & hooksB.stats.lastFetchReason &
-        " publish=" & hooksB.stats.lastPublishReason & traceOf(second))
-      check hooksB.stats.strongMisses > missesBefore
-      check hooksB.stats.hits == hitsBefore           # no false hit
-      check rebuilt.status == asSucceeded
-      check rebuilt.launched
-      check execProcess(wsB / "out" / "hello").strip() == "hello from config v2"
-      check hooksB.stats.publishes == 1
-
-      # Two selectors under ONE weak fingerprint on B; A's is byte-identical.
-      let selectorsB = storageB.memo.listSelectors(weak)
-      check selectorsB.len == 2
-      check selectorA in selectorsB
-      var selectorBOwn: MemoSelector
-      for sel in selectorsB:
-        if sel != selectorA:
-          selectorBOwn = sel
-      check selectorBOwn.strongFingerprint != selectorA.strongFingerprint
-      check storageB.memo.readMemoEntryBytes(weak,
-        selectorA.strongFingerprint).get() == encodeMemoEntry(entryA)
-      # A's own store still holds exactly its one entry.
-      let storageA = openPeerCacheStorage(cacheA)
-      check storageA.memo.listSelectors(weak) == @[selectorA]
-
-      # Both nodes serve their selector sets over TCP to a third party.
-      queryClient = newPeerCacheClient(nodePeerId('Q'), 0'u16,
-        newPeerRegistry(nodePeerId('Q'), initEndpoint("0.0.0.0", Port(0))),
-        @[initEndpoint("127.0.0.1", portA),
-          initEndpoint("127.0.0.1", hostB.actualPort)],
-        @[parseCidrV4("127.0.0.0/8")])
-      waitFor queryClient.start()
-      check queryClient.connectedPeers().len == 2
-      var servedCounts: seq[int] = @[]
-      for peerId in queryClient.connectedPeers():
-        let answer = waitFor queryClient.requestSelectorsFrom(peerId, weak)
-        check answer.isSome
-        if answer.isSome:
-          check selectorA in answer.get()
-          servedCounts.add(answer.get().len)
-      servedCounts.sort()
-      check servedCounts == @[1, 2]
-
-      # ---- (4) revert: the original execution is served again ------------
-      sleep(20)
-      writeFile(wsB / "config.h", ConfigV1)
-      let third = runBuild(helloGraph(wsB), configB)
-      let again = third.byId(ActionId)
-      checkpoint("third B build: status=" & $again.status & " reason=" &
-        again.reason & traceOf(third))
-      check again.cacheDecision in {cdHit, cdHybridCutoff}
-      check not again.launched
-      check execProcess(wsB / "out" / "hello").strip() == "hello from config v1"
-
-      # ---- no markSuspect false positives, and A really served -------------
-      check hostB.client.suspectMarks == 0
-      check queryClient.suspectMarks == 0
-      check not hostB.registry.entries[peerA].suspect
-      # A writes its counters on its store-scan interval; give it a moment.
-      var statusA = readStatus(stateA)
-      let statusDeadline = epochTime() + 10.0
-      while (statusInt(statusA, "memo_requests_served") < 3 or
-          statusInt(statusA, "fetch_hits_served") < 2) and
-          epochTime() < statusDeadline:
-        sleep(50)
-        statusA = readStatus(stateA)
-      checkpoint("node A status: " & $statusA)
-      check statusInt(statusA, "memo_requests_served") >= 3
-      check statusInt(statusA, "fetch_hits_served") >= 2
+  test "t_peer_cache_two_phase_lan_roundtrip (trusted profile, the default)":
+    # Trusted nodes (pinned long-lived host keys) — the product default.
+    check runTwoPhaseRoundtrip(tpTrusted)

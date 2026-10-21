@@ -8,11 +8,16 @@
 ## `startPeerCacheHost` — the constructor `startPeerCacheServices`,
 ## `buildPeerCacheWiringFor` and the daemon's background service all use.
 ##
-##   * a node mints its self-signed certificate on first use;
-##   * two nodes that trust each other's certificate complete a BearSSL TLS
-##     1.2 mutual-auth handshake, and a real build on one is served to the
-##     other through the two-phase lookup INSIDE the tunnel (memo requests
-##     and BLAKE3-verified blob fetches);
+##   * a node mints its HOST CA on first use (Distributed-Execution M7:
+##     the persistent credential is the per-host CA; the wire carries a
+##     short-lived leaf it mints, `identity.nim`);
+##   * two nodes that trust each other's host CA complete a BearSSL TLS
+##     1.2 mutual-auth handshake plus the leaf identity proof, and a real
+##     build on one is served to the other through the two-phase lookup
+##     INSIDE the tunnel (memo requests, an attested memo entry, and
+##     BLAKE3-verified blob fetches);
+##   * the nodes bind the declared interface — loopback, as none is
+##     declared — never a wildcard (FLOW-6);
 ##   * a third node whose certificate is not in the producer's anchors is
 ##     refused at the handshake and gets nothing;
 ##   * a TLS spec with no trust anchors refuses to start rather than falling
@@ -101,18 +106,19 @@ suite "peer-cache TLS through the CLI/daemon wiring":
     let cfgB0 = tlsConfigFor(base / "b")
     let cfgC0 = tlsConfigFor(base / "c")
     for cfg in [cfgA0, cfgB0, cfgC0]:
-      discard ensurePeerCacheTlsCert(cfg)
+      discard loadOrCreateHostIdentity(cfg.tlsCertPath, cfg.tlsKeyPath)
     cfgA0.trust(cfgB0, "b")
     cfgB0.trust(cfgA0, "a")
     cfgC0.trust(cfgA0, "a")       # C trusts A, but A does not trust C
 
     let hostA = startPeerCacheHost(cfgA0, nodeId('A'),
-      cacheRoot = base / "a-cache", listenAddr = "0.0.0.0")
+      cacheRoot = base / "a-cache")
     hosts.add(hostA)
     check hostA.server.trustMode == tmTls
+    check hostA.server.listenAddr == "127.0.0.1"   # declared: loopback
     let seedA = "127.0.0.1:" & $int(hostA.actualPort)
     let hostB = startPeerCacheHost(tlsConfigFor(base / "b", seedA),
-      nodeId('B'), cacheRoot = base / "b-cache", listenAddr = "0.0.0.0")
+      nodeId('B'), cacheRoot = base / "b-cache")
     hosts.add(hostB)
     # The identity is the certificate's, not the caller-supplied id.
     check hostA.selfPeerId == derivePeerIdFromPublicKey(
@@ -127,7 +133,8 @@ suite "peer-cache TLS through the CLI/daemon wiring":
       createDir(ws)
       writeFile(ws / "in.txt", "over tls\n")
     let hooksA = newPeerCacheEngineHooks(hostA.client,
-      openPeerCacheStorage(base / "a-cache"), hostA.registry)
+      openPeerCacheStorage(base / "a-cache"), hostA.registry,
+      hostA.attestorFor())
     let built = runBuild(copyAction(wsA),
       engineConfig(base / "a-cache", wsA, hooksA))
     checkpoint("producer: " & built.results[0].reason & " " &
@@ -137,7 +144,8 @@ suite "peer-cache TLS through the CLI/daemon wiring":
 
     # Consumer B gets it through the tunnel.
     let hooksB = newPeerCacheEngineHooks(hostB.client,
-      openPeerCacheStorage(base / "b-cache"), hostB.registry)
+      openPeerCacheStorage(base / "b-cache"), hostB.registry,
+      hostB.attestorFor())
     let fetched = runBuild(copyAction(wsB),
       engineConfig(base / "b-cache", wsB, hooksB))
     checkpoint("fetch: " & hooksB.stats.lastFetchReason & " install: " &
@@ -154,7 +162,7 @@ suite "peer-cache TLS through the CLI/daemon wiring":
 
     # Stranger C: its certificate is not among A's anchors.
     let hostC = startPeerCacheHost(tlsConfigFor(base / "c", seedA),
-      nodeId('C'), cacheRoot = base / "c-cache", listenAddr = "0.0.0.0")
+      nodeId('C'), cacheRoot = base / "c-cache")
     hosts.add(hostC)
     for _ in 0 ..< 40:
       if hostA.server.tlsHandshakeRejectedCount > 0: break

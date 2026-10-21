@@ -7,8 +7,11 @@
 ## action-cache root, serve two checkouts of the same project at different
 ## roots:
 ##
-##   1. Daemon A starts with the peer cache enabled (seed-only, loopback
-##      CIDR) and binds its peer-cache server on `0.0.0.0`.
+##   1. Daemon A starts with the peer cache enabled (seed-only, TLS with its
+##      own host CA, loopback CIDR) and binds its peer-cache server on the
+##      interface its policy declares — loopback, as no `bind=` is given.
+##      Since Distributed-Execution M7 it never binds a wildcard (FLOW-6),
+##      and the memoization plane needs authenticated, attested peers.
 ##   2. `repro build ws-a --daemon=require` runs THROUGH daemon A (the build
 ##      executes in A's forked worker, which publishes the two-phase memo
 ##      entry and output blobs into ws-a's action-cache root and registers
@@ -36,7 +39,8 @@
 ## which also covers the `mkdir -p build` probe described below.
 ##
 ## MOCK POLICY — none: real `repro` binaries, real daemons, real sockets,
-## real project builds, real disk stores. Multicast is turned off
+## real TLS with per-daemon host CAs pinned by each other, real project
+## builds, real disk stores. Multicast is turned off
 ## (`multicast=0`) so concurrent suite runs on this host cannot discover
 ## each other's daemons; discovery is by explicit seed, which is the
 ## spec's unicast mode (`Peer-Cache.md` §"Discovery model").
@@ -46,6 +50,8 @@ import std/[json, os, osproc, streams, strtabs, strutils, tables, tempfiles,
 
 import repro_test_support
 import repro_test_support/descendant_guard_expectations
+
+import ../../libs/repro_peer_cache/tests/m7_test_pki
 
 const
   ActionId = "m0-peer-cache-artifact"
@@ -76,6 +82,7 @@ type
     stateDir: string
     logPath: string
     cacheRoot: string
+    pki: TestNode
     process: Process
 
 proc nimString(value: string): string =
@@ -136,6 +143,7 @@ proc newNode(base, name: string): DaemonNode =
   result.cacheRoot = result.root / "action-cache"
   createDir(result.stateDir)
   createDir(result.cacheRoot)
+  result.pki = newTestNode(base, name)
 
 proc nodeEnv(node: DaemonNode): seq[(string, string)] =
   result = @[
@@ -143,7 +151,9 @@ proc nodeEnv(node: DaemonNode): seq[(string, string)] =
     ("REPRO_DAEMON_STATE_DIR", node.stateDir),
     ("REPROBUILD_ACTION_CACHE_ROOT", node.cacheRoot),
     ("REPROBUILD_STORE_ROOT", node.root / "store"),
-    ("REPRO_PORTABLE_CACHE", "1")
+    ("REPRO_PORTABLE_CACHE", "1"),
+    # `?tls=1` reads the host CA and anchors from here.
+    ("XDG_STATE_HOME", node.pki.xdgState)
   ]
   # The recipe compile needs a Nim compiler; reprobuild does not fall back
   # to PATH on its own (Distribution-And-Packaging M5 rule 2), so name the
@@ -266,16 +276,19 @@ suite "Distributed-Execution M0: daemon-hosted peer cache":
     let wsB = base / "ws-b"
     writeProject(wsA)
     writeProject(wsB)
+    mutualTrust([nodeA.pki, nodeB.pki])
     defer:
       stopDaemon(nodeB)
       stopDaemon(nodeA)
       removeDir(base)
 
     # 1. Daemon A, peer cache on, no seeds.
-    startDaemon(nodeA, "lan://127.0.0.0/8?multicast=0")
+    startDaemon(nodeA, "lan://127.0.0.0/8?multicast=0&tls=1")
     let portA = nodeA.peerCachePort()
     check portA > 0
-    check readFile(nodeA.stateDir / "peer-cache-endpoint").startsWith("0.0.0.0:")
+    # The declared interface — loopback — and never a wildcard.
+    check readFile(nodeA.stateDir / "peer-cache-endpoint").startsWith(
+      "127.0.0.1:")
 
     # 2. The producer build runs through daemon A, then its CLI exits.
     let producer = buildThroughDaemon(nodeA, wsA)
@@ -295,7 +308,7 @@ suite "Distributed-Execution M0: daemon-hosted peer cache":
 
     # 3. Daemon B, seeded with A.
     startDaemon(nodeB,
-      "lan://127.0.0.0/8?multicast=0&seeds=127.0.0.1:" & $portA)
+      "lan://127.0.0.0/8?multicast=0&tls=1&seeds=127.0.0.1:" & $portA)
     let connectDeadline = epochTime() + 30.0
     while nodeB.statusInt("peers_connected") < 1 and
         epochTime() < connectDeadline:

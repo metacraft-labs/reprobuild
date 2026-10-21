@@ -9,15 +9,34 @@
 ##
 ## See `Peer-Cache-Scale.md` §"Tier-2 cache hierarchy" and
 ## `Peer-Cache-Scale.milestones.org` §M2.
+##
+## Distributed-Execution M7 (threat model G27) made it a Boundary node like
+## every other peer-cache node:
+##
+## * its identity is a per-host CA (`--tls-cert`/`--tls-key` name
+##   `host-ca.crt`/`host-ca.key`) and it presents short-lived leaves; legacy
+##   long-lived certificates are refused from peers too
+##   (`requireShortLivedLeaves`);
+## * every frame passes the receiver gate and is AUDITED — to the off-host
+##   evidence sink (`--evidence=host:port`, its CA pinned at
+##   `<tls dir>/evidence-sink.crt`), which a listener off loopback requires;
+## * the CIDR allow-list defaults to loopback, and a listener off loopback
+##   needs an explicit `--cidr` (it used to default to `0.0.0.0/0`).
 
-import std/[asyncdispatch, os, parseopt, random, strutils, times]
+import std/[asyncdispatch, os, parseopt, random, sets, strutils, tables, times]
 
 import repro_peer_cache
 
 const
-  DefaultListen = "0.0.0.0:0"
+  DefaultListen = "127.0.0.1:0"
+    ## Loopback unless the operator names the rack interface's address
+    ## (`--listen=<addr>:<port>`); a wildcard is refused
+    ## (deployment-security-architecture.md FLOW-6).
   DefaultMaxStoreBytes = 10_737_418_240'u64  # 10 GiB
-  DefaultCidr = "0.0.0.0/0"
+  DefaultCidr = "127.0.0.0/8"
+    ## Defence in depth beside TLS: loopback unless the operator names the
+    ## rack's range (`--cidr`), which a non-loopback listener requires.
+  DefaultHeartbeatMs = 60_000
 
 type
   Tier2DaemonConfig* = object
@@ -32,14 +51,21 @@ type
     tlsCertPath*: string
       ## Peer-Cache-BearSSL M4: PEM-encoded X.509 leaf cert for `tmTls`.
       ## When this, `tlsKeyPath`, and `tlsTrustAnchorsPath` are all
-      ## non-empty (and the files exist), the daemon defaults its
-      ## `trustMode` to `tmTls`. Otherwise it falls back to `tmCidr`.
+      ## non-empty (and the files exist), the daemon runs in `tmTls`.
+      ## Otherwise it refuses to start (CIDR-only trust is removed).
     tlsKeyPath*: string
       ## Peer-Cache-BearSSL M4: ECDSA-P256 private-key file for `tmTls`
       ## (M1 `ecdsa-p256:<hex>` format).
     tlsTrustAnchorsPath*: string
       ## Peer-Cache-BearSSL M4: directory of PEM-encoded trust-anchor
       ## certs (one `*.crt` file per anchor).
+    evidenceSpec*: string
+      ## Distributed-Execution M7 (G27): `host:port` of the evidence sink
+      ## every audit record goes to. Required off loopback.
+    evidenceCaPath*: string
+      ## The sink's host CA; default `<tls dir>/evidence-sink.crt`.
+    explicitCidr*: bool
+    heartbeatMs*: int
 
   Tier2DaemonError* = object of CatchableError
 
@@ -87,9 +113,13 @@ proc defaultConfig*(): Tier2DaemonConfig =
   let envCert = getEnv("REPRO_PEER_CACHE_TLS_CERT")
   let envKey  = getEnv("REPRO_PEER_CACHE_TLS_KEY")
   let envAnch = getEnv("REPRO_PEER_CACHE_TLS_ANCHORS")
+  # The default listener is DefaultListen (loopback), never a wildcard
+  # (FLOW-6). It used to be "0.0.0.0" here while the constant above said
+  # loopback, so a daemon started without `--listen` bound every interface.
+  let listen = parseHostPort(DefaultListen)
   Tier2DaemonConfig(
-    listenHost: "0.0.0.0",
-    listenPort: Port(0),
+    listenHost: listen.host,
+    listenPort: listen.port,
     seeds: @[],
     cidrs: @[DefaultCidr],
     storeDir: storeDir,
@@ -97,11 +127,12 @@ proc defaultConfig*(): Tier2DaemonConfig =
     upstreamCacheUrl: "",
     peerIdPath: storeDir / "peer-id",
     tlsCertPath: (if envCert.len > 0: envCert
-                  else: tlsDir / "peer.crt"),
+                  else: tlsDir / "host-ca.crt"),
     tlsKeyPath:  (if envKey.len > 0: envKey
-                  else: tlsDir / "peer.key"),
+                  else: tlsDir / "host-ca.key"),
     tlsTrustAnchorsPath: (if envAnch.len > 0: envAnch
-                          else: tlsDir / "anchors"))
+                          else: tlsDir / "anchors"),
+    heartbeatMs: DefaultHeartbeatMs)
 
 proc parseConfig*(argv: openArray[string]): Tier2DaemonConfig =
   result = defaultConfig()
@@ -116,6 +147,10 @@ proc parseConfig*(argv: openArray[string]): Tier2DaemonConfig =
       case p.key
       of "listen":
         let ep = parseHostPort(p.val)
+        if isWildcard(ep.host):
+          raise newException(Tier2DaemonError,
+            "--listen=" & p.val & ": a wildcard bind is refused; name the " &
+            "address of the interface peers reach this node on (FLOW-6)")
         result.listenHost = ep.host
         result.listenPort = ep.port
       of "seed":
@@ -124,7 +159,14 @@ proc parseConfig*(argv: openArray[string]): Tier2DaemonConfig =
         if not explicitCidr:
           result.cidrs = @[]
           explicitCidr = true
+          result.explicitCidr = true
         result.cidrs.add(p.val)
+      of "evidence":
+        result.evidenceSpec = p.val
+      of "evidence-ca":
+        result.evidenceCaPath = p.val
+      of "heartbeat":
+        result.heartbeatMs = parseInt(p.val)
       of "store-dir":
         result.storeDir = p.val
         if result.peerIdPath == defaultConfig().peerIdPath:
@@ -200,6 +242,12 @@ type
     server*: PeerCacheServer
     client*: PeerCacheClient
     tier2*: Tier2Cache
+    identity*: HostIdentity
+    leaf*: LeafCredential
+      ## The current short-lived leaf, re-minted before expiry.
+    appender*: EvidenceAppender
+      ## Nil only for a loopback-only daemon without `--evidence`; its
+      ## audit lines then go to `<store dir>/audit.log`.
 
 proc resolveTrustMode*(config: Tier2DaemonConfig): TrustMode =
   ## Peer-Cache-BearSSL M4: tier-2 daemon TLS auto-defaulting.
@@ -214,8 +262,9 @@ proc resolveTrustMode*(config: Tier2DaemonConfig): TrustMode =
   ##
   ## When none of the three TLS paths is configured (the defaults
   ## resolve to `XDG_STATE_HOME/repro-peer-cache/tls/...` but the
-  ## operator hasn't placed any files there), the daemon falls back
-  ## to `tmCidr` with a `peer-cache: tmCidr trust mode` log line.
+  ## operator hasn't placed any files there), this returns `tmCidr` and
+  ## `bootDaemon` refuses to start: CIDR-only trust is removed
+  ## (Distributed-Execution M7, deviation D3).
   let havePaths = config.tlsCertPath.len > 0 and
                   config.tlsKeyPath.len > 0 and
                   config.tlsTrustAnchorsPath.len > 0
@@ -235,58 +284,117 @@ proc bootDaemon*(config: Tier2DaemonConfig;
   ##
   ## Peer-Cache-BearSSL M4: emits a one-line trust-mode banner to
   ## stderr unless `silent = true` (tests pass `silent = true`).
+  # Refused here too, not only in `parseConfig`: a config built in code
+  # never passes through the flag parser (FLOW-6).
+  if isWildcard(config.listenHost):
+    raise newException(Tier2DaemonError,
+      "listen address " & config.listenHost & " is a wildcard; name the " &
+      "address of the interface peers reach this node on (FLOW-6)")
   if not dirExists(config.storeDir):
     createDir(config.storeDir)
-  let peerId = loadOrCreatePeerId(config.peerIdPath)
+  # Peer-Cache-BearSSL M4: TLS-mode auto-defaulting + loud failure on
+  # half-configured paths.
+  let trustMode = resolveTrustMode(config)
+  if trustMode != tmTls:
+    # If any TLS path is configured (non-default) but the file is
+    # missing, say which (operator typos in the `--tls-*` flags).
+    if not fileExists(config.tlsCertPath) and fileExists(config.tlsKeyPath):
+      raise newException(Tier2DaemonError,
+        "configured --tls-cert path does not exist: " & config.tlsCertPath)
+    if not dirExists(config.tlsTrustAnchorsPath) and
+        fileExists(config.tlsCertPath):
+      raise newException(Tier2DaemonError,
+        "configured --tls-anchors directory does not exist: " &
+        config.tlsTrustAnchorsPath)
+    # CIDR-only trust is removed (Distributed-Execution M7, deviation D3):
+    # a node that admits callers by source address serves its store to
+    # every user of every host that can reach it.
+    raise newException(Tier2DaemonError,
+      "no host CA and trust anchors are configured (--tls-cert, --tls-key, " &
+      "--tls-anchors); CIDR-only trust is removed and the tier-2 daemon " &
+      "does not start without TLS")
+  let loopback = config.listenHost.startsWith("127.") or
+    config.listenHost == "localhost"
+  if not loopback and not config.explicitCidr:
+    raise newException(Tier2DaemonError,
+      "a listener on " & config.listenHost & " needs --cidr naming the " &
+      "rack's address range (the default allow-list is loopback)")
+  if not loopback and config.evidenceSpec.len == 0:
+    raise newException(Tier2DaemonError,
+      "a listener on " & config.listenHost & " audits every frame to an " &
+      "off-host evidence sink (FLOW-2); add --evidence=host:port")
+  # G27: a per-host CA and short-lived leaves, never a long-lived cert.
+  let identity = loadOrCreateHostIdentity(config.tlsCertPath,
+    config.tlsKeyPath)
+  let anchorSet = loadTrustAnchorDir(config.tlsTrustAnchorsPath)
+  if not silent:
+    stderr.writeLine("peer-cache: tmTls trust mode (host CA " &
+      config.tlsCertPath & ", anchors " & config.tlsTrustAnchorsPath & ")")
   let diskStore = newDiskStore(config.storeDir, config.maxStoreBytes)
   let endpoint = initEndpoint(config.listenHost, config.listenPort)
-  let registry = newPeerRegistry(peerId, endpoint)
+  # The node's id is its host CA's (G27), not a random peer-id file.
+  let registry = newPeerRegistry(identity.hostId, endpoint)
   let tier2 = newTier2Cache(diskStore, registry, upstream)
   var allowlist: seq[CidrV4] = @[]
   for cidr in config.cidrs:
     allowlist.add(parseCidrV4(cidr))
 
-  # Peer-Cache-BearSSL M4: TLS-mode auto-defaulting + loud failure on
-  # half-configured paths.
-  let trustMode = resolveTrustMode(config)
-  var ourCert: CertAndKey
-  var anchorSet: TrustAnchorSet
-  if trustMode == tmTls:
-    ourCert = loadCertAndKey(config.tlsCertPath, config.tlsKeyPath)
-    anchorSet = loadTrustAnchorDir(config.tlsTrustAnchorsPath)
-    if not silent:
-      stderr.writeLine("peer-cache: tmTls trust mode (cert=" &
-        config.tlsCertPath & " key=" & config.tlsKeyPath &
-        " anchors=" & config.tlsTrustAnchorsPath & ")")
-  else:
-    # If any TLS path is configured (non-default) but the file is
-    # missing, refuse to start. This catches operator typos in the
-    # `--tls-*` flags.
-    let userCertConfigured =
-      getEnv("REPRO_PEER_CACHE_TLS_CERT").len > 0 or
-      config.tlsCertPath != defaultTlsDir() / "peer.crt"
-    let userKeyConfigured =
-      getEnv("REPRO_PEER_CACHE_TLS_KEY").len > 0 or
-      config.tlsKeyPath != defaultTlsDir() / "peer.key"
-    let userAnchorsConfigured =
-      getEnv("REPRO_PEER_CACHE_TLS_ANCHORS").len > 0 or
-      config.tlsTrustAnchorsPath != defaultTlsDir() / "anchors"
-    if userCertConfigured and not fileExists(config.tlsCertPath):
+  let daemon = Tier2Daemon(config: config, selfPeerId: identity.hostId,
+    diskStore: diskStore, registry: registry, tier2: tier2,
+    identity: identity, leaf: mintLeaf(identity, lrDaemon))
+  let leafProvider = proc(): LeafCredential {.gcsafe, closure.} =
+    {.cast(gcsafe).}:
+      if daemon.leaf.needsRenewal:
+        daemon.leaf = mintLeaf(daemon.identity, lrDaemon)
+      daemon.leaf
+  if config.evidenceSpec.len > 0:
+    let caPath =
+      if config.evidenceCaPath.len > 0: config.evidenceCaPath
+      else: config.tlsTrustAnchorsPath.parentDir / "evidence-sink.crt"
+    if not fileExists(caPath):
       raise newException(Tier2DaemonError,
-        "configured --tls-cert path does not exist: " & config.tlsCertPath)
-    if userKeyConfigured and not fileExists(config.tlsKeyPath):
-      raise newException(Tier2DaemonError,
-        "configured --tls-key path does not exist: " & config.tlsKeyPath)
-    if userAnchorsConfigured and not dirExists(config.tlsTrustAnchorsPath):
-      raise newException(Tier2DaemonError,
-        "configured --tls-anchors directory does not exist: " &
-        config.tlsTrustAnchorsPath)
-    if not silent:
-      stderr.writeLine(
-        "peer-cache: tmCidr trust mode (no TLS cert/key/anchors configured)")
-
-  let server = newPeerCacheServer(
-    selfPeerId = peerId,
+        "the evidence sink's CA is not provisioned at " & caPath)
+    daemon.appender = newEvidenceAppender(parseSinkEndpoint(config.evidenceSpec),
+      leafProvider, loadTrustAnchorFile(caPath),
+      expectedSink = derivePeerIdFromPublicKey(certPublicKey(certPemToDer(
+        readFile(caPath)))))
+    for detector in ["boundary-gate", "peer-cache-content", "peer-suspicion"]:
+      daemon.appender.registerDetector(detector, config.heartbeatMs)
+  let auditLog = config.storeDir / "audit.log"
+  let app = daemon.appender
+  let auditSink = proc(event: AuditEvent) {.gcsafe, closure.} =
+    {.cast(gcsafe).}:
+      let fields = @[
+        ("peer", (if event.caller.authenticated: $event.caller.hostId
+                  else: "anonymous")),
+        ("leafRole", $event.caller.leafRole),
+        ("peerAddress", event.caller.address),
+        ("messageKind", event.message), ("direction", event.direction),
+        ("size", $event.payloadLen)]
+      let record =
+        if event.decision.allowed:
+          newEvidenceRecord(ecAudit, "boundary-gate", event.message, fields,
+            event.payload)
+        else:
+          newEvidenceRecord(ecDetection, "boundary-gate", "frame-refused",
+            fields & @[("refusal", $event.decision.refusal),
+                       ("reason", event.decision.reason),
+                       ("suppressed", $event.suppressed)], event.payload)
+      if not app.isNil:
+        app.append(record)
+      else:
+        try:
+          let f = open(auditLog, fmAppend)
+          defer: f.close()
+          f.writeLine($getTime().toUnix & " " & describe(redact(record)))
+        except CatchableError:
+          discard
+  var policy = defaultAuthorizationPolicy()
+  policy.requireAnchored = true
+  for id, entry in anchorSet.byPeerId.pairs:
+    if entry.isCa: policy.anchoredHosts.incl(id)
+  daemon.server = newPeerCacheServer(
+    selfPeerId = identity.hostId,
     listenAddr = config.listenHost,
     listenPort = config.listenPort,
     registry = registry,
@@ -294,28 +402,30 @@ proc bootDaemon*(config: Tier2DaemonConfig;
     maxBlobBytes = DefaultMaxBlobBytes,
     localStoreReader = makeTier2StoreReader(tier2),
     capTier2 = true,
-    trustMode = trustMode,
-    ourCert = ourCert,
-    trustAnchorSet = anchorSet)
-  let client = newPeerCacheClient(
-    selfPeerId = peerId,
+    trustMode = tmTls,
+    trustAnchorSet = anchorSet,
+    gate = newReceiverGate(policy, auditSink))
+  daemon.server.leafProvider = leafProvider
+  daemon.server.requireShortLivedLeaves = true
+  if not app.isNil:
+    daemon.server.reporter = app.reporter()
+  daemon.client = newPeerCacheClient(
+    selfPeerId = identity.hostId,
     listenPort = uint16(config.listenPort),
     registry = registry,
     seedPeers = config.seeds,
     cidrAllowlist = allowlist,
     localStoreWriter = makeTier2StoreWriter(tier2),
     capTier2 = true,
-    trustMode = trustMode,
-    ourCert = ourCert,
+    trustMode = tmTls,
     trustAnchorSet = anchorSet)
-  result = Tier2Daemon(
-    config: config,
-    selfPeerId: peerId,
-    diskStore: diskStore,
-    registry: registry,
-    server: server,
-    client: client,
-    tier2: tier2)
+  daemon.client.leafProvider = leafProvider
+  daemon.client.requireShortLivedLeaves = true
+  daemon.client.gate.policy = policy
+  daemon.client.gate.audit = auditSink
+  if not app.isNil:
+    daemon.client.reporter = app.reporter()
+  result = daemon
 
 proc start*(daemon: Tier2Daemon) {.async.} =
   daemon.server.start()
@@ -347,4 +457,6 @@ when isMainModule:
   # Block until interrupted; the SWIM/multicast loops drive
   # discovery + advertisement on the running async dispatcher.
   while true:
-    poll(1000)
+    try: poll(1000) except ValueError: sleep(1000)
+    if not daemon.appender.isNil:
+      daemon.appender.tickHeartbeats()

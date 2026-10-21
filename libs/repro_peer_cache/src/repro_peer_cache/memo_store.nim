@@ -39,7 +39,11 @@ import ./types
 
 const
   MemoEntryMagic = "RPME"
-  MemoEntryVersion = 1'u16
+  MemoEntryVersion = 2'u16
+    ## v2 (Distributed-Execution M7) appends the issuer attestation. A v1
+    ## entry still decodes — with an empty attestation, which every
+    ## consumer refuses (`memo_attestation.nim`).
+  MaxIssuerLeafBytes* = 8 * 1024
   MemoEntryExt = ".rpme"
   MemoStoreLayoutDir = "v1"
   PathSetMagic = "RPPS"
@@ -77,6 +81,14 @@ type
       ## CAS digests of every output blob the record references, in record
       ## order. Kept beside the record so the store can advertise them
       ## without decoding it.
+    # Distributed-Execution M7 issuer binding (`memo_attestation.nim`): who
+    # computed this execution, signed with their short-lived leaf. Carried
+    # unchanged when a node re-serves an entry it fetched, so the record of
+    # WHO published it survives every hop (and M8 can revoke by issuer).
+    issuerHostId*: PeerId
+    issuerLeafDer*: seq[byte]
+    issuedAtUnix*: int64
+    issuerSignature*: seq[byte]
 
   PeerMemoStore* = object
     root*: string
@@ -260,15 +272,27 @@ proc encodeMemoEntry*(entry: MemoEntry): seq[byte] =
   result.putU32(uint32(entry.outputDigests.len))
   for d in entry.outputDigests:
     result.putDigest(d)
+  result.putU32(uint32(entry.issuerLeafDer.len))
+  for b in entry.issuerLeafDer:
+    result.add(b)
+  for shift in countup(0, 56, 8):
+    result.add(byte((cast[uint64](entry.issuedAtUnix) shr uint64(shift)) and
+      0xff'u64))
+  for b in bytes(entry.issuerHostId):
+    result.add(b)
+  result.putU32(uint32(entry.issuerSignature.len))
+  for b in entry.issuerSignature:
+    result.add(b)
 
 proc decodeMemoEntryHeader(data: openArray[byte]):
-    tuple[weak, pathSet, strong: BlobDigest; pos: int] =
+    tuple[weak, pathSet, strong: BlobDigest; pos: int; version: uint16] =
   checkMagic(data, MemoEntryMagic, "memo entry")
   var pos = MemoEntryMagic.len
   let version = getU16(data, pos, "memo entry version")
-  if version != MemoEntryVersion:
+  if version != MemoEntryVersion and version != 1'u16:
     raise newException(PeerMemoStoreError,
       "unsupported memo entry version " & $version)
+  result.version = version
   result.weak = getDigest(data, pos, "memo entry weak fingerprint")
   result.pathSet = getDigest(data, pos, "memo entry path set digest")
   result.strong = getDigest(data, pos, "memo entry strong fingerprint")
@@ -296,6 +320,35 @@ proc decodeMemoEntry*(data: openArray[byte]): MemoEntry =
   need(data, pos, outputs * 32, "memo entry output digests")
   for _ in 0 ..< outputs:
     result.outputDigests.add(getDigest(data, pos, "memo entry output digest"))
+  if header.version >= 2'u16:
+    let leafLen = int(getU32(data, pos, "memo entry issuer leaf length"))
+    if leafLen > MaxIssuerLeafBytes:
+      raise newException(PeerMemoStoreError, "issuer leaf too large")
+    need(data, pos, leafLen, "memo entry issuer leaf")
+    result.issuerLeafDer = newSeq[byte](leafLen)
+    for i in 0 ..< leafLen:
+      result.issuerLeafDer[i] = data[pos + i]
+    pos += leafLen
+    need(data, pos, 8, "memo entry issuance time")
+    var t = 0'u64
+    for i in 0 ..< 8:
+      t = t or (uint64(data[pos + i]) shl uint64(8 * i))
+    pos += 8
+    result.issuedAtUnix = cast[int64](t)
+    var raw: array[32, byte]
+    need(data, pos, 32, "memo entry issuer")
+    for i in 0 ..< 32:
+      raw[i] = data[pos + i]
+    pos += 32
+    result.issuerHostId = peerIdFromBytes(raw)
+    let sigLen = int(getU32(data, pos, "memo entry signature length"))
+    if sigLen > 128:
+      raise newException(PeerMemoStoreError, "issuer signature too large")
+    need(data, pos, sigLen, "memo entry signature")
+    result.issuerSignature = newSeq[byte](sigLen)
+    for i in 0 ..< sigLen:
+      result.issuerSignature[i] = data[pos + i]
+    pos += sigLen
   if pos != data.len:
     raise newException(PeerMemoStoreError, "trailing bytes after memo entry")
 
@@ -323,16 +376,18 @@ proc readBytesFile(path: string): seq[byte] =
   if raw.len > 0:
     copyMem(addr result[0], unsafeAddr raw[0], raw.len)
 
-proc writeMemoEntry*(store: PeerMemoStore; entry: MemoEntry): bool
-    {.discardable.} =
+proc writeMemoEntry*(store: PeerMemoStore; entry: MemoEntry;
+                     replace = false): bool {.discardable.} =
   ## Persists `entry` under its own `(weak, strong)` file. Returns `true`
   ## when the file was newly created, `false` when an entry for the same
   ## selector already existed (it is left untouched: a strong fingerprint
   ## names one execution's observed inputs, so a second writer for the same
   ## selector describes the same computation and BuildXL's cache-convergence
-  ## rule says the first published result stands).
+  ## rule says the first published result stands). `replace` overwrites it
+  ## — only for the issuer refreshing its own attestation of the same
+  ## record (Distributed-Execution M7, threat model G15).
   let path = store.entryPath(entry.weakFingerprint, entry.strongFingerprint)
-  if fileExists(path):
+  if fileExists(path) and not replace:
     return false
   createDir(path.parentDir)
   let bytes = encodeMemoEntry(entry)

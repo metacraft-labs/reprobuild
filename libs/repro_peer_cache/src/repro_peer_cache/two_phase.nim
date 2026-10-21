@@ -37,6 +37,9 @@ import repro_cas_store
 import repro_local_store
 
 import ./client
+import ./evidence_record
+import ./identity
+import ./memo_attestation
 import ./memo_store
 import ./types
 import ./workspace_paths
@@ -368,7 +371,8 @@ proc blobDigestOf(blob: CasBlobRef): BlobDigest =
 
 proc publishTwoPhase*(store: PeerMemoStore; cas: var CasStore;
                       record: ActionResultRecord;
-                      ctx: TwoPhaseContext): TwoPhasePublishOutcome =
+                      ctx: TwoPhaseContext;
+                      attestor: LeafProvider = nil): TwoPhasePublishOutcome =
   ## Publishes one freshly recorded execution into the two-phase stores.
   ##
   ## Refuses (returns `published = false` with a reason) rather than
@@ -379,10 +383,17 @@ proc publishTwoPhase*(store: PeerMemoStore; cas: var CasStore;
   ##     execution);
   ##   * an input that cannot be read (its identity would be meaningless).
   ##
+  ##   * no issuer identity (`attestor` nil): an unattested entry is one
+  ##     every consumer refuses (Distributed-Execution M7), so the memo
+  ##     plane needs a node with a host identity (`tls=1`).
+  ##
   ## On success the PathSet blob is in the CAS under its BLAKE3-256 digest,
   ## the memo entry is on disk under `(peerKey, strong)`, and `advertKeys`
   ## lists what the caller should advertise. Re-publishing the same
   ## execution is idempotent and never rewrites another selector's entry.
+  if attestor.isNil:
+    return TwoPhasePublishOutcome(reason: "no issuer identity to attest " &
+      "the entry with (the memoization plane requires tls=1)")
   if record.outputPayloadKind != opkCasBlobs:
     return TwoPhasePublishOutcome(reason: "record carries no output payloads")
   var outputDigests: seq[BlobDigest] = @[]
@@ -418,12 +429,17 @@ proc publishTwoPhase*(store: PeerMemoStore; cas: var CasStore;
     return TwoPhasePublishOutcome(reason: "CAS returned a different digest " &
       "for the path set blob")
   let strong = twoPhaseStrongFingerprint(ctx.peerKey, pathSetDigest, identities)
-  let entry = MemoEntry(
+  var entry = MemoEntry(
     weakFingerprint: ctx.peerKey,
     pathSetDigest: pathSetDigest,
     strongFingerprint: strong,
     recordBytes: encodeActionResultRecord(normalized),
     outputDigests: outputDigests)
+  try:
+    attest(entry, attestor())
+  except CatchableError as err:
+    return TwoPhasePublishOutcome(reason: "cannot attest the entry: " &
+      err.msg)
   result.newlyWritten = store.writeMemoEntry(entry)
   result.published = true
   result.entry = entry
@@ -482,6 +498,13 @@ proc fetchTwoPhase*(client: PeerCacheClient; ctx: TwoPhaseContext;
   ## never raises for peer misbehaviour (a reply that fails a check is
   ## skipped and the next candidate tried).
   var outcome = TwoPhaseFetchOutcome()
+  if client.trustMode != tmTls:
+    # Memo entries are accepted only with a verified issuer attestation,
+    # which needs trust anchors; a CIDR-only node has none (and peers do
+    # not answer an unauthenticated memo query).
+    outcome.reason = "the memoization plane requires authenticated " &
+      "issuers (tls=1)"
+    return outcome
   let offered = await client.requestSelectors(ctx.peerKey)
   outcome.selectorsOffered = offered.len
   if offered.len == 0:
@@ -535,29 +558,59 @@ proc fetchTwoPhase*(client: PeerCacheClient; ctx: TwoPhaseContext;
         continue
       var entry: MemoEntry
       var record: ActionResultRecord
+      # Every check below that fails is a REJECTION, REPORTED off-host, and
+      # the serving peer is marked suspect (DET-2: a cache that quietly
+      # drops a poisoned record teaches us nothing about who sent it).
+      template report(trigger, why: string) =
+        outcome.reason = why
+        client.reportDetection(newEvidenceRecord(ecDetection,
+          "peer-cache-memo", trigger,
+          [("peer", $item.peerId), ("weakFingerprint", $ctx.peerKey),
+           ("strongFingerprint", $strong), ("pathSetDigest", $psd),
+           ("issuer", $entry.issuerHostId), ("reason", why)],
+          payload = entryBytes.get()))
+      template reject(trigger, why: string) =
+        report(trigger, why)
+        client.markPeerSuspect(item.peerId, trigger, why)
       try:
         entry = decodeMemoEntry(entryBytes.get())
         record = decodeActionResultRecord(entry.recordBytes)
       except CatchableError as err:
-        outcome.reason = "malformed memo entry: " & err.msg
+        reject("selector-validation-failed", "malformed memo entry: " &
+          err.msg)
         continue
       if entry.weakFingerprint != ctx.peerKey or
           entry.pathSetDigest != psd or entry.strongFingerprint != strong:
-        outcome.reason = "memo entry does not describe the requested selector"
+        reject("memo-selector-mismatch",
+          "memo entry does not describe the requested selector")
+        continue
+      let verdict = verifyAttestation(entry, client.trustAnchorSet,
+        client.revokedIssuers)
+      if verdict.expired:
+        # Judged at OUR clock the issuer's leaf has expired (threat model
+        # G15). Refused and reported, but an expired attestation is not
+        # evidence that the serving peer forged anything: no suspicion.
+        report("memo-attestation-expired", verdict.reason)
+        continue
+      if not verdict.ok:
+        reject("memo-issuer-unbound", verdict.reason)
         continue
       if pathSetOf(record) != pathSet:
-        outcome.reason = "memo entry record disagrees with its path set"
+        reject("selector-validation-failed",
+          "memo entry record disagrees with its path set")
         continue
       if record.outputPayloadKind != opkCasBlobs or
           record.outputs.len != entry.outputDigests.len:
-        outcome.reason = "memo entry carries no restorable outputs"
+        reject("selector-validation-failed",
+          "memo entry carries no restorable outputs")
         continue
       var consistent = true
       for i, output in record.outputs:
         if blobDigestOf(output.blob) != entry.outputDigests[i]:
           consistent = false
       if not consistent:
-        outcome.reason = "memo entry output digests disagree with its record"
+        reject("selector-validation-failed",
+          "memo entry output digests disagree with its record")
         continue
       var blobs: seq[seq[byte]] = @[]
       var complete = true

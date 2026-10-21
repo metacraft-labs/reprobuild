@@ -436,6 +436,12 @@ for libName in [
   "repro_test_support",
   "repro_workspace_manifests",
   "repro_peer_cache",
+  # Distributed-Execution M7: the receiver half of remote goals. Snapshot
+  # manifests + tree verification + materialization (M1 extends with
+  # capture and the worktree pool), and the worker that executes ONLY
+  # nodes of a hydrated graph descriptor inside a confined execution lease.
+  "repro_workspace_snapshot",
+  "repro_distributed_worker",
   # ReproOS-Generations-And-Foreign-Packages A2: binary-cache server
   # library + apps/repro-binary-cache HTTP daemon. Layer-3 substitute
   # plane per Binary-Caches.md; see THREE-LAYER-TAXONOMY.md.

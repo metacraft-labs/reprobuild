@@ -633,6 +633,70 @@ proc decodeSwimRefute*(data: openArray[byte]): SwimMember =
       "trailing bytes after SwimRefute payload: " & $(data.len - pos))
 
 # ---------------------------------------------------------------------------
+# Distributed-Execution M7: identity proof and refusal notices.
+# ---------------------------------------------------------------------------
+
+const
+  MaxIdentityProofBytes* = 8 * 1024
+  MaxRefusalReasonBytes* = 512
+
+type
+  RefusedNotice* = object
+    ## What a receiver tells a sender about a frame it refused. The reason
+    ## is diagnostic only; the refusal class is the contract.
+    refusedTag*: uint16
+    refusalClass*: uint8
+    reason*: string
+
+proc encodeIdentityProof*(leafDer: openArray[byte]): seq[byte] =
+  result = @[]
+  result.writeU32(uint32(leafDer.len))
+  for b in leafDer:
+    result.add(b)
+
+proc decodeIdentityProof*(data: openArray[byte]): seq[byte] =
+  var pos = 0
+  let n = int(readU32(data, pos))
+  if n > MaxIdentityProofBytes:
+    raise newException(PeerCacheCodecError, "identity proof too large: " & $n)
+  ensureBytes(data.len - pos, n, "identity proof")
+  result = newSeq[byte](n)
+  for i in 0 ..< n:
+    result[i] = data[pos + i]
+  pos += n
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after IdentityProof payload")
+
+proc encodeRefused*(msg: RefusedNotice): seq[byte] =
+  result = @[]
+  result.writeU16(msg.refusedTag)
+  result.writeU8(msg.refusalClass)
+  let reason =
+    if msg.reason.len > MaxRefusalReasonBytes:
+      msg.reason[0 ..< MaxRefusalReasonBytes]
+    else: msg.reason
+  result.writeU32(uint32(reason.len))
+  for ch in reason:
+    result.add(byte(ord(ch)))
+
+proc decodeRefused*(data: openArray[byte]): RefusedNotice =
+  var pos = 0
+  result.refusedTag = readU16(data, pos)
+  result.refusalClass = readU8(data, pos)
+  let n = int(readU32(data, pos))
+  if n > MaxRefusalReasonBytes:
+    raise newException(PeerCacheCodecError, "refusal reason too long")
+  ensureBytes(data.len - pos, n, "refusal reason")
+  result.reason = newString(n)
+  for i in 0 ..< n:
+    result.reason[i] = char(data[pos + i])
+  pos += n
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after Refused payload")
+
+# ---------------------------------------------------------------------------
 # Frame encode / decode.
 # ---------------------------------------------------------------------------
 
@@ -816,6 +880,12 @@ proc dispatch*(frame: Frame;
   of mkGetActionRecordResponse:
     if not onGetActionRecordResponse.isNil:
       onGetActionRecordResponse(decodeGetActionRecordResponse(frame.payload))
+  of mkIdentityProof, mkRefused, mkReachGoalRequest, mkReachGoalResponse,
+     mkAttach, mkGraphDescriptorFetch, mkExecutePips, mkNotifyPipResults,
+     mkShardDispatch:
+    # Distributed-Execution M7 Boundary messages are handled by the
+    # server's gate and the worker receiver, not by this table.
+    discard
 
 # ---------------------------------------------------------------------------
 # Hex helpers — useful for diagnostics + test failure messages.

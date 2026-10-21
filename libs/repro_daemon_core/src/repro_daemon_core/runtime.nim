@@ -105,6 +105,11 @@ type
       ## Explicit lease state-store root override (``--state-root``). Empty
       ## => derived from ``systemScope`` via ``leaseStoreRootForScope``. A
       ## hermetic test points this at a throwaway dir under ``$HOME``.
+    trustProfile*: string
+      ## Distributed-Execution M7: ``--trust-profile=trusted|hardened`` —
+      ## the peer-cache node's and worker role's trust profile. Empty =
+      ## whatever the spec says (``profile=``), and ``trusted`` when it says
+      ## nothing. Validated where the spec is parsed.
     peerCacheSpec*: string
       ## Distributed-Execution M0: ``--peer-cache=<spec>`` — when non-empty
       ## the daemon hosts the long-lived LAN peer-cache service (server,
@@ -3358,6 +3363,9 @@ proc daemonProcessArgs(config: UserDaemonConfig): seq[string] =
   if config.peerCacheSpec.len > 0:
     result.add("--peer-cache")
     result.add(config.peerCacheSpec)
+  if config.trustProfile.len > 0:
+    result.add("--trust-profile")
+    result.add(config.trustProfile)
 
 proc legacyLaunchdLabel(config: UserDaemonConfig): string =
   ## The label binaries before the endpoint-keyed naming registered: the
@@ -4129,6 +4137,8 @@ proc parseUserDaemonConfigFlags*(args: seq[string];
       result.config.leaseStoreRoot = valueFor("--state-root")
     elif raw == "--peer-cache" or raw.startsWith("--peer-cache="):
       result.config.peerCacheSpec = valueFor("--peer-cache")
+    elif raw == "--trust-profile" or raw.startsWith("--trust-profile="):
+      result.config.trustProfile = valueFor("--trust-profile")
     else:
       result.rest.add(raw)
     inc i
@@ -4139,7 +4149,7 @@ proc parseUserDaemonConfigFlags*(args: seq[string];
 proc userDaemonUsage*(): string =
   "usage: repro-daemon [--foreground] [--dev] [--system] [--endpoint PATH] " &
     "[--state-dir PATH] [--log PATH] [--state-root PATH] " &
-    "[--peer-cache SPEC]"
+    "[--peer-cache SPEC] [--trust-profile trusted|hardened]"
 
 proc runUserDaemonCommand*(args: seq[string]): int =
   if args.len == 1 and args[0] in ["--help", "-h"]:

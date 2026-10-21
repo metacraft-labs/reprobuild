@@ -78,6 +78,21 @@ type
     mkGetActionRecordRequest = 19  ## "Send the memo entry for this
                                    ## (WeakFingerprint, StrongFingerprint)."
     mkGetActionRecordResponse = 20 ## Memo entry bytes, or `found = false`.
+    # Distributed-Execution M7: the Boundary vocabulary
+    # (`boundary.nim`, `spec/Distributed-Execution.md` §"Worker Boundary
+    # Vocabulary"). Contiguous with the memo tags for the same reason.
+    mkIdentityProof = 21           ## The sender's short-lived leaf
+                                   ## certificate DER (`identity.nim`).
+    mkRefused = 22                 ## Receiver -> sender: a frame was refused
+                                   ## (refusal class + reason).
+    mkReachGoalRequest = 23        ## Orchestrator -> worker: reach a node of
+                                   ## a hydrated graph descriptor.
+    mkReachGoalResponse = 24       ## Worker -> orchestrator: the outcome.
+    mkAttach = 25                  ## Reserved (M4): BuildXL Attach.
+    mkGraphDescriptorFetch = 26    ## Reserved (M4).
+    mkExecutePips = 27             ## Reserved (M4).
+    mkNotifyPipResults = 28        ## Reserved (M4).
+    mkShardDispatch = 29           ## Reserved (M3).
 
   AdvertiseMode* = enum
     amSnapshot = 0
@@ -390,10 +405,13 @@ type
     ## Peer-Cache-BearSSL M3: how the peer authenticates inbound +
     ## outbound peers.
     ##
-    ## `tmCidr` (the M0-M2 default) drops the trust check at the CIDR
-    ## allowlist layer — fine for tightly controlled loopback /
-    ## intra-DC operator deployments where the network already
-    ## isolates the cluster.
+    ## `tmCidr` drops the trust check to the CIDR allowlist. Since
+    ## Distributed-Execution M7 (deviation D3 closed) it is an IN-PROCESS
+    ## HARNESS mode only: no shipped entry point constructs it — the CLI
+    ## and daemon wiring (`peer_cache_wiring.validateListenerPolicy`) and
+    ## the tier-2 daemon refuse it — and `server.start` refuses it on any
+    ## address but loopback. A source address is not an identity: even on
+    ## loopback it admits every local user, not the node's owner.
     ##
     ## `tmTls` wraps every accept/dial with a BearSSL TLS 1.2 mutual-
     ## auth context (see `tls.nim`) backed by the M2 self-signed
@@ -422,6 +440,21 @@ type
     swimConfirmTimeoutMs*: int
     swimGossipMessageCap*: int
     swimGossipMaxForwards*: int
+
+  TrustProfile* = enum
+    ## Distributed-Execution M7, trust profiles (operator decision
+    ## 2026-10-20; `spec/Distributed-Execution-Threat-Model.md` §3a).
+    ## `tpTrusted` is the DEFAULT (the first value, so a zero-initialized
+    ## config is trusted): a single-owner fleet where every enrolled host
+    ## and requester is trusted, the sandbox serves correctness, identities
+    ## are pinned long-lived host keys, and detections go to the
+    ## content-addressed execution record and the local log. `tpHardened`
+    ## is opt-in (`lan://…?profile=hardened`, `--trust-profile=hardened`):
+    ## one-hour host-CA leaves, the off-host evidence sink, the off-worker
+    ## certificate signer, and no macOS or Windows worker until a VM-grade
+    ## boundary exists for them.
+    tpTrusted = "trusted"
+    tpHardened = "hardened"
 
   PeerCacheConfig* = object
     ## Unified peer-cache configuration. The CLI parser produces one of
@@ -488,6 +521,55 @@ type
       ## multicast group (no join, no broadcast) so it discovers peers only
       ## through `seedPeers`. Negative-sense so every existing config keeps
       ## multicast on. Set by `lan://...?multicast=0`.
+      ## Distributed-Execution M7: `parsePeerCache` now sets it for every
+      ## `lan://` spec unless `multicast=1` is given — discovery broadcasts
+      ## on a shared LAN are opt-in, and discovery is never authorization.
+    bindSpec*: string
+      ## Distributed-Execution M7 (FLOW-6): the interface name or address
+      ## the listener binds (`lan://...?bind=wt0`). Empty = loopback only.
+      ## Wildcards are refused (`netif.resolveBindSpec`).
+    trustProfile*: TrustProfile
+      ## Distributed-Execution M7: `trusted` (default) or `hardened`
+      ## (`lan://…?profile=`; `--trust-profile=`). See `TrustProfile`.
+    evidenceSinkSpec*: string
+      ## Distributed-Execution M7 (FLOW-2, DET-6): `host:port` of the
+      ## off-host evidence sink every audit record and detection is sent
+      ## to (`lan://...?evidence=host:port`). Required for any listener
+      ## that is not loopback-only.
+    grantsPath*: string
+      ## Distributed-Execution M7 (FLOW-4): per-host role grants
+      ## (`boundary.loadGrantsFile`). Empty = the TLS directory's `grants`
+      ## file when present, else every authenticated host is a cache peer.
+    heartbeatIntervalMs*: int
+      ## Distributed-Execution M7 (DET-5): detector heartbeat interval.
+      ## 0 = 60 s.
+    workerEnabled*: bool
+      ## Distributed-Execution M7: this node holds the worker role and
+      ## answers `mkReachGoalRequest` (`lan://...?worker=1`).
+    workerReposPath*: string
+      ## Distributed-Execution M7: a file of `<repoId> <local repository
+      ## cache path>` lines naming the base-commit caches the worker
+      ## materializes snapshots from (`repos=<path>`).
+    workerEgress*: seq[string]
+      ## Distributed-Execution M7 (FLOW-3): the execution-lease egress
+      ## allow-list, `name@ipv4:port` each (`egress=a@1.2.3.4:80,...`).
+      ## Nothing else — not even this node's own listener (threat model
+      ## G26: a lease holds no credential to talk to it, so reaching it was
+      ## only attack surface). A lease that needs a peer cache is given one
+      ## here (`egress=peer-cache@<cache node>:<port>`).
+    signerSpec*: string
+      ## Distributed-Execution M7 (EDGE-5, threat model D5): `host:port` of
+      ## the certificate signer (`lan://...?signer=host:port`). A worker
+      ## holds no signing credential; it asks the signer, which holds the
+      ## per-worker signing CA, once per certificate. Without it the worker
+      ## issues no certificates.
+    evidenceQueueMax*: int
+      ## Records the evidence appender queues while the sink is slow or
+      ## unreachable (`evidence-queue=N`); 0 = the default (100 000).
+    leaseMemoryMax*: int64
+      ## Bytes of memory one execution lease may use when the worker can
+      ## place leases in their own cgroup (`lease-memory=N`); 0 = the
+      ## default (threat model G31).
 
 const
   DefaultMulticastAddress* = "224.0.0.123"

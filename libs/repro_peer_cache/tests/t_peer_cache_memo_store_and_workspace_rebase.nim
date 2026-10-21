@@ -8,16 +8,22 @@
 ##   a second write for an existing selector never clobbers it, a file whose
 ##   content disagrees with its name is not served, and the advertisement
 ##   set carries the memo key plus every content blob;
-## * the memoization plane over loopback TCP: a server wired to a memo store
-##   answers selector and entry requests, and a content-plane request for a
-##   memo key is an honest miss, never a suspect mark.
+## * the memoization plane over loopback TCP: an anonymous (CIDR-only)
+##   caller is refused it per message (Distributed-Execution M7), and a
+##   server wired to a memo store answers an authenticated peer's selector
+##   and entry requests over TLS, while a content-plane request for a memo
+##   key is an honest miss, never a suspect mark.
 ##
-## No mocks: real files in a temp dir and real loopback sockets.
+## No mocks: real files in a temp dir, real loopback sockets, real TLS with
+## host-CA leaves.
 
 import std/[asyncdispatch, options, os, strutils, tables, tempfiles, unittest]
 
 import repro_local_store
 import repro_peer_cache
+import repro_cli_support/peer_cache_wiring
+
+import ./m7_test_pki
 
 proc digestN(seed: byte): BlobDigest =
   var raw: array[32, byte]
@@ -230,40 +236,83 @@ suite "Distributed-Execution M0: memo store":
 
 suite "Distributed-Execution M0: memoization plane over loopback TCP":
 
-  test "selector and entry requests are served; memo keys are not content":
-    let root = createTempDir("m0-memo-tcp-", "")
+  test "an anonymous CIDR-only caller is refused the memoization plane":
+    # Distributed-Execution M7 (FLOW-4): memo queries need an authenticated
+    # caller — a memo entry is only ever accepted with a verified issuer
+    # attestation, and an anonymous node can verify none — so the receiver
+    # refuses them per message, and serves nothing.
+    let root = createTempDir("m0-memo-anon-", "")
     defer: removeDir(root)
     let store = openPeerMemoStore(root)
-    let weak = digestN(21)
-    let entry = entryFor(weak, 6)
-    store.writeMemoEntry(entry)
+    let weak = digestN(31)
+    store.writeMemoEntry(entryFor(weak, 7))
     var peers = spawnLoopbackPeers(2)
     defer: waitFor shutdownLoopbackPeers(peers)
     waitFor dialAllLoopbackClients(peers)
     let server = peers[1].server
     server.memoSelectorReader = proc(w: BlobDigest): seq[MemoSelector] =
       store.listSelectors(w)
-    server.memoEntryReader = proc(w, s: BlobDigest): Option[seq[byte]] =
-      store.readMemoEntryBytes(w, s)
     let client = peers[0].client
-    let target = peers[1].peerId
-    let sels = waitFor client.requestSelectorsFrom(target, weak)
-    check sels.isSome
-    check sels.get() == @[selectorOf(entry)]
-    let miss = waitFor client.requestSelectorsFrom(target, digestN(22))
-    check miss.isSome
-    check miss.get().len == 0
-    let fetched = waitFor client.requestMemoEntryFrom(target, weak,
-      entry.strongFingerprint)
-    check fetched.isSome
-    check decodeMemoEntry(fetched.get()) == entry
-    let absent = waitFor client.requestMemoEntryFrom(target, weak, digestN(23))
-    check absent.isNone
-    # Asking the CONTENT plane for a fingerprint key is a miss — the old
-    # bundle-by-weak-fingerprint shape — and must not mark the peer suspect.
-    let wrongPlane = waitFor client.requestFetchFrom(target,
-      memoAdvertKey(weak))
-    check wrongPlane.isNone
+    client.fetchTimeoutMs = 1_000
+    let sels = waitFor client.requestSelectorsFrom(peers[1].peerId, weak)
+    check sels.isNone
+    check client.refusalsReceived >= 1
+    check client.lastRefusal.refusalClass == uint8(ord(rcUnauthenticated))
+    check server.memoRequestsServed == 0
+    check server.gate.refusedCount[rcUnauthenticated] >= 1
     check client.suspectMarks == 0
-    check not peers[0].registry.entries[target].suspect
-    check server.memoRequestsServed == 4
+
+  test "selector and entry requests are served; memo keys are not content":
+    # Over TLS between two hosts that pin each other (the shape every LAN
+    # node runs since Distributed-Execution M7), in BOTH trust profiles:
+    # hardened one-hour host-CA leaves, and trusted pinned long-lived host
+    # keys (the product default).
+    for profile in [tpHardened, tpTrusted]:
+      checkpoint("trust profile: " & $profile)
+      let base = createTempDir("m0-memo-tcp-", "")
+      defer: removeDir(base)
+      let a = newTestNode(base, "a")
+      let b = newTestNode(base, "b")
+      mutualTrust([a, b])
+      let rootB = base / "b-cache"
+      createDir(rootB)
+      let store = openPeerMemoStore(rootB / PeerMemoDirName)
+      let weak = digestN(21)
+      var entry = entryFor(weak, 6)
+      # Attested by B (its issuer): a node serves an entry only with an
+      # attestation a consumer can accept (Distributed-Execution M7, G15).
+      attest(entry, mintNodeCredential(b.identity, lrDaemon,
+        identityPolicyOf(profile)))
+      store.writeMemoEntry(entry)
+      let hostB = startPeerCacheHost(tlsConfig(b, profile = profile),
+        b.identity.hostId,
+        cacheRoot = rootB)
+      defer: hostB.stop()
+      let hostA = startPeerCacheHost(tlsConfig(a, seeds = @[initEndpoint(
+        "127.0.0.1", hostB.actualPort)], profile = profile), a.identity.hostId,
+        cacheRoot = base / "a-cache")
+      defer: hostA.stop()
+      let client = hostA.client
+      let target = b.identity.hostId
+      check client.isConnected(target)
+      let server = hostB.server
+      let sels = waitFor client.requestSelectorsFrom(target, weak)
+      check sels.isSome
+      check sels.get() == @[selectorOf(entry)]
+      let miss = waitFor client.requestSelectorsFrom(target, digestN(22))
+      check miss.isSome
+      check miss.get().len == 0
+      let fetched = waitFor client.requestMemoEntryFrom(target, weak,
+        entry.strongFingerprint)
+      check fetched.isSome
+      check decodeMemoEntry(fetched.get()) == entry
+      let absent = waitFor client.requestMemoEntryFrom(target, weak, digestN(23))
+      check absent.isNone
+      # Asking the CONTENT plane for a fingerprint key is a miss — the old
+      # bundle-by-weak-fingerprint shape — and must not mark the peer suspect.
+      let wrongPlane = waitFor client.requestFetchFrom(target,
+        memoAdvertKey(weak))
+      check wrongPlane.isNone
+      check client.suspectMarks == 0
+      check not hostA.registry.entries[target].suspect
+      check server.memoRequestsServed == 4
