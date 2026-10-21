@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2303,
+    "nimTestBinaries": 2305,
     "pureUnitConsolidationGroups": 66,
     "pureUnitTests": 686,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2334
+    "testEntries": 2336
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1360,9 +1360,9 @@
     "classificationCounts": {
       "graph-fixture": 18,
       "integration": 1253,
-      "platform/destructive": 141,
+      "platform/destructive": 142,
       "pure unit": 686,
-      "unclassified": 236
+      "unclassified": 237
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1564,9 +1564,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2303,
+    "nimTestBinaryCount": 2305,
     "pythonTestFileCount": 31,
-    "testEntryCount": 2334
+    "testEntryCount": 2336
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -11571,6 +11571,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_daemon_log_is_bounded_by_rotation",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_daemon_core",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_daemon_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_daemon_core/tests/t_daemon_log_is_bounded_by_rotation.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_daemon_missing_feature_diagnostic",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -11602,6 +11620,24 @@
       "source": "libs/repro_daemon_core/tests/t_daemon_missing_feature_refusal.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_daemon_runtime_log_retention",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_daemon_core",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_daemon_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_daemon_core/tests/t_daemon_runtime_log_retention.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
