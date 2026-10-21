@@ -40466,7 +40466,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_repro_cli_input_matches_declared_output.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

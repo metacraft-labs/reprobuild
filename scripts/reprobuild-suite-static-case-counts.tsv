@@ -1833,7 +1833,7 @@ tests/integration/t_repos_add_records_project_membership_by_key.nim	nim	1
 tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim	nim	6
 tests/integration/t_repro_build_test_aggregate_builds_every_test.nim	nim	2
 tests/integration/t_repro_certify_runs_the_required_set_in_workspace_mode.nim	nim	1
-tests/integration/t_repro_cli_input_matches_declared_output.nim	nim	2
+tests/integration/t_repro_cli_input_matches_declared_output.nim	nim	3
 tests/integration/t_repro_core_binary_roundtrip.nim	nim	3
 tests/integration/t_repro_prompt_is_fast_and_silent_outside_workspace.nim	nim	1
 tests/integration/t_repro_push_publishes_dependency_closure_in_topological_order.nim	nim	2
