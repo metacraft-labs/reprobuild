@@ -342,6 +342,11 @@ op: required-grants
 input: a36461726773a16470617468412e646b696e646b736f757263652e6c69737466746172676574627731|firefox
 expect: source.read:firefox
 
+name: required grants of source.diff on w1
+op: required-grants
+input: a36461726773a0646b696e646b736f757263652e6469666666746172676574627731|firefox
+expect: source.read:firefox
+
 name: required grants of source.write with 2 args on w1
 op: required-grants
 input: a36461726773a26470617468416167636f6e74656e744162646b696e646c736f757263652e777269746566746172676574627731|firefox

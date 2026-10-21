@@ -103,6 +103,10 @@ method runBuild*(b: Backend; ws: Workspace; op: Operation): OpResult {.base.} =
   OpResult(status: osFailed, detail: "build is not supported")
 method runTest*(b: Backend; ws: Workspace; op: Operation): OpResult {.base.} =
   OpResult(status: osFailed, detail: "test is not supported")
+method diff*(b: Backend; ws: Workspace): OpResult {.base.} =
+  ## The workspace's change against what was checked out, as a unified
+  ## diff in `output`. Only the backend knows the workspace's base.
+  OpResult(status: osFailed, detail: "diff is not supported")
 method preview*(b: Backend; ws: Workspace; op: Operation): OpResult {.base.} =
   OpResult(status: osFailed, detail: "preview is not supported")
 method activeGeneration*(b: Backend): string {.base.} = ""
@@ -514,6 +518,8 @@ proc runOne(h: Host; s: Session; op: Operation): OpResult =
     for n in listBeneath(ws.root, op.arg("path")):
       names.add n & "\n"
     result = OpResult(status: osCompleted, output: names)
+  of okSourceDiff:
+    result = h.backend.diff(h.workspaceOf(op))
   of okBuildRun:
     result = h.backend.runBuild(h.workspaceOf(op), op)
   of okTestRun:

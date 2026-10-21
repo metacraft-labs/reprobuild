@@ -115,7 +115,8 @@ proc parseGrant*(s: string): Grant =
 
 proc usesWorkspaceTarget*(kind: OperationKind): bool =
   ## Operations whose target is a session workspace id.
-  kind in {okSourceRead, okSourceWrite, okSourceList, okBuildRun, okTestRun,
+  kind in {okSourceRead, okSourceWrite, okSourceList, okSourceDiff,
+           okBuildRun, okTestRun,
            okPreviewStart, okPreviewStop, okGenerationStage, okRemixCapture,
            okRemixExport, okRemixSubmit}
 
@@ -126,7 +127,7 @@ proc familyOf*(kind: OperationKind): Family =
   case kind
   of okOwnershipResolve: fOwnership
   of okCheckoutCreate: fCheckout
-  of okSourceRead, okSourceWrite, okSourceList: fSource
+  of okSourceRead, okSourceWrite, okSourceList, okSourceDiff: fSource
   of okBuildRun: fBuild
   of okTestRun: fTest
   of okPreviewStart, okPreviewStop: fPreview
@@ -148,7 +149,7 @@ proc requiredGrants*(op: Operation; packageOfTarget: string): seq[Grant] =
       result.add grant(ckContextPackage, op.target)
   of okCheckoutCreate:
     result.add grant(ckWorkspaceCreate, op.target)
-  of okSourceRead, okSourceList:
+  of okSourceRead, okSourceList, okSourceDiff:
     result.add grant(ckSourceRead, pkg)
   of okSourceWrite:
     result.add grant(ckSourceWrite, pkg)

@@ -171,6 +171,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_agent_backend/tests/t_agent_ownership_and_checkout.nim",
+    binary: "build/test-bin/t_agent_ownership_and_checkout",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_agent_protocol/tests/t_agent_harbor_reproos_permission_protocol.nim",
     binary: "build/test-bin/t_agent_harbor_reproos_permission_protocol",
     defines: @[],
@@ -3728,6 +3737,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_local_store/tests/t_portable_memo.nim",
     binary: "build/test-bin/t_portable_memo",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_local_store/tests/t_prefix_owning_path.nim",
+    binary: "build/test-bin/t_prefix_owning_path",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

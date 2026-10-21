@@ -384,6 +384,9 @@ for libName in [
   # ReproOS-Agent-Harbor-Integration M0: the agent integration host,
   # capabilities, approvals and audit log.
   "repro_agent_protocol",
+  # ReproOS-Agent-Harbor-Integration M3: ownership, checkout and the
+  # Reprobuild backend of the agent host.
+  "repro_agent_backend",
   "repro_home_generations",
   "repro_home_apply",
   "repro_home_rollback",

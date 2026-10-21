@@ -192,6 +192,7 @@ proc corpus(): seq[Vector] =
       (op(okOwnershipResolve, "firefox"), ""),
       (op(okCheckoutCreate, "firefox"), ""),
       (op(okSourceList, "w1", {"path": "."}), "firefox"),
+      (op(okSourceDiff, "w1"), "firefox"),
       (op(okSourceWrite, "w1", {"path": "a", "content": "b"}), "firefox"),
       (op(okBuildRun, "w1"), "firefox"),
       (op(okBuildRun, "w1", {"network": "crates-io"}), "firefox"),

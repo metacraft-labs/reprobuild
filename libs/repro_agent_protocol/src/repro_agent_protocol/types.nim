@@ -125,6 +125,7 @@ type
     okSourceRead = "source.read"
     okSourceWrite = "source.write"
     okSourceList = "source.list"
+    okSourceDiff = "source.diff"
     okBuildRun = "build.run"
     okTestRun = "test.run"
     okPreviewStart = "preview.start"

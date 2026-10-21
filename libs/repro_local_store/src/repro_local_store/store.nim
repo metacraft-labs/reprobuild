@@ -1219,6 +1219,48 @@ proc listPrefixes*(s: Store): seq[PrefixRow] =
     row.createdAtUnix = stmt.columnInt(6)
     result.add(row)
 
+proc lookupPrefixByRealizedPath*(s: Store; realizedPath: string):
+    tuple[found: bool; row: PrefixRow] =
+  ## The index row whose store-relative, forward-slash `realized_path` is
+  ## exactly `realizedPath`.
+  var stmt = s.db.prepare(
+    "SELECT prefix_id FROM prefixes WHERE realized_path = ?")
+  defer: stmt.finalize()
+  stmt.bindText(1, realizedPath)
+  if stmt.step() != SqliteRow:
+    return (false, PrefixRow())
+  var pid: PrefixIdBytes
+  let raw = stmt.columnBlob(0)
+  for i in 0 ..< 32: pid[i] = raw[i]
+  s.lookupPrefix(pid)
+
+proc prefixOwningPath*(s: Store; path: string):
+    tuple[found: bool; row: PrefixRow] =
+  ## The realized prefix that contains `path` -- an installed executable, a
+  ## launcher, a library -- or `found = false` when `path` is not inside a
+  ## prefix of this store.
+  ##
+  ## Symlinks are resolved first, so a profile launcher or a `bin/` link
+  ## that points into the store resolves to the prefix it points at. The
+  ## owner is the deepest indexed prefix among `path`'s ancestors; a
+  ## directory under the store root that the index does not know is not a
+  ## prefix, however it is named.
+  let real =
+    try: expandFilename(path)
+    except OSError: return (false, PrefixRow())
+  let root =
+    try: expandFilename(s.root)
+    except OSError: return (false, PrefixRow())
+  if not real.startsWith(root & DirSep):
+    return (false, PrefixRow())
+  let parts = toForwardSlash(real[root.len + 1 .. ^1]).split('/')
+  for n in countdown(parts.len, 1):
+    let candidate = parts[0 ..< n].join("/")
+    let hit = s.lookupPrefixByRealizedPath(candidate)
+    if hit.found:
+      return hit
+  (false, PrefixRow())
+
 proc insertPrefixOrIgnore*(s: Store; row: PrefixRow): bool =
   ## Returns true if this caller actually inserted a row, false if the
   ## row was already present (the loser of the rename race).
