@@ -281,7 +281,11 @@
       # ancestor. The Linux shim records a directory enumeration anchored on
       # the cwd at the time of the opendir, so `git -C <repo>` is no longer
       # keyed on phantom enumerated directories under the action's cwd.
-      url = "github:metacraft-labs/io-mon/71b4d7ce8ea7346700bbd86ee2e7cbf1a95482b1";
+      # Bumped to 8a9a71c (2026-10-21), io-mon's `agents` tip; 71b4d7c is an
+      # ancestor. The Linux shim keeps a `..` that follows a symlink as
+      # spelled instead of folding it lexically, so `link/../x` is recorded
+      # beside the link's target, where the kernel resolved it.
+      url = "github:metacraft-labs/io-mon/8a9a71c9cf75898a83c854898860b9e589e2a264";
       flake = false;
     };
     nim-shm-gset-src = {
