@@ -541,8 +541,10 @@ suite "the engine records the sibling's variant declarations":
 
   test "the premise: the sibling really declares two variants":
     # If the fixture stopped declaring them, every case below would be
-    # asserting that a path nobody takes works.
-    let recipe = readFile(variantSibling().checkout / "repro.nim")
+    # asserting that a path nobody takes works. Read straight from the
+    # checked-in checkout: the premise is about the fixture, not about what
+    # the verb wrote, so it does not need the verb run (minutes when cold).
+    let recipe = readFile(siblingCheckout("variants") / "repro.nim")
     check "enableTls: variant bool = true" in recipe
     check "profile: variant string = \"release\"" in recipe
 
