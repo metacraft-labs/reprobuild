@@ -1809,6 +1809,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_core/tests/t_relocatable_names_keep_dotdot_after_a_symlink.nim",
+    binary: "build/test-bin/t_relocatable_names_keep_dotdot_after_a_symlink",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_core/tests/t_show_conventions_cli.nim",
     binary: "build/test-bin/t_show_conventions_cli",
     defines: @[],

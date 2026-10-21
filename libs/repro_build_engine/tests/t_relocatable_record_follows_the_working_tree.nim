@@ -14,6 +14,13 @@
 ## `config.nims` from every ancestor), an anchored input changing, and a
 ## working tree at a different depth.
 ##
+## One input is reached through a symlink and a `..` after it
+## (`<cwd>/link/../file` with `link -> sub/target`, which the kernel opens as
+## `<cwd>/sub/file`; Monitor-Hook-Shim.md §"Metadata, Probe, And Symlink
+## APIs": "Never pop a symlink component lexically"). Its record name must
+## keep naming `sub/file`, never the decoy `<cwd>/file` a lexical fold names,
+## so an edit to `sub/file` is a miss.
+##
 ## The child is this binary re-invoked with a marker, and the monitor
 ## evidence is a canned RMDF per location, the shape
 ## `t_cache_record_for_other_outputs_is_not_served.nim` uses.
@@ -59,15 +66,29 @@ proc treeAt(tempRoot, location: string): string =
   createDir(result)
   writeFile(result / "input.txt", "payload")
 
+proc linkedTree(proj: string) =
+  ## `<proj>/link -> sub/target` beside `<proj>/sub/file`, and a decoy
+  ## `<proj>/file`: what `link/../file` names when `..` is popped lexically.
+  createDir(proj / "sub" / "target")
+  writeFile(proj / "sub" / "file", "through the link v1")
+  writeFile(proj / "file", "decoy")
+  createSymlink("sub/target", proj / "link")
+
 proc relocatableAction(tempRoot, proj: string;
-                       relocatable = true): BuildAction =
+                       relocatable = true;
+                       viaLink = false): BuildAction =
   ## The same computation wherever `proj` is: read `input.txt`, probe for a
-  ## `config.nims` in the parent directory, read an anchored tool file.
+  ## `config.nims` in the parent directory, read an anchored tool file. With
+  ## `viaLink`, also read `link/../file` (`linkedTree`), recorded the way the
+  ## shims record it: the cwd joined with the spelling, `..` kept.
   let anchor = tempRoot / "anchored"
   let output = proj / "out" / "product.txt"
   let rmdf = proj & ".rdep"
+  var reads = @[proj / "input.txt", anchor / "tool.txt"]
+  if viaLink:
+    reads.add(proj & "/link/../file")
   writeRmdf(rmdf,
-    reads = [proj / "input.txt", anchor / "tool.txt"],
+    reads = reads,
     probes = [parentDir(proj) / "config.nims"],
     output = output)
   result = action("produce",
@@ -200,3 +221,38 @@ suite "a relocatable record follows the working tree":
       relocatableAction(tempRoot, proj).weakFingerprint
     check edge.recordedInputNames([proj / "input.txt"]) ==
       @[proj / "input.txt"]
+
+  test "an input read through link/.. is revalidated where the link points":
+    let tempRoot = createTempDir("repro-relocatable-link", "")
+    defer: removeDir(tempRoot)
+    createDir(tempRoot / "anchored")
+    writeFile(tempRoot / "anchored" / "tool.txt", "tool v1")
+    let config = restoreConfig(tempRoot / "cache")
+    let proj = treeAt(tempRoot, "alpha")
+    linkedTree(proj)
+    let first = runBuild(graph([relocatableAction(tempRoot, proj,
+      viaLink = true)]), config).only("produce")
+    require first.launched
+    let edge = relocatableAction(tempRoot, proj, viaLink = true)
+    let cache = openActionCache(tempRoot / "cache" / "action-cache")
+    let records = cache.loadPerEdgeRecords(edge.weakFingerprint)
+    require records.len == 1
+    var names: seq[string] = @[]
+    for input in records[0].inputs:
+      names.add(input.path)
+    checkpoint("recorded inputs: " & names.join(", "))
+    # Not the decoy a lexical fold names; kept as observed, absolute.
+    check "file" notin names
+    check (proj & "/link/../file") in names
+    # Nothing changed: still a hit.
+    let unchanged = runBuild(graph([relocatableAction(tempRoot, proj,
+      viaLink = true)]), config).only("produce")
+    checkpoint("unchanged: " & unchanged.describe)
+    check unchanged.status == asCacheHit
+    check not unchanged.launched
+    # The file the kernel opened changes: a miss.
+    writeFile(proj / "sub" / "file", "through the link v2, longer")
+    let edited = runBuild(graph([relocatableAction(tempRoot, proj,
+      viaLink = true)]), config).only("produce")
+    checkpoint("sub/file edited: " & edited.describe)
+    check edited.launched
