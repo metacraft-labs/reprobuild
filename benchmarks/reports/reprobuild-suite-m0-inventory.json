@@ -5,7 +5,7 @@
     "caseDetailTracked": false,
     "caseDetailUntrackedReason": "bodyHash is a function of the project's absolute path (campaign defect #52), so tracking per-case detail would rewrite every hash per checkout path and defeat byte-level catalog diffing",
     "countSourceCounts": {
-      "catalog": 2293,
+      "catalog": 2294,
       "quarantined": 10,
       "static": 31
     },
@@ -150,8 +150,8 @@
     },
     "dirty": true,
     "environmentReportPath": "build/reprobuild-suite-m0-environment.md",
-    "head": "5221abebbb7954634311ea3dd9b51f64951cf42d",
-    "headShort": "5221abebbb",
+    "head": "ea62f14b18cb3bc9944337f19dedf65ba0d5f124",
+    "headShort": "ea62f14b18",
     "repoRoot": ".",
     "runtimeDetailPath": "build/reprobuild-suite-case-catalog.json",
     "runtimeDetailReason": "footprint, host, tool versions, the recorded environment and the sibling-checkout paths are properties of the machine and of the moment, not of the tree; keeping them here made the tracked artifact differ on every build and every host, which is the defect spec \u00a716.4 forbids for an embedded build timestamp",
@@ -176,9 +176,14 @@
         "branch": "fix-the-daemon-log-is-never-rotated-and-noth",
         "dirty": false,
         "head": "b0fc1bcb9c2f1cb6a7fc3a558592ae7051782c24"
+      },
+      "runquota": {
+        "branch": "fix-the-daemon-log-is-never-rotated-and-noth",
+        "dirty": false,
+        "head": "4962e37106e318c88626040fbdce4aa0832ff82a"
       }
     },
-    "sourceFingerprint": "27a6d483127b24fb412352c84afe5229e5493b8a408e9dcf4dbc84748effa42d"
+    "sourceFingerprint": "cd9cf844446a4967c115b04a78246c8b8d51070e5f4da261de807e9fc05d9528"
   },
   "performanceAssessment": {
     "deferredMeasurementCommand": "REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/reprobuild_suite_inventory.py --run-suite --clean-first --warm-runs 2 --suite-timeout-seconds 7200",
@@ -199,12 +204,12 @@
     },
     "observedStructuralFacts": {
       "graphOwnedHelperArtifacts": 33,
-      "nimTestBinaries": 2303,
+      "nimTestBinaries": 2304,
       "pureUnitConsolidationGroups": 66,
       "pureUnitTests": 685,
-      "sourceCases": 15167,
+      "sourceCases": 15170,
       "staticallyDetectedRuntimeCompilerFlowTests": 126,
-      "testEntries": 2334
+      "testEntries": 2335
     },
     "status": "structural-inference-only"
   },
@@ -1643,7 +1648,7 @@
     "classificationCounts": {
       "graph-fixture": 18,
       "integration": 1253,
-      "platform/destructive": 141,
+      "platform/destructive": 142,
       "pure unit": 685,
       "unclassified": 237
     },
@@ -1848,10 +1853,10 @@
       }
     ],
     "measuredProtocolAwareCaseCount": null,
-    "nimTestBinaryCount": 2303,
+    "nimTestBinaryCount": 2304,
     "pythonTestFileCount": 31,
-    "sourceCaseCount": 15167,
-    "testEntryCount": 2334
+    "sourceCaseCount": 15170,
+    "testEntryCount": 2335
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -51136,6 +51141,29 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_tool_acquisition_does_not_inherit_the_loader_env",
+      "catalogSuiteCount": 1,
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "countSource": "catalog",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_interface_artifacts",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_tool_acquisition_does_not_inherit_the_loader_env.nim",
+      "sourceCaseCount": 3,
+      "sourceNewerThanBinary": false,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_tool_consumer_declares_provisioning_receipt",
       "catalogSuiteCount": 1,
       "class": "integration",
@@ -59177,7 +59205,7 @@
   ],
   "timing": {
     "complete": false,
-    "currentSourceFingerprint": "27a6d483127b24fb412352c84afe5229e5493b8a408e9dcf4dbc84748effa42d",
+    "currentSourceFingerprint": "cd9cf844446a4967c115b04a78246c8b8d51070e5f4da261de807e9fc05d9528",
     "notes": [
       "No suite run was requested for this inventory."
     ],

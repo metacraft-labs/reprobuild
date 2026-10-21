@@ -26,11 +26,11 @@ REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/
 
 | Field | Value |
 | --- | --- |
-| HEAD | 5221abebbb7954634311ea3dd9b51f64951cf42d |
-| HEAD short | 5221abebbb |
+| HEAD | ea62f14b18cb3bc9944337f19dedf65ba0d5f124 |
+| HEAD short | ea62f14b18 |
 | Branch | fix-the-daemon-log-is-never-rotated-and-noth |
-| Source fingerprint | 27a6d483127b24fb412352c84afe5229e5493b8a408e9dcf4dbc84748effa42d |
-| External source revisions | {"nim-shm-queue": {"branch": "", "dirty": false, "head": "91451f2250beb89d1d221f0a77be0841c19b182e"}, "nim-stackable-hooks": {"branch": "", "dirty": false, "head": "6082ee94203a5937d3dffe99e5098f644c4799b2"}, "reprobuild-ct-test-runner": {"branch": "fix-the-daemon-log-is-never-rotated-and-noth", "dirty": false, "head": "69167f4226e0faca4fb64cb0e913c7b49eddf853"}, "reprobuild-test-adapters": {"branch": "fix-the-daemon-log-is-never-rotated-and-noth", "dirty": false, "head": "b0fc1bcb9c2f1cb6a7fc3a558592ae7051782c24"}} |
+| Source fingerprint | cd9cf844446a4967c115b04a78246c8b8d51070e5f4da261de807e9fc05d9528 |
+| External source revisions | {"nim-shm-queue": {"branch": "", "dirty": false, "head": "91451f2250beb89d1d221f0a77be0841c19b182e"}, "nim-stackable-hooks": {"branch": "", "dirty": false, "head": "6082ee94203a5937d3dffe99e5098f644c4799b2"}, "reprobuild-ct-test-runner": {"branch": "fix-the-daemon-log-is-never-rotated-and-noth", "dirty": false, "head": "69167f4226e0faca4fb64cb0e913c7b49eddf853"}, "reprobuild-test-adapters": {"branch": "fix-the-daemon-log-is-never-rotated-and-noth", "dirty": false, "head": "b0fc1bcb9c2f1cb6a7fc3a558592ae7051782c24"}, "runquota": {"branch": "fix-the-daemon-log-is-never-rotated-and-noth", "dirty": false, "head": "4962e37106e318c88626040fbdce4aa0832ff82a"}} |
 | Inventory JSON | benchmarks/reports/reprobuild-suite-m0-inventory.json |
 | Per-case protocol detail | build/reprobuild-suite-case-catalog.json |
 | Measurement environment | build/reprobuild-suite-m0-environment.md |
@@ -41,10 +41,10 @@ The measurement environment — host kernel and glibc, tool versions, the record
 
 | Metric | Value |
 | --- | --- |
-| Test entries | 2334 |
-| Nim test binaries | 2303 |
+| Test entries | 2335 |
+| Nim test binaries | 2304 |
 | Python test files | 31 |
-| Case count (catalog-authoritative) | 15167 |
+| Case count (catalog-authoritative) | 15170 |
 | Measured protocol-aware cases | not measured (requires runner summary) |
 | Graph-owned helper/fixture artifacts | 33 |
 | Tests with statically detected runtime compiler flows | 126 |
@@ -56,7 +56,7 @@ Case counts come from each built binary's `--list-json` catalog (spec §3.2/§6.
 
 | Count source | Test entries | Meaning |
 | --- | --- | --- |
-| catalog | 2293 | authoritative: enumerated from the built binary |
+| catalog | 2294 | authoritative: enumerated from the built binary |
 | static | 31 | Python file, or probing disabled; counted by source scan |
 | missing-binary | 0 | Nim source with no built binary; counted by source scan |
 | quarantined | 10 | binary exists but could not enumerate; contributes 0 cases to the total |
@@ -96,7 +96,7 @@ Earlier contended or rejected timing attempts are diagnostic only and are intent
 
 ## Theoretical Performance Assessment
 
-The current graph contains 2303 Nim test binaries, 685 statically classified pure-unit entries in 66 compatible consolidation groups, and 126 tests with statically detected runtime compiler flows. These are structural counts, not timing results or an exhaustive semantic proof.
+The current graph contains 2304 Nim test binaries, 685 statically classified pure-unit entries in 66 compatible consolidation groups, and 126 tests with statically detected runtime compiler flows. These are structural counts, not timing results or an exhaustive semantic proof.
 
 - Parallel execution can reduce the serial execution component, but the exclusive lane and longest dependency chain bound the achievable wall-time reduction.
 - Consolidating compatible pure-unit groups should reduce repeated Nim compilation, link, and process-start overhead while preserving logical case identity.
@@ -126,7 +126,7 @@ The following paths are measured on every run: `build/bin`, `build/test-bin`, `b
 | --- | --- |
 | graph-fixture | 18 |
 | integration | 1253 |
-| platform/destructive | 141 |
+| platform/destructive | 142 |
 | pure unit | 685 |
 | unclassified | 237 |
 

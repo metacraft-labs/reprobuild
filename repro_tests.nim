@@ -17730,6 +17730,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_tool_acquisition_does_not_inherit_the_loader_env.nim",
+    binary: "build/test-bin/t_tool_acquisition_does_not_inherit_the_loader_env",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_tool_consumer_declares_provisioning_receipt.nim",
     binary: "build/test-bin/t_tool_consumer_declares_provisioning_receipt",
     defines: @[],
