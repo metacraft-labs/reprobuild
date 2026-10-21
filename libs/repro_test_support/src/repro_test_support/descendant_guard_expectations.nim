@@ -5,18 +5,25 @@
 ## using the original capture for product verdicts and raw evidence comparisons.
 ##
 ## The limitation itself is normative, not a defect to wait out: io-mon's
-## `docs/usage.md` ("macOS and Windows limitation (normative)", introduced by
-## io-mon 57ce305) requires every finished macOS and Windows capture to carry
-## the marker below, to grade `mcIncomplete`, and offers no override. The
-## engine therefore never publishes a monitored edge's record on those hosts
-## and re-runs it on every build. Suites whose assertions depend on
-## publication or reuse branch on `NoTreeLifetimeGuard` instead of each
-## spelling its own `when defined(...)`, so the platform set lives here once,
-## next to the marker it is derived from.
+## `docs/usage.md` ("macOS limitation (normative)", introduced by io-mon
+## 57ce305) requires every finished macOS capture to carry the marker below,
+## to grade `mcIncomplete`, and offers no override. The engine therefore never
+## publishes a monitored edge's record on macOS and re-runs it on every build.
+## Suites whose assertions depend on publication or reuse branch on
+## `NoTreeLifetimeGuard` instead of each spelling its own `when defined(...)`,
+## so the platform set lives here once, next to the marker it is derived from.
+##
+## WINDOWS IS NOT IN THE SET. io-mon proves Windows tree quiescence with a Job
+## Object (io-mon `docs/usage.md`, "The Windows tree-lifetime guard
+## (normative)"; reprobuild-pm spec/io-mon-Windows-Tree-Lifetime-Guard.md), so
+## a healthy Windows capture is complete and its edge is published, exactly as
+## on Linux. On Windows this module removes nothing: the retired Windows
+## marker, or any Windows guard loss, keeps a capture incomplete and fails the
+## suites that expect a healthy fixture.
 import std/strutils
 import io_mon
 
-const NoTreeLifetimeGuard* = defined(macosx) or defined(windows)
+const NoTreeLifetimeGuard* = defined(macosx)
   ## True where io-mon cannot prove detached-descendant quiescence, so every
   ## monitored capture fails closed and no monitored edge is ever published.
   ## A plain `bool` constant rather than a `when` symbol, so a caller can
@@ -27,10 +34,9 @@ const NoTreeLifetimeGuard* = defined(macosx) or defined(windows)
 # `run=<id>` suffix. Empty where the limitation does not apply, which
 # `isTreeLifetimeLimitation` turns into "never matches".
 const TreeLifetimeLimitationPrefix* =
-  when defined(macosx) or defined(windows):
+  when defined(macosx):
     "detached-descendant quiescence cannot be established: " &
-      (when defined(macosx): "macos" else: "windows") &
-      " backend has no complete tree-lifetime guard run="
+      "macos backend has no complete tree-lifetime guard run="
   else:
     ""
 

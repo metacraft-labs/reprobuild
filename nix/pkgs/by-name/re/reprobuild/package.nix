@@ -99,8 +99,8 @@
   stackableHooksSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-stackable-hooks";
-    rev = "ff7eb18af166f9355c5e62bf1434ba5f9fd2c99e";
-    hash = "sha256-itD4iFoT/HMbY0qbxM7NJmxzBJJIzaWY64NHmd7wC8I=";
+    rev = "6082ee94203a5937d3dffe99e5098f644c4799b2";
+    hash = "sha256-OClpXo2nKlpbLk1uYt06/gNMlC77lwq+o9ipgLk0BbQ=";
   },
   ctTraceFormatSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -123,8 +123,8 @@
   ioMonSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "io-mon";
-    rev = "8a9a71c9cf75898a83c854898860b9e589e2a264";
-    hash = "sha256-nD8LqZKiPx5QgKFkdQonFzg6Ee2SS29Sz6CEYXSBol4=";
+    rev = "4d468bc585ed10e77b9cfc468924155b6dd107cb";
+    hash = "sha256-qugE8+s9DhLzgWH5PbSB1/1dh+DTVOmYzBGlV6ZANGk=";
   },
   shmGsetSrc ? fetchFromGitHub {
     owner = "metacraft-labs";

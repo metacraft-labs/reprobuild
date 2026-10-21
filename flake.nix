@@ -285,7 +285,11 @@
       # ancestor. The Linux shim keeps a `..` that follows a symlink as
       # spelled instead of folding it lexically, so `link/../x` is recorded
       # beside the link's target, where the kernel resolved it.
-      url = "github:metacraft-labs/io-mon/8a9a71c9cf75898a83c854898860b9e589e2a264";
+      # Bumped to 4d468bc (2026-10-21), io-mon's `agents` tip; 8a9a71c is an
+      # ancestor. Windows proves tree quiescence with a Job Object, so a
+      # healthy Windows capture is complete again; it needs the job
+      # assignment in nim-stackable-hooks 6082ee94 (below).
+      url = "github:metacraft-labs/io-mon/4d468bc585ed10e77b9cfc468924155b6dd107cb";
       flake = false;
     };
     nim-shm-gset-src = {
