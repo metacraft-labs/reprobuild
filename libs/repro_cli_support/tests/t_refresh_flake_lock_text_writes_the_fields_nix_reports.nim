@@ -183,3 +183,36 @@ suite "flakeRevisionFetchExpr":
     check expr.contains("\\${")
     check not expr.replace("\\${", "").contains("${")
     check expr.contains("\\\\\\\"x\\\\\\\"")
+
+
+suite "flakeRevisionTargetAttrs handles optional locked fields":
+
+  test "GitHub locks omit revCount and ref":
+    let locked = %*{"type": "github", "owner": "metacraft-labs",
+      "repo": "reprobuild", "rev": oldRev, "narHash": "sha256-OLD=",
+      "lastModified": 100}
+    let before = locked.copy()
+    check flakeRevisionTargetAttrs(locked, newRev) ==
+      %*{"type": "github", "owner": "metacraft-labs",
+        "repo": "reprobuild", "rev": newRev}
+    check locked == before
+
+  test "each derived field may independently be absent":
+    for absent in ["narHash", "lastModified", "revCount", "ref"]:
+      let locked = %*{"type": "github", "owner": "o", "repo": "r",
+        "rev": oldRev, "ref": "agents", "narHash": "sha256-OLD=",
+        "lastModified": 100, "revCount": 2}
+      locked.delete(absent)
+      check flakeRevisionTargetAttrs(locked, newRev) ==
+        %*{"type": "github", "owner": "o", "repo": "r", "rev": newRev}
+
+  test "minimal forge locks and git refs preserve source parameters":
+    check flakeRevisionTargetAttrs(%*{"type": "github", "owner": "o",
+      "repo": "r", "rev": oldRev, "dir": "nix"}, newRev) ==
+      %*{"type": "github", "owner": "o", "repo": "r", "rev": newRev,
+        "dir": "nix"}
+    check flakeRevisionTargetAttrs(%*{"type": "git", "url": "file:///r",
+      "ref": "main", "rev": oldRev, "narHash": "sha256-OLD=",
+      "lastModified": 100, "revCount": 2, "dir": "nix", "submodules": true},
+      newRev) == %*{"type": "git", "url": "file:///r", "ref": "main",
+        "rev": newRev, "dir": "nix", "submodules": true}

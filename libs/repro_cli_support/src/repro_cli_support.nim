@@ -92385,6 +92385,19 @@ proc runLockUpdateNix(root: string; inputs: openArray[string]):
   except CatchableError as err:
     (false, err.msg)
 
+proc flakeRevisionTargetAttrs*(locked: JsonNode; revision: string): JsonNode =
+  ## Exact source attributes for an explicit upgrade. Derived metadata belongs
+  ## to the old revision; fetchTree will recompute it. Forge references select
+  ## either a ref or a revision, while git may need the ref to fetch the rev.
+  ## Copy so preparing an upgrade never mutates the caller's lock snapshot.
+  result = locked.copy()
+  for key in flakeLockRevisionDerivedKeys:
+    if result.hasKey(key): result.delete(key)
+  result["rev"] = %revision
+  if result{"type"}.getStr() in ["github", "gitlab", "sourcehut"] and
+      result.hasKey("ref"):
+    result.delete("ref")
+
 proc runLockUpdateNixTargets(root, lockText: string;
     targets: openArray[tuple[input, rev: string]]):
     tuple[ok: bool; text, output: string] =
@@ -92401,15 +92414,8 @@ proc runLockUpdateNixTargets(root, lockText: string;
     var attrsByInput = newJObject()
     for target in targets:
       let nodeKey = nodes[rootKey]["inputs"][target.input].getStr()
-      var attrs = nodes[nodeKey]["locked"].copy()
-      for key in flakeLockRevisionDerivedKeys:
-        attrs.delete(key)
-      attrs["rev"] = %target.rev
-      # Forge references spell either a branch or a revision. Git references
-      # may retain both (the ref can be necessary to fetch the revision).
-      if attrs{"type"}.getStr() in ["github", "gitlab", "sourcehut"]:
-        attrs.delete("ref")
-      attrsByInput[target.input] = attrs
+      attrsByInput[target.input] = flakeRevisionTargetAttrs(
+        nodes[nodeKey]["locked"], target.rev)
     let expr = "builtins.mapAttrs (_: builtins.flakeRefToString) " &
       "(builtins.fromJSON " & nixStringLiteral($attrsByInput) & ")"
     let prefix = quoteShell(nixBin) &
