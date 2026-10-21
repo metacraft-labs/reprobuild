@@ -26,6 +26,8 @@ type
     pid*: int ## -1 when the platform does not report it
 
   ConsentPeerCheck* = proc (pid: int): bool {.gcsafe.}
+    ## Called for every consent-socket peer, with -1 when the platform
+    ## does not report the peer's pid (macOS `getpeereid`).
 
   HostServer* = ref object
     host*: Host
@@ -108,7 +110,11 @@ proc admit(s: HostServer; client: AsyncSocket; channel: AgentChannel): bool =
   if cred.uid != int(getuid()):
     return false
   if channel == chConsent and not s.consentPeer.isNil:
-    if cred.pid < 0 or not s.consentPeer(cred.pid):
+    # The policy always sees the attempt (it may audit it), with -1 when
+    # the platform does not report the peer's pid; an unknown pid is
+    # refused whatever the policy says.
+    let accepted = s.consentPeer(cred.pid)
+    if cred.pid < 0 or not accepted:
       return false
   true
 

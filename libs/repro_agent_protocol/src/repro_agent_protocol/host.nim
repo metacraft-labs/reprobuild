@@ -463,6 +463,14 @@ proc showPlan*(h: Host; conn: Connection; planIdHex: string): Plan =
       refuse(arPlanUnknown, planIdHex)
     h.plans[planIdHex].plan
 
+iterator pendingPlansNeedingApproval*(h: Host; sessionId: string):
+    tuple[planIdHex: string; plan: Plan] =
+  ## The submitted plans of `sessionId` that wait for the user's approval,
+  ## for the consent surface to present.
+  for pid, p in h.plans:
+    if p.plan.sessionId == sessionId and p.approvalRequired.len > 0:
+      yield (pid, p.plan)
+
 # ---------------------------------------------------------------------
 # Approvals (consent channel).
 

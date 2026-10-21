@@ -216,6 +216,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_agent_protocol/tests/t_agent_provider_conformance.nim",
+    binary: "build/test-bin/t_agent_provider_conformance",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_a2_5_p1_module_loads.nim",
     binary: "build/test-bin/t_a2_5_p1_module_loads",
     defines: @[],
