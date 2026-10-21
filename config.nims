@@ -381,6 +381,9 @@ for libName in [
   # identities, signatures and lineage.
   "repro_remix",
   "repro_remix_registry",
+  # ReproOS-Agent-Harbor-Integration M0: the agent integration host,
+  # capabilities, approvals and audit log.
+  "repro_agent_protocol",
   "repro_home_generations",
   "repro_home_apply",
   "repro_home_rollback",

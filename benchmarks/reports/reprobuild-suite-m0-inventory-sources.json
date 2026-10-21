@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2286,
+    "nimTestBinaries": 2287,
     "pureUnitConsolidationGroups": 64,
-    "pureUnitTests": 680,
+    "pureUnitTests": 681,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2317
+    "testEntries": 2318
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1333,7 +1333,7 @@
       "graph-fixture": 18,
       "integration": 1247,
       "platform/destructive": 138,
-      "pure unit": 680,
+      "pure unit": 681,
       "unclassified": 234
     },
     "graphOwnedTestArtifacts": [
@@ -1536,9 +1536,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2286,
+    "nimTestBinaryCount": 2287,
     "pythonTestFileCount": 31,
-    "testEntryCount": 2317
+    "testEntryCount": 2318
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7729,6 +7729,23 @@
       "source": "libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_agent_harbor_reproos_permission_protocol",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_agent_protocol"
+      ],
+      "owner": "libs/repro_agent_protocol",
+      "requiresReproBinary": false,
+      "source": "libs/repro_agent_protocol/tests/t_agent_harbor_reproos_permission_protocol.nim",
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
