@@ -16602,6 +16602,69 @@ when not defined(windows):
      response: exchange.response, attempts: exchange.attempts,
      diagnostic: exchange.diagnostic)
 
+proc ensureSnippetContent(content, openSentinel, closeSentinel, openSearch,
+                          closeSearch, snippet: string): string =
+  ## The bytes ``ensureSnippet`` wants the file holding ``content`` to hold.
+  ## A result equal to ``content`` means "already up to date, do not write".
+  ##
+  ## The file is often TRACKED (``nimRepropathsConfig`` targets a project's
+  ## ``config.nims``), so every byte outside the sentinel block -- each line
+  ## terminator, the presence or absence of a final one, the count of trailing
+  ## blank lines -- is copied through verbatim, never re-joined from split
+  ## lines. Re-joining is what used to add one "\n" per build: ``splitLines``
+  ## yields a trailing "" for a file ending in "\n", and the rejoin appended
+  ## another terminator after it. It also rewrote CRLF files to LF.
+  ##
+  ## Lines are recognised as ``splitLines`` does (``\r\n``, ``\n`` or a lone
+  ## ``\r``). The block's own lines, and any terminator added when appending
+  ## it, use CRLF when the file's first terminator is CRLF and LF otherwise,
+  ## so a CRLF checkout (e.g. Windows with ``core.autocrlf``) stays CRLF.
+  var eol = "\n"
+  let firstBreak = content.find({'\r', '\n'})
+  if firstBreak >= 0 and content.continuesWith("\r\n", firstBreak):
+    eol = "\r\n"
+  let newBlock =
+    if eol == "\n": openSentinel & "\n" & snippet & "\n" & closeSentinel
+    else: (openSentinel & "\n" & snippet & "\n" & closeSentinel).
+      replace("\r\n", "\n").replace("\n", eol)
+  # Byte offsets of the block: from the start of the (last) open-sentinel
+  # line before the first close-sentinel line, to the end of that close line's
+  # text -- its terminator is outside the block and therefore preserved.
+  var blockStart = -1
+  var blockEnd = -1
+  var lineStart = 0
+  var lastLineStart = 0
+  while lineStart <= content.len:
+    var lineEnd = lineStart
+    while lineEnd < content.len and content[lineEnd] notin {'\r', '\n'}:
+      inc lineEnd
+    let line = content[lineStart ..< lineEnd].strip()
+    if line.startsWith(openSearch):
+      blockStart = lineStart
+    elif line.startsWith(closeSearch) and blockStart != -1:
+      blockEnd = lineEnd
+      break
+    lastLineStart = lineStart
+    if lineEnd >= content.len:
+      break
+    lineStart = lineEnd + 1
+    if content[lineEnd] == '\r' and lineStart < content.len and
+        content[lineStart] == '\n':
+      inc lineStart
+  if blockStart != -1 and blockEnd != -1:
+    return content[0 ..< blockStart] & newBlock & content[blockEnd .. ^1]
+  # Absent block: append it after one blank line. These are byte-for-byte the
+  # bytes the action has always appended to an LF file, so a file that
+  # already received the block is not touched again by this rewrite: one
+  # terminator closes an unterminated non-blank last line, one more makes the
+  # blank separator, and the block ends with a terminator.
+  result = content
+  if content[lastLineStart .. ^1].strip().len > 0:
+    result.add(eol)
+  result.add(eol)
+  result.add(newBlock)
+  result.add(eol)
+
 proc executeBuiltinAction*(action: BuildAction): ActionResult =
   result = ActionResult(
     id: action.id,
@@ -16691,29 +16754,10 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
       var content = ""
       if fileExists(destExt):
         content = readFile(destExt)
-      let newBlock = openSentinel & "\n" & snippet & "\n" & closeSentinel
-      var startIdx = -1
-      var endIdx = -1
-      let linesList = content.splitLines()
-      for i, l in linesList:
-        if l.strip().startsWith(openSearch):
-          startIdx = i
-        elif l.strip().startsWith(closeSearch) and startIdx != -1:
-          endIdx = i
-          break
-      var newLinesList: seq[string] = @[]
-      if startIdx != -1 and endIdx != -1:
-        for i in 0 ..< startIdx:
-          newLinesList.add(linesList[i])
-        newLinesList.add(newBlock)
-        for i in (endIdx + 1) ..< linesList.len:
-          newLinesList.add(linesList[i])
-      else:
-        newLinesList = linesList
-        if newLinesList.len > 0 and newLinesList[^1].strip().len > 0:
-          newLinesList.add("")
-        newLinesList.add(newBlock)
-      let newContent = newLinesList.join("\n") & "\n"
+      let newContent = ensureSnippetContent(content, openSentinel,
+        closeSentinel, openSearch, closeSearch, snippet)
+      # Write only on a real change: an up-to-date tracked file keeps its
+      # bytes and its mtime.
       if content != newContent:
         createDir(destExt.splitPath.head)
         prepareBuiltinFileOutput(destination)

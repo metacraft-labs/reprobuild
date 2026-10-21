@@ -630,6 +630,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_ensure_snippet_leaves_an_up_to_date_file_untouched.nim",
+    binary: "build/test-bin/t_ensure_snippet_leaves_an_up_to_date_file_untouched",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_fingerprint_audit_every_action_has_lock_identity.nim",
     binary: "build/test-bin/t_fingerprint_audit_every_action_has_lock_identity",
     defines: @[],
