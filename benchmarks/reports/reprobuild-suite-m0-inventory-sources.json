@@ -1,13 +1,26 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2287,
-    "pureUnitConsolidationGroups": 64,
-    "pureUnitTests": 681,
+    "nimTestBinaries": 2289,
+    "pureUnitConsolidationGroups": 65,
+    "pureUnitTests": 682,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2318
+    "testEntries": 2320
   },
   "pureUnitConsolidationCandidates": [
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_agent_protocol"
+      ],
+      "owner": "libs/repro_agent_protocol",
+      "sources": [
+        "libs/repro_agent_protocol/tests/t_agent_harbor_reproos_permission_protocol.nim",
+        "libs/repro_agent_protocol/tests/t_agent_protocol_conformance_vectors.nim"
+      ],
+      "targetOs": "soAny"
+    },
     {
       "count": 2,
       "defines": [],
@@ -1333,8 +1346,8 @@
       "graph-fixture": 18,
       "integration": 1247,
       "platform/destructive": 138,
-      "pure unit": 681,
-      "unclassified": 234
+      "pure unit": 682,
+      "unclassified": 235
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1536,9 +1549,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2287,
+    "nimTestBinaryCount": 2289,
     "pythonTestFileCount": 31,
-    "testEntryCount": 2318
+    "testEntryCount": 2320
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7746,6 +7759,40 @@
       "source": "libs/repro_agent_protocol/tests/t_agent_harbor_reproos_permission_protocol.nim",
       "sourceSuiteCount": 6,
       "staticCaseCount": 18,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_agent_protocol_conformance_vectors",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_agent_protocol"
+      ],
+      "owner": "libs/repro_agent_protocol",
+      "requiresReproBinary": false,
+      "source": "libs/repro_agent_protocol/tests/t_agent_protocol_conformance_vectors.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_agent_protocol_socket_transport",
+      "class": "unclassified",
+      "classificationReason": "imports `asyncdispatch`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_agent_protocol"
+      ],
+      "owner": "libs/repro_agent_protocol",
+      "requiresReproBinary": false,
+      "source": "libs/repro_agent_protocol/tests/t_agent_protocol_socket_transport.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

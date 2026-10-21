@@ -108,6 +108,10 @@ proc parseGrant*(s: string): Grant =
   result = Grant(kind: parseEnumStrict[CapabilityKind](k, arUnknownCapability),
                  scope: scope)
   validateGrant(result)
+  # One grant has one spelling: `kind:` with an empty scope is refused
+  # rather than read as the scopeless grant.
+  if $result != s:
+    refuse(arBadScope, "non-canonical grant spelling " & s.escape)
 
 proc usesWorkspaceTarget*(kind: OperationKind): bool =
   ## Operations whose target is a session workspace id.

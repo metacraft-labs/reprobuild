@@ -54,7 +54,7 @@ proc encodeRecord*(r: AuditRecord): seq[byte] =
     tp("grant", cText(r.grant)),
     tp("result", cText(r.resultDigest))]))
 
-proc decodeRecord(bytes: openArray[byte]): AuditRecord =
+proc decodeAuditRecord*(bytes: openArray[byte]): AuditRecord =
   let v = canonical.decodeRecord(bytes)
   v.requireOnlyKeys(["seq", "prev", "time", "session", "provider", "family",
                      "kind", "decision", "reason", "plan", "intent",
@@ -97,7 +97,7 @@ proc newAuditLog*(path = ""): AuditLog =
     if int(n) > data.len - pos:
       refuse(arAuditCorrupt, "truncated record")
     let rec =
-      try: decodeRecord(data[pos ..< pos + int(n)].toBytes)
+      try: decodeAuditRecord(data[pos ..< pos + int(n)].toBytes)
       except AgentRefusal as e: refuse(arAuditCorrupt, e.msg)
     pos += int(n)
     if rec.seq != uint64(result.records.len) or rec.prevDigest != prev:

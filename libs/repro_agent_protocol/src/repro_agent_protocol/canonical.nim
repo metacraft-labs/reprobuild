@@ -179,6 +179,17 @@ proc encodeIntent*(i: Intent): seq[byte] =
 
 proc intentId*(i: Intent): Digest32 = id(IntentContext, encodeIntent(i))
 
+proc decodeIntent*(bytes: openArray[byte]): Intent =
+  let v = decodeRecord(bytes)
+  v.requireOnlyKeys(["session", "text", "context", "capturedAt"])
+  result.sessionId = asText(v.need("session"), "intent session")
+  result.text = asText(v.need("text"), "intent text")
+  if result.text.len > MaxIntentTextBytes:
+    refuse(arBoundsExceeded, "intent text")
+  result.contextItems = decodeGrants(v.need("context"), "context",
+                                     MaxGrantsPerSession)
+  result.capturedAt = int64(asUInt(v.need("capturedAt"), "capturedAt"))
+
 proc encodePlanItem*(p: Plan): CborItem =
   var ops: seq[CborItem]
   for op in p.operations:
