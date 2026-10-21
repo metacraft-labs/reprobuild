@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2305,
+    "nimTestBinaries": 2313,
     "pureUnitConsolidationGroups": 66,
     "pureUnitTests": 686,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2336
+    "testEntries": 2344
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1359,10 +1359,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1253,
+      "integration": 1255,
       "platform/destructive": 142,
       "pure unit": 686,
-      "unclassified": 237
+      "unclassified": 243
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1564,9 +1564,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2305,
+    "nimTestBinaryCount": 2313,
     "pythonTestFileCount": 31,
-    "testEntryCount": 2336
+    "testEntryCount": 2344
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -40880,6 +40880,42 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_role_validation_refused_through_repro",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_role_validation_refused_through_repro.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_roles_resolve_from_settings_committed_at_the_revision",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_roles_resolve_from_settings_committed_at_the_revision.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_rp1_provider_compile_edge_materializes",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -45625,6 +45661,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_custom_role_fallback_cycle_is_rejected",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment (through `tests/unit/branch_roles_fixture.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_custom_role_fallback_cycle_is_rejected.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_da1i_evidence_help_names_the_hazard",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -45858,6 +45911,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_false_declares_absence",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment (through `tests/unit/branch_roles_fixture.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_false_declares_absence.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_flake_lock_has_no_competing_reprobuild_pin",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -45884,6 +45954,23 @@
       "source": "tests/unit/t_flake_lock_names_no_private_input.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_fragment_beats_profile_beats_default_profile",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment (through `tests/unit/branch_roles_fixture.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_fragment_beats_profile_beats_default_profile.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -48381,6 +48468,57 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_repo_v1_and_v2_resolve_identically.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_role_falls_back_toward_mainline",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment (through `tests/unit/branch_roles_fixture.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_role_falls_back_toward_mainline.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_role_validation_refused_at_manifest_load",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment (through `tests/unit/branch_roles_fixture.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_role_validation_refused_at_manifest_load.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_root_repo_resolves_from_workspace_settings",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_root_repo_resolves_from_workspace_settings.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

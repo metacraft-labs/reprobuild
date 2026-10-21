@@ -32,6 +32,7 @@ import std/[algorithm, options, os, strutils]
 import types
 import diagnostics
 import reader
+import roles
 import repro_core/workspace_root
 
 export workspace_root.settingsFileIn
@@ -415,6 +416,12 @@ proc decodeSettingsTree(path, content: string): WorkspaceSettings =
     for k, v in ext.tableVal[]:
       result.extensions.raw[k] = v
 
+  # Workspace-Branch-Roles.md §3.5 — the role rules this file can break on
+  # its own (dangling or cyclic custom-role fallbacks, an undeclared profile
+  # or custom role, a value that is not a branch name). Checked here, at
+  # load, so a settings file that cannot resolve never reaches a command.
+  validateRoleSettings(result)
+
 proc settingsFromBootstrap(cfg: WorkspaceBootstrap;
                            path: string): WorkspaceSettings =
   ## Map an old `bootstrap.v1` file onto the settings record, preserving what
@@ -499,6 +506,31 @@ proc readLocalSettingsLayers*(localPath, sharedPath: string;
     result.add(layer)
 
 # ---- reading ----------------------------------------------------------------
+
+proc decodeWorkspaceSettingsContent*(path, content: string):
+    Option[WorkspaceSettings] =
+  ## Decode a shared settings file supplied as TEXT — one read from a source
+  ## other than the filesystem, such as a commit of the metadata repository.
+  ## `path` only names the file in diagnostics.
+  ##
+  ## `settings.v1` is decoded strictly, exactly as `readWorkspaceSettings`
+  ## decodes it (its role rules included). `bootstrap.v1` answers `none`:
+  ## reading it needs its private companion file beside it on disk, and it
+  ## declares nothing a content-only caller (role resolution) can use. The
+  ## local file `repro-workspace.local.toml` is never consulted: it is
+  ## per-checkout and is never part of a commit.
+  let tree = decodeTree(path, content, schemaWorkspaceSettingsV1)
+  let s = child(tree, "schema")
+  if s.isNil or s.kind != TomlKind.String or s.stringVal.len == 0:
+    raiseManifestError(path, "schema", schemaWorkspaceSettingsV1, "",
+      "top-level `schema` key is missing or empty")
+  if s.stringVal == schemaWorkspaceBootstrapV1:
+    return none(WorkspaceSettings)
+  if s.stringVal != schemaWorkspaceSettingsV1:
+    raiseManifestError(path, "schema", schemaWorkspaceSettingsV1, s.stringVal,
+      "schema version mismatch (this repro reads " &
+        schemaWorkspaceSettingsV1 & ", " & schemaWorkspaceBootstrapV1 & ")")
+  some(decodeSettingsTree(path, content))
 
 proc readWorkspaceSettings*(path: string): WorkspaceSettings =
   ## Read the workspace settings at `path`, in either schema, together with
@@ -604,29 +636,31 @@ proc rootMainline*(s: WorkspaceSettings;
                    legacyStoreIsRoot: bool): Option[string] =
   ## The workspace ROOT repository's declared mainline (Branch-Roles §3.4).
   ##
-  ## `settings.v1`: `[workspace] mainline`, else the mainline of the profile
-  ## `[workspace] profile` names, else of `default_profile` (§3.3's order,
-  ## applied to the root). `bootstrap.v1`: `[manifest] branch`, which is what
-  ## the root's mainline was read from before the settings file existed — but
-  ## only when `legacyStoreIsRoot`, i.e. the caller has established that
-  ## `[manifest] url` is absent or names the root repository itself. Once the
-  ## record store is a separate repository (Workspace-Manifests.md §"Metadata
-  ## and records are separate repositories") that branch is the STORE's, and
-  ## reading it as the root's refuses `mainline_unresolved` on a root that has
-  ## no such branch (CLI/branch.md §"The root workspace repo is cut from its
-  ## mainline too"). Deciding repository identity needs the root's remote, which
-  ## this pure reader does not see, so the caller decides it.
+  ## `settings.v1`: resolved from `[workspace]` by the same procedure as any
+  ## repo's roles (`resolveRootRoles`): `[workspace] mainline`, else the
+  ## mainline of the profile `[workspace] profile` names, else of
+  ## `default_profile`. Always `some` — a `settings.v1` file that declares no
+  ## root mainline RAISES (naming the file and `workspace.mainline`) rather
+  ## than returning `none`, so no caller can fall through to the root repo's
+  ## `origin/HEAD`, the inference §3.4 forbids. `legacyStoreIsRoot` does not
+  ## apply to it: a `settings.v1` file has no `[manifest]` pointer.
+  ##
+  ## `bootstrap.v1` (the old `.repro-workspace.toml`): `[manifest] branch`,
+  ## which is what the root's mainline was read from before the settings file
+  ## existed — but only when `legacyStoreIsRoot`, i.e. the caller has
+  ## established that `[manifest] url` is absent or names the root repository
+  ## itself. Once the record store is a separate repository
+  ## (Workspace-Manifests.md §"Metadata and records are separate
+  ## repositories") that branch is the STORE's, and reading it as the root's
+  ## refuses `mainline_unresolved` on a root that has no such branch
+  ## (CLI/branch.md §"The root workspace repo is cut from its mainline too").
+  ## Deciding repository identity needs the root's remote, which this pure
+  ## reader does not see, so the caller decides it. `none` otherwise: §3.4
+  ## replaces that chain for the settings file that can declare
+  ## `[workspace]`; the old file cannot, so its callers keep today's
+  ## behaviour (then `origin/HEAD`) until the old name is retired.
   if s.isLegacySettings:
     if legacyStoreIsRoot:
       return s.records.branch
     return none(string)
-  if s.workspace.roles.mainline.isSome:
-    return s.workspace.roles.mainline
-  let profile =
-    if s.workspace.profile.isSome: s.workspace.profile
-    else: s.workspace.default_profile
-  if profile.isSome:
-    let decls = s.profileRoles(profile.get())
-    if decls.isSome:
-      return decls.get().mainline
-  none(string)
+  some(resolveRootRoles(s).findRole("mainline").get().branch)

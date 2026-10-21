@@ -60109,7 +60109,10 @@ proc classifyRepoPathVisibility(workspaceRoot: string;
       continue
     var layerResolved: ResolvedProject
     try:
-      layerResolved = resolveProject(projectFile)
+      # Roles resolve against the WORKSPACE's settings, as the composer
+      # resolves them, including for a `local_path` layer outside the root.
+      layerResolved = resolveProject(projectFile,
+        workspaceRoleSettings(workspaceRoot))
     except CatchableError:
       # Re-resolution failure here is non-fatal for M26: the strict
       # composer path (the rest of the gate) would already have surfaced
@@ -78612,12 +78615,23 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     # The ROOT repo carries the membership manifests, so cutting it from a stale
     # local state while every member repo starts at trunk would hand back a
     # workspace whose bill of materials disagrees with its contents. Its
-    # mainline is a declaration too: the settings file's ``[workspace]``
-    # mainline (or its profile's; Workspace-Branch-Roles.md §3.4) — for the
-    # old ``.repro-workspace.toml``, its ``[manifest] branch`` when
-    # ``[manifest] url`` is absent or names the root repo itself — else the
-    # root repo's own ``origin/HEAD``.
+    # mainline is a declaration too (Workspace-Branch-Roles.md §3.4):
+    #
+    #   * ``repro-workspace.toml`` (``settings.v1``): resolved from
+    #     ``[workspace]`` — its ``mainline``, else its profile's, else the
+    #     default profile's — and NOTHING else. A settings file that declares
+    #     no root mainline is refused naming the file and
+    #     ``workspace.mainline``; the root repo's ``origin/HEAD`` is never
+    #     consulted, because inferring a mainline from it is the inference the
+    #     roles model forbids for every repo, the root included.
+    #   * the old ``.repro-workspace.toml`` (``bootstrap.v1``), or no settings
+    #     file at all: unchanged — ``[manifest] branch`` when ``[manifest]
+    #     url`` is absent or names the root repo itself, else ``origin/HEAD``.
+    #     Neither can declare ``[workspace]``, so §3.4's rule has nothing to
+    #     read there; it takes over when the workspace migrates to the new
+    #     file, and the fallback goes when the old name is retired.
     let bootstrapPath = findBootstrapConfigPath(parsed.workspaceRoot)
+    var rootDeclaresRoles = false
     if bootstrapPath.len > 0:
       # A settings file that exists but does not parse raises the strict
       # reader's diagnostic: falling through to ``origin/HEAD`` would cut the
@@ -78632,17 +78646,24 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       # A root without an ``origin`` URL cannot be shown to BE the store, so a
       # declared store URL then counts as separate.
       var legacyStoreIsRoot = settings.records.url.isNone
-      if not legacyStoreIsRoot:
+      if settings.isLegacySettings and not legacyStoreIsRoot:
         let originUrl = gitRunPlain(identity,
           ["-C", parsed.workspaceRoot, "remote", "get-url", "origin"])
         legacyStoreIsRoot = originUrl.code == 0 and
           originUrl.output.strip().len > 0 and
           canonicalRemoteIdentity(originUrl.output.strip()) ==
             canonicalRemoteIdentity(settings.records.url.get())
-      let declared = rootMainline(settings, legacyStoreIsRoot)
-      if declared.isSome:
-        rootMainlineBranch = declared.get().strip()
-    if rootMainlineBranch.len == 0:
+      if settings.isLegacySettings:
+        let declared = rootMainline(settings, legacyStoreIsRoot)
+        if declared.isSome:
+          rootMainlineBranch = declared.get().strip()
+      else:
+        rootDeclaresRoles = true
+        try:
+          rootMainlineBranch = rootMainline(settings, legacyStoreIsRoot).get()
+        except WorkspaceManifestParseError as err:
+          rootMainlineRefusal = err.msg
+    if rootMainlineBranch.len == 0 and not rootDeclaresRoles:
       let headRef = gitRunPlain(identity,
         ["-C", parsed.workspaceRoot, "symbolic-ref", "--short", "-q",
          "refs/remotes/origin/HEAD"])
@@ -78651,13 +78672,14 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         rootMainlineBranch =
           if value.startsWith("origin/"): value["origin/".len .. ^1]
           else: value
-    if rootMainlineBranch.len == 0:
+    if rootMainlineBranch.len == 0 and rootMainlineRefusal.len == 0:
       rootMainlineRefusal = "the workspace root '" & parsed.workspaceRoot &
-        "' declares no mainline: `" & settingsFileName & "` sets no " &
-        "`[workspace] mainline` (the old `.repro-workspace.toml`: no " &
-        "`[manifest] branch` for a record store that is the root repo itself) " &
-        "and the root repo has no `origin/HEAD` to read " &
-        "one from. Set `[workspace] mainline`, or drop `--from-mainlines`"
+        "' declares no mainline: it has no `" & settingsFileName & "` to " &
+        "declare `[workspace] mainline` in, the old `.repro-workspace.toml` " &
+        "(if any) sets no `[manifest] branch` for a record store that is the " &
+        "root repo itself, and the root repo has no `origin/HEAD` to read one " &
+        "from. Declare `[workspace] mainline` in `" & settingsFileName &
+        "`, or drop `--from-mainlines`"
 
   if parsed.fromMainlines and parsed.fetch:
     var fetchActions: seq[BuildAction]

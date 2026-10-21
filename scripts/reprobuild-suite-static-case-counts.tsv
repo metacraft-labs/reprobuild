@@ -1858,6 +1858,8 @@ tests/integration/t_reproos_source_bridge_inventory.nim	nim	1
 tests/integration/t_reproos_uki_through_the_cvm_path.nim	nim	8
 tests/integration/t_required_features_are_a_subset_of_host_features.nim	nim	1
 tests/integration/t_reseal_on_generation_switch.nim	nim	4
+tests/integration/t_role_validation_refused_through_repro.nim	nim	1
+tests/integration/t_roles_resolve_from_settings_committed_at_the_revision.nim	nim	1
 tests/integration/t_rp1_provider_compile_edge_materializes.nim	nim	1
 tests/integration/t_rp2_provider_session_invoke.nim	nim	4
 tests/integration/t_rp3_bind_deps_and_sharing.nim	nim	3
@@ -2124,6 +2126,7 @@ tests/unit/t_configure_build_tree_cleanup.nim	nim	12
 tests/unit/t_constructor_fetch_tool_refs.nim	nim	9
 tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	2
 tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	5
+tests/unit/t_custom_role_fallback_cycle_is_rejected.nim	nim	1
 tests/unit/t_da1i_evidence_help_names_the_hazard.nim	nim	9
 tests/unit/t_daemon_request_working_directory.nim	nim	4
 tests/unit/t_declared_package_deps_from_recipe.nim	nim	6
@@ -2137,8 +2140,10 @@ tests/unit/t_dev_env_prompt_watch_key.nim	nim	14
 tests/unit/t_electron_builder_binaries.nim	nim	5
 tests/unit/t_every_tool_profile_is_sealed.nim	nim	6
 tests/unit/t_export_plan_carries_tool_ops.nim	nim	4
+tests/unit/t_false_declares_absence.nim	nim	1
 tests/unit/t_flake_lock_has_no_competing_reprobuild_pin.nim	nim	2
 tests/unit/t_flake_lock_names_no_private_input.nim	nim	10
+tests/unit/t_fragment_beats_profile_beats_default_profile.nim	nim	1
 tests/unit/t_fribidi_dev_stub.nim	nim	1
 tests/unit/t_from_source_cabal_recognition.nim	nim	8
 tests/unit/t_from_source_cargo_recognition.nim	nim	8
@@ -2277,6 +2282,9 @@ tests/unit/t_repo_fragment_role_keys.nim	nim	6
 tests/unit/t_repo_fragment_writer_emits_v1_when_v1_can_say_it.nim	nim	5
 tests/unit/t_repo_relocation_move_ordering.nim	nim	10
 tests/unit/t_repo_v1_and_v2_resolve_identically.nim	nim	1
+tests/unit/t_role_falls_back_toward_mainline.nim	nim	1
+tests/unit/t_role_validation_refused_at_manifest_load.nim	nim	7
+tests/unit/t_root_repo_resolves_from_workspace_settings.nim	nim	1
 tests/unit/t_run_consumes.nim	nim	10
 tests/unit/t_runner_closes_merged_pipes_once.nim	nim	4
 tests/unit/t_runquota_endpoint_paths.nim	nim	6
