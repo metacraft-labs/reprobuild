@@ -27,6 +27,8 @@ const
   MaxScopeBytes* = 4096
   MaxFrameBytes* = 16 shl 20
   DefaultApprovalLifetimeSeconds* = 600'i64
+  DefaultProvider* = "agent-harbor"
+    ## The provider ReproOS curator policy selects by default (M7).
 
 type
   AgentRefusalReason* = enum
@@ -66,6 +68,7 @@ type
     arTooLate = "too-late"
     arAuditCorrupt = "audit-corrupt"
     arEvidenceUnknown = "evidence-unknown"
+    arProviderNotAdmitted = "provider-not-admitted"
 
   AgentRefusal* = object of CatchableError
     ## Raised for every refusal. `reason` is the machine-readable code;

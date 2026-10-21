@@ -59,3 +59,33 @@ suite "M7 — provider conformance":
     let r = conformanceOf("idle")
     check not r.passed
     check r.failures.anyIt("never attached" in it)
+
+type NoBackend = ref object of Backend
+
+suite "M7 — admission follows conformance":
+  test "only Agent Harbor is admitted by default; others need a passing report":
+    let root = createTempDir("rac-admit-", "")
+    defer: removeDir(root)
+    let h = newHost(NoBackend(), root / "ws")
+    let consent = newConnection(chConsent)
+    discard h.hello(consent, ProtocolVersion, {low(Family) .. high(Family)})
+    check h.isAdmitted(DefaultProvider)
+    discard h.createSession(consent, DefaultProvider, @[])
+    expect AgentRefusal:
+      discard h.createSession(consent, "other-agent", @[])
+    # A failing report admits nothing.
+    let failing = conformanceOf("idle")
+    expect AgentRefusal:
+      h.admitAfterConformance(consent, "other-agent", failing)
+    check not h.isAdmitted("other-agent")
+    # A passing one admits, and the audit log names the evidence.
+    let passing = conformanceOf("provider")
+    h.admitAfterConformance(consent, "other-agent", passing)
+    check h.isAdmitted("other-agent")
+    discard h.createSession(consent, "other-agent", @[])
+    check h.audit.records.anyIt(it.decision == "admit" and
+      it.grant == "other-agent" and it.resultDigest == reportDigest(passing).hex)
+    # The provider channel cannot admit.
+    let agent = newConnection(chProvider)
+    expect AgentRefusal:
+      h.admitProvider(agent, "rogue", default(Digest32))

@@ -487,6 +487,7 @@ suite "M0 — privilege escalation":
       tp("kind", cText("plan.execute")), tp("plan", cText("00"))]))))
     check early.field("reason").text == "malformed"
     refuses(arUnsupportedProtocol): discard f.host.hello(c, 2, AllFamilies)
+    f.host.admitProvider(f.consent, "alt", default(Digest32))
     let (sid, secret) = f.host.createSession(f.consent, "alt", @[
       g("workspace.create:hello"), g("build.run:hello")])
     let narrow = newConnection(chProvider)

@@ -87,6 +87,9 @@ type
     workspaces*: Table[string, Workspace]
     workspacesRoot*: string
     counter: int
+    admitted: HashSet[string]
+      ## Providers a session may be created for. Agent Harbor is admitted
+      ## by default; any other provider only after `admitProvider`.
 
   Connection* = ref object
     ## One accepted socket connection. `channel` is fixed by which socket
@@ -157,7 +160,8 @@ proc newHost*(backend: Backend; workspacesRoot: string; auditPath = "";
   createDir(workspacesRoot)
   result = Host(clock: clock, backend: backend,
                 audit: newAuditLog(auditPath),
-                workspacesRoot: expandFilename(workspacesRoot))
+                workspacesRoot: expandFilename(workspacesRoot),
+                admitted: toHashSet([DefaultProvider]))
   if randomBytes(result.bootKey) != result.bootKey.len:
     raise newException(OSError, "system random source failed")
 
@@ -244,6 +248,24 @@ proc hello*(h: Host; conn: Connection; protocol: uint64;
 # ---------------------------------------------------------------------
 # Consent channel.
 
+proc admitProvider*(h: Host; conn: Connection; provider: string;
+                    conformanceEvidence: Digest32) =
+  ## Admit an alternative provider (M7: "only after permission, audit,
+  ## cancellation, generation, and Remix conformance"). The consent surface
+  ## calls this with the digest of the provider's PASSING conformance report
+  ## (`conformance.admitAfterConformance` is the only caller that checks the
+  ## verdict); the digest is in the audit log, so every admission names the
+  ## evidence it rests on.
+  h.audited(conn, "session", "admit"):
+    conn.requireChannel(chConsent, "provider admission")
+    if not isIdentifier(provider):
+      refuse(arMalformed, "provider name " & provider.escape)
+    h.admitted.incl provider
+    discard h.record(conn, "session", "admit", "admit", grant = provider,
+                     resultDigest = conformanceEvidence.hex)
+
+proc isAdmitted*(h: Host; provider: string): bool = provider in h.admitted
+
 proc createSession*(h: Host; conn: Connection; provider: string;
                     grants: seq[Grant];
                     lifetimeSeconds = 8 * 3600'i64): tuple[id, secret: string] =
@@ -252,6 +274,8 @@ proc createSession*(h: Host; conn: Connection; provider: string;
   ## refuse the whole request.
   h.audited(conn, "session", "create"):
     conn.requireChannel(chConsent, "session creation")
+    if provider notin h.admitted:
+      refuse(arProviderNotAdmitted, provider & " has not passed conformance")
     if grants.len > MaxGrantsPerSession:
       refuse(arBoundsExceeded, "too many grants")
     var live = 0

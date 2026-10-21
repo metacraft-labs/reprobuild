@@ -88,6 +88,10 @@ proc runConformance*(providerCmd: seq[string]; workRoot: string;
   defer: server.stop()
   let consent = newConnection(chConsent)
   discard h.hello(consent, ProtocolVersion, {low(Family) .. high(Family)})
+  # This host exists to examine the provider under test, so it admits the
+  # scenario's provider identity itself; production admission is
+  # `admitAfterConformance`.
+  h.admitProvider(consent, "conformance", default(Digest32))
   var grants: seq[Grant]
   for g in ScenarioGrants:
     grants.add parseGrant(g)
@@ -180,3 +184,19 @@ proc runConformance*(providerCmd: seq[string]; workRoot: string;
   if "conformance-done" notin result.providerOutput:
     fail "the provider did not report completion"
   result.passed = result.failures.len == 0
+
+proc reportDigest*(r: ConformanceReport): Digest32 =
+  ## The identity of a verdict: scenario, pass/fail, failures, exit status
+  ## and the backend calls, in order.
+  var text = ScenarioV1 & "\n" & $r.passed & "\n" & $r.providerExit & "\n"
+  for f in r.failures: text.add "failure " & f & "\n"
+  for c in r.backendCalls: text.add "call " & c & "\n"
+  id("reproos.agent.conformance-report.v1", text.toBytes)
+
+proc admitAfterConformance*(h: Host; conn: Connection; provider: string;
+                            report: ConformanceReport) =
+  ## Admit `provider` on the strength of a PASSING report, and only then.
+  if not report.passed:
+    refuse(arProviderNotAdmitted, provider & " failed conformance: " &
+      report.failures.join("; "))
+  h.admitProvider(conn, provider, reportDigest(report))

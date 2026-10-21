@@ -7857,8 +7857,8 @@
       "owner": "libs/repro_agent_protocol",
       "requiresReproBinary": false,
       "source": "libs/repro_agent_protocol/tests/t_agent_provider_conformance.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
