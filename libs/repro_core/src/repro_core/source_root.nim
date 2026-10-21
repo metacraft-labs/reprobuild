@@ -377,6 +377,15 @@ proc reprobuildSourceRootCandidates*(): seq[SourceRootCandidate] =
       (if runningImageIsUnder(CompiledSourceRoot): ""
        else: "not used: this repro does not run from that checkout"))
 
+proc resolveReprobuildSourceRootCandidate*(): SourceRootCandidate =
+  ## The candidate `resolveReprobuildSourceRoot` selects, with its `origin`,
+  ## or an empty candidate when none holds reprobuild's libs. For a
+  ## diagnostic that has to say not only which tree a compile used but why
+  ## that one was chosen -- the half an operator needs to change it.
+  for candidate in reprobuildSourceRootCandidates():
+    if candidate.skipReason.len == 0 and hasReprobuildLibs(candidate.path):
+      return candidate
+
 proc resolveReprobuildSourceRoot*(): string =
   ## The reprobuild source tree to compile against, or "" when no candidate
   ## holds reprobuild's libs. Precedence: `reprobuildSourceRootCandidates`.
@@ -384,10 +393,7 @@ proc resolveReprobuildSourceRoot*(): string =
   ## Each candidate is taken only when it really holds the libs, so an
   ## override naming a stale or empty directory falls through instead of
   ## producing a compile that fails far from the cause.
-  for candidate in reprobuildSourceRootCandidates():
-    if candidate.skipReason.len == 0 and hasReprobuildLibs(candidate.path):
-      return candidate.path
-  ""
+  resolveReprobuildSourceRootCandidate().path
 
 proc describeReprobuildSourceRootSearch*(): string =
   ## A multi-line account of every candidate `resolveReprobuildSourceRoot`

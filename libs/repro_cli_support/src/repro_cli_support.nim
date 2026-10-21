@@ -7499,18 +7499,144 @@ proc providerSnapshotInputsFresh(snapshot: ProviderGraphSnapshot): bool =
         return false
   true
 
+proc newerActionPayloadIn(snapshot: ProviderGraphSnapshot):
+    tuple[found: bool; actionNodeId: string; version: uint16] =
+  ## The first action whose payload a NEWER reprobuild wrote, if the snapshot
+  ## holds one.
+  ##
+  ## The snapshot's own envelope is version-gated by
+  ## ``loadProviderGraphSnapshot``, but the action payloads inside it are
+  ## opaque bytes there: nothing in the snapshot's key (provider artifact id,
+  ## binary evidence, evaluation inputs) names their version. Only a header
+  ## is read per action. A payload that is not an envelope at all is NOT
+  ## reported here; that is corruption, and lowering's full decode raises it.
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind != gnkAction:
+        continue
+      let version =
+        try: buildActionPayloadVersion(toBytes(node.payload))
+        except BuildActionPayloadError: 0'u16
+      if version > BuildActionPayloadVersion:
+        return (found: true, actionNodeId: node.id, version: version)
+
+proc providerSnapshotUsable(snapshot: ProviderGraphSnapshot;
+                            snapshotPath: string): bool =
+  ## Whether a provider-graph snapshot read from disk may be served, as far
+  ## as its action payloads go. The one check every cache read of
+  ## ``provider-fragments.rbsz`` applies before handing the graph on.
+  ##
+  ## A snapshot holding an action payload newer than this build reads was
+  ## written by a newer ``repro`` sharing the store, and per
+  ## Incremental-Invalidation.md §"Record payload schemas" an older reader
+  ## treats a newer record as ABSENT: a miss, never a fatal error (it used to
+  ## end the build with ``unsupported build action payload version``, naming
+  ## neither the entry nor either version). The answer is ``false``, the
+  ## versions are reported, and the file is removed.
+  ##
+  ## Removing it is what makes the miss a REBUILD rather than a loop. The
+  ## refresh that follows a miss reads the stored snapshot itself and keeps
+  ## every fragment whose provider binary and inputs are unchanged, so it
+  ## would hand the same unreadable payloads straight back. The file is a
+  ## derived cache this build is about to overwrite anyway (as
+  ## ``loadProviderGraphSnapshot`` already does for a newer ENVELOPE), and
+  ## once rewritten at this build's version the next read is a silent hit,
+  ## which is why the diagnostic appears once per entry.
+  let newer = newerActionPayloadIn(snapshot)
+  if not newer.found:
+    return true
+  stderr.writeLine("repro: warning: provider graph snapshot " &
+    snapshotPath & " holds a newer build action payload (action `" &
+    newer.actionNodeId & "`, payload version " & $newer.version &
+    "); this repro reads up to version " & $BuildActionPayloadVersion &
+    ", so the entry is a cache miss and is rebuilt")
+  try:
+    removeFile(extendedPath(snapshotPath))
+  except OSError as err:
+    # Not fatal for the miss itself; the refresh's save replaces the file.
+    stderr.writeLine("repro: warning: could not remove " & snapshotPath &
+      ": " & err.msg)
+  false
+
+proc refreshReadableProviderGraph(config: RefreshConfig):
+    ProviderRefreshReport =
+  ## ``refreshProviderGraph``, refusing a graph this build cannot read.
+  ##
+  ## Every route that runs a provider to produce a graph goes through here,
+  ## so the refusal is stated once. ``providerSnapshotUsable`` handles a
+  ## newer payload that arrives from a CACHED snapshot: a miss and a rebuild.
+  ## This is the other way one arrives, and the one a rebuild cannot cure:
+  ## the provider binary itself writes payloads newer than this engine reads.
+  ##
+  ## A provider writes the ``BuildActionPayloadVersion`` of the reprobuild
+  ## libraries it was COMPILED AGAINST, and every cache that can hand an
+  ## engine a provider binary -- the provider-compile edge in the shared
+  ## action cache (``ProviderCompileActionKey``), its recipe-relative output
+  ## directory, the provider-compile binary cache -- keys on the content of
+  ## those libraries (``frontendRuntimeIdentity``), which holds that
+  ## constant. The shipped Tier-2a/2b providers are keyed by their own
+  ## content. So no cache serves a provider built against libraries other
+  ## than the ones this engine resolved, and recompiling would compile the
+  ## same libraries again. What is wrong is the RESOLUTION: the engine
+  ## selected a source tree newer than itself (a checkout that moved on
+  ## without a rebuild, an inherited ``$REPROBUILD_SOURCE_ROOT``, a
+  ## ``$REPROBUILD_LIBS_DIR``). The error says which tree, and why it was
+  ## selected, because that is the one thing the operator must change.
+  ##
+  ## The persisted snapshot is removed before raising, so the next build
+  ## meets this same refusal rather than a cache "miss" that cannot rebuild.
+  result = refreshProviderGraph(config)
+  let newer = newerActionPayloadIn(result.snapshot)
+  if not newer.found:
+    return
+  if result.persistedSnapshotPath.len > 0:
+    try:
+      removeFile(extendedPath(result.persistedSnapshotPath))
+    except OSError:
+      discard
+  let source = resolveReprobuildSourceRootCandidate()
+  # The remedy names whatever selected the tree: an earlier candidate
+  # outranks a later one, so advice to set a lower-precedence variable
+  # (`$REPROBUILD_SOURCE_ROOT` under a `$REPROBUILD_LIBS_DIR`) would change
+  # nothing.
+  let sourceLine =
+    if source.path.len > 0:
+      "reprobuild sources it compiles providers against: " & source.path &
+        " (selected by " & source.origin & ")\nRebuild repro from those " &
+        "sources, or make " & source.origin & " name the sources this " &
+        "repro was built from."
+    else:
+      "no reprobuild source tree resolved for provider compiles"
+  raise newException(ValueError,
+    "provider " & config.providerBinaryPath & " wrote build action payload " &
+    "version " & $newer.version & " (action `" & newer.actionNodeId &
+    "`), newer than version " & $BuildActionPayloadVersion & ", the " &
+    "newest this repro (" & publicCliImagePath() & ") reads. The provider " &
+    "was built from reprobuild libraries newer than this repro binary.\n  " &
+    sourceLine)
+
 proc readFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
                                    providerBinaryPath: string):
     Option[ProviderGraphSnapshot] =
   inc warmBuildCacheCounters.providerSnapshotDiskReads
-  if not fileExists(extendedPath(providerSnapshotPath(storeRoot))):
+  let path = providerSnapshotPath(storeRoot)
+  if not fileExists(extendedPath(path)):
     return none(ProviderGraphSnapshot)
   try:
     let snapshot = loadProviderGraphSnapshot(storeRoot)
     if snapshot.providerArtifactId != providerArtifactId:
       return none(ProviderGraphSnapshot)
-    if not providerSnapshotBinaryFresh(snapshot, providerBinaryPath) or
-        not providerSnapshotInputsFresh(snapshot):
+    if not providerSnapshotBinaryFresh(snapshot, providerBinaryPath):
+      return none(ProviderGraphSnapshot)
+    # Before the inputs check, not after it: with the artifact id and the
+    # binary matching, ``refreshProviderGraph`` keeps every fragment whose
+    # inputs did not change, so a snapshot that is merely input-stale would
+    # still carry its unreadable payloads into the refreshed graph. A
+    # snapshot of another artifact or binary is not reused by the refresh
+    # and is left alone.
+    if not providerSnapshotUsable(snapshot, path):
+      return none(ProviderGraphSnapshot)
+    if not providerSnapshotInputsFresh(snapshot):
       return none(ProviderGraphSnapshot)
     return some(snapshot)
   except CatchableError:
@@ -8024,6 +8150,11 @@ proc prewarmProviderSnapshotsFrom(outDir: string;
     try:
       let snapshot = loadProviderGraphSnapshot(store)
       if snapshot.providerArtifactId.len == 0:
+        continue
+      # Not warmed, and not reported or removed here either: the request's
+      # own disk read (``providerSnapshotUsable``) does both, on the stderr
+      # the user is reading rather than the daemon's.
+      if newerActionPayloadIn(snapshot).found:
         continue
       let evidence = durableFileEvidence(path)
       if not evidence.exists:
@@ -12234,7 +12365,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let synthIdentity = cmakeDirectBuildIdentity(metadata, pathEnv)
     let providerGraphStart = statStart(statsEnabled)
     progressRenderer.renderPhase("refreshing trycompile provider graph")
-    let refresh = refreshProviderGraph(RefreshConfig(
+    let refresh = refreshReadableProviderGraph(RefreshConfig(
       storeRoot: providerGraphStoreRoot(outDir / "provider-graph"),
       providerBinaryPath: tryCompileProviderBinary,
       providerArtifactId: TryCompileProviderArtifactId,
@@ -12998,7 +13129,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         interfaceFingerprint: artifact.interfaceFingerprint)
       let providerGraphStart = statStart(statsEnabled)
       progressRenderer.renderPhase("refreshing standard provider graph")
-      let refresh = refreshProviderGraph(RefreshConfig(
+      let refresh = refreshReadableProviderGraph(RefreshConfig(
         storeRoot: providerGraphStoreRoot(outDir / "provider-graph"),
         providerBinaryPath: standardProviderBinary,
         providerArtifactId: standardProviderArtifactId,
@@ -13292,7 +13423,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       refresh.persistedSnapshotPath = providerSnapshotPath(providerGraphStore)
     else:
       progressRenderer.renderPhase("refreshing project provider graph")
-      refresh = refreshProviderGraph(RefreshConfig(
+      refresh = refreshReadableProviderGraph(RefreshConfig(
         storeRoot: providerGraphStore,
         providerBinaryPath: provider.outputBinaryPath,
         providerArtifactId: providerArtifactId,
@@ -30168,7 +30299,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     refresh.persistedSnapshotPath = providerSnapshotPath(providerGraphStore)
     result.providerGraphCacheHit = true
   else:
-    refresh = refreshProviderGraph(RefreshConfig(
+    refresh = refreshReadableProviderGraph(RefreshConfig(
       storeRoot: providerGraphStore,
       providerBinaryPath: provider.outputBinaryPath,
       providerArtifactId: result.providerArtifactId,
@@ -30364,7 +30495,7 @@ proc refreshRecipeProviderSnapshot(target: string;
   if freshSnapshot.isSome:
     refresh.snapshot = freshSnapshot.get()
   else:
-    refresh = refreshProviderGraph(RefreshConfig(
+    refresh = refreshReadableProviderGraph(RefreshConfig(
       storeRoot: providerGraphStore,
       providerBinaryPath: provider.outputBinaryPath,
       providerArtifactId: providerArtifactId,

@@ -65,6 +65,17 @@ template registerExtension*[T](id: string) =
 type
   BuildActionPayloadError* = object of CatchableError
 
+  BuildActionPayloadTooNewError* = object of BuildActionPayloadError
+    ## A well-formed payload envelope whose version is NEWER than the
+    ## ``BuildActionPayloadVersion`` this build reads: it was written by a
+    ## newer reprobuild, not corrupted. Kept distinct from its parent so a
+    ## reader of a shared cache can treat exactly this refusal as a miss
+    ## (Incremental-Invalidation.md §"Record payload schemas": an older
+    ## reader treats a newer record as absent) without also hiding real
+    ## corruption, which stays a plain ``BuildActionPayloadError``.
+    foundVersion*: uint16
+    supportedVersion*: uint16
+
 
   Tool*[name: static string] = object
 

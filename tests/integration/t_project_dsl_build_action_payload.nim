@@ -243,6 +243,48 @@ suite "project DSL build action payload":
     check decoded.dependencyPolicy.depfiles.len == 0
     check decoded.actionCachePolicy == acfpTimestamp
 
+  test "a NEWER version is refused as too new, naming both versions":
+    # A cache shared with a newer reprobuild maps exactly this refusal to a
+    # miss (``providerSnapshotUsable``), so it must be told apart from
+    # corruption by TYPE, and must carry the versions for the diagnostic.
+    # The version word is a u16 LE directly after the 4-byte magic.
+    var encoded = encodeBuildActionPayload(sampleAction())
+    let newer = BuildActionPayloadVersion + 1'u16
+    encoded[4] = byte(newer and 0xff'u16)
+    encoded[5] = byte(newer shr 8)
+    check buildActionPayloadVersion(encoded) == newer
+    try:
+      discard decodeBuildActionPayload(encoded)
+      checkpoint("a newer payload decoded")
+      fail()
+    except BuildActionPayloadTooNewError as err:
+      check err.foundVersion == newer
+      check err.supportedVersion == BuildActionPayloadVersion
+      check ("version " & $newer) in err.msg
+
+  test "version 0 and a bad magic are corruption, not a newer version":
+    # The narrow half: neither is a payload of another reprobuild, so neither
+    # may be mistaken for one and silently treated as a cache miss.
+    var zero = encodeBuildActionPayload(sampleAction())
+    # version-literal-ok: zero is the structural floor below version 1,
+    # never a real version, so it does not move with the current one.
+    zero[4] = 0'u8
+    # version-literal-ok: high byte of the same structural-floor zero.
+    zero[5] = 0'u8
+    var badMagic = encodeBuildActionPayload(sampleAction())
+    badMagic[0] = byte(ord('X'))
+    for corrupt in [zero, badMagic]:
+      try:
+        discard decodeBuildActionPayload(corrupt)
+        fail()
+      except BuildActionPayloadTooNewError:
+        checkpoint("corruption raised the too-new subtype")
+        fail()
+      except BuildActionPayloadError:
+        discard
+    expect BuildActionPayloadError:
+      discard buildActionPayloadVersion(badMagic)
+
   test "invalid dependency policy kind fails closed":
     # The kind byte is located by encoding two policies that differ ONLY in
     # their kind, never by a distance from the payload's tail: see the note on

@@ -4288,14 +4288,34 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
 proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.} =
   encodeBuildActionPayloadAtVersion(action, BuildActionPayloadVersion)
 
-proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrStatic.} =
+proc readBuildActionPayloadHeader(bytes: openArray[byte]; pos: var int):
+    uint16 =
+  ## Validate the envelope's magic and return its version word, leaving
+  ## ``pos`` on the payload-length field. The one reader of the header, so
+  ## the decoder and ``buildActionPayloadVersion`` cannot disagree on it.
   if bytes.len < 10:
     raisePayload("truncated build action payload envelope")
   for i in 0 ..< BuildActionPayloadMagic.len:
     if bytes[i] != BuildActionPayloadMagic[i]:
       raisePayload("unknown build action payload magic")
-  var pos = 4
-  let version = readU16Le(bytes, pos)
+  pos = BuildActionPayloadMagic.len
+  readU16Le(bytes, pos)
+
+proc buildActionPayloadVersion*(bytes: openArray[byte]): uint16 {.dynOrStatic.} =
+  ## The envelope version of an encoded action payload, read from its
+  ## header alone. Raises ``BuildActionPayloadError`` when ``bytes`` does not
+  ## start with a payload envelope.
+  ##
+  ## For a cache reader that must decide whether an entry was written by a
+  ## NEWER build before it serves it: checking the version of every action in
+  ## a cached graph costs a header read each, where a full decode would cost
+  ## the decode twice over (once here and once when the graph is lowered).
+  var pos = 0
+  readBuildActionPayloadHeader(bytes, pos)
+
+proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrStatic.} =
+  var pos = 0
+  let version = readBuildActionPayloadHeader(bytes, pos)
   # Every version from 1 up to the current one is readable: each bump either
   # APPENDS a field gated on its own ``version >=`` check below, or — as at
   # v25, which dropped two fields a removed policy kind had carried — REPLACES
@@ -4309,7 +4329,22 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   # the constant was bumped — a v24 binary then rejected every graph a v23
   # binary had cached, with "unsupported build action payload version", and
   # the only way back was deleting the cache.
-  if version < 1'u16 or version > BuildActionPayloadVersion:
+  #
+  # The top of the range is closed, and has to be: a newer version may
+  # REPLACE a field, so no prefix of its bytes is safe to read. That refusal
+  # is a different fact from corruption, though -- the bytes are a valid
+  # payload of another reprobuild -- so it raises its own subtype carrying
+  # both versions. A cache reader maps exactly that to a miss
+  # (``BuildActionPayloadTooNewError``); everything else stays an error.
+  if version > BuildActionPayloadVersion:
+    var err = newException(BuildActionPayloadTooNewError,
+      "unsupported build action payload version " & $version &
+        " (newer than version " & $BuildActionPayloadVersion &
+        ", the newest this build reads)")
+    err.foundVersion = version
+    err.supportedVersion = BuildActionPayloadVersion
+    raise err
+  if version < 1'u16:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
