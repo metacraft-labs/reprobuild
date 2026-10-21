@@ -133,7 +133,7 @@ proc familyOf*(kind: OperationKind): Family =
   of okPreviewStart, okPreviewStop: fPreview
   of okGenerationStage, okGenerationActivate, okGenerationRollback:
     fGeneration
-  of okRemixCapture, okRemixExport, okRemixSubmit: fRemix
+  of okRemixCapture, okRemixExport, okRemixSubmit, okRemixCompose: fRemix
 
 proc requiredGrants*(op: Operation; packageOfTarget: string): seq[Grant] =
   ## Every grant `op` exercises. `packageOfTarget` is the package of the
@@ -176,5 +176,8 @@ proc requiredGrants*(op: Operation; packageOfTarget: string): seq[Grant] =
   of okRemixSubmit:
     result.add grant(ckRemixPublish, "marketplace")
     result.add grant(ckCredentialsUse, op.arg("credential"))
+  of okRemixCompose:
+    # Composing local Remixes produces a workspace for the target package.
+    result.add grant(ckWorkspaceCreate, op.target)
   for g in result:
     validateGrant(g)

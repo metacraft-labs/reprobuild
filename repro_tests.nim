@@ -225,6 +225,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_agent_protocol/tests/t_agent_surface_state_contract.nim",
+    binary: "build/test-bin/t_agent_surface_state_contract",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_a2_5_p1_module_loads.nim",
     binary: "build/test-bin/t_a2_5_p1_module_loads",
     defines: @[],
@@ -8687,6 +8696,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/e2e/agent-harbor/t_e2e_agent_harbor_change_to_generation_and_remix.nim",
     binary: "build/test-bin/t_e2e_agent_harbor_change_to_generation_and_remix",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/e2e/agent-harbor/t_e2e_agent_harbor_combines_and_augments_remixes.nim",
+    binary: "build/test-bin/t_e2e_agent_harbor_combines_and_augments_remixes",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

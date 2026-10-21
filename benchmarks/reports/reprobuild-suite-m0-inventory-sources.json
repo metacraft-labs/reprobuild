@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2298,
+    "nimTestBinaries": 2300,
     "pureUnitConsolidationGroups": 66,
     "pureUnitTests": 685,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2329
+    "testEntries": 2331
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1358,8 +1358,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1251,
-      "platform/destructive": 139,
+      "integration": 1252,
+      "platform/destructive": 140,
       "pure unit": 685,
       "unclassified": 236
     },
@@ -1563,9 +1563,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2298,
+    "nimTestBinaryCount": 2300,
     "pythonTestFileCount": 31,
-    "testEntryCount": 2329
+    "testEntryCount": 2331
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7806,8 +7806,8 @@
       "owner": "libs/repro_agent_protocol",
       "requiresReproBinary": false,
       "source": "libs/repro_agent_protocol/tests/t_agent_harbor_reproos_permission_protocol.nim",
-      "sourceSuiteCount": 7,
-      "staticCaseCount": 20,
+      "sourceSuiteCount": 8,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -7859,6 +7859,23 @@
       "source": "libs/repro_agent_protocol/tests/t_agent_provider_conformance.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_agent_surface_state_contract",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_agent_protocol"
+      ],
+      "owner": "libs/repro_agent_protocol",
+      "requiresReproBinary": false,
+      "source": "libs/repro_agent_protocol/tests/t_agent_surface_state_contract.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25089,6 +25106,25 @@
       "source": "tests/e2e/agent-harbor/t_e2e_agent_harbor_change_to_generation_and_remix.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_agent_harbor_combines_and_augments_remixes",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_agent_backend",
+        "repro_agent_protocol",
+        "repro_remix"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/agent-harbor/t_e2e_agent_harbor_combines_and_augments_remixes.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -76,10 +76,12 @@ package greeter:
 
   build:
     let compile = shell(
-      command = "mkdir -p build/out/usr/bin && cc -O2 -o build/out/usr/bin/greeter src/main.c",
+      command = "mkdir -p build/out/usr/bin build/out/usr/share/greeter && cc -O2 -o build/out/usr/bin/greeter src/main.c && cp src/banner.txt build/out/usr/share/greeter/banner.txt",
       actionId = "greeter.build.compile",
-      extraOutputs = @["build/out/usr/bin/greeter"])
-    appendRegisteredActionToolIdentityRefs(compile.id, ["mkdir", "cc"])
+      extraInputs = @["src/banner.txt"],
+      extraOutputs = @["build/out/usr/bin/greeter",
+                       "build/out/usr/share/greeter/banner.txt"])
+    appendRegisteredActionToolIdentityRefs(compile.id, ["mkdir", "cc", "cp"])
     emitInstallTreeMirror(compile, "build", "out", "greeter", "shell")
     let selftest = shell(
       command = "build/out/usr/bin/greeter > build/selftest.out && grep -qxF \"$(cat tests/expected.txt)\" build/selftest.out",
@@ -188,6 +190,8 @@ proc newFixture*(name: string; grants: seq[string];
   createDir(f.recipeDir / "tests")
   writeFile(f.recipeDir / "repro.nim", recipe())
   writeFile(f.recipeDir / "src" / "main.c", greeterV1)
+  # A second source file, so two changes can touch disjoint files (M6).
+  writeFile(f.recipeDir / "src" / "banner.txt", "banner v1\n")
   writeFile(f.recipeDir / "tests" / "expected.txt", "hello from greeter v1\n")
   # The repro binary's directory carries repro-install-mirror-publish,
   # which the install mirror runs by name.

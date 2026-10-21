@@ -80,6 +80,11 @@ proc op(kind: OperationKind; target: string;
 
 proc g(s: string): Grant = parseGrant(s)
 
+proc tap(c: Connection; h: Host): Connection =
+  ## A consent connection that has said hello.
+  discard h.hello(c, ProtocolVersion, {low(Family) .. high(Family)})
+  c
+
 const AllFamilies = {low(Family) .. high(Family)}
 
 type Fixture = object
@@ -318,6 +323,52 @@ suite "M0 — stale approvals":
     refuses(arApprovalStaleBase):
       discard s.f.host.execute(s.conn, s.receipt.planId.hex, s.approval)
     check s.f.backend.calls.countIt(it.startsWith("generation")) == 0
+
+suite "M0 — crash recovery":
+  test "a host restart resumes sessions suspended and voids every approval":
+    let dir = scratch / "restart"
+    let backend = FixtureBackend(active: "gen-1")
+    var h = newHost(backend, dir / "workspaces", auditPath = dir / "audit.log",
+                    clock = testClock, statePath = dir / "state.cbor")
+    let consent = newConnection(chConsent)
+    discard h.hello(consent, ProtocolVersion, AllFamilies)
+    let (sid, secret) = h.createSession(consent, "agent-harbor",
+                                        EditGrants.map(g))
+    var conn = newConnection(chProvider)
+    discard h.hello(conn, ProtocolVersion, AllFamilies)
+    h.attach(conn, sid, secret)
+    let intent = h.captureIntent(consent, sid, "stage it")
+    let co = h.submitPlan(conn, Plan(sessionId: sid, intentId: intentId(intent),
+      baseGeneration: "gen-1", operations: @[op(okCheckoutCreate, "hello")],
+      declaredCapabilities: @[g("workspace.create:hello")]))
+    let ws = h.execute(conn, co.planId.hex).results[0].detail
+    let stagePlan = Plan(sessionId: sid, intentId: intentId(intent),
+      baseGeneration: "gen-1", operations: @[op(okGenerationStage, ws)],
+      declaredCapabilities: @[g("system.generation:stage")])
+    let r = h.submitPlan(conn, stagePlan)
+    let approval = h.approvePlan(consent, r.planId.hex)
+    # The host process dies here. A new one starts over the same state.
+    h = newHost(backend, dir / "workspaces", auditPath = dir / "audit.log",
+                clock = testClock, statePath = dir / "state.cbor")
+    check h.sessionState(sid) == ssSuspended
+    check h.audit.verify()
+    check h.audit.records.anyIt(it.kind == "restart" and it.sessionId == sid)
+    # The old connection is gone; the provider re-attaches with its secret.
+    conn = newConnection(chProvider)
+    discard h.hello(conn, ProtocolVersion, AllFamilies)
+    refuses(arSessionSecretMismatch): h.attach(conn, sid, "0".repeat(64))
+    h.attach(conn, sid, secret)
+    check h.sessionState(sid) == ssActive
+    # Plans are not persisted and the approval is void; the intent and the
+    # workspace survive, so the provider resubmits and the user re-approves.
+    refuses(arPlanUnknown): discard h.execute(conn, r.planId.hex, approval)
+    let again = h.submitPlan(conn, stagePlan)
+    check again.planId == r.planId
+    refuses(arApprovalUnknown): discard h.execute(conn, again.planId.hex, approval)
+    check backend.calls.countIt(it.startsWith("generation")) == 0
+    let fresh = h.approvePlan(newConnection(chConsent).tap(h), again.planId.hex)
+    check h.execute(conn, again.planId.hex, fresh).results[0].status == osCompleted
+    check backend.calls.countIt(it.startsWith("generation")) == 1
 
 suite "M4 — evidence and feedback":
   test "plans cite only results this session produced; the user sees them":

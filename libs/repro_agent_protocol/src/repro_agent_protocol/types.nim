@@ -141,6 +141,7 @@ type
     okRemixCapture = "remix.capture"
     okRemixExport = "remix.export"
     okRemixSubmit = "remix.submit"
+    okRemixCompose = "remix.compose"
 
   OpArg* = object
     ## A named operation argument. Values are bytes so a source write

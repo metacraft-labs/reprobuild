@@ -129,6 +129,13 @@ proc interfaceIdentityFromGraphJson*(graphJson: string): InterfaceIdentity =
   result.fingerprint = toDigest(artifact.interfaceFingerprint.bytes)
   result.artifactDigest = toDigest(blake3.digest(readFile(path)))
 
+proc sortedParents(ps: seq[Digest32]): seq[Digest32] =
+  result = ps
+  result.sort(proc (a, b: Digest32): int =
+    for i in 0 ..< 32:
+      if a[i] != b[i]: return cmp(a[i], b[i])
+    0)
+
 proc slug(s: string): string =
   for c in s.toLowerAscii:
     result.add(if c in {'a'..'z', '0'..'9', '.', '_', '-'}: c else: '-')
@@ -138,12 +145,14 @@ proc slug(s: string): string =
 proc draftManifest*(rec: OwnershipRecord; identity: InterfaceIdentity;
                     patch, intent: string; platform: string;
                     healthChecks: seq[HealthCheck];
-                    author: KeyId): Manifest =
+                    author: KeyId;
+                    parents: seq[Digest32] = @[]): Manifest =
   ## The declarative overlay of one accepted change: the original package
   ## by its interface identity, the change as one patch, the checks that
   ## decide whether the activated generation is healthy, no permission
   ## change, and the local author. A Remix of original software has no
-  ## parents.
+  ## parents; a composition staged as a release names its members
+  ## (`Remix-Protocol.md` §"Lineage").
   let blob = BlobRef(id: blobId(bytesOf(patch)), mediaType: PatchMediaType,
                      size: uint64(patch.len))
   var checks = healthChecks
@@ -166,6 +175,7 @@ proc draftManifest*(rec: OwnershipRecord; identity: InterfaceIdentity;
     patches: @[Patch(appliesToKind: ptTarget, appliesToIndex: 0, blob: blob,
                      strip: 1, order: 0)],
     healthChecks: checks,
+    parents: sortedParents(parents),
     authors: @[Digest32(author)])
 
 proc writeOverlay*(overlayRoot: string; m: Manifest; patch: string;

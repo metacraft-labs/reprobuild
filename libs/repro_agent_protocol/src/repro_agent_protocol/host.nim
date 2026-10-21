@@ -15,6 +15,8 @@
 
 import std/[os, sets, strutils, tables, times]
 
+import cbor
+
 import nimcrypto/[hmac, sha2, sysrand]
 
 import ./[types, capabilities, canonical, audit, paths]
@@ -47,6 +49,14 @@ type
       ## Results this session's executions produced, by hex result id. A
       ## plan may cite only these as evidence.
     expiresAt*: int64
+    running*: string
+      ## The operation kind executing right now, "" when idle.
+    lastResults*: seq[EvidenceRecord]
+      ## The results of the most recent execution, in operation order.
+    lastIntent*: string
+      ## Hex id of the most recently captured intent.
+    plannedSinceIntent*: bool
+      ## Whether a plan was submitted after `lastIntent` was captured.
 
   EvidenceRecord* = object
     ## One executed operation's result, as the consent surface shows it.
@@ -87,6 +97,10 @@ type
     workspaces*: Table[string, Workspace]
     workspacesRoot*: string
     counter: int
+    statePath: string
+      ## Where sessions, workspaces and admissions are persisted ("" for
+      ## an in-memory host). Approvals and plans are never persisted: a
+      ## restart voids them by construction (§"Crash recovery").
     admitted: HashSet[string]
       ## Providers a session may be created for. Agent Harbor is admitted
       ## by default; any other provider only after `admitProvider`.
@@ -121,6 +135,12 @@ method reapplyCheckout*(b: Backend; package, root: string;
   ## the workspace is kept, conflict markers and all, for the provider to
   ## resolve.
   OpResult(status: osFailed, detail: "reapply is not supported")
+method composeCheckout*(b: Backend; package, root: string;
+                        op: Operation): OpResult {.base.} =
+  ## Compose the Remixes `op.arg("releases")` names for `package` and lay the
+  ## composition out as a workspace (M6). A blocked member or an unresolved
+  ## conflict is a FAILED result, so no workspace is created.
+  OpResult(status: osFailed, detail: "composition is not supported")
 method runBuild*(b: Backend; ws: Workspace; op: Operation): OpResult {.base.} =
   OpResult(status: osFailed, detail: "build is not supported")
 method runTest*(b: Backend; ws: Workspace; op: Operation): OpResult {.base.} =
@@ -153,17 +173,94 @@ proc randomHex(n: int): string =
     result.add "0123456789abcdef"[int(x shr 4)]
     result.add "0123456789abcdef"[int(x and 0xf)]
 
+proc encodeState(h: Host): seq[byte] =
+  ## The persisted host state, deterministic CBOR.
+  var sessions, workspaces, intents, admitted: seq[CborItem]
+  for id, s in h.sessions:
+    var grants, ints: seq[CborItem]
+    for g in s.grants: grants.add cText($g)
+    for i in s.intents: ints.add cText(i)
+    sessions.add cMap([tp("id", cText(s.id)), tp("provider", cText(s.provider)),
+      tp("secret", cDigest(s.secretDigest)), tp("state", cText($s.state)),
+      tp("grants", cArray(grants)), tp("epoch", cUInt(s.epoch)),
+      tp("intents", cArray(ints)),
+      tp("expires", cUInt(uint64(max(s.expiresAt, 0))))])
+  for id, w in h.workspaces:
+    workspaces.add cMap([tp("id", cText(w.id)), tp("session", cText(w.sessionId)),
+      tp("package", cText(w.package)), tp("root", cText(w.root))])
+  for hex, i in h.intentsById:
+    intents.add cBytes(encodeIntent(i))
+  for p in h.admitted:
+    admitted.add cText(p)
+  encodeDeterministic(cMap([tp("sessions", cArray(sessions)),
+    tp("workspaces", cArray(workspaces)), tp("intents", cArray(intents)),
+    tp("admitted", cArray(admitted)), tp("counter", cUInt(uint64(h.counter)))]))
+
+proc persist(h: Host) =
+  ## Write the state atomically (write, flush, rename) before the change it
+  ## records is acknowledged.
+  if h.statePath.len == 0:
+    return
+  let bytes = encodeState(h)
+  let tmp = h.statePath & ".tmp"
+  writeFile(tmp, bytes.toStr)
+  moveFile(tmp, h.statePath)
+
+proc loadState(h: Host) =
+  let v = decodeRecord(readFile(h.statePath).toBytes)
+  for e in asArray(v.field("sessions"), "sessions", MaxSessionsPerUser * 64):
+    var s = Session(id: asText(e.field("id"), "id"),
+      provider: asText(e.field("provider"), "provider"),
+      secretDigest: asDigest(e.field("secret"), "secret"),
+      state: parseEnumStrict[SessionState](asText(e.field("state"), "state"),
+                                           arMalformed),
+      epoch: asUInt(e.field("epoch"), "epoch"),
+      expiresAt: int64(asUInt(e.field("expires"), "expires")))
+    for g in asArray(e.field("grants"), "grants", MaxGrantsPerSession):
+      s.grants.add parseGrant(asText(g, "grant"))
+    for i in asArray(e.field("intents"), "intents", 1 shl 16):
+      s.intents.incl asText(i, "intent")
+    h.sessions[s.id] = s
+  for e in asArray(v.field("workspaces"), "workspaces", 1 shl 16):
+    let w = Workspace(id: asText(e.field("id"), "id"),
+      sessionId: asText(e.field("session"), "session"),
+      package: asText(e.field("package"), "package"),
+      root: asText(e.field("root"), "root"))
+    h.workspaces[w.id] = w
+  for e in asArray(v.field("intents"), "intents", 1 shl 16):
+    let i = decodeIntent(asBytes(e, "intent").toBytes)
+    h.intentsById[intentId(i).hex] = i
+  for p in asArray(v.field("admitted"), "admitted", 1024):
+    h.admitted.incl asText(p, "provider")
+  h.counter = int(asUInt(v.field("counter"), "counter"))
+
 proc newHost*(backend: Backend; workspacesRoot: string; auditPath = "";
-              clock: Clock = systemClock): Host =
-  ## A host with no sessions. `workspacesRoot` is created and resolved to
-  ## its symlink-free absolute form, which `paths` requires.
+              clock: Clock = systemClock; statePath = ""): Host =
+  ## A host. `workspacesRoot` is created and resolved to its symlink-free
+  ## absolute form, which `paths` requires. With `statePath`, sessions,
+  ## workspaces and admissions persist, and a host started over an existing
+  ## state resumes it the way §"Crash recovery" requires: every live session
+  ## comes back SUSPENDED with its epoch advanced, so it must be re-attached
+  ## with its secret, and every approval of the previous run is void (the
+  ## boot key that MACed them is gone).
   createDir(workspacesRoot)
   result = Host(clock: clock, backend: backend,
                 audit: newAuditLog(auditPath),
                 workspacesRoot: expandFilename(workspacesRoot),
+                statePath: statePath,
                 admitted: toHashSet([DefaultProvider]))
   if randomBytes(result.bootKey) != result.bootKey.len:
     raise newException(OSError, "system random source failed")
+  if statePath.len > 0 and fileExists(statePath):
+    result.loadState()
+    for id, s in result.sessions:
+      if s.state == ssActive:
+        s.state = ssSuspended
+        inc s.epoch
+        discard result.audit.append(AuditRecord(time: clock(), sessionId: id,
+          provider: s.provider, family: "session", kind: "restart",
+          decision: "recover"))
+    result.persist()
 
 proc newConnection*(channel: AgentChannel): Connection =
   Connection(channel: channel)
@@ -263,6 +360,7 @@ proc admitProvider*(h: Host; conn: Connection; provider: string;
     h.admitted.incl provider
     discard h.record(conn, "session", "admit", "admit", grant = provider,
                      resultDigest = conformanceEvidence.hex)
+    h.persist()
 
 proc isAdmitted*(h: Host; provider: string): bool = provider in h.admitted
 
@@ -300,6 +398,7 @@ proc createSession*(h: Host; conn: Connection; provider: string;
       discard h.record(conn, "session", "create", "grant", grant = $g)
     discard h.record(conn, "session", "create", "allowed")
     conn.sessionId = saved
+    h.persist()
     (sid, secret)
 
 proc captureIntent*(h: Host; conn: Connection; sessionId, text: string;
@@ -320,8 +419,11 @@ proc captureIntent*(h: Host; conn: Connection; sessionId, text: string;
                         capturedAt: h.clock())
     let iid = intentId(intent).hex
     s.intents.incl iid
+    s.lastIntent = iid
+    s.plannedSinceIntent = false
     h.intentsById[iid] = intent
     discard h.record(conn, "intent", "capture", "allowed", intent = iid)
+    h.persist()
     intent
 
 proc showEvidence*(h: Host; conn: Connection; sessionId,
@@ -362,6 +464,7 @@ proc revokeGrant*(h: Host; conn: Connection; sessionId: string; g: Grant) =
       s.grants.delete(i)
     h.bumpEpoch(s)
     discard h.record(conn, "session", "revoke-grant", "revoke", grant = $g)
+    h.persist()
 
 proc revokeSession*(h: Host; conn: Connection; sessionId: string) =
   h.audited(conn, "session", "revoke"):
@@ -373,6 +476,7 @@ proc revokeSession*(h: Host; conn: Connection; sessionId: string) =
       s.state = ssRevoked
     h.bumpEpoch(s)
     discard h.record(conn, "session", "revoke", "revoke")
+    h.persist()
 
 # ---------------------------------------------------------------------
 # Plan checking.
@@ -466,6 +570,7 @@ proc attach*(h: Host; conn: Connection; sessionId, secret: string) =
     discard h.requireLive(sessionId)
     conn.sessionId = sessionId
     discard h.record(conn, "session", "attach", "allowed")
+    h.persist()
 
 proc submitPlan*(h: Host; conn: Connection; plan: Plan): PlanReceipt =
   h.audited(conn, "plan", "submit"):
@@ -474,6 +579,7 @@ proc submitPlan*(h: Host; conn: Connection; plan: Plan): PlanReceipt =
     let pid = planId(plan)
     h.plans[pid.hex] = PendingPlan(plan: plan, id: pid,
                                    approvalRequired: needs)
+    s.plannedSinceIntent = true
     discard h.record(conn, "plan", "submit", "allowed", plan = pid.hex,
                      intent = plan.intentId.hex)
     PlanReceipt(planId: pid, approvalRequired: needs)
@@ -576,14 +682,16 @@ proc runOne(h: Host; s: Session; op: Operation): OpResult =
   case op.kind
   of okOwnershipResolve:
     result = h.backend.resolveOwnership(op.target)
-  of okCheckoutCreate, okCheckoutReapply:
+  of okCheckoutCreate, okCheckoutReapply, okRemixCompose:
     inc h.counter
     let wid = "w" & $h.counter & "-" & randomHex(6)
     let root = h.workspacesRoot / wid
     createDir(root)
     result =
-      if op.kind == okCheckoutCreate: h.backend.createCheckout(op.target, root)
-      else: h.backend.reapplyCheckout(op.target, root, op)
+      case op.kind
+      of okCheckoutCreate: h.backend.createCheckout(op.target, root)
+      of okCheckoutReapply: h.backend.reapplyCheckout(op.target, root, op)
+      else: h.backend.composeCheckout(op.target, root, op)
     if result.status == osCompleted:
       h.workspaces[wid] = Workspace(id: wid, sessionId: s.id,
                                     package: op.target, root: root)
@@ -640,6 +748,7 @@ proc execute*(h: Host; conn: Connection; planIdHex: string;
                        plan = planIdHex, approval = consumed)
     h.plans.del(planIdHex)
     result.planId = p.id
+    s.lastResults = @[]
     var failed = false
     for i, op in p.plan.operations:
       if failed:
@@ -648,21 +757,25 @@ proc execute*(h: Host; conn: Connection; planIdHex: string;
       discard h.record(conn, $familyOf(op.kind), $op.kind, "allowed",
                        plan = planIdHex, approval = consumed)
       var r: OpResult
+      s.running = $op.kind
       try:
         r = h.runOne(s, op)
       except AgentRefusal as e:
         r = OpResult(status: osFailed, detail: $e.reason & ": " & e.msg)
       except OSError, IOError:
         r = OpResult(status: osFailed, detail: getCurrentExceptionMsg())
+      s.running = ""
       r.resultId = resultIdOf(p.id, i, op.kind, r.status, r.detail, r.output)
       s.evidence[r.resultId.hex] = EvidenceRecord(planId: p.id, index: i,
         kind: op.kind, status: r.status, detail: r.detail, output: r.output)
+      s.lastResults.add s.evidence[r.resultId.hex]
       discard h.record(conn, $familyOf(op.kind), $op.kind, "result",
                        reason = $r.status, plan = planIdHex,
                        resultDigest = r.resultId.hex)
       if r.status != osCompleted:
         failed = true
       result.results.add r
+    h.persist() # workspaces the plan created
 
 # ---------------------------------------------------------------------
 # Lifecycle.
@@ -678,7 +791,14 @@ proc disconnect*(h: Host; conn: Connection) =
       s.state = ssSuspended
       h.bumpEpoch(s)
       discard h.record(conn, "session", "disconnect", "suspend")
+      h.persist()
   conn.sessionId = ""
+
+proc session*(h: Host; sessionId: string): Session =
+  ## Read access for the consent surface's view (`surface`).
+  if not h.sessions.hasKey(sessionId):
+    refuse(arSessionUnknown, sessionId)
+  h.sessions[sessionId]
 
 proc sessionState*(h: Host; sessionId: string): SessionState =
   if not h.sessions.hasKey(sessionId):

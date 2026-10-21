@@ -206,6 +206,7 @@ proc corpus(): seq[Vector] =
       (op(okRemixExport, "w1"), "firefox"),
       (op(okRemixSubmit, "w1", {"credential": "registry-main"}), "firefox"),
       (op(okRemixSubmit, "w1"), "firefox"),
+      (op(okRemixCompose, "firefox", {"releases": "aa,bb"}), ""),
       (op(okBuildRun, "w1", {"network": "../etc"}), "firefox")]:
     result.add Vector(name: "required grants of " & $o.kind &
                       (if o.args.len > 0: " with " & $o.args.len & " args"

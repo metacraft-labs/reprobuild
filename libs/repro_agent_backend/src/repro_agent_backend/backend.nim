@@ -15,7 +15,7 @@
 ## Every child runs without a shell, with a bounded wall time, and with
 ## its output captured.
 
-import std/[os, osproc, posix, strtabs, strutils, tables, times]
+import std/[algorithm, os, osproc, posix, sets, strtabs, strutils, tables, times]
 
 import repro_core/ambient_execution
 import repro_agent_protocol
@@ -51,6 +51,11 @@ type
     remixKey*: PeerKeypair
       ## The local author key staged overlays are signed with.
     staged*: Table[string, StagedChange] ## by hex release id
+    blocked*: HashSet[string]
+      ## Hex release ids under a blocking verdict or revocation (Remix
+      ## Invariant I-7), as trust policy reports them.
+    compositionParents*: Table[string, seq[string]]
+      ## Workspace root -> the releases a composed workspace was built from.
     hcr*: HcrAdvertisement
       ## What the focused application's HCR agent advertised, if one
       ## connected; decides between HCR and restart (`preview_strategy`).
@@ -335,9 +340,12 @@ proc stageChange(b: ReprobuildBackend; ws: Workspace; op: Operation): OpResult =
   let rel = co.previewOutput
   if rel.len == 0 or rel == co.ownership.prefixPath.relativePath(b.storeRoot):
     return failed("the change built no new prefix")
+  var parents: seq[Digest32]
+  for hex in b.compositionParents.getOrDefault(ws.root, @[]):
+    parents.add Digest32(b.staged[hex].releaseId)
   let m = draftManifest(co.ownership, identity, patch, op.arg("intent"),
                         currentRealizationPlatformTag(), health,
-                        keyIdOf(b.remixKey))
+                        keyIdOf(b.remixKey), parents)
   let (rid, path) = writeOverlay(b.overlayRoot, m, patch, b.remixKey)
   let change = StagedChange(package: co.ownership.recipeName,
     baseGeneration: b.activeGeneration(), patch: patch,
@@ -438,4 +446,91 @@ method reapplyCheckout*(b: ReprobuildBackend; package, root: string;
                output: "reapply=conflict\nbase=" & co.baseCommit & "\n" &
                  "rejected=" & rejects.join(",") & "\n" & e.msg.tail(4096))
   except OwnershipError, CheckoutError, KeyError, OSError, IOError:
+    failed(getCurrentExceptionMsg())
+
+proc releaseDir(b: ReprobuildBackend; hex: string): string =
+  b.staged[hex].manifestPath.parentDir
+
+method composeCheckout*(b: ReprobuildBackend; package, root: string;
+                        op: Operation): OpResult =
+  ## Compose staged Remixes for `package` (M6). Every member is read back
+  ## and verified from its overlay; composition is `repro_remix.compose`,
+  ## with the blocked set as trust policy and no permission grant (a local
+  ## change declares none). A blocked member or any unresolved conflict
+  ## refuses with the conflicts named, before any workspace exists. A ready
+  ## composition is checked out fresh with every member's patch applied in
+  ## the composition's canonical order, ready to build, test and stage as a
+  ## release whose parents are its members.
+  try:
+    var members: seq[MemberSpec]
+    var hexes: seq[string]
+    for hex in op.arg("releases").split(','):
+      if hex.len == 0: continue
+      if not b.staged.hasKey(hex):
+        return failed("no staged change " & hex)
+      let raw = readFile(b.staged[hex].manifestPath)
+      var bytes = newSeq[byte](raw.len)
+      for i, c in raw: bytes[i] = byte(ord(c))
+      members.add MemberSpec(release: decodeAndVerify(bytes))
+      hexes.add hex
+    if members.len < 2:
+      return failed("a composition needs at least two releases")
+    let blockedSet = b.blocked
+    let staged = b.staged
+    let comp = compose(ComposeInputs(members: members,
+      blobs: proc (id: Digest32): (bool, seq[byte]) =
+        for hex, c in staged:
+          let p = c.manifestPath.parentDir / "blobs" / toHex(id)
+          if fileExists(p):
+            let raw = readFile(p)
+            var bytes = newSeq[byte](raw.len)
+            for i, ch in raw: bytes[i] = byte(ord(ch))
+            return (true, bytes)
+        (false, newSeq[byte]()),
+      parents: proc (id: ReleaseId): (bool, seq[Digest32]) =
+        let hex = toHex(Digest32(id))
+        if staged.hasKey(hex): (true, newSeq[Digest32]()) else: (false, newSeq[Digest32]()),
+      isBlocked: proc (id: Digest32): bool = toHex(id) in blockedSet,
+      admittedLicenses: @["LicenseRef-Local-Change"]))
+    if comp.status != csReady:
+      # Spec words, not enum identifiers: `patch conflict on <target>:<path>`.
+      proc words(e: string; prefix: string): string =
+        var name = e[prefix.len .. ^1]
+        for i, ch in name:
+          if ch in {'A'..'Z'}:
+            if i > 0: result.add '-'
+            result.add ch.toLowerAscii
+          else:
+            result.add ch
+      var why: seq[string]
+      for c in comp.conflicts:
+        if c.resolvedBy < 0:
+          why.add words($c.class, "cc") & " conflict on " & c.subject
+      return failed("composition " & words($comp.status, "cs") & ": " &
+                    why.join("; "))
+    let rec = b.ownershipFor(package)
+    let co = createCheckout(rec, root, storeRoot = b.storeRoot)
+    b.checkouts[root] = co
+    for i, step in comp.plan.patches:
+      var found = false
+      for hex in hexes:
+        let p = b.releaseDir(hex) / "blobs" / toHex(step.patch.blob.id)
+        if fileExists(p):
+          let file = root / ".reproos-agent" / ("compose-" & $i & ".patch")
+          copyFile(p, file)
+          discard git(root, ["apply", "-p" & $step.patch.strip,
+                             "--directory=" & rec.recipeName, file])
+          found = true
+          break
+      if not found:
+        return failed("composition patch blob " & toHex(step.patch.blob.id) &
+          " is unavailable")
+    b.compositionParents[root] = hexes
+    var perms: seq[string]
+    for p in comp.plan.permissions:
+      perms.add $p.kind & (if p.scope.len > 0: ":" & p.scope else: "")
+    OpResult(status: osCompleted, output: "composition=" & toHex(comp.id) &
+      "\nmembers=" & hexes.sorted.join(",") &
+      "\npermissions=" & perms.join(",") & "\n")
+  except RemixError, OwnershipError, CheckoutError, KeyError, OSError, IOError:
     failed(getCurrentExceptionMsg())

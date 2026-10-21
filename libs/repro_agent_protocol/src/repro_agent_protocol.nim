@@ -4,6 +4,6 @@
 ## Spec: reprobuild-pm `spec/ReproOS-Agent-Integration-Protocol.md`.
 
 import ./repro_agent_protocol/[types, capabilities, canonical, paths, audit,
-                               host, wire]
+                               host, wire, surface]
 
-export types, capabilities, canonical, paths, audit, host, wire
+export types, capabilities, canonical, paths, audit, host, wire, surface

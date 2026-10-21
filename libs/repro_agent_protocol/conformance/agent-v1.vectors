@@ -412,6 +412,11 @@ op: required-grants
 input: a36461726773a0646b696e646c72656d69782e7375626d697466746172676574627731|firefox
 expect: refuse:bad-scope
 
+name: required grants of remix.compose with 1 args on firefox
+op: required-grants
+input: a36461726773a16872656c65617365734561612c6262646b696e646d72656d69782e636f6d706f7365667461726765746766697265666f78|
+expect: workspace.create:firefox
+
 name: required grants of build.run with 1 args on w1
 op: required-grants
 input: a36461726773a1676e6574776f726b462e2e2f657463646b696e64696275696c642e72756e66746172676574627731|firefox
