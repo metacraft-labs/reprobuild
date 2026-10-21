@@ -11,7 +11,7 @@
 >
 > A backend-agnostic Nim benchmark that drives the same measurement
 > through the library API ships at
-> `metacraft-labs/vm-harness:tools/bench/snapshot_revert_bench.nim`
+> `metacraft-labs/gosti:tools/bench/snapshot_revert_bench.nim`
 > (build: `nimble buildBench`). The PowerShell scripts in this
 > directory remain the canonical reproducer for the original
 > measurements documented here, but new measurement work should

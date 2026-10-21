@@ -3,7 +3,7 @@
 > **Migration note (2026-06).** The lifecycle logic in
 > `run-hyperv-m69-system.ps1` and `provision-base-vm.ps1` is now wrapped
 > by the Nim
-> [`vm-harness`](https://github.com/metacraft-labs/vm-harness) library's
+> [`vm-harness`](https://github.com/metacraft-labs/gosti) library's
 > `HyperVBackend` adapter (M1 of the *Multi-OS VM Automation Campaign*;
 > see `metacraft/reprobuild-specs/Multi-OS-VM-Automation-Campaign.milestones.org`).
 > The PowerShell scripts in this directory are Tier-2 reprobuild
