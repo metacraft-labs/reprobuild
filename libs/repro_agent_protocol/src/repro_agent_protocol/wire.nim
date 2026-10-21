@@ -101,8 +101,22 @@ proc handleMessage*(h: Host; conn: Connection;
       for r in rep.results:
         rs.add cMap([tp("status", cText($r.status)),
                      tp("detail", cText(r.detail)),
-                     tp("output", cBytes(r.output.toBytes))])
+                     tp("output", cBytes(r.output.toBytes)),
+                     tp("result", cDigest(r.resultId))])
       h.okResponse([tp("results", cArray(rs))])
+    of "evidence.show":
+      let e = h.showEvidence(conn, asText(req.field("session"), "session"),
+                             asText(req.field("result"), "result"))
+      h.okResponse([tp("plan", cDigest(e.planId)),
+                    tp("index", cUInt(uint64(e.index))),
+                    tp("kind", cText($e.kind)), tp("status", cText($e.status)),
+                    tp("detail", cText(e.detail)),
+                    tp("output", cBytes(e.output.toBytes))])
+    of "intent.feedback":
+      let intent = h.captureFeedback(conn, asText(req.field("session"),
+        "session"), asText(req.field("plan"), "plan"),
+        asText(req.field("text"), "text"))
+      h.okResponse([tp("intent", cDigest(intentId(intent)))])
     of "grant.revoke":
       h.revokeGrant(conn, asText(req.field("session"), "session"),
                     decodeGrant(req.field("grant")))

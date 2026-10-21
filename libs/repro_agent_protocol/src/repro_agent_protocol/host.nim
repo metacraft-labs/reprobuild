@@ -43,7 +43,19 @@ type
     grants*: seq[Grant]
     epoch*: uint64
     intents: HashSet[string] ## hex intent ids
+    evidence: Table[string, EvidenceRecord]
+      ## Results this session's executions produced, by hex result id. A
+      ## plan may cite only these as evidence.
     expiresAt*: int64
+
+  EvidenceRecord* = object
+    ## One executed operation's result, as the consent surface shows it.
+    planId*: Digest32
+    index*: int
+    kind*: OperationKind
+    status*: OpStatus
+    detail*: string
+    output*: string
 
   PendingPlan = object
     plan: Plan
@@ -281,6 +293,33 @@ proc captureIntent*(h: Host; conn: Connection; sessionId, text: string;
     discard h.record(conn, "intent", "capture", "allowed", intent = iid)
     intent
 
+proc showEvidence*(h: Host; conn: Connection; sessionId,
+                   resultIdHex: string): EvidenceRecord =
+  ## What the consent surface shows for one piece of a plan's evidence:
+  ## the before/after preview, a test run, a diff, an ownership record.
+  h.audited(conn, "evidence", "show"):
+    conn.requireChannel(chConsent, "evidence display")
+    if not h.sessions.hasKey(sessionId):
+      refuse(arSessionUnknown, sessionId)
+    let s = h.sessions[sessionId]
+    if not s.evidence.hasKey(resultIdHex):
+      refuse(arEvidenceUnknown, resultIdHex)
+    s.evidence[resultIdHex]
+
+proc captureFeedback*(h: Host; conn: Connection; sessionId,
+                      planIdHex, text: string): Intent =
+  ## The user's response to a previewed or rejected plan, captured as a
+  ## new intent the provider refines against. Feedback never approves
+  ## anything: it is an intent, and an intent executes nothing.
+  h.audited(conn, "intent", "feedback"):
+    let intent = h.captureIntent(conn, sessionId, text)
+    let saved = conn.sessionId
+    conn.sessionId = sessionId
+    discard h.record(conn, "intent", "feedback", "feedback",
+                     plan = planIdHex, intent = intentId(intent).hex)
+    conn.sessionId = saved
+    intent
+
 proc revokeGrant*(h: Host; conn: Connection; sessionId: string; g: Grant) =
   h.audited(conn, "session", "revoke-grant"):
     conn.requireChannel(chConsent, "revocation")
@@ -332,6 +371,12 @@ proc checkPlan(h: Host; conn: Connection; s: Session;
       " operations")
   if plan.intentId.hex notin s.intents:
     refuse(arIntentNotInSession, "intent " & plan.intentId.hex)
+  for e in plan.evidence:
+    # Evidence the user is shown must be what this host produced for this
+    # session, not a digest the provider made up.
+    if not s.evidence.hasKey(e.hex):
+      refuse(arEvidenceUnknown, "evidence " & e.hex &
+        " is not a result of this session")
   for op in plan.operations:
     if familyOf(op.kind) notin conn.families:
       refuse(arUnsupportedFamily, $familyOf(op.kind) & " was not negotiated")
@@ -568,10 +613,12 @@ proc execute*(h: Host; conn: Connection; planIdHex: string;
         r = OpResult(status: osFailed, detail: $e.reason & ": " & e.msg)
       except OSError, IOError:
         r = OpResult(status: osFailed, detail: getCurrentExceptionMsg())
+      r.resultId = resultIdOf(p.id, i, op.kind, r.status, r.detail, r.output)
+      s.evidence[r.resultId.hex] = EvidenceRecord(planId: p.id, index: i,
+        kind: op.kind, status: r.status, detail: r.detail, output: r.output)
       discard h.record(conn, $familyOf(op.kind), $op.kind, "result",
                        reason = $r.status, plan = planIdHex,
-                       resultDigest = id("reproos.agent.result.v1",
-                                   (r.detail & "\0" & r.output).toBytes).hex)
+                       resultDigest = r.resultId.hex)
       if r.status != osCompleted:
         failed = true
       result.results.add r

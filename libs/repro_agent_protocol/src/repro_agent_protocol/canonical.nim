@@ -20,6 +20,7 @@ const
   PlanContext* = "reproos.agent.plan.v1"
   ApprovalContext* = "reproos.agent.approval.v1"
   AuditContext* = "reproos.agent.audit.v1"
+  ResultContext* = "reproos.agent.result.v1"
 
 proc id*(context: string; bytes: openArray[byte]): Digest32 =
   ## `id(context, bytes) = BLAKE3-256(u32le(len(context)) ‖ context ‖
@@ -232,6 +233,17 @@ proc decodePlanItem*(v: CborItem): Plan =
 
 proc decodePlan*(bytes: openArray[byte]): Plan =
   decodePlanItem(decodeRecord(bytes))
+
+proc resultIdOf*(planId: Digest32; index: int; kind: OperationKind;
+                 status: OpStatus; detail, output: string): Digest32 =
+  ## The identity of one executed operation's result: which plan and which
+  ## operation produced it, and what it reported. A plan cites results by
+  ## this identity as its evidence.
+  id(ResultContext, encodeDeterministic(cMap([
+    tp("plan", cDigest(planId)), tp("index", cUInt(uint64(index))),
+    tp("kind", cText($kind)), tp("status", cText($status)),
+    tp("detail", cBytes(detail.toBytes)),
+    tp("output", cBytes(output.toBytes))])))
 
 # ---------------------------------------------------------------------
 # Approval MAC input.

@@ -65,6 +65,7 @@ type
     arCancelled = "cancelled"
     arTooLate = "too-late"
     arAuditCorrupt = "audit-corrupt"
+    arEvidenceUnknown = "evidence-unknown"
 
   AgentRefusal* = object of CatchableError
     ## Raised for every refusal. `reason` is the machine-readable code;
@@ -186,6 +187,9 @@ type
       ## the id of a workspace a checkout created).
     output*: string
       ## Result bytes (file contents for `source.read`).
+    resultId*: Digest32
+      ## Set by the host: the identity of this result, which a later plan
+      ## cites as evidence (§"Evidence").
 
 proc refuse*(reason: AgentRefusalReason; detail: string) {.noreturn.} =
   ## Raise the refusal for `reason`. Every refusal goes through here so a

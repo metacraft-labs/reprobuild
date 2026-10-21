@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2292,
+    "nimTestBinaries": 2294,
     "pureUnitConsolidationGroups": 65,
-    "pureUnitTests": 683,
+    "pureUnitTests": 684,
     "staticallyDetectedRuntimeCompilerFlowTests": 126,
-    "testEntries": 2323
+    "testEntries": 2325
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1345,9 +1345,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1248,
+      "integration": 1249,
       "platform/destructive": 138,
-      "pure unit": 683,
+      "pure unit": 684,
       "unclassified": 236
     },
     "graphOwnedTestArtifacts": [
@@ -1550,9 +1550,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2292,
+    "nimTestBinaryCount": 2294,
     "pythonTestFileCount": 31,
-    "testEntryCount": 2323
+    "testEntryCount": 2325
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7765,6 +7765,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_agent_preview_strategy",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_agent_backend"
+      ],
+      "owner": "libs/repro_agent_backend",
+      "requiresReproBinary": false,
+      "source": "libs/repro_agent_backend/tests/t_agent_preview_strategy.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_agent_harbor_reproos_permission_protocol",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -7776,8 +7793,8 @@
       "owner": "libs/repro_agent_protocol",
       "requiresReproBinary": false,
       "source": "libs/repro_agent_protocol/tests/t_agent_harbor_reproos_permission_protocol.nim",
-      "sourceSuiteCount": 6,
-      "staticCaseCount": 18,
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25023,6 +25040,26 @@
       "source": "tests/bundles/bundle_repro_solver_pure_unit.nim",
       "sourceSuiteCount": 24,
       "staticCaseCount": 82,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_agent_harbor_modifies_installed_source_package",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_agent_backend",
+        "repro_agent_protocol",
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/agent-harbor/t_e2e_agent_harbor_modifies_installed_source_package.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

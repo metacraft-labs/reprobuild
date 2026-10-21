@@ -21,7 +21,7 @@ import repro_core/ambient_execution
 import repro_agent_protocol
 import repro_project_dsl/install_mirror_resolver
 
-import ./[ownership, checkout]
+import ./[ownership, checkout, preview_strategy]
 
 type
   ReprobuildBackend* = ref object of Backend
@@ -40,6 +40,9 @@ type
     checkouts*: Table[string, Checkout] ## by workspace root
     extraEnv*: seq[(string, string)]
       ## Added to every child environment (tool PATH, provisioning mode).
+    hcr*: HcrAdvertisement
+      ## What the focused application's HCR agent advertised, if one
+      ## connected; decides between HCR and restart (`preview_strategy`).
 
 proc newReprobuildBackend*(reproExe, storeRoot: string;
                            catalogRoots: seq[string];
@@ -197,21 +200,42 @@ method runTest*(b: ReprobuildBackend; ws: Workspace; op: Operation): OpResult =
     failed(getCurrentExceptionMsg())
 
 method preview*(b: ReprobuildBackend; ws: Workspace; op: Operation): OpResult =
-  ## Supervised-restart preview: run `executable` (prefix-relative, e.g.
-  ## `bin/hello`) from the change's preview output with its own HOME and
-  ## XDG directories under the workspace. `preview.stop` has nothing to stop
+  ## Preview the change. The strategy is decided first
+  ## (`choosePreviewStrategy`) and reported in `detail` with its reason.
+  ##
+  ## Restart preview: run `executable` (prefix-relative, e.g. `bin/hello`)
+  ## from the change's preview output with its own HOME and XDG directories
+  ## under the workspace, so it neither reads nor writes the user's state.
+  ## With `baseline=1` the same run uses the INSTALLED prefix instead: the
+  ## "before" the user compares against. `preview.stop` has nothing to stop
   ## for a run-to-completion preview and succeeds.
+  ##
+  ## An HCR decision is reported and refused: driving `repro hcr
+  ## coordinate` against the running application is not wired yet.
   if op.kind == okPreviewStop:
     return OpResult(status: osCompleted)
   try:
     let co = b.checkoutOf(ws)
-    let rel = co.previewOutput
-    if rel.len == 0:
-      return failed("the change has not been built")
+    let baseline = op.arg("baseline") == "1"
+    let decision =
+      if baseline: PreviewDecision(strategy: psRestart,
+                                   reason: "baseline of the installed package")
+      else: choosePreviewStrategy(hostDirectProfile(), b.hcr,
+                                  changedPathsOf(diffAgainstBase(co.root)))
+    let head = "strategy=" & $decision.strategy & " reason=" &
+               decision.reason.escape & " "
+    if decision.strategy == psHcr:
+      return failed(head & "hcr preview is not wired to the coordinator yet")
+    let prefix =
+      if baseline: co.ownership.prefixPath
+      else:
+        let rel = co.previewOutput
+        if rel.len == 0:
+          return failed(head & "the change has not been built")
+        b.previewStoreRoot / rel
     let exeRel = op.arg("executable")
     if not isCanonicalRelPath(exeRel):
       return failed("path-escape: executable " & exeRel.escape)
-    let prefix = b.previewStoreRoot / rel
     let exe = resolveBeneath(expandFilename(prefix), exeRel)
     let home = co.root / ".reproos-agent" / "preview-home"
     removeDir(home)
@@ -226,8 +250,11 @@ method preview*(b: ReprobuildBackend; ws: Workspace; op: Operation): OpResult =
       args = op.arg("args").split('\0')
     let (code, output) = b.run(exe, args, home, env)
     OpResult(status: (if code == 0: osCompleted else: osFailed),
-             detail: "exit=" & $code & " prefix=" & rel, output: output.tail)
+             detail: head & "exit=" & $code & " prefix=" &
+               prefix.relativePath(if baseline: b.storeRoot
+                                   else: b.previewStoreRoot),
+             output: output.tail)
   except AgentRefusal as e:
     failed($e.reason & ": " & e.msg)
-  except KeyError, OSError:
+  except CheckoutError, KeyError, OSError:
     failed(getCurrentExceptionMsg())

@@ -264,7 +264,11 @@ suite "M0 — stale approvals":
     let s = staged("stale-changed")
     var changed = s.f.planFor(s.sid, s.intent, @[op(okGenerationStage, s.ws)],
                               @["system.generation:stage"])
-    changed.evidence = @[id("x", "a different diff".toBytes)]
+    # Cite a real result of this session: a build run after approval.
+    let b = s.f.host.submitPlan(s.conn, s.f.planFor(s.sid, s.intent,
+      @[op(okBuildRun, s.ws)], @["build.run:hello"]))
+    let built = s.f.host.execute(s.conn, b.planId.hex).results[0]
+    changed.evidence = @[built.resultId]
     let r2 = s.f.host.submitPlan(s.conn, changed)
     check r2.planId != s.receipt.planId
     refuses(arApprovalPlanMismatch):
@@ -314,6 +318,63 @@ suite "M0 — stale approvals":
     refuses(arApprovalStaleBase):
       discard s.f.host.execute(s.conn, s.receipt.planId.hex, s.approval)
     check s.f.backend.calls.countIt(it.startsWith("generation")) == 0
+
+suite "M4 — evidence and feedback":
+  test "plans cite only results this session produced; the user sees them":
+    let f = newFixture("evidence")
+    let (sid, _, conn) = f.session(EditGrants)
+    let (sb, _, cb) = f.session(EditGrants)
+    let intent = f.host.captureIntent(f.consent, sid, "x")
+    let ib = f.host.captureIntent(f.consent, sb, "y")
+    let ws = f.checkout(sid, conn, intent)
+    let wb = f.checkout(sb, cb, ib)
+    let r = f.host.submitPlan(conn, f.planFor(sid, intent,
+      @[op(okBuildRun, ws)], @["build.run:hello"]))
+    let built = f.host.execute(conn, r.planId.hex).results[0]
+    check built.resultId != default(Digest32)
+    # A made-up digest, and another session's real result, are refused.
+    var forged = f.planFor(sid, intent, @[op(okGenerationStage, ws)],
+                           @["system.generation:stage"])
+    forged.evidence = @[id("x", "a review nobody ran".toBytes)]
+    refuses(arEvidenceUnknown): discard f.host.submitPlan(conn, forged)
+    let rb = f.host.submitPlan(cb, f.planFor(sb, ib, @[op(okBuildRun, wb)],
+                                             @["build.run:hello"]))
+    let otherResult = f.host.execute(cb, rb.planId.hex).results[0].resultId
+    forged.evidence = @[otherResult]
+    refuses(arEvidenceUnknown): discard f.host.submitPlan(conn, forged)
+    # The real one is accepted, and the consent surface can show it.
+    var honest = forged
+    honest.evidence = @[built.resultId]
+    check f.host.submitPlan(conn, honest).approvalRequired == @[0]
+    let shown = f.host.showEvidence(f.consent, sid, built.resultId.hex)
+    check shown.kind == okBuildRun
+    check shown.status == osCompleted
+    check shown.planId == r.planId
+    refuses(arWrongChannel):
+      discard f.host.showEvidence(conn, sid, built.resultId.hex)
+
+  test "feedback is a new intent and executes nothing":
+    let f = newFixture("feedback")
+    let (sid, _, conn) = f.session(EditGrants)
+    let intent = f.host.captureIntent(f.consent, sid, "ship it")
+    let ws = f.checkout(sid, conn, intent)
+    let r = f.host.submitPlan(conn, f.planFor(sid, intent,
+      @[op(okGenerationStage, ws)], @["system.generation:stage"]))
+    f.host.rejectPlan(f.consent, r.planId.hex)
+    let calls = f.backend.calls.len
+    let fb = f.host.captureFeedback(f.consent, sid, r.planId.hex,
+                                    "keep the old greeting as an option")
+    check f.backend.calls.len == calls
+    check f.host.audit.records.anyIt(it.decision == "feedback" and
+      it.planId == r.planId.hex and it.intentId == intentId(fb).hex)
+    # The provider can plan against the feedback intent; the rejected plan
+    # is gone.
+    refuses(arPlanUnknown): discard f.host.execute(conn, r.planId.hex)
+    check f.host.submitPlan(conn, f.planFor(sid, fb,
+      @[op(okGenerationStage, ws)], @["system.generation:stage"])).
+      approvalRequired == @[0]
+    refuses(arWrongChannel):
+      discard f.host.captureFeedback(conn, sid, r.planId.hex, "forged")
 
 suite "M0 — path escape":
   test "non-canonical paths are refused at submission":
