@@ -30019,7 +30019,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_a_refreshed_flake_pin_carries_what_nix_would_write.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

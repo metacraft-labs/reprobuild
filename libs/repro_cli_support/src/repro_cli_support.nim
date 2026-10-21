@@ -91322,15 +91322,30 @@ proc nixStringLiteral(text: string): string =
     else: result.add(c)
   result.add('"')
 
-proc flakeRevisionFetchExpr*(attrs: JsonNode): string =
+proc flakeRevisionFetchExpr*(attrs: JsonNode;
+    dependencyDir = ""; includeDependencySnapshot = false): string =
   ## The expression ``fetchFlakeRevisionFields`` evaluates, exposed so a case
   ## can show what is asked.
   var asked = attrs.copy()
   if asked{"type"}.getStr() == "git" and not asked.hasKey("shallow"):
     asked["shallow"] = %false
-  "builtins.intersectAttrs { narHash = null; lastModified = null; " &
-    "revCount = null; } (builtins.fetchTree (builtins.fromJSON " &
-    nixStringLiteral($asked) & "))"
+  let tree = "builtins.fetchTree (builtins.fromJSON " &
+    nixStringLiteral($asked) & ")"
+  let fields = "builtins.intersectAttrs { narHash = null; lastModified = null; " &
+    "revCount = null; } tree"
+  if not includeDependencySnapshot:
+    return "let tree = " & tree & "; in " & fields
+  # Read the dependency lock from the exact fetched source, without evaluating
+  # its outputs or resolving any dependency. `dir` belongs to the flake, not
+  # fetchTree. Parse JSON so whitespace/key ordering cannot withhold a move.
+  "let tree = " & tree & "; root = tree.outPath + " &
+    nixStringLiteral(if dependencyDir.len > 0: "/" & dependencyDir else: "") &
+    "; lock = root + " & nixStringLiteral("/flake.lock") &
+    "; flake = root + " & nixStringLiteral("/flake.nix") & "; in " &
+    fields & " // { dependencySnapshot = if builtins.pathExists lock then " &
+    "{ lock = builtins.readFile lock; } else " &
+    "{ flake = if builtins.pathExists flake then builtins.readFile flake " &
+    "else null; }; }"
 
 proc nixErrorSummary(stderrText: string; code: int): string =
   ## nix's own reason, in one line: its last `error:` line (the innermost
@@ -91348,7 +91363,8 @@ proc nixErrorSummary(stderrText: string; code: int): string =
   result = result.replace('`', '\'')
 
 proc fetchFlakeRevisionFields*(nixExe: string;
-    attrs: JsonNode): FlakeRevisionFields =
+    attrs: JsonNode; dependencyDir = "";
+    includeDependencySnapshot = false): FlakeRevisionFields =
   ## Ask ``nixExe`` for the derived fields of the revision ``attrs`` names.
   ## Never raises; a failure comes back in ``error``.
   var env = scrubbedGitRepositoryEnv()
@@ -91375,7 +91391,8 @@ proc fetchFlakeRevisionFields*(nixExe: string;
   # inside the JSON and an unread pipe cannot fill and hang nix.
   let cmd = quoteShell(nixExe) &
     " --extra-experimental-features " & quoteShell("nix-command flakes") &
-    " eval --json --expr " & quoteShell(flakeRevisionFetchExpr(attrs)) &
+    " eval --json --expr " & quoteShell(flakeRevisionFetchExpr(attrs, dependencyDir,
+      includeDependencySnapshot)) &
     " 2>" & quoteShell(errPath)
   var res: tuple[output: string, exitCode: int]
   try:
@@ -91403,10 +91420,39 @@ proc fetchFlakeRevisionFields*(nixExe: string;
     if answer.hasKey(key) and answer[key].kind != JInt:
       result.error = "nix reported a non-integer " & key
       return
+  if includeDependencySnapshot:
+    let snapshot = answer{"dependencySnapshot"}
+    if snapshot.isNil or snapshot.kind != JObject or snapshot.len != 1:
+      result.error = "nix reported no verifiable dependency snapshot"
+      return
+    if snapshot.hasKey("lock"):
+      var dependencyLock: JsonNode
+      try:
+        if snapshot["lock"].kind != JString:
+          result.error = "dependency lock verification: nix reported no lock text"
+          return
+        dependencyLock = parseJson(snapshot["lock"].getStr())
+      except CatchableError as err:
+        result.error = "dependency lock verification: the source lock is not " &
+          "readable as JSON (" & err.msg & ")"
+        return
+      if dependencyLock.kind != JObject or
+          dependencyLock{"nodes"}.isNil or
+          dependencyLock["nodes"].kind != JObject or
+          dependencyLock{"root"}.isNil or
+          dependencyLock["root"].kind != JString:
+        result.error = "dependency lock verification: the source lock is not a flake lock"
+        return
+      snapshot["lock"] = dependencyLock
+    elif not snapshot.hasKey("flake") or
+        snapshot["flake"].kind notin {JString, JNull}:
+      result.error = "nix reported an invalid dependency snapshot"
+      return
   result.ok = true
   result.fields = answer
 
-proc fetchPendingDerivedFields(pending: openArray[FlakeLockRewrite]):
+proc fetchPendingDerivedFields(pending: openArray[FlakeLockRewrite];
+    lockText: string):
     tuple[derived: Table[string, JsonNode];
           failed: seq[tuple[rewrite: FlakeLockRewrite; error: string]]] =
   ## Ask nix for the derived fields of every pending move
@@ -91422,20 +91468,50 @@ proc fetchPendingDerivedFields(pending: openArray[FlakeLockRewrite]):
       nixExe = resolveNixExe()
     except CatchableError:
       nixMissing = "there is no 'nix' on PATH (nor in REPRO_FOREIGN_ENV_NIX)"
+  let nodes = parseJson(lockText)["nodes"]
   for p in pending:
+    let node = nodes[p.node]
+    let isFlake = node{"flake"}.isNil or node["flake"].getBool()
+    let subdir = node{"locked"}{"dir"}.getStr()
     let fetched =
       if nixMissing.len > 0: FlakeRevisionFields(error: nixMissing)
-      else: fetchFlakeRevisionFields(nixExe, p.fetchAttrs)
-    if fetched.ok:
-      result.derived[p.input] = fetched.fields
-    else:
+      else: fetchFlakeRevisionFields(nixExe, p.fetchAttrs, subdir, isFlake)
+    if not fetched.ok:
       result.failed.add((rewrite: p, error: fetched.error))
+      continue
+    if isFlake:
+      # A metadata-only parent move must not retain a dependency graph from
+      # another parent revision. Re-locking that graph is an explicit solver
+      # operation; withholding keeps both halves intact until that happens.
+      var oldAttrs = p.fetchAttrs.copy()
+      oldAttrs["rev"] = %p.oldRev
+      let previous = fetchFlakeRevisionFields(nixExe, oldAttrs, subdir, true)
+      if not previous.ok:
+        result.failed.add((rewrite: p, error:
+          "dependency lock verification: could not read the old exact source " &
+          p.oldRev & ": " & previous.error))
+        continue
+      if previous.fields{"dependencySnapshot"} !=
+          fetched.fields{"dependencySnapshot"}:
+        result.failed.add((rewrite: p, error:
+          "dependency lock changed between " & p.oldRev & " and " & p.newRev))
+        continue
+      fetched.fields.delete("dependencySnapshot")
+    result.derived[p.input] = fetched.fields
 
 proc flakeUnfetchableNotice(rewrite: FlakeLockRewrite; sibling, error,
     flakeRoot, workspaceRoot: string): string =
   ## The announcement for ONE input whose new revision nix could not report
   ## the derived fields of. Same shape, and same channel, as every other §3.2
   ## withholding (`flakeWithheldNotice`).
+  if error.startsWith("dependency lock"):
+    return "flake.lock NOT refreshed for input '" & rewrite.input & "': " &
+      error & " (" & rewrite.oldRev & " -> " & rewrite.newRev &
+      "). The parent and its existing child nodes were LEFT ALONE; " &
+      "moving only the parent would retain a dependency graph from another " &
+      "revision. Explicitly re-lock the parent and its dependencies: `cd " &
+      quoteShell(flakeRoot) & " && nix flake update " &
+      quoteShell(rewrite.input) & "`. Then re-run the refresh."
   "flake.lock NOT refreshed for input '" & rewrite.input & "': its sibling " &
     (if sibling.len > 0: sibling & " " else: "") &
     "is at " & rewrite.newRev & " and the pin names " & rewrite.oldRev &
@@ -91954,7 +92030,7 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     # rather than filed weaker: the same shape as every other skip (so the
     # commit hook holds the repository in both locks, §16.3 H3), and NF-3's
     # pre-push gate refuses the lagging lock, so nothing escapes.
-    let fetched = fetchPendingDerivedFields(refreshed.pending)
+    let fetched = fetchPendingDerivedFields(refreshed.pending, lockText)
     for f in fetched.failed:
       let notice = flakeUnfetchableNotice(f.rewrite,
         siblingOf.getOrDefault(f.rewrite.input, ""), f.error, flakeRoot,
@@ -92308,6 +92384,58 @@ proc runLockUpdateNix(root: string; inputs: openArray[string]):
     (res.exitCode == 0, res.output.strip())
   except CatchableError as err:
     (false, err.msg)
+
+proc runLockUpdateNixTargets(root, lockText: string;
+    targets: openArray[tuple[input, rev: string]]):
+    tuple[ok: bool; text, output: string] =
+  ## An explicit upgrade may re-lock a parent's dependency closure. Ask Nix
+  ## to select the requested exact sources while retaining the recipe's
+  ## original branch coordinates. The temporary output keeps failure atomic.
+  let nixBin = uncontrolledFindExe("nix")
+  if nixBin.len == 0: return (false, "", "nix is not on PATH")
+  var outputPath = ""
+  try:
+    let doc = parseJson(lockText)
+    let nodes = doc["nodes"]
+    let rootKey = doc{"root"}.getStr("root")
+    var attrsByInput = newJObject()
+    for target in targets:
+      let nodeKey = nodes[rootKey]["inputs"][target.input].getStr()
+      var attrs = nodes[nodeKey]["locked"].copy()
+      for key in flakeLockRevisionDerivedKeys:
+        attrs.delete(key)
+      attrs["rev"] = %target.rev
+      # Forge references spell either a branch or a revision. Git references
+      # may retain both (the ref can be necessary to fetch the revision).
+      if attrs{"type"}.getStr() in ["github", "gitlab", "sourcehut"]:
+        attrs.delete("ref")
+      attrsByInput[target.input] = attrs
+    let expr = "builtins.mapAttrs (_: builtins.flakeRefToString) " &
+      "(builtins.fromJSON " & nixStringLiteral($attrsByInput) & ")"
+    let prefix = quoteShell(nixBin) &
+      " --extra-experimental-features 'nix-command flakes'"
+    let refs = uncontrolledExecCmdEx(prefix & " eval --json --expr " &
+      quoteShell(expr), options = {poUsePath}, workingDir = root)
+    if refs.exitCode != 0: return (false, "", refs.output)
+    let urls = parseJson(refs.output)
+    let created = createTempFile("repro-flake-relock-", ".lock")
+    created.cfile.close()
+    outputPath = created.path
+    var cmd = prefix & " flake lock " & quoteShell(root) &
+      " --output-lock-file " & quoteShell(outputPath)
+    for target in targets:
+      cmd.add(" --override-input " & quoteShell(target.input) & " " &
+        quoteShell(urls[target.input].getStr()))
+    let ran = uncontrolledExecCmdEx(cmd,
+      options = {poStdErrToStdOut, poUsePath}, workingDir = root)
+    if ran.exitCode != 0: return (false, "", ran.output)
+    (true, readFile(outputPath), ran.output)
+  except CatchableError as err:
+    (false, "", err.msg)
+  finally:
+    if outputPath.len > 0:
+      try: removeFile(outputPath)
+      except CatchableError: discard
 
 proc nixSaid(output: string): string =
   ## nix's own output, one indented line each, after a refusal's summary
@@ -92841,24 +92969,29 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
         result.written.add(flakeLockPath)
     if floating.len > 0:
       var moved = refreshFlakeLockText(flakeLockText, floating, root)
+      var closureRelock: seq[tuple[input, rev: string]]
       if not moved.failed and moved.pending.len > 0:
         # The moved nodes carry what nix reports for the target — the same
         # `narHash` / `lastModified` / `revCount` the commit-time refresh
         # writes (``fetchPendingDerivedFields``). A target nix cannot fetch
         # is not filed as a weaker node; the whole update is undone.
-        let fetched = fetchPendingDerivedFields(moved.pending)
+        let fetched = fetchPendingDerivedFields(moved.pending, flakeLockText)
         if fetched.failed.len > 0:
           var why: seq[string]
           for f in fetched.failed:
-            why.add("input '" & f.rewrite.input & "': " & f.error)
-          undoAll(LockUpdateExitFailed, "nix could not fetch " & target &
-            " to compute the narHash it records with it (" &
-            why.join("; ") & "). If " & target & " is not yet pushed to " &
-            "the input's url, push it first")
+            if f.error.startsWith("dependency lock"):
+              closureRelock.add((input: f.rewrite.input, rev: f.rewrite.newRev))
+            else:
+              why.add("input '" & f.rewrite.input & "': " & f.error)
+          if why.len > 0:
+            undoAll(LockUpdateExitFailed, "nix could not fetch " & target &
+              " to compute the narHash it records with it (" &
+              why.join("; ") & "). If " & target & " is not yet pushed to " &
+              "the input's url, push it first")
         moved = refreshFlakeLockText(flakeLockText, floating, root,
           fetched.derived)
       if moved.failed or moved.declined.len > 0 or
-          moved.rewrites.len != floating.len:
+          moved.rewrites.len + closureRelock.len != floating.len:
         undoAll(LockUpdateExitFailed, flakeLockPath & " could not be moved " &
           "to " & target & ": " &
           (if moved.failed: moved.diagnostic
@@ -92876,6 +93009,29 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
            else: "no derived fields from nix") &
           (if m.dropped.len > 0: "; " & m.dropped.join("/") & " dropped"
            else: "") & ")")
+      if closureRelock.len > 0:
+        # The metadata-only path has proved its remaining closures unchanged.
+        # Only inputs whose dependency graph needs resolution reach Nix's
+        # solver, so unrelated stale recipe metadata is left alone in the
+        # ordinary source-only upgrade case.
+        let relocked = runLockUpdateNixTargets(root, flakeLockText, closureRelock)
+        if not relocked.ok:
+          undoAll(LockUpdateExitFailed, "re-locking the requested exact " &
+            "sources and their dependency closures through nix failed:" &
+            nixSaid(relocked.output))
+        var lockedAt = initTable[string, FlakeLockResolution]()
+        for r in flakeLockResolutions(relocked.text): lockedAt[r.input] = r
+        for move in closureRelock:
+          let actual = lockedAt.getOrDefault(move.input, FlakeLockResolution())
+          if actual.lockedRev.toLowerAscii() != move.rev:
+            undoAll(LockUpdateExitFailed, "nix re-locked input '" & move.input &
+              "' at " & actual.lockedRev & ", not at " & move.rev)
+          result.report.add("flake.lock input '" & move.input &
+            "': re-locked through nix at " & move.rev &
+            " together with its dependency closure")
+        flakeLockText = relocked.text
+        writeFile(extendedPath(flakeLockPath), flakeLockText)
+
     if reproOfRepo.len > 0:
       var originalDepsLine = ""
       for line in inputs.reproLock.text.splitLines():
