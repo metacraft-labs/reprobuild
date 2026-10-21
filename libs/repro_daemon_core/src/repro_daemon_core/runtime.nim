@@ -6,6 +6,7 @@ from repro_core/source_root import declareRunningImageSource
 import blake3
 
 import ./client
+import ./daemon_log
 import ./writer_identity
 import ./protocol
 import ./stats_store
@@ -787,13 +788,9 @@ proc sweepStaleDevStagedGenerationsForTest*(config: UserDaemonConfig):
   sweepStaleDevStagedGenerations(config)
 
 proc logLine(path, message: string) =
-  try:
-    createDir(parentDir(path))
-    var file = open(path, fmAppend)
-    defer: file.close()
-    file.writeLine($now() & " " & message)
-  except CatchableError:
-    discard
+  ## Every daemon-side diagnostic goes through here. Size-bounded and
+  ## never raising: see `appendUserDaemonLogLine` (`daemon_log.nim`).
+  appendUserDaemonLogLine(path, message)
 
 proc lockMetadata(config: UserDaemonConfig; token: string): string =
   "role=" & UserDaemonRole & "\n" &
@@ -2820,7 +2817,9 @@ proc deferralLogDue*(state: var DevRestartState; nowMs: int64;
   ##
   ## NOT ROTATION. Rotation would have bounded the file and hidden the cause:
   ## the 82 MB was the symptom that made 19 session records stuck in
-  ## `state=running` findable at all.
+  ## `state=running` findable at all. (The log is now also bounded by
+  ## rotation, `appendUserDaemonLogLine`; that bounds the file, and a flood
+  ## would still evict everything else from it, so it does not replace this.)
   if state.deferredLogAtMs == 0 or nowMs - state.deferredLogAtMs >= windowMs:
     state.deferredLogAtMs = nowMs
     return true
@@ -2939,7 +2938,7 @@ proc performDevSelfRestart(config: UserDaemonConfig;
   else:
     let pid = spawnWithOwnStdio(staged.imagePath,
       daemonProcessArgs(nextConfig), [], inheritEnvironment = true,
-      logPath = nextConfig.logPath,
+      logPath = "",
       workingDir = daemonWorkingDirectory(nextConfig))
     logLine(config.logPath, "dev restart launched backend=windows-handle-list " &
       "pid=" & $pid)
@@ -3377,9 +3376,9 @@ proc renderLaunchdUserAgentPlist*(exe: string; config: UserDaemonConfig):
     "  <key>RunAtLoad</key>\n  <true/>\n" &
     "  <key>KeepAlive</key>\n  <false/>\n" &
     "  <key>StandardOutPath</key>\n  <string>" &
-      xmlEscape(config.logPath) & "</string>\n" &
+      xmlEscape("/dev/null") & "</string>\n" &
     "  <key>StandardErrorPath</key>\n  <string>" &
-      xmlEscape(config.logPath) & "</string>\n" &
+      xmlEscape("/dev/null") & "</string>\n" &
     "</dict>\n</plist>\n")
 
 proc quoteCommand(args: openArray[string]): string =
@@ -3633,7 +3632,6 @@ proc launchWithFork(exe: string; config: UserDaemonConfig) =
       environment.add(ReproTestRunnerOwnerTokenEnv & "=" & processOwnerToken)
     let cenv = allocCStringArray(environment)
     let exeCString = cstring(exe)
-    let logPathCString = cstring(config.logPath)
     # Prepared before the fork: the child may only make async-signal-safe
     # calls, and ``chdir`` is one, allocating a C string is not.
     let workingDir = daemonWorkingDirectory(config)
@@ -3650,14 +3648,13 @@ proc launchWithFork(exe: string; config: UserDaemonConfig) =
       # conventional fallback when the state directory cannot be entered.
       if posix.chdir(workingDirCString) != 0:
         discard posix.chdir(cstring("/"))
-      let devNull = posix.open(cstring("/dev/null"), O_RDONLY)
-      if devNull >= 0:
-        discard dup2(devNull, 0)
-      let logFd = posix.open(logPathCString,
-        O_WRONLY or O_CREAT or O_APPEND, Mode(0o600))
-      if logFd >= 0:
-        discard dup2(logFd, 1)
-        discard dup2(logFd, 2)
+      # Raw output must not bypass the structured log writer's size bound.
+      let devNull = posix.open(cstring("/dev/null"), O_RDWR)
+      if devNull < 0:
+        exitnow(127)
+      for fd in 0.cint .. 2.cint:
+        if dup2(devNull, fd) < 0:
+          exitnow(127)
       for fd in 3.cint .. 255.cint:
         discard posix.close(fd)
       discard execve(exeCString, cargv, cenv)
@@ -3868,7 +3865,7 @@ proc startUserDaemon*(publicCliPath: string;
       envPairsForChild.add((key, value))
     let pid = spawnWithOwnStdio(exe, daemonProcessArgs(launchConfig),
       envPairsForChild, inheritEnvironment = false,
-      logPath = launchConfig.logPath,
+      logPath = "",
       workingDir = daemonWorkingDirectory(launchConfig))
     logLine(launchConfig.logPath,
       "launch requested backend=windows-handle-list pid=" & $pid)
@@ -3951,9 +3948,28 @@ proc renderUserDaemonStatus*(status: UserDaemonStatus): string =
     "reconnect-limitations: " & status.reconnectLimitations
 
 proc renderUserDaemonLogs*(config: UserDaemonConfig): string =
-  if not fileExists(config.logPath):
+  ## What `repro daemon logs` prints: the previous generation (`<log>.1`)
+  ## followed by the current file, oldest line first. Printing `.1` is what
+  ## keeps a rotation from hiding the previous retained generation. The
+  ## byte amount depends on line lengths and rotation boundaries.
+  let previous = userDaemonLogPreviousGeneration(config.logPath)
+  let hasPrevious = fileExists(previous)
+  let hasCurrent = fileExists(config.logPath)
+  if not hasPrevious and not hasCurrent:
     return "repro daemon logs: no log file at " & config.logPath
-  readFile(config.logPath)
+  # Each read is guarded on its own: a writer can rotate between the
+  # `fileExists` above and the read, and whatever is still there is worth
+  # printing.
+  if hasPrevious:
+    try:
+      result.add(readFile(previous))
+    except IOError:
+      discard
+  if hasCurrent:
+    try:
+      result.add(readFile(config.logPath))
+    except IOError:
+      discard
 
 proc renderUserDaemonSessions*(sessions: openArray[UserDaemonSession]):
     string =

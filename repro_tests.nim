@@ -1989,6 +1989,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_daemon_core/tests/t_daemon_log_is_bounded_by_rotation.nim",
+    binary: "build/test-bin/t_daemon_log_is_bounded_by_rotation",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_daemon_core/tests/t_daemon_missing_feature_diagnostic.nim",
     binary: "build/test-bin/t_daemon_missing_feature_diagnostic",
     defines: @[],
@@ -2000,6 +2009,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_daemon_core/tests/t_daemon_missing_feature_refusal.nim",
     binary: "build/test-bin/t_daemon_missing_feature_refusal",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_daemon_core/tests/t_daemon_runtime_log_retention.nim",
+    binary: "build/test-bin/t_daemon_runtime_log_retention",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
