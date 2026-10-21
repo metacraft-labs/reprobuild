@@ -111,6 +111,13 @@ method resolveOwnership*(b: Backend; target: string): OpResult {.base.} =
   OpResult(status: osFailed, detail: "ownership is not supported")
 method createCheckout*(b: Backend; package, root: string): OpResult {.base.} =
   OpResult(status: osFailed, detail: "checkout is not supported")
+method reapplyCheckout*(b: Backend; package, root: string;
+                        op: Operation): OpResult {.base.} =
+  ## Check out `package` as it is NOW and re-apply an earlier change to it
+  ## (`op.arg("release")`). A conflict is a completed result that says so:
+  ## the workspace is kept, conflict markers and all, for the provider to
+  ## resolve.
+  OpResult(status: osFailed, detail: "reapply is not supported")
 method runBuild*(b: Backend; ws: Workspace; op: Operation): OpResult {.base.} =
   OpResult(status: osFailed, detail: "build is not supported")
 method runTest*(b: Backend; ws: Workspace; op: Operation): OpResult {.base.} =
@@ -537,12 +544,14 @@ proc runOne(h: Host; s: Session; op: Operation): OpResult =
   case op.kind
   of okOwnershipResolve:
     result = h.backend.resolveOwnership(op.target)
-  of okCheckoutCreate:
+  of okCheckoutCreate, okCheckoutReapply:
     inc h.counter
     let wid = "w" & $h.counter & "-" & randomHex(6)
     let root = h.workspacesRoot / wid
     createDir(root)
-    result = h.backend.createCheckout(op.target, root)
+    result =
+      if op.kind == okCheckoutCreate: h.backend.createCheckout(op.target, root)
+      else: h.backend.reapplyCheckout(op.target, root, op)
     if result.status == osCompleted:
       h.workspaces[wid] = Workspace(id: wid, sessionId: s.id,
                                     package: op.target, root: root)

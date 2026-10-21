@@ -126,7 +126,7 @@ proc usesPathArg*(kind: OperationKind): bool =
 proc familyOf*(kind: OperationKind): Family =
   case kind
   of okOwnershipResolve: fOwnership
-  of okCheckoutCreate: fCheckout
+  of okCheckoutCreate, okCheckoutReapply: fCheckout
   of okSourceRead, okSourceWrite, okSourceList, okSourceDiff: fSource
   of okBuildRun: fBuild
   of okTestRun: fTest
@@ -147,7 +147,7 @@ proc requiredGrants*(op: Operation; packageOfTarget: string): seq[Grant] =
       result.add grant(ckContextActiveApp)
     else:
       result.add grant(ckContextPackage, op.target)
-  of okCheckoutCreate:
+  of okCheckoutCreate, okCheckoutReapply:
     result.add grant(ckWorkspaceCreate, op.target)
   of okSourceRead, okSourceList, okSourceDiff:
     result.add grant(ckSourceRead, pkg)

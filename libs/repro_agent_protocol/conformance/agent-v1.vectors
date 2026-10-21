@@ -337,6 +337,11 @@ op: required-grants
 input: a36461726773a0646b696e646f636865636b6f75742e637265617465667461726765746766697265666f78|
 expect: workspace.create:firefox
 
+name: required grants of checkout.reapply with 1 args on firefox
+op: required-grants
+input: a36461726773a16772656c65617365423030646b696e6470636865636b6f75742e72656170706c79667461726765746766697265666f78|
+expect: workspace.create:firefox
+
 name: required grants of source.list with 1 args on w1
 op: required-grants
 input: a36461726773a16470617468412e646b696e646b736f757263652e6c69737466746172676574627731|firefox

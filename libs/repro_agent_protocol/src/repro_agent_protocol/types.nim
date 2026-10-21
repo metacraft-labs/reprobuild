@@ -123,6 +123,7 @@ type
     ## The executable operations a plan may contain, by family.
     okOwnershipResolve = "ownership.resolve"
     okCheckoutCreate = "checkout.create"
+    okCheckoutReapply = "checkout.reapply"
     okSourceRead = "source.read"
     okSourceWrite = "source.write"
     okSourceList = "source.list"

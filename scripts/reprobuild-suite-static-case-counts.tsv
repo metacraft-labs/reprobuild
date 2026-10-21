@@ -970,7 +970,9 @@ tests/bundles/bundle_repro_lock_files_cli_pure_unit.nim	nim	24
 tests/bundles/bundle_repro_lock_files_pure_unit.nim	nim	42
 tests/bundles/bundle_repro_peer_cache_pure_unit.nim	nim	29
 tests/bundles/bundle_repro_solver_pure_unit.nim	nim	82
+tests/e2e/agent-harbor/t_e2e_agent_harbor_change_to_generation_and_remix.nim	nim	5
 tests/e2e/agent-harbor/t_e2e_agent_harbor_modifies_installed_source_package.nim	nim	6
+tests/e2e/agent-harbor/t_e2e_agent_harbor_preview_accept_reject.nim	nim	5
 tests/e2e/cmake-develop/t_e2e_repro_develop_cmake.nim	nim	3
 tests/e2e/cmake-path-hermeticity/t_cmake_actions_declare_their_path.nim	nim	4
 tests/e2e/codetracer-subset/t_e2e_codetracer_build_subset_without_tup.nim	nim	1
@@ -2087,6 +2089,7 @@ tests/test_dev_env_m9_policy.py	python	11
 tests/unit/t_action_compatibility_key.nim	nim	4
 tests/unit/t_action_depfile_policy.nim	nim	7
 tests/unit/t_action_index_platform_arm.nim	nim	3
+tests/unit/t_agent_harbor_activity_module.nim	nim	5
 tests/unit/t_bearssl_probe_marker_is_the_imported_module.nim	nim	5
 tests/unit/t_binary_decoder_cli_counts.nim	nim	2
 tests/unit/t_binary_decoder_daemon_counts.nim	nim	2

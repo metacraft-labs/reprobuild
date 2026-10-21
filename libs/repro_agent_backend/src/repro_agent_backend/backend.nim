@@ -21,7 +21,10 @@ import repro_core/ambient_execution
 import repro_agent_protocol
 import repro_project_dsl/install_mirror_resolver
 
-import ./[ownership, checkout, preview_strategy]
+import repro_remix
+import repro_peer_cache/auth as peerAuth
+
+import ./[ownership, checkout, preview_strategy, stage]
 
 type
   ReprobuildBackend* = ref object of Backend
@@ -40,6 +43,14 @@ type
     checkouts*: Table[string, Checkout] ## by workspace root
     extraEnv*: seq[(string, string)]
       ## Added to every child environment (tool PATH, provisioning mode).
+    driver*: GenerationDriver
+      ## The generation system changes are activated in (M5).
+    overlayRoot*: string
+      ## Where staged overlays (signed draft Remix manifests and their
+      ## patch blobs) are kept, private to this machine.
+    remixKey*: PeerKeypair
+      ## The local author key staged overlays are signed with.
+    staged*: Table[string, StagedChange] ## by hex release id
     hcr*: HcrAdvertisement
       ## What the focused application's HCR agent advertised, if one
       ## connected; decides between HCR and restart (`preview_strategy`).
@@ -257,4 +268,174 @@ method preview*(b: ReprobuildBackend; ws: Workspace; op: Operation): OpResult =
   except AgentRefusal as e:
     failed($e.reason & ": " & e.msg)
   except CheckoutError, KeyError, OSError:
+    failed(getCurrentExceptionMsg())
+
+# ---------------------------------------------------------------------
+# Generations (M5).
+
+method activeGeneration*(b: ReprobuildBackend): string =
+  if b.driver.isNil: "" else: b.driver.current()
+
+proc runHealthCheck(b: ReprobuildBackend; h: HealthCheck): tuple[ok: bool;
+                                                               why: string] =
+  ## One declared check against the generation that is now current. Home
+  ## generations have launchers and files, not units or sockets: those
+  ## kinds need a system generation and are refused, never skipped.
+  let bin = b.driver.launcherDir()
+  case h.kind
+  of hcCommandExitZero:
+    let argv = h.target.split(' ')
+    let cmd = bin / argv[0]
+    if argv[0].len == 0 or '/' in argv[0] or not fileExists(cmd):
+      return (false, "no launcher " & argv[0].escape & " in the generation")
+    let saved = b.timeoutSeconds
+    b.timeoutSeconds = int(h.timeoutSeconds)
+    defer: b.timeoutSeconds = saved
+    let (code, output) = b.run(cmd, argv[1 .. ^1], bin, b.childEnv([]))
+    if code != 0:
+      return (false, "command-exit-zero " & h.target.escape & " exited " &
+        $code & ": " & output.tail(512))
+    (true, "")
+  of hcPathExists:
+    if not isCanonicalRelPath(h.target):
+      return (false, "path-exists target is not a relative path")
+    if not fileExists(bin.parentDir / h.target) and
+        not dirExists(bin.parentDir / h.target):
+      return (false, "path-exists " & h.target & " is missing")
+    (true, "")
+  of hcUnitActive, hcUnitNotFailed, hcSocketListening:
+    (false, $h.kind & " needs a system generation")
+
+proc stageChange(b: ReprobuildBackend; ws: Workspace; op: Operation): OpResult =
+  let co = b.checkoutOf(ws)
+  let diff = diffAgainstBase(co.root)
+  let patch = recipeRelativePatch(diff, co.ownership.recipeName)
+  let health = parseHealthChecks(op.arg("health"))
+  # The interface identity of the ORIGINAL recipe: what the overlay
+  # patches. Read from a pristine checkout, never from the edited one.
+  let pristine = co.root / ".reproos-agent" / "pristine"
+  removeDir(pristine)
+  discard createCheckout(co.ownership, pristine, storeRoot = b.storeRoot)
+  let graphEnv = b.childEnv([("REPRO_STORE_ROOT", b.previewStoreRoot)])
+  let (gcode, graph) = b.run(b.reproExe, @["graph", "--format=json"],
+                             pristine / co.ownership.recipeName, graphEnv)
+  if gcode != 0:
+    return failed("repro graph exited " & $gcode & ": " & graph.tail(1024))
+  let identity = interfaceIdentityFromGraphJson(graph)
+  # Build the change into the installed store, beside the original.
+  let env = b.childEnv([("REPRO_STORE_ROOT", b.storeRoot),
+                        ("REPRO_INSTALL_MIRROR_MODE", "hashed")])
+  var args = @["build"]
+  if op.arg("target").len > 0:
+    args.add op.arg("target")
+  let (code, output) = b.run(b.reproExe, args, co.packageDir, env)
+  if code != 0:
+    return OpResult(status: osFailed, detail: "repro " & args.join(" ") &
+      " exited " & $code, output: output.tail)
+  let rel = co.previewOutput
+  if rel.len == 0 or rel == co.ownership.prefixPath.relativePath(b.storeRoot):
+    return failed("the change built no new prefix")
+  let m = draftManifest(co.ownership, identity, patch, op.arg("intent"),
+                        currentRealizationPlatformTag(), health,
+                        keyIdOf(b.remixKey))
+  let (rid, path) = writeOverlay(b.overlayRoot, m, patch, b.remixKey)
+  let change = StagedChange(package: co.ownership.recipeName,
+    baseGeneration: b.activeGeneration(), patch: patch,
+    changedPaths: changedPathsOf(diff), prefixRel: rel,
+    prefixPath: b.storeRoot / rel, releaseId: rid, manifestPath: path,
+    healthChecks: m.healthChecks)
+  b.staged[toHex(rid)] = change
+  OpResult(status: osCompleted, detail: "release=" & toHex(rid) &
+    " prefix=" & rel, output: patch)
+
+proc activate(b: ReprobuildBackend; op: Operation): OpResult =
+  if not b.staged.hasKey(op.target):
+    return failed("no staged change " & op.target)
+  let change = b.staged[op.target]
+  let previous = b.driver.current()
+  let next = b.driver.switchTo(change)
+  for h in change.healthChecks:
+    let (ok, why) = b.runHealthCheck(h)
+    if not ok:
+      b.driver.rollbackTo(previous)
+      return failed("health check failed (" & why & "); rolled back to " &
+        "generation " & previous)
+  OpResult(status: osCompleted, detail: "generation=" & next &
+    " previous=" & previous)
+
+method generation*(b: ReprobuildBackend; ws: Workspace;
+                   op: Operation): OpResult =
+  if b.driver.isNil:
+    return failed("this host has no generation driver")
+  try:
+    case op.kind
+    of okGenerationStage: b.stageChange(ws, op)
+    of okGenerationActivate: b.activate(op)
+    of okGenerationRollback:
+      b.driver.rollbackTo(op.target)
+      OpResult(status: osCompleted, detail: "generation=" & b.driver.current())
+    else: failed("not a generation operation")
+  except StageError, CheckoutError, RemixError, KeyError, OSError:
+    failed(getCurrentExceptionMsg())
+
+method remix*(b: ReprobuildBackend; ws: Workspace; op: Operation): OpResult =
+  ## `remix.capture` keeps the staged overlay private (staging already
+  ## stored it); `remix.export` writes its detached export bundle beside it.
+  ## `remix.submit` needs the registry client and the user's credential
+  ## handle, which this backend is not wired to.
+  try:
+    let rid = op.arg("release")
+    if not b.staged.hasKey(rid):
+      return failed("no staged change " & rid)
+    let dir = b.staged[rid].manifestPath.parentDir
+    case op.kind
+    of okRemixCapture:
+      OpResult(status: osCompleted, detail: "overlay=" & dir)
+    of okRemixExport:
+      let bundle = exportOverlay(dir)
+      var s = newString(bundle.len)
+      for i, x in bundle: s[i] = char(x)
+      writeFile(dir / "export.bundle", s)
+      OpResult(status: osCompleted, detail: "bundle=" & dir / "export.bundle")
+    of okRemixSubmit:
+      failed("registry submission is not wired to this backend")
+    else: failed("not a remix operation")
+  except RemixError, OSError, IOError:
+    failed(getCurrentExceptionMsg())
+
+method reapplyCheckout*(b: ReprobuildBackend; package, root: string;
+                        op: Operation): OpResult =
+  ## Check out `package` as the catalog has it NOW (after an upstream
+  ## update its recipe resolves to a newer output) and re-apply a staged
+  ## change's patch to it (M5 deliverable 4). A clean apply leaves the
+  ## change ready to rebuild and retest; a conflict is reported hunk by hunk
+  ## (`git apply --reject` keeps every hunk that applies and writes the rest
+  ## to `.rej` files beside their targets) and the workspace is kept, so the
+  ## agent can reapply the change semantically and revalidate it.
+  try:
+    let rid = op.arg("release")
+    if not b.staged.hasKey(rid):
+      return failed("no staged change " & rid)
+    let change = b.staged[rid]
+    let rec = b.ownershipFor(package)
+    let co = createCheckout(rec, root, storeRoot = b.storeRoot)
+    b.checkouts[root] = co
+    let patchFile = root / ".reproos-agent" / "reapply.patch"
+    writeFile(patchFile, change.patch)
+    try:
+      discard git(root, ["apply", "-p1", "--directory=" & rec.recipeName,
+                         "--reject", "--whitespace=nowarn", patchFile])
+      # The host replaces `detail` with the new workspace id, so the
+      # outcome is the first line of `output`.
+      OpResult(status: osCompleted,
+               output: "reapply=clean\nbase=" & co.baseCommit & "\n")
+    except CheckoutError as e:
+      var rejects: seq[string]
+      for p in walkDirRec(co.packageDir, relative = true):
+        if p.endsWith(".rej"):
+          rejects.add rec.recipeName & "/" & p
+      OpResult(status: osCompleted,
+               output: "reapply=conflict\nbase=" & co.baseCommit & "\n" &
+                 "rejected=" & rejects.join(",") & "\n" & e.msg.tail(4096))
+  except OwnershipError, CheckoutError, KeyError, OSError, IOError:
     failed(getCurrentExceptionMsg())

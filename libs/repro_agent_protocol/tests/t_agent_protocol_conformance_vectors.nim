@@ -191,6 +191,7 @@ proc corpus(): seq[Vector] =
       (op(okOwnershipResolve, "active-app"), ""),
       (op(okOwnershipResolve, "firefox"), ""),
       (op(okCheckoutCreate, "firefox"), ""),
+      (op(okCheckoutReapply, "firefox", {"release": "00"}), ""),
       (op(okSourceList, "w1", {"path": "."}), "firefox"),
       (op(okSourceDiff, "w1"), "firefox"),
       (op(okSourceWrite, "w1", {"path": "a", "content": "b"}), "firefox"),
