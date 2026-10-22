@@ -260,6 +260,14 @@ jobs:
             throw "Windows expandArchive execution-boundary gate failed with exit code $LASTEXITCODE"
           }
 
+      - name: Verify native Windows release DLL staging
+        shell: pwsh
+        run: |
+          nim c -r --threads:on --hints:off --warnings:off --nimcache:build/nimcache/windows-release-dll-staging --out:build/test-bin/windows_release_dll_staging_boundary.exe tests/windows/windows_release_dll_staging_boundary.nim
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows release DLL staging boundary failed with exit code $LASTEXITCODE"
+          }
+
       - name: Verify Windows Python provisioning
         shell: pwsh
         run: ./scripts/check_windows_python_provisioning.ps1
