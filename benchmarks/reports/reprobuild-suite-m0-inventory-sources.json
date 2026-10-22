@@ -46289,8 +46289,8 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_configure_build_tree_cleanup.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 12,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
