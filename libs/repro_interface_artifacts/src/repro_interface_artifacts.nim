@@ -79,7 +79,9 @@ when defined(windows):
 else:
   import std/posix
 
-  const ProviderLockExclusive = 2.cint
+  const
+    ProviderLockExclusive = 2.cint
+    ProviderLockNonBlocking = 4.cint
 
   proc providerLockFlock(fd: cint; operation: cint): cint
     {.importc: "flock", header: "<sys/file.h>".}
@@ -7002,10 +7004,11 @@ proc positionKeyedNimcacheKey*(declaredCache, producingProject,
   ##
   ## SCOPE (Compiles-Are-Normal-Edges.md): this selects a SCRATCH DIRECTORY
   ## for Nim's own incremental cache. It is NOT the cache key of any
-  ## artifact. Both compiles that use it -- the provider compile and the
-  ## interface extraction -- run as monitored build edges, so what they
-  ## produce is addressed by the engine's action key over the observed argv,
-  ## inputs and reads. Do not grow this into an input enumeration.
+  ## artifact. The provider compile that uses it (the interface extraction
+  ## keys its own by configuration, `interfaceNimcacheConfigKey`) runs as a
+  ## monitored build edge, so what it produces is addressed by the engine's
+  ## action key over the observed argv, inputs and reads. Do not grow this
+  ## into an input enumeration.
   var parts = @[declaredCache,
                 "project=" & absolutePath(producingProject),
                 "variant=" & activeVariantSignature(),
@@ -7171,6 +7174,46 @@ proc acquireProviderFileLock(lockPath: string): ReproFileLock =
         "flock(" & lockPath & ") failed, errno=" & $lockError)
     return ReproFileLock(held: true, fd: fd)
 
+proc tryAcquireProviderFileLock(lockPath: string;
+                                lock: var ReproFileLock): bool =
+  ## Non-blocking `acquireProviderFileLock`: true and `lock` held when the
+  ## lock was free, false (nothing held) when another holder has it.
+  createDir(extendedPath(parentDir(lockPath)))
+  when defined(windows):
+    let handle = providerLockCreateFileW(
+      newWideCString(lockPath),
+      ProviderLockGenericRead or ProviderLockGenericWrite,
+      0,
+      nil,
+      ProviderLockOpenAlways,
+      ProviderLockFileAttributeNormal,
+      nil)
+    if cast[int](handle) != cast[int](ProviderLockInvalidHandle):
+      lock = ReproFileLock(held: true, handle: handle)
+      return true
+    let error = providerLockGetLastError()
+    if error != ProviderLockSharingViolation:
+      raise newException(IOError,
+        "CreateFileW(" & lockPath & ") failed, GetLastError=" & $error)
+    false
+  else:
+    let fd = posix.open(lockPath.cstring, O_RDWR or O_CREAT, Mode(0o600))
+    if fd < 0:
+      raise newException(IOError,
+        "open(" & lockPath & ") failed, errno=" & $errno)
+    while providerLockFlock(fd, ProviderLockExclusive or
+        ProviderLockNonBlocking) != 0:
+      if errno == EINTR:
+        continue
+      let lockError = errno
+      discard posix.close(fd)
+      if lockError == EWOULDBLOCK or lockError == EAGAIN:
+        return false
+      raise newException(IOError,
+        "flock(" & lockPath & ") failed, errno=" & $lockError)
+    lock = ReproFileLock(held: true, fd: fd)
+    true
+
 proc acquireProviderNimcacheLock(command: openArray[string]):
     ReproFileLock =
   ## DELIBERATE RESIDUAL. Position-keying the nimcache removes the reason
@@ -7218,6 +7261,38 @@ proc acquireInterfaceArtifactLock*(artifactPath: string):
 proc releaseInterfaceArtifactLock*(lock: var ReproFileLock) =
   releaseProviderNimcacheLock(lock)
 
+proc runNimcacheCompilerCommandHeld(command: openArray[string]; cwd = ""):
+    ProviderCompileExecutionResult =
+  ## Execute a compiler command whose nimcache the CALLER already holds
+  ## exclusively (`runSharedNimcacheCompilerCommand` takes the directory's
+  ## lock itself; the interface extraction holds a slot lock instead, see
+  ## `acquireInterfaceNimcacheSlot`).
+  result = runCommand(command, cwd = cwd, raiseOnFailure = false)
+  var priorNote = ""
+  if compilerCrashIsRetryable(result.exitCode):
+    # The compiler died instead of answering, so this run produced no
+    # verdict about the recipe -- retrying is not papering over a compile
+    # error, it is asking the question that never got answered.
+    #
+    # Observed on Windows against `agent-harbor`: `nim c` printed its own
+    # `[SuccessX]` line, having written the provider binary, and then exited
+    # 0xC0000005. Because `just` sets `windows-shell` to `repro exec`, EVERY
+    # recipe line is a fresh nested `repro`, so a per-invocation crash
+    # probability that is tolerable once becomes a near-certain abort
+    # somewhere across a multi-recipe run.
+    #
+    # The same nimcache is reused deliberately. It is the compiler's own
+    # incremental directory, it is already held exclusively by the caller,
+    # and re-entering it is what makes the second attempt cost seconds
+    # rather than a full rebuild.
+    let firstCrash = abnormalTerminationName(result.exitCode)
+    priorNote = "note: a first attempt terminated abnormally (" &
+      firstCrash & ") and was retried once; the output below is the " &
+      "SECOND attempt's.\n"
+    result = runCommand(command, cwd = cwd, raiseOnFailure = false)
+  if result.exitCode != 0:
+    raise commandFailure(command, result, priorNote)
+
 proc runSharedNimcacheCompilerCommand(command: openArray[string]; cwd = ""):
     ProviderCompileExecutionResult =
   ## Execute a compiler command under the lock for its shared Nim cache. The
@@ -7225,31 +7300,7 @@ proc runSharedNimcacheCompilerCommand(command: openArray[string]; cwd = ""):
   ## small lock file remains available for later sessions.
   var lock = acquireProviderNimcacheLock(command)
   try:
-    result = runCommand(command, cwd = cwd, raiseOnFailure = false)
-    var priorNote = ""
-    if compilerCrashIsRetryable(result.exitCode):
-      # The compiler died instead of answering, so this run produced no
-      # verdict about the recipe -- retrying is not papering over a compile
-      # error, it is asking the question that never got answered.
-      #
-      # Observed on Windows against `agent-harbor`: `nim c` printed its own
-      # `[SuccessX]` line, having written the provider binary, and then exited
-      # 0xC0000005. Because `just` sets `windows-shell` to `repro exec`, EVERY
-      # recipe line is a fresh nested `repro`, so a per-invocation crash
-      # probability that is tolerable once becomes a near-certain abort
-      # somewhere across a multi-recipe run.
-      #
-      # The same nimcache is reused deliberately. It is the compiler's own
-      # incremental directory, it is already guarded by the lock held here,
-      # and re-entering it is what makes the second attempt cost seconds
-      # rather than a full rebuild.
-      let firstCrash = abnormalTerminationName(result.exitCode)
-      priorNote = "note: a first attempt terminated abnormally (" &
-        firstCrash & ") and was retried once; the output below is the " &
-        "SECOND attempt's.\n"
-      result = runCommand(command, cwd = cwd, raiseOnFailure = false)
-    if result.exitCode != 0:
-      raise commandFailure(command, result, priorNote)
+    result = runNimcacheCompilerCommandHeld(command, cwd)
   finally:
     releaseProviderNimcacheLock(lock)
 
@@ -7264,6 +7315,140 @@ proc runInterfaceCompilerCommand*(command: openArray[string]; cwd = ""):
   ## their compiler writes require the same cross-process serialization as
   ## provider compiles.
   runSharedNimcacheCompilerCommand(command, cwd)
+
+# ---------------------------------------------------------------------
+# The interface extraction's nimcache: keyed by COMPILE CONFIGURATION,
+# outside the action-cache root, used through a small pool of locked slots.
+#
+# What a nimcache entry depends on. Nim regenerates the C of every module on
+# each compile and recompiles an object only when that C, or (with the
+# pinned compiler's depfiles, see `boundedNimCompileCommand`) a header it
+# includes, changed. So a library module's object depends on the module, the
+# toolchain and the options the C was generated and compiled under, and on
+# nothing about the recipe being extracted or the action-cache root the
+# extraction publishes to. Keying the directory on the recipe's bytes (they
+# selected the edge's output directory, which held the nimcache) or on the
+# recipe's path (`positionKeyedNimcacheKey`) made every edited recipe and
+# every fresh action-cache root recompile ~220 library C files from cold.
+#
+# What made position keying necessary, and why it does not apply here. The
+# PROVIDER compile's main module is the recipe, so every recipe's entry is
+# `@mrepro.nim.c` and its link manifest `project-provider.json`: different
+# recipes in one directory claim the same names. The extraction's main module
+# is a generated runner whose file name is a digest of its source (which
+# names the recipe by absolute path), and the recipe it imports is named
+# from its path relative to the runner, so different recipes get different
+# entries. A slot's only shared names are the library modules' -- the point
+# of sharing -- and the runner's link manifest, which each compile rewrites
+# whole and which nothing reads afterwards.
+#
+# Concurrency. Nim's nimcache is unsafe for concurrent use (its incremental
+# backend renames and removes entries mid-build), so a directory is used by
+# one compile at a time. One directory per configuration would serialise
+# concurrent extractions behind one lock -- measured 4.7x slower than
+# isolated directories when cold (measured for the provider compile in
+# 5cf689c072). A configuration therefore has
+# `InterfaceNimcacheSlotCount` slots, each a nimcache with its own lock. An
+# extraction takes the LOWEST free slot without waiting, so sequential
+# extractions keep landing on slot 0 and only genuinely concurrent ones
+# spill into (and warm) the others; it waits only when every slot is busy.
+#
+# Identity. None of this is the identity of what the extraction produces.
+# The extraction edge's action key and output directory still carry the
+# recipe's bytes and the action-cache root (`extractInterfaceEdge`), and the
+# directory below is an ignored prefix of that edge, like the provider's.
+# ---------------------------------------------------------------------
+
+const InterfaceNimcacheSlotCount* = 4
+  ## Concurrent extractions of one configuration that each get a nimcache
+  ## without waiting. A cold slot costs one full library compile, so this is
+  ## small; past it an extraction waits for slot 0 rather than going cold.
+
+proc interfaceExtractionNimcacheRoot*(): string =
+  ## Root of the interface extraction's shared nimcache, beside the provider
+  ## compile's (`providerCompileNimcacheRoot`) and for the same reasons:
+  ## machine-local derived state that must survive a new action-cache root,
+  ## a writable location when the reprobuild sources are an immutable store
+  ## path, and a short prefix on Windows (Nim's mkdir is MAX_PATH-bound).
+  getTempDir() / "repro-nimcache-interface"
+
+proc interfaceExtractionIgnoredInputPrefixes*(): seq[string] =
+  ## What the extraction edge's monitor must not record from the shared
+  ## nimcache: other extractions rewrite it, so recording it would make an
+  ## unchanged extraction miss depending on what else ran (see
+  ## `providerCompileIgnoredInputPrefixes`).
+  @[absolutePath(interfaceExtractionNimcacheRoot())]
+
+proc interfaceNimcacheConfigKey*(workDir: string;
+                                 hostFlags, libFlags: openArray[string];
+                                 compileFlags: openArray[string] = []):
+    string =
+  ## The configuration a slot's objects were produced under: declared cache,
+  ## variant, compiler, reprobuild library root, host C flags, library
+  ## `--path`s and the compile options of the command. The same components as
+  ## `positionKeyedNimcacheKey` WITHOUT the producing project. Callers leave
+  ## the recipe's own location out of `compileFlags` (see
+  ## `interfaceNimcacheKeyedCompileFlags`).
+  var parts = @[InterfaceCacheName,
+                "config-keyed",
+                "variant=" & activeVariantSignature(),
+                nimCompilerPath(),
+                absolutePath(workDir)]
+  for f in hostFlags:
+    parts.add(f)
+  for f in libFlags:
+    parts.add(f)
+  if compileFlags.len > 0:
+    parts.add("compile-flags")
+    for f in compileFlags:
+      parts.add(f)
+  fnvHex64(parts)
+
+proc interfaceNimcacheKeyedCompileFlags*(command: openArray[string];
+                                         moduleArg: string;
+                                         recipeFlags: openArray[string]):
+    seq[string] =
+  ## `nimcacheKeyedCompileFlags` minus `recipeFlags`: the arguments that name
+  ## WHERE the extracted recipe is (its directory on the search path, the
+  ## consumer root handed to its macros). They select which modules the
+  ## compile reads and what C those generate, and Nim keys both of those
+  ## itself (entry names follow module paths; an entry's object is rebuilt
+  ## when its C changes). Keeping them in the key would give every project
+  ## its own cold directory.
+  for arg in nimcacheKeyedCompileFlags(command, moduleArg):
+    if arg notin recipeFlags:
+      result.add(arg)
+
+type InterfaceNimcacheSlot* = object
+  dir*: string
+    ## The slot's directory; its nimcache is `dir / "nimcache"` and the
+    ## extraction runners' sources live directly in it.
+  index*: int
+  lock: ReproFileLock
+
+proc acquireInterfaceNimcacheSlot*(configDir: string;
+                                   slotCount = InterfaceNimcacheSlotCount):
+    InterfaceNimcacheSlot =
+  ## Exclusive use of one slot of `configDir`: the lowest free one. When all
+  ## are busy it polls them all and takes the first to free up -- a warm
+  ## slot is worth waiting for (a cold one is a full library compile), and
+  ## waiting on one particular slot would idle behind its holder while
+  ## another frees. The lock is kernel-owned, so a killed extraction
+  ## releases its slot.
+  let count = max(1, slotCount)
+  var pause = 20
+  while true:
+    for i in 0 ..< count:
+      let dir = configDir / ("slot-" & $i)
+      var lock: ReproFileLock
+      if tryAcquireProviderFileLock(dir & ".lock", lock):
+        createDir(extendedPath(dir))
+        return InterfaceNimcacheSlot(dir: dir, index: i, lock: lock)
+    sleep(pause)
+    pause = min(pause * 2, 500)
+
+proc releaseInterfaceNimcacheSlot*(slot: var InterfaceNimcacheSlot) =
+  releaseProviderNimcacheLock(slot.lock)
 
 proc providerDynamicEnabled(): bool =
   ## Returns true when ``REPRO_PROVIDER_DYNAMIC`` selects the Tier 1
@@ -7473,8 +7658,8 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     let absoluteResourceModule =
       absolutePath(resourceModule).replace('\\', '/')
     resourceImport = "import \"" & absoluteResourceModule & "\"\n"
-  # The runner of a recipe-relative extraction (`extractInterfaceEdge`)
-  # lives OUTSIDE the recipe's tree, under the action-cache root; it imports
+  # The runner lives OUTSIDE the recipe's tree, in a slot of the shared
+  # interface nimcache (see the placement note below the source); it imports
   # the recipe by absolute path (scratch only — the edge's key and record
   # name the recipe relative to its own directory). Nim reads the
   # `config.nims` / `nim.cfg` chain of the MAIN module's directory — the
@@ -7498,91 +7683,14 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
      else:
        "writeInterfaceArtifact(paramStr(1), artifact)\n") &
     "writeNimInterfaceStub(paramStr(2), artifact)\n"
-  # CONTENT-KEYED, and therefore stable across invocations.
-  #
-  # Nim names a nimcache entry after the MAIN MODULE and puts the main
-  # module's DIRECTORY on every C compiler invocation. The directory has
-  # always been stable (``tempParent``); the FILE used to be a fresh
-  # ``createTempFile`` per invocation, so the runner's own translation unit
-  # arrived under a new name every time. Its object
-  # ``@mextract_runner_<rand>.nim.c.o`` could therefore never be reused, and
-  # was never removed: measured on a warm extraction, exactly one object
-  # rebuilt on 6 of 6 runs -- the entire residual of an otherwise perfectly
-  # warm cache, 1 of 229 -- while the key directory grew by three entries
-  # (``.c``, ``.c.d``, ``.c.o``) per run, without bound and with no reaper
-  # anywhere. Tool-Owned-Caches.md, "Lifecycle", forbids exactly that.
-  #
-  # THE RANDOMNESS WAS LOAD-BEARING, AND A LITERAL FIXED NAME WOULD BE
-  # UNSAFE. ``tempParent`` is keyed on ``(workDir, scratchDir)`` ONLY: it is
-  # COARSER than the nimcache, which is position-keyed per recipe, so every
-  # recipe extracted against one scratch tree shares this one directory.
-  # Nothing serialises recipe A against recipe B -- their
-  # ``<nimcache>.compile.lock`` paths differ by construction (see
-  # ``acquireProviderNimcacheLock``, which says so, and counts that as the
-  # measured concurrency win), and ``acquireInterfaceArtifactLock`` is keyed
-  # on the ARTIFACT path, which is not a component of the nimcache key at
-  # all. A literal ``extract_runner.nim`` would let two concurrent
-  # extractions of DIFFERENT recipes write different bytes to one path --
-  # precisely the clobber the random name was dodging.
-  #
-  # Keying the name on the runner's own SOURCE TEXT dodges it too, and by
-  # construction rather than by luck: two extractions share this path if and
-  # only if they would have written identical bytes into it, so the write is
-  # idempotent and no content can be lost. The name varies only with
-  # ``modulePath`` and ``resourceModule``, never with the recipe's BODY, so
-  # editing a recipe does not orphan its object; and ``modulePath`` is
-  # already a nimcache key component, so within one key directory this
-  # normally resolves to exactly one runner and one object.
-  #
-  # AND IT IS NOT DELETED. The old ``defer removeFile`` ran after the
-  # compile had released the nimcache lock, so under a shared name one
-  # extraction's cleanup could delete the source a sibling was about to
-  # hand to ``nim c``. Leaving the file is what makes the shared name safe,
-  # and it trades unbounded per-RUN growth for one file per distinct runner
-  # source -- bounded, and identifiable from its own name.
-  let runnerPath = tempParent /
-    ("extract_runner_" & fnvHex64([runnerSource]) & ".nim")
-  if not fileExists(extendedPath(runnerPath)):
-    # Publish by rename, so a concurrent extraction that derived the same
-    # name never observes a partially written file: the path either does not
-    # exist yet or already holds the whole source.
-    let (stageFile, stagePath) =
-      createTempFile("extract_runner_stage_", ".tmp", tempParent)
-    try:
-      stageFile.write(runnerSource)
-    finally:
-      close(stageFile)
-    try:
-      moveFile(extendedPath(stagePath), extendedPath(runnerPath))
-    except OSError:
-      # Windows refuses to replace a file another process holds open. That
-      # process published byte-identical content, so its copy is ours too.
-      try:
-        removeFile(extendedPath(stagePath))
-      except OSError:
-        discard
-      if not fileExists(extendedPath(runnerPath)):
-        raise
+  let runnerName =
+    "extract_runner_" & fnvHex64([runnerSource]) & ".nim"
+  # A placeholder until the runner's directory is chosen below; it is the
+  # module argument, so the nimcache key leaves it out either way.
+  const runnerPlaceholder = "\x00extract-runner\x00"
   let runnerBin = tempRoot / "extract_runner"
   let hostFlags = hostCCompilerFlags()
   let libFlags = reproLibPathFlags(workDir)
-  # POSITION-KEYED (Tool-Owned-Caches.md): the extractor nimcache is keyed on
-  # the PRODUCING PROJECT -- this extraction's `modulePath`, the recipe's own
-  # `repro.nim` -- so two recipes extracted concurrently never write the same
-  # slot. They previously shared one directory, and the entries they collided
-  # on are named from the MAIN MODULE's directory: every recipe's definition
-  # is a file called `repro.nim`, so every one of them claimed `@mrepro.nim.c`
-  # and the extraction runners overwrote each other's generated C.
-  # The cost of isolating is a cold standard-library compile per recipe; the
-  # measurement that motivated this change says isolated concurrent compiles
-  # still finish ~3x faster than shared+locked ones, because they proceed at
-  # the same time instead of queueing behind one flock.
-  # `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` narrows further, to the
-  # per-tempRoot nimcache that isolates each INVOCATION (not each position).
-  # Nim's `--nimcache:` directive is also subject to the MAX_PATH ceiling
-  # because Nim's own mkdir does not use the \\?\ extended-length prefix.
-  # On Windows root the nimcache under the same short temp parent we use for
-  # the runner.
   # The engine's own binary and the consumer's root are handed to the recipe's
   # macro expansion. A macro that needs to resolve a declared dependency calls
   # back through `staticExec` (see `internal resolve-package`) rather than
@@ -7598,6 +7706,8 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # reached the command line, and still had no effect.
   let effectiveConsumerRoot =
     if consumerRoot.len > 0: absolutePath(consumerRoot) else: getCurrentDir()
+  let consumerRootDefine = "--define:reproConsumerRoot=" & effectiveConsumerRoot
+  let recipePathFlag = "--path:" & moduleDir
   let interfaceDefines = @[
     "--define:reproInterfaceMode",
     # The path that re-enters this engine, NOT `getAppFilename()`: under the
@@ -7612,19 +7722,19 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     # `-d:reproConsumerRoot=workDir` handed the macro reprobuild instead of
     # the consumer, and every dependency resolved against the wrong
     # workspace.
-    "--define:reproConsumerRoot=" & effectiveConsumerRoot,
+    consumerRootDefine,
   ] & (if getEnv("REPRO_DSLDEPS_DEBUG").len > 0:
          @["--define:reproDslDepsDebug"] else: @[])
   # The `--nimcache:` argument is filled in once the command is complete: its
-  # position key folds in every compile option (defines, producer paths), so
-  # two configurations of one recipe never share generated C.
+  # key folds in every compile option (defines, producer paths), so two
+  # configurations never share generated C.
   var command = boundedNimCompileCommand()
   command.add(interfaceDefines)
   command.add(@[
-    "--path:" & moduleDir,
+    recipePathFlag,
     "--nimcache:",
     "--out:" & runnerBin,
-    runnerPath
+    runnerPlaceholder
   ])
   command.insert(hostFlags, 2)
   command.insert(externalHashFlags(workDir), 2)
@@ -7654,41 +7764,97 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # issues. Paired with runCommand's Windows timeout-and-dump-sink, the LAST
   # echoed command in the dump names the exact sub-process that wedged, turning a
   # silent multi-hour hang into an actionable error. Inserted among the flags
-  # (index 2), never after `runnerPath`, or nim treats it as a second input file.
+  # (index 2), never after the runner, or nim treats it as a second input file.
   if getEnv("REPRO_INTERFACE_LIST_CMD").len > 0:
     command.insert(@["--listCmd"], 2)
-  block:
+  # WHERE THE NIMCACHE AND THE RUNNER LIVE. By default: a slot of the
+  # configuration-keyed pool under `interfaceExtractionNimcacheRoot()` (see
+  # the block comment above `InterfaceNimcacheSlotCount` for why the key
+  # leaves the recipe out and why that is sound), held exclusively from
+  # writing the runner until the compile has finished.
+  #
+  # The runner's source sits IN the slot, not in the per-scratch
+  # `tempParent`. Nim names a non-main module's entry from its path relative
+  # to the main module's directory (with the bootstrap-selected Nim 2.2.4,
+  # relative to nothing else), so a runner directory that moved with the
+  # scratch tree -- a new action-cache root, a recipe edit -- renamed every
+  # library entry and left the whole cache cold even with the directory
+  # shared. In the slot, the names are a function of the slot alone.
+  #
+  # The runner's name is a digest of its source, which names the recipe by
+  # absolute path: two recipes never share a runner or its entry, one recipe
+  # always finds its own, and editing a recipe's body changes neither. One
+  # file per distinct runner source -- bounded, identifiable from its name.
+  #
+  # `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` isolates each INVOCATION
+  # instead: a nimcache in the private `tempRoot` and the runner beside the
+  # other extractions of this scratch tree, as before.
+  let perBinary = providerNimcacheMode() == "per-binary"
+  var slot: InterfaceNimcacheSlot
+  let runnerDir =
+    if perBinary:
+      tempParent
+    else:
+      let key = interfaceNimcacheConfigKey(workDir, hostFlags, libFlags,
+        interfaceNimcacheKeyedCompileFlags(command, runnerPlaceholder,
+          [recipePathFlag, consumerRootDefine]))
+      slot = acquireInterfaceNimcacheSlot(
+        interfaceExtractionNimcacheRoot() / key)
+      slot.dir
+  var compileExecution: ProviderCompileExecutionResult
+  try:
+    let runnerPath = runnerDir / runnerName
+    if not fileExists(extendedPath(runnerPath)):
+      # Publish by rename, so a concurrent extraction that derived the same
+      # name (possible in `tempParent`, which no lock covers) never observes
+      # a partially written file: the path either does not exist yet or
+      # already holds the whole source.
+      let (stageFile, stagePath) =
+        createTempFile("extract_runner_stage_", ".tmp", runnerDir)
+      try:
+        stageFile.write(runnerSource)
+      finally:
+        close(stageFile)
+      try:
+        moveFile(extendedPath(stagePath), extendedPath(runnerPath))
+      except OSError:
+        # Windows refuses to replace a file another process holds open. That
+        # process published byte-identical content, so its copy is ours too.
+        try:
+          removeFile(extendedPath(stagePath))
+        except OSError:
+          discard
+        if not fileExists(extendedPath(runnerPath)):
+          raise
     let nimcache =
-      if providerNimcacheMode() == "per-binary":
-        tempRoot / "nimcache"
-      else:
-        let key = positionKeyedNimcacheKey(InterfaceCacheName, modulePath,
-          workDir, hostFlags, libFlags,
-          nimcacheKeyedCompileFlags(command, runnerPath))
-        when defined(windows):
-          tempParent / "nimcache-interface" / key
-        else:
-          buildScratchRoot(workDir, scratchDir) / "nimcache-interface" / key
+      if perBinary: tempRoot / "nimcache" else: slot.dir / "nimcache"
     for i in 0 ..< command.len:
       if command[i] == "--nimcache:":
         command[i] = "--nimcache:" & nimcache
-        break
-  # `workDir` is the reprobuild library lookup/fingerprint root. Installed Nix
-  # packages deliberately point it at their immutable source closure, so it is
-  # not a valid compiler working directory: Nim writes relative linker response
-  # files (for example `extract_runner_linkerArgs.txt`) into its process CWD.
-  # Keep response files and binaries in the extraction's private directory.
-  #
-  # This holds for a recipe-relative extraction too, whose EDGE runs in the
-  # recipe directory: Nim writes `<runner>_linkerArgs.txt` into its cwd for a
-  # long link line and deletes it again, and that transient entry in the
-  # recipe's root changes the root's mtime — which an editable develop
-  # override folds into its consumers' action keys
-  # (`computeOverrideContentIdentity`). Measured: every consumer action
-  # missed on the second build. The compiler's private cwd is under the
-  # edge's scratch, so its reads stay absolute and the edge's record names
-  # them relative to the recipe.
-  let compileExecution = runInterfaceCompilerCommand(command, cwd = tempRoot)
+      elif command[i] == runnerPlaceholder:
+        command[i] = runnerPath
+    # `workDir` is the reprobuild library lookup/fingerprint root. Installed
+    # Nix packages deliberately point it at their immutable source closure, so
+    # it is not a valid compiler working directory: Nim writes relative linker
+    # response files (for example `extract_runner_linkerArgs.txt`) into its
+    # process CWD. Keep response files and binaries in the extraction's
+    # private directory.
+    #
+    # This holds for a recipe-relative extraction too, whose EDGE runs in the
+    # recipe directory: Nim writes `<runner>_linkerArgs.txt` into its cwd for
+    # a long link line and deletes it again, and that transient entry in the
+    # recipe's root changes the root's mtime — which an editable develop
+    # override folds into its consumers' action keys
+    # (`computeOverrideContentIdentity`). Measured: every consumer action
+    # missed on the second build. The compiler's private cwd is under the
+    # edge's scratch, so its reads stay absolute and the edge's record names
+    # them relative to the recipe.
+    compileExecution =
+      if perBinary: runInterfaceCompilerCommand(command, cwd = tempRoot)
+      else: runNimcacheCompilerCommandHeld(command, cwd = tempRoot)
+  finally:
+    if not perBinary:
+      releaseInterfaceNimcacheSlot(slot)
   let runnerExe = compiledExecutablePath(runnerBin)
   if not fileExists(extendedPath(runnerExe)):
     # `runCommand` already raises on non-zero exit, so reaching this branch

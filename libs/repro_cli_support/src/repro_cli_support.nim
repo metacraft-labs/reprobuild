@@ -11182,16 +11182,19 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   let actionId = "__repro_interface_extract-" &
     toHex(weakFingerprintFromText(absolutePath(edgeArtifactPath)).bytes)[0 .. 15]
   # The extraction's own scratch is NOT an input. It reads back what it just
-  # wrote there: the Nim incremental cache (``nimcache-interface``), the
-  # generated extract-runner tree under ``m7-temp`` (a fresh random directory
-  # every invocation), and the runner binary it links and then executes.
+  # wrote there: the generated extract-runner tree under ``m7-temp`` (a
+  # fresh random directory every invocation), and the runner binary it links
+  # and then executes.
   # Recording those as inputs would make the edge miss its cache on every
   # single build — the random directory does not even exist next time — and
   # would turn a correct warm build into a full recompile. Everything under
   # the scratch root is machine-local derived state; the real inputs are the
   # recipe, the reprobuild libs, the toolchain and the config files, all of
   # which live elsewhere and stay recorded.
-  var ignoredInputPrefixes: seq[string] = @[]
+  # The shared, configuration-keyed nimcache outside the action-cache root
+  # (`interfaceExtractionNimcacheRoot`) is the same kind of derived state, and
+  # other extractions rewrite it.
+  var ignoredInputPrefixes = interfaceExtractionIgnoredInputPrefixes()
   if relocatable:
     ignoredInputPrefixes.add(parentDir(edgeArtifact) / "work")
   elif scratchDir.len > 0:
