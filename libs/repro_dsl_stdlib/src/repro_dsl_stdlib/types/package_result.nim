@@ -1280,6 +1280,10 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
   # Remove the previous mirror to avoid stale artefacts. ``rm -rf`` is
   # safe here because ``dstUsr`` is a deterministic per-recipe path that
   # we own; no user data lives under ``.repro/output/install/usr``.
+  # In hashed mode the previous build left the mirror read-only (see the
+  # enforcement step below); clear it so this rebuild can lay out a new
+  # one. Empty in legacy mode.
+  script.add(emitInstallMirrorClearPrevious(dstUsrRoot))
   script.add("rm -rf \"" & escapedDstUsr & "\"; ")
   script.add("mkdir -p \"" & escapedDstUsrRoot & "\"; ")
   script.add(m9r14e2ResetBareFhsMirrorScript(dstUsrRoot))

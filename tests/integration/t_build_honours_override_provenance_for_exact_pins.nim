@@ -25,9 +25,9 @@
 ##     the first case: the override is honoured when it should be.
 ##   * `t_build_does_not_substitute_a_bulk_override_of_a_repro_nim_exact_pin` —
 ##     the same, for an exact `uses:` version in `repro.nim` that the
-##     producer's `versions:` maps to R1 (read from the checkout the
-##     `repro.lock` entry names, as the hooks read it), with an explicit entry
-##     as its control.
+##     producer's `versions:` maps to R1 (read from the checkout located by
+##     the develop override, as path-free lock readers locate it), with an
+##     explicit entry as its control.
 ##   * `t_build_substitutes_a_bulk_override_of_an_unpinned_dependency` — with
 ##     no exact pin in any recipe — no `flake.nix`, and then a `flake.nix`
 ##     naming the same repository on a branch, so the recipes are read and
@@ -154,12 +154,12 @@ proc setupFixture(label: string): Fixture =
   createDir(result.consumer)
   writeFile(result.consumer / "repro.nim", consumerRecipe)
   var ld = LockedDependencies(
-    schema: "reprobuild.solved-graph-lock.v2",
+    schema: "reprobuild.solved-graph-lock.v3",
     platform: currentPlatformId(),
     optimal: true,
     inputsDigest: inputsDigestOf("hl11-build-fixture"))
   ld.deps.add(LockedDep(
-    name: "exeprod", path: "",
+    name: "exeprod",
     coordinates: Coordinates(kind: ckVcs, url: "file://" & result.remote,
       gitRef: "main", revision: result.pinnedRev),
     integrity: gitObjectMultihash("sha1", result.pinnedRev),
@@ -179,15 +179,15 @@ proc pinInFlake(fx: Fixture) =
 
 proc pinInReproNim(fx: Fixture) =
   ## The consumer's `repro.nim` pins `exeprod ==1.0.0`, which the producer's
-  ## `versions:` maps to R1, and its `repro.lock` entry names the producer's
-  ## checkout (where that `versions:` table is read, as the hooks read it).
+  ## `versions:` maps to R1. The path-free lock reader locates that recipe
+  ## through the develop override written before each build; the committed
+  ## lock records the producer's identity and never its checkout location.
   writeFile(fx.consumer / "repro.nim",
     consumerRecipe.replace("    \"exeprod\"\n", "    \"exeprod ==1.0.0\"\n"))
   doAssert "exeprod ==1.0.0" in readFile(fx.consumer / "repro.nim")
   let lockText = readFile(fx.consumer / "repro.lock")
-  doAssert "path = \"\"" in lockText
-  writeFile(fx.consumer / "repro.lock", lockText.replace("path = \"\"",
-    "path = \"" & relativePath(fx.devCheckout, fx.consumer) & "\""))
+  doAssert "reprobuild.solved-graph-lock.v3" in lockText
+  doAssert "path =" notin lockText
 
 proc reproNimPinLine(fx: Fixture): string =
   ## `<file>:<line>` of the `repro.nim` pin, as the notice names it.
@@ -323,12 +323,17 @@ suite "HL-11 §16.4: repro build honours override provenance for exact pins":
       let fx = setupFixture("reponim")
       defer: removeDir(fx.scratch)
       pinInReproNim(fx)
+      let lockText = readFile(fx.consumer / "repro.lock")
       check reproNimPinLine(fx) == fx.consumer / "repro.nim:10"
       writeOverride(fx, "repro develop --all")
       let bulk = build(fx)
       checkpoint("bulk: exit " & $bulk.code & "\n" & bulk.output)
       check bulk.code == 0
       check bulk.consumed == PinnedStamp
+      check fileExists(fx.consumer / ".repro" / "cross-repo-producers" /
+        "exeprod" / fx.pinnedRev / "repro.nim")
+      check not fileExists(fx.devCheckout / "build" / "bin" / "exeprod")
+      check readFile(fx.consumer / "repro.lock") == lockText
       check bulk.output.count(NoticeHead) == 1
       check notice(fx, "repro develop --all", reproNimPinLine(fx)) in
         bulk.output.splitLines()
@@ -338,4 +343,6 @@ suite "HL-11 §16.4: repro build honours override provenance for exact pins":
       checkpoint("explicit: exit " & $explicit.code & "\n" & explicit.output)
       check explicit.code == 0
       check explicit.consumed == CheckoutStamp
+      check fileExists(fx.devCheckout / "build" / "bin" / "exeprod")
+      check readFile(fx.consumer / "repro.lock") == lockText
       check NoticeHead notin explicit.output

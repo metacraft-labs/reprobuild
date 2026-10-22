@@ -418,6 +418,12 @@ suite "the engine keeps the initiating failure of a batched inline launch":
     config.progressCallback = proc(event: BuildProgressEvent) =
       if event.kind == bpkActionStarted and not stopped:
         stopped = true
+        # Let the child record its own pid first, so the identity the
+        # teardown must disclose is checked against one obtained independently
+        # of the engine.
+        for _ in 0 ..< 200:
+          if fileExists(markers / "only.started"): break
+          sleep(25)
         daemon.kill()
         discard daemon.waitForExit(5000)
         raise newException(ValueError, "progress observer refused " &
@@ -438,6 +444,26 @@ suite "the engine keeps the initiating failure of a batched inline launch":
     check "progress observer refused only" in raisedMessage
     # ...and the teardown failures are disclosed beside it, not dropped.
     check "runquota" in raisedMessage.toLowerAscii()
+    # The step that could not finish the action's lease names what it left
+    # unresolved -- the lease and the child process -- so both can be found
+    # and reclaimed (RunQuota-Protocol-And-Client-Libraries.md, "Ownership
+    # Across a Batched Client Launch"). The pid is the one the child wrote.
+    check fileExists(markers / "only.started")
+    let childPid =
+      if fileExists(markers / "only.started"):
+        readFile(markers / "only.started").strip()
+      else: "<unrecorded>"
+    const prefix = "stopping action only (lease "
+    let at = raisedMessage.find(prefix)
+    check at >= 0
+    if at >= 0:
+      var digits = 0
+      while at + prefix.len + digits < raisedMessage.len and
+          raisedMessage[at + prefix.len + digits] in Digits:
+        inc digits
+      check digits > 0
+      check raisedMessage.continuesWith(", child pid " & childPid & "): ",
+        at + prefix.len + digits)
     # The child was still cancelled and reaped: losing the daemon is not
     # evidence that it completed.
     waitPastLinger(finishedAt)

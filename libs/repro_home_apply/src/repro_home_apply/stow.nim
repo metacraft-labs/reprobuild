@@ -73,6 +73,7 @@ from repro_core/paths import extendedPath
 import blake3
 import repro_home_generations
 
+import repro_home_resources/test_home_fence
 import ./errors
 import ./plan
 import repro_home_intent
@@ -381,6 +382,7 @@ proc releaseRecordedStowTarget*(target, desiredSource: string;
   ## links the new source there; returns whether it did.
   if not isRecordedStowTarget(target, desiredSource, rec):
     return false
+  enforceTestHomeFence(target, "home.stow release")
   try:
     removeFile(extendedPath(target))
     true
@@ -570,6 +572,7 @@ proc materializeStowEntry*(profileDir, homeDir: string;
   ## `EStowConflict` is raised under `srpFailClosed`, leaving the
   ## target byte-identical; under `srpReconcileDrift` the prior
   ## content is recorded (`preWriteDigest`) and the target replaced.
+  enforceTestHomeFence(entry.targetAbsolutePath, "home.stow link")
   result.sourceAbsolutePath = entry.sourceAbsolutePath
   result.homeRelativePath = entry.homeRelativePath
   result.targetAbsolutePath = entry.targetAbsolutePath

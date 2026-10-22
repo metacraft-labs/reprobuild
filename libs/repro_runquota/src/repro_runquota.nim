@@ -1378,6 +1378,24 @@ proc startDirect*(command: ReproCommandSpec): ReproDirectRunningProcess =
 proc processId*(running: ReproDirectRunningProcess): int =
   int(running.child.info.processId)
 
+proc leaseId*(running: ReproRunQuotaRunningProcess): uint64 =
+  ## The daemon-assigned id of the lease this process runs under. Read-only:
+  ## it exists so a caller whose cleanup could not establish completion or
+  ## release can name the lease it left unresolved
+  ## (RunQuota-Protocol-And-Client-Libraries.md, "Ownership Across a Batched
+  ## Client Launch").
+  running.lease.id.value
+
+proc processId*(running: ReproRunQuotaRunningProcess): int =
+  ## The OS process id of the launched child, for the same disclosure as
+  ## ``leaseId``. 0 when no child was launched.
+  int(running.child.info.processId)
+
+proc leaseId*(queued: ReproRunQuotaQueuedProcess): uint64 =
+  ## The daemon-assigned id of the queued lease, so a failed cancellation can
+  ## name the lease it may have left queued.
+  queued.lease.id.value
+
 proc pollCompletion*(running: var ReproDirectRunningProcess): bool =
   if running.completed:
     return true

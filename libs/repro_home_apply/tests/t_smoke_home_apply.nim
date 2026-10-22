@@ -232,3 +232,80 @@ suite "Home-apply smoke":
     check sorted[0].address == "alpha"
     check sorted[1].address == "bravo"
     check sorted[2].address == "charlie"
+
+# ---------------------------------------------------------------------------
+# Test home fence over the apply materialisers.
+#
+# `repro_home_resources/test_home_fence` refuses home writes inside a fenced
+# home (see that module for the rule). The drivers in `repro_home_resources`
+# are covered by `t_smoke_home_resources`; these cases pin that the apply
+# pipeline's own writers -- generated files, managed blocks, stow links and
+# launchers -- refuse too and leave the fenced home unchanged. Real files
+# under the scratch root; nothing is mocked.
+# ---------------------------------------------------------------------------
+
+proc withFence(protectedRoot: string; body: proc ()) =
+  let prior = getEnv(TestHomeFenceEnvVar)
+  let priorAllow = getEnv(TestHomeFenceAllowEnvVar)
+  putEnv(TestHomeFenceEnvVar, protectedRoot)
+  delEnv(TestHomeFenceAllowEnvVar)
+  try:
+    body()
+  finally:
+    if prior.len > 0: putEnv(TestHomeFenceEnvVar, prior)
+    else: delEnv(TestHomeFenceEnvVar)
+    if priorAllow.len > 0: putEnv(TestHomeFenceAllowEnvVar, priorAllow)
+    else: delEnv(TestHomeFenceAllowEnvVar)
+
+suite "Home-apply smoke: test home fence":
+
+  test "apply materialisers refuse writes into a fenced home and change nothing":
+    let root = SmokeDir / "fence"
+    resetDir(root)
+    let home = root / "home"
+    let profileDir = root / "profile"
+    createDir(extendedPath(home))
+    createDir(extendedPath(profileDir / "stow" / "pkg"))
+    writeFile(extendedPath(profileDir / "stow" / "pkg" / ".gitconfig"), "[user]\n")
+    const Initial = "# the user's own rc\n"
+    writeFile(extendedPath(home / ".bashrc"), Initial)
+    let launcherBin = home / ".local" / "bin"
+    # `removeLauncher` deletes the platform's launcher artifact: a `.cmd`
+    # shim on Windows, a script named after the command elsewhere.
+    const LauncherFile = when defined(windows): "tool.cmd" else: "tool"
+    createDir(extendedPath(launcherBin))
+    writeFile(extendedPath(launcherBin / LauncherFile), "#!/bin/sh\n")
+    withFence(home, proc () =
+      expect TestHomeFenceError:
+        discard materializePackageOutput(PlannedGeneratedFile(
+          absoluteOutputPath: home / ".config" / "tool.toml",
+          relativeHomePath: ".config/tool.toml",
+          sourceKind: pgfsPackageOutput, contentBytes: @[byte('x')]))
+      check not dirExists(extendedPath(home / ".config"))
+      expect TestHomeFenceError:
+        deleteRemovedFile(home / ".bashrc")
+      expect TestHomeFenceError:
+        discard applyManagedBlock(PlannedManagedBlock(
+          hostFilePath: home / ".bashrc", blockId: "leak",
+          blockBytes: "export PATH=/leak\n"))
+      check readFile(extendedPath(home / ".bashrc")) == Initial
+      check not fileExists(extendedPath(home / ".bashrc.repro.tmp"))
+      let entries = discoverStowEntries(profileDir, home).entries
+      check entries.len == 1
+      expect TestHomeFenceError:
+        discard materializeStowEntry(profileDir, home, entries[0])
+      check not fileExists(extendedPath(home / ".gitconfig"))
+      check not symlinkExists(extendedPath(home / ".gitconfig"))
+      expect TestHomeFenceError:
+        removeLauncher(launcherBin, "tool")
+      check fileExists(extendedPath(launcherBin / LauncherFile)))
+    # The same calls go through once the fence is off, so the refusals
+    # above are the fence's and not some other failure.
+    let rec = materializePackageOutput(PlannedGeneratedFile(
+      absoluteOutputPath: home / ".config" / "tool.toml",
+      relativeHomePath: ".config/tool.toml",
+      sourceKind: pgfsPackageOutput, contentBytes: @[byte('x')]))
+    check rec.absoluteOutputPath == home / ".config" / "tool.toml"
+    check readFile(extendedPath(home / ".config" / "tool.toml")) == "x"
+    removeLauncher(launcherBin, "tool")
+    check not fileExists(extendedPath(launcherBin / LauncherFile))

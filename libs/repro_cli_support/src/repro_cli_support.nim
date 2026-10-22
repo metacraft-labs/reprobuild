@@ -136,7 +136,16 @@ import repro_hcr_linkgraph
 import repro_elevation
 import repro_cli_support/watch
 import repro_cli_support/dev_session
+from repro_cli_support/session_process_owner import sessionProcessAlive
 import repro_cli_support/push_hook_protocol
+# The `runquotad` an invocation owns must not outlive it, however it ends:
+# terminating signals are forwarded to it, and it holds no descriptor of ours
+# above 2. See `spawnOwnedRunQuotaDaemon`.
+import repro_cli_support/owned_daemon_signals
+when not defined(windows):
+  from repro_core/descriptor_inheritance import
+    markInheritableDescriptorsCloseOnExec, restoreInheritableDescriptors,
+    setCloseOnExec
 import repro_cli_support/cmake_direct
 import repro_cli_support/daemon_working_directory
 # TC-8b: the certificate verifier matches by CONTENT (Verification §4.1.1), so
@@ -3047,6 +3056,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # preserving pre-M9.R.75 behaviour byte-for-byte.
     result.declaredOutputs = payload.declaredOutputs
     result.scratchDirs = payload.scratchDirs
+    result.removeBeforeRun = payload.removeBeforeRun
     result.readOnlyRoots = payload.readOnlyRoots
   let actionCachePolicy =
     case payload.actionCachePolicy
@@ -4557,7 +4567,11 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 12'u16
+  LoweredGraphCacheVersion = 13'u16
+    # v13: ``BuildAction.removeBeforeRun``, a string list after
+    # ``scratchDirs``. A v12 cache would decode every action with nothing to
+    # remove, and a warm build of a ``create_dmg`` edge would fail over the
+    # ``.dmg`` its previous run wrote.
     # v12: ``BuildAction.scratchDirs``, a string list after
     # ``requiresElevation``. A v11 cache would decode every action with no
     # scratch directories, and the engine would then neither empty them nor
@@ -5580,6 +5594,7 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeStringSeq(action.readOnlyRoots)
   outp.add(if action.requiresElevation: 1'u8 else: 0'u8)
   outp.writeStringSeq(action.scratchDirs)
+  outp.writeStringSeq(action.removeBeforeRun)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result = BuildAction(
@@ -5660,6 +5675,7 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
       "invalid lowered action elevation sentinel")
   result.requiresElevation = elevationByte == 1'u8
   result.scratchDirs = readStringSeq(bytes, pos)
+  result.removeBeforeRun = readStringSeq(bytes, pos)
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)
@@ -6062,6 +6078,28 @@ const BuildReportSchemaId* = "reprobuild.build.report.v1"
   ## apart from the failure report (and from a stale pre-schema file) by
   ## value rather than by file name.
 
+var interfaceExtractReportTrace {.threadvar.}: seq[SchedulerTraceEvent]
+var interfaceExtractReportItems {.threadvar.}: seq[ActionResult]
+  ## The interface-extraction edge results of the build being reported.
+  ## The edge runs in its own engine pass (`extractInterfaceEdge`), so its
+  ## outcome is in none of the results the report is otherwise built from;
+  ## without this the report could not say why the extraction re-ran.
+  ## Cleared when `executeBuildTarget` starts, appended by the edge.
+
+proc interfaceExtractActionJson(item: ActionResult): JsonNode =
+  ## The outcome of one extraction edge: whether it ran and why its lookup
+  ## missed or its record was not published. Not `actionResultJson`: the
+  ## edge runs with cache-hit evidence elided whatever the report asks for.
+  %*{
+    "id": item.id,
+    "status": $item.status,
+    "launched": item.launched,
+    "cacheDecision": $item.cacheDecision,
+    "cacheMissReason": item.cacheMissReason,
+    "cachePublishSkipReason": item.cachePublishSkipReason,
+    "reason": item.reason
+  }
+
 type
   BuildReportProviderKind* = enum
     ## How the graph a full build report describes was obtained. The report's
@@ -6146,6 +6184,298 @@ proc loweredGraphCacheReportContext*(cachePath: string):
   BuildReportProviderContext(kind: brpkLoweredGraphCache,
     route: "lowered-graph-cache", loweredGraphCachePath: cachePath)
 
+type
+  BuildReportSink = object
+    ## Where the members of a build report go: into a ``JsonNode`` tree
+    ## (``buildReportJson``, for in-process readers and tests) or straight
+    ## into a file (``writeBuildReport`` / ``writeBuildFailureReport``).
+    ##
+    ## WHY THE FILE ROUTE NEVER BUILDS THE TREE. A ``.#test-builds`` report
+    ## is gigabytes of ``actions[].evidence`` path strings — 7.7 GB over
+    ## 2,180 actions, ~85M paths, on the run in reprobuild-pm
+    ## ``issues/2026-10-18-full-suite-run-dies-at-the-build-action-payload-cache-policy-case.md``.
+    ## Holding that document as a ``JsonNode`` tree and then as one ``$root``
+    ## string cost about 4.5x its size in RSS, AFTER every build had finished:
+    ## the engine grew to 16 GB plus ~29 GB of swap writing a post-mortem.
+    ## Streamed, the writer holds one action's subtree at a time, so its peak
+    ## no longer scales with the build.
+    ##
+    ## WHY ONE MEMBER LIST FOR BOTH. ``emitBuildReport`` is the only place
+    ## that knows the members and their order, and both destinations are fed
+    ## by it, so the streamed bytes cannot drift from ``$buildReportJson(...)``
+    ## — the exact compact text readers of the file rely on (the suite's
+    ## ``scripts/lib/build_report_attribution.sh`` greps the single line and
+    ## reads ``targetResolution`` from its tail).
+    case streamed: bool
+    of false:
+      root: JsonNode
+        ## The document being assembled.
+      currentArray: JsonNode
+        ## The array member currently receiving ``element``s. Already
+        ## inserted into ``root``, so the member keeps its position.
+    of true:
+      file: File
+      fileOpen: bool
+      partialPath: string
+        ## Written here and renamed onto ``finalPath`` only once complete, so
+        ## a reader never sees a truncated document under the final name and
+        ## a failed write leaves any earlier report as it was.
+      finalPath: string
+      committed: bool
+        ## Set once the partial has been renamed onto ``finalPath``; until
+        ## then ``abandonStreamedReport`` deletes it.
+      firstMember: bool
+      firstElement: bool
+      scratch: string
+        ## Reused serialisation buffer: it grows to the largest single member
+        ## or element, never to the document.
+
+proc treeReportSink(): BuildReportSink =
+  BuildReportSink(streamed: false, root: newJObject())
+
+proc reclaimAbandonedReportPartials(path: string) =
+  ## Delete the ``<name>.partial-<pid>`` files of earlier writers of
+  ## ``path`` that died before renaming them into place.
+  ##
+  ## A writer killed mid-write — the out-of-memory kill, a signal, a suite
+  ## timeout — never reaches ``abandonStreamedReport``, and for a
+  ## ``.#test-builds`` report the file it leaves is gigabytes. Nothing else
+  ## ever looks at these names, so without this they would accumulate, one
+  ## per killed run. The next writer of the same report is the one place
+  ## that both knows the name and runs routinely.
+  ##
+  ## Only what is provably abandoned is removed: the exact name of THIS
+  ## report followed by a decimal pid that is no longer alive. A live pid
+  ## is a concurrent writer and is left to finish; a name that does not
+  ## parse, or belongs to another report, is not ours to judge. A pid
+  ## reused by an unrelated live process only makes us keep a stale
+  ## partial one more time, never delete a live one.
+  let prefix = extractFilename(path) & ".partial-"
+  let ownPid = getCurrentProcessId()
+  try:
+    for kind, entry in walkDir(extendedPath(parentDir(path))):
+      if kind != pcFile:
+        continue
+      let name = extractFilename(entry)
+      if not name.startsWith(prefix) or name.len == prefix.len:
+        continue
+      let pidText = name[prefix.len .. ^1]
+      if not pidText.allCharsInSet(Digits):
+        continue
+      var pid: int
+      try:
+        pid = parseInt(pidText)
+      except ValueError:
+        continue
+      if pid == ownPid or sessionProcessAlive(pid):
+        continue
+      try:
+        removeFile(entry)
+      except OSError:
+        # Best effort: a partial that cannot be removed now (permissions,
+        # a racing writer of the same name) is retried by the next write
+        # and must not fail this one.
+        discard
+  except OSError:
+    discard
+
+proc stdioFlush(f: File): cint {.importc: "fflush", header: "<stdio.h>".}
+  ## ``fflush(3)`` with its result. ``flushFile`` and ``close`` both discard
+  ## it, and the last buffer of the document (up to the 1 MiB ``bufSize``) is
+  ## only written by that flush: a full disk there would otherwise go
+  ## unnoticed and a truncated report would be renamed into place.
+
+proc abandonStreamedReport(sink: var BuildReportSink) =
+  ## Cleanup for a write that raised before ``commitStreamedReport``
+  ## renamed it into place: close and delete the partial file. Harmless
+  ## after a commit.
+  if sink.fileOpen:
+    sink.file.close()
+    sink.fileOpen = false
+  if not sink.committed:
+    try:
+      removeFile(extendedPath(sink.partialPath))
+    except OSError:
+      discard
+
+proc openStreamedReportSink(path: string): BuildReportSink =
+  ## Create ``path``'s directory and open a partial file beside it. The
+  ## partial name is per process so two concurrent writers of one report
+  ## path cannot interleave into a single file.
+  createDir(extendedPath(parentDir(path)))
+  reclaimAbandonedReportPartials(path)
+  result = BuildReportSink(streamed: true, finalPath: path,
+    partialPath: path & ".partial-" & $getCurrentProcessId(),
+    firstMember: true)
+  result.file = open(extendedPath(result.partialPath), fmWrite,
+    bufSize = 1 shl 20)
+  result.fileOpen = true
+  try:
+    result.file.write('{')
+  except CatchableError:
+    abandonStreamedReport(result)
+    raise
+
+proc commitStreamedReport(sink: var BuildReportSink) =
+  ## Close the document, flush it with the result checked, and move it onto
+  ## its final name. Any failure raises with the partial still unrenamed, so
+  ## the caller's ``abandonStreamedReport`` deletes it.
+  sink.file.write('}')
+  if stdioFlush(sink.file) != 0:
+    raiseOSError(osLastError(), "flush build report " & sink.partialPath)
+  sink.file.close()
+  sink.fileOpen = false
+  moveFile(extendedPath(sink.partialPath), extendedPath(sink.finalPath))
+  sink.committed = true
+
+proc writeStreamedKey(sink: var BuildReportSink; key: string) =
+  if not sink.firstMember:
+    sink.file.write(',')
+  sink.firstMember = false
+  sink.scratch.setLen(0)
+  escapeJson(key, sink.scratch)
+  sink.scratch.add(':')
+  sink.file.write(sink.scratch)
+
+proc writeStreamedValue(sink: var BuildReportSink; value: JsonNode) =
+  # ``toUgly`` is exactly what ``$`` on a ``JsonNode`` produces, which is
+  # what keeps the streamed file byte-identical to ``$buildReportJson``.
+  sink.scratch.setLen(0)
+  toUgly(sink.scratch, value)
+  sink.file.write(sink.scratch)
+
+proc member(sink: var BuildReportSink; key: string; value: JsonNode) =
+  ## One top-level member whose value is small and fixed-shape.
+  if sink.streamed:
+    sink.writeStreamedKey(key)
+    sink.writeStreamedValue(value)
+  else:
+    sink.root[key] = value
+
+proc beginArrayMember(sink: var BuildReportSink; key: string) =
+  ## Open a top-level array member whose length scales with the build; its
+  ## elements are handed over one at a time with ``element``.
+  if sink.streamed:
+    sink.writeStreamedKey(key)
+    sink.file.write('[')
+    sink.firstElement = true
+  else:
+    sink.currentArray = newJArray()
+    sink.root[key] = sink.currentArray
+
+proc element(sink: var BuildReportSink; value: JsonNode) =
+  if sink.streamed:
+    if not sink.firstElement:
+      sink.file.write(',')
+    sink.firstElement = false
+    sink.writeStreamedValue(value)
+  else:
+    sink.currentArray.add(value)
+
+proc endArrayMember(sink: var BuildReportSink) =
+  if sink.streamed:
+    sink.file.write(']')
+  else:
+    sink.currentArray = nil
+
+template arrayMember(sink: var BuildReportSink; key: string;
+                     body: untyped) =
+  sink.beginArrayMember(key)
+  body
+  sink.endArrayMember()
+
+proc emitBuildReport(sink: var BuildReportSink;
+                     context: BuildReportProviderContext;
+                     cmakeRegenerationResult, buildResult: BuildRunResult;
+                     workspaceVcs: Option[seq[
+                         workspaceVcsEvidence.WorkspaceVcsEvidence]];
+                     targetResolutions: Option[seq[TargetResolutionRecord]]) =
+  ## The full build report's members, in order, into ``sink``. See
+  ## ``buildReportJson`` for what each member means and
+  ## ``BuildReportSink`` for why this is the only list of them.
+  sink.member("schemaId", %BuildReportSchemaId)
+  sink.member("providerRoute", %context.route)
+  case context.kind
+  of brpkCompiled:
+    # The compiled-provider members, unchanged in name and meaning from the
+    # report before routes were distinguished.
+    sink.member("providerBinary", %context.compiled.outputBinaryPath)
+    sink.member("providerArtifact", %context.artifactId)
+    sink.member("providerFingerprint",
+      %digestHex(context.compiled.providerFingerprint))
+    sink.member("providerCompileOutput",
+      %context.compiled.executionResult.output)
+    sink.arrayMember("providerCompileActions"):
+      for item in context.providerCompileResult.results:
+        sink.element(actionResultJson(item))
+    sink.member("providerSnapshot", %context.snapshotPath)
+    sink.member("providerInvocations", %context.invocations)
+  of brpkPrebuilt:
+    # A prebuilt provider reports "its actual binary/content identity,
+    # snapshot and invocations rather than an invented compile
+    # fingerprint/output" (CLI/build.md). So the compile members are ABSENT,
+    # not empty: an empty ``providerFingerprint`` would read as "a compile
+    # whose fingerprint was the empty digest". The digest is the same
+    # ``fileContentDigest`` the Tier 2b artifact id is built from (see
+    # ``standardProviderArtifactIdForBinary``), taken here from the bytes on
+    # disk, so on that route it equals the artifact id's suffix.
+    sink.member("providerBinary", %context.binaryPath)
+    sink.member("providerArtifact", %context.artifactId)
+    sink.member("providerBinaryContentDigest",
+      %fileContentDigest(context.binaryPath))
+    sink.member("providerSnapshot", %context.snapshotPath)
+    sink.member("providerInvocations", %context.invocations)
+  of brpkLoweredGraphCache:
+    # No provider ran. The route and the cache file are what is known; the
+    # validated content key that admitted the entry is not handed to the
+    # writer, so it is stated as unavailable rather than calling the path a
+    # key (CLI/build.md: "state ``keyAvailable: false``").
+    sink.member("loweredGraphCache", %*{
+      "path": context.loweredGraphCachePath,
+      "keyAvailable": false
+    })
+    sink.member("providerInvocations", %0)
+  # The interface-extraction edges this invocation ran, and their trace (see
+  # ``interfaceExtractActionJson``).
+  sink.arrayMember("interfaceExtractActions"):
+    for item in interfaceExtractReportItems:
+      sink.element(interfaceExtractActionJson(item))
+  sink.arrayMember("interfaceExtractTrace"):
+    for event in interfaceExtractReportTrace:
+      sink.element(%*{"actionId": event.actionId,
+        "event": event.event, "detail": event.detail})
+  # The three members that scale with the build — one element per action or
+  # trace event — are handed over an element at a time, so the streamed
+  # writer holds a single action's evidence at once.
+  sink.arrayMember("cmakeRegenerationActions"):
+    for item in cmakeRegenerationResult.results:
+      sink.element(actionResultJson(item))
+  sink.arrayMember("actions"):
+    for item in buildResult.results:
+      sink.element(actionResultJson(item))
+  sink.arrayMember("trace"):
+    for event in buildResult.trace:
+      sink.element(%*{
+        "seq": event.seq,
+        "actionId": event.actionId,
+        "event": event.event,
+        "detail": event.detail
+      })
+  let vcsRecords =
+    if workspaceVcs.isSome: workspaceVcs.get()
+    else: newSeq[workspaceVcsEvidence.WorkspaceVcsEvidence]()
+  sink.member("workspaceVcs", workspaceVcsEvidence.toJson(vcsRecords))
+  sink.member("workspaceVcsObserved", %workspaceVcs.isSome)
+  sink.arrayMember("targetResolution"):
+    if targetResolutions.isSome:
+      for record in targetResolutions.get():
+        sink.element(targetResolutionJson(record))
+  sink.member("targetResolutionObserved", %targetResolutions.isSome)
+  # RA-13: machine-readable resource-authority status (see
+  # ``runQuotaReportJson``).
+  sink.member("runQuota", runQuotaReportJson(buildResult.runQuotaBypassed))
+  sink.member("stats", statsJson(buildResult.stats))
+
 proc buildReportJson*(context: BuildReportProviderContext;
                       cmakeRegenerationResult,
                       buildResult: BuildRunResult;
@@ -6158,6 +6488,8 @@ proc buildReportJson*(context: BuildReportProviderContext;
   ## the full report: the compiled-provider route and the lowered-graph
   ## routes used to differ in whether they wrote anything at all, and a
   ## second serializer is how they would start differing in what they write.
+  ## ``writeBuildReport`` streams the same members (``emitBuildReport``) to
+  ## disk instead of building this tree; this form is for in-process readers.
   ##
   ## M4: ``workspaceVcs`` carries the unified Workspace-VCS evidence
   ## seq accumulated by ``repro workspace status`` / ``repro check``
@@ -6178,96 +6510,31 @@ proc buildReportJson*(context: BuildReportProviderContext;
   ## beside the (then empty) member; ``some(@[])`` is a real observation
   ## that found nothing. The members themselves keep their array shape on
   ## every route, which is the contract existing readers rely on.
-  var cmakeRegenerationActions = newJArray()
-  for item in cmakeRegenerationResult.results:
-    cmakeRegenerationActions.add(actionResultJson(item))
-  var actions = newJArray()
-  for item in buildResult.results:
-    actions.add(actionResultJson(item))
-  var trace = newJArray()
-  for event in buildResult.trace:
-    trace.add(%*{
-      "seq": event.seq,
-      "actionId": event.actionId,
-      "event": event.event,
-      "detail": event.detail
-    })
-  var targetResolutionArr = newJArray()
-  if targetResolutions.isSome:
-    for record in targetResolutions.get():
-      targetResolutionArr.add(targetResolutionJson(record))
-  let vcsRecords =
-    if workspaceVcs.isSome: workspaceVcs.get()
-    else: newSeq[workspaceVcsEvidence.WorkspaceVcsEvidence]()
-  result = %*{
-    "schemaId": BuildReportSchemaId,
-    "providerRoute": context.route
-  }
-  case context.kind
-  of brpkCompiled:
-    # The compiled-provider members, unchanged in name and meaning from the
-    # report before routes were distinguished.
-    var providerCompileActions = newJArray()
-    for item in context.providerCompileResult.results:
-      providerCompileActions.add(actionResultJson(item))
-    result["providerBinary"] = %context.compiled.outputBinaryPath
-    result["providerArtifact"] = %context.artifactId
-    result["providerFingerprint"] =
-      %digestHex(context.compiled.providerFingerprint)
-    result["providerCompileOutput"] =
-      %context.compiled.executionResult.output
-    result["providerCompileActions"] = providerCompileActions
-    result["providerSnapshot"] = %context.snapshotPath
-    result["providerInvocations"] = %context.invocations
-  of brpkPrebuilt:
-    # A prebuilt provider reports "its actual binary/content identity,
-    # snapshot and invocations rather than an invented compile
-    # fingerprint/output" (CLI/build.md). So the compile members are ABSENT,
-    # not empty: an empty ``providerFingerprint`` would read as "a compile
-    # whose fingerprint was the empty digest". The digest is the same
-    # ``fileContentDigest`` the Tier 2b artifact id is built from (see
-    # ``standardProviderArtifactIdForBinary``), taken here from the bytes on
-    # disk, so on that route it equals the artifact id's suffix.
-    result["providerBinary"] = %context.binaryPath
-    result["providerArtifact"] = %context.artifactId
-    result["providerBinaryContentDigest"] =
-      %fileContentDigest(context.binaryPath)
-    result["providerSnapshot"] = %context.snapshotPath
-    result["providerInvocations"] = %context.invocations
-  of brpkLoweredGraphCache:
-    # No provider ran. The route and the cache file are what is known; the
-    # validated content key that admitted the entry is not handed to the
-    # writer, so it is stated as unavailable rather than calling the path a
-    # key (CLI/build.md: "state ``keyAvailable: false``").
-    result["loweredGraphCache"] = %*{
-      "path": context.loweredGraphCachePath,
-      "keyAvailable": false
-    }
-    result["providerInvocations"] = %0
-  result["cmakeRegenerationActions"] = cmakeRegenerationActions
-  result["actions"] = actions
-  result["trace"] = trace
-  result["workspaceVcs"] = workspaceVcsEvidence.toJson(vcsRecords)
-  result["workspaceVcsObserved"] = %workspaceVcs.isSome
-  result["targetResolution"] = targetResolutionArr
-  result["targetResolutionObserved"] = %targetResolutions.isSome
-  # RA-13: machine-readable resource-authority status (see
-  # ``runQuotaReportJson``).
-  result["runQuota"] = runQuotaReportJson(buildResult.runQuotaBypassed)
-  result["stats"] = statsJson(buildResult.stats)
+  var sink = treeReportSink()
+  emitBuildReport(sink, context, cmakeRegenerationResult, buildResult,
+    workspaceVcs, targetResolutions)
+  sink.root
 
-proc writeBuildReport(path: string; context: BuildReportProviderContext;
+proc writeBuildReport*(path: string; context: BuildReportProviderContext;
                        cmakeRegenerationResult,
                        buildResult: BuildRunResult;
                        workspaceVcs = none(seq[
                            workspaceVcsEvidence.WorkspaceVcsEvidence]);
                        targetResolutions =
                            none(seq[TargetResolutionRecord])) =
-  ## Persist ``buildReportJson`` at ``path``, creating its directory.
-  let root = buildReportJson(context, cmakeRegenerationResult, buildResult,
-    workspaceVcs, targetResolutions)
-  createDir(extendedPath(parentDir(path)))
-  writeFile(extendedPath(path), $root)
+  ## Persist the report ``buildReportJson`` describes at ``path``, creating
+  ## its directory — byte-for-byte ``$buildReportJson(...)``, but streamed,
+  ## so writing it costs one action's subtree of memory rather than the
+  ## document twice over (see ``BuildReportSink``). Errors propagate as
+  ## before; a write that fails leaves no partial file and does not touch an
+  ## earlier report at ``path``.
+  var sink = openStreamedReportSink(path)
+  try:
+    emitBuildReport(sink, context, cmakeRegenerationResult, buildResult,
+      workspaceVcs, targetResolutions)
+    commitStreamedReport(sink)
+  finally:
+    abandonStreamedReport(sink)
 
 proc resolveSnapshotTargetSelectors*(snapshot: ProviderGraphSnapshot;
                                      userSelectors: openArray[string]):
@@ -6329,11 +6596,13 @@ proc writeBuildFailureReport*(path: string; buildResult: BuildRunResult;
   ## waiting behind a failure. Successful actions are deliberately NOT
   ## enumerated — a 4000-action build with one broken compile must produce a
   ## document a person can read top to bottom.
+  ##
+  ## Written unasked on every failed build, so it is streamed through the
+  ## same ``BuildReportSink`` as the full report: a build in which most
+  ## actions fail still writes one action's subtree at a time.
   var byId = initTable[string, int]()
   for i, action in actions:
     byId[action.id] = i
-  var failed = newJArray()
-  var blocked = newJArray()
   var counts = (total: 0, succeeded: 0, failed: 0, blocked: 0, cacheHit: 0)
   for item in buildResult.results:
     inc counts.total
@@ -6349,57 +6618,58 @@ proc writeBuildFailureReport*(path: string; buildResult: BuildRunResult;
       inc counts.succeeded
     else:
       discard
-  for item in buildResult.results:
-    if item.status == asBlocked:
-      blocked.add(%*{
-        "id": item.id,
-        "blockedBy": item.blockedBy,
-        "reason": item.reason
-      })
-      continue
-    if item.status != asFailed:
-      continue
-    var node = %*{
-      "id": item.id,
-      "status": $item.status,
-      "exitCode": item.exitCode,
-      "reason": item.reason,
-      "blockedBy": item.blockedBy,
-      "cacheDecision": $item.cacheDecision,
-      "dependencyPolicyKind": $item.dependencyPolicyKind,
-      "runQuotaBackend": item.runQuotaBackend,
-      "leaseId": item.leaseId,
-      "stdout": item.stdout,
-      "stderr": item.stderr
-    }
-    if byId.hasKey(item.id):
-      let action = actions[byId[item.id]]
-      node["argv"] = %action.argv
-      node["cwd"] = %action.cwd
-      node["inputs"] = %action.inputs
-      node["outputs"] = %action.outputs
-      node["cacheable"] = %action.cacheable
-      node["weakFingerprint"] = %digestHex(action.weakFingerprint)
-    failed.add(node)
-  let root = %*{
-    "schemaId": BuildFailureReportSchemaId,
-    "target": target,
-    "projectRoot": projectRoot,
-    "outDir": outDir,
-    "exitCode": exitCode,
-    "counts": {
+  var sink = openStreamedReportSink(path)
+  try:
+    sink.member("schemaId", %BuildFailureReportSchemaId)
+    sink.member("target", %target)
+    sink.member("projectRoot", %projectRoot)
+    sink.member("outDir", %outDir)
+    sink.member("exitCode", %exitCode)
+    sink.member("counts", %*{
       "total": counts.total,
       "succeeded": counts.succeeded,
       "failed": counts.failed,
       "blocked": counts.blocked,
       "cacheHit": counts.cacheHit
-    },
-    "failedActions": failed,
-    "blockedActions": blocked,
-    "runQuota": runQuotaReportJson(buildResult.runQuotaBypassed)
-  }
-  createDir(extendedPath(parentDir(path)))
-  writeFile(extendedPath(path), $root)
+    })
+    sink.arrayMember("failedActions"):
+      for item in buildResult.results:
+        if item.status != asFailed:
+          continue
+        var node = %*{
+          "id": item.id,
+          "status": $item.status,
+          "exitCode": item.exitCode,
+          "reason": item.reason,
+          "blockedBy": item.blockedBy,
+          "cacheDecision": $item.cacheDecision,
+          "dependencyPolicyKind": $item.dependencyPolicyKind,
+          "runQuotaBackend": item.runQuotaBackend,
+          "leaseId": item.leaseId,
+          "stdout": item.stdout,
+          "stderr": item.stderr
+        }
+        if byId.hasKey(item.id):
+          let action = actions[byId[item.id]]
+          node["argv"] = %action.argv
+          node["cwd"] = %action.cwd
+          node["inputs"] = %action.inputs
+          node["outputs"] = %action.outputs
+          node["cacheable"] = %action.cacheable
+          node["weakFingerprint"] = %digestHex(action.weakFingerprint)
+        sink.element(node)
+    sink.arrayMember("blockedActions"):
+      for item in buildResult.results:
+        if item.status == asBlocked:
+          sink.element(%*{
+            "id": item.id,
+            "blockedBy": item.blockedBy,
+            "reason": item.reason
+          })
+    sink.member("runQuota", runQuotaReportJson(buildResult.runQuotaBypassed))
+    commitStreamedReport(sink)
+  finally:
+    abandonStreamedReport(sink)
 
 proc renderBuildTrace*(buildResult: BuildRunResult): string =
   ## ``--show=trace`` presenter for the scheduler trace.
@@ -7229,18 +7499,144 @@ proc providerSnapshotInputsFresh(snapshot: ProviderGraphSnapshot): bool =
         return false
   true
 
+proc newerActionPayloadIn(snapshot: ProviderGraphSnapshot):
+    tuple[found: bool; actionNodeId: string; version: uint16] =
+  ## The first action whose payload a NEWER reprobuild wrote, if the snapshot
+  ## holds one.
+  ##
+  ## The snapshot's own envelope is version-gated by
+  ## ``loadProviderGraphSnapshot``, but the action payloads inside it are
+  ## opaque bytes there: nothing in the snapshot's key (provider artifact id,
+  ## binary evidence, evaluation inputs) names their version. Only a header
+  ## is read per action. A payload that is not an envelope at all is NOT
+  ## reported here; that is corruption, and lowering's full decode raises it.
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind != gnkAction:
+        continue
+      let version =
+        try: buildActionPayloadVersion(toBytes(node.payload))
+        except BuildActionPayloadError: 0'u16
+      if version > BuildActionPayloadVersion:
+        return (found: true, actionNodeId: node.id, version: version)
+
+proc providerSnapshotUsable(snapshot: ProviderGraphSnapshot;
+                            snapshotPath: string): bool =
+  ## Whether a provider-graph snapshot read from disk may be served, as far
+  ## as its action payloads go. The one check every cache read of
+  ## ``provider-fragments.rbsz`` applies before handing the graph on.
+  ##
+  ## A snapshot holding an action payload newer than this build reads was
+  ## written by a newer ``repro`` sharing the store, and per
+  ## Incremental-Invalidation.md §"Record payload schemas" an older reader
+  ## treats a newer record as ABSENT: a miss, never a fatal error (it used to
+  ## end the build with ``unsupported build action payload version``, naming
+  ## neither the entry nor either version). The answer is ``false``, the
+  ## versions are reported, and the file is removed.
+  ##
+  ## Removing it is what makes the miss a REBUILD rather than a loop. The
+  ## refresh that follows a miss reads the stored snapshot itself and keeps
+  ## every fragment whose provider binary and inputs are unchanged, so it
+  ## would hand the same unreadable payloads straight back. The file is a
+  ## derived cache this build is about to overwrite anyway (as
+  ## ``loadProviderGraphSnapshot`` already does for a newer ENVELOPE), and
+  ## once rewritten at this build's version the next read is a silent hit,
+  ## which is why the diagnostic appears once per entry.
+  let newer = newerActionPayloadIn(snapshot)
+  if not newer.found:
+    return true
+  stderr.writeLine("repro: warning: provider graph snapshot " &
+    snapshotPath & " holds a newer build action payload (action `" &
+    newer.actionNodeId & "`, payload version " & $newer.version &
+    "); this repro reads up to version " & $BuildActionPayloadVersion &
+    ", so the entry is a cache miss and is rebuilt")
+  try:
+    removeFile(extendedPath(snapshotPath))
+  except OSError as err:
+    # Not fatal for the miss itself; the refresh's save replaces the file.
+    stderr.writeLine("repro: warning: could not remove " & snapshotPath &
+      ": " & err.msg)
+  false
+
+proc refreshReadableProviderGraph(config: RefreshConfig):
+    ProviderRefreshReport =
+  ## ``refreshProviderGraph``, refusing a graph this build cannot read.
+  ##
+  ## Every route that runs a provider to produce a graph goes through here,
+  ## so the refusal is stated once. ``providerSnapshotUsable`` handles a
+  ## newer payload that arrives from a CACHED snapshot: a miss and a rebuild.
+  ## This is the other way one arrives, and the one a rebuild cannot cure:
+  ## the provider binary itself writes payloads newer than this engine reads.
+  ##
+  ## A provider writes the ``BuildActionPayloadVersion`` of the reprobuild
+  ## libraries it was COMPILED AGAINST, and every cache that can hand an
+  ## engine a provider binary -- the provider-compile edge in the shared
+  ## action cache (``ProviderCompileActionKey``), its recipe-relative output
+  ## directory, the provider-compile binary cache -- keys on the content of
+  ## those libraries (``frontendRuntimeIdentity``), which holds that
+  ## constant. The shipped Tier-2a/2b providers are keyed by their own
+  ## content. So no cache serves a provider built against libraries other
+  ## than the ones this engine resolved, and recompiling would compile the
+  ## same libraries again. What is wrong is the RESOLUTION: the engine
+  ## selected a source tree newer than itself (a checkout that moved on
+  ## without a rebuild, an inherited ``$REPROBUILD_SOURCE_ROOT``, a
+  ## ``$REPROBUILD_LIBS_DIR``). The error says which tree, and why it was
+  ## selected, because that is the one thing the operator must change.
+  ##
+  ## The persisted snapshot is removed before raising, so the next build
+  ## meets this same refusal rather than a cache "miss" that cannot rebuild.
+  result = refreshProviderGraph(config)
+  let newer = newerActionPayloadIn(result.snapshot)
+  if not newer.found:
+    return
+  if result.persistedSnapshotPath.len > 0:
+    try:
+      removeFile(extendedPath(result.persistedSnapshotPath))
+    except OSError:
+      discard
+  let source = resolveReprobuildSourceRootCandidate()
+  # The remedy names whatever selected the tree: an earlier candidate
+  # outranks a later one, so advice to set a lower-precedence variable
+  # (`$REPROBUILD_SOURCE_ROOT` under a `$REPROBUILD_LIBS_DIR`) would change
+  # nothing.
+  let sourceLine =
+    if source.path.len > 0:
+      "reprobuild sources it compiles providers against: " & source.path &
+        " (selected by " & source.origin & ")\nRebuild repro from those " &
+        "sources, or make " & source.origin & " name the sources this " &
+        "repro was built from."
+    else:
+      "no reprobuild source tree resolved for provider compiles"
+  raise newException(ValueError,
+    "provider " & config.providerBinaryPath & " wrote build action payload " &
+    "version " & $newer.version & " (action `" & newer.actionNodeId &
+    "`), newer than version " & $BuildActionPayloadVersion & ", the " &
+    "newest this repro (" & publicCliImagePath() & ") reads. The provider " &
+    "was built from reprobuild libraries newer than this repro binary.\n  " &
+    sourceLine)
+
 proc readFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
                                    providerBinaryPath: string):
     Option[ProviderGraphSnapshot] =
   inc warmBuildCacheCounters.providerSnapshotDiskReads
-  if not fileExists(extendedPath(providerSnapshotPath(storeRoot))):
+  let path = providerSnapshotPath(storeRoot)
+  if not fileExists(extendedPath(path)):
     return none(ProviderGraphSnapshot)
   try:
     let snapshot = loadProviderGraphSnapshot(storeRoot)
     if snapshot.providerArtifactId != providerArtifactId:
       return none(ProviderGraphSnapshot)
-    if not providerSnapshotBinaryFresh(snapshot, providerBinaryPath) or
-        not providerSnapshotInputsFresh(snapshot):
+    if not providerSnapshotBinaryFresh(snapshot, providerBinaryPath):
+      return none(ProviderGraphSnapshot)
+    # Before the inputs check, not after it: with the artifact id and the
+    # binary matching, ``refreshProviderGraph`` keeps every fragment whose
+    # inputs did not change, so a snapshot that is merely input-stale would
+    # still carry its unreadable payloads into the refreshed graph. A
+    # snapshot of another artifact or binary is not reused by the refresh
+    # and is left alone.
+    if not providerSnapshotUsable(snapshot, path):
+      return none(ProviderGraphSnapshot)
+    if not providerSnapshotInputsFresh(snapshot):
       return none(ProviderGraphSnapshot)
     return some(snapshot)
   except CatchableError:
@@ -7754,6 +8150,11 @@ proc prewarmProviderSnapshotsFrom(outDir: string;
     try:
       let snapshot = loadProviderGraphSnapshot(store)
       if snapshot.providerArtifactId.len == 0:
+        continue
+      # Not warmed, and not reported or removed here either: the request's
+      # own disk read (``providerSnapshotUsable``) does both, on the stderr
+      # the user is reading rather than the daemon's.
+      if newerActionPayloadIn(snapshot).found:
         continue
       let evidence = durableFileEvidence(path)
       if not evidence.exists:
@@ -10864,6 +11265,8 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   try:
     let edgeResult = runBuild(graph([extractAction]), edgeConfig)
     stats.mergeStats(edgeResult.stats)
+    interfaceExtractReportItems.add(edgeResult.results)
+    interfaceExtractReportTrace.add(edgeResult.trace)
     # M1 N11. This edge may run under the RunQuota bypass while the rest
     # of the build does not (see ``interfaceEdgeRunQuotaBypass``), and
     # the compensating control for a bypass is the warning that says one
@@ -11081,6 +11484,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # is the only handle we have on enabling them.
   if fromSourceBuildInvocationDepth == 0:
     fromSourceResolvedRecipes.clear()
+    interfaceExtractReportItems.setLen(0)
+    interfaceExtractReportTrace.setLen(0)
   inc fromSourceBuildInvocationDepth
   defer:
     dec fromSourceBuildInvocationDepth
@@ -11461,13 +11866,20 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         selectedActionId)
 
   proc collectInputEvidence(buildResult: BuildRunResult) =
-    if not wantEvidencePaths:
+    if not wantsInputEvidencePaths:
       # Nobody will read ``BuildCommandOutcome.inputEvidencePaths`` on this
-      # invocation — that is the same statement that told the engine not to
-      # build the strings in the first place — so there is nothing to
-      # harvest. The two are ONE decision, made once above and read here and
-      # by the engine config, which is what keeps the empty seq below from
-      # ever being an accident.
+      # invocation, so there is nothing to harvest. The engine may still have
+      # built the strings — ``--write-report`` turns them on — but the report
+      # reads them off ``buildResult`` directly, never off this seq.
+      #
+      # Gated on the CALLER's demand alone, not on ``wantEvidencePaths``,
+      # because the report half of that union made this a second full copy
+      # of every read and probe path for no reader: ``repro build
+      # --write-report .#test-builds`` held ~85M path strings twice over
+      # after its builds were done (reprobuild-pm
+      # ``issues/2026-10-18-full-suite-run-dies-at-the-build-action-payload-cache-policy-case.md``).
+      # When the caller does want them, ``wantEvidencePaths`` is true too, so
+      # the engine has built every string harvested below.
       return
     for item in buildResult.results:
       # An ELIDED result's path seqs are empty because nobody asked for them,
@@ -11953,7 +12365,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let synthIdentity = cmakeDirectBuildIdentity(metadata, pathEnv)
     let providerGraphStart = statStart(statsEnabled)
     progressRenderer.renderPhase("refreshing trycompile provider graph")
-    let refresh = refreshProviderGraph(RefreshConfig(
+    let refresh = refreshReadableProviderGraph(RefreshConfig(
       storeRoot: providerGraphStoreRoot(outDir / "provider-graph"),
       providerBinaryPath: tryCompileProviderBinary,
       providerArtifactId: TryCompileProviderArtifactId,
@@ -12717,7 +13129,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         interfaceFingerprint: artifact.interfaceFingerprint)
       let providerGraphStart = statStart(statsEnabled)
       progressRenderer.renderPhase("refreshing standard provider graph")
-      let refresh = refreshProviderGraph(RefreshConfig(
+      let refresh = refreshReadableProviderGraph(RefreshConfig(
         storeRoot: providerGraphStoreRoot(outDir / "provider-graph"),
         providerBinaryPath: standardProviderBinary,
         providerArtifactId: standardProviderArtifactId,
@@ -13011,7 +13423,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       refresh.persistedSnapshotPath = providerSnapshotPath(providerGraphStore)
     else:
       progressRenderer.renderPhase("refreshing project provider graph")
-      refresh = refreshProviderGraph(RefreshConfig(
+      refresh = refreshReadableProviderGraph(RefreshConfig(
         storeRoot: providerGraphStore,
         providerBinaryPath: provider.outputBinaryPath,
         providerArtifactId: providerArtifactId,
@@ -24550,6 +24962,102 @@ proc forgetMachineDeclaredDaemonTrust*() =
   ## more than once in a process; production calls it nowhere.
   machineDaemonTrustApplied = false
 
+when not defined(windows):
+  const runQuotaExitWithParentEnvVar = "RUNQUOTA_EXIT_WITH_PARENT"
+    ## Read by `runquotad` (runquota `runquota_daemon/parent_watch`): `1`
+    ## makes the daemon stop, through its orderly SIGTERM shutdown, when its
+    ## parent is gone. Spelled here rather than imported so reprobuild does
+    ## not need a runquota new enough to define it -- an older `runquotad`
+    ## ignores the variable, which costs the SIGKILL half of the lifetime
+    ## rule and nothing else.
+
+  proc spawnOwnedRunQuotaDaemon(runquotad: string;
+                                args: seq[string]): owned(Process) =
+    ## Starts the `runquotad` this invocation OWNS, so that it cannot outlive
+    ## the invocation however the invocation ends and holds nothing of the
+    ## invocation's but its own 0, 1 and 2 (reprobuild-pm
+    ## `spec/RunQuota-Host-Configuration.md`, "\"Terminated when the
+    ## top-level build ends\" means however it ends"). Three things, each
+    ## covering what the others cannot:
+    ##
+    ## 1. NO DESCRIPTOR ABOVE 2 CROSSES THE SPAWN. `osproc` creates its pipes
+    ##    without `O_CLOEXEC` and leaves the originals open in the child after
+    ##    `dup2`ing them onto 0/1/2, and offers no hook between `fork` and
+    ##    `exec` to close them. So an invocation started that way -- as
+    ##    `e2e_repro_dev_watch_and_service_events` started `repro dev` --
+    ##    holds copies of its own stdout pipe above 2, and a daemon spawned
+    ##    with them open kept that pipe alive after the invocation died: the
+    ##    caller's `readAll()` waited 30 minutes for an end of file. Every
+    ##    descriptor above 2 is therefore close-on-exec for the duration of
+    ##    the spawn (`markInheritableDescriptorsCloseOnExec`, the rule
+    ##    RunQuota's process backend applies with `closeInheritedChildFds`),
+    ##    and the flags are restored afterwards. The window is one
+    ##    `startProcess`. A spawn another thread makes inside it loses only
+    ##    descriptors above 2 that it did not `dup2` into place -- and the
+    ##    build's own launch paths already give every child 0, 1 and 2 and
+    ##    nothing else (RunQuota's `closeInheritedChildFds`, the engine's
+    ##    `beginMonitorSpawnContext`), so none of them relies on one.
+    ##
+    ##    And afterwards OUR ends of the daemon's own stdio pipes are marked
+    ##    close-on-exec for good, so that no later child of this invocation
+    ##    -- a build action, a provider, a nested `repro` -- holds a copy of a
+    ##    pipe to the daemon it did not create.
+    ##
+    ## 2. A TERMINATING SIGNAL IS FORWARDED. The pid is registered with
+    ##    `owned_daemon_signals` right after the spawn and before the
+    ##    readiness wait, so a SIGTERM/SIGINT/SIGHUP/SIGQUIT that ends this
+    ##    invocation at any point from here on sends the daemon SIGTERM first.
+    ##    `releaseAutoRunQuotaProcess`, and the failure path of
+    ##    `startAutoRunQuotaIfNeeded`, unregister it.
+    ##
+    ## 3. THE DAEMON WATCHES ITS PARENT. `RUNQUOTA_EXIT_WITH_PARENT=1` is put
+    ##    in the DAEMON's environment only -- never into ours, where every
+    ##    later child would inherit a request addressed to one process. It is
+    ##    the only half that covers SIGKILL and the OOM killer, which no
+    ##    handler here can see.
+    # SIGCHLD auto-reaping can recycle a child pid while the signal registry
+    # still owns it. Refuse BEFORE fork or descriptor/environment mutation;
+    # changing the caller's disposition would change unrelated child behavior.
+    ensureOwnedDaemonReaping()
+    let env = newStringTable(modeCaseSensitive)
+    for key, value in envPairs():
+      env[key] = value
+    env[runQuotaExitWithParentEnvVar] = "1"
+    # Recorded before the spawn: a SIGKILL before the daemon reaches main
+    # must not let it adopt a subreaper as its apparent owner.
+    env["RUNQUOTA_EXIT_WITH_PARENT_PID"] = $getCurrentProcessId()
+    let madeCloseOnExec = markInheritableDescriptorsCloseOnExec()
+    try:
+      result = startProcess(runquotad, args = args, env = env,
+        options = {poUsePath})
+    finally:
+      restoreInheritableDescriptors(madeCloseOnExec)
+    setCloseOnExec(cint(result.inputHandle))
+    setCloseOnExec(cint(result.outputHandle))
+    setCloseOnExec(cint(result.errorHandle))
+    if not registerOwnedDaemon(processID(result)):
+      let registrationError = osLastError()
+      var stillOurChild = false
+      var live = false
+      try:
+        live = ownedDaemonStillRunning(result)
+        stillOurChild = true
+      except OSError:
+        # In particular ECHILD: an externally reaped pid is no longer ours
+        # to terminate, even if another process now has the same number.
+        discard
+      if stillOurChild:
+        if live:
+          try: result.terminate()
+          except CatchableError: discard
+        try: discard result.waitForExit()
+        except CatchableError: discard
+      try: result.close()
+      except CatchableError: discard
+      result = nil
+      raiseOSError(registrationError,
+        "cannot own auto-started runquotad: signal-forwarding registration failed")
+
 proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
   ## Exported for `tests/integration/t_derived_daemon_ipc_trust.nim` and
   ## `tests/integration/t_declared_daemon_ipc_trust.nim`, which grade the
@@ -24726,7 +25234,19 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     var args = @["--socket", socket]
     args.add(budget.args)
     putEnv("RUNQUOTA_SOCKET", socket)
-  result = startProcess(runquotad, args = args, options = {poUsePath})
+  # THE DAEMON'S LIFETIME. On Windows it binds the shared per-user pipe and is
+  # deliberately left running for invocations that adopt it (see
+  # `releaseAutoRunQuotaProcess`), so it is started plainly. On POSIX it is
+  # OWNED by this invocation and ends with it however the invocation ends:
+  # `releaseAutoRunQuotaProcess` stops it on a normal return or a raise, a
+  # terminating signal is forwarded to it, and the daemon itself stops when
+  # it is re-parented (the SIGKILL case) -- and it inherits none of this
+  # invocation's descriptors above 2. `spawnOwnedRunQuotaDaemon` says how.
+  when defined(windows):
+    result = startProcess(runquotad, args = args, options = {poUsePath})
+  else:
+    result = spawnOwnedRunQuotaDaemon(runquotad, args)
+  var readinessError = ""
   for _ in 0 ..< 300:
     if isRunQuotaDaemonReachable():
       # DA-2 — DERIVED class-3 IPC trust. We spawned this daemon, so its pid is
@@ -24763,10 +25283,13 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
       # on a given host is exactly the set of builds that take THIS branch:
       #
       #   * LINUX, unprovisioned host: every top-level `repro build` spawns,
-      #     because the socket is per-PID (`reprobuild-runquota-<pid>`) and
-      #     `releaseAutoRunQuotaProcess` terminates and reaps the daemon at end
-      #     of build. DA-2 is live on every such build — and this is the ONLY
-      #     topology on which it is.
+      #     because the socket is per-PID (`reprobuild-runquota-<pid>`) and the
+      #     daemon ends with the invocation that started it, however that
+      #     invocation ends (`releaseAutoRunQuotaProcess` on a return or a
+      #     raise, signal forwarding and the daemon's own parent watch
+      #     otherwise; see `spawnOwnedRunQuotaDaemon`), so no daemon survives
+      #     for the next build to adopt. DA-2 is live on every such build — and
+      #     this is the ONLY topology on which it is.
       #   * macOS: INERT, spawn arm or not. Reaching this line is not the same
       #     as registering: `trustDaemonWeSpawned` refuses a peer it cannot
       #     re-validate, and `processStartIdentity` is `when defined(linux)`
@@ -24799,12 +25322,29 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
       # spawn arm registers, and that the warm arm provably does not.
       trustDaemonWeSpawned(result, "runquotad", tdcNoContent)
       return
-    if not result.running:
+    try:
+      if not ownedDaemonStillRunning(result):
+        break
+    except OSError as error:
+      when defined(posix):
+        unregisterOwnedDaemon(processID(result))
+      readinessError = error.msg
       break
     sleep(50)
+  # THE SPAWN FAILED, so the daemon is no longer ours to forward signals to.
+  # Unregistered BEFORE it is terminated and reaped, so the forwarder can never
+  # signal its pid after the kernel has handed it to another process.
+  when not defined(windows):
+    unregisterOwnedDaemon(processID(result))
   try:
-    result.terminate()
-    discard result.waitForExit()
+    # Only inspect/reap after unregistering. ECHILD means ownership was lost;
+    # running then raises, so no signal is sent to a possibly reused pid.
+    if result.running:
+      result.terminate()
+      discard result.waitForExit()
+  except CatchableError:
+    discard
+  try:
     result.close()
   except CatchableError:
     discard
@@ -24814,7 +25354,8 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     when defined(windows): "default per-user named pipe"
     else: socket
   raise newException(OSError,
-    "runquotad did not become reachable at " & endpointHint)
+    "runquotad did not become reachable at " & endpointHint &
+    (if readinessError.len > 0: ": " & readinessError else: ""))
 
 proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
   ## Release this invocation's handle to an automatically started RunQuota
@@ -24822,8 +25363,18 @@ proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
   ## invocation may already have adopted the daemon; terminating it here would
   ## break that client's live session. POSIX auto-daemons use invocation-local
   ## socket paths and remain owned by their spawning process.
+  ##
+  ## On POSIX this is the NORMAL end of the daemon -- a return or a raise
+  ## through the caller's `defer`. It is no longer the only one: a terminating
+  ## signal is forwarded to the daemon, and the daemon stops by itself when
+  ## this process is gone (`spawnOwnedRunQuotaDaemon`). The forwarding is
+  ## withdrawn FIRST, before the terminate and the reap, so the handler can
+  ## never signal the pid once it may belong to another process; the last
+  ## release restores the signal dispositions the invocation had before.
   if process == nil:
     return
+  when not defined(windows):
+    unregisterOwnedDaemon(processID(process))
   try:
     when not defined(windows):
       process.terminate()
@@ -29300,6 +29851,7 @@ proc buildActionJson(action: BuildAction): JsonNode =
     "publishToBinaryCache": action.publishToBinaryCache,
     "fixedOutput": action.fixedOutput,
     "scratchDirs": action.scratchDirs,
+    "removeBeforeRun": action.removeBeforeRun,
     "binaryCacheKey": binaryCacheKey,
     "binaryCacheIdentityError": identityError,
     "actionCachePolicy": $action.actionCachePolicy,
@@ -29747,7 +30299,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     refresh.persistedSnapshotPath = providerSnapshotPath(providerGraphStore)
     result.providerGraphCacheHit = true
   else:
-    refresh = refreshProviderGraph(RefreshConfig(
+    refresh = refreshReadableProviderGraph(RefreshConfig(
       storeRoot: providerGraphStore,
       providerBinaryPath: provider.outputBinaryPath,
       providerArtifactId: result.providerArtifactId,
@@ -29943,7 +30495,7 @@ proc refreshRecipeProviderSnapshot(target: string;
   if freshSnapshot.isSome:
     refresh.snapshot = freshSnapshot.get()
   else:
-    refresh = refreshProviderGraph(RefreshConfig(
+    refresh = refreshReadableProviderGraph(RefreshConfig(
       storeRoot: providerGraphStore,
       providerBinaryPath: provider.outputBinaryPath,
       providerArtifactId: providerArtifactId,
@@ -90770,15 +91322,30 @@ proc nixStringLiteral(text: string): string =
     else: result.add(c)
   result.add('"')
 
-proc flakeRevisionFetchExpr*(attrs: JsonNode): string =
+proc flakeRevisionFetchExpr*(attrs: JsonNode;
+    dependencyDir = ""; includeDependencySnapshot = false): string =
   ## The expression ``fetchFlakeRevisionFields`` evaluates, exposed so a case
   ## can show what is asked.
   var asked = attrs.copy()
   if asked{"type"}.getStr() == "git" and not asked.hasKey("shallow"):
     asked["shallow"] = %false
-  "builtins.intersectAttrs { narHash = null; lastModified = null; " &
-    "revCount = null; } (builtins.fetchTree (builtins.fromJSON " &
-    nixStringLiteral($asked) & "))"
+  let tree = "builtins.fetchTree (builtins.fromJSON " &
+    nixStringLiteral($asked) & ")"
+  let fields = "builtins.intersectAttrs { narHash = null; lastModified = null; " &
+    "revCount = null; } tree"
+  if not includeDependencySnapshot:
+    return "let tree = " & tree & "; in " & fields
+  # Read the dependency lock from the exact fetched source, without evaluating
+  # its outputs or resolving any dependency. `dir` belongs to the flake, not
+  # fetchTree. Parse JSON so whitespace/key ordering cannot withhold a move.
+  "let tree = " & tree & "; root = tree.outPath + " &
+    nixStringLiteral(if dependencyDir.len > 0: "/" & dependencyDir else: "") &
+    "; lock = root + " & nixStringLiteral("/flake.lock") &
+    "; flake = root + " & nixStringLiteral("/flake.nix") & "; in " &
+    fields & " // { dependencySnapshot = if builtins.pathExists lock then " &
+    "{ lock = builtins.readFile lock; } else " &
+    "{ flake = if builtins.pathExists flake then builtins.readFile flake " &
+    "else null; }; }"
 
 proc nixErrorSummary(stderrText: string; code: int): string =
   ## nix's own reason, in one line: its last `error:` line (the innermost
@@ -90796,7 +91363,8 @@ proc nixErrorSummary(stderrText: string; code: int): string =
   result = result.replace('`', '\'')
 
 proc fetchFlakeRevisionFields*(nixExe: string;
-    attrs: JsonNode): FlakeRevisionFields =
+    attrs: JsonNode; dependencyDir = "";
+    includeDependencySnapshot = false): FlakeRevisionFields =
   ## Ask ``nixExe`` for the derived fields of the revision ``attrs`` names.
   ## Never raises; a failure comes back in ``error``.
   var env = scrubbedGitRepositoryEnv()
@@ -90823,7 +91391,8 @@ proc fetchFlakeRevisionFields*(nixExe: string;
   # inside the JSON and an unread pipe cannot fill and hang nix.
   let cmd = quoteShell(nixExe) &
     " --extra-experimental-features " & quoteShell("nix-command flakes") &
-    " eval --json --expr " & quoteShell(flakeRevisionFetchExpr(attrs)) &
+    " eval --json --expr " & quoteShell(flakeRevisionFetchExpr(attrs, dependencyDir,
+      includeDependencySnapshot)) &
     " 2>" & quoteShell(errPath)
   var res: tuple[output: string, exitCode: int]
   try:
@@ -90851,10 +91420,39 @@ proc fetchFlakeRevisionFields*(nixExe: string;
     if answer.hasKey(key) and answer[key].kind != JInt:
       result.error = "nix reported a non-integer " & key
       return
+  if includeDependencySnapshot:
+    let snapshot = answer{"dependencySnapshot"}
+    if snapshot.isNil or snapshot.kind != JObject or snapshot.len != 1:
+      result.error = "nix reported no verifiable dependency snapshot"
+      return
+    if snapshot.hasKey("lock"):
+      var dependencyLock: JsonNode
+      try:
+        if snapshot["lock"].kind != JString:
+          result.error = "dependency lock verification: nix reported no lock text"
+          return
+        dependencyLock = parseJson(snapshot["lock"].getStr())
+      except CatchableError as err:
+        result.error = "dependency lock verification: the source lock is not " &
+          "readable as JSON (" & err.msg & ")"
+        return
+      if dependencyLock.kind != JObject or
+          dependencyLock{"nodes"}.isNil or
+          dependencyLock["nodes"].kind != JObject or
+          dependencyLock{"root"}.isNil or
+          dependencyLock["root"].kind != JString:
+        result.error = "dependency lock verification: the source lock is not a flake lock"
+        return
+      snapshot["lock"] = dependencyLock
+    elif not snapshot.hasKey("flake") or
+        snapshot["flake"].kind notin {JString, JNull}:
+      result.error = "nix reported an invalid dependency snapshot"
+      return
   result.ok = true
   result.fields = answer
 
-proc fetchPendingDerivedFields(pending: openArray[FlakeLockRewrite]):
+proc fetchPendingDerivedFields(pending: openArray[FlakeLockRewrite];
+    lockText: string):
     tuple[derived: Table[string, JsonNode];
           failed: seq[tuple[rewrite: FlakeLockRewrite; error: string]]] =
   ## Ask nix for the derived fields of every pending move
@@ -90870,20 +91468,50 @@ proc fetchPendingDerivedFields(pending: openArray[FlakeLockRewrite]):
       nixExe = resolveNixExe()
     except CatchableError:
       nixMissing = "there is no 'nix' on PATH (nor in REPRO_FOREIGN_ENV_NIX)"
+  let nodes = parseJson(lockText)["nodes"]
   for p in pending:
+    let node = nodes[p.node]
+    let isFlake = node{"flake"}.isNil or node["flake"].getBool()
+    let subdir = node{"locked"}{"dir"}.getStr()
     let fetched =
       if nixMissing.len > 0: FlakeRevisionFields(error: nixMissing)
-      else: fetchFlakeRevisionFields(nixExe, p.fetchAttrs)
-    if fetched.ok:
-      result.derived[p.input] = fetched.fields
-    else:
+      else: fetchFlakeRevisionFields(nixExe, p.fetchAttrs, subdir, isFlake)
+    if not fetched.ok:
       result.failed.add((rewrite: p, error: fetched.error))
+      continue
+    if isFlake:
+      # A metadata-only parent move must not retain a dependency graph from
+      # another parent revision. Re-locking that graph is an explicit solver
+      # operation; withholding keeps both halves intact until that happens.
+      var oldAttrs = p.fetchAttrs.copy()
+      oldAttrs["rev"] = %p.oldRev
+      let previous = fetchFlakeRevisionFields(nixExe, oldAttrs, subdir, true)
+      if not previous.ok:
+        result.failed.add((rewrite: p, error:
+          "dependency lock verification: could not read the old exact source " &
+          p.oldRev & ": " & previous.error))
+        continue
+      if previous.fields{"dependencySnapshot"} !=
+          fetched.fields{"dependencySnapshot"}:
+        result.failed.add((rewrite: p, error:
+          "dependency lock changed between " & p.oldRev & " and " & p.newRev))
+        continue
+      fetched.fields.delete("dependencySnapshot")
+    result.derived[p.input] = fetched.fields
 
 proc flakeUnfetchableNotice(rewrite: FlakeLockRewrite; sibling, error,
     flakeRoot, workspaceRoot: string): string =
   ## The announcement for ONE input whose new revision nix could not report
   ## the derived fields of. Same shape, and same channel, as every other §3.2
   ## withholding (`flakeWithheldNotice`).
+  if error.startsWith("dependency lock"):
+    return "flake.lock NOT refreshed for input '" & rewrite.input & "': " &
+      error & " (" & rewrite.oldRev & " -> " & rewrite.newRev &
+      "). The parent and its existing child nodes were LEFT ALONE; " &
+      "moving only the parent would retain a dependency graph from another " &
+      "revision. Explicitly re-lock the parent and its dependencies: `cd " &
+      quoteShell(flakeRoot) & " && nix flake update " &
+      quoteShell(rewrite.input) & "`. Then re-run the refresh."
   "flake.lock NOT refreshed for input '" & rewrite.input & "': its sibling " &
     (if sibling.len > 0: sibling & " " else: "") &
     "is at " & rewrite.newRev & " and the pin names " & rewrite.oldRev &
@@ -91402,7 +92030,7 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     # rather than filed weaker: the same shape as every other skip (so the
     # commit hook holds the repository in both locks, §16.3 H3), and NF-3's
     # pre-push gate refuses the lagging lock, so nothing escapes.
-    let fetched = fetchPendingDerivedFields(refreshed.pending)
+    let fetched = fetchPendingDerivedFields(refreshed.pending, lockText)
     for f in fetched.failed:
       let notice = flakeUnfetchableNotice(f.rewrite,
         siblingOf.getOrDefault(f.rewrite.input, ""), f.error, flakeRoot,
@@ -91756,6 +92384,64 @@ proc runLockUpdateNix(root: string; inputs: openArray[string]):
     (res.exitCode == 0, res.output.strip())
   except CatchableError as err:
     (false, err.msg)
+
+proc flakeRevisionTargetAttrs*(locked: JsonNode; revision: string): JsonNode =
+  ## Exact source attributes for an explicit upgrade. Derived metadata belongs
+  ## to the old revision; fetchTree will recompute it. Forge references select
+  ## either a ref or a revision, while git may need the ref to fetch the rev.
+  ## Copy so preparing an upgrade never mutates the caller's lock snapshot.
+  result = locked.copy()
+  for key in flakeLockRevisionDerivedKeys:
+    if result.hasKey(key): result.delete(key)
+  result["rev"] = %revision
+  if result{"type"}.getStr() in ["github", "gitlab", "sourcehut"] and
+      result.hasKey("ref"):
+    result.delete("ref")
+
+proc runLockUpdateNixTargets(root, lockText: string;
+    targets: openArray[tuple[input, rev: string]]):
+    tuple[ok: bool; text, output: string] =
+  ## An explicit upgrade may re-lock a parent's dependency closure. Ask Nix
+  ## to select the requested exact sources while retaining the recipe's
+  ## original branch coordinates. The temporary output keeps failure atomic.
+  let nixBin = uncontrolledFindExe("nix")
+  if nixBin.len == 0: return (false, "", "nix is not on PATH")
+  var outputPath = ""
+  try:
+    let doc = parseJson(lockText)
+    let nodes = doc["nodes"]
+    let rootKey = doc{"root"}.getStr("root")
+    var attrsByInput = newJObject()
+    for target in targets:
+      let nodeKey = nodes[rootKey]["inputs"][target.input].getStr()
+      attrsByInput[target.input] = flakeRevisionTargetAttrs(
+        nodes[nodeKey]["locked"], target.rev)
+    let expr = "builtins.mapAttrs (_: builtins.flakeRefToString) " &
+      "(builtins.fromJSON " & nixStringLiteral($attrsByInput) & ")"
+    let prefix = quoteShell(nixBin) &
+      " --extra-experimental-features 'nix-command flakes'"
+    let refs = uncontrolledExecCmdEx(prefix & " eval --json --expr " &
+      quoteShell(expr), options = {poUsePath}, workingDir = root)
+    if refs.exitCode != 0: return (false, "", refs.output)
+    let urls = parseJson(refs.output)
+    let created = createTempFile("repro-flake-relock-", ".lock")
+    created.cfile.close()
+    outputPath = created.path
+    var cmd = prefix & " flake lock " & quoteShell(root) &
+      " --output-lock-file " & quoteShell(outputPath)
+    for target in targets:
+      cmd.add(" --override-input " & quoteShell(target.input) & " " &
+        quoteShell(urls[target.input].getStr()))
+    let ran = uncontrolledExecCmdEx(cmd,
+      options = {poStdErrToStdOut, poUsePath}, workingDir = root)
+    if ran.exitCode != 0: return (false, "", ran.output)
+    (true, readFile(outputPath), ran.output)
+  except CatchableError as err:
+    (false, "", err.msg)
+  finally:
+    if outputPath.len > 0:
+      try: removeFile(outputPath)
+      except CatchableError: discard
 
 proc nixSaid(output: string): string =
   ## nix's own output, one indented line each, after a refusal's summary
@@ -92289,24 +92975,29 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
         result.written.add(flakeLockPath)
     if floating.len > 0:
       var moved = refreshFlakeLockText(flakeLockText, floating, root)
+      var closureRelock: seq[tuple[input, rev: string]]
       if not moved.failed and moved.pending.len > 0:
         # The moved nodes carry what nix reports for the target — the same
         # `narHash` / `lastModified` / `revCount` the commit-time refresh
         # writes (``fetchPendingDerivedFields``). A target nix cannot fetch
         # is not filed as a weaker node; the whole update is undone.
-        let fetched = fetchPendingDerivedFields(moved.pending)
+        let fetched = fetchPendingDerivedFields(moved.pending, flakeLockText)
         if fetched.failed.len > 0:
           var why: seq[string]
           for f in fetched.failed:
-            why.add("input '" & f.rewrite.input & "': " & f.error)
-          undoAll(LockUpdateExitFailed, "nix could not fetch " & target &
-            " to compute the narHash it records with it (" &
-            why.join("; ") & "). If " & target & " is not yet pushed to " &
-            "the input's url, push it first")
+            if f.error.startsWith("dependency lock"):
+              closureRelock.add((input: f.rewrite.input, rev: f.rewrite.newRev))
+            else:
+              why.add("input '" & f.rewrite.input & "': " & f.error)
+          if why.len > 0:
+            undoAll(LockUpdateExitFailed, "nix could not fetch " & target &
+              " to compute the narHash it records with it (" &
+              why.join("; ") & "). If " & target & " is not yet pushed to " &
+              "the input's url, push it first")
         moved = refreshFlakeLockText(flakeLockText, floating, root,
           fetched.derived)
       if moved.failed or moved.declined.len > 0 or
-          moved.rewrites.len != floating.len:
+          moved.rewrites.len + closureRelock.len != floating.len:
         undoAll(LockUpdateExitFailed, flakeLockPath & " could not be moved " &
           "to " & target & ": " &
           (if moved.failed: moved.diagnostic
@@ -92324,6 +93015,29 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
            else: "no derived fields from nix") &
           (if m.dropped.len > 0: "; " & m.dropped.join("/") & " dropped"
            else: "") & ")")
+      if closureRelock.len > 0:
+        # The metadata-only path has proved its remaining closures unchanged.
+        # Only inputs whose dependency graph needs resolution reach Nix's
+        # solver, so unrelated stale recipe metadata is left alone in the
+        # ordinary source-only upgrade case.
+        let relocked = runLockUpdateNixTargets(root, flakeLockText, closureRelock)
+        if not relocked.ok:
+          undoAll(LockUpdateExitFailed, "re-locking the requested exact " &
+            "sources and their dependency closures through nix failed:" &
+            nixSaid(relocked.output))
+        var lockedAt = initTable[string, FlakeLockResolution]()
+        for r in flakeLockResolutions(relocked.text): lockedAt[r.input] = r
+        for move in closureRelock:
+          let actual = lockedAt.getOrDefault(move.input, FlakeLockResolution())
+          if actual.lockedRev.toLowerAscii() != move.rev:
+            undoAll(LockUpdateExitFailed, "nix re-locked input '" & move.input &
+              "' at " & actual.lockedRev & ", not at " & move.rev)
+          result.report.add("flake.lock input '" & move.input &
+            "': re-locked through nix at " & move.rev &
+            " together with its dependency closure")
+        flakeLockText = relocked.text
+        writeFile(extendedPath(flakeLockPath), flakeLockText)
+
     if reproOfRepo.len > 0:
       var originalDepsLine = ""
       for line in inputs.reproLock.text.splitLines():

@@ -11,6 +11,7 @@ import std/[os, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
 import repro_build_engine
+import repro_core/path_identity
 import repro_hash
 
 proc probeAction(sh, root: string): BuildAction =
@@ -129,3 +130,172 @@ suite "scratch directories":
     check "cwd" in scratchDirProblem(a)
     a.scratchDirs = @["/home"]
     check scratchDirProblem(a).len > 0
+
+  test "a parent walk through a scratch symlink keeps external evidence":
+    let root = createTempDir("repro-scratch-parent-", "")
+    defer: removeDir(root)
+    createDir(root / "work")
+    createDir(root / "outside" / "dir")
+    when defined(windows):
+      require execShellCmd("cmd /c mklink /J \"" & root / "work" / "link" &
+        "\" \"" & root / "outside" / "dir" & "\" > NUL") == 0
+    else:
+      createSymlink(root / "outside" / "dir", root / "work" / "link")
+    writeFile(root / "outside" / "input", "external")
+    let escaped = root / "work" / "link" & "/../input"
+    require readFile(escaped) == "external"
+    var a = action("scratch/parent", ["tool"], cwd = root,
+      weakFingerprint = weakFingerprintFromText("scratch.parent"),
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    a.scratchDirs = @["work"]
+    var evidence = PathSetEvidence()
+    evidence.monitorReads.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [escaped])
+    dropScratchEvidence(a, evidence)
+    check evidence.monitorReads == @[escaped]
+
+# Literal evidence tests the production folds, without mocking capture or
+# filesystem resolution. Links and their targets below are real filesystem
+# objects; unknown paths deliberately exercise failed kernel resolution.
+proc parentWalkAction(root, excluded: string): BuildAction =
+  result = action("containment", ["tool"], cwd = root,
+    outputs = [excluded],
+    governingLockIdentity = lockIdentityOutsideSolvedGraph())
+  result.scratchDirs = @[excluded]
+  result.dependencyPolicy.ignoredInputPrefixes = @[excluded]
+
+proc directoryLink(target, link: string) =
+  when defined(windows):
+    doAssert execShellCmd("cmd /c mklink /J \"" & link & "\" \"" &
+      target & "\" > NUL") == 0
+  else:
+    createSymlink(target, link)
+
+proc assertExcluded(a: BuildAction; path: string; excluded: bool) =
+  var evidence = PathSetEvidence()
+  evidence.monitorReads.observeAll(evidence.evidenceProvenance,
+    evcMonitorCapture, [path])
+  evidence.monitorProbes.observeAll(evidence.evidenceProvenance,
+    evcMonitorCapture, [path])
+  evidence.monitorDirectoryEnumerations.observeAll(evidence.evidenceProvenance,
+    evcMonitorCapture, [path])
+  check a.isOwnOutput(path) == excluded
+  check (a.cacheInputPaths(evidence).len == 0) == excluded
+  check (a.cacheEnumeratedDirectories(evidence).len == 0) == excluded
+  dropScratchEvidence(a, evidence)
+  check (evidence.monitorReads.len == 0) == excluded
+  check (evidence.monitorProbes.len == 0) == excluded
+  check (evidence.monitorDirectoryEnumerations.len == 0) == excluded
+
+suite "monitor containment follows parent walks through links":
+  test "resolved paths and roots use the kernel namespace, with absent suffixes":
+    let root = createTempDir("repro-containment-", "")
+    defer: removeDir(root)
+    createDir(root / "inside" / "dir")
+    createDir(root / "outside" / "dir")
+    directoryLink(root / "outside" / "dir", root / "inside" / "link")
+    directoryLink(root / "inside" / "dir", root / "outside" / "link")
+    let physicalInside = expandFilename(root / "inside")
+    check resolveExistingTraversal(root / "outside" / "link" & "/..").path ==
+      physicalInside
+    block:
+      let oldCwd = getCurrentDir()
+      setCurrentDir(root)
+      try:
+        check resolveExistingTraversal("outside/link/..").path == physicalInside
+      finally:
+        setCurrentDir(oldCwd)
+    let outWalk = root / "inside" / "link" & "/../missing/deep"
+    let inWalk = root / "outside" / "link" & "/../missing/deep"
+    let a = parentWalkAction(root, root / "inside")
+    assertExcluded(a, outWalk, false)
+    assertExcluded(a, inWalk, true)
+    check detectSourceWrites([root / "inside"], [outWalk]).len == 0
+    check detectSourceWrites([root / "inside"], [inWalk]).len == 1
+    let rootWalk = root / "inside" / "link" & "/.././missing//"
+    let b = parentWalkAction(root, rootWalk)
+    assertExcluded(b, root / "outside" / "missing" / "deep", true)
+    assertExcluded(b, root / "inside" / "missing" / "deep", false)
+    check detectSourceWrites([rootWalk],
+      [root / "outside" / "missing" / "deep"]).len == 1
+    check detectSourceWrites([rootWalk],
+      [root / "inside" / "missing" / "deep"]).len == 0
+    # Relative observed paths must reach the same decision as absolute ones;
+    # joinPath must not fold the link/.. before the predicate sees it.
+    assertExcluded(a, "inside/link/../missing/deep", false)
+    assertExcluded(a, "outside/link/../missing/deep", true)
+    let relativeRoot = parentWalkAction(root, "inside/link/../missing")
+    check relativeRoot.isOwnOutput(root / "outside" / "missing" / "deep")
+    check not relativeRoot.isOwnOutput(root / "inside" / "missing" / "deep")
+    var relativeEvidence = PathSetEvidence()
+    relativeEvidence.monitorReads.observeAll(relativeEvidence.evidenceProvenance,
+      evcMonitorCapture, [root / "outside" / "missing" / "deep",
+        root / "inside" / "missing" / "deep"])
+    dropScratchEvidence(relativeRoot, relativeEvidence)
+    check relativeEvidence.monitorReads == @[root / "inside" / "missing" / "deep"]
+    let parentCwd = parentWalkAction(root / "inside" / "link" & "/..", "missing")
+    check parentCwd.isOwnOutput(root / "outside" / "missing" / "deep")
+    check not parentCwd.isOwnOutput(root / "inside" / "missing" / "deep")
+    when not defined(windows):
+      # The mandatory prefix can itself resolve to the filesystem root.
+      var filesystemRoot = root
+      for component in root.split('/'):
+        if component.len > 0:
+          filesystemRoot.add("/..")
+      check detectSourceWrites(["/"], [outWalk]).len == 1
+      check detectSourceWrites([filesystemRoot], [outWalk]).len == 1
+
+  test "unresolvable parent prefixes retain inputs and report source writes":
+    let root = createTempDir("repro-containment-unknown-", "")
+    defer: removeDir(root)
+    createDir(root / "inside")
+    writeFile(root / "inside" / "file", "not a directory")
+    when not defined(windows):
+      createSymlink(root / "absent", root / "inside" / "dangling")
+      createSymlink("loop", root / "inside" / "loop")
+    let a = parentWalkAction(root, root / "inside")
+    check resolveExistingTraversal("").status == prsFailed
+    var prefixes = @["absent", "file"]
+    when not defined(windows):
+      prefixes.add(["dangling", "loop"])
+    for prefix in prefixes:
+      let unknown = root / "inside" / prefix & "/../input"
+      checkpoint(prefix)
+      check resolveExistingTraversal(root / "inside" / prefix & "/..").status ==
+        prsFailed
+      assertExcluded(a, unknown, false)
+      # A spelling outside the source root cannot prove the write safe.
+      check detectSourceWrites([root / "elsewhere"], [unknown]).len == 1
+      let b = parentWalkAction(root, unknown)
+      assertExcluded(b, unknown & "/child", false)
+      check detectSourceWrites([unknown], [root / "elsewhere"]).len == 1
+
+  test "content-addressed tool exemptions do not discard escaped observations":
+    let root = createTempDir("repro-containment-tool-", "")
+    defer: removeDir(root)
+    let hadStore = existsEnv("REPRO_STORE_ROOT")
+    let oldStore = getEnv("REPRO_STORE_ROOT")
+    putEnv("REPRO_STORE_ROOT", root)
+    defer:
+      if hadStore: putEnv("REPRO_STORE_ROOT", oldStore)
+      else: delEnv("REPRO_STORE_ROOT")
+    let toolRoot = root / "prefixes" / "tool" / "1-0123456789abcdef"
+    createDir(toolRoot / "bin")
+    createDir(root / "outside" / "dir")
+    directoryLink(root / "outside" / "dir", toolRoot / "link")
+    let a = action("tool-containment", [toolRoot / "bin" / "tool"],
+      cwd = root, governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    require contentAddressedRoot(a.argv[0]) == toolRoot.replace('\\', '/')
+    for suffix in ["link/../input", "absent/../input"]:
+      let path = toolRoot & "/" & suffix
+      var evidence = PathSetEvidence()
+      evidence.monitorReads.observeAll(evidence.evidenceProvenance,
+        evcMonitorCapture, [path])
+      evidence.monitorDirectoryEnumerations.observeAll(evidence.evidenceProvenance,
+        evcMonitorCapture, [path])
+      check a.cacheInputPaths(evidence) == @[path]
+      check a.cacheEnumeratedDirectories(evidence) == @[path]
+    var control = PathSetEvidence()
+    control.monitorReads.observeAll(control.evidenceProvenance,
+      evcMonitorCapture, [toolRoot / "bin" / "tool"])
+    check a.cacheInputPaths(control).len == 0

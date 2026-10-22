@@ -18,6 +18,30 @@ profile "stderrProfile":
     fsUserFile(hostFile = "~/stderr-marker.txt", content = "intent payload")
 """
 
+proc expectedLargeStderr(payloadBytes: int): string =
+  if payloadBytes == 0: "" else: "large:" & repeat('l', payloadBytes) & "\n"
+
+proc runProfileBinaryOnce(binary: string; payloadBytes: int): int =
+  ## Child mode of the fresh-process regression below: run the compiled
+  ## profile once through `runProfileBinary` and verify the capture. The
+  ## result is DESTROYED when this proc returns -- before `quit` -- which is
+  ## the free that used to crash.
+  let res = runProfileBinary(binary)
+  if res.exitCode != 0:
+    echo "profile binary exited ", res.exitCode
+    return 2
+  if res.stderrText != expectedLargeStderr(payloadBytes):
+    echo "stderr capture differs: ", res.stderrText.len, " bytes, wanted ",
+      expectedLargeStderr(payloadBytes).len
+    return 3
+  if parseProfileIntentJson(res.output).name != "stderrProfile":
+    echo "stdout is not the intent"
+    return 4
+  0
+
+if paramCount() == 3 and paramStr(1) == "--run-profile-binary":
+  quit(runProfileBinaryOnce(paramStr(2), parseInt(paramStr(3))))
+
 proc compileIn(root, body: string): tuple[jsonOutput, stderrText: string] =
   let profile = root / "home.nim"
   writeFile(profile, body)
@@ -89,6 +113,54 @@ suite "profile runtime stderr":
       check "runtime stdout detail" in err.stderrText
       check "runtime stderr tail" in err.stderrText
     check failed
+
+  # REGRESSION: the runtime capture must not free memory owned by a thread
+  # that has already exited. Its stderr reader used to build the captured
+  # text in a Nim string on the READER's ORC heap; the reader exited at
+  # `joinThread`, and the caller freed that string when the result was
+  # destroyed, which made Nim's allocator write into the dead thread's
+  # region (`rawDealloc` -> `addToSharedFreeList`). On Windows the region
+  # is thread-local storage the loader releases at thread exit, and the
+  # profile compile died with a SIGSEGV whether or not the profile wrote
+  # anything to stderr.
+  #
+  # EACH RUN IS A FRESH PROCESS. Whether the write into released memory
+  # faults depends on the state of the process heap: in a fresh process
+  # (the shape of the real `repro` helper) it faulted on every run measured
+  # on eli-pc, while the same loop inside this long-lived test process
+  # survived 25 runs on the unfixed code. So the binary is compiled once
+  # and run `FreshProcessRuns` times, each in a child of this test
+  # (`--run-profile-binary`) that captures it once and exits.
+  const FreshProcessRuns = 10
+
+  proc runInFreshProcesses(body: string; payloadBytes: int):
+      seq[tuple[output: string; exitCode: int]] =
+    ## Compile `body` once, then run the binary in `FreshProcessRuns`
+    ## children (`--run-profile-binary`); returns each child's exit code and
+    ## its own diagnostic output.
+    let root = createTempDir("repro-profile-stderr-fresh-", "")
+    defer: removeDir(root)
+    discard compileIn(root, body)
+    for i in 1 .. FreshProcessRuns:
+      let p = startProcess(getAppFilename(), args = @["--run-profile-binary",
+        root / "profile-build", $payloadBytes], options = {poStdErrToStdOut})
+      try:
+        let output = drainStream(p.outputStream)
+        result.add((output: output, exitCode: p.waitForExit()))
+      finally:
+        p.close()
+
+  test "fresh-process runtime captures with an EMPTY stderr":
+    for run in runInFreshProcesses(IntentBody, 0):
+      checkpoint(run.output)
+      check run.exitCode == 0
+
+  test "fresh-process runtime captures with a LARGE stderr":
+    let body = "import std/strutils\n" &
+      "stderr.writeLine(\"large:\" & repeat('l', 262144))\n" & IntentBody
+    for run in runInFreshProcesses(body, 262144):
+      checkpoint(run.output)
+      check run.exitCode == 0
 
   test "helper forwards runtime diagnostics on successful encoding":
     let root = createTempDir("repro-profile-stderr-helper-", "")

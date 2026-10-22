@@ -277,7 +277,15 @@
       # directory it resolved against when the call was made, so a tool that
       # chdir()s (`git -C <repo>`) is no longer keyed on phantom paths under
       # the action's cwd.
-      url = "github:metacraft-labs/io-mon/091fa26ce03d9dd1ca8cfa6a1d9d46624dc50491";
+      # Bumped to 71b4d7c (2026-10-21), io-mon's `agents` tip; 091fa26 is an
+      # ancestor. The Linux shim records a directory enumeration anchored on
+      # the cwd at the time of the opendir, so `git -C <repo>` is no longer
+      # keyed on phantom enumerated directories under the action's cwd.
+      # Bumped to 8a9a71c (2026-10-21), io-mon's `agents` tip; 71b4d7c is an
+      # ancestor. The Linux shim keeps a `..` that follows a symlink as
+      # spelled instead of folding it lexically, so `link/../x` is recorded
+      # beside the link's target, where the kernel resolved it.
+      url = "github:metacraft-labs/io-mon/8a9a71c9cf75898a83c854898860b9e589e2a264";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -421,7 +429,9 @@
       # hops in SIP tool resolution; only ``propagation.nim`` changes.
       # 4f8f7e60 aligns this pin with the workspace's agent landing branch;
       # its additions since ff7eb18 affect Windows hook freezing only.
-      url = "github:metacraft-labs/nim-stackable-hooks/4f8f7e60af74dc94efbff05159d9b3f6084ca5df";
+      # 6082ee94 keeps the graph build aligned with the synced landing branch;
+      # its source change assigns injected Windows roots to the caller's job.
+      url = "github:metacraft-labs/nim-stackable-hooks/6082ee94203a5937d3dffe99e5098f644c4799b2";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -1333,6 +1343,7 @@
               ctTestRunnerSrc = reprobuild-ct-test-runner-src;
               testAdaptersSrc = reprobuild-test-adapters-src;
               runquotaSrc = runquota-src;
+              inherit runquotaTools;
             }).overrideAttrs
               (old: {
                 # `src` and `version` go through overrideAttrs, not through
@@ -1486,6 +1497,8 @@
                 REPRO_TEST_ADAPTERS_SRC|${reprobuild-test-adapters-src}/src
                 REPROBUILD_USE_SYSTEM_HASH_LIBS|1
                 RUNQUOTA_SRC|${runquota-src}
+                RUNQUOTAD_BIN|${runquotaTools}/bin/runquotad
+                RUNQUOTA_BIN|${runquotaTools}/bin/runquota
                 SQLITE_PREFIX|${pkgs.sqlite.out}
                 XXHASH_PREFIX|${pkgs.xxHash}
                 CLINGO_PREFIX|${pkgs.clingo}
@@ -2011,7 +2024,13 @@
                   # Same as the flake's own call: the pinned nixpkgs spells it
                   # `xxHash`. Not a source argument.
                   xxhash = pkgs.xxHash;
+                  # Construct the snapshot with its own published runtime. The
+                  # main package above uses this tree's newer RunQuota input.
+                  runquotaTools = snapshotRunquotaTools;
                 };
+                snapshotRunquotaTools =
+                  (builtins.getFlake "github:metacraft-labs/runquota/${(lockedOf "runquota-src").rev}")
+                  .packages.${system}.default;
                 # argument -> the flake input passed for it (see the
                 # `callPackage` calls of package.nix and nim-fork.nix above).
                 packageArgs = {
@@ -2210,6 +2229,9 @@
               inherit (pkgs) lib;
               homeManager = inputs.nixos-modules.inputs.home-manager-unstable;
               root = ./.;
+            };
+            packaged-runquota-runtime-wrapper = pkgs.callPackage ./nix/tests-runquota-runtime-wrapper.nix {
+              inherit reprobuild runquotaTools;
             };
             repo-requirements =
               pkgs.runCommand "reprobuild-repo-requirements" { nativeBuildInputs = [ pkgs.just ]; }

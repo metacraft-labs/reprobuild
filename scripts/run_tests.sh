@@ -53,6 +53,53 @@ test_tmp_root="${test_tmp_parent%/}/${test_tmp_slot}"
 rm -rf "${test_tmp_root}"
 mkdir -p "${test_tmp_root}"
 export TMPDIR="${test_tmp_root}" TMP="${test_tmp_root}" TEMP="${test_tmp_root}"
+# Fence the invoking user's real home against home-resource drivers. Between
+# b9d193fee and 8d8418a1e the m71 and m83 home-apply tests wrote PATH blocks
+# into the real ~/.bashrc of every host that ran this suite, and passed
+# (reprobuild-pm issue 2026-10-20-home-apply-tests-wrote-path-blocks-into-
+# the-real-users-bashrc.md). With REPRO_TEST_HOME_FENCE set, any driver write
+# inside these homes raises (libs/repro_home_resources test_home_fence.nim),
+# except under the suite scratch and this checkout. Both normally live inside
+# the home: the scratch is allowed through TMPDIR and REPRO_TEST_HOME_FENCE_ALLOW,
+# and the checkout because many home-apply tests keep their fixture homes under
+# build/test-tmp. Neither holds the user's own dotfiles. Both $HOME and the
+# passwd home are fenced: code that resolves the home from the account rather
+# than from $HOME must be caught as well. A fence the caller set is kept.
+# The lists are read by Nim with its PathSep (';' on Windows), and under
+# Git Bash / MSYS the paths must be native ones, hence fence_path.
+fence_sep=":"
+fence_path() { printf '%s' "$1"; }
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*)
+    fence_sep=";"
+    if command -v cygpath >/dev/null 2>&1; then
+      fence_path() { cygpath -w "$1"; }
+    fi
+    ;;
+esac
+if [[ -z "${REPRO_TEST_HOME_FENCE:-}" ]]; then
+  fence_homes=""
+  [[ -n "${HOME:-}" ]] && fence_homes="$(fence_path "${HOME}")"
+  account_home=""
+  if command -v getent >/dev/null 2>&1; then
+    account_home="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f6 || true)"
+  elif [[ "$(uname -s)" == "Darwin" ]] && command -v dscl >/dev/null 2>&1; then
+    account_home="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null |
+      awk '{print $2}' || true)"
+  fi
+  if [[ -n "${account_home}" ]]; then
+    account_home="$(fence_path "${account_home}")"
+    if [[ "${account_home}" != "${fence_homes}" ]]; then
+      fence_homes="${fence_homes:+${fence_homes}${fence_sep}}${account_home}"
+    fi
+  fi
+  if [[ -n "${fence_homes}" ]]; then
+    export REPRO_TEST_HOME_FENCE="${fence_homes}"
+  fi
+fi
+REPRO_TEST_HOME_FENCE_ALLOW="$(fence_path "${test_tmp_parent}")${fence_sep}$(fence_path "${repo_root}")${REPRO_TEST_HOME_FENCE_ALLOW:+${fence_sep}${REPRO_TEST_HOME_FENCE_ALLOW}}"
+export REPRO_TEST_HOME_FENCE_ALLOW
+echo "run_tests.sh: home fence REPRO_TEST_HOME_FENCE=${REPRO_TEST_HOME_FENCE:-<none>}"
 # Print the mapping: a numeric slot is not self-describing, and a developer
 # looking for a run's scratch should not have to re-derive the checksum.
 echo "run_tests.sh: scratch TMPDIR=${test_tmp_root} (checkout ${repo_root})"

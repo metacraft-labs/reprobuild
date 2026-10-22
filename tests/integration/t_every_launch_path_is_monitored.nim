@@ -869,7 +869,8 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                   "acquireCliArgs", "helperCliArgs"],
       inert: @["toRunQuotaRequest", "grantHeartbeatMs", "grantUnresponsiveMs",
                "grantBoundedReadMs", "reportGrantHeartbeat", "awaitGrantLoop",
-               "isRunQuotaDaemonReachable", "processId", "pollCompletion",
+               "isRunQuotaDaemonReachable", "processId", "leaseId",
+               "pollCompletion",
                "finishCompleted", "cancelAndWait", "openRunQuotaSession",
                "close", "maxOfferBatchSize", "pollRunQuotaGrants",
                "cancelQueued", "defaultRunQuotaWindowsPipePath",
@@ -1022,7 +1023,11 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # 0, 1 and 2 and nothing else — by marking the engine's other descriptors
     # close-on-exec across io-mon's spawn and saving the stdio copies
     # close-on-exec from birth. ``fcntl`` changes a descriptor flag and
-    # starts nothing; the other four are constants.
+    # starts nothing; the other four are constants. The marking has since
+    # moved to ``repro_core/descriptor_inheritance`` (shared with the CLI's
+    # spawn of the ``runquotad`` an invocation owns), which starts nothing
+    # either, so the engine's own import is down to ``fcntl`` and
+    # ``F_DUPFD_CLOEXEC`` and the allowlist below with it.
     CapabilitySurface(key: "posix", audit: caImportAllowlist,
       sourceRels: @["posix/posix.nim"],
       spawning: @[],
@@ -1031,8 +1036,8 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
       # (Dev-Env-Warm-Entry.md §3). Metadata reads; none can start a child.
       inert: @["kill", "setpgid", "umask", "dup2", "close", "fcntl", "lstat"],
       allowedSymbols: @["Pid", "SIGKILL", "SIGTERM", "kill", "setpgid",
-                        "Mode", "umask", "dup2", "close", "fcntl", "F_GETFD",
-                        "F_SETFD", "FD_CLOEXEC", "F_DUPFD_CLOEXEC",
+                        "Mode", "umask", "dup2", "close", "fcntl",
+                        "F_DUPFD_CLOEXEC",
                         "Stat", "lstat", "S_ISDIR", "S_ISLNK", "S_ISSOCK"]),
     CapabilitySurface(key: "winlean", audit: caImportAllowlist,
       sourceRels: @["windows/winlean.nim"],

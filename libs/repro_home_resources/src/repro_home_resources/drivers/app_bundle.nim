@@ -49,6 +49,8 @@
 import std/[algorithm, os, osproc, strutils, streams]
 from repro_core/ambient_execution import uncontrolledStartProcess
 
+import ./../test_home_fence
+
 const
   CodesignExe* = "/usr/bin/codesign"
   SpctlExe* = "/usr/sbin/spctl"
@@ -784,6 +786,7 @@ proc stageAppBundle*(source, applicationsDir, bundleName: string;
   ## only when every one verified, so a refusal of any bundle changes none
   ## (rollback does this). Each bundle has its own staging directory, so
   ## several can be staged into one Applications directory at once.
+  enforceTestHomeFence(applicationsDir / bundleName, "app.bundle stage")
   if bundleName.len == 0 or '/' in bundleName or bundleName == "." or
       bundleName == ".." or bundleName.startsWith("."):
     invalidPlacement(applicationsDir / bundleName,
@@ -912,6 +915,7 @@ proc placeAppBundle*(source, applicationsDir, bundleName: string;
 proc removeAppBundle*(targetPath: string) =
   ## Remove a bundle Reprobuild placed. The caller has established
   ## ownership (the recorded binding's digest matches what is there).
+  enforceTestHomeFence(targetPath, "app.bundle remove")
   try:
     removeTree(targetPath)
   except OSError as err:

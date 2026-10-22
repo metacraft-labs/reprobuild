@@ -16,16 +16,18 @@ when defined(windows):
     MAXIMUM_WAIT_OBJECTS, WOHandleArray, openProcess, closeHandle,
     waitForMultipleObjects
 elif defined(posix):
-  # ``Mode`` / ``umask`` / ``dup2`` / ``close`` / ``fcntl`` and the four
-  # descriptor-flag constants are the In-Process-Monitor-Hosting HM-4 spawn
-  # context and nothing else. io-mon spawns with ``poParentStreams``, so a
-  # monitored child inherits THIS process's descriptors — 0, 1 and 2, and any
+  # ``Mode`` / ``umask`` / ``dup2`` / ``close`` / ``fcntl`` and
+  # ``F_DUPFD_CLOEXEC`` are the In-Process-Monitor-Hosting HM-4 spawn context
+  # and nothing else (marking the other descriptors close-on-exec across the
+  # spawn lives in ``repro_core/descriptor_inheritance``, shared with the
+  # CLI). io-mon spawns with ``poParentStreams``, so a monitored child
+  # inherits THIS process's descriptors — 0, 1 and 2, and any
   # other one not marked close-on-exec — and the canonical 0022 file-creation
   # mask used to arrive through the ``/bin/sh -c 'umask 022 && …'`` wrapper
   # the monitor CLI ran under. All of it is re-established across the spawn
   # instead — see ``beginMonitorSpawnContext``. None of them starts a child.
   from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid, Mode, umask,
-    dup2, close, fcntl, F_GETFD, F_SETFD, FD_CLOEXEC, F_DUPFD_CLOEXEC
+    dup2, close, fcntl, F_DUPFD_CLOEXEC
   # Endpoint ownership for Dev-Env-Warm-Entry.md §3 (`endpointRootOwned`).
   # Metadata reads only; nothing here starts a child.
   from std/posix import Stat, lstat, S_ISDIR, S_ISLNK, S_ISSOCK
@@ -103,6 +105,7 @@ else:
 
 import repro_core
 import repro_core/relocation
+from repro_core/path_identity import resolveExistingTraversal, prsResolved
 # Nix GC roots for the store paths working-tree outputs name; see the ledger
 # note in `runBuild`.
 import repro_core/nix_store_roots
@@ -114,6 +117,12 @@ from repro_core/process_streams import drainStream
 # child it starts — converters, RunQuota helpers — is released through
 # ``closeProcessOnce``. See ``repro_core/process_close``.
 from repro_core/process_close import closeProcessOnce
+# Every descriptor above 2 close-on-exec across io-mon's in-process spawn
+# (``beginMonitorSpawnContext``). Shared with ``repro_cli_support``, which
+# applies the same rule around the ``runquotad`` an invocation owns.
+when defined(posix):
+  from repro_core/descriptor_inheritance import
+    markInheritableDescriptorsCloseOnExec, restoreInheritableDescriptors
 import repro_depfile
 import repro_hash
 import repro_local_store
@@ -145,6 +154,11 @@ import repro_build_engine/action_extension
 # the scheduler. Read its header before changing anything here that touches
 # ``depTempPath`` / ``depDestPath``.
 import repro_build_engine/monitor_flush
+# A withheld action-cache publish and the class that withheld it, as ONE value
+# whose only writer takes the class as an argument. It is a module of its own
+# because a private field is writable from anywhere in its declaring module, so
+# declared here it would seal nothing. Read its header before adding a refusal.
+import repro_build_engine/cache_refusal
 # Engine-Threadpool TP-1/TP-2: the flush above is one TENANT of the engine's
 # worker pool, not a thread of its own, and TP-2's monitor finish is the
 # second. The flush's tenancy is entirely inside ``monitor_flush``, so the
@@ -505,6 +519,19 @@ type
       ## Refused (the action fails) when a scratch directory is or contains
       ## the action's cwd, a declared input or a declared output: emptying it
       ## would destroy what the action reads or makes.
+    removeBeforeRun*: seq[string]
+      ## Declared outputs the engine REMOVES before the action runs, for a
+      ## tool that refuses to write over an existing output: create-dmg's
+      ## final ``hdiutil convert -o <dmg>`` fails ``File exists``, so a
+      ## ``create_dmg`` edge re-run after any input change failed because
+      ## the previous run had succeeded. Opt-in per action -- declared by the
+      ## typed tool (``cli: removeBeforeRun <flag>``) or by ``buildAction``
+      ## -- because most tools overwrite in place and gain nothing from it.
+      ##
+      ## Removal never follows a link (a symlink there is unlinked, its
+      ## target left alone) and touches only the action's own outputs: an
+      ## entry that is not exactly one of ``outputs`` / ``declaredOutputs``
+      ## is refused and the action fails (``removeBeforeRunProblem``).
     fixedOutput*: bool
       ## Cache-Scope P3.4 — a FIXED-OUTPUT action (BuildXL's download pip,
       ## Nix's fixed-output derivation): its outputs are determined by
@@ -1431,7 +1458,7 @@ type
     ## It is harmless on the GUARD'S POLARITY, which is the only thing that
     ## matters here. The five terms in `applyMonitorEvidenceStatus` are
     ## joined by `and`, and the conjunction being TRUE is the REFUSAL — it
-    ## adds `zeroEvidenceDiagnostic`, sets `disableCacheHits` and
+    ## adds `zeroEvidenceDiagnostic` and refuses the publish with
     ## `cirEmptyEvidence`. An empty channel makes its term TRUE, i.e. pushes
     ## toward refusing the publish; a FILLED one makes its term FALSE and
     ## short-circuits the refusal. No term anywhere reads emptiness as
@@ -1665,33 +1692,6 @@ type
     mesUnknownScopeLoss    ## Level 2
     mesMonitorUnavailable  ## Level 3
 
-  CacheIneligibilityReason = enum
-    cirUnblessedEntropy = "unblessed-entropy"
-    cirEntropyUnobservable = "entropy-unobservable"
-    cirEntropyObservabilityUnknown = "entropy-observability-unknown"
-    cirEmptyEvidence = "empty-evidence"
-    cirMonitorLoss = "monitor-loss"
-    cirMonitorFlushFailed = "monitor-flush-failed"
-    cirMissingDependencyReport = "missing-dependency-report"
-      ## A cacheable edge declared a recognized dependency report (a
-      ## depfile) and produced none of the paths it declared, so it
-      ## contributed no evidence at all. See the aggregate guard in
-      ## ``collectEvidence``.
-    cirEmptyKeyedInputSet = "empty-keyed-input-set"
-      ## The edge DID observe something, and the engine's own subtractions
-      ## — ``toolInputRoots`` and ``ignoredInputRoots`` — removed all of it,
-      ## so the record would have been keyed on the weak fingerprint alone.
-      ## Distinct from ``cirEmptyEvidence``, which is the monitor having
-      ## seen nothing: the remedies differ (the elision, or the edge wanting
-      ## ``cacheable = false``) and so must the class. See
-      ## ``gradeKeyedInputSet`` and ``emptyKeyedInputSetDiagnostic``.
-      ##
-      ## APPEND NEW MEMBERS HERE. Nothing persists this enum — the set is a
-      ## module-private diagnostic field whose only escape is ``$reason`` in
-      ## ``traceCacheIneligibility`` — but ordinal order IS the order those
-      ## strings are joined in, which several tests pin, so an insertion
-      ## reshuffles reported text for no gain.
-
   MonitorEvidenceRequirement* = object
     ## WHAT THIS BUILD NEEDS A CAPTURE TO HAVE OBSERVED BEFORE IT WILL TRUST IT
     ## — the consumer side of DA-1i and DA-1j, in one object so a fold site
@@ -1748,31 +1748,32 @@ type
   EvidenceCollection = object
     evidence: PathSetEvidence
     publishable: bool
-    disableCacheHits: bool
-      ## Withhold this action's cache publication without failing the action.
-      ## ``CacheIneligibilityReason`` enumerates every cause — read that enum
-      ## rather than a list here, which had already gone stale (it omitted
-      ## ``cirMissingDependencyReport``). Only ``monitorStatus`` governs
-      ## session-wide loss invalidation; known-scope loss uses
+    cacheRefusal: CacheRefusal
+      ## Whether this action's cache publication is withheld WITHOUT failing
+      ## the action, and which classes withheld it — one value, not two.
+      ## ``CacheIneligibilityReason`` enumerates every cause; read that enum
+      ## rather than a list here, which had already gone stale once (it
+      ## omitted ``cirMissingDependencyReport``). Only ``monitorStatus``
+      ## governs session-wide loss invalidation; known-scope loss uses
       ## ``invalidatedPaths`` instead.
       ##
-      ## SET THIS AND ``cacheIneligibilityReasons`` TOGETHER, always. The two
-      ## are not independent: this flag decides, that set says which class
-      ## decided, and a site that sets only this one reaches an operator as
-      ## ``reasons=unspecified`` and is invisible to any per-class count.
-    cacheIneligibilityReasons: set[CacheIneligibilityReason]
-      ## Diagnostic, with ONE exception that this comment used to deny and
-      ## that a reader must not be surprised by: ``determinismProbeAdmits``
-      ## gates on ``!= {cirUnblessedEntropy}``, because a probe that compares
-      ## output bytes can answer a determinism question and cannot answer a
-      ## question about what was SEEN. That is an exact-set comparison, so it
-      ## is only as truthful as this set is COMPLETE — a site that refuses
-      ## without recording its class does not merely go uncounted, it tells
-      ## the probe that entropy was the sole refusal and buys a publish the
-      ## other refusal had already denied. ``gradeKeyedInputSet`` did exactly
-      ## that; the case is in
-      ## ``t_zero_evidence_edge_is_not_cacheable``. Nothing else reads this
-      ## set but ``traceCacheIneligibility``.
+      ## WRITE IT ONLY THROUGH ``refuseCachePublication``, which takes the
+      ## reason as an argument; read it through ``disableCacheHits`` and
+      ## ``cacheIneligibilityReasons``. This used to be a ``disableCacheHits``
+      ## flag beside a reason set, paired by a comment, and the comment failed
+      ## at ``gradeKeyedInputSet``: it refused without naming a class.
+      ##
+      ## That was not merely uncounted. ``determinismProbeAdmits`` gates on
+      ## ``cacheIneligibilityReasons != {cirUnblessedEntropy}`` — a probe
+      ## that compares output bytes can answer a determinism question and
+      ## cannot answer a question about what was SEEN — and an exact-set
+      ## comparison is only as truthful as the set is COMPLETE. A refusal
+      ## with no class told the probe that entropy was the sole refusal and
+      ## bought a publish the other refusal had already denied; the case is
+      ## in ``t_zero_evidence_edge_is_not_cacheable``. ``CacheRefusal``
+      ## derives "refused" from a non-empty reason set and keeps that set
+      ## private to its own module, so "refused with no reason" cannot be
+      ## constructed here at all — see ``cache_refusal.nim``.
       ##
       ## Never persisted — see the note on ``CacheIneligibilityReason``.
     invalidatedPaths: HashSet[string]
@@ -2419,6 +2420,31 @@ const
     dgRecognizedFormatValidatedByMonitor,
     dgPostBuildConverterValidatedByMonitor
   }
+
+# ``EvidenceCollection.cacheRefusal``'s three faces. The two readers keep the
+# names the fields had, so every reader in this file — the scheduler's publish
+# gates, ``traceCacheIneligibility``, ``determinismProbeAdmits`` — reads exactly
+# what it read before. The writer is the change: there is no other way to set
+# ``disableCacheHits``, and it cannot be called without a reason.
+
+func disableCacheHits(c: EvidenceCollection): bool {.inline.} =
+  ## True iff some class withheld this action's cache publication. Derived
+  ## from ``cacheIneligibilityReasons`` being non-empty, never stored.
+  c.cacheRefusal.refused
+
+func cacheIneligibilityReasons(c: EvidenceCollection):
+    set[CacheIneligibilityReason] {.inline.} =
+  ## Every class that withheld the publication; empty iff
+  ## ``disableCacheHits`` is false.
+  c.cacheRefusal.reasons
+
+proc refuseCachePublication(c: var EvidenceCollection;
+                            reason: CacheIneligibilityReason) {.inline.} =
+  ## Withhold this action's cache publication — the action still succeeds —
+  ## and record ``reason`` as a class that withheld it. The ONLY way to make
+  ## ``disableCacheHits`` true. Cumulative: a second refusal adds its class,
+  ## which ``determinismProbeAdmits``'s exact-set gate depends on.
+  c.cacheRefusal.refuse(reason)
 
 proc applyCachePlatformTag*(idy: CacheEntryIdentity; tag: string):
     CacheEntryIdentity =
@@ -3449,11 +3475,15 @@ proc traceCacheIneligibility(result: var BuildRunResult; actionId: string;
   ## and `test_m6_entropy_blessing`, and widening it there would move a
   ## string three suites compare byte-for-byte while adding nothing those
   ## suites are about.
+  ##
+  ## Every caller guards on `collection.disableCacheHits`, and that is true
+  ## exactly when the reason set is non-empty (`cache_refusal.nim`), so the
+  ## list below always names at least one class. There used to be an
+  ## `"unspecified"` placeholder for an empty set; it rendered a state that
+  ## can no longer be constructed, and has gone with it.
   var reasons: seq[string] = @[]
   for reason in collection.cacheIneligibilityReasons:
     reasons.add($reason)
-  if reasons.len == 0:
-    reasons.add("unspecified")
   # Keep the existing event for actual loss, not every cache refusal.
   let event =
     if cirMonitorLoss in collection.cacheIneligibilityReasons:
@@ -3525,13 +3555,85 @@ proc writeRootsOverlap(a, b: string): bool =
     return b.startsWith(a & "/")
   return a.startsWith(b & "/")
 
+proc lastParentComponent(path: string): int =
+  ## End offset of the last parent component, without folding its prefix.
+  result = -1
+  if ".." notin path:
+    return
+  var start = 0
+  for stop in 0 .. path.len:
+    if stop == path.len or path[stop] == '/':
+      if path[start ..< stop] == "..":
+        result = stop
+      start = stop + 1
+
+proc existingContainmentPath(path: string): string =
+  let resolved = resolveExistingTraversal(path)
+  if resolved.status != prsResolved:
+    raise newException(OSError, resolved.reason)
+  resolved.path
+
+proc containmentLocation(path: string; parentEnd: int): Option[string] =
+  ## A parent walk must be resolved by the filesystem THROUGH the last `..`.
+  ## The remaining suffix may be absent (a probe, removal or new output), so
+  ## it is appended without requiring the final object to exist. Failure to
+  ## resolve that mandatory prefix is unknown, never lexical containment.
+  if parentEnd >= 0:
+    try:
+      return some(normalizeWriteRoot(os.normalizedPath(
+        existingContainmentPath(path[0 ..< parentEnd]) & path.substr(parentEnd))))
+    except CatchableError:
+      return none(string)
+  # Resolve the other side too: `/var` and `/private/var`, or a declared
+  # symlink root, must compare in the same namespace as the resolved walk.
+  var ancestor = normalizeWriteRoot(path)
+  var suffix = ""
+  while ancestor.len > 0:
+    try:
+      return some(normalizeWriteRoot(os.normalizedPath(
+        existingContainmentPath(ancestor) & suffix)))
+    except CatchableError:
+      let slash = ancestor.rfind('/')
+      if slash < 0 or ancestor == "/":
+        return none(string)
+      suffix = ancestor.substr(slash) & suffix
+      ancestor = if slash == 0: "/" else: ancestor[0 ..< slash]
+  none(string)
+
+proc recordedPathUnderRoot(path, root: string; unresolved = false): bool =
+  ## Keep ordinary monitor spellings cheap. Only parent walks need physical
+  ## resolution. Callers choose the conservative answer for unknown walks:
+  ## exclusions retain inputs; source-write enforcement reports the write.
+  if path.len == 0 or root.len == 0:
+    return false
+  var key = path.replace('\\', '/')
+  var rootKey = root.replace('\\', '/')
+  let parentEnd = lastParentComponent(key)
+  let rootParentEnd = lastParentComponent(rootKey)
+  if parentEnd >= 0 or rootParentEnd >= 0:
+    # A relative policy root has no action cwd here. Preserve its inert
+    # relationship to absolute observations rather than resolving it against
+    # the engine's unrelated cwd. Action-owned roots are materialized first.
+    if key.isAbsolute != rootKey.isAbsolute:
+      return unresolved
+    let physical = containmentLocation(key, parentEnd)
+    let physicalRoot = containmentLocation(rootKey, rootParentEnd)
+    if physical.isNone or physicalRoot.isNone:
+      return unresolved
+    key = physical.get()
+    rootKey = physicalRoot.get()
+    when defined(windows):
+      key = key.toLowerAscii()
+      rootKey = rootKey.toLowerAscii()
+    if rootKey == "/":
+      return key.startsWith("/")
+  key == rootKey or key.startsWith(rootKey & "/")
+
 proc pathAtOrUnderRoot(path, root: string): bool =
   ## Directional containment predicate for R6: ``path`` must be equal
   ## to ``root`` or be a descendant of it. A write to a parent of the
   ## read-only root is not a source write.
-  if path.len == 0 or root.len == 0:
-    return false
-  path == root or path.startsWith(root & "/")
+  recordedPathUnderRoot(path, root, unresolved = true)
 
 proc detectSourceWrites*(readOnlyRoots, monitorWrites: openArray[string]):
     seq[tuple[write: string; root: string]] =
@@ -4468,6 +4570,17 @@ proc materialPath(root, path: string): string =
     path
   else:
     root / path
+
+proc materialContainmentPath(root, path: string): string =
+  ## `joinPath` folds relative parent walks before the filesystem sees them.
+  ## Recorded paths and containment roots must retain that traversal.
+  if path.isAbsolute or root.len == 0:
+    path
+  elif lastParentComponent(path.replace('\\', '/')) < 0 and
+      lastParentComponent(root.replace('\\', '/')) < 0:
+    materialPath(root, path)
+  else:
+    root & "/" & path
 
 proc selfConsumedDeclaredPaths*(action: BuildAction): seq[string] =
   ## S5 — the materialized paths this action declares as BOTH an input and
@@ -8000,8 +8113,7 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
       "§General Rules (ambiguous correctness failures fail " &
       "closed).")
     collection.evidence.diagnostics.add(text)
-    collection.disableCacheHits = true
-    collection.cacheIneligibilityReasons.incl(cirUnblessedEntropy)
+    collection.refuseCachePublication(cirUnblessedEntropy)
     return
   if collection.evidence.entropyObservability != entObserved:
     collection.evidence.diagnostics.add(
@@ -8016,8 +8128,7 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
       "randomness was consumed. Rule: Failure-Semantics.md " &
       "§General Rules (ambiguous correctness failures fail " &
       "closed).")
-    collection.disableCacheHits = true
-    collection.cacheIneligibilityReasons.incl(
+    collection.refuseCachePublication(
       if collection.evidence.entropyObservability == entNotObserved:
         cirEntropyUnobservable
       else:
@@ -8170,8 +8281,8 @@ proc depfileObservedNothing(col: EvidenceCollection): bool {.inline.} =
   ##
   ## WHICH POLARITY THAT IS, AND WHAT GRADES IT. The caller is the
   ## zero-evidence guard in `applyMonitorEvidenceStatus`, the only one, and
-  ## `true` there is a REFUSAL: it adds `zeroEvidenceDiagnostic`, sets
-  ## `disableCacheHits` and `cirEmptyEvidence`, so the action succeeds and
+  ## `true` there is a REFUSAL: it adds `zeroEvidenceDiagnostic` and
+  ## refuses the publish with `cirEmptyEvidence`, so the action succeeds and
   ## does not publish. `false` lets the publish through. For an UNMARKED
   ## writer this returns `true` — the refusal — which is the fail-closed
   ## answer; the absence spelling (`evcDeclarationDerivedDepfile in …`) would
@@ -8314,8 +8425,7 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
         col.depfileObservedNothing():
       col.evidence.diagnostics.add(
         zeroEvidenceDiagnostic(action.id, MonitorHasLibraryLoadFloor))
-      col.disableCacheHits = true
-      col.cacheIneligibilityReasons.incl(cirEmptyEvidence)
+      col.refuseCachePublication(cirEmptyEvidence)
   of mesKnownScopeLoss:
     # M9.R.73.2 — spec Level 1 narrow path-set invalidation per
     # ``reprobuild-specs/Monitor-Loss-Path-Invalidation.md``. The
@@ -8350,8 +8460,7 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
       "action-cache publish skipped this session per " &
       "Failure-Semantics.md §Monitoring Failures")
     if action.cacheable:
-      col.disableCacheHits = true
-      col.cacheIneligibilityReasons.incl(cirMonitorLoss)
+      col.refuseCachePublication(cirMonitorLoss)
   of mesMonitorUnavailable:
     # Unreachable from foldMonitorDepFileEvidence today (Level 3 is
     # asserted here only when the iomon path was empty), but future
@@ -8535,15 +8644,15 @@ proc gradeKeyedInputSet(action: BuildAction; col: var EvidenceCollection) =
     return
   col.evidence.diagnostics.add(
     emptyKeyedInputSetDiagnostic(action.id, observed, observed))
-  col.disableCacheHits = true
-  # The MACHINE-READABLE half of the same refusal. The diagnostic above is
-  # for a human reading one build; this is what a per-class count reads, and
-  # a refusal that records no reason is not "uncounted" but INVISIBLE — it
-  # cannot appear as a row, a zero, or a regression. Every other
-  # ``disableCacheHits`` site in this file names its class; this one did not,
-  # and reached an operator as ``reasons=unspecified`` via the defensive
-  # fallback in ``traceCacheIneligibility``.
-  col.cacheIneligibilityReasons.incl(cirEmptyKeyedInputSet)
+  # The reason is the MACHINE-READABLE half of the same refusal. The
+  # diagnostic above is for a human reading one build; the class is what a
+  # per-class count and ``determinismProbeAdmits``'s exact-set gate read, and
+  # a refusal that records no class is not "uncounted" but INVISIBLE — and,
+  # beside an entropy refusal, it reads to the probe as "entropy alone" and
+  # buys a publish. This site once set the flag and omitted the class; that
+  # can no longer be written, because the reason is an argument of the only
+  # way to refuse (``refuseCachePublication``; see ``cache_refusal.nim``).
+  col.refuseCachePublication(cirEmptyKeyedInputSet)
 
 proc scratchKey(path: string): string =
   ## Normalized for containment: forward slashes, no trailing separator,
@@ -8554,14 +8663,60 @@ proc scratchKey(path: string): string =
   when defined(windows):
     result = result.toLowerAscii()
 
+proc isOwnOutput*(action: BuildAction; path: string): bool =
+  ## `path` is, or lies inside, one of the action's own outputs -- what it
+  ## PRODUCES. BuildXL: a pip's accesses to its own outputs are not inputs.
+  ## An action that writes its declared output directory observes it while
+  ## doing so (`cp` probes the tree it is filling, `mkdir -p` each parent
+  ## below it), and the portable lookup can never answer such an entry: on
+  ## any host, before the action runs, its own outputs are by definition
+  ## not there to be identified. Left in, they made gemini-cli's bundle
+  ## step unresolvable everywhere (1701 entries of 8408).
+  ##
+  ## For the PORTABLE record and the determinism probe only. The local key
+  ## keeps its narrower exact-path rule (`selfWrittenOutputKeys`).
+  var key = withoutExtendedLengthPrefix(
+    materialContainmentPath(action.cwd, path)).replace('\\', '/')
+  when defined(windows):
+    key = key.toLowerAscii()
+  # `outputs` plus `declaredOutputs`, as `portablePhysicalOutputsOf`
+  # (defined further down) names them.
+  for output in action.outputs & action.declaredOutputs:
+    var root = materialContainmentPath(action.cwd, output).replace('\\', '/')
+    while root.len > 1 and root.endsWith("/"):
+      root.setLen(root.len - 1)
+    when defined(windows):
+      root = root.toLowerAscii()
+    if recordedPathUnderRoot(key, root):
+      return true
+    when defined(windows):
+      # The absent .exe/.lnk compatibility probe is still an observation:
+      # an unresolvable parent walk cannot acquire this exemption either.
+      let parentEnd = lastParentComponent(key)
+      let rootParentEnd = lastParentComponent(root)
+      if (parentEnd >= 0 or rootParentEnd >= 0) and
+          (containmentLocation(key, parentEnd).isNone or
+           containmentLocation(root, rootParentEnd).isNone):
+        continue
+      # MSYS/Cygwin resolve a path that is missing by trying `<path>.exe`
+      # and `<path>.lnk`: gemini-cli's bundle step, `rm -rf dist`, probed
+      # `dist.exe` only on a cold run, when its own `dist` was not there
+      # yet. While such a sibling does not exist, probing it is resolving
+      # the action's own output. One that exists stays an input: the
+      # runtime would have used it.
+      if root.len > 0 and (key == root & ".exe" or key == root & ".lnk") and
+          not fileExists(extendedPath(path)) and
+          not dirExists(extendedPath(path)):
+        return true
+
 proc scratchRoots*(action: BuildAction): seq[string] =
   for dir in action.scratchDirs:
     if dir.len > 0:
-      result.add(scratchKey(materialPath(action.cwd, dir)))
+      result.add(scratchKey(materialContainmentPath(action.cwd, dir)))
 
 proc isUnderScratch(key: string; roots: openArray[string]): bool =
   for root in roots:
-    if key == root or key.startsWith(root & "/"):
+    if recordedPathUnderRoot(key, root):
       return true
 
 proc dropScratchEvidence*(action: BuildAction; evidence: var PathSetEvidence) =
@@ -8577,7 +8732,7 @@ proc dropScratchEvidence*(action: BuildAction; evidence: var PathSetEvidence) =
     ## `dropObserved` keeps the entries it does not drop, in place.
     var drop = initHashSet[string]()
     for path in channel:
-      if isUnderScratch(scratchKey(path), roots):
+      if isUnderScratch(scratchKey(materialContainmentPath(action.cwd, path)), roots):
         drop.incl(path)
     channel.dropObserved(drop)
   keep(evidence.monitorReads)
@@ -8652,6 +8807,28 @@ proc removeTreeNoFollow(path: string) =
   else:
     removeDir(path)
 
+proc removePathNoFollow(path: string) =
+  ## Removes whatever is at `path` WITHOUT FOLLOWING A LINK: a symlink (or,
+  ## on Windows, a directory link or junction) is unlinked and its target is
+  ## left alone, a regular file is deleted, a real directory is removed with
+  ## `removeTreeNoFollow`. A missing path is not an error.
+  if symlinkExists(path):
+    when defined(windows):
+      # A directory link is removed as a directory, never as a file -- and
+      # never by recursing into it, which is what `removeDir` would do.
+      if dirExists(path):
+        if scratchRemoveDirectoryW(newWideCString(path)) == 0:
+          raiseOSError(osLastError(), path)
+        return
+    removeFile(path)
+  elif dirExists(path):
+    removeTreeNoFollow(path)
+  elif fileExists(path):
+    when defined(windows):
+      discard scratchSetFileAttributesW(newWideCString(path),
+        DWORD(0x80))   # FILE_ATTRIBUTE_NORMAL: clears read-only
+    removeFile(path)
+
 proc ensureOutputParents*(action: BuildAction) =
   ## Creates the parent directory of each of the action's outputs and
   ## declared outputs before it runs (ninja and BuildXL do the same). What
@@ -8687,6 +8864,44 @@ proc ensureOutputParents*(action: BuildAction) =
       createDir(extendedPath(parent))
     except CatchableError:
       discard
+
+proc removeBeforeRunProblem*(action: BuildAction): string =
+  ## Why removing the action's ``removeBeforeRun`` paths would be unsafe, or
+  ## "". Each must be exactly one of the action's declared outputs -- not a
+  ## parent of one, not an input -- so the removal can only ever destroy
+  ## what this action is about to make again.
+  var owned: seq[string] = @[]
+  for output in action.outputs & action.declaredOutputs:
+    if output.len > 0:
+      owned.add(scratchKey(materialPath(action.cwd, output)))
+  for path in action.removeBeforeRun:
+    if path.len == 0:
+      continue
+    let key = scratchKey(materialPath(action.cwd, path))
+    if key notin owned:
+      return "'" & path & "' is listed to be removed before the action " &
+        "runs, but it is not a declared output of the action"
+    if key.count('/') < 2:
+      return "'" & path & "' is too close to a filesystem root to remove " &
+        "before the action runs"
+  ""
+
+proc removeOutputsBeforeRun*(action: BuildAction): string =
+  ## Removes the action's ``removeBeforeRun`` outputs before it runs, without
+  ## following links; returns why it could not, or "". A missing output is
+  ## not an error -- a first run has nothing to remove.
+  let problem = action.removeBeforeRunProblem()
+  if problem.len > 0:
+    return problem
+  for path in action.removeBeforeRun:
+    if path.len == 0:
+      continue
+    try:
+      removePathNoFollow(extendedPath(materialPath(action.cwd, path)))
+    except CatchableError as err:
+      return "cannot remove output '" & path & "' before the action runs: " &
+        err.msg
+  ""
 
 proc resetScratchDirs*(action: BuildAction): string =
   ## Empties the action's scratch directories before it runs; returns why it
@@ -9008,8 +9223,7 @@ proc collectEvidence(action: BuildAction; strict: bool;
         "published. Either make the command write that file or move the " &
         "edge off the depfile policy. Spec: " &
         "Compiles-Are-Normal-Edges.md.")
-      result.disableCacheHits = true
-      result.cacheIneligibilityReasons.incl(cirMissingDependencyReport)
+      result.refuseCachePublication(cirMissingDependencyReport)
   let converters = action.converterSpecsForPolicy()
   if action.dependencyPolicy.kind in ConverterPolicyKinds and converters.len == 0:
     result.evidence.diagnostics.add(
@@ -9325,6 +9539,12 @@ proc canonicalPolicyPath(path: string): string =
   ## gate materializes them against the action's cwd before calling this.
   if not path.isAbsolute:
     return normalizeWriteRoot(path)
+  let parentEnd = lastParentComponent(path.replace('\\', '/'))
+  if parentEnd >= 0:
+    let physical = containmentLocation(path.replace('\\', '/'), parentEnd)
+    # Leave an unknown parent walk intact, so the containment predicate
+    # retains the input rather than recovering an ancestor above the walk.
+    return if physical.isSome: physical.get() else: normalizeWriteRoot(path)
   var ancestor = normalizeWriteRoot(path)
   var suffix: seq[string] = @[]
   while ancestor.len > 0:
@@ -9393,7 +9613,10 @@ proc ignoredInputRoots(action: BuildAction): seq[string] =
     if not expanded.isAbsolute:
       continue
     try:
-      let resolved = expandFilename(expanded)
+      let resolved =
+        if lastParentComponent(expanded.replace('\\', '/')) >= 0:
+          canonicalPolicyPath(expanded)
+        else: expandFilename(expanded)
       if resolved.len > 0 and resolved != expanded:
         result.add(resolved)
     except CatchableError:
@@ -9435,14 +9658,17 @@ proc declaredWriteRootPrefixes(action: BuildAction): seq[string] =
   ## derived from a `/tmp/...` declaration would never fire.
   for root in action.declaredOutputs:
     let expanded = normalizeWriteRoot(
-      materialPath(action.cwd, action.expandPolicyPath(root)))
+      materialContainmentPath(action.cwd, action.expandPolicyPath(root)))
     if expanded.len == 0:
       continue
     result.add(expanded)
     if not expanded.isAbsolute:
       continue
     try:
-      let resolved = normalizeWriteRoot(expandFilename(expanded))
+      let resolved = normalizeWriteRoot(
+        if lastParentComponent(expanded.replace('\\', '/')) >= 0:
+          canonicalPolicyPath(expanded)
+        else: expandFilename(expanded))
       if resolved.len > 0 and resolved != expanded:
         result.add(resolved)
     except CatchableError:
@@ -9657,10 +9883,8 @@ proc isOutputAncestorObservation(ancestors: HashSet[string];
   ancestors.len > 0 and normalizeWriteRoot(key) in ancestors
 
 proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
-  let normalized = path.replace('\\', '/')
   for root in roots:
-    let normalizedRoot = root.replace('\\', '/')
-    if normalized == normalizedRoot or normalized.startsWith(normalizedRoot & "/"):
+    if recordedPathUnderRoot(path, root):
       return true
 
 proc isUnderCanonicalPolicyRoot(path: string; roots: openArray[string]): bool =
@@ -10403,11 +10627,11 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   # construction downstream is order-sensitive.
   var seen = initHashSet[string]()
   for input in evidence.declaredInputs:
-    let path = materialPath(action.cwd, input)
+    let path = materialContainmentPath(action.cwd, input)
     declaredMaterialized.incl(path.replace('\\', '/'))
     result.addUnique(seen, path)
   for input in evidence.depfileInputs:
-    let path = materialPath(action.cwd, input)
+    let path = materialContainmentPath(action.cwd, input)
     let key = path.replace('\\', '/')
     if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
@@ -10420,7 +10644,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
       continue
     result.addUnique(seen, path)
   for input in evidence.monitorReads:
-    let path = materialPath(action.cwd, input)
+    let path = materialContainmentPath(action.cwd, input)
     let key = path.replace('\\', '/')
     if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
@@ -10433,7 +10657,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
       continue
     result.addUnique(seen, path)
   for probe in evidence.monitorProbes:
-    let path = materialPath(action.cwd, probe)
+    let path = materialContainmentPath(action.cwd, probe)
     let key = path.replace('\\', '/')
     if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
       continue
@@ -10811,10 +11035,10 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
   var declaredMaterialized = initHashSet[string]()
   for input in evidence.declaredInputs:
     declaredMaterialized.incl(
-      materialPath(action.cwd, input).replace('\\', '/'))
+      materialContainmentPath(action.cwd, input).replace('\\', '/'))
   var seen = initHashSet[string]()
   for dir in evidence.monitorDirectoryEnumerations:
-    let path = materialPath(action.cwd, dir)
+    let path = materialContainmentPath(action.cwd, dir)
     if declaredMaterialized.contains(path.replace('\\', '/')):
       result.addUnique(seen, path)
       continue
@@ -14667,38 +14891,6 @@ when defined(posix):
     madeCloseOnExec: seq[cint]
     active: bool
 
-  proc markInheritableDescriptorsCloseOnExec(): seq[cint] =
-    ## Every descriptor above 2 that THIS process holds without
-    ## ``FD_CLOEXEC`` is given it, and the ones changed are returned so
-    ## ``endMonitorSpawnContext`` can put them back exactly as they were.
-    ##
-    ## Only the flag moves; no descriptor is closed, so nothing the engine
-    ## itself is using changes under it. The descriptor table is ENUMERATED
-    ## (``/proc/self/fd`` on Linux, ``/dev/fd`` elsewhere) rather than
-    ## scanned numerically, for the reason ``runquota_process.nim`` gives: a
-    ## loop bounded by ``RLIMIT_NOFILE`` is a million ``fcntl`` calls on hosts
-    ## that raise it. A descriptor that vanishes between the listing and the
-    ## ``fcntl`` (the listing's own directory handle, for one) fails the
-    ## ``F_GETFD`` and is skipped.
-    let listing = when defined(linux): "/proc/self/fd" else: "/dev/fd"
-    var candidates: seq[cint] = @[]
-    try:
-      for kind, path in walkDir(listing, relative = true):
-        try:
-          let fd = parseInt(path)
-          if fd > 2:
-            candidates.add(cint(fd))
-        except ValueError:
-          discard
-    except OSError:
-      return
-    for fd in candidates:
-      let flags = fcntl(fd, F_GETFD)
-      if flags < 0 or (flags and FD_CLOEXEC) != 0:
-        continue
-      if fcntl(fd, F_SETFD, flags or FD_CLOEXEC) == 0:
-        result.add(fd)
-
   proc beginMonitorSpawnContext(outPath, errPath: string): MonitorSpawnContext =
     ## Re-establish, across io-mon's spawn, the three things the retired
     ## ``/bin/sh -c 'umask 022 && <repro> internal io monitor …'`` wrapper and
@@ -14808,10 +15000,7 @@ when defined(posix):
     if not ctx.active:
       return
     ctx.active = false
-    for fd in ctx.madeCloseOnExec:
-      let flags = fcntl(fd, F_GETFD)
-      if flags >= 0:
-        discard fcntl(fd, F_SETFD, flags and not FD_CLOEXEC)
+    restoreInheritableDescriptors(ctx.madeCloseOnExec)
     discard umask(ctx.savedMask)
     flushFile(stdout)
     flushFile(stderr)
@@ -15190,6 +15379,41 @@ proc abandonMonitorHost(pool: var MonitorHostPool; slot: int) =
     except CatchableError:
       discard
   releaseMonitorHostSlot(pool, slot)
+
+proc teardownIdentities(item: RunningAction; pool: MonitorHostPool): string =
+  ## The lease and process identities a teardown step for ``item`` is about to
+  ## resolve, as a parenthesised suffix for its failure text -- `` (lease 12,
+  ## child pid 345)`` -- or "" when the kind holds none. When the step fails,
+  ## these are what it left unresolved, and RunQuota-Protocol-And-Client-
+  ## Libraries.md, "Ownership Across a Batched Client Launch", requires the
+  ## failure to disclose them rather than only the error. Read BEFORE the step
+  ## runs: ``releaseMonitorHostSlot`` resets the record it would be read from.
+  var parts: seq[string]
+  case item.processKind
+  of rpkInlineRunQuotaPending:
+    parts.add("lease " & $item.queuedRunQuotaProcess.leaseId())
+  of rpkInlineRunQuota:
+    parts.add("lease " & $item.runQuotaProcess.leaseId())
+    let pid = item.runQuotaProcess.processId()
+    if pid > 0: parts.add("child pid " & $pid)
+  of rpkInlineRunQuotaFailed:
+    discard
+  of rpkMonitorHost:
+    let slot = item.monitorSlot
+    if slot >= 0 and slot < pool.records.len and pool.records[slot].rootPid > 0:
+      parts.add("monitored root pid " & $pool.records[slot].rootPid)
+  of rpkBypassProcess:
+    let pid = item.directProcess.processId()
+    if pid > 0: parts.add("child pid " & $pid)
+  of rpkHelperProcess:
+    if not item.process.isNil:
+      let pid = processID(item.process)
+      if pid > 0: parts.add("helper pid " & $pid)
+    when defined(posix):
+      if item.processGroupPid > 0:
+        parts.add("process group " & $item.processGroupPid)
+  if parts.len > 0:
+    result = " (" & parts.join(", ") & ")"
 
 proc startBypassRunQuotaProcess(action: BuildAction;
                                 config: BuildEngineConfig):
@@ -15708,13 +15932,6 @@ proc copyFileReplacingBusyDestination(source, destination: string) =
     # sweep above collects it on the next build.
     discard tryRemoveFile(extendedPath(displaced))
 
-proc removeExistingPath(path: string) =
-  let expanded = extendedPath(path)
-  if symlinkExists(expanded) or fileExists(expanded):
-    removeFile(expanded)
-  elif dirExists(expanded):
-    removeDir(expanded)
-
 proc pathWithinRoot(path, root: string): tuple[inside: bool; relative: string] =
   let relative = relativePath(os.normalizedPath(path), os.normalizedPath(root))
   if relative == ".":
@@ -15760,6 +15977,104 @@ proc parsePreserveTreeEntry(entry: string): PreserveTreeEntry =
       relative: fields[1],
       target: fields[2])
   PreserveTreeEntry(kind: ptekFile, relative: normalized)
+
+# ---------------------------------------------------------------------------
+# preserveTree over a previous output tree.
+#
+# The output root is a CONTAINER directory output (Incremental-Invalidation,
+# "Non-regular outputs"): the action owns the entries it mirrors -- this run's
+# and, through the manifest, the previous run's -- and other writers may put
+# entries of their own beside them. So a re-run cannot assume the tree holds
+# what it wrote last time, and it must never WRITE THROUGH what it finds: a
+# symlink an earlier run mirrored, or one another writer left, at an ancestor
+# of an entry would send the copy into the link's target. That is how the
+# CodeTracer dmg staging walked into `/nix/store` and failed with `Permission
+# denied` over a tree the user could not delete. The helpers below are the
+# only way the executor touches the tree: every path component strictly
+# inside the output root on an entry's path is made a real directory (a link
+# there is unlinked, never followed), and nothing is removed through a
+# component that is not one.
+# ---------------------------------------------------------------------------
+
+proc preserveTreeEntryParts(relative: string): seq[string] =
+  ## The components of an entry's path below the output root. Refuses an
+  ## absolute path or one that climbs out with `..`: the DSL never encodes
+  ## one, and an entry the executor resolved outside the root would be a
+  ## write to a path the action does not own.
+  let normalized = relative.replace('\\', '/')
+  if normalized.startsWith("/") or normalized.isAbsolute:
+    raiseEngine("preserveTree entry lies outside the output root: " & relative)
+  for part in normalized.split('/'):
+    if part.len == 0 or part == ".":
+      continue
+    if part == "..":
+      raiseEngine("preserveTree entry lies outside the output root: " &
+        relative)
+    result.add(part)
+  if result.len == 0:
+    raiseEngine("preserveTree entry names the output root itself: " &
+      relative)
+
+proc preserveTreeJoin(root: string; parts: openArray[string]): string =
+  result = root
+  for part in parts:
+    result = result / part
+
+proc ensureRealDirectory(path: string) =
+  ## Makes `path` a real directory. A symlink there (to a directory or not)
+  ## is unlinked, never followed, and a regular file is removed; an existing
+  ## real directory is kept with its contents.
+  let expanded = extendedPath(path)
+  if symlinkExists(expanded) or
+      (fileExists(expanded) and not dirExists(expanded)):
+    removePathNoFollow(expanded)
+  if not dirExists(expanded):
+    createDir(expanded)
+
+proc preparePreserveTreeDestination(outputRoot: string;
+                                    parts: openArray[string];
+                                    keepRegularFile: bool): string =
+  ## Readies the path of one entry for writing and returns it: every
+  ## ancestor strictly inside `outputRoot` becomes a real directory, and
+  ## whatever occupies the destination itself -- a symlink, or a directory
+  ## where a file or link goes -- is removed without following links.
+  ## `outputRoot` itself must already be a real directory.
+  ##
+  ## `keepRegularFile` leaves a regular file at the destination for the copy
+  ## to replace: `copyFileReplacingBusyDestination` replaces one that a live
+  ## process still has mapped on Windows by renaming it aside, which an
+  ## unlink here would refuse first.
+  var current = outputRoot
+  for i in 0 ..< parts.len - 1:
+    current = current / parts[i]
+    ensureRealDirectory(current)
+  result = current / parts[^1]
+  let expanded = extendedPath(result)
+  if keepRegularFile and not symlinkExists(expanded) and
+      not dirExists(expanded):
+    return
+  removePathNoFollow(expanded)
+
+proc removeStalePreserveTreeEntry(outputRoot: string;
+                                  parts: openArray[string]) =
+  ## Removes an entry the previous run mirrored and this one does not.
+  ##
+  ## Only through real directories: when an ancestor of the stale path is a
+  ## symlink, or is missing or a file, the stale entry is not in the tree any
+  ## more, and the path would resolve to somewhere this action does not own
+  ## (the case that used to delete a CURRENT entry through a link the same
+  ## run had just created). And only a file or a symlink: a real directory
+  ## at the path now holds entries this action did not put there, so it is
+  ## left alone -- container semantics.
+  var current = outputRoot
+  for i in 0 ..< parts.len - 1:
+    current = current / parts[i]
+    let expanded = extendedPath(current)
+    if symlinkExists(expanded) or not dirExists(expanded):
+      return
+  let stale = extendedPath(current / parts[^1])
+  if symlinkExists(stale) or (fileExists(stale) and not dirExists(stale)):
+    removePathNoFollow(stale)
 
 type
   NixDaemonCandidate* = object
@@ -16287,6 +16602,69 @@ when not defined(windows):
      response: exchange.response, attempts: exchange.attempts,
      diagnostic: exchange.diagnostic)
 
+proc ensureSnippetContent(content, openSentinel, closeSentinel, openSearch,
+                          closeSearch, snippet: string): string =
+  ## The bytes ``ensureSnippet`` wants the file holding ``content`` to hold.
+  ## A result equal to ``content`` means "already up to date, do not write".
+  ##
+  ## The file is often TRACKED (``nimRepropathsConfig`` targets a project's
+  ## ``config.nims``), so every byte outside the sentinel block -- each line
+  ## terminator, the presence or absence of a final one, the count of trailing
+  ## blank lines -- is copied through verbatim, never re-joined from split
+  ## lines. Re-joining is what used to add one "\n" per build: ``splitLines``
+  ## yields a trailing "" for a file ending in "\n", and the rejoin appended
+  ## another terminator after it. It also rewrote CRLF files to LF.
+  ##
+  ## Lines are recognised as ``splitLines`` does (``\r\n``, ``\n`` or a lone
+  ## ``\r``). The block's own lines, and any terminator added when appending
+  ## it, use CRLF when the file's first terminator is CRLF and LF otherwise,
+  ## so a CRLF checkout (e.g. Windows with ``core.autocrlf``) stays CRLF.
+  var eol = "\n"
+  let firstBreak = content.find({'\r', '\n'})
+  if firstBreak >= 0 and content.continuesWith("\r\n", firstBreak):
+    eol = "\r\n"
+  let newBlock =
+    if eol == "\n": openSentinel & "\n" & snippet & "\n" & closeSentinel
+    else: (openSentinel & "\n" & snippet & "\n" & closeSentinel).
+      replace("\r\n", "\n").replace("\n", eol)
+  # Byte offsets of the block: from the start of the (last) open-sentinel
+  # line before the first close-sentinel line, to the end of that close line's
+  # text -- its terminator is outside the block and therefore preserved.
+  var blockStart = -1
+  var blockEnd = -1
+  var lineStart = 0
+  var lastLineStart = 0
+  while lineStart <= content.len:
+    var lineEnd = lineStart
+    while lineEnd < content.len and content[lineEnd] notin {'\r', '\n'}:
+      inc lineEnd
+    let line = content[lineStart ..< lineEnd].strip()
+    if line.startsWith(openSearch):
+      blockStart = lineStart
+    elif line.startsWith(closeSearch) and blockStart != -1:
+      blockEnd = lineEnd
+      break
+    lastLineStart = lineStart
+    if lineEnd >= content.len:
+      break
+    lineStart = lineEnd + 1
+    if content[lineEnd] == '\r' and lineStart < content.len and
+        content[lineStart] == '\n':
+      inc lineStart
+  if blockStart != -1 and blockEnd != -1:
+    return content[0 ..< blockStart] & newBlock & content[blockEnd .. ^1]
+  # Absent block: append it after one blank line. These are byte-for-byte the
+  # bytes the action has always appended to an LF file, so a file that
+  # already received the block is not touched again by this rewrite: one
+  # terminator closes an unterminated non-blank last line, one more makes the
+  # blank separator, and the block ends with a terminator.
+  result = content
+  if content[lastLineStart .. ^1].strip().len > 0:
+    result.add(eol)
+  result.add(eol)
+  result.add(newBlock)
+  result.add(eol)
+
 proc executeBuiltinAction*(action: BuildAction): ActionResult =
   result = ActionResult(
     id: action.id,
@@ -16376,29 +16754,10 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
       var content = ""
       if fileExists(destExt):
         content = readFile(destExt)
-      let newBlock = openSentinel & "\n" & snippet & "\n" & closeSentinel
-      var startIdx = -1
-      var endIdx = -1
-      let linesList = content.splitLines()
-      for i, l in linesList:
-        if l.strip().startsWith(openSearch):
-          startIdx = i
-        elif l.strip().startsWith(closeSearch) and startIdx != -1:
-          endIdx = i
-          break
-      var newLinesList: seq[string] = @[]
-      if startIdx != -1 and endIdx != -1:
-        for i in 0 ..< startIdx:
-          newLinesList.add(linesList[i])
-        newLinesList.add(newBlock)
-        for i in (endIdx + 1) ..< linesList.len:
-          newLinesList.add(linesList[i])
-      else:
-        newLinesList = linesList
-        if newLinesList.len > 0 and newLinesList[^1].strip().len > 0:
-          newLinesList.add("")
-        newLinesList.add(newBlock)
-      let newContent = newLinesList.join("\n") & "\n"
+      let newContent = ensureSnippetContent(content, openSentinel,
+        closeSentinel, openSearch, closeSearch, snippet)
+      # Write only on a real change: an up-to-date tracked file keeps its
+      # bytes and its mtime.
       if content != newContent:
         createDir(destExt.splitPath.head)
         prepareBuiltinFileOutput(destination)
@@ -16420,25 +16779,44 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
       let roots = builtinRoots(action.builtinText)
       let sourceRoot = action.builtinPath(roots.sourceRoot)
       let outputRoot = action.builtinPath(roots.outputRoot)
-      createDir(extendedPath(outputRoot))
+      # See "preserveTree over a previous output tree" above for why every
+      # write below goes through those helpers.
+      var entries: seq[tuple[entry: PreserveTreeEntry; parts: seq[string]]] = @[]
       var expected = initHashSet[string]()
       var currentEntries: seq[string] = @[]
       for rawEntry in action.builtinEntries:
         let entry = parsePreserveTreeEntry(rawEntry)
-        let relative = entry.relative
-        if relative.len == 0:
+        if entry.relative.len == 0:
           continue
-        expected.incl(relative)
-        currentEntries.add(relative)
-        let source = sourceRoot / relative
-        let destination = outputRoot / relative
-        createDir(extendedPath(destination.splitPath.head))
+        entries.add((entry: entry,
+          parts: preserveTreeEntryParts(entry.relative)))
+        expected.incl(entry.relative)
+        currentEntries.add(entry.relative)
+      ensureRealDirectory(outputRoot)
+      # The previous run's entries this run does not mirror go FIRST. Removed
+      # after the copy, a stale path can resolve through a link this run has
+      # just created and delete a current entry, or remove the link this run
+      # has just replaced with a directory.
+      let manifestPath = preserveTreeManifestPath(action)
+      for previous in readManifestEntries(manifestPath):
+        if expected.contains(previous):
+          continue
+        var parts: seq[string] = @[]
+        try:
+          parts = preserveTreeEntryParts(previous)
+        except BuildEngineError:
+          continue   # never written by this executor; nothing of ours there
+        removeStalePreserveTreeEntry(outputRoot, parts)
+      for item in entries:
+        let entry = item.entry
+        let source = preserveTreeJoin(sourceRoot, item.parts)
         case entry.kind
         of ptekFile:
           if not fileExists(extendedPath(source)):
             raiseEngine("preserveTree source file disappeared before execution: " &
               source)
-          prepareBuiltinFileOutput(destination)
+          let destination = preparePreserveTreeDestination(outputRoot,
+            item.parts, keepRegularFile = true)
           # Preserve source mode bits (notably the exec bit) — see the
           # bakCopyFile note above; preserveTree mirrors arbitrary trees that
           # may contain executables. It mirrors DLLs too, and unlike bakCopyFile
@@ -16449,16 +16827,11 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
           if not symlinkExists(extendedPath(source)):
             raiseEngine("preserveTree source symlink disappeared before execution: " &
               source)
+          let destination = preparePreserveTreeDestination(outputRoot,
+            item.parts, keepRegularFile = false)
           let currentTarget = copiedSymlinkTarget(sourceRoot, outputRoot, source,
             destination, entry.target)
-          removeExistingPath(destination)
           createSymlink(currentTarget, extendedPath(destination))
-      let manifestPath = preserveTreeManifestPath(action)
-      for previous in readManifestEntries(manifestPath):
-        if not expected.contains(previous):
-          let stale = outputRoot / previous
-          if symlinkExists(extendedPath(stale)) or fileExists(extendedPath(stale)):
-            removeFile(extendedPath(stale))
       currentEntries.sort(system.cmp[string])
       writeManifestEntries(manifestPath, currentEntries)
     of bakWorkspaceVcs:
@@ -16599,10 +16972,16 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         if provisioner != "nix":
           raiseEngine("Unsupported provisioner: " & provisioner)
         
+        # The helper refuses a missing or relative ``workspaceRoot``: it is
+        # shared, runs from ``/``, and has no directory of its own to
+        # resolve one against. A relative (or empty) ``cwd`` means what it
+        # means for every other edge here (``builtinPath``): relative to
+        # this process, so the root is made absolute here, where that is
+        # still known.
         let req = %*{
           "action": "resolve",
           "selector": selector,
-          "workspaceRoot": action.cwd
+          "workspaceRoot": absolutePath(action.cwd)
         }
         # An edge MAY carry a JSON object in ``builtinText``
         # (``repro_tool_profiles``' ``nixToolProvisioningEdges``) naming
@@ -16623,7 +17002,8 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         # for a build run from the reprobuild tree): a tool edge's ``cwd``,
         # its tool store, is no place to look for one, and before the edge
         # existed tool resolution resolved it from the project directory.
-        var helperRoot = action.cwd
+        var helperRoot =
+          if action.cwd.len > 0: absolutePath(action.cwd) else: ""
         if action.builtinText.len > 0:
           let spec =
             try: parseJson(action.builtinText)
@@ -16635,8 +17015,8 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
               "a JSON object: " & action.id)
           let workspaceRoot = spec{"workspaceRoot"}.getStr()
           if workspaceRoot.len > 0:
-            req["workspaceRoot"] = %workspaceRoot
-            helperRoot = workspaceRoot
+            helperRoot = absolutePath(workspaceRoot)
+            req["workspaceRoot"] = %helperRoot
           let expressionFile = spec{"expressionFile"}.getStr()
           if expressionFile.len > 0:
             req["expressionFile"] = %expressionFile
@@ -17675,43 +18055,6 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## `portableRoots` plus the launch machinery, untracked.
     config.portableRoots & launchMachineryRoots()
 
-  proc isOwnOutput(action: BuildAction; path: string): bool =
-    ## `path` is, or lies inside, one of the action's own outputs -- what it
-    ## PRODUCES. BuildXL: a pip's accesses to its own outputs are not inputs.
-    ## An action that writes its declared output directory observes it while
-    ## doing so (`cp` probes the tree it is filling, `mkdir -p` each parent
-    ## below it), and the portable lookup can never answer such an entry: on
-    ## any host, before the action runs, its own outputs are by definition
-    ## not there to be identified. Left in, they made gemini-cli's bundle
-    ## step unresolvable everywhere (1701 entries of 8408).
-    ##
-    ## For the PORTABLE record and the determinism probe only. The local key
-    ## keeps its narrower exact-path rule (`selfWrittenOutputKeys`).
-    var key = withoutExtendedLengthPrefix(path).replace('\\', '/')
-    when defined(windows):
-      key = key.toLowerAscii()
-    # `outputs` plus `declaredOutputs`, as `portablePhysicalOutputsOf`
-    # (defined further down) names them.
-    for output in action.outputs & action.declaredOutputs:
-      var root = materialPath(action.cwd, output).replace('\\', '/')
-      while root.len > 1 and root.endsWith("/"):
-        root.setLen(root.len - 1)
-      when defined(windows):
-        root = root.toLowerAscii()
-      if root.len > 0 and (key == root or key.startsWith(root & "/")):
-        return true
-      when defined(windows):
-        # MSYS/Cygwin resolve a path that is missing by trying `<path>.exe`
-        # and `<path>.lnk`: gemini-cli's bundle step, `rm -rf dist`, probed
-        # `dist.exe` only on a cold run, when its own `dist` was not there
-        # yet. While such a sibling does not exist, probing it is resolving
-        # the action's own output. One that exists stays an input: the
-        # runtime would have used it.
-        if root.len > 0 and (key == root & ".exe" or key == root & ".lnk") and
-            not fileExists(extendedPath(path)) and
-            not dirExists(extendedPath(path)):
-          return true
-
   # The graph view of a directory above build outputs (BuildXL's graph
   # file-system view). Such a directory's listing on disk says which OTHER
   # actions have run in this checkout: gemini-cli's bundle step lists
@@ -18121,6 +18464,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       outputs.add("declaredOutput=" & materialPath(action.cwd, output))
     for dir in action.scratchDirs:
       outputs.add("scratch=" & materialPath(action.cwd, dir))
+    for path in action.removeBeforeRun:
+      outputs.add("removeBeforeRun=" & materialPath(action.cwd, path))
     outputs.sort()
     result.add(outputs)
     # Passthrough is keyed by NAME (BuildXL): the value is the host's, but
@@ -18879,7 +19224,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # "disable cache hits for the affected session" language: all subsequent
   # cache lookups are treated as ``cdMiss``. It gates LOOKUPS and nothing
   # else; the Level 2 action's own publish is withheld separately, by
-  # ``EvidenceCollection.disableCacheHits``. It was called
+  # ``EvidenceCollection.cacheRefusal`` (``disableCacheHits``). It was called
   # ``sessionCachePublishDisabled``, which named the one thing it does not
   # do. Level 1 does NOT set this bit — its narrow
   # ``sessionInvalidatedPaths`` accumulator is the whole story.
@@ -20041,10 +20386,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # The normal cache lookup below fingerprints declared and monitored
         # inputs after dependencies settle, so changed outputs still miss while
         # byte-identical producer reruns leave consumers reusable.
+        #
+        # Each arm of this chain up to `elif action.cacheable` decides the
+        # miss BEFORE any lookup, and a cacheable action records why in
+        # `cacheMissReason` as well as in `reason`. `completeSuccess`
+        # overwrites `reason` with the settle detail once the action launches
+        # (see `recordCacheLookupFacts`), so without it the build report and
+        # `--log=actions` showed a launched miss with no explanation: the
+        # interface extraction re-running for every copy of a recipe on a
+        # `nix-store-references-missing` refusal was invisible that way.
         if config.forceRebuild:
           runResult.results[idToIndex.resultIndex(id)].cacheDecision =
             if action.cacheable: cdMiss else: cdNotCacheable
           runResult.results[idToIndex.resultIndex(id)].reason = "force-rebuild"
+          if action.cacheable:
+            runResult.results[idToIndex.resultIndex(id)].cacheMissReason =
+              "force-rebuild"
           runResult.trace(id, "cache-skipped", "force-rebuild")
         elif config.rebuildSelectorInvalidates(action):
           # `Edge-Determinism-And-Soft-Rebuild.md` §4.1–§4.3. The shape
@@ -20065,6 +20422,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if action.cacheable: cdMiss else: cdNotCacheable
           let reason = config.rebuildClass.flagSpelling & " " &
             $action.determinismClass
+          if action.cacheable:
+            runResult.results[idToIndex.resultIndex(id)].cacheMissReason =
+              reason
           runResult.results[idToIndex.resultIndex(id)].reason = reason
           runResult.trace(id, "cache-skipped", reason)
           cacheInvalidatedByPolicy = true
@@ -20081,6 +20441,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             else: "monitor-loss-narrow-invalidation"
           runResult.trace(id, "cache-skipped",
             runResult.results[idToIndex.resultIndex(id)].reason)
+          runResult.results[idToIndex.resultIndex(id)].cacheMissReason =
+            runResult.results[idToIndex.resultIndex(id)].reason
           # And it must set this, for the same reason
           # ``rebuildSelectorInvalidates`` above does: without it the
           # "outputs are present, call it up to date" shortcut further
@@ -20108,6 +20470,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           runResult.results[idToIndex.resultIndex(id)].cacheDecision =
             if action.cacheable: cdMiss else: cdNotCacheable
           runResult.results[idToIndex.resultIndex(id)].reason = reason
+          if action.cacheable:
+            runResult.results[idToIndex.resultIndex(id)].cacheMissReason =
+              reason
           runResult.trace(id, "cache-skipped", reason)
           cacheInvalidatedByPolicy = true
         elif action.cacheable:
@@ -20633,6 +20998,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runResult.results[idx].status = asFailed
             runResult.results[idx].stderr = scratchProblem
             runResult.trace(id, "failed", scratchProblem)
+            blockClosure(id, id)
+            emitProgress(bpkActionCompleted, id)
+            completed = terminalCount()
+            launchedAny = true
+            continue
+        if action.removeBeforeRun.len > 0:
+          let removeProblem = action.removeOutputsBeforeRun()
+          if removeProblem.len > 0:
+            statuses[id] = asFailed
+            let idx = idToIndex.resultIndex(id)
+            runResult.results[idx].status = asFailed
+            runResult.results[idx].stderr = removeProblem
+            runResult.trace(id, "failed", removeProblem)
             blockClosure(id, id)
             emitProgress(bpkActionCompleted, id)
             completed = terminalCount()
@@ -21332,8 +21710,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           if outcome.error.len == 0: continue
           monitorFlushFailures[outcome.actionId] = outcome.error
         if monitorFlushFailures.hasKey(finished.id):
-          evidence.disableCacheHits = true
-          evidence.cacheIneligibilityReasons.incl(cirMonitorFlushFailed)
+          evidence.refuseCachePublication(cirMonitorFlushFailed)
           evidence.evidence.diagnostics.add(
             "monitor depfile flush failed; action-cache publish skipped so " &
             "the next build re-executes: " & monitorFlushFailures[finished.id])
@@ -21435,6 +21812,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var teardownFailures: seq[string]
     var firstTeardownError: ref CatchableError = nil
     for item in running.mitems:
+      let identities = teardownIdentities(item, monitorHosts)
       try:
         case item.processKind
         of rpkInlineRunQuotaPending:
@@ -21459,7 +21837,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           closeProcessOnce(item.process)
       except CatchableError as err:
         if firstTeardownError.isNil: firstTeardownError = err
-        teardownFailures.add("stopping action " & item.id & ": " & err.msg)
+        # Name what this step left unresolved -- the lease and the process
+        # it could not establish as completed or released -- not only why.
+        teardownFailures.add("stopping action " & item.id & identities &
+          ": " & err.msg)
     if inlineRunQuotaSessionOpen:
       emitActionExtensionRows(inlineRunQuotaSession, runResult, actionsById)
       # The daemon refuses to close a session that still owns leases, and
@@ -21545,4 +21926,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   finishChildCpuStat()
   finishMetadataCacheStats(fileMetadataCache)
   runResult.stats = stats
-  result = runResult
+  # MOVED, not assigned. ``runResult`` is captured by the closures above, so
+  # the compiler cannot treat this last use as a move by itself, and a plain
+  # assignment deep-copies every ``ActionResult`` and every evidence path in
+  # it. For a cold ``.#test-builds`` that was gigabytes, allocated after
+  # every build had finished. Nothing reads ``runResult`` after this line:
+  # the ``finally`` above has drained the engine pool, so no closure can run.
+  result = move(runResult)

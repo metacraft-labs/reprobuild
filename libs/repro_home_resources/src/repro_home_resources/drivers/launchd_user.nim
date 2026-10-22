@@ -33,6 +33,7 @@ when defined(macosx):
 
 import ./../errors
 import ./../manifest_record
+import ./../test_home_fence
 import ./../types
 
 # ---------------------------------------------------------------------------
@@ -174,6 +175,7 @@ proc applyLaunchAgent*(homeDir, label, plistContent: string;
   ## the macosx guard.
   when defined(macosx):
     let path = agentPlistPath(homeDir, label)
+    enforceTestHomeFence(path, "launchd.userAgent apply")
     createDir(extendedPath(parentDir(path)))
     writeFile(extendedPath(path), plistContent)
     let uid = currentUid()
@@ -203,6 +205,7 @@ proc destroyLaunchAgent*(homeDir, label: string) =
   ## `launchctl bootout gui/<uid>/<label>`, then remove the plist.
   when defined(macosx):
     let path = agentPlistPath(homeDir, label)
+    enforceTestHomeFence(path, "launchd.userAgent destroy")
     # `gui/<uid>/<label>` is `quoteShell`'d as one argument
     # (layer 2; the label is validated at layer 1).
     discard execCmd("launchctl bootout " &

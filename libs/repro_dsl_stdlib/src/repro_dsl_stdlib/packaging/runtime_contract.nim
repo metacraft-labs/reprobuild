@@ -1961,6 +1961,10 @@ proc publicEntryPoints*(tree: StagedTree): seq[StagedFile] =
 # ---------------------------------------------------------------------------
 
 const
+  ReprobuildNixRuntimeToolVariables* = ["RUNQUOTAD_BIN", "RUNQUOTA_BIN"]
+    ## Nix packages retain the matching RunQuota runtime package in their
+    ## closure and default to its exact executables. Native distributions
+    ## do not bundle these tools, so they must not emit dangling defaults.
   ReprobuildWrapperVariables* = [
     "REPROBUILD_RUNTIME_LIBRARY_PATH",
     "REPROBUILD_SOURCE_ROOT",

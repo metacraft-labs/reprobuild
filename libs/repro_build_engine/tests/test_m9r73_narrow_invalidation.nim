@@ -13,9 +13,9 @@
 ##     skipped. Non-intersecting lookups are served normally.
 ##   Level 2 (unmonitored subtree, out-of-tree content, ambiguous
 ##     fragment, duplicate identity token, corrupt fragment,
-##     unauthenticated breakaway report, unknown detail) — set
-##     ``EvidenceCollection.disableCacheHits`` to skip THIS action's
-##     publish, and flip a session-wide flag that forces ALL
+##     unauthenticated breakaway report, unknown detail) — refuse THIS
+##     action's publish (``EvidenceCollection.cacheRefusal``, read as
+##     ``disableCacheHits``), and flip a session-wide flag that forces ALL
 ##     downstream cache lookups to miss.
 ##   Level 3 (iomon path empty or decode error) — fail closed.
 ##

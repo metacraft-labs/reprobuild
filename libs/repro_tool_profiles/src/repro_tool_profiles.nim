@@ -2258,11 +2258,24 @@ proc systemToolEnv(): StringTableRef =
   ## has: `/usr/bin/curl: libc.so.6: version 'GLIBC_2.38' not found (required by
   ## …/openssl-3.6.1/lib/libssl.so.3)`. A system tool must use its own system
   ## libraries; scrub the overrides so it does. `repro`'s own env is untouched.
+  ##
+  ## The list is every variable through which a caller can make the loader
+  ## put something into, or say something about, a child it did not build:
+  ## the search paths (`LD_LIBRARY_PATH`, both `DYLD_*_LIBRARY_PATH`s), the
+  ## injected objects (`LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`) and
+  ## the loader's own tracing (`LD_DEBUG`, `LD_DEBUG_OUTPUT`). Tracing is not
+  ## harmless here: `downloadUrlToFile` captures the child's stderr into its
+  ## error, so an inherited `LD_DEBUG` would bury the one line that matters
+  ## under the loader's trace, and `LD_DEBUG_OUTPUT` would have a host tool
+  ## write files wherever the caller pointed it. PATH is deliberately KEPT:
+  ## this is the class-2 PATH-only tier and PATH is how it finds tools at all.
   result = newStringTable(modeCaseSensitive)
   for k, v in envPairs():
     result[k] = v
-  for override in ["LD_LIBRARY_PATH", "LD_PRELOAD",
-                   "DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES"]:
+  for override in ["LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT",
+                   "LD_DEBUG", "LD_DEBUG_OUTPUT",
+                   "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
+                   "DYLD_INSERT_LIBRARIES"]:
     if result.hasKey(override):
       result.del(override)
 
@@ -2356,16 +2369,32 @@ proc downloadUrlToFile(url, destination: string) =
     if curl.len == 0:
       raise newException(IOError,
         "curl is required to download archive URL: " & url)
+    # stderr is captured, not handed to `poParentStreams`: with the parent's
+    # streams curl's own diagnostic -- or the loader's, when the child dies
+    # before `main` -- went to the terminal and never reached the exception,
+    # so `verifiedDownload` reported only "all tarball archive URLs failed"
+    # and pointed at the URL. `-o` sends the body to `destination`, so the
+    # merged stream carries nothing but diagnostics; it is read to EOF before
+    # `waitForExit` so a chatty child cannot block on a full pipe.
     let process = startProcess(curl,
       args = ["-L", "--fail", "--silent", "--show-error", "-o",
         destination, url],
       env = systemToolEnv(),
-      options = {poUsePath, poParentStreams})
+      options = {poUsePath, poStdErrToStdOut})
+    var diagnostic = ""
+    try:
+      diagnostic = process.outputStream().readAll().strip()
+    except CatchableError:
+      discard
     let exitCode = waitForExit(process)
     close(process)
     if exitCode != 0:
+      const DiagnosticLimit = 4096
+      if diagnostic.len > DiagnosticLimit:
+        diagnostic = "..." & diagnostic[^DiagnosticLimit .. ^1]
       raise newException(IOError,
-        "curl failed while downloading archive URL: " & url)
+        "curl failed (exit " & $exitCode & ") while downloading archive URL: " &
+        url & (if diagnostic.len > 0: ": " & diagnostic else: ""))
   else:
     if not fileExists(extendedPath(url)):
       raise newException(IOError, "unsupported archive URL or missing file: " & url)

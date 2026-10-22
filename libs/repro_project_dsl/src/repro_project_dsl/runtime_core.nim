@@ -260,7 +260,9 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion* = 30'u16
+  BuildActionPayloadVersion* = 31'u16
+    ## v31: ``removeBeforeRun`` — declared outputs the engine removes before
+    ## the action runs, a string list appended last.
     ## v30: ``scratchDirs`` — the action's scratch directories (BuildXL's pip
     ## temp directories), a string list appended last.
     ## v29: ``subToolRefs`` — the typed tool's own bare-name sub-tools
@@ -2035,7 +2037,8 @@ proc buildAction*(id: string; call: PublicCliCall;
                   cwdCustomPath = "";
                   declaredOutputs: openArray[string] = [];
                   readOnlyRoots: openArray[string] = [];
-                  scratchDirs: openArray[string] = []):
+                  scratchDirs: openArray[string] = [];
+                  removeBeforeRun: openArray[string] = []):
     BuildActionDef {.dynOrStatic.} =
   ## ``outputTag`` (Recipe-Val M8): which package-output this edge
   ## contributes to. Defaults to the empty string which the closure
@@ -2118,7 +2121,8 @@ proc buildAction*(id: string; call: PublicCliCall;
     cwdCustomPath: cwdCustomPath,
     declaredOutputs: @declaredOutputs,
     readOnlyRoots: @readOnlyRoots,
-    scratchDirs: @scratchDirs)
+    scratchDirs: @scratchDirs,
+    removeBeforeRun: @removeBeforeRun)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
@@ -2977,6 +2981,29 @@ proc appendRegisteredActionToolIdentityRefs*(actionId: string;
           buildActionRegistry[i].toolIdentityRefs.add(refName)
       return
 
+proc appendRegisteredActionRemoveBeforeRun*(actionId: string;
+                                            call: PublicCliCall;
+                                            flags: openArray[string]) {.dynOrStatic.} =
+  ## Record, on an already-registered action, the output paths a typed tool
+  ## declared with ``cli: removeBeforeRun <flag>...``: the values the call
+  ## supplied for those flags, in declaration order, deduplicated. A flag
+  ## the call did not supply contributes nothing. The generated typed-tool
+  ## wrapper calls this right after ``recordToolInvocation``; the macro has
+  ## already checked that each flag is an output (``role = output``), so
+  ## every path recorded here is one of the action's declared outputs. No-op
+  ## when the id is absent.
+  var paths: seq[string] = @[]
+  for flagName in flags:
+    for arg in call.arguments:
+      if arg.name == flagName:
+        paths.addRoleValues(arg)
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      for path in paths:
+        if path.len > 0 and path notin buildActionRegistry[i].removeBeforeRun:
+          buildActionRegistry[i].removeBeforeRun.add(path)
+      return
+
 proc appendRegisteredActionSubToolRefs*(actionId: string;
                                         refs: openArray[string]) {.dynOrStatic.} =
   ## Record the typed tool's own bare-name sub-tools (``cli: subTools``) on
@@ -3606,6 +3633,85 @@ proc shouldExcludePreserveTreeEntry(relative: string;
         normalizedPrefix & "/"):
       return true
 
+proc normalizedDeclaredProjectPath*(projectRoot, path: string): string {.dynOrStatic.} =
+  result = path.replace('\\', '/').strip()
+  while result.startsWith("./"):
+    result = result.substr(2)
+  while result.endsWith("/") and result.len > 1:
+    result.setLen(result.len - 1)
+  if result.len == 0:
+    return
+  if projectRoot.len > 0 and path.isAbsolute:
+    let normalizedRoot = normalizedPath(projectRoot).replace('\\', '/')
+    let normalizedPathValue = normalizedPath(path).replace('\\', '/')
+    if normalizedPathValue == normalizedRoot:
+      return "."
+    let prefix = normalizedRoot & "/"
+    if normalizedPathValue.startsWith(prefix):
+      return normalizedPathValue.substr(prefix.len)
+    result = normalizedPathValue
+
+proc refuseGeneratedPreserveTreeSource(sourceRoot, outputRoot, actionId: string;
+                                       deps: openArray[string];
+                                       after: openArray[BuildActionDef]) =
+  ## ``fs.preserveTree`` mirrors a SOURCE tree -- Tup's ``!tup_preserve``
+  ## (Typed-Tool-Definitions.md §Built-In File Operations) -- and it lists
+  ## that tree HERE, when the recipe is evaluated, not when the action runs.
+  ## A tree that an action of the same build generates is read before its
+  ## producer runs, so the mirror is a snapshot of the PREVIOUS build's tree:
+  ## on a fresh checkout it stages nothing and "succeeds", and once the
+  ## producer drops a file the build fails with ``preserveTree source file
+  ## disappeared before execution`` (seen staging CodeTracer's macOS dmg
+  ## from the ``.app`` the same build generates). Refuse it while the
+  ## producer is in hand: one of the actions the call is ordered after
+  ## (``after``, or ``deps`` by id) declares an output that is the source
+  ## root, lies under it, or contains it.
+  ##
+  ## A producer the call is NOT ordered after is not looked for: that graph
+  ## is already wrong for a second reason (the mirror may run first), and
+  ## the registry seen here holds only the actions registered so far.
+  let projectRoot = activeProviderProjectRoot()
+  let source = normalizedDeclaredProjectPath(projectRoot, sourceRoot)
+  if source.len == 0:
+    return
+  proc overlaps(output: string): bool =
+    let produced = normalizedDeclaredProjectPath(projectRoot, output)
+    if produced.len == 0:
+      return false
+    produced == source or source == "." or produced == "." or
+      produced.startsWith(source & "/") or source.startsWith(produced & "/")
+  var producers: seq[BuildActionDef] = @[]
+  for action in after:
+    producers.add(action)
+  for id in deps:
+    for action in buildActionRegistry:
+      if action.id == id:
+        producers.add(action)
+        break
+  for producer in producers:
+    # The registry entry is authoritative: a typed-tool wrapper appends to the
+    # registered action after it returned the value the caller holds.
+    var current = producer
+    for action in buildActionRegistry:
+      if action.id == producer.id:
+        current = action
+        break
+    for output in current.outputs & current.declaredOutputs:
+      if overlaps(output):
+        let caller =
+          if actionId.len > 0: "fs.preserveTree '" & actionId & "'"
+          else: "fs.preserveTree"
+        raise newException(ValueError,
+          caller & " cannot mirror '" & sourceRoot & "' into '" &
+            outputRoot & "': action '" & current.id &
+            "', which it runs after, declares the output '" & output &
+            "', so that tree is generated in this build. preserveTree " &
+            "mirrors SOURCE trees and lists its source when the recipe is " &
+            "evaluated, before '" & current.id & "' runs, so it would stage " &
+            "the previous build's tree (or nothing). Stage a generated tree " &
+            "in the action that produces it, or in a process action that " &
+            "declares the staging directory as its output.")
+
 proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
                    actionId = ""; deps: openArray[string] = [];
                    after: openArray[BuildActionDef] = [];
@@ -3613,6 +3719,8 @@ proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
                    commandStatsId = ""):
     BuildActionDef {.discardable, dynOrStatic.} =
   discard tool
+  refuseGeneratedPreserveTreeSource(sourceRoot, outputRoot, actionId, deps,
+    after)
   providerDirectoryInput(sourceRoot)
   let tree = collectPreserveTree(sourceRoot)
   for dirPath in tree.dirs:
@@ -3648,24 +3756,6 @@ proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
     extraOutputs = outputs,
     commandStatsId = commandStatsId,
     dependencyPolicy = automaticMonitorPolicy())
-
-proc normalizedDeclaredProjectPath*(projectRoot, path: string): string {.dynOrStatic.} =
-  result = path.replace('\\', '/').strip()
-  while result.startsWith("./"):
-    result = result.substr(2)
-  while result.endsWith("/") and result.len > 1:
-    result.setLen(result.len - 1)
-  if result.len == 0:
-    return
-  if projectRoot.len > 0 and path.isAbsolute:
-    let normalizedRoot = normalizedPath(projectRoot).replace('\\', '/')
-    let normalizedPathValue = normalizedPath(path).replace('\\', '/')
-    if normalizedPathValue == normalizedRoot:
-      return "."
-    let prefix = normalizedRoot & "/"
-    if normalizedPathValue.startsWith(prefix):
-      return normalizedPathValue.substr(prefix.len)
-    result = normalizedPathValue
 
 proc inferDeclaredActionDeps*(actions: openArray[BuildActionDef];
                               projectRoot = ""): seq[BuildActionDef] {.dynOrStatic.} =
@@ -3737,14 +3827,51 @@ proc writeString(outp: var seq[byte]; value: string) =
   for ch in value:
     outp.add(byte(ord(ch)))
 
+const
+  # Smallest encoding of one element of each count-prefixed list, used by
+  # ``readElementCount``. Each is a LOWER bound: a field a later version
+  # appends only makes the element longer, so a bound that is not raised on a
+  # version bump stays safe and merely admits a larger bogus count.
+  StringMinBytes = 4            # u32 length prefix of an empty string
+  StringPairMinBytes = 2 * StringMinBytes
+  CliArgMinBytes = 3 * StringMinBytes  # name, nimType, encodedValue (v1+)
+  TypedOutputMinBytes = 3 * StringMinBytes  # fieldName, types count, path
+  ToolIdentityRefKindMinBytes = 1
+  RunEdgeLeaseMinBytes = 2 * StringMinBytes + 1 + 8
+  TargetExportEntryMinBytes = 4 * StringMinBytes + 1 + 4  # v1 shape
+  CertificateExportEntryMinBytes = 4 * StringMinBytes + 1 + 1 + 4
+
+proc readElementCount(bytes: openArray[byte]; pos: var int;
+                      minElementBytes: int; what: string): int =
+  ## Read the u32 element count of a list and refuse it when the bytes left
+  ## in the payload cannot hold that many elements of at least
+  ## ``minElementBytes`` each.
+  ##
+  ## The check runs BEFORE anything is sized by the count. A corrupted count
+  ## is otherwise trusted up to ``high(uint32)``: ``newSeq`` then asks for
+  ## gigabytes (~68 GB for a string list) and the process dies in the
+  ## allocator or the OOM killer instead of raising the payload error every
+  ## other malformed shape raises. With the check, every allocation a count
+  ## drives is bounded by the payload's own length.
+  assert minElementBytes >= 1
+  let count = readU32Le(bytes, pos)
+  # uint64 arithmetic: a u32 count times a small element size cannot
+  # overflow it, where ``int`` on a 32-bit target could.
+  if uint64(count) * uint64(minElementBytes) > uint64(bytes.len - pos):
+    raisePayload(what & " count exceeds remaining payload bytes")
+  int(count)
+
 proc readString(bytes: openArray[byte]; pos: var int): string =
-  let length = int(readU32Le(bytes, pos))
-  if pos + length > bytes.len:
+  let length = readU32Le(bytes, pos)
+  # Compared as uint64 against the bytes left, so a length near
+  # ``high(uint32)`` can neither overflow ``pos + length`` nor turn negative
+  # when converted to a 32-bit ``int``.
+  if uint64(length) > uint64(bytes.len - pos):
     raisePayload("truncated string in build action payload")
-  result = newString(length)
-  for i in 0 ..< length:
+  result = newString(int(length))
+  for i in 0 ..< int(length):
     result[i] = char(bytes[pos + i])
-  pos += length
+  pos += int(length)
 
 proc fromBytes(bytes: openArray[byte]): string =
   result = newString(bytes.len)
@@ -3760,7 +3887,7 @@ proc writeU32(outp: var seq[byte]; value: uint32) =
   outp.writeU32Le(value)
 
 proc readStringSeq(bytes: openArray[byte]; pos: var int): seq[string] =
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, StringMinBytes, "string list")
   result = newSeq[string](count)
   for i in 0 ..< count:
     result[i] = readString(bytes, pos)
@@ -3836,7 +3963,7 @@ proc readCliCall(bytes: openArray[byte]; pos: var int; version: uint16):
   result.executableName = readString(bytes, pos)
   result.subcommand = readString(bytes, pos)
   result.providerEntrypointId = readString(bytes, pos)
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, CliArgMinBytes, "CLI argument")
   result.arguments = newSeq[PublicCliArg](count)
   for i in 0 ..< count:
     result.arguments[i] = readCliArg(bytes, pos, version)
@@ -3982,7 +4109,10 @@ proc readCacheEntryIdentity(bytes: openArray[byte]; pos: var int):
   ## v16 codec counterpart of ``writeCacheEntryIdentity``.
   result.packageName = readString(bytes, pos)
   result.packageVersion = readString(bytes, pos)
-  let optionCount = int(readU32Le(bytes, pos))
+  # Nothing is pre-sized here, but a bogus count would still spin the loop
+  # below until a string read runs off the end; refuse it up front instead.
+  let optionCount = readElementCount(bytes, pos, StringPairMinBytes,
+    "selected option")
   result.selectedOptions = newTable[string, string]()
   for _ in 0 ..< optionCount:
     let name = readString(bytes, pos)
@@ -4146,6 +4276,9 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
   # v30: the action's scratch directories.
   if version >= 30'u16:
     payload.writeStringSeq(action.scratchDirs)
+  # v31: declared outputs the engine removes before the action runs.
+  if version >= 31'u16:
+    payload.writeStringSeq(action.removeBeforeRun)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(version)
@@ -4155,14 +4288,34 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
 proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.} =
   encodeBuildActionPayloadAtVersion(action, BuildActionPayloadVersion)
 
-proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrStatic.} =
+proc readBuildActionPayloadHeader(bytes: openArray[byte]; pos: var int):
+    uint16 =
+  ## Validate the envelope's magic and return its version word, leaving
+  ## ``pos`` on the payload-length field. The one reader of the header, so
+  ## the decoder and ``buildActionPayloadVersion`` cannot disagree on it.
   if bytes.len < 10:
     raisePayload("truncated build action payload envelope")
   for i in 0 ..< BuildActionPayloadMagic.len:
     if bytes[i] != BuildActionPayloadMagic[i]:
       raisePayload("unknown build action payload magic")
-  var pos = 4
-  let version = readU16Le(bytes, pos)
+  pos = BuildActionPayloadMagic.len
+  readU16Le(bytes, pos)
+
+proc buildActionPayloadVersion*(bytes: openArray[byte]): uint16 {.dynOrStatic.} =
+  ## The envelope version of an encoded action payload, read from its
+  ## header alone. Raises ``BuildActionPayloadError`` when ``bytes`` does not
+  ## start with a payload envelope.
+  ##
+  ## For a cache reader that must decide whether an entry was written by a
+  ## NEWER build before it serves it: checking the version of every action in
+  ## a cached graph costs a header read each, where a full decode would cost
+  ## the decode twice over (once here and once when the graph is lowered).
+  var pos = 0
+  readBuildActionPayloadHeader(bytes, pos)
+
+proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrStatic.} =
+  var pos = 0
+  let version = readBuildActionPayloadHeader(bytes, pos)
   # Every version from 1 up to the current one is readable: each bump either
   # APPENDS a field gated on its own ``version >=`` check below, or — as at
   # v25, which dropped two fields a removed policy kind had carried — REPLACES
@@ -4176,7 +4329,22 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   # the constant was bumped — a v24 binary then rejected every graph a v23
   # binary had cached, with "unsupported build action payload version", and
   # the only way back was deleting the cache.
-  if version < 1'u16 or version > BuildActionPayloadVersion:
+  #
+  # The top of the range is closed, and has to be: a newer version may
+  # REPLACE a field, so no prefix of its bytes is safe to read. That refusal
+  # is a different fact from corruption, though -- the bytes are a valid
+  # payload of another reprobuild -- so it raises its own subtype carrying
+  # both versions. A cache reader maps exactly that to a miss
+  # (``BuildActionPayloadTooNewError``); everything else stays an error.
+  if version > BuildActionPayloadVersion:
+    var err = newException(BuildActionPayloadTooNewError,
+      "unsupported build action payload version " & $version &
+        " (newer than version " & $BuildActionPayloadVersion &
+        ", the newest this build reads)")
+    err.foundVersion = version
+    err.supportedVersion = BuildActionPayloadVersion
+    raise err
+  if version < 1'u16:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -4208,7 +4376,8 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   if version >= 11'u16:
     result.targetNames = readStringSeq(bytes, pos)
   if version >= 12'u16:
-    let typedOutputCount = int(readU32Le(bytes, pos))
+    let typedOutputCount = readElementCount(bytes, pos, TypedOutputMinBytes,
+      "typed output")
     result.typedOutputs = newSeq[BuildActionTypedOutput](typedOutputCount)
     for i in 0 ..< typedOutputCount:
       result.typedOutputs[i].fieldName = readString(bytes, pos)
@@ -4220,7 +4389,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   # the closure walker normalises to the default ``"out"`` output —
   # preserving legacy single-output behavior byte-for-byte.
   if version >= 14'u16:
-    let envCount = int(readU32Le(bytes, pos))
+    let envCount = readElementCount(bytes, pos, StringPairMinBytes, "env")
     result.env = newSeq[(string, string)](envCount)
     for i in 0 ..< envCount:
       let name = readString(bytes, pos)
@@ -4257,7 +4426,8 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     # ``toolIdentityRefs``. v16-and-earlier payloads decode with an
     # empty seq — the engine's resolver block is a no-op when the
     # action carries no refs.
-    let refCount = int(readU32Le(bytes, pos))
+    let refCount = readElementCount(bytes, pos, StringMinBytes,
+      "tool identity ref")
     result.toolIdentityRefs = newSeq[string](refCount)
     for i in 0 ..< refCount:
       result.toolIdentityRefs[i] = readString(bytes, pos)
@@ -4328,7 +4498,8 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     result.declaredOutputs = @[]
     result.readOnlyRoots = @[]
   if version >= 23'u16:
-    let refKindCount = int(readU32Le(bytes, pos))
+    let refKindCount = readElementCount(bytes, pos,
+      ToolIdentityRefKindMinBytes, "tool identity ref kind")
     result.toolIdentityRefKinds =
       newSeq[ToolIdentityRefKind](refKindCount)
     for i in 0 ..< refKindCount:
@@ -4374,6 +4545,12 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     result.scratchDirs = readStringSeq(bytes, pos)
   else:
     result.scratchDirs = @[]
+  if version >= 31'u16:
+    result.removeBeforeRun = readStringSeq(bytes, pos)
+  else:
+    # Absence of the list is absence of the request: the engine then removes
+    # nothing, which is what every action did before the field existed.
+    result.removeBeforeRun = @[]
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 
@@ -4431,7 +4608,8 @@ proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef {.dynOrSt
       raisePayload("invalid build target kind in build target payload")
     result.kind = BuildTargetKind(kindByte)
   if version >= 4'u16:
-    let extLen = int(readU32Le(bytes, pos))
+    let extLen = readElementCount(bytes, pos, StringPairMinBytes,
+      "build target extension")
     for _ in 0 ..< extLen:
       let typeId = readString(bytes, pos)
       let jsonStr = readString(bytes, pos)
@@ -4527,7 +4705,8 @@ proc readTargetExportEntry(bytes: openArray[byte]; pos: var int;
   # legacy artifacts decode byte-compatibly.
   if version >= 3'u16:
     result.runArgs = readStringSeq(bytes, pos)
-    let consumeCount = int(readU32Le(bytes, pos))
+    let consumeCount = readElementCount(bytes, pos, RunEdgeLeaseMinBytes,
+      "run-edge lease")
     result.consumes = newSeq[RunEdgeLease](consumeCount)
     for i in 0 ..< consumeCount:
       result.consumes[i] = readRunEdgeLease(bytes, pos)
@@ -4583,11 +4762,13 @@ proc decodeTargetExportTablePayload*(bytes: openArray[byte]):
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
     raisePayload("target export table payload length mismatch")
-  let entryCount = int(readU32Le(bytes, pos))
+  let entryCount = readElementCount(bytes, pos, TargetExportEntryMinBytes,
+    "target export entry")
   result.entries = newSeq[TargetExportEntry](entryCount)
   for i in 0 ..< entryCount:
     result.entries[i] = readTargetExportEntry(bytes, pos, version)
-  let ambiguityCount = int(readU32Le(bytes, pos))
+  let ambiguityCount = readElementCount(bytes, pos, StringPairMinBytes,
+    "target export ambiguity")
   result.ambiguities = newSeq[TargetExportAmbiguity](ambiguityCount)
   for i in 0 ..< ambiguityCount:
     result.ambiguities[i] = readTargetExportAmbiguity(bytes, pos)
@@ -4634,7 +4815,8 @@ proc decodeCertificateExportTablePayload*(bytes: openArray[byte]):
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
     raisePayload("certificate export table payload length mismatch")
-  let entryCount = int(readU32Le(bytes, pos))
+  let entryCount = readElementCount(bytes, pos,
+    CertificateExportEntryMinBytes, "certificate export entry")
   result.entries = newSeq[CertificateExportEntry](entryCount)
   for i in 0 ..< entryCount:
     var entry: CertificateExportEntry

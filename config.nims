@@ -19,6 +19,25 @@ import std/[algorithm, os, strutils, compilesettings]
 # denote a location in THIS repository has to be anchored here instead.
 let reproRepoRoot = currentSourcePath().parentDir()
 
+# Every existence probe below goes through these, never through a bare
+# `fileExists` / `dirExists`. Those resolve a relative path against the
+# compiler's WORKING DIRECTORY, while a relative `switch("path", ...)` is
+# resolved against the directory of this file -- so a probe and the switch it
+# guards agreed only for as long as nim happened to be started in the repo
+# root. Compiles do not have to be: the `apps` edges run in their module's own
+# directory (`nim.c(runInSourceDir = true)` in `repro.nim`), and from there a
+# cwd-relative probe of `../io-mon/src` looks inside `apps/` and finds
+# nothing. Anchoring a relative probe here makes it test exactly the
+# directory the switch would add, whatever the working directory. Absolute
+# paths are unaffected.
+proc repoPath(path: string): string =
+  if path.len == 0 or path.isAbsolute: path
+  else: reproRepoRoot / path
+
+proc repoFileExists(path: string): bool = fileExists(repoPath(path))
+
+proc repoDirExists(path: string): bool = dirExists(repoPath(path))
+
 switch("styleCheck", "hint")
 
 if defined(windows):
@@ -171,7 +190,7 @@ let ctTestRunnerRoot = block:
     ".." / "reprobuild-ct-test-runner"
 let ctTestRunnerAdapterSrc = ctTestRunnerRoot / "libs" /
   "ct_test_runner_adapter" / "src"
-if dirExists(ctTestRunnerAdapterSrc):
+if repoDirExists(ctTestRunnerAdapterSrc):
   switch("path", ctTestRunnerAdapterSrc)
 
 # Incremental-Test-Runner: ``ct_incremental_adapter`` is hosted by CodeTracer
@@ -213,7 +232,7 @@ let ctIncrementalSrc = block:
                     ".." / "codetracer" / "src",
                     getEnv("CODETRACER_PINNED_SRC")]:
     if candidate.len > 0 and
-        fileExists(candidate / "ct_incremental_adapter.nim"):
+        repoFileExists(candidate / "ct_incremental_adapter.nim"):
       found = candidate
       break
   found
@@ -262,7 +281,7 @@ else:
   # canonical file.
   let ctIncrementalFallbackSrc = ctTestRunnerRoot / "libs" /
     "ct_incremental_adapter" / "src"
-  if dirExists(ctIncrementalFallbackSrc):
+  if repoDirExists(ctIncrementalFallbackSrc):
     switch("path", ctIncrementalFallbackSrc)
 
 # The ``TestRunner`` cross-cutting contract lives in the standalone
@@ -277,7 +296,7 @@ let reproTestAdaptersSrc = block:
     fromEnv
   else:
     ".." / "reprobuild-test-adapters" / "src"
-if dirExists(reproTestAdaptersSrc):
+if repoDirExists(reproTestAdaptersSrc):
   switch("path", reproTestAdaptersSrc)
 
 for libName in [
@@ -358,6 +377,16 @@ for libName in [
   # Windows-Runner-Binary-Cache-Deploy M5: the signed desired-state
   # manifest pull agent (reprobuild-native analog of mcl-deploy-agent).
   "repro_deploy_agent",
+  # ReproOS-Remix-Protocol-And-Registry M1: the Remix manifest codec,
+  # identities, signatures and lineage.
+  "repro_remix",
+  "repro_remix_registry",
+  # ReproOS-Agent-Harbor-Integration M0: the agent integration host,
+  # capabilities, approvals and audit log.
+  "repro_agent_protocol",
+  # ReproOS-Agent-Harbor-Integration M3: ownership, checkout and the
+  # Reprobuild backend of the agent host.
+  "repro_agent_backend",
   "repro_home_generations",
   "repro_home_apply",
   "repro_home_rollback",
@@ -536,20 +565,20 @@ for libName in [
 # Nim sibling. Prefer ``$IO_MON_SRC``, then the sibling checkout.
 let ioMonSrc = block:
   let fromEnv = getEnv("IO_MON_SRC")
-  if fromEnv.len > 0 and fileExists(fromEnv / "io_mon.nim"):
+  if fromEnv.len > 0 and repoFileExists(fromEnv / "io_mon.nim"):
     fromEnv
-  elif fromEnv.len > 0 and fileExists(fromEnv / "src" / "io_mon.nim"):
+  elif fromEnv.len > 0 and repoFileExists(fromEnv / "src" / "io_mon.nim"):
     fromEnv / "src"
   else:
     ".." / "io-mon" / "src"
-if fileExists(ioMonSrc / "io_mon.nim"):
+if repoFileExists(ioMonSrc / "io_mon.nim"):
   switch("path", ioMonSrc)
 
 proc nixDevShellSourcePath(envName, marker: string): string =
   when defined(windows):
     ""
   else:
-    if not fileExists("flake.nix"):
+    if not repoFileExists("flake.nix"):
       return ""
     let systemResult =
       gorgeEx("nix eval --raw --impure --expr 'builtins.currentSystem' 2>/dev/null")
@@ -558,13 +587,16 @@ proc nixDevShellSourcePath(envName, marker: string): string =
     let system = systemResult.output.strip()
     if system.len == 0:
       return ""
+    # `cd` first: `.#` names the flake in the working directory, and the
+    # `flake.nix` probe above is anchored at the repo root (see `repoPath`).
     let valueResult = gorgeEx(
+      "cd " & quoteShell(reproRepoRoot) & " && " &
       "nix eval --raw '.#devShells." & system & ".default." & envName &
       "' 2>/dev/null")
     if valueResult.exitCode != 0:
       return ""
     let candidate = valueResult.output.strip()
-    if candidate.len > 0 and fileExists(candidate / marker):
+    if candidate.len > 0 and repoFileExists(candidate / marker):
       return candidate
     ""
 
@@ -602,14 +634,14 @@ proc reportUnresolvedPackagePath(envName: string;
     "  wanted a directory containing: " & marker & "\n" &
     "  $" & envName & ": " &
     (if envPath.len == 0: "unset"
-     elif dirExists(envPath): "set to " & envPath & ", which has no " & marker
+     elif repoDirExists(envPath): "set to " & envPath & ", which has no " & marker
      else: "set to " & envPath & ", which does not exist") & "\n"
   if candidates.len == 0:
     report.add "  candidate directories: none are declared for this package\n"
   else:
     for candidate in candidates:
       report.add "  candidate directory: " & candidate & " -- " &
-        (if dirExists(candidate): "exists, but has no " & marker
+        (if repoDirExists(candidate): "exists, but has no " & marker
          else: "does not exist") & "\n"
   if useDevShellFallback:
     report.add "  development-shell fallback: consulted, no match\n"
@@ -639,11 +671,11 @@ proc addPackagePath(envName: string; candidates: openArray[string];
   ## about whether the build proceeds: see ``reportUnresolvedPackagePath``
   ## for why nothing here refuses.
   let envPath = getEnv(envName)
-  if envPath.len > 0 and fileExists(envPath / marker):
+  if envPath.len > 0 and repoFileExists(envPath / marker):
     switch("path", envPath)
     return
   for candidate in candidates:
-    if fileExists(candidate / marker):
+    if repoFileExists(candidate / marker):
       switch("path", candidate)
       return
   if useDevShellFallback:
@@ -749,7 +781,7 @@ addPackagePath("STACKABLE_HOOKS_SRC", [
 # These libraries retain their own sibling-first policy, then the env pin
 # ($SHM_QUEUE_SRC / $SHM_GSET_SRC), then the devshell fallback.
 proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
-  if fileExists(sibling / marker):
+  if repoFileExists(sibling / marker):
     switch("path", sibling)
     return
   addPackagePath(envName, [], marker, useDevShellFallback = true)
@@ -799,8 +831,8 @@ addPackagePath("VM_HARNESS_SRC", [
 # Interactive-UX-And-Progress.md Principle 2).
 block:
   let vmhEnv = getEnv("VM_HARNESS_SRC")
-  if (vmhEnv.len > 0 and fileExists(vmhEnv / "vm_harness.nim")) or
-     fileExists(".." / "vm-harness" / "src" / "vm_harness.nim"):
+  if (vmhEnv.len > 0 and repoFileExists(vmhEnv / "vm_harness.nim")) or
+     repoFileExists(".." / "vm-harness" / "src" / "vm_harness.nim"):
     switch("define", "vmHarnessAvailable")
 
 # Lib subdirectories to probe under a system prefix. The order matters:
@@ -846,9 +878,9 @@ proc libMatchesTargetArch(libFile: string): bool =
   ## a non-Darwin one. Anything unclassified -- a static archive, a linker
   ## script, a short file, an unknown target machine -- is accepted and left
   ## to the linker, as before this filter existed.
-  if not fileExists(libFile):
+  if not repoFileExists(libFile):
     return true
-  let hdr = readFile(libFile)
+  let hdr = readFile(repoPath(libFile))
   if hdr.len < 8:
     return true
   proc b(at: int): uint32 = uint32(ord(hdr[at]))
@@ -910,7 +942,7 @@ proc holdsLibrary(libDir, dylibName: string; targetArchOnly: bool): bool =
   ## Whether `libDir/dylibName` exists and -- when `targetArchOnly` -- is a
   ## file the target's loader can map (see `libMatchesTargetArch`).
   let path = libDir / dylibName
-  fileExists(path) and (not targetArchOnly or libMatchesTargetArch(path))
+  repoFileExists(path) and (not targetArchOnly or libMatchesTargetArch(path))
 
 proc firstExistingPrefixLibDir(prefix: string;
                                dylibNames: openArray[string];
@@ -930,7 +962,7 @@ proc firstExistingPrefix(candidates: openArray[string]; header: string;
   for prefix in candidates:
     if prefix.len == 0:
       continue
-    if not fileExists(prefix / header):
+    if not repoFileExists(prefix / header):
       continue
     if firstExistingPrefixLibDir(prefix, dylibNames).len > 0:
       return prefix
@@ -974,7 +1006,7 @@ proc nixPrefix(namePattern, header: string; dylibNames: openArray[string]): stri
   for prefix in nixStorePrefixes(namePattern):
     # Same architecture filter as `nixLibDir` (and as the library's
     # `nixPrefix`): the store holds every architecture under one name.
-    if fileExists(prefix / header) and
+    if repoFileExists(prefix / header) and
        firstExistingPrefixLibDir(prefix, dylibNames,
                                  targetArchOnly = true).len > 0:
       return prefix
@@ -1046,9 +1078,9 @@ if not useSystemHashLibs:
   # file -- came apart into a stray `vendor` linker input and every profile
   # compile failed in gcc (measured 2026-10-13, Gradual-Nix-To-Reprobuild-
   # Migration GM1w).
-  if fileExists(vendoredBlake3Inc / "blake3.h"):
+  if repoFileExists(vendoredBlake3Inc / "blake3.h"):
     switch("passC", "-I" & quoteShell(vendoredBlake3Inc))
-  if fileExists(vendoredXxhashInc / "xxhash.h"):
+  if repoFileExists(vendoredXxhashInc / "xxhash.h"):
     switch("passC", "-I" & quoteShell(vendoredXxhashInc))
 else:
   let blake3Prefix = block:
@@ -1109,7 +1141,7 @@ proc nixLdflagsLibDir(dylibNames: openArray[string]): string =
     if tok.startsWith("-L") and tok.len > 2:
       let dir = tok[2 .. ^1]
       for n in dylibNames:
-        if fileExists(dir / n):
+        if repoFileExists(dir / n):
           return dir
   ""
 
@@ -1129,7 +1161,7 @@ when not defined(windows) and not defined(macosx):
   # `/usr/lib` here.
   let sqliteNames = ["libsqlite3.so", "libsqlite3.a"]
   let nixInPlay = getEnv("NIX_CC").len > 0 or
-    getEnv("IN_NIX_SHELL").len > 0 or dirExists("/nix/store")
+    getEnv("IN_NIX_SHELL").len > 0 or repoDirExists("/nix/store")
   let sqliteLibDir = block:
     let explicit = firstExistingLibDir(
       [getEnv("SQLITE_LIBDIR"), getEnv("SQLITE_PREFIX")], sqliteNames)

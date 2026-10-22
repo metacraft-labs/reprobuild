@@ -1330,7 +1330,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
     ## above because the two can fail independently: the diagnostic STRING
     ## shipped correct and informative from the day the guard landed, while
     ## the refusal recorded no `CacheIneligibilityReason` at all for three
-    ## weeks. `traceCacheIneligibility` substitutes its defensive
+    ## weeks. `traceCacheIneligibility` then substituted a defensive
     ## `"unspecified"` placeholder for an empty reason set, so the refusal
     ## reached an operator as
     ##
@@ -1338,21 +1338,36 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
     ##                            reasons=unspecified
     ##
     ## and — the consequence that matters beyond the wording — was invisible
-    ## to any per-class count over `cacheIneligibilityReasons`, which is how
-    ## DA-7's item 2 is measured. A class that never enters the set cannot
-    ## appear in such a table as a row, a zero, or a regression, whatever
-    ## its true count.
+    ## to any per-class count over the reason set, which is how DA-7's item 2
+    ## is measured. A class that never enters the set cannot appear in such
+    ## a table as a row, a zero, or a regression, whatever its true count.
     ##
-    ## WHY THE TRACE RATHER THAN THE SET: `cacheIneligibilityReasons` is a
-    ## module-private field of a module-private object, so the trace event
-    ## is the only place the class is observable from outside the engine —
-    ## and it is also the place an operator actually reads it, which makes
-    ## it the right assertion target rather than a concession.
+    ## WHAT THE TYPE NOW GUARANTEES, AND WHAT IT LEAVES TO THIS CASE. The
+    ## refusal flag and the reason set used to be two fields written by
+    ## convention. They are now one `CacheRefusal` whose only writer,
+    ## `refuseCachePublication`, takes the reason as an argument, and whose
+    ## "refused" is derived from the set being non-empty — so a refusal with
+    ## NO class cannot be written, and the placeholder went with it
+    ## (`t_cache_refusal_always_names_its_reason` pins that at compile time).
+    ## What no type can check is that this guard names THIS class rather than
+    ## a neighbour's, and that is what the equality below still pins.
     ##
-    ## MUTATION-CHECKED (2026-10-03): deleting the
+    ## WHY THE TRACE RATHER THAN THE SET: the reason set is a private field
+    ## of `CacheRefusal`, held in a module-private field of a module-private
+    ## object, so the trace event is the only place the class is observable
+    ## from outside the engine — and it is also the place an operator
+    ## actually reads it, which makes it the right assertion target rather
+    ## than a concession.
+    ##
+    ## MUTATION-CHECKED (2026-10-03, against the former two-field shape):
+    ## deleting the then-separate
     ## `cacheIneligibilityReasons.incl(cirEmptyKeyedInputSet)` line in
-    ## `gradeKeyedInputSet` reddens this case on the `reasons=` equality and
-    ## on the `unspecified` assertion, and reddens NOTHING else in the file.
+    ## `gradeKeyedInputSet` reddened this case on the `reasons=` equality and
+    ## on the `unspecified` assertion, and reddened NOTHING else in the file.
+    ## That mutation is no longer expressible: the class is an argument of
+    ## the refusal, so deleting it deletes the refusal too. The one that
+    ## remains — passing a different class — falls on the `reasons=`
+    ## equality by construction.
     let sh = contentAddressedShell()
     if sh.len == 0:
       skip("no executable /nix/store bash on this host; the tool-root " &
@@ -1398,7 +1413,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
     ## reason this file now asserts a publish decision about a combination
     ## rather than only a trace string.
     ##
-    ## `cacheIneligibilityReasons` is documented as diagnostic-only, and it
+    ## The reason set (`cacheIneligibilityReasons`) reads as diagnostic, and it
     ## is — with exactly one exception. `determinismProbeAdmits` gates on
     ##
     ##     if evidence.cacheIneligibilityReasons != {cirUnblessedEntropy}:
@@ -1427,7 +1442,8 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
     ## compared"), so a fixture built like its siblings would grade the gate
     ## above with the gate below and pass whatever the first one did.
     ##
-    ## MEASURED BOTH WAYS (2026-10-03), by deleting the
+    ## MEASURED BOTH WAYS (2026-10-03, against the former two-field shape,
+    ## where the reason was a separate line), by deleting the
     ## `cacheIneligibilityReasons.incl(cirEmptyKeyedInputSet)` line and
     ## rebuilding. The warm run's trace and the published evidence file:
     ##
@@ -1771,7 +1787,7 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
     ## WHICH POLARITY IS THE SAFE ONE, TRACED RATHER THAN ASSUMED. The
     ## predicate has exactly one caller — the fifth term of the zero-evidence
     ## guard in `applyMonitorEvidenceStatus` — and `true` there is the
-    ## REFUSAL: `zeroEvidenceDiagnostic`, `disableCacheHits`,
+    ## REFUSAL: `zeroEvidenceDiagnostic` plus a publish refusal naming
     ## `cirEmptyEvidence`, so the action succeeds and publishes nothing.
     ## `false` lets the record through. The shipped presence test answers
     ## `true` for an UNMARKED writer (the fail-closed answer, a lost hit); the

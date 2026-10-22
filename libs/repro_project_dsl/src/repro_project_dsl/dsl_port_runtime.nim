@@ -3616,7 +3616,13 @@ proc decodeServicePayload*(bytes: openArray[byte]): DslServiceDef =
   result.executableRef = readString(bytes, pos)
   result.executable = result.executableRef
   result.args = readStringSeq(bytes, pos)
-  var count = int(readU32Le(bytes, pos))
+  # Every count below is checked against the bytes left before its loop
+  # runs (``readElementCount``): nothing here is pre-sized, but a corrupted
+  # count must still fail as the payload error it is, at the count.
+  # Minimum element sizes: a kind byte plus four strings; three strings; a
+  # kind byte, two strings and an action count; a kind byte and a string.
+  var count = readElementCount(bytes, pos, 1 + 4 * StringMinBytes,
+    "service argument")
   for _ in 0 ..< count:
     let kindByte = readByte(bytes, pos)
     if kindByte > byte(ord(svakBuildOutput)):
@@ -3627,13 +3633,15 @@ proc decodeServicePayload*(bytes: openArray[byte]): DslServiceDef =
       producerPackage: readString(bytes, pos),
       producerActionId: readString(bytes, pos),
       producerPath: readString(bytes, pos)))
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, 3 * StringMinBytes,
+    "service runtime file")
   for _ in 0 ..< count:
     result.runtimeFiles.add(ServiceRuntimeFileDef(
       path: readString(bytes, pos),
       producerPackage: readString(bytes, pos),
       producerActionId: readString(bytes, pos)))
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, 1 + 3 * StringMinBytes,
+    "service trigger")
   for _ in 0 ..< count:
     let kindByte = readByte(bytes, pos)
     if kindByte > byte(ord(stkCrash)):
@@ -3642,7 +3650,8 @@ proc decodeServicePayload*(bytes: openArray[byte]): DslServiceDef =
       kind: ServiceTriggerKind(kindByte),
       subject: readString(bytes, pos),
       producerActionId: readString(bytes, pos))
-    let actionCount = int(readU32Le(bytes, pos))
+    let actionCount = readElementCount(bytes, pos, 1 + StringMinBytes,
+      "service trigger action")
     for _ in 0 ..< actionCount:
       let actionKindByte = readByte(bytes, pos)
       if actionKindByte > byte(ord(stakNotify)):
@@ -3659,7 +3668,7 @@ proc decodeServicePayload*(bytes: openArray[byte]): DslServiceDef =
   result.requires = readStringSeq(bytes, pos)
   result.before = readStringSeq(bytes, pos)
   result.after = readStringSeq(bytes, pos)
-  count = int(readU32Le(bytes, pos))
+  count = readElementCount(bytes, pos, StringPairMinBytes, "service env")
   for _ in 0 ..< count:
     let key = readString(bytes, pos)
     let value = readString(bytes, pos)

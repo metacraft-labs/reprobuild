@@ -161,6 +161,17 @@ proc runFixture*(binary: string; args: openArray[string]): FixtureRun =
     except CatchableError:
       result.payload = nil
 
+  # Deliberate crash controls emit HCR-M4-CRASH and are inspected by the
+  # concurrent-publication gate. Every other missing result is a fixture
+  # failure: name its fate before a caller can dereference nil JSON and hide
+  # the original signal behind the test process's own SIGSEGV.
+  if result.payload == nil and not result.crashed:
+    var fate = "fixture " & binary & " exited " & $result.exitCode
+    if result.exitCode > 128:
+      fate.add " (signal " & $(result.exitCode - 128) & ")"
+    raise newException(IOError, fate & "; no valid JSON result\n" &
+      result.stderrText & result.output)
+
 proc hex*(bytes: seq[byte]): string =
   for b in bytes:
     result.add(toHex(int(b), 2).toLowerAscii())

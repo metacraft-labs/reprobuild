@@ -66,6 +66,23 @@ forwarded into daemon-hosted and nested builds so they use the same capacity.
 See `reprobuild-specs/RunQuota-Host-Configuration.md`, *What the auto-spawn
 passes* and *Pools a build declares*.
 
+On an unprovisioned POSIX host, reprobuild owns the private daemon it starts
+for its invocation. That daemon stops when the invocation returns, fails, or
+is killed, including by SIGKILL. Terminating signals are forwarded to it,
+and the daemon watches the expected parent PID supplied before spawn. It
+does not inherit the invocation's descriptors above 2, so a caller reading
+reprobuild's output reaches EOF when the invocation exits. SIGKILL cleanup
+requires a daemon supporting `RUNQUOTA_EXIT_WITH_PARENT`. The Nix package
+defaults `RUNQUOTAD_BIN` and `RUNQUOTA_BIN` to its pinned runtime dependency,
+which includes that support; explicit environment values override these
+defaults. A provisioned host's existing service
+and Windows' shared daemon keep their own lifetimes.
+
+Starting a private POSIX daemon requires waitable child status. If `SIGCHLD`
+is inherited as ignored or with `SA_NOCLDWAIT`, reprobuild reports an error
+before spawning it and preserves that signal disposition. Embedding callers
+must retain child-wait ownership until they release the daemon.
+
 Denials happen for one of two distinct reasons:
 
 1. **Hard denial** — the request exceeds the *machine's static capacity*

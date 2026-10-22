@@ -49,6 +49,7 @@ repro-binary-cache-crosshost apps/repro-binary-cache-crosshost/repro_binary_cach
 # Hashed install-mirror publisher. From-source producer actions call this
 # after composing their legacy staging mirror so the Layer-2 store writes
 # receipts/index rows and the recipe sidecar points at the registered prefix.
+repro-agent-conformance apps/repro-agent-conformance/repro_agent_conformance.nim
 repro-install-mirror-publish apps/repro-install-mirror-publish/repro_install_mirror_publish.nim
 repro-peer-cache-tier2 apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim
 repro-peer-cache-admin apps/repro-peer-cache-admin/repro_peer_cache_admin.nim

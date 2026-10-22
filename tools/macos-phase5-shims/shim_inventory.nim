@@ -3,7 +3,7 @@
 ##
 ## This module knows WHICH macOS binaries the Phase-5 drivers shell
 ## out to. The actual shim INSTALLATION primitive lives in the
-## standalone vm-harness Nim library (`metacraft-labs/vm-harness`,
+## standalone vm-harness Nim library (`metacraft-labs/gosti`,
 ## per the M0 milestone in
 ## `reprobuild-specs/Multi-OS-VM-Automation-Campaign.milestones.org`)
 ## as a generic argv-tracer that can wrap any named binary. This

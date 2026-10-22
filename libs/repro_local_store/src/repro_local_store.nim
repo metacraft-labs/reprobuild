@@ -20,6 +20,7 @@ when defined(posix):
     {.importc: "flock", header: "<sys/file.h>".}
 
 import repro_core
+import repro_core/relocation
 import repro_hash
 
 # Re-export the new M56 content-addressed local store API. The pre-M56
@@ -2461,11 +2462,16 @@ proc recordedInputLocation*(root, path: string): string =
   ## that directory, so the same record describes the same computation at
   ## another location: such a name resolves against the CONSULTING action's
   ## cwd (`root`), exactly as its relative declared outputs already do
-  ## (`recordOutputsNotOwnedBy`, `restoreOutputs`).
+  ## (`recordOutputsNotOwnedBy`, `restoreOutputs`). The name is resolved by
+  ## `repro_core/relocation.rebasedName`, the one rule for it, so a `..`
+  ## that follows a symlink in the consulting tree is left for the kernel
+  ## to resolve rather than folded lexically onto a different file.
   if path.isAbsolute or root.len == 0:
     path
+  elif path.len == 0:
+    os.normalizedPath(root) # `rebasedName` leaves an empty name empty
   else:
-    os.normalizedPath(root / path)
+    rebasedName(path, root)
 
 const
   WitnessMagic = "RBOW"

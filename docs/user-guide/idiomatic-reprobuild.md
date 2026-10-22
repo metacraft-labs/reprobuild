@@ -620,7 +620,7 @@ the evidence actually improving — because both moves flip the engine from
 The zero-observation guard is the other half of this, and it is narrow on
 purpose (`repro_build_engine.nim:6225`). An action with **no observation
 of any kind** — no read, no write, no probe, no directory enumeration, no
-depfile input — gets `disableCacheHits` and `cirEmptyEvidence`: the same
+depfile input — is refused publication with reason `cirEmptyEvidence`: the same
 publish refusal as Level 2. **One observation of any kind and it
 publishes.** So a change that takes an action's observed set from 0 to 1 —
 one incidental path, the working directory, anything — has moved it

@@ -22,6 +22,16 @@ package `create-dmg`:
         flag icon is seq[string], alias = "--icon"
         flag appDropLink is seq[string], alias = "--app-drop-link"
         boolFlag sandboxSafe is bool, alias = "--sandbox-safe"
-        pos dmg is string
+        # The image is the edge's OUTPUT (`role = output`): the engine checks
+        # it after the run and caches it, and only an output may be removed
+        # before the run (below).
+        pos dmg is string, role = output
         pos src is string
         outputs dmg
+        # create-dmg 1.2.2 ends with `hdiutil convert ... -o <dmg>`, which
+        # refuses an existing file (`hdiutil: convert failed - File exists`),
+        # so without this every re-run after an input change failed because
+        # the previous run had succeeded. The engine removes the image before
+        # the edge runs, without following a link -- the `rm -f` a shell
+        # script calling create-dmg has to open with.
+        removeBeforeRun dmg

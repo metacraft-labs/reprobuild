@@ -25,7 +25,7 @@
 ## Linux build targets glibc 2.17+ (the prebuilt is statically linked
 ## against the c runtime where feasible).
 
-import std/[options, os, sets, strutils, tables]
+import std/[options, os, sequtils, sets, strutils, tables]
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/packages_schema
@@ -642,8 +642,29 @@ proc c*(pkg: NimPackage; source: string; binary: string;
         publishAs = "";
         dependencyPolicy = defaultDependencyPolicy();
         actionCachePolicy = defaultActionCachePolicy();
-        commandStatsId = ""): BuildActionDef
+        commandStatsId = "";
+        runInSourceDir = false): BuildActionDef
     {.discardable.} =
+  ## ``runInSourceDir`` runs the compile with its working directory set to
+  ## the directory of ``source`` instead of the recipe root. The recipe
+  ## keeps spelling every path relative to the recipe root; the alias
+  ## re-spells the ones nim and the engine resolve against the working
+  ## directory (the source on the argv, ``--out:``, ``--nimcache:``,
+  ## ``--path:``, extra outputs, the depfile) relative to that directory, so
+  ## the command line names the same files. Declared inputs keep the
+  ## recipe-root spelling, because the lowering materializes them against
+  ## the recipe root.
+  ##
+  ## Why it exists: nim writes scratch files into its working directory --
+  ## ``<project>_linkerArgs.txt`` on a long link line, deleted again after
+  ## the link (``extccomp.nim``). In the recipe root that bumps the
+  ## modification time of a directory other edges record as an input, and
+  ## each of them then misses on the next build with "input metadata
+  ## changed". In the source's own directory the scratch file lands where
+  ## no other edge looks. It is also the general rule for compiles here:
+  ## run them where the compiled module lives, so paths come out naturally
+  ## relative.
+  ##
   ## Test-Fixtures-In-Build-Graph M2: ``appLib`` / ``threadsOn`` were
   ## added to the convenience alias so the monitor-shim fixture edge in
   ## ``repro.nim`` can express ``nim c --app:lib --threads:on`` and
@@ -697,19 +718,53 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   if reproNimPathsEnabled and reproConfigNimsFile.len > 0:
     inputs.add(reproConfigNimsFile)
 
-  result = c(pkg = pkg, source = source, output = effectiveBinary,
+  # The directory the compile runs in, spelled relative to the recipe root
+  # ("" = the recipe root itself), and the re-spelling of a
+  # recipe-root-relative path relative to it.
+  let runDir =
+    if runInSourceDir: source.parentDir.replace('\\', '/')
+    else: ""
+  if runInSourceDir and (source.isAbsolute or runDir.len == 0 or
+      runDir == "." or runDir.startsWith("..")):
+    raise newException(ValueError,
+      "nim.c(runInSourceDir = true) needs a `source` in a subdirectory of " &
+      "the recipe root, spelled relative to it; got `" & source & "`")
+  proc fromRunDir(path: string): string =
+    if runDir.len == 0 or path.len == 0 or path.isAbsolute:
+      path
+    else:
+      relativePath(path, runDir, '/')
+
+  result = c(pkg = pkg, source = fromRunDir(source),
+    output = fromRunDir(effectiveBinary),
     defines = defines,
     cpu = cpu, cc = cc, gccExe = gccExe, gccLinkerExe = gccLinkerExe, mm = mm,
-    paths = paths, passC = passC, passL = effectivePassL, nimcache = cacheDir,
+    paths = paths.mapIt(fromRunDir(it)), passC = passC,
+    passL = effectivePassL, nimcache = fromRunDir(cacheDir),
     appLib = appLib, threadsOn = threadsOn, parallelBuild = parallelBuild,
     actionId = actionId,
     deps = deps, after = after, extraInputs = inputs,
-    extraOutputs = extraOutputs, extraEnv = extraEnv,
-    depfile = depfile, cacheable = cacheable,
+    extraOutputs = extraOutputs.mapIt(fromRunDir(it)), extraEnv = extraEnv,
+    depfile = fromRunDir(depfile), cacheable = cacheable,
     dependencyPolicy = compileDependencyPolicy(
-      cacheDir, cacheable, dependencyPolicy),
+      fromRunDir(cacheDir), cacheable, dependencyPolicy),
     actionCachePolicy = actionCachePolicy,
     commandStatsId = commandStatsId)
+  if runInSourceDir:
+    # The engine resolves outputs, the depfile and the policy roots against
+    # the action's cwd, which is why they are re-spelled above. Declared
+    # inputs are materialized against the recipe root instead, so the source
+    # -- which the typed tool derives as an input from its argv spelling --
+    # goes back to the recipe-root spelling, in the same first position.
+    var rootInputs = @[source]
+    for item in inputs:
+      if item notin rootInputs:
+        rootInputs.add(item)
+    setRegisteredActionInputs(result.id, rootInputs)
+    setRegisteredActionCwd(result.id, acwdCustom, runDir)
+    result.inputs = rootInputs
+    result.cwdKind = acwdCustom
+    result.cwdCustomPath = runDir
   if usesSslDefine(defines):
     # The OpenSSL profile supplies the platform-specific library directories;
     # the linker arguments above intentionally contain no host paths.

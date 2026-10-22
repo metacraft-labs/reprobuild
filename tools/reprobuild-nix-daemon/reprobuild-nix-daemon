@@ -211,8 +211,22 @@ def response_for(line: bytes, cache: "ResolveCache", cached_only: bool = False):
     if not selector:
         return {"status": "error", "error": "missing selector"}
 
-    workspace_root = Path(str(req.get("workspaceRoot") or os.getcwd()))
-    workspace_root = workspace_root.expanduser().resolve()
+    # THE CLIENT NAMES THE ROOT; THE HELPER NEVER GUESSES IT. The helper is
+    # shared and runs from ``/`` (see ``main``), so its own working directory
+    # says nothing about any request. A missing root used to fall back to it,
+    # which answered for whichever client happened to start the helper; a
+    # relative one resolved against the same accident. Both are refused, the
+    # way a missing selector is, rather than silently resolved against ``/``.
+    workspace_value = str(req.get("workspaceRoot") or "")
+    if not workspace_value:
+        return {"status": "error", "error": "missing workspaceRoot"}
+    workspace_root = Path(workspace_value).expanduser()
+    if not workspace_root.is_absolute():
+        return {
+            "status": "error",
+            "error": f"workspaceRoot is not an absolute path: {workspace_value}",
+        }
+    workspace_root = workspace_root.resolve()
     expression_value = str(req.get("expressionFile") or "")
     expression_file = None
     if expression_value:
@@ -600,8 +614,26 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--idle-exit-ms", type=int, default=300000)
     parser.add_argument("--socket-path", default=default_socket_path())
     args = parser.parse_args(argv)
+    # A relative ``--socket-path`` means "relative to the launcher", so it is
+    # made absolute while the launcher's directory is still the cwd. The
+    # ``.lock`` and ``.log`` beside it, and the path unlinked on exit, then
+    # name the same files after the chdir below.
+    args.socket_path = os.path.abspath(args.socket_path)
     Path(args.socket_path).parent.mkdir(parents=True, exist_ok=True)
     redirect_output(args.socket_path)
+    # LEAVE THE LAUNCHER'S DIRECTORY. ``requestNixDaemon`` starts this helper
+    # detached and with no working directory of its own, so it inherits the
+    # cwd of whichever client spawned it first -- a test case's temp tree, a
+    # worktree, any project -- and would keep it pinned for its whole
+    # idle-exit lifetime while every other client shares it: the directory
+    # cannot be unmounted, it reads ``<path> (deleted)`` once removed, and a
+    # test reaper that attributes processes to a fixture by cwd stops a helper
+    # other worktrees are using. Nothing below reads the cwd: every request
+    # names an absolute ``workspaceRoot`` and each Nix command runs with that
+    # as its ``cwd`` (so a relative PATH entry, too, resolves there, exactly
+    # as before). Closing inherited descriptors and redirecting stdio are the
+    # rest of the same detachment.
+    os.chdir("/")
     signal.signal(signal.SIGTERM, on_terminate)
     signal.signal(signal.SIGINT, on_terminate)
     if hasattr(signal, "SIGHUP"):

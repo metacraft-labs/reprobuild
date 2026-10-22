@@ -387,10 +387,11 @@ suite "M6 the blast radius is one action":
 
   test "a sibling action still publishes when its neighbour read entropy":
     ## One tool's randomness must not disable the session's cache. The
-    ## mechanism matters here, not just the outcome: the policy sets
-    ## `disableCacheHits` on THIS action and deliberately leaves
-    ## `monitorStatus` alone, because the scheduler flips a session-wide
-    ## `sessionCachePublishDisabled` bit off `mesUnknownScopeLoss`. Routing
+    ## mechanism matters here, not just the outcome: the policy refuses THIS
+    ## action's publish (`cirUnblessedEntropy`, read as `disableCacheHits`)
+    ## and deliberately leaves `monitorStatus` alone, because the scheduler
+    ## flips a session-wide `sessionCachePublishDisabled` bit off
+    ## `mesUnknownScopeLoss`. Routing
     ## entropy through the monitor-loss ladder would have been the obvious
     ## implementation and would have turned one non-deterministic edge into a
     ## whole build's worth of re-runs.

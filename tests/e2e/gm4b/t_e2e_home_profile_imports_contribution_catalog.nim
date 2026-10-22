@@ -283,17 +283,20 @@ withNoCatalogRoot:
 
 suite "GM4b: e2e_home_profile_imports_contribution_catalog":
 
-  var recipeRecord: InterfaceTarballProvisioning
-  var recipeLock = ""
+  setup:
+    # The runner executes each case in its own process. Derive the recipe
+    # oracle for this case rather than relying on the vacuity guard to have
+    # run first; an empty oracle would only compare against fixture defaults.
+    let recipeRecord = selectTarballProvisioning(recipeWith,
+      target = hostTarget)
+    let recipeLock = contributorLockIdentity(recipeRecord.contributor,
+      tarballRealizationLockIdentity(recipeRecord))
 
   test "the recipe that imports the catalog selects its contribution; " &
       "without the import nothing serves this host (vacuity guard)":
     let record = selectTarballProvisioning(recipeWith, target = hostTarget)
     check record.contributor == Contributor
     check record.url == payloadUrl
-    recipeRecord = record
-    recipeLock = contributorLockIdentity(record.contributor,
-      tarballRealizationLockIdentity(record))
     check recipeLock.startsWith("contributor:" & Contributor & "\n")
     # The real acquisition plan carries the same identity.
     check tarballAcquisitionPlan(recipeWith, target = hostTarget).
