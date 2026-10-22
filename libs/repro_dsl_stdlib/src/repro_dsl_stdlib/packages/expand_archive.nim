@@ -187,6 +187,8 @@ proc buildZipArgvWindows*(archive, destination: string): seq[string] =
   ## case a module the host loads writes any. ``-NoProfile`` keeps operator
   ## profiles out of the execution boundary, and ``-NonInteractive`` makes
   ## anything that would prompt fail instead of waiting.
+  # Explicit CP437 preserves unflagged ZIP names; flagged UTF-8 still wins.
+  # https://learn.microsoft.com/en-us/dotnet/api/system.io.compression.zipfile.open
   let command =
     "$ProgressPreference = 'SilentlyContinue'; " &
     "$ErrorActionPreference = 'Stop'; " &
@@ -195,8 +197,10 @@ proc buildZipArgvWindows*(archive, destination: string): seq[string] =
       powershellSingleQuotedLiteral(destination) & ").FullName; " &
     "$root = $root.TrimEnd([char[]]'\\/') + " &
       "[System.IO.Path]::DirectorySeparatorChar; " &
-    "$zip = [System.IO.Compression.ZipFile]::OpenRead(" &
-      powershellSingleQuotedLiteral(archive) & "); " &
+    "$zip = [System.IO.Compression.ZipFile]::Open(" &
+      powershellSingleQuotedLiteral(archive) &
+      ", [System.IO.Compression.ZipArchiveMode]::Read, " &
+      "[System.Text.Encoding]::GetEncoding(437)); " &
     "try { " &
       "foreach ($entry in $zip.Entries) { " &
         "$target = [System.IO.Path]::GetFullPath(" &

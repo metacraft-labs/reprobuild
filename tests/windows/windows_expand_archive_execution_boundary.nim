@@ -388,3 +388,73 @@ suite "M3f Windows expandArchive runtime boundary":
         names.add(relativePath(path, extendedPath(destination)).replace('\\', '/'))
       check names == @[name]
       check readFile(extendedPath(destination / name)) == "encoded-body"
+
+  test "DSL retains CP437 and flagged UTF-8 names without scratch copies":
+    let root = toolStoreFixtureRoot()
+    let extractor = repro_tool_profiles.resolveZipExtractor()
+    doAssert extractor.kind == "powershell" and extractor.exe.isAbsolute
+    for utf8 in [false, true]:
+      let label = if utf8: "utf8" else: "cp437"
+      let archive = root / (label & ".archive")
+      let name = "pkg/" & repeat('a', 100) &
+        (if utf8: "/雪.nim" else: "/åäö.nim")
+      let encoding = if utf8: "[System.Text.Encoding]::UTF8"
+                     else: "[System.Text.Encoding]::GetEncoding(437)"
+      let fixture = runProcess(extractor.exe,
+        @["-NoProfile", "-NonInteractive", "-Command",
+        "$ErrorActionPreference = 'Stop'; " &
+        "Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem; " &
+        "$fs = [System.IO.File]::Open(" & powershellSingleQuotedLiteral(archive) & ", 'CreateNew'); " &
+        "try { $zip = New-Object System.IO.Compression.ZipArchive($fs, 'Create', $false, " & encoding & "); " &
+        "try { $entry = $zip.CreateEntry(" & powershellSingleQuotedLiteral(name) & "); " &
+        "$stream = $entry.Open(); try { $bytes = [System.Text.Encoding]::ASCII.GetBytes('encoded-body'); " &
+        "$stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() } " &
+        "} finally { $zip.Dispose() } } finally { $fs.Dispose() }"])
+      requireProcessSuccess(fixture, "create genuine encoded ZIP fixture")
+      let raw = readFile(archive)
+      doAssert raw.len >= 30 and raw[0 .. 3] == "PK\x03\x04"
+      let flags = ord(raw[6]) or (ord(raw[7]) shl 8)
+      let nameLength = ord(raw[26]) or (ord(raw[27]) shl 8)
+      doAssert nameLength > 0 and nameLength <= raw.len - 30
+      check ((flags and 0x800) != 0) == utf8
+      check raw[30 ..< 30 + nameLength] ==
+        (if utf8: name else: "pkg/" & repeat('a', 100) & "/\x86\x84\x94.nim")
+      let destination = root / (label & "-dsl")
+      createDir(destination)
+      writeFile(destination / "keep.txt", "unrelated-body")
+      for pass in 0 .. 1:
+        let extracted = runObserved(buildZipArgvWindows(archive, destination), root)
+        check extracted.exitCode == 0
+        check extracted.scratchPath.len == 0
+        if extracted.exitCode != 0: echo extracted.output
+        check readFile(extendedPath(destination / name)) == "encoded-body"
+        check readFile(extendedPath(destination / "keep.txt")) == "unrelated-body"
+        var names: seq[string]
+        for path in walkDirRec(extendedPath(destination)):
+          names.add(relativePath(path, extendedPath(destination)).replace('\\', '/'))
+        check names.len == 2
+        check name in names and "keep.txt" in names
+        check remainingScratchFiles(root).len == 0
+
+      # The bootstrap helper is a third owning producer entry point. Invoke
+      # its actual file in the same absolute OS PowerShell, without switching
+      # runtime or weakening its exclusive destination contract.
+      let helper = currentSourcePath().parentDir.parentDir.parentDir /
+        "windows" / "toolchain-utils.ps1"
+      doAssert fileExists(helper), "canonical SDK helper is required"
+      let bootstrapDestination = root / (label & "-bootstrap")
+      let bootstrapScript = ". " & powershellSingleQuotedLiteral(helper) &
+        "; Expand-ZipArchive -ArchivePath " & powershellSingleQuotedLiteral(archive) &
+        " -Destination " & powershellSingleQuotedLiteral(bootstrapDestination)
+      let bootstrapped = runProcess(extractor.exe,
+        @["-NoProfile", "-NonInteractive", "-Command", bootstrapScript])
+      requireProcessSuccess(bootstrapped, "canonical SDK encoded-name extraction")
+      var bootstrapNames: seq[string]
+      for path in walkDirRec(extendedPath(bootstrapDestination)):
+        bootstrapNames.add(relativePath(path, extendedPath(bootstrapDestination)).replace('\\', '/'))
+      check bootstrapNames == @[name]
+      check readFile(extendedPath(bootstrapDestination / name)) == "encoded-body"
+      let repeated = runProcess(extractor.exe,
+        @["-NoProfile", "-NonInteractive", "-Command", bootstrapScript])
+      check repeated.exitCode != 0
+      check readFile(extendedPath(bootstrapDestination / name)) == "encoded-body"
