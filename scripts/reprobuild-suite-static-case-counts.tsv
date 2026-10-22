@@ -2015,6 +2015,7 @@ tests/integration/t_tpm2_driver_composes_and_refuses.nim	nim	19
 tests/integration/t_tpm2_evidence_composite_roundtrip.nim	nim	14
 tests/integration/t_tpm2_evidence_rejects_malformed.nim	nim	23
 tests/integration/t_tpm2_structure_vectors.nim	nim	2
+tests/integration/t_tpm_quote_comes_from_the_tpm.nim	nim	4
 tests/integration/t_tpm_quote_verifies.nim	nim	7
 tests/integration/t_transparency_log_inclusion_against_a_witnessed_root.nim	nim	15
 tests/integration/t_tsm_report_transport.nim	nim	39
@@ -2154,7 +2155,7 @@ tests/unit/t_closure_manifest.nim	nim	4
 tests/unit/t_cmake_direct_tool_identity.nim	nim	5
 tests/unit/t_config_nims_lib_resolution.nim	nim	7
 tests/unit/t_config_package_paths_resolve.nim	nim	5
-tests/unit/t_configure_build_tree_cleanup.nim	nim	12
+tests/unit/t_configure_build_tree_cleanup.nim	nim	13
 tests/unit/t_constructor_fetch_tool_refs.nim	nim	9
 tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	2
 tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	5
@@ -2375,9 +2376,11 @@ tests/unit/test_package_root_anchor.py	python	3
 tests/unit/test_prune_undeclared_test_binaries.py	python	5
 tests/unit/test_publish_surface_routing.py	python	32
 tests/unit/test_regenerate_suite_artifacts.py	python	25
+tests/unit/test_release_git.py	python	5
 tests/unit/test_release_native_packages.py	python	8
 tests/unit/test_release_smoke_dev_exec.py	python	6
 tests/unit/test_reprobuild_suite_inventory.py	python	109
+tests/unit/test_sibling_lock_pins.py	python	10
 tests/unit/test_source_revision.py	python	18
 tests/unit/test_suite_drift_attribution.py	python	12
 tests/unit/test_wrapper_default_provenance.py	python	3

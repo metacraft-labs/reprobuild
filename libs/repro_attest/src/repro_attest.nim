@@ -59,10 +59,16 @@
 ##     key source the agent mints key agreements with, and the opener
 ##     that recovers what was released to one. Not re-exported, for the
 ##     same reason ``hpke`` is not — it is built on it.
+##   * ``repro_attest/tpm2_device`` — the command transactions: the
+##     request and response framing a TPM speaks, the password
+##     authorization a machine's own attestation key is created under,
+##     and the five commands this surface needs, over a character
+##     device or a socket.
 ##   * ``repro_attest/tpm2_backend`` — the measured-boot backend: the
 ##     ``reproos.tpm2-evidence.v1`` composite that carries a quote, its
-##     signature and the TCG event log as one blob, and the driver that
-##     assembles it.
+##     signature and the TCG event log as one blob, and the two sources
+##     it assembles one from — a machine's own TPM, or artifacts a TPM
+##     already produced.
 ##   * ``repro_attest/tsm_report`` — the kernel's unified
 ##     attestation-report directory: the write-then-read pass a
 ##     confidential guest makes over it, and the counter discipline that
@@ -119,6 +125,7 @@ import ./repro_attest/report
 import ./repro_attest/driver
 import ./repro_attest/provision
 import ./repro_attest/mock_backend
+import ./repro_attest/tpm2_device
 import ./repro_attest/tpm2_backend
 import ./repro_attest/tsm_report
 import ./repro_attest/snp_backend
@@ -132,6 +139,7 @@ import ./repro_attest/inference_statement
 
 export measurement, snp_launch, tdx_launch, tpm2, event_log, manifest,
        image_layout,
-       binding, report, driver, provision, mock_backend, tpm2_backend,
+       binding, report, driver, provision, mock_backend, tpm2_device,
+       tpm2_backend,
        tsm_report, snp_backend, tdx_backend, sealing, cloud_launch,
        merkle, edge_attestation, commitment, inference_statement

@@ -18081,6 +18081,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_tpm_quote_comes_from_the_tpm.nim",
+    binary: "build/test-bin/t_tpm_quote_comes_from_the_tpm",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_tpm_quote_verifies.nim",
     binary: "build/test-bin/t_tpm_quote_verifies",
     defines: @[],
@@ -21221,9 +21230,11 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_prune_undeclared_test_binaries.py",
   "tests/unit/test_publish_surface_routing.py",
   "tests/unit/test_regenerate_suite_artifacts.py",
+  "tests/unit/test_release_git.py",
   "tests/unit/test_release_native_packages.py",
   "tests/unit/test_release_smoke_dev_exec.py",
   "tests/unit/test_reprobuild_suite_inventory.py",
+  "tests/unit/test_sibling_lock_pins.py",
   "tests/unit/test_source_revision.py",
   "tests/unit/test_suite_drift_attribution.py",
   "tests/unit/test_wrapper_default_provenance.py"

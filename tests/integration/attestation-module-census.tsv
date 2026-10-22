@@ -82,6 +82,7 @@ libs/repro_attest/src/repro_attest/tdx_backend.nim	library	exported	The trust-do
 libs/repro_attest/src/repro_attest/tdx_launch.nim	library	exported	The measurement registers an Intel trust domain will report
 libs/repro_attest/src/repro_attest/tpm2.nim	library	exported	TPM 2.0 structure codec: the big-endian TLV a measured-boot machine
 libs/repro_attest/src/repro_attest/tpm2_backend.nim	library	exported	The tpm2 backend: the evidence a measured-boot machine produces, and
+libs/repro_attest/src/repro_attest/tpm2_device.nim	library	exported	Talking to a TPM: the command transactions the quote seam needs, and
 libs/repro_attest/src/repro_attest/tsm_report.nim	library	exported	The kernel's unified attestation-report surface, and the discipline
 libs/repro_attest/src/repro_attest/x25519_kem.nim	library	standalone	The key-encapsulation mechanism an attested instance carries: X25519
 libs/repro_attest_verify/src/repro_attest_verify.nim	umbrella	-	Verification: the half of the attestation chain that decides whether
@@ -193,6 +194,7 @@ tests/integration/t_tpm2_driver_composes_and_refuses.nim	gate	-	The tpm2 arm of 
 tests/integration/t_tpm2_evidence_composite_roundtrip.nim	gate	-	A quote, its signature and the log that explains it survive one blob
 tests/integration/t_tpm2_evidence_rejects_malformed.nim	gate	-	Every way a tpm2 evidence composite can be wrong, refused — and each
 tests/integration/t_tpm2_structure_vectors.nim	gate	-	The TPM 2.0 structure codec, against quotes a real TPM produced.
+tests/integration/t_tpm_quote_comes_from_the_tpm.nim	gate	-	A quote taken from a real TPM, and the reason a recording of one
 tests/integration/t_tpm_quote_verifies.nim	gate	-	A machine attested, and the verifier accepted it.
 tests/integration/t_transparency_log_inclusion_against_a_witnessed_root.nim	gate	-	Transparency-log inclusion: RFC 6962 proofs, checked against a root
 tests/integration/t_tsm_report_transport.nim	gate	-	The kernel's attestation-report surface: the counter discipline, the

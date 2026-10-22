@@ -373,7 +373,7 @@ class ContinuousBenchmarkingPolicyTests(unittest.TestCase):
         self.assertIn("branches: [dev, stable]", workflow)
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn(
-            'runner: \'["self-hosted", "Linux", "X64", "benchmark"]\'', workflow
+            'runner: \'["linux", "x64", "benchmark"]\'', workflow
         )
         # Check the active measurement job, not a label array in a comment
         # or another job. Continuous benchmarking policy requires m3's
@@ -397,7 +397,7 @@ class ContinuousBenchmarkingPolicyTests(unittest.TestCase):
         self.assertEqual(len(macos_runners), 1)
         self.assertEqual(
             json.loads(macos_runners[0]),
-            ["self-hosted", "darwin", "nix-darwin", "aarch64-darwin", "benchmark"],
+            ["self-hosted", "macOS", "ARM64", "benchmark"],
         )
         self.assertRegex(
             benchmark_job.group(1),

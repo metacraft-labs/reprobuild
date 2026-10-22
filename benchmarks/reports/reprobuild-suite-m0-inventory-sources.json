@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2345,
+    "nimTestBinaries": 2346,
     "pureUnitConsolidationGroups": 67,
     "pureUnitTests": 688,
     "staticallyDetectedRuntimeCompilerFlowTests": 127,
-    "testEntries": 2376
+    "testEntries": 2379
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1372,10 +1372,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1272,
+      "integration": 1273,
       "platform/destructive": 145,
       "pure unit": 688,
-      "unclassified": 253
+      "unclassified": 255
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1577,9 +1577,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2345,
-    "pythonTestFileCount": 31,
-    "testEntryCount": 2376
+    "nimTestBinaryCount": 2346,
+    "pythonTestFileCount": 33,
+    "testEntryCount": 2379
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -43815,6 +43815,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_tpm_quote_comes_from_the_tpm",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_agent",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_tpm_quote_comes_from_the_tpm.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_tpm_quote_verifies",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -46287,8 +46306,8 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_configure_build_tree_cleanup.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 12,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -50193,6 +50212,21 @@
     {
       "binary": "",
       "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_release_git.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
       "classificationReason": "imports `shutil`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
       "language": "python",
@@ -50232,6 +50266,21 @@
       "source": "tests/unit/test_reprobuild_suite_inventory.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 109,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_sibling_lock_pins.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

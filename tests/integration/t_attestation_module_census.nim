@@ -80,11 +80,11 @@ import std/[algorithm, os, sequtils, strutils, unittest]
 const
   # The row counts, pinned as numbers. See property 2 in the header:
   # without these, deleting a file and its row together is silent.
-  ReproAttestModules = 26
+  ReproAttestModules = 27
   ReproAttestVerifyModules = 18
   UmbrellaModules = 2
   MutationTools = 4
-  AttestationTestSources = 94
+  AttestationTestSources = 95
 
   AttestDir = "libs/repro_attest/src/repro_attest"
   VerifyDir = "libs/repro_attest_verify/src/repro_attest_verify"

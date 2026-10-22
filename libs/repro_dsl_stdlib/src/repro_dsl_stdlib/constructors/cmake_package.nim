@@ -144,6 +144,25 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     toolIdentityRefs = fetchToolRefs)
   some(act)
 
+proc cmakeBuildScript*(libraryDirs, buildArgv: openArray[string];
+                       buildStamp: string;
+                       exportLibraryPath = true): string =
+  ## The ``sh -c`` body of the cmake build and install edges: optionally export
+  ## ``libraryDirs`` as ``LD_LIBRARY_PATH`` (see ``exportBuildLibraryPath``
+  ## on ``cmake_package``), run ``buildArgv``, then touch the stamp.
+  result = "set -e; "
+  if exportLibraryPath and libraryDirs.len > 0:
+    result.add("export LD_LIBRARY_PATH=\"")
+    for i, d in libraryDirs:
+      if i > 0: result.add(":")
+      result.add(d.replace("\\", "/").replace("\"", "\\\""))
+    result.add(":${LD_LIBRARY_PATH:-}\"; ")
+  var quoted: seq[string] = @[]
+  for a in buildArgv:
+    quoted.add("\"" & a.replace("\"", "\\\"") & "\"")
+  result.add(quoted.join(" ") & "; ")
+  result.add(": > \"" & buildStamp.replace("\\", "/") & "\"")
+
 proc cmake_package*(srcDir: string;
                     buildDir = "build";
                     destdir = "out";
@@ -154,7 +173,8 @@ proc cmake_package*(srcDir: string;
                     extraEnv: seq[(string, string)] = @[];
                     allowSourceWrites = false;
                     srcPatches: seq[string] = @[];
-                    freshConfigure = false): CmakePackageResult =
+                    freshConfigure = false;
+                    exportBuildLibraryPath = true): CmakePackageResult =
   ## Configure → build → install pipeline for an upstream cmake
   ## project. v1 leaves component selection up to the recipe
   ## (``component`` field on the install call); the standard layout
@@ -171,6 +191,15 @@ proc cmake_package*(srcDir: string;
   ## probes via the nix-wrapped pkg-config — the wrapper only consults
   ## PKG_CONFIG_PATH_FOR_TARGET, not the bare PKG_CONFIG_PATH, and the
   ## auto-channel doesn't compose for graphs with 70+ deps).
+  ##
+  ## ``exportBuildLibraryPath`` (default on) bakes every dependency library
+  ## directory into the build script's ``LD_LIBRARY_PATH`` for helper
+  ## binaries whose RUNPATH cannot find them (see M9.R.15q.13 below).
+  ## Ninja and make run each command through ``/bin/sh``, which then loads
+  ## those libraries too; where /bin/sh is a dynamically linked bash (NixOS)
+  ## a source-built readline older than its own breaks every command with
+  ## ``undefined symbol: rl_completion_rewrite_hook``. A recipe whose build
+  ## helpers find their libraries through CMake's build RPATH turns it off.
   ##
   ## ``allowSourceWrites`` is an explicit exception for upstream CMake
   ## projects that generate configuration inputs inside their extracted
@@ -632,21 +661,8 @@ proc cmake_package*(srcDir: string;
   # of paths into the build script via ``export LD_LIBRARY_PATH`` makes
   # the channel bulletproof.  Inert in unit-test mode (empty
   # ``projectRoot``).
-  let ldLibraryDirs = cmakeRuntimeLibraryDirs(linkLibraryDirs)
-  let buildScript = block:
-    var s = "set -e; "
-    if ldLibraryDirs.len > 0:
-      s.add("export LD_LIBRARY_PATH=\"")
-      for i, d in ldLibraryDirs:
-        if i > 0: s.add(":")
-        s.add(d.replace("\\", "/").replace("\"", "\\\""))
-      s.add(":${LD_LIBRARY_PATH:-}\"; ")
-    var quoted: seq[string] = @[]
-    for a in buildArgv:
-      quoted.add("\"" & a.replace("\"", "\\\"") & "\"")
-    s.add(quoted.join(" ") & "; ")
-    s.add(": > \"" & buildStamp.replace("\\", "/") & "\"")
-    s
+  let buildScript = cmakeBuildScript(cmakeRuntimeLibraryDirs(linkLibraryDirs),
+    buildArgv, buildStamp, exportBuildLibraryPath)
   let buildEdge = buildAction(
     id = "cmake-build-" & pkgName,
     call = inlineExecCall(@["sh", "-c", buildScript]),
@@ -688,24 +704,13 @@ proc cmake_package*(srcDir: string;
   let installArgv = @["cmake", "--install", buildDir, "--prefix", effectiveInstallPrefix]
   let installStamp = projectRoot / ".repro" / "build" / "cmake-install.stamp"
   createDir(parentDir(installStamp))
-  let installScript = block:
-    var s = "set -e; "
-    # M9.R.15q.13.1 — same LD_LIBRARY_PATH baking as the build script,
-    # so cmake --install's helper binaries (e.g. plugin-registration
-    # binaries, ELF strippers from sibling toolchain recipes) inherit
-    # the sibling install-mirror lib dirs.
-    if ldLibraryDirs.len > 0:
-      s.add("export LD_LIBRARY_PATH=\"")
-      for i, d in ldLibraryDirs:
-        if i > 0: s.add(":")
-        s.add(d.replace("\\", "/").replace("\"", "\\\""))
-      s.add(":${LD_LIBRARY_PATH:-}\"; ")
-    var quoted: seq[string] = @[]
-    for a in installArgv:
-      quoted.add("\"" & a.replace("\"", "\\\"") & "\"")
-    s.add(quoted.join(" ") & "; ")
-    s.add(": > \"" & installStamp.replace("\\", "/") & "\"")
-    s
+  # M9.R.15q.13.1 — same LD_LIBRARY_PATH baking as the build script,
+  # so cmake --install's helper binaries (e.g. plugin-registration
+  # binaries, ELF strippers from sibling toolchain recipes) inherit
+  # the sibling install-mirror lib dirs.
+  let installScript = cmakeBuildScript(
+    cmakeRuntimeLibraryDirs(linkLibraryDirs), installArgv, installStamp,
+    exportBuildLibraryPath)
   let installEdge = buildAction(
     id = "cmake-install-" & pkgName,
     call = inlineExecCall(@["sh", "-c", installScript]),

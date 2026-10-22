@@ -176,7 +176,7 @@ echo "== .github/sibling-repos pins =="
 # Run offline and before remote lookups: an existing SHA can still be unusable
 # when the consumer lock requires another revision. Both = and != forms must
 # agree; acknowledging an override cannot waive the build's source check.
-python3 scripts/test_sibling_lock_pins.py
+python3 tests/unit/test_sibling_lock_pins.py
 python3 scripts/check_sibling_lock_pins.py
 
 sibling_repos_file=".github/sibling-repos"
