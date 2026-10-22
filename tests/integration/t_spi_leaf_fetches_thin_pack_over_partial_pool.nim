@@ -40,15 +40,55 @@
 ##     leaf carries the chain; true for a partial pool without one, including
 ##     a pool whose only remaining partial-clone signal is a ``*.promisor``
 ##     pack file.
+##   - ``nested_full_alternate_of_partial_pool_leaf_fetch_succeeds`` — the
+##     leaf's alternate is a FULL bare clone (no filter, no promisor remote,
+##     no promisor packs) whose own ``objects/info/alternates`` names the
+##     ``blob:none`` pool. Git follows alternates transitively, so the leaf
+##     advertises the pool's commits as haves just the same. Positive
+##     control: a plain fetch in one leaf fails with unresolved deltas; the
+##     engine's fetch in the other succeeds, as in the first case.
+##   - ``nested_alternates_decision`` — ``borrowedObjectStores`` and
+##     ``leafFetchNeedsPromisor`` over hand-built chains of bare stores: a
+##     chain of full stores (with a relative entry, a comment line and a
+##     missing directory) is false; the same chain with a partial store three
+##     hops away is true; a cycle terminates, false while every store is full
+##     and true once one on it is partial; git's nesting cap is honoured (a
+##     partial store six hops away counts, seven hops away does not), and the
+##     cap is cross-checked against the installed git by object visibility;
+##     an unreadable alternates file contributes nothing (git ignores it
+##     too), while another branch of the chain is still evaluated.
+##   - ``pinned_clone_fetch_over_unregistrable_partial_pool_succeeds`` — the
+##     clone action with a commit-SHA revision, ``--single-branch`` and a
+##     ``referencePath`` to a ``blob:none`` pool the user cannot write. The
+##     pinned commit sits on a side branch outside ``--single-branch``, one
+##     commit past the pool on the same big file, so ``cat-file -e`` misses
+##     and the follow-up ``fetch --no-tags origin <sha>`` runs. Registration
+##     fails (no ``repro/`` can be created in the pool) and the dissociating
+##     ``repack -a -d`` fails too (the clone names blobs the pool only
+##     promises), so the clone keeps its alternates with no promisor remote:
+##     exactly the state that fetch must survive. Positive control: the same
+##     fetch with plain git in a plain ``--reference`` twin fails with
+##     unresolved deltas.
 ##
-## No mocks: real ``git``, real repositories, and the real fetch action driven
-## through the build engine (``runBuild``), as ``repro`` runs it. Hermetic: one
+## No mocks: real ``git``, real repositories, and the real fetch and clone
+## actions driven through the build engine (``runBuild``), as ``repro`` runs
+## them. Two fixture states are made by hand rather than by a tool, and both
+## are real git or filesystem state, not stand-ins: the nested-decision
+## chains are ``git init --bare`` stores whose alternates files the test
+## writes (git reads them exactly as it reads ones ``clone --reference``
+## writes; the object-visibility cross-check proves it), and the unwritable
+## pool is a real ``chmod``-ed directory, standing in for a shared cache that
+## another user owns. That case and the unreadable-alternates check skip when
+## running as root (root ignores the permission bits) and on Windows (POSIX
+## modes there do not deny creating a subdirectory). Hermetic: one
 ## ``createTempDir`` root per case, a private ``GIT_CONFIG_GLOBAL``,
 ## ``file://`` URLs throughout (a plain path would make git hardlink instead of
 ## borrow). Every presence probe runs with ``GIT_NO_LAZY_FETCH=1`` so it cannot
 ## heal what it checks. Skip rule: ``git`` missing on PATH.
 
 import std/[algorithm, os, osproc, strutils, tempfiles, unittest]
+when not defined(windows):
+  from std/posix import geteuid
 import repro_test_support/reasoned_skip
 
 import git_actions
@@ -100,19 +140,25 @@ type Fixture = object
   root, up, url, pool, gitBin: string
   leaves: seq[string]
 
-proc cloneLeaf(f: Fixture; name: string): string =
-  ## A leaf as a legacy tool leaves it: ``--reference`` the pool, so its
-  ## alternates point there, and NO promisor remote of its own.
+proc cloneLeaf(f: Fixture; reference, name: string): string =
+  ## A leaf as a legacy tool leaves it: ``--reference`` the pool (or the
+  ## relay in front of it), so its alternates point there, and NO promisor
+  ## remote of its own.
   result = f.root / "ws" / name
   createDir(result.parentDir)
   discard must(f.root, "clone", "-q", "--no-local", "--no-checkout",
-    "--reference", f.pool, f.url, result)
+    "--reference", reference, f.url, result)
   doAssert gitIn(result, "config", "--get-regexp", "promisor").code != 0
 
-proc setUp(root, pool: string; owned: bool; leafCount: int): Fixture =
+proc setUp(root, pool: string; owned: bool; leafCount: int;
+           relay = ""): Fixture =
   ## Upstream at commit one; a ``blob:none`` pool at ``pool``; ``leafCount``
   ## leaves cloned from it; then the pool fetches commit two and upstream
   ## moves on to commit three, all three rewriting ``big.txt``.
+  ##
+  ## With ``relay``, a FULL bare clone is made there at commit one with
+  ## ``--reference`` to the pool, and the leaves reference the relay instead:
+  ## they reach the pool only through the relay's own alternates.
   result.root = root
   result.gitBin = findExe("git")
   result.up = root / "up"
@@ -137,8 +183,14 @@ proc setUp(root, pool: string; owned: bool; leafCount: int): Fixture =
   else:
     discard must(pool, "config", "remote.origin.fetch",
       "+refs/heads/*:refs/heads/*")
+  var reference = pool
+  if relay.len > 0:
+    createDir(relay.parentDir)
+    discard must(root, "clone", "-q", "--bare", "--no-local", "--reference",
+      pool, result.url, relay)
+    reference = relay
   for i in 1 .. leafCount:
-    result.leaves.add(cloneLeaf(result, "leaf" & $i))
+    result.leaves.add(cloneLeaf(result, reference, "leaf" & $i))
   commitBig(result.up, bigFile("extra\n"), "two")
   discard must(pool, "fetch", "-q", "origin")
   let two = must(result.up, "rev-parse", "HEAD")
@@ -192,6 +244,56 @@ proc checkFetchHealed(f: Fixture; leaf: string) =
   check readFile(leaf / ".git" / "config") == configBefore
   # The missing base came from the remote being fetched, not via the pool.
   check poolState(f.pool) == poolBefore
+
+proc permissionsAreEnforced(): bool =
+  ## Whether a mode bit can deny this process a write: not on Windows, and
+  ## not for root.
+  when defined(windows):
+    false
+  else:
+    geteuid() != 0
+
+proc bareStore(root, name: string): string =
+  ## An empty bare repository: an object store with an owning git directory.
+  result = root / "stores" / name
+  createDir(result.parentDir)
+  discard must(root, "init", "-q", "--bare", result)
+
+proc linkStores(fromRepo: string; entries: varargs[string]) =
+  ## Write ``fromRepo``'s ``objects/info/alternates`` as git reads it: one
+  ## entry per line.
+  createDir(fromRepo / "objects" / "info")
+  writeFile(fromRepo / "objects" / "info" / "alternates",
+    entries.join("\n") & "\n")
+
+proc markPartial(repo: string) =
+  ## The config signal of a partial clone: a promisor remote.
+  discard must(repo, "config", "remote.origin.url", "file:///nowhere")
+  discard must(repo, "config", "remote.origin.promisor", "true")
+
+proc unmarkPartial(repo: string) =
+  discard must(repo, "config", "--unset", "remote.origin.promisor")
+
+proc storeBlob(repo, body: string): string =
+  ## Write a blob into ``repo``'s own object store and return its id.
+  let res = execCmdEx("git --git-dir=" & q(repo) & " hash-object -w --stdin",
+    input = body)
+  doAssert res.exitCode == 0, res.output
+  res.output.strip()
+
+proc cloneThroughEngine(f: Fixture; revision, reference: string;
+                        singleBranch: bool): tuple[res: BuildRunResult;
+                                                   clone: string] =
+  ## Run reprobuild's clone action the way ``repro`` does.
+  let identity = ensureGitToolResolvable(tpmPathOnly, f.gitBin.parentDir)
+  let work = f.root / "clone-ws"
+  createDir(work)
+  let act = gitCloneAction("spi-thin-clone", identity, remoteUrl = f.url,
+    repoPath = "clone", receiptPath = "clone-receipt", revision = revision,
+    cwd = work, referencePath = reference, singleBranch = singleBranch)
+  var config = defaultBuildEngineConfig(f.root / "engine-cache-clone")
+  config.suppressTrace = true
+  (res: runBuild(graph([act]), config), clone: work / "clone")
 
 suite "SPI: leaves of a partial-clone pool fetch thin packs":
 
@@ -271,3 +373,188 @@ suite "SPI: leaves of a partial-clone pool fetch thin packs":
       check gitIn(f.pool, "config", "--get", "extensions.partialClone").code != 0
       check repoIsPartialClone(git, f.pool)
       check leafFetchNeedsPromisor(git, f.leaves[1])
+
+  test "nested_full_alternate_of_partial_pool_leaf_fetch_succeeds":
+    if findExe("git").len == 0:
+      skip("needs git on PATH")
+    else:
+      let root = createTempDir("repro-spi-thin-nested-fetch-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let relay = root / "relay" / "up.git"
+      let f = setUp(root, root / "repo-workspaces" / "clones" / "up.git",
+        owned = false, leafCount = 2, relay = relay)
+      # Premise: the leaves borrow from a FULL repository, and reach the
+      # partial pool only through that repository's own alternates.
+      check not repoIsPartialClone(f.gitBin, relay)
+      let relayAlternates = readAlternates(relay)
+      check relayAlternates.len == 1
+      if relayAlternates.len == 1:
+        check samePathOnDisk(relayAlternates[0], f.pool / "objects")
+      let direct = poolsOfLeaf(f.leaves[0])
+      check direct.len == 1
+      if direct.len == 1:
+        check samePathOnDisk(direct[0], relay)
+      check borrowedObjectStores(f.leaves[0]).len == 2
+      # Positive control: the nested chain reproduces the issue too.
+      let plain = gitIn(f.leaves[0], "fetch", "origin")
+      checkpoint("plain fetch: " & plain.output)
+      check plain.code != 0
+      check plain.output.contains("unresolved deltas")
+      let relayBefore = poolState(relay)
+      checkFetchHealed(f, f.leaves[1])
+      check poolState(relay) == relayBefore
+
+  test "nested_alternates_decision":
+    if findExe("git").len == 0:
+      skip("needs git on PATH")
+    else:
+      let root = createTempDir("repro-spi-thin-nested-decide-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      writeFile(root / "gitconfig", GlobalConfig)
+      putEnv("GIT_CONFIG_GLOBAL", root / "gitconfig")
+      putEnv("GIT_CONFIG_NOSYSTEM", "1")
+      let git = findExe("git")
+      let leaf = root / "ws" / "leaf"
+      discard must(root, "init", "-q", leaf)
+      var s: seq[string]
+      for i in 1 .. 7:
+        s.add(bareStore(root, "s" & $i & ".git"))
+      proc objects(repo: string): string = expandFilename(repo / "objects")
+
+      # A chain of full stores: leaf -> s1 -> s2 -> s3. s1's file carries a
+      # comment, an entry for a directory that does not exist, and s2 as a
+      # path relative to s1's object directory.
+      linkStores(leaf / ".git", s[0] / "objects")
+      linkStores(s[0], "# a comment, not a path",
+        root / "stores" / "missing.git" / "objects", "../../s2.git/objects")
+      linkStores(s[1], s[2] / "objects")
+      check borrowedObjectStores(leaf) ==
+        @[objects(s[0]), objects(s[1]), objects(s[2])]
+      check not leafFetchNeedsPromisor(git, leaf)
+      # The same chain with a partial store three hops away.
+      markPartial(s[2])
+      check leafFetchNeedsPromisor(git, leaf)
+      unmarkPartial(s[2])
+      check not leafFetchNeedsPromisor(git, leaf)
+
+      # A cycle, s3 -> s1, terminates with each store listed once.
+      linkStores(s[2], s[0] / "objects")
+      check borrowedObjectStores(leaf) ==
+        @[objects(s[0]), objects(s[1]), objects(s[2])]
+      check not leafFetchNeedsPromisor(git, leaf)
+      markPartial(s[1])
+      check leafFetchNeedsPromisor(git, leaf)
+      unmarkPartial(s[1])
+
+      # Git's nesting cap: leaf -> s1 -> ... -> s7. Git reads six of them.
+      for i in 0 .. 5:
+        linkStores(s[i], s[i + 1] / "objects")
+      linkStores(s[6])
+      var six: seq[string]
+      for i in 0 .. 5:
+        six.add(objects(s[i]))
+      check borrowedObjectStores(leaf) == six
+      # Cross-check against the installed git: an object only in s6 is
+      # visible from the leaf, one only in s7 is not.
+      let inSix = storeBlob(s[5], "only in s6\n")
+      let inSeven = storeBlob(s[6], "only in s7\n")
+      check has(leaf, inSix)
+      check not has(leaf, inSeven)
+      markPartial(s[6])
+      check not leafFetchNeedsPromisor(git, leaf)
+      markPartial(s[5])
+      check leafFetchNeedsPromisor(git, leaf)
+      unmarkPartial(s[5])
+      unmarkPartial(s[6])
+
+      # An unreadable alternates file contributes nothing, as in git; another
+      # branch of the chain is still evaluated.
+      if permissionsAreEnforced():
+        markPartial(s[1])
+        check leafFetchNeedsPromisor(git, leaf)
+        let inTwo = storeBlob(s[1], "only in s2\n")
+        check has(leaf, inTwo)
+        let alt = s[0] / "objects" / "info" / "alternates"
+        let mode = getFilePermissions(alt)
+        setFilePermissions(alt, {})
+        defer: setFilePermissions(alt, mode)
+        check not has(leaf, inTwo)
+        check borrowedObjectStores(leaf) == @[objects(s[0])]
+        check not leafFetchNeedsPromisor(git, leaf)
+        let partial = bareStore(root, "partial.git")
+        markPartial(partial)
+        linkStores(leaf / ".git", s[0] / "objects", partial / "objects")
+        check leafFetchNeedsPromisor(git, leaf)
+      else:
+        checkpoint("unreadable-alternates check not run: permission bits " &
+          "are not enforced for this process")
+
+  test "pinned_clone_fetch_over_unregistrable_partial_pool_succeeds":
+    if findExe("git").len == 0:
+      skip("needs git on PATH")
+    elif not permissionsAreEnforced():
+      skip("needs POSIX permission bits enforced (not root, not Windows) " &
+        "to make the pool unwritable")
+    else:
+      let root = createTempDir("repro-spi-thin-pinned-clone-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root, root / "repo-workspaces" / "clones" / "up.git",
+        owned = false, leafCount = 0)
+      # Move commit three onto a side branch and give main a commit four
+      # without big.txt. The clone checks out main, so its tip must not need
+      # a blob the pool only promises; and under --single-branch the clone
+      # does not fetch ``side``, so commit three is absent and the pinned
+      # fetch runs.
+      let three = must(f.up, "rev-parse", "HEAD")
+      discard must(f.up, "branch", "side", three)
+      discard must(f.up, "reset", "-q", "--hard", "HEAD~1")
+      discard must(f.up, "rm", "-q", "big.txt")
+      writeFile(f.up / "readme.txt", "four\n")
+      discard must(f.up, "add", "readme.txt")
+      discard must(f.up, "commit", "-q", "-m", "four")
+      let bigThree = must(f.up, "rev-parse", three & ":big.txt")
+      let poolBefore = poolState(f.pool)
+      # The pool is a cache this user cannot write, so registration cannot
+      # create its ``repro/`` registry.
+      let mode = getFilePermissions(f.pool)
+      setFilePermissions(f.pool, {fpUserRead, fpUserExec, fpGroupRead,
+        fpGroupExec, fpOthersRead, fpOthersExec})
+      defer: setFilePermissions(f.pool, mode)
+
+      # Positive control: in a plain ``--reference`` twin, the same fetch of
+      # the pinned commit fails with unresolved deltas.
+      let twin = root / "twin"
+      discard must(root, "clone", "-q", "--no-local", "--single-branch",
+        "--reference", f.pool, f.url, twin)
+      check not has(twin, three)
+      let plain = gitIn(twin, "fetch", "--no-tags", "origin", three)
+      checkpoint("plain pinned fetch: " & plain.output)
+      check plain.code != 0
+      check plain.output.contains("unresolved deltas")
+
+      let (res, clone) = cloneThroughEngine(f, three, f.pool,
+        singleBranch = true)
+      check res.results.len == 1
+      if res.results.len == 1:
+        if res.results[0].status != asSucceeded:
+          checkpoint("clone action: " & res.results[0].reason & ": " &
+            res.results[0].stderr)
+        check res.results[0].status == asSucceeded
+      check gitIn(clone, "rev-parse", "HEAD").output == three
+      check has(clone, bigThree)
+      # The state that fetch had to survive was the real one: registration
+      # failed, the dissociating repack failed, and the clone still borrows
+      # from the pool with no promisor remote of its own.
+      check not fileExists(borrowersPath(f.pool))
+      let alternates = readAlternates(clone)
+      check alternates.len == 1
+      if alternates.len == 1:
+        check samePathOnDisk(alternates[0], f.pool / "objects")
+      check gitIn(clone, "config", "--get-regexp", "promisor").code != 0
+      check poolState(f.pool) == poolBefore

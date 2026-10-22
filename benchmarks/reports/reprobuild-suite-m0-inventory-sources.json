@@ -42520,7 +42520,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_spi_leaf_fetches_thin_pack_over_partial_pool.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

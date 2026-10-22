@@ -1009,6 +1009,7 @@ proc borrowedBaseFetchArgs(payload: GitVcsPayload; target,
   ## (Shared-Clone-Pool-Integrity §3.7).
   ##
   ## When ``target`` borrows from a partial-clone pool through its alternates
+  ## (directly, or through an alternate's own alternates: git follows them)
   ## and has no promisor remote of its own, the server may delta a new object
   ## against a blob of a commit ``target`` "has" through the alternate but
   ## the pool only promised; ``index-pack`` then dies with "unresolved deltas
