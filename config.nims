@@ -1293,6 +1293,14 @@ when defined(macosx):
 # ``$nim/dist/nim-results`` are exactly the 10 ambiguous entries, and hoisting
 # them would silently swap the vendored copies for the fork's.
 #
+# Those two entries came from the fork's global ``config/nim.cfg``, which put
+# them on the path of every compile. The fork pinned by ``nim-fork-src`` since
+# the advance recorded in ``flake.nix`` no longer does (its ``dist/`` trees are
+# on the path only of the fork's own programs), so with that compiler neither
+# entry is on this repository's search path and the 10 specs above resolve to
+# the vendored copies alone. The ``libPath`` key stays right either way: it is
+# what keeps a compiler that still lists them from swapping the copies.
+#
 # Re-derive the ambiguity set before extending this block — the safety property
 # is a fact about the current tree, not an invariant anything enforces.
 #

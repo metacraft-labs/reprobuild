@@ -68,10 +68,11 @@ work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/repro-release-runquota-XXXXXX"
 trap 'rm -rf "$work" 2>/dev/null || true' EXIT
 
 # Every git call on a sibling goes through release_git: on the Windows leg
-# this runs in Git for Windows' bash, where a bare `git` is not on PATH and
+# this runs in Git for Windows' bash, where Git may be absent from PATH and
 # the runner's service account may not own the checkout. v0.2.14 (run
-# 39794420520) reported the pinned runquota commit as missing from a clone
-# that held it, because this script ran a bare `git` and discarded its error.
+# 39794420520) reported the pinned runquota commit as missing after this
+# script discarded Git's error. The log did not distinguish missing PATH Git,
+# ownership refusal, or an absent commit; keep that distinction observable.
 # shellcheck source=scripts/lib/release_git.sh
 . scripts/lib/release_git.sh
 release_git_init stage_release_runquota || exit 1

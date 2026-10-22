@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 67,
     "pureUnitTests": 688,
     "staticallyDetectedRuntimeCompilerFlowTests": 127,
-    "testEntries": 2379
+    "testEntries": 2380
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1375,7 +1375,7 @@
       "integration": 1273,
       "platform/destructive": 145,
       "pure unit": 688,
-      "unclassified": 255
+      "unclassified": 256
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1578,8 +1578,8 @@
       }
     ],
     "nimTestBinaryCount": 2346,
-    "pythonTestFileCount": 33,
-    "testEntryCount": 2379
+    "pythonTestFileCount": 34,
+    "testEntryCount": 2380
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -12582,7 +12582,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_expand_archive_zip_extraction_cost.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -22034,7 +22034,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_tool_profiles/tests/t_zip_extraction_cost_does_not_scale_with_progress_records.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -50008,6 +50008,21 @@
       "localDependencyShape": [],
       "owner": "tests/unit",
       "requiresReproBinary": false,
+      "source": "tests/unit/test_daemon_worker_confinement_systemd_analyze.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
       "source": "tests/unit/test_dev_shell_hook_scope.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
@@ -50250,7 +50265,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_smoke_dev_exec.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

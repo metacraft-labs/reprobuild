@@ -156,7 +156,10 @@ function Expand-ZipArchive {
   $target = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Destination)
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   New-Item -ItemType Directory -Force -Path $target | Out-Null
-  [System.IO.Compression.ZipFile]::ExtractToDirectory($archive, $target)
+  # ZIP unflagged names use CP437; the encoding overload preserves flagged UTF-8.
+  # https://learn.microsoft.com/en-us/dotnet/api/system.io.compression.zipfile.extracttodirectory
+  [System.IO.Compression.ZipFile]::ExtractToDirectory(
+    $archive, $target, [System.Text.Encoding]::GetEncoding(437))
 }
 
 function Test-BootstrapStepEnabled {

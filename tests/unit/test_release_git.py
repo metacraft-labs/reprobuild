@@ -1,11 +1,12 @@
 """Tests for scripts/lib/release_git.sh, the git the release staging scripts use.
 
 The Windows release leg runs the staging scripts in Git for Windows' bash,
-where git is not on PATH and the runner's service account may not own the
-sibling checkouts. v0.2.8 (run 37941621127) failed the catalog staging on the
+where Git may be absent from PATH and the runner's service account may not
+own the sibling checkouts. v0.2.8 (run 37941621127) failed catalog staging on the
 first, and v0.2.14 (run 39794420520) failed the runquota staging with "does
-not have <rev>" for a clone that held the commit, because that script ran a
-bare `git` and discarded its error.
+not have <rev>" after that script discarded Git's error. The latter log did
+not distinguish its actual cause. These tests independently reproduce the
+missing-PATH and ownership failure modes; they do not attribute that run.
 
 No Windows host is needed to exercise either trap:
 

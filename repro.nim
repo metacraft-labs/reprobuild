@@ -2090,6 +2090,8 @@ package reprobuild:
         source == "tests/unit/test_ci_reconcile_lock_credentials.py"
       let hcrFixtureEdgeTest =
         source == "tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py"
+      let confinementSystemdAnalyzeTest =
+        source == "tests/unit/test_daemon_worker_confinement_systemd_analyze.py"
       let pyExecute = pythonUnittest.run(
         source = source,
         actionId = pyActionId,
@@ -2111,6 +2113,16 @@ package reprobuild:
         elif hcrFixtureEdgeTest:
           # The fixture script its prebuilt-bundle cases run.
           @["scripts/build_hcr_ct_mcr_fixture.sh"]
+        elif confinementSystemdAnalyzeTest:
+          # The two CONF-3/CONF-4 scripts it imports, and the real unit,
+          # threshold and lease-floor inputs and header they read.
+          @["scripts/derive_lease_floor_syscalls.py",
+            "scripts/check_daemon_worker_unit_confinement.py",
+            "recipes/repro-daemon-worker/systemd-units/repro-daemon-worker.service",
+            "recipes/repro-daemon-worker/confinement-threshold",
+            "recipes/repro-daemon-worker/lease-syscalls",
+            "recipes/repro-daemon-worker/syscalls",
+            "libs/repro_distributed_worker/c/repro_lease_floor_syscalls.h"]
         else: @[])
       when not defined(windows):
         if hookScopeTest:

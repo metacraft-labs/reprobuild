@@ -11,18 +11,20 @@
 #
 # WHY A SHARED HELPER. Every staging script reads sibling checkouts the release
 # workflow cloned beside this one (reprobuild-packages, runquota,
-# nim-shm-lease), and on the Windows release leg each of them meets the same
+# nim-shm-lease), and on the Windows release leg each can meet the same
 # two traps. Fixing them in one script left the next one to rediscover them:
 # v0.2.8 run 37941621127 for stage_release_catalog.sh, v0.2.14 run 39794420520
-# for stage_release_runquota.sh, which reported a present commit as missing.
+# for stage_release_runquota.sh, which reported the pinned commit as missing
+# after discarding Git's error. That log did not distinguish the actual cause;
+# missing PATH Git and ownership refusal are independently reproduced modes.
 #
-# 1. git is not on PATH. The packaging scripts run in Git for Windows' bash,
-#    whose PATH there carries `<git>/usr/bin` (bash, coreutils) but not the
+# 1. Git may be absent from PATH. Packaging runs in Git for Windows' bash,
+#    whose PATH can carry `<git>/usr/bin` (bash, coreutils) but not the
 #    directories holding git itself, so a bare `git` is "command not found".
 #    Inside that bash the install root is `/`, and git lives at /cmd/git or
 #    /mingw64/bin/git (/clangarm64/bin/git on Windows on Arm;
 #    https://github.com/git-for-windows/git/wiki/FAQ).
-# 2. The checkout is not owned by the runner's service account. git then
+# 2. The checkout may not be owned by the runner's service account. git then
 #    refuses to read it ("dubious ownership",
 #    https://git-scm.com/docs/git-config#Documentation/git-config.txt-safedirectory).
 #    Every release_git call is a read of a checkout the workflow itself just
