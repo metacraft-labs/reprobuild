@@ -123,8 +123,8 @@
   ioMonSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "io-mon";
-    rev = "06ee30afb623a9d2dd78bac266d45cbdfc297e80";
-    hash = "sha256-HcXWrZ1UXaCk02oJCCyN+4AnTL0t0gT6tki/WLzLiKc=";
+    rev = "6fc4ba9a2a9636298fc2e6c6578bc4677bd0a134";
+    hash = "sha256-VvujIm5p39wuIuNtv0080ZSaX4lSGT0xYf07rio0Ba8=";
   },
   shmGsetSrc ? fetchFromGitHub {
     owner = "metacraft-labs";

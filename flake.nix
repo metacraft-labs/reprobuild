@@ -294,7 +294,11 @@
       # 32-bit, static or static-pie program, or a script run by one) is now
       # an event-loss, so such a capture no longer publishes. It brings
       # io-mon's nim-stackable-hooks 059c549 requirement (below).
-      url = "github:metacraft-labs/io-mon/06ee30afb623a9d2dd78bac266d45cbdfc297e80";
+      # Bumped to 6fc4ba9 (2026-10-22), io-mon's `agents` tip; 06ee30a is an
+      # ancestor. Execute-only images, a posix_spawn whose file actions change
+      # the child's directory, and an exec from a thread that cannot record
+      # are now graded as loss too.
+      url = "github:metacraft-labs/io-mon/6fc4ba9a2a9636298fc2e6c6578bc4677bd0a134";
       flake = false;
     };
     nim-shm-gset-src = {

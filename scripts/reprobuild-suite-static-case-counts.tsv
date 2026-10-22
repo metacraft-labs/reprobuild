@@ -2375,6 +2375,7 @@ tests/unit/test_package_root_anchor.py	python	3
 tests/unit/test_prune_undeclared_test_binaries.py	python	5
 tests/unit/test_publish_surface_routing.py	python	32
 tests/unit/test_regenerate_suite_artifacts.py	python	25
+tests/unit/test_release_git.py	python	5
 tests/unit/test_release_native_packages.py	python	8
 tests/unit/test_release_smoke_dev_exec.py	python	10
 tests/unit/test_reprobuild_suite_inventory.py	python	109

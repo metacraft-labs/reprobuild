@@ -44,32 +44,13 @@ pin=$(tr -d '\r' < .github/sibling-repos |
 [[ -n "$pin" ]] ||
   fail ".github/sibling-repos pins no 40-hex reprobuild-packages revision"
 
-# Every git call on the catalog checkout goes through this. The checkout is
-# one the workflow itself just cloned beside this one, and every call is a
-# read (rev-parse, archive, remote get-url), so git's ownership check
-# (`safe.directory`, https://git-scm.com/docs/git-config#Documentation/git-config.txt-safedirectory)
-# protects nothing here, and on a runner whose service account does not own
-# the work directory it would make a present checkout read as absent. Scoped
-# to these calls only; nothing is written to config.
-pkg_git() { "$git_bin" -c safe.directory='*' -C "$@"; }
-
-# Resolve git once. On the Windows release leg this script runs in Git for
-# Windows' bash, whose PATH there carries `<git>/usr/bin` (bash, coreutils)
-# but not the directories holding git itself, so a bare `git` is "command not
-# found" (v0.2.8 run 37941621127). Inside that bash the install root is `/`,
-# and git lives at /cmd/git or /mingw64/bin/git
-# (https://github.com/git-for-windows/git/wiki/FAQ).
-git_bin=$(command -v git || true)
-if [[ -z "$git_bin" ]]; then
-  for candidate in /cmd/git /mingw64/bin/git /clangarm64/bin/git; do
-    if [[ -x "$candidate" || -x "$candidate.exe" ]]; then
-      git_bin=$candidate
-      break
-    fi
-  done
-fi
-[[ -n "$git_bin" ]] ||
-  fail "git is not on PATH, and none of Git for Windows' /cmd/git, /mingw64/bin/git is present"
+# Every git call on the catalog checkout goes through pkg_git: git resolved
+# where Git for Windows' bash hides it, with the ownership check lifted for
+# these reads only (scripts/lib/release_git.sh says why each is needed).
+# shellcheck source=scripts/lib/release_git.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/release_git.sh"
+release_git_init stage_release_catalog || exit 1
+pkg_git() { release_git -C "$@"; }
 
 root=""
 tried=""
