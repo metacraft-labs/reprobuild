@@ -47045,7 +47045,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_m9q_from_source_provisioning.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

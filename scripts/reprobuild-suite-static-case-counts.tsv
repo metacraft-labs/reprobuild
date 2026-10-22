@@ -2195,7 +2195,7 @@ tests/unit/t_local_file_cannot_declare_policy.nim	nim	1
 tests/unit/t_local_name_without_shared_layer_is_an_error.nim	nim	1
 tests/unit/t_lock_writer_trace_reader_classifies_refusal_runs.nim	nim	14
 tests/unit/t_m21_history_fed_scheduling.nim	nim	22
-tests/unit/t_m9q_from_source_provisioning.nim	nim	9
+tests/unit/t_m9q_from_source_provisioning.nim	nim	10
 tests/unit/t_m9r10a_cycle_break.nim	nim	7
 tests/unit/t_m9r10a_exec_name_audit.nim	nim	5
 tests/unit/t_m9r10b_synthesis_wiring.nim	nim	8

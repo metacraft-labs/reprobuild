@@ -7786,6 +7786,19 @@ proc fromSourceRecipeRoot*(workspaceRoot = ""): string =
     "packages" / "source"
   if dirExists(federated):
     return federated
+  # A from-source sub-build runs inside one catalog recipe
+  # (`.../packages/source/<pkg>`). Its siblings are that catalog; without
+  # this, the recipe's own library dependencies were not found and fell
+  # through to stdlib provisioning (a header-less `nixpkgs#zlib` for zstd).
+  var dir = root
+  for _ in 0 .. 3:
+    let parent = parentDir(dir)
+    if parent.len == 0 or parent == dir: break
+    if lastPathPart(parent) == "source" and
+        lastPathPart(parentDir(parent)) == "packages" and
+        fileExists(dir / "repro.nim"):
+      return parent
+    dir = parent
   inTree
 
 proc fromSourceArtifactCandidate*(recipeRoot, packageName,
