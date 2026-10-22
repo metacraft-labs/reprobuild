@@ -2753,12 +2753,15 @@ proc powershellZipExtractScript*(archivePath, destination: string): string =
   ## silenced anyway, so no module that the host loads can reintroduce the
   ## per-record cost. The destination is always a fresh staging directory,
   ## so `Expand-Archive -Force`'s overwrite behavior is not needed.
+  ## ZIP names without the UTF-8 flag use CP437, not the runtime's current
+  ## code page. The explicit entry-name encoding leaves flagged UTF-8 names
+  ## unchanged: https://learn.microsoft.com/dotnet/api/system.io.compression.zipfile.extracttodirectory
   "$ProgressPreference = 'SilentlyContinue'; " &
     "$ErrorActionPreference = 'Stop'; " &
     "Add-Type -AssemblyName System.IO.Compression.FileSystem; " &
     "[System.IO.Compression.ZipFile]::ExtractToDirectory(" &
     powershellLiteral(archivePath) & ", " & powershellLiteral(destination) &
-    ")"
+    ", [System.Text.Encoding]::GetEncoding(437))"
 
 proc zipExtractCommand*(extractor: tuple[exe: string; kind: string];
                         archivePath, destination: string): string =

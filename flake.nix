@@ -2594,6 +2594,9 @@
             # gated by Linux. macOS doesn't ship libbpf, so don't drag
             # it into the dev shell there.
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              # Run the real .NET ZIP regression cases on Linux too. Windows
+              # extraction still uses its declared operating-system runtime.
+              pkgs.powershell
               pkgs.libbpf
               # M9.R.54: the reproos-image recipe's ``runtimeDeps`` list
               # (recipes/reproos-image/repro.nim) enumerates 35 host

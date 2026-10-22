@@ -27,8 +27,16 @@
 ## against 3.9 s with `ZipFile.ExtractToDirectory`. So the case catches a
 ## regression on any host that has a PowerShell. The budget is 3,000 entries
 ## in 60 s.
+##
+## Filename fixtures are written by the real .NET ZIP writer with explicit
+## CP437 or UTF-8 encodings. Their raw local headers independently establish
+## the encoding flag and bytes before the production extractor runs. Traversal
+## targets stay inside the owned scratch parent, even if the refusal regresses.
+## Each case acquires its scratch lazily and registers process-owned cleanup.
 
 import std/[os, osproc, strutils, times, unittest]
+from std/sysrand import urandom
+import repro_test_support/process_fixtures
 import repro_test_support/reasoned_skip
 
 import repro_tool_profiles {.all.}
@@ -54,6 +62,40 @@ $zip.Dispose()
 $fs.Dispose()
 """
 
+const SingleEntryFixtureScript = """
+$ProgressPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+$encoding = if ($env:REPRO_ZIP_FIXTURE_UTF8 -eq '1') {
+  [System.Text.Encoding]::UTF8
+} else {
+  [System.Text.Encoding]::GetEncoding(437)
+}
+$fs = [System.IO.File]::Open($env:REPRO_ZIP_FIXTURE_PATH, 'CreateNew')
+try {
+  $zip = New-Object System.IO.Compression.ZipArchive($fs, 'Create', $false, $encoding)
+  try {
+    $entry = $zip.CreateEntry($env:REPRO_ZIP_FIXTURE_NAME)
+    $stream = $entry.Open()
+    try {
+      $body = [System.Text.Encoding]::ASCII.GetBytes('encoded-body')
+      $stream.Write($body, 0, $body.Length)
+    } finally { $stream.Dispose() }
+  } finally { $zip.Dispose() }
+} finally { $fs.Dispose() }
+"""
+
+proc fixtureRoot(): string =
+  # Keep the quoting coverage of the original root without creating/removing
+  # anything during the runner's --list-json discovery process.
+  var nonce: string
+  for value in urandom(8):
+    nonce.add(toHex(value, 2))
+  result = getTempDir() / ("repro zip o'test " & $getCurrentProcessId() & "-" & nonce)
+  doAssert not dirExists(result) and not fileExists(result) and not symlinkExists(result)
+  releaseDirAtProcessExit(result)
+  createDir(result)
+
 proc findPowerShell(): string =
   when defined(windows):
     let extractor = resolveZipExtractor()
@@ -63,6 +105,15 @@ proc findPowerShell(): string =
   else:
     findExe("pwsh")
 
+proc runFixtureScript(ps, path, script: string) =
+  let scriptPath = path & ".make.ps1"
+  writeFile(scriptPath, script)
+  let res = execCmdEx(quoteShell(ps) &
+    " -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " &
+    quoteShell(scriptPath))
+  doAssert res.exitCode == 0, "fixture creation failed:\n" & res.output
+  doAssert fileExists(path)
+
 proc makeFixture(ps, path: string; entries: int) =
   ## Builds the fixture with .NET's own zip writer. The archive is
   ## deliberately named `.archive`, as tool-store downloads are, because the
@@ -71,13 +122,23 @@ proc makeFixture(ps, path: string; entries: int) =
   putEnv("REPRO_ZIP_FIXTURE_ENTRIES", $entries)
   putEnv("REPRO_ZIP_FIXTURE_BACKSLASH",
     (when defined(windows): "1" else: "0"))
-  let scriptPath = path & ".make.ps1"
-  writeFile(scriptPath, FixtureScript)
-  let res = execCmdEx(quoteShell(ps) &
-    " -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " &
-    quoteShell(scriptPath))
-  doAssert res.exitCode == 0, "fixture creation failed:\n" & res.output
-  doAssert fileExists(path)
+  runFixtureScript(ps, path, FixtureScript)
+
+proc makeSingleEntryFixture(ps, path, name: string; utf8: bool) =
+  putEnv("REPRO_ZIP_FIXTURE_PATH", path)
+  putEnv("REPRO_ZIP_FIXTURE_NAME", name)
+  putEnv("REPRO_ZIP_FIXTURE_UTF8", if utf8: "1" else: "0")
+  runFixtureScript(ps, path, SingleEntryFixtureScript)
+
+proc localEntryName(archive: string): tuple[flags: int, bytes: string] =
+  # Read the small fixture's first local header, not another ZIP decoder's
+  # interpretation of its filename. This also makes each fixture flag causal.
+  let raw = readFile(archive)
+  doAssert raw.len >= 30 and raw[0 .. 3] == "PK\x03\x04"
+  let nameLength = ord(raw[26]) or (ord(raw[27]) shl 8)
+  doAssert nameLength > 0 and nameLength <= raw.len - 30
+  result.flags = ord(raw[6]) or (ord(raw[7]) shl 8)
+  result.bytes = raw[30 ..< 30 + nameLength]
 
 proc extractZip(ps, archive, destination: string): string =
   ## Runs the tool store's zip command line with `ps` and returns the
@@ -97,16 +158,12 @@ proc countFiles(dir: string): int =
 
 suite "tool-store zip extraction through PowerShell":
   let ps = findPowerShell()
-  # The paths carry a space and an apostrophe. Both must survive the
-  # command line and the single-quoted PowerShell literals the script uses.
-  let root = getTempDir() / ("repro zip o'test " & $getCurrentProcessId())
-  removeDir(root)
-  createDir(root)
 
   test "an extension-less archive extracts completely, quotes and all":
     if ps.len == 0:
       skip("no PowerShell on this host; install pwsh to run this case")
     else:
+      let root = fixtureRoot()
       let archive = root / "small.archive"
       makeFixture(ps, archive, 10)
       let dest = root / "small dest"
@@ -126,6 +183,7 @@ suite "tool-store zip extraction through PowerShell":
     if ps.len == 0:
       skip("no PowerShell on this host; install pwsh to run this case")
     else:
+      let root = fixtureRoot()
       let archive = root / "corrupt.archive"
       writeFile(archive, "PK\x03\x04 this is not a zip archive")
       expect OSError:
@@ -135,6 +193,7 @@ suite "tool-store zip extraction through PowerShell":
     if ps.len == 0:
       skip("no PowerShell on this host; install pwsh to run this case")
     else:
+      let root = fixtureRoot()
       const entries = 3000
       let archive = root / "many.archive"
       makeFixture(ps, archive, entries)
@@ -150,4 +209,45 @@ suite "tool-store zip extraction through PowerShell":
       check "S=\"progress\"" notin output
       check elapsed < 60.0
 
-  removeDir(root)
+  test "CP437 names and UTF-8 flagged names retain their exact bytes":
+    if ps.len == 0:
+      skip("no PowerShell on this host; install pwsh to run this case")
+    else:
+      let root = fixtureRoot()
+      for utf8 in [false, true]:
+        let label = if utf8: "utf8" else: "cp437"
+        let name = if utf8: "pkg/雪.nim" else: "pkg/åäö.nim"
+        let archive = root / (label & ".archive")
+        makeSingleEntryFixture(ps, archive, name, utf8)
+        let header = localEntryName(archive)
+        check ((header.flags and 0x800) != 0) == utf8
+        check header.bytes == (if utf8: name else: "pkg/\x86\x84\x94.nim")
+        let dest = root / label
+        discard extractZip(ps, archive, dest)
+        check countFiles(dest) == 1
+        check readFile(dest / name) == "encoded-body"
+
+  test "a traversal entry is refused without writing outside its destination":
+    if ps.len == 0:
+      skip("no PowerShell on this host; install pwsh to run this case")
+    else:
+      let root = fixtureRoot()
+      let archive = root / "traversal.archive"
+      makeSingleEntryFixture(ps, archive, "../outside.txt", true)
+      expect OSError:
+        discard extractZip(ps, archive, root / "destination")
+      check not fileExists(root / "outside.txt")
+
+  test "an existing destination file is refused and preserved":
+    if ps.len == 0:
+      skip("no PowerShell on this host; install pwsh to run this case")
+    else:
+      let root = fixtureRoot()
+      let archive = root / "existing.archive"
+      makeSingleEntryFixture(ps, archive, "owned.txt", true)
+      let dest = root / "destination"
+      createDir(dest)
+      writeFile(dest / "owned.txt", "existing-owned-body")
+      expect OSError:
+        discard extractZip(ps, archive, dest)
+      check readFile(dest / "owned.txt") == "existing-owned-body"

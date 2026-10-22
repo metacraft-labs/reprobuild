@@ -784,7 +784,7 @@ libs/repro_tool_profiles/tests/t_realization_selection.nim	nim	27
 libs/repro_tool_profiles/tests/t_tar_listing_ignores_tar_warnings.nim	nim	3
 libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim	nim	3
 libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim	nim	15
-libs/repro_tool_profiles/tests/t_zip_extraction_cost_does_not_scale_with_progress_records.nim	nim	3
+libs/repro_tool_profiles/tests/t_zip_extraction_cost_does_not_scale_with_progress_records.nim	nim	6
 libs/repro_workspace_snapshot/tests/t_manifest_validation_and_tree_id.nim	nim	4
 libs/repro_workspace_vcs/tests/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths.nim	nim	3
 libs/repro_workspace_vcs/tests/t_workspace_sibling_ignore_set.nim	nim	4
