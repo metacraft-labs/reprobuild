@@ -99,12 +99,15 @@ strace_bin=${STRACE:-$(command -v strace || true)}
 [[ -x "$strace_bin" ]] || { echo "CONF-3 profiling needs strace (\$STRACE or on PATH)" >&2; exit 2; }
 
 # expand <group-or-name>: every syscall name it stands for, recursively.
+# The dev shell's pinned systemd-analyze when there is one, so the profile
+# subtracts the same @system-service the lint derives the floor from.
+systemd_analyze=${REPRO_SYSTEMD_ANALYZE:-systemd-analyze}
 declare -A expanded=()
 expand() {
   local item=$1
   if [[ $item != @* ]]; then echo "$item"; return; fi
   if [[ -z "${expanded[$item]:-}" ]]; then
-    expanded[$item]=$(systemd-analyze syscall-filter --no-pager "$item" 2>/dev/null |
+    expanded[$item]=$("$systemd_analyze" syscall-filter --no-pager "$item" 2>/dev/null |
       awk 'NR > 1 && $1 !~ /^#/ && NF == 1 {print $1}')
   fi
   local member

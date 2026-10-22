@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 67,
     "pureUnitTests": 688,
     "staticallyDetectedRuntimeCompilerFlowTests": 127,
-    "testEntries": 2378
+    "testEntries": 2379
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1375,7 +1375,7 @@
       "integration": 1272,
       "platform/destructive": 145,
       "pure unit": 688,
-      "unclassified": 255
+      "unclassified": 256
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1578,8 +1578,8 @@
       }
     ],
     "nimTestBinaryCount": 2345,
-    "pythonTestFileCount": 33,
-    "testEntryCount": 2378
+    "pythonTestFileCount": 34,
+    "testEntryCount": 2379
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -49979,6 +49979,21 @@
       "source": "tests/unit/test_ct_test_surface_addressability.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 14,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_daemon_worker_confinement_systemd_analyze.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

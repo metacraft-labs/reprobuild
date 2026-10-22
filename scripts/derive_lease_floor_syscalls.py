@@ -14,6 +14,16 @@ Needs Linux: `systemd-analyze syscall-filter` expands the groups, and the
 syscall numbers come from the kernel UAPI headers (x86_64:
 <asm/unistd_64.h>; aarch64: <asm-generic/unistd.h> preprocessed with the
 arm64 ABI switches) so an entry cannot vanish because a libc header is old.
+
+Both inputs come from the dev shell, never from the host. The headers are
+`REPRO_LINUX_UAPI_INCLUDE`; the `systemd-analyze` is `REPRO_SYSTEMD_ANALYZE`,
+the flake's pinned systemd, and it is REQUIRED -- there is no PATH fallback.
+What `@system-service` expands to is a property of the systemd revision (257
+leaves out syscalls 260 includes), so a host binary would make the derived
+floor, and the --check verdict, depend on which systemd the developer's host
+runs; and the host binary, started under the shell's `LD_LIBRARY_PATH`, can
+load a second glibc and die before `main` (reprobuild-pm issue
+2026-10-22-lint-confinement-check-runs-the-hosts-systemd-analyze).
 """
 
 import os
@@ -35,9 +45,33 @@ ARM64_DEFINES = ["__ARCH_WANT_RENAMEAT", "__ARCH_WANT_NEW_STAT",
                  "__ARCH_WANT_MEMFD_SECRET", "__ARCH_WANT_SYS_CLONE3"]
 
 
+class SystemdAnalyzeUnavailable(Exception):
+    """The pinned `systemd-analyze` is not configured or not runnable."""
+
+
 def fail(msg):
     sys.stderr.write("derive_lease_floor_syscalls: " + msg + "\n")
     sys.exit(1)
+
+
+def systemd_analyze():
+    """The `systemd-analyze` CONF-3 and CONF-4 run: `$REPRO_SYSTEMD_ANALYZE`.
+
+    Shared with check_daemon_worker_unit_confinement.py so both checks run
+    the same binary. Raises SystemdAnalyzeUnavailable rather than looking on
+    PATH: the module docstring says why the host's is not acceptable."""
+    path = os.environ.get("REPRO_SYSTEMD_ANALYZE", "")
+    if not path:
+        raise SystemdAnalyzeUnavailable(
+            "REPRO_SYSTEMD_ANALYZE is not set. It names the flake's pinned "
+            "systemd-analyze; run this from the dev shell (`nix develop`, "
+            "`direnv exec . ...`). The host's systemd-analyze is not used: its "
+            "@system-service expansion depends on the host's systemd version.")
+    if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+        raise SystemdAnalyzeUnavailable(
+            "REPRO_SYSTEMD_ANALYZE=%s is not an executable file; re-enter the "
+            "dev shell so it names the flake's systemd" % path)
+    return path
 
 
 def expand(group, seen=None):
@@ -45,7 +79,7 @@ def expand(group, seen=None):
     if group in seen:
         return set()
     seen.add(group)
-    out = subprocess.run(["systemd-analyze", "syscall-filter", group],
+    out = subprocess.run([systemd_analyze(), "syscall-filter", group],
                          capture_output=True, text=True)
     if out.returncode != 0:
         fail("systemd-analyze syscall-filter %s failed: %s" % (group, out.stderr))
@@ -203,8 +237,10 @@ def main():
         print("derive_lease_floor_syscalls: needs Linux (systemd-analyze and the "
               "kernel UAPI headers); not regenerated on " + sys.platform)
         return 0
-    if not shutil.which("systemd-analyze"):
-        fail("systemd-analyze is not on PATH")
+    try:
+        systemd_analyze()
+    except SystemdAnalyzeUnavailable as err:
+        fail(str(err))
     text = render()
     if "--check" in sys.argv[1:]:
         current = open(OUTPUT).read() if os.path.exists(OUTPUT) else ""

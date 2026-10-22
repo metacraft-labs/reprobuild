@@ -1253,6 +1253,7 @@
                 export SHM_GSET_SRC=${nim-shm-gset-src}/src
                 export SHM_QUEUE_SRC=${nim-shm-queue-src}/src
                 ${pkgs.lib.optionalString pkgs.stdenv.isLinux "export REPRO_LINUX_UAPI_INCLUDE=${pkgs.linuxHeaders}/include"}
+                ${pkgs.lib.optionalString pkgs.stdenv.isLinux "export REPRO_SYSTEMD_ANALYZE=${pkgs.systemd}/bin/systemd-analyze"}
                 export CODETRACER_PINNED_SRC=${codetracer-src}/src
                 export REPRO_CT_TEST_RUNNER_SRC=${reprobuild-ct-test-runner-src}
                 export REPRO_TEST_ADAPTERS_SRC=${reprobuild-test-adapters-src}/src
@@ -2363,6 +2364,19 @@
             # (scripts/derive_lease_floor_syscalls.py); NixOS has no /usr/include.
             REPRO_LINUX_UAPI_INCLUDE =
               pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.linuxHeaders}/include";
+            # The other input of that derivation, and of CONF-4's
+            # `systemd-analyze security` (scripts/check_daemon_worker_unit_confinement.py):
+            # both scripts run THIS binary and refuse to fall back to PATH.
+            # The host's would make the lint verdict depend on the host --
+            # `@system-service` expands differently per systemd revision (257
+            # derived a floor three syscalls short of the committed one) -- and
+            # a host binary started under LD_LIBRARY_PATH above loads a second
+            # glibc and dies before `main` (reprobuild-pm issue
+            # 2026-10-22-lint-confinement-check-runs-the-hosts-systemd-analyze).
+            # A variable and not `packages`: on PATH, nixpkgs' systemctl & co.
+            # would shadow the host's, which must match the running manager.
+            REPRO_SYSTEMD_ANALYZE =
+              pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.systemd}/bin/systemd-analyze";
             CODETRACER_PINNED_SRC = "${codetracer-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";

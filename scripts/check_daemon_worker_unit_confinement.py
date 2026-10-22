@@ -24,15 +24,25 @@ occurrence of a key — so a later `ProtectSystem=no` passed — and counted any
    exactly recipes/repro-daemon-worker/syscalls, and (Linux) the lease
    floor's header is the one scripts/derive_lease_floor_syscalls.py derives.
 3. CONF-4 (Linux): `systemd-analyze security --offline` of the rendered unit
-   does not exceed recipes/repro-daemon-worker/confinement-threshold.
+   does not exceed recipes/repro-daemon-worker/confinement-threshold. The
+   verdict is read from the analysis' own "Overall exposure level" line: a
+   `systemd-analyze` that exits non-zero WITHOUT one did not analyse the unit
+   (it could not start, could not parse it, ...) and is reported as that, never
+   as an exposure over the threshold.
+
+Both Linux checks run the dev shell's pinned `systemd-analyze`
+(`$REPRO_SYSTEMD_ANALYZE`, resolved by derive_lease_floor_syscalls.py), never
+the host's; see that script's docstring for why.
 """
 
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from derive_lease_floor_syscalls import SystemdAnalyzeUnavailable, systemd_analyze  # noqa: E402
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 UNIT = os.path.join(ROOT, "recipes", "repro-daemon-worker", "systemd-units",
@@ -206,23 +216,50 @@ def render(text):
     return text
 
 
+# systemd-analyze's closing verdict line, e.g.
+# `→ Overall exposure level for repro-daemon-worker.service: 2.6 OK 🙂`
+# (src/analyze/analyze-security.c).
+EXPOSURE_LINE = re.compile(r"Overall exposure level for \S+: (\d+)\.(\d)\b")
+
+
 def check_conf4(text):
-    threshold = open(THRESHOLD).read().strip()
-    if not shutil.which("systemd-analyze"):
-        raise Failure("CONF-4: systemd-analyze is not on PATH; the exposure check cannot run")
+    with open(THRESHOLD) as f:
+        threshold = f.read().strip()
+    try:
+        analyze = systemd_analyze()
+    except SystemdAnalyzeUnavailable as err:
+        raise Failure("CONF-4: " + str(err))
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "repro-daemon-worker.service")
         with open(path, "w") as f:
             f.write(render(text))
-        out = subprocess.run(["systemd-analyze", "security", "--offline=true",
+        out = subprocess.run([analyze, "security", "--offline=true",
                               "--threshold=" + threshold, path],
                              capture_output=True, text=True)
-        if out.returncode != 0:
-            sys.stderr.write("\n".join((out.stdout + out.stderr).splitlines()[-25:]) + "\n")
-            raise Failure("CONF-4: exposure of repro-daemon-worker.service exceeds the "
-                          "committed threshold " + threshold)
-        lines = out.stdout.strip().splitlines()
-        print(lines[-1] if lines else "")
+    output = out.stdout + out.stderr
+    verdict = EXPOSURE_LINE.search(output)
+    if verdict is None:
+        # No analysis happened, so there is no exposure to report: saying
+        # "exceeds the threshold" here sent a reader to the unit for what was
+        # a loader crash of the binary (the glibc mix under LD_LIBRARY_PATH).
+        tail = "\n".join(output.splitlines()[-25:])
+        raise Failure("CONF-4: %s failed to analyse repro-daemon-worker.service (exit %d, "
+                      "no exposure verdict in its output):\n%s"
+                      % (analyze, out.returncode, tail))
+    exposure = int(verdict.group(1)) * 10 + int(verdict.group(2))
+    if exposure > int(threshold):
+        sys.stderr.write("\n".join(output.splitlines()[-25:]) + "\n")
+        raise Failure("CONF-4: exposure of repro-daemon-worker.service, %d.%d, exceeds the "
+                      "committed threshold %s (%s)"
+                      % (exposure // 10, exposure % 10, threshold, analyze))
+    if out.returncode != 0:
+        # `--threshold` makes systemd-analyze fail only above it; failing at
+        # or below it is some other error, and is reported as one.
+        raise Failure("CONF-4: %s exited %d although it measured %d.%d, within the "
+                      "threshold %s:\n%s"
+                      % (analyze, out.returncode, exposure // 10, exposure % 10, threshold,
+                         "\n".join(output.splitlines()[-25:])))
+    print(verdict.group(0) + " (" + analyze + ")")
     return threshold
 
 
