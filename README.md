@@ -317,6 +317,11 @@ Reprobuild wraps all development workflows under one CLI.
   `repro-workspace.toml`.
 - `repro workspace status` — audit git status and alignment across all
   workspace repos.
+- `repro workspace branch-roles` — show which branch each branch role
+  (`mainline`, `unstable`, `staging`, `stable`, `production`, `lts`, and any
+  custom role) resolves to in every repo, and the fallback chain behind it.
+  `--to=<role>` or a shorthand such as `--unstable` prints one role. Reads the
+  manifests only; nothing is fetched.
 
 Workspace cloning uses a shared object pool by default. Pass
 `--clone-objects=none` (or `dissociate`) to create self-contained checkouts

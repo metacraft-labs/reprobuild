@@ -415,3 +415,22 @@ proc resolveRootRoles*(s: WorkspaceSettings): seq[ResolvedRole] =
       noMainlineMessage(rs, declarers, "the workspace root repository") &
         ". The root's mainline is never inferred from its `origin/HEAD` " &
         "(Workspace-Branch-Roles.md §3.4)")
+
+# ---- reporting (§4.4) -------------------------------------------------------
+
+proc reportedFallbackPath*(r: ResolvedRole): seq[string] =
+  ## The `fallbackPath` a report carries (Workspace-Branch-Roles.md §4.4): the
+  ## chain followed, `@["unstable", "mainline"]`, and EMPTY when the requested
+  ## role was declared directly. `ResolvedRole.fallbackPath` always holds at
+  ## least the requested role itself; the report's empty form is what lets a
+  ## consumer test "did this fall back?" without comparing two fields.
+  if r.fallbackPath.len <= 1: @[] else: r.fallbackPath
+
+proc roleChainText*(r: ResolvedRole): string =
+  ## The parenthesised role annotation of §4.4's text form: `unstable` when
+  ## the role was declared directly, `unstable → mainline` when it fell back
+  ## (every role visited, in order). A report prints it after the branch —
+  ## `agents (unstable)`, `latest (unstable → mainline)` — so a fallback is
+  ## never invisible in text either.
+  if r.fallbackPath.len <= 1: r.role
+  else: r.fallbackPath.join(" → ")

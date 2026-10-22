@@ -20,6 +20,11 @@ Reprobuild replaces multi-repo wrappers (like Google's `repo` tool or Git submod
 - `repro workspace init` — bootstrap a clean multi-project workspace on a new host.
 - `repro workspace sync` — clone and fetch all repositories in the manifest.
 - `repro workspace status` — audit git status across all sibling repositories.
+- `repro workspace branch-roles` — print the branch every branch role
+  (`mainline`, `unstable`, `stable`, ...) resolves to per repo, with the
+  fallback chain for a role a repo does not declare. `--unstable` (or
+  `--to=<role>`) prints one role; `--json` is the machine form. A read-only
+  lookup: use it instead of probing remotes for a branch name.
 - `repro workspace migrate` — reconcile each existing checkout's local git
   state (remote names and URLs, detached HEADs) with what the manifest now
   declares. Rarely needed by hand: the managed `post-merge` hook runs the same

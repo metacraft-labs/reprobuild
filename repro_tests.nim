@@ -18342,6 +18342,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_workspace_branch_roles_query.nim",
+    binary: "build/test-bin/t_workspace_branch_roles_query",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_workspace_clone_auto_trusts_per_repo_envrc.nim",
     binary: "build/test-bin/t_workspace_clone_auto_trusts_per_repo_envrc",
     defines: @[],

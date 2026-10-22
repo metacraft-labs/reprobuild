@@ -499,6 +499,9 @@ proc renderUsage*(programName: string): string =
       "projects {list [--enabled|--disabled] | add <name> [-m DESC] | " &
       "remove <name>} | repos {list [--project=NAME] | add <repo> " &
       "--remote=URL [--project=NAME]... | remove <repo>} | " &
+      "branch-roles [--to=<role>|--mainline|--unstable|--staging|" &
+      "--stable|--production|--lts] [<project>...] [--only=LIST] " &
+      "[--except=LIST] [--filter=GLOB] [--tags=LIST] [--json] | " &
       "manifests | shared-clones | forall -c <command> | " &
       "provision | publish-evidence | " &
       "migrate-locks [--dry-run|--apply]} " &
@@ -42267,6 +42270,55 @@ proc parseSyncJobsValue(raw, flag: string): int =
       flag & " expects a positive integer, got: " & raw)
   value
 
+proc parseSyncRepoSelector(args: openArray[string]; i: var int;
+                           sel: var WorkspaceSyncArgs): bool =
+  ## Consume ``args[i]`` when it is one of the repo-NAME selectors every
+  ## workspace sweep shares — ``--tags``, ``--only``, ``--except``,
+  ## ``--filter`` — recording it in ``sel`` and returning true; false (and
+  ## ``i`` untouched) otherwise. One parser for ``repro workspace sync`` and
+  ## ``repro workspace branch-roles``, so an operator who checks a role column
+  ## with a selector set is shown exactly the repos the same selectors would
+  ## sync. ``narrowSyncRepoSet`` applies what this records.
+  let arg = args[i]
+  result = true
+  if arg == "--tags" or arg.startsWith("--tags="):
+    # RA-18 subset selection. A comma-separated list; an entry prefixed
+    # with ``-`` (e.g. ``--tags=default,-heavy``) is an EXCLUDE term,
+    # otherwise an INCLUDE term. Mirrors ``repo``'s ``--groups`` syntax,
+    # under the word the membership model left free for a filter.
+    for raw in valueFromFlag(args, i, "--tags").split(','):
+      let term = raw.strip()
+      if term.len == 0:
+        continue
+      if term.startsWith("-"):
+        let t = term[1 .. ^1]
+        if t.len > 0:
+          sel.excludeTags.add(t)
+      else:
+        sel.includeTags.add(term)
+  elif arg == "--only" or arg.startsWith("--only="):
+    for raw in valueFromFlag(args, i, "--only").split(','):
+      let n = raw.strip()
+      if n.len > 0 and n notin sel.onlyRepos:
+        sel.onlyRepos.add(n)
+  elif arg == "--except" or arg.startsWith("--except="):
+    for raw in valueFromFlag(args, i, "--except").split(','):
+      let n = raw.strip()
+      if n.len > 0 and n notin sel.exceptRepos:
+        sel.exceptRepos.add(n)
+  elif arg == "--filter" or arg.startsWith("--filter="):
+    let g = valueFromFlag(args, i, "--filter").strip()
+    # Same rule ``develop`` applies: taking the last of two different values
+    # would make the answer depend on argv order.
+    if sel.filterGlob.len > 0 and sel.filterGlob != g:
+      raise newException(ValueError,
+        "--filter was given twice with different values ('" &
+        sel.filterGlob & "' and '" & g & "'). It takes a single value. " &
+        "Use --only=a,b to name several repos exactly.")
+    sel.filterGlob = g
+  else:
+    result = false
+
 proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
   ## ``repro workspace sync`` argv parser. Unlike M9's ``init`` there is
   ## no required positional: sync operates on the existing workspace
@@ -42313,41 +42365,11 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
     elif arg == "--jobs-checkout" or arg.startsWith("--jobs-checkout="):
       result.jobsCheckout = parseSyncJobsValue(
         valueFromFlag(args, i, "--jobs-checkout"), "--jobs-checkout")
-    elif arg == "--tags" or arg.startsWith("--tags="):
-      # RA-18 subset selection. A comma-separated list; an entry prefixed
-      # with ``-`` (e.g. ``--tags=default,-heavy``) is an EXCLUDE term,
-      # otherwise an INCLUDE term. Mirrors ``repo``'s ``--groups`` syntax,
-      # under the word the membership model left free for a filter.
-      for raw in valueFromFlag(args, i, "--tags").split(','):
-        let term = raw.strip()
-        if term.len == 0:
-          continue
-        if term.startsWith("-"):
-          let t = term[1 .. ^1]
-          if t.len > 0:
-            result.excludeTags.add(t)
-        else:
-          result.includeTags.add(term)
-    elif arg == "--only" or arg.startsWith("--only="):
-      for raw in valueFromFlag(args, i, "--only").split(','):
-        let n = raw.strip()
-        if n.len > 0 and n notin result.onlyRepos:
-          result.onlyRepos.add(n)
-    elif arg == "--except" or arg.startsWith("--except="):
-      for raw in valueFromFlag(args, i, "--except").split(','):
-        let n = raw.strip()
-        if n.len > 0 and n notin result.exceptRepos:
-          result.exceptRepos.add(n)
-    elif arg == "--filter" or arg.startsWith("--filter="):
-      let g = valueFromFlag(args, i, "--filter").strip()
-      # Same rule ``develop`` applies: taking the last of two different values
-      # would make the answer depend on argv order.
-      if result.filterGlob.len > 0 and result.filterGlob != g:
-        raise newException(ValueError,
-          "--filter was given twice with different values ('" &
-          result.filterGlob & "' and '" & g & "'). It takes a single value. " &
-          "Use --only=a,b to name several repos exactly.")
-      result.filterGlob = g
+    elif parseSyncRepoSelector(args, i, result):
+      # ``--tags`` / ``--only`` / ``--except`` / ``--filter``: shared with
+      # ``repro workspace branch-roles`` so the workspace keeps ONE selection
+      # language (``parseSyncRepoSelector``).
+      discard
     elif arg == "--mainline":
       result.mainline = true
     elif arg == "--rebase":
@@ -49912,6 +49934,315 @@ proc runWorkspaceSyncWithProjects(args: openArray[string];
 
 proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   runWorkspaceSyncWithProjects(args, @[])
+
+# ---- `repro workspace branch-roles` (Workspace-Branch-Roles.md §4.5) -------
+#
+# The read-only query of the branch-roles model: per repo, what each role
+# resolves to and through which chain. It is how an operator checks a profile
+# before a role-wide sweep runs with it, and it is the lookup that replaces a
+# script's own probing of remotes for "which branch is this repo's X".
+#
+# It reads DECLARATIONS ONLY. The roles were already resolved when the
+# manifest loaded (`ResolvedRepo.roles`, from the one resolver in
+# `repro_workspace_manifests/roles.nim`); this verb selects and prints them.
+# It runs no git command, fetches nothing, refreshes no manifest layer and
+# writes no file: what a role resolves to never depends on what a remote has
+# (§2.2 "fallback is on declaration, never on ref existence"), so there is
+# nothing for a fetch to contribute and nothing for a query to change.
+
+const WorkspaceBranchRolesUsage = """usage: repro workspace branch-roles [--to=<role> | --mainline | --unstable | --staging | --stable | --production | --lts] [<project>...] [--only=A,B] [--except=A,B] [--filter=GLOB] [--tags=T,-U] [--json] [--workspace-root=PATH]
+
+Print, for every selected repo, the branch each branch role resolves to and
+the fallback chain that produced it. Nothing is fetched or changed.
+
+  --to=<role>   print only that role (a built-in role, or a custom role the
+                workspace declares under [branch-roles.<name>])
+  --mainline, --unstable, --staging, --stable, --production, --lts
+                shorthands for --to=<role>
+  --json        one JSON document on stdout
+
+Selectors are the ones `repro sync` takes. With no selector the workspace
+root repository is listed too, when repro-workspace.toml declares its roles.
+
+Exit codes: 0 printed; 1 the workspace manifests do not load; 2 usage error
+(an unknown flag, an undeclared role, two different roles).
+"""
+
+const branchRoleShorthands = ["--mainline", "--unstable", "--staging",
+                              "--stable", "--production", "--lts"]
+  ## Each built-in role's shorthand, which means exactly `--to=<role>`
+  ## (Workspace-Branch-Roles.md §4.1).
+
+type
+  WorkspaceBranchRolesArgs = object
+    selection: WorkspaceSyncArgs
+      ## The workspace root and the repo selectors, in the record
+      ## `narrowSyncRepoSet` reads, so this verb selects exactly the repos
+      ## `repro sync` would with the same selectors.
+    role: string
+      ## The one role to print (`--to` or a shorthand); "" prints every role.
+    roleFlag: string
+      ## The spelling that named `role`, for the conflict diagnostic.
+    json: bool
+
+  BranchRolesUsageError = object of ValueError
+    ## A command-line mistake: exit 2, as §4.4 requires for an undeclared
+    ## role, rather than the exit 1 of a workspace that does not load.
+
+  BranchRolesEntry* = object
+    ## One repo's roles as the query reports them.
+    name*: string
+    path*: string
+    profile*: string
+    roles*: seq[ResolvedRole]
+      ## Every role, or only the requested one. Empty when the repo resolves
+      ## no mainline (a legacy `repo.v1` fragment pinning only `revision`);
+      ## `diagnostic` then says so.
+    diagnostic*: string
+
+  BranchRolesReport* = object
+    workspaceRoot*: string
+    project*: string
+    role*: string
+      ## The requested role; "" when every role was printed.
+    roleNames*: seq[string]
+      ## The roles printed, in resolution order.
+    hasRoot*: bool
+      ## Whether `root` is reported: only with no selector, and only when a
+      ## `settings.v1` file can declare the root's roles (§3.4).
+    root*: BranchRolesEntry
+    repos*: seq[BranchRolesEntry]
+
+proc branchRolesUsage(msg: string) =
+  raise newException(BranchRolesUsageError, msg)
+
+proc parseWorkspaceBranchRolesArgs(args: openArray[string]):
+    WorkspaceBranchRolesArgs =
+  ## Every flag this verb accepts, and nothing else: a sweep flag (`--jobs`,
+  ## `--rebase`, `--dry-run`) on a query is a mistake worth naming, not an
+  ## option to ignore.
+  var sel = WorkspaceSyncArgs(toolProvisioning: tpmPathOnly)
+  proc chooseRole(res: var WorkspaceBranchRolesArgs; flag, role: string) =
+    # §4.1: `--to` and the shorthands are mutually exclusive. Repeating the
+    # SAME role is harmless (a script assembling argv from fragments does
+    # that); two different roles would make the answer depend on argv order.
+    if role.len == 0:
+      branchRolesUsage("--to needs a role name: --to=<role>")
+    if res.role.len > 0 and res.role != role:
+      branchRolesUsage("`repro workspace branch-roles` was given two roles (" &
+        res.roleFlag & " and " & flag & "). --to and the shorthands are " &
+        "mutually exclusive: name one role, or none to print every role.")
+    res.role = role
+    res.roleFlag = flag
+  var i = 0
+  while i < args.len:
+    let arg = args[i]
+    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
+      sel.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
+    elif arg == "--to" or arg.startsWith("--to="):
+      let role = valueFromFlag(args, i, "--to").strip()
+      chooseRole(result, "--to=" & role, role)
+    elif arg in branchRoleShorthands:
+      chooseRole(result, arg, arg[2 .. ^1])
+    elif arg == "--json":
+      result.json = true
+    elif parseSyncRepoSelector(args, i, sel):
+      discard
+    elif arg.startsWith("-"):
+      branchRolesUsage("unsupported `repro workspace branch-roles` flag: " &
+        arg)
+    else:
+      # A positional names a project and SCOPES the set, as on `repro sync`.
+      if sel.projectName.len == 0:
+        sel.projectName = arg
+      sel.scopeProjects.add(arg)
+    inc i
+  if sel.workspaceRoot.len == 0:
+    sel.workspaceRoot = getCurrentDir()
+  sel.workspaceRoot = absolutePath(sel.workspaceRoot)
+  result.selection = sel
+
+proc hasRepoSelector(sel: WorkspaceSyncArgs): bool =
+  sel.scopeProjects.len > 0 or sel.onlyRepos.len > 0 or
+    sel.exceptRepos.len > 0 or sel.filterGlob.len > 0 or
+    sel.includeTags.len > 0 or sel.excludeTags.len > 0
+
+proc pickRoles(roles: seq[ResolvedRole]; role: string): seq[ResolvedRole] =
+  if role.len == 0:
+    return roles
+  let found = roles.findRole(role)
+  if found.isSome:
+    result.add(found.get())
+
+proc workspaceRootRolesEntry(workspaceRoot, role: string):
+    tuple[present: bool; entry: BranchRolesEntry] =
+  ## The workspace ROOT repository's roles (§3.4), from the settings file's
+  ## `[workspace]`. Only a `settings.v1` file can declare them; the old
+  ## `.repro-workspace.toml`, or no settings file, yields no entry. A
+  ## `settings.v1` file that declares no root mainline is reported on the
+  ## entry, not raised: the member repos still resolve, and a query should
+  ## show what it can.
+  let path = findWorkspaceSettingsPath(workspaceRoot)
+  if path.len == 0 or not fileExists(path) or
+      extractFilename(path) == legacySettingsFileName:
+    return
+  let settings = readWorkspaceSettings(path)
+  if settings.isLegacySettings:
+    return
+  result.present = true
+  result.entry.name = "(root)"
+  result.entry.path = "."
+  result.entry.profile =
+    if settings.workspace.profile.isSome: settings.workspace.profile.get()
+    elif settings.workspace.default_profile.isSome:
+      settings.workspace.default_profile.get()
+    else: ""
+  try:
+    result.entry.roles = pickRoles(resolveRootRoles(settings), role)
+  except WorkspaceManifestParseError as err:
+    result.entry.diagnostic = err.msg
+
+proc executeWorkspaceBranchRoles(parsed: WorkspaceBranchRolesArgs):
+    BranchRolesReport =
+  let sel = parsed.selection
+  result.workspaceRoot = sel.workspaceRoot
+  result.role = parsed.role
+  # Validate the role against the workspace's declared vocabulary BEFORE the
+  # manifests resolve: an undeclared custom role is a usage error (§4.4).
+  let roleSettings = workspaceRoleSettings(sel.workspaceRoot)
+  let known = declaredRoleNames(roleSettings)
+  if parsed.role.len > 0 and parsed.role notin known:
+    branchRolesUsage("role '" & parsed.role & "' is not declared in this " &
+      "workspace: the roles are " & known.join(", ") & " (a custom role is " &
+      "declared as `[branch-roles.<name>]` in " &
+      (if roleSettings.path.len > 0: roleSettings.path
+       else: "repro-workspace.toml, which this workspace does not have") &
+      ")")
+  result.roleNames = if parsed.role.len > 0: @[parsed.role] else: known
+  try:
+    refuseRepoPassedAsProject(sel.workspaceRoot, sel.scopeProjects)
+  except ValueError as err:
+    # A repo named where a project belongs is a command-line mistake.
+    branchRolesUsage(err.msg)
+  var resolved = resolveSyncBaseProject(sel)
+  result.project = resolved.projectName
+  resolved.repos = narrowSyncRepoSet(sel, sel.workspaceRoot, resolved.repos)
+  if not hasRepoSelector(sel):
+    let root = workspaceRootRolesEntry(sel.workspaceRoot, parsed.role)
+    result.hasRoot = root.present
+    result.root = root.entry
+  for repo in resolved.repos:
+    var entry = BranchRolesEntry(name: repo.name, path: repo.path,
+      profile: repo.profile, roles: pickRoles(repo.roles, parsed.role))
+    if repo.roles.len == 0:
+      entry.diagnostic = "no mainline declared (" & repo.fragmentPath &
+        " is a repo.v1 fragment that pins only a revision), so no role " &
+        "resolves"
+    result.repos.add(entry)
+
+proc toJsonNode(r: ResolvedRole): JsonNode =
+  ## §4.4's per-role fields, plus who declared the branch.
+  result = newJObject()
+  result["role"] = %r.role
+  result["resolvedRole"] = %r.resolvedRole
+  result["roleBranch"] = %r.branch
+  result["fallbackPath"] = %reportedFallbackPath(r)
+  result["declaredBy"] = %($r.declaredBy)
+  result["profile"] = %r.profile
+
+proc toJsonNode(e: BranchRolesEntry): JsonNode =
+  result = newJObject()
+  result["name"] = %e.name
+  result["path"] = %e.path
+  result["profile"] = %e.profile
+  var roles = newJArray()
+  for r in e.roles:
+    roles.add(r.toJsonNode())
+  result["roles"] = roles
+  result["diagnostic"] = %e.diagnostic
+
+proc toJsonNode*(report: BranchRolesReport): JsonNode =
+  result = newJObject()
+  result["workspaceRoot"] = %report.workspaceRoot
+  result["project"] = %report.project
+  result["role"] = if report.role.len > 0: %report.role else: newJNull()
+  result["roleNames"] = %report.roleNames
+  result["root"] = if report.hasRoot: report.root.toJsonNode() else: newJNull()
+  var repos = newJArray()
+  for e in report.repos:
+    repos.add(e.toJsonNode())
+  result["repos"] = repos
+
+proc renderBranchRolesTextLines*(report: BranchRolesReport): seq[string] =
+  ## With one role: one line per repo in §4.4's text form —
+  ## `codetracer      agents (unstable)` /
+  ## `reprobuild-pm   latest (unstable → mainline)` — so the second field is
+  ## the branch for a script that reads text. With every role: a block per
+  ## repo, one aligned line per role, the chain shown only on a fallback.
+  var entries: seq[BranchRolesEntry]
+  if report.hasRoot:
+    entries.add(report.root)
+  entries.add(report.repos)
+  if report.role.len > 0:
+    var width = 0
+    for e in entries:
+      width = max(width, e.name.len)
+    for e in entries:
+      let value =
+        if e.roles.len > 0:
+          e.roles[0].branch & " (" & roleChainText(e.roles[0]) & ")"
+        else: "- (" & e.diagnostic & ")"
+      result.add(e.name.alignLeft(width) & "  " & value)
+    return
+  var roleWidth = 0
+  for name in report.roleNames:
+    roleWidth = max(roleWidth, name.len)
+  for idx, e in entries:
+    if idx > 0:
+      result.add("")
+    result.add(e.name & (if e.profile.len > 0: "  (profile " & e.profile & ")"
+                         else: ""))
+    if e.roles.len == 0:
+      result.add("  " & e.diagnostic)
+      continue
+    var branchWidth = 0
+    for r in e.roles:
+      branchWidth = max(branchWidth, r.branch.len)
+    for r in e.roles:
+      let line = "  " & r.role.alignLeft(roleWidth) & "  " &
+        (if r.fallbackPath.len > 1:
+          r.branch.alignLeft(branchWidth) & "  (" & roleChainText(r) & ")"
+         else: r.branch)
+      result.add(line)
+
+proc runWorkspaceBranchRolesCommand*(args: openArray[string]): int =
+  ## `repro workspace branch-roles [--to=<role> | <shorthand>] [selectors]
+  ## [--json]` (Workspace-Branch-Roles.md §4.5). Exit 0 when printed, 1 when
+  ## the workspace manifests do not load, 2 on a usage error.
+  if "--help" in args or "-h" in args:
+    stdout.write(WorkspaceBranchRolesUsage)
+    return 0
+  var parsed: WorkspaceBranchRolesArgs
+  var report: BranchRolesReport
+  try:
+    # Every error the argv parser raises is a usage error, including the
+    # plain `ValueError`s of the selector parser it shares with sync
+    # (`--only` with no value, `--filter` given twice), so all of them exit 2.
+    parsed = parseWorkspaceBranchRolesArgs(args)
+  except ValueError as err:
+    stderr.writeLine("repro workspace branch-roles: " & err.msg)
+    return 2
+  try:
+    report = executeWorkspaceBranchRoles(parsed)
+  except BranchRolesUsageError as err:
+    stderr.writeLine("repro workspace branch-roles: " & err.msg)
+    return 2
+  if parsed.json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  else:
+    for line in renderBranchRolesTextLines(report):
+      stdout.writeLine(line)
+  0
 
 # ---- RA-11: `repro workspace pull` ----------------------------------------
 #
@@ -95643,6 +95974,8 @@ const reproWorkspaceSubcommands = [
   # alongside it until the manifest repo is converted.
   "enable", "disable", "sets", "projects", "repos", "new", "switch",
   "publish-evidence",
+  # Workspace-Branch-Roles.md §4.5 — the read-only branch-role query.
+  "branch-roles",
   # RA-32 — the explicit lock-record repair. Never invoked implicitly.
   "migrate-locks",
   # Workspace-Membership-Model.md — the explicit local-state reconciliation.
@@ -98109,6 +98442,23 @@ proc runThinAppDispatch(programName: string): int =
       return runWorkspaceSyncCommand(syncArgs)
     except CatchableError as err:
       stderr.writeLine("repro workspace sync: error: " & err.msg)
+      return 1
+  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
+      args[1] == "branch-roles":
+    # Workspace-Branch-Roles.md §4.5 — `repro workspace branch-roles`, the
+    # read-only query of what each branch role resolves to per repo. Same
+    # dispatch convention as the M9–M12 family; implementation in
+    # ``runWorkspaceBranchRolesCommand``, which returns 2 itself for a usage
+    # error.
+    try:
+      let brArgs =
+        if args.len > 2:
+          args[2 .. ^1]
+        else:
+          @[]
+      return runWorkspaceBranchRolesCommand(brArgs)
+    except CatchableError as err:
+      stderr.writeLine("repro workspace branch-roles: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "pull":
