@@ -492,6 +492,9 @@ jobs:
           # source-first with a pinned-download fallback) and independently gated
           # by scripts/verify_release.sh against the packaged archive.
           just bootstrap
+          if ($LASTEXITCODE -ne 0) {
+            throw "reprobuild bootstrap failed (exit code $LASTEXITCODE)"
+          }
 
           # Put the MSYS coreutils on PATH for the pwsh-side `repro build`.
           # repro's recipe declares `uses: "mkdir"/"cp"/"chmod"/"sh"` (the

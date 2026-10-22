@@ -10,6 +10,10 @@ Real archive compilation and Windows process ownership remain release gates.
 The PowerShell cases execute the production parameter block and pure argv
 reader/quoting functions, extracted by its parser. They never replace Windows
 APIs with successful fakes or claim native Windows argv/lifecycle coverage.
+The workflow-exit case uses real Just with an owned temporary Justfile whose
+recipe starts the real PowerShell child with exit 0 or 23. It runs the exact
+workflow fragment and its predecessor; no compiler or native Windows build
+is simulated or accepted as passing.
 """
 
 from pathlib import Path
@@ -19,6 +23,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import textwrap
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -310,6 +315,61 @@ $data = @{command=$invocation.Command; arguments=@($invocation.Arguments); quote
         for carrier in (b"command\0unterminated", b"command\0\xff\0", b"\0argument\0"):
             with self.subTest(carrier=carrier):
                 self.assertNotEqual(0, self.run_probe(carrier).returncode)
+
+
+    def test_failed_bootstrap_refuses_before_later_release_work(self):
+        just = shutil.which("just")
+        self.assertIsNotNone(just, "the declared Just executable is required")
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        lines = workflow.splitlines()
+        starts = [index for index, line in enumerate(lines) if line == "          just bootstrap"]
+        self.assertEqual(1, len(starts), "one owning Windows bootstrap invocation is required")
+        start = starts[0]
+        end = start + 1
+        while end < len(lines) and lines[end].strip():
+            end += 1
+        fragment = textwrap.dedent("\n".join(lines[start:end]))
+        runtime = str(Path(PWSH).resolve())
+        shell = json.dumps([runtime, "-NoProfile", "-NonInteractive", "-Command"], ensure_ascii=False)
+        (self.root / "Justfile").write_text(
+            "set shell := " + shell + "\nset windows-shell := " + shell +
+            "\nbootstrap:\n    exit $env:REPRO_TEST_BOOTSTRAP_EXIT\n", encoding="utf-8",
+        )
+        script = self.root / "workflow.ps1"
+
+        def run(body, status):
+            script.write_text(
+                "$ErrorActionPreference = 'Stop'\n" +
+                "$PSNativeCommandUseErrorActionPreference = $false\n" + body +
+                "\nWrite-Output 'after-bootstrap'\n", encoding="utf-8",
+            )
+            environment = dict(os.environ, REPRO_TEST_BOOTSTRAP_EXIT=str(status))
+            return subprocess.run(
+                [PWSH, "-NoProfile", "-NonInteractive", "-File", str(script)],
+                cwd=self.root, env=environment, capture_output=True, text=True, timeout=30,
+            )
+
+        # Observe Just's own nonzero exit (which need not preserve the
+        # recipe child's numeric code) rather than assuming it is 23.
+        direct = subprocess.run(
+            [just, "bootstrap"], cwd=self.root,
+            env=dict(os.environ, REPRO_TEST_BOOTSTRAP_EXIT="23"),
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertNotEqual(0, direct.returncode, direct.stdout + direct.stderr)
+        self.assertIn("exit code 23", direct.stderr)
+        failed = run(fragment, 23)
+        self.assertNotEqual(0, failed.returncode, failed.stdout + failed.stderr)
+        self.assertNotIn("after-bootstrap", failed.stdout)
+        self.assertIn(f"reprobuild bootstrap failed (exit code {direct.returncode})", failed.stderr)
+        passed = run(fragment, 0)
+        self.assertEqual(0, passed.returncode, passed.stderr)
+        self.assertIn("after-bootstrap", passed.stdout)
+        # The exact predecessor call continues after the same failed native
+        # Just command. Removing the guard falsifies the refusal above.
+        predecessor = run("just bootstrap", 23)
+        self.assertEqual(0, predecessor.returncode, predecessor.stderr)
+        self.assertIn("after-bootstrap", predecessor.stdout)
 
 
 if __name__ == "__main__":

@@ -95,13 +95,12 @@ reprobuild-ct-test-runner=dev
 # catalog and asserts their records, which arrived in 9f981af.
 #
 # Pinned to an exact revision, like io-mon above, so the catalog content the
-# suite asserts against does not move under a commit. It is not in repro.lock:
-# the lock records `uses:` dependencies, and the catalog is not one -- nothing
-# records catalog coordinates in a lock yet (Provisioning-Contributions.md,
-# "Catalog Lookup And Provisioning"). Nor is it a flake input: no Nix-sandboxed
+# suite asserts against does not move under a commit. Keep this source pin
+# aligned with the catalog dependency recorded in repro.lock. It is not a
+# flake input: no Nix-sandboxed
 # build here compiles a recipe, and $REPROBUILD_PACKAGES_ROOT in the dev shell
 # would replace the fixture catalog the lookup test walks to.
-reprobuild-packages=9f981af6c771ce062de810dcdd3affae21857f22
+reprobuild-packages=69581e3f3c6a0e0299e7461fbcbcf56dca747f2a
 
 
 # codetracer's incremental test engine (src/ct_test/incremental/io_mon_capture.nim

@@ -772,6 +772,23 @@ package reprobuild:
     when defined(macosx):
       "clang"
     "just >=1"
+    when defined(linux):
+      # The owning Linux shell already supplies this cross-platform binary.
+      "pwsh"
+    when not defined(windows):
+      # Real subprocesses of the existing POSIX release-smoke controls.
+      "mktemp"
+      "rm"
+      "basename"
+      "cat"
+      "uname"
+      "env"
+      "sed"
+      "grep"
+      "date"
+      "mv"
+      "dirname"
+      "timeout"
     # ``just lint`` ends in ``scripts/check_workflows.sh``, which runs
     # actionlint over ``.github/workflows``. The flake shell carries it on
     # Linux and macOS (so path mode finds it there); on Windows there is no
@@ -2088,6 +2105,8 @@ package reprobuild:
       let sourceRevisionTest = source == "tests/unit/test_source_revision.py"
       let ciLockCredentialsTest =
         source == "tests/unit/test_ci_reconcile_lock_credentials.py"
+      let releaseSmokeTest =
+        source == "tests/unit/test_release_smoke_dev_exec.py"
       let hcrFixtureEdgeTest =
         source == "tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py"
       let confinementSystemdAnalyzeTest =
@@ -2110,6 +2129,10 @@ package reprobuild:
           # contract cases read.
           @["scripts/ci_lock_source_credentials.py",
             ".github/workflows/ci.yml"]
+        elif releaseSmokeTest:
+          @["scripts/release/smoke_release_dev_exec.sh",
+            "scripts/release/with_windows_archive_runquota.ps1",
+            ".github/workflows/release.yml"]
         elif hcrFixtureEdgeTest:
           # The fixture script its prebuilt-bundle cases run.
           @["scripts/build_hcr_ct_mcr_fixture.sh"]
@@ -2146,6 +2169,15 @@ package reprobuild:
       if hcrFixtureEdgeTest:
         appendRegisteredActionToolIdentityRefs(pyExecute.id,
           ["bash", "git", "mkdir", "cp"])
+      if releaseSmokeTest:
+        # Bind actual declared child tools into the filtered execute PATH.
+        appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "just"])
+        when not defined(windows):
+          appendRegisteredActionToolIdentityRefs(pyExecute.id,
+            ["mktemp", "rm", "basename", "cp", "mkdir", "cat", "uname",
+              "env", "sed", "grep", "date", "mv", "dirname", "timeout"])
+        when defined(linux):
+          appendRegisteredActionToolIdentityRefs(pyExecute.id, ["pwsh"])
       if hookScopeTest:
         discard target("test-dev-shell-hook-scope", pyExecute)
       if nixCacheTest:
