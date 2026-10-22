@@ -286,12 +286,12 @@ provisioning selection refused: the committed lock {lock} does not resolve again
     eligible: contributor "github:example/fed-catalog-b" from catalog "fed-catalog-b" ({remoteB}) at {revB1}, declared at repro.nim:6 (imported at {decl}:13)
     fix: the lock {lock} pins contributor "github:example/nobody" for "federatedTool", which no imported catalog offers (eligible: "github:example/fed-catalog-a", "github:example/fed-catalog-b"). Re-select with `repro lock refresh --provisioning {dir}` (rewrites the lock's provisioning records from the catalogs and the curator policy in {decl}), or restore the lock from version control if it was edited by hand
 what changed since the lock was written (the locked record -> what the composed catalogs offer now):
-  provisioning "federatedTool" on amd64-windows -> amd64-windows: changed (not-offered)
+  provisioning "federatedTool" on {host} -> {host}: changed (not-offered)
     the locked contributor "github:example/nobody" offers no contribution for the package in any imported catalog; offered by: "github:example/fed-catalog-a", "github:example/fed-catalog-b"
 to re-select explicitly (rewrites the lock's provisioning records and prints this diff; nothing re-selects silently):
   repro lock refresh --provisioning {dir}"""
   golden["doubled-record"] = """
-provisioning selection refused: the committed lock {lock} has `provisioning` records that cannot be read (lock two provisioning realizations are locked for package "federatedTool" on amd64-windows -> amd64-windows; a lock selects exactly one; the lock writer never produces this, and `repro lock refresh` carries the provisioning array forward rather than regenerating it (it refuses to replace a lock whose array it cannot read); restore the `provisioning` line from version control, or remove it deliberately); they are not ignored. Restore the `provisioning` line from version control, or delete it and re-select with `repro lock refresh --provisioning {dir}` (a refresh does not replace records it cannot read)."""
+provisioning selection refused: the committed lock {lock} has `provisioning` records that cannot be read (lock two provisioning realizations are locked for package "federatedTool" on {host} -> {host}; a lock selects exactly one; the lock writer never produces this, and `repro lock refresh` carries the provisioning array forward rather than regenerating it (it refuses to replace a lock whose array it cannot read); restore the `provisioning` line from version control, or remove it deliberately); they are not ignored. Restore the `provisioning` line from version control, or delete it and re-select with `repro lock refresh --provisioning {dir}` (a refresh does not replace records it cannot read)."""
   golden["disagree"] = """
 provisioning selection refused: the catalogs the committed lock {lock} is verified against could not be obtained: the committed lock's pin for catalog import "fed-catalog-a" disagrees with repro-catalogs.toml ({decl}:8): the declaration names commit {revA1}, the lock pins revision {revA1} for ref "main"; re-pin with `repro lock refresh --provisioning {dir}` to adopt the declaration, or change the [[import]] at {decl}:8 back to what the lock pins"""
   golden["unpinned"] = """
@@ -320,7 +320,7 @@ provisioning selection refused: the committed lock {lock} does not resolve again
     fix: first resolve the incomplete-catalog-coordinate refusal for "fed-packages": if that catalog owns the canonical interface of "federatedTool", this resolves too
     fix: in {decl}, add an [[import]] for the catalog that publishes the canonical interface of "federatedTool", or remove the [[import]] of "fed-catalog-b" ({decl}:13); then re-select with `repro lock refresh --provisioning {dir}`
 what changed since the lock was written (the locked record -> what the composed catalogs offer now):
-  provisioning "federatedTool" on amd64-windows -> amd64-windows: changed
+  provisioning "federatedTool" on {host} -> {host}: changed
     contributor "github:example/fed-catalog-a" offers it at interface {fp} from catalog fed-catalog-a|{remoteA}@{revA1}#{idA}
     the composed catalogs refused (see the refusals above), so the locked record could not be compared further
 to re-select explicitly (rewrites the lock's provisioning records and prints this diff; nothing re-selects silently):
@@ -340,7 +340,7 @@ provisioning selection refused: the committed lock {lock} does not resolve again
     fix: first resolve the missing-catalog refusal for "fed-packages": if that catalog owns the canonical interface of "federatedTool", this resolves too
     fix: in {decl}, add an [[import]] for the catalog that publishes the canonical interface of "federatedTool", or remove the [[import]] of "fed-catalog-b" ({decl}:13); then re-select with `repro lock refresh --provisioning {dir}`
 what changed since the lock was written (the locked record -> what the composed catalogs offer now):
-  provisioning "federatedTool" on amd64-windows -> amd64-windows: changed
+  provisioning "federatedTool" on {host} -> {host}: changed
     no imported catalog declares a canonical interface for the package
     contributor "github:example/fed-catalog-a" offers it at interface {fp} from catalog fed-catalog-a|{remoteA}@{revA1}#{idA}
     the composed catalogs refused (see the refusals above), so the locked record could not be compared further
@@ -361,7 +361,7 @@ provisioning selection refused: the committed lock {lock} does not resolve again
     fix: first resolve the catalog-identity-conflict refusal for "fed-packages": if that catalog owns the canonical interface of "federatedTool", this resolves too
     fix: in {decl}, add an [[import]] for the catalog that publishes the canonical interface of "federatedTool", or remove the [[import]] of "fed-catalog-b" ({decl}:13); then re-select with `repro lock refresh --provisioning {dir}`
 what changed since the lock was written (the locked record -> what the composed catalogs offer now):
-  provisioning "federatedTool" on amd64-windows -> amd64-windows: changed
+  provisioning "federatedTool" on {host} -> {host}: changed
     contributor "github:example/fed-catalog-a" offers it at interface {fp} from catalog fed-catalog-a|{remoteA}@{revA1}#{idA}
     the composed catalogs refused (see the refusals above), so the locked record could not be compared further
 to re-select explicitly (rewrites the lock's provisioning records and prints this diff; nothing re-selects silently):
@@ -371,7 +371,7 @@ provisioning selection refused: the committed lock {lock} does not resolve again
   contribution-changed: the locked provisioning realization of package "federatedTool" selects contribution {cfA1} from "github:example/fed-catalog-a", which is now {cfA2}; the package interface is unchanged (typechecking stays valid), but the locked realization must be refreshed (the lock pins contributor "github:example/fed-catalog-a"; the composed catalogs offer contributor "github:example/fed-catalog-a" at interface {fp}, contribution {cfA2}; not re-selected)
     fix: the lock {lock} no longer describes what the catalogs it pins offer; re-select with `repro lock refresh --provisioning {dir}` to adopt what they offer now (it prints what changed), or restore the lock from version control if it was edited by hand
 what changed since the lock was written (the locked record -> what the composed catalogs offer now):
-  provisioning "federatedTool" on amd64-windows -> amd64-windows: changed (contribution-changed, catalog-changed)
+  provisioning "federatedTool" on {host} -> {host}: changed (contribution-changed, catalog-changed)
     contribution changed (realization-only: the interface is unchanged, so typechecking stays valid): {cfA1} -> {cfA2}
       cause (from the two contribution identities, each verified to reproduce its record's fingerprint):
         - provider identity: {provA1} -> {provA2}
@@ -383,7 +383,7 @@ provisioning selection refused: the committed lock {lock} does not resolve again
   contribution-changed: the locked provisioning realization of package "federatedTool" selects contribution {cfA1} from "github:example/fed-catalog-a", which is now {cfA2}; the package interface is unchanged (typechecking stays valid), but the locked realization must be refreshed (the lock pins contributor "github:example/fed-catalog-a"; the composed catalogs offer contributor "github:example/fed-catalog-a" at interface {fp}, contribution {cfA2}; not re-selected)
     fix: the lock {lock} no longer describes what the catalogs it pins offer; re-select with `repro lock refresh --provisioning {dir}` to adopt what they offer now (it prints what changed), or restore the lock from version control if it was edited by hand
 what changed since the lock was written (the locked record -> what the composed catalogs offer now):
-  provisioning "federatedTool" on amd64-windows -> amd64-windows: changed (contribution-changed, catalog-changed)
+  provisioning "federatedTool" on {host} -> {host}: changed (contribution-changed, catalog-changed)
     contribution changed (realization-only: the interface is unchanged, so typechecking stays valid): {cfA1} -> {cfA2}
       cause: not determinable from the records -- a lock records the contribution fingerprint, not the metadata it was computed from, and no identity reproducing the fingerprint of the locked contribution was supplied
       no recorded fingerprint input changed (the interface, realization lock identity, family and integrity are the same), so the change is in metadata the lock does not record: realization fields, the provider identity or a dependency
@@ -394,13 +394,13 @@ what changed since the lock was written (the locked record -> what the composed 
 to re-select explicitly (rewrites the lock's provisioning records and prints this diff; nothing re-selects silently):
   repro lock refresh --provisioning {dir}"""
   golden["diff"] = """
-provisioning "federatedTool" on amd64-windows -> amd64-windows: changed (contribution-changed, catalog-changed)
+provisioning "federatedTool" on {host} -> {host}: changed (contribution-changed, catalog-changed)
   contribution changed (realization-only: the interface is unchanged, so typechecking stays valid): {cfA1} -> {cfA2}
     cause (from the two contribution identities, each verified to reproduce its record's fingerprint):
       - provider identity: {provA1} -> {provA2}
   catalog revision changed: "{revA1}" -> "{revA2}""""
   golden["diff-blind"] = """
-provisioning "federatedTool" on amd64-windows -> amd64-windows: changed (contribution-changed, catalog-changed)
+provisioning "federatedTool" on {host} -> {host}: changed (contribution-changed, catalog-changed)
   contribution changed (realization-only: the interface is unchanged, so typechecking stays valid): {cfA1} -> {cfA2}
     cause: not determinable from the records -- a lock records the contribution fingerprint, not the metadata it was computed from, and no identity reproducing the fingerprint of the locked contribution or the new contribution was supplied
     no recorded fingerprint input changed (the interface, realization lock identity, family and integrity are the same), so the change is in metadata the lock does not record: realization fields, the provider identity or a dependency
@@ -528,7 +528,7 @@ provisioning selection refused: the committed lock {lock} does not resolve again
   catalog-changed: the lock pins contributor "github:example/fed-catalog-a" for package "federatedTool" from catalog fed-catalog-a|{remoteA}@7777777777777777777777777777777777777777#{idA}, but the composed catalogs offer it from catalog fed-catalog-a|{remoteA}@{revA1}#{idA}. The lock pins the catalog revision; refresh the lock deliberately.
     fix: the lock {lock} no longer describes what the catalogs it pins offer; re-select with `repro lock refresh --provisioning {dir}` to adopt what they offer now (it prints what changed), or restore the lock from version control if it was edited by hand
 what changed since the lock was written (the locked record -> what the composed catalogs offer now):
-  provisioning "federatedTool" on amd64-windows -> amd64-windows: changed (catalog-changed)
+  provisioning "federatedTool" on {host} -> {host}: changed (catalog-changed)
     contribution fingerprint unchanged: {cfA1} (the same contribution, byte for byte)
     catalog revision changed: "7777777777777777777777777777777777777777" -> "{revA1}"
 to re-select explicitly (rewrites the lock's provisioning records and prints this diff; nothing re-selects silently):
@@ -538,7 +538,7 @@ provisioning selection refused: the committed lock {lock} does not resolve again
   contribution-changed: the locked provisioning realization of package "federatedTool" selects contribution 0000000000000000000000000000000000000000000000000000000000000000 from "github:example/fed-catalog-a", which is now {cfA1}; the package interface is unchanged (typechecking stays valid), but the locked realization must be refreshed (the lock pins contributor "github:example/fed-catalog-a"; the composed catalogs offer contributor "github:example/fed-catalog-a" at interface {fp}, contribution {cfA1}; not re-selected)
     fix: the lock {lock} no longer describes what the catalogs it pins offer; re-select with `repro lock refresh --provisioning {dir}` to adopt what they offer now (it prints what changed), or restore the lock from version control if it was edited by hand
 what changed since the lock was written (the locked record -> what the composed catalogs offer now):
-  provisioning "federatedTool" on amd64-windows -> amd64-windows: changed (contribution-changed, catalog-changed)
+  provisioning "federatedTool" on {host} -> {host}: changed (contribution-changed, catalog-changed)
     contribution changed (realization-only: the interface is unchanged, so typechecking stays valid): 0000000000000000000000000000000000000000000000000000000000000000 -> {cfA1}
       cause: not determinable from the records -- a lock records the contribution fingerprint, not the metadata it was computed from, and no identity reproducing the fingerprint of the locked contribution was supplied
       no recorded fingerprint input changed (the interface, realization lock identity, family and integrity are the same), so the change is in metadata the lock does not record: realization fields, the provider identity or a dependency
@@ -611,6 +611,9 @@ suite "federated catalog diagnostics are actionable":
       rootTreeOf(sharedCloneOf(env.clonesRoot, repo.remote), rev))
 
   var base = initTable[string, string]()
+  # The goldens were observed on amd64-windows; the platform pair is the
+  # host's, so it is a placeholder like every other run-specific value.
+  base["host"] = Host
   base["fp"] = fp
   base["fp2"] = fp2
   base["remoteP"] = w.packages.remote
@@ -643,6 +646,17 @@ suite "federated catalog diagnostics are actionable":
     result["dir"] = dir
     result["decl"] = dir / CatalogImportsFileName
     result["lock"] = dir / "repro.lock"
+
+  proc nothingRevision(): string =
+    ## The crafted commit that publishes nothing, on branch `nothing` of
+    ## catalog A, synced into the shared clone. Every case that needs it
+    ## asks here: a case is also run on its own (`--run`), where no earlier
+    ## case has created the branch.
+    result = git(["for-each-ref", "--format=%(objectname)",
+      "refs/heads/nothing"], w.a.upstream).strip()
+    if result.len == 0:
+      result = w.a.publishCommit(@[], "nothing", branch = "nothing")
+    discard w.a.syncSharedClone(env.clonesRoot)
 
   test "an ambiguous selection names each candidate and the [[policy]] that resolves it":
     let dir = consumer("ambiguous", w.standardImports(), policy = @[])
@@ -717,8 +731,7 @@ suite "federated catalog diagnostics are actionable":
       check expectText("no-ref", refreshRefusal(dir), ctx(dir))
     # A commit that publishes nothing (crafted: no publisher writes it).
     block:
-      let nothing = w.a.publishCommit(@[], "nothing", branch = "nothing")
-      discard w.a.syncSharedClone(env.clonesRoot)
+      let nothing = nothingRevision()
       var specs = w.standardImports()
       specs[1].gitRef = ""
       specs[1].commit = nothing
@@ -886,7 +899,7 @@ suite "federated catalog diagnostics are actionable":
       "refs/heads/main"])
     discard git(["--git-dir=" & bareA, "tag", "split", w.revA1])
     discard git(["--git-dir=" & bareA, "branch", "split",
-      git(["--git-dir=" & bareA, "rev-parse", "nothing"]).strip()])
+      nothingRevision()])
     discard git(["--git-dir=" & bareA, "tag", "blobtag", artifactBlob])
     for (name, gitRef) in [("ref-symbolic", "follow"), ("ref-both", "split"),
                            ("ref-blob", "blobtag")]:
@@ -895,8 +908,7 @@ suite "federated catalog diagnostics are actionable":
       let dir = consumer(name, specs)
       var tt = t
       for k, v in ctx(dir): tt[k] = v
-      tt["revNothing"] = git(["--git-dir=" & bareA, "rev-parse",
-        "nothing"]).strip()
+      tt["revNothing"] = nothingRevision()
       tt["blobA"] = artifactBlob
       check expectText(name, refreshRefusal(dir), tt)
     # The shared clone: no origin, two origins, another remote's origin, an
