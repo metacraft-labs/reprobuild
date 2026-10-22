@@ -54833,7 +54833,8 @@ proc parsePostCommitArgs(args: openArray[string]):
 # runs detached with stdio redirected away, so it survives the
 # post-commit process exiting.
 #
-#   * POSIX: a new session via ``setsid ... &`` with stdio to /dev/null.
+#   * POSIX: a new session via ``setsid ... &`` with stdio to /dev/null,
+#     and no other descriptor of the hook inherited.
 #   * Windows (W4): a SHELL-FREE detached child — ``CreateProcessW`` with
 #     a hidden console, stdio bound to ``NUL`` and no other handle
 #     inherited. No ``cmd.exe``, no ``start /b``. See
@@ -55151,7 +55152,8 @@ proc spawnAsyncCachePush(repoRoot, workspaceName: string) =
   ##   * POSIX: ``sh -c "setsid … &"`` — new session, stdio to /dev/null.
   ##     ``quoteShell`` on POSIX IS ``sh``'s own quoting convention, so
   ##     the shell round trip is lossless and the shell is doing real work
-  ##     (``setsid`` + the ``&`` background fork).
+  ##     (``setsid`` + the ``&`` background fork). The redirections cover
+  ##     0, 1 and 2, and no other descriptor of the hook crosses the launch.
   ##   * Windows (W4): ``CreateProcessW`` with stdio to ``NUL`` and no
   ##     other handle inherited, straight from ``spec.argv``. No shell is
   ##     involved, so no quoting convention has to survive a second
@@ -55172,7 +55174,26 @@ proc spawnAsyncCachePush(repoRoot, workspaceName: string) =
     when defined(windows):
       discard spawnDetachedNoShell(spec.argv)
     else:
-      discard execShellCmd("sh -c " & q(spec.shellInvocation))
+      # NO DESCRIPTOR ABOVE 2 CROSSES THE LAUNCH. The shell's redirections
+      # give the detached push its own 0, 1 and 2, but every other
+      # descriptor this hook inherited without ``FD_CLOEXEC`` would pass
+      # through ``sh`` and ``setsid`` into a process that lives until the
+      # push, and any shared-bare gc after it, finishes. Such copies are
+      # routine: a caller that runs ``git commit`` through Nim's
+      # ``osproc.startProcess`` hands git -- and so this hook -- the
+      # original ends of its stdio pipes at descriptors above 2 (see
+      # ``repro_core/descriptor_inheritance``). The push then held the
+      # caller's output pipe open, and the caller saw no end of file until
+      # the push ended. This is the POSIX half of the rule
+      # ``spawnDetachedNoShell`` applies on Windows by inheriting no other
+      # handle. Only the flag moves, for this one launch, and it is put
+      # back afterwards; the hook dispatch starts no child from another
+      # thread inside that window.
+      let madeCloseOnExec = markInheritableDescriptorsCloseOnExec()
+      try:
+        discard execShellCmd("sh -c " & q(spec.shellInvocation))
+      finally:
+        restoreInheritableDescriptors(madeCloseOnExec)
   except CatchableError:
     discard
 
