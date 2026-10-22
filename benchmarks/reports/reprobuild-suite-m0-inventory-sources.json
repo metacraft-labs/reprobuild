@@ -22034,7 +22034,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_workspace_snapshot/tests/t_manifest_validation_and_tree_id.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

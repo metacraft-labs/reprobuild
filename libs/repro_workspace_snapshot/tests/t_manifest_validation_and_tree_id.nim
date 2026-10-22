@@ -12,7 +12,16 @@
 ##     without the gitlink does not (the defect it fixes: gitlinks used to be
 ##     left out, and such a repository never verified);
 ##   * `materializeRepoSnapshot` of that repository verifies its tree, with a
-##     submodule moved to another commit in the snapshot.
+##     submodule moved to another commit in the snapshot;
+##   * the base checkout writes BLOB BYTES, untouched by any git conversion:
+##     a tree whose `.gitattributes` asks for `eol=crlf`, `ident` and a smudge
+##     filter, in a cache that also sets `core.autocrlf` and an
+##     `info/attributes` rule, materializes byte for byte as `git cat-file`
+##     returns it and verifies its tree (the defect it fixes: a converted
+##     checkout hashed to another tree id and every such snapshot was
+##     refused), next to a modified entry written from the manifest; a
+##     replace ref in the cache does not substitute a blob's bytes, and a
+##     base tree with a `.GIT` component is refused as git refuses it.
 ##
 ## MOCK POLICY — none: a real git repository with a real submodule; tree ids
 ## are computed by git itself and by the library, and compared.
@@ -139,3 +148,104 @@ suite "repro_workspace_snapshot: manifests and tree ids":
     check mat.ok
     check mat.observedTree == dirtyTree
     check reverifyTree(base / "wt", mat.tracked, dirtyTree, mat.gitlinks).ok
+
+  test "the base checkout writes blob bytes, with no git conversion":
+    let base = createTempDir("m7-snapshot-attrs-", "")
+    defer: removeDir(base)
+    let repo = base / "repo"
+    gitRepo(repo)
+    writeFile(repo / ".gitattributes",
+      "*.txt text eol=crlf\n*.id ident\n*.up filter=upper\n")
+    writeFile(repo / "f.txt", "a\nb\n")
+    writeFile(repo / "v.id", "$Id$\n")
+    writeFile(repo / "u.up", "hello\n")
+    writeFile(repo / "m.c", "int main(void){return 0;}\n")
+    createDir(repo / "src")
+    writeFile(repo / "src" / "keep.txt", "unchanged\n")
+    writeFile(repo / "src" / "edit.txt", "before\n")
+    discard git(repo, "add", "-A")
+    discard git(repo, "commit", "-q", "-m", "base")
+    let head = git(repo, "rev-parse", "HEAD")
+    let tree = git(repo, "rev-parse", "HEAD^{tree}")
+    let cache = base / "cache.git"
+    discard execCmdEx(quoteShellCommand(["git", "clone", "-q", "--bare", repo,
+      cache]))
+    # Every conversion git would apply on checkout, configured in the CACHE
+    # the worker reads (its config and its info/attributes), on top of the
+    # committed `.gitattributes`.
+    discard git(cache, "config", "filter.upper.smudge", "tr a-z A-Z")
+    discard git(cache, "config", "filter.upper.clean", "cat")
+    discard git(cache, "config", "core.autocrlf", "true")
+    createDir(cache / "info")
+    writeFile(cache / "info" / "attributes", "*.c text eol=crlf\n")
+    let reader = proc(d: Blake3Digest): Option[seq[byte]] {.gcsafe, closure.} =
+      none(seq[byte])
+    # No modifications: the snapshot IS the base tree.
+    let clean = RepoSnapshot(repoId: "r", baseCommitSha: head,
+      gitTreeSha1: tree)
+    let mat = materializeRepoSnapshot(cache, clean, base / "wt", reader)
+    checkpoint("materialize: " & mat.reason)
+    check mat.ok
+    check mat.observedTree == tree
+    for rel in [".gitattributes", "f.txt", "v.id", "u.up", "m.c",
+                "src/keep.txt", "src/edit.txt"]:
+      checkpoint(rel)
+      check readFile(base / "wt" / rel) ==
+        execCmdEx(quoteShellCommand(["git", "--git-dir=" & cache, "cat-file",
+          "blob", head & ":" & rel])).output
+    check reverifyTree(base / "wt", mat.tracked, tree, mat.gitlinks).ok
+    # A modified entry and the base files under conversion attributes
+    # coexist: the tree git computes for that state verifies.
+    let edited = "after\n"
+    let editedBytes = toBytes(edited)
+    writeFile(repo / "src" / "edit.txt", edited)
+    let index = base / "idx"
+    let env = "GIT_INDEX_FILE=" & quoteShell(index) & " "
+    discard execCmdEx(env & "git -C " & quoteShell(repo) & " read-tree HEAD")
+    discard execCmdEx(env & "git -C " & quoteShell(repo) &
+      " update-index --add src/edit.txt")
+    let dirtyTree = execCmdEx(env & "git -C " & quoteShell(repo) &
+      " write-tree").output.strip()
+    check dirtyTree != tree
+    let dirty = RepoSnapshot(repoId: "r", baseCommitSha: head,
+      gitTreeSha1: dirtyTree, modified: @[entry("src/edit.txt", edited)])
+    check validateManifest(WorkspaceSnapshotManifest(schema: ManifestSchema,
+      primaryRepo: dirty)) == ""
+    let blobs = proc(d: Blake3Digest): Option[seq[byte]] {.gcsafe, closure.} =
+      if d == blake3.digest(editedBytes): some(editedBytes)
+      else: none(seq[byte])
+    let mat2 = materializeRepoSnapshot(cache, dirty, base / "wt2", blobs)
+    checkpoint("materialize (modified): " & mat2.reason)
+    check mat2.ok
+    check mat2.observedTree == dirtyTree
+    check readFile(base / "wt2" / "src" / "edit.txt") == edited
+    check readFile(base / "wt2" / "f.txt") == "a\nb\n"
+    check readFile(base / "wt2" / "u.up") == "hello\n"
+    check reverifyTree(base / "wt2", mat2.tracked, dirtyTree,
+      mat2.gitlinks).ok
+    # A replace ref in the cache substitutes nothing: the bytes written are
+    # those of the blob the tree names (git itself would read the
+    # replacement, and the blob would then fail its id check).
+    let keepOid = git(cache, "rev-parse", head & ":src/keep.txt")
+    let editOid = git(cache, "rev-parse", head & ":src/edit.txt")
+    discard git(cache, "replace", keepOid, editOid)
+    let mat3 = materializeRepoSnapshot(cache, clean, base / "wt3", reader)
+    checkpoint("materialize (replace ref): " & mat3.reason)
+    check mat3.ok
+    check readFile(base / "wt3" / "src" / "keep.txt") == "unchanged\n"
+    # A base tree git itself would not check out — a `.GIT` component, which
+    # a case-insensitive filesystem resolves as `.git` — is refused, not
+    # written. `mktree` builds it; `git add` would refuse the path.
+    let hiOid = execCmdEx("printf 'hi\\n' | git --git-dir=" & quoteShell(cache) &
+      " hash-object -w --stdin").output.strip()
+    let inner = execCmdEx("printf '100644 blob " & hiOid & "\\tconfig\\n' | " &
+      "git --git-dir=" & quoteShell(cache) & " mktree").output.strip()
+    let outer = execCmdEx("printf '040000 tree " & inner & "\\t.GIT\\n' | " &
+      "git --git-dir=" & quoteShell(cache) & " mktree").output.strip()
+    let evil = git(cache, "-c", "user.name=M7", "-c",
+      "user.email=m7@example.invalid", "commit-tree", "-m", "evil", outer)
+    let mat4 = materializeRepoSnapshot(cache, RepoSnapshot(repoId: "r",
+      baseCommitSha: evil, gitTreeSha1: outer), base / "wt4", reader)
+    check not mat4.ok
+    check ".git component" in mat4.reason
+    check not fileExists(base / "wt4" / ".GIT" / "config")
