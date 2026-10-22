@@ -53,7 +53,10 @@ suite "M7 — provider conformance":
       @["checkout fixture", "build fixture", "test fixture",
         "generation.stage fixture",
         "remix.capture fixture " & FixtureRelease,
-        "remix.export fixture " & FixtureRelease]
+        "remix.export fixture " & FixtureRelease,
+        "generation.activate " & FixtureRelease,
+        "generation.rollback " & FixtureBase,
+        "compose fixture " & FixtureRelease]
 
   test "a provider that reaches for the consent socket fails":
     let r = conformanceOf("consent-reacher")

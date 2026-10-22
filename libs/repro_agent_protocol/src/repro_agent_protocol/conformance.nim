@@ -12,10 +12,11 @@
 ##
 ## The fixture backend is a stand-in by design: conformance is about the
 ## provider's use of the protocol, and a real build would make the verdict
-## depend on a toolchain. It performs checkout and records build, test,
-## stage and Remix calls against a real temporary filesystem; its build of
-## target `long` runs until it is cancelled (at most `LongBuildSeconds`),
-## which is how the scenario exercises cancellation.
+## depend on a toolchain. It performs checkout and composition and records
+## build, test, generation and Remix calls against a real temporary
+## filesystem; it keeps an active generation that activation and rollback
+## move; its build of target `long` runs until it is cancelled (at most
+## `LongBuildSeconds`), which is how the scenario exercises cancellation.
 
 import std/[asyncdispatch, os, osproc, sequtils, sets, streams, strtabs,
             strutils, tables, times]
@@ -31,10 +32,13 @@ const
   ConformanceTimeoutSeconds* = 120
   LongBuildSeconds* = 60
   FixtureRelease* = "fixture-release-1"
+  FixtureBase* = "gen-1"
+  FixtureActivated* = "gen-2"
 
 type
   ConformanceBackend = ref object of Backend
     calls*: seq[string]
+    active: string ## the active generation
 
   ConformanceReport* = object
     passed*: bool
@@ -67,11 +71,31 @@ method runTest(b: ConformanceBackend; ws: Workspace; op: Operation): OpResult =
   b.calls.add "test " & ws.package
   OpResult(status: osCompleted, detail: "tests passed")
 
-method activeGeneration(b: ConformanceBackend): string = "gen-1"
+method composeCheckout(b: ConformanceBackend; package, root: string;
+                       op: Operation): OpResult =
+  b.calls.add "compose " & package & " " & op.arg("releases")
+  writeFile(root / "README.md", FixtureReadme)
+  OpResult(status: osCompleted)
+
+method activeGeneration(b: ConformanceBackend): string = b.active
 
 method generation(b: ConformanceBackend; ws: Workspace; op: Operation): OpResult =
-  b.calls.add $op.kind & " " & ws.package
-  OpResult(status: osCompleted, detail: "release=" & FixtureRelease)
+  case op.kind
+  of okGenerationStage:
+    b.calls.add "generation.stage " & ws.package
+    OpResult(status: osCompleted, detail: "release=" & FixtureRelease)
+  of okGenerationActivate:
+    b.calls.add "generation.activate " & op.target
+    if op.target != FixtureRelease:
+      return OpResult(status: osFailed, detail: "no staged change " & op.target)
+    let previous = b.active
+    b.active = FixtureActivated
+    OpResult(status: osCompleted,
+             detail: "generation=" & b.active & " previous=" & previous)
+  else:
+    b.calls.add "generation.rollback " & op.target
+    b.active = op.target
+    OpResult(status: osCompleted, detail: "generation=" & b.active)
 
 method remix(b: ConformanceBackend; ws: Workspace; op: Operation): OpResult =
   b.calls.add $op.kind & " " & ws.package & " " & op.arg("release")
@@ -93,7 +117,7 @@ proc runConformance*(providerCmd: seq[string]; workRoot: string;
   ## Run scenario `agent-v1` against the provider started by
   ## `providerCmd` (argv; no shell). `workRoot` must be empty or absent and
   ## short enough for Unix socket paths.
-  let backend = ConformanceBackend()
+  let backend = ConformanceBackend(active: FixtureBase)
   let h = newHost(backend, workRoot / "workspaces",
                   auditPath = workRoot / "audit.log")
   var consentAttempts = 0
@@ -191,7 +215,10 @@ proc runConformance*(providerCmd: seq[string]; workRoot: string;
   let expectedCalls = @["checkout fixture", "build fixture", "test fixture",
     "generation.stage fixture",
     "remix.capture fixture " & FixtureRelease,
-    "remix.export fixture " & FixtureRelease]
+    "remix.export fixture " & FixtureRelease,
+    "generation.activate " & FixtureRelease,
+    "generation.rollback " & FixtureBase,
+    "compose fixture " & FixtureRelease]
   if otherCalls != expectedCalls:
     fail "the backend saw " & $otherCalls & ", expected " & $expectedCalls
   if longCalls.len > 1 or
@@ -202,11 +229,13 @@ proc runConformance*(providerCmd: seq[string]; workRoot: string;
     fail "the provider never cancelled its long build"
   let consumed = mine.filterIt(it.kind == "consume" and
                                it.decision == "consume")
-  if consumed.len != 2:
-    fail "expected the provider to execute 2 approved plans, saw " &
+  if consumed.len != 4:
+    fail "expected the provider to execute 4 approved plans, saw " &
       $consumed.len
-  if approved.len != 2:
-    fail "expected two plans needing approval, saw " & $approved.len
+  if approved.len != 4:
+    fail "expected four plans needing approval, saw " & $approved.len
+  if backend.active != FixtureBase:
+    fail "the provider left generation " & backend.active & " active"
   let reads = mine.filterIt(it.kind == "source.read" and
                             it.decision == "result" and it.reason == "completed")
   if reads.len != 1:

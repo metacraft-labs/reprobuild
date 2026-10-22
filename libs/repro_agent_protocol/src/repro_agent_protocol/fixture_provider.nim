@@ -188,6 +188,32 @@ proc runFixtureProvider*(): int =
                        awaitApproval(approvalFile)):
       if x.field("status").text != "completed":
         raise newException(ProviderError, "the approved Remix plan failed")
+    # 9. Activate the staged release, after the user approves.
+    proc approved(s: Session; p: Plan; what: string): seq[CborItem] =
+      let r = s.submit(p)
+      if r.outcome != "ok" or r.field("approvalRequired").elems.len != 1:
+        raise newException(ProviderError, what & " was not held for approval")
+      result = s.execute(asDigest(r.field("plan"), "plan").hex,
+                         awaitApproval(approvalFile))
+      if result[0].field("status").text != "completed":
+        raise newException(ProviderError, what & " failed")
+    let activated = s.approved(s.plan(@[op(okGenerationActivate, release)],
+      @["system.generation:activate"]), "the activation")
+    var current, previous = ""
+    for w in activated[0].field("detail").text.split(' '):
+      if w.startsWith("generation="): current = w["generation=".len .. ^1]
+      if w.startsWith("previous="): previous = w["previous=".len .. ^1]
+    if current.len == 0 or previous.len == 0:
+      raise newException(ProviderError, "the activation named no generations")
+    # 10. Roll back to the previous generation; the plan is based on the
+    # generation that is active now.
+    var back = s
+    back.base = current
+    discard back.approved(back.plan(@[op(okGenerationRollback, previous)],
+      @["system.generation:rollback"]), "the rollback")
+    # 11. Compose the release into a fresh workspace.
+    discard s.run(s.plan(@[op(okRemixCompose, "fixture",
+      {"releases": release})], @["workspace.create:fixture"]))
     echo "conformance-done"
     0
   except ProviderError, AgentRefusal, OSError, IOError, ValueError:
