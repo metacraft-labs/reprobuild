@@ -23610,7 +23610,20 @@ proc emitLeafReports(reports: openArray[LeafCheckReport]) =
   ## a pool or runs the detector routes its findings here, so a stale ref
   ## that was removed, or a branch of the user's whose history is gone, is
   ## said once, in the same words, whichever command noticed it.
-  for line in messages(reports):
+  ##
+  ## Whatever the command has already written to stdout is flushed first.
+  ## Into a pipe, C stdio buffers stdout in blocks (4096 bytes on glibc)
+  ## while stderr is unbuffered, so a caller reading both streams on one
+  ## pipe got the first block of the report, then these messages, then the
+  ## rest -- with the messages spliced into whichever row straddled the
+  ## block boundary (`repro health`'s `shared-clone-leaves` row, for one).
+  ## Flushing here keeps every row whole and puts the messages after the
+  ## report they explain.
+  let reportLines = messages(reports)
+  if reportLines.len == 0:
+    return
+  stdout.flushFile()
+  for line in reportLines:
     stderr.writeLine(line)
 
 proc runManifestRefreshHookCommand*(hookName: string;
