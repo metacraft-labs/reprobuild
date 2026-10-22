@@ -2132,7 +2132,8 @@ package reprobuild:
         elif releaseSmokeTest:
           @["scripts/release/smoke_release_dev_exec.sh",
             "scripts/release/with_windows_archive_runquota.ps1",
-            ".github/workflows/release.yml"]
+            ".github/workflows/release.yml",
+            "scripts/verify_release.sh", "repro.nim"]
         elif hcrFixtureEdgeTest:
           # The fixture script its prebuilt-bundle cases run.
           @["scripts/build_hcr_ct_mcr_fixture.sh"]

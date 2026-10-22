@@ -126,7 +126,7 @@ if (( ${#missing_sources[@]} > 0 )); then
   exit 1
 fi
 
-# ── All platforms: the RunQuota daemon the engine starts for a build ─────────
+# ── All platforms: release applications and the build lease coordinator ────
 #
 # Under `--tool-provisioning=tarball` and `nix` the engine will not run an
 # action unleased, and it starts `runquotad` itself only when it can find one:
@@ -137,8 +137,19 @@ fi
 # a build finds it.
 exe_suffix=""
 [[ "$archive_name" == *.zip ]] && exe_suffix=".exe"
-required_bins=(runquotad runquota)
-echo "=== Checking the RunQuota executables in $pkg_dir/bin ==="
+# These are the existing native app outputs of repro.nim's release collection,
+# not every bootstrap entrypoint. Conformance and evidence-sink binaries are
+# absent from that collection; this check does not decide their scope.
+required_bins=(
+  repro reprobuild
+  repro-peer-cache-tier2 repro-peer-cache-admin repro-peer-cache-mint-cert
+  repro-cmake-dyndep-fragment repro-cmake-trycompile-provider
+  repro-standard-provider repro-install-mirror-publish
+  repro-binary-cache repro-binary-cache-crosshost repro-harvest-apt
+  attestation-agent
+  runquotad runquota
+)
+echo "=== Checking the release application and RunQuota inventory in $pkg_dir/bin ==="
 missing_bins=()
 for b in "${required_bins[@]}"; do
   if [[ -f "$pkg_dir/bin/$b$exe_suffix" ]]; then
@@ -150,7 +161,8 @@ for b in "${required_bins[@]}"; do
 done
 if (( ${#missing_bins[@]} > 0 )); then
   echo "ERROR: $archive_name cannot build a from-source recipe: missing from bin/: ${missing_bins[*]}" >&2
-  echo "       Staged by scripts/release/stage_release_runquota.sh." >&2
+  echo "       Build/package the declared release apps; stage RunQuota with" >&2
+  echo "       scripts/release/stage_release_runquota.sh." >&2
   exit 1
 fi
 
@@ -252,7 +264,7 @@ echo "Capabilities: $capabilities"
 
 # The RunQuota images must start from the archive alone too (on Windows, under
 # the scrubbed PATH above).
-for b in "${required_bins[@]}"; do
+for b in runquotad runquota; do
   run_repro "$pkg_dir/bin/$b$exe_suffix" --version
 done
 

@@ -372,5 +372,98 @@ $data = @{command=$invocation.Command; arguments=@($invocation.Arguments); quote
         self.assertIn("after-bootstrap", predecessor.stdout)
 
 
+class ReleaseInventoryTests(unittest.TestCase):
+    """Execute the real verifier's membership block, without runtime probes.
+
+    Empty regular files model only names/types in this durable unit fixture;
+    they are never run as SDK binaries. Real archive execution stays in the
+    unchanged verifier and installed smoke. The retained qualification also
+    repeats these membership controls with authenticated package images.
+    """
+
+    APPS = {
+        "repro", "reprobuild", "repro-peer-cache-tier2", "repro-peer-cache-admin",
+        "repro-peer-cache-mint-cert", "repro-cmake-dyndep-fragment",
+        "repro-cmake-trycompile-provider", "repro-standard-provider",
+        "repro-install-mirror-publish", "repro-binary-cache",
+        "repro-binary-cache-crosshost", "repro-harvest-apt", "attestation-agent",
+    }
+    REQUIRED = APPS | {"runquotad", "runquota"}
+
+    @staticmethod
+    def inventory_block():
+        script = (ROOT / "scripts/verify_release.sh").read_text(encoding="utf-8")
+        start = script.index('exe_suffix=""\n')
+        end = script.index('if [[ "$archive_name" != *.zip ]]; then', start)
+        return script[start:end]
+
+    def check_inventory(self, root, archive, block=None):
+        bash = shutil.which("bash")
+        self.assertIsNotNone(bash, "declared Bash is required")
+        return subprocess.run(
+            [bash, "-euo", "pipefail", "-c",
+             'pkg_dir="$1"; archive_name="$2"\n' +
+             (self.inventory_block() if block is None else block),
+             "release-inventory", str(root), archive],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+
+    def make_inventory(self, root, suffix):
+        (root / "bin").mkdir()
+        for name in self.REQUIRED:
+            (root / "bin" / (name + suffix)).write_bytes(b"")
+
+    def test_complete_release_inventory(self):
+        for suffix, archive in (("", "release.tar.gz"), (".exe", "release.zip")):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as work:
+                root = Path(work)
+                self.make_inventory(root, suffix)
+                ran = self.check_inventory(root, archive)
+                self.assertEqual(0, ran.returncode, ran.stderr)
+
+    def test_every_required_member_is_independently_required(self):
+        for suffix, archive in (("", "release.tar.gz"), (".exe", "release.zip")):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as work:
+                root = Path(work)
+                self.make_inventory(root, suffix)
+                for name in sorted(self.REQUIRED):
+                    with self.subTest(member=name):
+                        path = root / "bin" / (name + suffix)
+                        path.unlink()
+                        ran = self.check_inventory(root, archive)
+                        self.assertNotEqual(0, ran.returncode, ran.stdout)
+                        self.assertIn("MISSING bin/" + name + suffix, ran.stdout)
+                        path.write_bytes(b"")
+
+    def test_predecessor_accepts_missing_standard_provider(self):
+        import re
+        predecessor, count = re.subn(
+            r"required_bins=\([^)]*\)", "required_bins=(runquotad runquota)",
+            self.inventory_block(), count=1,
+        )
+        self.assertEqual(1, count)
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            self.make_inventory(root, "")
+            (root / "bin/repro-standard-provider").unlink()
+            self.assertEqual(0, self.check_inventory(
+                root, "release.tar.gz", predecessor).returncode)
+            self.assertNotEqual(0, self.check_inventory(root, "release.tar.gz").returncode)
+
+    def test_inventory_matches_existing_release_graph(self):
+        import re
+        recipe = (ROOT / "repro.nim").read_text(encoding="utf-8")
+        native_edges = re.findall(
+            r"reprobuildAppsActions\.add\(nim\.c\((.*?)\)\)", recipe, re.S)
+        apps = [re.search(r'binary\s*=\s*"build/bin/([^"/]+)"', edge).group(1)
+                for edge in native_edges]
+        self.assertEqual(len(apps), len(set(apps)), "duplicate release app output")
+        self.assertEqual(self.APPS, set(apps))
+        block = self.inventory_block()
+        inventory = re.search(r"required_bins=\(([^)]*)\)", block).group(1).split()
+        self.assertEqual(len(inventory), len(set(inventory)))
+        self.assertEqual(self.REQUIRED, set(inventory))
+
+
 if __name__ == "__main__":
     unittest.main()
