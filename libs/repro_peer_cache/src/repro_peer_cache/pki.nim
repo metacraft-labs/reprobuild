@@ -44,6 +44,8 @@
 ## bytes themselves are plain `seq[byte]` Nim-managed.
 
 import std/[base64, os, strutils, tables, times]
+when defined(posix):
+  from std/posix import nil
 
 import bearssl/[ec, hash as bsslHash]
 import bearssl/abi/bearssl_ec as bsslEcAbi
@@ -94,8 +96,25 @@ type
       ## verifier uses the anchor as an intermediate-issuer for
       ## chain validation rather than direct-trusting it as a leaf.
 
+  IdentityPolicy* = enum
+    ## Which peer identities a node accepts (Distributed-Execution M7,
+    ## trust profiles). Carried by the anchor set so every verifier that is
+    ## handed the anchors applies the same rule.
+    ipLegacy = "legacy"
+      ## Library default for pre-M7 callers: a directly pinned certificate,
+      ## or a short-lived host-CA leaf. No shipped entry point uses it.
+    ipPinnedHostKey = "pinned-host-key"
+      ## TRUSTED profile: the peer presents a certificate for its own
+      ## long-lived host key, and that key must be the key of a host
+      ## certificate pinned in the anchor directory. Revocation = remove
+      ## the pin. A key that is not pinned is refused, however it is signed.
+    ipShortLivedLeaves = "short-lived-leaves"
+      ## HARDENED profile: a leaf of at most one hour signed by the pinned
+      ## per-host CA of the host it names.
+
   TrustAnchorSet* = object
     byPeerId*: Table[PeerId, TrustAnchorEntry]
+    identityPolicy*: IdentityPolicy
 
   CertExpiredError* = object of CatchableError
   CertParseError* = object of CatchableError
@@ -1085,7 +1104,35 @@ proc writeCertAndKey*(c: CertAndKey; certPath, keyPath: string) =
   for i, b in c.keypair.privateKey:
     hex[2 * i] = HexChars[(int(b) shr 4) and 0xf]
     hex[2 * i + 1] = HexChars[int(b) and 0xf]
-  writeFile(keyPath, KeyFilePrefix & hex & "\n")
+  # The private scalar is a credential (deployment-security-architecture.md
+  # CRED-3): readable by its owner only, never by another local user. The
+  # file is CREATED with mode 0600 (`O_CREAT|O_EXCL`, after removing any
+  # previous file), so no other user can ever hold an open descriptor on
+  # it: creating it with the umask and chmod-ing afterwards left a window in
+  # which another user could open the empty file and later read the key
+  # through that descriptor.
+  let content = KeyFilePrefix & hex & "\n"
+  when defined(posix):
+    if fileExists(keyPath) or symlinkExists(keyPath):
+      removeFile(keyPath)
+    let fd = posix.open(keyPath.cstring, posix.O_WRONLY or posix.O_CREAT or
+      posix.O_EXCL or posix.O_CLOEXEC, posix.Mode(0o600))
+    if fd < 0:
+      raiseOSError(osLastError(), "creating key file " & keyPath)
+    try:
+      var off = 0
+      while off < content.len:
+        let n = posix.write(fd, unsafeAddr content[off], content.len - off)
+        if n < 0:
+          if posix.errno == posix.EINTR: continue
+          raiseOSError(osLastError(), "writing key file " & keyPath)
+        off += n
+    finally:
+      discard posix.close(fd)
+  else:
+    writeFile(keyPath, "")
+    setFilePermissions(keyPath, {fpUserRead, fpUserWrite})
+    writeFile(keyPath, content)
 
 # ---------------------------------------------------------------------------
 # Trust-anchor directory loader.
@@ -1093,6 +1140,28 @@ proc writeCertAndKey*(c: CertAndKey; certPath, keyPath: string) =
 
 proc newTrustAnchorSet*(): TrustAnchorSet =
   result = TrustAnchorSet(byPeerId: initTable[PeerId, TrustAnchorEntry]())
+
+proc addAnchorFile(result: var TrustAnchorSet; entry: string) =
+  let pem = readFile(entry)
+  let der = certPemToDer(pem)
+  let info = parseCertDer(der)
+  let peerId = derivePeerIdFromPublicKey(info.publicKey)
+  result.byPeerId[peerId] = TrustAnchorEntry(
+    peerId: peerId, publicKey: info.publicKey, certDer: der, certPem: pem,
+    notBefore: info.notBefore, notAfter: info.notAfter,
+    subjectCn: findSubjectCn(der), subjectDn: findSubjectDn(der),
+    isCa: findIsCa(der))
+
+proc loadTrustAnchorFile*(path: string): TrustAnchorSet =
+  ## A trust-anchor set holding exactly the one PEM certificate at `path`
+  ## (Distributed-Execution M7: a PINNED service — the evidence sink, the
+  ## certificate signer — is trusted under its own CA alone, never under
+  ## the general peer anchor set).
+  if not fileExists(path):
+    raise newException(CertParseError,
+      "pinned certificate does not exist: " & path)
+  result = newTrustAnchorSet()
+  result.addAnchorFile(path)
 
 proc loadTrustAnchorDir*(path: string): TrustAnchorSet =
   ## Reads every `*.crt` file in `path`. Each file is one PEM cert.
@@ -1131,3 +1200,25 @@ proc loadTrustAnchorDir*(path: string): TrustAnchorSet =
 proc validateCertNotExpired*(entry: TrustAnchorEntry; now: int64): bool =
   ## Returns true iff `entry.notBefore <= now < entry.notAfter`.
   result = entry.notBefore <= now and now < entry.notAfter
+
+# ---------------------------------------------------------------------------
+# Distributed-Execution M7: read-only accessors over a certificate's DER, for
+# the identity binding in `identity.nim` (which must check a presented leaf
+# against its issuing anchor without trusting anything the peer asserts).
+# ---------------------------------------------------------------------------
+
+proc certPublicKey*(certDer: openArray[byte]): PublicKeyBytes =
+  ## The P-256 public key in `certDer`'s SubjectPublicKeyInfo. Raises
+  ## `CertParseError` on a malformed or non-P-256 certificate.
+  parseCertDer(certDer).publicKey
+
+proc certValidityWindow*(certDer: openArray[byte]):
+    tuple[notBefore, notAfter: int64] =
+  ## `certDer`'s validity window, in Unix seconds. Raises `CertParseError`.
+  let info = parseCertDer(certDer)
+  (info.notBefore, info.notAfter)
+
+proc certSubjectCn*(certDer: openArray[byte]): string =
+  ## The first CN attribute of `certDer`'s subject, or "" when it has none.
+  ## Raises `CertParseError` on malformed DER.
+  findSubjectCn(certDer)

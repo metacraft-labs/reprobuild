@@ -1,0 +1,10 @@
+version       = "0.1.0"
+author        = "Metacraft Labs"
+description   = "Distributed-Execution worker receiver: hydrated graph descriptors, ReachGoal derivation checks, confined execution leases, and certificate re-verification (M7)"
+license       = "MIT"
+srcDir        = "src"
+
+requires "nim >= 2.2.0"
+requires "repro_peer_cache >= 0.1.0"
+requires "repro_workspace_snapshot >= 0.1.0"
+requires "repro_core >= 0.1.0"

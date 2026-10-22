@@ -17,18 +17,21 @@
 ##   2. building the UNMODIFIED checkout reproduces the installed prefix's
 ##      realization hash, so the workspace source matches the installed
 ##      output;
-##   3. a source edit with a stale test expectation fails ``test.run``, and
+##   3. a build of an edit the user cancels stops (its ``repro`` process is
+##      terminated mid-build) and the next build of the same edit is
+##      unaffected;
+##   4. a source edit with a stale test expectation fails ``test.run``, and
 ##      with the expectation updated passes it;
-##   4. the preview runs the changed binary from the preview store with an
+##   5. the preview runs the changed binary from the preview store with an
 ##      isolated HOME, and the diff is exactly the edit;
-##   5. the installed prefix, the installed binary's behaviour and the
+##   6. the installed prefix, the installed binary's behaviour and the
 ##      catalog recipe are unchanged, and nothing was published into the
 ##      installed store.
 ##
 ## Skip rule: Linux only (``/proc/<pid>/exe``), and ``./build/bin/repro``
 ## plus ``cc`` must exist.
 
-import std/[os, osproc, sequtils, streams, strutils, tables, unittest]
+import std/[os, osproc, sequtils, streams, strutils, tables, times, unittest]
 
 import repro_agent_protocol
 import repro_agent_backend
@@ -81,6 +84,41 @@ else:
       checkpoint rs[0].output
       check rs[0].status == osCompleted
       check rs[0].detail == f.installedRel
+
+    test "a build the user cancels stops, and the next build is unaffected":
+      # The user presses cancel once `repro build` has run for a moment (or
+      # has printed something). The pump is where the socket server would
+      # deliver the consent surface's `plan.cancel`.
+      let started = epochTime()
+      var cancelledAt = 0.0
+      f.host.pump = proc (waitMs: int) {.gcsafe.} =
+        {.cast(gcsafe).}:
+          if cancelledAt == 0 and (waitMs == 0 or epochTime() - started > 0.3):
+            cancelledAt = epochTime()
+            discard f.host.cancel(f.consent, f.host.executingPlan)
+          sleep(waitMs)
+      let rs = f.runPlan(intent,
+        @[op(okSourceWrite, ws, {"path": "greeter/src/main.c",
+                                 "content": greeterV2}),
+          op(okBuildRun, ws, {"target": InstallTarget}), op(okTestRun, ws)],
+        @["source.write:greeter", "build.run:greeter", "test.run:greeter"])
+      f.host.pump = nil
+      let finished = epochTime()
+      checkpoint rs[1].detail & "\n" & rs[1].output
+      check rs[0].status == osCompleted
+      check rs[1].status == osFailed
+      check rs[1].detail == "cancelled: by the user"
+      check rs[2].status == osNotRun
+      # Stopped promptly, not run to completion behind the user's back.
+      check cancelledAt > 0 and finished - cancelledAt < 10
+      # The same edit builds cleanly afterwards: the cancelled build left
+      # no lock or half-written output in the way.
+      let again = f.runPlan(intent,
+        @[op(okBuildRun, ws, {"target": InstallTarget})],
+        @["build.run:greeter"])
+      checkpoint again[0].output
+      check again[0].status == osCompleted
+      check again[0].detail.len > 0 and again[0].detail != f.installedRel
 
     test "an edit with a stale test fails the test, then passes":
       let edit = f.runPlan(intent,

@@ -64,6 +64,7 @@ import nimcrypto/sysrand
 
 import ./types
 import ./key_types
+import ./secret_key
 export key_types
 
 # ---------------------------------------------------------------------------
@@ -166,6 +167,7 @@ proc derivePublicKey*(privateKey: PrivateKeyBytes): PublicKeyBytes =
   ## the 32-byte scalar; the resulting public key is copied out before
   ## the local buffers go out of scope.
   var skBytes: array[P256PrivLen, byte]
+  defer: secureZeroVar(skBytes)
   for i in 0 ..< P256PrivLen:
     skBytes[i] = privateKey[i]
   var sk: bsslEcAbi.EcPrivateKey
@@ -231,6 +233,9 @@ proc signMessage*(kp: PeerKeypair; msg: openArray[byte]): SignatureBytes =
   ## live, owned buffer.
   let digest = sha256Digest(msg)
   var skBytes: array[P256PrivLen, byte]
+  # Distributed-Execution M7 (G16): the transient copy of the scalar does
+  # not outlive the signature on this stack frame.
+  defer: secureZeroVar(skBytes)
   for i in 0 ..< P256PrivLen:
     skBytes[i] = kp.privateKey[i]
   var sk: bsslEcAbi.EcPrivateKey

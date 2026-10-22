@@ -29,26 +29,44 @@ proc parseFamilies(v: CborItem): set[Family] =
       if $f & ".v1" == s:
         result.incl f
 
-proc okResponse(h: Host; extra: openArray[CborPair]): seq[byte] =
+proc okResponse(h: Host; rid: CborItem; extra: openArray[CborPair]): seq[byte] =
   var entries = @[tp("outcome", cText("ok")),
                   tp("auditSeq", cUInt(uint64(h.audit.records.len - 1)))]
+  if not rid.isNil:
+    entries.add tp("requestId", rid)
   for e in extra:
     entries.add e
   encodeDeterministic(cMap(entries))
 
-proc refusedResponse(h: Host; e: ref AgentRefusal): seq[byte] =
-  encodeDeterministic(cMap([
+proc refusedResponse(h: Host; rid: CborItem; e: ref AgentRefusal): seq[byte] =
+  var entries = @[
     tp("outcome", cText("refused")),
     tp("reason", cText($e.reason)),
     tp("detail", cText(e.msg)),
-    tp("auditSeq", cUInt(uint64(max(h.audit.records.len - 1, 0))))]))
+    tp("auditSeq", cUInt(uint64(max(h.audit.records.len - 1, 0))))]
+  if not rid.isNil:
+    entries.add tp("requestId", rid)
+  encodeDeterministic(cMap(entries))
+
+proc requestKind*(request: openArray[byte]): string =
+  ## The `kind` of a request, "" when it does not decode. The transport
+  ## uses it to serve `plan.cancel` while another request is executing.
+  try: asText(decodeRecord(request).field("kind"), "request kind")
+  except AgentRefusal, CatchableError: ""
 
 proc handleMessage*(h: Host; conn: Connection;
                     request: openArray[byte]): seq[byte] =
   ## Serve one request. Never raises for peer input: every refusal becomes
-  ## a `refused` response naming its reason.
+  ## a `refused` response naming its reason. A request's `requestId`, an
+  ## unsigned integer, is echoed in its response, so a peer that sends
+  ## `plan.cancel` while its `plan.execute` runs can tell the two answers
+  ## apart (the cancellation is answered first).
+  var rid: CborItem = nil
   try:
     let req = decodeRecord(request)
+    let ridField = req.field("requestId")
+    if not ridField.isNil:
+      rid = cUInt(asUInt(ridField, "requestId"))
     let kind = asText(req.field("kind"), "request kind")
     if kind != "hello" and not conn.helloDone:
       refuse(arMalformed, "the first message must be hello")
@@ -56,18 +74,18 @@ proc handleMessage*(h: Host; conn: Connection;
     of "hello":
       let served = h.hello(conn, asUInt(req.field("protocol"), "protocol"),
                            parseFamilies(req.field("families")))
-      h.okResponse([tp("families", familiesItem(served))])
+      h.okResponse(rid, [tp("families", familiesItem(served))])
     of "session.attach":
       h.attach(conn, asText(req.field("session"), "session"),
                asText(req.field("secret"), "secret"))
-      h.okResponse([])
+      h.okResponse(rid, [])
     of "session.create":
       var grants: seq[Grant]
       for g in asArray(req.field("grants"), "grants", MaxGrantsPerSession):
         grants.add decodeGrant(g)
       let (sid, secret) = h.createSession(conn,
         asText(req.field("provider"), "provider"), grants)
-      h.okResponse([tp("session", cText(sid)), tp("secret", cText(secret))])
+      h.okResponse(rid, [tp("session", cText(sid)), tp("secret", cText(secret))])
     of "intent.capture":
       var items: seq[Grant]
       let ctx = req.field("context")
@@ -76,23 +94,23 @@ proc handleMessage*(h: Host; conn: Connection;
           items.add decodeGrant(g)
       let intent = h.captureIntent(conn, asText(req.field("session"),
         "session"), asText(req.field("text"), "text"), items)
-      h.okResponse([tp("intent", cDigest(intentId(intent)))])
+      h.okResponse(rid, [tp("intent", cDigest(intentId(intent)))])
     of "plan.submit":
       let r = h.submitPlan(conn, decodePlanItem(req.field("plan")))
       var idx: seq[CborItem]
       for i in r.approvalRequired:
         idx.add cUInt(uint64(i))
-      h.okResponse([tp("plan", cDigest(r.planId)),
+      h.okResponse(rid, [tp("plan", cDigest(r.planId)),
                     tp("approvalRequired", cArray(idx))])
     of "plan.show":
       let p = h.showPlan(conn, asText(req.field("plan"), "plan"))
-      h.okResponse([tp("plan", encodePlanItem(p))])
+      h.okResponse(rid, [tp("plan", encodePlanItem(p))])
     of "plan.approve":
       let a = h.approvePlan(conn, asText(req.field("plan"), "plan"))
-      h.okResponse([tp("approval", cText(a))])
+      h.okResponse(rid, [tp("approval", cText(a))])
     of "plan.reject":
       h.rejectPlan(conn, asText(req.field("plan"), "plan"))
-      h.okResponse([])
+      h.okResponse(rid, [])
     of "plan.execute":
       let ap = req.field("approval")
       let rep = h.execute(conn, asText(req.field("plan"), "plan"),
@@ -103,11 +121,11 @@ proc handleMessage*(h: Host; conn: Connection;
                      tp("detail", cText(r.detail)),
                      tp("output", cBytes(r.output.toBytes)),
                      tp("result", cDigest(r.resultId))])
-      h.okResponse([tp("results", cArray(rs))])
+      h.okResponse(rid, [tp("results", cArray(rs))])
     of "evidence.show":
       let e = h.showEvidence(conn, asText(req.field("session"), "session"),
                              asText(req.field("result"), "result"))
-      h.okResponse([tp("plan", cDigest(e.planId)),
+      h.okResponse(rid, [tp("plan", cDigest(e.planId)),
                     tp("index", cUInt(uint64(e.index))),
                     tp("kind", cText($e.kind)), tp("status", cText($e.status)),
                     tp("detail", cText(e.detail)),
@@ -116,18 +134,21 @@ proc handleMessage*(h: Host; conn: Connection;
       let intent = h.captureFeedback(conn, asText(req.field("session"),
         "session"), asText(req.field("plan"), "plan"),
         asText(req.field("text"), "text"))
-      h.okResponse([tp("intent", cDigest(intentId(intent)))])
+      h.okResponse(rid, [tp("intent", cDigest(intentId(intent)))])
     of "grant.revoke":
       h.revokeGrant(conn, asText(req.field("session"), "session"),
                     decodeGrant(req.field("grant")))
-      h.okResponse([])
+      h.okResponse(rid, [])
     of "session.revoke":
       h.revokeSession(conn, asText(req.field("session"), "session"))
-      h.okResponse([])
+      h.okResponse(rid, [])
+    of "plan.cancel":
+      let state = h.cancel(conn, asText(req.field("plan"), "plan"))
+      h.okResponse(rid, [tp("state", cText(state))])
     else:
       refuse(arUnsupportedFamily, "unknown request kind " & kind.escape)
   except AgentRefusal as e:
-    h.refusedResponse(e)
+    h.refusedResponse(rid, e)
 
 # ---------------------------------------------------------------------
 # Framing: a u32 big-endian length, then one CBOR item.

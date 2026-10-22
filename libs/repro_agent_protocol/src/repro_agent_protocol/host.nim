@@ -33,9 +33,35 @@ type
 
   Backend* = ref object of RootObj
     ## The operations the host does not perform itself. Each method returns
-    ## an `OpResult`; it raises only for programming errors. The base
-    ## methods fail every operation, so a backend implements exactly the
-    ## families it supports.
+    ## an `OpResult`; it raises only for programming errors and for
+    ## `OperationCancelled`. The base methods fail every operation, so a
+    ## backend implements exactly the families it supports.
+    execution*: Execution
+      ## The plan executing right now, set by the host around every
+      ## backend call and nil otherwise. A backend reaches the cancellation
+      ## checkpoint and the commit point through it (`checkpoint`,
+      ## `commit`).
+
+  Pump* = proc (waitMs: int) {.gcsafe.}
+    ## Serve other requests for up to `waitMs`. The socket server installs
+    ## one that runs the async dispatcher, which is how a cancellation
+    ## reaches a host that is inside a backend call.
+
+  Execution* = ref object
+    ## The cancellation state of the executing plan (§"Cancellation").
+    planIdHex*: string
+    sessionId*: string
+    op*: Operation       ## the operation running now
+    package*: string     ## the package of its workspace, "" for none
+    cancelledBy*: string ## who cancelled; "" while not cancelled
+    committed*: bool
+      ## The running operation passed its commit point: a cancellation is
+      ## now `too-late`.
+    pump: Pump
+
+  OperationCancelled* = object of CatchableError
+    ## Raised by `checkpoint` users and `commit` when the executing plan
+    ## was cancelled; the host turns it into a failed result.
 
   Session* = ref object
     id*: string
@@ -104,6 +130,12 @@ type
     admitted: HashSet[string]
       ## Providers a session may be created for. Agent Harbor is admitted
       ## by default; any other provider only after `admitProvider`.
+    pump*: Pump
+      ## Installed by `transport.startServer`; nil for a host driven
+      ## directly, whose backend calls then simply wait.
+    executing: Execution
+      ## The one plan executing on this host, nil when none is. Execution
+      ## is serialised host-wide: a second `execute` refuses `busy`.
 
   Connection* = ref object
     ## One accepted socket connection. `channel` is fixed by which socket
@@ -158,6 +190,38 @@ method generation*(b: Backend; ws: Workspace; op: Operation): OpResult {.base.} 
   OpResult(status: osFailed, detail: "generations are not supported")
 method remix*(b: Backend; ws: Workspace; op: Operation): OpResult {.base.} =
   OpResult(status: osFailed, detail: "remix is not supported")
+
+# ---------------------------------------------------------------------
+# Cancellation points, for backends.
+
+proc checkpoint*(b: Backend; waitMs = 10): bool =
+  ## Wait up to `waitMs` while letting the host serve other requests, and
+  ## say whether the executing plan has been cancelled. A backend calls it
+  ## wherever it waits (for a child process, say) and, on true, stops the
+  ## operation and raises `OperationCancelled`, discarding partial output.
+  let e = b.execution
+  if e.isNil or e.pump.isNil:
+    sleep(waitMs)
+  else:
+    e.pump(waitMs)
+  not e.isNil and e.cancelledBy.len > 0
+
+proc raiseCancelled*(b: Backend) {.noreturn.} =
+  raise newException(OperationCancelled,
+    if b.execution.isNil: "cancelled" else: b.execution.cancelledBy)
+
+proc commit*(b: Backend) =
+  ## Cross the running operation's commit point: the step after which the
+  ## operation completes or rolls back but is never abandoned (for
+  ## `generation.activate`, the switch of the active generation). Raises
+  ## `OperationCancelled` when a cancellation came first, so nothing was
+  ## committed; afterwards every cancellation is answered `too-late`.
+  let e = b.execution
+  if e.isNil:
+    return
+  if e.cancelledBy.len > 0:
+    b.raiseCancelled()
+  e.committed = true
 
 # ---------------------------------------------------------------------
 # Construction and helpers.
@@ -453,6 +517,25 @@ proc captureFeedback*(h: Host; conn: Connection; sessionId,
     conn.sessionId = saved
     intent
 
+proc cancelRunning(h: Host; conn: Connection; sessionId, why: string;
+                   uses: Grant = Grant(); onlyIfUses = false) =
+  ## Cancel the executing plan of `sessionId` (if it has one and it has not
+  ## passed its commit point), audited before the cancellation can take
+  ## effect. With `onlyIfUses`, only when the running operation needs
+  ## `uses`.
+  let e = h.executing
+  if e.isNil or e.sessionId != sessionId or e.committed or
+      e.cancelledBy.len > 0:
+    return
+  if onlyIfUses and uses notin requiredGrants(e.op, e.package):
+    return
+  let saved = conn.sessionId
+  conn.sessionId = sessionId
+  discard h.record(conn, "plan", "cancel", "cancel", reason = why,
+                   plan = e.planIdHex)
+  conn.sessionId = saved
+  e.cancelledBy = why
+
 proc revokeGrant*(h: Host; conn: Connection; sessionId: string; g: Grant) =
   h.audited(conn, "session", "revoke-grant"):
     conn.requireChannel(chConsent, "revocation")
@@ -465,6 +548,8 @@ proc revokeGrant*(h: Host; conn: Connection; sessionId: string; g: Grant) =
     h.bumpEpoch(s)
     discard h.record(conn, "session", "revoke-grant", "revoke", grant = $g)
     h.persist()
+    h.cancelRunning(conn, sessionId, "revocation of " & $g, g,
+                    onlyIfUses = true)
 
 proc revokeSession*(h: Host; conn: Connection; sessionId: string) =
   h.audited(conn, "session", "revoke"):
@@ -477,6 +562,7 @@ proc revokeSession*(h: Host; conn: Connection; sessionId: string) =
     h.bumpEpoch(s)
     discard h.record(conn, "session", "revoke", "revoke")
     h.persist()
+    h.cancelRunning(conn, sessionId, "revocation of the session")
 
 # ---------------------------------------------------------------------
 # Plan checking.
@@ -734,6 +820,8 @@ proc execute*(h: Host; conn: Connection; planIdHex: string;
   ## results").
   h.audited(conn, "plan", "execute"):
     let s = h.attachedSession(conn)
+    if not h.executing.isNil:
+      refuse(arBusy, "plan " & h.executing.planIdHex & " is executing")
     if not h.plans.hasKey(planIdHex):
       refuse(arPlanUnknown, planIdHex)
     let p = h.plans[planIdHex]
@@ -749,17 +837,31 @@ proc execute*(h: Host; conn: Connection; planIdHex: string;
     h.plans.del(planIdHex)
     result.planId = p.id
     s.lastResults = @[]
+    let ex = Execution(planIdHex: planIdHex, sessionId: s.id, pump: h.pump)
+    h.executing = ex
+    h.backend.execution = ex
+    defer:
+      h.executing = nil
+      h.backend.execution = nil
     var failed = false
     for i, op in p.plan.operations:
-      if failed:
+      # A cancellation, a revocation or a disconnection while an earlier
+      # operation ran stops the plan here.
+      if failed or ex.cancelledBy.len > 0 or s.state != ssActive:
         result.results.add OpResult(status: osNotRun)
         continue
       discard h.record(conn, $familyOf(op.kind), $op.kind, "allowed",
                        plan = planIdHex, approval = consumed)
       var r: OpResult
       s.running = $op.kind
+      ex.op = op
+      ex.package = h.packageOfTarget(s, op)
+      ex.committed = false
       try:
         r = h.runOne(s, op)
+      except OperationCancelled as e:
+        r = OpResult(status: osFailed,
+                     detail: $arCancelled & ": by " & e.msg)
       except AgentRefusal as e:
         r = OpResult(status: osFailed, detail: $e.reason & ": " & e.msg)
       except OSError, IOError:
@@ -777,12 +879,62 @@ proc execute*(h: Host; conn: Connection; planIdHex: string;
       result.results.add r
     h.persist() # workspaces the plan created
 
+proc cancel*(h: Host; conn: Connection; planIdHex: string): string =
+  ## §"Cancellation": a provider cancels a plan of its own session, the
+  ## consent surface any plan. A plan that is executing is cancelled: the
+  ## running operation stops at its next checkpoint and the rest of the
+  ## plan does not run; the answer is "cancelling". A submitted plan that
+  ## has not started is withdrawn, so no approval can execute it; the
+  ## answer is "withdrawn". A running operation past its commit point
+  ## refuses `too-late` (the user rolls back instead).
+  h.audited(conn, "plan", "cancel"):
+    let e = h.executing
+    let running = not e.isNil and e.planIdHex == planIdHex
+    let sid =
+      if running: e.sessionId
+      elif h.plans.hasKey(planIdHex): h.plans[planIdHex].plan.sessionId
+      else: refuse(arPlanUnknown, planIdHex)
+    let by =
+      if conn.channel == chConsent: "the user"
+      else:
+        if h.attachedSession(conn).id != sid:
+          refuse(arPlanUnknown, planIdHex & " is not a plan of this session")
+        "the provider"
+    if running and e.cancelledBy.len > 0:
+      return "cancelling"
+    if running and e.committed:
+      refuse(arTooLate, $e.op.kind & " passed its commit point; " &
+        "roll back instead")
+    let saved = conn.sessionId
+    conn.sessionId = sid
+    discard h.record(conn, "plan", "cancel", "cancel", reason = by,
+                     plan = planIdHex)
+    conn.sessionId = saved
+    if running:
+      e.cancelledBy = by
+      "cancelling"
+    else:
+      h.plans.del(planIdHex)
+      "withdrawn"
+
+proc executingPlan*(h: Host): string =
+  ## The hex id of the plan executing now, "" when none is.
+  if h.executing.isNil: "" else: h.executing.planIdHex
+
+proc cancellable*(h: Host; sessionId: string): bool =
+  ## Whether `sessionId` has a running operation a cancellation can still
+  ## stop.
+  let e = h.executing
+  not e.isNil and e.sessionId == sessionId and not e.committed and
+    e.cancelledBy.len == 0
+
 # ---------------------------------------------------------------------
 # Lifecycle.
 
 proc disconnect*(h: Host; conn: Connection) =
   ## The provider's connection closed (cleanly or by a crash). Its session
-  ## is suspended and its approvals voided until it re-attaches.
+  ## is suspended, its approvals voided until it re-attaches, and its
+  ## running operation cancelled.
   if conn.channel != chProvider or conn.sessionId.len == 0:
     return
   if h.sessions.hasKey(conn.sessionId):
@@ -792,6 +944,7 @@ proc disconnect*(h: Host; conn: Connection) =
       h.bumpEpoch(s)
       discard h.record(conn, "session", "disconnect", "suspend")
       h.persist()
+      h.cancelRunning(conn, s.id, "the provider's disconnection")
   conn.sessionId = ""
 
 proc session*(h: Host; sessionId: string): Session =
