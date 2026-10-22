@@ -33,6 +33,17 @@ proc cmakeRuntimeLibraryDirs*(libraryDirs: openArray[string]): seq[string] =
   ## Profiles can propagate libc or Python runtimes through otherwise
   ## unrelated dependencies. Keep those directories in CMake's link-time
   ## search, but do not interpose them on CMake, Ninja, or helper processes.
+  ##
+  ## The same holds for the line-editing libraries a dynamically linked
+  ## /bin/sh loads: Ninja and make run every command through it, and on
+  ## NixOS that is a bash linked against its own readline. A source-built
+  ## readline older than that one (8.2 against 8.3) made every command fail
+  ## with "undefined symbol: rl_completion_rewrite_hook". Build helpers do
+  ## not need readline or ncurses, so neither is exported.
+  proc isShellRuntime(name: string): bool =
+    for lib in ["readline", "ncurses"]:
+      if name == lib or name.startsWith(lib & "-"):
+        return true
   const storePrefix = "/nix/store/"
   for path in libraryDirs:
     var isCoreRuntime = fileExists(path / "libc.so.6")
@@ -46,7 +57,8 @@ proc cmakeRuntimeLibraryDirs*(libraryDirs: openArray[string]): seq[string] =
         if packageEnd < 0: normalized[packageStart .. ^1]
         else: normalized[packageStart ..< packageEnd]
       isCoreRuntime = isCoreRuntime or packageName == "glibc" or
-        packageName == "python3" or packageName.startsWith("python3-")
+        packageName == "python3" or packageName.startsWith("python3-") or
+        isShellRuntime(packageName)
     if path.startsWith(storePrefix):
       let relative = path[storePrefix.len .. ^1]
       let slash = relative.find('/')
@@ -57,7 +69,8 @@ proc cmakeRuntimeLibraryDirs*(libraryDirs: openArray[string]): seq[string] =
           let packageName = storeEntry[hashSeparator + 1 .. ^1]
           isCoreRuntime = isCoreRuntime or packageName == "glibc" or
             packageName.startsWith("glibc-") or packageName == "python3" or
-            packageName.startsWith("python3-")
+            packageName.startsWith("python3-") or
+            isShellRuntime(packageName)
     if not isCoreRuntime:
       result.add(path)
 
