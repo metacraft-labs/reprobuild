@@ -69,17 +69,22 @@ def defines_from(text):
     return table
 
 
+def uapi_include():
+    # The dev shell exports the kernel UAPI headers; NixOS has no /usr/include.
+    return os.environ.get("REPRO_LINUX_UAPI_INCLUDE") or "/usr/include"
+
+
 def x86_64_table():
-    path = "/usr/include/asm/unistd_64.h"
+    path = os.path.join(uapi_include(), "asm/unistd_64.h")
     if not os.path.exists(path):
-        fail("missing " + path + " (kernel UAPI headers)")
+        fail("missing " + path + " (kernel UAPI headers; set REPRO_LINUX_UAPI_INCLUDE)")
     return defines_from(open(path).read())
 
 
 def aarch64_table():
-    path = "/usr/include/asm-generic/unistd.h"
+    path = os.path.join(uapi_include(), "asm-generic/unistd.h")
     if not os.path.exists(path):
-        fail("missing " + path + " (kernel UAPI headers)")
+        fail("missing " + path + " (kernel UAPI headers; set REPRO_LINUX_UAPI_INCLUDE)")
     cc = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
     if not cc:
         fail("no C preprocessor (cc) on PATH")
@@ -162,6 +167,37 @@ def render():
     return "\n".join(out)
 
 
+def comparable(text, highest):
+    """``text`` with every syscall numbered above ``highest[arch]`` removed.
+
+    The committed header may be generated from NEWER kernel headers than the
+    ones on this host (the pinned nixpkgs `linuxHeaders` trails the kernel),
+    which adds syscalls this host cannot name. Those, and the counts that
+    include them, are not comparable here; every syscall both sides know
+    must still match exactly, allowed set included.
+    """
+    out, arch = [], None
+    for line in text.splitlines():
+        m = re.match(r"#(?:el)?if defined\(__(\w+)__\)", line)
+        if m:
+            arch = m.group(1)
+        limit = highest.get(arch)
+        if limit is not None:
+            line = re.sub(r"(/\* \w+: )\d+ allowed of \d+ known syscalls \*/",
+                          r"\1* allowed of * known syscalls */", line)
+            entry = re.match(r'  \{ (\d+), "\w+" \},$', line)
+            if entry and int(entry.group(1)) > limit:
+                continue
+            if re.match(r"  (\d+, )*\d+,$", line):
+                nrs = [n for n in re.findall(r"\d+", line) if int(n) <= limit]
+                line = "  " + "".join(n + ", " for n in nrs).rstrip(" ") if nrs else None
+                if line is None:
+                    continue
+        out.append(line)
+    # Re-flow the allowed arrays so dropped numbers do not leave short lines.
+    return re.sub(r",\n  ", ", ", "\n".join(out))
+
+
 def main():
     if not sys.platform.startswith("linux"):
         print("derive_lease_floor_syscalls: needs Linux (systemd-analyze and the "
@@ -172,7 +208,9 @@ def main():
     text = render()
     if "--check" in sys.argv[1:]:
         current = open(OUTPUT).read() if os.path.exists(OUTPUT) else ""
-        if current != text:
+        highest = {"x86_64": max(x86_64_table().values()),
+                   "aarch64": max(aarch64_table().values())}
+        if comparable(current, highest) != comparable(text, highest):
             with tempfile.NamedTemporaryFile("w", suffix=".h", delete=False) as f:
                 f.write(text)
             fail("the committed %s is stale; regenerated copy in %s (run "

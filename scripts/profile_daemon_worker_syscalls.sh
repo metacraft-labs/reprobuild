@@ -44,8 +44,9 @@ cd "$(dirname "$0")/.."
 [[ "$(uname -s)" == Linux ]] || { echo "CONF-3 profiling runs on Linux" >&2; exit 2; }
 OUT=recipes/repro-daemon-worker/syscalls
 UNIT=recipes/repro-daemon-worker/systemd-units/repro-daemon-worker.service
-HDR=/usr/include/asm/unistd_64.h
-[[ "$(uname -m)" == aarch64 ]] && HDR=/usr/include/asm-generic/unistd.h
+UAPI=${REPRO_LINUX_UAPI_INCLUDE:-/usr/include}
+HDR=$UAPI/asm/unistd_64.h
+[[ "$(uname -m)" == aarch64 ]] && HDR=$UAPI/asm-generic/unistd.h
 mode=profile
 if [[ "${1:-}" == --verify ]]; then mode=verify; shift; fi
 workload=("$@")

@@ -1222,6 +1222,7 @@
                 export IO_MON_SRC=${io-mon-src}/src
                 export SHM_GSET_SRC=${nim-shm-gset-src}/src
                 export SHM_QUEUE_SRC=${nim-shm-queue-src}/src
+                ${pkgs.lib.optionalString pkgs.stdenv.isLinux "export REPRO_LINUX_UAPI_INCLUDE=${pkgs.linuxHeaders}/include"}
                 export CODETRACER_PINNED_SRC=${codetracer-src}/src
                 export REPRO_CT_TEST_RUNNER_SRC=${reprobuild-ct-test-runner-src}
                 export REPRO_TEST_ADAPTERS_SRC=${reprobuild-test-adapters-src}/src
@@ -2328,6 +2329,10 @@
             IO_MON_SRC = "${io-mon-src}/src";
             SHM_GSET_SRC = "${nim-shm-gset-src}/src";
             SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";
+            # Kernel UAPI syscall tables for the CONF-3 lease-floor derivation
+            # (scripts/derive_lease_floor_syscalls.py); NixOS has no /usr/include.
+            REPRO_LINUX_UAPI_INCLUDE =
+              pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.linuxHeaders}/include";
             CODETRACER_PINNED_SRC = "${codetracer-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
