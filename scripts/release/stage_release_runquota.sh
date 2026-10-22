@@ -67,14 +67,25 @@ pinned_rev() {
 work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/repro-release-runquota-XXXXXX")
 trap 'rm -rf "$work" 2>/dev/null || true' EXIT
 
+# Every git call on a sibling goes through release_git: on the Windows leg
+# this runs in Git for Windows' bash, where a bare `git` is not on PATH and
+# the runner's service account may not own the checkout. v0.2.14 (run
+# 39794420520) reported the pinned runquota commit as missing from a clone
+# that held it, because this script ran a bare `git` and discarded its error.
+# shellcheck source=scripts/lib/release_git.sh
+. scripts/lib/release_git.sh
+release_git_init stage_release_runquota || exit 1
+
 # export_rev <sibling> <rev> <dest>
 export_rev() {
-  local repo=$1 rev=$2 dest=$3
+  local repo=$1 rev=$2 dest=$3 why
   [[ -e "$repo/.git" ]] || fail "$repo is not a git checkout; clone it beside this repository"
-  git -C "$repo" cat-file -e "$rev^{commit}" 2>/dev/null ||
-    fail "$repo does not have $rev; run: git -C $repo fetch origin $rev"
+  # Keep git's own answer: an absent commit, a refused checkout and a missing
+  # git need different remedies.
+  why=$(release_git -C "$repo" cat-file -e "$rev^{commit}" 2>&1) ||
+    fail "$repo does not have $rev (git: ${why:-no message}); if the commit is absent, run: git -C $repo fetch origin $rev"
   mkdir -p "$dest"
-  git -C "$repo" archive --format=tar "$rev" | (cd "$dest" && tar -xf -)
+  release_git -C "$repo" archive --format=tar "$rev" | (cd "$dest" && tar -xf -)
   echo "stage_release_runquota: $(basename "$dest") <- $repo @ $rev"
 }
 
