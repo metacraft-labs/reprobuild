@@ -3,10 +3,19 @@
 Verifies that release smoke verification runs successfully under stock macOS
 shells (/bin/bash 3.2) even when optional host utilities like GNU timeout are
 not installed on PATH.
+
+The package CLI and Windows helper are stubs because these cases test shell
+routing and refusal propagation, not installed SDK or Windows API behavior.
+Real archive compilation and Windows process ownership remain release gates.
+The PowerShell cases execute the production parameter block and pure argv
+reader/quoting functions, extracted by its parser. They never replace Windows
+APIs with successful fakes or claim native Windows argv/lifecycle coverage.
 """
 
 from pathlib import Path
 import os
+import base64
+import json
 import shutil
 import subprocess
 import tempfile
@@ -38,7 +47,11 @@ def _clean_path_without_timeout(work_dir: Path) -> str:
         if not os.path.isdir(directory):
             continue
         for entry in os.listdir(directory):
-            if entry in ("timeout", "gtimeout"):
+            # The fixture collapses distinct host tool directories into one.
+            # Keep foreign coordinators out: production correctly drops any
+            # daemon-containing PATH directory, which would drop every utility
+            # in this synthetic directory along with the coordinator.
+            if entry in ("timeout", "gtimeout", "runquotad", "runquotad.exe"):
                 continue
             src = os.path.join(directory, entry)
             dst = shadow / entry
@@ -171,6 +184,60 @@ class ReleaseSmokeDevExecTests(unittest.TestCase):
         self.assertEqual(0, res.returncode, f"stdout:\n{res.stdout}\nstderr:\n{res.stderr}")
         self.assertIn("=== repro build smoke test PASSED", res.stdout)
 
+    def test_occupied_windows_endpoint_cannot_qualify_the_archive(self):
+        """A foreign endpoint refusal must not become a skipped control/PASS."""
+        for name, body in (
+            ("runquotad.exe", "#!/bin/sh\nexit 0\n"),
+            ("runquota.exe", "#!/bin/sh\nexit 0\n"),
+            ("powershell", "#!/bin/sh\necho 'default RunQuota endpoint is already occupied' >&2\nexit 23\n"),
+        ):
+            file = self.pkg / "bin" / name
+            file.write_text(body, encoding="utf-8")
+            file.chmod(0o755)
+        res = self._run_smoke(shutil.which("bash") or "/bin/bash",
+                              self._env_with(self.pkg / "bin"))
+        self.assertNotEqual(0, res.returncode, res.stdout)
+        self.assertIn("endpoint is already occupied", res.stderr + res.stdout)
+        self.assertNotIn("repro build smoke test PASSED", res.stdout)
+
+    def test_initial_windows_exec_isolates_foreign_daemon_environment(self):
+        """Isolation must precede the first archive exec, which can auto-start."""
+        foreign = self.work / "foreign-daemon"
+        foreign.mkdir()
+        daemon = foreign / "runquotad"
+        daemon.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        daemon.chmod(0o755)
+        (self.pkg / "bin/runquotad.exe").write_text("fixture", encoding="utf-8")
+        powershell = self.pkg / "bin/powershell"
+        powershell.write_text("#!" + shutil.which("bash") + r"""
+set -eu
+for name in RUNQUOTAD_BIN RUNQUOTA_BIN RUNQUOTA_SOCKET REPROBUILD_NO_RUNQUOTA; do
+  if declare -p "$name" >/dev/null 2>&1; then echo "foreign daemon environment reached initial exec" >&2; exit 71; fi
+done
+case ":$PATH:" in *":$FOREIGN_DAEMON_DIR:"*) echo "foreign daemon PATH reached initial exec" >&2; exit 72;; esac
+case "${PATH%%:*}" in "$TMPDIR"/repro-release-smoke-*/mock-package/bin) ;; *) exit 73;; esac
+argument_file=""
+while (( $# )); do
+  if [[ "$1" == -ArgumentFile ]]; then argument_file=$2; break; fi
+  shift
+done
+[[ -n "$argument_file" ]] || exit 74
+{ IFS= read -r -d '' command; IFS= read -r -d '' verb; } < "$argument_file"
+[[ "$verb" == exec ]] || exit 75
+echo "initial archive exec isolation verified" >&2
+# Refusal propagation only; this stand-in never grants a fake Windows success.
+exit 23
+""", encoding="utf-8")
+        powershell.chmod(0o755)
+        env = self._env_with(self.pkg / "bin", foreign)
+        env.update(RUNQUOTAD_BIN=str(daemon), RUNQUOTA_BIN="foreign-cli",
+                   RUNQUOTA_SOCKET="foreign-endpoint", REPROBUILD_NO_RUNQUOTA="1",
+                   FOREIGN_DAEMON_DIR=str(foreign))
+        result = self._run_smoke(shutil.which("bash") or "/bin/bash", env)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("initial archive exec isolation verified", result.stdout + result.stderr)
+        self.assertNotIn("repro build smoke test PASSED", result.stdout)
+
     def test_a_build_that_is_never_refused_fails_the_control(self):
         """If the hidden-daemon build still succeeds, something else served it."""
         repro_bin = self.pkg / "bin" / "repro"
@@ -180,6 +247,69 @@ class ReleaseSmokeDevExecTests(unittest.TestCase):
         res = self._run_smoke(shutil.which("bash") or "/bin/bash", self._env_with())
         self.assertNotEqual(0, res.returncode, res.stdout)
         self.assertIn("was not refused", res.stderr)
+
+
+PWSH = os.environ.get("REPRO_TEST_PWSH") or shutil.which("pwsh") or shutil.which("powershell")
+
+
+@unittest.skipUnless(PWSH, "PowerShell is required for actual argument binding")
+class ReleaseSmokeWindowsArguments(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="release-smoke-argv-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        source = ROOT / "scripts/release/with_windows_archive_runquota.ps1"
+        self.probe = self.root / "probe.ps1"
+        extractor = self.root / "extract.ps1"
+        extractor.write_text(r"""param($Source, $Probe)
+$ast = [Management.Automation.Language.Parser]::ParseFile($Source, [ref]$null, [ref]$null)
+$reader = $ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Read-CommandArguments'}, $true)
+$quote = $ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Quote-NativeArgument'}, $true)
+if (-not $reader -or -not $quote) { throw 'Production argument functions not found.' }
+$emit = @'
+$invocation = Read-CommandArguments $ArgumentFile
+$data = @{command=$invocation.Command; arguments=@($invocation.Arguments); quoted=@($invocation.Arguments | ForEach-Object { Quote-NativeArgument $_ })} | ConvertTo-Json -Compress
+[Console]::WriteLine([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($data)))
+'@
+[IO.File]::WriteAllText($Probe, $ast.ParamBlock.Extent.Text + "`n" + $reader.Extent.Text + "`n" + $quote.Extent.Text + "`n" + $emit)
+""", encoding="utf-8")
+        subprocess.run([PWSH, "-NoProfile", "-NonInteractive", "-File", str(extractor),
+                        str(source), str(self.probe)], check=True, capture_output=True, timeout=30)
+
+    def run_probe(self, data):
+        carrier = self.root / "command.argv"
+        carrier.write_bytes(data)
+        return subprocess.run([PWSH, "-NoProfile", "-NonInteractive", "-File", str(self.probe),
+                               "-ArchiveDaemon", r"C:\private archive\runquotad.exe",
+                               "-ArgumentFile", str(carrier)],
+                              capture_output=True, text=True, timeout=30)
+
+    def test_original_commands_and_argument_boundaries_are_preserved(self):
+        command = r"C:\private archive\repro.exe"
+        vectors = [
+            (["exec", "--", "bash", "-c", 'echo "$1"', "_", "marker"],
+             ['"exec"', '"--"', '"bash"', '"-c"', r'"echo \"$1\""', '"_"', '"marker"']),
+            (["build", "--daemon=off", "--tool-provisioning=tarball"],
+             ['"build"', '"--daemon=off"', '"--tool-provisioning=tarball"']),
+            (["exec", "--", "bash", "-c", "", "a b", 'a"b', "ends\\", "λ"],
+             ['"exec"', '"--"', '"bash"', '"-c"', '""', '"a b"', r'"a\"b"', r'"ends\\"', '"λ"']),
+        ]
+        for args, quoted in vectors:
+            with self.subTest(args=args):
+                # This is the real Bash printf framing, including the final
+                # delimiter. No shell evaluates the argument values.
+                carrier = subprocess.check_output(["bash", "-c", "printf '%s\\0' \"$@\"", "_", command, *args])
+                result = self.run_probe(carrier)
+                self.assertEqual(0, result.returncode, result.stderr)
+                actual = json.loads(base64.b64decode(result.stdout.strip()))
+                self.assertEqual(command, actual["command"])
+                self.assertEqual(args, actual["arguments"])
+                self.assertEqual(quoted, actual["quoted"])
+
+    def test_malformed_argument_carriers_are_refused(self):
+        for carrier in (b"command\0unterminated", b"command\0\xff\0", b"\0argument\0"):
+            with self.subTest(carrier=carrier):
+                self.assertNotEqual(0, self.run_probe(carrier).returncode)
 
 
 if __name__ == "__main__":

@@ -113,6 +113,35 @@ scrub=(
 )
 for v in "${scrub[@]}"; do unset "$v"; done
 
+native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
+# Windows' default RunQuota authority is host-wide. The release test runs in
+# an exclusive fresh guest; each invocation retains and cleans only a server
+# authenticated as this private archive's newly created image.
+# Every Windows archive invocation can auto-start its coordinator, including
+# the first exec. Isolate it before that invocation, not only before build.
+isolate_archive_runquota() {
+  # Drop source/build installations and explicit daemon/bypass overrides;
+  # ordinary lookup must discover only the archive copy. Binary-cache
+  # settings are withdrawn too, so this check neither substitutes nor publishes.
+  local v d kept_path="" path_entries
+  unset RUNQUOTAD_BIN RUNQUOTA_BIN RUNQUOTA_SOCKET REPROBUILD_NO_RUNQUOTA
+  for v in $(env | sed -n 's/^\(REPRO_BINARY_CACHE_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
+  IFS=: read -r -a path_entries <<< "$PATH"
+  for d in ${path_entries[@]+"${path_entries[@]}"}; do
+    [[ -n "$d" && ( -e "$d/runquotad" || -e "$d/runquotad.exe" ) ]] && continue
+    kept_path="${kept_path:+$kept_path:}$d"
+  done
+  PATH="$pkg/bin:$kept_path"
+  export PATH
+}
+windows_repro=no
+if [[ -f "$pkg/bin/runquotad.exe" || -f "$pkg/bin/repro.exe" ]]; then
+  windows_repro=yes
+  windows_helper=$(native "$(cd "$(dirname "$0")" && pwd)/with_windows_archive_runquota.ps1")
+  repro_bin=$(native "$repro_bin")
+  isolate_archive_runquota
+fi
+
 marker="repro-release-smoke-ok"
 echo "=== repro exec in a fresh project, using only $pkg ==="
 out="$work/exec.log"
@@ -124,11 +153,24 @@ bound=()
 if command -v timeout >/dev/null 2>&1; then
   bound=(timeout --kill-after=60 "${REPRO_SMOKE_TIMEOUT_SECONDS:-2700}")
 fi
+run_packaged_repro() {
+  if [[ "$windows_repro" == yes ]]; then
+    # printf is Bash's builtin: no Python/jq or new bootstrap dependency.
+    # NUL framing preserves empty, quoted and trailing-backslash arguments.
+    printf '%s\0' "$repro_bin" "$@" > "$work/command.argv"
+    ${bound[@]+"${bound[@]}"} powershell -NoProfile -NonInteractive \
+      -File "$windows_helper" \
+      -ArchiveDaemon "$(native "$pkg/bin/runquotad.exe")" \
+      -ArgumentFile "$(native "$work/command.argv")"
+  else
+    ${bound[@]+"${bound[@]}"} "$repro_bin" "$@"
+  fi
+}
 set +e
 # Guarded array expansion: under `set -u`, bash < 4.4 treats `"${bound[@]}"` on an
 # empty array as an unbound variable. `${bound[@]+"${bound[@]}"}` expands to nothing
 # when empty without triggering nounset errors on macOS stock /bin/bash (3.2).
-(cd "$project" && ${bound[@]+"${bound[@]}"} "$repro_bin" exec -- bash -c \
+(cd "$project" && run_packaged_repro exec -- bash -c \
   'echo "$1"' _ "$marker") \
   > "$out" 2>&1 < /dev/null
 rc=$?
@@ -193,7 +235,6 @@ exe=""
   echo "smoke_release_dev_exec: ERROR: no bin/runquotad$exe in the archive (scripts/release/stage_release_runquota.sh)." >&2
   exit 1
 }
-native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
 
 if [[ -z "${REPRO_NIM_COMPILER:-}" ]] && nim_exe=$(command -v nim); then
   REPRO_NIM_COMPILER=$(native "$nim_exe")
@@ -204,77 +245,38 @@ if [[ -z "${REPRO_BOOTSTRAP_CC:-}" ]] && cc_exe=$(command -v cc || command -v gc
   export REPRO_BOOTSTRAP_CC
 fi
 
-# Nothing but the archive may supply a daemon: drop every PATH entry holding
-# one (the Windows leg puts ../runquota/build/bin there, the dev shell its
-# runquota package), the variables that name one, and the binary-cache
-# configuration, so this build neither substitutes nor publishes.
-unset RUNQUOTAD_BIN RUNQUOTA_BIN RUNQUOTA_SOCKET REPROBUILD_NO_RUNQUOTA
-for v in $(env | sed -n 's/^\(REPRO_BINARY_CACHE_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
-kept_path=""
-IFS=: read -r -a path_entries <<< "$PATH"
-for d in ${path_entries[@]+"${path_entries[@]}"}; do
-  [[ -n "$d" && ( -e "$d/runquotad" || -e "$d/runquotad.exe" ) ]] && continue
-  kept_path="${kept_path:+$kept_path:}$d"
-done
-PATH="$pkg/bin:$kept_path"
-export PATH
+isolate_archive_runquota
 
-# On Linux and macOS a socket path of this run's own makes the check hermetic:
-# with RUNQUOTA_SOCKET set the engine adopts only a daemon answering there, so a
-# host-wide daemon cannot serve the build. A Windows build always meets its
-# daemon on the per-user pipe, and the engine leaves the daemon it started
-# running there for later builds. The `repro exec` above has already started
-# one out of this copy; stop it, and any other this copy started, so the pipe
-# is free again and no daemon outlives the copy it runs from. A daemon still
-# answering after that is not this archive's, and then the check below cannot
-# tell whose daemon granted the lease.
-stop_copy_daemons() {
-  [[ -n "$exe" ]] && command -v powershell >/dev/null 2>&1 || return 0
-  powershell -NoProfile -NonInteractive -Command \
-    "Get-CimInstance Win32_Process -Filter \"Name='runquotad.exe'\" | Where-Object { \$_.ExecutablePath -and \$_.ExecutablePath.StartsWith('$(native "$pkg")', [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }" \
-    > /dev/null 2>&1 || true
-}
-trap 'stop_copy_daemons; rm -rf "$work" 2>/dev/null || true' EXIT
-attributable=yes
-if [[ -n "$exe" ]]; then
-  stop_copy_daemons
-  if "$pkg/bin/runquota$exe" daemon status > /dev/null 2>&1; then
-    attributable=no
-    echo "smoke_release_dev_exec: WARNING: a runquotad already answers on this user's pipe; the" >&2
-    echo "  build below may take its lease from it, so it cannot show that the archive's" >&2
-    echo "  runquotad is found. Skipping the control run; PATH resolves runquotad to:" >&2
-    echo "  $(command -v runquotad)" >&2
-  fi
-else
+# POSIX auto-start owns a private socket. Windows retains the real default
+# discovery path through the helper; an occupied endpoint refuses qualification.
+if [[ -z "$exe" ]]; then
   RUNQUOTA_SOCKET="$work/runquota-smoke.sock"
   export RUNQUOTA_SOCKET
 fi
 
 run_build() { # run_build <log>
   set +e
-  (cd "$build_project" && ${bound[@]+"${bound[@]}"} "$repro_bin" build \
+  (cd "$build_project" && run_packaged_repro build \
     --daemon=off --tool-provisioning=tarball) > "$1" 2>&1 < /dev/null
   local rc=$?
   set -e
   return $rc
 }
 
-if [[ "$attributable" == yes ]]; then
-  # The control: with the archive's daemon hidden the same build must be
-  # refused. If it is not, something other than the archive answered, and the
-  # run below would prove nothing.
-  echo "=== repro build --tool-provisioning=tarball, archive runquotad hidden (must be refused) ==="
-  mv "$pkg/bin/runquotad$exe" "$pkg/bin/runquotad$exe.hidden"
-  control_rc=0
-  run_build "$work/build-control.log" || control_rc=$?
-  mv "$pkg/bin/runquotad$exe.hidden" "$pkg/bin/runquotad$exe"
-  cat "$work/build-control.log"
-  if [[ $control_rc -eq 0 ]] || ! grep -q "runquota daemon unreachable" "$work/build-control.log"; then
-    echo "smoke_release_dev_exec: ERROR: with the archive's runquotad hidden, the build was not refused" >&2
-    echo "  for want of a daemon (exit $control_rc), so the build below could not show that the" >&2
-    echo "  archive's runquotad is the one found." >&2
-    exit 1
-  fi
+# The control: with the archive's daemon hidden the same build must be
+# refused. If it is not, something other than the archive answered, and the
+# run below would prove nothing.
+echo "=== repro build --tool-provisioning=tarball, archive runquotad hidden (must be refused) ==="
+mv "$pkg/bin/runquotad$exe" "$pkg/bin/runquotad$exe.hidden"
+control_rc=0
+run_build "$work/build-control.log" || control_rc=$?
+mv "$pkg/bin/runquotad$exe.hidden" "$pkg/bin/runquotad$exe"
+cat "$work/build-control.log"
+if [[ $control_rc -eq 0 ]] || ! grep -q "runquota daemon unreachable" "$work/build-control.log"; then
+  echo "smoke_release_dev_exec: ERROR: with the archive's runquotad hidden, the build was not refused" >&2
+  echo "  for want of a daemon (exit $control_rc), so the build below could not show that the" >&2
+  echo "  archive's runquotad is the one found." >&2
+  exit 1
 fi
 
 echo "=== repro build --tool-provisioning=tarball in a fresh project, runquotad from $pkg/bin ==="
