@@ -512,8 +512,8 @@
       #
       # ``flake = false`` — we want the source tree only. CodeTracer's own
       # flake drags in the Electron/frontend/db-backend toolchain, none of
-      # which ``ct-test`` needs (its only non-stdlib dependency is runquota;
-      # see ctTestTools). The ``.envrc`` auto-override
+      # which ``ct-test`` needs (see the explicit dependency paths in
+      # ctTestTools). The ``.envrc`` auto-override
       # (NIX_FLAKE_OVERRIDE_AUTO + the ``-src`` suffix convention) names this
       # input for a ``../codetracer`` sibling when one exists. Be aware of what
       # that costs before leaning on it: overriding a source input to a plain
@@ -672,8 +672,28 @@
     # passes a raising call's temporary to its destructor the way the
     # destructor takes it, and VM/NimScript trace recording changes (exact I/O
     # event kinds, one value-carrying step per recorded position).
+    #
+    # Advanced from fa222005 to 73545515 for the search path of every OTHER
+    # compile. The
+    # fork's global `config/nim.cfg` listed `$nim/dist/nim-stew`,
+    # `$nim/dist/nim-results` and `$nim/dist/codetracer-trace-format-nim/src`,
+    # the trees nim-fork.nix vendors only because the compiler itself imports
+    # them. Every program this `nim` compiled saw them, so a project bringing
+    # its own copy got two: in CodeTracer's dev shell, `nim c
+    # src/ct/codetracer.nim` failed with an ambiguous `stew/ptrops.offset`
+    # (codetracer-pm issue 2026-10-22-dev-shell-nim-cannot-compile-ct-two-nim-
+    # stew-copies-make-ptrops-offset-ambiguous). The paths now live only in the
+    # configs of the fork's programs that import the library (its compiler,
+    # nimsuggest, drnim, testament, and the test directories and koch steps
+    # that link compiler modules). This repository is unaffected: it vendors
+    # `libs/results` and `libs/nim-stew` and puts them on the path itself
+    # (`config.nims`, and the engine's own `--path` set), and nothing here
+    # imports the trace-format library. The separate CodeTracer ctTestTools
+    # build names its results input explicitly below; it must not rely on
+    # this compiler's former global paths. Riding along: two test files and a
+    # doc/intern.md section (afb4372c..d2b52f7f), no compiler or stdlib change.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=fa22200571d36eb8c24c0aaa883940d93c71b397";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=73545515fcc71eb947853e6aed366c13b196fb37";
       flake = false;
     };
     nim-csources-src = {
@@ -1093,16 +1113,15 @@
           # yields a ``ct-test`` built from the local tree with no push.
           #
           # Dependency surface: ``ct-test`` compiles from ``src/ct_test/**``,
-          # the Nim stdlib, and runquota's ``runquota_process`` /
-          # ``runquota_core`` / ``runquota_host*`` packages — and nothing else.
-          # (Verified against the Nim compilation cache of a full build: no
-          # vendored ``libs/`` tree, no Electron/frontend stack, no db-backend,
-          # no io-mon, no codetracer-trace-format-nim.) That is why this
-          # derivation is cheap despite CodeTracer being a large repo, why a
-          # submodule-less source input suffices, and why ``RUNQUOTA_SRC`` is
-          # the only source path it has to thread through: codetracer's
-          # repo-root ``config.nims`` reads that variable and adds the runquota
-          # library paths, the sandbox having no ``../runquota`` sibling.
+          # the Nim stdlib, runquota's ``runquota_process`` / ``runquota_core`` /
+          # ``runquota_host*`` packages, and ``results`` (native_readfiles.nim).
+          # No CodeTracer vendored ``libs/`` tree, Electron/frontend stack,
+          # db-backend, io-mon or codetracer-trace-format-nim is needed. The
+          # submodule-less source input therefore suffices when these explicit
+          # source paths are provided: CodeTracer's config.nims files read
+          # RUNQUOTA_SRC and CODETRACER_RESULTS_SRC. The latter selects results
+          # >= 0.5 without the compiler injecting its private dist/ libraries
+          # into every compile or discovering an operator's nimble packages.
           ctTestTools = pkgs.stdenv.mkDerivation {
             pname = "ct-test";
             version = "0.1.0";
@@ -1115,6 +1134,7 @@
               nimFork
             ];
             RUNQUOTA_SRC = runquota-src;
+            CODETRACER_RESULTS_SRC = nim-results-src;
             # The compile is spelled out here rather than delegated to a script
             # in the codetracer checkout (which is how ``runquotaTools`` calls
             # ``scripts/build_apps.sh``) for one concrete reason: codetracer has
@@ -1235,6 +1255,7 @@
                 export SHM_GSET_SRC=${nim-shm-gset-src}/src
                 export SHM_QUEUE_SRC=${nim-shm-queue-src}/src
                 ${pkgs.lib.optionalString pkgs.stdenv.isLinux "export REPRO_LINUX_UAPI_INCLUDE=${pkgs.linuxHeaders}/include"}
+                ${pkgs.lib.optionalString pkgs.stdenv.isLinux "export REPRO_SYSTEMD_ANALYZE=${pkgs.systemd}/bin/systemd-analyze"}
                 export CODETRACER_PINNED_SRC=${codetracer-src}/src
                 export REPRO_CT_TEST_RUNNER_SRC=${reprobuild-ct-test-runner-src}
                 export REPRO_TEST_ADAPTERS_SRC=${reprobuild-test-adapters-src}/src
@@ -2345,6 +2366,19 @@
             # (scripts/derive_lease_floor_syscalls.py); NixOS has no /usr/include.
             REPRO_LINUX_UAPI_INCLUDE =
               pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.linuxHeaders}/include";
+            # The other input of that derivation, and of CONF-4's
+            # `systemd-analyze security` (scripts/check_daemon_worker_unit_confinement.py):
+            # both scripts run THIS binary and refuse to fall back to PATH.
+            # The host's would make the lint verdict depend on the host --
+            # `@system-service` expands differently per systemd revision (257
+            # derived a floor three syscalls short of the committed one) -- and
+            # a host binary started under LD_LIBRARY_PATH above loads a second
+            # glibc and dies before `main` (reprobuild-pm issue
+            # 2026-10-22-lint-confinement-check-runs-the-hosts-systemd-analyze).
+            # A variable and not `packages`: on PATH, nixpkgs' systemctl & co.
+            # would shadow the host's, which must match the running manager.
+            REPRO_SYSTEMD_ANALYZE =
+              pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.systemd}/bin/systemd-analyze";
             CODETRACER_PINNED_SRC = "${codetracer-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";

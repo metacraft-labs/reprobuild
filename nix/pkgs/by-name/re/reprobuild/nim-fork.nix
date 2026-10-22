@@ -9,7 +9,15 @@
 # the compiler proper): bootstrap a stage-0 `nim` from csources_v3, then compile
 # `compiler/nim.nim` directly. The fork compiler itself imports the CodeTracer
 # trace-writer + stew + results, so those three are vendored under `dist/`
-# exactly where `config/nim.cfg` expects them (`$nim/dist/...`).
+# exactly where the fork's `compiler/nim.cfg` expects them
+# (`$projectpath/../dist/...`). From the revision `flake.nix`'s `nim-fork-src`
+# advanced to on 2026-10-22, the fork's GLOBAL `config/nim.cfg` no longer puts
+# them on the search path, so a program compiled by the installed `nim` never
+# sees them: a project that brings its own nim-stew (CodeTracer's
+# `libs/nim-stew`) would otherwise get two copies and ambiguous symbols. The
+# `forkSrc` default below (fa222005) predates that and still lists them; it
+# moves with the release snapshot `package.nix`'s `src` names, not with
+# `flake.nix` (see the `nixpkgs-package-src-sync` check).
 #
 # THIS IS A PRIVATE HELPER of `pkgs/by-name/re/reprobuild/package.nix`, not a
 # top-level nixpkgs attribute: nixpkgs' by-name resolver auto-exposes only
@@ -205,7 +213,12 @@ stdenv.mkDerivation {
     runHook preInstall
     mkdir -p "$out"
     # Ship a faithful Nim installation tree: the compiler + stdlib + config +
-    # the vendored dist/ deps that config/nim.cfg references on every compile.
+    # the vendored dist/ deps. The compiled `nim` does not read dist/ at run
+    # time, and the global config/nim.cfg of the forks this file is built from
+    # since the 2026-10-22 advance does not list it; it is shipped so a
+    # program built against this installation with an explicit
+    # `$nim/dist/...` path (the fork's `testament/testament.nim.cfg` uses that
+    # form) still finds the copies the compiler was built with.
     cp -r bin lib config dist "$out/"
     ${lib.optionalString stdenv.hostPlatform.isLinux ''
       # Linux: nim dlopens libpcre/libzstd by soname, so bake the store lib dirs

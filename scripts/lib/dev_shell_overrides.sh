@@ -1115,6 +1115,13 @@ dev_shell_report_override_drift() {
 # one this check prescribes for `git` — have the dev shell provide the tool
 # instead of inheriting it — so add `ssh` here and `pkgs.openssh` to the
 # devShell's `packages` together.
+#
+# Plus one program the shell names by VARIABLE rather than on PATH:
+# `$REPRO_SYSTEMD_ANALYZE`, which `just lint`'s CONF-3/CONF-4 checks run with
+# this shell's `LD_LIBRARY_PATH`. The host's systemd-analyze died exactly this
+# way under it (reprobuild-pm issue
+# 2026-10-22-lint-confinement-check-runs-the-hosts-systemd-analyze); the
+# flake's must not, and this check is what says so if it ever does.
 
 # The programs the dev shell must be able to hand its own loader state to.
 DEV_SHELL_SUBPROCESS_TOOLS=(
@@ -1278,6 +1285,10 @@ dev_shell_subprocess_tool_binaries() {
       done
     fi
   done
+  if [[ -n "${REPRO_SYSTEMD_ANALYZE:-}" && -x "$REPRO_SYSTEMD_ANALYZE" ]]; then
+    printf '%s\t%s\n' systemd-analyze \
+      "$(readlink -f "$REPRO_SYSTEMD_ANALYZE" 2>/dev/null || printf '%s' "$REPRO_SYSTEMD_ANALYZE")"
+  fi
 }
 
 # The check itself. Prints one row per finding, tab-separated, with the first
