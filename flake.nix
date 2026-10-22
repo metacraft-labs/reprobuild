@@ -289,7 +289,12 @@
       # ancestor. Windows proves tree quiescence with a Job Object, so a
       # healthy Windows capture is complete again; it needs the job
       # assignment in nim-stackable-hooks 6082ee94 (below).
-      url = "github:metacraft-labs/io-mon/4d468bc585ed10e77b9cfc468924155b6dd107cb";
+      # Bumped to 06ee30a (2026-10-22), io-mon's `agents` tip; 4d468bc is an
+      # ancestor. Entering an image the Linux shim cannot be loaded into (a
+      # 32-bit, static or static-pie program, or a script run by one) is now
+      # an event-loss, so such a capture no longer publishes. It brings
+      # io-mon's nim-stackable-hooks 059c549 requirement (below).
+      url = "github:metacraft-labs/io-mon/06ee30afb623a9d2dd78bac266d45cbdfc297e80";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -435,7 +440,10 @@
       # its additions since ff7eb18 affect Windows hook freezing only.
       # 6082ee94 keeps the graph build aligned with the synced landing branch;
       # its source change assigns injected Windows roots to the caller's job.
-      url = "github:metacraft-labs/nim-stackable-hooks/6082ee94203a5937d3dffe99e5098f644c4799b2";
+      # 059c549 (2026-10-22) moves with io-mon-src: io-mon names the Windows
+      # borrow-timeout policy (BorrowTimeoutPolicy), which exists only from
+      # 059c549 on; its additions since 6082ee94 are Windows-only.
+      url = "github:metacraft-labs/nim-stackable-hooks/059c549306621e2f769adf75630b0b7f29018dca";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
