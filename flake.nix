@@ -672,8 +672,26 @@
     # passes a raising call's temporary to its destructor the way the
     # destructor takes it, and VM/NimScript trace recording changes (exact I/O
     # event kinds, one value-carrying step per recorded position).
+    #
+    # Advanced from fa222005 to 73545515 for the search path of every OTHER
+    # compile. The
+    # fork's global `config/nim.cfg` listed `$nim/dist/nim-stew`,
+    # `$nim/dist/nim-results` and `$nim/dist/codetracer-trace-format-nim/src`,
+    # the trees nim-fork.nix vendors only because the compiler itself imports
+    # them. Every program this `nim` compiled saw them, so a project bringing
+    # its own copy got two: in CodeTracer's dev shell, `nim c
+    # src/ct/codetracer.nim` failed with an ambiguous `stew/ptrops.offset`
+    # (codetracer-pm issue 2026-10-22-dev-shell-nim-cannot-compile-ct-two-nim-
+    # stew-copies-make-ptrops-offset-ambiguous). The paths now live only in the
+    # configs of the fork's programs that import the library (its compiler,
+    # nimsuggest, drnim, testament, and the test directories and koch steps
+    # that link compiler modules). This repository is unaffected: it vendors
+    # `libs/results` and `libs/nim-stew` and puts them on the path itself
+    # (`config.nims`, and the engine's own `--path` set), and nothing here
+    # imports the trace-format library. Riding along: two test files and a
+    # doc/intern.md section (afb4372c..d2b52f7f), no compiler or stdlib change.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=fa22200571d36eb8c24c0aaa883940d93c71b397";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=73545515fcc71eb947853e6aed366c13b196fb37";
       flake = false;
     };
     nim-csources-src = {
