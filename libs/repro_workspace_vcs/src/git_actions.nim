@@ -55,7 +55,8 @@ import repro_hash
 import git_tool
 from shared_clones import prepareSharedBare, sharedBareFetchArgs,
   checkRegisteredLeaves, messages, registerLeafWithPool,
-  withCacheEntryVcsLock, withCheckoutVcsLock, isTransientGitLockContention
+  withCacheEntryVcsLock, withCheckoutVcsLock, isTransientGitLockContention,
+  leafFetchNeedsPromisor
 
 export GitToolIdentity, EGitToolUnresolved, ensureGitToolResolvable,
   resolveGitTool, digestHex, ToolProvisioningMode
@@ -997,6 +998,54 @@ proc cloneBranchRef(revision: string): string =
       return revision[prefix.len .. ^1]
   revision
 
+const ThinBaseRemoteName = "repro-thin-base"
+  ## The per-invocation promisor remote ``borrowedBaseFetchArgs`` declares.
+  ## Never written to any config.
+
+proc borrowedBaseFetchArgs(payload: GitVcsPayload; target,
+                           remoteName: string): seq[string] =
+  ## Git global options (they go BEFORE ``fetch``) that a fetch into
+  ## ``target`` from ``remoteName`` needs so it can resolve a thin pack
+  ## (Shared-Clone-Pool-Integrity §3.7).
+  ##
+  ## When ``target`` borrows from a partial-clone pool through its alternates
+  ## and has no promisor remote of its own, the server may delta a new object
+  ## against a blob of a commit ``target`` "has" through the alternate but
+  ## the pool only promised; ``index-pack`` then dies with "unresolved deltas
+  ## left after unpacking" (see ``shared_clones.leafFetchNeedsPromisor``).
+  ## Declaring, for this one invocation, a promisor remote with the URL of the
+  ## remote being fetched lets ``index-pack`` fetch that base lazily from it.
+  ##
+  ## It is a SEPARATE remote (``ThinBaseRemoteName``), not
+  ## ``remote.<remoteName>.promisor=true``. Measured with git 2.54.0: marking
+  ## the fetched remote itself a promisor makes the lazy fetch's child
+  ## ``git fetch --filter=blob:none`` register that filter
+  ## (``partial_clone_register``) and write
+  ## ``remote.<remoteName>.partialclonefilter=blob:none`` into the leaf's
+  ## config, after which every fetch carrying the promisor flag would be a
+  ## blob-less one. The separate remote's ``partialclonefilter`` is given
+  ## here so that registration finds a filter already set and writes nothing;
+  ## and since ``remoteName`` stays a non-promisor remote, the main fetch is
+  ## an ordinary unfiltered one.
+  ##
+  ## Per invocation, so no config is written: the persistent mechanism stays
+  ## the §3.4 refetch chain (Shared-Clone-Pool-Integrity), and a leaf that
+  ## carries it never takes this path. Nothing of a foreign pool's config is
+  ## trusted either: the lazy fetch goes to the URL already being fetched,
+  ## not to whatever repository the pool names.
+  if not leafFetchNeedsPromisor(payload.binaryPath, target):
+    return @[]
+  let url = runGitQuery(payload, ["-C", target, "remote", "get-url",
+    remoteName])
+  if url.exitCode != 0 or url.output.strip().len == 0:
+    # Not a configured remote: nothing to name. The fetch runs as before
+    # and reports its own error if it hits the thin-pack case.
+    return @[]
+  let prefix = "remote." & ThinBaseRemoteName & "."
+  @["-c", prefix & "url=" & url.output.strip(),
+    "-c", prefix & "promisor=true",
+    "-c", prefix & "partialclonefilter=blob:none"]
+
 proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResult =
   let target = absoluteRepoPath(payload, cwd)
   let parent = target.splitPath.head
@@ -1153,8 +1202,14 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     let present = runGit(payload,
       ["-C", target, "cat-file", "-e", wanted & "^{commit}"])
     if present.exitCode != 0:
+      # The clone may still borrow from the pool without the §3.4 chain:
+      # registration above can fail to write the leaf's config, or the
+      # dissociating repack can fail, and both leave the alternates entry in
+      # place. A pinned commit newer than the pool is then the thin-pack case
+      # ``borrowedBaseFetchArgs`` describes.
       let fetched = runGit(payload,
-        ["-C", target, "fetch", "--no-tags", "origin", wanted])
+        borrowedBaseFetchArgs(payload, target, "origin") &
+          @["-C", target, "fetch", "--no-tags", "origin", wanted])
       if fetched.exitCode != 0:
         discardPartial()
         return failed("clone-revision-fetch-failed",
@@ -1186,7 +1241,12 @@ proc executeFetch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
   if not dirExists(target / ".git"):
     return failed("fetch-target-missing",
       "fetch target is not a git working tree: " & target)
-  var fetchArgs = @["-C", target, "fetch"]
+  # A checkout that borrows from a partial-clone pool -- a foreign one, or an
+  # owned one the detector has not configured yet -- needs a promisor remote
+  # to resolve a thin pack. ``borrowedBaseFetchArgs`` declares one for this
+  # invocation only (Shared-Clone-Pool-Integrity §3.7).
+  var fetchArgs = borrowedBaseFetchArgs(payload, target, payload.remoteName) &
+    @["-C", target, "fetch"]
   # RA-14 — carry the partial-clone filter and shallow depth onto the
   # fetch so a develop-mode "deepen on demand" (``--depth``/``--unshallow``)
   # or a widening of the promisor filter is expressible as the same

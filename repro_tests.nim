@@ -17415,6 +17415,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_spi_leaf_fetches_thin_pack_over_partial_pool.nim",
+    binary: "build/test-bin/t_spi_leaf_fetches_thin_pack_over_partial_pool",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_spi_leaf_refetches_through_pool.nim",
     binary: "build/test-bin/t_spi_leaf_refetches_through_pool",
     defines: @[],

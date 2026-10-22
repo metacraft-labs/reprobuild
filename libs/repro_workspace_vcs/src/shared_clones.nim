@@ -2026,18 +2026,47 @@ proc leafPoolConfigRows(pool: string): seq[(string, string)] =
     ("remote." & LeafPoolRemoteName & ".uploadpack", LeafPoolUploadPack),
     ("remote." & LeafPoolRemoteName & ".skipFetchAll", "true")]
 
+proc hasPromisorRemoteConfig(gitBin, repo: string): bool =
+  ## Whether ``repo``'s effective config names a promisor remote: either
+  ## ``extensions.partialClone`` (which makes the remote it names one) or any
+  ## ``remote.<name>.promisor=true``. These are the settings under which git
+  ## fetches a missing object on demand instead of failing on it.
+  let extension = runGit(gitBin, ["-C", repo, "config", "--get",
+    "extensions.partialClone"])
+  if extension.code == 0 and extension.output.strip().len > 0:
+    return true
+  let promisors = runGit(gitBin, ["-C", repo, "config", "--bool",
+    "--get-regexp", "^remote\\..*\\.promisor$"])
+  if promisors.code == 0:
+    for line in promisors.output.splitLines():
+      if line.strip().endsWith(" true"): return true
+  false
+
+proc repoIsPartialClone*(gitBin, repo: string): bool =
+  ## Whether ``repo`` may advertise objects it only promises, so that a
+  ## repository borrowing from it can "have" a commit whose blobs are absent.
+  ##
+  ## Config is the usual signal, but not the only one: a ``*.promisor`` file
+  ## beside a pack marks that pack as received from a promisor remote, and it
+  ## stays there after the config that made the remote a promisor is edited
+  ## away. A foreign cache (one another tool made, outside reprobuild's cache
+  ## root) may show only that file, so it counts too.
+  if hasPromisorRemoteConfig(gitBin, repo):
+    return true
+  var packDir = ""
+  try:
+    packDir = gitObjectDir(repo) / "pack"
+  except IOError:
+    return false
+  if dirExists(packDir):
+    for _ in walkFiles(packDir / "*.promisor"):
+      return true
+  false
+
 proc needsLeafRefetchChain(gitBin, leaf, pool: string): bool =
   ## Ref-tip presence cannot detect missing blobs below present commits.
   ## Inspect the actual chain before on-touch configuration repairs it.
-  let extension = runGit(gitBin, ["-C", pool, "config", "--get",
-    "extensions.partialClone"])
-  let promisors = runGit(gitBin, ["-C", pool, "config", "--bool",
-    "--get-regexp", "^remote\\..*\\.promisor$"])
-  var partial = extension.code == 0 and extension.output.strip().len > 0
-  if promisors.code == 0:
-    for line in promisors.output.splitLines():
-      if line.strip().endsWith(" true"): partial = true
-  if not partial: return false
+  if not repoIsPartialClone(gitBin, pool): return false
   for (key, value) in leafPoolConfigRows(pool):
     let current = runGit(gitBin, ["-C", leaf, "config", "--local",
       "--get-all", key])
@@ -2116,6 +2145,37 @@ proc poolsOfLeaf*(leaf: string; cacheRoot = ""): seq[string] =
           canon.replace('\\', '/').startsWith(root.replace('\\', '/') & "/")):
         continue
     result.add(pool)
+
+proc leafFetchNeedsPromisor*(gitBin, leaf: string): bool =
+  ## Whether a ``git fetch`` in ``leaf`` needs a promisor remote it does not
+  ## have, from which to fetch a thin pack's missing delta bases.
+  ##
+  ## A server answers a fetch with a THIN pack: it may send an object as a
+  ## delta against a base the client said it has. A leaf says it has every
+  ## commit its alternates reach, but when the repository behind an
+  ## alternate is a partial clone, the blobs of those commits may only be
+  ## promised. ``index-pack`` then cannot resolve the delta ("unresolved
+  ## deltas left after unpacking") unless the leaf has a promisor remote to
+  ## fetch the base from.
+  ##
+  ## True when ``leaf`` borrows from ANY bare repository that is a partial
+  ## clone -- one under reprobuild's cache root or a foreign one, which is
+  ## why ``poolsOfLeaf`` is called without a cache root -- and the leaf's
+  ## own config names no promisor remote. A leaf carrying the §3.4 refetch
+  ## chain (``remote.repro-pool.promisor=true``) answers false: the chain
+  ## already supplies a missing base through the pool.
+  var pools: seq[string]
+  try:
+    pools = poolsOfLeaf(leaf)
+  except IOError, OSError:
+    # An unreadable ``.git`` file: the fetch itself will report it.
+    return false
+  var borrowsPartial = false
+  for pool in pools:
+    if repoIsPartialClone(gitBin, pool):
+      borrowsPartial = true
+      break
+  borrowsPartial and not hasPromisorRemoteConfig(gitBin, leaf)
 
 # -- detector (§4) ------------------------------------------------------------
 
