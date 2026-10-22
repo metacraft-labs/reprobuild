@@ -96,7 +96,7 @@
 ## installed is a REFUSAL, not a "ready" — a hook whose absence read as
 ## success would be this campaign's defect class inside its own fix.
 
-import std/[options, os, strutils, tables]
+import std/[monotimes, options, os, strutils, tables, times]
 
 from repro_home_generations/pointer import Digest256
 from repro_home_resources/types import ObservedState, ResourceActionKind,
@@ -782,18 +782,25 @@ proc serviceNodeApply(inst: ResourceInstance; action: ResourceActionKind;
     return ResourceBinding(address: inst.address, typeId: inst.typeId,
       resourceId: serviceNodeIdentity(inst),
       postWriteDigest: serviceNodeDigest(inst), present: false)
+  # WALL-CLOCK time since the wait began, not a count of polls times the
+  # nominal interval: under load each `sleep` overruns, and a poll counter
+  # then both under-reports `waitedMs` and stretches the declared timeout.
+  # The clock starts BEFORE `waiting` is published, so the wait it reports
+  # covers everything a reader of that event can have seen happen after it.
+  let started = getMonoTime()
   publish("service.readiness.waiting", a.serviceName,
     "probe=" & probe.kind & " timeoutMs=" & $probe.timeoutMs)
   var waited = 0
   while waited <= probe.timeoutMs:
     if readinessSatisfied(probe):
+      waited = int(inMilliseconds(getMonoTime() - started))
       publish("service.readiness.satisfied", a.serviceName,
         "probe=" & probe.kind & " waitedMs=" & $waited)
       return ResourceBinding(address: inst.address, typeId: inst.typeId,
         resourceId: serviceNodeIdentity(inst),
         postWriteDigest: serviceNodeDigest(inst), present: true)
     sleep(ReadinessPollIntervalMs)
-    waited.inc(ReadinessPollIntervalMs)
+    waited = int(inMilliseconds(getMonoTime() - started))
   publish("service.readiness.timeout", a.serviceName,
     "probe=" & probe.kind & " waitedMs=" & $waited)
   raise newException(ReadinessEdgeError,
