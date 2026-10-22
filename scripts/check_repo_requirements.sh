@@ -284,9 +284,9 @@ require_contains .github/workflows/ci.yml "dev-exec nix flake metadata --no-upda
 require_contains .github/workflows/ci.yml "run: dev-exec nix build --no-update-lock-file --log-lines 200 .#default"
 require_contains .github/workflows/ci.yml "if: always()"
 require_contains .github/workflows/ci.yml "actions/upload-artifact@v4"
-require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "Linux", "X64", "benchmark"]'\'''
+require_contains .github/workflows/benchmark.yml 'runner: '\''["linux", "x64", "benchmark"]'\'''
 # Both measurement legs require dedicated benchmark runners.
-require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "darwin", "nix-darwin", "aarch64-darwin", "benchmark"]'\'''
+require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "macOS", "ARM64", "benchmark"]'\'''
 require_contains .github/workflows/benchmark.yml "metacraft-labs/runquota"
 require_contains .github/workflows/benchmark.yml "metacraft-labs/reprobuild-cmake"
 require_contains .github/workflows/benchmark.yml "ref: reprobuild"

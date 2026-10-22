@@ -26,11 +26,20 @@ jobs:
         include:
           # EXEMPTION (CIP-5): persistent benchmark runner — real perf hardware
           # is required for meaningful numbers; not migrated to ephemeral eph-linux-x64.
+          #
+          # NO `self-hosted`. The benchmark runner is being moved to dedicated labels
+          # only (registered without GitHub's default `self-hosted`/OS/arch labels) so
+          # that general `[self-hosted, linux, x64]` jobs can no longer take its single
+          # CPU-isolated slot. `[linux, x64, benchmark]` matches it both before and after
+          # that change, and never matches the macOS benchmark runner.
           - platform: linux
-            runner: '["self-hosted", "Linux", "X64", "benchmark"]'
+            runner: '["linux", "x64", "benchmark"]'
           # Dedicated m3 benchmark runner; continuous-benchmarking policy §4.
+          # GitHub's implicit macOS/ARM64 labels, not the shared runners'
+          # `darwin`/`nix-darwin`/`aarch64-darwin`: the benchmark runner no
+          # longer carries those.
           - platform: macos
-            runner: '["self-hosted", "darwin", "nix-darwin", "aarch64-darwin", "benchmark"]'
+            runner: '["self-hosted", "macOS", "ARM64", "benchmark"]'
     runs-on: ${{ fromJSON(matrix.runner) }}
     # Successful runs take <=72 min (linux, 68 runs) and <=30 min (macos, 31 runs);
     # hung runs have held the single benchmark runner for 10h+. Fail them instead.
