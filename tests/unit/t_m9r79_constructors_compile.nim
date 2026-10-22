@@ -36,6 +36,18 @@ suite "t_m9r79_constructors_compile":
     check cmakeRuntimeLibraryDirs(@[glibcLib, dependencyLib]) ==
       @[dependencyLib]
 
+  test "cmake runtime paths exclude the libraries a host /bin/sh loads":
+    # Ninja runs each command through /bin/sh; a source-built readline on
+    # LD_LIBRARY_PATH broke a NixOS bash linked against a newer one.
+    let src = "/w/reprobuild-packages/packages/source"
+    let readline = src & "/readline/.repro/output/install/usr/lib"
+    let ncurses = src & "/ncurses/.repro/output/install/usr/lib"
+    let nixReadline = "/nix/store/0123456789abcdefghijklmnopqrstuv-readline-8.3p3/lib"
+    let zlib = src & "/zlib/.repro/output/install/usr/lib"
+    let libedit = "/nix/store/vutsrqponmlkjihgfedcba9876543210-libedit-3.1/lib"
+    check cmakeRuntimeLibraryDirs(
+      @[readline, zlib, ncurses, nixReadline, libedit]) == @[zlib, libedit]
+
   test "cmake runtime paths exclude federated compiler bootstrap libc":
     let scratch = createTempDir("repro-cmake-bootstrap-libc-", "")
     defer: removeDir(scratch)

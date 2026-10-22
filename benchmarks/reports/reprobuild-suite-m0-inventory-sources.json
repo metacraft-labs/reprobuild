@@ -48543,7 +48543,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_m9r79_constructors_compile.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
