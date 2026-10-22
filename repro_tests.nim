@@ -3537,6 +3537,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_interface_nimcache_slots.nim",
+    binary: "build/test-bin/t_interface_nimcache_slots",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_l3_lift_carries_service_and_activity_signatures.nim",
     binary: "build/test-bin/t_l3_lift_carries_service_and_activity_signatures",
     defines: @[],
@@ -14501,6 +14510,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_interface_extraction_is_served_to_a_copy_at_another_path.nim",
     binary: "build/test-bin/t_interface_extraction_is_served_to_a_copy_at_another_path",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_interface_extraction_reuses_library_objects.nim",
+    binary: "build/test-bin/t_interface_extraction_reuses_library_objects",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
