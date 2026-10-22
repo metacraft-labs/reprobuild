@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2332,
+    "nimTestBinaries": 2333,
     "pureUnitConsolidationGroups": 67,
     "pureUnitTests": 688,
     "staticallyDetectedRuntimeCompilerFlowTests": 127,
-    "testEntries": 2363
+    "testEntries": 2364
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1375,7 +1375,7 @@
       "integration": 1267,
       "platform/destructive": 145,
       "pure unit": 688,
-      "unclassified": 245
+      "unclassified": 246
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1577,9 +1577,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2332,
+    "nimTestBinaryCount": 2333,
     "pythonTestFileCount": 31,
-    "testEntryCount": 2363
+    "testEntryCount": 2364
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7900,6 +7900,24 @@
       "source": "libs/repro_agent_protocol/tests/t_agent_harbor_reproos_permission_protocol.nim",
       "sourceSuiteCount": 8,
       "staticCaseCount": 21,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_agent_protocol_cancellation",
+      "class": "unclassified",
+      "classificationReason": "imports `asyncdispatch`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_agent_protocol",
+        "repro_core"
+      ],
+      "owner": "libs/repro_agent_protocol",
+      "requiresReproBinary": false,
+      "source": "libs/repro_agent_protocol/tests/t_agent_protocol_cancellation.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25661,7 +25679,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/agent-harbor/t_e2e_agent_harbor_modifies_installed_source_package.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

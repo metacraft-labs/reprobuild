@@ -47,8 +47,13 @@ suite "M7 — provider conformance":
     checkpoint r.providerOutput
     checkpoint r.failures.join("\n")
     check r.passed
-    check r.backendCalls == @["checkout fixture", "build fixture",
-                              "test fixture", "generation.stage fixture"]
+    # The long build is cancelled while it runs or, when the cancellation
+    # overtakes it, withdrawn before it starts.
+    check r.backendCalls.filterIt(it != "build-long fixture cancelled") ==
+      @["checkout fixture", "build fixture", "test fixture",
+        "generation.stage fixture",
+        "remix.capture fixture " & FixtureRelease,
+        "remix.export fixture " & FixtureRelease]
 
   test "a provider that reaches for the consent socket fails":
     let r = conformanceOf("consent-reacher")

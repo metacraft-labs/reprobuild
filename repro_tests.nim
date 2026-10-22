@@ -198,6 +198,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_agent_protocol/tests/t_agent_protocol_cancellation.nim",
+    binary: "build/test-bin/t_agent_protocol_cancellation",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_agent_protocol/tests/t_agent_protocol_conformance_vectors.nim",
     binary: "build/test-bin/t_agent_protocol_conformance_vectors",
     defines: @[],

@@ -12,8 +12,10 @@
 ##
 ## The fixture backend is a stand-in by design: conformance is about the
 ## provider's use of the protocol, and a real build would make the verdict
-## depend on a toolchain. It performs checkout and records build, test and
-## stage calls against a real temporary filesystem.
+## depend on a toolchain. It performs checkout and records build, test,
+## stage and Remix calls against a real temporary filesystem; its build of
+## target `long` runs until it is cancelled (at most `LongBuildSeconds`),
+## which is how the scenario exercises cancellation.
 
 import std/[asyncdispatch, os, osproc, sequtils, sets, streams, strtabs,
             strutils, tables, times]
@@ -27,6 +29,8 @@ const
   FixturePackage* = "fixture"
   FixtureReadme* = "# fixture\nThe conformance fixture package.\n"
   ConformanceTimeoutSeconds* = 120
+  LongBuildSeconds* = 60
+  FixtureRelease* = "fixture-release-1"
 
 type
   ConformanceBackend = ref object of Backend
@@ -47,6 +51,15 @@ method createCheckout(b: ConformanceBackend; package, root: string): OpResult =
   OpResult(status: osCompleted)
 
 method runBuild(b: ConformanceBackend; ws: Workspace; op: Operation): OpResult =
+  if op.arg("target") == "long":
+    b.calls.add "build-long " & ws.package
+    let deadline = epochTime() + LongBuildSeconds
+    while epochTime() < deadline:
+      if b.checkpoint():
+        b.calls[^1].add " cancelled"
+        b.raiseCancelled()
+    b.calls[^1].add " timed-out"
+    return OpResult(status: osFailed, detail: "the long build was not cancelled")
   b.calls.add "build " & ws.package
   OpResult(status: osCompleted, detail: "built")
 
@@ -58,10 +71,15 @@ method activeGeneration(b: ConformanceBackend): string = "gen-1"
 
 method generation(b: ConformanceBackend; ws: Workspace; op: Operation): OpResult =
   b.calls.add $op.kind & " " & ws.package
-  OpResult(status: osCompleted, detail: "release=fixture")
+  OpResult(status: osCompleted, detail: "release=" & FixtureRelease)
+
+method remix(b: ConformanceBackend; ws: Workspace; op: Operation): OpResult =
+  b.calls.add $op.kind & " " & ws.package & " " & op.arg("release")
+  OpResult(status: osCompleted, detail: $op.kind & "=" & op.arg("release"))
 
 const ScenarioGrants = ["workspace.create:fixture", "source.read:fixture",
-  "source.write:fixture", "build.run:fixture", "test.run:fixture"]
+  "source.write:fixture", "build.run:fixture", "test.run:fixture",
+  "remix.publish:private"]
 
 proc scenarioContent*(nonce: string): string =
   ## The file content the scenario asks the provider to write: unique per
@@ -155,20 +173,40 @@ proc runConformance*(providerCmd: seq[string]; workRoot: string;
     fail "the audit chain does not verify"
   let recs = h.audit.records
   let mine = recs.filterIt(it.sessionId == sid)
+  # The long build is either cancelled while it runs or withdrawn before
+  # it starts (the provider cannot tell when the host starts it); either
+  # way it must not run to its timeout.
+  let longCalls = backend.calls.filterIt(it.startsWith("build-long "))
   if not mine.anyIt(it.kind == "attach" and it.decision == "allowed"):
     fail "the provider never attached to its session"
-  let refusals = mine.filterIt(it.decision == "refused")
+  # A withdrawn long build makes its execute refuse `plan-unknown`; that
+  # refusal is the protocol working, not the provider misbehaving.
+  let refusals = mine.filterIt(it.decision == "refused" and
+    not (it.kind == "execute" and it.reason == "plan-unknown" and
+         longCalls.len == 0))
   if refusals.mapIt(it.reason) != @["path-escape"]:
     fail "expected exactly one refusal (path-escape), got " &
       $refusals.mapIt(it.kind & ":" & it.reason)
+  let otherCalls = backend.calls.filterIt(not it.startsWith("build-long "))
   let expectedCalls = @["checkout fixture", "build fixture", "test fixture",
-                        "generation.stage fixture"]
-  if backend.calls != expectedCalls:
-    fail "the backend saw " & $backend.calls & ", expected " & $expectedCalls
-  if not mine.anyIt(it.kind == "consume" and it.decision == "consume"):
-    fail "the provider never executed its approved plan"
-  if approved.len != 1:
-    fail "expected one plan needing approval, saw " & $approved.len
+    "generation.stage fixture",
+    "remix.capture fixture " & FixtureRelease,
+    "remix.export fixture " & FixtureRelease]
+  if otherCalls != expectedCalls:
+    fail "the backend saw " & $otherCalls & ", expected " & $expectedCalls
+  if longCalls.len > 1 or
+      (longCalls.len == 1 and longCalls[0] != "build-long fixture cancelled"):
+    fail "the long build was not cancelled: " & $longCalls
+  if not mine.anyIt(it.kind == "cancel" and it.decision == "cancel" and
+                    it.reason == "the provider"):
+    fail "the provider never cancelled its long build"
+  let consumed = mine.filterIt(it.kind == "consume" and
+                               it.decision == "consume")
+  if consumed.len != 2:
+    fail "expected the provider to execute 2 approved plans, saw " &
+      $consumed.len
+  if approved.len != 2:
+    fail "expected two plans needing approval, saw " & $approved.len
   let reads = mine.filterIt(it.kind == "source.read" and
                             it.decision == "result" and it.reason == "completed")
   if reads.len != 1:
