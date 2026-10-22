@@ -130,14 +130,24 @@ proc parseGraphJson(output: string): JsonNode =
   except JsonParsingError:
     return nil
 
-proc actionOutputs(action: JsonNode): seq[string] =
+proc actionOutputs(action: JsonNode; repoRoot: string): seq[string] =
+  ## The action's declared outputs, spelled from ``repoRoot``. A relative
+  ## output is resolved against the action's own ``cwd`` first, as the engine
+  ## resolves it: ``nim.c(runInSourceDir = true)`` declares the CLI as
+  ## ``../../build/bin/repro`` from ``apps/repro-client``.
   var node = action{"outputs"}
   if node.isNil or node.kind == JNull:
     node = action{"evidence"}{"declaredOutputs"}
   if node.isNil or node.kind == JNull:
     return @[]
+  let cwd = action{"cwd"}.getStr()
   for entry in node:
-    result.add(entry.getStr().replace('\\', '/'))
+    var path = entry.getStr()
+    if not path.isAbsolute and cwd.len > 0:
+      path = normalizedPath(cwd / path)
+    if path.isAbsolute:
+      path = relativePath(path, repoRoot)
+    result.add(path.replace('\\', '/'))
 
 template cliInputMatchesProducer(text, producerSource, constMarker,
                                  label: string): bool =
@@ -273,7 +283,7 @@ suite "the repro CLI input is spelled as its producer declares it":
       var sawExecute = false
       for action in actions:
         let id = action{"id"}.getStr()
-        if cliPath in actionOutputs(action):
+        if cliPath in actionOutputs(action, repoRoot):
           producerId = id
         if id == executeId:
           sawExecute = true
@@ -294,3 +304,26 @@ suite "the repro CLI input is spelled as its producer declares it":
       # And the execute edge has to name it, which is the half that delivers
       # "re-run when the CLI changes".
       check producerId in executeDeps
+
+  test "an edge that runs in its source directory still produces the CLI input":
+    # `nim.c(runInSourceDir = true)` declares its output relative to the
+    # module directory (`../../build/bin/repro` from `apps/repro-client`),
+    # while consumers name it from the recipe root. The dependency inference
+    # has to resolve the producer's spelling against its working directory,
+    # as the engine does; comparing the raw strings drops the edge silently.
+    resetBuildActionRegistry()
+    resetTargetExportRegistry()
+    let producer = nimTool.c(
+      source = "apps/repro-client/repro_client.nim",
+      binary = "build/bin/repro",
+      runInSourceDir = true,
+      actionId = "t_repro_cli_input.producer.in-source-dir")
+    checkpoint("producer outputs: " & $producer.outputs &
+      " cwd: " & producer.cwdCustomPath)
+    check producer.cwdCustomPath == "apps/repro-client"
+
+    let consumer = BuildActionDef(id: "t_repro_cli_input.consumer",
+      inputs: @[addFileExt("build/bin/repro", ExeExt)])
+    let inferred = inferDeclaredActionDeps([producer, consumer])
+    checkpoint("consumer deps: " & $inferred[1].deps)
+    check producer.id in inferred[1].deps
