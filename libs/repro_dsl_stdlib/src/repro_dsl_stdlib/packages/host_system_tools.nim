@@ -180,6 +180,14 @@ package `diff`:
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
 
+package `getent`:
+  ## systemd's meson setup runs `getent passwd 65534` to warn about a
+  ## mismatched nobody user, and fails when the program is absent.
+  provisioning:
+    nixPackage "nixpkgs#getent", executablePath = "bin/getent",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
 package `head`:
   provisioning:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/head",
