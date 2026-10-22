@@ -8407,8 +8407,16 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
     # plus its dependent libraries (6 records for a `-nostdlib`
     # dynamic binary; 18 records naming 14 distinct paths / 9
     # distinct sonames for `env true`), and a process the shim CANNOT
-    # inject — a static binary — already trips `mrEventLoss` and
-    # lands on the Level 2 arm below. An edge that genuinely needs to
+    # inject — a static binary, or a dynamic one of another ELF class
+    # whose loader drops the shim — emits nothing itself but is
+    # reported as `mrEventLoss` by io-mon where a monitored context
+    # enters it (the root spawn, an exec or posix_spawn hook, a raw
+    # execve), and lands on the Level 2 arm below. That entry report
+    # is what makes this true: io-mon's process-tree signals alone
+    # miss such an image when it execs a monitored one in the same
+    # pid, which graded `mcComplete` up to io-mon 8b6e94ae
+    # (Monitor-Hook-Shim.md §"Entering An Image The Shim Cannot
+    # Enter"). An edge that genuinely needs to
     # run without evidence already has a sanctioned answer with no
     # new soundness surface: `cacheable = false`.
     #
