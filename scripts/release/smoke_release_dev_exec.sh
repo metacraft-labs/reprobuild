@@ -204,16 +204,31 @@ if [[ -z "${REPRO_BOOTSTRAP_CC:-}" ]] && cc_exe=$(command -v cc || command -v gc
   export REPRO_BOOTSTRAP_CC
 fi
 
-# Nothing but the archive may supply a daemon: drop every PATH entry holding
-# one (the Windows leg puts ../runquota/build/bin there, the dev shell its
-# runquota package), the variables that name one, and the binary-cache
-# configuration, so this build neither substitutes nor publishes.
+# Nothing but the archive may supply a daemon: hide every runquotad on PATH
+# (the Windows leg puts ../runquota/build/bin there, the dev shell its
+# runquota package), unset the variables that name one, and drop the
+# binary-cache configuration, so this build neither substitutes nor
+# publishes. A PATH entry that holds a runquotad is replaced by a copy of
+# itself without it, not dropped: on a merged profile directory the same
+# entry is where `mv`, `cat` and the rest of this script's tools come from.
 unset RUNQUOTAD_BIN RUNQUOTA_BIN RUNQUOTA_SOCKET REPROBUILD_NO_RUNQUOTA
 for v in $(env | sed -n 's/^\(REPRO_BINARY_CACHE_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
 kept_path=""
+shadow_index=0
 IFS=: read -r -a path_entries <<< "$PATH"
 for d in ${path_entries[@]+"${path_entries[@]}"}; do
-  [[ -n "$d" && ( -e "$d/runquotad" || -e "$d/runquotad.exe" ) ]] && continue
+  [[ -n "$d" ]] || continue
+  if [[ -e "$d/runquotad" || -e "$d/runquotad.exe" ]]; then
+    shadow_index=$((shadow_index + 1))
+    shadow="$work/path-without-runquotad-$shadow_index"
+    mkdir -p "$shadow"
+    for entry in "$d"/* "$d"/.[!.]*; do
+      [[ -e "$entry" || -L "$entry" ]] || continue
+      case "${entry##*/}" in runquotad|runquotad.exe) continue ;; esac
+      ln -s "$entry" "$shadow/${entry##*/}"
+    done
+    d="$shadow"
+  fi
   kept_path="${kept_path:+$kept_path:}$d"
 done
 PATH="$pkg/bin:$kept_path"
