@@ -1391,16 +1391,105 @@ proc alternatesFilePath*(repoPath: string): string =
   ## Path of the alternates file for ``repoPath`` (normal or bare).
   gitObjectDir(repoPath) / "info" / "alternates"
 
-proc readAlternates*(repoPath: string): seq[string] =
-  ## Return the alternates currently wired for ``repoPath`` (empty if the
-  ## file is absent). Blank lines are skipped.
-  let p = alternatesFilePath(repoPath)
-  if not fileExists(p):
+proc readAlternatesFile(path: string): seq[string] =
+  ## The entries of the alternates file at ``path``, verbatim (empty if the
+  ## file is absent). Blank lines are skipped and nothing else is
+  ## interpreted, so a caller that rewrites the file keeps every line it did
+  ## not change. Raises ``IOError`` when the file exists but cannot be read.
+  if not fileExists(path):
     return @[]
-  for line in readFile(p).splitLines:
+  for line in readFile(path).splitLines:
     let trimmed = line.strip()
     if trimmed.len > 0:
       result.add(trimmed)
+
+proc readAlternates*(repoPath: string): seq[string] =
+  ## Return the alternates currently wired for ``repoPath`` (empty if the
+  ## file is absent). Blank lines are skipped.
+  readAlternatesFile(alternatesFilePath(repoPath))
+
+proc resolveAlternateEntry(entry, objectDir: string): string =
+  ## The object directory that an entry in ``objectDir``'s alternates file
+  ## names. Git resolves a relative entry against the object directory whose
+  ## ``info/alternates`` lists it, not against the repository or the working
+  ## directory (``parse_alternates`` in git's ``odb.c``).
+  if entry.isAbsolute: entry
+  else: absolutePath(entry, absolutePath(objectDir))
+
+proc alternateObjectDirs*(leaf: string): seq[string] =
+  ## Resolve relative alternates against the object directory, including a
+  ## linked worktree's common store. Keep missing targets visible to health.
+  let objectDir = gitObjectDir(leaf)
+  for entry in readAlternates(leaf):
+    result.add(resolveAlternateEntry(entry, objectDir))
+
+const GitMaxAlternateDepth = 5
+  ## How deep git follows nested alternates. In git 2.54.0's ``odb.c``,
+  ## ``odb_prepare_alternates`` links the primary store's entries at depth 0,
+  ## and ``odb_add_alternate_recursively`` follows the ``info/alternates`` of
+  ## a store at depth ``d`` only while ``d + 1 <= 5``; past that it reports
+  ## "ignoring alternate object stores, nesting too deep". So stores up to
+  ## six hops away are part of a repository's object database, and a seventh
+  ## is not. Older gits apply the same limit in ``link_alt_odb_entries``
+  ## (``if (depth > 5)``, in ``sha1_file.c`` and later ``object-file.c``).
+  ## https://github.com/git/git/blob/v2.54.0/odb.c
+
+proc objectStoreIdentity(objectDir: string): string =
+  ## The spelling git keys an object store by: its real path, since
+  ## ``parse_alternates`` normalises each entry with ``strbuf_realpath``. A
+  ## store whose path cannot be resolved keeps its absolute lexical spelling.
+  try:
+    result = expandFilename(objectDir)
+  except OSError:
+    result = absolutePath(objectDir)
+  while result.len > 1 and result[^1] in {DirSep, AltSep}:
+    result.setLen(result.len - 1)
+
+proc linkAlternateStores(objectDir: string; childDepth: int;
+                         seen, stores: var seq[string]) =
+  ## Append to ``stores`` every store that ``objectDir``'s alternates file
+  ## names, each followed by the stores IT borrows from, the way git builds
+  ## an object database: depth first, in file order, each store once.
+  ##
+  ## Mirrors git's rules, so the result is the set of stores git itself
+  ## reads. An absent or unreadable ``info/alternates`` contributes nothing
+  ## (git warns and carries on, ``odb_source_files_read_alternates``). A
+  ## ``#`` line is a comment. An entry naming a missing directory is skipped
+  ## (git: "object directory ... does not exist"). A store already linked,
+  ## or the primary one, is skipped (``odb_is_source_usable``), and that is
+  ## also what makes a cycle terminate. Nesting stops at
+  ## ``GitMaxAlternateDepth``. A C-quoted entry is not unquoted, so it is
+  ## skipped as a missing directory; git never writes one itself.
+  var entries: seq[string]
+  try:
+    entries = readAlternatesFile(objectDir / "info" / "alternates")
+  except IOError, OSError:
+    return
+  if entries.len > 0 and childDepth > GitMaxAlternateDepth:
+    return
+  for entry in entries:
+    if entry.startsWith("#"):
+      continue
+    let resolved = resolveAlternateEntry(entry, objectDir)
+    if not dirExists(resolved):
+      continue
+    let store = objectStoreIdentity(resolved)
+    if store in seen:
+      continue
+    seen.add(store)
+    stores.add(store)
+    linkAlternateStores(store, childDepth + 1, seen, stores)
+
+proc borrowedObjectStores*(repoPath: string): seq[string] =
+  ## Every object store ``repoPath`` reads objects from through alternates,
+  ## TRANSITIVELY: the stores its own ``objects/info/alternates`` names, the
+  ## stores their alternates name, and so on, as git follows them (see
+  ## ``linkAlternateStores``). Each is given by its real path, and the
+  ## repository's own store is not included. Raises ``IOError`` for an
+  ## invalid ``.git`` file, like ``gitObjectDir``.
+  let primary = objectStoreIdentity(gitObjectDir(repoPath))
+  var seen = @[primary]
+  linkAlternateStores(primary, 0, seen, result)
 
 proc wireAlternates*(repoPath, sharedBarePath: string;
                      gitBin = "git"): SharedCloneResult =
@@ -2026,18 +2115,70 @@ proc leafPoolConfigRows(pool: string): seq[(string, string)] =
     ("remote." & LeafPoolRemoteName & ".uploadpack", LeafPoolUploadPack),
     ("remote." & LeafPoolRemoteName & ".skipFetchAll", "true")]
 
+proc hasPromisorRemoteConfig(gitBin, repo: string): bool =
+  ## Whether ``repo``'s effective config names a promisor remote: either
+  ## ``extensions.partialClone`` (which makes the remote it names one) or any
+  ## ``remote.<name>.promisor=true``. These are the settings under which git
+  ## fetches a missing object on demand instead of failing on it.
+  let extension = runGit(gitBin, ["-C", repo, "config", "--get",
+    "extensions.partialClone"])
+  if extension.code == 0 and extension.output.strip().len > 0:
+    return true
+  let promisors = runGit(gitBin, ["-C", repo, "config", "--bool",
+    "--get-regexp", "^remote\\..*\\.promisor$"])
+  if promisors.code == 0:
+    for line in promisors.output.splitLines():
+      if line.strip().endsWith(" true"): return true
+  false
+
+proc hasPromisorPacks(objectDir: string): bool =
+  ## Whether ``objectDir`` holds a pack received from a promisor remote: a
+  ## ``*.promisor`` file beside it marks every object it does not contain
+  ## but references as promised rather than missing.
+  let packDir = objectDir / "pack"
+  if dirExists(packDir):
+    for _ in walkFiles(packDir / "*.promisor"):
+      return true
+  false
+
+proc repoIsPartialClone*(gitBin, repo: string): bool =
+  ## Whether ``repo`` may advertise objects it only promises, so that a
+  ## repository borrowing from it can "have" a commit whose blobs are absent.
+  ##
+  ## Config is the usual signal, but not the only one: a ``*.promisor`` file
+  ## beside a pack marks that pack as received from a promisor remote, and it
+  ## stays there after the config that made the remote a promisor is edited
+  ## away. A foreign cache (one another tool made, outside reprobuild's cache
+  ## root) may show only that file, so it counts too.
+  if hasPromisorRemoteConfig(gitBin, repo):
+    return true
+  var objectDir = ""
+  try:
+    objectDir = gitObjectDir(repo)
+  except IOError:
+    return false
+  hasPromisorPacks(objectDir)
+
+proc objectStoreIsPartial*(gitBin, objectDir: string): bool =
+  ## ``repoIsPartialClone`` for an object store reached through alternates,
+  ## which may belong to a bare repository (``<pool>.git/objects``) or to a
+  ## non-bare one's ``.git`` directory (``<checkout>/.git/objects``).
+  ##
+  ## The ``*.promisor`` packs are the store's own signal. The config signal
+  ## is read from the repository that owns the store, its parent directory,
+  ## and only when that directory is a git directory (it has ``HEAD``):
+  ## ``git -C`` on any other directory would discover and answer for some
+  ## unrelated enclosing repository.
+  if hasPromisorPacks(objectDir):
+    return true
+  let owner = objectDir.parentDir
+  objectDir.lastPathPart == "objects" and fileExists(owner / "HEAD") and
+    hasPromisorRemoteConfig(gitBin, owner)
+
 proc needsLeafRefetchChain(gitBin, leaf, pool: string): bool =
   ## Ref-tip presence cannot detect missing blobs below present commits.
   ## Inspect the actual chain before on-touch configuration repairs it.
-  let extension = runGit(gitBin, ["-C", pool, "config", "--get",
-    "extensions.partialClone"])
-  let promisors = runGit(gitBin, ["-C", pool, "config", "--bool",
-    "--get-regexp", "^remote\\..*\\.promisor$"])
-  var partial = extension.code == 0 and extension.output.strip().len > 0
-  if promisors.code == 0:
-    for line in promisors.output.splitLines():
-      if line.strip().endsWith(" true"): partial = true
-  if not partial: return false
+  if not repoIsPartialClone(gitBin, pool): return false
   for (key, value) in leafPoolConfigRows(pool):
     let current = runGit(gitBin, ["-C", leaf, "config", "--local",
       "--get-all", key])
@@ -2101,10 +2242,7 @@ proc poolsOfLeaf*(leaf: string; cacheRoot = ""): seq[string] =
   ## The pools ``leaf`` borrows from: every alternates entry whose parent is
   ## a bare repository, restricted to ``cacheRoot`` when one is given (the
   ## detector only ever writes into pools reprobuild owns).
-  for entry in readAlternates(leaf):
-    var objects = entry
-    if not objects.isAbsolute:
-      objects = alternatesFilePath(leaf).parentDir.parentDir / objects
+  for objects in alternateObjectDirs(leaf):
     let pool = objects.parentDir
     if not (dirExists(pool / "objects") and fileExists(pool / "HEAD")) or
         dirExists(pool / ".git"):
@@ -2116,6 +2254,46 @@ proc poolsOfLeaf*(leaf: string; cacheRoot = ""): seq[string] =
           canon.replace('\\', '/').startsWith(root.replace('\\', '/') & "/")):
         continue
     result.add(pool)
+
+proc leafFetchNeedsPromisor*(gitBin, leaf: string): bool =
+  ## Whether a ``git fetch`` in ``leaf`` needs a promisor remote it does not
+  ## have, from which to fetch a thin pack's missing delta bases.
+  ##
+  ## A server answers a fetch with a THIN pack: it may send an object as a
+  ## delta against a base the client said it has. A leaf says it has every
+  ## commit its alternates reach, but when the repository behind an
+  ## alternate is a partial clone, the blobs of those commits may only be
+  ## promised. ``index-pack`` then cannot resolve the delta ("unresolved
+  ## deltas left after unpacking") unless the leaf has a promisor remote to
+  ## fetch the base from.
+  ##
+  ## True when ANY object store in the leaf's object database is a partial
+  ## clone's (``objectStoreIsPartial``) and the leaf's own config names no
+  ## promisor remote. The stores are those git itself reads, so the walk is
+  ## transitive (``borrowedObjectStores``): a leaf whose alternate is a full
+  ## repository that in turn borrows from a ``blob:none`` one advertises that
+  ## one's commits too, and is in the same position as a direct leaf of it.
+  ## Owned or foreign, bare or a non-bare ``.git`` directory, all count. A
+  ## leaf carrying the §3.4 refetch chain (``remote.repro-pool.promisor=
+  ## true``) answers false: the chain already supplies a missing base
+  ## through the pool.
+  ##
+  ## Failing safe means answering false, i.e. running the fetch exactly as
+  ## before this check existed: for an unreadable ``.git`` file (the fetch
+  ## itself reports it), and for an alternates file anywhere in the chain
+  ## that cannot be read. The latter contributes no stores, which is not a
+  ## guess: git skips such a file too, so the stores beyond it are not in
+  ## the leaf's object database and their commits are not advertised. Every
+  ## other branch of the chain is still evaluated.
+  var stores: seq[string]
+  try:
+    stores = borrowedObjectStores(leaf)
+  except IOError, OSError:
+    return false
+  for store in stores:
+    if objectStoreIsPartial(gitBin, store):
+      return not hasPromisorRemoteConfig(gitBin, leaf)
+  false
 
 # -- detector (§4) ------------------------------------------------------------
 
@@ -3355,12 +3533,6 @@ type
     wired*: bool
     verdict*: string
 
-proc alternateObjectDirs*(leaf: string): seq[string] =
-  ## Resolve relative alternates against the object directory, including a
-  ## linked worktree's common store. Keep missing targets visible to health.
-  for entry in readAlternates(leaf):
-    result.add(if entry.isAbsolute: entry
-      else: absolutePath(entry, absolutePath(gitObjectDir(leaf))))
 
 proc sameObjectDirectory(a, b: string): bool =
   ## Existing stores have filesystem identity: a symlink spelling is not a

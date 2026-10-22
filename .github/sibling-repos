@@ -178,7 +178,9 @@ reprobuild-packages=9f981af6c771ce062de810dcdd3affae21857f22
 # flake.nix and flake.lock; 091fa26 is an ancestor.
 # Moved to 8a9a71c (2026-10-21), io-mon's `agents` tip, with `io-mon-src` in
 # flake.nix and flake.lock; 71b4d7c is an ancestor.
-io-mon=8a9a71c9cf75898a83c854898860b9e589e2a264
+# Moved to 4d468bc (2026-10-21), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock; 8a9a71c is an ancestor.
+io-mon=4d468bc585ed10e77b9cfc468924155b6dd107cb
 # Must match `nim-stackable-hooks-src` in flake.nix. `release.yml` overrides
 # that input to THIS clone, so a divergent revision here silently substitutes a
 # different stackable_hooks for the one the flake pins. c6cf6ad, which stood
@@ -215,7 +217,7 @@ nim-stackable-hooks=6082ee94203a5937d3dffe99e5098f644c4799b2
 # (scripts/release/stage_release_runquota.sh), which it exports from this
 # clone, so the clone has to contain it. It was `dev` until 2026-10-20, 14
 # commits behind the pin.
-runquota=4962e37106e318c88626040fbdce4aa0832ff82a
+runquota=f9f1118cd33a27051c6fea683348f343df91e96f
 nim-shm-queue=91451f2250beb89d1d221f0a77be0841c19b182e
 nim-shm-gset=c9048e9a7e0ba2b11c1ec137acc5fc2c0bcfec27
 

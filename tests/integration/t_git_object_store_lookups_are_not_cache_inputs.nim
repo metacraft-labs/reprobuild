@@ -55,8 +55,8 @@
 ## while `HEAD`, `refs/heads/main` and `objects/info/alternates` (and, in the
 ## lookalike control, the lookalike file) must be. That is the classification
 ## itself, and it needs no published record. The reuse half — a second run
-## hitting after the store moved — needs one, and on macOS and Windows there
-## never is: io-mon's `docs/usage.md` ("macOS and Windows limitation
+## hitting after the store moved — needs one, and on macOS there
+## never is: io-mon's `docs/usage.md` ("macOS limitation
 ## (normative)", io-mon 57ce305) makes every capture there carry an
 ## `mrEventLoss` tree-lifetime marker and grade `mcIncomplete`, consumers
 ## MUST conservatively rebuild, and nothing promotes such a capture to
@@ -312,7 +312,7 @@ proc recordedInputsUnder(f: Fixture; edge: BuildAction; dir: string):
 
 proc checkFailsClosed(f: Fixture; edge: BuildAction; r0: ActionResult) =
   ## Where `NoTreeLifetimeGuard` holds, the specified outcome of run 1 in
-  ## place of a published record (io-mon `docs/usage.md`, "macOS and Windows
+  ## place of a published record (io-mon `docs/usage.md`, "macOS
   ## limitation (normative)"): the capture carries this platform's exact
   ## tree-lifetime marker, the engine reports the skip as `monitor-loss`, and
   ## nothing was published — so a later run cannot reuse it and must rebuild.

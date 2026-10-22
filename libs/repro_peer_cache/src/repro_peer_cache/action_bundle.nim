@@ -25,11 +25,15 @@
 ##     blobBytes blobLen bytes — raw CAS payload, digest validated by
 ##                        the reader on decode
 
+import std/tables
+
 from repro_core/codec import elementCountFits
 import repro_hash
 import repro_local_store
 import repro_cas_store
 
+import ./memo_store
+import ./two_phase
 import ./types
 
 type
@@ -146,12 +150,15 @@ proc decodeActionBundle*(payload: openArray[byte]): ActionBundle =
 # ---------------------------------------------------------------------------
 
 proc actionBundleKey*(weakFingerprint: ContentDigest): BlobDigest =
-  ## Derives the peer-cache key for an action's bundle from the
-  ## engine's `weakFingerprint`. This is a stable identifier producer
-  ## and consumer can both compute; both must agree on the
-  ## `weakFingerprint` shape (they do — it's the action-fingerprint
-  ## composition documented in
-  ## `repro_tool_profiles.actionFingerprintFor`).
+  ## Derives the peer-cache WeakFingerprint key from the engine's local
+  ## `weakFingerprint` (a straight byte copy; both are 32-byte digests).
+  ##
+  ## Distributed-Execution M0: this key is used ONLY on the memoization
+  ## plane (`mkGetSelectorsRequest` and the memo store). It is NOT a content
+  ## digest of anything, so it must never be handed to `requestFetch` /
+  ## `mkFetchRequest`: the content plane rejects any payload whose BLAKE3
+  ## differs from the requested digest and marks the serving peer suspect,
+  ## which is exactly what happened when bundles were fetched under this key.
   blobDigestFromBytes(weakFingerprint.bytes)
 
 proc contentHashForBundleBlob(blob: CasBlobRef): ContentHash =
@@ -234,4 +241,107 @@ proc installActionBundle*(cas: var CasStore; cache: var ActionCache;
           "bundle blob size mismatch for output " &
           bundle.record.outputs[i].path)
   cache.appendActionResultRecord(bundle.record)
+  (true, "")
+
+# ---------------------------------------------------------------------------
+# Distributed-Execution M0: install a two-phase lookup result.
+# ---------------------------------------------------------------------------
+
+proc installTwoPhaseBundle*(cas: var CasStore; cache: var ActionCache;
+                            bundle: TwoPhaseBundle;
+                            localWeak: ContentDigest;
+                            policy: FileFingerprintPolicy;
+                            ctx: TwoPhaseContext):
+                            tuple[ok: bool; reason: string] {.gcsafe.} =
+  ## Installs the result of `two_phase.fetchTwoPhase` into the local CAS and
+  ## action cache so the engine's retry `lookupActionResult` hits.
+  ##
+  ## The peer's record is the PRODUCER's: its paths may be `$WORKSPACE`
+  ## markers, its input fingerprints carry the producer's metadata, and its
+  ## weak/strong fingerprints are the producer's LOCAL ones. None of that can
+  ## be appended as-is. What the lookup established is that every input the
+  ## execution observed has the same content here, so the record is re-keyed
+  ## for this host:
+  ##
+  ##   1. paths rebased onto this workspace root;
+  ##   2. every input re-observed HERE under the consumer action's own
+  ##      policy, and its identity checked once more against what the lookup
+  ##      computed (an input edited between lookup and install fails the
+  ##      install instead of pairing old outputs with new content);
+  ##   3. weak fingerprint replaced by the consumer action's, strong
+  ##      fingerprint recomputed from the re-observed inputs.
+  ##
+  ## Output blobs are verified against the record's digests and sizes as
+  ## they are written. Nothing is appended unless every step succeeds, so a
+  ## failed install leaves the next lookup missing cleanly.
+  var entry: MemoEntry
+  var normalized: ActionResultRecord
+  try:
+    entry = decodeMemoEntry(bundle.entryBytes)
+    normalized = decodeActionResultRecord(entry.recordBytes)
+  except CatchableError as err:
+    return (false, "malformed memo entry: " & err.msg)
+  let pathSet = pathSetOf(normalized)
+  if digestOf(bundle.pathSetBytes) != entry.pathSetDigest:
+    return (false, "path set blob does not match the entry's digest")
+  try:
+    if decodePeerPathSet(bundle.pathSetBytes) != pathSet:
+      return (false, "path set blob disagrees with the entry's record")
+  except CatchableError as err:
+    return (false, "malformed path set blob: " & err.msg)
+  if bundle.identities.len != pathSet.len:
+    return (false, "identity count " & $bundle.identities.len &
+      " does not match path set size " & $pathSet.len)
+  if normalized.outputPayloadKind != opkCasBlobs or
+      bundle.blobs.len != normalized.outputs.len:
+    return (false, "bundle blob count " & $bundle.blobs.len &
+      " does not match record outputs " & $normalized.outputs.len)
+  var record: ActionResultRecord
+  try:
+    record = rebaseRecord(normalized, ctx)
+  except CatchableError as err:
+    return (false, "rebase failed: " & err.msg)
+  # Step 2: re-observe and re-check every input.
+  var expected = initTable[string, string]()
+  for i, entry in pathSet:
+    expected[entry] = bundle.identities[i]
+  var inputs: seq[FileFingerprint] = @[]
+  for i, input in record.inputs:
+    let entry = pathSetEntryOf(normalized.inputs[i])
+    let wanted = expected.getOrDefault(entry, "")
+    let location = recordedInputLocation(ctx.cwd, input.path)
+    let id = observedIdentity(location,
+      membershipTrackedDirectory(input.metadata))
+    if id != wanted:
+      return (false, "input changed since lookup: " & input.path)
+    var fresh =
+      try:
+        if membershipTrackedDirectory(input.metadata):
+          observeEnumeratedDirectory(location, policy)
+        else:
+          observeFile(location, policy)
+      except CatchableError as err:
+        return (false, "cannot observe input " & input.path & ": " & err.msg)
+    fresh.path = input.path
+    inputs.add(fresh)
+  record.inputs = inputs
+  record.policy = policy
+  record.weakFingerprint = localWeak
+  try:
+    record.strongFingerprint = computeStrongFingerprint(localWeak,
+      record.inputs, record.envInputs)
+  except CatchableError as err:
+    return (false, "cannot fingerprint installed record: " & err.msg)
+  # The PathSet blob (already verified against the entry above) and the
+  # output payloads, digest- and size-checked as they land.
+  if cas.casPut(bundle.pathSetBytes) != toContentHash(bytes(entry.pathSetDigest)):
+    return (false, "CAS stored the path set blob under another digest")
+  for i, payload in bundle.blobs:
+    let output = record.outputs[i]
+    if uint64(payload.len) != output.blob.sizeBytes:
+      return (false, "bundle blob size mismatch for output " & output.path)
+    let stored = cas.casPut(payload)
+    if stored != contentHashForBundleBlob(output.blob):
+      return (false, "bundle blob digest mismatch for output " & output.path)
+  cache.appendActionResultRecord(record)
   (true, "")

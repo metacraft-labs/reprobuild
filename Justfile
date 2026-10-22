@@ -509,6 +509,13 @@ lint:
     bash ./scripts/check_repo_requirements.sh 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_nim_sources.sh 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_ambient_execution.sh 2>&1 | tee -a test-logs/lint.log
+    # Distributed-Execution M7 (deployment-security-architecture.md CONF-1,
+    # CONF-3, CONF-4): the worker unit carries the confinement floor (every
+    # omission argued in the unit), its syscall additions are the derived
+    # list, and `systemd-analyze security` stays under the committed
+    # threshold. A source check plus an offline analysis — no build — so it
+    # runs here; the Linux CI lint job is where the systemd-analyze half runs.
+    bash ./scripts/check_daemon_worker_unit_confinement.sh 2>&1 | tee -a test-logs/lint.log
     # The "poEvalCommand is not a shell" gate. Same shape as the ambient
     # check above and for the same reason: it is a source scan, so it can
     # answer before anything is compiled. Five defects in one campaign came

@@ -3757,13 +3757,29 @@ proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
     commandStatsId = commandStatsId,
     dependencyPolicy = automaticMonitorPolicy())
 
+proc declaredOutputProjectPath(projectRoot: string; action: BuildActionDef;
+                               output: string): string {.dynOrStatic.} =
+  ## The engine resolves a relative declared output against the action's
+  ## working directory (``normalizedDeclaredActionPath`` in
+  ## ``repro_build_engine``), so an edge that runs in its own directory --
+  ## ``nim.c(runInSourceDir = true)`` -- spells its outputs relative to that
+  ## directory. Index them by the same file here. Inputs are not re-spelled:
+  ## they are materialized against the recipe root.
+  let cwd =
+    if action.cwdKind == acwdRecipeRoot: ""
+    else: action.cwdCustomPath.replace('\\', '/')
+  if cwd.len == 0 or output.len == 0 or output.isAbsolute:
+    return normalizedDeclaredProjectPath(projectRoot, output)
+  normalizedDeclaredProjectPath(projectRoot,
+    normalizedPath(cwd / output).replace('\\', '/'))
+
 proc inferDeclaredActionDeps*(actions: openArray[BuildActionDef];
                               projectRoot = ""): seq[BuildActionDef] {.dynOrStatic.} =
   result = @actions
   var outputProducer = initTable[string, string]()
   for action in actions:
     for output in action.outputs:
-      let normalized = normalizedDeclaredProjectPath(projectRoot, output)
+      let normalized = declaredOutputProjectPath(projectRoot, action, output)
       if normalized.len > 0 and not outputProducer.hasKey(normalized):
         outputProducer[normalized] = action.id
   for i in 0 ..< result.len:

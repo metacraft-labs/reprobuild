@@ -43,22 +43,25 @@ package xvariantprobe:
 
 const WitnessLog = "xvariant-witness.log"
 
-proc extractionCount(actionCacheRoot: string): int =
-  ## Interface-extraction compiles so far, summed over every extraction
-  ## directory (one per identity; another compiler is another identity).
-  for log in walkFiles(actionCacheRoot / "recipe-compiles" / "interface" /
-      "*" / "work" / WitnessLog):
+proc extractionCount(root: string): int =
+  ## Interface-extraction compiles so far, summed over every log under the
+  ## fixture root (one per nimcache configuration; another compiler is
+  ## another configuration).
+  for log in walkDirRec(root):
+    if log.extractFilename != WitnessLog:
+      continue
     for line in readFile(log).splitLines:
       if line.startsWith("extract "):
         inc result
 
 proc writeWitness(dir, name, nim: string): string =
   ## A wrapper around the real `nim` that logs every interface-extraction
-  ## compile. It logs INTO the extraction's own derived scratch tree (two
-  ## levels above its `--nimcache:`, the edge's `work/`), which the edge
-  ## declares machine-local derived state: a log anywhere else is a file the
-  ## extraction writes and does not declare, the S7 gate rightly withholds
-  ## the record's payloads for it, and the fixture would measure itself.
+  ## compile. It logs INTO the extraction's own derived state (two levels
+  ## above its `--nimcache:`, inside the shared interface nimcache root),
+  ## which the edge declares machine-local derived state: a log anywhere
+  ## else is a file the extraction writes and does not declare, the S7 gate
+  ## rightly withholds the record's payloads for it, and the fixture would
+  ## measure itself.
   createDir(dir)
   result = dir / "nim"
   writeFile(result, "#!/bin/sh\n" &
@@ -73,9 +76,10 @@ proc writeWitness(dir, name, nim: string): string =
   setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec})
 
 proc build(reproBin, path, witness, projectRoot, actionCacheRoot,
-           storeRoot: string): tuple[output: string; exitCode: int] =
+           storeRoot, tmp: string): tuple[output: string; exitCode: int] =
   let res = execCmdEx(quoteShellCommand([
     "env",
+    "TMPDIR=" & tmp,
     "PATH=" & path,
     "REPRO_NIM_COMPILER=" & witness,
     "REPROBUILD_STORE_ROOT=" & storeRoot,
@@ -115,6 +119,9 @@ suite "interface extraction variants keep their own outputs":
         let pathC = parentDir(witnessC) & ":" & hostPath
         let actionCacheRoot = tempRoot / "action-cache"
         let storeRoot = tempRoot / "store"
+        # A private temporary directory, so the shared interface nimcache
+        # (and the witness logs inside it) belong to this fixture alone.
+        createDir(tempRoot / "tmp")
         createDir(actionCacheRoot)
         let project = tempRoot / "project"
         createDir(project)
@@ -125,13 +132,13 @@ suite "interface extraction variants keep their own outputs":
           ## Build under one variant; the extraction count after it. A failed
           ## build or a wrong product is collected and asserted below.
           let res = build(reproBin, path, witness, project, actionCacheRoot,
-            storeRoot)
+            storeRoot, tempRoot / "tmp")
           if res.exitCode != 0:
             failures.add(label & " exited " & $res.exitCode & ":\n" &
               res.output)
           elif readFile(project / "out" / "probe.txt") != "probe\n":
             failures.add(label & ": wrong out/probe.txt")
-          extractionCount(actionCacheRoot)
+          extractionCount(tempRoot)
 
         let afterA1 = step("A1", pathA, witnessA)
         let afterB1 = step("B1", pathB, witnessA)

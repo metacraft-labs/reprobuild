@@ -32,8 +32,13 @@
 ## also gives a prompt EOF).
 ##
 ## Runs on every platform. On POSIX the push is started through ``setsid ...
-## </dev/null >/dev/null 2>&1 &``, which gives the child its own stdio; the
-## case pins that this stays so.
+## </dev/null >/dev/null 2>&1 &``, which gives the child its own stdio, with
+## every descriptor above 2 close-on-exec across the launch. Both halves are
+## needed, and this case exercises the second: ``startProcess`` below hands
+## the dispatch the original ends of its pipes at descriptors above 2 (Nim's
+## ``osproc`` does not close them in the child), exactly as a caller that runs
+## ``git commit`` through ``osproc`` does, and those copies are what kept the
+## pipe open when only 0, 1 and 2 were redirected.
 ##
 ## Hermetic: a local bare upstream and a shared bare under one
 ## ``createTempDir``, with ``REPRO_WORKSPACE_CLONES`` pointing into it so the
@@ -297,6 +302,12 @@ suite "post-commit cache push stdio":
       state = drainUntilEof(pipe, 200, output)
       if state == psEof:
         break
+    # EOF can be seen a moment before the dispatch is waitable: an exiting
+    # process closes its descriptors before it becomes a zombie, so
+    # ``peekExitCode`` straight after EOF can still answer -1. Wait, inside
+    # the same deadline, for the exit itself.
+    while dispatch.running and nowMs() < dispatchDeadline:
+      sleep(20)
     let dispatchExit = dispatch.peekExitCode()
     if dispatchExit == -1:
       killProcessTree(dispatch.processID)

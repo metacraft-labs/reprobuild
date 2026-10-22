@@ -728,13 +728,65 @@ proc customRoleNameRejection*(name: string): string =
       "separated by single hyphens"
   ""
 
-proc roleValueRejection(value: BranchRoleValue): string =
+proc looksLikeCommitId(value: string): bool =
+  ## 7–64 lowercase hex characters: a commit id or an abbreviation of one.
+  ## The same heuristic the sync planner and the CLI use to tell a pinned
+  ## `revision` from a branch, so a value they would read as a commit is never
+  ## accepted as a branch here.
+  if value.len < 7 or value.len > 64:
+    return false
+  for ch in value:
+    if ch notin {'0'..'9', 'a'..'f'}:
+      return false
+  true
+
+proc branchNameRejection*(value: string): string =
+  ## Why `value` cannot be the branch a role (or `mainline`, or a v1 `branch`)
+  ## resolves to, or "" when it can.
+  ##
+  ## Workspace-Branch-Roles.md §2 / §3.5: every resolved value is a legal
+  ## argument to `git clone --branch` — a short branch name, never a commit
+  ## (pins live in lock files) and never a fully-qualified ref. The shape
+  ## rules are git's own for a branch, `git check-ref-format --branch`
+  ## (https://git-scm.com/docs/git-check-ref-format), checked here without
+  ## running git so a manifest is refused the same way on every host,
+  ## including one with no git installed.
+  if value.len == 0:
+    return "a branch name must not be empty"
+  for ch in value:
+    if ch.ord < 0x20 or ch.ord == 0x7f or ch == ' ' or ch == '\t':
+      return "'" & value & "' contains whitespace or a control character; " &
+        "a branch name has none"
+  if value.startsWith("refs/"):
+    return "'" & value & "' is a fully-qualified ref; name the branch " &
+      "itself (what follows `refs/heads/`)"
+  if looksLikeCommitId(value):
+    return "'" & value & "' looks like a commit id; a role names a branch, " &
+      "and an exact commit belongs in the lock"
+  for bad in ["~", "^", ":", "?", "*", "[", "\\", "..", "@{", "//"]:
+    if bad in value:
+      return "'" & value & "' contains '" & bad & "', which git forbids in " &
+        "a branch name"
+  if value == "@" or value == "HEAD":
+    return "'" & value & "' is not a branch name"
+  if value[0] in {'-', '/'} or value[^1] in {'/', '.'}:
+    return "'" & value & "' may not begin with '-' or '/', or end with '/' " &
+      "or '.'"
+  for component in value.split('/'):
+    if component.startsWith(".") or component.endsWith(".lock"):
+      return "'" & value & "' has a path component that begins with '.' " &
+        "or ends with '.lock', which git forbids in a branch name"
+  ""
+
+proc roleValueRejection*(value: BranchRoleValue): string =
   ## Why a decoded role value is unusable, or "".
   if value.rejected.len > 0:
     return value.rejected
   if value.kind == brvBranch and value.branch.len == 0:
     return "a role's branch name must not be empty; write `false` to " &
       "declare the tier absent"
+  if value.kind == brvBranch:
+    return branchNameRejection(value.branch)
   ""
 
 proc customRoleTableFromTree*(path, schema, keyPath: string;
@@ -795,6 +847,13 @@ proc checkRepoRoles(path, content, schema: string; fragment: var RepoFragment) =
     # Deliberately NO copy of `branch` into `mainline`: the record keeps the
     # key the file actually used, and `mainlineBranch` (types.nim) is the
     # single place that answers "what is the mainline" for both schemas.
+    # `branch` has always been documented as a branch name only (never a
+    # commit, never a full ref); §3.5 makes that a load-time check.
+    # An empty `branch` has always meant "none declared" in v1 and still does.
+    if fragment.repo.branch.isSome and fragment.repo.branch.get().len > 0:
+      let rejection = branchNameRejection(fragment.repo.branch.get())
+      if rejection.len > 0:
+        raiseManifestError(path, "repo.branch", schema, schema, rejection)
     return
   if "branch" in repoKeys:
     raiseManifestError(path, "repo.branch", schema, schema,
@@ -807,6 +866,10 @@ proc checkRepoRoles(path, content, schema: string; fragment: var RepoFragment) =
     if k notin known:
       raiseManifestError(path, "repo." & k, schema, schema,
         schemaSkewMessage(path, k, "RepoBody"))
+  if fragment.repo.mainline.isSome:
+    let rejection = branchNameRejection(fragment.repo.mainline.get())
+    if rejection.len > 0:
+      raiseManifestError(path, "repo.mainline", schema, schema, rejection)
   for (role, value) in [("unstable", fragment.repo.unstable),
                         ("staging", fragment.repo.staging),
                         ("stable", fragment.repo.stable),

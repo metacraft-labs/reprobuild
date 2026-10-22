@@ -81,8 +81,11 @@ proc run(b: ReprobuildBackend; exe: string; args: seq[string]; cwd: string;
   ## after `timeoutSeconds`. Output is drained as it arrives (`hasData` is a
   ## `select` on the pipe, and `posix.read` returns what is there), so a
   ## chatty child cannot fill the pipe and a silent one cannot outlive its
-  ## deadline. Ambient by necessity for now (see `checkout.git`): the
-  ## executables are the active generation's.
+  ## deadline. It waits at the host's cancellation checkpoint, so a
+  ## cancelled operation's child is terminated (then killed, after a grace
+  ## period) and `OperationCancelled` raised; what it printed is
+  ## discarded with it. Ambient by necessity for now (see `checkout.git`):
+  ## the executables are the active generation's.
   let p = uncontrolledStartProcess(exe, workingDir = cwd, args = args,
                                    env = env, options = {poStdErrToStdOut})
   defer: p.close()
@@ -90,11 +93,22 @@ proc run(b: ReprobuildBackend; exe: string; args: seq[string]; cwd: string;
   var buf: array[4096, char]
   let fd = cint(p.outputHandle)
   let deadline = epochTime() + float(b.timeoutSeconds)
+  template stopCancelled() =
+    p.terminate()
+    let grace = epochTime() + 5
+    while p.running and epochTime() < grace:
+      sleep(10)
+    if p.running:
+      p.kill()
+    discard p.waitForExit()
+    b.raiseCancelled()
   while true:
     if p.hasData:
       let n = posix.read(fd, addr buf[0], buf.len)
       if n > 0:
         output.add buf.toOpenArray(0, n - 1).join("")
+        if b.checkpoint(0):
+          stopCancelled()
         continue
       if n == 0:
         break # EOF: the child closed its output
@@ -109,7 +123,8 @@ proc run(b: ReprobuildBackend; exe: string; args: seq[string]; cwd: string;
       p.kill()
       discard p.waitForExit()
       return (124, output & "\n[killed after " & $b.timeoutSeconds & "s]\n")
-    sleep(10)
+    if b.checkpoint():
+      stopCancelled()
   (p.waitForExit(), output)
 
 proc childEnv(b: ReprobuildBackend; overrides: openArray[(string, string)]):
@@ -361,6 +376,9 @@ proc activate(b: ReprobuildBackend; op: Operation): OpResult =
     return failed("no staged change " & op.target)
   let change = b.staged[op.target]
   let previous = b.driver.current()
+  # The commit point (§"Cancellation"): cancelled before it, the active
+  # generation is untouched; after it, the switch completes or rolls back.
+  b.commit()
   let next = b.driver.switchTo(change)
   for h in change.healthChecks:
     let (ok, why) = b.runHealthCheck(h)

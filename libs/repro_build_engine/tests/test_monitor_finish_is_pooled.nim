@@ -923,7 +923,8 @@ else:
       # because each finish holds the detached-descendant window open for a
       # full grace — and io-mon's guard is a ``/proc`` scan that
       # ``settleMonitorDescendants`` runs ``when defined(linux)`` alone
-      # (macOS and Windows fail closed without a tree-lifetime scan).
+      # (macOS fails closed without a tree-lifetime guard; Windows waits on a
+      # Job Object instead, but this suite does not run on Windows at all).
       # Off Linux a finish
       # holds nothing open, so the one-worker arm's worst delay is the sum of
       # three ordinary finishes: 20.8 ms at load ~21 and 24.7 ms at load ~70,

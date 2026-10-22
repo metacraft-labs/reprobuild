@@ -43,7 +43,7 @@ type
     pending*: seq[PendingApproval]
     running*: string
     lastResults*: seq[tuple[kind: string; status: string; detail: string]]
-    canCancel*: bool           ## something is running
+    canCancel*: bool           ## a running operation can still be stopped
     canRevoke*: bool           ## the session can still be revoked
 
 proc isConflict(r: EvidenceRecord): bool =
@@ -59,7 +59,7 @@ proc surfaceViewOf*(h: Host; sessionId: string;
   let s = h.session(sessionId)
   result = SurfaceView(sessionId: sessionId, provider: s.provider,
     profile: profile, sessionState: s.state, running: s.running,
-    canCancel: s.running.len > 0,
+    canCancel: h.cancellable(sessionId),
     canRevoke: s.state in {ssRequested, ssActive, ssSuspended})
   for g in s.grants:
     result.grants.add $g

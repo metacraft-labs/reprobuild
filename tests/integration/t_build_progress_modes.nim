@@ -22,15 +22,17 @@ proc findRepoRoot(): string =
 proc runBuild(reproBin, repoRoot: string; progressMode: string; workRoot: string;
               actionCacheRoot: string;
               extraArgs: seq[string] = @[]): tuple[output: string; exitCode: int] =
-  ## ``actionCacheRoot`` is chosen by the caller. The real build (step 1) gets
-  ## a cache of its own, so it runs cold and actually executes actions. The
-  ## five ``--dry-run`` steps share ONE further cache that no real build ever
-  ## writes to: a dry run records no action results there, so every one of
-  ## them still lists the same would-run actions (measured: 10 ``Starting:`` /
-  ## 10 ``Finished:`` lines with a fresh cache and with a reused one), but only
-  ## the first pays for compiling reprobuild's own project provider into it.
-  ## A fresh cache per dry run made each of them recompile that provider
-  ## (measured alone: 178 s with a fresh cache vs 12 s reused, same work root).
+  ## ``actionCacheRoot`` is chosen by the caller; every step uses the SAME one.
+  ## The five ``--dry-run`` steps run FIRST: a dry run records no action
+  ## results, so each of them lists the same would-run actions, and the real
+  ## build that follows still finds no record for any of them and executes all
+  ## of them cold (measured at bbe3c30de9: 12 of 12 actions cdMiss/launched
+  ## after the five dry runs). What the dry runs DO leave behind is the
+  ## engine's own recipe compiles -- interface extraction of reprobuild's
+  ## repro.nim and of its three lock-pinned producers, and the provider
+  ## compile -- which the real build then reuses instead of paying for them a
+  ## second time in a cache of its own (measured at bbe3c30de9: about 1300 s
+  ## of CPU each time on a fresh root, versus about 12 s for a warm dry run).
   var args = @[
     reproBin,
     "build",
@@ -67,21 +69,12 @@ suite "t_build_progress_modes":
       defer: removeDir(tempRoot)
       let workRoot = tempRoot / "work"
       createDir(workRoot)
-      let buildCache = tempRoot / "build-cache"
-      createDir(buildCache)
-      let dryRunCache = tempRoot / "dry-run-cache"
-      createDir(dryRunCache)
-
-      # 1. Test `simple-dots` with real execution (cold cache)
-      # We want to see dots representing completion of launched actions.
-      let dotsRes = runBuild(reproBin, repoRoot, "simple-dots", workRoot, buildCache)
-      check dotsRes.exitCode == 0
-      # Verify that dots were output to stderr (captured in output)
-      check dotsRes.output.contains(".")
+      let cacheRoot = tempRoot / "action-cache"
+      createDir(cacheRoot)
 
       # 2. Test `simple-lines` with --dry-run
       # We want to see "Starting: " and "Finished: " lines with elapsed time.
-      let linesRes = runBuild(reproBin, repoRoot, "simple-lines", workRoot, dryRunCache, @["--dry-run"])
+      let linesRes = runBuild(reproBin, repoRoot, "simple-lines", workRoot, cacheRoot, @["--dry-run"])
       check linesRes.exitCode == 0
       check linesRes.output.contains("Starting:")
       check linesRes.output.contains("Finished:")
@@ -89,25 +82,25 @@ suite "t_build_progress_modes":
 
       # 3. Test `live-lines` with --dry-run and --unicode
       # We want to see completed lines ending with unicode checkboxes like [✓]
-      let liveUnicodeRes = runBuild(reproBin, repoRoot, "live-lines", workRoot, dryRunCache, @["--dry-run", "--unicode"])
+      let liveUnicodeRes = runBuild(reproBin, repoRoot, "live-lines", workRoot, cacheRoot, @["--dry-run", "--unicode"])
       check liveUnicodeRes.exitCode == 0
       check liveUnicodeRes.output.contains("[✓]") or liveUnicodeRes.output.contains("[✗]")
 
       # 4. Test `live-lines` with --dry-run and --no-unicode
       # We want to see completed lines ending with ASCII indicators like [OK]
-      let liveAsciiRes = runBuild(reproBin, repoRoot, "live-lines", workRoot, dryRunCache, @["--dry-run", "--no-unicode"])
+      let liveAsciiRes = runBuild(reproBin, repoRoot, "live-lines", workRoot, cacheRoot, @["--dry-run", "--no-unicode"])
       check liveAsciiRes.exitCode == 0
       check liveAsciiRes.output.contains("[OK]") or liveAsciiRes.output.contains("[FAIL]")
 
       # 5. Test `dots` mode with --dry-run
       # We want to see dots representation (bright or pale dots)
-      let paleDotsRes = runBuild(reproBin, repoRoot, "dots", workRoot, dryRunCache, @["--dry-run"])
+      let paleDotsRes = runBuild(reproBin, repoRoot, "dots", workRoot, cacheRoot, @["--dry-run"])
       check paleDotsRes.exitCode == 0
       check paleDotsRes.output.contains(".")
 
       # 6. Test `IN_AGENT_SHELL` override (defaults to quiet mode)
       putEnv("IN_AGENT_SHELL", "1")
-      let agentShellRes = runBuild(reproBin, repoRoot, "", workRoot, dryRunCache, @["--dry-run"])
+      let agentShellRes = runBuild(reproBin, repoRoot, "", workRoot, cacheRoot, @["--dry-run"])
       delEnv("IN_AGENT_SHELL")
       check agentShellRes.exitCode == 0
       # In quiet mode, stdout/stderr progress updates are suppressed
@@ -115,3 +108,11 @@ suite "t_build_progress_modes":
       check not agentShellRes.output.contains("Finished:")
       check not agentShellRes.output.contains("[OK]")
       check not agentShellRes.output.contains("[✓]")
+
+      # 7. Test `simple-dots` with REAL execution, last: the dry runs above
+      # recorded no action, so every action still runs here.
+      # We want to see dots representing completion of launched actions.
+      let dotsRes = runBuild(reproBin, repoRoot, "simple-dots", workRoot, cacheRoot)
+      check dotsRes.exitCode == 0
+      # Verify that dots were output to stderr (captured in output)
+      check dotsRes.output.contains(".")

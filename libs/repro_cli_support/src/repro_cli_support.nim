@@ -1,5 +1,6 @@
 import std/[algorithm, base64, hashes, json, options, os, osproc, sequtils,
-    sets, streams, strtabs, strutils, tables, tempfiles, terminal, times]
+    sets, streams, strtabs, strutils, sysrand, tables, tempfiles, terminal,
+    times]
 
 when defined(windows):
   import std/winlean
@@ -234,6 +235,14 @@ import repro_home_resources/drivers/managed_block
 # concrete configuration and start the peer-cache services so the
 # partition planner has a multicast-discovered registry to lean on.
 import repro_peer_cache
+# Distributed-Execution M0: the disk-backed peer-cache engine hooks and the
+# long-lived peer-cache host `repro-daemon` runs (`peer_cache_wiring.nim`).
+import repro_cli_support/peer_cache_wiring
+# Distributed-Execution M7: the worker role (graph descriptors, ReachGoal
+# derivation, confined execution leases). Qualified-only import: its names
+# (lease, receiver, …) must not shadow anything in this module.
+from repro_distributed_worker as dw import nil
+import std/asyncdispatch
 # Incremental-Test-Runner: the skip/re-run seam (``watchTestEdgeDecision``) the
 # ``--ct-incremental`` watch hook calls on each filesystem-change cycle, and the
 # post-run cache refresh (``recordWatchTestEdge``), are provided by CodeTracer's
@@ -322,27 +331,41 @@ export cli_attest.runAttestCommand, cli_attest.parseAttestArgs,
 # (`peerCacheFetcher` / `peerCachePublisher` / `peerCacheInstaller`) the
 # build path threads through `executeBuildTarget`. The type lives near
 # the top of the file so `runBuildCommand` (defined further down, around
-# line 8900) can reference it; the bodies of
-# `newBuildPeerCacheWiring` / `buildPeerCacheWiringFor` are with the
-# other peer-cache helpers around line 20000, after `parsePeerCache`
+# line 8900) can reference it; the body of `buildPeerCacheWiringFor` is
+# with the other peer-cache helpers further down, after `parsePeerCache`
 # and `startPeerCacheServices` are in scope.
 # ---------------------------------------------------------------------------
 
 type
   BuildPeerCacheWiring* = object
-    reader*: PeerCacheActionCacheReader
+    ## Engine closures for one `repro build` with a peer cache attached, and
+    ## the counters they keep. Distributed-Execution M0: the closures run the
+    ## two-phase lookup/publish against real disk stores
+    ## (`peer_cache_wiring.newPeerCacheEngineHooks`).
     fetcher*: PeerCacheActionFetcher
     publisher*: PeerCacheActionPublisher
     installer*: PeerCacheActionBundleInstaller
+    stats*: PeerCacheWiringStats
+    ownedHost*: PeerCacheHost
+      ## The transient host a direct (non-daemon) build started; stopped when
+      ## the build ends. Nil when the build used the daemon's peer cache.
+    workerClient*: PeerCacheClient
+      ## The short-lived client a daemon build worker dials peers with.
+    workerSession*: WorkerPeerCacheSession
+      ## Distributed-Execution M7: that client's session — the worker's own
+      ## leaf and evidence connection (`startWorkerPeerCacheSession`).
 
+proc withTrustProfile*(spec, profile: string): string
 proc buildPeerCacheWiringFor*(spec: string): BuildPeerCacheWiring
   ## Forward declaration; body lives near the other peer-cache helpers.
 
-proc newBuildPeerCacheWiring*(reader: PeerCacheActionCacheReader;
-                               cas: LocalCas;
-                               cache: ptr ActionCache;
-                               localPeerRegistry: PeerRegistry = nil):
-                               BuildPeerCacheWiring
+proc releaseBuildPeerCacheWiring*(wiring: BuildPeerCacheWiring)
+  ## Forward declaration; body lives near the other peer-cache helpers.
+
+proc peerCacheWorkspaceRootFor*(projectRoot: string): string
+  ## Forward declaration; body lives near the other peer-cache helpers.
+
+proc releaseInheritedDaemonPeerCacheHost*()
   ## Forward declaration; body lives near the other peer-cache helpers.
 
 proc wantsVersion*(args: openArray[string]): bool =
@@ -364,7 +387,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota|--runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota|--runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--peer-cache=none|lan://CIDR[:port][?seeds=HOST:PORT,...&listen=PORT&multicast=0&tls=1&profile=trusted|hardened]] [--trust-profile=trusted|hardened] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
@@ -11159,16 +11182,19 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   let actionId = "__repro_interface_extract-" &
     toHex(weakFingerprintFromText(absolutePath(edgeArtifactPath)).bytes)[0 .. 15]
   # The extraction's own scratch is NOT an input. It reads back what it just
-  # wrote there: the Nim incremental cache (``nimcache-interface``), the
-  # generated extract-runner tree under ``m7-temp`` (a fresh random directory
-  # every invocation), and the runner binary it links and then executes.
+  # wrote there: the generated extract-runner tree under ``m7-temp`` (a
+  # fresh random directory every invocation), and the runner binary it links
+  # and then executes.
   # Recording those as inputs would make the edge miss its cache on every
   # single build — the random directory does not even exist next time — and
   # would turn a correct warm build into a full recompile. Everything under
   # the scratch root is machine-local derived state; the real inputs are the
   # recipe, the reprobuild libs, the toolchain and the config files, all of
   # which live elsewhere and stay recorded.
-  var ignoredInputPrefixes: seq[string] = @[]
+  # The shared, configuration-keyed nimcache outside the action-cache root
+  # (`interfaceExtractionNimcacheRoot`) is the same kind of derived state, and
+  # other extractions rewrite it.
+  var ignoredInputPrefixes = interfaceExtractionIgnoredInputPrefixes()
   if relocatable:
     ignoredInputPrefixes.add(parentDir(edgeArtifact) / "work")
   elif scratchDir.len > 0:
@@ -12010,6 +12036,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       bcCachesConfig.publishTargetScope() == bcCachesConfig.csIntermediate
     # Cache-Scope P3.4: portable (cross-host) caching, when opted in.
     wirePortableCache(engineConfig, reportProjectRoot, outDir)
+    if peerCacheFetcher != nil or peerCachePublisher != nil:
+      # Distributed-Execution M0: what `$WORKSPACE` stands for.
+      engineConfig.peerCacheWorkspaceRoot =
+        peerCacheWorkspaceRootFor(reportProjectRoot)
     # M9.N Batch B: attach the tool-identity resolver closure once
     # the outer scope has resolved the build identity. ``nil`` is
     # the legitimate fast-path-no-identity value — the engine then
@@ -13603,7 +13633,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       stdoutLimit: 1024 * 1024,
       stderrLimit: 1024 * 1024,
       rebuildMissingOutputsOnCacheHit: true,
-      deferLocalOutputBlobs: true,
+      deferLocalOutputBlobs: peerCachePublisher == nil,
       bypassRunQuota: bypassRunQuota,
       fallbackToRunQuotaBypass: fallbackToRunQuotaBypass,
       inlineRunQuota: true,
@@ -13676,6 +13706,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       bcCachesConfig.publishTargetScope() == bcCachesConfig.csIntermediate
     # Cache-Scope P3.4: portable (cross-host) caching, when opted in.
     wirePortableCache(engineConfig, projectRoot, outDir)
+    # Distributed-Execution M0: the peer cache rides BOTH build configs (it
+    # used to ride only `runLoweredGraphBuild`'s, so whether ``--peer-cache``
+    # did anything depended on which path the graph took). A publisher
+    # serves output blobs by digest, hence `deferLocalOutputBlobs` above.
+    engineConfig.peerCacheActionFetcher = peerCacheFetcher
+    engineConfig.peerCacheActionPublisher = peerCachePublisher
+    engineConfig.peerCacheActionInstaller = peerCacheInstaller
+    if peerCacheFetcher != nil or peerCachePublisher != nil:
+      engineConfig.peerCacheWorkspaceRoot = peerCacheWorkspaceRootFor(projectRoot)
     # M9.N Batch B: attach the tool-identity resolver closure here
     # too. ``identity`` is in scope at this site (the main inline
     # build path resolves it before reaching here); the closure
@@ -14507,6 +14546,16 @@ proc valueFromFlag(args: openArray[string]; i: var int; flag: string): string =
     inc i
     return args[i]
   ""
+
+proc acceptTrustProfileFlag*(seen: var bool; value: string): string =
+  ## Distributed-Execution M7: `--trust-profile=` names THE profile of the
+  ## node a command starts, so a second one is refused — never resolved by
+  ## position, the same rule as two `profile=` keys in a `lan://` spec.
+  if seen:
+    raise newException(ValueError, "--trust-profile given more than once " &
+      "(one profile per node; it is never resolved by position)")
+  seen = true
+  value
 
 type
   ReportSpec* = object
@@ -23564,7 +23613,20 @@ proc emitLeafReports(reports: openArray[LeafCheckReport]) =
   ## a pool or runs the detector routes its findings here, so a stale ref
   ## that was removed, or a branch of the user's whose history is gone, is
   ## said once, in the same words, whichever command noticed it.
-  for line in messages(reports):
+  ##
+  ## Whatever the command has already written to stdout is flushed first.
+  ## Into a pipe, C stdio buffers stdout in blocks (4096 bytes on glibc)
+  ## while stderr is unbuffered, so a caller reading both streams on one
+  ## pipe got the first block of the report, then these messages, then the
+  ## rest -- with the messages spliced into whichever row straddled the
+  ## block boundary (`repro health`'s `shared-clone-leaves` row, for one).
+  ## Flushing here keeps every row whole and puts the messages after the
+  ## report they explain.
+  let reportLines = messages(reports)
+  if reportLines.len == 0:
+    return
+  stdout.flushFile()
+  for line in reportLines:
     stderr.writeLine(line)
 
 proc runManifestRefreshHookCommand*(hookName: string;
@@ -28965,6 +29027,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # ``BuildEngineConfig`` peer-cache fields; the legacy local-only
   # flow is byte-for-byte preserved when the flag is absent.
   var peerCacheSpec = ""
+  var trustProfileFlag = ""
+  var trustProfileSeen = false
   var i = 0
   while i < args.len:
     let arg = args[i]
@@ -29133,6 +29197,13 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       setUnicodeOverride(false)
     elif arg == "--peer-cache" or arg.startsWith("--peer-cache="):
       peerCacheSpec = valueFromFlag(args, i, "--peer-cache")
+    elif arg == "--trust-profile" or arg.startsWith("--trust-profile="):
+      try:
+        trustProfileFlag = acceptTrustProfileFlag(trustProfileSeen,
+          valueFromFlag(args, i, "--trust-profile"))
+      except ValueError as err:
+        stderr.writeLine("repro build: " & err.msg)
+        return 2
     elif arg == "--lock" or arg.startsWith("--lock="):
       # MO-1 alternate committed lock, generalised by Named-Lock-Files §5.1.
       # ``--lock-slice`` is a distinct flag handled elsewhere; the exact
@@ -29512,10 +29583,22 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     # ``startPeerCacheServices``) are in scope.
     let peerCacheBuildWiring =
       try:
-        buildPeerCacheWiringFor(peerCacheSpec)
+        buildPeerCacheWiringFor(withTrustProfile(peerCacheSpec,
+          trustProfileFlag))
       except CatchableError as exc:
         stderr.writeLine("repro build: error: " & exc.msg)
         return 2
+    defer:
+      # Distributed-Execution M0: say what the peer cache did, then end the
+      # build-scoped peer-cache pieces (a daemon's own node keeps running).
+      let summary = peerCacheSummaryLine(peerCacheBuildWiring.stats)
+      if summary.len > 0 and logMode != blmQuiet:
+        if eventSink != nil:
+          try: eventSink("diagnostic", summary & "\n", "{}")
+          except CatchableError: discard
+        else:
+          stdout.writeLine(summary)
+      releaseBuildPeerCacheWiring(peerCacheBuildWiring)
     try:
       result = executeBuildTarget(target, mode, publicCliPath,
         selectDefaultAction = targetWasOmitted,
@@ -38353,7 +38436,7 @@ proc runUserDaemonCliCommand(args: seq[string]): int =
   if args.len == 0:
     echo "usage: repro daemon {status | start | stop | restart | logs | sessions} " &
       "[--foreground] [--dev] [--endpoint PATH] [--state-dir PATH] " &
-      "[--log PATH]"
+      "[--log PATH] [--peer-cache lan://CIDR[:port][?seeds=HOST:PORT,...&listen=PORT]]"
     return 2
   let action = args[0]
   let rest = if args.len > 1: args[1 .. ^1] else: @[]
@@ -39052,6 +39135,9 @@ proc installUserDaemonBuildExecutor() =
   setUserDaemonBuildExecutor(proc(request: UserDaemonBuildRequest;
       emit: UserDaemonBuildEmit;
       cancelCheck: UserDaemonBuildCancelCheck): int =
+    # Distributed-Execution M0: a forked worker must not drive the daemon's
+    # peer-cache sockets or its async dispatcher; let go of both first.
+    releaseInheritedDaemonPeerCacheHost()
     let previousCwd = enterDaemonRequestDirectory(request.workingDir)
     var previousEnv: seq[tuple[key: string; value: string; present: bool]] = @[]
     try:
@@ -39204,6 +39290,7 @@ proc installUserDaemonWatchExecutor() =
   setUserDaemonWatchExecutor(proc(request: UserDaemonWatchRequest;
       emit: UserDaemonWatchEmit;
       cancelCheck: UserDaemonWatchCancelCheck): int =
+    releaseInheritedDaemonPeerCacheHost()
     let previousCwd = enterDaemonRequestDirectory(request.workingDir)
     var previousEnv: seq[tuple[key: string; value: string; present: bool]] = @[]
     try:
@@ -54762,7 +54849,8 @@ proc parsePostCommitArgs(args: openArray[string]):
 # runs detached with stdio redirected away, so it survives the
 # post-commit process exiting.
 #
-#   * POSIX: a new session via ``setsid ... &`` with stdio to /dev/null.
+#   * POSIX: a new session via ``setsid ... &`` with stdio to /dev/null,
+#     and no other descriptor of the hook inherited.
 #   * Windows (W4): a SHELL-FREE detached child — ``CreateProcessW`` with
 #     a hidden console, stdio bound to ``NUL`` and no other handle
 #     inherited. No ``cmd.exe``, no ``start /b``. See
@@ -55080,7 +55168,8 @@ proc spawnAsyncCachePush(repoRoot, workspaceName: string) =
   ##   * POSIX: ``sh -c "setsid … &"`` — new session, stdio to /dev/null.
   ##     ``quoteShell`` on POSIX IS ``sh``'s own quoting convention, so
   ##     the shell round trip is lossless and the shell is doing real work
-  ##     (``setsid`` + the ``&`` background fork).
+  ##     (``setsid`` + the ``&`` background fork). The redirections cover
+  ##     0, 1 and 2, and no other descriptor of the hook crosses the launch.
   ##   * Windows (W4): ``CreateProcessW`` with stdio to ``NUL`` and no
   ##     other handle inherited, straight from ``spec.argv``. No shell is
   ##     involved, so no quoting convention has to survive a second
@@ -55101,7 +55190,26 @@ proc spawnAsyncCachePush(repoRoot, workspaceName: string) =
     when defined(windows):
       discard spawnDetachedNoShell(spec.argv)
     else:
-      discard execShellCmd("sh -c " & q(spec.shellInvocation))
+      # NO DESCRIPTOR ABOVE 2 CROSSES THE LAUNCH. The shell's redirections
+      # give the detached push its own 0, 1 and 2, but every other
+      # descriptor this hook inherited without ``FD_CLOEXEC`` would pass
+      # through ``sh`` and ``setsid`` into a process that lives until the
+      # push, and any shared-bare gc after it, finishes. Such copies are
+      # routine: a caller that runs ``git commit`` through Nim's
+      # ``osproc.startProcess`` hands git -- and so this hook -- the
+      # original ends of its stdio pipes at descriptors above 2 (see
+      # ``repro_core/descriptor_inheritance``). The push then held the
+      # caller's output pipe open, and the caller saw no end of file until
+      # the push ended. This is the POSIX half of the rule
+      # ``spawnDetachedNoShell`` applies on Windows by inheriting no other
+      # handle. Only the flag moves, for this one launch, and it is put
+      # back afterwards; the hook dispatch starts no child from another
+      # thread inside that window.
+      let madeCloseOnExec = markInheritableDescriptorsCloseOnExec()
+      try:
+        discard execShellCmd("sh -c " & q(spec.shellInvocation))
+      finally:
+        restoreInheritableDescriptors(madeCloseOnExec)
   except CatchableError:
     discard
 
@@ -60109,7 +60217,10 @@ proc classifyRepoPathVisibility(workspaceRoot: string;
       continue
     var layerResolved: ResolvedProject
     try:
-      layerResolved = resolveProject(projectFile)
+      # Roles resolve against the WORKSPACE's settings, as the composer
+      # resolves them, including for a `local_path` layer outside the root.
+      layerResolved = resolveProject(projectFile,
+        workspaceRoleSettings(workspaceRoot))
     except CatchableError:
       # Re-resolution failure here is non-fatal for M26: the strict
       # composer path (the rest of the gate) would already have surfaced
@@ -62097,7 +62208,8 @@ type
 proc verifyDetachedCertificateSignature*(payload, publicKey,
                                          signatureValue: string;
     namespace = certificateSignatureNamespace;
-    identity = "test-certificate-verifier@example.invalid"): SignatureCheck =
+    identity = "test-certificate-verifier@example.invalid";
+    verifyTime = ""): SignatureCheck =
   ## The signature PRIMITIVE (Standard §6.1): does this base64 detached SSH
   ## signature check out over exactly these payload bytes, against this public
   ## key, under this namespace?
@@ -62114,6 +62226,16 @@ proc verifyDetachedCertificateSignature*(payload, publicKey,
   ## ``identity`` selects a line in the allowed-signers file and nothing else:
   ## an SSH signature blob binds the NAMESPACE and the PUBLIC KEY, not a
   ## principal.
+  ##
+  ## ``verifyTime`` (``YYYYMMDDHHMMSSZ``), when given, is the instant a
+  ## CERTIFICATE-signed signature is judged at (``ssh-keygen -O
+  ## verify-time``). Distributed-Execution M7: a worker signs with a
+  ## short-lived SSH certificate issued by its per-host signing CA (the
+  ## registered key is then ``cert-authority <CA key>``); the certificate is
+  ## checked against the record's own ``issued_at``, so it verifies after the
+  ## one-hour certificate has expired — and a stolen certificate key can
+  ## only produce records dated inside its own hour. A plain key has no
+  ## validity window and is unaffected.
   let sshKeygen = sshKeygenBinary()
   if sshKeygen.len == 0:
     return scToolingUnavailable
@@ -62132,10 +62254,26 @@ proc verifyDetachedCertificateSignature*(payload, publicKey,
   # that is a no-op on Windows (see ``runFeedingStdin``), which made every
   # signature verify against an EMPTY payload and therefore fail — no
   # certificate has ever been trusted on Windows.
-  let res = runFeedingStdin(sshKeygen, @["-Y", "verify",
+  var verifyArgs = @["-Y", "verify",
     "-f", allowedSigners, "-I", identity,
-    "-n", namespace, "-s", sigFile], payload)
+    "-n", namespace, "-s", sigFile]
+  if verifyTime.len > 0:
+    verifyArgs.add("-O")
+    verifyArgs.add("verify-time=" & verifyTime)
+  let res = runFeedingStdin(sshKeygen, verifyArgs, payload)
   if res.code == 0: scValid else: scInvalid
+
+proc sshVerifyTimeOf*(issuedAt: string): string =
+  ## ``2026-10-18T12:34:56Z`` -> ``20261018123456Z`` (``ssh-keygen -O
+  ## verify-time``); "" for anything else (the certificate is then judged at
+  ## the current time, which only ever rejects more).
+  if issuedAt.len != 20 or issuedAt[^1] != 'Z' or issuedAt[10] != 'T':
+    return ""
+  result = issuedAt[0 ..< 4] & issuedAt[5 ..< 7] & issuedAt[8 ..< 10] &
+    issuedAt[11 ..< 13] & issuedAt[14 ..< 16] & issuedAt[17 ..< 19] & "Z"
+  for ch in result[0 ..< 14]:
+    if ch notin Digits:
+      return ""
 
 proc verifyCertificateSignature*(cert: TestCertificate;
                                  store: RegisteredKeyStore): SignatureVerdict =
@@ -62160,9 +62298,16 @@ proc verifyCertificateSignature*(cert: TestCertificate;
   # The allowed-signers file ties THIS key_id's registered public key to the
   # principal we verify as, so a signature made by a DIFFERENT key (even a
   # registered one under another id) does not verify for this key_id.
+  # A ``cert-authority`` registration (a worker's per-host signing CA,
+  # Distributed-Execution M7) is judged at the record's own issuance time;
+  # a plain key is verified exactly as before.
+  let verifyTime =
+    if signer.publicKey.startsWith("cert-authority"):
+      sshVerifyTimeOf(cert.issuedAt)
+    else: ""
   case verifyDetachedCertificateSignature(canonicalCertificatePayload(cert),
       signer.publicKey, cert.signature.value,
-      identity = allowedSignerIdentity(cert.keyId))
+      identity = allowedSignerIdentity(cert.keyId), verifyTime = verifyTime)
   of scValid: svValid
   of scToolingUnavailable: svToolingUnavailable
   of scInvalid: svBadSignature
@@ -78612,12 +78757,23 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     # The ROOT repo carries the membership manifests, so cutting it from a stale
     # local state while every member repo starts at trunk would hand back a
     # workspace whose bill of materials disagrees with its contents. Its
-    # mainline is a declaration too: the settings file's ``[workspace]``
-    # mainline (or its profile's; Workspace-Branch-Roles.md §3.4) — for the
-    # old ``.repro-workspace.toml``, its ``[manifest] branch`` when
-    # ``[manifest] url`` is absent or names the root repo itself — else the
-    # root repo's own ``origin/HEAD``.
+    # mainline is a declaration too (Workspace-Branch-Roles.md §3.4):
+    #
+    #   * ``repro-workspace.toml`` (``settings.v1``): resolved from
+    #     ``[workspace]`` — its ``mainline``, else its profile's, else the
+    #     default profile's — and NOTHING else. A settings file that declares
+    #     no root mainline is refused naming the file and
+    #     ``workspace.mainline``; the root repo's ``origin/HEAD`` is never
+    #     consulted, because inferring a mainline from it is the inference the
+    #     roles model forbids for every repo, the root included.
+    #   * the old ``.repro-workspace.toml`` (``bootstrap.v1``), or no settings
+    #     file at all: unchanged — ``[manifest] branch`` when ``[manifest]
+    #     url`` is absent or names the root repo itself, else ``origin/HEAD``.
+    #     Neither can declare ``[workspace]``, so §3.4's rule has nothing to
+    #     read there; it takes over when the workspace migrates to the new
+    #     file, and the fallback goes when the old name is retired.
     let bootstrapPath = findBootstrapConfigPath(parsed.workspaceRoot)
+    var rootDeclaresRoles = false
     if bootstrapPath.len > 0:
       # A settings file that exists but does not parse raises the strict
       # reader's diagnostic: falling through to ``origin/HEAD`` would cut the
@@ -78632,17 +78788,24 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       # A root without an ``origin`` URL cannot be shown to BE the store, so a
       # declared store URL then counts as separate.
       var legacyStoreIsRoot = settings.records.url.isNone
-      if not legacyStoreIsRoot:
+      if settings.isLegacySettings and not legacyStoreIsRoot:
         let originUrl = gitRunPlain(identity,
           ["-C", parsed.workspaceRoot, "remote", "get-url", "origin"])
         legacyStoreIsRoot = originUrl.code == 0 and
           originUrl.output.strip().len > 0 and
           canonicalRemoteIdentity(originUrl.output.strip()) ==
             canonicalRemoteIdentity(settings.records.url.get())
-      let declared = rootMainline(settings, legacyStoreIsRoot)
-      if declared.isSome:
-        rootMainlineBranch = declared.get().strip()
-    if rootMainlineBranch.len == 0:
+      if settings.isLegacySettings:
+        let declared = rootMainline(settings, legacyStoreIsRoot)
+        if declared.isSome:
+          rootMainlineBranch = declared.get().strip()
+      else:
+        rootDeclaresRoles = true
+        try:
+          rootMainlineBranch = rootMainline(settings, legacyStoreIsRoot).get()
+        except WorkspaceManifestParseError as err:
+          rootMainlineRefusal = err.msg
+    if rootMainlineBranch.len == 0 and not rootDeclaresRoles:
       let headRef = gitRunPlain(identity,
         ["-C", parsed.workspaceRoot, "symbolic-ref", "--short", "-q",
          "refs/remotes/origin/HEAD"])
@@ -78651,13 +78814,14 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         rootMainlineBranch =
           if value.startsWith("origin/"): value["origin/".len .. ^1]
           else: value
-    if rootMainlineBranch.len == 0:
+    if rootMainlineBranch.len == 0 and rootMainlineRefusal.len == 0:
       rootMainlineRefusal = "the workspace root '" & parsed.workspaceRoot &
-        "' declares no mainline: `" & settingsFileName & "` sets no " &
-        "`[workspace] mainline` (the old `.repro-workspace.toml`: no " &
-        "`[manifest] branch` for a record store that is the root repo itself) " &
-        "and the root repo has no `origin/HEAD` to read " &
-        "one from. Set `[workspace] mainline`, or drop `--from-mainlines`"
+        "' declares no mainline: it has no `" & settingsFileName & "` to " &
+        "declare `[workspace] mainline` in, the old `.repro-workspace.toml` " &
+        "(if any) sets no `[manifest] branch` for a record store that is the " &
+        "root repo itself, and the root repo has no `origin/HEAD` to read one " &
+        "from. Declare `[workspace] mainline` in `" & settingsFileName &
+        "`, or drop `--from-mainlines`"
 
   if parsed.fromMainlines and parsed.fetch:
     var fetchActions: seq[BuildAction]
@@ -79616,6 +79780,41 @@ proc modeName*(kind: PeerCacheSpecKind): string =
   of pcsLan: "lan"
   of pcsRemote: "remote"
 
+proc withTrustProfile*(spec, profile: string): string =
+  ## Distributed-Execution M7: applies ``--trust-profile=<profile>`` to a
+  ## ``lan://`` spec as its ``profile=`` parameter. Empty `profile` leaves
+  ## the spec alone (the default is ``trusted``). Raises `ValueError` for an
+  ## unknown profile, for a non-``lan://`` spec, and for a spec whose own
+  ## ``profile=`` says otherwise — a conflict is an error, never a silent
+  ## choice of one.
+  if profile notin ["", "trusted", "hardened"]:
+    raise newException(ValueError,
+      "invalid --trust-profile: " & profile & " (expected trusted|hardened)")
+  if profile.len == 0 or spec.len == 0 or spec == "none":
+    return spec
+  if profile notin ["trusted", "hardened"]:
+    raise newException(ValueError,
+      "invalid --trust-profile: " & profile & " (expected trusted|hardened)")
+  if not spec.startsWith("lan://"):
+    raise newException(ValueError,
+      "--trust-profile applies to a lan:// peer-cache spec, not: " & spec)
+  let q = spec.find('?')
+  if q >= 0:
+    var own: seq[string] = @[]
+    for piece in spec[q + 1 .. ^1].split('&'):
+      if piece.startsWith("profile="):
+        own.add(piece)
+    if own.len > 1:
+      raise newException(ValueError, "the peer-cache spec names " &
+        $own.len & " profile= keys (" & own.join(", ") & "); one is allowed")
+    if own.len == 1:
+      if own[0] != "profile=" & profile:
+        raise newException(ValueError, "--trust-profile=" & profile &
+          " conflicts with the spec's " & own[0])
+      return spec
+    return spec & "&profile=" & profile
+  spec & "?profile=" & profile
+
 proc parsePeerCache*(spec: string): PeerCacheSpecResult =
   ## Peer-Cache M2: parser for the ``--peer-cache=`` flag. Recognises
   ## the three forms documented in
@@ -79644,22 +79843,179 @@ proc parsePeerCache*(spec: string): PeerCacheSpecResult =
     return
   if spec.startsWith("lan://"):
     var arg = spec[len("lan://") .. ^1]
-    # Peer-Cache-BearSSL M4: strip an optional ``?tls=1`` query knob
-    # before parsing the CIDR + port. When present, populate the
-    # ``tlsCertPath`` / ``tlsKeyPath`` / ``tlsTrustAnchorsPath`` fields
-    # from ``XDG_STATE_HOME/repro-peer-cache/tls/`` and flip the trust
-    # mode to ``tmTls``. Any other query knob is rejected.
-    var enableTls = false
+    # Peer-Cache-BearSSL M4 introduced the ``?tls=1`` query knob; since
+    # Distributed-Execution M7 closed deviation D3 every node is a TLS node:
+    # the ``tlsCertPath`` / ``tlsKeyPath`` / ``tlsTrustAnchorsPath`` fields
+    # come from ``XDG_STATE_HOME/repro-peer-cache/tls/`` and the trust mode
+    # is ``tmTls`` whether or not ``tls=1`` is written. CIDR-only trust is
+    # removed (a loopback CIDR node served the content plane to every local
+    # user, not just its owner), so ``tls=0`` is refused rather than
+    # honoured. Any other unknown query knob is rejected too.
+    # Distributed-Execution M0 knobs:
+    #   ``seeds=host:port[,host:port…]`` — unicast seed peers, dialled in
+    #     addition to (or, with ``multicast=0``, instead of) multicast
+    #     discovery (`Peer-Cache.md` §"Discovery model" mode 1);
+    #   ``listen=PORT`` — fixed TCP listen port (default 0 = ephemeral);
+    #   ``multicast=0`` — do not join or broadcast on the multicast group.
+    #
+    # Distributed-Execution M7 knobs (deployment-security-architecture.md):
+    #   ``bind=<interface|address>`` — the interface the listener binds
+    #     (FLOW-6). Absent = loopback only. Wildcards are refused.
+    #   ``evidence=host:port`` — the off-host evidence sink (FLOW-2 audit,
+    #     DET-*). Required for a non-loopback listener.
+    #   ``grants=<path>`` — per-host role grants (FLOW-4).
+    #   ``heartbeat=<ms>`` — detector heartbeat interval (DET-5).
+    #   ``worker=1`` — hold the worker role (answer ReachGoal).
+    #   ``multicast=1`` — opt IN to multicast discovery (now off by default).
+    #   ``signer=host:port`` — the certificate signer (EDGE-5, threat model
+    #     D5); the worker holds no signing credential of its own.
+    #   ``evidence-queue=<n>`` — records queued while the sink is slow.
+    #   ``lease-memory=<bytes>`` — per-lease memory limit when the worker's
+    #     cgroup is delegated (G31).
+    var seeds: seq[Endpoint] = @[]
+    var listenPort = 0'u16
+    var multicastDisabled = true
+    var bindSpec = ""
+    var evidenceSpec = ""
+    var grantsPath = ""
+    var heartbeatMs = 0
+    var workerEnabled = false
+    var workerReposPath = ""
+    var workerEgress: seq[string] = @[]
+    var signerSpec = ""
+    var evidenceQueueMax = 0
+    var leaseMemoryMax = 0'i64
+    var trustProfile = tpTrusted
+    var profileSeen = false
     let queryIdx = arg.find('?')
     if queryIdx >= 0:
       let query = arg[queryIdx + 1 .. ^1]
       arg = arg[0 ..< queryIdx]
       for piece in query.split('&'):
+        if piece.startsWith("seeds="):
+          for item in piece[len("seeds=") .. ^1].split(','):
+            if item.len == 0:
+              continue
+            let colon = item.rfind(':')
+            if colon <= 0:
+              result.ok = false
+              return
+            try:
+              let port = parseInt(item[colon + 1 .. ^1])
+              if port < 1 or port > 65535:
+                result.ok = false
+                return
+              seeds.add(initEndpoint(item[0 ..< colon], Port(uint16(port))))
+            except ValueError:
+              result.ok = false
+              return
+          continue
+        if piece.startsWith("bind="):
+          bindSpec = piece[len("bind=") .. ^1]
+          if bindSpec.len == 0 or isWildcard(bindSpec):
+            result.ok = false
+            return
+          continue
+        if piece.startsWith("evidence="):
+          evidenceSpec = piece[len("evidence=") .. ^1]
+          if evidenceSpec.rfind(':') <= 0:
+            result.ok = false
+            return
+          continue
+        if piece.startsWith("grants="):
+          grantsPath = piece[len("grants=") .. ^1]
+          continue
+        if piece.startsWith("repos="):
+          workerReposPath = piece[len("repos=") .. ^1]
+          continue
+        if piece.startsWith("egress="):
+          for item in piece[len("egress=") .. ^1].split(','):
+            if item.len == 0:
+              continue
+            let at = item.find('@')
+            if at <= 0 or item.rfind(':') <= at:
+              result.ok = false
+              return
+            workerEgress.add(item)
+          continue
+        if piece.startsWith("signer="):
+          signerSpec = piece[len("signer=") .. ^1]
+          if signerSpec.rfind(':') <= 0:
+            result.ok = false
+            return
+          continue
+        if piece.startsWith("evidence-queue="):
+          try:
+            evidenceQueueMax = parseInt(piece[len("evidence-queue=") .. ^1])
+            if evidenceQueueMax < 1:
+              result.ok = false
+              return
+          except ValueError:
+            result.ok = false
+            return
+          continue
+        if piece.startsWith("profile="):
+          # One profile per spec: two `profile=` keys are refused, never
+          # resolved by position (a later key silently overriding an
+          # earlier one would let a spec read as trusted run hardened, or
+          # the reverse).
+          if profileSeen:
+            result.ok = false
+            return
+          profileSeen = true
+          case piece[len("profile=") .. ^1]
+          of "trusted": trustProfile = tpTrusted
+          of "hardened": trustProfile = tpHardened
+          else:
+            result.ok = false
+            return
+          continue
+        if piece.startsWith("lease-memory="):
+          try:
+            leaseMemoryMax = parseBiggestInt(piece[len("lease-memory=") .. ^1])
+            if leaseMemoryMax < 16 * 1024 * 1024:
+              result.ok = false
+              return
+          except ValueError:
+            result.ok = false
+            return
+          continue
+        if piece.startsWith("heartbeat="):
+          try:
+            heartbeatMs = parseInt(piece[len("heartbeat=") .. ^1])
+            if heartbeatMs < 50:
+              result.ok = false
+              return
+          except ValueError:
+            result.ok = false
+            return
+          continue
+        if piece.startsWith("listen="):
+          try:
+            let port = parseInt(piece[len("listen=") .. ^1])
+            if port < 0 or port > 65535:
+              result.ok = false
+              return
+            listenPort = uint16(port)
+          except ValueError:
+            result.ok = false
+            return
+          continue
         case piece
-        of "tls=1":
-          enableTls = true
-        of "tls=0", "":
+        of "tls=1", "":
           discard
+        of "tls=0":
+          # CIDR-only trust is removed (Distributed-Execution M7, D3).
+          result.ok = false
+          return
+        of "multicast=0":
+          multicastDisabled = true
+        of "multicast=1":
+          multicastDisabled = false
+        of "worker=1":
+          workerEnabled = true
+        of "worker=0":
+          workerEnabled = false
         else:
           result.ok = false
           return
@@ -79705,17 +80061,34 @@ proc parsePeerCache*(spec: string): PeerCacheSpecResult =
       cidrAllowlistRaw: @[cidrPart],
       advertiseIntervalMs: DefaultAdvertiseIntervalMs,
       pingIntervalMs: DefaultPingIntervalMs,
-      maxBlobBytes: DefaultMaxBlobBytes)
-    if enableTls:
-      let envState = getEnv("XDG_STATE_HOME")
-      let stateRoot =
-        if envState.len > 0: envState
-        else: getHomeDir() / ".local" / "state"
-      let tlsDir = stateRoot / "repro-peer-cache" / "tls"
-      cfg.trustMode = tmTls
-      cfg.tlsCertPath = tlsDir / "peer.crt"
-      cfg.tlsKeyPath = tlsDir / "peer.key"
-      cfg.tlsTrustAnchorsPath = tlsDir / "anchors"
+      maxBlobBytes: DefaultMaxBlobBytes,
+      listenPort: listenPort,
+      multicastDisabled: multicastDisabled,
+      bindSpec: bindSpec,
+      evidenceSinkSpec: evidenceSpec,
+      grantsPath: grantsPath,
+      heartbeatIntervalMs: heartbeatMs,
+      workerEnabled: workerEnabled,
+      workerReposPath: workerReposPath,
+      workerEgress: workerEgress,
+      signerSpec: signerSpec,
+      evidenceQueueMax: evidenceQueueMax,
+      leaseMemoryMax: leaseMemoryMax,
+      trustProfile: trustProfile)
+    cfg.seedPeers = seeds
+    let envState = getEnv("XDG_STATE_HOME")
+    let stateRoot =
+      if envState.len > 0: envState
+      else: getHomeDir() / ".local" / "state"
+    let tlsDir = stateRoot / "repro-peer-cache" / "tls"
+    cfg.trustMode = tmTls
+    # Distributed-Execution M7: the persistent credential is the HOST CA
+    # (`identity.nim`); what goes on the wire is a short-lived leaf it
+    # mints. Distinct file names from the pre-M7 self-signed `peer.crt`,
+    # which `loadOrCreateHostIdentity` would refuse to reuse.
+    cfg.tlsCertPath = tlsDir / "host-ca.crt"
+    cfg.tlsKeyPath = tlsDir / "host-ca.key"
+    cfg.tlsTrustAnchorsPath = tlsDir / "anchors"
     result.config = cfg
     return
   # Unrecognised prefix.
@@ -79740,6 +80113,8 @@ type
     server*: PeerCacheServer
     client*: PeerCacheClient
     registry*: PeerRegistry
+    host*: PeerCacheHost
+      ## Distributed-Execution M0: the node the three fields above belong to.
 
 var lastStartedPeerCacheRuntime*: PeerCacheRuntime
   ## Peer-Cache M2 test seam: the most recent `PeerCacheRuntime` started
@@ -79749,219 +80124,812 @@ var lastStartedPeerCacheRuntime*: PeerCacheRuntime
   ## production code path doesn't read this variable; it exists purely
   ## for in-process introspection from the verification harness.
 
+proc runtimeOf(host: PeerCacheHost): PeerCacheRuntime =
+  PeerCacheRuntime(server: host.server, client: host.client,
+                   registry: host.registry, host: host)
+
 proc startPeerCacheServices*(config: PeerCacheConfig;
                             selfPeerId: PeerId;
-                            listenAddr: string = "0.0.0.0"):
+                            listenAddr: string = ""):
                             PeerCacheRuntime =
-  ## Boots the peer-cache TCP server + multicast receiver and the
-  ## client-side multicast broadcaster from a parsed `PeerCacheConfig`.
-  ## The CIDR allowlist is converted from the parser's raw strings to
-  ## typed `CidrV4` values here so any drift between the parser and
-  ## the server's matcher surfaces as a single diagnostic at start
-  ## time.
-  let endpoint = initEndpoint(listenAddr, Port(0))
-  result.registry = newPeerRegistry(selfPeerId, endpoint)
-  var allowlist: seq[CidrV4] = @[]
-  for cidrStr in config.cidrAllowlistRaw:
-    allowlist.add(parseCidrV4(cidrStr))
-  result.server = newPeerCacheServer(
-    selfPeerId = selfPeerId,
-    listenAddr = listenAddr,
-    listenPort = Port(0),
-    registry = result.registry,
-    cidrAllowlist = allowlist,
-    maxBlobBytes = config.maxBlobBytes)
-  result.server.start()
-  if config.discoveryMode == pdmMulticast:
-    result.server.multicastListen(config.multicastGroup)
-  result.client = newPeerCacheClient(
-    selfPeerId = selfPeerId,
-    listenPort = uint16(result.server.actualPort),
-    registry = result.registry,
-    seedPeers = config.seedPeers,
-    cidrAllowlist = allowlist,
-    advertiseIntervalMs = config.advertiseIntervalMs)
-  if config.discoveryMode == pdmMulticast:
-    result.client.multicastBroadcast(config.multicastGroup)
-
-# ---------------------------------------------------------------------------
-# Peer-Cache M1 build wiring (Linux-Distro-Recipe-Validation M5,
-# 2026-06-12).
-#
-# Given a `PeerCacheActionCacheReader` (wired to a `PeerCacheClient` for
-# the LAN-discovered peer pool) and a local CAS + ActionCache pair, the
-# three procs below produce the engine closures the `BuildEngineConfig`
-# peer-cache fields accept. The reader's own counters
-# (`peerHits`/`peerMisses`/`localHits`) survive the wrap so verification
-# tests can assert against them.
-#
-# The closures are pure value-capturing — no daemon round-trip happens
-# here; `PeerCacheActionCacheReader.readActionOutput` already drives the
-# blocking `waitFor` for the `mkFetchRequest` round trip, and the
-# publisher closure dispatches an async `peerCacheServer.serveLocalBlob`
-# equivalent via the registry's `selfAddBlob` hook plus a local store
-# writer call.
-# ---------------------------------------------------------------------------
-
-proc newBuildPeerCacheWiring*(reader: PeerCacheActionCacheReader;
-                               cas: LocalCas;
-                               cache: ptr ActionCache;
-                               localPeerRegistry: PeerRegistry = nil):
-                               BuildPeerCacheWiring =
-  ## Returns a wiring bundle the engine can adopt. `cas` and `cache` are
-  ## the same handles the engine uses internally — the installer closure
-  ## writes peer-fetched bundles into them so the engine's next
-  ## `lookupActionResult` call hits locally.
+  ## Boots a peer-cache node from a parsed `PeerCacheConfig`.
   ##
-  ## `localPeerRegistry`, when non-nil, receives `selfAddBlob(digest)`
-  ## calls on every publish so the local peer's advertise plane learns
-  ## the new blob immediately (otherwise the next advertise tick
-  ## propagates it). Tests typically pass the loopback peer's registry
-  ## here so the second peer's `requestFetch` finds the bundle without
-  ## waiting for an advertise round.
-  result.reader = reader
-  # `cas` and `cache` are retained for API stability but the active
-  # install path uses the engine-supplied handles (the engine pushes
-  # its own `CasStore` and `ptr ActionCache` into the installer
-  # closure). Earlier drafts of this helper closed over them locally;
-  # we keep the parameters so existing callers don't break.
-  discard cas
-  discard cache
-  let registryRef = localPeerRegistry
-  let readerRef = reader
-  result.fetcher = proc(weakFingerprint: ContentDigest):
-      Option[seq[byte]] {.gcsafe, closure.} =
-    let key = actionBundleKey(weakFingerprint)
-    readerRef.readActionOutput(key)
-  result.installer = proc(weakFingerprint: ContentDigest;
-                          bundleBytes: seq[byte];
-                          engineCas: var CasStore;
-                          engineCache: ptr ActionCache):
-                          tuple[ok: bool; reason: string]
-      {.gcsafe, closure.} =
-    let bundle =
-      try:
-        decodeActionBundle(bundleBytes)
-      except CatchableError as exc:
-        return (false, "decode failed: " & exc.msg)
-    installActionBundle(engineCas, engineCache[], bundle)
-  result.publisher = proc(weakFingerprint: ContentDigest;
-                          bundleBytes: seq[byte]) {.gcsafe, closure.} =
-    let key = actionBundleKey(weakFingerprint)
-    # Push the bundle bytes into the reader's local-write closure so a
-    # subsequent `readActionOutput(key)` from any peer that picks up the
-    # advertise (or from the same reader on the next lookup) gets a
-    # cache hit. Mirrors how `PeerCacheClient.requestFetch` writes a
-    # verified `mkFetchResponse` payload to the local store before
-    # returning.
-    if readerRef.localWrite != nil:
-      readerRef.localWrite(key, bundleBytes)
-    if registryRef != nil:
-      registryRef.selfAddBlob(key)
+  ## Distributed-Execution M0 Catch #2, as constrained by M7 (FLOW-6): the
+  ## server binds the interface the peer-cache policy declares
+  ## (``bind=``), loopback when none is declared, never a wildcard; and its
+  ## content and memo readers are the REAL disk stores of this process's
+  ## action-cache root — the CAS that builds write output blobs into and
+  ## the memo store the two-phase publisher writes selectors into — not a
+  ## constant miss.
+  ## The CIDR allowlist is converted from the parser's raw strings to typed
+  ## `CidrV4` values at start so a bad entry surfaces as one diagnostic.
+  runtimeOf(startPeerCacheHost(config, selfPeerId,
+    cacheRoot = currentActionCacheRoot(), listenAddr = listenAddr))
 
 var lastStartedBuildPeerCacheRuntime*: PeerCacheRuntime
   ## Peer-Cache M1 / LDRV M5 test seam: the most recent `PeerCacheRuntime`
-  ## started by ``runBuildCommand`` is captured here so verification tests
-  ## can assert against the runtime's counters or stop the services
-  ## after a build run. Production code does not consume this variable.
+  ## started by a direct (non-daemon) ``repro build --peer-cache=…`` is
+  ## captured here so verification tests can assert against its counters.
+
+var activeDaemonPeerCacheHost*: PeerCacheHost
+  ## Distributed-Execution M0 Catch #3: the long-lived peer-cache node of
+  ## THIS `repro-daemon` process (nil everywhere else). A daemon-hosted
+  ## build worker is a fork of the daemon and inherits this object; see
+  ## `releaseInheritedDaemonPeerCacheHost`.
+
+proc randomPeerIdBytes(tag: char): array[32, byte] =
+  ## A fresh random peer id; byte 0 tags the role for log triage.
+  try:
+    let random = urandom(32)
+    for i in 0 ..< 32:
+      result[i] = random[i]
+  except CatchableError:
+    let nowNs = uint64(epochTime() * 1e9)
+    for k in 0 ..< 8:
+      result[1 + k] = byte((nowNs shr uint64(k * 8)) and 0xff'u64)
+    let pid = uint64(getCurrentProcessId())
+    for k in 0 ..< 8:
+      result[9 + k] = byte((pid shr uint64(k * 8)) and 0xff'u64)
+  result[0] = byte(ord(tag))
+
+proc peerCacheWorkspaceRootFor*(projectRoot: string): string =
+  ## What ``$WORKSPACE`` stands for in a portable peer-cache record: the
+  ## repository holding the project when there is one (a recipe's inputs
+  ## reach sibling packages of that repository), else the project itself.
+  let repo = repositoryRootOf(projectRoot)
+  if repo.len > 0: repo else: projectRoot
+
+proc releaseInheritedDaemonPeerCacheHost*() =
+  ## In a forked daemon worker: drop the inherited copies of the daemon's
+  ## peer-cache sockets and give the worker its own async dispatcher BEFORE
+  ## anything in the worker uses asyncdispatch. A no-op in the daemon
+  ## itself and in any process without a daemon host.
+  if not activeDaemonPeerCacheHost.isNil and
+      activeDaemonPeerCacheHost.isForkedChild:
+    activeDaemonPeerCacheHost.releaseInheritedHost()
 
 proc buildPeerCacheWiringFor*(spec: string): BuildPeerCacheWiring =
-  ## CLI-side ``--peer-cache=<spec>`` wiring helper for ``repro build``.
-  ## Empty / ``none`` spec returns a zero-valued wiring (all closures
-  ## nil) so the engine falls through to its legacy local-only path.
-  ## Structural-parse failures raise `ValueError`; runtime-start
-  ## failures raise `IOError` / `OSError` with the underlying message.
-  if spec.len == 0:
+  ## CLI-side peer-cache wiring for ``repro build``.
+  ##
+  ## * Inside `repro-daemon` with a daemon peer cache configured, every
+  ##   hosted build uses it (an explicit ``--peer-cache=none`` opts out):
+  ##   the worker publishes into its action-cache root, registers that root
+  ##   with the daemon so the daemon's long-lived server serves it after the
+  ##   build (and the CLI) are gone, and looks peers up through a short-lived
+  ##   client seeded with the daemon's membership view (on a worker-role
+  ##   daemon: its declared seeds only — FLOW-1, threat model D4).
+  ## * A direct build with ``--peer-cache=lan://…`` starts its own node for
+  ##   the duration of the build.
+  ## * Empty / ``none`` / ``remote://`` (not wired yet) return a zero-valued
+  ##   wiring, so the engine runs its local-only path.
+  ##
+  ## Structural-parse failures raise `ValueError`; runtime-start failures
+  ## raise with the underlying message.
+  let daemonHost = activeDaemonPeerCacheHost
+  if spec == "none":
     return BuildPeerCacheWiring()
-  let parsed = parsePeerCache(spec)
-  if not parsed.ok:
+  if spec.len == 0 and daemonHost.isNil:
+    return BuildPeerCacheWiring()
+  var parsed: PeerCacheSpecResult
+  if spec.len > 0:
+    parsed = parsePeerCache(spec)
+    if not parsed.ok:
+      raise newException(ValueError,
+        "invalid --peer-cache spec: " & spec &
+        " (expected ``none``, ``lan://<CIDR>``, or ``remote://<URL>``)")
+    if parsed.kind == pcsRemote:
+      # ``remote://`` is parsed for forward-compatibility; its reader
+      # bridge lands in a follow-up milestone.
+      return BuildPeerCacheWiring()
+  let cacheRoot = currentActionCacheRoot()
+  if not daemonHost.isNil:
+    let storage = openPeerCacheStorage(cacheRoot)
+    if daemonHost.isForkedChild:
+      # FLOW-1 (threat model D4): a worker-role daemon's builds seed only
+      # its declared peers, never the requesters its registry learned.
+      let members = daemonHost.buildWorkerSeedsFor()
+      releaseInheritedDaemonPeerCacheHost()
+      registerServedRoot(daemonHost.stateDir, cacheRoot)
+      let session = startWorkerPeerCacheSession(daemonHost, members,
+        peerIdFromBytes(randomPeerIdBytes('W')))
+      let hooks = newPeerCacheEngineHooks(session.client, storage, nil,
+        session.workerLeafProvider())
+      return BuildPeerCacheWiring(fetcher: hooks.fetcher,
+        publisher: hooks.publisher, installer: hooks.installer,
+        stats: hooks.stats, workerClient: session.client,
+        workerSession: session)
+    # Non-POSIX daemons run the build in-process: use the host directly.
+    daemonHost.addStorage(cacheRoot)
+    let hooks = newPeerCacheEngineHooks(daemonHost.client, storage,
+      daemonHost.registry, daemonHost.attestorFor())
+    return BuildPeerCacheWiring(fetcher: hooks.fetcher,
+      publisher: hooks.publisher, installer: hooks.installer,
+      stats: hooks.stats)
+  # Direct build: a node of our own for the build's lifetime.
+  let cliPeerId = peerIdFromBytes(randomPeerIdBytes('B'))
+  let host = startPeerCacheHost(parsed.config, cliPeerId,
+    cacheRoot = cacheRoot)
+  lastStartedBuildPeerCacheRuntime = runtimeOf(host)
+  let hooks = newPeerCacheEngineHooks(host.client,
+    openPeerCacheStorage(cacheRoot), host.registry, host.attestorFor())
+  BuildPeerCacheWiring(fetcher: hooks.fetcher, publisher: hooks.publisher,
+    installer: hooks.installer, stats: hooks.stats, ownedHost: host)
+
+proc releaseBuildPeerCacheWiring*(wiring: BuildPeerCacheWiring) =
+  ## Ends what `buildPeerCacheWiringFor` started for one build. The daemon's
+  ## own host is never stopped here — outliving the build is its job.
+  if not wiring.workerSession.isNil:
+    stopWorkerPeerCacheSession(wiring.workerSession)
+  elif not wiring.workerClient.isNil:
+    stopPeerCacheClient(wiring.workerClient)
+  if not wiring.ownedHost.isNil:
+    wiring.ownedHost.stop()
+
+proc daemonPeerIdFor(stateDir: string): PeerId =
+  ## `Peer-Cache.md` §"Configuration surface" `peer_cache.peer_id_path`: a
+  ## daemon keeps one peer id across restarts in `<state>/peer-id`.
+  let path = stateDir / "peer-id"
+  try:
+    if fileExists(path):
+      let raw = readFile(path)
+      if raw.len == 32:
+        var bytes: array[32, byte]
+        for i in 0 ..< 32:
+          bytes[i] = byte(ord(raw[i]))
+        return peerIdFromBytes(bytes)
+  except CatchableError:
+    discard
+  let bytes = randomPeerIdBytes('D')
+  try:
+    createDir(stateDir)
+    var text = newString(32)
+    for i in 0 ..< 32:
+      text[i] = char(bytes[i])
+    let tmp = path & ".tmp." & $getCurrentProcessId()
+    writeFile(tmp, text)
+    moveFile(tmp, path)
+  except CatchableError:
+    discard
+  peerIdFromBytes(bytes)
+
+# ---------------------------------------------------------------------------
+# Distributed-Execution M7: the daemon's worker role.
+# ---------------------------------------------------------------------------
+
+const
+  SignerCertWindowSeconds* = 120
+    ## CRED-1, threat model D5: the one-issuance signing key the SIGNER
+    ## certifies is valid for two minutes around the signer's own clock —
+    ## it signs one record at once and is deleted. (The worker used to hold
+    ## a signing CA and mint hour-long keys itself.)
+
+proc signerWorkerKeyId*(workerHost: PeerId): string =
+  ## The registered key id of one worker's certificates: revoking it names
+  ## exactly that worker (CRED-4).
+  "repro-worker-" & ($workerHost)[0 ..< 16]
+
+proc signerWorkerCa*(stateDir: string; workerHost: PeerId):
+    tuple[caPath, keyId, registration: string] =
+  ## The signing CA the CERTIFICATE SIGNER keeps for one worker (ed25519,
+  ## OpenSSH format) under its own state directory — never on the worker
+  ## (EDGE-5). `registration` is what a caller adds to its registered keys
+  ## to accept that worker's certificates (`cert-authority <CA key>`) under
+  ## `keyId`.
+  let dir = stateDir / "workers" / $workerHost
+  createDir(dir)
+  setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec})
+  result.caPath = dir / "signing-ca"
+  result.keyId = signerWorkerKeyId(workerHost)
+  if not fileExists(result.caPath):
+    # PATH-only by design: the signer is the same ssh-keygen
+    # `signCertificateOnIssuance` and the verifier use (Test-Certificates
+    # TC-5), resolved the same way.
+    let keygen = uncontrolledFindExe("ssh-keygen")
+    if keygen.len == 0:
+      raise newException(CertificateSigningError,
+        "ssh-keygen not found; the signer cannot mint a worker signing CA")
+    let res = uncontrolledExecCmdEx(quoteShellCommand([keygen, "-q", "-t",
+      "ed25519", "-N", "", "-C", result.keyId & "-ca", "-f",
+      result.caPath]))
+    if res.exitCode != 0:
+      raise newException(CertificateSigningError,
+        "ssh-keygen could not mint the worker signing CA: " & res.output)
+  setFilePermissions(result.caPath, {fpUserRead, fpUserWrite})
+  result.registration = "cert-authority " &
+    readFile(result.caPath & ".pub").strip()
+
+proc signerOneIssuanceCert*(caPath, keyId, scratch: string;
+                            issuedAt: Time): tuple[certPath, serial: string] =
+  ## A fresh ed25519 key in `scratch` and an SSH certificate for it, issued
+  ## by the worker's signing CA for the principal the verifier checks
+  ## (`allowedSignerIdentity(keyId)`), valid for `SignerCertWindowSeconds`
+  ## around `issuedAt`. Returns the certificate path, which
+  ## `ssh-keygen -Y sign -f` accepts, and the certificate's serial (unique
+  ## per issuance, so one issuance can be revoked alone). The caller
+  ## deletes `scratch` after signing.
+  let keygen = uncontrolledFindExe("ssh-keygen")
+  if keygen.len == 0:
+    raise newException(CertificateSigningError, "ssh-keygen not found")
+  let key = scratch / "signing-key"
+  var res = uncontrolledExecCmdEx(quoteShellCommand([keygen, "-q", "-t",
+    "ed25519", "-N", "", "-C", keyId, "-f", key]))
+  if res.exitCode != 0:
+    raise newException(CertificateSigningError,
+      "ssh-keygen could not mint a signing key: " & res.output)
+  let now = getTime()
+  let serial = now.toUnix * 1_000_000_000 + int64(now.nanosecond)
+  # Relative to now, which is `issuedAt` to within the signing call (the
+  # signer stamps and signs at once); absolute `-V` times would be read in
+  # the signer's local time zone.
+  let half = SignerCertWindowSeconds div 2
+  let validity = "-" & $half & "s:+" & $half & "s"
+  res = uncontrolledExecCmdEx(quoteShellCommand([keygen, "-q", "-s", caPath,
+    "-I", keyId & "@" & $issuedAt.toUnix, "-n", allowedSignerIdentity(keyId),
+    "-z", $serial, "-V", validity, key & ".pub"]))
+  if res.exitCode != 0:
+    raise newException(CertificateSigningError,
+      "ssh-keygen could not certify the signing key: " & res.output)
+  (key & "-cert.pub", $serial)
+
+proc signerSignOperation*(stateDir: string): dw.SignOperation =
+  ## What the certificate signer runs for one authorized request: the
+  ## worker's CA certifies a one-issuance key, which signs the record dated
+  ## at the SIGNER's clock, and is deleted.
+  let sd = stateDir
+  result = proc(workerHost: PeerId; req: dw.CertificateRequest;
+                issuedAt: Time): tuple[ok: bool; certificate, serial,
+                                       reason: string] {.gcsafe, closure.} =
+    {.cast(gcsafe).}:
+      var scratch = ""
+      try:
+        let ca = signerWorkerCa(sd, workerHost)
+        scratch = createTempDir("repro-signer-", "")
+        setFilePermissions(scratch, {fpUserRead, fpUserWrite, fpUserExec})
+        let issued = signerOneIssuanceCert(ca.caPath, ca.keyId, scratch,
+          issuedAt)
+        var cert = TestCertificate(
+          schema: testCertificateSchemaV1,
+          framework: reprobuildFrameworkId,
+          project: req.project,
+          platform: req.platform,
+          targets: @[req.target],
+          result: tcrPassed,
+          issuedAt: issuedAt.utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+          issuer: "repro-worker@" & $workerHost,
+          keyId: "",
+          vcs: TestCertificateVcs(repo: req.project, content: req.content,
+            untracked: false, base: req.baseCommit))
+        for argv in req.commands:
+          cert.commands.add(TestCertificateCommand(argv: argv))
+        signCertificateOnIssuance(cert, ca.keyId, issued.certPath)
+        result = (true, serializeCertificateToToml(cert), issued.serial, "")
+      except CatchableError as err:
+        result = (false, "", "", err.msg)
+      if scratch.len > 0:
+        try: removeDir(scratch) except OSError: discard
+
+type
+  RequesterGoalContext* = object
+    ## What the REQUESTER knows independently of the worker's answer: the
+    ## content it snapshotted and the node it asked for.
+    expectedContent*: string
+      ## `git-tree-sha1:<40-hex>` of the snapshot the requester sent.
+    project*: string
+    platform*: string
+    target*: string
+    argv*: seq[string]
+      ## The node's argv in the descriptor the requester published.
+    isTest*: bool
+    baseCommit*: string
+    issuer*: string
+      ## The certificate's `issuer` (the requester or the designated
+      ## publisher).
+    minIsolation*: string
+      ## The minimum isolation level this requester accepts (empty = any).
+      ## Compared as SETS (`dw.isolationSatisfies`): the result's base must
+      ## confine at least as much (`windows-job` < `macos-seatbelt` <
+      ## `linux-namespace`) and every layer named here must have run — a
+      ## `windows-job` result, or a `linux-namespace` worker without
+      ## Landlock when `linux-namespace+landlock` is required, is refused,
+      ## so a mixed fleet can refuse weaker results.
+
+proc requesterVerifyGoal*(resp: dw.ReachGoalResponse; recordBytes: seq[byte];
+                          ctx: RequesterGoalContext): tuple[ok: bool;
+                                                            reason: string] =
+  ## TRUSTED profile, requester side (operator decision 2026-10-20): the
+  ## checks a requester (or designated publisher) makes BEFORE it signs a
+  ## test certificate for a remote result — the worker signs nothing.
+  ## (No production command calls this yet: M2's remote goal driver wires
+  ## it into `repro test --on …`; M7 exercises it from
+  ## `t_certificate_requires_verified_tree`.)
+  ##
+  ## * the goal completed with exit status 0 and produced no detection that
+  ##   withholds a certificate in the trusted profile — the plan's DET
+  ##   triggers (`dw.blocksCertificate`); a benign sandbox report such as a
+  ##   macOS `fs-denied` is recorded in the execution record and does not
+  ##   withhold signing;
+  ## * the result's isolation level satisfies `ctx.minIsolation`, when
+  ##   the requester set one (`dw.isolationSatisfies`: the required layers
+  ##   are a subset of the layers that ran);
+  ## * the worker verified the tree the requester sent BEFORE the goal and
+  ##   found it unchanged AFTER (a goal that rewrote a tracked file
+  ##   certifies nothing);
+  ## * the execution record the response names hashes to that digest (the
+  ##   requester fetched the bytes from the worker's CAS), and agrees: the
+  ##   same node and argv, the same trees, the same isolation level,
+  ##   status completed, and no detection that withholds a certificate in
+  ##   the trusted profile (the plan's six DET triggers, or a folded flood
+  ##   of one — `dw.blocksCertificate`); other detections are recorded and
+  ##   do not withhold.
+  let want = ctx.expectedContent
+  const prefix = "git-tree-sha1:"
+  if not want.startsWith(prefix) or want.len != prefix.len + 40:
+    return (false, "the requester's expected content is not a git-tree-sha1")
+  let tree = want[prefix.len .. ^1]
+  if not ctx.isTest:
+    return (false, "node '" & ctx.target & "' is not a test node")
+  if resp.status != dw.gsCompleted or resp.exitCode != 0:
+    return (false, "the goal did not complete successfully (status " &
+      $resp.status & ", exit " & $resp.exitCode & ")")
+  if resp.treeBefore != tree:
+    return (false, "the worker ran against tree " & resp.treeBefore &
+      ", not the requested " & tree)
+  if resp.treeAfter != tree:
+    return (false, "certificate tree mismatch: the worktree changed during " &
+      "the goal (" & tree & " -> " & resp.treeAfter & ")")
+  if recordBytes.len == 0 or
+      dw.executionRecordDigestOf(recordBytes) != resp.executionRecordDigest:
+    return (false, "the execution record does not match the digest the " &
+      "worker returned")
+  var rec: dw.ExecutionRecord
+  try:
+    rec = dw.decodeExecutionRecord(recordBytes)
+  except CatchableError as err:
+    return (false, err.msg)
+  if rec.goalNode != ctx.target or rec.argv != ctx.argv:
+    return (false, "the execution record names another node or argv")
+  if rec.treeBefore != tree or rec.treeAfter != tree:
+    return (false, "certificate tree mismatch in the execution record (" &
+      rec.treeBefore & " -> " & rec.treeAfter & ")")
+  if rec.status != "completed":
+    return (false, "the execution record says " & rec.status)
+  if rec.isolation != resp.isolation or rec.isolation.len == 0:
+    return (false, "the execution record names no or another isolation level")
+  var blocking: seq[string] = @[]
+  for d in rec.detections:
+    if dw.blocksCertificate(d.trigger, d.detail, hardened = false):
+      blocking.add(d.trigger & (if d.detail.len > 0: " " & d.detail else: ""))
+  if blocking.len > 0:
+    return (false, "the execution record holds detections that withhold a " &
+      "certificate: " & blocking.join("; "))
+  if not dw.isolationSatisfies(rec.isolation, ctx.minIsolation):
+    return (false, "the result's isolation level " & rec.isolation &
+      " does not meet the required " & ctx.minIsolation)
+  (true, "")
+
+proc requesterSignVerifiedGoal*(resp: dw.ReachGoalResponse;
+                                recordBytes: seq[byte];
+                                ctx: RequesterGoalContext;
+                                keyId, signingKeyPath: string):
+    tuple[ok: bool; certificate, reason: string] =
+  ## Signs a `test-certificate.v1` with the REQUESTER's key for a remote
+  ## goal that passed `requesterVerifyGoal`; refuses (no certificate, the
+  ## reason) otherwise. The trusted profile's replacement for the
+  ## certificate signer (which stays, for the hardened profile). No
+  ## production command calls it yet — M2's remote goal driver wires it.
+  let verdict = requesterVerifyGoal(resp, recordBytes, ctx)
+  if not verdict.ok:
+    return (false, "", "no certificate: " & verdict.reason)
+  try:
+    var cert = TestCertificate(
+      schema: testCertificateSchemaV1,
+      framework: reprobuildFrameworkId,
+      project: ctx.project,
+      platform: ctx.platform,
+      targets: @[ctx.target],
+      result: tcrPassed,
+      issuedAt: getTime().utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+      issuer: ctx.issuer,
+      keyId: "",
+      vcs: TestCertificateVcs(repo: ctx.project, content: ctx.expectedContent,
+        untracked: false, base: ctx.baseCommit))
+    cert.commands.add(TestCertificateCommand(argv: ctx.argv))
+    signCertificateOnIssuance(cert, keyId, signingKeyPath)
+    (true, serializeCertificateToToml(cert), "")
+  except CatchableError as err:
+    (false, "", "no certificate: " & err.msg)
+
+proc remoteCertificateIssuer*(host: PeerCacheHost): dw.CertificateIssuer =
+  ## The worker side of D5: asks the certificate signer named by
+  ## `signer=host:port` — proving the pinned identity in
+  ## `<tls dir>/cert-signer.crt` — for each certificate. Nil when no signer
+  ## is configured: the worker then issues none.
+  if host.config.signerSpec.len == 0:
+    return nil
+  let pin = pinnedAnchors(signerCaPathOf(host.config), "the certificate signer")
+  let endpoint = parseSinkEndpoint(host.config.signerSpec)
+  let h = host
+  result = proc(req: dw.CertificateRequest): Future[tuple[ok: bool;
+      certificate, reason: string]] {.gcsafe, closure.} =
+    {.cast(gcsafe).}:
+      dw.requestCertificate(endpoint, h.leafProviderFor(), pin.anchors,
+        pin.hostId, req)
+
+proc workerReposFrom(path: string): seq[(string, string)] =
+  if path.len == 0 or not fileExists(path):
+    return @[]
+  for raw in readFile(path).splitLines:
+    let line = raw.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    let parts = line.splitWhitespace()
+    if parts.len == 2:
+      result.add((parts[0], parts[1]))
+
+proc workerEgressFrom(host: PeerCacheHost): seq[dw.EgressDestination] =
+  ## FLOW-3: the lease allow-list — exactly the destinations the operator
+  ## declared (`egress=`). Not this node's own listener (threat model G26:
+  ## a lease holds no credential to speak to it, so reaching it was only
+  ## attack surface); a lease that needs a peer cache is given one there.
+  ## Below the daemon, the unit's `IPAddressAllow=` lists the same
+  ## destinations, so a daemon whose `egress=` was widened still cannot
+  ## reach anything else.
+  for item in host.config.workerEgress:
+    let at = item.find('@')
+    let colon = item.rfind(':')
+    result.add(dw.EgressDestination(name: item[0 ..< at],
+      host: item[at + 1 ..< colon], port: parseInt(item[colon + 1 .. ^1])))
+
+proc defaultLeaseRoots(): tuple[read, base: seq[string]] =
+  ## The roots a lease may read, and the base system's executable
+  ## directories on a host whose system is not in the Nix store (the rest
+  ## of the closure is computed: `dw.computeLeaseClosure`). Nothing under
+  ## any home directory is on either list.
+  when defined(windows):
+    # The job object confines lifecycle only; these are recorded, not
+    # enforced (isolation level `windows-job`).
+    result.read = @[getEnv("SystemRoot", "C:\\Windows")]
+    result.base = @[getEnv("SystemRoot", "C:\\Windows")]
+  elif defined(macosx):
+    result.read = @["/usr", "/bin", "/sbin", "/System", "/Library",
+      "/private/etc", "/private/var/db/timezone", "/nix/store",
+      "/Applications/Xcode.app", "/opt/homebrew"]
+    result.base = @["/usr/bin", "/bin", "/usr/libexec", "/usr/sbin",
+      "/Library/Developer/CommandLineTools", "/Applications/Xcode.app"]
+  else:
+    # Not `/nix/store` as a whole (trust profiles: the namespace layer
+    # mounts only these roots and the computed closure, so the store paths
+    # a lease can see are exactly its closure — the Nix sandbox's rule).
+    result.read = @["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc",
+      "/run/current-system", "/opt",
+      # Read-only facts a runtime asks for at start (the CPU count, its
+      # memory and process limits); nothing else under /sys.
+      "/sys/devices/system/cpu", "/sys/fs/cgroup"]
+    if dirExists("/run/current-system"):
+      # NixOS: the system is in the store; its closure is computed.
+      result.base = @[]
+    else:
+      result.base = @["/usr/bin", "/bin", "/usr/lib", "/usr/lib64", "/lib",
+        "/lib64", "/usr/libexec", "/usr/sbin", "/sbin"]
+
+proc leasePathEnv(closure: seq[string]): string =
+  ## The daemon's PATH reduced to directories inside the closure.
+  var keep: seq[string] = @[]
+  for dir in getEnv("PATH").split(PathSep):
+    let real = try: expandFilename(dir) except OSError: dir
+    for root in closure:
+      if dir == root or dir.startsWith(root & "/") or real == root or
+          real.startsWith(root & "/"):
+        if dir notin keep: keep.add(dir)
+        break
+  if keep.len == 0: keep = @["/usr/bin", "/bin"]
+  keep.join($PathSep)
+
+proc startDaemonWorkerRole*(host: PeerCacheHost; stateDir: string): string =
+  ## Gives `host` the worker role: `mkReachGoalRequest` frames the gate
+  ## admitted (orchestrator role only) are answered by a
+  ## `dw.WorkerReceiver`. Refuses — rather than degrading — when the
+  ## prerequisites of a safe worker are missing: an authenticated node,
+  ## execution-lease confinement on this host, a computable executable
+  ## closure and, in the HARDENED profile, an off-host evidence sink (and
+  ## a Linux host: macOS and Windows workers are refused there until a
+  ## VM-grade boundary exists).
+  ##
+  ## Trust profiles (operator decision 2026-10-20): in the TRUSTED profile
+  ## (the default) detections go to each goal's execution record and to
+  ## `<state>/worker/detections.log`, no evidence sink is required, and the
+  ## worker signs no certificate — the requester does
+  ## (`requesterSignVerifiedGoal`). In the HARDENED profile they also go to
+  ## the sink, a worker whose evidence cannot leave refuses goals, and
+  ## certificates come from the certificate signer (`signer=`).
+  ##
+  ## FLOW-1 (threat model D4): the worker never opens a connection to a
+  ## requester or orchestrator. It hydrates over the connection the caller
+  ## opened (`HydrationChannel`), and its client dials only its declared
+  ## seeds, never the peers it learned from their Hellos.
+  if host.config.trustMode != tmTls:
     raise newException(ValueError,
-      "invalid --peer-cache spec: " & spec &
-      " (expected ``none``, ``lan://<CIDR>``, or ``remote://<URL>``)")
-  case parsed.kind
-  of pcsNone:
-    return BuildPeerCacheWiring()
-  of pcsRemote:
-    # ``remote://`` is parsed for forward-compatibility but the action-
-    # cache reader bridge for it lands in a follow-up milestone.
-    # Returning a no-op wiring keeps `--peer-cache=remote://...` from
-    # crashing existing harnesses that pass it speculatively.
-    return BuildPeerCacheWiring()
-  of pcsLan:
-    var raw: array[32, byte]
-    raw[0] = byte(ord('B'))  # ``B`` for repro build, distinct from
-                             # the loopback helper's ``L`` and the
-                             # repro-test path's ``R``.
-    let nowSeconds = uint64(epochTime())
-    for k in 0 ..< 8:
-      raw[1 + k] = byte((nowSeconds shr uint64(k * 8)) and 0xff'u64)
-    let cliPeerId = peerIdFromBytes(raw)
-    lastStartedBuildPeerCacheRuntime = startPeerCacheServices(
-      parsed.config, cliPeerId, listenAddr = "127.0.0.1")
-    # The CLI doesn't have the engine's CAS + ActionCache in scope (the
-    # engine opens them lazily inside ``runBuild``). Close over the
-    # spec'd root paths instead so the installer closure re-opens
-    # them on demand. Tests that need direct access to the engine's
-    # internal handles call ``newBuildPeerCacheWiring`` instead.
-    let runtime = lastStartedBuildPeerCacheRuntime
-    let actionCacheRoot = currentActionCacheRoot()
-    let casRoot =
-      if actionCacheRoot.len > 0: actionCacheRoot / "cas"
-      else: getCurrentDir() / ".repro" / "build-engine-cache" / "cas"
-    let cacheDir =
-      if actionCacheRoot.len > 0: actionCacheRoot / "action-cache"
-      else: getCurrentDir() / ".repro" / "build-engine-cache" /
-            "action-cache"
-    let peerCasReader: LocalStoreReader =
-      proc(digest: BlobDigest): Option[seq[byte]] {.gcsafe.} =
-        # The CLI path doesn't keep a process-local map of bundle
-        # digests — every bundle hit goes through the engine's
-        # installer closure and the next `lookupActionResult`. The
-        # peer-cache reader's "local-read" branch is therefore a
-        # constant miss; the fall-through to `peerCacheClient.
-        # requestFetch` is the active code path.
-        none(seq[byte])
-    let peerCasWriter: LocalStoreWriter =
-      proc(digest: BlobDigest; payload: seq[byte]) {.gcsafe.} =
-        # The fetched bundle is written to the local CAS + ActionCache
-        # by the engine's installer closure on the lookup retry; we
-        # intentionally do not double-write here.
-        discard
-    result.reader = newPeerCacheActionCacheReader(
-      localRead = peerCasReader,
-      localWrite = peerCasWriter,
-      peerCacheClient = runtime.client)
-    let readerRef = result.reader
-    let registryRef = runtime.registry
-    result.fetcher = proc(weakFingerprint: ContentDigest):
-        Option[seq[byte]] {.gcsafe, closure.} =
-      let key = actionBundleKey(weakFingerprint)
-      readerRef.readActionOutput(key)
-    result.installer = proc(weakFingerprint: ContentDigest;
-                            bundleBytes: seq[byte];
-                            engineCas: var CasStore;
-                            engineCache: ptr ActionCache):
-                            tuple[ok: bool; reason: string]
-        {.gcsafe, closure.} =
-      let bundle =
+      "the worker role requires tls=1 (callers are authorized by identity)")
+  let hardened = host.config.trustProfile == tpHardened
+  if hardened and host.appender.isNil:
+    raise newException(ValueError,
+      "the hardened worker role requires an evidence sink " &
+      "(evidence=host:port): every ReachGoal is audited off-host")
+  # Trusted: namespaces + noexec always, Landlock and the floor when this
+  # host has them (the lease records the level it got). Hardened: all
+  # three, or no worker role.
+  let conf = dw.availableLeaseLayers(hardened)
+  if not conf.ok:
+    raise newException(ValueError,
+      "the worker role is refused on this host: " & conf.reason)
+  let roots = defaultLeaseRoots()
+  when defined(macosx):
+    # macOS (trusted profile only): the build user plus the Seatbelt
+    # profile (D2 as decided 2026-10-20). Its executable roots stay the
+    # base system and the Nix store as a whole; the computed closure (G25)
+    # is the Linux lease's — the profile would have to change shape to
+    # carry thousands of store paths.
+    let closure = (ok: true, roots: roots.base & @["/nix/store"], reason: "")
+  elif defined(windows):
+    let closure = (ok: true, roots: roots.base, reason: "")
+  else:
+    let closure = dw.computeLeaseClosure(getEnv("PATH").split(PathSep),
+      getAppFilename(), roots.base)
+  if not closure.ok:
+    raise newException(ValueError,
+      "the worker role is refused on this host: the executable closure of " &
+      "its leases cannot be computed (" & closure.reason & ")")
+  let workerDir = stateDir / "worker"
+  var hide = @[stateDir]
+  if host.config.tlsCertPath.len > 0:
+    hide.add(host.config.tlsCertPath.parentDir)
+  let cgroups = dw.prepareLeaseCgroups(
+    if host.config.leaseMemoryMax > 0: host.config.leaseMemoryMax
+    else: dw.DefaultLeaseMemoryMax)
+  let config = dw.WorkerConfig(
+    leaseRoot: workerDir / "leases",
+    metaRoot: workerDir / "lease-meta",
+    repoCaches: workerReposFrom(host.config.workerReposPath),
+    platform: currentPlatformTag(),
+    readRoots: roots.read,
+    closureRoots: closure.roots,
+    hidePaths: hide,
+    egress: workerEgressFrom(host),
+    pathEnv: leasePathEnv(closure.roots),
+    timeoutMs: 15 * 60 * 1000,
+    layers: conf.layers,
+    cgroups: cgroups,
+    profile: host.config.trustProfile,
+    workerHost: $host.selfPeerId,
+    detectionLogPath: workerDir / "detections.log",
+    recordIndexPath: workerDir / "execution-records.index")
+  createDir(config.leaseRoot)
+  createDir(config.metaRoot)
+  # A goal's stdout/stderr and lease reports can carry the developer's
+  # uncommitted source (asset 3): owner-only whatever the daemon's umask —
+  # `ensureLeaseTraversal` below makes the PARENT searchable by the lease
+  # user, so this directory must not be.
+  setFilePermissions(config.metaRoot, {fpUserRead, fpUserWrite, fpUserExec})
+  let traversal = dw.ensureLeaseTraversal(config.leaseRoot, stateDir)
+  if not traversal.ok:
+    raise newException(ValueError,
+      "the worker role is refused on this host: " & traversal.reason)
+  let h = host
+  let outputRoot = currentActionCacheRoot()
+  let storeOutput = proc(bytes: seq[byte]): array[32, byte] {.gcsafe, closure.} =
+    {.cast(gcsafe).}:
+      # Opened per call and closed at once: a CAS handle holds a SQLite
+      # connection, which must never sit on the far side of the daemon's
+      # build-worker fork().
+      var cas = openCasStore(outputRoot)
+      defer: cas.close()
+      bytes(cas.casPut(bytes))
+  # EVID-6: an execution record describes a goal run on a developer's
+  # uncommitted source, so its CAS blob is owner-only (read-only) whatever
+  # the daemon's umask, and it is deleted once past its retention
+  # (`dw.sweepExecutionRecords`, run below on a timer).
+  let storeRecord = proc(bytes: seq[byte]): array[32, byte] {.gcsafe, closure.} =
+    {.cast(gcsafe).}:
+      var cas = openCasStore(outputRoot)
+      defer: cas.close()
+      let h = cas.casPut(bytes)
+      when defined(posix):
+        try: setFilePermissions(cas.casPath(h), {fpUserRead})
+        except CatchableError: discard
+      bytes(h)
+  let deleteRecord = proc(d: array[32, byte]): bool {.gcsafe, closure.} =
+    {.cast(gcsafe).}:
+      deleteExecutionRecordBlob(outputRoot, d)
+  let localOnly = proc(d: array[32, byte]): Future[Option[seq[byte]]]
+      {.async, gcsafe.} =
+    {.cast(gcsafe).}:
+      return readBlobFrom(h.storages, blobDigestFromBytes(d))
+  let receiver =
+    if hardened:
+      dw.newWorkerReceiver(config, localOnly, storeOutput,
+        remoteCertificateIssuer(host), host.appender.reporter())
+    else:
+      # Trusted: no signer, no sink — the execution record and the local
+      # detection log carry the detections, the requester signs.
+      dw.newWorkerReceiver(config, localOnly, storeOutput)
+  receiver.storeRecord = storeRecord
+  host.localLogs.add(config.detectionLogPath)
+  let app = host.appender
+  if hardened:
+    receiver.evidenceHealthy = proc(): bool {.gcsafe, closure.} =
+      {.cast(gcsafe).}:
+        app.healthy()
+  let heartbeatMs =
+    if host.config.heartbeatIntervalMs > 0: host.config.heartbeatIntervalMs
+    else: 60_000
+  # The lease supervisor's detector proves itself with a canary lease
+  # (threat model G22); its heartbeat interval is that probe's.
+  let canaryMs = max(heartbeatMs, 10_000)
+  if not app.isNil:
+    for detector in dw.WorkerDetectors:
+      let probed = detector in dw.ProbedWorkerDetectors
+      app.registerDetector(detector,
+        if probed: canaryMs else: heartbeatMs, probed = probed)
+  let detectionLog = config.detectionLogPath
+  let recordIndex = config.recordIndexPath
+  # DET-5 in BOTH profiles: a dead worker's silent detector must be
+  # distinguishable from an idle fleet. Hardened: heartbeats at the sink.
+  # Trusted (no sink): every canary round writes a `heartbeat` line for each
+  # worker detector into the local detection log (the lease supervisor's
+  # only after the canary proved its detection path, G22) and the status
+  # file names the last heartbeat and the interval — a worker whose last
+  # heartbeat is older than a few intervals is dead or wedged, not idle.
+  var lastHeartbeatMs = 0'i64
+  var lastRecordSweepMs = 0'i64
+  # The canary's latest verdict, for the status file (both profiles): a
+  # trusted worker has no sink to go silent at, so an operator reads a
+  # failing detection path here rather than only as a missing heartbeat.
+  var probeRounds = 0
+  var lastProbeOk = false
+  var lastProbeFailure = ""
+  proc canaryLoop() {.async.} =
+    var n = 0
+    while h.running:
+      inc n
+      let probe = await dw.runCanaryLease(receiver, n)
+      if not h.running:
+        break
+      inc probeRounds
+      lastProbeOk = probe.ok
+      if not probe.ok:
+        lastProbeFailure = probe.reason.replace('\n', ' ').replace('\r', ' ')
+      if not app.isNil:
+        if probe.ok:
+          app.heartbeat("lease-supervisor", [("probe", "ok")])
+        else:
+          app.append(newEvidenceRecord(ecDetection, "lease-supervisor",
+            "detector-probe-failed", [("reason", probe.reason)]))
+      else:
+        for detector in dw.WorkerDetectors:
+          if detector in dw.ProbedWorkerDetectors and not probe.ok:
+            continue
+          appendLocalLog(detectionLog, localLogEntry(newEvidenceRecord(
+            ecHeartbeat, detector, "",
+            @[("intervalMs", $canaryMs)] &
+            (if detector in dw.ProbedWorkerDetectors: @[("probe", "ok")]
+             else: newSeq[(string, string)]()))))
+        lastHeartbeatMs = int64(epochTime() * 1000)
+      if not probe.ok:
+        appendLocalLog(detectionLog, localLogEntry(newEvidenceRecord(
+          ecDetection, "lease-supervisor", "detector-probe-failed",
+          [("reason", probe.reason)])))
+      # EVID-6: execution records past their retention leave the CAS.
+      let nowMs = int64(epochTime() * 1000)
+      if nowMs - lastRecordSweepMs >= LocalLogSweepIntervalMs:
+        lastRecordSweepMs = nowMs
+        discard dw.sweepExecutionRecords(recordIndex, deleteRecord)
+      await sleepAsync(canaryMs)
+  asyncCheck canaryLoop()
+  host.workerStatus = proc(): seq[string] {.gcsafe, closure.} =
+    @["worker_goals_executed=" & $receiver.goalsExecuted,
+      "worker_goals_refused=" & $receiver.goalsRefused,
+      "worker_certificates_issued=" & $receiver.certificatesIssued,
+      "worker_certificates_withheld=" & $receiver.certificatesWithheld,
+      "worker_evidence_healthy=" & (if app.isNil: "n/a"
+                                     elif app.healthy(): "1" else: "0"),
+      "worker_trust_profile=" & $h.config.trustProfile,
+      "worker_isolation=" & dw.isolationLevelOf(dw.LeaseSpec(
+        layers: config.layers, memfdNoexec: hardened)),
+      "worker_execution_records=" & $receiver.executionRecords,
+      "worker_heartbeat_ms=" & $lastHeartbeatMs,
+      "worker_heartbeat_interval_ms=" & $canaryMs,
+      "worker_detector_probe_ok=" & (if probeRounds == 0: "n/a"
+                                      elif lastProbeOk: "1" else: "0"),
+      "worker_detector_probe_last_failure=" & lastProbeFailure,
+      "worker_lease_limits=" & (if cgroups.available: "cgroup" else: "rlimit")]
+  # FLOW-1: never dial a requester or orchestrator back.
+  host.client.dialDiscovered = false
+  host.server.gate.policy.servesWorker = true
+  let handler = dw.workerHandlerFor(receiver)
+  host.server.workerHandler = proc(caller: CallerIdentity; frame: Frame;
+      hydration: HydrationChannel):
+      Future[tuple[kind: MessageKind; payload: seq[byte]]] {.async, gcsafe.} =
+    {.cast(gcsafe).}:
+      # Hydration: this worker's own stores first, then the CALLER, over
+      # the connection it opened.
+      let fetch = proc(d: array[32, byte]): Future[Option[seq[byte]]]
+          {.async, gcsafe.} =
+        {.cast(gcsafe).}:
+          let digest = blobDigestFromBytes(d)
+          let local = readBlobFrom(h.storages, digest)
+          if local.isSome:
+            return local
+          return await hydration.fetch(digest)
+      let bytes = await handler(caller, frame.payload, fetch)
+      return (mkReachGoalResponse, bytes)
+  let isolation = dw.isolationLevelOf(dw.LeaseSpec(layers: conf.layers,
+    memfdNoexec: hardened))
+  "worker role started profile=" & $host.config.trustProfile &
+    " isolation=" & isolation &
+    (if conf.reason.len > 0: " (" & conf.reason & ")" else: "") &
+    " lease_root=" & config.leaseRoot & " repos=" &
+    $config.repoCaches.len & " egress=" & $config.egress.len &
+    " closure=" & $config.closureRoots.len &
+    " lease_limits=" & (if cgroups.available: "cgroup" else: "rlimit (" &
+      cgroups.reason & ")") &
+    " signer=" & (if host.config.signerSpec.len > 0: host.config.signerSpec
+                  else: "none")
+
+proc installUserDaemonPeerCacheService*() =
+  ## Distributed-Execution M0 Catch #3: registers the peer cache as the
+  ## daemon's background service. Enabled by ``repro daemon serve
+  ## --peer-cache=lan://…`` (or ``REPRO_DAEMON_PEER_CACHE``); serves the
+  ## daemon's action-cache root plus every root its build workers register.
+  setUserDaemonBackgroundService(UserDaemonBackgroundService(
+    pollIntervalMs: 10,
+    start: proc(config: UserDaemonConfig): string =
+      let rawSpec =
+        if config.peerCacheSpec.len > 0: config.peerCacheSpec
+        else: getEnv("REPRO_DAEMON_PEER_CACHE")
+      if rawSpec.len == 0 or rawSpec == "none":
+        return ""
+      let spec = withTrustProfile(rawSpec, config.trustProfile)
+      let parsed = parsePeerCache(spec)
+      if not parsed.ok or parsed.kind != pcsLan:
+        raise newException(ValueError,
+          "invalid daemon --peer-cache spec (expected lan://<CIDR>…): " & spec)
+      let host = startPeerCacheHost(parsed.config,
+        daemonPeerIdFor(config.stateDir), cacheRoot = currentActionCacheRoot(),
+        stateDir = config.stateDir)
+      activeDaemonPeerCacheHost = host
+      var workerLine = ""
+      if parsed.config.workerEnabled:
         try:
-          decodeActionBundle(bundleBytes)
-        except CatchableError as exc:
-          return (false, "decode failed: " & exc.msg)
-      installActionBundle(engineCas, engineCache[], bundle)
-    # `casRoot` / `cacheDir` are unused now — the engine threads its
-    # own opened handles into the installer. Keep the local
-    # declarations so the build path doesn't drift from earlier
-    # drafts; the compiler folds the unused locals out.
-    discard casRoot
-    discard cacheDir
-    result.publisher = proc(weakFingerprint: ContentDigest;
-                            bundleBytes: seq[byte]) {.gcsafe, closure.} =
-      let key = actionBundleKey(weakFingerprint)
-      if readerRef.localWrite != nil:
-        readerRef.localWrite(key, bundleBytes)
-      if registryRef != nil:
-        registryRef.selfAddBlob(key)
+          workerLine = " " & startDaemonWorkerRole(host, config.stateDir)
+        except CatchableError:
+          # A worker that cannot be safe does not run at all — not even as
+          # a plain cache node the operator did not ask for.
+          host.stop()
+          activeDaemonPeerCacheHost = nil
+          raise
+      var seeds: seq[string] = @[]
+      for seed in parsed.config.seedPeers:
+        seeds.add(seed.host & ":" & $int(seed.port))
+      "peer-cache started trust=" &
+        (if parsed.config.trustMode == tmTls: "tls" else: "cidr") &
+        " profile=" & $parsed.config.trustProfile &
+        " listen=" & host.listenAddr & ":" & $int(host.actualPort) &
+        " interface=" & host.bindResolution.interfaceName &
+        " evidence=" & (if host.appender.isNil: "none"
+                        else: parsed.config.evidenceSinkSpec) &
+        " root=" & currentActionCacheRoot() & " seeds=" & seeds.join(",") &
+        " connected=" & $host.client.connectedPeers().len & workerLine,
+    tick: proc(maxWaitMs: int) =
+      if not activeDaemonPeerCacheHost.isNil:
+        activeDaemonPeerCacheHost.tick(maxWaitMs),
+    stop: proc() =
+      if not activeDaemonPeerCacheHost.isNil:
+        activeDaemonPeerCacheHost.stop()
+        activeDaemonPeerCacheHost = nil,
+    active: proc(): bool =
+      not activeDaemonPeerCacheHost.isNil and
+        activeDaemonPeerCacheHost.running and
+        not activeDaemonPeerCacheHost.isForkedChild))
 
 proc parseShardSpec(value: string): tuple[ok: bool; k, n: int] =
   let parts = value.split('/')
@@ -82846,8 +83814,7 @@ proc runReproTestCommand*(args: openArray[string];
     let cliPeerId = peerIdFromBytes(raw)
     try:
       lastStartedPeerCacheRuntime =
-        startPeerCacheServices(peer.config, cliPeerId,
-                              listenAddr = "127.0.0.1")
+        startPeerCacheServices(peer.config, cliPeerId)
     except CatchableError as exc:
       emitShardDiagnostic(
         "failed to start peer-cache services: " & exc.msg)
@@ -83078,6 +84045,173 @@ proc defaultCheckSetCommand*(repoPath: string): seq[string] =
       return @["sh", "-c", "cd " & quoteShell(repoPath) & " && exec " &
         quoteShell(exe) & " run --all-files"]
   @[]
+
+proc runCertifyVerify*(args: openArray[string]): int =
+  ## ``repro certify --verify <certificate> --content <id>
+  ## [--registered-keys <path>] [--workspace <root>]`` —
+  ## Distributed-Execution M7.
+  ##
+  ## The caller-side check a certificate returned by a remote worker must
+  ## pass before it is imported: AUTHENTIC (Verification §3: signed, its
+  ## ``key_id`` registered and not revoked, the ed25519 signature checks
+  ## over the canonical payload) AND bound to exactly the content the
+  ## caller sent. ``--content`` is required (threat model G32): an
+  ## authentic certificate for some other tree is precisely the asset an
+  ## attacker wants accepted. Exit 0 only when both hold.
+  var certPath = ""
+  var keysPath = ""
+  var content = ""
+  var workspace = getCurrentDir()
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    template value(): string =
+      (if i + 1 < args.len: (inc i; args[i]) else: "")
+    case a
+    of "--verify": discard
+    of "--registered-keys": keysPath = value()
+    of "--content": content = value()
+    of "--workspace": workspace = value()
+    else:
+      if a.startsWith("--registered-keys="):
+        keysPath = a["--registered-keys=".len .. ^1]
+      elif a.startsWith("--content="):
+        content = a["--content=".len .. ^1]
+      elif a.startsWith("--workspace="):
+        workspace = a["--workspace=".len .. ^1]
+      elif a.startsWith("-"):
+        stderr.writeLine("repro certify --verify: unknown option " & a)
+        return 2
+      elif certPath.len == 0:
+        certPath = a
+      else:
+        stderr.writeLine("repro certify --verify: one certificate at a time")
+        return 2
+    inc i
+  if certPath.len == 0 or content.len == 0:
+    stderr.writeLine("usage: repro certify --verify <certificate> " &
+      "--content <git-tree-sha1:...> [--registered-keys <path>] " &
+      "[--workspace <root>]" &
+      (if certPath.len > 0: "  (--content is required: a certificate is " &
+         "accepted only for the content the caller sent)" else: ""))
+    return 2
+  if keysPath.len == 0:
+    keysPath = registeredKeyStorePath(workspace)
+  var cert: TestCertificate
+  try:
+    cert = readCertificateFile(certPath)
+  except CatchableError as err:
+    stderr.writeLine("repro certify --verify: not a certificate: " & err.msg)
+    return 1
+  let load = readRegisteredKeyStoreChecked(keysPath)
+  if load.availability != ksaReadable:
+    stderr.writeLine("repro certify --verify: registered keys unusable (" &
+      keysPath & "): " & $load.availability & " " & load.detail)
+    return 1
+  let verdict = verifyCertificateSignature(cert, load.store)
+  if verdict != svValid:
+    stderr.writeLine("repro certify --verify: REJECTED: signature verdict " &
+      $verdict & " (key_id " & cert.keyId & ")")
+    return 1
+  if cert.vcs.content != content:
+    stderr.writeLine("repro certify --verify: REJECTED: the certificate " &
+      "names content " & cert.vcs.content & ", not " & content)
+    return 1
+  stdout.writeLine("certificate valid: key_id=" & cert.keyId & " content=" &
+    cert.vcs.content & " platform=" & cert.platform & " targets=" &
+    cert.targets.join(","))
+  0
+
+proc runCertSignerCommand*(args: openArray[string]): int =
+  ## ``repro cert-signer serve|registration`` — the certificate signer of
+  ## Distributed-Execution M7 (EDGE-5, threat model D5): the service that
+  ## holds every worker's signing CA, OFF the workers.
+  ##
+  ##   repro cert-signer serve --state DIR --identity DIR --anchors DIR
+  ##       --authorized FILE [--revoked FILE] [--bind ADDR] [--port N]
+  ##       [--ready-file F]
+  ##     Signs one certificate per request for a worker whose host CA is in
+  ##     `--anchors` AND whose host id is in `--authorized` (re-read on
+  ##     every request; remove a line and that worker obtains nothing
+  ##     more). Every issuance and refusal goes to `<state>/issued.log`.
+  ##     `--identity` holds the signer's host CA (copy its `host-ca.crt` to
+  ##     each worker as `<tls dir>/cert-signer.crt`).
+  ##   repro cert-signer registration --state DIR --worker HOSTID
+  ##     Prints the registered-keys entry (`key_id`, `cert-authority …`)
+  ##     callers add to accept that worker's certificates.
+  var cmd = ""
+  var stateDir, identityDir, anchorsDir, authorized, revoked, readyFile,
+    worker = ""
+  var bindAddr = "127.0.0.1"
+  var port = 0
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    template value(): string =
+      (if i + 1 < args.len: (inc i; args[i]) else: "")
+    var key = a
+    var val = ""
+    let eq = a.find('=')
+    if a.startsWith("--") and eq > 0:
+      key = a[0 ..< eq]
+      val = a[eq + 1 .. ^1]
+    case key
+    of "--state": stateDir = (if val.len > 0: val else: value())
+    of "--identity": identityDir = (if val.len > 0: val else: value())
+    of "--anchors": anchorsDir = (if val.len > 0: val else: value())
+    of "--authorized": authorized = (if val.len > 0: val else: value())
+    of "--revoked": revoked = (if val.len > 0: val else: value())
+    of "--ready-file": readyFile = (if val.len > 0: val else: value())
+    of "--bind": bindAddr = (if val.len > 0: val else: value())
+    of "--port": port = parseInt(if val.len > 0: val else: value())
+    of "--worker": worker = (if val.len > 0: val else: value())
+    else:
+      if a.startsWith("-") or cmd.len > 0:
+        stderr.writeLine("repro cert-signer: unexpected argument " & a)
+        return 2
+      cmd = a
+    inc i
+  case cmd
+  of "registration":
+    if stateDir.len == 0 or worker.len != 64:
+      stderr.writeLine("usage: repro cert-signer registration --state DIR " &
+        "--worker <64-hex host id>")
+      return 2
+    let ca = signerWorkerCa(stateDir, parseHostIdHex(worker))
+    stdout.writeLine("key_id = \"" & ca.keyId & "\"")
+    stdout.writeLine("public_key = \"" & ca.registration & "\"")
+    return 0
+  of "serve":
+    if stateDir.len == 0 or identityDir.len == 0 or anchorsDir.len == 0 or
+        authorized.len == 0:
+      stderr.writeLine("usage: repro cert-signer serve --state DIR " &
+        "--identity DIR --anchors DIR --authorized FILE [--revoked FILE] " &
+        "[--bind ADDR] [--port N] [--ready-file F]")
+      return 2
+    if isWildcard(bindAddr):
+      stderr.writeLine("repro cert-signer: refusing wildcard bind " &
+        bindAddr & " (FLOW-6)")
+      return 2
+    createDir(stateDir)
+    setFilePermissions(stateDir, {fpUserRead, fpUserWrite, fpUserExec})
+    let identity = loadOrCreateHostIdentity(identityDir / "host-ca.crt",
+      identityDir / "host-ca.key")
+    let server = dw.newCertSignerServer(identity, anchorsDir, authorized,
+      revoked, stateDir / "issued.log", signerSignOperation(stateDir),
+      bindAddr, Port(port))
+    dw.start(server)
+    if readyFile.len > 0:
+      writeFile(readyFile & ".tmp", bindAddr & ":" & $int(server.listenPort) &
+        "\n" & $identity.hostId & "\n")
+      moveFile(readyFile & ".tmp", readyFile)
+    stdout.writeLine("certificate signer listening on " & bindAddr & ":" &
+      $int(server.listenPort) & " host=" & $identity.hostId)
+    stdout.flushFile()
+    while true:
+      try: poll(200) except ValueError: sleep(200)
+  else:
+    stderr.writeLine("usage: repro cert-signer serve|registration ...")
+    return 2
 
 proc runCertifyCheckSet*(args: openArray[string];
                          publicCliPath = ""): int =
@@ -96207,6 +97341,7 @@ proc runThinAppDispatch(programName: string): int =
     installUserDaemonParentPrewarmer()
     installUserDaemonBuildExecutor()
     installUserDaemonWatchExecutor()
+    installUserDaemonPeerCacheService()
     return runUserDaemonCommand(args)
   # Documented ``repro internal …`` namespace (Executable-Consolidation M1).
   # ``internal <helper>`` spellings for the role helpers were already rewritten
@@ -96512,6 +97647,14 @@ proc runThinAppDispatch(programName: string): int =
     # TC-9a: list the project's named certificates, or the
     # certificate-producing nodes a plan materializes.
     return runCertificatesCommand(args[1 .. ^1], publicCliPath)
+  if programName == "repro" and args.len > 0 and args[0] == "cert-signer":
+    # Distributed-Execution M7 (EDGE-5, threat model D5): the certificate
+    # signer that holds the workers' signing CAs, off the workers.
+    try:
+      return runCertSignerCommand(args[1 .. ^1])
+    except CatchableError as err:
+      stderr.writeLine("repro cert-signer: error: " & err.msg)
+      return 1
   if programName == "repro" and args.len > 0 and args[0] == "certify":
     # TC-1: ``repro certify`` is the explicit "run the full required set to
     # obtain a certificate" form — an alias for ``repro test --certify``
@@ -96519,6 +97662,12 @@ proc runThinAppDispatch(programName: string): int =
     # ``runReproTestCommand`` with ``--certify`` prepended so the same
     # issuance path runs; ``--no-certify`` would contradict the verb and is
     # left to the user's responsibility (last-flag-wins in the parser).
+    if "--verify" in args:
+      try:
+        return runCertifyVerify(args[1 .. ^1])
+      except CatchableError as err:
+        stderr.writeLine("repro certify --verify: error: " & err.msg)
+        return 1
     if "--check-set" in args:
       try:
         return runCertifyCheckSet(args[1 .. ^1], publicCliPath)
@@ -97455,6 +98604,7 @@ proc runThinAppDispatch(programName: string): int =
       installUserDaemonParentPrewarmer()
       installUserDaemonBuildExecutor()
       installUserDaemonWatchExecutor()
+      installUserDaemonPeerCacheService()
       return runUserDaemonCommand(daemonArgs[1 .. ^1])
     return runUserDaemonCliCommand(daemonArgs)
   if programName == "repro" and args.len > 0 and args[0] == "launch-plan":

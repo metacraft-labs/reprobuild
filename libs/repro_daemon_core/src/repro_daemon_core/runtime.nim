@@ -105,6 +105,19 @@ type
       ## Explicit lease state-store root override (``--state-root``). Empty
       ## => derived from ``systemScope`` via ``leaseStoreRootForScope``. A
       ## hermetic test points this at a throwaway dir under ``$HOME``.
+    trustProfile*: string
+      ## Distributed-Execution M7: ``--trust-profile=trusted|hardened`` —
+      ## the peer-cache node's and worker role's trust profile. Empty =
+      ## whatever the spec says (``profile=``), and ``trusted`` when it says
+      ## nothing. Validated where the spec is parsed.
+    peerCacheSpec*: string
+      ## Distributed-Execution M0: ``--peer-cache=<spec>`` — when non-empty
+      ## the daemon hosts the long-lived LAN peer-cache service (server,
+      ## client and membership loop) through the registered
+      ## ``UserDaemonBackgroundService``, so artifacts a build published stay
+      ## servable to peers after the CLI that ran the build exits. The spec
+      ## is opaque here; the service that consumes it lives in
+      ## ``repro_cli_support``.
     processOwnerToken: string
       ## Internal launch-only copy of ``ReproTestRunnerOwnerTokenEnv``. Never
       ## serialize or log this field, or include it in action environments.
@@ -223,7 +236,42 @@ type
       ## deferring", which is what makes entry into deferral loggable.
     deferralPollsSuppressed*: int
 
+type
+  UserDaemonBackgroundService* = object
+    ## Distributed-Execution M0: a long-lived service hosted by the daemon's
+    ## event loop — today the LAN peer cache. The daemon core knows nothing
+    ## about what the service does; it only gives it CPU between IPC accepts:
+    ##
+    ##   * ``start`` runs once after the daemon has bound its endpoint and
+    ##     returns a line for the daemon log ("" when the service decided not
+    ##     to run, e.g. no spec configured);
+    ##   * ``tick`` runs every loop iteration and may block for at most
+    ##     ``maxWaitMs`` servicing its own sockets and timers;
+    ##   * ``stop`` runs once on shutdown (and before a dev self-restart, so a
+    ##     fixed listen port is free for the successor).
+    ##
+    ## While the service is active the IPC accept wait is capped at
+    ## ``pollIntervalMs`` so neither side starves the other. On POSIX a
+    ## build request is executed in a forked worker, so a long build never
+    ## blocks the service; the worker must not touch the service's sockets
+    ## (the service's own fork-safety is its business).
+    start*: proc(config: UserDaemonConfig): string {.closure.}
+    tick*: proc(maxWaitMs: int) {.closure.}
+    stop*: proc() {.closure.}
+    active*: proc(): bool {.closure.}
+    pollIntervalMs*: int
+
 const UserDaemonLockFileName = ".repro-daemon.lock"
+
+var userDaemonBackgroundService: UserDaemonBackgroundService
+
+proc setUserDaemonBackgroundService*(service: UserDaemonBackgroundService) =
+  ## Registers the daemon-hosted background service (see the type).
+  userDaemonBackgroundService = service
+
+proc backgroundServiceActive(): bool =
+  userDaemonBackgroundService.active != nil and
+    userDaemonBackgroundService.active()
 
 var userDaemonBuildExecutor: UserDaemonBuildExecutor
 var userDaemonParentPrewarmer: UserDaemonParentPrewarmer
@@ -3187,11 +3235,46 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
   if leaseReapMs > 0:
     runScopedLeaseReapTick(config, leaseReapState, addr instances)
 
+  # Distributed-Execution M0: the hosted background service (peer cache).
+  # Started after the endpoint is bound, so a client that sees the daemon
+  # running can rely on the service having been attempted; a service that
+  # fails to start logs and leaves the daemon serving builds as before.
+  var serviceStopped = true
+  if userDaemonBackgroundService.start != nil:
+    try:
+      let line = userDaemonBackgroundService.start(config)
+      serviceStopped = false
+      if line.len > 0:
+        logLine(config.logPath, line)
+    except CatchableError as err:
+      logLine(config.logPath, "background service failed to start: " &
+        err.msg)
+  proc stopBackgroundService() =
+    if serviceStopped:
+      return
+    serviceStopped = true
+    if userDaemonBackgroundService.stop != nil:
+      try:
+        userDaemonBackgroundService.stop()
+      except CatchableError as err:
+        logLine(config.logPath, "background service stop failed: " & err.msg)
+  defer:
+    stopBackgroundService()
+  proc tickBackgroundService(maxWaitMs: int) =
+    if serviceStopped or not backgroundServiceActive():
+      return
+    try:
+      userDaemonBackgroundService.tick(maxWaitMs)
+    except CatchableError as err:
+      logLine(config.logPath, "background service tick failed: " & err.msg)
+
   var shuttingDown = false
   while not shuttingDown:
     if restartCandidateReady(config, devRestart):
       writeStatusFile(config, statusFor(config, startedAt, generation,
         activeSessionTallyFor(config), devRestart))
+      # The successor binds the service's listen port; free it first.
+      stopBackgroundService()
       if performDevSelfRestart(config, listener, daemonLock, devRestart):
         selfRestarting = true
         return 0
@@ -3201,7 +3284,17 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
     var pollMs = int(devRestartPollIntervalMs())
     if leaseReapMs > 0 and leaseReapMs < pollMs:
       pollMs = leaseReapMs           # wake in time for the next reap tick
-    if not listener.waitForClient(pollMs):
+    let serviceRunning = not serviceStopped and backgroundServiceActive()
+    if serviceRunning:
+      let servicePoll = max(1, userDaemonBackgroundService.pollIntervalMs)
+      if servicePoll < pollMs:
+        pollMs = servicePoll
+    let clientWaiting = listener.waitForClient(pollMs)
+    if serviceRunning:
+      # Service its sockets whether or not an IPC client arrived, bounded so
+      # a waiting client is accepted promptly.
+      tickBackgroundService(if clientWaiting: 0 else: pollMs)
+    if not clientWaiting:
       continue
     var client = listener.acceptIpc()
     try:
@@ -3267,6 +3360,12 @@ proc daemonProcessArgs(config: UserDaemonConfig): seq[string] =
   if config.leaseStoreRoot.len > 0:
     result.add("--state-root")
     result.add(config.leaseStoreRoot)
+  if config.peerCacheSpec.len > 0:
+    result.add("--peer-cache")
+    result.add(config.peerCacheSpec)
+  if config.trustProfile.len > 0:
+    result.add("--trust-profile")
+    result.add(config.trustProfile)
 
 proc legacyLaunchdLabel(config: UserDaemonConfig): string =
   ## The label binaries before the endpoint-keyed naming registered: the
@@ -4036,6 +4135,10 @@ proc parseUserDaemonConfigFlags*(args: seq[string];
       result.config.systemScope = true
     elif raw == "--state-root" or raw.startsWith("--state-root="):
       result.config.leaseStoreRoot = valueFor("--state-root")
+    elif raw == "--peer-cache" or raw.startsWith("--peer-cache="):
+      result.config.peerCacheSpec = valueFor("--peer-cache")
+    elif raw == "--trust-profile" or raw.startsWith("--trust-profile="):
+      result.config.trustProfile = valueFor("--trust-profile")
     else:
       result.rest.add(raw)
     inc i
@@ -4045,7 +4148,8 @@ proc parseUserDaemonConfigFlags*(args: seq[string];
 
 proc userDaemonUsage*(): string =
   "usage: repro-daemon [--foreground] [--dev] [--system] [--endpoint PATH] " &
-    "[--state-dir PATH] [--log PATH] [--state-root PATH]"
+    "[--state-dir PATH] [--log PATH] [--state-root PATH] " &
+    "[--peer-cache SPEC] [--trust-profile trusted|hardened]"
 
 proc runUserDaemonCommand*(args: seq[string]): int =
   if args.len == 1 and args[0] in ["--help", "-h"]:

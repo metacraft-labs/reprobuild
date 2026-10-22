@@ -442,6 +442,11 @@ proc composeManifestLayersWithOptions*(
       schemaWorkspaceStateV1, schemaWorkspaceStateV1,
       "workspace declares no manifest layers")
 
+  # Every layer's fragments resolve their branch roles against the ONE
+  # settings file that governs the workspace (Workspace-Branch-Roles.md §3):
+  # profiles and custom roles are workspace policy, so a layer — including a
+  # `local_path` layer that lives outside the root — never brings its own.
+  let roleSettings = workspaceRoleSettings(workspaceRoot)
   var composed: ResolvedProject
   var seen = initTable[string, int]()
   var skipped: seq[SkippedLayer]
@@ -523,7 +528,7 @@ proc composeManifestLayersWithOptions*(
 
     var layerResolved: ResolvedProject
     try:
-      layerResolved = resolveProject(projectFile)
+      layerResolved = resolveProject(projectFile, roleSettings)
     except WorkspaceManifestParseError as err:
       # Re-raise with the layer's provenance added so the user can tell
       # WHICH layer's project resolution failed — but still ABOUT the file

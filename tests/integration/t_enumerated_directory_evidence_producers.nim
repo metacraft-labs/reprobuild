@@ -49,7 +49,7 @@
 ##
 ## The evidence-level contract is checked on every platform. Publication
 ## and reuse also require a complete capture: io-mon `docs/usage.md`
-## ("macOS and Windows limitation (normative)") requires captures without
+## ("macOS limitation (normative)") requires captures without
 ## a complete tree-lifetime guard to report loss, so Failure-Semantics.md
 ## §Monitoring Failures forbids their publication and requires a rebuild.
 ## Where `NoTreeLifetimeGuard` holds, every monitored run must retain the

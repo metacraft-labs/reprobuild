@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""Derive the execution-lease floor's seccomp allow-list (CONF-3).
+
+Distributed-Execution M7, threat model G30: the floor in
+libs/repro_distributed_worker/c/repro_lease_linux.c is an ALLOW-list derived
+from systemd's @system-service set plus the profiled lease workload, minus the
+removals in recipes/repro-daemon-worker/lease-syscalls — never a hand-picked
+deny-list.
+
+    derive_lease_floor_syscalls.py            write the header
+    derive_lease_floor_syscalls.py --check    regenerate and compare (lint)
+
+Needs Linux: `systemd-analyze syscall-filter` expands the groups, and the
+syscall numbers come from the kernel UAPI headers (x86_64:
+<asm/unistd_64.h>; aarch64: <asm-generic/unistd.h> preprocessed with the
+arm64 ABI switches) so an entry cannot vanish because a libc header is old.
+"""
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+INPUT = os.path.join(ROOT, "recipes", "repro-daemon-worker", "lease-syscalls")
+OUTPUT = os.path.join(ROOT, "libs", "repro_distributed_worker", "c",
+                      "repro_lease_floor_syscalls.h")
+
+# The ABI switches arch/arm64/include/uapi/asm/unistd.h sets before it
+# includes asm-generic/unistd.h.
+ARM64_DEFINES = ["__ARCH_WANT_RENAMEAT", "__ARCH_WANT_NEW_STAT",
+                 "__ARCH_WANT_SET_GET_RLIMIT", "__ARCH_WANT_TIME32_SYSCALLS",
+                 "__ARCH_WANT_MEMFD_SECRET", "__ARCH_WANT_SYS_CLONE3"]
+
+
+def fail(msg):
+    sys.stderr.write("derive_lease_floor_syscalls: " + msg + "\n")
+    sys.exit(1)
+
+
+def expand(group, seen=None):
+    seen = seen if seen is not None else set()
+    if group in seen:
+        return set()
+    seen.add(group)
+    out = subprocess.run(["systemd-analyze", "syscall-filter", group],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        fail("systemd-analyze syscall-filter %s failed: %s" % (group, out.stderr))
+    names = set()
+    lines = out.stdout.splitlines()[1:]
+    for line in lines:
+        item = line.split("#", 1)[0].strip()
+        if not item:
+            continue
+        if item.startswith("@"):
+            names |= expand(item, seen)
+        else:
+            names.add(item)
+    return names
+
+
+def defines_from(text):
+    table = {}
+    for m in re.finditer(r"^#define\s+__NR(?:3264)?_(\w+)\s+(\d+)\s*$", text, re.M):
+        table.setdefault(m.group(1), int(m.group(2)))
+    return table
+
+
+def uapi_include():
+    # The dev shell exports the kernel UAPI headers; NixOS has no /usr/include.
+    return os.environ.get("REPRO_LINUX_UAPI_INCLUDE") or "/usr/include"
+
+
+def x86_64_table():
+    path = os.path.join(uapi_include(), "asm/unistd_64.h")
+    if not os.path.exists(path):
+        fail("missing " + path + " (kernel UAPI headers; set REPRO_LINUX_UAPI_INCLUDE)")
+    return defines_from(open(path).read())
+
+
+def aarch64_table():
+    path = os.path.join(uapi_include(), "asm-generic/unistd.h")
+    if not os.path.exists(path):
+        fail("missing " + path + " (kernel UAPI headers; set REPRO_LINUX_UAPI_INCLUDE)")
+    cc = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
+    if not cc:
+        fail("no C preprocessor (cc) on PATH")
+    args = [cc, "-E", "-dM", "-D__BITS_PER_LONG=64", "-x", "c", path]
+    for d in ARM64_DEFINES:
+        args.insert(2, "-D" + d)
+    out = subprocess.run(args, capture_output=True, text=True)
+    if out.returncode != 0:
+        fail("preprocessing asm-generic/unistd.h failed: " + out.stderr)
+    table = {}
+    for m in re.finditer(r"^#define\s+__NR(3264)?_(\w+)\s+(\S+)\s*$", out.stdout, re.M):
+        name, value = m.group(2), m.group(3)
+        if value.isdigit():
+            table.setdefault(name, int(value))
+    # The 3264 aliases name the 64-bit variants (fcntl, statfs, lseek, ...).
+    for m in re.finditer(r"^#define\s+__NR3264_(\w+)\s+(\d+)\s*$", out.stdout, re.M):
+        table[m.group(1)] = int(m.group(2))
+    table.pop("syscalls", None)
+    table.pop("arch_specific_syscall", None)
+    return table
+
+
+def read_input():
+    allow, deny = set(), set()
+    for raw in open(INPUT):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        if parts[0] not in ("allow", "deny") or len(parts) < 2:
+            fail("%s: expected 'allow <syscall>' or 'deny <syscall> <reason>': %s"
+                 % (INPUT, raw.strip()))
+        if parts[0] == "deny" and len(parts) < 3:
+            fail("%s: a deny line needs its reason: %s" % (INPUT, raw.strip()))
+        (allow if parts[0] == "allow" else deny).add(parts[1])
+    return allow, deny
+
+
+def render():
+    allow, deny = read_input()
+    base = expand("@system-service")
+    names = (base | allow) - deny
+    arches = [("__x86_64__", "x86_64", x86_64_table()),
+              ("__aarch64__", "aarch64", aarch64_table())]
+    out = ["/* GENERATED by scripts/derive_lease_floor_syscalls.py from",
+           " * recipes/repro-daemon-worker/lease-syscalls and systemd's",
+           " * @system-service (expanded); see that file. Do not edit: `just lint`",
+           " * regenerates it on Linux and fails when it differs. */",
+           "#ifndef REPRO_LEASE_FLOOR_SYSCALLS_H",
+           "#define REPRO_LEASE_FLOOR_SYSCALLS_H",
+           "#include <stddef.h>", ""]
+    for i, (macro, label, table) in enumerate(arches):
+        nrs = sorted({table[n] for n in names if n in table})
+        out.append(("#if " if i == 0 else "#elif ") + "defined(%s)" % macro)
+        out.append("/* %s: %d allowed of %d known syscalls */" % (label, len(nrs), len(table)))
+        out.append("static const unsigned rl_floor_allowed[] = {")
+        for j in range(0, len(nrs), 12):
+            out.append("  " + ", ".join(str(n) for n in nrs[j:j + 12]) + ",")
+        out.append("};")
+        out.append("#define RL_FLOOR_ALLOWED_COUNT (sizeof rl_floor_allowed / sizeof rl_floor_allowed[0])")
+        out.append("static const struct { unsigned nr; const char *name; } rl_syscall_names[] = {")
+        for name, nr in sorted(table.items(), key=lambda kv: kv[1]):
+            out.append('  { %d, "%s" },' % (nr, name))
+        out.append("};")
+    out.append("#else")
+    out.append('#error "repro_lease_floor_syscalls: unsupported architecture"')
+    out.append("#endif")
+    out += ["",
+            "static const char *rl_syscall_name(unsigned nr) {",
+            "  size_t lo = 0, hi = sizeof rl_syscall_names / sizeof rl_syscall_names[0];",
+            "  while (lo < hi) {",
+            "    size_t mid = (lo + hi) / 2;",
+            "    if (rl_syscall_names[mid].nr == nr) return rl_syscall_names[mid].name;",
+            "    if (rl_syscall_names[mid].nr < nr) lo = mid + 1; else hi = mid;",
+            "  }",
+            "  return NULL;",
+            "}",
+            "#endif",
+            ""]
+    return "\n".join(out)
+
+
+def comparable(text, highest):
+    """``text`` with every syscall numbered above ``highest[arch]`` removed.
+
+    The committed header may be generated from NEWER kernel headers than the
+    ones on this host (the pinned nixpkgs `linuxHeaders` trails the kernel),
+    which adds syscalls this host cannot name. Those, and the counts that
+    include them, are not comparable here; every syscall both sides know
+    must still match exactly, allowed set included.
+    """
+    out, arch = [], None
+    for line in text.splitlines():
+        m = re.match(r"#(?:el)?if defined\(__(\w+)__\)", line)
+        if m:
+            arch = m.group(1)
+        limit = highest.get(arch)
+        if limit is not None:
+            line = re.sub(r"(/\* \w+: )\d+ allowed of \d+ known syscalls \*/",
+                          r"\1* allowed of * known syscalls */", line)
+            entry = re.match(r'  \{ (\d+), "\w+" \},$', line)
+            if entry and int(entry.group(1)) > limit:
+                continue
+            if re.match(r"  (\d+, )*\d+,$", line):
+                nrs = [n for n in re.findall(r"\d+", line) if int(n) <= limit]
+                line = "  " + "".join(n + ", " for n in nrs).rstrip(" ") if nrs else None
+                if line is None:
+                    continue
+        out.append(line)
+    # Re-flow the allowed arrays so dropped numbers do not leave short lines.
+    return re.sub(r",\n  ", ", ", "\n".join(out))
+
+
+def main():
+    if not sys.platform.startswith("linux"):
+        print("derive_lease_floor_syscalls: needs Linux (systemd-analyze and the "
+              "kernel UAPI headers); not regenerated on " + sys.platform)
+        return 0
+    if not shutil.which("systemd-analyze"):
+        fail("systemd-analyze is not on PATH")
+    text = render()
+    if "--check" in sys.argv[1:]:
+        current = open(OUTPUT).read() if os.path.exists(OUTPUT) else ""
+        highest = {"x86_64": max(x86_64_table().values()),
+                   "aarch64": max(aarch64_table().values())}
+        if comparable(current, highest) != comparable(text, highest):
+            with tempfile.NamedTemporaryFile("w", suffix=".h", delete=False) as f:
+                f.write(text)
+            fail("the committed %s is stale; regenerated copy in %s (run "
+                 "scripts/derive_lease_floor_syscalls.py)" % (os.path.relpath(OUTPUT, ROOT), f.name))
+        print("lease floor syscall allow-list up to date")
+        return 0
+    with open(OUTPUT, "w") as f:
+        f.write(text)
+    print("wrote " + os.path.relpath(OUTPUT, ROOT))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

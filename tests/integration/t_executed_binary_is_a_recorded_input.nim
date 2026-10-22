@@ -96,10 +96,10 @@
 ## KEY CLASSIFICATION IS CHECKED ON EVERY HOST from cacheInputPaths over real
 ## evidence, including helper inclusion and content-addressed root elision.
 ## On platforms with NoTreeLifetimeGuard every capture is incomplete by
-## io-mon docs/usage.md ("macOS and Windows limitation (normative)"). There
+## io-mon docs/usage.md ("macOS limitation (normative)"). There
 ## the publication/reuse half instead checks the exact tree-lifetime marker,
 ## monitor-loss skip reason, no hot record, and conservative re-launches.
-## Linux retains the published-input and reuse checks. No evidence is filtered
+## Linux and Windows retain the published-input and reuse checks. No evidence is filtered
 ## or promoted. The fixture canonicalises /tmp on macOS to match F_GETPATH
 ## evidence and runs shell scripts via the monitor's non-SIP shebang route.
 

@@ -14,7 +14,14 @@
 ##   - ``sourceCache`` / ``sourceCas`` — built by running `runBuild`
 ##     with `peerCacheActionPublisher` set. After the run, the
 ##     publisher closure has stored the action-bundle bytes into the
-##     in-process peer table keyed by `actionBundleKey(weak)`.
+##     in-process peer table keyed by the action's weak fingerprint.
+##
+## MOCK JUSTIFICATION: the in-process table stands in for the network on
+## purpose — this file pins the ENGINE seam (miss -> fetcher -> installer
+## -> retry hit, and a weak-fingerprint miss falling through to a build).
+## The real wire path, two-phase selectors and BLAKE3-verified blob fetches
+## over TCP between distinct workspace roots, is covered end to end by
+## `libs/repro_peer_cache/tests/t_peer_cache_two_phase_lan_roundtrip.nim`.
 ##
 ##   - ``targetCache`` / ``targetCas`` — built by running `runBuild`
 ##     with `peerCacheActionFetcher` + `peerCacheActionInstaller` set.
@@ -103,21 +110,25 @@ proc keyHex(digest: ContentDigest): string =
     result.add(toHex(int(b), 2))
 
 proc newPublisher(peer: PeerTable): PeerCacheActionPublisher =
-  result = proc(weakFingerprint: ContentDigest;
-                bundleBytes: seq[byte]) {.gcsafe, closure.} =
-    peer[][keyHex(weakFingerprint)] = bundleBytes
+  result = proc(query: PeerCacheActionQuery; record: ActionResultRecord;
+                cas: var CasStore) {.gcsafe, closure.} =
+    # The engine hands the publisher the record and its own CAS; the
+    # bundle (record + output payloads) is materialised from there, the
+    # way a real publisher reads the blobs it is about to serve.
+    peer[][keyHex(query.weakFingerprint)] =
+      encodeActionBundle(materializeActionBundle(cas, record))
 
 proc newFetcher(peer: PeerTable): PeerCacheActionFetcher =
-  result = proc(weakFingerprint: ContentDigest):
+  result = proc(query: PeerCacheActionQuery):
       Option[seq[byte]] {.gcsafe, closure.} =
-    let key = keyHex(weakFingerprint)
+    let key = keyHex(query.weakFingerprint)
     if peer[].hasKey(key):
       some(peer[][key])
     else:
       none(seq[byte])
 
 proc newInstaller(): PeerCacheActionBundleInstaller =
-  result = proc(weakFingerprint: ContentDigest;
+  result = proc(query: PeerCacheActionQuery;
                 bundleBytes: seq[byte];
                 cas: var CasStore;
                 cache: ptr ActionCache):

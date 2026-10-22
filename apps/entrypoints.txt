@@ -73,6 +73,12 @@ repro-harvest-apt apps/repro-harvest-apt/repro_harvest_apt.nim --define:ssl --pa
 # transport nobody is meant to rely on (the binding, not the transport, is
 # what makes the evidence trustworthy).
 attestation-agent apps/attestation-agent/attestation_agent.nim
+# Distributed-Execution M7: the Evidence zone of the worker pool. Its own
+# binary, like the attestation agent, because it runs on a DIFFERENT host
+# from the workers whose detections and audit records it holds, and its
+# operator trusts its closure, not the engine's. Append-only wire
+# vocabulary; reading is local to the sink host (EVID-3).
+repro-evidence-sink apps/repro-evidence-sink/repro_evidence_sink.nim
 # Dependency-Attribution MAC-1: the thin daemon client, and since the
 # thin-client-on-PATH rename THE `repro` A USER TYPES. Links ONLY
 # `repro_daemon_core` -- no build engine, no DSL runtime -- which is what

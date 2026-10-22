@@ -123,12 +123,14 @@ when defined(posix) and isNixSupported:
       let oldFail = getEnv("REPRO_TEST_NIM_FAIL")
       let oldFake = getEnv("REPRO_TEST_FAKE_PROVIDER")
       let oldRuntimeRpath = getEnv("REPROBUILD_RUNTIME_LIBRARY_PATH")
+      let oldTmpDir = getEnv("TMPDIR")
       defer:
         putEnv("REPRO_NIM_COMPILER", oldCompiler)
         putEnv("REPRO_PROVIDER_NIMCACHE_MODE", oldMode)
         putEnv("REPRO_TEST_NIM_FAIL", oldFail)
         putEnv("REPRO_TEST_FAKE_PROVIDER", oldFake)
         putEnv("REPROBUILD_RUNTIME_LIBRARY_PATH", oldRuntimeRpath)
+        if oldTmpDir.len > 0: putEnv("TMPDIR", oldTmpDir) else: delEnv("TMPDIR")
         setFilePermissions(modulePath, {fpUserRead, fpUserWrite})
         setFilePermissions(projectRoot,
           {fpUserRead, fpUserWrite, fpUserExec})
@@ -253,6 +255,12 @@ when defined(posix) and isNixSupported:
       putEnv("REPRO_TEST_NIM_FAIL", "")
       putEnv("REPROBUILD_RUNTIME_LIBRARY_PATH", oldRuntimeRpath)
       putEnv("REPRO_PROVIDER_NIMCACHE_MODE", "shared")
+      # The shared interface nimcache lives under the temporary directory
+      # (`interfaceExtractionNimcacheRoot`), outside any scratch or
+      # action-cache root. A private one keeps the object counts below about
+      # this fixture alone.
+      createDir(tempRoot / "tmp")
+      putEnv("TMPDIR", tempRoot / "tmp")
 
       let first = extractInterfaceFromModule(modulePath,
         outputRoot / "first.rbsz", outputRoot / "first.nim", sourceRoot,
@@ -266,7 +274,7 @@ when defined(posix) and isNixSupported:
       # exactly one object here and it is subject to the same reuse claim as
       # everything else in the directory.
       var objectTimes = initTable[string, Time]()
-      for path in walkDirRec(scratchRoot / "nimcache-interface"):
+      for path in walkDirRec(interfaceExtractionNimcacheRoot()):
         if path.endsWith(".o"):
           objectTimes[path] = getLastModificationTime(path)
       require objectTimes.len >= 4
@@ -280,7 +288,7 @@ when defined(posix) and isNixSupported:
         if not fileExists(path) or getLastModificationTime(path) != modified:
           inc rebuilt
       var objectsAfter = 0
-      for path in walkDirRec(scratchRoot / "nimcache-interface"):
+      for path in walkDirRec(interfaceExtractionNimcacheRoot()):
         if path.endsWith(".o"):
           inc objectsAfter
       checkpoint "shared objects: " & $objectTimes.len & ", rebuilt: " &

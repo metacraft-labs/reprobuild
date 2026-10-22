@@ -6,7 +6,7 @@
 ## record encoders, never the host, and runs as its own process. Agent
 ## Harbor implements the same scenario with its own crate.
 
-import std/[asyncdispatch, os, strutils, times]
+import std/[asyncdispatch, os, strutils, tables, times]
 
 import cbor
 
@@ -62,6 +62,17 @@ proc execute(s: Session; planHex: string; approval = ""): seq[CborItem] =
     raise newException(ProviderError, "execute refused: " & r.reason)
   r.field("results").elems
 
+proc awaitApproval(path: string): string =
+  ## The approval the harness hands over as a file, which is consumed, so
+  ## the next approval is a new file.
+  let deadline = epochTime() + 60
+  while not fileExists(path):
+    if epochTime() > deadline:
+      raise newException(ProviderError, "no approval arrived")
+    sleep(50)
+  result = readFile(path).strip
+  removeFile(path)
+
 proc run(s: Session; p: Plan): seq[CborItem] =
   let r = s.submit(p)
   if r.outcome != "ok":
@@ -88,7 +99,8 @@ proc runFixtureProvider*(): int =
     let hello = s.client.call([tp("kind", cText("hello")),
       tp("protocol", cUInt(ProtocolVersion)),
       tp("families", cArray([cText("checkout.v1"), cText("source.v1"),
-        cText("build.v1"), cText("test.v1"), cText("generation.v1")]))])
+        cText("build.v1"), cText("test.v1"), cText("generation.v1"),
+        cText("remix.v1")]))])
     if hello.outcome != "ok":
       raise newException(ProviderError, "hello refused: " & hello.reason)
     let attach = s.client.call([tp("kind", cText("session.attach")),
@@ -108,12 +120,47 @@ proc runFixtureProvider*(): int =
                              "path": "src/main.c"}),
       op(okBuildRun, ws), op(okTestRun, ws)],
       @["source.write:fixture", "build.run:fixture", "test.run:fixture"]))
-    # 5. An escaping path must be refused, and the provider carries on.
+    # 5. Start the long build and cancel it at once, on this connection.
+    # The host answers the cancellation first; it is "cancelling" when the
+    # build had started and "withdrawn" when it had not.
+    let long = s.submit(s.plan(@[op(okBuildRun, ws, {"target": "long"})],
+                               @["build.run:fixture"]))
+    if long.outcome != "ok":
+      raise newException(ProviderError, "long build refused: " & long.reason)
+    let longPlan = asDigest(long.field("plan"), "plan").hex
+    for (kind, rid) in [("plan.execute", 1'u64), ("plan.cancel", 2'u64)]:
+      waitFor s.client.send(encodeDeterministic(cMap([
+        tp("kind", cText(kind)), tp("plan", cText(longPlan)),
+        tp("requestId", cUInt(rid))])))
+    var answers: Table[uint64, CborItem]
+    for _ in 0 ..< 2:
+      let resp = waitFor s.client.receive()
+      if resp.len == 0:
+        raise newException(ProviderError, "the host closed the connection")
+      let r = decodeItem(resp)
+      answers[asUInt(r.field("requestId"), "requestId")] = r
+    if not answers.hasKey(1) or not answers.hasKey(2):
+      raise newException(ProviderError, "answers do not match the requests")
+    let cancelled = answers[2]
+    if cancelled.outcome != "ok":
+      raise newException(ProviderError, "cancel refused: " & cancelled.reason)
+    case cancelled.field("state").text
+    of "cancelling":
+      let r = answers[1]
+      if r.outcome != "ok" or not r.field("results").elems[0].
+          field("detail").text.startsWith("cancelled"):
+        raise newException(ProviderError, "the long build was not cancelled")
+    of "withdrawn":
+      if answers[1].reason != "plan-unknown":
+        raise newException(ProviderError, "a withdrawn plan executed")
+    else:
+      raise newException(ProviderError, "unknown cancel state")
+    # 6. An escaping path must be refused, and the provider carries on.
     let escape = s.submit(s.plan(@[op(okSourceWrite, ws,
       {"content": "x", "path": "../escape"})], @["source.write:fixture"]))
     if escape.outcome != "refused" or escape.reason != "path-escape":
       raise newException(ProviderError, "an escaping path was not refused")
-    # 6. Stage, citing the build and test results, after the user approves.
+    # 7. Stage, citing the build and test results, after the user approves.
     let stage = s.submit(s.plan(@[op(okGenerationStage, ws)],
       @["system.generation:stage"],
       @[asDigest(built[1].field("result"), "result"),
@@ -121,15 +168,52 @@ proc runFixtureProvider*(): int =
     if stage.outcome != "ok" or stage.field("approvalRequired").elems.len != 1:
       raise newException(ProviderError, "stage plan was not held for approval")
     let approvalFile = env("REPROOS_CONFORMANCE_APPROVAL_FILE")
-    let deadline = epochTime() + 60
-    while not fileExists(approvalFile):
-      if epochTime() > deadline:
-        raise newException(ProviderError, "no approval arrived")
-      sleep(50)
     let staged = s.execute(asDigest(stage.field("plan"), "plan").hex,
-                           readFile(approvalFile).strip)
+                           awaitApproval(approvalFile))
     if staged[0].field("status").text != "completed":
       raise newException(ProviderError, "the approved stage failed")
+    # 8. Capture the staged release as a private Remix and export it; the
+    # export needs the user's approval.
+    let detail = staged[0].field("detail").text.split(' ')[0]
+    if not detail.startsWith("release="):
+      raise newException(ProviderError, "the stage named no release")
+    let release = detail["release=".len .. ^1]
+    let remix = s.submit(s.plan(@[
+      op(okRemixCapture, ws, {"release": release}),
+      op(okRemixExport, ws, {"release": release})],
+      @["remix.publish:private", "remix.publish:export"]))
+    if remix.outcome != "ok" or remix.field("approvalRequired").elems.len != 1:
+      raise newException(ProviderError, "the export was not held for approval")
+    for x in s.execute(asDigest(remix.field("plan"), "plan").hex,
+                       awaitApproval(approvalFile)):
+      if x.field("status").text != "completed":
+        raise newException(ProviderError, "the approved Remix plan failed")
+    # 9. Activate the staged release, after the user approves.
+    proc approved(s: Session; p: Plan; what: string): seq[CborItem] =
+      let r = s.submit(p)
+      if r.outcome != "ok" or r.field("approvalRequired").elems.len != 1:
+        raise newException(ProviderError, what & " was not held for approval")
+      result = s.execute(asDigest(r.field("plan"), "plan").hex,
+                         awaitApproval(approvalFile))
+      if result[0].field("status").text != "completed":
+        raise newException(ProviderError, what & " failed")
+    let activated = s.approved(s.plan(@[op(okGenerationActivate, release)],
+      @["system.generation:activate"]), "the activation")
+    var current, previous = ""
+    for w in activated[0].field("detail").text.split(' '):
+      if w.startsWith("generation="): current = w["generation=".len .. ^1]
+      if w.startsWith("previous="): previous = w["previous=".len .. ^1]
+    if current.len == 0 or previous.len == 0:
+      raise newException(ProviderError, "the activation named no generations")
+    # 10. Roll back to the previous generation; the plan is based on the
+    # generation that is active now.
+    var back = s
+    back.base = current
+    discard back.approved(back.plan(@[op(okGenerationRollback, previous)],
+      @["system.generation:rollback"]), "the rollback")
+    # 11. Compose the release into a fresh workspace.
+    discard s.run(s.plan(@[op(okRemixCompose, "fixture",
+      {"releases": release})], @["workspace.create:fixture"]))
     echo "conformance-done"
     0
   except ProviderError, AgentRefusal, OSError, IOError, ValueError:

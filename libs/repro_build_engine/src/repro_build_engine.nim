@@ -977,6 +977,11 @@ type
       ## `repro_peer_cache.action_bundle`. The engine treats the
       ## fetcher's `some(bytes)` result as an opaque payload and
       ## delegates installation to this closure.
+    peerCacheWorkspaceRoot*: string
+      ## Distributed-Execution M0: the workspace checkout root that
+      ## `$WORKSPACE` stands for when portable caching normalizes peer-cache
+      ## records. Passed through to the peer-cache closures in
+      ## `PeerCacheActionQuery.workspaceRoot`; empty disables the rewrite.
     binaryCachePublisher*: BinaryCachePublisher
       ## M9.L.4-refactor Step A. Optional binary-cache publisher
       ## closure. When non-nil, fired after every successful action
@@ -2056,33 +2061,63 @@ type
   BuildProgressCallback* = proc(event: BuildProgressEvent)
   BuildCancelCallback* = proc(): bool
 
-  PeerCacheActionFetcher* = proc(weakFingerprint: ContentDigest):
+  PeerCacheActionQuery* = object
+    ## Distributed-Execution M0: what the engine tells the peer-cache
+    ## closures about one action. The peer cache runs BuildXL's two-phase
+    ## lookup (WeakFingerprint -> PathSet selectors -> StrongFingerprint ->
+    ## action result), and Step 2 of that lookup observes the action's
+    ## inputs on THIS workspace — so the closures need the action's working
+    ## directory and policy, not just a fingerprint.
+    weakFingerprint*: ContentDigest
+      ## The engine's LOCAL weak fingerprint (`BuildAction.weakFingerprint`).
+      ## The installer re-keys a peer's record to it.
+    peerKey*: array[32, byte]
+      ## The weak fingerprint PEERS agree on. Under portable caching
+      ## (`BuildEngineConfig.portableRoots` non-empty, i.e.
+      ## `REPRO_PORTABLE_CACHE=1`) this is the portable weak fingerprint —
+      ## the action's static description over logical paths, identical on
+      ## every checkout. Otherwise it is `weakFingerprint.bytes`.
+    portable*: bool
+      ## Portable caching is on: the closures normalize published paths to
+      ## `$WORKSPACE/...` and rebase fetched ones onto `workspaceRoot`.
+    cwd*: string
+      ## `BuildAction.cwd` — relative record names resolve against it.
+    policy*: FileFingerprintPolicy
+      ## `BuildAction.actionCachePolicy` — an installed record is re-observed
+      ## under it so the engine's local lookup can validate it.
+    workspaceRoot*: string
+      ## `BuildEngineConfig.peerCacheWorkspaceRoot`.
+
+  PeerCacheActionFetcher* = proc(query: PeerCacheActionQuery):
     Option[seq[byte]] {.gcsafe, closure.}
-    ## Optional peer-cache action-bundle fetcher. The engine calls this
-    ## on action-cache miss (no record or input-changed) with the
-    ## action's weak fingerprint; a `some(bytes)` reply carries an
-    ## encoded `ActionBundle` (see
-    ## `repro_peer_cache/action_bundle.nim`) which the engine installs
-    ## via `installPeerCacheActionBundle` before re-trying the local
-    ## lookup. `none` means the peer cache missed and the engine falls
-    ## through to a rebuild. The closure type keeps `repro_build_engine`
-    ## free of a `repro_peer_cache` dependency — the CLI wires it.
+    ## Optional peer-cache fetcher. The engine calls this on action-cache
+    ## miss (no record or input-changed). A `some(bytes)` reply carries an
+    ## opaque bundle the CLI's two-phase lookup produced (see
+    ## `repro_peer_cache/two_phase.nim`), which the engine hands to
+    ## `peerCacheActionInstaller` before re-trying the local lookup. `none`
+    ## means the peer cache missed — including a strong-fingerprint miss,
+    ## where peers know the action but not with these inputs — and the
+    ## engine falls through to a rebuild. The closure type keeps
+    ## `repro_build_engine` free of a `repro_peer_cache` dependency — the
+    ## CLI wires it.
 
-  PeerCacheActionPublisher* = proc(weakFingerprint: ContentDigest;
-                                   bundleBytes: seq[byte])
+  PeerCacheActionPublisher* = proc(query: PeerCacheActionQuery;
+                                   record: ActionResultRecord;
+                                   cas: var CasStore)
     {.gcsafe, closure.}
-    ## Optional peer-cache action-bundle publisher. The engine calls
-    ## this after a successful local cache record write so the producer
-    ## side of a same-recipe build seeds the LAN cache. `nil` keeps the
-    ## engine pure-local (the legacy behaviour).
+    ## Optional peer-cache publisher. The engine calls this after a
+    ## successful local cache record write so the producer side seeds the
+    ## LAN cache; `cas` is the engine's own store, which holds the record's
+    ## output blobs. `nil` keeps the engine pure-local (the legacy
+    ## behaviour).
 
-  PeerCacheActionBundleInstaller* = proc(weakFingerprint: ContentDigest;
+  PeerCacheActionBundleInstaller* = proc(query: PeerCacheActionQuery;
                                           bundleBytes: seq[byte];
                                           cas: var CasStore;
                                           cache: ptr ActionCache):
                                           tuple[ok: bool; reason: string]
     {.gcsafe, closure.}
-    ## Optional decoder + installer for peer-cache action bundles. The
+    ## Optional decoder + installer for peer-cache bundles. The
     ## engine invokes this synchronously when `peerCacheActionFetcher`
     ## returns `some(bytes)`. The closure decodes the bundle, writes
     ## the output blobs to the engine's `cas` (so the next blob
@@ -17910,14 +17945,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     for input in record.inputs:
       item.cacheRecordInputs.add(materialPath(action.cwd, input.path))
 
-  proc publishPeerCacheBundle(weakFingerprint: ContentDigest;
+  proc publishPeerCacheBundle(query: PeerCacheActionQuery;
                               record: ActionResultRecord) =
-    ## Peer-Cache M1 publisher hook (Linux-Distro-Recipe-Validation
-    ## M5 wiring). Materialises the action-bundle bytes — record +
-    ## every output blob payload read back from the local CAS — and
-    ## hands them to the configured publisher closure. Nil-safe;
-    ## inactive when the CLI didn't pass ``--peer-cache=…`` or when
-    ## the record has no CAS-backed outputs (``opkMetadataOnly``).
+    ## Peer-Cache publisher hook. Hands the freshly recorded execution and
+    ## the engine's CAS (which holds its output blobs) to the configured
+    ## publisher closure; Distributed-Execution M0's two-phase publish
+    ## (PathSet blob + memo entry) happens there. Nil-safe; inactive when
+    ## the CLI didn't pass ``--peer-cache=…`` or when the record has no
+    ## CAS-backed outputs (``opkMetadataOnly``).
     if config.peerCacheActionPublisher == nil:
       return
     if record.outputPayloadKind != opkCasBlobs:
@@ -17938,27 +17973,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         not record.determinism.class.allowsCrossMachineSubstitution():
       return
     let publishStart = statStart()
-    var bundleBytes: seq[byte] = @[]
-    proc writeU32Le(dst: var seq[byte]; value: uint32) =
-      dst.add(byte(value and 0xff'u32))
-      dst.add(byte((value shr 8) and 0xff'u32))
-      dst.add(byte((value shr 16) and 0xff'u32))
-      dst.add(byte((value shr 24) and 0xff'u32))
-    for ch in "RPAB":
-      bundleBytes.add(byte(ord(ch)))
-    bundleBytes.add(byte(1)); bundleBytes.add(byte(0))  # version 1, LE
-    let recordBytes = encodeActionResultRecord(record)
-    bundleBytes.writeU32Le(uint32(recordBytes.len))
-    for b in recordBytes: bundleBytes.add(b)
-    bundleBytes.writeU32Le(uint32(record.outputs.len))
     for output in record.outputs:
-      let payload = cas.casGet(contentHashForActionBlob(output.blob))
-      if uint64(payload.len) != output.blob.sizeBytes:
-        raise newException(CacheIntegrityError, "CAS size mismatch for " &
+      # The publisher serves these blobs to peers by digest; a record whose
+      # blob is not where it says is an integrity failure, not a publish.
+      let payloadHash = contentHashForActionBlob(output.blob)
+      if not cas.casExists(payloadHash):
+        raise newException(CacheIntegrityError, "CAS blob missing for " &
           digestHex(output.blob.digest))
-      bundleBytes.writeU32Le(uint32(payload.len))
-      for b in payload: bundleBytes.add(b)
-    config.peerCacheActionPublisher(weakFingerprint, bundleBytes)
+    config.peerCacheActionPublisher(query, record, cas)
     finishStat("repro peer-cache publish", publishStart)
 
   proc portableEnvOf(action: BuildAction): seq[(string, string)] =
@@ -18486,6 +18508,42 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     portableWeakFingerprint(config.portableRoots, action.argv, action.cwd,
       portableEnvOf(action), portableDeclaredInputsOf(action),
       portableStaticFieldsOf(action))
+
+  var peerCacheQueries = initTable[string, PeerCacheActionQuery]()
+    ## Distributed-Execution M0: the query computed for each action when the
+    ## scheduler first takes it up, by action id. The publish site reuses it
+    ## because by
+    ## then the scheduler may have REWRITTEN the action for execution
+    ## (`monitoredAction` wraps argv in `internal io monitor --depfile
+    ## <per-run temp file> --`), and a key derived from that argv would
+    ## differ on every run — the publication would never be found.
+
+  proc computePeerCacheQuery(action: BuildAction): PeerCacheActionQuery =
+    ## Distributed-Execution M0: the peer-cache view of one action. Under
+    ## portable caching the key peers agree on is the PORTABLE weak
+    ## fingerprint, because the local one may mix in this checkout's
+    ## absolute paths and two checkouts of one workspace must find each
+    ## other's selectors.
+    result = PeerCacheActionQuery(
+      weakFingerprint: action.weakFingerprint,
+      peerKey: action.weakFingerprint.bytes,
+      portable: config.portableRoots.len > 0,
+      cwd: action.cwd,
+      policy: action.actionCachePolicy,
+      workspaceRoot: config.peerCacheWorkspaceRoot)
+    if result.portable:
+      let hex = portableWeakOf(action)
+      if hex.len == 64:
+        for i in 0 ..< 32:
+          result.peerKey[i] = byte(parseHexInt(hex[2 * i .. 2 * i + 1]))
+
+  proc peerCacheQueryOf(action: BuildAction): PeerCacheActionQuery =
+    ## The query for `action`: the one recorded when it was scheduled (see
+    ## `peerCacheQueries`), else computed — and recorded — now.
+    if peerCacheQueries.hasKey(action.id):
+      return peerCacheQueries[action.id]
+    result = computePeerCacheQuery(action)
+    peerCacheQueries[action.id] = result
 
   proc portablePhysicalOutputsOf(action: BuildAction): seq[string] =
     ## `outputs` plus `declaredOutputs`: an install-mirror action's outputs
@@ -20378,6 +20436,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # DECLARED outputs so the no-record "outputs-present" shortcut below
         # cannot fire for an edge that declares none.
         var reusableInPlace = false
+        if action.cacheable and (config.peerCacheActionPublisher != nil or
+            config.peerCacheActionFetcher != nil):
+          # Pin the peer-cache query to the action as SCHEDULED, before any
+          # execution-time rewrite can change its argv (`peerCacheQueries`).
+          discard peerCacheQueryOf(action)
         for dep in action.deps:
           if launchedSucceeded.contains(dep):
             dependencyLaunched = true
@@ -20508,28 +20571,35 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # preserved. On peer hit we install the bundle locally and
           # re-run the same `lookupActionResult` call so the rest of
           # the scheduler treats this as a normal local hit.
+          # Distributed-Execution M0: true once a peer's result was installed
+          # for this action. Its output payloads are then IN the CAS (the
+          # installer verified and wrote every one), so the hit below is
+          # served by restoring them — never by the warm in-place shortcut,
+          # whose "rebuild what is missing" rule exists for records whose
+          # payloads were deferred, and whose in-place revalidation compares
+          # against whatever an earlier local run left at the output paths.
+          var peerInstalled = false
           if lookup.status in {aclMissNoRecord, aclMissInputChanged,
               aclMissNoOutputPayload} and
               config.peerCacheActionFetcher != nil and
               config.peerCacheActionInstaller != nil:
             let peerFetchStart = statStart()
-            let peerReply = config.peerCacheActionFetcher(
-              action.weakFingerprint)
+            let peerQuery = peerCacheQueryOf(action)
+            let peerReply = config.peerCacheActionFetcher(peerQuery)
             finishStat("repro peer-cache fetch", peerFetchStart)
             if peerReply.isSome:
               let installStart = statStart()
               let install = config.peerCacheActionInstaller(
-                action.weakFingerprint, peerReply.get(),
-                cas, addr cache)
+                peerQuery, peerReply.get(), cas, addr cache)
               finishStat("repro peer-cache install", installStart)
               if install.ok:
+                peerInstalled = true
+                reusableInPlace = false
                 let retryStart = statStart()
                 lookup = cache.lookupActionResult(cas.inner, action.weakFingerprint,
                   action.actionCachePolicy,
-                  verifyOutputBlobs = not reusableInPlace,
-                  allowMetadataOnlyHit =
-                    config.rebuildMissingOutputsOnCacheHit and
-                    reusableInPlace,
+                  verifyOutputBlobs = true,
+                  allowMetadataOnlyHit = false,
                   metadataCache = addr fileMetadataCache,
                   envResolver = action.actionEnvResolver(unsafeAddr config),
                   outputRoot = action.cwd,
@@ -20598,7 +20668,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               inc completed
               launchedAny = true
               continue
-            if config.rebuildMissingOutputsOnCacheHit:
+            if config.rebuildMissingOutputsOnCacheHit and not peerInstalled:
               runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
               runResult.results[idToIndex.resultIndex(id)].reason =
                 "missing-output"
@@ -20648,7 +20718,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               inc completed
               launchedAny = true
               continue
-            if config.rebuildMissingOutputsOnCacheHit:
+            if config.rebuildMissingOutputsOnCacheHit and not peerInstalled:
               runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
               runResult.results[idToIndex.resultIndex(id)].reason =
                 "missing-output"
@@ -20910,7 +20980,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 writeActionResultRecordFile(
                   dependencyEvidencePath(cacheRoot, action.id), record)
                 recordPortableFingerprint(idx, action, evidence.evidence, record)
-                publishPeerCacheBundle(action.weakFingerprint, record)
+                publishPeerCacheBundle(peerCacheQueryOf(action), record)
                 publishBinaryCacheBundle(action, record)
               except UnreadableInputError as err:
                 runResult.traceUnreadableInput(id, idToIndex.resultIndex(id), err.msg)
@@ -21147,7 +21217,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                   dependencyEvidencePath(cacheRoot, plan.action.id), record)
                 recordPortableFingerprint(idx, plan.action, evidence.evidence,
                   record)
-                publishPeerCacheBundle(plan.action.weakFingerprint, record)
+                publishPeerCacheBundle(peerCacheQueryOf(plan.action), record)
                 publishBinaryCacheBundle(plan.action, record)
               except UnreadableInputError as err:
                 runResult.traceUnreadableInput(finished.id, idToIndex.resultIndex(finished.id), err.msg)
@@ -21754,7 +21824,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             writeActionResultRecordFile(
               dependencyEvidencePath(cacheRoot, action.id), record)
             recordPortableFingerprint(idx, action, evidence.evidence, record)
-            publishPeerCacheBundle(action.weakFingerprint, record)
+            publishPeerCacheBundle(peerCacheQueryOf(action), record)
             publishBinaryCacheBundle(action, record)
           except UnreadableInputError as err:
             runResult.traceUnreadableInput(finished.id, idx, err.msg)

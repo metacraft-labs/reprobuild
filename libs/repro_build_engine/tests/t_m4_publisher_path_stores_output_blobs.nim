@@ -204,8 +204,8 @@ type Recorder = ref object
   binaryPublishes: int
 
 proc peerPublisher(rec: Recorder): PeerCacheActionPublisher =
-  result = proc(weakFingerprint: ContentDigest;
-                bundleBytes: seq[byte]) {.gcsafe, closure.} =
+  result = proc(query: PeerCacheActionQuery; record: ActionResultRecord;
+                cas: var CasStore) {.gcsafe, closure.} =
     rec.peerPublishes.inc
 
 proc binaryPublisher(rec: Recorder): BinaryCachePublisher =

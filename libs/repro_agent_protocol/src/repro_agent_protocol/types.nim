@@ -69,6 +69,8 @@ type
     arAuditCorrupt = "audit-corrupt"
     arEvidenceUnknown = "evidence-unknown"
     arProviderNotAdmitted = "provider-not-admitted"
+    arBusy = "busy"
+      ## Another execution is in progress on this host; retry after it.
 
   AgentRefusal* = object of CatchableError
     ## Raised for every refusal. `reason` is the machine-readable code;
