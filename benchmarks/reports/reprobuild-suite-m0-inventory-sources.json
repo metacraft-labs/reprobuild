@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 67,
     "pureUnitTests": 688,
     "staticallyDetectedRuntimeCompilerFlowTests": 127,
-    "testEntries": 2376
+    "testEntries": 2377
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1375,7 +1375,7 @@
       "integration": 1272,
       "platform/destructive": 145,
       "pure unit": 688,
-      "unclassified": 253
+      "unclassified": 254
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1578,8 +1578,8 @@
       }
     ],
     "nimTestBinaryCount": 2345,
-    "pythonTestFileCount": 31,
-    "testEntryCount": 2376
+    "pythonTestFileCount": 32,
+    "testEntryCount": 2377
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -50234,6 +50234,21 @@
       "source": "tests/unit/test_reprobuild_suite_inventory.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 109,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_sibling_lock_pins.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

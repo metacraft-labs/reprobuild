@@ -4,6 +4,19 @@
 No network is needed: a commit's sibling bill of materials must be consistent
 before any clone or build starts. Acknowledging an override with != does not
 make a checkout usable by a consumer whose lock requires another revision.
+
+Rules, for every explicit entry (`name=ref` or `name!=ref`):
+
+  * a 40-hex `ref` must equal every revision repro.lock and flake.lock (direct
+    root inputs only) pin for `name`;
+  * a branch or tag `ref` is refused when repro.lock pins `name`. The engine
+    refuses a cross-repo producer at any commit other than the locked one, so
+    such a clone works only while the branch happens to sit on the lock and
+    breaks CI the moment it moves. A repo only flake.lock names may follow a
+    branch: several entries do so on purpose, and their comments say why.
+
+A bare `name` entry carries no ref and is resolved by the clone action, so it
+is not checked here.
 """
 import argparse
 import json
@@ -43,8 +56,14 @@ def check(root: Path) -> list[str]:
         if '=' not in entry:
             continue
         name, revision = entry.split('=', 1)
-        name = name.removesuffix('!')
+        name = name.strip().removesuffix('!')
+        revision = revision.strip()
         if not SHA.fullmatch(revision):
+            for source, expected in locked.get(name, []):
+                if source == 'repro.lock':
+                    errors.append(f'.github/sibling-repos:{number}: {name}={revision} is a branch/ref, '
+                                  f'but repro.lock pins {name} at revision {expected}; the engine '
+                                  f'refuses any other commit, so pin {name}={expected}')
             continue
         for source, expected in locked.get(name, []):
             if revision.lower() != expected.lower():
