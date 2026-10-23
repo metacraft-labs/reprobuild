@@ -118,6 +118,12 @@ export c_compiler.CCompilerUnusableError, c_compiler.bootstrapCCompilerEnv,
   c_compiler.bootstrapSdkRootEnv, c_compiler.bootstrapSysrootArgs,
   c_compiler.cCompilerOverrideRemedy
 
+# The compile edges' entropy blessing is declared once, in
+# `repro_core/entropy_blessings`, because the profile compile -- which sits
+# below this library -- carries the same one. It used to be defined here and
+# is re-exported for the callers that name it through this module.
+export ProviderCompilerEntropyJustification
+
 proc compileTimeSourceRoot(name: string): string {.compileTime.} =
   ## Preserve source-only dependency roots from the environment that built
   ## ``repro``. A Nix-built CLI can then compile out-of-tree providers after
@@ -6856,12 +6862,6 @@ const
     ## tool-owned cache's identity.
   ProviderParallelBuildEnv* = "REPRO_PROVIDER_PARALLEL_BUILD"
   ProviderParallelBuildMax* = 64
-  ProviderCompilerEntropyJustification* =
-    "The Nim compiler uses randomness only for disposable names under its " &
-    "nimcache and for process-local hash-table seeding. The generated C, " &
-    "objects, interface artifact, and linked provider are named and derived " &
-    "from the compiler command and monitored inputs; those random values do " &
-    "not reach an output."
   ProviderCompileEnvironmentPassthrough* = [
     "REPRO_NIM_COMPILER",
     "REPRO_BOOTSTRAP_CC",

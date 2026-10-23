@@ -233,7 +233,7 @@ proc runProfilePlatformProbes*(profileRoot, nimcacheDir, repoRoot: string):
   let nimExe = resolveProfileNimCompiler()
   let repoRootAbs = absolutePath(repoRoot)
   requireReprobuildSources(repoRootAbs)
-  let childEnv = profileCompileChildEnv(repoRootAbs)
+  let childEnv = profileCompileEnvAdditions(repoRootAbs)
   let staged = stageProfileFiles(profileRoot, repoRootAbs)
   try:
     var config: ProfileNimConfig

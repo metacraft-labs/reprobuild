@@ -1,8 +1,18 @@
 ## The profile runtime's stdout is the intent; stderr is diagnostic text.
 ## Drive real Nim compilation and the production helper, including output
 ## larger than either pipe buffer so sequential draining cannot pass.
+##
+## Since the profile compile was split into a compile edge and a run edge
+## (reprobuild-pm `spec/Profile-Compilation-Model.md` §2), the production
+## helper ONLY compiles; the cases that drive it check that it never runs the
+## profile (the premise of the compile edge's entropy blessing). The run edge
+## invokes the binary under the intent-output contract
+## (`ReproIntentOutFlag`), checked here at the binary level. What the user
+## sees when a profile emits no intent or fails at run time is now produced
+## by `compileProfileToRbpi` from the run edge's result, and is checked
+## end-to-end in `tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim`.
 import std/[os, osproc, strutils, tables, tempfiles, unittest]
-from repro_core/process_streams import drainStream
+from repro_core/process_streams import drainStream, drainStdoutAndStderr
 import repro_profile
 import repro_profile_compile/[compile, helper]
 
@@ -48,11 +58,15 @@ proc compileIn(root, body: string): tuple[jsonOutput, stderrText: string] =
   compileProfileBinary(profile, root / "nimcache", root / "profile-build",
     ProjectRoot)
 
+const helperBinaryName = addFileExt("profile-build", ExeExt)
+
 proc helperIn(root, body: string): tuple[output, stderrText: string; exitCode: int] =
+  ## Drive the production compile helper (`runProfileCompileHelper`, the
+  ## compile edge's body) in a child of this test.
   let profile = root / "home.nim"
   writeFile(profile, body)
   let p = startProcess(getAppFilename(), args = @["--profile-helper",
-    "--profile", profile, "--rbpi", root / "profile.rbpi",
+    "--profile", profile, "--binary", root / helperBinaryName,
     "--nimcache", root / "nimcache", "--repo-root", ProjectRoot],
     options = {})
   # Helper fixtures emit only bounded stderr and no stdout. Read stderr
@@ -162,31 +176,66 @@ suite "profile runtime stderr":
       checkpoint(run.output)
       check run.exitCode == 0
 
-  test "helper forwards runtime diagnostics on successful encoding":
+  test "the compile helper compiles and does NOT run the profile":
+    # The compile edge carries the provider compile's entropy blessing, and
+    # that is sound only because nothing in its process tree runs what it
+    # compiled (reprobuild-pm `spec/Profile-Compilation-Model.md` §2.1). The
+    # fixture writes a marker file and a stderr line when it RUNS; after the
+    # helper neither exists, while the binary does.
     let root = createTempDir("repro-profile-stderr-helper-", "")
     defer: removeDir(root)
-    let res = helperIn(root, "stderr.writeLine(\"success warning\")\n" & IntentBody)
+    let marker = root / "ran.marker"
+    let res = helperIn(root, "writeFile(\"" & marker.replace('\\', '/') &
+      "\", \"ran\")\nstderr.writeLine(\"runtime warning\")\n" & IntentBody)
     checkpoint(res.stderrText)
     check res.exitCode == 0
     check res.output.len == 0
-    check "success warning" in res.stderrText
-    check rbpiEnvelopeIsValid(root / "profile.rbpi")
+    check fileExists(root / helperBinaryName)
+    check not fileExists(marker)
+    check "runtime warning" notin res.stderrText
+    # Positive control: the same binary, run, does both.
+    let run = runProfileBinary(root / helperBinaryName)
+    check run.exitCode == 0
+    check fileExists(marker)
+    check "runtime warning" in run.stderrText
+    check parseProfileIntentJson(run.output).name == "stderrProfile"
 
-  test "helper retains stderr when stdout is malformed JSON":
-    let root = createTempDir("repro-profile-stderr-json-", "")
+  test "the compile helper fails with nim's diagnostics and links nothing":
+    let root = createTempDir("repro-profile-stderr-nimfail-", "")
     defer: removeDir(root)
-    let res = helperIn(root, "stderr.writeLine(\"malformed stdout diagnostic\")\n" &
-      "stdout.writeLine(\"not intent json\")\n")
+    let res = helperIn(root, "import repro_profile\nthis is not nim\n")
     check res.exitCode == 1
-    check "failed to encode RBPI envelope" in res.stderrText
-    check "malformed stdout diagnostic" in res.stderrText
-    check not fileExists(root / "profile.rbpi")
+    check "---- nim diagnostics ----" in res.stderrText
+    check "nim compile failed" in res.stderrText
+    check not fileExists(root / helperBinaryName)
 
-  test "helper identifies missing stdout intent and retains stderr":
-    let root = createTempDir("repro-profile-stderr-empty-", "")
+  test "the intent-output contract writes the document to the named file":
+    # `<binary> --repro-intent-out <path>` is how the run edge invokes a
+    # profile: the document goes to the file (the edge's declared output),
+    # stdout and stderr stay the profile's own. With no arguments the binary
+    # prints the document on stdout, as Phase A defined.
+    let root = createTempDir("repro-profile-intent-out-", "")
     defer: removeDir(root)
-    let res = helperIn(root, "stderr.writeLine(\"missing emitter diagnostic\")\n")
-    check res.exitCode == 1
-    check "printed no ProfileIntent JSON on stdout" in res.stderrText
-    check "missing emitter diagnostic" in res.stderrText
-    check not fileExists(root / "profile.rbpi")
+    let profile = root / "home.nim"
+    writeFile(profile, "echo \"stdout chatter\"\n" &
+      "stderr.writeLine(\"stderr chatter\")\n" & IntentBody)
+    discard compileProfileExecutable(profile, root / "nimcache",
+      root / helperBinaryName, ProjectRoot)
+    let document = root / "intent.json"
+    let p = startProcess(root / helperBinaryName,
+      args = [ReproIntentOutFlag, document], options = {})
+    let captured = drainStdoutAndStderr(p)
+    check p.waitForExit() == 0
+    p.close()
+    check fileExists(document)
+    let intent = parseProfileIntentJson(readFile(document))
+    check intent.name == "stderrProfile"
+    check intent.resources.len == 1
+    # The document is NOT on stdout; the profile's own output is.
+    check captured.output.strip() == "stdout chatter"
+    check "stderr chatter" in captured.errorOutput
+    # Without the flag, the same binary prints the document on stdout.
+    let plain = runProfileBinary(root / helperBinaryName)
+    check plain.exitCode == 0
+    check plain.output.startsWith("stdout chatter")
+    check readFile(document).strip() in plain.output

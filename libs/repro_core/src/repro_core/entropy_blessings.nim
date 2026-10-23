@@ -156,6 +156,63 @@ const
       justification: GitEntropyJustification)
   ]
 
+const ProviderCompilerEntropyJustification* =
+  "The Nim compiler uses randomness only for disposable names under its " &
+  "nimcache and for process-local hash-table seeding. The C toolchain it " &
+  "drives draws randomness only to seed its own stack-protector canary at " &
+  "process start (MSYS2's mingw64 gcc, cc1, as, collect2 and ld, and the " &
+  "OpenSSL DLLs the reprobuild engine loads, through rand_s / RtlGenRandom " &
+  "/ ProcessPrng; Linux and macOS seed it from the kernel with no " &
+  "observable call), a value that lives on that process's stack and in no " &
+  "file. The generated C, objects, interface artifact, linked provider or " &
+  "profile binary, and profile platform-probe document are named and " &
+  "derived from the compiler command and monitored inputs; those random " &
+  "values do not reach an output. The edge only compiles (compile-time " &
+  "evaluation included): it never runs what it produced."
+  ## The ACTION-scoped blessing of reprobuild's own compile edges: the
+  ## provider compile (`__repro_provider_compile`, all three constructions in
+  ## `repro_cli_support` and the dev-env engine's), the interface extraction,
+  ## the profile compile (`__repro_profile_compile`) and the profile
+  ## platform probe (`__repro_profile_platform_probe`, `nim check` with the
+  ## profile evaluated in the compile-time VM). Each of them sets
+  ## `nonDeterminism = ndpEntropyBlessed` with exactly this text.
+  ##
+  ## WHY IT LIVES HERE. It was declared in `repro_interface_artifacts`, which
+  ## `repro_profile_compile` sits below. The profile compile must carry THE
+  ## SAME blessing -- same mechanism, same scope, same justification -- not a
+  ## copy that could drift, so the one declaration moved to the lowest library
+  ## every user of it sees (`repro_interface_artifacts` re-exports it).
+  ##
+  ## WHAT IT IS NOT. It is not a per-image entry: it does not belong in
+  ## `EntropyBlessedTools`, and no `nim` or `gcc` process running under some
+  ## other action is vouched for by it (see this module's header on `nim`,
+  ## `gcc`). It covers the process tree of an edge that ONLY compiles. An
+  ## edge that also RUNS what it compiled must not carry it: the produced
+  ## program's randomness can reach that edge's output. That is why the
+  ## profile compile was split into a blessed compile edge and an unblessed
+  ## run edge (reprobuild-pm `spec/Profile-Compilation-Model.md` §2.1)
+  ## rather than blessed whole.
+  ##
+  ## RESIDUAL, shared by every edge above and not closed by this text. The
+  ## blessing is action-scoped, so it covers every process in the compile's
+  ## tree, including a program a recipe or profile starts at compile time
+  ## with `staticExec` / `gorge`. A compile-time program whose randomness
+  ## reaches the compiled output (`const id = staticExec("uuidgen")`) is
+  ## therefore published, and an edge that consumes that output keys on its
+  ## bytes and cannot notice. Narrowing it -- per-image grading inside a
+  ## blessed tree -- belongs to all of these edges together
+  ## (reprobuild-pm `spec/Profile-Compilation-Model.md` §2.1, "Residual").
+  ##
+  ## MEASURED, for the C-toolchain sentence (eli-pc, Windows 11 x86_64, MSYS2
+  ## `gcc 16.1.0 (Rev5)`, reprobuild 5733305db, io-mon 4d468bc): 168 of the
+  ## 171 processes of one profile compile emit exactly `ProcessPrng` +
+  ## `RtlGenRandom` (`caller=system`) right after their process start --
+  ## gcc 56, cc1 54, as 54, collect2 1, ld 1, reprobuild 1; nim, the root
+  ## repro and the profile binary draw nothing. The same `hello.c` built
+  ## plain draws nothing and built with `-fstack-protector-strong` draws
+  ## exactly that pair. reprobuild-pm issue
+  ## 2026-10-13-windows-profile-compile-edge-never-publishes-unattributed-entropy.
+
 proc entropyBlessingImageKey*(imagePath: string): string =
   ## The key an image path is matched by: its base name, lower-cased, with a
   ## trailing `.exe` removed.

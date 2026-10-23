@@ -44,7 +44,7 @@
 ## build engine spawning `repro.exe` as a subprocess, which
 ## `t_e2e_repro_profile_compile_via_action.nim` already gates.
 
-import std/[algorithm, os, sequtils, strutils, tempfiles, unittest]
+import std/[algorithm, os, osproc, sequtils, strutils, tempfiles, unittest]
 from repro_core/paths import extendedPath
 
 import repro_build_engine
@@ -132,7 +132,8 @@ suite "profile-compile Nim path closure":
     doAssert not profileRoot.isRelativeTo(reprobuildRepoRoot()),
       "the profile must live outside the repo or config.nims masks the bug"
 
-    let rbpiPath = stateDir / "gate.rbpi"
+    let binaryPath = stateDir / "bin" / addFileExt("profile-build", ExeExt)
+    let intentPath = stateDir / "gate.intent.json"
     let nimcacheDir = stateDir / "nimcache"
 
     # Build the argv through the production BuildAction constructor rather
@@ -140,7 +141,7 @@ suite "profile-compile Nim path closure":
     # the build engine really emits. argv[0] is the `repro` binary and
     # argv[1] the subcommand; the helper body parses everything after.
     let action = profileCompileBuildAction(
-      profileRoot, rbpiPath, nimcacheDir,
+      profileRoot, binaryPath, nimcacheDir,
       publicCliPath = "repro", workDir = profileDir,
       repoRoot = reprobuildRepoRoot(),
       weak = weakFingerprintFromText("nim-path-closure-gate"))
@@ -148,14 +149,20 @@ suite "profile-compile Nim path closure":
 
     let exitCode = runProfileCompileHelper(action.argv[2 .. ^1])
     check exitCode == 0
+    check fileExists(extendedPath(binaryPath))
 
-    check fileExists(extendedPath(rbpiPath))
+    # The run edge's argv, through its production constructor too: the
+    # binary under the intent-output contract.
+    let run = profileRunBuildAction(profileRoot, binaryPath, intentPath,
+      profileDir, profileRunWeakFingerprint(intentPath))
+    let p = startProcess(run.argv[0], args = run.argv[1 .. ^1],
+      workingDir = run.cwd, options = {poStdErrToStdOut})
+    check p.waitForExit() == 0
+    p.close()
+    check fileExists(extendedPath(intentPath))
 
-    let raw = readFile(extendedPath(rbpiPath))
-    var bytes = newSeq[byte](raw.len)
-    for i, ch in raw:
-      bytes[i] = byte(ord(ch))
-    let intent = decodeRbpi(bytes)
+    let intent = decodeRbpi(rbpiBytesFromJson(
+      readFile(extendedPath(intentPath))))
     check intent.name == "nimPathClosureGate"
     check intent.activities.len == 1
     check intent.activities[0].name == "default"

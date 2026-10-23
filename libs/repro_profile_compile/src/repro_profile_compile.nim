@@ -46,6 +46,8 @@ export sources.resolveProfileRoot
 export sources.profileCacheDir
 export sources.cachedRbpiPath
 export sources.cachedNimcacheDir
+export sources.cachedProfileBinaryPath
+export sources.cachedIntentDocumentPath
 export sources.pruneStaleProfileCache
 
 # Direct nim invocation + JSON->RBPI bridge.
@@ -57,10 +59,11 @@ export compile.NimDefaultCCompilerExe
 export compile.profileCompileCFlags
 export compile.ProfileDepfileTarget
 export compile.requireReprobuildSources
-export compile.profileCompileChildEnv
+export compile.profileCompileEnvAdditions
 export compile.profileCompileArgv
 export compile.ProfileCompileDefines
 export compile.compileProfileBinary
+export compile.compileProfileExecutable
 export compile.rbpiBytesFromJson
 export compile.writeBytesAtomic
 export compile.readBytes
@@ -92,9 +95,13 @@ export edge.ProfileCompileArtifact
 export edge.ProfileCompileOptions
 export edge.ProfileCompileError
 export edge.ProfileCompileActionId
+export edge.ProfileRunActionId
+export edge.ProfileEdgeOutcome
 export edge.profileCompileKey
 export edge.profileCompileWeakFingerprint
 export edge.profileCompileBuildAction
+export edge.profileRunWeakFingerprint
+export edge.profileRunBuildAction
 export edge.ProfileCompileScratchEnvNames
 export edge.ProfileCompileEnvPassthrough
 export edge.profileCompileEngineConfig

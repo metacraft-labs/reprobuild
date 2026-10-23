@@ -1,10 +1,12 @@
 ## M83 Phase C end-to-end test: drive the public library API
-## (`compileProfileToRbpi`) end-to-end. The library submits a
-## `BuildAction` to `runBuild`, which spawns `repro.exe` with the
-## `__repro-compile-profile` internal helper. So this gate exercises
-## the full build-graph edge: source discovery, BuildAction
-## construction, action-cache lookup, helper subprocess spawn,
-## `nim c` invocation, JSON->RBPI bridge, and atomic publish.
+## (`compileProfileToRbpi`) end-to-end. The library submits TWO
+## `BuildAction`s to one `runBuild`: the COMPILE edge, which spawns
+## `repro.exe` with the `__repro-compile-profile` internal helper (`nim c`
+## only), and the RUN edge, which launches the profile binary itself under
+## the intent-output contract. So this gate exercises the full pair:
+## BuildAction construction, action-cache lookup per edge, helper subprocess
+## spawn, `nim c` invocation, the direct binary launch, the JSON->RBPI bridge,
+## and atomic publish (reprobuild-pm `spec/Profile-Compilation-Model.md` §2).
 ##
 ## Scenarios:
 ##
@@ -12,19 +14,36 @@
 ##     valid RBPI envelope at `<state-dir>/profile-cache/<profile-key>.rbpi`,
 ##     the bytes round-trip through `decodeRbpi`.
 ##   - Cache hit: a second invocation with no source change is answered
-##     by the engine's ACTION CACHE (the edge is not launched) and does
-##     NOT rewrite the published file (mtime is preserved). There is no
-##     structural fast path in front of the edge any more.
+##     by the engine's ACTION CACHE on BOTH edges (neither is launched) and
+##     does NOT rewrite the published file (mtime is preserved). There is no
+##     structural fast path in front of the edges any more. The FIRST call
+##     must have published both records: on Windows the compile edge's tree
+##     (MSYS2's gcc toolchain, the engine's OpenSSL DLLs) draws a
+##     stack-protector canary seed through `ProcessPrng` / `RtlGenRandom` in
+##     almost every process, and before the split the unblessed single edge
+##     therefore hit only on the THIRD call. The compile edge now carries the
+##     provider compile's blessing, so this is the gate that the second call
+##     is a hit on Windows as on Linux. Falsifying mutation: drop that
+##     blessing (`nonDeterminism = ndpEntropyBlessed` in
+##     `profileCompileBuildAction`) -- red on Windows: the first call's
+##     compile edge is skipped with `unblessed-entropy` and the second
+##     call's compile edge is not a hit.
 ##   - Re-run on touch: touching the profile source re-executes the edge
 ##     and republishes to the SAME per-profile path — the output name is
 ##     declared identity, not a content key.
-##   - `forceRebuild`: setting the option forces the helper to re-run.
+##   - `forceRebuild`: setting the option forces both edges to re-run.
 ##   - Compile failure: a deliberately broken fixture surfaces the Nim
 ##     diagnostic and `compileProfileToRbpi` raises
-##     `ProfileCompileError`.
+##     `ProfileCompileError` naming the compile edge.
+##   - A profile whose emitter never runs is refused with the profile's own
+##     diagnostics -- including after an earlier successful run, whose intent
+##     document the run edge must not leave behind to be served.
+##   - A profile binary that exits non-zero fails the run edge, and its
+##     stderr reaches the error.
 ##   - Direct helper-subcommand drive: `repro.exe __repro-compile-profile`
-##     is callable on its own (the action-graph edge is just a wrapper)
-##     and writes the same envelope.
+##     is callable on its own (the action-graph edge is just a wrapper),
+##     links the binary and does not run it; the binary, run under the
+##     intent-output contract, writes the intent the envelope is made of.
 ##
 ## The gate requires `build/bin/repro.exe` (built by `just build` or
 ## the recipe's `scripts/build_apps.sh` prelude).
@@ -112,6 +131,18 @@ suite "M83 Phase C: compileProfileToRbpi via build-graph edge":
 
     let first = compileProfileToRbpi(profilePath, compileOpts(stateDir))
     check first.edgeLaunched
+    check first.compileEdge.launched
+    check first.runEdge.launched
+    # Both records were published on the FIRST run (see the header): the
+    # compile edge's entropy, where the platform draws any, is excused by
+    # its blessing; the run edge's tree (the profile binary) draws none.
+    checkpoint("first: compile entropy=" &
+      first.compileEdge.entropySources.join(",") & " run entropy=" &
+      first.runEdge.entropySources.join(",") & " publishSkip=" &
+      first.cachePublishSkipReason)
+    check first.compileEdge.cachePublishSkipReason.len == 0
+    check first.runEdge.cachePublishSkipReason.len == 0
+    check first.runEdge.entropySources.len == 0
     let mtime1 = getLastModificationTime(first.rbpiPath)
 
     sleep(1100)  # NTFS / ext4 timestamp granularity.
@@ -121,6 +152,12 @@ suite "M83 Phase C: compileProfileToRbpi via build-graph edge":
       first.cachePublishSkipReason)
     check not second.edgeLaunched
     check second.cacheDecision == cdHit
+    # The COMPILE edge is answered from the cache (nim not spawned), and so
+    # is the run edge (the profile binary not spawned).
+    check second.compileEdge.cacheDecision == cdHit
+    check not second.compileEdge.launched
+    check second.runEdge.cacheDecision == cdHit
+    check not second.runEdge.launched
     check second.rbpiBytes == first.rbpiBytes
     check second.rbpiPath == first.rbpiPath
     let mtime2 = getLastModificationTime(second.rbpiPath)
@@ -140,6 +177,7 @@ suite "M83 Phase C: compileProfileToRbpi via build-graph edge":
 
     let second = compileProfileToRbpi(profilePath, compileOpts(stateDir))
     check second.edgeLaunched
+    check second.compileEdge.launched
     # A trailing comment does not change the intent, so the envelope bytes
     # (and their digest) are unchanged; what matters is that the edge ran.
     check second.digestHex == first.digestHex
@@ -163,6 +201,8 @@ suite "M83 Phase C: compileProfileToRbpi via build-graph edge":
     forceOpts.forceRebuild = true
     let second = compileProfileToRbpi(profilePath, forceOpts)
     check second.edgeLaunched
+    check second.compileEdge.launched
+    check second.runEdge.launched
     check second.rbpiBytes == first.rbpiBytes
     let mtime2 = getLastModificationTime(second.rbpiPath)
     check mtime2 > mtime1
@@ -183,7 +223,56 @@ suite "M83 Phase C: compileProfileToRbpi via build-graph edge":
       # helper subprocess to its own stderr (visible in this test's
       # captured output via the action's stdoutMerged stream).
       check "__repro_profile_compile" in err.msg
+      # The compile edge FAILED and its transcript is what is reported, not
+      # the run edge it blocked.
+      check "nim compile failed" in err.msg
     check caught
+    var rbpiFiles = 0
+    for kind, p in walkDir(stateDir / "profile-cache"):
+      if kind == pcFile and p.endsWith(".rbpi"):
+        inc rbpiFiles
+    check rbpiFiles == 0
+
+  test "a profile whose emitter never runs is refused, and no stale intent is served":
+    # The run edge's declared output is the intent document, and the engine
+    # removes it before every run (`removeBeforeRun`). Without that, a
+    # profile edited so that it no longer reaches the emitter would exit 0,
+    # leave the PREVIOUS run's document in place, and be encoded as this
+    # run's intent -- a stale plan with a green exit.
+    let stateDir = makeStateDir("missing-emitter")
+    let profileSrcDir = createTempDir("repro-profile-src-", "")
+    defer: removeDir(profileSrcDir)
+    let profilePath = copyFixtureInto("home_basic.nim", profileSrcDir,
+      "home.nim")
+    let first = compileProfileToRbpi(profilePath, compileOpts(stateDir))
+    check decodeRbpi(first.rbpiBytes).name == "homeBasic"
+
+    writeFile(extendedPath(profilePath),
+      "stderr.writeLine(\"missing emitter diagnostic\")\n")
+    var caught = ""
+    try:
+      discard compileProfileToRbpi(profilePath, compileOpts(stateDir))
+    except ProfileCompileError as err:
+      caught = err.msg
+    checkpoint(caught)
+    check "printed no ProfileIntent JSON" in caught
+    check "missing emitter diagnostic" in caught
+
+  test "a failing profile binary fails the run edge with its own stderr":
+    let stateDir = makeStateDir("runtime-failure")
+    let profileSrcDir = createTempDir("repro-profile-src-", "")
+    defer: removeDir(profileSrcDir)
+    let profilePath = profileSrcDir / "home.nim"
+    writeFile(extendedPath(profilePath),
+      "stderr.writeLine(\"runtime failure detail\")\nquit(7)\n")
+    var caught = ""
+    try:
+      discard compileProfileToRbpi(profilePath, compileOpts(stateDir))
+    except ProfileCompileError as err:
+      caught = err.msg
+    checkpoint(caught)
+    check ProfileRunActionId in caught
+    check "runtime failure detail" in caught
     var rbpiFiles = 0
     for kind, p in walkDir(stateDir / "profile-cache"):
       if kind == pcFile and p.endsWith(".rbpi"):
@@ -199,13 +288,13 @@ suite "M83 Phase C: compileProfileToRbpi via build-graph edge":
 
 suite "M83 Phase C: __repro-compile-profile helper subcommand":
 
-  test "helper produces a valid RBPI envelope on its own":
+  test "helper links the profile binary on its own and does not run it":
     let stateDir = makeStateDir("helper-direct")
     let profileSrcDir = createTempDir("repro-profile-src-", "")
     defer: removeDir(profileSrcDir)
     let profilePath = copyFixtureInto("home_basic.nim", profileSrcDir,
       "home.nim")
-    let rbpiPath = stateDir / "out.rbpi"
+    let binaryPath = stateDir / "bin" / addFileExt("profile-build", ExeExt)
     let nimcacheDir = stateDir / "nimcache"
     createDir(extendedPath(stateDir))
 
@@ -215,7 +304,7 @@ suite "M83 Phase C: __repro-compile-profile helper subcommand":
     let p = startProcess(reproBinary(), args = [
         "__repro-compile-profile",
         "--profile", profilePath,
-        "--rbpi", rbpiPath,
+        "--binary", binaryPath,
         "--nimcache", nimcacheDir,
         "--repo-root", ProjectRoot
       ],
@@ -224,12 +313,17 @@ suite "M83 Phase C: __repro-compile-profile helper subcommand":
     let exitCode = p.waitForExit()
     p.close()
     check exitCode == 0
-    check fileExists(extendedPath(rbpiPath))
+    check fileExists(extendedPath(binaryPath))
 
-    let raw = readFile(extendedPath(rbpiPath))
-    var bytes = newSeq[byte](raw.len)
-    for i, ch in raw:
-      bytes[i] = byte(ord(ch))
-    let recovered = decodeRbpi(bytes)
+    # The run edge's invocation: the binary, under the intent-output
+    # contract, writes the document the envelope is encoded from.
+    let document = stateDir / "intent.json"
+    check not fileExists(extendedPath(document))
+    let run = startProcess(binaryPath, args = [ReproIntentOutFlag, document],
+      options = {poStdErrToStdOut})
+    check run.waitForExit() == 0
+    run.close()
+    let recovered = decodeRbpi(rbpiBytesFromJson(
+      readFile(extendedPath(document))))
     check recovered.name == "homeBasic"
     check recovered.activities.len == 1

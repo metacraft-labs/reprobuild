@@ -158,9 +158,9 @@ proc publishedRbpiPath*(sb: ProfileSandbox): string =
   cachedRbpiPath(sb.stateDir, profileCompileKey(sb.profilePath))
 
 proc profileBinaryPath*(sb: ProfileSandbox): string =
-  ## The profile binary the edge compiled (it lives in the edge's nimcache).
-  cachedNimcacheDir(sb.stateDir, profileCompileKey(sb.profilePath)) /
-    addFileExt("profile-build", ExeExt)
+  ## The profile binary the compile edge linked: its declared output, and the
+  ## run edge's declared input.
+  cachedProfileBinaryPath(sb.stateDir, profileCompileKey(sb.profilePath))
 
 const DefaultSandboxHost* = "gm0-profile-compile-host"
   ## The `$REPRO_HOST` every run gets unless the caller names another.

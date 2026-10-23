@@ -36,6 +36,15 @@
 ## Negative control: an unchanged file on a second run spawns no `nim` and
 ## plans the same value.
 ##
+## ONLY THE RUN EDGE RE-RUNS. Since the profile compile was split into a
+## compile edge and a run edge (reprobuild-pm
+## `spec/Profile-Compilation-Model.md` §2), a file read only at run time is
+## an input of the run edge alone. After its edit the CLI case spawns no
+## `nim` (the compile is answered from the cache) and still plans the new
+## value; the library case reads the engine's decision per edge: the compile
+## edge `cdHit` and not launched, the run edge launched with the file named
+## in its miss reason.
+##
 ## No mocks: real `build/bin/repro`, real Nim, real io-mon shim, real
 ## filesystem; the `nim` spy is a pass-through counter (harness header).
 
@@ -44,10 +53,12 @@
 ## makes the edge fail closed (`cacheAnswered` in the harness); the planned
 ## value must be the file's current text everywhere.
 
-import std/[strutils, tables, unittest]
+import std/[os, strutils, tables, unittest]
 
+import repro_build_engine
 import repro_profile
 import repro_profile_intent
+import repro_profile_compile
 
 import ./profile_compile_edge_harness
 
@@ -112,3 +123,52 @@ suite "profile compile edge: run-time reads":
 
     let run3 = sb.runHomePlan()
     checkPlans(run3, "two")
+    # Only the run edge re-ran: the compile was answered from the cache, so
+    # no `nim` was spawned for the edit (on macOS, or a complete re-run).
+    check cacheAnswered(run3.nimSpawns, run1.nimSpawns,
+      "run-time file edited, repro home plan: the compile edge")
+
+  test "a run-time read re-runs the run edge and not the compile":
+    # The same sequence through `compileProfileToRbpi`, reading the ENGINE's
+    # decision for each edge instead of inferring it from spawn counts.
+    let sb = newProfileSandbox("runtime-read-lib", RuntimeReadProfile)
+    defer: sb.dispose()
+    let opts = ProfileCompileOptions(stateDir: sb.stateDir,
+      publicCliPath: reproBinary(), repoRoot: ProjectRoot)
+
+    sb.writeProfileFile("runtime.txt", "one")
+    let first = compileProfileToRbpi(sb.profilePath, opts)
+    checkpoint("first: publishSkip=" & first.cachePublishSkipReason)
+    check first.compileEdge.launched
+    check first.runEdge.launched
+    check decodeRbpi(first.rbpiBytes).resources[0].fields["content"].s == "one"
+    # The run-time read is in the RUN edge's record, and not in the
+    # compile's: the compiler never opened the file.
+    var runSaw, compileSaw = false
+    for path in first.runEdge.observedInputs:
+      if path.endsWith("runtime.txt"):
+        runSaw = true
+    for path in first.compileEdge.observedInputs:
+      if path.endsWith("runtime.txt"):
+        compileSaw = true
+    check not compileSaw
+    let failedClosed = EdgeMayFailClosed and
+      first.cachePublishSkipReason.len > 0
+    if not failedClosed:
+      check runSaw
+
+    sb.writeProfileFile("runtime.txt", "two")
+    let second = compileProfileToRbpi(sb.profilePath, opts)
+    checkpoint("second: compile=" & $second.compileEdge.cacheDecision &
+      " run=" & $second.runEdge.cacheDecision & " runMiss=" &
+      second.runEdge.cacheMissReason)
+    check decodeRbpi(second.rbpiBytes).resources[0].fields["content"].s ==
+      "two"
+    check second.runEdge.launched
+    if failedClosed:
+      echo "    [fail-closed, GM0m] run-time read library case: publish " &
+        "skipped (", first.cachePublishSkipReason, ")"
+    else:
+      check second.compileEdge.cacheDecision == cdHit
+      check not second.compileEdge.launched
+      check second.runEdge.cacheMissReason.contains("runtime.txt")

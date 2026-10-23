@@ -42,11 +42,15 @@ const
     ##                     (e.g. `ripgrep` -> `rg`); present only when
     ##                     non-empty.
     ##     The version bump matters for the on-disk cache: the profile
-    ##     compile edge's weak fingerprint names the schema version
+    ##     compile edge's weak fingerprint named the schema version
     ##     (`profileCompileWeakFingerprint`), so an action-cache record
-    ##     written for v1 is never served for v2; v1 files are also
+    ##     written for v1 was never served for v2; v1 files are also
     ##     rejected by the strict reader at read time
-    ##     (`unsupported RBPI schema version`).
+    ##     (`unsupported RBPI schema version`). Since the profile compile
+    ##     was split into a compile edge and a run edge (2026-10-22), no
+    ##     edge outputs the envelope: `compileProfileToRbpi` encodes it from
+    ##     the run edge's intent document on every call, so a schema bump
+    ##     takes effect on the next call without any cache key naming it.
     ##   3 (Windows-System-Resources Phase G): ProfileIntent gains a
     ##     new top-level CBOR key ``"buildActions"`` carrying the list
     ##     of profile-scope action-edge intents (typed-tool

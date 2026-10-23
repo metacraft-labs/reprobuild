@@ -198,6 +198,13 @@ suite "M83 Phase F1: canonical profile-modules example":
     check "home.nim" in rels
     check "modules/git_dev_environment.nim" in rels
     check "modules/dev_shell.nim" in rels
+    # The sources are the COMPILE edge's reads: that is the edge an edit to
+    # one of them must re-run.
+    let compileRels = observedUnder(artifact.compileEdge.observedInputs,
+      profileSrcDir)
+    check "home.nim" in compileRels
+    check "modules/git_dev_environment.nim" in compileRels
+    check "modules/dev_shell.nim" in compileRels
 
   test "decoded ProfileIntent contains every helper-contributed " &
        "package + ConfigOverride":
@@ -346,6 +353,8 @@ suite "M83 Phase F1: canonical profile-modules example":
     checkpoint("cacheDecision=" & $second.cacheDecision &
       " missReason=" & second.cacheMissReason)
     check second.edgeLaunched
+    check second.compileEdge.launched
+    check second.compileEdge.cacheMissReason.contains("dev_shell.nim")
     # A comment does not change the intent, and the edge publishes to one
     # stable, per-profile location: the output name is not a cache key.
     check second.digestHex == first.digestHex
@@ -368,10 +377,19 @@ suite "M83 Phase F1: canonical profile-modules example":
       " missReason=" & second.cacheMissReason &
       " publishSkip=" & first.cachePublishSkipReason)
     check first.edgeLaunched
+    # Both records were published on the first run; on Windows that is the
+    # compile edge's blessing at work (its gcc toolchain draws a
+    # stack-protector seed in nearly every process).
+    check first.compileEdge.cachePublishSkipReason.len == 0
+    check first.runEdge.cachePublishSkipReason.len == 0
     # The answer comes from the engine's action cache, not from a
-    # structural probe in front of it.
+    # structural probe in front of it -- on both edges.
     check not second.edgeLaunched
     check second.cacheDecision == cdHit
+    check second.compileEdge.cacheDecision == cdHit
+    check not second.compileEdge.launched
+    check second.runEdge.cacheDecision == cdHit
+    check not second.runEdge.launched
     check second.digestHex == first.digestHex
     check second.rbpiPath == first.rbpiPath
     check second.rbpiBytes == first.rbpiBytes
@@ -423,10 +441,16 @@ proc outerBundle*(): seq[ActivityElement] =
     let unchanged = compileProfileToRbpi(dir / "home.nim",
       compileOpts(stateDir))
     check not unchanged.edgeLaunched
+    check not unchanged.compileEdge.launched
+    check not unchanged.runEdge.launched
     check unchanged.rbpiBytes == first.rbpiBytes
 
     writeLeaf("inner-two")
     let second = compileProfileToRbpi(dir / "home.nim", compileOpts(stateDir))
     check second.edgeLaunched
+    # The leaf is a compile-time read: the compile re-runs, and the new
+    # binary re-runs the run edge through its declared input.
+    check second.compileEdge.launched
+    check second.runEdge.launched
     check collectPackageNames(decodeRbpi(second.rbpiBytes), "default") ==
       @["inner-two", "outer-pkg"]

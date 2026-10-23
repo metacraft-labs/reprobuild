@@ -11034,6 +11034,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/m83/t_e2e_profile_run_edge_is_unblessed.nim",
+    binary: "build/test-bin/t_e2e_profile_run_edge_is_unblessed",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/m83/t_e2e_repro_profile_compile.nim",
     binary: "build/test-bin/t_e2e_repro_profile_compile",
     defines: @[],
