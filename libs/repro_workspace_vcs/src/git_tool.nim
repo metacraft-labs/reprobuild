@@ -215,6 +215,49 @@ proc receivedObjectStoreEnv*(store: ReceivedObjectStore): StringTableRef =
   ## ``scrubbedGitRepositoryEnv()``, so a non-hook caller is unaffected.
   withReceivedObjectStore(scrubbedGitRepositoryEnv(), store)
 
+proc forwardingObjectStoreEnv*(store: ReceivedObjectStore): StringTableRef =
+  ## The environment for a ``pre-receive``-time push of the RECEIVED objects to
+  ## a DIFFERENT repository: the gateway forwarding a push upstream before it
+  ## lets its own refs move.
+  ##
+  ## This is the narrow exception to the rule on ``withReceivedObjectStore``
+  ## ("never for a child that touches a different repository"), and it needs
+  ## its own shape rather than either of the two above:
+  ##
+  ##   - ``scrubbedGitRepositoryEnv`` alone cannot see the objects being
+  ##     forwarded: until the hook accepts they exist only in the quarantine.
+  ##   - ``receivedObjectStoreEnv`` passes ``GIT_OBJECT_DIRECTORY`` through, so
+  ##     the forwarding git would treat this repository's quarantine as its
+  ##     primary object store; and it passes ``GIT_QUARANTINE_PATH``, under
+  ##     which git refuses every ref update ("ref updates forbidden inside
+  ##     quarantine environment").
+  ##
+  ## So both of those are DROPPED, and the quarantine is offered back only as a
+  ## read-only alternate (``GIT_ALTERNATE_OBJECT_DIRECTORIES``), which is all
+  ## the sending side needs to read the objects it is forwarding. With nothing
+  ## captured this is exactly ``scrubbedGitRepositoryEnv()``.
+  ##
+  ## The alternate is the SENDER's only. On a local-path upstream the
+  ## receiving ``receive-pack`` is a child of the forward, and git clears the
+  ## repository variables (``GIT_ALTERNATE_OBJECT_DIRECTORIES`` included) for
+  ## a local transport's child, so the upstream neither advertises the
+  ## gateway's refs nor satisfies its connectivity check from objects that
+  ## exist only here. ``t_gateway_push_fails_when_the_upstream_rejects_the_
+  ## forward`` (``upstream_receive_side_never_borrows_the_gateways_objects``)
+  ## pins that: the upstream must end up self-contained.
+  result = scrubbedGitRepositoryEnv()
+  if not store.captured:
+    return
+  var alternates: seq[string]
+  for binding in store.bindings:
+    if binding.name == "GIT_OBJECT_DIRECTORY" and binding.value.len > 0:
+      alternates.insert(binding.value, 0)
+    elif binding.name == "GIT_ALTERNATE_OBJECT_DIRECTORIES" and
+        binding.value.len > 0:
+      alternates.add(binding.value)
+  if alternates.len > 0:
+    result["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = alternates.join($PathSep)
+
 proc modeName(mode: ToolProvisioningMode): string =
   case mode
   of tpmUnspecified: "unspecified"

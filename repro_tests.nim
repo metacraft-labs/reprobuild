@@ -13743,6 +13743,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_gateway_push_fails_when_the_upstream_rejects_the_forward.nim",
+    binary: "build/test-bin/t_gateway_push_fails_when_the_upstream_rejects_the_forward",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_gateway_ratchets_the_anchor_requirements.nim",
     binary: "build/test-bin/t_gateway_ratchets_the_anchor_requirements",
     defines: @[],

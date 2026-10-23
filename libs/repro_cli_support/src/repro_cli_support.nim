@@ -65302,10 +65302,11 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
 #     each required platform. On failure it exits non-zero → git rejects the
 #     whole push, so an accidental ``--no-verify`` is caught even though the
 #     upstream host can't run a custom hook.
-#   - On success the gateway's ``post-receive`` FORWARDS the push to the real
-#     upstream bare (a second bare standing in for GitHub). A covered push thus
-#     lands on the upstream; an uncovered push is rejected at the gateway and
-#     never reaches it.
+#   - On success the same ``pre-receive`` FORWARDS the push to the real
+#     upstream (a second bare standing in for GitHub) before the gateway's refs
+#     move, and rejects the push if the upstream refuses it. A covered push thus
+#     lands on the upstream; an uncovered or upstream-refused push is rejected
+#     at the gateway and the developer's ``git push`` says so.
 #
 # Both hooks are THIN: they invoke ``repro gateway pre-receive`` /
 # ``repro gateway post-receive`` so the verify/forward logic lives here, not in
@@ -65462,9 +65463,10 @@ proc gatewayPreReceiveHookBody*(): string =
 
 proc gatewayPostReceiveHookBody*(): string =
   ## The bare gateway's ``post-receive`` hook. Fires only AFTER ``pre-receive``
-  ## accepted + the refs were updated. It forwards the just-received refs to the
-  ## real upstream by invoking ``repro gateway post-receive``. git feeds it the
-  ## same ``<old> <new> <ref>`` lines on stdin.
+  ## accepted (and forwarded) and the refs were updated. It invokes ``repro
+  ## gateway post-receive``, which changes nothing: git ignores a
+  ## ``post-receive`` exit status, which is why nothing that can fail lives
+  ## here (the forward and its report are ``pre-receive``'s).
   result = "#!/usr/bin/env sh\n"
   result.add("# reprobuild managed post-receive hook (push gateway)\n")
   result.add("set -eu\n\n")
@@ -65478,7 +65480,7 @@ proc gatewayPostReceiveHookBody*(): string =
   result.add("  REPRO_CMD=$(command -v repro)\n")
   result.add("else\n")
   result.add("  echo \"reprobuild gateway: repro CLI not found; " &
-    "cannot forward to upstream\" >&2\n")
+    "post-receive skipped\" >&2\n")
   result.add("  exit 1\n")
   result.add("fi\n")
   result.add("exec \"$REPRO_CMD\" gateway post-receive " &
@@ -66193,15 +66195,32 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
       else:  # advisory — record but accept.
         result.diagnostic = "advisory: " & detail
 
+const AtomicPushUnsupportedMarker =
+  "the receiving end does not support --atomic push"
+  ## git's own refusal when the receiving side does not advertise ``atomic``.
+
 proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
-                               updates: seq[GatewayRefUpdate]):
+                               updates: seq[GatewayRefUpdate];
+                               received = ReceivedObjectStore()):
     tuple[ok: bool; diagnostic: string] =
-  ## ``post-receive`` forward: push the just-received refs from the gateway
-  ## bare to the REAL upstream bare. We push each received ref by its value;
-  ## branch deletions propagate as deletions. The certificate notes ref is
-  ## forwarded too so the upstream carries the attestations. A failure to
-  ## forward is reported but does NOT roll back the gateway (the gateway is the
-  ## reproducibility boundary; the upstream catches up on the next push).
+  ## The forward: push the refs being received from the gateway bare to the
+  ## REAL upstream, from ``pre-receive``, after the gate accepted and BEFORE
+  ## the gateway's own refs move. A rejected forward therefore rejects the
+  ## push: the developer's ``git push`` exits non-zero and the gateway never
+  ## claims to hold something the upstream refused. (Forwarding from
+  ## ``post-receive`` could not do that: git ignores a ``post-receive`` exit
+  ## status, so an upstream rejection read as a successful push.)
+  ##
+  ## Every received ref goes in ONE ``git push --atomic``, so a push of several
+  ## refs that the upstream refuses in part leaves the upstream untouched
+  ## rather than half-updated behind a "rejected" message. When the upstream
+  ## does not support atomic pushes the forward is retried non-atomically and
+  ## the diagnostic SAYS so, because a failure there may be partial.
+  ##
+  ## ``received`` is the quarantine snapshot taken at hook entry; the child
+  ## reads the pushed objects through it as an alternate only
+  ## (``forwardingObjectStoreEnv``). Branch deletions propagate as deletions;
+  ## the certificate notes ref travels like any other received ref.
   var refspecs: seq[string]
   let zeroSha = "0000000000000000000000000000000000000000"
   for u in updates:
@@ -66211,13 +66230,29 @@ proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
       refspecs.add(u.newSha & ":" & u.refName)  # set ref to the received value
   if refspecs.len == 0:
     return (ok: true, diagnostic: "no refs to forward")
-  var argv = @["-C", gatewayBareDir, "push", upstreamUrl]
-  for r in refspecs: argv.add(r)
-  let res = gitNoteRun(gitBin, argv)
+  let env = forwardingObjectStoreEnv(received)
+  proc push(atomic: bool): tuple[code: int; output: string] =
+    var cmd = quoteShell(gitBin) & " -C " & quoteShell(gatewayBareDir) &
+      " push"
+    if atomic:
+      cmd.add(" --atomic")
+    cmd.add(" " & quoteShell(upstreamUrl))
+    for r in refspecs:
+      cmd.add(" " & quoteShell(r))
+    let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
+      env = env)
+    (code: res.exitCode, output: res.output)
+  var res = push(atomic = true)
+  var note = ""
+  if res.code != 0 and AtomicPushUnsupportedMarker in res.output:
+    note = " (upstream does not support atomic push; forwarded " &
+      "non-atomically, so a partial update is possible)"
+    res = push(atomic = false)
   if res.code != 0:
-    return (ok: false, diagnostic: "forward push to upstream failed: " &
-      res.output.strip())
-  (ok: true, diagnostic: "")
+    return (ok: false, diagnostic: "the upstream " & upstreamUrl &
+      " refused the forward" & note & "; nothing was published by this " &
+      "gateway: " & res.output.strip())
+  (ok: true, diagnostic: note.strip())
 
 # ---- ``repro gateway <phase>`` dispatch ------------------------------------
 
@@ -66872,8 +66907,10 @@ proc runGatewayCommand*(args: openArray[string]): int =
   ## gateway bare's hooks invoke. Two phases:
   ##   - ``pre-receive``  : read ``<old> <new> <ref>`` lines from stdin, run the
   ##     AUTHORITATIVE certificate verify, exit non-zero to REJECT on a miss.
-  ##   - ``post-receive`` : read the same stream, FORWARD the received refs to
-  ##     the real upstream bare.
+  ##     When both gates accept it FORWARDS the received refs to the real
+  ##     upstream, and rejects the push if the upstream refuses them.
+  ##   - ``post-receive`` : a no-op; the forward and its report already
+  ##     happened in ``pre-receive``.
   ##
   ## GATEWAY ENTRY, and the reason that phrase matters: the receive-pack
   ## object-store bindings are captured HERE, on the very first statement,
@@ -66881,10 +66918,9 @@ proc runGatewayCommand*(args: openArray[string]): int =
   ## ``pre-receive`` the pushed objects live in a quarantine directory that
   ## only those bindings name, so every read the gate makes of the receiving
   ## bare's OWN incoming objects carries them back in (see
-  ## ``receiveHookObjectStore``). Nothing else does: the ``post-receive``
-  ## forward to the upstream deliberately runs scrubbed, because there the
-  ## child touches a DIFFERENT repository and the bindings would be the
-  ## cross-repository bug the scrubber exists to prevent.
+  ## ``receiveHookObjectStore``). The forward to the upstream is the one
+  ## child that touches a DIFFERENT repository, and it gets the quarantine
+  ## back only as a read-only alternate (``forwardingObjectStoreEnv``).
   let received = receiveHookObjectStore()
   if args.len == 0:
     stderr.writeLine("repro gateway: expected a phase " &
@@ -66962,13 +66998,34 @@ proc runGatewayCommand*(args: openArray[string]): int =
         "The receiving-side gateway is authoritative; '--no-verify' does " &
         "not bypass it.")
       return 1
+    # Both gates accepted: forward NOW, before git moves this gateway's refs,
+    # so an upstream refusal is the push's refusal.
+    if cfg.upstreamUrl.len > 0:
+      let fwd = gatewayForwardToUpstream(gitBin, gatewayDir, cfg.upstreamUrl,
+        updates, received)
+      if not fwd.ok:
+        stderr.writeLine("reprobuild gateway: push REJECTED — " &
+          fwd.diagnostic)
+        return 1
+      if fwd.diagnostic.len > 0:
+        stderr.writeLine("reprobuild gateway: " & fwd.diagnostic)
+      # A gateway with no policy anywhere is a documented strict no-op whose
+      # specification is the absence of output: report the forward only when
+      # the gates above had something to say.
+      let gatewaySpoke = verdict.policyNotes.len > 0 or
+        verdict.carrierFaults.len > 0 or verdict.diagnostic.len > 0 or
+        verdict.gated.len > 0 or lockVerdict.diagnostic.len > 0 or
+        lockVerdict.gated.len > 0
+      if gatewaySpoke:
+        for u in updates:
+          stderr.writeLine("reprobuild gateway: forwarded " & u.refName &
+            " -> " & cfg.upstreamUrl)
     return 0
   of "post-receive":
-    let fwd = gatewayForwardToUpstream(gitBin, gatewayDir, cfg.upstreamUrl,
-      updates)
-    if not fwd.ok:
-      stderr.writeLine("reprobuild gateway: " & fwd.diagnostic)
-      return 1
+    # Nothing to do. The forward (and its report) happened in
+    # ``pre-receive``. The refs git just updated are deliberately KEPT: they
+    # are this gateway's fast-forward anchor and its record of what it
+    # published.
     return 0
   else:
     stderr.writeLine("repro gateway: unknown phase '" & phase &
