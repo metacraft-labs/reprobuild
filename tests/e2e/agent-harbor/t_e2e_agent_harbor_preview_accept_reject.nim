@@ -48,14 +48,16 @@ else:
     let intent = f.host.captureIntent(f.consent, f.sid, "make greeter say v2")
     let ws = f.checkoutGreeter(intent)
     var evidence: seq[Digest32]
+    var previewed: seq[OpResult]
 
-    test "the active generation runs the installed package":
-      check g1.len > 0
-      check exeOutput(f.backend.driver.launcherDir / "greeter") ==
-        "hello from greeter v1"
-
-    test "before and after are previewed, tested and diffed":
-      let rs = f.runPlan(intent,
+    # The suite runner runs every case in a process of its own, so a case
+    # must not rely on evidence an earlier case produced
+    # (Test-Suite-Architecture-Guidelines, "Every case MUST pass when run
+    # alone"). The edit, its test, both previews and the diff run at most once
+    # per process, on first use.
+    proc previewBeforeAndAfter(): seq[OpResult] =
+      if previewed.len > 0: return previewed
+      previewed = f.runPlan(intent,
         @[op(okSourceWrite, ws, {"path": "greeter/src/main.c",
                                  "content": greeterV2}),
           op(okSourceWrite, ws, {"path": "greeter/tests/expected.txt",
@@ -68,6 +70,26 @@ else:
           op(okSourceDiff, ws)],
         @["source.write:greeter", "build.run:greeter", "test.run:greeter",
           "preview.run:greeter", "source.read:greeter"])
+      let rs = previewed
+      # The test run, both previews and the diff: what the user is shown.
+      evidence = @[rs[3].resultId, rs[4].resultId, rs[5].resultId,
+                   rs[6].resultId]
+      previewed
+
+    proc evidenceShown(): seq[Digest32] =
+      discard previewBeforeAndAfter()
+      evidence
+
+    proc prefixCount(): int =
+      toSeq(walkDir(f.store / "prefixes" / "greeter")).len
+
+    test "the active generation runs the installed package":
+      check g1.len > 0
+      check exeOutput(f.backend.driver.launcherDir / "greeter") ==
+        "hello from greeter v1"
+
+    test "before and after are previewed, tested and diffed":
+      let rs = previewBeforeAndAfter()
       for r in rs:
         checkpoint r.detail & "\n" & r.output
       check rs.allIt(it.status == osCompleted)
@@ -78,11 +100,10 @@ else:
       check "strategy=restart" in after.detail
       check ("no direct-patch HCR profile" in after.detail or
              "did not connect an HCR agent" in after.detail)
-      evidence = @[rs[3].resultId, before.resultId, after.resultId,
-                   rs[6].resultId]
 
     test "the user is shown exactly the evidence the host produced":
-      let shown = evidence.mapIt(f.host.showEvidence(f.consent, f.sid, it.hex))
+      let shown = evidenceShown().mapIt(
+        f.host.showEvidence(f.consent, f.sid, it.hex))
       check shown.mapIt(it.kind) == @[okTestRun, okPreviewStart,
                                        okPreviewStart, okSourceDiff]
       check shown[1].output.strip == "hello from greeter v1"
@@ -94,9 +115,9 @@ else:
         discard f.submit(intent, @[op(okGenerationStage, ws)],
                          @["system.generation:stage"], forged)
 
-    let prefixesBefore = toSeq(walkDir(f.store / "prefixes" / "greeter")).len
-
     test "a rejected change leaves no trace and feedback executes nothing":
+      let evidence = evidenceShown()
+      let prefixesBefore = prefixCount()
       let r = f.submit(intent, @[op(okGenerationStage, ws,
                                     {"target": InstallTarget})],
                        @["system.generation:stage"], evidence)
@@ -114,6 +135,8 @@ else:
         "hello from greeter v1"
 
     test "an approved change is staged; the active generation still waits":
+      let evidence = evidenceShown()
+      let prefixesBefore = prefixCount()
       let r = f.submit(intent, @[op(okGenerationStage, ws,
         {"target": InstallTarget, "intent": "make greeter say v2",
          "health": "command-exit-zero:greeter"})],
