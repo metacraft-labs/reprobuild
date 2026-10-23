@@ -12,7 +12,8 @@
 ##      on stdout, the message names `beta`, the workspace's roles and the
 ##      settings file; no fetch, no fork directory.
 ##   2. two different roles (`--unstable --stable`, `--to=stable --mainline`):
-##      exit 2, "mutually exclusive"; the SAME role twice is accepted.
+##      exit 2, "mutually exclusive"; the SAME role twice is accepted. A role
+##      with `switch`'s `<branch>` positional or `-b` is exit 2 as well.
 ##   3. `sync --rebase` with no role: refused, naming `--to=<role>`.
 ##   4. the declared custom role `partner` IS accepted by `--to=`.
 ##   5. `--to=` and `--from=` are not interchangeable: `sync --from=unstable`
@@ -71,6 +72,18 @@ suite "undeclared_role_is_a_usage_error_before_any_fetch":
         check res.code == 2
         check res.stdout.len == 0
         check "mutually exclusive" in res.stderr
+        noFetch()
+      # A role with `switch`'s branch positional or `-b`: the same exit 2,
+      # nothing fetched (CLI/switch.md: mutually exclusive, usage error).
+      for (argv, expected) in [
+          (@["switch", rootArg, "--unstable", "feature/y", "--yes"],
+           "takes no branch positional"),
+          (@["switch", rootArg, "--to=stable", "-b", "--yes"],
+           "cannot be combined with -b/--new-branch")]:
+        let res = run(argv)
+        check res.code == 2
+        check res.stdout.len == 0
+        check expected in res.stderr
         noFetch()
       let same = run(@["sync", rootArg, "--to=unstable", "--unstable",
         "--dry-run", "--json"])

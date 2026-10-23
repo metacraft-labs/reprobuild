@@ -77534,15 +77534,16 @@ proc parseSwitchArgs*(args: openArray[string]): SwitchArgs =
   # A role names the target per repo, so a positional branch or ``-b``
   # alongside it is a contradiction rather than a precedence question (§4.1).
   # Refusing is the only honest answer: silently letting one win would switch
-  # the workspace somewhere the operator did not ask for.
+  # the workspace somewhere the operator did not ask for. Both are usage
+  # errors (exit 2, CLI/switch.md), raised before anything is fetched.
   let roleFlag = result.role.flag
   if result.role.role.len > 0 and result.branchName.len > 0:
-    raise newException(ValueError,
+    branchRolesUsage(
       "`repro switch " & roleFlag & "` takes no branch positional (got '" &
       result.branchName & "'); " & roleFlag & " resolves each repo's " &
       "target from the manifest. Drop one of the two.")
   if result.role.role.len > 0 and result.newBranch:
-    raise newException(ValueError,
+    branchRolesUsage(
       "`repro switch " & roleFlag & "` cannot be combined with " &
       "-b/--new-branch: there is no single branch name to create when every " &
       "repo resolves the role to its own branch")
