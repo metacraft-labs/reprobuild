@@ -331,6 +331,7 @@ let
   # --- nixRealizationOf -----------------------------------------------------
   realizationTests =
     expect "nixRealizationOf bash" "bash" (reprobuildLib.nixRealizationOf "bash")
+    ++ expect "nixRealizationOf pwsh" "powershell" (reprobuildLib.nixRealizationOf "pwsh")
     ++ expect "nixRealizationOf llvm (an attribute path)" "llvm.dev" (
       reprobuildLib.nixRealizationOf "llvm"
     )

@@ -773,7 +773,7 @@
     # `--override-input reprobuild-nix-packages-src git+file:<checkout>`.
     # Move the pin when the catalog's records change.
     reprobuild-nix-packages-src = {
-      url = "github:metacraft-labs/reprobuild-nix-packages/507bffbe53673caebb686017e76910e321fd9175";
+      url = "github:metacraft-labs/reprobuild-nix-packages/bb14c2e1b25e50be320261bea93400263f2deeb5";
       flake = false;
     };
 

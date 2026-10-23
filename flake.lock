@@ -2502,17 +2502,17 @@
     "reprobuild-nix-packages-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1792132841,
-        "narHash": "sha256-X1dTtmSa73F2vitRrqFopwex+JaBHoZGyr6tNU1DSa8=",
+        "lastModified": 1792778697,
+        "narHash": "sha256-XQmgI0sb8lYC3a4cJ7Pt5bxm9HFDz6XTRjJqSEeypbI=",
         "owner": "metacraft-labs",
         "repo": "reprobuild-nix-packages",
-        "rev": "507bffbe53673caebb686017e76910e321fd9175",
+        "rev": "bb14c2e1b25e50be320261bea93400263f2deeb5",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "reprobuild-nix-packages",
-        "rev": "507bffbe53673caebb686017e76910e321fd9175",
+        "rev": "bb14c2e1b25e50be320261bea93400263f2deeb5",
         "type": "github"
       }
     },
