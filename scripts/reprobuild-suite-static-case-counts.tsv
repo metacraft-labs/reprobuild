@@ -697,7 +697,7 @@ libs/repro_remix_registry/tests/t_remix_registry_statements.nim	nim	2
 libs/repro_resources/tests/t_attr_missing_interface_diagnostic.nim	nim	1
 libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim	nim	3
 libs/repro_resources/tests/t_converge_does_not_attach_to_a_dead_instance.nim	nim	6
-libs/repro_resources/tests/t_dss10_readiness_edge_orders_the_registration.nim	nim	24
+libs/repro_resources/tests/t_dss10_readiness_edge_orders_the_registration.nim	nim	26
 libs/repro_resources/tests/t_dss11_converge_response_carries_the_instances_points.nim	nim	7
 libs/repro_resources/tests/t_dss11_cross_process_contribution_store.nim	nim	21
 libs/repro_resources/tests/t_dss72_registrar_provenance_is_marked_and_refusable.nim	nim	16
@@ -1635,7 +1635,7 @@ tests/integration/t_just_test_end_to_end_via_parallel_runner.nim	nim	1
 tests/integration/t_just_test_hot_cache_is_no_op_build.nim	nim	2
 tests/integration/t_just_test_via_ct_test_runner.nim	nim	1
 tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim	nim	3
-tests/integration/t_l7_repro_up_converges_on_one_shared_instance.nim	nim	5
+tests/integration/t_l7_repro_up_converges_on_one_shared_instance.nim	nim	8
 tests/integration/t_leaked_instance_is_reaped.nim	nim	52
 tests/integration/t_lease_reap_destroys_an_unlinked_type_over_a_session.nim	nim	1
 tests/integration/t_lease_reap_session_transport_is_reachable_from_production.nim	nim	4

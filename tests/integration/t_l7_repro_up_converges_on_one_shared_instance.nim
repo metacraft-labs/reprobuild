@@ -122,10 +122,15 @@ proc prepareCase(): L7Case =
       "#!/bin/sh\n" &
       "mkdir -p state\n" &
       "printf 'sso-start %s\\n' \"$$\" >> state/sso.log\n" &
-      "touch state/sso.ready\n" &
-      "trap 'printf \"sso-stop\\n\" >> state/sso.log; exit 0' TERM INT\n" &
+      "touch ../sso.ready\n" &
+      "trap 'printf \"sso-stop\\n\" >> state/sso.log; rm -f ../sso.ready; exit 0' TERM INT\n" &
       "while :; do sleep 1; done\n")
-    writeFile(project / "reprobuild.nim", recipeFor("l7p" & $i))
+    # Every holder observes the SAME instance's readiness. A per-project
+    # marker would only be written in the materialising owner's cwd, so
+    # another holder would correctly refuse its absent local marker.
+    writeFile(project / "reprobuild.nim", recipeFor("l7p" & $i).replace(
+      "\"path\":\"state/sso.ready\"",
+      "\"path\":" & $(%(result.workspaceRoot / "sso.ready"))))
     result.projects.add(project)
   result.reproBin = reproBinary()
 
@@ -288,6 +293,37 @@ proc down(c: L7Case; project: string):
 proc downEveryProject(c: L7Case) =
   for project in c.projects:
     discard c.down(project)
+
+proc checkGatedReadiness(c: L7Case; project: string): string =
+  let eventsPath = parentDir(ledgerPath(project)) / "events.jsonl"
+  var process = startProcess(c.reproBin, args = @["up"],
+    workingDir = project, env = c.envFor(),
+    options = {poUsePath, poStdErrToStdOut})
+  defer:
+    if process.running():
+      process.terminate()
+      discard process.waitForExit()
+    process.close()
+  var waiting = false
+  while process.running():
+    if fileExists(eventsPath):
+      waiting = readFile(eventsPath).contains("service.readiness.waiting")
+    if waiting or not process.running(): break
+    sleep(50)
+  check waiting
+  check process.running()
+  check not fileExists(project / "state" / "sso.ready")
+  if fileExists(eventsPath):
+    check not readFile(eventsPath).contains("session.up")
+  # Release even on failure so teardown cannot strand an instance.
+  createDir(project / "state")
+  writeFile(project / "state" / "release", "ready\n")
+  let output = process.outputStream.readAll()
+  checkpoint(output)
+  check process.waitForExit() == 0
+  check fileExists(project / "state" / "sso.ready")
+  require fileExists(eventsPath)
+  result = readFile(eventsPath)
 
 suite "L7 §4.5 — `repro up` in three projects converges on one instance":
   # Prepared on the first case's `setup`, NOT in the suite body. The suite
@@ -457,3 +493,86 @@ suite "L7 §4.5 — `repro up` in three projects converges on one instance":
     let onDown = runRepro(c, c.projects[0], @["down", "--replace"])
     check onDown.exitCode == 1
     check onDown.output.contains("unsupported down flag: --replace")
+
+
+  test "a shared service without registrations refuses an unsatisfied probe":
+    let project = c.projects[0]
+    discard c.down(project)
+    defer: discard c.down(project)
+    for marker in ["sso.ready", "release"]:
+      if fileExists(project / "state" / marker):
+        removeFile(project / "state" / marker)
+    let eventsPath = parentDir(ledgerPath(project)) / "events.jsonl"
+    if fileExists(eventsPath): removeFile(eventsPath)
+    writeFile(project / "reprobuild.nim",
+      recipeFor("l7p1").replace("\"timeoutMs\":5000", "\"timeoutMs\":300"))
+    writeExecutable(project / "scripts" / "sso.sh",
+      "#!/bin/sh\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n")
+    let response = c.up(project)
+    checkpoint(response.output)
+    check response.exitCode == 1
+    check response.output.contains("readiness probe (fileExists")
+    check not response.output.contains(" up http://")
+    check not fileExists(project / "state" / "sso.ready")
+    require fileExists(eventsPath)
+    let events = readFile(eventsPath)
+    check events.contains("service.readiness.waiting")
+    check events.contains("service.readiness.timeout")
+    check not events.contains("session.up")
+
+  test "a shared service without registrations completes only after its probe":
+    let project = c.projects[0]
+    discard c.down(project)
+    defer: discard c.down(project)
+    for marker in ["sso.ready", "release"]:
+      if fileExists(project / "state" / marker):
+        removeFile(project / "state" / marker)
+    let eventsPath = parentDir(ledgerPath(project)) / "events.jsonl"
+    if fileExists(eventsPath): removeFile(eventsPath)
+    writeFile(project / "reprobuild.nim", recipeFor("l7p1"))
+    # The test controls the readiness gate rather than inferring readiness
+    # from a sleep: the real service cannot write its marker until released.
+    writeExecutable(project / "scripts" / "sso.sh",
+      "#!/bin/sh\nmkdir -p state\ntrap 'exit 0' TERM INT\n" &
+      "while [ ! -f state/release ]; do sleep 0.05; done\n" &
+      "touch state/sso.ready\nwhile :; do sleep 1; done\n")
+    let events = checkGatedReadiness(c, project)
+    check events.contains("service.readiness.satisfied")
+    check events.find("service.readiness.satisfied") < events.find("session.up")
+
+
+  test "an attached shared service without registrations rechecks readiness":
+    let project = c.projects[0]
+    discard c.down(project)
+    defer: discard c.down(project)
+    for marker in ["sso.ready", "release"]:
+      if fileExists(project / "state" / marker):
+        removeFile(project / "state" / marker)
+    writeFile(project / "reprobuild.nim",
+      recipeFor("l7p1").replace("\"timeoutMs\":5000", "\"timeoutMs\":300"))
+    writeExecutable(project / "scripts" / "sso.sh",
+      "#!/bin/sh\nmkdir -p state\ntouch state/sso.ready\n" &
+      "trap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n")
+    let first = c.up(project)
+    checkpoint(first.output)
+    require first.exitCode == 0
+    let firstLine = convergeLine(first.output)
+    require outcomeWordOf(firstLine) == "Materialise"
+    let pid = parseInt(fieldAfter(firstLine, "pid"))
+    require fileExists(project / "state" / "sso.ready")
+    removeFile(project / "state" / "sso.ready")
+    check processAlive(pid)
+    let eventsPath = parentDir(ledgerPath(project)) / "events.jsonl"
+    if fileExists(eventsPath): removeFile(eventsPath)
+    let attached = c.up(project)
+    checkpoint(attached.output)
+    check outcomeWordOf(convergeLine(attached.output)) == "AttachSilently"
+    check fieldAfter(convergeLine(attached.output), "pid") == $pid
+    check attached.exitCode == 1
+    check attached.output.contains("readiness probe (fileExists")
+    check not attached.output.contains(" up http://")
+    check processAlive(pid)
+    require fileExists(eventsPath)
+    let events = readFile(eventsPath)
+    check events.contains("service.readiness.timeout")
+    check not events.contains("session.up")

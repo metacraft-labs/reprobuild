@@ -18564,35 +18564,9 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
       (if response.holders.len == 1: "" else: "s"))
     recordSharedInstanceAcquisition(parsed.selection.outDir, holderId,
       item.declaration.serviceName, encodeServiceInstanceKey(key), response.address)
-    # Shared-Development-Services L8 -- RECONCILE THE REGISTRATIONS, now
-    # that the instance is LIVE.
-    #
-    # §7's ordering requirement, and it is the whole of what §7 says is
-    # left to build: "The registration resource's provider needs the
-    # issuer *running* before it can reconcile, so the resource depends
-    # on the service's readiness, and consuming edges depend on the
-    # resource." This is that point in the program: the daemon has
-    # answered that the instance is materialised or attached, and the
-    # supervisor has NOT been launched yet, so every consuming edge is
-    # downstream of here.
-    #
-    # D-SS10 IS NOT RESOLVED BY THIS, and the difference is worth
-    # stating. The decision asks whether the ordering edge is "an
-    # ordinary `dependsOn` onto the service node, a leased
-    # `stateGroup`, or a distinct readiness edge". This is none of the
-    # three: it is a sequential step in the CLI, ordered by program
-    # order rather than by a graph edge. It satisfies the REQUIREMENT
-    # (nothing reads an attribute before it is computed) without taking
-    # the decision.
-    #
-    # THE MINTER IS A PLACEHOLDER AND IT SAYS SO. There is no OIDC
-    # client in this repository: the real minter registers an
-    # application against a running Zitadel, which L9 owns. What runs
-    # here derives a deterministic identifier from the instance address
-    # and the member -- which is enough to prove the lane (mint once,
-    # persist, reuse byte-identically, reach argv) and is NOT enough to
-    # be an OIDC client id. A consumer handed one of these will fail at
-    # the issuer, loudly, which is the right failure for a placeholder.
+    # The daemon has materialised or attached the instance. Its declared
+    # readiness still has to complete before this command starts consumers;
+    # registrations, when present, are downstream of that same service node.
     # Shared-Development-Services D-SS11 (§4.6) -- APPLY THE
     # CROSS-PROCESS CONTRIBUTIONS.
     #
@@ -18651,6 +18625,28 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
           (if folded.members.len == 1: "" else: "s") & " from " &
           $stored.contributions.len & " cross-process contribution" &
           (if stored.contributions.len == 1: "" else: "s"))
+    let readinessProbe = ServiceReadinessProbe(kind: launch.readinessKind,
+      path: launch.readinessPath, url: launch.readinessUrl,
+      timeoutMs: launch.readinessTimeoutMs)
+    setServiceReadinessProber(
+      proc (url: string): bool {.closure.} =
+        readinessProbeSatisfied(url))
+    setReadinessEdgeEventSink(
+      proc (kind, service, detail: string) {.closure.} =
+        appendSessionEvent(parsed.selection.outDir, kind, service, detail))
+    if item.service.registrationPoints.len == 0 and
+        serviceCompletionRule(readinessProbe) == scrDeclaredReadiness:
+      # Readiness is the service's completion rule, even when no resource
+      # registers members. Keep the wait in the instance convergence phase;
+      # the supervisor does not own this process or its timeout budget.
+      try:
+        discard reconcileResources(planServiceReadinessEdge(
+          item.declaration.serviceName, response.address, readinessProbe))
+      except CatchableError as err:
+        stderr.writeLine("repro " & commandName & ": service `" &
+          item.declaration.serviceName & "`: readiness failed: " & err.msg)
+        refused.inc
+        continue
     if item.service.registrationPoints.len > 0:
       let storeRoot = serviceInstanceStoreRoot(dlsUser)
       # Shared-Development-Services D-SS10 (§7.1) -- THE EDGE, AND WHAT
@@ -18675,12 +18671,6 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
         outcomes: seq[tuple[member: string;
                             outcome: ServiceRegistrationOutcome]]]
       var registrarRan = false
-      setServiceReadinessProber(
-        proc (url: string): bool {.closure.} =
-          readinessProbeSatisfied(url))
-      setReadinessEdgeEventSink(
-        proc (kind, service, detail: string) {.closure.} =
-          appendSessionEvent(parsed.selection.outDir, kind, service, detail))
       # Shared-Development-Services §7.2 -- WHICH REGISTRAR, AND WHY THE
       # DEVELOPMENT ONE IS STILL THE DEFAULT.
       #
@@ -18844,10 +18834,7 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
       try:
         let plan = planRegistrationEdge(item.declaration.serviceName,
           response.address,
-          ServiceReadinessProbe(kind: launch.readinessKind,
-            path: launch.readinessPath, url: launch.readinessUrl,
-            timeoutMs: launch.readinessTimeoutMs),
-          unionMembers, unionContributors)
+          readinessProbe, unionMembers, unionContributors)
         discard reconcileResources(plan)
       except CatchableError as err:
         stderr.writeLine("repro " & commandName & ": service `" &
