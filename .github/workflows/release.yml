@@ -149,6 +149,16 @@ jobs:
     name: ${{ matrix.os-name }} (${{ matrix.arch }}) Release Build
     needs: plan
     runs-on: ${{ matrix.runner }}
+    # Without a job-level cap GitHub applies its default of 360 minutes
+    # (https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idtimeout-minutes),
+    # and the Linux leg's normal duration sits at that default: 5 h 25 m for
+    # v0.2.12 (run 39049060492), and v0.2.15 (run 39813513564, attempt 1)
+    # was cancelled at 6 h 0 m in its archive smoke after every build step had
+    # passed. The release runners are self-hosted, where a job may run for up
+    # to five days, so the cap is set here with headroom over the slowest
+    # measured leg. The steps that can wedge keep their own tighter caps
+    # (Windows build 240, each archive verify 60).
+    timeout-minutes: 540
     env:
       # Per-edge lines instead of a repainting bar, on every leg.
       #
