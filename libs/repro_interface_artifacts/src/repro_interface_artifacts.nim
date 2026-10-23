@@ -1,5 +1,5 @@
-import std/[algorithm, options, os, osproc, sequtils, sets, streams, strutils,
-            tables, tempfiles, times]
+import std/[algorithm, json, options, os, osproc, sequtils, sets, streams,
+            strutils, tables, tempfiles, times]
 
 when defined(windows):
   type
@@ -7419,9 +7419,61 @@ proc interfaceNimcacheKeyedCompileFlags*(command: openArray[string];
     if arg notin recipeFlags:
       result.add(arg)
 
+proc recipeConfigSearchPathFlags*(modulePath: string): seq[string] =
+  ## `--path:` flags for the search paths the recipe's OWN configuration
+  ## files add: the `config.nims` / `nim.cfg` of the recipe's directory and
+  ## of every ancestor, which Nim applies to a compile whose main module is
+  ## the recipe -- the provider compile reads them that way.
+  ##
+  ## The extraction's main module is a generated runner, so Nim reads the
+  ## runner directory's chain instead, and the runner lives in a nimcache
+  ## slot under the temporary directory (see `extractInterfaceFromModule`).
+  ## A recipe that reaches its imports through such a file (a root
+  ## `config.nims` with `switch("path", thisDir())` and `usesImportPath
+  ## "stubs"`) then failed with "cannot open file: stubs/...". The compiler
+  ## itself evaluates the chain (`nim dump`), so the paths are exactly the
+  ## ones the recipe's own compile would see; the standard library's
+  ## directories, which every compile has anyway, are left out.
+  ##
+  ## Search paths only. Other switches such a file sets (defines, C flags)
+  ## are not carried over, as before this was added.
+  ##
+  ## `--path` decides which module an import resolves to; the module's C and
+  ## its entry name follow from that, and Nim keys reuse on both, so these
+  ## flags stay out of the nimcache key (`interfaceNimcacheKeyedCompileFlags`)
+  ## like the recipe's own directory. A failed evaluation adds nothing.
+  let execution =
+    try:
+      runCommand(@[nimCompilerPath(), "dump", "--dump.format:json",
+        "--hints:off", "--warnings:off", absolutePath(modulePath)],
+        raiseOnFailure = false)
+    except CatchableError:
+      return @[]
+  if execution.exitCode != 0:
+    return @[]
+  let first = execution.output.find('{')
+  let last = execution.output.rfind('}')
+  if first < 0 or last <= first:
+    return @[]
+  var dumped: JsonNode
+  try:
+    dumped = parseJson(execution.output[first .. last])
+  except CatchableError:
+    return @[]
+  let prefix = dumped{"prefixdir"}.getStr()
+  for node in dumped{"lib_paths"}.getElems():
+    let path = node.getStr()
+    if path.len == 0 or
+        (prefix.len > 0 and (path == prefix or path.startsWith(prefix & "/"))):
+      continue
+    let flag = "--path:" & path
+    if flag notin result:
+      result.add(flag)
+
 type InterfaceNimcacheSlot* = object
   dir*: string
-    ## The slot's directory; its nimcache is `dir / "nimcache"`.
+    ## The slot's directory; its nimcache is `dir / "nimcache"` and the
+    ## extraction runners' sources live directly in it.
   index*: int
   lock: ReproFileLock
 
@@ -7657,8 +7709,8 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     let absoluteResourceModule =
       absolutePath(resourceModule).replace('\\', '/')
     resourceImport = "import \"" & absoluteResourceModule & "\"\n"
-  # The runner lives OUTSIDE the recipe's tree, in this extraction's scratch
-  # tree (see the placement note below the source); it imports
+  # The runner lives OUTSIDE the recipe's tree, in a slot of the shared
+  # interface nimcache (see the placement note below the source); it imports
   # the recipe by absolute path (scratch only — the edge's key and record
   # name the recipe relative to its own directory). Nim reads the
   # `config.nims` / `nim.cfg` chain of the MAIN module's directory — the
@@ -7766,35 +7818,35 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # (index 2), never after the runner, or nim treats it as a second input file.
   if getEnv("REPRO_INTERFACE_LIST_CMD").len > 0:
     command.insert(@["--listCmd"], 2)
-  # WHERE THE NIMCACHE AND THE RUNNER LIVE. The nimcache: by default a slot
-  # of the configuration-keyed pool under `interfaceExtractionNimcacheRoot()`
-  # (see the block comment above `InterfaceNimcacheSlotCount` for why the
-  # key leaves the recipe out and why that is sound), held exclusively until
-  # the compile has finished.
+  # The recipe's own configuration chain. The runner, not the recipe, is the
+  # main module, so Nim would read the runner directory's `config.nims` /
+  # `nim.cfg` chain; the search paths the recipe's chain adds are passed
+  # explicitly instead (`recipeConfigSearchPathFlags`), after every other
+  # path so they cannot shadow a reprobuild library (see TI2 above).
+  let recipeConfigFlags = recipeConfigSearchPathFlags(absoluteModulePath)
+  if recipeConfigFlags.len > 0:
+    let runnerAt = command.find(runnerPlaceholder)
+    command.insert(recipeConfigFlags, runnerAt)
+  # WHERE THE NIMCACHE AND THE RUNNER LIVE. By default: a slot of the
+  # configuration-keyed pool under `interfaceExtractionNimcacheRoot()` (see
+  # the block comment above `InterfaceNimcacheSlotCount` for why the key
+  # leaves the recipe out and why that is sound), held exclusively from
+  # writing the runner until the compile has finished.
   #
-  # The runner: in `tempParent`, this extraction's scratch tree, NOT in the
-  # slot. The runner is the compile's MAIN module, and Nim runs the
-  # `config.nims` / `nim.cfg` of every ANCESTOR of the main module's
-  # directory. For a recipe-relative extraction that is the action-cache
-  # root's ancestry, and recipes rely on it: a fixture whose root
-  # `config.nims` adds the root to the search path, with the action-cache
-  # (or work) root inside it, resolves `usesImportPath "stubs"` imports only
-  # through that file. A runner under the temporary directory reads the
-  # temporary directory's ancestry instead, and those imports fail ("cannot
-  # open file: stubs/..."; the Windows runner, under `%TEMP%`, already
-  # could not read it, see `t_tarball_mode_builds_a_fall_through_source_recipe`).
+  # The runner's source sits IN the slot, not in the per-extraction scratch
+  # tree, because its directory reaches every generated C file: Nim puts
+  # `-I<main module directory>` on each C compile and records that command
+  # in the file's header comment, and it rebuilds an object whenever its C
+  # changes. Measured with the dev-shell Nim: the same main source compiled
+  # from another directory of the same depth into one nimcache rebuilt 20 of
+  # 20 objects; from the same directory, 0. A runner whose directory follows
+  # the scratch tree -- a new action-cache root, an edited recipe -- would
+  # recompile the whole library every time even with the nimcache shared.
   #
-  # Reuse does not need the runner in the slot. Nim reuses a generated
-  # module's object on its C content and the object's freshness alone, not
-  # on the compile command, so a runner directory that differs per extraction
-  # costs nothing by itself. What it does change is the generated NAMES:
-  # Nim 2.2.6 and later name a module relative to its nearest search path,
-  # which does not involve the runner at all; Nim 2.2.4 names it relative to
-  # the main module's directory. `tempParent` sits at a fixed depth under the
-  # action-cache root (`recipe-compiles/interface/<identity>/work/m7-temp`),
-  # so an edited recipe or a fresh root at the same depth produces the same
-  # relative names there too; only a root at another depth starts cold under
-  # 2.2.4.
+  # What the runner's directory does NOT supply any more is configuration:
+  # Nim runs the config files of every ancestor of the main module's
+  # directory, and under the temporary directory those are not the recipe's.
+  # The recipe's own chain is applied explicitly above.
   #
   # The runner's name is a digest of its source, which names the recipe by
   # absolute path: two recipes never share a runner or its entry, one recipe
@@ -7802,22 +7854,26 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # file per distinct runner source -- bounded, identifiable from its name.
   #
   # `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` isolates each INVOCATION
-  # instead: a nimcache in the private `tempRoot`.
+  # instead: a nimcache in the private `tempRoot` and the runner beside the
+  # other extractions of this scratch tree.
   let perBinary = providerNimcacheMode() == "per-binary"
   var slot: InterfaceNimcacheSlot
-  if not perBinary:
-    let key = interfaceNimcacheConfigKey(workDir, hostFlags, libFlags,
-      interfaceNimcacheKeyedCompileFlags(command, runnerPlaceholder,
-        [recipePathFlag, consumerRootDefine]))
-    slot = acquireInterfaceNimcacheSlot(
-      interfaceExtractionNimcacheRoot() / key)
-  let runnerDir = tempParent
+  let runnerDir =
+    if perBinary:
+      tempParent
+    else:
+      let key = interfaceNimcacheConfigKey(workDir, hostFlags, libFlags,
+        interfaceNimcacheKeyedCompileFlags(command, runnerPlaceholder,
+          @[recipePathFlag, consumerRootDefine] & recipeConfigFlags))
+      slot = acquireInterfaceNimcacheSlot(
+        interfaceExtractionNimcacheRoot() / key)
+      slot.dir
   var compileExecution: ProviderCompileExecutionResult
   try:
     let runnerPath = runnerDir / runnerName
     if not fileExists(extendedPath(runnerPath)):
       # Publish by rename, so a concurrent extraction that derived the same
-      # name (`tempParent` is shared and no lock covers it) never observes
+      # name (possible in `tempParent`, which no lock covers) never observes
       # a partially written file: the path either does not exist yet or
       # already holds the whole source.
       let (stageFile, stagePath) =
