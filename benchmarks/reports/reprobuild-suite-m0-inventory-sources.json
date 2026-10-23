@@ -2,8 +2,8 @@
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
     "nimTestBinaries": 2358,
-    "pureUnitConsolidationGroups": 67,
-    "pureUnitTests": 688,
+    "pureUnitConsolidationGroups": 68,
+    "pureUnitTests": 689,
     "staticallyDetectedRuntimeCompilerFlowTests": 127,
     "testEntries": 2394
   },
@@ -680,6 +680,21 @@
         "libs/repro_resources/tests/t_l8_registrations_mint_once_and_reach_argv.nim",
         "libs/repro_resources/tests/t_resource_provider_lane.nim",
         "libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_resources",
+      "sources": [
+        "libs/repro_resources/tests/t_l2_lease_edge.nim",
+        "libs/repro_resources/tests/t_l3_reaper.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1372,9 +1387,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1286,
+      "integration": 1285,
       "platform/destructive": 145,
-      "pure unit": 688,
+      "pure unit": 689,
       "unclassified": 257
     },
     "graphOwnedTestArtifacts": [
@@ -4808,10 +4823,11 @@
             "c",
             "cc",
             "daemon",
+            "dir",
             "env",
             "tools"
           ],
-          "line": 168,
+          "line": 186,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -4826,10 +4842,11 @@
             "c",
             "cc",
             "daemon",
+            "dir",
             "env",
             "tools"
           ],
-          "line": 198,
+          "line": 216,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -4844,10 +4861,11 @@
             "c",
             "cc",
             "daemon",
+            "dir",
             "env",
             "tools"
           ],
-          "line": 464,
+          "line": 485,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -4862,10 +4880,11 @@
             "c",
             "cc",
             "daemon",
+            "dir",
             "env",
             "tools"
           ],
-          "line": 483,
+          "line": 504,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5621,7 +5640,7 @@
             "socketPath",
             "tempRoot"
           ],
-          "line": 247,
+          "line": 272,
           "path": "tests/integration/t_integration_reprobuild_sessions_share_runquota.nim",
           "patterns": [
             "nim-argv"
@@ -20400,8 +20419,8 @@
     },
     {
       "binary": "build/test-bin/t_l3_reaper",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -20410,7 +20429,7 @@
         "repro_resources"
       ],
       "owner": "libs/repro_resources",
-      "requiresReproBinary": true,
+      "requiresReproBinary": false,
       "source": "libs/repro_resources/tests/t_l3_reaper.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 27,

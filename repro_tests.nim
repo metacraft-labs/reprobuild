@@ -6303,7 +6303,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     source: "libs/repro_resources/tests/t_l3_reaper.nim",
     binary: "build/test-bin/t_l3_reaper",
     defines: @[],
-    requiresReproBinary: true,
+    requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny,
