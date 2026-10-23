@@ -31,7 +31,7 @@
 ##     catalogued (search paths, impure builtins, computed paths, fetchers);
 ##   * the identity is re-resolved on every call, warm or cold, and nothing
 ##     is written or kept under a nonce;
-##   * a selector-only use (no ``expressionFile``) stays cacheable and is
+##   * a remote selector-only use (no ``expressionFile``) stays cacheable and is
 ##     keyed deterministically -- the same key every call -- and its key
 ##     moves with the selector and the nixpkgs pin it names.
 ##
@@ -40,9 +40,10 @@
 ## in path mode, which reaches the tool through ``$PATH`` on any host while
 ## the use still carries the Nix expression.
 
-import std/[algorithm, os, sequtils, strutils, tempfiles, unittest]
+import std/[algorithm, json, os, sequtils, strutils, tempfiles, unittest]
 
 import repro_cli_support
+import repro_core/nix_evaluation_policy
 import repro_interface_artifacts
 import repro_project_dsl
 import repro_tool_profiles
@@ -130,10 +131,10 @@ proc materializationKey(expr: string; selector = "reprobuild-test-expr-tool";
   let useDef = exprUse(expr, selector, nixpkgsRev)
   nixMaterializationCacheKey(useDef, planOf(useDef))
 
-template checkNeverServed(expr: string) =
+template checkNeverServed(expr: string; selector: string = "reprobuild-test-expr-tool") =
   ## Every key that could serve an identity or a realization for ``expr``
   ## is uncacheable and never equals itself recomputed.
-  let artifact = consumer(expr)
+  let artifact = consumer(expr, selector)
   for mode in AllModes:
     checkpoint("mode " & $mode)
     let first = toolIdentityCacheKeyInfo(artifact, mode, pathValue = "")
@@ -143,13 +144,22 @@ template checkNeverServed(expr: string) =
     check first.key != second.key
   check loweredGraphCacheKey(artifact, tpmNix, "p", "", "") !=
     loweredGraphCacheKey(artifact, tpmNix, "p", "", "")
-  let m1 = materializationKey(expr)
-  let m2 = materializationKey(expr)
+  let m1 = materializationKey(expr, selector)
+  let m2 = materializationKey(expr, selector)
   check not m1.cacheable
   check not m2.cacheable
   check m1.key != m2.key
 
 suite "a Nix expressionFile tool use is never served from a cache":
+
+  test "local selectors share the helper policy and never reuse predicted keys":
+    let corpus = currentSourcePath().parentDir.parentDir / "fixtures" /
+      "nix-evaluation-policy.json"
+    for item in parseFile(corpus):
+      let selector = item["selector"].getStr()
+      check isMutableLocalNixSelector(selector) == item["local"].getBool()
+      if item["local"].getBool():
+        checkNeverServed("", selector)
 
   test "every key carries a nonce, in every mode, whatever the expression":
     let project = makeProject()
@@ -199,7 +209,7 @@ suite "a Nix expressionFile tool use is never served from a cache":
     check toSeq(walkFiles(outDir / "tool-identity-cache" /
       "*.inspect.json")).len == 0
 
-  test "a selector-only use stays cacheable, keyed by what it names":
+  test "a remote selector-only use stays cacheable, keyed by what it names":
     # The control: without an expressionFile the keys are deterministic, so
     # the nonce above is the expressionFile's doing, not the fixture's.
     let artifact = consumer("")
@@ -227,7 +237,7 @@ suite "a Nix expressionFile tool use is never served from a cache":
       # the top-level expression and the flake files as its only inputs, and
       # the evaluation runs in the helper, outside the monitor: a recorded
       # result would be served after an edit of a file the expression
-      # imports. A selector-only use stays cacheable (the control).
+      # imports. A remote selector-only use stays cacheable (the control).
       let project = makeProject()
       defer: removeDir(project)
       let store = project / "store"

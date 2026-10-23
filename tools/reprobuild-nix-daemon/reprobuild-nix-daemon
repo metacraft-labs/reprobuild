@@ -30,6 +30,14 @@ HOST_DYNAMIC_LOADER_ENV = (
 )
 
 
+def is_mutable_local_nix_selector(selector: str) -> bool:
+    # Same policy as repro_core/nix_evaluation_policy; the cross-language
+    # regression exercises this helper and the Nim cache layers together.
+    value = selector.strip()
+    return value in (".", "..") or value.startswith(
+        ("./", "../", ".#", "..#", "/", "path:", "file:", "git+file:"))
+
+
 def close_inherited_descriptors() -> None:
     """Do not keep the launcher's locks or pipe writers alive between requests."""
     if os.name != "posix":
@@ -240,7 +248,9 @@ def response_for(line: bytes, cache: "ResolveCache", cached_only: bool = False):
                 "error": f"Nix expression file does not exist: {expression_file}",
             }
     dependencies = dependencies_for(workspace_root, expression_file)
-    if expression_file is not None:
+    if expression_file is not None or is_mutable_local_nix_selector(selector):
+        # Explicit local flakes have mutable imported source too. The known
+        # top-level files cannot establish their complete evaluation identity.
         # NEVER CACHED (owner decision 2026-10-14, Edge-Derived-Identities.md
         # §7 rider): until the monitored ``nix-eval`` / ``nix-realise`` edges
         # of campaign M19 exist, a Nix tool use with an ``expressionFile`` is

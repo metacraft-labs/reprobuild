@@ -21241,6 +21241,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
 ## test execute edges, so the ``test`` collection covers
 ## both languages in one engine pass.
 const pythonTestPaths*: seq[string] = @[
+  "tests/integration/test_dev_env_local_flake_root.py",
   "tests/integration/test_nix_daemon_cache.py",
   "tests/test_dev_env_m9_policy.py",
   "tests/unit/test_build_report_attribution.py",
@@ -21263,6 +21264,7 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_nix_daemon_descriptors.py",
   "tests/unit/test_nix_daemon_expression_file_is_never_cached.py",
   "tests/unit/test_nix_daemon_request_requires_workspace_root.py",
+  "tests/unit/test_nix_evaluation_policy.py",
   "tests/unit/test_package_root_anchor.py",
   "tests/unit/test_prune_undeclared_test_binaries.py",
   "tests/unit/test_publish_surface_routing.py",

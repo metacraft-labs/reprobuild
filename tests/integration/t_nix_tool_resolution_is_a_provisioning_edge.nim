@@ -24,8 +24,9 @@
 ##     its declared inputs; a repeat is not re-executed; a realization to a
 ##     different store path keeps the receipt's path, changes its content,
 ##     and re-executes the consumer;
-##   * a repeat realization is an action-cache hit, and a realization whose
-##     store path was collected is realized again rather than served.
+##   * explicit local sources are re-evaluated while immutable remote
+##     realizations remain cache hits; a collected store path is realized
+##     again rather than served.
 ##
 ## MOCK POLICY -- NO MOCKS. The tool is realized by the real
 ## `reprobuild-nix-daemon` helper running the host's real `nix build` over the
@@ -49,6 +50,7 @@ import repro_interface_artifacts
 import repro_test_support/process_fixtures
 import repro_test_support/reasoned_skip
 import repro_tool_profiles
+import repro_dsl_stdlib/nixpkgs_pin
 
 const RepoMarker = "repro.nim"
 const FixtureRelRoot = "tests/fixtures/nix-daemon-local-flake"
@@ -351,7 +353,7 @@ suite "a Nix-realized tool is a provisioning edge with a receipt":
       check plain.resultFor("plain").status == asSucceeded
       check receipt notin plain.resultFor("plain").evidence.declaredInputs
 
-  test "a repeat is an action-cache hit; a collected realization is redone":
+  test "a mutable local repeat re-evaluates; a collected realization is redone":
     if not HostRunsGate:
       skip(PlatformSkipReason)
     else:
@@ -366,13 +368,14 @@ suite "a Nix-realized tool is a provisioning edge with a receipt":
       check profile.provisioningReceipt.len > 0
       let edges = nixToolProvisioningEdges(use, f.storeRoot, getCurrentDir())
 
-      # Run the edge again, as a resolution that missed its fast path would:
-      # the action cache serves it and nothing is launched.
+      # Local source has no complete evaluator-owned identity, so running
+      # its acquisition again must evaluate rather than reuse a cache entry.
       let repeat = runProvisioningEdges(edges, f.storeRoot)
       let edgeResult = repeat.resultFor(edges.rootId)
       checkpoint("repeat edge status: " & $edgeResult.status)
-      check edgeResult.status in {asUpToDate, asCacheHit}
-      check not edgeResult.launched
+      check not edges.actions[0].cacheable
+      check edgeResult.status == asSucceeded
+      check realized in receiptPaths(profile.provisioningReceipt)
 
       # The realization is collected (its tool-store roots dropped, then the
       # private output deleted). The action cache still holds a receipt naming
@@ -389,6 +392,36 @@ suite "a Nix-realized tool is a provisioning edge with a receipt":
       check fileExists(again.resolvedExecutablePath)
       check again.provisioningReceipt == profile.provisioningReceipt
       check realized in receiptPaths(again.provisioningReceipt)
+
+  test "an immutable remote pin retains cached acquisition and helper-free warm resolution":
+    if not HostRunsGate:
+      skip(PlatformSkipReason)
+    else:
+      var f = openFixture()
+      defer: f.close()
+      setCurrentDir(f.root)
+      let use = InterfaceToolUse(rawConstraint: "bash", packageSelector: "bash",
+        executableName: "bash", nixProvisioning: @[InterfaceNixProvisioning(
+          selector: "nixpkgs#bash", executablePath: "bin/bash",
+          nixpkgsRev: CanonicalNixpkgsRev, nixpkgsNarHash: CanonicalNixpkgsNarHash)])
+      let cold = resolveNixTool(use, f.storeRoot)
+      let edges = nixToolProvisioningEdges(use, f.storeRoot, f.root)
+      require edges.actions[0].cacheable
+      let repeat = runProvisioningEdges(edges, f.storeRoot)
+      check repeat.resultFor(edges.rootId).status in {asUpToDate, asCacheHit}
+      check not repeat.resultFor(edges.rootId).launched
+      # A real non-executable file makes helper access fail. Warm resolution
+      # must still return the exact profile without calling that boundary;
+      # no replacement helper or Nix implementation is installed.
+      let unavailable = f.root / "non-executable-helper"
+      writeFile(unavailable, "not executable")
+      let previous = getEnv("REPROBUILD_NIX_DAEMON_BIN")
+      putEnv("REPROBUILD_NIX_DAEMON_BIN", unavailable)
+      defer: putEnv("REPROBUILD_NIX_DAEMON_BIN", previous)
+      let warm = resolveNixTool(use, f.storeRoot)
+      check warm.selectedStorePath == cold.selectedStorePath
+      check warm.resolvedExecutablePath == cold.resolvedExecutablePath
+      check warm.provisioningReceipt == cold.provisioningReceipt
 
   test "a resolution with no tool store has no receipt":
     if not HostRunsGate:

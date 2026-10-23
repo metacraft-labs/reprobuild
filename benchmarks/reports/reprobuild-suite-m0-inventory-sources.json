@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 67,
     "pureUnitTests": 688,
     "staticallyDetectedRuntimeCompilerFlowTests": 127,
-    "testEntries": 2384
+    "testEntries": 2386
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1372,10 +1372,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1277,
+      "integration": 1278,
       "platform/destructive": 145,
       "pure unit": 688,
-      "unclassified": 256
+      "unclassified": 257
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1578,8 +1578,8 @@
       }
     ],
     "nimTestBinaryCount": 2350,
-    "pythonTestFileCount": 34,
-    "testEntryCount": 2384
+    "pythonTestFileCount": 36,
+    "testEntryCount": 2386
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -38910,13 +38910,14 @@
         "repro_core",
         "repro_dev_env_engine",
         "repro_interface_artifacts",
+        "repro_local_store",
         "repro_tool_profiles"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_nix_daemon_provisioner.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 11,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -38928,6 +38929,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
+        "repro_core",
         "repro_dsl_stdlib",
         "repro_interface_artifacts",
         "repro_project_dsl",
@@ -38937,7 +38939,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_nix_expression_closure_keys.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -38971,6 +38973,7 @@
         "repro_cli_support",
         "repro_core",
         "repro_depfile",
+        "repro_dsl_stdlib",
         "repro_interface_artifacts",
         "repro_test_support",
         "repro_tool_profiles"
@@ -38979,7 +38982,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_nix_tool_resolution_is_a_provisioning_edge.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -45875,6 +45878,21 @@
       "localDependencyShape": [],
       "owner": "tests/integration",
       "requiresReproBinary": false,
+      "source": "tests/integration/test_dev_env_local_flake_root.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
       "source": "tests/integration/test_nix_daemon_cache.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -50231,6 +50249,21 @@
       "source": "tests/unit/test_nix_daemon_request_requires_workspace_root.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_nix_evaluation_policy.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -746,55 +746,43 @@ proc shellRenderAction(config: DevEnvEdgeConfig; artifactPath,
 
 proc devEnvNixProvisioningActions*(toolUses: openArray[InterfaceToolUse];
     effectiveProvisioning: ToolProvisioningMode;
-    outDir, workDir: string): seq[BuildAction] =
-  ## One foreign acquisition per selector, regardless of dependency multiplicity.
+    outDir, workDir: string; projectRoot = ""): seq[BuildAction] =
+  ## ``workDir`` is the engine's compiler/library directory. A relative Nix
+  ## selector belongs to the caller's project, whose root must travel to the
+  ## provisioner independently of that compilation directory.
+  let selectorRoot = absolutePath(if projectRoot.len > 0: projectRoot else: workDir)
   var seen: seq[string]
   for useDef in toolUses:
-    # GM4b: nix selection is target-filtered (Provisioning-Contributions.md
-    # §"Profile Package References"): a `nixPackage` has no realization on a
-    # host Nix does not run on, so there is no edge to plan there.
     if effectiveProvisioning in {tpmUnspecified, tpmNix} and
         useDef.nixProvisioning.len > 0 and
         nixServesTarget(hostRealizationTarget()):
+      # Use the same acquisition edges as build-time tool resolution. Their
+      # metadata binds selector ownership, their checksum inputs invalidate
+      # edited flake files, and expression-file acquisitions stay uncacheable.
+      # The foreign edge's cwd is its tool store for GC-root accounting; the
+      # provider compilation keeps its separate workDir below.
       let plan = nixAcquisitionPlan(useDef)
-      # Several dependency paths may request the same realization. Key the
-      # edge by its acquisition selector, not by the package name: distinct
-      # selectors of the same package must also have distinct receipt outputs.
-      let identity = hexDigest(fingerprintText([
-        "reprobuild.dev-env.nix-provision.v2", plan.nixSelector]))
-      if identity in seen:
+      # Expression-file builders deliberately draw a new nonce per request.
+      # Coalesce equal acquisitions before creating them, while preserving
+      # their uncacheable disposition across separate activations.
+      let acquisition = selectorRoot & "\0" & plan.nixSelector & "\0" &
+        plan.nixExpressionFile
+      if acquisition in seen:
         continue
-      seen.add(identity)
-      let receiptDir = outDir / "tool-store" / "nix-provision"
-      let receiptFile = receiptDir / (identity & ".receipt")
-
-      let provAction = BuildAction(
-        # Named-Lock-Files §7.2. A foreign-provisioner edge is materialised by
-        # a provisioner Reprobuild does not own — the very case that decided
-        # design A over path-partitioning (§7.2's owner note) — and no solved
-        # package instance reaches it here.
-        governingLockIdentity: lockIdentityOutsideSolvedGraph(),
-        kind: bakForeignProvision,
-        id: "nix-provision." & identity,
-        argv: @["nix", plan.nixSelector],
-        outputs: @[receiptFile],
-        cwd: workDir,
-        commandStatsId: "repro dev-env nix provision edge",
-        # Owner decision, 2026-10-14 (Edge-Derived-Identities.md §7 rider):
-        # a Nix tool use with an ``expressionFile`` is never served from a
-        # cache until the ``nix-eval`` / ``nix-realise`` edges (campaign
-        # M19) exist. This edge is keyed by the selector alone and does not
-        # bind the expression (campaign M7 open item (vii)), so for such a
-        # use it runs on every activation.
-        cacheable: plan.nixExpressionFile.len == 0,
-        weakFingerprint: fingerprintText([
-          "reprobuild.dev-env.nix-provision.v1",
-          useDef.packageSelector,
-          plan.nixSelector
-        ]),
-        dependencyPolicy: DependencyGatheringPolicy(kind: dgAutomaticMonitor)
-      )
-      result.add(provAction)
+      seen.add(acquisition)
+      let provision = nixToolProvisioningEdges(useDef, outDir / "tool-store",
+        selectorRoot)
+      # Build-time acquisition deliberately replaces one tool request's
+      # receipt when its selector changes. An activation can request several
+      # selectors for that package together, so retain its per-acquisition
+      # namespace while sharing the builder's execution and cache contract.
+      let identity = hexDigest(fingerprintText([
+        "reprobuild.dev-env.nix-provision.v3", acquisition]))
+      var edge = provision.actions[0]  # Nix acquisition has one foreign edge.
+      edge.id = "nix-provision." & identity
+      edge.outputs = @[outDir / "tool-store" / "nix-provision" /
+        (identity & ".receipt")]
+      result.add(edge)
 
 
 proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
@@ -879,7 +867,7 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
 
   let provisioningActions = devEnvNixProvisioningActions(
     interfaceArtifact.projectInterface.toolUses, effectiveProvisioning,
-    active.outDir, workDir)
+    active.outDir, workDir, active.projectRoot)
   var provisioningReceipts: seq[string]
   for provision in provisioningActions:
     provisioningReceipts.add(provision.outputs)

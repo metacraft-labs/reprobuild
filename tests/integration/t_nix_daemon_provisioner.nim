@@ -27,6 +27,7 @@ import repro_core/dependency_gathering
 import repro_build_engine
 import repro_dev_env_engine
 import repro_interface_artifacts
+from repro_local_store import ffpChecksum
 import repro_tool_profiles
 
 const RepoMarker = "repro.nim"
@@ -229,6 +230,37 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
       fixtureRoot, fixtureRoot).len == 0
 
   when not defined(windows):
+    test "dev env selector context is independent of compiler cwd":
+      let callerRoot = prepareFixtureRoot(findRepoRoot())
+      defer: removeDir(callerRoot)
+      let compilerRoot = findRepoRoot()
+      let useDef = InterfaceToolUse(packageSelector: "sh", rawConstraint: "sh",
+        nixProvisioning: @[InterfaceNixProvisioning(
+          selector: FixtureSelector, executablePath: FixtureExecutable)])
+      let actions = devEnvNixProvisioningActions([useDef], tpmNix,
+        callerRoot / "state", compilerRoot, callerRoot)
+      check actions.len == 1
+      check actions[0].cwd == callerRoot / "state" / "tool-store"
+      check actions[0].cwd != compilerRoot
+      check actions[0].actionCachePolicy == ffpChecksum
+      check callerRoot / "flake.nix" in actions[0].inputs
+      check callerRoot / "flake.lock" in actions[0].inputs
+      check parseJson(actions[0].builtinText)["workspaceRoot"].getStr() == callerRoot
+      let other = devEnvNixProvisioningActions([useDef], tpmNix,
+        callerRoot / "other-state", compilerRoot, compilerRoot)
+      check actions[0].id != other[0].id
+      check actions[0].weakFingerprint != other[0].weakFingerprint
+      writeFile(callerRoot / "tool.nix", "{}")
+      var expressionUse = useDef
+      expressionUse.nixProvisioning[0].expressionFile = callerRoot / "tool.nix"
+      let expressionActions = devEnvNixProvisioningActions([expressionUse], tpmNix,
+        callerRoot / "expression-state", compilerRoot, callerRoot)
+      check parseJson(expressionActions[0].builtinText)["expressionFile"].getStr() ==
+        callerRoot / "tool.nix"
+      check callerRoot / "tool.nix" in expressionActions[0].inputs
+      check not expressionActions[0].cacheable
+
+  when not defined(windows):
     # Nix provisions nothing for a Windows host, so there is no edge to
     # inspect there.
     test "a provision edge for a Nix expressionFile is never cacheable":
@@ -242,13 +274,14 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
       let selectorOnly = InterfaceToolUse(packageSelector: "sh",
         rawConstraint: "sh",
         nixProvisioning: @[InterfaceNixProvisioning(
-          selector: FixtureSelector, executablePath: FixtureExecutable)])
+          selector: "github:NixOS/nixpkgs/addf7cf5f383a3101ecfba091b98d0a1263dc9b8#bash",
+          executablePath: "bin/bash")])
       var withExpression = selectorOnly
       withExpression.nixProvisioning = @[InterfaceNixProvisioning(
         selector: ".#expression-sh", executablePath: FixtureExecutable,
         expressionFile: fixtureRoot / "default.nix")]
       let actions = devEnvNixProvisioningActions(
-        [selectorOnly, withExpression], tpmNix, fixtureRoot, fixtureRoot)
+        [selectorOnly, withExpression, withExpression], tpmNix, fixtureRoot, fixtureRoot)
       check actions.len == 2
       check actions[0].cacheable
       check not actions[1].cacheable

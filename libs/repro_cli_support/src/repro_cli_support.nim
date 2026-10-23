@@ -28,6 +28,7 @@ import repro_core/relocation
 import repro_core/ambient_execution
 import repro_core/cli_images
 import repro_core/source_root
+import repro_core/nix_evaluation_policy
 import repro_build_engine
 import repro_cmake_trycompile
 import repro_dev_env_activation
@@ -7318,16 +7319,18 @@ proc toolIdentityCacheKeyInfo*(artifact: ProjectInterfaceArtifact;
     payload.addCacheField(useDef.policyPath.join("/"))
     # Every realization the use carries, whole (see the v5 note above).
     payload.addCacheField(toolUseRealizationDigest(useDef))
+  # Explicit local flake selectors have the same missing imported-read
+  # closure as expression files; neither may reuse a predicted tool identity.
   # v7: a Nix ``expressionFile`` anywhere makes the key uncacheable (see
   # above). The nonce is the LAST field, so nothing after it could make two
   # such keys equal.
   result.cacheable = true
   for useDef in artifact.projectInterface.toolUses:
     for entry in useDef.nixProvisioning:
-      if entry.expressionFile.len > 0:
+      if requiresFreshNixEvaluation(entry.selector, entry.expressionFile):
         result.cacheable = false
   if not result.cacheable:
-    payload.addCacheField("uncacheable-nix-expression-file")
+    payload.addCacheField("uncacheable-nix-evaluation")
     payload.addCacheField(uncacheableNixExpressionKey())
   result.key = digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
 

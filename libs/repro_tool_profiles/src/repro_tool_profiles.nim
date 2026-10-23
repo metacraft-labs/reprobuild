@@ -14,6 +14,7 @@ import repro_core/ambient_execution
 import repro_core/host_tar
 # GC roots for the store paths a Nix tool realization is recorded under.
 import repro_core/nix_store_roots
+import repro_core/nix_evaluation_policy
 # The tarball provisioner runs as a built-in executor on the build engine's
 # scheduler thread, possibly while the engine's worker pool is live, so its
 # extraction commands are released without ``osproc.close``'s double close of
@@ -1568,6 +1569,9 @@ type
 proc nixMaterializationCacheKey*(useDef: InterfaceToolUse;
                                  plan: NixAcquisitionPlan):
     NixMaterializationKey =
+  ## An explicit local flake is mutable too: like an expressionFile, its
+  ## imports are absent from this predicted key, so it uses a fresh nonce.
+  ## Immutable remote selectors retain their existing v3 keys and reuse.
   ## v3 (2026-10-14). A plan with an ``expressionFile`` is uncacheable
   ## (``uncacheableNixExpressionKey``). A selector-only plan binds exactly
   ## the fields v1 bound before the expression-closure scanner existed --
@@ -1585,7 +1589,7 @@ proc nixMaterializationCacheKey*(useDef: InterfaceToolUse;
   ## complete only as far as the selector itself is content-locked: a
   ## ``nixpkgs#`` selector with a pinned ``nixpkgsRev`` and
   ## ``nixpkgsNarHash`` (``effectiveNixSelector``).
-  if plan.nixExpressionFile.len > 0:
+  if requiresFreshNixEvaluation(plan.nixSelector, plan.nixExpressionFile):
     return (cacheable: false, key: uncacheableNixExpressionKey())
   var payload: seq[byte] = @[]
   payload.writeString("reprobuild.nix.materialization.v3")
@@ -4542,7 +4546,9 @@ proc addNixProvisionEdge(edges: var ProvisioningEdges; useDef: InterfaceToolUse;
     cwd = storeRoot,
     outputs = [receipt],
     commandStatsId = "repro nix provision edge",
-    cacheable = true,
+    cacheable = not requiresFreshNixEvaluation(plan.nixSelector, plan.nixExpressionFile),
+    text = $(%*{"workspaceRoot": getCurrentDir(),
+                "expressionFile": plan.nixExpressionFile}),
     weakFingerprint = weakFingerprintFromText(
       "reprobuild.nix-provision.v1\0" & plan.nixSelector & "\0" &
       plan.lockIdentity))
@@ -5074,12 +5080,14 @@ proc nixToolProvisioningEdges*(useDef: InterfaceToolUse; storeRoot: string;
     # Owner decision, 2026-10-14 (Edge-Derived-Identities.md §7 rider): a
     # Nix tool use with an ``expressionFile`` is never served from a cache
     # until the ``nix-eval`` / ``nix-realise`` edges of campaign M19 exist.
+    # Explicit mutable local selectors follow the same containment: imported
+    # source is not covered by the helper's reported top-level flake files.
     # This edge declares only the top-level expression and the flake files
     # as inputs and the evaluation runs in the helper, outside the monitor,
     # so a recorded result would be served after an edit of a file the
     # expression imports. For such a use it runs every time; its
     # fingerprint's materialization key is then a nonce anyway.
-    cacheable = plan.nixExpressionFile.len == 0,
+    cacheable = not requiresFreshNixEvaluation(plan.nixSelector, plan.nixExpressionFile),
     weakFingerprint = weakFingerprintFromText(
       NixToolProvisionEdgeSchema & "\0" &
       nixMaterializationCacheKey(useDef, plan).key & "\0" & selector &
