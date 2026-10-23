@@ -40,7 +40,7 @@
 ## ``SyncPlan`` (list of mutating ``bakWorkspaceVcs`` actions) and a
 ## ``SyncReport`` (per-repo diagnostic).
 
-import std/[strutils]
+import std/[os, strutils]
 import resolver
 
 type
@@ -54,6 +54,7 @@ type
     scCleanFastForwardable
     scDetachedAtLockedRevision
     scDirty
+    scInterruptedFastForward
     scLocallyUnpublished
     scDivergentFeatureBranch
     scMissingCheckout
@@ -140,6 +141,9 @@ type
     exists*: bool
     headSha*: string
     isClean*: bool
+    interruptedFastForwardTarget*: string
+      ## Non-empty only after the dispatcher proves compatible interrupted
+      ## upstream content. Refuse with manual recovery advice, never stash.
     currentBranch*: string
     localBranchTip*: string
     remoteBranchTip*: string
@@ -228,6 +232,7 @@ proc syncCaseTag*(syncCase: SyncCase): string =
   of scCleanFastForwardable: "clean_fast_forwardable"
   of scDetachedAtLockedRevision: "detached_at_locked_revision"
   of scDirty: "dirty"
+  of scInterruptedFastForward: "interrupted_fast_forward"
   of scLocallyUnpublished: "locally_unpublished"
   of scDivergentFeatureBranch: "divergent_feature_branch"
   of scMissingCheckout: "missing_checkout"
@@ -343,6 +348,11 @@ proc trunkNameFor(resolved: ResolvedRepo): string =
     resolved.revision
   else: "<trunk>"
 
+proc interruptedRecoveryMessage(path, target: string): string =
+  "checkout has compatible interrupted fast-forward content; left untouched" &
+    "; complete it with 'git -C " & quoteShell(path) & " reset --hard " &
+    quoteShell(target) & "'"
+
 proc classifyRepoState*(resolved: ResolvedRepo;
                         observation: RepoSyncObservation;
                         rebaseOnForcePush: bool = false): RepoSyncDecision =
@@ -454,6 +464,15 @@ proc classifyRepoState*(resolved: ResolvedRepo;
       resolved.path & " fetch --all --prune', then re-run 'repro sync'"
     result.message = "refusing to classify '" & resolved.path &
       "' on unfetched data"
+    return
+
+  if not observation.isClean and observation.interruptedFastForwardTarget.len > 0:
+    result.syncCase = scInterruptedFastForward
+    result.action = saNone
+    result.expected = observation.interruptedFastForwardTarget
+    result.refusalReason = interruptedRecoveryMessage(resolved.path,
+      observation.interruptedFastForwardTarget)
+    result.message = result.refusalReason
     return
 
   if not observation.isClean:
@@ -775,6 +794,7 @@ type
     mscDiverged          ## Diverged and no flavor chosen — report, don't guess.
     mscConflict          ## Chosen flavor would conflict; repo left untouched.
     mscDirty             ## Uncommitted changes; integration needs a clean tree.
+    mscInterruptedFastForward ## Compatible partial upstream content; manual recovery.
     mscDetachedHead      ## No branch to reconcile.
     mscNoMainlineBranch
       ## The repo resolves no role at all: a legacy `repo.v1` fragment that
@@ -800,6 +820,8 @@ type
     ## planner adds no I/O of its own.
     exists*: bool
     isClean*: bool
+    interruptedFastForwardTarget*: string
+      ## Proven target-compatible partial checkout; never integrate or stash.
     currentBranch*: string     ## Empty when HEAD is detached.
     headSha*: string
     role*: string
@@ -842,6 +864,7 @@ proc mainlineSyncCaseTag*(c: MainlineSyncCase): string =
   of mscDiverged: "diverged"
   of mscConflict: "conflict"
   of mscDirty: "dirty"
+  of mscInterruptedFastForward: "interrupted_fast_forward"
   of mscDetachedHead: "detached_head"
   of mscNoMainlineBranch: "no_mainline_branch"
   of mscNoRoleRef: "no_role_ref"
@@ -909,6 +932,13 @@ proc classifyMainlineSync*(resolved: ResolvedRepo;
     result.message = result.refusalReason
     return
 
+  if not obs.isClean and obs.interruptedFastForwardTarget.len > 0:
+    result.syncCase = mscInterruptedFastForward
+    result.refusalReason = interruptedRecoveryMessage(resolved.path,
+      obs.interruptedFastForwardTarget)
+    result.message = result.refusalReason
+    return
+
   # Already carries the role branch: identical, or the branch is strictly
   # ahead. Both are "nothing to integrate" — being ahead is the normal state of
   # a feature branch whose base has not moved, not something to act on.
@@ -916,6 +946,18 @@ proc classifyMainlineSync*(resolved: ResolvedRepo;
     result.syncCase = mscUpToDate
     result.message = "'" & obs.currentBranch & "' already contains '" &
       obs.roleBranch & "'"
+    return
+
+  # Fast-forwards also require a clean index and worktree: Git may leave
+  # partially updated paths when a checkout fails, and local work must never
+  # enter that mutation. A branch already containing the target needed no
+  # mutation above, so it may remain a harmless no-op with local changes.
+  if not obs.isClean:
+    result.syncCase = mscDirty
+    result.refusalReason = "repo '" & resolved.path &
+      "' has uncommitted changes; commit or stash them before integrating '" &
+      obs.roleBranch & "' into '" & obs.currentBranch & "'"
+    result.message = result.refusalReason
     return
 
   # No local commits of its own and the role branch moved: a fast-forward,
@@ -936,17 +978,6 @@ proc classifyMainlineSync*(resolved: ResolvedRepo;
       "your commits onto '" & obs.roleBranch & "', or --merge to record " &
       "a merge (scope it with --only=" & resolved.name & " if the answer " &
       "differs per repo)."
-    result.message = result.refusalReason
-    return
-
-  # A flavor was chosen. Both `rebase` and `merge` require a clean tree, and a
-  # conflict prediction made against a dirty one would not describe what the
-  # operator would actually get.
-  if not obs.isClean:
-    result.syncCase = mscDirty
-    result.refusalReason = "repo '" & resolved.path &
-      "' has uncommitted changes; commit or stash them before integrating '" &
-      obs.roleBranch & "' into '" & obs.currentBranch & "'"
     result.message = result.refusalReason
     return
 

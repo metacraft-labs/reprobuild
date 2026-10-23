@@ -53,6 +53,7 @@ from repro_core/process_exec import execCmdExCloseOnce
 import repro_hash
 
 import git_tool
+import git_fast_forward
 from shared_clones import prepareSharedBare, sharedBareFetchArgs,
   checkRegisteredLeaves, messages, registerLeafWithPool,
   withCacheEntryVcsLock, withCheckoutVcsLock, isTransientGitLockContention,
@@ -615,7 +616,7 @@ proc runGit(payload: GitVcsPayload; args: openArray[string];
   (exitCode: res.exitCode, output: res.output)
 
 proc runGitSeparated(payload: GitVcsPayload; args: openArray[string];
-                     workingDir = ""):
+                     workingDir = ""; exactStdout = false):
     tuple[exitCode: int; stdoutText, stderrText: string] =
   ## Invoke git capturing stdout and stderr as SEPARATE strings.
   ##
@@ -671,12 +672,33 @@ proc runGitSeparated(payload: GitVcsPayload; args: openArray[string];
       cmd.add(" ")
       cmd.add(quoteShell(arg))
     var errPath = ""
+    var outPath = ""
+    defer:
+      for path in [errPath, outPath]:
+        if path.len > 0 and fileExists(path):
+          try: removeFile(path)
+          except OSError: discard
     try:
       let created = createTempFile("repro-git-", ".stderr")
       created.cfile.close()
       errPath = created.path
     except CatchableError, Defect:
       errPath = ""
+    if exactStdout:
+      try:
+        let created = createTempFile("repro-git-", ".stdout")
+        created.cfile.close()
+        outPath = created.path
+      except CatchableError, Defect:
+        outPath = ""
+      if outPath.len == 0 or errPath.len == 0:
+        if outPath.len > 0: removeFile(outPath)
+        if errPath.len > 0: removeFile(errPath)
+        return (exitCode: -1, stdoutText: "", stderrText:
+          "cannot capture exact Git query output")
+      # NUL-delimited paths cannot pass through execCmdEx's line rebuilding,
+      # which appends a newline and normalizes embedded CRLF bytes.
+      cmd.add(" >" & quoteShell(outPath))
     if errPath.len > 0:
       cmd.add(" 2>" & quoteShell(errPath))
     # Without the redirect the child's stderr would be an unread pipe that
@@ -690,9 +712,18 @@ proc runGitSeparated(payload: GitVcsPayload; args: openArray[string];
       env = scrubbedGitRepositoryEnv())
     result.exitCode = res.exitCode
     result.stdoutText = res.output
+    if outPath.len > 0:
+      try:
+        result.stdoutText = readFile(outPath)
+      except CatchableError as err:
+        result.exitCode = -1
+        result.stdoutText = ""
+        result.stderrText = "cannot read exact Git query output: " & err.msg
+      finally:
+        removeFile(outPath)
     if errPath.len > 0:
       try:
-        result.stderrText = readFile(errPath)
+        result.stderrText.add(readFile(errPath))
       except CatchableError:
         discard
       try:
@@ -701,7 +732,7 @@ proc runGitSeparated(payload: GitVcsPayload; args: openArray[string];
         discard
 
 proc runGitQuery(payload: GitVcsPayload; args: openArray[string];
-                 workingDir = ""):
+                 workingDir = ""; exactStdout = false):
     tuple[exitCode: int; output: string; diagnostic: string] =
   ## Invoke git for an answer that will be PARSED.
   ##
@@ -717,7 +748,7 @@ proc runGitQuery(payload: GitVcsPayload; args: openArray[string];
   ## ``diagnostic`` is the merged, trimmed text — what ``runGit``'s
   ## ``output`` would have held — so a caller reporting a FAILURE still
   ## surfaces git's message, which lives on stderr.
-  let res = runGitSeparated(payload, args, workingDir)
+  let res = runGitSeparated(payload, args, workingDir, exactStdout)
   (exitCode: res.exitCode, output: res.stdoutText,
    diagnostic: (res.stderrText & res.stdoutText).strip())
 
@@ -1626,12 +1657,17 @@ proc executeMergeFf(payload: GitVcsPayload;
     return failed("dirty",
       "git merge --ff-only refused: working tree is dirty at " & target)
   let ref0 = "refs/remotes/" & payload.remoteName & "/" & payload.branchName
-  let res = runGit(payload,
-    ["-C", target, "merge", "--ff-only", ref0])
-  if res.exitCode != 0:
-    return failed("merge-ff-failed",
-      "git merge --ff-only exited " & $res.exitCode & ": " &
-        res.output.trimmed)
+  let res = atomicFastForward(target, ref0,
+    proc(args: seq[string]; query: bool): FastForwardGitResult {.gcsafe.} =
+      if query:
+        let answer = runGitQuery(payload, args, exactStdout = true)
+        (answer.exitCode, answer.output, answer.diagnostic)
+      else:
+        let answer = runGit(payload, args)
+        (answer.exitCode, answer.output, answer.output))
+  if not res.ok:
+    return failed((if res.refused: "merge-ff-refused" else: "merge-ff-failed"),
+      res.diagnostic)
   # After the fast-forward the superproject's submodule gitlinks may point at
   # new commits. Bring already-checked-out submodules in line so the
   # superproject does not end up dirty with a stale ``M <submodule>`` gitlink
