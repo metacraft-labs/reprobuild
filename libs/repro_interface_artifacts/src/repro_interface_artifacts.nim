@@ -4620,6 +4620,16 @@ const ReprobuildLibsOverrideEnvVars* = ["REPROBUILD_LIBS_DIR",
   ## crosses has to carry them: an isolated launch, and the dev-env cache key
   ## that decides whether a previous extraction may be reused.
 
+proc providerCompileNimcacheRoot*(): string =
+  ## Stable, per-user derived state, independent of a caller's disposable
+  ## temp directory and of the content-keyed scratch of an individual action.
+  ## Windows' LOCALAPPDATA cache root is shorter than the previous Temp root.
+  let cache = getCacheDir()
+  if cache.len == 0:
+    raise newException(ValueError,
+      "cannot resolve the user cache directory for the provider nimcache")
+  absolutePath(cache) / "repro-nimcache-provider"
+
 proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
   ## The environment values the provider-compile edge DECLARES, so that the
   ## caller's shell stops deciding what the edge is.
@@ -4647,6 +4657,12 @@ proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
   ##     locale is not a cache key;
   ##   * `HOME`: a directory owned by this edge, so a user-level
   ##     `~/.config/nim` cannot change the compile without being an input;
+  ##   * the four temp-directory variables: private scratch inside that home.
+  ##     Compiler wrappers probe the temp directory itself, so ignoring only
+  ##     their response files still left the caller's directory as an input;
+  ##   * the selected shared provider nimcache: carry its stable user-cache
+  ##     root across the isolated HOME. Putting it under this action's temp
+  ##     would discard incremental objects on every recipe edit;
   ##   * `NIX_STORE`: the store directory, when the C compiler lives in it.
   ##     Nix's ld-wrapper turns every `-L<dir>` holding a library the link
   ##     uses into `-rpath <dir>`, skipping only directories outside
@@ -4695,9 +4711,19 @@ proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
     result.add("PATH=" & dirs.join($PathSep))
   result.add("TERM=dumb")
   result.add("LANG=C")
+  # Carry the cache BASE across the isolated HOME, always reserving the
+  # fixed child in providerCompileNimcacheRoot. An arbitrary full-root
+  # override would also let the caller exempt semantic source directories
+  # through providerCompileIgnoredInputPrefixes.
+  let cacheHomeEnv = when defined(windows): "LOCALAPPDATA" else: "XDG_CACHE_HOME"
+  result.add(cacheHomeEnv & "=" & parentDir(providerCompileNimcacheRoot()))
   if homeDir.len > 0:
     createDir(extendedPath(homeDir))
     result.add("HOME=" & homeDir)
+    let tempDir = absolutePath(homeDir) / "tmp"
+    createDir(extendedPath(tempDir))
+    for name in ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]:
+      result.add(name & "=" & tempDir)
   # The source roots this process resolved (baked, seeded, or a develop-mode
   # override), declared by value: under an isolated launch the compile sees
   # the roots repro chose and nothing a caller's shell happened to export.
@@ -6885,7 +6911,8 @@ const
     ProviderParallelBuildEnv,
     "TMPDIR",
     "TMP",
-    "TEMP"
+    "TEMP",
+    "TEMPDIR"
   ]
     ## Environment values already represented by the provider compile command
     ## or affecting scratch placement only. The command-derived action key
@@ -8500,17 +8527,11 @@ proc normalizedProviderOutputPath*(outputBinaryPath: string): string =
   else:
     outputBinaryPath
 
-proc providerCompileNimcacheRoot*(): string =
-  ## Root of the SHARED provider nimcache (`providerCompileCommand` anchors
-  ## `--nimcache:` under it). Exported so the provider-compile edge can declare
-  ## it as an ignored input prefix — see `providerCompileIgnoredInputPrefixes`.
-  getTempDir() / "repro-nimcache-provider"
-
 proc providerCompileIgnoredInputPrefixes*(scratchDir = ""): seq[string] =
   ## Prefixes the provider-compile edge's monitor must NOT record as inputs.
   ##
   ## The compile reads back what it just wrote into its own derived state: the
-  ## Nim incremental cache (`<temp>/repro-nimcache-provider/<key>`) and the
+  ## Nim incremental cache (`<user-cache>/repro-nimcache-provider/<key>`) and the
   ## per-recipe scratch tree. Recording those as inputs is wrong twice over:
   ##
   ##   * the nimcache is SHARED by key across recipes and across `repro`
@@ -8716,20 +8737,20 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   # to bound intermediate storage (auto-recurse has one scratchDir per recipe)
   # and so the SAME recipe rebuilt in a fresh scratch dir still finds its own
   # populated directory -- the spec's stability guarantee. Anchor it under a
-  # stable system-temp root on every platform; the full path is then
-  # `<temp>/repro-nimcache-provider/<positionKey>`, where the key scopes by
+  # stable user-cache root on every platform; the full path is then
+  # `<user-cache>/repro-nimcache-provider/<positionKey>`, where the key scopes by
   # producing project + declared cache + variant + toolchain + library set,
   # so:
   #   * recipes A and B never collide, whether or not they run concurrently;
   #   * different projects / toolchains / variants get different keys;
   #   * a second `repro` invocation of the SAME recipe lands back on the
   #     SAME directory, already populated (no session token re-keys it).
-  # Using system-temp rather than the workDir also keeps this working
+  # Using the user cache rather than the workDir also keeps this working
   # when workDir is a read-only immutable store path, and on Windows the
-  # short temp root avoids the MAX_PATH overflow that nested CMake
+  # short LOCALAPPDATA root avoids the MAX_PATH overflow that nested CMake
   # TryCompile scratch trees hit (Nim's mkdir does not use the \\?\
   # extended-length prefix).
-  let nimcacheRoot = getTempDir() / "repro-nimcache-provider"
+  let nimcacheRoot = providerCompileNimcacheRoot()
   # The position key folds in the finished command's compile options, so the
   # `--nimcache:` argument is filled in last (see the end of this proc).
   result = boundedNimCompileCommand()

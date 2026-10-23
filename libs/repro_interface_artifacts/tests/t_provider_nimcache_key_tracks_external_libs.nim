@@ -49,6 +49,53 @@ import repro_interface_artifacts
 
 suite "harness lib-path skew — which key an external reprobuild lib edit moves":
 
+  test "caller temp and action scratch do not relocate the provider nimcache":
+    let scratch = createTempDir("repro-nimcache-root-", "")
+    defer: removeDir(scratch)
+    let names = ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
+    var saved: seq[tuple[name, value: string; present: bool]]
+    for name in names:
+      saved.add((name, getEnv(name), existsEnv(name)))
+    defer:
+      for item in saved:
+        if item.present: putEnv(item.name, item.value)
+        else: delEnv(item.name)
+    let original = providerCompileNimcacheRoot()
+    for name in names:
+      putEnv(name, scratch / "caller-temp")
+    check providerCompileNimcacheRoot() == original
+    proc valueIn(env: seq[string]; name: string): string =
+      for entry in env:
+        if entry.startsWith(name & "="):
+          return entry[name.len + 1 .. ^1]
+    let homeA = scratch / "action-a" / "home"
+    let homeB = scratch / "action-b" / "home"
+    let envA = providerCompileLaunchEnv(homeA)
+    let envB = providerCompileLaunchEnv(homeB)
+    let cacheHomeEnv = when defined(windows): "LOCALAPPDATA" else: "XDG_CACHE_HOME"
+    check valueIn(envA, cacheHomeEnv) / "repro-nimcache-provider" == original
+    check valueIn(envB, cacheHomeEnv) / "repro-nimcache-provider" == original
+    for name in names:
+      check valueIn(envA, name) == homeA / "tmp"
+      check valueIn(envB, name) == homeB / "tmp"
+    check original in providerCompileIgnoredInputPrefixes(scratch / "action-a")
+
+  test "a cache selector never exempts the semantic root itself":
+    let semanticRoot = createTempDir("repro-nimcache-semantic-", "")
+    defer: removeDir(semanticRoot)
+    let cacheHomeEnv = when defined(windows): "LOCALAPPDATA" else: "XDG_CACHE_HOME"
+    let names = [cacheHomeEnv, "REPRO_PROVIDER_NIMCACHE_ROOT"]
+    var saved: seq[tuple[name, value: string; present: bool]]
+    for name in names:
+      saved.add((name, getEnv(name), existsEnv(name)))
+      putEnv(name, semanticRoot)
+    defer:
+      for item in saved:
+        if item.present: putEnv(item.name, item.value)
+        else: delEnv(item.name)
+    check providerCompileNimcacheRoot() == semanticRoot / "repro-nimcache-provider"
+    check semanticRoot notin providerCompileIgnoredInputPrefixes()
+
   test "an external lib edit re-keys the ARTIFACT fingerprint, not the nimcache":
     let scratch = createTempDir("repro-libskew-", "")
     defer: removeDir(scratch)

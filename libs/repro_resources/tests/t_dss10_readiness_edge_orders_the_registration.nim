@@ -184,6 +184,27 @@ proc registrarRecording(ran: ref seq[string]): ServiceRegistrar =
       ran[].add(m)
       result.add((member: m, mintedId: "client-" & m))
 
+suite "shared readiness without registrations":
+
+  test "a singleton service node completes with no registrar installed":
+    clearReadinessEdgeCollaborators()
+    defer: clearReadinessEdgeCollaborators()
+    let s = newScratch("service-only")
+    defer: s.drop()
+    let plan = planServiceReadinessEdge(Svc, Instance, fileProbe(s))
+    require plan.len == 1
+    check plan[0].address == serviceNodeAddress(Instance)
+    check plan[0].typeId == SharedServiceNodeTypeId
+    writeFile(s.marker, "ready\n")
+    let reconciled = reconcileResources(plan)
+    check reconciled.actions.len == 1
+
+  test "a service-only readiness plan refuses absent probes":
+    for kind in ["", "none"]:
+      expect ReadinessEdgeError:
+        discard planServiceReadinessEdge(Svc, Instance,
+          ServiceReadinessProbe(kind: kind))
+
 suite "D-SS10 — the plan is two nodes and an ordinary dependsOn":
 
   test "the registration's only ordering edge is dependsOn the service node":

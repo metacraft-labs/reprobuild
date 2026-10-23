@@ -910,8 +910,35 @@ proc registerReadinessEdgeProviders*() =
 registerReadinessEdgeProviders()
 
 # ---------------------------------------------------------------------------
-# The plan: two nodes and the edge between them.
+# Plans: a service node, and an optional dependent registration.
 # ---------------------------------------------------------------------------
+
+proc planServiceReadinessEdge*(serviceName, instanceAddress: string;
+                               probe: ServiceReadinessProbe):
+    seq[ResourceInstance] =
+  ## Plan the service node independently of registrations. Its volatile
+  ## observation checks the declared probe on every converge, including an
+  ## attachment to an already materialised instance.
+  if serviceCompletionRule(probe) != scrDeclaredReadiness:
+    raise newException(ReadinessEdgeError,
+      "service `" & serviceName & "` declares no readiness probe")
+  let nodeAddr = serviceNodeAddress(instanceAddress)
+  result = @[
+    ResourceInstance(
+      typeId: SharedServiceNodeTypeId,
+      address: nodeAddr,
+      attrs: TypedExtensionBox[SharedServiceNodeAttrs](
+        typeId: SharedServiceNodeTypeId,
+        val: SharedServiceNodeAttrs(
+          serviceName: serviceName,
+          instanceAddress: instanceAddress,
+          readinessKind: probe.kind,
+          readinessPath: probe.path,
+          readinessUrl: probe.url,
+          readinessTimeoutMs: probe.timeoutMs)),
+      dependsOn: @[],
+      determinism: rdVolatile,
+      consumes: @[])]
 
 proc planRegistrationEdge*(serviceName, instanceAddress: string;
                            probe: ServiceReadinessProbe;
@@ -937,22 +964,8 @@ proc planRegistrationEdge*(serviceName, instanceAddress: string;
       "construction, so a length mismatch means they came from " &
       "different folds and the attribution would be wrong.")
   let nodeAddr = serviceNodeAddress(instanceAddress)
-  result = @[
-    ResourceInstance(
-      typeId: SharedServiceNodeTypeId,
-      address: nodeAddr,
-      attrs: TypedExtensionBox[SharedServiceNodeAttrs](
-        typeId: SharedServiceNodeTypeId,
-        val: SharedServiceNodeAttrs(
-          serviceName: serviceName,
-          instanceAddress: instanceAddress,
-          readinessKind: probe.kind,
-          readinessPath: probe.path,
-          readinessUrl: probe.url,
-          readinessTimeoutMs: probe.timeoutMs)),
-      dependsOn: @[],
-      determinism: rdVolatile,
-      consumes: @[]),
+  result = planServiceReadinessEdge(serviceName, instanceAddress, probe)
+  result.add(
     ResourceInstance(
       typeId: ServiceRegistrationTypeId,
       address: registrationResourceAddress(instanceAddress),
@@ -967,7 +980,7 @@ proc planRegistrationEdge*(serviceName, instanceAddress: string;
       # as §7.1 resolved — and the reason this module adds no edge kind.
       dependsOn: @[nodeAddr],
       determinism: rdVolatile,
-      consumes: @[])]
+      consumes: @[]))
 
 proc computedClientIdAddress*(instanceAddress, member: string): string =
   ## Where `registrationApply` records a member's `clientId`. Named so a
