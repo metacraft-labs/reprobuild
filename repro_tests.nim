@@ -16749,6 +16749,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_repro_exec_survives_compile_time_tmpdir_removal.nim",
+    binary: "build/test-bin/t_repro_exec_survives_compile_time_tmpdir_removal",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_repro_prompt_is_fast_and_silent_outside_workspace.nim",
     binary: "build/test-bin/t_repro_prompt_is_fast_and_silent_outside_workspace",
     defines: @[],
