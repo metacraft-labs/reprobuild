@@ -4808,10 +4808,11 @@
             "c",
             "cc",
             "daemon",
+            "dir",
             "env",
             "tools"
           ],
-          "line": 168,
+          "line": 186,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -4826,10 +4827,11 @@
             "c",
             "cc",
             "daemon",
+            "dir",
             "env",
             "tools"
           ],
-          "line": 198,
+          "line": 216,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -4844,10 +4846,11 @@
             "c",
             "cc",
             "daemon",
+            "dir",
             "env",
             "tools"
           ],
-          "line": 464,
+          "line": 485,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -4862,10 +4865,11 @@
             "c",
             "cc",
             "daemon",
+            "dir",
             "env",
             "tools"
           ],
-          "line": 483,
+          "line": 504,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"

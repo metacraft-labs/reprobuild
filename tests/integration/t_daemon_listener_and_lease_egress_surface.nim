@@ -118,6 +118,22 @@ if (exec 7<>"/dev/udp/1.1.1.1/53") 2>/dev/null; then echo DNS_OPEN >> "$out"; fi
 echo done >> "$out"
 """
 
+proc hostBash(): string =
+  ## An absolute `bash` inside the lease closure. The scripts need bash for
+  ## `/dev/tcp`, but a fixed `/bin/bash` exists on an FHS host only (NixOS
+  ## has no `/bin` beyond `/bin/sh`): take the one on PATH, followed through
+  ## profile symlinks until it lies under a closure root.
+  var p = findExe("bash")
+  doAssert p.len > 0, "no `bash` on PATH"
+  for _ in 0 ..< 16:
+    let dir = p.parentDir
+    if dir in ["/usr/bin", "/bin"] or dir.startsWith("/nix/store/"):
+      return p
+    if not symlinkExists(p): break
+    let target = expandSymlink(p)
+    p = if target.isAbsolute: target else: dir / target
+  p
+
 proc serveOnce(sock: AsyncSocket; reply: string; hits: ref int) {.async.} =
   while true:
     let c = await sock.accept()
@@ -242,11 +258,11 @@ suite "Distributed-Execution M7: daemon listener and lease egress surface":
       let desc = GraphCacheDescriptor(schema: DescriptorSchema,
         project: "m7-egress", platform: hostOS & "/" & hostCPU,
         snapshotContentId: contentIdOf(snap.manifest),
-        nodes: @[GraphNode(id: "egress", argv: @["/bin/bash", "egress.sh"],
+        nodes: @[GraphNode(id: "egress", argv: @[hostBash(), "egress.sh"],
           inputs: @["egress.sh"], outputs: @["out/egress.txt"],
           env: @[("M7_SELF", iface.address & ":" & $worker.peerCachePort())],
           egress: @["peer-cache", "tools"]),
-          GraphNode(id: "no-network", argv: @["/bin/bash", "none.sh"],
+          GraphNode(id: "no-network", argv: @[hostBash(), "none.sh"],
           inputs: @["none.sh"], outputs: @["out/none.txt"])])
       let descDigest = orch.publish(encodeDescriptor(desc))
       pump(300)
@@ -344,7 +360,7 @@ suite "Distributed-Execution M7: daemon listener and lease egress surface":
     let tDescObj = GraphCacheDescriptor(schema: DescriptorSchema,
       project: "m7-egress", platform: hostOS & "/" & hostCPU,
       snapshotContentId: contentIdOf(tSnap.manifest),
-      nodes: @[GraphNode(id: "egress", argv: @["/bin/bash", "egress.sh"],
+      nodes: @[GraphNode(id: "egress", argv: @[hostBash(), "egress.sh"],
         inputs: @["egress.sh"], outputs: @["out/egress.txt"],
         env: @[("M7_SELF", iface.address & ":" & $trusted.peerCachePort())],
         egress: @["peer-cache", "tools"])])

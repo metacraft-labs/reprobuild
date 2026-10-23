@@ -140,6 +140,24 @@ int main(int argc, char **argv) {
 }
 """
 
+proc coreToolDir(): string =
+  ## The directory the lease scripts take `true`, `cp` and `chmod` from: the
+  ## host's own, followed through PATH symlinks until it lies under a
+  ## closure root (`/usr/bin`, `/bin`, `/nix/store`). A fixed `/bin/true`
+  ## and a PATH of `/usr/bin:/bin` exist on an FHS host only; NixOS has
+  ## neither, and its PATH entries (`/run/current-system/sw/bin`, a user
+  ## profile) are symlink farms outside every lease root.
+  var p = findExe("true")
+  doAssert p.len > 0, "no `true` on PATH"
+  for _ in 0 ..< 16:
+    let dir = p.parentDir
+    if dir in ["/usr/bin", "/bin"] or dir.startsWith("/nix/store/"):
+      return dir
+    if not symlinkExists(p): break
+    let target = expandSymlink(p)
+    p = if target.isAbsolute: target else: dir / target
+  p.parentDir
+
 proc socketExists(path: string): bool =
   ## `fileExists` is false for a socket; any directory entry will do here.
   try:
@@ -251,7 +269,8 @@ suite "Distributed-Execution M7: execution-lease confinement, layer by layer":
             leaseRoot / "neighbour" / "wt" / "secret.c", canary,
             daemon.stateDir / "host-ca.key", daemon.endpoint, daemonPrivate,
             $leakedFd],
-          env: @[("PATH", parentDir(cc) & ":/usr/bin:/bin"), ("CC", cc),
+          env: @[("PATH", parentDir(cc) & ":" & coreToolDir() &
+              ":/usr/bin:/bin"), ("CC", cc),
             ("PROBE", tools / "probe"),
             ("HOME", leaseDir / "home"), ("TMPDIR", leaseDir / "tmp")],
           readRoots: roots[0] & @[tools, base / "run"],
@@ -371,15 +390,16 @@ suite "Distributed-Execution M7: execution-lease confinement, layer by layer":
         # The written binary goes into the DECLARED OUTPUT directory: the
         # closure check and Landlock's EXECUTE rule both allow executing
         # from there, so only the mount's noexec flag can stop it.
-        let script = "set -u; cp /bin/true out/written-true; " &
+        let script = "set -u; cp \"$TRUE\" out/written-true; " &
           "chmod +x out/written-true; " &
           "if ./out/written-true; then echo WRITTEN-RAN; " &
           "else echo WRITTEN-BLOCKED; fi > out/result.txt; " &
-          "if /bin/true; then echo TOOLCHAIN-RAN >> out/result.txt; fi"
+          "if \"$TRUE\"; then echo TOOLCHAIN-RAN >> out/result.txt; fi"
         let spec = LeaseSpec(leaseId: "noexec", leaseRoot: leaseRoot,
           leaseDir: leaseDir, metaDir: base / "lease-meta" / "noexec",
           cwd: leaseDir / "wt", argv: @["/bin/sh", "-c", script],
-          env: @[("PATH", "/usr/bin:/bin"), ("HOME", leaseDir / "home"),
+          env: @[("PATH", coreToolDir() & ":/usr/bin:/bin"),
+            ("TRUE", coreToolDir() / "true"), ("HOME", leaseDir / "home"),
             ("TMPDIR", leaseDir / "tmp")],
           readRoots: @["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix/store"],
           closureRoots: @["/usr/bin", "/bin", "/usr/lib", "/lib", "/lib64",
@@ -416,16 +436,17 @@ suite "Distributed-Execution M7: execution-lease confinement, layer by layer":
         let rootDir = leaseRoot / "noexec-root"
         createDir(rootDir / "wt")
         let rootScript = "set -u; " &
-          "if cp /bin/true /root-true 2>/dev/null; then echo ROOT-WRITTEN; " &
+          "if cp \"$TRUE\" /root-true 2>/dev/null; then echo ROOT-WRITTEN; " &
           "else echo ROOT-WRITE-BLOCKED; fi > result.txt; " &
           "if /root-true 2>/dev/null; then echo ROOT-RAN >> result.txt; fi; " &
-          "if cp /bin/true /dev/dev-true 2>/dev/null && /dev/dev-true; " &
+          "if cp \"$TRUE\" /dev/dev-true 2>/dev/null && /dev/dev-true; " &
           "then echo DEV-RAN >> result.txt; fi; " &
-          "if /bin/true; then echo TOOLCHAIN-RAN >> result.txt; fi"
+          "if \"$TRUE\"; then echo TOOLCHAIN-RAN >> result.txt; fi"
         let rootSpec = LeaseSpec(leaseId: "noexec-root", leaseRoot: leaseRoot,
           leaseDir: rootDir, metaDir: base / "lease-meta" / "noexec-root",
           cwd: rootDir / "wt", argv: @["/bin/sh", "-c", rootScript],
-          env: @[("PATH", "/usr/bin:/bin"), ("HOME", rootDir / "home"),
+          env: @[("PATH", coreToolDir() & ":/usr/bin:/bin"),
+            ("TRUE", coreToolDir() / "true"), ("HOME", rootDir / "home"),
             ("TMPDIR", rootDir / "tmp")],
           readRoots: @["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix/store"],
           closureRoots: @["/usr/bin", "/bin", "/usr/lib", "/lib", "/lib64",
