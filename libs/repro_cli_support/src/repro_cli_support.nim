@@ -66411,11 +66411,6 @@ proc gatewayBarePathFor*(cacheRoot, workspaceName, upstreamUrl: string): string 
   ## Spec §2's layout: ``<cache>/gateways/<workspace>/<host>/<org>/<repo>.git``
   ## beside ``<cache>/clones/<host>/<org>/<repo>.git``.
   ##
-  ## MINIMAL BY INTENT. PG-4 owns the real ``ensureGateway`` — alternates to
-  ## the pool, refs seeded from it, so a gateway costs no network and almost no
-  ## disk. This computes only the PATH, which is all the skew refusal and its
-  ## test need, and is the path PG-4 will fill in.
-  ##
   ## ``cacheRoot`` is the clones root. When ``REPRO_WORKSPACE_CLONES`` points it
   ## somewhere arbitrary the gateways tree still lands beside it, which is the
   ## intended relationship.
@@ -66472,6 +66467,99 @@ proc gatewayConfigForRepo(gitBin, workspaceRoot, repoName: string): GatewayConfi
     result.lockRecordsDir = lockRecordsDirFor(recordStore.manifestRepoRoot,
       resolved.projectName, selected[0].name)
 
+proc gatewayIsComplete*(gatewayDir: string): bool =
+  ## A gateway a push can go through: a bare with both hooks and its config.
+  ## A ``pushurl`` naming anything less fails every push (or, without
+  ## ``pre-receive``, forwards none and gates none), so "wired" requires this.
+  dirExists(gatewayDir / "objects") and
+    fileExists(gatewayDir / "hooks" / "pre-receive") and
+    fileExists(gatewayDir / "hooks" / "post-receive") and
+    fileExists(gatewayConfigPath(gatewayDir))
+
+proc seedGatewayRefsFromPool*(gitBin, gatewayDir, pool: string): string =
+  ## Give the gateway every ``refs/heads/*`` the pool holds and it does not.
+  ## Existing gateway refs are NEVER moved: they are what this workspace
+  ## published, and a ref ahead of the pool is that record, not drift.
+  ## The objects are already reachable through the alternate, so this writes
+  ## refs only. Returns "" on success, otherwise the diagnostic.
+  ##
+  ## Each ref is created with ``git update-ref <ref> <sha> ""`` -- an argv, no
+  ## shell and no stdin redirect, so it behaves the same on every platform --
+  ## and the empty old value makes git refuse to move a ref that appeared in
+  ## the meantime, which is the same rule enforced atomically.
+  let listed = gitNoteRun(gitBin, ["--git-dir=" & pool, "for-each-ref",
+    "--format=%(objectname) %(refname)", "refs/heads/"])
+  if listed.code != 0:
+    return "could not list the pool's branches: " & listed.output.strip()
+  var failures: seq[string]
+  for line in listed.output.splitLines():
+    let parts = line.strip().split(' ')
+    if parts.len != 2 or not parts[1].startsWith("refs/heads/"):
+      continue
+    let exists = gitNoteRun(gitBin, ["--git-dir=" & gatewayDir, "rev-parse",
+      "--verify", "-q", parts[1]])
+    if exists.code == 0:
+      continue
+    let created = gitNoteRun(gitBin, ["--git-dir=" & gatewayDir, "update-ref",
+      parts[1], parts[0], ""])
+    if created.code != 0:
+      failures.add(parts[1] & ": " & created.output.strip())
+  if failures.len > 0:
+    return "could not seed the gateway's branches: " & failures.join("; ")
+  ""
+
+proc ensureGateway*(gitBin, repoPath, gatewayDir, upstreamUrl, poolCacheRoot:
+                    string; cfg: GatewayConfig; remoteName = "origin"):
+    tuple[ok: bool; borrowed: bool; diagnostic: string] =
+  ## Create (or complete) the gateway for one ``(workspace, upstream)`` and
+  ## point ``repoPath``'s push at it. The gateway BORROWS the shared pool's
+  ## objects instead of holding a copy of the history:
+  ##
+  ##   1. refresh the pool for ``upstreamUrl`` (clone-if-missing);
+  ##   2. ``git init --bare`` the gateway;
+  ##   3. ``objects/info/alternates`` -> the pool, with the gateway registered
+  ##      as a borrower so the pool's gc keeps what it names;
+  ##   4. seed the gateway's ``refs/heads/*`` from the pool, so its first push
+  ##      already has a fast-forward anchor;
+  ##   5. hooks and config;
+  ##   6. the ``pushurl`` -- LAST, because a ``pushurl`` naming a gateway with
+  ##      no ``pre-receive`` forwards nothing and gates nothing.
+  ##
+  ## A pool that cannot be refreshed (offline, unreachable) does not stop the
+  ## wiring: the gateway is created without the alternate and simply receives
+  ## whole histories until the next wiring borrows. ``borrowed`` says which.
+  var diagnostics: seq[string]
+  var pool = ""
+  if poolCacheRoot.len > 0:
+    let refreshed = refreshSharedBare(gitBin, poolCacheRoot, upstreamUrl)
+    if refreshed.ok:
+      pool = refreshed.sharedBarePath
+    else:
+      diagnostics.add("shared pool unavailable, gateway created without " &
+        "borrowing: " & refreshed.diagnostic)
+  if not dirExists(gatewayDir / "objects"):
+    createDir(gatewayDir.parentDir)
+    let initRes = gitNoteRun(gitBin, ["init", "--quiet", "--bare", gatewayDir])
+    if initRes.code != 0:
+      return (ok: false, borrowed: false, diagnostic:
+        "git init --bare (gateway) failed: " & initRes.output.strip())
+  var borrowed = false
+  if pool.len > 0:
+    let wired = wireAlternates(gatewayDir, pool, gitBin)
+    if wired.ok:
+      borrowed = true
+      let seeded = seedGatewayRefsFromPool(gitBin, gatewayDir, pool)
+      if seeded.len > 0:
+        diagnostics.add(seeded)
+    else:
+      diagnostics.add("could not borrow from the shared pool: " &
+        wired.diagnostic)
+  let finished = wirePushGateway(gitBin, repoPath, gatewayDir, upstreamUrl,
+    cfg, remoteName)
+  if not finished.ok:
+    diagnostics.add(finished.diagnostic)
+  (ok: finished.ok, borrowed: borrowed, diagnostic: diagnostics.join("; "))
+
 proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
                            cacheRoot = ""; remoteName = "origin";
                            skew = HookWriterRunnerSkew(skewed: false);
@@ -66507,7 +66595,11 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
   if existing.code == 0 and existing.output.strip().len > 0:
     let current = existing.output.strip()
     if current == absolutePath(result.gatewayDir):
-      alreadyWired = true
+      # Ours. Only a COMPLETE gateway counts as wired: when the directory
+      # behind the pushurl is gone or partial (a cache wipe, a hand deletion)
+      # every push through it would fail, so it is rebuilt below instead of
+      # being reported as wired.
+      alreadyWired = gatewayIsComplete(result.gatewayDir)
     else:
       # §7.3 — a pushurl this tool did not set is never overwritten. Stricter
       # here than PG-9 will be: without the provenance record (PG-9's
@@ -66537,16 +66629,65 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
         writeFile(path, body)
       result.outcome = gwoAlreadyWired
       return
-    let wired = wirePushGateway(gitBin, repoPath, result.gatewayDir,
-      result.upstreamUrl, cfg, remoteName)
+    let wired = ensureGateway(gitBin, repoPath, result.gatewayDir,
+      result.upstreamUrl, root, cfg, remoteName)
+    result.diagnostic = wired.diagnostic
     if not wired.ok:
       result.outcome = gwoFailed
-      result.diagnostic = wired.diagnostic
       return
     result.outcome = gwoWired
   except CatchableError as err:
     result.outcome = gwoFailed
     result.diagnostic = "could not configure gateway lock source: " & err.msg
+
+type
+  GatewayUnwireOutcome* = enum
+    guoUnwired          ## pushurl unset and the gateway removed
+    guoNotWired         ## nothing of ours was there; nothing changed
+    guoForeignPushurl   ## a pushurl this tool did not set; left untouched
+    guoFailed
+
+proc unwireGatewayForRepo*(gitBin, workspaceRoot, repoPath: string;
+                           cacheRoot = ""; remoteName = "origin"):
+    tuple[outcome: GatewayUnwireOutcome; gatewayDir, diagnostic: string] =
+  ## The inverse of ``ensureGatewayForRepo``: ``remote.<name>.pushurl`` goes
+  ## back to UNSET (pushes go straight to ``remote.<name>.url`` again) and this
+  ## workspace's gateway for that upstream is deleted. Deleting a gateway never
+  ## touches the pool. A ``pushurl`` that does not name this workspace's
+  ## gateway is not ours and is left exactly as found. A second call is a
+  ## no-op.
+  let upstream = gitNoteRun(gitBin,
+    ["-C", repoPath, "config", "--get", "remote." & remoteName & ".url"])
+  if upstream.code != 0 or upstream.output.strip().len == 0:
+    return (guoNotWired, "", "no remote." & remoteName & ".url")
+  let root =
+    if cacheRoot.len > 0: cacheRoot
+    else: defaultCacheRoot(workspaceRoot)
+  let gatewayDir = gatewayBarePathFor(root, lastPathPart(workspaceRoot),
+    upstream.output.strip())
+  let existing = gitNoteRun(gitBin,
+    ["-C", repoPath, "config", "--get", "remote." & remoteName & ".pushurl"])
+  let current = if existing.code == 0: existing.output.strip() else: ""
+  var changed = false
+  if current.len > 0:
+    if current != absolutePath(gatewayDir):
+      return (guoForeignPushurl, gatewayDir, "remote." & remoteName &
+        ".pushurl is '" & current & "'; not this workspace's gateway, left " &
+        "untouched")
+    let unset = gitNoteRun(gitBin, ["-C", repoPath, "config", "--unset",
+      "remote." & remoteName & ".pushurl"])
+    if unset.code != 0:
+      return (guoFailed, gatewayDir, "could not unset remote." & remoteName &
+        ".pushurl: " & unset.output.strip())
+    changed = true
+  if dirExists(gatewayDir):
+    try:
+      removeDir(gatewayDir)
+      changed = true
+    except OSError as e:
+      return (guoFailed, gatewayDir, "could not remove " & gatewayDir & ": " &
+        e.msg)
+  ((if changed: guoUnwired else: guoNotWired), gatewayDir, "")
 
 proc migrateWorkspaceGateways*(workspaceRoot: string; dryRun = false;
     cacheRoot = ""): tuple[code: int; lines: seq[string];

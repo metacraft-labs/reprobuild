@@ -1531,7 +1531,9 @@ tests/integration/t_gate_refusals_name_offender_and_remedy_command.nim	nim	13
 tests/integration/t_gate_reports_unverifiable_apart_from_uncovered.nim	nim	1
 tests/integration/t_gate_runs_after_the_chained_hook.nim	nim	1
 tests/integration/t_gateway_accepts_one_ref_push_certified_before_push.nim	nim	4
+tests/integration/t_gateway_bare_borrows_pool_objects_and_costs_no_second_copy.nim	nim	2
 tests/integration/t_gateway_finds_certificates_by_the_pushed_tree.nim	nim	1
+tests/integration/t_gateway_lifecycle_is_idempotent_and_reversible.nim	nim	4
 tests/integration/t_gateway_lock_read_keeps_git_stderr_apart.nim	nim	2
 tests/integration/t_gateway_push_fails_when_the_upstream_rejects_the_forward.nim	nim	4
 tests/integration/t_gateway_ratchets_the_anchor_requirements.nim	nim	7
