@@ -342,6 +342,20 @@ proc runServe(o: Options): int =
     stderr.writeLine("attestation-agent: " & err.msg)
     return 2
 
+  # The device handle and whatever the backend loaded into the TPM. A
+  # daemon that exited cleanly and left a transient object behind would
+  # leak an object slot on every restart.
+  #
+  # `defer` and not a call at the end of the proc, because the two
+  # failures below this line return without reaching the end: a daemon
+  # that refused to START would then hold the device AND leave the
+  # transient object loaded, which is the same leak with nobody left to
+  # notice it. `defer` covers every exit from here on, including one
+  # added later. It is placed after the construction rather than before,
+  # so it only ever closes a driver that exists; `newDriverFor` closes
+  # its own on the path where the probe refuses.
+  defer: driver.driverClose()
+
   var agent: AttestationAgent
   try:
     agent = newAttestationAgent(
@@ -368,11 +382,7 @@ proc runServe(o: Options): int =
     " on " & host & ":" & $server.boundPort
   server.serve()
   server.close()
-  # The device handle and whatever the backend loaded into the TPM. A
-  # daemon that exited cleanly and left a transient object behind would
-  # leak an object slot on every restart.
-  driver.driverClose()
-  0
+  return 0
 
 proc runSystemdUnit(o: Options): int =
   try:

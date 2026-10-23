@@ -76,17 +76,25 @@
 ## why the difference is a subclass of two methods rather than a flag
 ## threaded through the command layer.
 ##
-## **The character device is not exercised by any test.** The gate below
-## this module drives the socket transport, because a development host
-## has no TPM in it and a software TPM offers a socket and not a device
-## node. So `Tpm2CharDeviceTransport` is read, reviewed and compiled,
-## and has never performed a transaction — while every command above it
-## has, over the socket. Read that as the real division: the framing and
-## the commands are exercised, the twenty lines that do `write` and
-## `read` on a device node are not, and the first machine with a TPM to
-## run this is the one that finds out. A host with `/dev/tpmrm0` can
-## check it in one step, which is why it is worth saying where the line
-## falls rather than leaving a reader to assume it is all the same.
+## **No test has ever performed a transaction over the character
+## device.** The gate below this module drives the socket transport,
+## because a development host has no TPM in it and a software TPM offers
+## a socket and not a device node. So the `write` and `read` in
+## `Tpm2CharDeviceTransport` are read, reviewed and compiled, and have
+## never carried a command — while every command above them has, over
+## the socket. Read that as the real division: the framing and the
+## commands are exercised, the twenty lines that do `write` and `read`
+## on a device node are not, and the first machine with a TPM to run
+## this is the one that finds out. A host with `/dev/tpmrm0` can check
+## it in one step, which is why it is worth saying where the line falls
+## rather than leaving a reader to assume it is all the same.
+##
+## Its `open` is the exception, and only for the FLAGS it passes:
+## `t_tpm_device_descriptor_is_not_inherited` opens an ordinary file
+## through this constructor and checks the descriptor it gets back is
+## close-on-exec, which is an argument to `open(2)` and so does not
+## depend on a TPM being at the other end. Nothing else about the
+## device path is covered.
 ##
 ## ## Mocking
 ##
@@ -95,7 +103,7 @@
 ## reachable gets a refusal naming the endpoint, which is the honest
 ## answer and the one an operator can act on.
 
-import std/[nativesockets, net, strutils]
+import std/[monotimes, nativesockets, net, oserrors, strutils, times]
 
 when defined(posix):
   import std/posix
@@ -288,6 +296,66 @@ proc sendAll(t: Tpm2SocketTransport; data: string) =
       "TPM transport " & t.endpoint & ": sending a " & $data.len &
       "-byte command failed: " & e.msg)
 
+type
+  Tpm2ReadWait* = enum
+    ## What one bounded wait for an answer concluded.
+    twReadable
+      ## The endpoint has bytes to read.
+    twTimedOut
+      ## The bound elapsed with nothing to read.
+
+proc waitForReadable*(fd: SocketHandle; timeoutMs: int;
+                      endpointName: string): Tpm2ReadWait =
+  ## Wait up to `timeoutMs` for `fd` to carry an answer, resuming across
+  ## a delivered signal.
+  ##
+  ## There are three outcomes and `selectRead` reports them in two
+  ## values: a positive count means readable, `0` means the bound
+  ## elapsed, and `-1` means the WAIT ITSELF failed — which includes
+  ## `EINTR`, the answer it gives whenever any signal at all is
+  ## delivered to this process, by anything. So `<= 0` is not "the bound
+  ## elapsed": a caller that read it that way would answer a signal with
+  ## a substantive claim about the endpoint, and the claim the timeout
+  ## below makes — that something else is holding the TPM's data channel
+  ## — would then be made falsely, sending whoever read it after a
+  ## contention problem that does not exist.
+  ##
+  ## `EINTR` resumes rather than fails, because a signal says nothing
+  ## about the TPM. It resumes on what is LEFT of the bound and not on a
+  ## fresh one: a process taking a signal every few milliseconds — a
+  ## profiler, an interval timer, a child reaped by SIGCHLD — would
+  ## otherwise push the deadline out on every resume and never reach it,
+  ## which is exactly the unbounded wait the bound exists to prevent.
+  ##
+  ## Exported so the three outcomes can each be driven directly, and
+  ## taking a descriptor rather than a transport because that and the
+  ## bound are all a wait needs to know.
+  let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
+  var remaining = timeoutMs
+  while true:
+    # Rebuilt per attempt: `selectRead` PRUNES the sequence it is given
+    # down to the descriptors that are ready, so a seq carried across a
+    # resume would be empty and the next wait would watch nothing.
+    var waiting = @[fd]
+    let ready = selectRead(waiting, remaining)
+    if ready > 0: return twReadable
+    if ready == 0: return twTimedOut
+    let err = osLastError()
+    when defined(posix):
+      if cint(err) == EINTR:
+        let leftMs = (deadline - getMonoTime()).inMilliseconds
+        if leftMs <= 0: return twTimedOut
+        # A sub-millisecond remainder floors to zero, and a zero bound
+        # is a poll rather than a wait, so the last fraction of the
+        # bound is spent as one millisecond.
+        remaining = max(int(leftMs), 1)
+        continue
+    raise newException(Tpm2TransportError,
+      "TPM transport " & endpointName & ": waiting for an answer failed " &
+      "with errno " & $int(err) & " (" & osErrorMsg(err) &
+      "). The WAIT failed rather than the TPM, so this says nothing " &
+      "about whether the endpoint is being serviced.")
+
 proc readExactly(t: Tpm2SocketTransport; n: int; what: string): string =
   result = newString(n)
   var got = 0
@@ -311,9 +379,14 @@ proc readExactly(t: Tpm2SocketTransport; n: int; what: string): string =
     # the single truth about what has arrived, and the check keeps the
     # loop correct if a buffered socket is ever handed to a transport
     # that did not build it.
-    var waiting = @[t.socket.getFd()]
-    if not t.socket.hasDataBuffered and selectRead(waiting,
-                                                   t.readTimeoutMs) <= 0:
+    #
+    # Only a GENUINE timeout raises the message below — `waitForReadable`
+    # separates that from a failed wait, and resumes across a signal,
+    # because the sentence is a substantive claim about the endpoint and
+    # a signal is no evidence for it.
+    if not t.socket.hasDataBuffered and
+       waitForReadable(t.socket.getFd(), t.readTimeoutMs,
+                       t.endpoint) == twTimedOut:
       raise newException(Tpm2TransportError,
         "TPM transport " & t.endpoint & ": no answer within " &
         $t.readTimeoutMs & "ms while reading " & what & " (" & $got &
@@ -420,6 +493,14 @@ when defined(posix):
       ## read.
       fd: cint
 
+  # `let`, not `const`: on Linux `std/posix` gives `O_CLOEXEC` as a
+  # compile-time constant, but on macOS and the BSDs it is an `importc`'d
+  # variable standing for a header macro, and a `const` binding of one is
+  # a compile error ("cannot evaluate at compile time"). The only use is
+  # the runtime `or` in the `posix.open` below, which never wanted a
+  # compile-time value.
+  let O_CLOEXEC_C = posix.O_CLOEXEC
+
   proc newTpm2CharDeviceTransport*(path: string): Tpm2CharDeviceTransport =
     ## Open a TPM character device. Prefer `/dev/tpmrm0`: the raw
     ## `/dev/tpm0` admits one caller at a time, so a daemon holding it
@@ -429,7 +510,15 @@ when defined(posix):
         "a TPM device transport needs a device path")
     result = Tpm2CharDeviceTransport()
     initTpm2Transport(result, "device:" & path)
-    let fd = posix.open(path.cstring, O_RDWR)
+    # `O_CLOEXEC`, for the exclusion the doc comment above describes.
+    # Without it every process this one later spawns inherits the
+    # descriptor, and an inherited descriptor keeps the device open after
+    # this transport has closed it — so a daemon that took care to
+    # release the TPM would still be locking the machine's other users
+    # out through a child it forgot it had. The flag is set in `open`
+    # rather than with a later `fcntl` because a fork between the two
+    # would inherit it anyway.
+    let fd = posix.open(path.cstring, O_RDWR or O_CLOEXEC_C)
     if fd < 0:
       raise newException(Tpm2TransportError,
         "cannot open " & path & " (" & $strerror(errno) &

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2350,
+    "nimTestBinaries": 2353,
     "pureUnitConsolidationGroups": 67,
     "pureUnitTests": 688,
     "staticallyDetectedRuntimeCompilerFlowTests": 127,
-    "testEntries": 2386
+    "testEntries": 2389
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1372,7 +1372,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1278,
+      "integration": 1281,
       "platform/destructive": 145,
       "pure unit": 688,
       "unclassified": 257
@@ -1577,9 +1577,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2350,
+    "nimTestBinaryCount": 2353,
     "pythonTestFileCount": 36,
-    "testEntryCount": 2386
+    "testEntryCount": 2389
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -31174,6 +31174,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_agent_releases_the_tpm_when_start_up_fails",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_agent"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_agent_releases_the_tpm_when_start_up_fails.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_agent_replay_rejected",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -43871,6 +43889,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_tpm_device_descriptor_is_not_inherited",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_tpm_device_descriptor_is_not_inherited.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_tpm_quote_comes_from_the_tpm",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -43904,6 +43939,23 @@
       "source": "tests/integration/t_tpm_quote_verifies.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tpm_read_wait_tells_a_signal_from_a_timeout",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_tpm_read_wait_tells_a_signal_from_a_timeout.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -11673,6 +11673,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_agent_releases_the_tpm_when_start_up_fails.nim",
+    binary: "build/test-bin/t_agent_releases_the_tpm_when_start_up_fails",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_agent_replay_rejected.nim",
     binary: "build/test-bin/t_agent_replay_rejected",
     defines: @[],
@@ -18108,6 +18117,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_tpm_device_descriptor_is_not_inherited.nim",
+    binary: "build/test-bin/t_tpm_device_descriptor_is_not_inherited",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_tpm_quote_comes_from_the_tpm.nim",
     binary: "build/test-bin/t_tpm_quote_comes_from_the_tpm",
     defines: @[],
@@ -18119,6 +18137,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_tpm_quote_verifies.nim",
     binary: "build/test-bin/t_tpm_quote_verifies",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_tpm_read_wait_tells_a_signal_from_a_timeout.nim",
+    binary: "build/test-bin/t_tpm_read_wait_tells_a_signal_from_a_timeout",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
