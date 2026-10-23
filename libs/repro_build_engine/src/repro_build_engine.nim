@@ -1892,6 +1892,19 @@ type
       ## permanent miss rather than to the prefix's cost.
     outputBytes*: int64
       ## Total size of the action's declared outputs after it settled.
+    missingOutputs*: seq[string]
+      ## The declared `outputs` (spelled as declared) that were NOT on disk
+      ## when the action exited 0. Non-empty exactly when the engine failed
+      ## the action for that reason (`status = asFailed`, `exitCode = 0`),
+      ## and empty on every other result.
+      ##
+      ## Build-Engine-And-Scheduler.md §"A declared output is an
+      ## obligation": an exit status of 0 does not make a cacheable action
+      ## succeed when it did not produce what it declared
+      ## (`declaredOutputsAreObligatory`). Carried as data, not only
+      ## as stderr text, so a caller that owns the output's meaning (the
+      ## profile run edge's intent document) can name the failure in its own
+      ## terms without re-probing the filesystem.
     cacheRecordObservedHere*: bool
       ## The action-cache record that answered this action carries this cache
       ## root's execution-observation mark
@@ -8945,6 +8958,62 @@ proc removeOutputsBeforeRun*(action: BuildAction): string =
       return "cannot remove output '" & path & "' before the action runs: " &
         err.msg
   ""
+
+proc declaredOutputsAreObligatory*(action: BuildAction): bool =
+  ## Whether `action` FAILS when it exits 0 without producing one of its
+  ## declared outputs (Build-Engine-And-Scheduler.md §"A declared output is
+  ## an obligation"). True exactly for a cacheable action.
+  ##
+  ## A cacheable action's declared outputs are what its record describes and
+  ## what a later hit puts back, so an absent one can only be wrong: a record
+  ## of a file that does not exist, or (before the check) a raw error out of
+  ## the record step.
+  ##
+  ## A NON-cacheable action is exempt, because declaring an output that is
+  ## never written is how an always-run edge is expressed, as in Make and
+  ## Ninja: the absent output keeps the edge out of date, and nothing is
+  ## recorded for it. The tree relies on that idiom on non-cacheable edges
+  ## only -- CMake's `SYMBOLIC` custom-target placeholder
+  ## (`<bindir>/CMakeFiles/<target>`) and custom-command byproducts, which
+  ## the Reprobuild CMake generator declares on non-cacheable edges, and the
+  ## glob-verification sentinel of the CMake regeneration edge
+  ## (`cmakeRegenerationOutputs`), which is non-cacheable exactly when that
+  ## sentinel is declared. Failing those would fail every such build.
+  action.cacheable
+
+proc missingDeclaredOutputs*(action: BuildAction): seq[string] =
+  ## The declared `outputs` of `action` that are not on disk, spelled as
+  ## declared. Asked once, after the action exited 0 and before anything
+  ## reads its outputs (converters, evidence, the cache record), and only
+  ## for an action whose outputs are obligatory
+  ## (`declaredOutputsAreObligatory`).
+  ##
+  ## Existence is `lstat`-level (`pathExists`): a symbolic link the action
+  ## created IS the output it produced, dangling or not; whether a link is
+  ## an acceptable output is the readiness rule's question
+  ## (`outputPathReady`), not this one.
+  for output in action.outputs:
+    if output.len == 0:
+      continue
+    if not pathExists(materialPath(action.cwd, output)):
+      result.add(output)
+
+proc missingDeclaredOutputsDiagnostic*(action: BuildAction;
+                                       missing: openArray[string]): string =
+  ## The stderr text for an action failed by `missingDeclaredOutputs`.
+  result = "action '" & action.id & "' exited 0 but did not produce " &
+    (if missing.len == 1: "its declared output" else: "declared outputs") &
+    ": "
+  var shown: seq[string] = @[]
+  for output in missing:
+    let physical = materialPath(action.cwd, output)
+    shown.add(if physical == output: output
+              else: output & " (" & physical & ")")
+  result.add(shown.join(", "))
+  result.add(". An exit status of 0 does not make an action succeed when " &
+    "what it declared is absent; the action is failed and nothing is " &
+    "recorded for it (Build-Engine-And-Scheduler.md §\"A declared output " &
+    "is an obligation\").")
 
 proc resetScratchDirs*(action: BuildAction): string =
   ## Empties the action's scratch directories before it runs; returns why it
@@ -19892,6 +19961,42 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         emitProgress(bpkActionCompleted, dep)
         blockClosure(dep, blocker)
 
+  proc failedForMissingOutputs(id: string; action: BuildAction): bool =
+    ## Build-Engine-And-Scheduler.md §"A declared output is an obligation".
+    ## Called on every success arm (process, built-in, brokered) right after
+    ## the action exited 0: when a declared output is absent the action is
+    ## FAILED here -- a structured failure with `missingOutputs` set, its
+    ## dependents blocked -- and true is returned so the caller skips the
+    ## converters, the evidence and the cache record. Only a cacheable action
+    ## is held to its outputs: a non-cacheable one's never-written output is
+    ## the always-run idiom, not a defect (`declaredOutputsAreObligatory`).
+    ##
+    ## Without it the absence surfaced wherever the outputs were first
+    ## touched, and differently per platform and configuration: on POSIX the
+    ## record step's `getFilePermissions` raised a raw `OSError` out of
+    ## `runBuild`; on Windows, where that call is compiled out, the record
+    ## step's read of the output's bytes raised a raw `IOError` when payloads
+    ## were stored, and a metadata-only record described an absent output as
+    ## if it were one; and an action whose publication was withheld recorded
+    ## nothing and was reported a success. One check before any of those
+    ## makes the outcome the same everywhere.
+    if not action.declaredOutputsAreObligatory():
+      return false
+    let missing = action.missingDeclaredOutputs()
+    if missing.len == 0:
+      return false
+    let idx = idToIndex.resultIndex(id)
+    runResult.results[idx].status = asFailed
+    runResult.results[idx].missingOutputs = missing
+    runResult.results[idx].stderr = [runResult.results[idx].stderr,
+      missingDeclaredOutputsDiagnostic(action, missing)].join("\n").strip()
+    statuses[id] = asFailed
+    runResult.trace(id, "failed", "declared output not produced: " &
+      missing.join(", "))
+    blockClosure(id, id)
+    emitProgress(bpkActionCompleted, id)
+    true
+
   # M25: a single declared output may not be claimed by two different
   # actions. The static graph already enforces this in ``validateGraph``;
   # for dynamically materialised actions we re-enforce the invariant by
@@ -20934,6 +21039,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           statuses[id] = status
           if status == asSucceeded:
             invalidateCachedOutputs(action)
+            if failedForMissingOutputs(id, action):
+              completed = terminalCount()
+              launchedAny = true
+              continue
             let evidenceStart = statStart()
             let evidence = collectEvidence(action, strict = true,
               config = addr config)
@@ -21149,6 +21258,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               # them before it ran. Its dependents are looked up after this.
               for written in finished.rewrittenSources:
                 invalidateCachedPath(materialPath(plan.action.cwd, written))
+            if failedForMissingOutputs(finished.id, plan.action):
+              completed = terminalCount()
+              launchedAny = true
+              continue
             let evidenceStart = statStart()
             var evidence = collectEvidence(plan.action, strict = true,
               config = addr config)
@@ -21724,6 +21837,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if finished.status == asSucceeded:
         let action = runningItem.action
         invalidateCachedOutputs(action)
+        if failedForMissingOutputs(finished.id, action):
+          # As for a non-zero exit below: the capture still lands where
+          # `repro why` looks for it, though nothing is recorded from it.
+          let wrappedCapture = wrappedMonitorCaptures.getOrDefault(finished.id)
+          if wrappedCapture.len > 0:
+            enqueueMonitorFlush(MonitorFlushJob(actionId: finished.id,
+              tempPath: wrappedCapture, destPath: action.monitorDepfile))
+          completed = terminalCount()
+          continue
         let converterStart = statStart()
         let converterResult = action.runConverters(action.converterSpecsForPolicy())
         finishStat("repro dependency convert", converterStart)

@@ -1997,9 +1997,16 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
           script.add("elif [ -f \"" & dir & "/" & strippedSnake & "\" ]; then ")
           script.add("cp -fL \"" & dir & "/" & strippedSnake & "\" \"" &
               escapedOut & "\"; chmod +x \"" & escapedOut & "\"; ")
+      # A Windows build installs `<name>.exe`. It is staged under the native
+      # name AND under the declared output `<name>`: the engine fails a
+      # cacheable action that exits 0 without producing a declared output
+      # (Build-Engine-And-Scheduler.md §"A declared output is an
+      # obligation"), and this branch used to write only `<name>.exe`.
       script.add("elif [ -f \"" & dir & "/" & escapedName & ".exe\" ]; then ")
       script.add("cp -fL \"" & dir & "/" & escapedName & ".exe\" \"" &
           escapedOut & ".exe\"; ")
+      script.add("cp -fL \"" & dir & "/" & escapedName & ".exe\" \"" &
+          escapedOut & "\"; ")
       first = false
     script.add("else echo \"autotools_package stage-copy: no executable candidate for " &
         escapedName & " under " & escapedSrcDir & " or " & sbinSrcDir & " or " &
