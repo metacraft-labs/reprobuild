@@ -7421,8 +7421,7 @@ proc interfaceNimcacheKeyedCompileFlags*(command: openArray[string];
 
 type InterfaceNimcacheSlot* = object
   dir*: string
-    ## The slot's directory; its nimcache is `dir / "nimcache"` and the
-    ## extraction runners' sources live directly in it.
+    ## The slot's directory; its nimcache is `dir / "nimcache"`.
   index*: int
   lock: ReproFileLock
 
@@ -7658,8 +7657,8 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     let absoluteResourceModule =
       absolutePath(resourceModule).replace('\\', '/')
     resourceImport = "import \"" & absoluteResourceModule & "\"\n"
-  # The runner lives OUTSIDE the recipe's tree, in a slot of the shared
-  # interface nimcache (see the placement note below the source); it imports
+  # The runner lives OUTSIDE the recipe's tree, in this extraction's scratch
+  # tree (see the placement note below the source); it imports
   # the recipe by absolute path (scratch only — the edge's key and record
   # name the recipe relative to its own directory). Nim reads the
   # `config.nims` / `nim.cfg` chain of the MAIN module's directory — the
@@ -7767,19 +7766,35 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # (index 2), never after the runner, or nim treats it as a second input file.
   if getEnv("REPRO_INTERFACE_LIST_CMD").len > 0:
     command.insert(@["--listCmd"], 2)
-  # WHERE THE NIMCACHE AND THE RUNNER LIVE. By default: a slot of the
-  # configuration-keyed pool under `interfaceExtractionNimcacheRoot()` (see
-  # the block comment above `InterfaceNimcacheSlotCount` for why the key
-  # leaves the recipe out and why that is sound), held exclusively from
-  # writing the runner until the compile has finished.
+  # WHERE THE NIMCACHE AND THE RUNNER LIVE. The nimcache: by default a slot
+  # of the configuration-keyed pool under `interfaceExtractionNimcacheRoot()`
+  # (see the block comment above `InterfaceNimcacheSlotCount` for why the
+  # key leaves the recipe out and why that is sound), held exclusively until
+  # the compile has finished.
   #
-  # The runner's source sits IN the slot, not in the per-scratch
-  # `tempParent`. Nim names a non-main module's entry from its path relative
-  # to the main module's directory (with the bootstrap-selected Nim 2.2.4,
-  # relative to nothing else), so a runner directory that moved with the
-  # scratch tree -- a new action-cache root, a recipe edit -- renamed every
-  # library entry and left the whole cache cold even with the directory
-  # shared. In the slot, the names are a function of the slot alone.
+  # The runner: in `tempParent`, this extraction's scratch tree, NOT in the
+  # slot. The runner is the compile's MAIN module, and Nim runs the
+  # `config.nims` / `nim.cfg` of every ANCESTOR of the main module's
+  # directory. For a recipe-relative extraction that is the action-cache
+  # root's ancestry, and recipes rely on it: a fixture whose root
+  # `config.nims` adds the root to the search path, with the action-cache
+  # (or work) root inside it, resolves `usesImportPath "stubs"` imports only
+  # through that file. A runner under the temporary directory reads the
+  # temporary directory's ancestry instead, and those imports fail ("cannot
+  # open file: stubs/..."; the Windows runner, under `%TEMP%`, already
+  # could not read it, see `t_tarball_mode_builds_a_fall_through_source_recipe`).
+  #
+  # Reuse does not need the runner in the slot. Nim reuses a generated
+  # module's object on its C content and the object's freshness alone, not
+  # on the compile command, so a runner directory that differs per extraction
+  # costs nothing by itself. What it does change is the generated NAMES:
+  # Nim 2.2.6 and later name a module relative to its nearest search path,
+  # which does not involve the runner at all; Nim 2.2.4 names it relative to
+  # the main module's directory. `tempParent` sits at a fixed depth under the
+  # action-cache root (`recipe-compiles/interface/<identity>/work/m7-temp`),
+  # so an edited recipe or a fresh root at the same depth produces the same
+  # relative names there too; only a root at another depth starts cold under
+  # 2.2.4.
   #
   # The runner's name is a digest of its source, which names the recipe by
   # absolute path: two recipes never share a runner or its entry, one recipe
@@ -7787,26 +7802,22 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # file per distinct runner source -- bounded, identifiable from its name.
   #
   # `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` isolates each INVOCATION
-  # instead: a nimcache in the private `tempRoot` and the runner beside the
-  # other extractions of this scratch tree, as before.
+  # instead: a nimcache in the private `tempRoot`.
   let perBinary = providerNimcacheMode() == "per-binary"
   var slot: InterfaceNimcacheSlot
-  let runnerDir =
-    if perBinary:
-      tempParent
-    else:
-      let key = interfaceNimcacheConfigKey(workDir, hostFlags, libFlags,
-        interfaceNimcacheKeyedCompileFlags(command, runnerPlaceholder,
-          [recipePathFlag, consumerRootDefine]))
-      slot = acquireInterfaceNimcacheSlot(
-        interfaceExtractionNimcacheRoot() / key)
-      slot.dir
+  if not perBinary:
+    let key = interfaceNimcacheConfigKey(workDir, hostFlags, libFlags,
+      interfaceNimcacheKeyedCompileFlags(command, runnerPlaceholder,
+        [recipePathFlag, consumerRootDefine]))
+    slot = acquireInterfaceNimcacheSlot(
+      interfaceExtractionNimcacheRoot() / key)
+  let runnerDir = tempParent
   var compileExecution: ProviderCompileExecutionResult
   try:
     let runnerPath = runnerDir / runnerName
     if not fileExists(extendedPath(runnerPath)):
       # Publish by rename, so a concurrent extraction that derived the same
-      # name (possible in `tempParent`, which no lock covers) never observes
+      # name (`tempParent` is shared and no lock covers it) never observes
       # a partially written file: the path either does not exist yet or
       # already holds the whole source.
       let (stageFile, stagePath) =
