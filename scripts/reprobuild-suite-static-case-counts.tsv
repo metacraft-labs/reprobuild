@@ -181,7 +181,7 @@ libs/repro_cli_support/tests/t_l9_a_typed_service_is_supervised_without_a_placeh
 libs/repro_cli_support/tests/t_lock_binding_governs_per_name.nim	nim	6
 libs/repro_cli_support/tests/t_lock_list_without_a_build_block.nim	nim	5
 libs/repro_cli_support/tests/t_lock_publish_hook_refusal_classification.nim	nim	8
-libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim	nim	7
+libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim	nim	8
 libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	nim	17
 libs/repro_cli_support/tests/t_loopback_node_admits_only_its_owner.nim	nim	2
 libs/repro_cli_support/tests/t_m5_peer_cache_build_wiring.nim	nim	2
@@ -1556,9 +1556,9 @@ tests/integration/t_hooks_ensure_generates_the_gate_from_the_imported_policy.nim
 tests/integration/t_hooks_ensure_installs_a_managed_pre_commit_hook.nim	nim	1
 tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	nim	18
 tests/integration/t_hooks_ensure_refuses_to_strand_a_hook_the_runner_can_service.nim	nim	1
-tests/integration/t_hooks_ensure_removes_retired_repo_workspaces_dispatcher.nim	nim	11
+tests/integration/t_hooks_ensure_removes_retired_repo_workspaces_dispatcher.nim	nim	16
 tests/integration/t_hooks_ensure_restores_dispatcher_displaced_by_prek.nim	nim	1
-tests/integration/t_hooks_noop_outside_initialized_workspace.nim	nim	4
+tests/integration/t_hooks_noop_outside_initialized_workspace.nim	nim	7
 tests/integration/t_host_binary_format_is_proven_before_execution.nim	nim	7
 tests/integration/t_hpke_rejects_wrong_recipient.nim	nim	12
 tests/integration/t_hpke_rfc9180_vectors.nim	nim	8

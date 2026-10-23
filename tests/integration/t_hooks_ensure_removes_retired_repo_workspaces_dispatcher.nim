@@ -95,6 +95,7 @@ import std/[algorithm, json, os, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
 import repro_test_support
+from repro_cli_support import selfHealManagedHooks
 
 proc repoRoot(): string =
   currentSourcePath().parentDir.parentDir.parentDir
@@ -980,3 +981,574 @@ suite "hooks ensure removes the retired repo-workspaces dispatcher":
       for item in snap:
         if item[0].startsWith("post-commit"): before.add(item)
       check after == before
+
+  test "separate record stores restore users from both retired dispatcher layouts":
+    require findExe("git").len > 0
+    when defined(posix):
+      const variants = [("retired-standard", true),
+        ("retired-chained", true), ("retired-standard", false),
+        ("retired-chained", false), ("retired-reshadowed", true),
+        ("retired-reshadowed", false)]
+    else:
+      # Windows file permissions do not represent a non-executable file.
+      const variants = [("retired-standard", true),
+        ("retired-chained", true), ("retired-reshadowed", true)]
+    for (layout, userExecutable) in variants:
+      checkpoint("record-store layout: " & layout &
+        ", user executable: " & $userExecutable)
+      let fx = setupFixture("store-" & layout)
+      defer: removeDir(fx.scratch)
+      let hadInterpreter = existsEnv("REPROBUILD_REPRO")
+      let previousInterpreter = getEnv("REPROBUILD_REPRO")
+      putEnv("REPROBUILD_REPRO", fx.reproBin)
+      defer:
+        if hadInterpreter: putEnv("REPROBUILD_REPRO", previousInterpreter)
+        else: delEnv("REPROBUILD_REPRO")
+
+      # The public repair API runs the same store cleanup as explicit ensure.
+      # Compile it from the code under test: a stale CLI cannot implement the
+      # cleanup that this regression measures. Its protocol probe still uses
+      # the real paired CLI, just as production repair does.
+      if layout in ["retired-chained", "retired-reshadowed"]:
+        for line in selfHealManagedHooks(fx.repoPath):
+          checkpoint(line)
+          require not line.contains("could NOT")
+        require fileExists(fx.slot("post-commit"))
+        require fileExists(fx.slot("post-commit.repro-managed"))
+
+      let store = fx.scratch / ".repro" / "records"
+      createDir(parentDir(store))
+      discard fx.mustRun(["git", "init", "-q", "-b", "main", store])
+      discard fx.mustRun(["git", "-C", store, "config", "user.email",
+        "tester@example.invalid"])
+      discard fx.mustRun(["git", "-C", store, "config", "user.name", "Tester"])
+      let hooks = store / ".git" / "hooks"
+      let preserved = "#!/bin/sh\nprintf 'context=%s\\n' " &
+        "\"${REPROBUILD_INTERNAL_HOOK_CONTEXT-}\" >> " &
+        quoteShell(fx.userRan) & "\n"
+      # A re-shadowed current installation keeps its genuine user's hook in
+      # our preserved slot; it has no retired-tool preserved user to migrate.
+      let preservedPath = hooks / (if layout == "retired-reshadowed":
+        "post-commit.repro-local" else: "post-commit.repo-workspaces-local")
+      plant(preservedPath, preserved)
+      if not userExecutable:
+        setFilePermissions(preservedPath,
+          {fpUserRead, fpUserWrite, fpGroupRead, fpOthersRead})
+      plant(hooks / "post-commit.repo-workspaces-managed",
+        retiredManagedStub("post-commit", fx.retiredRan))
+      if layout == "retired-chained":
+        for suffix in ["", ".repro-managed"]:
+          copyFile(fx.slot("post-commit" & suffix),
+            hooks / ("post-commit" & suffix))
+          setFilePermissions(hooks / ("post-commit" & suffix),
+            getFilePermissions(fx.slot("post-commit" & suffix)))
+        plant(hooks / "post-commit.repro-local",
+          retiredDispatcherFor("post-commit"))
+      else:
+        plant(hooks / "post-commit", retiredDispatcherFor("post-commit"))
+        if layout == "retired-reshadowed":
+          copyFile(fx.slot("post-commit.repro-managed"),
+            hooks / "post-commit.repro-managed")
+          require not fileExists(hooks / "post-commit.repo-workspaces-local")
+
+      for line in selfHealManagedHooks(store):
+        checkpoint(line)
+        check not line.contains("could NOT")
+      check fileExists(hooks / "pre-push")
+      check fileExists(hooks / "pre-push.repro-managed")
+      check fileExists(hooks / "post-commit")
+      if fileExists(hooks / "post-commit"):
+        check readFile(hooks / "post-commit") == preserved
+        check (fpUserExec in getFilePermissions(hooks / "post-commit")) ==
+          userExecutable
+      for hook in ["pre-commit", "post-commit", "post-merge", "post-checkout"]:
+        for suffix in [".repro-managed", ".repro-local",
+                       ".repo-workspaces-managed", ".repo-workspaces-local"]:
+          check not fileExists(hooks / (hook & suffix))
+        if hook != "post-commit": check not fileExists(hooks / hook)
+
+      writeFile(store / "record.txt", "real commit through the preserved user hook\n")
+      discard fx.mustRun(["git", "-C", store, "add", "record.txt"])
+      let committed = fx.run(["git", "-C", store, "commit", "-q", "-m",
+        "after record-store repair"])
+      checkpoint(committed.output)
+      check committed.code == 0
+      if userExecutable:
+        check linesOf(fx.userRan) == @["context="]
+      else:
+        # The retired dispatcher skipped this user hook. Migration must not
+        # grant it execution merely because its canonical pathname changes.
+        check not fileExists(fx.userRan)
+      check not fileExists(fx.retiredRan)
+      check not dirExists(store / ".repro")
+
+      var afterRepair = fx
+      afterRepair.hooks = hooks
+      let beforeSecondRepair = afterRepair.snapshot()
+      for line in selfHealManagedHooks(store):
+        checkpoint(line)
+        check not line.contains("could NOT")
+      check afterRepair.snapshot() == beforeSecondRepair
+
+
+  test "separate record stores preserve the qualified retired user hook's execution state":
+    require findExe("git").len > 0
+    when defined(posix):
+      const variants = [("wrapper", "preserved-only"),
+        ("wrapper", "executable-duplicate"),
+        ("wrapper", "conflicting-current"),
+        ("wrapper", "conflicting-retired"),
+        ("wrapper", "nonexecutable-duplicate"),
+        ("dispatcher", "nonexecutable-duplicate"),
+        ("wrapper", "inactive-preserved")]
+    else:
+      # Windows does not represent a non-executable preserved hook. Keep
+      # wrapper restoration and both collision controls on every platform.
+      const variants = [("wrapper", "preserved-only"),
+        ("wrapper", "executable-duplicate"),
+        ("wrapper", "conflicting-current"),
+        ("wrapper", "conflicting-retired")]
+    for (generation, layout) in variants:
+      checkpoint("qualified store user: " & generation & "/" & layout)
+      let fx = setupFixture("qualified-" & generation & "-" & layout)
+      defer: removeDir(fx.scratch)
+      fx.plantRetiredFramework()
+      let hadInterpreter = existsEnv("REPROBUILD_REPRO")
+      let previousInterpreter = getEnv("REPROBUILD_REPRO")
+      putEnv("REPROBUILD_REPRO", fx.reproBin)
+      defer:
+        if hadInterpreter: putEnv("REPROBUILD_REPRO", previousInterpreter)
+        else: delEnv("REPROBUILD_REPRO")
+
+      let store = fx.scratch / ".repro" / "records"
+      createDir(parentDir(store))
+      discard fx.mustRun(["git", "init", "-q", "-b", "main", store])
+      discard fx.mustRun(["git", "-C", store, "config", "user.email",
+        "tester@example.invalid"])
+      discard fx.mustRun(["git", "-C", store, "config", "user.name", "Tester"])
+      let hooks = store / ".git" / "hooks"
+      # The public API compiles from the production code under test. First
+      # install the applicable store hook, so a collision's complete snapshot
+      # cannot differ merely because repair also ensures pre-push afterwards.
+      for line in selfHealManagedHooks(store):
+        checkpoint(line)
+        require not line.contains("could NOT")
+      require fileExists(hooks / "pre-push.repro-managed")
+      require not fileExists(hooks / "post-commit.repro-managed")
+
+      let body = "#!/bin/sh\nprintf 'context=%s\\n' " &
+        "\"${REPROBUILD_INTERNAL_HOOK_CONTEXT-}\" >> " &
+        quoteShell(fx.userRan) & "\n"
+      let preservedPath = hooks / (if generation == "wrapper":
+        "post-commit.original" else: "post-commit.repo-workspaces-local")
+      plant(preservedPath, body)
+      let qualifiedExecutable = layout != "inactive-preserved"
+      if not qualifiedExecutable:
+        setFilePermissions(preservedPath,
+          {fpUserRead, fpUserWrite, fpGroupRead, fpOthersRead})
+      let expectedPermissions = getFilePermissions(preservedPath)
+      if generation == "wrapper":
+        plant(hooks / "post-commit", retiredWrapperFor("post-commit"))
+      else:
+        plant(hooks / "post-commit", retiredDispatcherFor("post-commit"))
+        plant(hooks / "post-commit.repo-workspaces-managed",
+          retiredManagedStub("post-commit", fx.retiredRan))
+      let currentLocal = hooks / "post-commit.repro-local"
+      if layout in ["executable-duplicate", "nonexecutable-duplicate",
+                    "inactive-preserved"]:
+        plant(currentLocal, body)
+        if layout == "nonexecutable-duplicate":
+          setFilePermissions(currentLocal,
+            {fpUserRead, fpUserWrite, fpGroupRead, fpOthersRead})
+      elif layout == "conflicting-current":
+        plant(currentLocal, userHook("different-current", fx.userRan))
+      elif layout == "conflicting-retired":
+        plant(hooks / "post-commit.repo-workspaces-local",
+          userHook("different-retired", fx.userRan))
+
+      # A canonical oldest wrapper runs ONLY .original; even an executable
+      # identical .repro-local is not in its chain. This real pre-control pins
+      # which hook is authoritative, including the inactive-preserved variant.
+      let control = fx.run(["git", "-C", store, "commit", "-q", "--allow-empty",
+        "-m", "before qualified store repair"])
+      checkpoint(control.output)
+      require control.code == 0
+      if qualifiedExecutable:
+        require linesOf(fx.userRan) == @["context="]
+      else:
+        require not fileExists(fx.userRan)
+      if fileExists(fx.userRan): removeFile(fx.userRan)
+      if fileExists(fx.retiredRan): removeFile(fx.retiredRan)
+
+      var storeFixture = fx
+      storeFixture.hooks = hooks
+      let beforeRepair = storeFixture.snapshot()
+      var permissionsBefore: seq[(string, set[FilePermission])]
+      for kind, path in walkDir(hooks):
+        if kind == pcFile:
+          permissionsBefore.add((path, getFilePermissions(path)))
+      let repair = selfHealManagedHooks(store)
+      for line in repair: checkpoint(line)
+      if layout.startsWith("conflicting-"):
+        check repair.join("\n").contains("could NOT")
+        check repair.join("\n").contains("post-commit.original")
+        check repair.join("\n").contains(if layout == "conflicting-current":
+          "post-commit.repro-local" else: "post-commit.repo-workspaces-local")
+        check storeFixture.snapshot() == beforeRepair
+        for (path, permissions) in permissionsBefore:
+          check fileExists(path)
+          if fileExists(path): check getFilePermissions(path) == permissions
+      else:
+        check not repair.join("\n").contains("could NOT")
+        check fileExists(hooks / "post-commit")
+        if fileExists(hooks / "post-commit"):
+          check readFile(hooks / "post-commit") == body
+          check getFilePermissions(hooks / "post-commit") == expectedPermissions
+        for suffix in [".original", ".repro-local", ".repro-managed",
+                       ".repo-workspaces-local", ".repo-workspaces-managed"]:
+          check not fileExists(hooks / ("post-commit" & suffix))
+        check fileExists(hooks / "pre-push.repro-managed")
+        for hook in ["pre-commit", "post-merge", "post-checkout"]:
+          check not fileExists(hooks / hook)
+          check not fileExists(hooks / (hook & ".repro-managed"))
+        let committed = fx.run(["git", "-C", store, "commit", "-q", "--allow-empty",
+          "-m", "after qualified store repair"])
+        checkpoint(committed.output)
+        check committed.code == 0
+        if qualifiedExecutable:
+          # Nonfatal mode/byte checks above must not prevent observing whether
+          # the formerly active qualified hook actually still runs in Git.
+          check linesOf(fx.userRan) == @["context="]
+        else:
+          check not fileExists(fx.userRan)
+        check not fileExists(fx.retiredRan)
+        check not dirExists(store / ".repro")
+        let afterRepair = storeFixture.snapshot()
+        for line in selfHealManagedHooks(store):
+          checkpoint(line)
+          check not line.contains("could NOT")
+        check storeFixture.snapshot() == afterRepair
+
+
+  when defined(posix):
+    test "separate store retired users retain safe symlink targets during cleanup":
+      require findExe("git").len > 0
+      for (layout, userExecutable) in [("current-local", true),
+          ("current-local", false), ("directory-alias", true),
+          ("qualified-local", true),
+          ("external", true), ("external", false),
+          ("unqualified-original", true), ("unqualified-managed", true)]:
+        checkpoint("store preserved symlink: " & layout &
+          ", user executable: " & $userExecutable)
+        let fx = setupFixture("store-link-" & layout)
+        defer: removeDir(fx.scratch)
+        fx.plantRetiredFramework()
+        let hadInterpreter = existsEnv("REPROBUILD_REPRO")
+        let previousInterpreter = getEnv("REPROBUILD_REPRO")
+        putEnv("REPROBUILD_REPRO", fx.reproBin)
+        defer:
+          if hadInterpreter: putEnv("REPROBUILD_REPRO", previousInterpreter)
+          else: delEnv("REPROBUILD_REPRO")
+        let store = fx.scratch / ".repro" / "records"
+        createDir(parentDir(store))
+        discard fx.mustRun(["git", "init", "-q", "-b", "main", store])
+        discard fx.mustRun(["git", "-C", store, "config", "user.email",
+          "tester@example.invalid"])
+        discard fx.mustRun(["git", "-C", store, "config", "user.name", "Tester"])
+        let hooks = store / ".git" / "hooks"
+        for line in selfHealManagedHooks(store):
+          checkpoint(line)
+          require not line.contains("could NOT")
+        require fileExists(hooks / "pre-push.repro-managed")
+        let body = "#!/bin/sh\nprintf 'context=%s\\n' " &
+          "\"${REPROBUILD_INTERNAL_HOOK_CONTEXT-}\" >> " &
+          quoteShell(fx.userRan) & "\n"
+        let original = hooks / "post-commit.original"
+        let currentLocal = hooks / "post-commit.repro-local"
+        let retiredLocal = hooks / "post-commit.repo-workspaces-local"
+        let external = fx.scratch / "read-only-user-hook"
+        let target =
+          case layout
+          of "current-local", "directory-alias": currentLocal
+          of "qualified-local": retiredLocal
+          of "external": external
+          of "unqualified-managed": hooks / "post-commit.repro-managed"
+          else: original
+        plant(target, body)
+        if layout == "external":
+          setFilePermissions(target, if userExecutable:
+            {fpUserRead, fpUserExec, fpGroupRead, fpGroupExec,
+              fpOthersRead, fpOthersExec}
+            else: {fpUserRead, fpGroupRead, fpOthersRead})
+        elif not userExecutable:
+          setFilePermissions(target,
+            {fpUserRead, fpUserWrite, fpGroupRead, fpOthersRead})
+        let targetPermissions = getFilePermissions(target)
+        if layout in ["unqualified-original", "unqualified-managed"]:
+          # An orphan .original is untouched and remains a safe user target.
+          # A foreign current-managed entry would be deleted by uninstall,
+          # so that unqualified target must instead be refused before mutation.
+          createSymlink(target.extractFilename(), retiredLocal)
+          plant(hooks / "post-commit", retiredDispatcherFor("post-commit"))
+          plant(hooks / "post-commit.repo-workspaces-managed",
+            retiredManagedStub("post-commit", fx.retiredRan))
+        else:
+          let linkTarget =
+            if layout == "external": target
+            elif layout == "directory-alias":
+              let alias = fx.scratch / "hooks-alias"
+              createSymlink(hooks, alias)
+              alias / currentLocal.extractFilename()
+            else: target.extractFilename()
+          createSymlink(linkTarget, original)
+          plant(hooks / "post-commit", retiredWrapperFor("post-commit"))
+        if layout notin ["current-local", "directory-alias"]:
+          plant(currentLocal, body)
+          if userExecutable:
+            setFilePermissions(currentLocal,
+              {fpUserRead, fpUserWrite, fpGroupRead, fpOthersRead})
+        let control = fx.run(["git", "-C", store, "commit", "-q", "--allow-empty",
+          "-m", "before store symlink repair"])
+        checkpoint(control.output)
+        require control.code == 0
+        if userExecutable: require linesOf(fx.userRan) == @["context="]
+        else: require not fileExists(fx.userRan)
+        if fileExists(fx.userRan): removeFile(fx.userRan)
+        if fileExists(fx.retiredRan): removeFile(fx.retiredRan)
+
+        var storeFixture = fx
+        storeFixture.hooks = hooks
+        let beforeRepair = storeFixture.snapshot()
+        var permissionsBefore: seq[(string, set[FilePermission])]
+        for kind, path in walkDir(hooks):
+          if kind in {pcFile, pcLinkToFile}:
+            permissionsBefore.add((path, getFilePermissions(path)))
+        let beforeOriginalLink = if symlinkExists(original): expandSymlink(original)
+          else: ""
+        let beforeRetiredLink = if symlinkExists(retiredLocal): expandSymlink(retiredLocal)
+          else: ""
+        let repair = selfHealManagedHooks(store)
+        for line in repair: checkpoint(line)
+        if layout == "unqualified-managed":
+          check repair.join("\n").contains("could NOT")
+          check repair.join("\n").contains("symlink")
+          check repair.join("\n").contains("post-commit.repro-managed")
+          check storeFixture.snapshot() == beforeRepair
+          for (path, permissions) in permissionsBefore:
+            check fileExists(path)
+            if fileExists(path): check getFilePermissions(path) == permissions
+          check symlinkExists(retiredLocal)
+          if symlinkExists(retiredLocal):
+            check expandSymlink(retiredLocal) == beforeRetiredLink
+          check fileExists(target)
+          if fileExists(target):
+            check getFilePermissions(target) == targetPermissions
+        else:
+          check not repair.join("\n").contains("could NOT")
+          check fileExists(hooks / "post-commit")
+          if fileExists(hooks / "post-commit"):
+            check readFile(hooks / "post-commit") == body
+            check getFilePermissions(hooks / "post-commit") == targetPermissions
+          for suffix in [".original", ".repro-local", ".repro-managed",
+                         ".repo-workspaces-local", ".repo-workspaces-managed"]:
+            if layout == "unqualified-original" and suffix == ".original":
+              check fileExists(original)
+              if fileExists(original):
+                check readFile(original) == body
+                check getFilePermissions(original) == targetPermissions
+            else:
+              check not fileExists(hooks / ("post-commit" & suffix))
+              check not symlinkExists(hooks / ("post-commit" & suffix))
+          if layout == "unqualified-original":
+            check symlinkExists(hooks / "post-commit")
+            if symlinkExists(hooks / "post-commit"):
+              check expandSymlink(hooks / "post-commit") ==
+                "post-commit.original"
+          if layout == "external":
+            check symlinkExists(hooks / "post-commit")
+            if symlinkExists(hooks / "post-commit"):
+              check expandSymlink(hooks / "post-commit") == beforeOriginalLink
+            check fileExists(external)
+            if fileExists(external):
+              check readFile(external) == body
+              check getFilePermissions(external) == targetPermissions
+          let committed = fx.run(["git", "-C", store, "commit", "-q", "--allow-empty",
+            "-m", "after store symlink repair"])
+          checkpoint(committed.output)
+          check committed.code == 0
+          if userExecutable: check linesOf(fx.userRan) == @["context="]
+          else: check not fileExists(fx.userRan)
+          check not fileExists(fx.retiredRan)
+          check not dirExists(store / ".repro")
+          let afterRepair = storeFixture.snapshot()
+          for line in selfHealManagedHooks(store):
+            checkpoint(line)
+            check not line.contains("could NOT")
+          check storeFixture.snapshot() == afterRepair
+
+
+  when defined(posix):
+    test "public store uninstall and reinstall preserve the qualified retired user's mode":
+      require findExe("git").len > 0
+      for (action, userExecutable) in [("uninstall", true),
+          ("uninstall", false), ("reinstall", true), ("reinstall", false)]:
+        checkpoint("public record-store hooks " & action &
+          ", qualified user executable: " & $userExecutable)
+        let fx = setupFixture("public-store-" & action)
+        defer: removeDir(fx.scratch)
+        fx.plantRetiredFramework()
+        let store = fx.scratch / ".repro" / "records"
+        createDir(parentDir(store))
+        discard fx.mustRun(["git", "init", "-q", "-b", "main", store])
+        discard fx.mustRun(["git", "-C", store, "config", "user.email",
+          "tester@example.invalid"])
+        discard fx.mustRun(["git", "-C", store, "config", "user.name", "Tester"])
+        # Both public paths start with a real installed store pre-push. The
+        # paired app is rebuilt from the production source before this runs.
+        let ensured = fx.run([fx.reproBin, "hooks", "ensure", "--vcs", store], store)
+        checkpoint(ensured.output)
+        require ensured.code == 0
+        let hooks = store / ".git" / "hooks"
+        require fileExists(hooks / "pre-push")
+        require fileExists(hooks / "pre-push.repro-managed")
+        require not fileExists(hooks / "post-commit.repro-managed")
+        let body = "#!/bin/sh\nprintf 'context=%s\\n' " &
+          "\"${REPROBUILD_INTERNAL_HOOK_CONTEXT-}\" >> " &
+          quoteShell(fx.userRan) & "\n"
+        let original = hooks / "post-commit.original"
+        let local = hooks / "post-commit.repro-local"
+        plant(original, body)
+        plant(local, body)
+        if userExecutable:
+          setFilePermissions(local,
+            {fpUserRead, fpUserWrite, fpGroupRead, fpOthersRead})
+        else:
+          setFilePermissions(original,
+            {fpUserRead, fpUserWrite, fpGroupRead, fpOthersRead})
+        let originalPermissions = getFilePermissions(original)
+        plant(hooks / "post-commit", retiredWrapperFor("post-commit"))
+        # The initial canonical wrapper really runs only .original, not the
+        # equal-byte current-local copy with the opposite execution state.
+        let control = fx.run(["git", "-C", store, "commit", "-q", "--allow-empty",
+          "-m", "before public store hook repair"])
+        checkpoint(control.output)
+        require control.code == 0
+        if userExecutable: require linesOf(fx.userRan) == @["context="]
+        else: require not fileExists(fx.userRan)
+        if fileExists(fx.userRan): removeFile(fx.userRan)
+        if fileExists(fx.retiredRan): removeFile(fx.retiredRan)
+
+        let repaired = fx.run([fx.reproBin, "hooks", action, "--vcs", store], store)
+        checkpoint(repaired.output)
+        check repaired.code == 0
+        check fileExists(hooks / "post-commit")
+        if fileExists(hooks / "post-commit"):
+          check readFile(hooks / "post-commit") == body
+          check getFilePermissions(hooks / "post-commit") == originalPermissions
+        for suffix in [".original", ".repro-local", ".repro-managed",
+                       ".repo-workspaces-local", ".repo-workspaces-managed"]:
+          check not fileExists(hooks / ("post-commit" & suffix))
+          check not symlinkExists(hooks / ("post-commit" & suffix))
+        if action == "reinstall":
+          check fileExists(hooks / "pre-push")
+          check fileExists(hooks / "pre-push.repro-managed")
+        else:
+          check not fileExists(hooks / "pre-push")
+          check not fileExists(hooks / "pre-push.repro-managed")
+        for hook in ["pre-commit", "post-merge", "post-checkout"]:
+          check not fileExists(hooks / hook)
+          check not fileExists(hooks / (hook & ".repro-managed"))
+        let committed = fx.run(["git", "-C", store, "commit", "-q", "--allow-empty",
+          "-m", "after public store hook repair"])
+        checkpoint(committed.output)
+        check committed.code == 0
+        if userExecutable: check linesOf(fx.userRan) == @["context="]
+        else: check not fileExists(fx.userRan)
+        check not fileExists(fx.retiredRan)
+        check not dirExists(store / ".repro")
+        check not fileExists(store / "repro.lock")
+
+
+  when defined(posix):
+    test "public store cleanup preserves current chained user's execution state":
+      require findExe("git").len > 0
+      for (action, userExecutable) in [("ensure", true), ("ensure", false),
+          ("uninstall", true), ("uninstall", false),
+          ("reinstall", true), ("reinstall", false)]:
+        checkpoint("public current-managed store hooks " & action &
+          ", user executable: " & $userExecutable)
+        let fx = setupFixture("current-store-" & action)
+        defer: removeDir(fx.scratch)
+        # Generate genuine current dispatcher/body bytes through the public
+        # ordinary-repository path; no retired tool or mock dispatcher exists.
+        let installed = fx.run([fx.reproBin, "hooks", "reinstall", "--vcs",
+          fx.repoPath], fx.repoPath)
+        checkpoint(installed.output)
+        require installed.code == 0
+        require fileExists(fx.slot("post-commit"))
+        require fileExists(fx.slot("post-commit.repro-managed"))
+        let store = fx.scratch / ".repro" / "records"
+        createDir(parentDir(store))
+        discard fx.mustRun(["git", "init", "-q", "-b", "main", store])
+        discard fx.mustRun(["git", "-C", store, "config", "user.email",
+          "tester@example.invalid"])
+        discard fx.mustRun(["git", "-C", store, "config", "user.name", "Tester"])
+        let hooks = store / ".git" / "hooks"
+        let canonical = hooks / "post-commit"
+        let local = hooks / "post-commit.repro-local"
+        let body = "#!/bin/sh\nprintf 'context=%s\\n' " &
+          "\"${REPROBUILD_INTERNAL_HOOK_CONTEXT-}\" >> " &
+          quoteShell(fx.userRan) & "\n"
+        plant(canonical, body)
+        if not userExecutable:
+          setFilePermissions(canonical,
+            {fpUserRead, fpUserWrite, fpGroupRead, fpOthersRead})
+        let userPermissions = getFilePermissions(canonical)
+        # A raw Git control proves this user's actual execution state without
+        # letting a managed dispatcher self-heal and change the fixture first.
+        let control = fx.run(["git", "-C", store, "commit", "-q", "--allow-empty",
+          "-m", "before current store hook cleanup"])
+        checkpoint(control.output)
+        require control.code == 0
+        if userExecutable: require linesOf(fx.userRan) == @["context="]
+        else: require not fileExists(fx.userRan)
+        if fileExists(fx.userRan): removeFile(fx.userRan)
+        moveFile(canonical, local)
+        for suffix in ["", ".repro-managed"]:
+          copyFile(fx.slot("post-commit" & suffix),
+            hooks / ("post-commit" & suffix))
+          setFilePermissions(hooks / ("post-commit" & suffix),
+            getFilePermissions(fx.slot("post-commit" & suffix)))
+        require readFile(local) == body
+        require getFilePermissions(local) == userPermissions
+        for suffix in [".original", ".repo-workspaces-local",
+                       ".repo-workspaces-managed"]:
+          require not fileExists(hooks / ("post-commit" & suffix))
+        let repaired = fx.run([fx.reproBin, "hooks", action, "--vcs", store], store)
+        checkpoint(repaired.output)
+        check repaired.code == 0
+        check fileExists(canonical)
+        if fileExists(canonical):
+          check readFile(canonical) == body
+          check getFilePermissions(canonical) == userPermissions
+        for suffix in [".original", ".repro-local", ".repro-managed",
+                       ".repo-workspaces-local", ".repo-workspaces-managed"]:
+          check not fileExists(hooks / ("post-commit" & suffix))
+          check not symlinkExists(hooks / ("post-commit" & suffix))
+        if action == "uninstall":
+          check not fileExists(hooks / "pre-push")
+          check not fileExists(hooks / "pre-push.repro-managed")
+        else:
+          check fileExists(hooks / "pre-push")
+          check fileExists(hooks / "pre-push.repro-managed")
+        for hook in ["pre-commit", "post-merge", "post-checkout"]:
+          check not fileExists(hooks / hook)
+          check not fileExists(hooks / (hook & ".repro-managed"))
+        let committed = fx.run(["git", "-C", store, "commit", "-q", "--allow-empty",
+          "-m", "after current store hook cleanup"])
+        checkpoint(committed.output)
+        check committed.code == 0
+        if userExecutable: check linesOf(fx.userRan) == @["context="]
+        else: check not fileExists(fx.userRan)
+        check not dirExists(store / ".repro")
+        check not fileExists(store / "repro.lock")

@@ -421,7 +421,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--debounce-ms=N] [--ready-timeout=MS] [--replace [--force]]\n       " &
           programName &
-      " hooks ensure|reinstall|uninstall [--vcs] [--shell-direnv] [--shell bash|zsh|fish|powershell] [--json] [--write-report[=PATH]] [path]\n       " &
+      " hooks ensure|reinstall|uninstall [--vcs] [--record-store] [--shell-direnv] [--shell bash|zsh|fish|powershell] [--json] [--write-report[=PATH]] [path]\n       " &
           programName &
       " check --mode=pre-push [--workspace-root=PATH] [--current-repo=PATH] [--pushed-refs=FILE] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n       " &
           programName &
@@ -19398,6 +19398,7 @@ type
     targetPath: string
     shellDirenv: bool
     vcs: bool
+    recordStore: bool      ## Explicit Git-local backend registration.
     nativeShells: seq[NativeShellKind]
     workspaceRoot: string  ## M17: explicit --workspace-root override.
     json: bool             ## M17: emit JSON to stdout in addition to the report file.
@@ -21437,6 +21438,11 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   result.add("unset REPROBUILD_GIT_CONFIG_NAME\n")
   result.add("if find_repro_cmd; then\n")
   if hookName == "pre-push":
+    # Backend classification and the physical immutable-record guard before
+    # capabilities are part of this body's servicing contract. The marker is
+    # hashed with the body so older dispatchers cannot claim that policy.
+    result.add("# reprobuild pre-push publication-policy: immutable-records-v1\n")
+    result.add("# Lock namespace policy: unique paths before record indexing.\n")
     result.add("  if [ \"$REPROBUILD_CAPTURED_DISPATCH_PROTOCOL\" != \"2\" ]; then\n")
     result.add("    echo \"repro hooks: hook protocol mismatch; run '$REPRO_CMD hooks ensure --vcs $REPO_ROOT' and retry\" >&2\n")
     result.add("    exit 1\n")
@@ -22512,49 +22518,16 @@ proc moveRetiredPreservedInto(preserved: openArray[RetiredPreservedHook];
     else:
       discard removeFileIfExists(item.path)
 
-proc ensureVcsHookDetailed(hooksDir, hookName: string;
-                           guard: HookWriteGuard = nil;
-                           repoRoot = ""): VcsHookEnsureOutcome =
-  ## Idempotent installer for one (hooksDir, hookName) pair. Returns a
-  ## structured outcome so callers can surface per-repo per-hook status
-  ## in the JSON report and the human-readable summary line.
-  ##
-  ## ``repoRoot`` is the repository the hooks serve (default: the parent of
-  ## ``.git/hooks``). The ``pre-commit`` dispatcher depends on it: its
-  ## certificate phase is generated only where a policy is in effect
-  ## (``certificateGatePlan``).
-  ##
-  ## Outcome priority (the higher-impact change wins when several apply):
-  ##   removed-retired-dispatcher  >  reclaimed-shadowed  >  chained-user-hook
-  ##   >  rewrote-contractless-body  >  refreshed-drifted  >  installed
-  ##   >  already-up-to-date
-  ##
-  ## ``removed-retired-dispatcher`` ranks first because it is the one repair
-  ## that DELETES executables and leaves nothing behind to show it happened.
-  ## A chain or a reclaim it co-occurs with (a foreign hook in the slot and the
-  ## retired dispatcher chained behind it) stays visible afterwards as the
-  ## ``<hook>.repro-local`` file; the removal is visible only in this report.
-  ## It also outranks ``reclaimed-shadowed`` on impact: a retired dispatcher at
-  ## the canonical path shadowed the managed hook just as a re-installed
-  ## pre-commit shim does, and in addition kept running the retired tool's
-  ## lock publication.
-  ##
-  ## ``guard`` memoises the PG-14 contract probe across the repos of one
-  ## ``ensure`` run; pass ``nil`` and one is created for this call alone.
-  createDir(extendedPath(hooksDir))
+proc migrateRetiredVcsHook(hooksDir, hookName: string;
+    verb = "install"; command = "ensure"; preserveCanonicalUser = false):
+    tuple[changed, removedRetired, preserveLocalMode: bool] =
+  ## Normalize the retired generator's chain before either installation or
+  ## removal. In particular, a separate store removes workspace dispatchers
+  ## entirely, but must still restore the user hook the retired one ran.
   let standard = hookPath(hooksDir, hookName)
   let local = localHookPath(hooksDir, hookName)
-  let managed = managedHookPath(hooksDir, hookName)
-
-  var chainedUser = false
-  var reclaimedShadowed = false
-  var removedRetired = false
   var anyChange = false
-  var refreshedDrift = false
-
-  # Stale sentinel-marked local file from an earlier `uninstall` run.
-  if fileExists(extendedPath(local)) and isReprobuildVcsHook(local, hookName):
-    anyChange = removeFileIfExists(local) or anyChange
+  var removedRetired = false
 
   # ---- The retired `repo-workspaces` generator (see
   #      `isRetiredRepoWorkspacesHook`). Its files are a previous generation of
@@ -22603,6 +22576,24 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
     isRetiredRepoWorkspacesHook(retiredLocal, hookName)
   let preserved = retiredPreservedHooks(hooksDir, hookName,
     retiredDispatcherRuns, retiredWrapperRuns)
+  var canonicalPreserved = ""
+  if preserveCanonicalUser:
+    # Only a canonical retired runner establishes this execution authority.
+    # A wrapper ran .original; a dispatcher ran .repo-workspaces-local.
+    # An equal current-local copy outside that chain must not change whether
+    # the qualified user's checks execute when a store removes the runner.
+    let canonicalSource =
+      if isRetiredRepoWorkspacesWrapper(standard, hookName):
+        retiredRepoWorkspacesOriginalPath(hooksDir, hookName)
+      elif headerCarriesRetiredMarker(standard,
+          [RetiredRepoWorkspacesDispatcherMarker]):
+        retiredLocal
+      else:
+        ""
+    for item in preserved:
+      if item.path == canonicalSource:
+        canonicalPreserved = item.path
+        break
   if preserved.len > 0:
     # Decide BEFORE deleting anything. Every preserved hook is headed for
     # `<hook>.repro-local`, and so is whatever foreign hook already sits there
@@ -22620,8 +22611,69 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
         continue
       occupants.add((occupant, "holds a different hook that Reprobuild's " &
         "dispatcher would run in the same place (" & local & ")"))
-    refuseCompetingRetiredPreserved(hooksDir, hookName, "install", "ensure",
+    refuseCompetingRetiredPreserved(hooksDir, hookName, verb, command,
       local, preserved, occupants)
+  var canonicalKeeper = canonicalPreserved
+  if canonicalPreserved.len > 0:
+    # Resolve the directory, but not the final entry: directory aliases must
+    # identify the same cleanup slot without dereferencing its user symlink.
+    proc hookEntryIdentity(path: string): string =
+      let absolute = absolutePath(path)
+      expandFilename(parentDir(absolute)) / extractFilename(absolute)
+
+    var cleanupSlots = @[standard, local, managedHookPath(hooksDir, hookName)]
+    if retiredAtLegacy:
+      cleanupSlots.add(retiredLegacy)
+    if isRetiredRepoWorkspacesHook(retiredManaged, hookName):
+      cleanupSlots.add(retiredManaged)
+    if retiredLocalIsGenerated:
+      cleanupSlots.add(retiredLocal)
+    for item in preserved:
+      cleanupSlots.add(item.path)
+    var cleanupIdentities: seq[string]
+    for slot in cleanupSlots:
+      cleanupIdentities.add(hookEntryIdentity(slot))
+    var cursor = canonicalPreserved
+    var visited: seq[string]
+    while true:
+      # Complete this read-only preflight before any removal or move. Keep
+      # original slot paths for the later rename, not an alias of that slot.
+      let identity = hookEntryIdentity(cursor)
+      var recognized = ""
+      for i, slot in cleanupSlots:
+        if cmpPaths(identity, cleanupIdentities[i]) == 0:
+          recognized = slot
+          break
+      if recognized.len > 0:
+        var qualified = false
+        for item in preserved:
+          if item.path == recognized:
+            qualified = true
+            break
+        if recognized == local and fileExists(extendedPath(local)) and
+            not isReprobuildVcsHook(local, hookName) and
+            not isRetiredRepoWorkspacesHook(local, hookName):
+          qualified = true
+        if not qualified:
+          raise newException(ValueError,
+            "refusing to uninstall " & hookName &
+              ": preserved user hook symlink targets an unqualified cleanup " &
+              "slot " & recognized & "; reconcile the user hook before retrying")
+        canonicalKeeper = recognized
+      if not symlinkExists(extendedPath(cursor)):
+        break
+      for prior in visited:
+        if cmpPaths(prior, identity) == 0:
+          raise newException(ValueError,
+            "refusing to uninstall " & hookName &
+              ": cyclic preserved user hook symlink at " & cursor)
+      visited.add(identity)
+      let target = expandSymlink(extendedPath(cursor))
+      cursor = absolutePath(target, parentDir(cursor))
+  # Stale sentinel-marked local file from an earlier `uninstall` run.
+  if fileExists(extendedPath(local)) and isReprobuildVcsHook(local, hookName):
+    anyChange = removeFileIfExists(local) or anyChange
+
   if retiredAtStandard:
     removedRetired = removeFileIfExists(standard) or removedRetired
   if retiredAtLocal:
@@ -22637,7 +22689,21 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
   if preserved.len > 0:
     # The check above proved every preserved copy, and any foreign occupant,
     # the same hook: keep exactly one.
-    if fileExists(extendedPath(local)) or
+    if canonicalPreserved.len > 0:
+      # The collision preflight proved every other copy equivalent. Move the
+      # actual qualified hook (including a symlink) rather than chmodding a
+      # duplicate or its target: both active and inactive users keep their
+      # execution state. Ordinary workspace installation keeps its own chain.
+      if canonicalKeeper != local:
+        moveFileReplacing(canonicalKeeper, local)
+      for item in preserved:
+        if item.path != canonicalKeeper:
+          if symlinkExists(extendedPath(item.path)):
+            # Moving the target may have made this duplicate link dangling.
+            removeFile(extendedPath(item.path))
+          else:
+            discard removeFileIfExists(item.path)
+    elif fileExists(extendedPath(local)) or
         (fileExists(extendedPath(standard)) and
           not isReprobuildVcsHook(standard, hookName)):
       # The same hook is already chained, or is at the canonical path and is
@@ -22649,6 +22715,53 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
       moveRetiredPreservedInto(preserved, local)
     removedRetired = true
   anyChange = anyChange or removedRetired
+
+  (changed: anyChange, removedRetired: removedRetired,
+    preserveLocalMode: preserved.len > 0)
+
+proc ensureVcsHookDetailed(hooksDir, hookName: string;
+                           guard: HookWriteGuard = nil;
+                           repoRoot = ""): VcsHookEnsureOutcome =
+  ## Idempotent installer for one (hooksDir, hookName) pair. Returns a
+  ## structured outcome so callers can surface per-repo per-hook status
+  ## in the JSON report and the human-readable summary line.
+  ##
+  ## ``repoRoot`` is the repository the hooks serve (default: the parent of
+  ## ``.git/hooks``). The ``pre-commit`` dispatcher depends on it: its
+  ## certificate phase is generated only where a policy is in effect
+  ## (``certificateGatePlan``).
+  ##
+  ## Outcome priority (the higher-impact change wins when several apply):
+  ##   removed-retired-dispatcher  >  reclaimed-shadowed  >  chained-user-hook
+  ##   >  rewrote-contractless-body  >  refreshed-drifted  >  installed
+  ##   >  already-up-to-date
+  ##
+  ## ``removed-retired-dispatcher`` ranks first because it is the one repair
+  ## that DELETES executables and leaves nothing behind to show it happened.
+  ## A chain or a reclaim it co-occurs with (a foreign hook in the slot and the
+  ## retired dispatcher chained behind it) stays visible afterwards as the
+  ## ``<hook>.repro-local`` file; the removal is visible only in this report.
+  ## It also outranks ``reclaimed-shadowed`` on impact: a retired dispatcher at
+  ## the canonical path shadowed the managed hook just as a re-installed
+  ## pre-commit shim does, and in addition kept running the retired tool's
+  ## lock publication.
+  ##
+  ## ``guard`` memoises the PG-14 contract probe across the repos of one
+  ## ``ensure`` run; pass ``nil`` and one is created for this call alone.
+  createDir(extendedPath(hooksDir))
+  let standard = hookPath(hooksDir, hookName)
+  let local = localHookPath(hooksDir, hookName)
+  let managed = managedHookPath(hooksDir, hookName)
+
+  var chainedUser = false
+  var reclaimedShadowed = false
+  var removedRetired = false
+  var anyChange = false
+  var refreshedDrift = false
+
+  let retiredRepair = migrateRetiredVcsHook(hooksDir, hookName)
+  anyChange = retiredRepair.changed
+  removedRetired = retiredRepair.removedRetired
 
   # Pre-existing user-owned hook at the canonical path: chain it.
   if fileExists(extendedPath(standard)) and
@@ -22843,6 +22956,26 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
 # because "changed / unchanged" cannot express the contract-less state PG-14
 # requires to be reported as its own (deliverable 2).
 
+proc isRecordStoreCheckout*(repoRoot: string): bool
+proc isRecordStoreBackendCheckout*(repoRoot: string): bool
+proc registerRecordStoreCheckout(repoRoot: string)
+proc registerRecordStoreBackendCheckout(repoRoot: string)
+proc backendLockCommitContext(repoRoot: string): string
+proc uninstallVcsHook(hooksDir, hookName: string;
+    preserveCanonicalUser = false): bool
+
+proc applicableVcsHookNames(repoRoot: string): seq[string] =
+  ## A backend never refreshes workspace locks or pushes source-cache refs.
+  if isRecordStoreCheckout(repoRoot): @["pre-push"] else: @VcsHookNames
+
+proc removeObsoleteStoreHooks(repoRoot, hooksDir: string): bool =
+  ## Restore displaced user hooks while removing our obsolete workspace set.
+  if not isRecordStoreCheckout(repoRoot): return false
+  for hookName in VcsHookNames:
+    if hookName != "pre-push":
+      result = uninstallVcsHook(hooksDir, hookName,
+        preserveCanonicalUser = true) or result
+
 proc selfHealManagedHooks*(repoRoot: string): seq[string] =
   ## Re-assert this repo's managed hook set from a hook that is CURRENTLY
   ## RUNNING, and return one report line per hook that had to be repaired
@@ -22938,7 +23071,12 @@ proc selfHealManagedHooks*(repoRoot: string): seq[string] =
   # subprocess and this proc runs from post-commit / post-merge /
   # post-checkout, i.e. on every commit in every repo.
   let guard = newHookWriteGuard()
-  for hookName in VcsHookNames:
+  try:
+    discard removeObsoleteStoreHooks(top, hooksDir)
+  except CatchableError as err:
+    result.add("repro hooks: could NOT remove obsolete record-store hooks in " &
+      top & ": " & err.msg)
+  for hookName in applicableVcsHookNames(top):
     try:
       let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard, top)
       case outcome
@@ -23265,7 +23403,8 @@ proc ensureRepoVcsHooks(repoName, repoPath: string;
       pathRepair.previous & "'): " & pathRepair.diagnostic)
     result.ok = false
   let hooksDir = gitHooksDir(repoPath)
-  for hookName in VcsHookNames:
+  discard removeObsoleteStoreHooks(repoPath, hooksDir)
+  for hookName in applicableVcsHookNames(repoPath):
     if hookName == "pre-commit":
       # TC-9c: say which certificate gates this repository now has, one
       # line per rule (stderr, so `--json` keeps stdout one document).
@@ -23336,45 +23475,43 @@ proc writeHooksEnsureReport(report: HooksEnsureReport; destination: string) =
   createDir(parentDir(destination))
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
-proc uninstallVcsHook(hooksDir, hookName: string): bool =
+proc uninstallVcsHook(hooksDir, hookName: string;
+    preserveCanonicalUser: bool): bool =
   let standard = hookPath(hooksDir, hookName)
   let local = localHookPath(hooksDir, hookName)
   let managed = managedHookPath(hooksDir, hookName)
+  let restoreShadowedCurrentLocal =
+    isRetiredRepoWorkspacesHook(standard, hookName) and
+    isReprobuildVcsHook(managed, hookName)
   if fileExists(extendedPath(standard)) and
-      isReprobuildVcsHook(standard, hookName):
-    if isRetiredRepoWorkspacesHook(local, hookName):
-      # A retired repo-workspaces file (dispatcher or older wrapper) that an
-      # `ensure` predating `isRetiredRepoWorkspacesHook` chained here is not
-      # the user's hook, so it is not "restored": putting it back at the
-      # canonical path would reinstate the retired tool's own checks and lock
-      # publication on every fire. What IS restored is the user hook it
-      # preserved and ran first (`retiredPreservedHooks`, the qualification
-      # `ensure` uses) — deleting the retired file without it would strand
-      # that hook where nothing runs it. Decided before anything is deleted:
-      # two different preserved hooks for the one canonical slot are refused,
-      # leaving the chain exactly as it was.
-      let preserved = retiredPreservedHooks(hooksDir, hookName,
-        dispatcherRuns = true,
-        wrapperRuns = isRetiredRepoWorkspacesWrapper(local, hookName))
-      refuseCompetingRetiredPreserved(hooksDir, hookName, "uninstall",
-        "uninstall",
-        standard, preserved, @[])
-      result = removeFileIfExists(standard) or result
-      result = removeFileIfExists(local) or result
-      if preserved.len > 0:
-        moveRetiredPreservedInto(preserved, standard)
-        result = true
-    else:
-      result = removeFileIfExists(standard) or result
-      if fileExists(extendedPath(local)):
-        moveFileReplacing(local, standard)
-        ensureExecutable(standard)
-        result = true
-  elif fileExists(extendedPath(standard)) and
-      fileExists(extendedPath(managed)):
+      fileExists(extendedPath(managed)) and
+      not isReprobuildVcsHook(standard, hookName) and
+      not isRetiredRepoWorkspacesHook(standard, hookName):
+    # Refuse an unrelated canonical hook before migrating or deleting any
+    # retired files. Its checks must not be displaced by uninstallation.
     raise newException(ValueError,
       "refusing to uninstall " & hookName & ": " & standard &
         " is not Reprobuild-managed")
+  let retiredRepair = migrateRetiredVcsHook(hooksDir, hookName,
+    verb = "uninstall", command = "uninstall",
+    preserveCanonicalUser = preserveCanonicalUser)
+  result = retiredRepair.changed
+  if fileExists(extendedPath(standard)) and
+      isReprobuildVcsHook(standard, hookName):
+    result = removeFileIfExists(standard) or result
+    if fileExists(extendedPath(local)):
+      moveFileReplacing(local, standard)
+      if not retiredRepair.preserveLocalMode and not preserveCanonicalUser:
+        ensureExecutable(standard)
+      result = true
+  elif not fileExists(extendedPath(standard)) and
+      (retiredRepair.preserveLocalMode or restoreShadowedCurrentLocal) and
+      fileExists(extendedPath(local)):
+    # The retired dispatcher was canonical, either with its own preserved
+    # user or shadowing our recognized managed chain. Restore that user hook
+    # directly, retaining a non-executable hook's deliberate inactivity.
+    moveFileReplacing(local, standard)
+    result = true
   result = removeFileIfExists(managed) or result
   if fileExists(extendedPath(local)) and isReprobuildVcsHook(local, hookName):
     result = removeFileIfExists(local) or result
@@ -23398,7 +23535,11 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
   ## now runs through the workspace-aware ``ensureWorkspaceHooks``
   ## driver below; this proc handles the single-repo subset the older
   ## actions still target.
-  let targetPath = parsed.targetPath
+  let targetPath =
+    if parsed.targetPath.len > 0: parsed.targetPath
+    else: resolveHooksWorkspaceRoot(parsed)
+  if parsed.recordStore:
+    registerRecordStoreCheckout(targetPath)
   if action == hakEnsure or action == hakReinstall:
     # Same repair as the workspace driver, for the single-repo path `.envrc`
     # and the dev shell take. See `ensureWorktreeSafeHooksPath`.
@@ -23414,6 +23555,7 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
           "', a relative path that names nothing in a linked worktree, and " &
           "it could not be rewritten: " & pathRepair.diagnostic)
   let hooksDir = gitHooksDir(targetPath)
+  let preserveCanonicalUser = isRecordStoreCheckout(targetPath)
   let actionName =
     case action
     of hakEnsure: "ensure"
@@ -23424,11 +23566,13 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
   var retired: seq[string]
   if action == hakReinstall:
     for hookName in VcsHookNames:
-      changed = uninstallVcsHook(hooksDir, hookName) or changed
+      changed = uninstallVcsHook(hooksDir, hookName,
+        preserveCanonicalUser = preserveCanonicalUser) or changed
   case action
   of hakEnsure, hakReinstall:
+    changed = removeObsoleteStoreHooks(targetPath, hooksDir) or changed
     let guard = newHookWriteGuard()
-    for hookName in VcsHookNames:
+    for hookName in applicableVcsHookNames(targetPath):
       if hookName == "pre-commit":
         # TC-9c: one line per rule of the certificate gate generated here.
         # stderr: the stdout line below is `.envrc`'s activation signal.
@@ -23444,7 +23588,8 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
         retired.add(hookName)
   of hakUninstall:
     for hookName in VcsHookNames:
-      changed = uninstallVcsHook(hooksDir, hookName) or changed
+      changed = uninstallVcsHook(hooksDir, hookName,
+        preserveCanonicalUser = preserveCanonicalUser) or changed
   # PG-14 deliverable 2 — a contract-less body is NOT "already current" and is
   # not merely "updated": it says a build that predates the handshake has been
   # writing into this hooks directory, and that it will do so again from the
@@ -23475,6 +23620,8 @@ proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand): int =
   ## shell — that path is what ``.envrc`` triggers from non-workspace
   ## projects.
   let workspaceRoot = resolveHooksWorkspaceRoot(parsed)
+  if parsed.recordStore:
+    registerRecordStoreCheckout(workspaceRoot)
   let enumerated = enumerateParticipatingRepos(workspaceRoot)
   if enumerated.mode == "single-repo":
     # Single-repo fallback. Mirror the legacy stdout line so callers
@@ -23505,7 +23652,7 @@ proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand): int =
 
 const HooksUsage = """usage: repro hooks <ensure|reinstall|uninstall> [--vcs] [--shell-direnv]
                    [--shell=bash|zsh|fish|pwsh] [--workspace-root=PATH]
-                   [--json] [--write-report[=PATH]] [PATH]
+                   [--record-store] [--json] [--write-report[=PATH]] [PATH]
 
   ensure      install or repair the managed hooks (idempotent)
   reinstall   rewrite the managed hooks from scratch
@@ -23513,6 +23660,7 @@ const HooksUsage = """usage: repro hooks <ensure|reinstall|uninstall> [--vcs] [-
 
   --vcs            the managed git hooks of every workspace repo
                    (or of the repo at PATH)
+  --record-store   register PATH as a Git-checkout record backend; implies --vcs
   --shell-direnv   the direnv .envrc activation block
   --shell=NAME     a native shell activation hook
 With no selector flag both --vcs and --shell-direnv are implied.
@@ -23539,6 +23687,9 @@ proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
     of "--shell-direnv":
       result.shellDirenv = true
     of "--vcs":
+      result.vcs = true
+    of "--record-store":
+      result.recordStore = true
       result.vcs = true
     of "--shell-autocomplete":
       raise newException(ValueError,
@@ -23569,6 +23720,10 @@ proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
       else:
         result.targetPath = arg
     inc i
+  if result.recordStore and (result.action == hakUninstall or
+      result.shellDirenv or result.nativeShells.len > 0):
+    raise newException(ValueError,
+      "--record-store requires ensure or reinstall with VCS hooks only")
   if not result.shellDirenv and not result.vcs and
       result.nativeShells.len == 0:
     result.shellDirenv = true
@@ -23642,6 +23797,8 @@ proc runManifestRefreshHookCommand*(hookName: string;
 proc reconcileLocalStateForHook(workspaceRoot: string):
   tuple[loud, quiet: seq[string]]
 
+proc runRecordStorePrePushGuard(repoRoot, refsFile, remoteLocation: string): int
+
 proc runHooksDispatchCommand(args: openArray[string]): int =
   ## ``repro hooks dispatch <hook-name> [--repo-root=PATH]
   ## [--refs-file=PATH] -- [hook args...]``. Invoked by the managed
@@ -23701,6 +23858,10 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
         arg.startsWith("--dispatcher-displaced="):
       displaced = valueFromFlag(args, i, "--dispatcher-displaced") == "1"
     inc i
+  let dispatchRoot = if repoRoot.len > 0: repoRoot else: getCurrentDir()
+  if hookName != "pre-push" and isRecordStoreCheckout(dispatchRoot):
+    stderr.writeLine("repro hooks: record store is not a workspace; " & hookName & " is a no-op")
+    return 0
   case hookName
   of "pre-commit":
     # NF-2 / §13.3 — refresh the repo's `flake.lock` and re-pin its committed
@@ -23813,12 +23974,32 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     # returning authorization.
     delEnv(HookCapabilityEnv)
     delEnv(LegacyHookSentinelEnv)
+    let recordStore = isRecordStoreCheckout(prePushRepoRoot)
+    if isRecordStoreBackendCheckout(prePushRepoRoot):
+      let storeResult = runRecordStorePrePushGuard(prePushRepoRoot, refsFile, remoteLocation)
+      if storeResult != 0: return storeResult
+    if recordStore:
+      # The physical record invariant is the store's entire gate. A token is
+      # merely publisher bookkeeping here; its age, binding or one-shot state
+      # cannot turn an already-verified ordinary store push into a refusal.
+      if capability.len > 0:
+        try:
+          discard consumeHookCapability(identity.binaryPath, prePushRepoRoot,
+            capability, remoteName, remoteLocation, refsFile)
+        except CatchableError:
+          discard
+        finally:
+          try:
+            discardHookCapability(identity.binaryPath, prePushRepoRoot, capability)
+          except CatchableError:
+            discard
+      return 0
     if capability.len > 0:
       let consumed = consumeHookCapability(identity.binaryPath, repoRoot,
         capability, remoteName, remoteLocation, refsFile)
       if consumed.authorized:
         return 0
-      if not consumed.claimLost:
+      elif not consumed.claimLost:
         stderr.writeLine("repro hooks: nested publication capability refused: " &
           consumed.diagnostic)
         return 1
@@ -44003,19 +44184,13 @@ method putLock*(s: GitCheckoutLockStore;
     if stagedRes.code == 0:
       rememberExpected()
       return ok()
-    # The same internal lock-commit context every other lock commit carries
-    # (``publishWorkspaceLock``, the canonical-path repair). Without it this
-    # commit fired the BACKEND's own managed post-commit as if an operator had
-    # committed there: a nested post-commit lock refresh inside the record
-    # store, plus the hook self-heal, which rewrote the backend's hooks as a
-    # side effect of recording a lock — so a tampered or stale backend
-    # pre-push was silently replaced before `repro push`'s hook preflight
-    # could report it.
+    # Shared workspace backends retain the internal recursion guard, while
+    # separate stores' preserved user hooks receive no private context.
     let commitRes = gitRunPlainEnv(s.identity,
       ["-C", s.manifestRepoRoot, "commit", "--quiet", "-m",
        "lockstore: " & rec.key.project & "/" & rec.key.repo & "@" &
        rec.key.sha, "--", rel],
-      internalContext = InternalLockCommitContext)
+      internalContext = backendLockCommitContext(s.manifestRepoRoot))
     if commitRes.code != 0:
       return failed("git commit failed: " & commitRes.output.strip())
     rememberExpected()
@@ -44894,6 +45069,145 @@ proc composeLockingRouting*(workspaceRoot: string; gitBin = ""):
   # Layer 5 — VCS-private dir.
   readConfigLayerRoutes(vcsPrivateConfigPath(root, gitBin), clkVcsPrivate,
     root, result.routes)
+
+proc recordStoreWorkspaceAncestors(repoRoot: string): seq[string] =
+  ## Only explicit workspace state or settings starts a membership lookup.
+  ## Manifest-shaped backend data must never declare a workspace by itself.
+  var parent = parentDir(repoRoot)
+  while parent.len > 0:
+    if fileExists(workspaceTomlPath(parent)) or settingsFileIn(parent).len > 0:
+      result.add(parent)
+    let next = parentDir(parent)
+    if next == parent: break
+    parent = next
+
+proc isDeclaredWorkspaceHookRepo(repoRoot: string): bool =
+  for workspace in recordStoreWorkspaceAncestors(repoRoot):
+    try:
+      let targets = enumerateParticipatingRepos(workspace)
+      for target in targets.repos:
+        if dirExists(target.repoPath) and sameFile(target.repoPath, repoRoot):
+          return true
+    except CatchableError:
+      # An unrelated owner's malformed state cannot turn the backend's
+      # independent publication boundary into a workspace-resolution gate.
+      discard
+    # Settings can declare an owner before it records active project state.
+    # The ordinary hook enumerator intentionally treats such a Git root as a
+    # single-repo target; inspect its explicit project declarations here too.
+    let projectsDir = manifestsRoot(workspace) / "projects"
+    if not dirExists(projectsDir): continue
+    for kind, projectFile in walkDir(projectsDir):
+      if kind != pcFile or not projectFile.endsWith(".toml"): continue
+      try:
+        let project = resolveProject(projectFile)
+        for repo in project.repos:
+          let location = workspace / repo.path
+          if dirExists(location) and sameFile(location, repoRoot): return true
+      except CatchableError:
+        discard
+  false
+
+proc isRecordStoreBackendCheckout*(repoRoot: string): bool =
+  ## Recognize the actual worktree root, including linked worktrees. Neither
+  ## a `locks/` subtree nor incidental manifests is a backend declaration.
+  let top = gitTopLevel(repoRoot)
+  if top.len == 0: return false
+  for key in ["reprobuild.recordStore", "reprobuild.recordStoreBackend"]:
+    let registered = execCmdEx(shellCommand(@["git", "-C", top, "config",
+      "--local", "--bool", "--get", key]),
+      env = scrubbedGitRepositoryEnv())
+    if registered.exitCode == 0 and registered.output.strip() == "true":
+      return true
+  # Backend identity belongs to the repository, so an external linked
+  # worktree inherits the main checkout's declaration even before ensure has
+  # had a chance to persist a local registration.
+  var checkouts = @[top]
+  let main = gitMainWorktreeTop(top)
+  if main.len > 0 and dirExists(main) and not sameFile(main, top):
+    checkouts.add(main)
+  for checkout in checkouts:
+    let parent = parentDir(checkout)
+    if lastPathPart(parent) == ".repro" and
+        lastPathPart(checkout) in ["records", "manifests"]:
+      return true
+    var owners = recordStoreWorkspaceAncestors(checkout)
+    if fileExists(workspaceTomlPath(checkout)) or
+        settingsFileIn(checkout).len > 0:
+      owners.insert(checkout, 0)
+    for workspace in owners:
+      try:
+        let routing = composeLockingRouting(workspace)
+        for route in routing.routes:
+          if route.entry.backend.strip().toLowerAscii() != "git-checkout" or
+              route.entry.path.isNone or route.entry.path.get().len == 0:
+            continue
+          let location = resolveStoreLocation(workspace, route.entry.path.get())
+          if dirExists(location) and sameFile(location, checkout): return true
+      except CatchableError:
+        # No successfully read route means no declaration from this owner.
+        discard
+  false
+
+proc hasWorkspaceHookRole(repoRoot: string): bool =
+  ## Store-only registration cannot discard a linked checkout's main
+  ## repository membership or explicit workspace duties.
+  if fileExists(workspaceTomlPath(repoRoot)) or
+      fileExists(repoRoot / "repro.lock") or
+      isDeclaredWorkspaceHookRepo(repoRoot): return true
+  let main = gitMainWorktreeTop(repoRoot)
+  main.len > 0 and dirExists(main) and not sameFile(main, repoRoot) and
+    (fileExists(workspaceTomlPath(main)) or fileExists(main / "repro.lock") or
+      isDeclaredWorkspaceHookRepo(main))
+
+proc backendLockCommitContext(repoRoot: string): string =
+  ## Only a backend sharing workspace duties needs to suppress recursive
+  ## workspace bookkeeping. A separate store preserves raw user hooks, so
+  ## exporting our private dispatcher context would leak it into those hooks.
+  ## Check the role directly: a custom backend's first commit precedes its
+  ## publication-time registration as a record store.
+  if hasWorkspaceHookRole(repoRoot): InternalLockCommitContext else: ""
+
+proc isRecordStoreCheckout*(repoRoot: string): bool =
+  ## Only a separate backend receives store-only hooks. A shared workspace
+  ## checkout keeps its full hook set and enforces both publication duties.
+  let top = gitTopLevel(repoRoot)
+  if top.len == 0 or hasWorkspaceHookRole(top): return false
+  isRecordStoreBackendCheckout(top)
+
+proc registerRecordStoreBackendCheckout(repoRoot: string) =
+  ## Publishing through a selected backend declares identity, without
+  ## changing a shared checkout's ordinary workspace hook responsibilities.
+  let top = gitTopLevel(repoRoot)
+  if top.len == 0 or not sameFile(top, resolveHooksTarget(repoRoot)):
+    raise newException(ValueError,
+      "record-store registration requires a Git worktree root: " & repoRoot)
+  let registered = execCmdEx(shellCommand(@["git", "-C", top, "config",
+    "--local", "reprobuild.recordStoreBackend", "true"]),
+    env = scrubbedGitRepositoryEnv())
+  if registered.exitCode != 0:
+    raise newException(ValueError,
+      "cannot register record-store backend " & top & ": " &
+      registered.output.strip())
+
+proc registerRecordStoreCheckout(repoRoot: string) =
+  ## Git-local identity lets a publisher's custom checkout retain its hook
+  ## policy when a later hook repair runs outside the parent workspace.
+  let top = gitTopLevel(repoRoot)
+  if top.len == 0 or not sameFile(top, resolveHooksTarget(repoRoot)):
+    raise newException(ValueError,
+      "record-store registration requires a Git worktree root: " & repoRoot)
+  if hasWorkspaceHookRole(top):
+    raise newException(ValueError,
+      "cannot register workspace repo " & top & " as a record store; " &
+      "use a separate Git-checkout backend")
+  let registered = execCmdEx(shellCommand(@["git", "-C", top, "config",
+    "--local", "reprobuild.recordStore", "true"]),
+    env = scrubbedGitRepositoryEnv())
+  if registered.exitCode != 0:
+    raise newException(ValueError,
+      "cannot register record-store checkout " & top & ": " &
+      registered.output.strip())
 
 proc resolveRepoBackends*(composed: ComposedRouting;
     repos: seq[ResolvedRepo]; workspaceRoot: string;
@@ -52535,7 +52849,7 @@ proc pushOutputIsNonFastForward*(output: string): bool =
   ## its lock) while we were pushing — the lost race RA-29's bounded, verified
   ## re-apply loop may retry. Every failure whose cause is transport,
   ## credentials, or branch policy returns ``false`` and stays LOUD (RA-21).
-  ## We fold stderr into stdout (``poStdErrToStdOut``), so all markers are
+  ## We fold stderr into stdout (``poStdErrToStdOut``), so Git markers are
   ## matched case-insensitively against the combined transcript.
   ##
   ## Git's wording for the SAME compare-and-swap loss changes between
@@ -52553,7 +52867,8 @@ proc pushOutputIsNonFastForward*(output: string): bool =
   ##   ``! [rejected]        HEAD -> main (fetch first)`` /
   ##   ``(non-fast-forward)``.
   ##
-  ## So we require two facts that ARE stable across every observed release:
+  ## For Git rejections we require two facts stable across these releases;
+  ## the managed hook also reports the same CAS loss before receive-pack:
   ##
   ## 1. Git reported a rejected ref update. Both spellings are live —
   ##    ``[rejected]`` for a client-side non-fast-forward, ``[remote
@@ -52580,6 +52895,56 @@ proc pushOutputIsNonFastForward*(output: string): bool =
   ## Pinned against literal captured transcripts from both git versions in
   ## this library's ``tests/t_lock_publish_push_race_classification.nim`` — a
   ## live-git test only ever proves whichever wording the local git emits.
+  # The managed pre-push guard observes the same CAS race before receive-pack
+  # can print Git's rejection marker. Accept its complete existing diagnostic
+  # (including from an older matching hook interpreter), never a generic
+  # instruction to retry. Any accompanying integrity/policy refusal wins.
+  const guardPrefix = "repro hooks: immutable record-store push refused: "
+  const changed = " changed since Git advertised "
+  const retrySuffix = "; retry the push"
+  var managedRace = false
+  for rawLine in output.splitLines():
+    let line = rawLine.strip()
+    if line.startsWith(guardPrefix):
+      let reason = line[guardPrefix.len .. ^1]
+      if not reason.startsWith("destination ref ") or
+          not reason.endsWith(retrySuffix):
+        return false
+      let boundary = reason.find(changed)
+      if boundary < "destination ref ".len:
+        return false
+      let refName = reason["destination ref ".len ..< boundary]
+      let oid = reason[boundary + changed.len ..< reason.len - retrySuffix.len]
+      if oid.len notin [40, 64]:
+        return false
+      for ch in oid:
+        if ch notin {'0'..'9', 'a'..'f', 'A'..'F'}:
+          return false
+      if not refName.startsWith("refs/") or refName.endsWith("/") or
+          refName.endsWith(".") or ".." in refName or "@{" in refName:
+        return false
+      for component in refName.split('/'):
+        if component.len == 0 or component.startsWith(".") or
+            component.endsWith(".lock"):
+          return false
+      for ch in refName:
+        if ord(ch) <= 32 or ord(ch) == 127 or ch in {'~', '^', ':', '?', '*', '[', '\\'}:
+          return false
+      managedRace = true
+    else:
+      let lowerLine = line.toLowerAscii()
+      if lowerLine.startsWith("repro check: error:") or
+          lowerLine.startsWith("repro check: malformed ") or
+          lowerLine.startsWith("repro check: refusing ") or
+          lowerLine.startsWith("repro check: lock update failed:") or
+          lowerLine.startsWith("repro hooks: refusing ") or
+          lowerLine.startsWith("repro hooks: hook protocol ") or
+          lowerLine.startsWith("repro hooks: pre-push protocol ") or
+          lowerLine.startsWith("repro hooks: pre-push: this hook could not ") or
+          lowerLine.startsWith("repro hooks: nested publication capability refused:"):
+        return false
+  if managedRace:
+    return true
   let low = output.toLowerAscii()
   if not (("[rejected]" in low) or ("[remote rejected]" in low)):
     return false
@@ -52858,6 +53223,14 @@ proc configuredPushLocation(identity: GitToolIdentity; repoRoot,
 proc pushLockRef(identity: GitToolIdentity; repoRoot: string;
     target: LockUpstream; remoteOldOid: string):
     tuple[code: int; output: string] =
+  # The publisher selects this checkout explicitly. Persist that declaration
+  # for custom paths; the hook still validates every record update normally.
+  # Register backend identity even when a legacy checkout shares workspace
+  # duties: its full hook set remains, and pre-push enforces both invariants.
+  try:
+    registerRecordStoreBackendCheckout(repoRoot)
+  except CatchableError as err:
+    return (1, err.msg)
   let hook = effectivePrePushHook(identity, repoRoot)
   if hook.kind == ephReproIncompatible:
     return (1, hook.diagnostic & "; run '" & publicCliImagePath() &
@@ -53842,7 +54215,7 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
     let message = "Publish " & $stagedLocks.len & " workspace lock " & plural
     let commitRes = gitRunPlainEnv(identity,
       @["-C", manifestRepoRoot, "commit", "--quiet", "-m", message, "--"] &
-        stagedLocks, internalContext = InternalLockCommitContext)
+        stagedLocks, internalContext = backendLockCommitContext(manifestRepoRoot))
     if commitRes.code != 0:
       result.outcome = lpoFailed
       result.diagnostic = "git commit failed: " & commitRes.output.strip()
@@ -54275,7 +54648,7 @@ proc applyLockRecordMigration*(identity: GitToolIdentity;
     @["-C", manifestRepoRoot, "commit", "--quiet", "-m",
       "Rebuild " & $deduped.len & " unpublished workspace lock " & plural &
         " at their canonical paths", "--"] & deduped,
-    internalContext = InternalLockCommitContext)
+    internalContext = backendLockCommitContext(manifestRepoRoot))
   if commitRes.code != 0:
     return (false, "git commit failed during the lock-record repair: " &
       commitRes.output.strip())
@@ -69088,6 +69461,142 @@ proc manifestBackendParticipates(parsed: CheckArgs; recordStoreRoot: string;
     return true
   false
 
+proc runRecordStorePrePushGuard(repoRoot, refsFile, remoteLocation: string): int =
+  ## CLI/hooks.md: a store guards published records, never sibling workspaces.
+  let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  let stream = parsePrePushRefStream(identity.binaryPath, repoRoot, refsFile)
+  proc query(args: openArray[string]):
+      tuple[code: int; output, diagnostic: string] =
+    # POSIX execCmdEx reads lines and appends newlines, corrupting ls-tree's
+    # NUL framing and filenames. Capture both streams in private files so the
+    # parser receives stdout's exact bytes, with diagnostics kept separate.
+    when defined(windows):
+      return gitRunPlainQuery(identity, args)
+    else:
+      var stdoutPath, stderrPath: string
+      try:
+        let stdoutFile = createTempFile("repro-record-query-", ".stdout")
+        stdoutPath = stdoutFile.path
+        stdoutFile.cfile.close()
+        let stderrFile = createTempFile("repro-record-query-", ".stderr")
+        stderrPath = stderrFile.path
+        stderrFile.cfile.close()
+        let command = shellCommand(@[identity.binaryPath] & @args) &
+          " >" & quoteShell(stdoutPath) & " 2>" & quoteShell(stderrPath)
+        let ran = execCmdEx(command, env = scrubbedGitRepositoryEnv())
+        result.code = ran.exitCode
+        result.output = readFile(stdoutPath)
+        result.diagnostic = readFile(stderrPath)
+      except CatchableError as err:
+        result.code = 1
+        result.diagnostic = "cannot capture Git query: " & err.msg
+      finally:
+        for path in [stdoutPath, stderrPath]:
+          if path.len > 0:
+            try: removeFile(path)
+            except CatchableError: discard
+  proc refuse(reason: string): int =
+    stderr.writeLine("repro hooks: immutable record-store push refused: " & redactUrlUserinfo(reason))
+    1
+  if not stream.ok: return refuse(stream.diagnostic)
+  proc zero(oid: string): bool =
+    oid.len > 0 and oid.allCharsInSet({'0'})
+  proc records(oid: string): tuple[ok: bool; entries: Table[string, string]; diagnostic: string] =
+    result.entries = initTable[string, string]()
+    if zero(oid):
+      result.ok = true
+      return
+    let tree = query(["--no-replace-objects", "-C", repoRoot, "ls-tree", "-r", "-t", "-z", oid & "^{tree}", "--", "locks"])
+    if tree.code != 0:
+      # A tag of a blob has no tree and therefore no records; every other
+      # unreadable object is a refusal, not an empty published snapshot.
+      let kind = query(["--no-replace-objects", "-C", repoRoot, "cat-file", "-t", oid & "^{}"])
+      if kind.code == 0 and kind.output.strip() == "blob":
+        result.ok = true
+        return
+      result.diagnostic = "cannot read published tree " & oid & ": " & tree.diagnostic.strip()
+      return
+    # Include directory entries as well as leaves: duplicate directories can
+    # shadow disjoint child sets without producing duplicate flattened files.
+    var seenNamespacePaths = initHashSet[string]()
+    for entry in tree.output.split('\0'):
+      if entry.len == 0: continue
+      let tab = entry.find('\t')
+      if tab <= 0:
+        result.diagnostic = "malformed Git tree response for " & oid
+        return
+      let path = entry[tab + 1 .. ^1]
+      let namespaceFields = entry[0 ..< tab].splitWhitespace()
+      if path == "locks" or path.startsWith("locks/"):
+        if path in seenNamespacePaths:
+          result.diagnostic = "duplicate lock namespace path " & path & " at " & oid
+          return
+        seenNamespacePaths.incl(path)
+        if namespaceFields.len != 3 or namespaceFields[1] notin ["blob", "tree"] or
+            namespaceFields[0] == "120000" or
+            (path == "locks" and namespaceFields[1] != "tree"):
+          result.diagnostic = "lock namespace entry " & path & " at " & oid &
+            " is not a regular file or directory; remove symlink or submodule indirection"
+          return
+      if path.startsWith("locks/") and path.endsWith(".toml") and
+          namespaceFields[1] != "tree":
+        let objectEntry = entry[0 ..< tab]
+        let fields = objectEntry.splitWhitespace()
+        if fields.len != 3 or fields[1] != "blob" or
+            fields[0] notin ["100644", "100755"]:
+          result.diagnostic = "record " & path & " at " & oid &
+            " is not a regular file; restore a regular lock record"
+          return
+        result.entries[path] = objectEntry
+    result.ok = true
+  let advertised = query(["--no-replace-objects", "-C", repoRoot, "ls-remote", "--refs", "--", remoteLocation])
+  if advertised.code != 0: return refuse("cannot read destination refs: " & advertised.diagnostic.strip())
+  var remoteRefs = initTable[string, string]()
+  for line in advertised.output.splitLines():
+    if line.len == 0: continue
+    let fields = line.splitWhitespace()
+    if fields.len != 2: return refuse("malformed destination refs response")
+    remoteRefs[fields[1]] = fields[0].toLowerAscii()
+  var destinations = initHashSet[string]()
+  for update in stream.updates:
+    if update.remoteRef in destinations:
+      return refuse("duplicate destination ref " & update.remoteRef)
+    destinations.incl(update.remoteRef)
+    let observed = remoteRefs.getOrDefault(update.remoteRef, repeat('0', stream.oidLength))
+    if observed != update.remoteOid:
+      return refuse("destination ref " & update.remoteRef & " changed since Git advertised " & update.remoteOid & "; retry the push")
+  var snapshots = initTable[string, Table[string, string]]()
+  var published = initTable[string, string]()
+  var fetched = initHashSet[string]()
+  for refName, oid in remoteRefs:
+    if oid notin fetched:
+      # Import objects only: never move the operator's refs, tracking refs or
+      # FETCH_HEAD, and never touch a workspace shared bare cache.
+      let fetch = gitRunPlain(identity, ["--no-replace-objects", "-C", repoRoot, "-c", "gc.auto=0", "fetch", "--no-write-fetch-head", "--no-tags", "--no-auto-maintenance", "--", remoteLocation, oid])
+      if fetch.code != 0: return refuse("cannot read destination objects at " & oid & ": " & fetch.output.strip())
+      fetched.incl(oid)
+    let snapshot = records(oid)
+    if not snapshot.ok: return refuse(snapshot.diagnostic)
+    snapshots[refName] = snapshot.entries
+    for path, objectId in snapshot.entries:
+      if published.hasKey(path) and published[path] != objectId:
+        return refuse("destination already contains conflicting published record " & path)
+      published[path] = objectId
+  for update in stream.updates:
+    let proposed = records(update.localOid)
+    if not proposed.ok: return refuse(proposed.diagnostic)
+    if snapshots.hasKey(update.remoteRef):
+      for path, objectId in snapshots[update.remoteRef]:
+        if not proposed.entries.hasKey(path):
+          return refuse(update.remoteRef & " removes published record " & path)
+        if proposed.entries[path] != objectId:
+          return refuse(update.remoteRef & " changes published record " & path)
+    for path, objectId in proposed.entries:
+      if published.hasKey(path) and published[path] != objectId:
+        return refuse(update.remoteRef & " changes published record " & path)
+      published[path] = objectId
+  0
+
 proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
                       hookRemoteLocation = ""): int =
   ## ``repro check --mode=pre-push [--workspace-root=PATH]
@@ -69125,6 +69634,10 @@ proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
         stderr.writeLine("repro check: malformed pre-push protocol: " &
           refs.diagnostic)
         return 2
+    if isRecordStoreCheckout(if parsed.currentRepo.len > 0:
+        parsed.currentRepo else: getCurrentDir()):
+      stderr.writeLine("repro check: record store is not a workspace; pre-push workspace gate is a no-op")
+      return 0
     # RA-10: no-op outside an initialized workspace. A managed pre-push
     # hook may be installed under a half-bootstrapped or non-workspace
     # parent (a plain git repo, or a bare ``.repo/`` with no resolved
@@ -72215,7 +72728,7 @@ proc installedManagedHookContracts(repos: seq[HookRepoTarget]):
     if gitTopLevel(repo.repoPath).len == 0:
       continue
     let hooksDir = gitHooksDir(repo.repoPath)
-    for hookName in VcsHookNames:
+    for hookName in applicableVcsHookNames(repo.repoPath):
       let managed = managedHookPath(hooksDir, hookName)
       if not fileExists(extendedPath(managed)):
         continue
@@ -73172,7 +73685,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       if pathEntry.len > 0:
         pathUnsafe.add(pathEntry)
       let hooksDir = gitHooksDir(repo.repoPath)
-      for hookName in VcsHookNames:
+      for hookName in applicableVcsHookNames(repo.repoPath):
         let standard = hookPath(hooksDir, hookName)
         let managed = managedHookPath(hooksDir, hookName)
         # RETIRED: every place `ensureVcsHookDetailed` removes a retired

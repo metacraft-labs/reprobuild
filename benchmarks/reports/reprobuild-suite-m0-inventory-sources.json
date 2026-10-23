@@ -10845,7 +10845,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -33039,7 +33039,7 @@
         "repro_workspace_manifests"
       ],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_config_layer_determines_tier_not_per_repo_field.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -35105,7 +35105,7 @@
         "repro_workspace_manifests"
       ],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_gate_consumes_published_evidence_for_unclonable_private_repo.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -35658,13 +35658,14 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_cli_support",
         "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_hooks_ensure_removes_retired_repo_workspaces_dispatcher.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 11,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -35694,6 +35695,7 @@
       "localDependencyShape": [
         "repro_cli_support",
         "repro_core",
+        "repro_lock_store",
         "repro_test_support",
         "repro_workspace_manifests"
       ],
@@ -35701,7 +35703,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_hooks_noop_outside_initialized_workspace.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -37759,7 +37761,7 @@
         "repro_lock_store"
       ],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_lock_store_backend_roundtrip_each_backend.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -38252,7 +38254,7 @@
         "repro_test_support"
       ],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_manifest_store_ops_routed_through_interface_not_literals.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -39675,7 +39677,7 @@
         "repro_test_support"
       ],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
@@ -39694,7 +39696,7 @@
         "repro_workspace_manifests"
       ],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_pre_push_consumes_evidence_and_applies_tier_unreachable_policy.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -40526,7 +40528,7 @@
         "repro_workspace_manifests"
       ],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_public_committed_team_manifest_personal_db_mixed.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
@@ -43379,7 +43381,7 @@
         "repro_workspace_manifests"
       ],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_team_repo_record_only_no_checkout.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
@@ -45446,7 +45448,7 @@
         "repro_workspace_manifests"
       ],
       "owner": "tests/integration",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/integration/t_workspace_routes_repo_sets_to_distinct_backends.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
