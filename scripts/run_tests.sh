@@ -50,6 +50,12 @@ fi
 # only ever deletes the scratch of the checkout that owns it.
 test_tmp_slot="$(printf '%s' "${repo_root}" | cksum | cut -d' ' -f1)"
 test_tmp_root="${test_tmp_parent%/}/${test_tmp_slot}"
+# Tests leave read-only trees behind on purpose (immutable store prefixes,
+# install mirrors). Make the old scratch writable first, or `rm -rf` refuses
+# and the run ends before it starts.
+if [[ -d "${test_tmp_root}" ]]; then
+  chmod -R u+w "${test_tmp_root}" 2>/dev/null || true
+fi
 rm -rf "${test_tmp_root}"
 mkdir -p "${test_tmp_root}"
 export TMPDIR="${test_tmp_root}" TMP="${test_tmp_root}" TEMP="${test_tmp_root}"
