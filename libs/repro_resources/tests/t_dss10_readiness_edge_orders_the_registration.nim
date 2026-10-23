@@ -65,7 +65,8 @@
 ## filesystem, the real `reconcileResources` / `topoOrder`, the real
 ## providers registered by `readiness_edge.nim`'s module init.
 
-import std/[algorithm, json, os, osproc, strutils, tables, unittest]
+import std/[algorithm, json, monotimes, os, osproc, strutils, tables, times,
+  unittest]
 
 import repro_resources
 import repro_resources/readiness_edge
@@ -98,16 +99,22 @@ proc drop(s: Scratch) =
   try: removeDir(s.root)
   except CatchableError: discard
 
-proc installSink(s: Scratch) =
+proc installSink(s: Scratch; arrivals: ref Table[string, MonoTime] = nil) =
   ## The real append-only writer, in the shape
   ## `appendSessionEvent` writes: one JSON object per line, in append
   ## order. `repro_resources` cannot import `repro_cli_support` (the
   ## dependency runs the other way), so the writer is spelled here rather
   ## than imported — the SHAPE is what the assertions read, and it is the
   ## same shape.
+  ##
+  ## `arrivals`, when given, records the moment each event kind FIRST reaches
+  ## the sink, read on entry, before the write. It is used for one bound
+  ## only (see the ordering case), never for order.
   let path = s.eventLog
   setReadinessEdgeEventSink(
     proc (kind, service, detail: string) {.closure.} =
+      if arrivals != nil and kind notin arrivals[]:
+        arrivals[][kind] = getMonoTime()
       let line = $(%*{"kind": kind, "service": service, "detail": detail})
       if fileExists(path): writeFile(path, readFile(path) & line & "\n")
       else: writeFile(path, line & "\n"))
@@ -314,12 +321,16 @@ suite "D-SS10 — completion is the DECLARED READINESS, not materialisation":
   test "the registration reconciles after the probe succeeds, not after the child exists":
     let s = newScratch("order")
     defer: s.drop()
-    s.installSink()
+    var arrivals = new(Table[string, MonoTime])
+    s.installSink(arrivals)
     var ran = new(seq[string])
     ran[] = @[]
     setServiceRegistrar(registrarRecording(ran))
     defer: clearReadinessEdgeCollaborators()
 
+    # Taken BEFORE the child exists, so the marker cannot appear earlier than
+    # `spawned + MarkerDelaySeconds`.
+    let spawned = getMonoTime()
     let child = s.startDelayedMarkerChild()
     # The instance EXISTS. This is the moment the daemon answers
     # `Materialise ok`, and the whole point of the case is that the marker
@@ -353,6 +364,15 @@ suite "D-SS10 — completion is the DECLARED READINESS, not materialisation":
     # once, found the marker and carried on would satisfy the order above
     # on a run where the child happened to win the race. `waitedMs` is
     # the service node's own report of how long it blocked.
+    #
+    # THE BOUND IS MEASURED FROM WHEN THE WAIT BEGAN, NOT FROM THE SPAWN.
+    # The marker cannot exist before `spawned + MarkerDelaySeconds`, and
+    # the node starts its clock no later than `waiting` reaches the sink.
+    # Everything between the spawn and that event (the materialised line,
+    # plan expansion, `observe`) is time the node did not have to wait, and
+    # on a loaded host it is hundreds of milliseconds. A bound that ignores
+    # it (`MarkerDelaySeconds * 1000 - poll interval`, as this case first
+    # said) fails a correct implementation for reasons of scheduling alone.
     let readyDetail = s.eventDetail("service.readiness.satisfied")
     checkpoint("readiness detail: " & readyDetail)
     check readyDetail.contains("waitedMs=")
@@ -360,7 +380,16 @@ suite "D-SS10 — completion is the DECLARED READINESS, not materialisation":
     for part in readyDetail.split(' '):
       if part.startsWith("waitedMs="):
         waitedMs = parseInt(part[len("waitedMs=") .. ^1])
-    check waitedMs >= MarkerDelaySeconds * 1000 - ReadinessPollIntervalMs
+    check "service.readiness.waiting" in arrivals[]
+    let lagMs = int(inMilliseconds(
+      arrivals[].getOrDefault("service.readiness.waiting", spawned) - spawned))
+    # `- 1`: both millisecond figures are truncated, so they may disagree by
+    # one even when the real durations satisfy the bound exactly.
+    let floorMs = max(MarkerDelaySeconds * 1000 - lagMs - 1, 0)
+    checkpoint("spawn-to-waiting lag: " & $lagMs & " ms; waitedMs floor: " &
+      $floorMs & " ms")
+    check waitedMs >= floorMs
+    check waitedMs > 0
 
   test "an already-satisfied probe is the fast path and waits for nothing":
     # The positive control for the case above: the wait is a consequence

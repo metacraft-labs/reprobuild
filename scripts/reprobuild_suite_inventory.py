@@ -19,6 +19,7 @@ import argparse
 import contextlib
 import ast
 import dataclasses
+import functools
 import hashlib
 import json
 import os
@@ -1879,6 +1880,23 @@ def nim_identifier_matches(token: NimToken, expected: str) -> bool:
 
 
 def nim_tokens(text: str) -> list[NimToken]:
+    """Return the tokens of ``text``; see ``_lex_nim_tokens``.
+
+    The suite inventory and its test module lex every test source once per
+    question they ask of it, and the same process asks many questions. The
+    tokens are a pure function of the text and ``NimToken`` is frozen, so
+    each distinct text is lexed once; callers get their own list.
+    """
+
+    return list(_lex_nim_tokens_cached(text))
+
+
+@functools.lru_cache(maxsize=None)
+def _lex_nim_tokens_cached(text: str) -> tuple[NimToken, ...]:
+    return tuple(_lex_nim_tokens(text))
+
+
+def _lex_nim_tokens(text: str) -> list[NimToken]:
     """Lex enough Nim syntax to find command-style test declarations.
 
     The inventory must not mistake fixture source, shell snippets, or comments

@@ -1072,11 +1072,25 @@ const
   DefaultLeasePidsMax* = 4_096
 
 proc writeSmall(path, text: string): bool =
-  try:
-    writeFile(path, text)
-    true
-  except CatchableError:
-    false
+  ## One write(2) of `text` to a cgroup control file, reporting whether the
+  ## KERNEL accepted it. The kernel refuses a cgroup write in write(2) itself
+  ## (EBUSY enabling a controller in a cgroup that has processes, EACCES or
+  ## EINVAL moving a process); `writeFile` buffers the text and its `close`
+  ## discards fclose's error, so it reported every refused write as done and
+  ## a cgroup that is not delegated passed for one that is.
+  when defined(linux):
+    let fd = posix.open(path.cstring, O_WRONLY or O_CLOEXEC)
+    if fd < 0:
+      return false
+    let n = posix.write(fd, text.cstring, text.len)
+    let closed = posix.close(fd)
+    n == text.len and closed == 0
+  else:
+    try:
+      writeFile(path, text)
+      true
+    except CatchableError:
+      false
 
 proc prepareLeaseCgroups*(memoryMax = DefaultLeaseMemoryMax;
                           pidsMax = DefaultLeasePidsMax): LeaseCgroups =
@@ -1131,6 +1145,9 @@ proc leaseCgroupFor*(cg: LeaseCgroups; leaseId: string): tuple[ok: bool;
     return (false, "")
   if not writeSmall(path / "memory.max", $cg.memoryMax) or
       not writeSmall(path / "pids.max", $cg.pidsMax):
+    # Not left behind, one empty cgroup per refused lease.
+    when defined(linux):
+      discard posix.rmdir(path.cstring)
     return (false, "")
   discard writeSmall(path / "memory.swap.max", "0")
   (true, path)

@@ -17,7 +17,7 @@
 ##
 ## ## What is asserted (Windows NTFS here; the fixtures are portable)
 ##
-##   * a same-size rewrite with the mtime put back (``setLastModificationTime``)
+##   * a same-size rewrite with the mtime put back to the nanosecond (``putMtimeBack``)
 ##     is re-resolved warm and cold -- through the NTFS change time, with the
 ##     recorded evidence shown NOT racy, so the racy-window rule is not what
 ##     caught it; a different-size rewrite likewise;
@@ -141,18 +141,46 @@ proc resolveCold(f: Fixture): tuple[identity: PathOnlyBuildIdentity;
 proc digestOf(identity: PathOnlyBuildIdentity): string =
   identity.profiles[0].resolvedExecutableDigest
 
+when defined(posix):
+  from std/posix import Timespec
+  # Nim's ``setLastModificationTime`` goes through ``utimes(2)``, whose
+  # ``timeval`` carries MICROseconds: it truncates the sub-microsecond part of
+  # the time it is asked to put back. The evidence these cases compare is
+  # ``st_mtim`` to the nanosecond, so "the mtime put back" has to be put back
+  # to the nanosecond or every precondition below is false before the product
+  # is even asked (``…038796`` restored as ``…038000``). ``utimensat`` is the
+  # call that takes a ``timespec``; Nim's ``std/posix`` does not expose it.
+  proc utimensatRaw(dirfd: cint; path: cstring; times: ptr Timespec;
+                    flags: cint): cint
+    {.importc: "utimensat", header: "<sys/stat.h>".}
+  var atFdCwd {.importc: "AT_FDCWD", header: "<fcntl.h>".}: cint
+  var utimeOmit {.importc: "UTIME_OMIT", header: "<sys/stat.h>".}: clong
+
+proc putMtimeBack(path: string; mtime: Time) =
+  ## Restore ``mtime`` EXACTLY. Windows' last-write time is already exact
+  ## through ``setLastModificationTime`` (100 ns ticks both ways).
+  when defined(posix):
+    var times: array[2, Timespec]
+    times[0].tv_nsec = utimeOmit              # leave the access time alone
+    times[1].tv_sec = typeof(times[1].tv_sec)(mtime.toUnix)
+    times[1].tv_nsec = typeof(times[1].tv_nsec)(mtime.nanosecond)
+    if utimensatRaw(atFdCwd, path.cstring, addr times[0], 0) != 0:
+      raiseOSError(osLastError(), path)
+  else:
+    setLastModificationTime(path, mtime)
+
 proc rewriteKeepingMtime(path, bytes: string) =
   ## In place (same file), then the mtime put back.
   let mtime = getLastModificationTime(path)
   writeExe(path, bytes)
-  setLastModificationTime(path, mtime)
+  putMtimeBack(path, mtime)
 
 proc replaceKeepingMtime(path, bytes: string) =
   ## Deleted and recreated (a new file), then the old mtime put on it.
   let mtime = getLastModificationTime(path)
   removeFile(path)
   writeExe(path, bytes)
-  setLastModificationTime(path, mtime)
+  putMtimeBack(path, mtime)
 
 template checkRewriteServed(before, after: PathOnlyBuildIdentity;
                             bytes: string) =

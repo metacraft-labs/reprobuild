@@ -129,3 +129,45 @@ package dssj2Stack:
         relyingParties = append(Dssj2IdpMember)),
       edge = dssj2Owner.edge.proxy.shared(
         sites = append(Dssj2ProxyMember)))
+
+var
+  Dssj2SwapHandles* = false
+  Dssj2IncludeGlobal* = true
+  Dssj2ResolveRetained* = true
+  dssj2RetainedHandle: SharedServiceHandle[LiftedServiceHandle]
+
+package dssj2Switching:
+  ## Ordinary Nim expressions can choose which real handle an activity
+  ## receives. Re-evaluating the recipe must replace that ownership.
+  uses:
+    "dssj2Owner"
+  devEnv:
+    activity first(sso: SharedServiceHandle[LiftedServiceHandle]):
+      discard
+    activity second(sso: SharedServiceHandle[LiftedServiceHandle]):
+      discard
+    let idp = dssj2Owner.sso.idp.shared()
+    let proxy = dssj2Owner.edge.proxy.shared()
+    enable first(sso = (if Dssj2SwapHandles: proxy else: idp))
+    enable second(sso = (if Dssj2SwapHandles: idp else: proxy))
+
+package dssj2OptionalGlobal:
+  uses:
+    "dssj2Owner"
+  devEnv:
+    activity ordinary():
+      discard
+    if Dssj2IncludeGlobal:
+      discard dssj2Owner.sso.idp.shared()
+    enable ordinary
+
+package dssj2Retained:
+  uses:
+    "dssj2Owner"
+  devEnv:
+    activity stack(sso: SharedServiceHandle[LiftedServiceHandle]):
+      discard
+    if Dssj2ResolveRetained:
+      dssj2RetainedHandle = dssj2Owner.sso.idp.shared(
+        relyingParties = append(Dssj2IdpMember))
+    enable stack(sso = dssj2RetainedHandle)

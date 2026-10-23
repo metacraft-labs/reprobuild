@@ -101,6 +101,8 @@ import evidence as workspaceVcsEvidence
 import repro_workspace_manifests
 import git_tool
 import git_actions
+import git_fast_forward
+import interrupted_fast_forward
 import shared_clones
 import sibling_ignores
 # Declared-Repository-Renames.md — the git/filesystem half of relocating a
@@ -42324,6 +42326,11 @@ proc renderSyncTextLines*(report: WorkspaceSyncReport;
       line.add(" → " & entry.executionStatus)
     if entry.refusalReason.len > 0:
       line.add(" (" & entry.refusalReason & ")")
+    elif entry.executionStatus in ["failed", "refused"] and
+        entry.executionDiagnostic.len > 0:
+      # A failed checkout can change the worktree before returning non-zero.
+      # Its Git error and restoration result belong in the default row.
+      line.add(" — " & entry.executionDiagnostic)
     elif entry.message.len > 0:
       line.add(" — " & entry.message)
     result.add(line)
@@ -47162,6 +47169,11 @@ proc observeRepoForSync(identity: GitToolIdentity;
     result.remoteBranchTip = revParse(identity, repoPath,
       "refs/remotes/" & rName & "/" & result.currentBranch)
 
+  if not result.isClean and result.currentBranch.len > 0 and
+      isInterruptedFastForward(identity, repoPath, result.headSha,
+        result.remoteBranchTip):
+    result.interruptedFastForwardTarget = result.remoteBranchTip
+
   # Where does the manifest's revision actually point in this clone?
   # SHA pin → itself; branch pin → ``remoteName/<branch>`` (matches M9's
   # ``expectedBranchTip``).
@@ -47420,7 +47432,8 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
     # the one `CLI/sync.md` already defines; relocation adds no exit code.
     if decision.syncCase == scRelocationFailed:
       return (false, noScheduledAction(), "failed", decision.refusalReason)
-    if decision.syncCase in {scDirty, scLocallyUnpublished, scForcePushRebase,
+    if decision.syncCase in {scDirty, scInterruptedFastForward,
+                             scLocallyUnpublished, scForcePushRebase,
                              scFetchFailed, scRelocationRefused}:
       # Named-Lock-Files §7.2. `hasAction: false` means the `action` field
       # is never read; the identity is supplied because the type requires it,
@@ -49422,6 +49435,8 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
           stderr.writeLine("workspace sync: [" &
             (if isClone: "cloned" else: "updated") & "] " &
             resolved.repos[repoIdx].path)
+      elif outcome.reason == "merge-ff-refused":
+        checkoutStatus[repoIdx] = ("refused", outcome.stderr)
       elif isClone:
         # RA-23: cloning a newly-declared dependency failed (auth /
         # unreadable / private repo a teammate added). Report + SKIP it —
@@ -50018,7 +50033,8 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
         @["--no-optional-locks", "-C", repoAbs, "status", "--porcelain"]
       else:
         @["-C", repoAbs, "status", "--porcelain"]
-    obs.isClean = gitRunPlainQuery(identity, statusArgs).output.strip().len == 0
+    let statusResult = gitRunPlainQuery(identity, statusArgs)
+    obs.isClean = statusResult.code == 0 and statusResult.output.strip().len == 0
     if obs.roleBranch.len > 0:
       obs.roleTip = revParse(identity, repoAbs,
         "refs/remotes/" & gitRemoteNameFor(repo) & "/" & obs.roleBranch)
@@ -50027,6 +50043,9 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
         "--is-ancestor", obs.roleTip, obs.headSha]).code == 0
       obs.headInRole = gitRunPlain(identity, ["-C", repoAbs, "merge-base",
         "--is-ancestor", obs.headSha, obs.roleTip]).code == 0
+      if not obs.isClean and isInterruptedFastForward(identity, repoAbs,
+          obs.headSha, obs.roleTip):
+        obs.interruptedFastForwardTarget = obs.roleTip
       # Predict the integration WITHOUT touching the tree. Only meaningful for
       # the diverged-and-a-flavor-was-chosen case, so only asked there.
       if args.mainlineFlavor != msfFastForwardOnly and
@@ -50175,14 +50194,21 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
       if not args.dryRun:
         # Invariant 15 — Reprobuild drives this fast-forward, so the bookkeeping
         # hooks skip it; the run reports the final state itself.
-        let ff = gitRunPlainEnv(identity,
-          ["-C", repoAbs, "merge", "--ff-only", remoteRef],
-          internalContext = InternalDrivenOperationContext)
-        if ff.code != 0:
-          entry.outcome = "fast_forward_failed"
-          entry.diagnostic = "fast-forward to " & remoteRef & " failed: " &
-            ff.output.strip()
-          anyFailure = true
+        let ff = atomicFastForward(repoAbs, remoteRef,
+          proc(cmd: seq[string]; query: bool): FastForwardGitResult {.gcsafe.} =
+            if query:
+              let answer = gitRunSeparated(identity.binaryPath, cmd,
+                scrubbedGitRepositoryEnv(), exactStdout = true)
+              (answer.code, answer.output, answer.diagnostic)
+            else:
+              let answer = gitRunPlainEnv(identity, cmd,
+                internalContext = InternalDrivenOperationContext)
+              (answer.code, answer.output, answer.output))
+        if not ff.ok:
+          entry.outcome = if ff.refused: "fast_forward_refused" else: "fast_forward_failed"
+          entry.diagnostic = ff.diagnostic
+          if ff.refused: anyRefusal = true
+          else: anyFailure = true
         else:
           entry.headAfter = revParse(identity, repoAbs, "HEAD")
           if emitProgress:

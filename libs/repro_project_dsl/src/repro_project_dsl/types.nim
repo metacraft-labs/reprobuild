@@ -774,6 +774,10 @@ type
       ## selecting ANY one includes this resolution. An empty list denotes
       ## a recipe-global resolver with no activity parameter binding.
       ## Derived during lowering, then filtered before the provider wire.
+    requestedThisEvaluation*: bool
+      ## The resolver or its retained handle was encountered in the current
+      ## dev-env evaluation. A previous request's unbound row is not a
+      ## recipe-global resolver in this request. Local lowering state only.
     contributions*: seq[SharedContributionDef]
     sourceFile*: string
     sourceLine*: int

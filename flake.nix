@@ -1212,6 +1212,9 @@
                     # git checkout, which never drifts and so never fails.
                     # coreutils supplies neither `awk`, `sed`, nor `find`.
                     pkgs.gawk
+                    # The constructor regression generates real config.status
+                    # scripts, then runs them with a closed action PATH.
+                    pkgs.autoconf
                     pkgs.gnused
                     pkgs.findutils
                     pkgs.just

@@ -33,7 +33,10 @@ method createCheckout(b: SlowBackend; package, root: string): OpResult =
   OpResult(status: osCompleted)
 
 method runBuild(b: SlowBackend; ws: Workspace; op: Operation): OpResult =
-  let p = uncontrolledStartProcess("/bin/sleep", args = ["30"], options = {})
+  # `sleep` from PATH: a fixed `/bin/sleep` does not exist on every Linux
+  # (NixOS has no `/bin` beyond `/bin/sh`), and a child that never starts
+  # leaves the socket cases waiting for it forever.
+  let p = uncontrolledStartProcess(findExe("sleep"), args = ["30"], options = {})
   defer: p.close()
   b.childPid = p.processID
   b.childAlive = true

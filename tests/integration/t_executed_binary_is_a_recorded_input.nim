@@ -525,6 +525,22 @@ suite "the binary an action executes is a recorded input":
 # The tool UNDER a content-addressed root.
 # ---------------------------------------------------------------------------
 
+proc runsUnderShim(prog, args, shim: string): bool =
+  ## `prog args` exits 0 with the shim injected AND the loader said nothing.
+  ##
+  ## The exit status alone is not enough. A loader that cannot use an
+  ## injected library does not always refuse to start the program: glibc's
+  ## `ld.so` reports "object ... from LD_PRELOAD cannot be preloaded (wrong
+  ## ELF class: ELFCLASS64): ignored." and then runs it, UNMONITORED, with
+  ## status 0. Measured 2026-10-22: two i686 `bash-5.3` derivations appeared
+  ## in this host's `/nix/store`, a bare name scan picked one, and both
+  ## content-addressed cases failed for want of evidence the monitor never
+  ## had a chance to record. The probe commands print nothing themselves, so
+  ## any output under injection is the loader speaking.
+  let res = execCmdEx(InjectionVariableForHost & "=" & quoteShell(shim) &
+    " " & quoteShell(prog) & " " & args & " 2>&1")
+  res.exitCode == 0 and res.output.strip().len == 0
+
 proc contentAddressedShells(shim: string): seq[string] =
   ## Distinct `/nix/store/<hash>-bash-…` roots, each supplying a `bin/sh` this
   ## host can execute UNDER THE MONITOR. Up to two; fewer means the suite below
@@ -571,8 +587,7 @@ proc contentAddressedShells(shim: string): seq[string] =
       continue
     if execShellCmd(sh & " -c true >/dev/null 2>&1") != 0:
       continue
-    if execShellCmd(InjectionVariableForHost & "=" & shim & " " & sh &
-        " -c true >/dev/null 2>&1") != 0:
+    if not runsUnderShim(sh, "-c true", shim):
       continue
     roots.add(sh)
     if roots.len >= 2:
@@ -601,8 +616,7 @@ proc coreutilsPrograms(shim: string): seq[string] =
     var usable = true
     for prog in [cat, head]:
       if execShellCmd(prog & " /dev/null >/dev/null 2>&1") != 0 or
-          execShellCmd(InjectionVariableForHost & "=" & shim & " " & prog &
-            " /dev/null >/dev/null 2>&1") != 0:
+          not runsUnderShim(prog, "/dev/null", shim):
         usable = false
         break
     if usable:

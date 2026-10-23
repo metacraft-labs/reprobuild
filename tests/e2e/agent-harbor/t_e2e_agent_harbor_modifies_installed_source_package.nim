@@ -48,13 +48,19 @@ else:
       "workspace.create:greeter", "source.read:greeter",
       "source.write:greeter", "build.run:greeter", "test.run:greeter",
       "preview.run:greeter"])
+    let intent = f.host.captureIntent(f.consent, f.sid, "make greeter say v2")
+
+    # The suite runner runs every case in a process of its own, so a case
+    # must not rely on a workspace, edit or preview an earlier case left
+    # behind (Test-Suite-Architecture-Guidelines, "Every case MUST pass when
+    # run alone"). Each step below runs at most once per process, on first
+    # use: in a whole-binary run the cases share it in order, and a case run
+    # alone performs the steps it builds on first.
     var ws = ""
+    var edited, previewed = false
 
-    test "the fixture installed from source into the store":
-      check f.installedRel.len > 0
-      check exeOutput(f.installedExe) == "hello from greeter v1"
-
-    test "the running binary is located and checked out":
+    proc locateAndCheckOut(): seq[OpResult] =
+      ## Resolve the running installed greeter and check it out; sets `ws`.
       # The user is running the installed greeter.
       let running = startProcess(f.installedExe, args = ["serve"], options = {})
       defer:
@@ -63,22 +69,60 @@ else:
         running.close()
       f.backend.activeAppPath = expandSymlink("/proc/" & $running.processID &
                                               "/exe")
-      let intent = f.host.captureIntent(f.consent, f.sid,
+      let located = f.host.captureIntent(f.consent, f.sid,
         "make greeter say v2", @[parseGrant("context.active-app")])
-      let rs = f.runPlan(intent, @[op(okOwnershipResolve, ActiveAppTarget),
-                                   op(okCheckoutCreate, "greeter")],
+      result = f.runPlan(located, @[op(okOwnershipResolve, ActiveAppTarget),
+                                    op(okCheckoutCreate, "greeter")],
                          @["context.active-app", "workspace.create:greeter"])
+      if result.len == 2 and result[1].status == osCompleted:
+        ws = result[1].detail
+
+    proc checkedOut(): string =
+      if ws.len == 0:
+        let rs = locateAndCheckOut()
+        doAssert ws.len > 0, "checking out greeter failed: " &
+          rs.mapIt(it.detail & "\n" & it.output).join("\n")
+      ws
+
+    proc editApplied() =
+      ## The v2 edit with its updated test expectation, built.
+      if edited: return
+      discard checkedOut()
+      let rs = f.runPlan(intent,
+        @[op(okSourceWrite, ws, {"path": "greeter/src/main.c",
+                                 "content": greeterV2}),
+          op(okSourceWrite, ws, {"path": "greeter/tests/expected.txt",
+                                 "content": "hello from greeter v2\n"}),
+          op(okBuildRun, ws, {"target": InstallTarget})],
+        @["source.write:greeter", "build.run:greeter"])
+      doAssert rs.allIt(it.status == osCompleted), "applying the edit failed: " &
+        rs.mapIt(it.detail & "\n" & it.output).join("\n")
+      edited = true
+
+    proc previewAndDiff(): seq[OpResult] =
+      ## Preview the edited greeter and diff the workspace.
+      editApplied()
+      result = f.runPlan(intent,
+        @[op(okPreviewStart, ws, {"executable": "usr/bin/greeter"}),
+          op(okSourceDiff, ws)],
+        @["preview.run:greeter", "source.read:greeter"])
+      previewed = true
+
+    test "the fixture installed from source into the store":
+      check f.installedRel.len > 0
+      check exeOutput(f.installedExe) == "hello from greeter v1"
+
+    test "the running binary is located and checked out":
+      let rs = locateAndCheckOut()
       check rs.mapIt(it.status) == @[osCompleted, osCompleted]
       checkpoint rs[0].output
       check "package=greeter\n" in rs[0].output
       check "prefix-path=" & f.store / f.installedRel & "\n" in rs[0].output
       check "recipe-tree=" & f.installedRecipeTree & "\n" in rs[0].output
-      ws = rs[1].detail
       check f.host.workspaces.hasKey(ws)
 
-    let intent = f.host.captureIntent(f.consent, f.sid, "make greeter say v2")
-
     test "the unmodified checkout rebuilds to the installed output":
+      discard checkedOut()
       let rs = f.runPlan(intent, @[op(okBuildRun, ws, {"target": InstallTarget})],
                          @["build.run:greeter"])
       checkpoint rs[0].output
@@ -86,6 +130,7 @@ else:
       check rs[0].detail == f.installedRel
 
     test "a build the user cancels stops, and the next build is unaffected":
+      discard checkedOut()
       # The user presses cancel once `repro build` has run for a moment (or
       # has printed something). The pump is where the socket server would
       # deliver the consent surface's `plan.cancel`.
@@ -121,6 +166,7 @@ else:
       check again[0].detail.len > 0 and again[0].detail != f.installedRel
 
     test "an edit with a stale test fails the test, then passes":
+      discard checkedOut()
       let edit = f.runPlan(intent,
         @[op(okSourceWrite, ws, {"path": "greeter/src/main.c",
                                  "content": greeterV2}),
@@ -138,12 +184,12 @@ else:
         @["source.write:greeter", "test.run:greeter"])
       checkpoint fixed[^1].output
       check fixed.mapIt(it.status) == @[osCompleted, osCompleted]
+      # The v2 edit, its expectation and its build are in place now.
+      edited = fixed.allIt(it.status == osCompleted) and
+        edit[1].status == osCompleted
 
     test "the preview runs the change in isolation and the diff is the edit":
-      let rs = f.runPlan(intent,
-        @[op(okPreviewStart, ws, {"executable": "usr/bin/greeter"}),
-          op(okSourceDiff, ws)],
-        @["preview.run:greeter", "source.read:greeter"])
+      let rs = previewAndDiff()
       checkpoint rs[0].detail & "\n" & rs[0].output
       check rs[0].status == osCompleted
       check rs[0].output.strip == "hello from greeter v2"
@@ -156,6 +202,8 @@ else:
       check d.count("diff --git") == 2
 
     test "nothing installed changed":
+      if not previewed:
+        discard previewAndDiff()
       check exeOutput(f.installedExe) == "hello from greeter v1"
       check readRealizationInfoFile(f.catalog, "greeter").storeRelativePath ==
         f.installedRel

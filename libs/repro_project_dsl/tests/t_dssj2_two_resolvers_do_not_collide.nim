@@ -101,6 +101,42 @@ proc serviceDefFor(name: string): DslServiceDef =
       return svc
   raise newException(ValueError, "no registered service named " & name)
 
+suite "shared resolver ownership belongs to one dev-env evaluation":
+  test "switching handle arguments replaces the previous ownership":
+    let pkg = pkgDef("dssj2Switching")
+    defer: Dssj2SwapHandles = false
+    for swapped in [false, true, false]:
+      Dssj2SwapHandles = swapped
+      let env = buildPackageDevEnv(pkg, devEnvRequest(pkg, "first"),
+        devEnvDssj2SwitchingPackage)
+      let artifact = decodeDevEnvArtifact(encodeDevEnvArtifact(
+        artifactFromDevEnvResult(env)))
+      var services: seq[string] = @[]
+      for resolution in artifact.sharedResolutions:
+        services.add(resolution.serviceName)
+      check services == @[(if swapped: "proxy" else: "idp")]
+
+  test "a resolver absent from this evaluation is not a global resolver":
+    let pkg = pkgDef("dssj2OptionalGlobal")
+    defer: Dssj2IncludeGlobal = true
+    for included in [true, false, true]:
+      Dssj2IncludeGlobal = included
+      let env = buildPackageDevEnv(pkg, devEnvRequest(pkg, "ordinary"),
+        devEnvDssj2OptionalGlobalPackage)
+      check env.sharedResolutions.len == (if included: 1 else: 0)
+
+  test "binding a retained handle preserves its resolution and contributions":
+    let pkg = pkgDef("dssj2Retained")
+    defer: Dssj2ResolveRetained = true
+    for resolveAgain in [true, false, false]:
+      Dssj2ResolveRetained = resolveAgain
+      let env = buildPackageDevEnv(pkg, devEnvRequest(pkg, "stack"),
+        devEnvDssj2RetainedPackage)
+      check env.sharedResolutions.len == 1
+      if env.sharedResolutions.len == 1:
+        check env.sharedResolutions[0].serviceName == "idp"
+        check env.sharedResolutions[0].contributionMembers == @[Dssj2IdpMember]
+
 suite "J-2: ONE recipe, TWO resolvers, and both are recorded":
 
   test "the consumer's single `enable` records TWO resolutions":

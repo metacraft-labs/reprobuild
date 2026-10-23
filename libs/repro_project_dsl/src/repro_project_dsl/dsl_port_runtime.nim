@@ -995,6 +995,16 @@ proc registeredSharedServiceResolutions*(): seq[SharedServiceResolution] =
   ## The resolutions recorded so far, in call order.
   dslPortSharedResolutions
 
+proc beginSharedResolutionEvaluation*(packageName: string) =
+  ## Ownership describes this evaluation, never the union of earlier
+  ## requests. Keep the declaration/contribution records so a recipe can
+  ## retain a handle; resolving it again or passing it to an activity marks
+  ## it requested below. Rows not encountered this time stay inactive.
+  for resolution in dslPortSharedResolutions.mitems:
+    if resolution.consumerPackage == packageName:
+      resolution.consumerActivities.setLen(0)
+      resolution.requestedThisEvaluation = false
+
 proc bindSharedResolutionActivity*[T](value: T; activityName: string) =
   ## Ordinary activity parameters carry no shared-service resolution.
   discard
@@ -1010,6 +1020,7 @@ proc bindSharedResolutionActivity*[T](value: SharedServiceHandle[T];
     if resolution.consumerPackage == value.consumerPackage and
         resolution.declaration.ownerPackage == value.ownerPackage and
         resolution.declaration.serviceName == value.serviceName:
+      resolution.requestedThisEvaluation = true
       if activityName notin resolution.consumerActivities:
         resolution.consumerActivities.add(activityName)
       return
@@ -1119,14 +1130,16 @@ proc resolveSharedService*[T](declaration: SharedServiceDeclarationDef;
         "point the instance does not declare is REFUSED, never dropped.")
   let row = SharedServiceResolution(
     declaration: declaration, consumerPackage: consumerPackage,
+    requestedThisEvaluation: true,
     contributions: contributions,
     sourceFile: sourceFile, sourceLine: sourceLine)
-  for existing in dslPortSharedResolutions:
+  for existing in dslPortSharedResolutions.mitems:
     if existing.declaration.ownerPackage != declaration.ownerPackage or
        existing.declaration.serviceName != declaration.serviceName or
        existing.consumerPackage != consumerPackage:
       continue
     if sharedResolutionsEqual(existing, row):
+      existing.requestedThisEvaluation = true
       return SharedServiceHandle[T](
         ownerPackage: declaration.ownerPackage,
         serviceName: declaration.serviceName,

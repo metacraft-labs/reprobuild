@@ -1,4 +1,5 @@
-import std/[json, os, osproc, streams, strutils, tempfiles, times, unittest]
+import std/[json, monotimes, os, osproc, streams, strutils, tempfiles, times,
+  unittest]
 
 import repro_test_support
 
@@ -133,6 +134,9 @@ proc writeProject(path, packageName, actionId, helperPath, stampPath, gatePath,
     "        outputs = @[" & nimString(outputRel) & "],\n" &
     "        cacheable = false)\n")
 
+const DaemonStartDeadlineMs = 30_000
+  ## How long a freshly started runquotad may take to bind its socket.
+
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string; cli: string] =
   let daemonBin = requireRunQuotaDaemonBin(repoRoot)
@@ -150,12 +154,33 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     "--no-write-stats"
   ], options = {poUsePath, poStdErrToStdOut})
   putEnv("RUNQUOTA_SOCKET", socketPath)
-  for _ in 0 ..< 200:
+  # The deadline is for a daemon that is starting, on a host that may be
+  # running a full suite beside this case. Five seconds was not enough there
+  # once (full run 37, eight cases in parallel at a load average above 100),
+  # and the case then said only that the socket "did not appear". A daemon
+  # that has EXITED is a different failure and is reported at once, with its
+  # status and output, rather than waited out.
+  let deadline = getMonoTime() + initDuration(milliseconds =
+    DaemonStartDeadlineMs)
+  while getMonoTime() < deadline:
     if pathExists(socketPath):
       return (process: daemon, socket: socketPath, cli: cliBin)
+    if not daemon.running:
+      let code = daemon.peekExitCode()
+      let output =
+        if daemon.outputStream != nil: daemon.outputStream.readAll() else: ""
+      daemon.close()
+      raise newException(OSError, "runquotad exited with status " & $code &
+        " before its socket appeared (" & daemonBin & "): " & output)
     sleep(25)
   daemon.terminate()
-  raise newException(OSError, "runquotad socket did not appear")
+  discard daemon.waitForExit()
+  let output =
+    if daemon.outputStream != nil: daemon.outputStream.readAll() else: ""
+  daemon.close()
+  raise newException(OSError, "runquotad socket did not appear within " &
+    $DaemonStartDeadlineMs & " ms (" & daemonBin & "); daemon output: " &
+    output)
 
 proc runQuotaJson(cliPath: string; args: openArray[string]): JsonNode =
   let res = runShell(shellCommand(@[cliPath] & @args))

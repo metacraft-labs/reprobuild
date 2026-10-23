@@ -490,7 +490,8 @@ when defined(reproProviderMode):
     ## is ordinal 0 and is the one operation a consumer may not use, so a
     ## dropped ordinal would decode to a destructive contribution.
     for resolution in registeredSharedServiceResolutions():
-      if resolution.consumerPackage != packageName:
+      if resolution.consumerPackage != packageName or
+          not resolution.requestedThisEvaluation:
         continue
       # Only selected consumer activities may attach or contribute. Filter
       # before the wire/artifact so cache hits preserve the same selection.
@@ -694,6 +695,7 @@ when defined(reproProviderMode):
     # case.
     resetProviderEvaluationInputRegistry()
     resetDevEnvRegistry()
+    beginSharedResolutionEvaluation(pkg.packageName)
     # Shared-Development-Services F1: the action registry is reset HERE
     # for the same reason `buildPackageFragment` resets it at its own
     # start -- so the actions this evaluation reports are exactly the
