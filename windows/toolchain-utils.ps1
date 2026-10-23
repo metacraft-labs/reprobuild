@@ -124,34 +124,92 @@ function Download-String {
   return [string]$content
 }
 
+function New-VerifiedDownloadHttpHandler {
+  # Each download owns its handler. Keep construction separate so transport
+  # tests can supply authenticated fixture trust while exercising real HTTP I/O.
+  # The default uses the platform trust store without validation overrides.
+  return (New-Object System.Net.Http.HttpClientHandler)
+}
+
 function Download-VerifiedFileFromMirrors {
   param(
-    [Parameter(Mandatory = $true)][string[]]$Urls,
+    [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string[]]$Urls,
     [Parameter(Mandatory = $true)][string]$OutFile,
     [Parameter(Mandatory = $true)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedSha256,
     [ValidateRange(1, 600)][int]$TimeoutSeconds = 60
   )
 
-  # Each mirror supplies the SAME pinned bytes. Publish only after verification;
-  # neither a failed request nor a bad checksum may leave a usable cache entry.
+  # Every source supplies the same pinned bytes. Keep the destination untouched
+  # until verification succeeds, and discard failed transfers before trying the
+  # next source. One attempt per source avoids spending all retries on an outage.
   $failures = @()
-  foreach ($url in $Urls) {
-    $partial = "$OutFile.$([Guid]::NewGuid().ToString('N')).partial"
-    try {
-      Invoke-WebRequest -Uri $url -OutFile $partial -UseBasicParsing -TimeoutSec $TimeoutSeconds
-      Assert-FileSha256 -Path $partial -Expected $ExpectedSha256
-      Move-Item -LiteralPath $partial -Destination $OutFile -Force
-      return
-    } catch {
-      $failures += "${url}: $($_.Exception.Message)"
-      Write-Warning "Verified download from '$url' failed. $($_.Exception.Message)"
-    } finally {
-      if (Test-Path -LiteralPath $partial) {
-        Remove-Item -LiteralPath $partial -Force
+  # .NET Framework follows HTTPS-to-HTTP redirects by default. Resolve them
+  # ourselves so the Windows PowerShell 5.1 path enforces the same HTTPS rule.
+  # https://learn.microsoft.com/dotnet/api/system.net.http.httpclienthandler.allowautoredirect
+  Add-Type -AssemblyName System.Net.Http
+  $handler = New-VerifiedDownloadHttpHandler
+  $handler.AllowAutoRedirect = $false
+  $client = New-Object System.Net.Http.HttpClient($handler)
+  # One cancellation deadline per source owns every redirect and the final
+  # buffered body. A client timeout alone would restart on each GetAsync.
+  $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
+  try {
+    foreach ($url in $Urls) {
+      $partial = "$OutFile.$([Guid]::NewGuid().ToString('N')).partial"
+      $deadline = New-Object Threading.CancellationTokenSource
+      $deadline.CancelAfter([TimeSpan]::FromSeconds($TimeoutSeconds))
+      try {
+        $current = [Uri]::new($url, [UriKind]::Absolute)
+        $redirects = 0
+        while ($true) {
+          # ResponseContentRead includes the entire body in this cancellable
+          # operation. The pinned OpenSSL archive is small enough to buffer.
+          $response = $client.GetAsync($current, [Net.Http.HttpCompletionOption]::ResponseContentRead,
+                                      $deadline.Token).GetAwaiter().GetResult()
+          try {
+            if ([int]$response.StatusCode -in @(301, 302, 303, 307, 308)) {
+              $location = $response.Headers.Location
+              if ($null -eq $location -or [string]::IsNullOrWhiteSpace($location.OriginalString)) {
+                throw "Redirect from '$current' has a missing or invalid Location."
+              }
+              $next = [Uri]::new($current, $location.OriginalString)
+              if ($next.Scheme -ne 'https') {
+                throw "Redirect from '$current' must preserve HTTPS; refused '$next'."
+              }
+              $redirects++
+              if ($redirects -gt 5) { throw "Redirect limit exceeded for '$url'." }
+              $current = $next
+              continue
+            }
+            [void]$response.EnsureSuccessStatusCode()
+            $bytes = $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+            break
+          } finally {
+            $response.Dispose()
+          }
+        }
+        $partialPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($partial)
+        [IO.File]::WriteAllBytes($partialPath, $bytes)
+        Assert-FileSha256 -Path $partial -Expected $ExpectedSha256
+        Move-Item -LiteralPath $partial -Destination $OutFile -Force
+        return
+      } catch {
+        $reason = if ($deadline.IsCancellationRequested) {
+          "Source deadline exceeded after $TimeoutSeconds seconds."
+        } else { $_.Exception.Message }
+        $failures += "${url}: $reason"
+        Write-Warning "Verified download from '$url' failed. $reason"
+      } finally {
+        $deadline.Dispose()
+        if (Test-Path -LiteralPath $partial) {
+          Remove-Item -LiteralPath $partial -Force
+        }
       }
     }
+    throw "No mirror supplied the pinned archive: $($failures -join '; ')"
+  } finally {
+    $client.Dispose()
   }
-  throw "No mirror supplied the pinned archive: $($failures -join '; ')"
 }
 
 function Ensure-CleanDirectory {

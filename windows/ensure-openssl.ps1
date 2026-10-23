@@ -75,6 +75,19 @@ function Get-OpenSslInstallDir {
   return (Join-Path $Root "openssl/$Version")
 }
 
+function Get-OpenSslArchiveUrls {
+  param([Parameter(Mandatory = $true)][string]$AssetName)
+
+  # Direct tier-one fallbacks from https://www.msys2.org/dev/mirrors/.
+  # The primary and its geo redirector share an outage domain. All sources
+  # must supply the identical archive authenticated by the existing SHA256 pin.
+  return @(
+    "https://repo.msys2.org/mingw/ucrt64/$AssetName",
+    "https://mirror.umd.edu/msys2/mingw/ucrt64/$AssetName",
+    "https://mirror.accum.se/mirror/msys2.org/mingw/ucrt64/$AssetName"
+  )
+}
+
 function Ensure-OpenSsl {
   param(
     [Parameter(Mandatory = $true)][string]$Root,
@@ -107,14 +120,7 @@ function Ensure-OpenSsl {
   }
 
   $assetName = "mingw-w64-ucrt-x86_64-openssl-$version-$release-any.pkg.tar.zst"
-  # The primary and its geo redirector share an outage domain. Keep direct
-  # tier-one fallbacks from https://www.msys2.org/dev/mirrors/ and verify the
-  # existing pin regardless of which server responds.
-  $assetUrls = @(
-    "https://repo.msys2.org/mingw/ucrt64/$assetName",
-    "https://mirror.umd.edu/msys2/mingw/ucrt64/$assetName",
-    "https://mirror.accum.se/mirror/msys2.org/mingw/ucrt64/$assetName"
-  )
+  $assetUrls = @(Get-OpenSslArchiveUrls -AssetName $assetName)
 
   $installDir = Get-OpenSslInstallDir -Root $Root -Version $version
   $libDir = Join-Path $installDir "lib"

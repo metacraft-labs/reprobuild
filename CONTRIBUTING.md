@@ -15,6 +15,36 @@ covers the behavior you touched.
 - `just test` runs the local Nim test suite.
 - `just lint` runs repository requirement and Nim source checks.
 
+## Windows OpenSSL Download Checks
+
+Run `windows/tests/test-openssl-mirrors.ps1` with PowerShell to exercise
+HTTP failures, corrupt and truncated responses, timeout cleanup, and the real
+OpenSSL provisioning path against a local HTTP fixture. It also checks reuse
+of verified downloads. Run `windows/tests/test-openssl-mirrors-live.ps1`
+separately to fetch the pinned archive from the official HTTPS mirrors and
+verify checksum rejection. The live check requires network access and fails
+when no mirror can supply the pinned bytes.
+
+`windows/tests/test-openssl-redirects.ps1` uses an owned local HTTPS server
+with an ephemeral certificate. A scoped handler-construction override trusts
+only that exact certificate while retaining hostname, validity and chain-error
+checks; production uses default system trust, which the test verifies before
+and after the override. The fixture requires the built-in CertificateRequest
+APIs (.NET Framework 4.7.2+ or current .NET), creates no certificate-store entries,
+and installs no packages.
+
+The deadline oracle requires TLS authentication, the exact request, response
+headers and body progress from the actual timed transaction. Same-URI controls
+that stall before TLS or after headers must fail that oracle even after a prior
+successful request. These local controls need no public test service. The live
+archive script separately verifies the official ACC HTTPS redirect and pin.
+
+All three checks run in the Windows CI boundary job. Its
+`scripts/check_windows_bootstrap_syntax.ps1` gate recursively parses bootstrap
+scripts and their tests under Windows PowerShell 5.1. Running the download
+checks under PowerShell 7 on Linux or macOS does not qualify Windows PowerShell
+5.1 parsing, Windows extraction or native DLL loading.
+
 ## Windows HCR Test Environment
 
 Enable the same pinned Python runtime and LLVM compilers used by the Windows
