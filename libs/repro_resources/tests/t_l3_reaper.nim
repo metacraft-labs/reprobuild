@@ -1446,7 +1446,13 @@ suite "L3: crash-safe reaper":
       effectiveDeadline: some(t0),
       lastRenewed: t0,
       providerArtifact: some(ResourceProviderArtifactRef(
-        binaryPath: getCurrentDir() / "build" / "bin" / "repro",
+        # Launchable in the only sense the reaper checks before a session
+        # (`isLaunchableArtifact`: an absolute path and an artifact id). It is
+        # never stat'ed or started on a pinned in-process transport, so it
+        # names no build output; spelling it as the built engine made the cwd
+        # and the host's executable suffix inputs of a case that reads
+        # neither.
+        binaryPath: "/launchable/provider",
         providerArtifactId: "good-id",
         workingDir: getCurrentDir()))))
     let pinned = reapOnce(store, now = later, inProcessTransport())
