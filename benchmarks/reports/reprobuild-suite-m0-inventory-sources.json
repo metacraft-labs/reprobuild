@@ -2,8 +2,8 @@
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
     "nimTestBinaries": 2344,
-    "pureUnitConsolidationGroups": 68,
-    "pureUnitTests": 689,
+    "pureUnitConsolidationGroups": 67,
+    "pureUnitTests": 688,
     "staticallyDetectedRuntimeCompilerFlowTests": 127,
     "testEntries": 2375
   },
@@ -680,21 +680,6 @@
         "libs/repro_resources/tests/t_l8_registrations_mint_once_and_reach_argv.nim",
         "libs/repro_resources/tests/t_resource_provider_lane.nim",
         "libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 2,
-      "defines": [],
-      "dependencyShape": [
-        "repro_project_dsl",
-        "repro_provider_runtime",
-        "repro_resources"
-      ],
-      "owner": "libs/repro_resources",
-      "sources": [
-        "libs/repro_resources/tests/t_l2_lease_edge.nim",
-        "libs/repro_resources/tests/t_l3_reaper.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1387,9 +1372,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1270,
+      "integration": 1271,
       "platform/destructive": 145,
-      "pure unit": 689,
+      "pure unit": 688,
       "unclassified": 253
     },
     "graphOwnedTestArtifacts": [
@@ -5636,7 +5621,7 @@
             "socketPath",
             "tempRoot"
           ],
-          "line": 247,
+          "line": 272,
           "path": "tests/integration/t_integration_reprobuild_sessions_share_runquota.nim",
           "patterns": [
             "nim-argv"
@@ -20415,8 +20400,8 @@
     },
     {
       "binary": "build/test-bin/t_l3_reaper",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -20425,7 +20410,7 @@
         "repro_resources"
       ],
       "owner": "libs/repro_resources",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "libs/repro_resources/tests/t_l3_reaper.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 27,
