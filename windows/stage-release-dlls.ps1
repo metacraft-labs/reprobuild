@@ -16,22 +16,10 @@
 # release archive ships incomplete. scripts/verify_release.sh then fails the leg
 # on the missing manifest -- correctly, but after an hour of build time.
 #
-# This script is the RELEASE-time guarantee: it stages every required runtime
-# DLL into build\bin deterministically, preferring the provisioned toolchain
-# sources on the runner and falling back to pinned, checksummed downloads when a
-# source is not present. It is idempotent and safe to re-run. Keep the required
-# set in sync with scripts/verify_release.sh and scripts/build_apps.sh.
-#
-# release.yml runs it TWICE: once BEFORE `repro build .#release` and once after.
-#   - Before: the orchestrating repro.exe (built by `just bootstrap`) dlopens
-#     clingo.dll AND sqlite3_64.dll at MODULE INIT and imports libcrypto/libssl,
-#     so those must sit in build\bin (or on PATH) for it to start at all.
-#   - After: `.#release` rewrites build\bin, so re-stage to guarantee the
-#     PACKAGED bin/ is complete (this pass is the first step of
-#     scripts/release/package_windows_release.ps1, which assembles the
-#     archive). Idempotent: the second pass re-copies from the
-#     runner sources (cheap) and short-circuits the pinned downloads when the DLL
-#     is already present.
+# The release consumes the exact sources selected by this checkout's bootstrap.
+# It never searches other versions or keeps an unqualified DLL from a prior build.
+# The pinned conda VC runtime is already this script's supported fallback; use
+# that same archive consistently rather than host System32 contents.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -48,8 +36,8 @@ $tmp = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
 # flake (transient `no healthy upstream` 503s). Without a retry a single blip
 # fails the whole ~2h Windows release leg. 6 attempts with capped linear
 # backoff (~45s total) rides out a minute-long outage, then fails for real.
-# (This script is standalone -- it does not dot-source toolchain-utils.ps1 --
-# so the helper is duplicated here rather than shared.)
+# Keep this release-CDN retry policy unchanged. The toolchain helpers loaded
+# below supply pin-file and hash verification, not a different retry policy.
 function Invoke-DownloadWithRetry {
     param([Parameter(Mandatory = $true)][scriptblock]$Script)
     $attempts = 6
@@ -67,7 +55,25 @@ function Invoke-DownloadWithRetry {
 }
 
 function Copy-IntoBin {
-    param([string]$SrcPath, [string]$DestName)
+    param([string]$SrcPath, [string]$DestName, [string]$ExpectedSha256 = "")
+    if (-not (Test-Path -LiteralPath $SrcPath -PathType Leaf)) {
+        throw "stage-release-dlls: required source is missing: $SrcPath"
+    }
+    if ($DestName.EndsWith(".dll", [StringComparison]::OrdinalIgnoreCase)) {
+        # This release leg produces x64 images. Do not stage a same-named x86 DLL.
+        $stream = [IO.File]::OpenRead($SrcPath)
+        $reader = [IO.BinaryReader]::new($stream)
+        try {
+            if ($reader.ReadUInt16() -ne 0x5a4d) { throw "Invalid DOS header: $SrcPath" }
+            $stream.Position = 0x3c
+            $peOffset = $reader.ReadUInt32()
+            $stream.Position = $peOffset
+            if ($reader.ReadUInt32() -ne 0x4550 -or $reader.ReadUInt16() -ne 0x8664) {
+                throw "stage-release-dlls: expected an x64 PE image: $SrcPath"
+            }
+        } finally { $reader.Dispose() }
+    }
+    if ($ExpectedSha256) { Assert-FileSha256 -Path $SrcPath -Expected $ExpectedSha256 }
     $dest = Join-Path $binDir $DestName
     Copy-Item -LiteralPath $SrcPath -Destination $dest -Force
     Write-Host "  staged $DestName  <-  $SrcPath"
@@ -87,29 +93,35 @@ function Find-FirstFile {
     return $null
 }
 
-function Get-CommandDir {
-    param([string]$Name)
-    $cmd = Get-Command $Name -ErrorAction SilentlyContinue
-    if ($null -eq $cmd) { return "" }
-    $src = if ($cmd.CommandType -eq "Alias") { $cmd.Definition } else { $cmd.Source }
-    if ([string]::IsNullOrWhiteSpace($src)) { return "" }
-    return (Split-Path -Parent $src)
+# Both archive formats reuse only the existing same-job archive path. Every
+# use rechecks content; this is not a host store or shared-prefix cache.
+function Get-VerifiedReleaseArchive {
+    param([string]$Url, [string]$Sha256, [string]$ArchivePath)
+    if ($Sha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        throw "stage-release-dlls: a complete archive SHA-256 is required for $Url"
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ArchivePath) | Out-Null
+    if (-not (Test-Path -LiteralPath $ArchivePath)) {
+        Write-Host "  downloading $Url"
+        Invoke-DownloadWithRetry { Invoke-WebRequest -Uri $Url -OutFile $ArchivePath }
+    }
+    Assert-FileSha256 -Path $ArchivePath -Expected $Sha256
+    return $ArchivePath
 }
 
 function Download-Zip {
     param([string]$Url, [string]$Sha256, [string]$OutDir)
-    $zip = Join-Path $tmp ("dl-" + [IO.Path]::GetRandomFileName() + ".zip")
-    Write-Host "  downloading $Url"
-    Invoke-DownloadWithRetry { Invoke-WebRequest -Uri $Url -OutFile $zip }
-    if ($Sha256) {
-        $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLower()
-        if ($got -ne $Sha256.ToLower()) {
-            throw "stage-release-dlls: checksum mismatch for $Url (expected $Sha256, got $got)"
-        }
+    $zip = Get-VerifiedReleaseArchive -Url $Url -Sha256 $Sha256 `
+        -ArchivePath (Join-Path $OutDir "pkg.zip")
+    $stage = Join-Path $OutDir ("stage-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $stage | Out-Null
+    try {
+        Expand-Archive -LiteralPath $zip -DestinationPath $stage
+        return $stage
+    } catch {
+        Remove-Item -LiteralPath $stage -Recurse -Force
+        throw
     }
-    New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-    Expand-Archive -LiteralPath $zip -DestinationPath $OutDir -Force
-    return $OutDir
 }
 
 # A conda package (.conda) is a ZIP whose payload is `pkg-*.tar.zst`. Expand the
@@ -119,72 +131,88 @@ function Download-Zip {
 # `Library/bin/`, etc.).
 function Expand-CondaPackage {
     param([string]$Url, [string]$Sha256, [string]$WorkDir)
-    New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
-    # A .conda file IS a zip, but Expand-Archive only accepts a `.zip` extension,
-    # so name the download accordingly (bytes are unchanged, checksum still holds).
-    $conda = Join-Path $WorkDir "pkg.zip"
-    Write-Host "  downloading $Url"
-    Invoke-DownloadWithRetry { Invoke-WebRequest -Uri $Url -OutFile $conda }
-    if ($Sha256) {
-        $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $conda).Hash.ToLower()
-        if ($got -ne $Sha256.ToLower()) {
-            throw "stage-release-dlls: checksum mismatch for $Url (expected $Sha256, got $got)"
-        }
+    # Keep the existing pkg.zip location, without trusting prior extracted files.
+    $conda = Get-VerifiedReleaseArchive -Url $Url -Sha256 $Sha256 `
+        -ArchivePath (Join-Path $WorkDir "pkg.zip")
+    $stage = Join-Path $WorkDir ("stage-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $stage | Out-Null
+    $unzipped = Join-Path $stage "unzipped"
+    try {
+        Expand-Archive -LiteralPath $conda -DestinationPath $unzipped -Force
+        $pkgZst = Get-ChildItem -LiteralPath $unzipped -Filter "pkg-*.tar.zst" | Select-Object -First 1
+        if ($null -eq $pkgZst) { throw "stage-release-dlls: no pkg-*.tar.zst payload in $Url" }
+        $pkgOut = Join-Path $stage "pkg"
+        New-Item -ItemType Directory -Force -Path $pkgOut | Out-Null
+        $tarExe = Join-Path $env:SystemRoot "System32\tar.exe"
+        & $tarExe -xf $pkgZst.FullName -C $pkgOut
+        if ($LASTEXITCODE -ne 0) { throw "stage-release-dlls: tar failed extracting $($pkgZst.Name) (exit $LASTEXITCODE)" }
+        return $pkgOut
+    } catch {
+        Remove-Item -LiteralPath $stage -Recurse -Force
+        throw
     }
-    $unzipped = Join-Path $WorkDir "unzipped"
-    Expand-Archive -LiteralPath $conda -DestinationPath $unzipped -Force
-    $pkgZst = Get-ChildItem -LiteralPath $unzipped -Filter "pkg-*.tar.zst" | Select-Object -First 1
-    if ($null -eq $pkgZst) { throw "stage-release-dlls: no pkg-*.tar.zst payload in $Url" }
-    $pkgOut = Join-Path $WorkDir "pkg"
-    New-Item -ItemType Directory -Force -Path $pkgOut | Out-Null
-    $tarExe = Join-Path $env:SystemRoot "System32\tar.exe"
-    & $tarExe -xf $pkgZst.FullName -C $pkgOut
-    if ($LASTEXITCODE -ne 0) { throw "stage-release-dlls: tar failed extracting $($pkgZst.Name) (exit $LASTEXITCODE)" }
-    return $pkgOut
+
 }
 
 Write-Host "=== Staging required runtime DLLs into $binDir ==="
-
+. (Join-Path $PSScriptRoot "toolchain-utils.ps1")
+$toolchain = Read-KeyValueFile -Path (Join-Path $PSScriptRoot "toolchain-versions.env")
 $toolchainRoot = $env:WINDOWS_DIY_INSTALL_ROOT
-$programFiles  = @("C:\Program Files", "C:\Program Files (x86)")
+if ([string]::IsNullOrWhiteSpace($toolchainRoot)) {
+    throw "stage-release-dlls: WINDOWS_DIY_INSTALL_ROOT is required; source env.ps1 first."
+}
+$gccRoot = Join-Path $toolchainRoot ("gcc/" + $toolchain["GCC_VERSION"])
+$gccDir = Join-Path $gccRoot "bin"
+$nimVersionRoot = Join-Path $toolchainRoot ("nim/" + $toolchain["NIM_VERSION"])
+$nimRelative = (Get-Content -LiteralPath (Join-Path $nimVersionRoot "nim.install.relative-path") -Raw).Trim()
+$nimMetadata = Read-KeyValueFile -Path (Join-Path $nimVersionRoot "nim.install.meta")
+if ($nimMetadata["nim_version"] -ne $toolchain["NIM_VERSION"] -or
+    $nimMetadata["install_relative_path"] -ne $nimRelative -or
+    $nimMetadata["effective_mode"] -notin @("prebuilt", "source")) {
+    throw "stage-release-dlls: Nim selection metadata does not match the declared version."
+}
+$nimRoot = [IO.Path]::GetFullPath((Join-Path $toolchainRoot $nimRelative))
+$rootPrefix = [IO.Path]::GetFullPath($toolchainRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+if (-not $nimRoot.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "stage-release-dlls: selected Nim prefix escapes the toolchain root."
+}
+$nimDir = Join-Path $nimRoot "bin"
+$opensslRoot = Join-Path $toolchainRoot ("openssl/" + $toolchain["OPENSSL_VERSION"])
+$clingoRoot = Join-Path $toolchainRoot ("clingo/" + $toolchain["CLINGO_VERSION"])
+foreach ($binding in @(
+    @{ name = "REPRO_WINDOWS_OPENSSL_DIR"; actual = $env:REPRO_WINDOWS_OPENSSL_DIR; expected = $opensslRoot },
+    @{ name = "REPRO_WINDOWS_CLINGO_DIR"; actual = $env:REPRO_WINDOWS_CLINGO_DIR; expected = $clingoRoot }
+)) {
+    if ([string]::IsNullOrWhiteSpace($binding.actual) -or
+        [IO.Path]::GetFullPath($binding.actual) -ine [IO.Path]::GetFullPath($binding.expected)) {
+        throw "stage-release-dlls: $($binding.name) does not name the declared toolchain root."
+    }
+}
+foreach ($binding in @(
+    @{ path = (Join-Path $gccRoot "gcc.install.meta"); expected = @{
+        gcc_version = $toolchain["GCC_VERSION"]
+        gcc_winlibs_release = $toolchain["GCC_WINLIBS_RELEASE"]
+        gcc_archive_sha256 = $toolchain["GCC_WINLIBS_SHA256"].ToLowerInvariant() } },
+    @{ path = (Join-Path $opensslRoot "openssl.install.meta"); expected = @{
+        openssl_version = $toolchain["OPENSSL_VERSION"]
+        openssl_msys2_release = $toolchain["OPENSSL_MSYS2_RELEASE"]
+        openssl_archive_sha256 = $toolchain["OPENSSL_SHA256"].ToLowerInvariant() } },
+    @{ path = (Join-Path $clingoRoot "clingo.install.meta"); expected = @{
+        clingo_version = $toolchain["CLINGO_VERSION"]
+        clingo_build_string = $toolchain["CLINGO_BUILD_STRING"]
+        clingo_archive_sha256 = $toolchain["CLINGO_SHA256"].ToLowerInvariant() } }
+)) {
+    $actual = Read-KeyValueFile -Path $binding.path
+    if (-not (Test-KeyValueFileMatches -Expected $binding.expected -Actual $actual)) {
+        throw "stage-release-dlls: source metadata does not match the declared pin: $($binding.path)"
+    }
+}
 
-# ── 1. OpenSSL (libcrypto-3-x64.dll, libssl-3-x64.dll) ───────────────────────
-# Imported (not dlopen'd): repro/repro-binary-cache/repro-harvest-apt are
-# --define:ssl. Source: the ensure-openssl.ps1 install dir (bin/), exported as
-# REPRO_WINDOWS_OPENSSL_DIR. Fall back to the toolchains tree / Program Files.
-$opensslRoots = @()
-if ($env:REPRO_WINDOWS_OPENSSL_DIR) { $opensslRoots += (Join-Path $env:REPRO_WINDOWS_OPENSSL_DIR "bin") }
-$opensslRoots += $toolchainRoot
-$opensslRoots += $programFiles
+# Exact exported OpenSSL and clingo roots; no recursive host search or old output reuse.
 foreach ($dll in @("libcrypto-3-x64.dll", "libssl-3-x64.dll")) {
-    $src = Find-FirstFile -Name $dll -Roots $opensslRoots
-    if ($null -eq $src) {
-        throw "stage-release-dlls: $dll not found (searched: $($opensslRoots -join '; ')). " +
-              "This is the MSYS2 ucrt64 OpenSSL that ensure-openssl.ps1 provisions; the archive cannot be self-contained without it."
-    }
-    Copy-IntoBin -SrcPath $src -DestName $dll
+    Copy-IntoBin -SrcPath (Join-Path $opensslRoot "bin/$dll") -DestName $dll
 }
-
-# ── 2. clingo.dll ────────────────────────────────────────────────────────────
-# dlopen'd at MODULE INIT by repro_solver. Source: REPRO_WINDOWS_CLINGO_DIR
-# (ensure-clingo.ps1). build_apps.sh already staged it so `repro build` could
-# run; re-stage for the archive in case the build rewrote build\bin.
-$clingoRoots = @()
-if ($env:REPRO_WINDOWS_CLINGO_DIR) { $clingoRoots += $env:REPRO_WINDOWS_CLINGO_DIR }
-$clingoRoots += $toolchainRoot
-$clingoRoots += $programFiles
-$clingoSrc = Find-FirstFile -Name "clingo.dll" -Roots $clingoRoots
-if ($null -eq $clingoSrc) {
-    # Already beside repro.exe? build_apps.sh may have put it there.
-    if (Test-Path -LiteralPath (Join-Path $binDir "clingo.dll")) {
-        Write-Host "  clingo.dll already present in build\bin (staged by build_apps.sh)"
-    } else {
-        throw "stage-release-dlls: clingo.dll not found (searched: $($clingoRoots -join '; ')). " +
-              "repro_solver dlopens it at module init, so every repro.exe subcommand aborts without it."
-    }
-} else {
-    Copy-IntoBin -SrcPath $clingoSrc -DestName "clingo.dll"
-}
+Copy-IntoBin -SrcPath (Join-Path $clingoRoot "clingo.dll") -DestName "clingo.dll"
 
 # ── 2b. clingo.dll's MSVC runtime dependencies ───────────────────────────────
 # The conda-forge clingo.dll is MSVC-built. Its import table needs the VC++
@@ -199,103 +227,65 @@ if ($null -eq $clingoSrc) {
 # orchestrating repro.exe loads clingo at module init) AND in the archive
 # (verify_release.sh scrubs PATH to the system dirs, so PATH cannot help).
 #
-# Source: the runner (System32 / toolchains) if the redist is installed, else a
-# pinned conda-forge vc14_runtime package (the loose, redistributable MSVC
+# Source: the existing pinned conda-forge vc14_runtime package (the loose, redistributable MSVC
 # runtime). msvcp140.dll pulls in msvcp140_1/2/atomic_wait + concrt140, so stage
 # the whole set to close the transitive class.
 $vcDlls = @(
     "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
     "msvcp140_1.dll", "msvcp140_2.dll", "msvcp140_atomic_wait.dll", "concrt140.dll"
 )
-$vcMissing = @($vcDlls | Where-Object { -not (Test-Path -LiteralPath (Join-Path $binDir $_)) })
-if ($vcMissing.Count -eq 0) {
-    Write-Host "  MSVC runtime already in build\bin (kept)"
-} else {
-    # Marker is VCRUNTIME140_1.dll: the one most often missing, so finding it
-    # means a complete-enough redist is on the runner. Check System32 DIRECTLY
-    # (the redist installs there, and a recursive walk of System32 is enormous);
-    # the toolchains tree is small enough to recurse.
-    $vcSrcDir = $null
-    $sys32 = Join-Path $env:SystemRoot "System32"
-    if (Test-Path -LiteralPath (Join-Path $sys32 "vcruntime140_1.dll")) {
-        $vcSrcDir = $sys32
-    } else {
-        $marker = Find-FirstFile -Name "vcruntime140_1.dll" -Roots @($toolchainRoot)
-        if ($marker) { $vcSrcDir = Split-Path -Parent $marker }
-    }
-    if (-not $vcSrcDir) {
-        $pkg = Expand-CondaPackage `
-            -Url "https://anaconda.org/conda-forge/vc14_runtime/14.44.35208/download/win-64/vc14_runtime-14.44.35208-h818238b_41.conda" `
-            -Sha256 "ec706fe9368b837fbd05af4851f5ebef12bef8c471a273f4805f7af788407317" `
-            -WorkDir (Join-Path $tmp "vc14_runtime")
-        $vcSrcDir = Join-Path $pkg "Library\bin"
-        if (-not (Test-Path -LiteralPath $vcSrcDir)) { $vcSrcDir = $pkg }
-    }
-    foreach ($d in $vcDlls) {
-        if (Test-Path -LiteralPath (Join-Path $binDir $d)) { continue }
-        $src = Join-Path $vcSrcDir $d
-        if (Test-Path -LiteralPath $src) { Copy-IntoBin -SrcPath $src -DestName $d }
-        elseif ($d -in @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")) {
-            throw "stage-release-dlls: required MSVC runtime DLL $d not found at $vcSrcDir; clingo.dll cannot load without it."
+$pkg = Expand-CondaPackage `
+    -Url "https://anaconda.org/conda-forge/vc14_runtime/14.44.35208/download/win-64/vc14_runtime-14.44.35208-h818238b_41.conda" `
+    -Sha256 "ec706fe9368b837fbd05af4851f5ebef12bef8c471a273f4805f7af788407317" `
+    -WorkDir (Join-Path $tmp "vc14_runtime")
+$vcSrcDir = Join-Path $pkg "Library/bin"
+try {
+    foreach ($dll in $vcDlls) {
+        $src = Join-Path $vcSrcDir $dll
+        if (Test-Path -LiteralPath $src -PathType Leaf) {
+            Copy-IntoBin -SrcPath $src -DestName $dll
+        } elseif ($dll -in @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")) {
+            throw "stage-release-dlls: required MSVC runtime DLL $dll missing from pinned archive."
+        } elseif (Test-Path -LiteralPath (Join-Path $binDir $dll)) {
+            Remove-Item -LiteralPath (Join-Path $binDir $dll) -Force
         }
     }
+} finally {
+    Remove-Item -LiteralPath (Split-Path -Parent $pkg) -Recurse -Force
 }
 
-# ── 3. libzstd.dll ───────────────────────────────────────────────────────────
-# dlopen'd LAZILY (explicit loadLib) by `repro cache substitute` for zstd frame
-# decompression -- not needed at startup, but required in the archive manifest.
-# The WinLibs UCRT gcc bundles libzstd.dll in its bin; search the toolchains tree
-# first, then fall back to a pinned facebook/zstd win64 release.
-if (Test-Path -LiteralPath (Join-Path $binDir "libzstd.dll")) {
-    Write-Host "  libzstd.dll already in build\bin (kept)"
-} else {
-    $zstdRoots = @($toolchainRoot)
-    if ($toolchainRoot) { $zstdRoots += (Join-Path $toolchainRoot "msys2") }
-    $zstdRoots += $programFiles
-    $zstdSrc = Find-FirstFile -Name "libzstd.dll" -Roots $zstdRoots
-    if ($null -eq $zstdSrc) {
-        $zstdVer = "1.5.6"
-        $out = Download-Zip `
-            -Url "https://github.com/facebook/zstd/releases/download/v$zstdVer/zstd-v$zstdVer-win64.zip" `
-            -Sha256 "" `
-            -OutDir (Join-Path $tmp "zstd-$zstdVer")
-        $zstdSrc = Find-FirstFile -Name "libzstd.dll" -Roots @($out)
-        if ($null -eq $zstdSrc) { throw "stage-release-dlls: libzstd.dll missing from downloaded facebook/zstd $zstdVer archive." }
+# These exact preferred members are authenticated against the existing archive pins.
+foreach ($key in @("GCC_LIBZSTD_DLL_SHA256", "NIM_SQLITE_DLL_SHA256")) {
+    if ($toolchain[$key] -notmatch '^[0-9a-fA-F]{64}$') {
+        throw "stage-release-dlls: required DLL content pin is missing: $key"
     }
-    Copy-IntoBin -SrcPath $zstdSrc -DestName "libzstd.dll"
 }
-
-# ── 4. sqlite3_64.dll + sqlite3.dll ──────────────────────────────────────────
-# dlopen'd at MODULE INIT by repro_local_store (linked into repro.exe), so it is
-# needed for repro.exe to START, not just at the archive. Search near nim.exe
-# first (the Windows Nim distribution ships sqlite3_64.dll in its tree), then
-# fall back to a pinned sqlite.org win-x64 DLL (staged under both leaf names the
-# binding probes).
-$nimDir = Get-CommandDir -Name "nim"
-if ((Test-Path -LiteralPath (Join-Path $binDir "sqlite3_64.dll")) -and
-    (Test-Path -LiteralPath (Join-Path $binDir "sqlite3.dll"))) {
-    Write-Host "  sqlite3_64.dll / sqlite3.dll already in build\bin (kept)"
-} else {
-    $sqliteRoots = @()
-    if ($nimDir) {
-        $nimRoot = Split-Path -Parent $nimDir
-        $sqliteRoots += $nimDir, (Join-Path $nimRoot "dist"), (Join-Path $nimRoot "dlls"), (Join-Path $nimRoot "bin")
-    }
-    $sqliteRoots += $toolchainRoot
-    $sqliteSrc = Find-FirstFile -Name "sqlite3_64.dll" -Roots $sqliteRoots
-    if ($null -eq $sqliteSrc) { $sqliteSrc = Find-FirstFile -Name "sqlite3.dll" -Roots $sqliteRoots }
-    if ($null -eq $sqliteSrc) {
-        # sqlite.org ships a single sqlite3.dll; the year in the asset URL is part
-        # of the release path. Pinned to 3.46.1.
-        $out = Download-Zip `
+# The declared compiler carries zstd; do not substitute another compiler tree.
+Copy-IntoBin -SrcPath (Join-Path $gccDir "libzstd.dll") -DestName "libzstd.dll" `
+    -ExpectedSha256 $toolchain["GCC_LIBZSTD_DLL_SHA256"]
+$sqliteSrc = @(
+    (Join-Path $nimDir "sqlite3_64.dll"),
+    (Join-Path $nimRoot "dist/sqlite3_64.dll"),
+    (Join-Path $nimRoot "dlls/sqlite3_64.dll")
+) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+$sqliteStage = $null
+$sqliteHash = $toolchain["NIM_SQLITE_DLL_SHA256"]
+try {
+    if (-not $sqliteSrc) {
+        # Ensure-Nim source mode does not carry SQLite. Preserve the existing
+        # 3.46.1 runtime fallback, authenticated before extraction.
+        $sqliteStage = Download-Zip `
             -Url "https://www.sqlite.org/2024/sqlite-dll-win-x64-3460100.zip" `
-            -Sha256 "" `
+            -Sha256 $toolchain["SQLITE_RUNTIME_ARCHIVE_SHA256"] `
             -OutDir (Join-Path $tmp "sqlite-3460100")
-        $sqliteSrc = Find-FirstFile -Name "sqlite3.dll" -Roots @($out)
-        if ($null -eq $sqliteSrc) { throw "stage-release-dlls: sqlite3.dll missing from downloaded sqlite.org archive." }
+        $sqliteSrc = Join-Path $sqliteStage "sqlite3.dll"
+        $sqliteHash = "" # The complete fixed archive was verified above.
     }
-    Copy-IntoBin -SrcPath $sqliteSrc -DestName "sqlite3_64.dll"
-    Copy-IntoBin -SrcPath $sqliteSrc -DestName "sqlite3.dll"
+    foreach ($dll in @("sqlite3_64.dll", "sqlite3.dll")) {
+        Copy-IntoBin -SrcPath $sqliteSrc -DestName $dll -ExpectedSha256 $sqliteHash
+    }
+} finally {
+    if ($sqliteStage) { Remove-Item -LiteralPath $sqliteStage -Recurse -Force }
 }
 
 # ── 5. cacert.pem (best-effort; not in the verify manifest) ──────────────────
@@ -327,17 +317,18 @@ if (Test-Path -LiteralPath (Join-Path $binDir "cacert.pem")) {
 # repro.exe is asserted to statically import only ADVAPI32/KERNEL32/msvcrt, but
 # the OpenSSL DLLs above come from MSYS2 ucrt64 and may carry transitive deps
 # (libgcc_s, libwinpthread, zlib1, libssp). Under verify_release.sh's scrubbed
-# PATH those must resolve from bin/ too. Stage whichever exist in the WinLibs gcc
+# PATH those must resolve from bin/ too. Stage whichever exist in the selected WinLibs gcc
 # bin -- harmless extras if unused, and they close the whole transitive-dep class
 # instead of chasing one missing DLL per CI cycle.
-$gccDir = Get-CommandDir -Name "gcc"
-$runtimeRoots = @()
-if ($gccDir) { $runtimeRoots += $gccDir }
-$runtimeRoots += $toolchainRoot
 foreach ($rt in @("libgcc_s_seh-1.dll", "libwinpthread-1.dll", "libstdc++-6.dll", "zlib1.dll", "libssp-0.dll")) {
-    if (Test-Path -LiteralPath (Join-Path $binDir $rt)) { continue }
-    $src = Find-FirstFile -Name $rt -Roots $runtimeRoots
-    if ($null -ne $src) { Copy-IntoBin -SrcPath $src -DestName $rt }
+    $src = Join-Path $gccDir $rt
+    if (Test-Path -LiteralPath $src -PathType Leaf) {
+        Copy-IntoBin -SrcPath $src -DestName $rt
+    } elseif (Test-Path -LiteralPath (Join-Path $binDir $rt)) {
+        # An optional DLL absent from this selected compiler cannot survive from
+        # an older compiler's build directory.
+        Remove-Item -LiteralPath (Join-Path $binDir $rt) -Force
+    }
 }
 
 Write-Host "=== Runtime DLL staging complete ==="
