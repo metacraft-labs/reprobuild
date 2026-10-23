@@ -322,12 +322,25 @@ Reprobuild wraps all development workflows under one CLI.
   custom role) resolves to in every repo, and the fallback chain behind it.
   `--to=<role>` or a shorthand such as `--unstable` prints one role. Reads the
   manifests only; nothing is fetched.
+- `repro sync --to=<role>` — reconcile each repo's current branch with the
+  branch that role resolves to there (fast-forward, or report what diverged;
+  `--rebase` / `--merge` integrate the rest). `repro switch --to=<role>` moves
+  every repo onto that branch instead, and `repro branch <path> --from=<role>`
+  forks a new workspace cut from it. Each built-in role has a shorthand
+  (`--mainline`, `--unstable`, `--staging`, `--stable`, `--production`,
+  `--lts`) that means exactly the `--to=` / `--from=` spelling; custom roles
+  are named with `--to=` / `--from=` only. A role a repo does not declare falls
+  back toward its mainline, and every report names the chain
+  (`latest (unstable → mainline)`); a role that IS declared but whose branch
+  the remote lacks is refused as `no_role_ref`, never redirected to another
+  branch. `--from-mainlines` is the older spelling of `--from=mainline`.
 
 Workspace cloning uses a shared object pool by default. Pass
 `--clone-objects=none` (or `dissociate`) to create self-contained checkouts
 without writing to a clone pool, or `--clone-objects=private=./clone-pool` to
 use a private pool that must outlive its checkouts. The option applies to
-`workspace init`, `sync` (including `--mainline`), `workspace pull`,
+`workspace init`, `sync` (including `--to=<role>` and its shorthands),
+`workspace pull`,
 `workspace enable`, and `branch` / `workspace new`. Relative private paths
 resolve from your current directory. `shared` preserves the default, including
 `REPRO_WORKSPACE_CLONES`; a private pool overrides that environment variable

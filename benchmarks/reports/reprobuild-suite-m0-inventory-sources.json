@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2346,
+    "nimTestBinaries": 2350,
     "pureUnitConsolidationGroups": 67,
     "pureUnitTests": 688,
     "staticallyDetectedRuntimeCompilerFlowTests": 127,
-    "testEntries": 2380
+    "testEntries": 2384
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1372,7 +1372,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1273,
+      "integration": 1277,
       "platform/destructive": 145,
       "pure unit": 688,
       "unclassified": 256
@@ -1577,9 +1577,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2346,
+    "nimTestBinaryCount": 2350,
     "pythonTestFileCount": 34,
-    "testEntryCount": 2380
+    "testEntryCount": 2384
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -33546,6 +33546,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_declared_role_does_not_fall_back_when_ref_is_absent",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_declared_role_does_not_fall_back_when_ref_is_absent.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_default_projects_auto_layer_on_fresh_workspace",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -40945,6 +40962,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_report_names_fallback_path",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_report_names_fallback_path.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_repos_add_commit_passes_end_of_file_fixer",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -42187,6 +42221,23 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_shell_entry_reports_drift_over_the_applied_overrides.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_shorthand_equals_to",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_shorthand_equals_to.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -43934,6 +43985,23 @@
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_unavailable_package_fails_with_platform_reason.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_undeclared_role_is_a_usage_error_before_any_fetch",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_undeclared_role_is_a_usage_error_before_any_fetch.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

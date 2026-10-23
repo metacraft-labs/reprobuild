@@ -25,6 +25,16 @@ Reprobuild replaces multi-repo wrappers (like Google's `repo` tool or Git submod
   fallback chain for a role a repo does not declare. `--unstable` (or
   `--to=<role>`) prints one role; `--json` is the machine form. A read-only
   lookup: use it instead of probing remotes for a branch name.
+- `repro sync --to=<role>` / `repro switch --to=<role>` /
+  `repro branch <path> --from=<role>` — reconcile with, switch to, or fork
+  from the branch a role resolves to in every repo at once, whatever each repo
+  calls it (`--unstable` reaches `agents` in a repo that declares it and the
+  mainline in one that does not). The shorthands `--mainline`, `--unstable`,
+  `--staging`, `--stable`, `--production` and `--lts` mean exactly
+  `--to=<role>` (on `branch`, `--from=<role>`). This is what replaces
+  `repo forall -c 'git rebase origin/<branch>'`: the branch name is read from
+  the manifest per repo, never typed. A declared role whose branch the remote
+  lacks is refused (`no_role_ref`) rather than silently redirected.
 - `repro workspace migrate` — reconcile each existing checkout's local git
   state (remote names and URLs, detached HEADs) with what the manifest now
   declares. Rarely needed by hand: the managed `post-merge` hook runs the same
