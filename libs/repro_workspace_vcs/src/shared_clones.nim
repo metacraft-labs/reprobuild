@@ -3523,6 +3523,73 @@ proc inspectSharedBareVerdict*(barePath: string): string =
   else:
     "unconfigured"
 
+# ---- whole-cache sweep (``shared-clones gc`` / ``rewire``) -----------------
+
+type
+  SharedBareSweepEntry* = object
+    path*: string
+    before*: string
+      ## ``inspectSharedBareVerdict`` as found, recorded before anything was
+      ## written, so a repair never erases the evidence of what it repaired.
+    after*: string
+    repaired*: bool
+    diagnostic*: string
+
+proc sharedBareLastFetch*(barePath: string): string =
+  ## UTC time of the bare's last fetch (``FETCH_HEAD``'s mtime), or "" when
+  ## nothing has ever fetched into it. Next to the config verdict it makes a
+  ## pool frozen at its clone-time tips visible rather than inferred.
+  let fetchHead = barePath / "FETCH_HEAD"
+  if fileExists(fetchHead):
+    try:
+      return getLastModificationTime(fetchHead).utc.format(
+        "yyyy-MM-dd'T'HH:mm:ss'Z'")
+    except OSError:
+      discard
+  ""
+
+proc findSharedBares*(cacheRoot: string): seq[string] =
+  ## Every bare repository under ``cacheRoot``, declared by an enabled project
+  ## or not. Descends until it meets a git directory and never below one; a
+  ## non-bare checkout found in the cache is not a pool and is skipped.
+  if cacheRoot.len == 0 or not dirExists(cacheRoot):
+    return
+  var stack = @[cacheRoot]
+  while stack.len > 0:
+    let dir = stack.pop()
+    for kind, entry in walkDir(dir):
+      if kind != pcDir:
+        continue
+      if dirExists(entry / "objects") and dirExists(entry / "refs") and
+          fileExists(entry / "HEAD"):
+        result.add(entry)
+      elif dirExists(entry / ".git"):
+        continue
+      else:
+        stack.add(entry)
+
+proc sweepSharedBares*(gitBin, cacheRoot: string): seq[SharedBareSweepEntry] =
+  ## The EAGER half of the pool migration. ``prepareSharedBare`` runs only on
+  ## the bares a refresh touches, so a property installed that way converges
+  ## "as repos happen to be synced" and is never checkably true of the cache:
+  ## a bare no enabled project declares is never visited at all. This visits
+  ## every bare under ``cacheRoot``, records its verdict, and installs the
+  ## refspec and the borrower-safety config where either is missing --
+  ## through ``prepareSharedBare``, so the safety-before-refspec order holds
+  ## here too. Each entry carries the verdict found BEFORE the repair.
+  for bare in findSharedBares(cacheRoot):
+    let before = inspectSharedBareVerdict(bare)
+    var entry = SharedBareSweepEntry(path: bare, before: before, after: before)
+    if before == "no-bare":
+      entry.diagnostic = "could not read the config of " & bare
+    elif before != "ok":
+      let prepared = prepareSharedBare(gitBin, bare)
+      entry.after = inspectSharedBareVerdict(bare)
+      entry.repaired = prepared.len == 0 and entry.after == "ok"
+      if prepared.len > 0:
+        entry.diagnostic = prepared
+    result.add(entry)
+
 type
   SharedCloneRepoInfo* = object
     ## Per-repo wiring view used by ``repro workspace shared-clones list``.

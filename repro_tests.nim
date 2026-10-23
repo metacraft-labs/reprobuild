@@ -17298,6 +17298,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_shared_clones_sweep_repairs_every_bare_in_the_cache.nim",
+    binary: "build/test-bin/t_shared_clones_sweep_repairs_every_bare_in_the_cache",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_shell_entry_reports_drift_over_the_applied_overrides.nim",
     binary: "build/test-bin/t_shell_entry_reports_drift_over_the_applied_overrides",
     defines: @[],

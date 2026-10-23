@@ -75654,6 +75654,8 @@ type
     looseBefore*: int
     looseAfter*: int
     prunedRefs*: seq[string]
+    lastFetch*: string
+      ## When the pool last fetched (UTC), "" when never or absent.
     diagnostic*: string
 
   SharedClonesReport* = object
@@ -75666,6 +75668,9 @@ type
       ## The shared-clone detector's reports (``rewire``, ``migrate``).
     poolExpiry*: seq[(string, string)]
       ## ``migrate`` only: each pool and its ``gc.pruneExpire`` afterwards.
+    sweep*: seq[SharedBareSweepEntry]
+      ## ``gc`` and ``rewire``: every bare in the cache root, with the state
+      ## found before the eager sweep repaired it.
     diagnostics*: seq[string]
     exitCode*: int
 
@@ -75693,6 +75698,7 @@ proc toJsonNode*(report: SharedClonesReport): JsonNode =
     for r in entry.prunedRefs:
       pruned.add(%r)
     obj["prunedRefs"] = pruned
+    obj["lastFetch"] = %entry.lastFetch
     obj["diagnostic"] = %entry.diagnostic
     repos.add(obj)
   result["repos"] = repos
@@ -75711,6 +75717,11 @@ proc toJsonNode*(report: SharedClonesReport): JsonNode =
       "registered": lr.registered, "configured": lr.configured,
       "findings": findings, "diagnostic": lr.diagnostic})
   result["leaves"] = leaves
+  var sweep = newJArray()
+  for e in report.sweep:
+    sweep.add(%*{"bare": e.path, "before": e.before, "after": e.after,
+      "repaired": e.repaired, "diagnostic": e.diagnostic})
+  result["sweep"] = sweep
   result["diagnostics"] = %report.diagnostics
   result["exitCode"] = %report.exitCode
 
@@ -75743,6 +75754,9 @@ proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
       " wired=" & $entry.wired
     if entry.verdict.len > 0:
       line.add(" verdict=" & entry.verdict)
+    if entry.barePresent:
+      line.add(" lastFetch=" &
+        (if entry.lastFetch.len > 0: entry.lastFetch else: "never"))
     if report.verb == "rewire":
       line.add(" rewired=" & $entry.rewired)
     if report.verb == "gc":
@@ -75752,6 +75766,23 @@ proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
     if entry.diagnostic.len > 0:
       line.add(" diagnostic=" & entry.diagnostic)
     result.add(line)
+  if report.verb in ["gc", "rewire"]:
+    var repaired, anomalous = 0
+    for e in report.sweep:
+      if e.repaired: inc repaired
+      if e.before == "refspec-without-safety": inc anomalous
+    result.add("workspace shared-clones: sweep bares=" & $report.sweep.len &
+      " repaired=" & $repaired & " refspec-without-safety=" & $anomalous)
+    for e in report.sweep:
+      if e.before == "refspec-without-safety":
+        # Not this build's doing: prepareSharedBare never writes the refspec
+        # without the safety config. Named before the repair hid it.
+        result.add("workspace shared-clones: warning: " & e.path &
+          " carried the fetch refspec WITHOUT the borrower-safety config, a " &
+          "state this build never writes; another tool is writing this " &
+          "cache" & (if e.repaired: " (repaired)" else: ""))
+  for d in report.diagnostics:
+    result.add("workspace shared-clones: error: " & d)
 
 proc parseSharedClonesArgs(args: openArray[string]): SharedClonesArgs =
   ## ``repro workspace shared-clones <verb> [<project>] [--workspace-root]
@@ -75871,6 +75902,17 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
   if parsed.verb == "gc":
     liveWorkspaces = liveWorkspaceNamesForCache(parsed.workspaceRoot)
 
+  # The eager sweep: every bare in the cache, not only the ones this
+  # project declares, gets the refspec and the safety config. Run before the
+  # per-repo pass so a ``gc`` never maintains a bare that lacks the safety
+  # config. Its state BEFORE repair is kept in the report.
+  if parsed.verb in ["gc", "rewire"]:
+    result.sweep = sweepSharedBares(identity.binaryPath, result.cacheRoot)
+    for e in result.sweep:
+      if e.diagnostic.len > 0:
+        result.diagnostics.add(e.path & ": " & e.diagnostic)
+        result.exitCode = 1
+
   var sharedBareByUrl = initTable[string, SharedCloneResult]()
   # RA-15: maintain each unique shared bare at most once per pass.
   var maintainedBares = initHashSet[string]()
@@ -75889,6 +75931,8 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
     entry.barePresent = info.barePresent
     entry.wired = info.wired
     entry.verdict = info.verdict
+    if info.barePresent:
+      entry.lastFetch = sharedBareLastFetch(info.sharedBarePath)
 
     if parsed.verb == "consolidate":
       let repoAbs = parsed.workspaceRoot / repo.path
