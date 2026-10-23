@@ -43392,6 +43392,7 @@ type
     repoIndex: int
     worktree: GitWorktreeDiscovery
     diagnostic: string
+    previousIdentityNotice: string
 
 proc canonicalDiscoveredGitPath(repoRoot, value: string): string =
   let candidate =
@@ -43545,6 +43546,43 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
       "worktree's filesystem identity"
     return
 
+  # A rename declaration can arrive before sync relocates this workspace.
+  # A prior path has the same structural authority as a current path, but only
+  # while the current slot is entirely absent. Never adopt an orphan over a
+  # live or corrupt canonical checkout, and never let a prior claim override
+  # a current path/common-directory claim from another declared repository.
+  var previousMatches: seq[int]
+  var previousNotices = initTable[int, string]()
+  for index, repo in repos:
+    if index notin missingDeclaredWorktrees:
+      continue
+    for prior in repo.previously:
+      let priorPath = workspaceRoot / prior.path
+      let previousWorktree = discoverGitWorktree(identity, priorPath)
+      if not previousWorktree.ok:
+        continue
+      let byPath = samePathIdentity(result.worktree.worktreeRoot, priorPath)
+      if byPath or samePathIdentity(result.worktree.commonDir,
+          previousWorktree.commonDir):
+        # Several prior spellings can identify the same physical worktree.
+        # Count repositories, not declarations, when checking ambiguity.
+        if index notin previousMatches:
+          previousMatches.add(index)
+          previousNotices[index] = "recognized '" & repo.name & "' via " &
+            "declared previous path '" & prior.path & "'" &
+            (if byPath: "" else: " (Git common directory)") &
+            "; run 'repro ws sync' to complete relocation"
+  if previousMatches.len == 1:
+    result.found = true
+    result.repoIndex = previousMatches[0]
+    result.previousIdentityNotice = previousNotices[result.repoIndex]
+    return
+  if previousMatches.len > 1:
+    result.ambiguous = true
+    result.diagnostic = "more than one declared repo shares the pushed " &
+      "worktree's declared previous filesystem identity"
+    return
+
   let actualRemotes = configuredRemoteDigests(identity,
     result.worktree.worktreeRoot)
   if actualRemotes.len == 0:
@@ -43552,17 +43590,28 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
     return
   var remoteMatches: seq[int]
   for index, repo in repos:
-    # A URL match is only a fallback for a manifest checkout that is absent.
-    # When the declared checkout exists with a different Git common directory,
-    # an arbitrary second clone of the same forge repository is not that
-    # workspace member. Treating it as one lets an explicit managed-hook root
-    # escape the workspace's structural identity boundary.
-    if index in missingDeclaredWorktrees and
-        sharesRemoteIdentity(actualRemotes, expectedRemoteDigests(repo)):
+    # Remote recovery must not turn occupancy or failed Git validation of
+    # the canonical checkout into authorization for an independent clone.
+    if index notin missingDeclaredWorktrees:
+      continue
+    if sharesRemoteIdentity(actualRemotes, expectedRemoteDigests(repo)):
       remoteMatches.add(index)
+      continue
+    for prior in repo.previously:
+      if prior.fetchUrl.len > 0 and
+          remoteLocationDigest(prior.fetchUrl) in actualRemotes:
+        remoteMatches.add(index)
+        # Identify the declaration without printing a URL that could contain
+        # embedded credentials. The canonical digest is credential-insensitive.
+        previousNotices[index] = "recognized '" & repo.name & "' via " &
+          "declared previous URL (identity " &
+          remoteLocationDigest(prior.fetchUrl) &
+          "); run 'repro ws sync' to complete relocation"
+        break
   if remoteMatches.len == 1:
     result.found = true
     result.repoIndex = remoteMatches[0]
+    result.previousIdentityNotice = previousNotices.getOrDefault(result.repoIndex)
   elif remoteMatches.len > 1:
     result.ambiguous = true
     result.diagnostic = "more than one declared repo matches the pushed " &
@@ -67989,6 +68038,8 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       let repo = resolved.repos[currentRepoMatch.repoIndex]
       currentRepoPath = repo.path
       currentRepoName = repo.name
+      if currentRepoMatch.previousIdentityNotice.len > 0:
+        result.notices.add(currentRepoMatch.previousIdentityNotice)
     elif currentRepoMatch.ambiguous:
       result.failures.add(CheckFailure(
         repo: "",
@@ -68076,6 +68127,16 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         # ``fetchUrl`` is already the resolver's full base+relative repository
         # URL. Do not reconstruct repository identity from local branch state.
         agreedRemoteLocation = repo.fetchUrl
+        # An alias for a declared pre-rename destination is still this repo.
+        # Keep the protocol helper's exact push-destination verification: only
+        # a declared prior URL may replace the current agreed URL, never an
+        # arbitrary configured fetch URL or a different pushURL.
+        for prior in repo.previously:
+          if prior.fetchUrl.len > 0 and
+              normalizedRemoteLocation(parsed.hookRemoteLocation) ==
+                normalizedRemoteLocation(prior.fetchUrl):
+            agreedRemoteLocation = prior.fetchUrl
+            break
         break
   elif currentManifestLayer.isSome:
     # Only a URL-backed layer has a manifest-declared repository identity.

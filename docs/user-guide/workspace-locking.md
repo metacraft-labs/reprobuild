@@ -1013,6 +1013,13 @@ values so sync can recognize the existing checkout:
 previously = [{ name = "old-name", path = "old-path" }]
 ```
 
+Before sync relocates the checkout, the pre-push gate recognizes its declared
+previous path, linked worktrees sharing that checkout's Git common directory,
+or a unique declared previous URL. It reports the prior identity and recommends
+`repro ws sync` to complete relocation. These recovery matches apply only while
+the current declared path is absent; an occupied path must be reconciled first.
+The usual cleanliness, publication and lock checks still apply.
+
 Keeping the checkout path is valid; `previously` does not by itself change
 the fetch URL. Health only reports the finding, including under `--fix`.
 It never migrates a checkout or shared clone for this row.
