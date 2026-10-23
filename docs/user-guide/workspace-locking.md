@@ -389,6 +389,10 @@ lock-only chain locally but failed to push it, retry verifies every commit and
 record before resuming an ordinary fast-forward backend push. Dirty, divergent,
 or non-lock history is left untouched for manual inspection.
 
+If the managed backend hook observes a destination change after Git advertised
+it, publication uses the same bounded, verified recovery as a non-fast-forward
+race. Integrity and workspace-policy refusals remain failures.
+
 ### `lock-backend-unreachable` (team or public backend down)
 
 > `team repo 'acme-internal' could not be published to its git-checkout
@@ -772,6 +776,40 @@ keeps `.repo/manifests` as its team backend instead of going public-only.
 Verify with `repro locking explain`.
 
 ## The hook boundary
+
+Separate Git-checkout record stores have a publication boundary. Their managed
+hook set contains only `pre-push`, which permits new lock records and refuses
+changes to records already published at the destination. Workspace lock
+refresh, dependency publication, and source-cache hooks do not run there.
+Other files in the store, including membership metadata, remain editable.
+Lock records must be regular files; symlinks and submodules within `locks/`
+are refused because they can hide records behind editable targets. Duplicate
+paths anywhere in the lock namespace, including its directories, are refused
+because Git's lookup could otherwise shadow a published record. The guard
+reads the actual destination refs and objects, so a stale local tracking ref,
+a new branch name, or a local replacement ref cannot exempt an existing record.
+
+`repro hooks ensure --vcs <store>` recognizes the conventional `.repro/records`
+checkout and the legacy `.repro/manifests` checkout, as well as configured
+Git-checkout backends. For a standalone or custom checkout, register it with:
+
+```console
+$ repro hooks ensure --vcs --record-store <store>
+```
+
+Registration writes `reprobuild.recordStore = true` in Git's local config.
+Later hook repair retains this identity and removes obsolete managed workspace
+hooks while restoring any displaced user hooks. A participating workspace
+repository cannot register as a record store. The lock publisher also registers
+backend identity for the checkout it explicitly selects before publication,
+using `reprobuild.recordStoreBackend = true`. A legacy backend that shares
+workspace duties retains the full workspace hook set; its pre-push enforces
+record immutability before the workspace publication gate. An internal nested
+publication capability cannot exempt it from record verification. A separate
+store's verified additions also pass with an expired or malformed internal token;
+that token is cleanup bookkeeping, and the record guard decides the push. The managed
+pre-push contract includes its immutable-record policy, so a servicing build
+that predates this guard refuses the hook instead of silently allowing a push.
 
 Three VCS hooks participate in locking. Knowing what each does — and
 what it can and cannot see — is what makes the refusal messages above

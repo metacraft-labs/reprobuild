@@ -37,7 +37,7 @@
 ## authentication / unresolvable-host cases fail; drop the policy discriminator
 ## and the ``pre-receive hook declined`` case fails.
 
-import std/unittest
+import std/[unittest, strutils]
 
 import repro_cli_support
 
@@ -140,3 +140,30 @@ suite "RA-29 lock-publish push-race classification":
     check not pushOutputIsNonFastForward("")
     check not pushOutputIsNonFastForward(
       "To /tmp/race/origin.git\n   8ae2714..1ee7a21  HEAD -> main\n")
+
+  test "managed snapshot races enter verified bounded recovery":
+    let prefix = "repro hooks: immutable record-store push refused: destination ref "
+    let suffix = "; retry the push\n"
+    for oid in [repeat('a', 40), repeat('B', 64)]:
+      check pushOutputIsNonFastForward(prefix & "refs/heads/main changed since Git advertised " & oid & suffix)
+    let race = prefix & "refs/heads/main changed since Git advertised " & repeat('a', 40) & suffix
+    for benign in ["repro check: mode=pre-push project=failed branch=refusal-test\n", "repro check: lock refreshed at /tmp/failed/record\n", "repro check: OK\n", "repro check: record store is not a workspace; pre-push workspace gate is a no-op\n"]:
+      check pushOutputIsNonFastForward(benign & Git2501RaceTranscript)
+      check pushOutputIsNonFastForward(benign & Git2512RaceTranscript)
+      check pushOutputIsNonFastForward(benign & race)
+    check pushOutputIsNonFastForward(race & "repro hooks: pre-push above was produced by /tmp/refusal-protocol/repro (resolved from REPROBUILD_REPRO).\n")
+    for refName in ["main", "refs/", "refs//main", "refs/heads/.hidden", "refs/heads/a.lock", "refs/heads/a..b", "refs/heads/a@{b", "refs/heads/a b", "refs/heads/a:b"]:
+      check not pushOutputIsNonFastForward(prefix & refName & " changed since Git advertised " & repeat('a', 40) & suffix)
+    for oid in ["", repeat('a', 39), repeat('a', 41), repeat('a', 63), repeat('g', 40), repeat('a', 40) & " extra"]:
+      check not pushOutputIsNonFastForward(prefix & "refs/heads/main changed since Git advertised " & oid & suffix)
+    for refusal in [
+        "repro hooks: immutable record-store push refused: changes published record locks/app/a.toml\n",
+        "repro hooks: immutable record-store push refused: malformed Git tree response\n",
+        "repro hooks: hook protocol mismatch\n",
+        "repro check: refusing publication of dirty workspace\n"]:
+      check not pushOutputIsNonFastForward(race & refusal)
+      check not pushOutputIsNonFastForward(refusal & race)
+      check not pushOutputIsNonFastForward(refusal & GitFetchFirstTranscript)
+    check not pushOutputIsNonFastForward(race.strip().replace("; retry the push", ""))
+    check not pushOutputIsNonFastForward("destination ref changed; retry the push\n")
+    check not pushOutputIsNonFastForward("repro hooks: retry the push after connectivity changes\n")
