@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 68,
     "pureUnitTests": 691,
     "staticallyDetectedRuntimeCompilerFlowTests": 127,
-    "testEntries": 2400
+    "testEntries": 2401
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1390,7 +1390,7 @@
     "classificationCounts": {
       "graph-fixture": 18,
       "integration": 1290,
-      "platform/destructive": 144,
+      "platform/destructive": 145,
       "pure unit": 691,
       "unclassified": 257
     },
@@ -1595,8 +1595,8 @@
       }
     ],
     "nimTestBinaryCount": 2364,
-    "pythonTestFileCount": 36,
-    "testEntryCount": 2400
+    "pythonTestFileCount": 37,
+    "testEntryCount": 2401
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -50536,6 +50536,21 @@
       "source": "tests/unit/test_package_root_anchor.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_profile_daemon_worker_syscalls.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

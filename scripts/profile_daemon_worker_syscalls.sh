@@ -35,7 +35,8 @@
 #     RestrictNamespaces=, RestrictAddressFamilies=, NoNewPrivileges=no, the
 #     bounding set) and fails unless every workload binary exits 0.
 #
-# Linux only; needs passwordless sudo, and strace for profiling ($STRACE or on
+# Linux only; profiling requires the dev shell's REPRO_SYSTEMD_ANALYZE.
+# Needs passwordless sudo, and strace for profiling ($STRACE or on
 # PATH; e.g. STRACE=$(nix build --no-link --print-out-paths nixpkgs#strace)/bin/strace).
 # Usage:
 #   scripts/profile_daemon_worker_syscalls.sh [--verify] <workload-binary> ...
@@ -99,24 +100,46 @@ strace_bin=${STRACE:-$(command -v strace || true)}
 [[ -x "$strace_bin" ]] || { echo "CONF-3 profiling needs strace (\$STRACE or on PATH)" >&2; exit 2; }
 
 # expand <group-or-name>: every syscall name it stands for, recursively.
-# The dev shell's pinned systemd-analyze when there is one, so the profile
-# subtracts the same @system-service the lint derives the floor from.
-systemd_analyze=${REPRO_SYSTEMD_ANALYZE:-systemd-analyze}
+# Subtract exactly the pinned base set the lint derives the floor from.
+# --verify uses the unit's filter directly and needs no group expansion.
+systemd_analyze=${REPRO_SYSTEMD_ANALYZE:-}
+[[ -n "$systemd_analyze" ]] || {
+  echo "CONF-3 profiling requires REPRO_SYSTEMD_ANALYZE from the dev shell" >&2
+  exit 2
+}
+[[ "$systemd_analyze" == */* && -f "$systemd_analyze" && -x "$systemd_analyze" ]] || {
+  echo "CONF-3: REPRO_SYSTEMD_ANALYZE=$systemd_analyze must name an executable file; re-enter the dev shell" >&2
+  exit 2
+}
 declare -A expanded=()
 expand() {
-  local item=$1
+  local item=$1 raw
   if [[ $item != @* ]]; then echo "$item"; return; fi
   if [[ -z "${expanded[$item]:-}" ]]; then
-    expanded[$item]=$("$systemd_analyze" syscall-filter --no-pager "$item" 2>/dev/null |
-      awk 'NR > 1 && $1 !~ /^#/ && NF == 1 {print $1}')
+    if ! raw=$("$systemd_analyze" syscall-filter --no-pager "$item" 2>"$logdir/analyze.stderr"); then
+      echo "CONF-3: $systemd_analyze failed to expand $item" >&2
+      cat "$logdir/analyze.stderr" >&2
+      return 1
+    fi
+    expanded[$item]=$(awk 'NR > 1 && $1 !~ /^#/ && NF == 1 {print $1}' <<< "$raw")
+    if [[ -z "${expanded[$item]}" ]]; then
+      echo "CONF-3: $systemd_analyze returned an empty expansion for $item" >&2
+      cat "$logdir/analyze.stderr" >&2
+      return 1
+    fi
   fi
   local member
-  for member in ${expanded[$item]}; do expand "$member"; done
+  for member in ${expanded[$item]}; do expand "$member" || return 1; done
 }
 declare -A allowed=()
-for n in $(expand @system-service); do allowed[$n]=1; done
+# Capture and check before iterating: a failed command substitution in a for
+# list does not fail the loop, even under set -e. Recursion must propagate its
+# status explicitly too, since these checked substitutions disable errexit.
+base_names=$(expand @system-service) || exit 1
+for n in $base_names; do allowed[$n]=1; done
 for g in @privileged @resources @obsolete; do
-  for n in $(expand "$g"); do unset "allowed[$n]"; done
+  group_names=$(expand "$g") || exit 1
+  for n in $group_names; do unset "allowed[$n]"; done
 done
 
 declare -A seen=()
