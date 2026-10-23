@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2363,
+    "nimTestBinaries": 2364,
     "pureUnitConsolidationGroups": 68,
-    "pureUnitTests": 690,
+    "pureUnitTests": 691,
     "staticallyDetectedRuntimeCompilerFlowTests": 127,
-    "testEntries": 2399
+    "testEntries": 2400
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1097,7 +1097,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 24,
+      "count": 25,
       "defines": [],
       "dependencyShape": [
         "repro_dsl_stdlib",
@@ -1109,6 +1109,7 @@
         "tests/unit/t_fribidi_dev_stub.nim",
         "tests/unit/t_m9r10b_synthesis_wiring.nim",
         "tests/unit/t_m9r12_4_autotools_emits_fetch.nim",
+        "tests/unit/t_m9r14c_4_inline_exec_path_enrichment.nim",
         "tests/unit/t_m9r14c_5_autotools_stage_copy.nim",
         "tests/unit/t_m9r14d_7_meson_package_stage_copy.nim",
         "tests/unit/t_m9r14e_2_install_tree_mirror.nim",
@@ -1388,9 +1389,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1289,
-      "platform/destructive": 145,
-      "pure unit": 690,
+      "integration": 1290,
+      "platform/destructive": 144,
+      "pure unit": 691,
       "unclassified": 257
     },
     "graphOwnedTestArtifacts": [
@@ -1593,9 +1594,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2363,
+    "nimTestBinaryCount": 2364,
     "pythonTestFileCount": 36,
-    "testEntryCount": 2399
+    "testEntryCount": 2400
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -31513,6 +31514,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_autotools_configure_tools",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_autotools_configure_tools.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_b0_develop_mode_uses_local_source",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -47808,8 +47828,8 @@
     },
     {
       "binary": "build/test-bin/t_m9r14c_4_inline_exec_path_enrichment",
-      "class": "platform/destructive",
-      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -47820,7 +47840,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_m9r14c_4_inline_exec_path_enrichment.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

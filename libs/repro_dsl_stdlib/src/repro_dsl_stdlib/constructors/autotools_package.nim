@@ -18,7 +18,8 @@
 ##
 ## The fix mirrors the production ``from-source-custom`` convention:
 ## emit the configure action via ``inlineExecCall(["sh", "-c", script],
-## ...)`` with ``toolIdentityRefs = @["sh"]``. The engine recognises
+## ...)`` with intrinsic ``sh``, ``awk``, and ``diff`` tool identities.
+## The engine recognises
 ## ``reprobuild.builtin.exec`` calls in ``lowerGraphAction`` and skips
 ## profile lookup; the ``toolIdentityRefs`` ride lets the engine
 ## prepend the resolved ``sh`` bin dir to PATH at fork time via the
@@ -59,9 +60,13 @@ import ../types/package_result
 # configure edge below uses ``inlineExecCall`` instead), but the module
 # import is preserved so the ``package sh:`` provisioning blocks land
 # in ``registeredPackages()`` and the M9.R.9 / M9.R.10a stdlib fall-
-# through path can resolve ``toolIdentityRefs = @["sh"]`` for the
+# through path can resolve the intrinsic tool identities for the
 # configure action's PATH plumbing at fork time.
 import ../packages/sh as sh_module
+# Autoconf's config.status substitutes with awk, while configure scripts
+# compare generated files with diff. Register their provisioning even when a
+# recipe imports this constructor directly and declares neither tool itself.
+import ../packages/host_system_tools as host_system_tools_module
 import ../packages/make as make_module
 # M9.R.14c.8 — auto-import the autotools regen layer + m4 + perl so
 # their stdlib ``package <name>:`` provisioning blocks land in
@@ -608,7 +613,7 @@ proc autotools_package*(srcDir: string;
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(configureIgnoredRoots),
     commandStatsId = "autotools_package.configure",
-    toolIdentityRefs = @["sh"],
+    toolIdentityRefs = @["sh", "awk", "diff"],
     env = extraEnv,
     declaredOutputs = @[m9r79ConfBuildDirAbs],
     readOnlyRoots = m9r79ConfReadOnly)
