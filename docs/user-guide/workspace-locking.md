@@ -455,6 +455,23 @@ next durable branch containing the commit, or an empty `ref` when only
 the stabilisation branch contains it, and a lock that already records
 one has it replaced on the next refresh or commit.
 
+Refresh also names every sibling pin it removes, including pins in HEAD's
+committed lock that a previous working-copy refresh already removed. The
+report gives the pinned revision and the manifest checkout revisions whose
+resolved `depends` closure no longer names the sibling.
+
+Before writing, refresh checks local remote-tracking refs for the flat
+manifest checkout and configured manifest layers. A manifest that lacks
+commits already fetched from its upstream gets a warning naming both
+revisions and `repro sync` as the remedy; refresh does not fetch or move
+manifest checkouts itself. If committed sibling pins would disappear while
+any manifest is known behind (including divergence), refresh leaves the lock
+untouched and exits 6. To proceed deliberately, pass
+`--allow-stale-manifest`; the warnings still appear. An intentional removal
+using current manifests succeeds and still reports the removed pins.
+`--json` puts a single report on stdout with `droppedPins` and
+`behindManifests` arrays, including on this refusal; diagnostics stay on stderr.
+
 `repro lock refresh` also **refuses to write a lock from an incomplete
 solve**. A recipe's `uses:` pulls sibling recipes into the solve
 transitively; when a `uses:` names a develop-set sibling (one the
