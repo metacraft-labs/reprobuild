@@ -48,6 +48,13 @@
 ##   real readiness waiter. Its bound is the persisted failure's identity,
 ##   independent of whether a listener has already exited.
 ##
+## Readiness cancellation also drives a real Python service that accepts HTTP
+## connections but never answers. Its on-disk probe marker proves the socket
+## was reached before cancellation; no readiness or process operation is mocked.
+## A second real peer keeps its socket open after a separate service child dies,
+## so the child-exit cancel check is tested independently of socket EOF. That
+## peer is registered for process-exit cleanup as soon as it is spawned.
+##
 ## The HTTP ownership cases spawn real helpers and a real Python parent,
 ## use real file locks and sockets, and kill actual processes. The duplicate
 ## case also calls the supervisor with a serialized empty artifact and a nil
@@ -69,6 +76,8 @@ import std/[json, net, os, osproc, sequtils, strtabs, streams, strutils,
 import repro_test_support
 import repro_cli_support/dev_session
 import repro_dev_env_artifacts
+when defined(posix):
+  from repro_test_support/process_fixtures import terminateAtProcessExit
 
 proc q(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
@@ -460,11 +469,10 @@ proc reapSession(projectRoot: string) =
   ## BEST-EFFORT reap of whatever the session left behind, by pid, after
   ## confirming each pid still belongs to this session.
   ##
-  ## Needed because a supervisor that gives up on a service exits WITHOUT
-  ## stopping the control-API child or the services it had already started
-  ## -- a pre-existing leak that `recordStartFailure` reports but does not
-  ## repair. A test that drives a failing start therefore has to reap, or it
-  ## leaves processes behind for every later case to trip over.
+  ## Negative controls run against the old supervisor that leaked children
+  ## on failed startup, and ownership cases deliberately kill the supervisor.
+  ## Both need fallback cleanup. Startup-failure regressions assert the owned
+  ## children are gone BEFORE invoking this fallback.
   ##
   ## WHAT THIS IS NOT: a guarantee that nothing leaks. It kills the pids the
   ## session PUBLISHED, so a process the session started but never recorded
@@ -527,6 +535,30 @@ proc closedLoopbackPort(): int =
   probe.bindAddr(Port(0), "127.0.0.1")
   result = int(probe.getLocalAddr()[1])
   probe.close()
+
+proc writeHttpReadinessFixture(dir: string; replyDelaySeconds: int) =
+  ## A real server with a deliberately slow (or absent) status line. The
+  ## probe marker is written only after accepting its actual connection.
+  createDir(dir / "scripts")
+  let port = closedLoopbackPort()
+  writeFile(dir / "scripts" / "http.py",
+    "import socket, pathlib, time\n" &
+    "s=socket.socket(); s.bind(('127.0.0.1', " & $port & ")); s.listen(8)\n" &
+    "while True:\n" &
+    " c,_=s.accept()\n" &
+    " c.recv(65536)\n" &
+    " pathlib.Path('state/probed').touch()\n" &
+    " time.sleep(" & $(if replyDelaySeconds >= 0: replyDelaySeconds else: 60) & ")\n" &
+    (if replyDelaySeconds >= 0:
+      " c.sendall(b'HTTP/1.1 200 OK\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n')\n"
+     else: "") &
+    " c.close()\n")
+  var metadata = parseJson(serviceJson(@["python3", "scripts/http.py"], "",
+    readinessTimeoutMs = 15000))
+  metadata["readiness"] = %*{"kind": "httpGet",
+    "url": "http://127.0.0.1:" & $port, "timeoutMs": 15000}
+  writeFile(dir / "reprobuild.nim", providerText([
+    (name: "http", metadata: $metadata)]))
 
 type
   UpAnnouncement = object
@@ -604,6 +636,24 @@ proc startStatuslessPeer(body: string): StatuslessPeer =
     options = {poUsePath})
   let portLine = result.process.outputStream.readLine()
   result.httpBind = "http://127.0.0.1:" & portLine.strip()
+
+proc startStalledPeer(marker: string): StatuslessPeer =
+  ## A separate real peer keeps the response socket open after the service
+  ## child exits. A socket owned only by that child would close on exit and
+  ## release recv even if the supervisor forgot its child-exit cancel check.
+  let script =
+    "import socket, sys, pathlib, time\n" &
+    "s=socket.socket(); s.bind(('127.0.0.1', 0)); s.listen(8)\n" &
+    "print(s.getsockname()[1], flush=True)\n" &
+    "c,_=s.accept(); c.recv(65536)\n" &
+    "pathlib.Path(sys.argv[1]).touch()\n" &
+    "time.sleep(60)\n"
+  result.process = startProcess("python3", args = @["-c", script, marker],
+    options = {poUsePath})
+  when defined(posix):
+    terminateAtProcessExit(result.process.processID())
+  result.httpBind = "http://127.0.0.1:" &
+    result.process.outputStream.readLine().strip()
 
 proc stop(peer: StatuslessPeer) =
   try:
@@ -1217,6 +1267,195 @@ suite "e2e_repro_dev_sessions":
         parseJson(it){"kind"}.getStr())
       check "service.failed" in kinds
       check "session.up" notin kinds
+
+    test "e2e_readiness_child_exit_reports_exit_status_and_reaps_started_services":
+      for exitCode in [0, 69]:
+        # Real HTTP readiness against a closed port, and real early exits. A
+        # ready sibling makes startup-failure cleanup observable too.
+        let c = prepareCase("repro-readiness-exit", writeFixture =
+          proc (dir: string) =
+            writeUpDownFixture(dir)
+            writeExecutable(dir / "scripts" / "die.sh",
+              "#!/bin/sh\nsleep 1\nexit " & $exitCode & "\n")
+            var dying = parseJson(serviceJson(@["sh", "scripts/die.sh"], "",
+              dependsOn = @["db"], readinessTimeoutMs = 15000))
+            dying["readiness"] = %*{"kind": "httpGet",
+              "url": "http://127.0.0.1:" & $closedLoopbackPort(),
+              "timeoutMs": 15000}
+            writeFile(dir / "reprobuild.nim", providerText([
+              (name: "db", metadata: serviceJson(@["sh", "scripts/db.sh"],
+                "state/db.ready")),
+              (name: "dying", metadata: $dying)])))
+        defer:
+          reapSession(c.projectRoot)
+          removeDir(c.tempRoot)
+        let res = runRepro(c, @["up", c.projectRoot, "--http=127.0.0.1:0"])
+        checkpoint(res.output)
+        check res.exitCode == 1
+        check res.output.contains("exitCode=" & $exitCode)
+        check reportedWaitMs(res.output) >= 0
+        check reportedWaitMs(res.output) < 10000
+        let failed = waitForStatus(sessionMetadataPath(c.projectRoot), "failed")
+        check failed{"failure"}.getStr().contains("exitCode=" & $exitCode)
+        let events = readFile(sessionMetadataPath(c.projectRoot).parentDir /
+          "events.jsonl").splitLines().filterIt(it.len > 0).mapIt(parseJson(it))
+        check events.anyIt(it{"kind"}.getStr() == "service.exited" and
+          it{"service"}.getStr() == "dying" and
+          it{"detail"}.getStr().contains("exitCode=" & $exitCode))
+        check events.anyIt(it{"kind"}.getStr() == "service.failed")
+        check not events.anyIt(it{"kind"}.getStr() == "session.up")
+        # Failure remains terminal while cleanup releases every owned child.
+        var cleanupWait = 0
+        while failed["services"].anyIt(pidAlive(it{"pid"}.getInt())) and
+            cleanupWait < 10000:
+          sleep(50)
+          cleanupWait += 50
+        let cleaned = parseJson(readFile(sessionMetadataPath(c.projectRoot)))
+        check cleaned{"status"}.getStr() == "failed"
+        check cleaned["services"].allIt(not pidAlive(it{"pid"}.getInt()))
+
+    test "e2e_down_cancels_file_readiness_without_publishing_up_or_failure":
+      for mode in ["up", "dev"]:
+        let c = prepareCase("repro-readiness-cancel", writeFixture =
+          proc (dir: string) =
+            writeReadinessFixture(dir, sleepSeconds = 0,
+              readinessTimeoutMs = 15000, everReady = false)
+            writeExecutable(dir / "scripts" / "task.sh",
+              "#!/bin/sh\ntouch state/task.ran\n")
+            writeExecutable(dir / "scripts" / "later.sh",
+              "#!/bin/sh\ntouch state/later.started state/later.ready\n" &
+              "while :; do sleep 1; done\n")
+            writeFile(dir / "reprobuild.nim", providerText([
+              (name: "slow", metadata: serviceJson(@["sh", "scripts/slow.sh"],
+                "state/slow.ready", readinessTimeoutMs = 15000)),
+              (name: "later", metadata: serviceJson(@["sh", "scripts/later.sh"],
+                "state/later.ready", dependsOn = @["slow"]))],
+              taskCommand = "sh scripts/task.sh")))
+        defer:
+          reapSession(c.projectRoot)
+          removeDir(c.tempRoot)
+        # The explicit parent budget returns while its supervisor is starting.
+        let up = runRepro(c, @[mode, c.projectRoot, "--http=127.0.0.1:0",
+          "--ready-timeout=500"])
+        check up.exitCode == 75
+        let starting = waitForStatus(sessionMetadataPath(c.projectRoot), "starting")
+        check starting["services"].len == 1
+        let down = runRepro(c, @["down", c.projectRoot, "--force",
+          "--stop-timeout=5000"])
+        checkpoint(down.output)
+        check down.exitCode == 0
+        let stopped = waitForStatus(sessionMetadataPath(c.projectRoot), "down")
+        check stopped["services"].allIt(not pidAlive(it{"pid"}.getInt()))
+        let events = readFile(sessionMetadataPath(c.projectRoot).parentDir /
+          "events.jsonl")
+        check not events.contains("session.up")
+        check not events.contains("service.failed")
+
+        check not fileExists(c.projectRoot / "state" / "task.ran")
+        check not fileExists(c.projectRoot / "state" / "later.started")
+
+    test "e2e_down_cancels_http_readiness_when_the_peer_never_answers":
+      # The actual service accepts the probe but never responds. This is a
+      # real stalled HTTP peer, not a substituted readiness implementation.
+      let c = prepareCase("repro-readiness-stalled-http", writeFixture =
+        proc (dir: string) = writeHttpReadinessFixture(dir,
+          replyDelaySeconds = -1))
+      defer:
+        reapSession(c.projectRoot)
+        removeDir(c.tempRoot)
+      let up = runRepro(c, @["up", c.projectRoot, "--http=127.0.0.1:0",
+        "--ready-timeout=500"])
+      check up.exitCode == 75
+      var waited = 0
+      while not fileExists(c.projectRoot / "state" / "probed") and waited < 5000:
+        sleep(50)
+        waited += 50
+      require fileExists(c.projectRoot / "state" / "probed")
+      let down = runRepro(c, @["down", c.projectRoot, "--force",
+        "--stop-timeout=5000"])
+      checkpoint(down.output)
+      check down.exitCode == 0
+      let stopped = waitForStatus(sessionMetadataPath(c.projectRoot), "down")
+      check stopped["services"].allIt(not pidAlive(it{"pid"}.getInt()))
+      let events = readFile(sessionMetadataPath(c.projectRoot).parentDir /
+        "events.jsonl")
+      check not events.contains("session.up")
+      check not events.contains("service.failed")
+
+    test "e2e_http_readiness_keeps_a_slow_valid_response_in_flight":
+      let c = prepareCase("repro-readiness-slow-http", writeFixture =
+        proc (dir: string) = writeHttpReadinessFixture(dir,
+          replyDelaySeconds = 2))
+      defer:
+        reapSession(c.projectRoot)
+        removeDir(c.tempRoot)
+      let up = runRepro(c, @["up", c.projectRoot, "--http=127.0.0.1:0"])
+      checkpoint(up.output)
+      check up.exitCode == 0
+      let ready = waitForStatus(sessionMetadataPath(c.projectRoot), "up")
+      check ready["services"][0]["ready"].getBool()
+      let started = eventTimes(c.projectRoot, "service.starting")
+      let finished = eventTimes(c.projectRoot, "service.ready")
+      require started.len == 1
+      require finished.len == 1
+      check (finished[0] - started[0]).inMilliseconds >= 2000
+      let down = runRepro(c, @["down", c.projectRoot])
+      checkpoint(down.output)
+      check down.exitCode == 0
+
+    test "e2e_child_exit_interrupts_an_http_response_held_open_by_a_peer":
+      var peer: StatuslessPeer
+      let c = prepareCase("repro-readiness-exit-in-http", writeFixture =
+        proc (dir: string) =
+          createDir(dir / "scripts")
+          peer = startStalledPeer(dir / "state" / "probed")
+          writeExecutable(dir / "scripts" / "die.sh",
+            "#!/bin/sh\nwhile [ ! -f state/probed ]; do sleep 0.05; done\n" &
+            "sleep 1\nexit 69\n")
+          var metadata = parseJson(serviceJson(@["sh", "scripts/die.sh"], "",
+            readinessTimeoutMs = 15000))
+          metadata["readiness"] = %*{"kind": "httpGet",
+            "url": peer.httpBind, "timeoutMs": 15000}
+          writeFile(dir / "reprobuild.nim", providerText([
+            (name: "dying", metadata: $metadata)])))
+      defer:
+        peer.stop()
+        reapSession(c.projectRoot)
+        removeDir(c.tempRoot)
+      let up = runRepro(c, @["up", c.projectRoot, "--http=127.0.0.1:0"])
+      checkpoint(up.output)
+      check up.exitCode == 1
+      check up.output.contains("exitCode=69")
+      check reportedWaitMs(up.output) >= 0
+      check reportedWaitMs(up.output) < 10000
+      check fileExists(c.projectRoot / "state" / "probed")
+      check peer.process.running()
+      let failed = waitForStatus(sessionMetadataPath(c.projectRoot), "failed")
+      check failed{"failure"}.getStr().contains("exitCode=69")
+      check failed["services"].allIt(not pidAlive(it{"pid"}.getInt()))
+
+    test "e2e_zero_readiness_budget_still_checks_an_immediate_probe":
+      for readinessKind in ["none", "fileExists"]:
+        let c = prepareCase("repro-readiness-zero", writeFixture =
+          proc (dir: string) =
+            writeReadinessFixture(dir, sleepSeconds = 0,
+              readinessTimeoutMs = 0)
+            createDir(dir / "state")
+            writeFile(dir / "state" / "slow.ready", "already ready\n")
+            var metadata = parseJson(serviceJson(@["sh", "scripts/slow.sh"],
+              "state/slow.ready", readinessTimeoutMs = 0))
+            metadata["readiness"]["kind"] = %readinessKind
+            writeFile(dir / "reprobuild.nim", providerText([
+              (name: "slow", metadata: $metadata)])))
+        defer:
+          reapSession(c.projectRoot)
+          removeDir(c.tempRoot)
+        let up = runRepro(c, @["up", c.projectRoot, "--http=127.0.0.1:0"])
+        checkpoint(up.output)
+        check up.exitCode == 0
+        let ready = waitForStatus(sessionMetadataPath(c.projectRoot), "up")
+        check ready["services"][0]["ready"].getBool()
+        check runRepro(c, @["down", c.projectRoot]).exitCode == 0
 
     test "e2e_repro_dev_session_flags_are_refused_when_they_cannot_act":
       # The unknown-flag refusal is not weakened by the new flag, and the

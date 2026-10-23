@@ -1,4 +1,4 @@
-import std/[algorithm, atomics, hashes, json, net, options, os, osproc, sequtils,
+import std/[algorithm, atomics, hashes, json, monotimes, nativesockets, net, options, os, osproc, sequtils,
             strtabs, strutils, tables, times]
 
 import cbor
@@ -2733,6 +2733,9 @@ proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
       config.eventLogHint() & "\n" &
       disposition)
 
+proc readinessStatusSatisfied(status: int): bool =
+  status >= 200 and status < 500
+
 proc readinessProbeSatisfied*(url: string): bool =
   ## The `httpGet` probe, as the resource lane's installed prober.
   ##
@@ -2746,7 +2749,7 @@ proc readinessProbeSatisfied*(url: string): bool =
     return false
   try:
     let response = httpRequest(url, "/")
-    response.status >= 200 and response.status < 500
+    readinessStatusSatisfied(response.status)
   except CatchableError:
     false
 
@@ -2765,15 +2768,114 @@ proc readinessOk(spec: ServiceSpec): bool =
   else:
     false
 
-proc waitForReadiness(spec: ServiceSpec) =
-  var waited = 0
-  while waited <= spec.readinessTimeoutMs:
-    if readinessOk(spec):
-      return
-    sleep(50)
-    waited.inc(50)
-  raise newException(IOError,
-    "service readiness timed out for " & spec.name)
+proc stopRequested(state: SessionState): bool =
+  fileExists(extendedPath(state.stopRequestPath))
+
+proc sessionHttpReadiness(url: string; deadline: MonoTime;
+                          cancelled: proc(): bool): bool =
+  ## A readiness request must retain a slow response while still giving the
+  ## owner a chance to notice stop requests and child exit. Nonblocking I/O
+  ## keeps one connection in flight; restarting a timed-out request every
+  ## poll would prevent a healthy but slow endpoint from ever becoming ready.
+  ## The declared readiness deadline also bounds peers that trickle bytes.
+  var raw = url
+  if raw.startsWith("http://"):
+    raw = raw["http://".len .. ^1]
+  let slash = raw.find('/')
+  if slash >= 0:
+    raw = raw[0 ..< slash]
+  let endpoint = parseHttpBind(raw)
+  let addresses = getAddrInfo(endpoint.host, Port(endpoint.port), AF_INET)
+  defer: freeAddrInfo(addresses)
+  var address = addresses
+  proc pollBudget(): int =
+    max(0, min(50, (deadline - getMonoTime()).inMilliseconds.int))
+  while address != nil:
+    let socket = newSocket(buffered = false)
+    defer: socket.close()
+    socket.getFd().setBlocking(false)
+    let connected = nativesockets.connect(socket.getFd(), address.ai_addr,
+      address.ai_addrlen.SockLen) == 0
+    if not connected:
+      let error = osLastError().int32
+      let pending =
+        when defined(windows):
+          error in [WSAEWOULDBLOCK, WSAEINPROGRESS, WSAEINTR]
+        else:
+          error in [EINPROGRESS, EINTR]
+      if not pending:
+        address = address.ai_next
+        continue
+    while true:
+      if cancelled() or pollBudget() == 0:
+        return false
+      var writable = @[socket.getFd()]
+      if selectWrite(writable, pollBudget()) > 0:
+        break
+    if getSockOptInt(socket.getFd(), SOL_SOCKET, SO_ERROR) != 0:
+      address = address.ai_next
+      continue
+    # This small request is sent on a nonblocking socket, so even a peer
+    # that never reads cannot hold the supervisor in send().
+    socket.send("GET / HTTP/1.1\r\nHost: " & endpoint.host &
+      "\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+    var statusLine = ""
+    while statusLine.len < 8192:
+      if cancelled() or pollBudget() == 0:
+        return false
+      var readable = @[socket.getFd()]
+      if selectRead(readable, pollBudget()) <= 0:
+        continue
+      let ch = socket.recv(1)
+      if ch.len == 0:
+        return false
+      if ch == "\n":
+        let fields = statusLine.splitWhitespace()
+        if fields.len < 2 or not fields[0].startsWith("HTTP/"):
+          return false
+        let status = parseInt(fields[1])
+        return readinessStatusSatisfied(status)
+      statusLine.add(ch)
+    return false
+
+proc waitForReadiness(state: var SessionState; index: int): bool =
+  let spec = state.services[index].spec
+  let process = state.services[index].process
+  let stopPath = state.stopRequestPath
+  let deadline = getMonoTime() + initDuration(milliseconds = spec.readinessTimeoutMs)
+  let cancelled = proc(): bool =
+    fileExists(extendedPath(stopPath)) or process.peekExitCode() != -1
+  var satisfied = false
+  var probed = false
+  while true:
+    if state.stopRequested():
+      return false
+    let exitCode = process.peekExitCode()
+    if exitCode != -1:
+      # peekExitCode reaps an exited child, including zombies for which
+      # kill(pid, 0) would still report life. Keep its actual exit status.
+      process.close()
+      state.services[index].process = nil
+      state.services[index].status = "exited"
+      state.writeState()
+      let detail = "exitCode=" & $exitCode
+      state.emitEvent("service.exited", service = spec.name, detail = detail)
+      raise newException(IOError, "service exited before readiness: " & detail)
+    # Check cancellation and exit AFTER a probe too: it may have been slow,
+    # and a service that died during it must not be published ready.
+    if satisfied:
+      return true
+    if probed and getMonoTime() > deadline:
+      raise newException(IOError, "service readiness timed out for " & spec.name)
+    probed = true
+    if spec.readinessKind.normalize() == "httpget":
+      satisfied =
+        try: sessionHttpReadiness(spec.readinessUrl, deadline, cancelled)
+        except CatchableError: false
+    else:
+      satisfied = readinessOk(spec)
+    if not satisfied:
+      sleep(50)
 
 proc selfSeededSourceRootUnsetOps(): seq[DevEnvShellOp] =
   ## Unset ops for the source roots this engine seeded for its OWN compiles
@@ -2808,7 +2910,9 @@ proc producerOps(state: SessionState;
 
 proc startService(state: var SessionState;
                   artifact: DevEnvArtifact;
-                  artifactPath: string; spec: ServiceSpec) =
+                  artifactPath: string; spec: ServiceSpec): bool =
+  if state.stopRequested():
+    return false
   var runtime = ServiceRuntime(spec: spec, status: "starting")
   state.services.add(runtime)
   state.writeState()
@@ -2831,12 +2935,14 @@ proc startService(state: var SessionState;
   state.services[^1] = runtime
   state.startOrder.add(spec.name)
   state.writeState()
-  spec.waitForReadiness()
+  if not state.waitForReadiness(state.services.high):
+    return false
   runtime.ready = true
   runtime.status = "ready"
   state.services[^1] = runtime
   state.writeState()
   state.emitEvent("service.ready", service = spec.name)
+  true
 
 proc recordStartFailure(state: var SessionState; service, detail: string) =
   ## Publish a terminal start failure: ``status: "failed"`` plus the reason
@@ -2998,9 +3104,6 @@ proc runWatchCycle(state: var SessionState; config: DevSessionSupervisorConfig;
   state.writeState()
   state.emitEvent("watch.cycle.finished", cycle = cycle)
 
-proc stopRequested(state: SessionState): bool =
-  fileExists(extendedPath(state.stopRequestPath))
-
 proc runWatchLoop(state: var SessionState; config: DevSessionSupervisorConfig;
                   artifact: var DevEnvArtifact; artifactPath: var string) =
   # AN EDIT MADE WHILE A CYCLE RUNS MUST START ANOTHER CYCLE. The watcher is
@@ -3161,9 +3264,9 @@ proc runDevSessionSupervisor*(config: DevSessionSupervisorConfig;
   # what lets ``waitForDevSessionReady`` fail at the moment the supervisor
   # knows, instead of at the end of its budget.
   #
-  # The exception is RE-RAISED unchanged: this arm adds a report, it does
-  # not change what a failed start does. In particular it does NOT stop the
-  # services that did start -- that pre-existing leak is untouched here.
+  # A failed start keeps that terminal failure while stopping every service
+  # already started. A stop request during readiness takes the normal shutdown
+  # path instead, without ever publishing an up session or a startup failure.
   var specs: seq[ServiceSpec]
   try:
     specs = serviceSpecsFromArtifact(artifact,
@@ -3182,16 +3285,21 @@ proc runDevSessionSupervisor*(config: DevSessionSupervisorConfig;
   state.emitEvent("resources.reconciled")
   for spec in specs:
     try:
-      state.startService(artifact, artifactPath, spec)
+      if not state.startService(artifact, artifactPath, spec):
+        break
     except CatchableError as err:
       state.recordStartFailure(spec.name, err.msg)
+      state.stopServices()
       raise
-  state.status = "up"
-  state.writeState()
-  state.emitEvent("session.up")
+  if not state.stopRequested():
+    state.status = "up"
+    state.writeState()
+    state.emitEvent("session.up")
 
   try:
-    if config.mode == dsmDev:
+    if state.stopRequested():
+      discard
+    elif config.mode == dsmDev:
       state.runWatchLoop(config, artifact, artifactPath)
     else:
       while not state.stopRequested():
