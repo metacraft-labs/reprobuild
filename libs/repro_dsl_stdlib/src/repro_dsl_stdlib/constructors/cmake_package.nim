@@ -176,6 +176,15 @@ proc cmakeBuildScript*(libraryDirs, buildArgv: openArray[string];
   result.add(quoted.join(" ") & "; ")
   result.add(": > \"" & buildStamp.replace("\\", "/") & "\"")
 
+proc cmakeEffectiveGenerator*(generator: string;
+                              nativeRefs: openArray[string]): string =
+  ## With no generator named, CMake picks Unix Makefiles and needs a make
+  ## the action PATH does not carry when the recipe declared ninja instead.
+  if generator.len == 0 and "ninja" in nativeRefs:
+    "Ninja"
+  else:
+    generator
+
 proc cmake_package*(srcDir: string;
                     buildDir = "build";
                     destdir = "out";
@@ -538,6 +547,7 @@ proc cmake_package*(srcDir: string;
       if extra notin cmakeBuildRefs:
         cmakeBuildRefs.add(extra)
   let cmakeDepRefs = cmakeNativeRefs & cmakeBuildRefs
+  let generator = cmakeEffectiveGenerator(generator, cmakeNativeRefs)
   if patchActionId.len > 0:
     appendRegisteredActionToolIdentityRefs(patchActionId, cmakeDepRefs)
     classifyRegisteredActionToolIdentityRefs(patchActionId, cmakeBuildRefs)

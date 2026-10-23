@@ -2284,7 +2284,7 @@ tests/unit/t_m9r6_convention_narrowing_default_synthesis.nim	nim	19
 tests/unit/t_m9r76_install_mirror_resolver.nim	nim	18
 tests/unit/t_m9r77_cas_cli.nim	nim	12
 tests/unit/t_m9r77_hashed_mirror_wiring.nim	nim	15
-tests/unit/t_m9r79_constructors_compile.nim	nim	5
+tests/unit/t_m9r79_constructors_compile.nim	nim	6
 tests/unit/t_m9r7_target_triple_cache_namespacing.nim	nim	14
 tests/unit/t_m9r81_dep_root_env_vars.nim	nim	5
 tests/unit/t_m9r82_action_cache_cas_migration.nim	nim	8

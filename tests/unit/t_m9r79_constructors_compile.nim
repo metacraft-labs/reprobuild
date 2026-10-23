@@ -48,6 +48,12 @@ suite "t_m9r79_constructors_compile":
     check cmakeRuntimeLibraryDirs(
       @[readline, zlib, ncurses, nixReadline, libedit]) == @[zlib, libedit]
 
+  test "cmake defaults to Ninja when the recipe declares ninja":
+    check cmakeEffectiveGenerator("", @["cmake", "ninja", "gcc"]) == "Ninja"
+    check cmakeEffectiveGenerator("", @["cmake", "make"]) == ""
+    check cmakeEffectiveGenerator("Unix Makefiles", @["ninja"]) ==
+      "Unix Makefiles"
+
   test "cmake runtime paths exclude federated compiler bootstrap libc":
     let scratch = createTempDir("repro-cmake-bootstrap-libc-", "")
     defer: removeDir(scratch)
