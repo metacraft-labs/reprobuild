@@ -124,6 +124,36 @@ function Download-String {
   return [string]$content
 }
 
+function Download-VerifiedFileFromMirrors {
+  param(
+    [Parameter(Mandatory = $true)][string[]]$Urls,
+    [Parameter(Mandatory = $true)][string]$OutFile,
+    [Parameter(Mandatory = $true)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedSha256,
+    [ValidateRange(1, 600)][int]$TimeoutSeconds = 60
+  )
+
+  # Each mirror supplies the SAME pinned bytes. Publish only after verification;
+  # neither a failed request nor a bad checksum may leave a usable cache entry.
+  $failures = @()
+  foreach ($url in $Urls) {
+    $partial = "$OutFile.$([Guid]::NewGuid().ToString('N')).partial"
+    try {
+      Invoke-WebRequest -Uri $url -OutFile $partial -UseBasicParsing -TimeoutSec $TimeoutSeconds
+      Assert-FileSha256 -Path $partial -Expected $ExpectedSha256
+      Move-Item -LiteralPath $partial -Destination $OutFile -Force
+      return
+    } catch {
+      $failures += "${url}: $($_.Exception.Message)"
+      Write-Warning "Verified download from '$url' failed. $($_.Exception.Message)"
+    } finally {
+      if (Test-Path -LiteralPath $partial) {
+        Remove-Item -LiteralPath $partial -Force
+      }
+    }
+  }
+  throw "No mirror supplied the pinned archive: $($failures -join '; ')"
+}
+
 function Ensure-CleanDirectory {
   param([Parameter(Mandatory = $true)][string]$Path)
 

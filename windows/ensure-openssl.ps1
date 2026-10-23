@@ -107,7 +107,14 @@ function Ensure-OpenSsl {
   }
 
   $assetName = "mingw-w64-ucrt-x86_64-openssl-$version-$release-any.pkg.tar.zst"
-  $assetUrl = "https://repo.msys2.org/mingw/ucrt64/$assetName"
+  # The primary and its geo redirector share an outage domain. Keep direct
+  # tier-one fallbacks from https://www.msys2.org/dev/mirrors/ and verify the
+  # existing pin regardless of which server responds.
+  $assetUrls = @(
+    "https://repo.msys2.org/mingw/ucrt64/$assetName",
+    "https://mirror.umd.edu/msys2/mingw/ucrt64/$assetName",
+    "https://mirror.accum.se/mirror/msys2.org/mingw/ucrt64/$assetName"
+  )
 
   $installDir = Get-OpenSslInstallDir -Root $Root -Version $version
   $libDir = Join-Path $installDir "lib"
@@ -151,7 +158,7 @@ function Ensure-OpenSsl {
 
   if (-not $haveCachedArchive) {
     Write-Host "Downloading openssl $version ($assetName)..."
-    Download-File -Url $assetUrl -OutFile $archivePath
+    Download-VerifiedFileFromMirrors -Urls $assetUrls -OutFile $archivePath -ExpectedSha256 $expectedSha
     Assert-FileSha256 -Path $archivePath -Expected $expectedSha
   }
 
