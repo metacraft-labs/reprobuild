@@ -995,6 +995,25 @@ proc registeredSharedServiceResolutions*(): seq[SharedServiceResolution] =
   ## The resolutions recorded so far, in call order.
   dslPortSharedResolutions
 
+proc bindSharedResolutionActivity*[T](value: T; activityName: string) =
+  ## Ordinary activity parameters carry no shared-service resolution.
+  discard
+
+proc bindSharedResolutionActivity*[T](value: SharedServiceHandle[T];
+                                     activityName: string) =
+  ## Associate the resolver with the CONSUMER activity receiving its
+  ## handle, rather than the owner's activity named by the declaration.
+  ## Binding at the typed entry point also covers a handle resolved once
+  ## and passed to several `enable` calls: each use adds an alternative
+  ## selection, while the resolver still takes only one lease.
+  for resolution in dslPortSharedResolutions.mitems:
+    if resolution.consumerPackage == value.consumerPackage and
+        resolution.declaration.ownerPackage == value.ownerPackage and
+        resolution.declaration.serviceName == value.serviceName:
+      if activityName notin resolution.consumerActivities:
+        resolution.consumerActivities.add(activityName)
+      return
+
 proc sharedResolutionsEqual(a, b: SharedServiceResolution): bool =
   ## Whether two resolutions are the SAME call, site included. Used only
   ## to drop a replay; a difference in anything is a real second

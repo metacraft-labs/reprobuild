@@ -142,6 +142,16 @@ proc consumerRecipe(extraContribution: string): string =
     "    \"" & OwnerPackage & "\"\n" &
     "\n" &
     "  devEnv:\n" &
+    "    activity ordinary():\n" &
+    "      service ordinaryApp:\n" &
+    "        executable executableAtPath(\"/bin/sh\")\n" &
+    "        args \"scripts/app.sh\"\n" &
+    "        identity stable \"com.example.dss11.ordinary\"\n" &
+    "        scope project\n" &
+    "        workingDirectory \".\"\n" &
+    "        readiness fileExists(\"state/app.ready\", timeoutMs = 60000)\n" &
+    "    enable ordinary\n" &
+    "\n" &
     "    activity stack(sso: SharedServiceHandle[LiftedServiceHandle]):\n" &
     "      service app:\n" &
     "        executable executableAtPath(\"/bin/sh\")\n" &
@@ -398,6 +408,44 @@ suite "D-SS11 §4.6 — a consumer in another process contributes to the instanc
   # retaining the prerequisite's assertions. Whole-binary and isolated runs
   # therefore test the same transitions without inheriting an earlier case's
   # registrations, edited recipes or event log.
+
+  test "an unselected resolver cannot break an ordinary activity":
+    # No owner instance is started. Its lifted declaration is real, so
+    # selecting the resolver below must refuse specifically for the
+    # absent instance, while an unrelated selection must succeed.
+    let lifted = c.runRepro(c.ownerProject,
+      @["shell", "--activity=" & OwnerActivity, "--print-env=json"])
+    checkpoint(lifted.output)
+    if lifted.exitCode != 0:
+      # Raising preserves the fixture's deferred cleanup. `require`
+      # terminates the process before those defers can stop its daemon.
+      raise newException(IOError, "owner interface lift failed:\n" & lifted.output)
+    for attempt in 0 .. 1:
+      let ordinary = c.runRepro(c.consumerProject,
+        @["up", "--activity=ordinary"])
+      checkpoint("ordinary up #" & $attempt & ":\n" & ordinary.output)
+      check ordinary.exitCode == 0
+      check ordinary.output.contains("session ")
+      check not ordinary.output.contains(".shared()`")
+      let stopped = c.runRepro(c.consumerProject,
+        @["down", "--activity=ordinary"])
+      checkpoint(stopped.output)
+      check stopped.exitCode == 0
+    let selected = consumerUp(c)
+    checkpoint("selected resolver:\n" & selected.output)
+    check selected.exitCode != 0
+    check selected.output.contains("no instance is running")
+    check selected.output.contains(".shared()`")
+
+    # Positive control: the same ordinary activity with only the
+    # resolver's enable removed also succeeds on an unfixed tree.
+    writeFile(c.consumerProject / "repro.nim",
+      consumerRecipe("").split("    enable stack")[0])
+    let control = c.runRepro(c.consumerProject,
+      @["up", "--activity=ordinary"])
+    checkpoint("resolver removed:\n" & control.output)
+    check control.exitCode == 0
+    discard c.runRepro(c.consumerProject, @["down", "--activity=ordinary"])
 
   template ownerAppliesTheConsumersContribution() =
     # The steps of case "the owner materialises, the consumer attaches and deposits, the owner applies".

@@ -19399,8 +19399,8 @@
       "owner": "libs/repro_project_dsl",
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/t_dss11_resolutions_reach_the_dev_env_artifact.nim",
-      "sourceSuiteCount": 6,
-      "staticCaseCount": 26,
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 30,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -34263,7 +34263,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_dss11_cross_process_contribution_reaches_the_instance.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

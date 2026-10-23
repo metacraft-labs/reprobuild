@@ -120,7 +120,22 @@ package dss11Quiet:
         identity stable "com.example.dss11.quiet-host"
         scope project
 
-    enable ide(sso = dss11Owner.sso.idp.shared())
+    activity alternate(sso: SharedServiceHandle[LiftedServiceHandle]):
+      discard
+
+    activity ordinary():
+      discard
+
+    activity default():
+      discard
+
+    # Resolve once, then share the handle between two independently
+    # selectable activities. Neither use belongs to `ordinary`.
+    let sharedSso = dss11Owner.sso.idp.shared()
+    enable ide(sso = sharedSso)
+    enable alternate(sso = sharedSso)
+    enable ordinary
+    enable default
 
 package dss11Unresolved:
   ## A consumer with a dev-env and NO resolver. The control for every
@@ -137,3 +152,14 @@ package dss11Unresolved:
         scope project
 
     enable bare
+
+package dss11Global:
+  ## A recipe-global resolver has no activity parameter binding, and
+  ## therefore retains the same unconditional scope as global services.
+  uses:
+    "dss11Owner"
+  devEnv:
+    activity ordinary():
+      discard
+    discard dss11Owner.sso.idp.shared()
+    enable ordinary

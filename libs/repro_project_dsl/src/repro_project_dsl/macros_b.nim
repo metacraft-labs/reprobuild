@@ -4926,6 +4926,12 @@ proc l2ActivityEmission(packageName: string; stmt: NimNode): NimNode =
         key: packageName & "." & parsed.activityName & "." & c.name))
 
   let procBody = newStmtList()
+  # Argument evaluation records a resolver before the activity body runs.
+  # Bind its returned handle here, where the receiving activity is known,
+  # including when a local variable shares one handle across several enables.
+  for param in params:
+    procBody.add(newCall(bindSym"bindSharedResolutionActivity",
+      ident(param.name), newLit(parsed.activityName)))
   procBody.add(l2MemberCheckStmts(parsed.activityName, params, parsed.body))
   for entry in parsed.body:
     if l2IsHeadNamed(entry, "config"):

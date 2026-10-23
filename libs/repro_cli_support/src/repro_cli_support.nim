@@ -18009,8 +18009,9 @@ proc ownerInterfaceCandidates(ownerRecipeDir: string): seq[string] =
 proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
                                     edge: DevEnvEdgeResult;
                                     commandName: string): int =
-  ## Shared-Development-Services D-SS11 (§4.6): run every
-  ## `<package>.<service>.shared(...)` this project's recipe wrote.
+  ## Shared-Development-Services D-SS11 (§4.6): run the shared-service
+  ## resolutions carried by this selection's dev-env artifact. The provider
+  ## filters by the consuming activities before persisting the artifact.
   ##
   ## THIS IS WHERE §4's MACHINERY TRIGGERS FOR A CONSUMER. §4.6: "The
   ## resolver is where the machinery of §4 is triggered. It resolves

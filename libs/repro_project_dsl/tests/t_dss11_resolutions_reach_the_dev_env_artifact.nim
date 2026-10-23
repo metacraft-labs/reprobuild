@@ -86,10 +86,10 @@ proc loudDevEnv(): DevEnvResult =
   buildPackageDevEnv(pkg, devEnvRequest(pkg, "stack"),
     devEnvDss11LoudPackage)
 
-proc quietDevEnv(): DevEnvResult =
+proc quietDevEnv(activity = "ide"): DevEnvResult =
   clearRegisteredServices(QuietPackage)
   let pkg = pkgDef(QuietPackage)
-  buildPackageDevEnv(pkg, devEnvRequest(pkg, "ide"), devEnvDss11QuietPackage)
+  buildPackageDevEnv(pkg, devEnvRequest(pkg, activity), devEnvDss11QuietPackage)
 
 proc unresolvedDevEnv(): DevEnvResult =
   clearRegisteredServices(UnresolvedPackage)
@@ -311,6 +311,33 @@ suite "D-SS11 §4.6 — the resolution survives the artifact codec":
   test "an artifact with no resolution carries an empty list":
     let json = toJsonInspection(artifactFromDevEnvResult(unresolvedDevEnv()))
     check json.contains("\"sharedResolutions\":[]")
+
+suite "D-SS11 §4.6 — only selected activities resolve shared services":
+  test "an ordinary activity excludes another activity's resolver":
+    for selected in ["ordinary", "default", "", "ordinary,default"]:
+      let ordinary = quietDevEnv(selected)
+      check ordinary.sharedResolutions.len == 0
+      let artifact = decodeDevEnvArtifact(encodeDevEnvArtifact(
+        artifactFromDevEnvResult(ordinary)))
+      check artifact.sharedResolutions.len == 0
+
+  test "either activity using one handle includes exactly one resolver":
+    for selected in ["ide", "alternate", "ide,alternate", "ordinary,ide"]:
+      let selectedEnv = quietDevEnv(selected)
+      check selectedEnv.sharedResolutions.len == 1
+      check selectedEnv.sharedResolutions[0].consumerPackage == QuietPackage
+
+  test "a recipe-global resolver remains unconditional":
+    let pkg = pkgDef("dss11Global")
+    for selected in ["ordinary", ""]:
+      let env = buildPackageDevEnv(pkg, devEnvRequest(pkg, selected),
+        devEnvDss11GlobalPackage)
+      check env.sharedResolutions.len == 1
+
+  test "selection changes do not leak or lose resolver ownership":
+    for selected in ["ide", "ordinary", "alternate", "ordinary", "ide"]:
+      let env = quietDevEnv(selected)
+      check env.sharedResolutions.len == (if selected == "ordinary": 0 else: 1)
 
 suite "D-SS11 §4.6 — `resolveSharedService` refuses rather than records":
   setup:

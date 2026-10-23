@@ -470,7 +470,8 @@ when defined(reproProviderMode):
     of srkFileExists: "fileExists"
     of srkHttpGet: "httpGet"
 
-  proc providerSharedResolutions(packageName: string):
+  proc providerSharedResolutions(packageName: string;
+                                 selected: openArray[string]):
       seq[DevEnvSharedResolution] =
     ## Shared-Development-Services D-SS11 (§4.6): project this package's
     ## resolver calls onto the provider wire.
@@ -490,6 +491,16 @@ when defined(reproProviderMode):
     ## dropped ordinal would decode to a destructive contribution.
     for resolution in registeredSharedServiceResolutions():
       if resolution.consumerPackage != packageName:
+        continue
+      # Only selected consumer activities may attach or contribute. Filter
+      # before the wire/artifact so cache hits preserve the same selection.
+      # The owner's activityName is an address and cannot serve as this gate.
+      var active = resolution.consumerActivities.len == 0
+      for activityName in resolution.consumerActivities:
+        if activityName in selected:
+          active = true
+          break
+      if not active:
         continue
       var row = DevEnvSharedResolution(
         ownerPackage: resolution.declaration.ownerPackage,
@@ -817,7 +828,8 @@ when defined(reproProviderMode):
       services: mergeTypedServiceFacts(pkg.packageName,
         selectedActivities, activeServices(selectedActivities)),
       diagnostics: devEnvDiagnosticRegistry,
-      sharedResolutions: providerSharedResolutions(pkg.packageName),
+      sharedResolutions: providerSharedResolutions(pkg.packageName,
+        selectedActivities),
       # F1: the actions channel. Collected above -- before this
       # constructor, because the unconsumed-action check RECORDS A
       # DIAGNOSTIC and `diagnostics:` above reads the registry.

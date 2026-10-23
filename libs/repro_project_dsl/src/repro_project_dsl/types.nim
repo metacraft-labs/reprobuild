@@ -769,6 +769,11 @@ type
     ## instance.
     declaration*: SharedServiceDeclarationDef
     consumerPackage*: string
+    consumerActivities*: seq[string]
+      ## Consumer activities receiving this handle. These are alternatives:
+      ## selecting ANY one includes this resolution. An empty list denotes
+      ## a recipe-global resolver with no activity parameter binding.
+      ## Derived during lowering, then filtered before the provider wire.
     contributions*: seq[SharedContributionDef]
     sourceFile*: string
     sourceLine*: int
