@@ -434,3 +434,31 @@ proc roleChainText*(r: ResolvedRole): string =
   ## never invisible in text either.
   if r.fallbackPath.len <= 1: r.role
   else: r.fallbackPath.join(" → ")
+
+proc roleDeclarerText*(r: ResolvedRole): string =
+  ## Where the declaration that supplied `r.branch` lives, worded for a
+  ## remedy: "its fragment's `unstable`", "profile 'product''s `unstable`".
+  ## A refusal over a declared branch that is missing on the remote names this
+  ## (§2.2), because the fix is to that declaration.
+  let key = "`" & r.resolvedRole & "`"
+  case r.declaredBy
+  of rdkFragment: "its fragment's " & key
+  of rdkProfile: "profile '" & r.profile & "''s " & key
+  of rdkDefaultProfile: "default profile '" & r.profile & "''s " & key
+  of rdkWorkspace: "the settings file's `[workspace]` " & key
+
+proc resolveRoleFromMainline*(rs: RoleSettings; mainline,
+                              role: string): Option[ResolvedRole] =
+  ## Resolve `role` for a repo whose ONLY declaration is a mainline that the
+  ## roles model did not produce: a legacy `repo.v1` fragment whose mainline
+  ## `repro branch` reads from a branch-shaped `revision` or the project's
+  ## `trunk`, or a root repo whose mainline comes from the old
+  ## `.repro-workspace.toml`. Every other role then falls back to that
+  ## mainline by the ordinary procedure (§2.2), through the same resolver —
+  ## a custom role through its declared `fallback` chain. `none` when
+  ## `mainline` is empty (nothing to fall back to).
+  if mainline.len == 0:
+    return none(ResolvedRole)
+  var decls: BranchRoleDecls
+  decls.mainline = some(mainline)
+  resolveRole(rs, [RoleDeclarer(kind: rdkFragment, decls: decls)], role)

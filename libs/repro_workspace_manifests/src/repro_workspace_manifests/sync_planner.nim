@@ -731,15 +731,27 @@ proc planSync*(resolved: openArray[ResolvedRepo];
     result.report.decisions.add(decision)
 
 # ---------------------------------------------------------------------------
-# `repro sync --mainline` — reconcile a branch with its repo's own mainline.
+# `repro sync --to=<role>` — reconcile a branch with one branch role of each
+# repo (Workspace-Branch-Roles.md §4.1). `--mainline` is the `--to=mainline`
+# shorthand, and the reason this table is named for it: it predates the other
+# roles, and it did not need to change when they arrived. Everything below is
+# role-agnostic: the observation carries the branch the requested role
+# RESOLVED to for this repo (from declarations only, `roles.nim`), and the
+# decision table compares the current branch with that branch's remote tip.
 #
 # A SEPARATE decision table from `planSync` above, deliberately. `planSync`
 # answers "is this checkout where the lock says it should be", comparing the
-# current branch against its own upstream and the locked revision. `--mainline`
-# answers a different question — "has trunk moved under my feature branch" —
-# against a different ref, and the two tables share no case. Folding them would
-# mean a `syncCase` whose meaning depended on a flag, which is exactly the kind
-# of overload that makes the report unreadable.
+# current branch against its own upstream and the locked revision. A role sync
+# answers a different question — "has the role branch moved under my feature
+# branch" — against a different ref, and the two tables share no case. Folding
+# them would mean a `syncCase` whose meaning depended on a flag, which is
+# exactly the kind of overload that makes the report unreadable.
+#
+# **A role branch absent from the remote is a refusal (`no_role_ref`), never a
+# fallback.** The role was resolved before this table runs, from what the
+# manifest declares; this table never re-resolves it from what a remote
+# happens to have. Falling back because a ref is missing would turn a
+# deleted or misspelled branch into a silent redirect (§2.2).
 #
 # Pure, like its sibling: the caller gathers the observation (fetch, rev-parse,
 # merge-base, and the `merge-tree` conflict prediction) and executes the plan.
@@ -748,7 +760,7 @@ proc planSync*(resolved: openArray[ResolvedRepo];
 type
   MainlineSyncFlavor* = enum
     ## How a DIVERGED branch should be integrated. `msfFastForwardOnly` is the
-    ## bare `--mainline` default and integrates nothing: it fast-forwards what
+    ## bare `--to=<role>` default and integrates nothing: it fast-forwards what
     ## can be fast-forwarded and reports the rest (CLI/sync.md §"Without
     ## --rebase or --merge"). The two real flavors are chosen per invocation
     ## because the answer depends on the diff, not on the repository.
@@ -757,15 +769,22 @@ type
     msfMerge
 
   MainlineSyncCase* = enum
-    mscUpToDate          ## Branch already contains the mainline tip.
-    mscFastForwardable   ## Branch is an ancestor of mainline; FF is safe.
+    mscUpToDate          ## Branch already contains the role branch's tip.
+    mscFastForwardable   ## Branch is an ancestor of the role tip; FF is safe.
     mscIntegrable        ## Diverged, a flavor was chosen, predicted clean.
     mscDiverged          ## Diverged and no flavor chosen — report, don't guess.
     mscConflict          ## Chosen flavor would conflict; repo left untouched.
     mscDirty             ## Uncommitted changes; integration needs a clean tree.
     mscDetachedHead      ## No branch to reconcile.
-    mscNoMainlineBranch  ## Fragment declares no `branch` to target.
-    mscNoMainlineRef     ## `<remote>/<mainline>` absent after fetching.
+    mscNoMainlineBranch
+      ## The repo resolves no role at all: a legacy `repo.v1` fragment that
+      ## pins only a `revision` and declares no `branch` (a `repo.v2` fragment
+      ## without a mainline does not load, Workspace-Branch-Roles.md §3.3).
+      ## Retired together with `repo.v1` reading.
+    mscNoRoleRef
+      ## `<remote>/<roleBranch>` is absent after fetching. A REFUSAL: the role
+      ## is declared, so its branch missing on the remote is a defect to fix,
+      ## not a reason to reconcile with some other branch (§2.2, §4.4).
     mscMissingCheckout   ## Nothing on disk.
 
   MainlineSyncAction* = enum
@@ -776,16 +795,26 @@ type
     msaClone
 
   MainlineSyncObservation* = object
-    ## One repo's git state, relative to ITS mainline. Every field is a fact
-    ## the caller measured; the planner adds no I/O of its own.
+    ## One repo's git state, relative to the branch ITS requested role
+    ## resolved to. Every field is a fact the caller measured or resolved; the
+    ## planner adds no I/O of its own.
     exists*: bool
     isClean*: bool
     currentBranch*: string     ## Empty when HEAD is detached.
     headSha*: string
-    mainlineBranch*: string    ## The fragment's `branch`; empty if undeclared.
-    mainlineTip*: string       ## `<remote>/<mainlineBranch>`; empty if absent.
-    mainlineInHead*: bool      ## merge-base --is-ancestor <mainlineTip> HEAD
-    headInMainline*: bool      ## merge-base --is-ancestor HEAD <mainlineTip>
+    role*: string
+      ## The role requested (`mainline`, `unstable`, a custom role). Used to
+      ## name the role in diagnostics.
+    roleBranch*: string
+      ## The branch the role resolved to for this repo; empty when the repo
+      ## resolves no role (`mscNoMainlineBranch`).
+    roleDeclaredBy*: string
+      ## Where the declaration that supplied `roleBranch` lives, for the
+      ## remedy a `no_role_ref` refusal names ("the fragment's `unstable`",
+      ## "profile 'product'"); empty falls back to a generic wording.
+    roleTip*: string           ## `<remote>/<roleBranch>`; empty if absent.
+    roleInHead*: bool          ## merge-base --is-ancestor <roleTip> HEAD
+    headInRole*: bool          ## merge-base --is-ancestor HEAD <roleTip>
     integrationConflicts*: bool
       ## Result of the `merge-tree --write-tree` prediction. Only consulted
       ## when a flavor is chosen AND the repo is diverged AND the tree is
@@ -798,13 +827,14 @@ type
     syncCase*: MainlineSyncCase
     action*: MainlineSyncAction
     branch*: string          ## The branch being reconciled.
-    mainlineBranch*: string  ## What it is being reconciled WITH.
+    roleBranch*: string      ## What it is being reconciled WITH.
     message*: string
     refusalReason*: string
 
 proc mainlineSyncCaseTag*(c: MainlineSyncCase): string =
   ## Stable snake_case identifiers for the JSON report, matching the names
-  ## CLI/sync.md §"Refusal cases" uses verbatim.
+  ## CLI/sync.md §"Refusal cases" and Workspace-Branch-Roles.md §4.4 use
+  ## verbatim.
   case c
   of mscUpToDate: "up_to_date"
   of mscFastForwardable: "fast_forwarded"
@@ -814,7 +844,7 @@ proc mainlineSyncCaseTag*(c: MainlineSyncCase): string =
   of mscDirty: "dirty"
   of mscDetachedHead: "detached_head"
   of mscNoMainlineBranch: "no_mainline_branch"
-  of mscNoMainlineRef: "no_mainline_ref"
+  of mscNoRoleRef: "no_role_ref"
   of mscMissingCheckout: "missing_checkout"
 
 proc mainlineSyncActionTag*(a: MainlineSyncAction): string =
@@ -828,81 +858,82 @@ proc mainlineSyncActionTag*(a: MainlineSyncAction): string =
 proc classifyMainlineSync*(resolved: ResolvedRepo;
                            obs: MainlineSyncObservation;
                            flavor: MainlineSyncFlavor): MainlineSyncDecision =
-  ## The whole `--mainline` decision table, in one place and in priority order.
+  ## The whole role-sync decision table, in one place and in priority order.
   result.name = resolved.name
   result.path = resolved.path
   result.branch = obs.currentBranch
-  result.mainlineBranch = obs.mainlineBranch
+  result.roleBranch = obs.roleBranch
   result.action = msaNone
+  let roleName = if obs.role.len > 0: obs.role else: "mainline"
+  let roleFlag = "--to=" & roleName
 
-  if not obs.exists:
-    if obs.mainlineBranch.len == 0:
-      result.syncCase = mscNoMainlineBranch
-      result.refusalReason = "repo '" & resolved.path &
-        "' declares no `branch` in its manifest fragment" &
-        (if resolved.fragmentPath.len > 0: " (" & resolved.fragmentPath & ")"
-         else: "") & " — cannot clone without a target branch"
-      result.message = result.refusalReason
-      return
-    result.syncCase = mscMissingCheckout
-    result.action = msaClone
-    result.message = "scheduling clone of '" & resolved.path & "' from " &
-      resolved.fetchUrl & " @ " & obs.mainlineBranch
-    return
-
-  # The manifest is this mode's input, so an incomplete fragment is named
-  # rather than skipped — the same rule `switch --mainline` follows.
-  if obs.mainlineBranch.len == 0:
+  # The manifest is this mode's input, so a fragment that resolves no role is
+  # named rather than skipped — the same rule `switch` follows. Only a legacy
+  # `repo.v1` fragment pinning a bare `revision` can get here.
+  if obs.roleBranch.len == 0:
     result.syncCase = mscNoMainlineBranch
     result.refusalReason = "repo '" & resolved.path &
       "' declares no `branch` in its manifest fragment" &
       (if resolved.fragmentPath.len > 0: " (" & resolved.fragmentPath & ")"
-       else: "") & " — `--mainline` reconciles toward that field"
+       else: "") &
+      (if obs.exists: " — `" & roleFlag & "` reconciles toward the branch " &
+         "its roles resolve to, and every role falls back to that mainline"
+       else: " — cannot clone without a target branch")
     result.message = result.refusalReason
+    return
+
+  if not obs.exists:
+    result.syncCase = mscMissingCheckout
+    result.action = msaClone
+    result.message = "scheduling clone of '" & resolved.path & "' from " &
+      resolved.fetchUrl & " @ " & obs.roleBranch
     return
 
   if obs.currentBranch.len == 0:
     result.syncCase = mscDetachedHead
     result.refusalReason = "repo '" & resolved.path &
       "' is in detached HEAD; there is no branch to reconcile with '" &
-      obs.mainlineBranch & "'"
+      obs.roleBranch & "'"
     result.message = result.refusalReason
     return
 
-  if obs.mainlineTip.len == 0:
-    result.syncCase = mscNoMainlineRef
-    result.refusalReason = "no remote-tracking branch for mainline '" &
-      obs.mainlineBranch & "' in repo '" & resolved.path &
-      "' after fetching — correct the fragment's `branch`, or restore that " &
-      "branch on the remote"
+  if obs.roleTip.len == 0:
+    result.syncCase = mscNoRoleRef
+    result.refusalReason = "no remote-tracking branch for '" &
+      obs.roleBranch & "' (role " & roleName & ") in repo '" & resolved.path &
+      "' after fetching. The role is declared" &
+      (if obs.roleDeclaredBy.len > 0: " by " & obs.roleDeclaredBy else: "") &
+      ", so it is not redirected to another branch — correct that " &
+      "declaration (or declare the tier absent with `" & roleName &
+      " = false`), or restore '" & obs.roleBranch & "' on the remote"
     result.message = result.refusalReason
     return
 
-  # Already carries trunk: identical, or the branch is strictly ahead. Both are
-  # "nothing to integrate" — being ahead of trunk is the normal state of a
-  # feature branch whose trunk has not moved, not something to act on.
-  if obs.mainlineInHead:
+  # Already carries the role branch: identical, or the branch is strictly
+  # ahead. Both are "nothing to integrate" — being ahead is the normal state of
+  # a feature branch whose base has not moved, not something to act on.
+  if obs.roleInHead:
     result.syncCase = mscUpToDate
     result.message = "'" & obs.currentBranch & "' already contains '" &
-      obs.mainlineBranch & "'"
+      obs.roleBranch & "'"
     return
 
-  # No local commits of its own and trunk moved: a fast-forward, which needs no
-  # decision and cannot rewrite anything.
-  if obs.headInMainline:
+  # No local commits of its own and the role branch moved: a fast-forward,
+  # which needs no decision and cannot rewrite anything.
+  if obs.headInRole:
     result.syncCase = mscFastForwardable
     result.action = msaFastForward
     result.message = "fast-forward '" & obs.currentBranch & "' to '" &
-      obs.mainlineBranch & "'"
+      obs.roleBranch & "'"
     return
 
   # Genuinely diverged from here on: both sides moved.
   if flavor == msfFastForwardOnly:
     result.syncCase = mscDiverged
     result.refusalReason = "'" & obs.currentBranch & "' and '" &
-      obs.mainlineBranch & "' have both advanced in repo '" & resolved.path &
+      obs.roleBranch & "' have both advanced in repo '" & resolved.path &
       "' — integrating is a judgment call. Re-run with --rebase to replay " &
-      "your commits onto '" & obs.mainlineBranch & "', or --merge to record " &
+      "your commits onto '" & obs.roleBranch & "', or --merge to record " &
       "a merge (scope it with --only=" & resolved.name & " if the answer " &
       "differs per repo)."
     result.message = result.refusalReason
@@ -915,18 +946,18 @@ proc classifyMainlineSync*(resolved: ResolvedRepo;
     result.syncCase = mscDirty
     result.refusalReason = "repo '" & resolved.path &
       "' has uncommitted changes; commit or stash them before integrating '" &
-      obs.mainlineBranch & "' into '" & obs.currentBranch & "'"
+      obs.roleBranch & "' into '" & obs.currentBranch & "'"
     result.message = result.refusalReason
     return
 
   if obs.integrationConflicts:
     result.syncCase = mscConflict
-    result.refusalReason = "integrating '" & obs.mainlineBranch & "' into '" &
+    result.refusalReason = "integrating '" & obs.roleBranch & "' into '" &
       obs.currentBranch & "' in repo '" & resolved.path &
       "' would conflict; the repo is UNTOUCHED. Resolve it there (git -C " &
       resolved.path & " " &
       (if flavor == msfRebase: "rebase" else: "merge") & " " &
-      obs.mainlineBranch & "), then re-run."
+      obs.roleBranch & "), then re-run."
     result.message = result.refusalReason
     return
 
@@ -934,7 +965,7 @@ proc classifyMainlineSync*(resolved: ResolvedRepo;
   result.action = if flavor == msfRebase: msaRebase else: msaMerge
   result.message =
     (if flavor == msfRebase: "rebase '" else: "merge '") &
-    obs.currentBranch & "' onto '" & obs.mainlineBranch & "'"
+    obs.currentBranch & "' onto '" & obs.roleBranch & "'"
 
 proc planMainlineSync*(resolved: openArray[ResolvedRepo];
                        observations: openArray[MainlineSyncObservation];

@@ -42225,14 +42225,17 @@ type
       ## the same precedence ``--tags`` uses.
     filterGlob: string
       ## ``--filter=GLOB``: glob over the repo name.
-    mainline: bool
-      ## ``--mainline``: reconcile toward each repo's manifest-declared branch
-      ## instead of its own upstream (CLI/sync.md §"Reconciling with the
-      ## mainline").
+    role: string
+      ## ``--to=<role>`` or a shorthand (``--mainline``, ``--unstable``, …):
+      ## reconcile toward the branch that ROLE resolves to in each repo
+      ## (Workspace-Branch-Roles.md §4.1) instead of toward the branch's own
+      ## upstream. "" for an ordinary sync.
+    roleFlag: string
+      ## The spelling that named ``role``, for command-line diagnostics only.
     mainlineFlavor: MainlineSyncFlavor
       ## ``--rebase`` / ``--merge``. Defaults to ``msfFastForwardOnly``, which
-      ## integrates nothing: bare ``--mainline`` fast-forwards what it can and
-      ## reports what needs a decision.
+      ## integrates nothing: a bare ``--to=<role>`` fast-forwards what it can
+      ## and reports what needs a decision.
     report: ReportSpec   ## Opt-in ``--write-report[=PATH]`` artifact.
 
 const
@@ -42319,6 +42322,116 @@ proc parseSyncRepoSelector(args: openArray[string]; i: var int;
   else:
     result = false
 
+# ---- branch-role flags (Workspace-Branch-Roles.md §4.1, §4.2) ---------------
+#
+# `sync` and `switch` take `--to=<role>`, `branch` takes `--from=<role>`, and
+# all three — with `repro workspace branch-roles` — take the six shorthands.
+# One parser and one validator serve every verb, so "which role did the
+# operator name" and "is that a role this workspace has" cannot be answered
+# differently by different commands.
+
+const branchRoleShorthands = ["--mainline", "--unstable", "--staging",
+                              "--stable", "--production", "--lts"]
+  ## Each built-in role's shorthand, which means exactly `--to=<role>` (and,
+  ## on `repro branch`, `--from=<role>`). Custom roles get none (§2.4): a flag
+  ## per workspace-defined word would make the command line's meaning depend
+  ## on the workspace it runs in.
+
+type
+  BranchRolesUsageError = object of ValueError
+    ## A command-line mistake in naming a branch role — no role after `--to=`,
+    ## two different roles, a role the workspace does not declare. Exit 2,
+    ## which §4.4 requires for an undeclared role, rather than the exit 1 of a
+    ## run that failed; and raised before anything is fetched.
+
+  RoleChoice = object
+    ## The branch role a command line named, and how.
+    role: string
+      ## The role (`mainline`, `unstable`, a custom role); "" when none.
+    flag: string
+      ## The spelling the operator typed (`--unstable`, `--to=unstable`,
+      ## `--from-mainlines`), for diagnostics about the command line itself.
+      ## Reports never carry it: a shorthand and its `--to=` spelling must
+      ## produce byte-identical reports (§4.1), so they name `role` only.
+
+proc branchRolesUsage(msg: string) =
+  raise newException(BranchRolesUsageError, msg)
+
+proc consumeBranchRoleFlag(args: openArray[string]; i: var int;
+                           choice: var RoleChoice; verb: string;
+                           roleFlag = "--to"): bool =
+  ## Consume `args[i]` when it names a branch role — `<roleFlag>=<role>`
+  ## (`--to` on `sync`, `switch` and `branch-roles`; `--from` on `branch`) or
+  ## one of the six shorthands — recording it in `choice` and returning true;
+  ## false (and `i` untouched) otherwise.
+  ##
+  ## §4.1: `--to` and the shorthands are mutually exclusive. Naming the SAME
+  ## role twice is harmless (a script assembling argv from fragments does
+  ## that); two different roles would make the run depend on argv order, so
+  ## that is a usage error.
+  let arg = args[i]
+  var role, flag: string
+  if arg == roleFlag or arg.startsWith(roleFlag & "="):
+    role = valueFromFlag(args, i, roleFlag).strip()
+    if role.len == 0:
+      branchRolesUsage(roleFlag & " needs a role name: " & roleFlag &
+        "=<role>")
+    flag = roleFlag & "=" & role
+  elif arg in branchRoleShorthands:
+    role = arg[2 .. ^1]
+    flag = arg
+  else:
+    return false
+  if choice.role.len > 0 and choice.role != role:
+    branchRolesUsage("`" & verb & "` was given two roles (" & choice.flag &
+      " and " & flag & "). " & roleFlag & " and the shorthands are " &
+      "mutually exclusive: name one role.")
+  if choice.role.len == 0:
+    choice.role = role
+    choice.flag = flag
+  true
+
+proc requireDeclaredRole(workspaceRoot, role, roleFlag: string) =
+  ## Refuse a role this workspace does not declare: a usage error (exit 2)
+  ## raised BEFORE the manifests resolve and before anything is fetched
+  ## (§4.4). The built-in roles always exist; a custom role exists when the
+  ## settings file declares `[branch-roles.<name>]`. The message lists the
+  ## workspace's roles and where a custom role is declared.
+  if role.len == 0:
+    return
+  let roleSettings = workspaceRoleSettings(workspaceRoot)
+  let known = declaredRoleNames(roleSettings)
+  if role notin known:
+    branchRolesUsage("role '" & role & "' (" & roleFlag & "=" & role &
+      ") is not declared in this workspace: the roles are " &
+      known.join(", ") & " (a custom role is declared as " &
+      "`[branch-roles.<name>]` in " &
+      (if roleSettings.path.len > 0: roleSettings.path
+       else: "repro-workspace.toml, which this workspace does not have") &
+      ")")
+
+proc roleFallbackText(r: ResolvedRole): string =
+  ## §4.4's text annotation of a role reconcile/switch/cut: the branch
+  ## followed by the role chain — `agents (unstable)`,
+  ## `latest (unstable → mainline)`.
+  r.branch & " (" & roleChainText(r) & ")"
+
+proc addRoleFields(obj: JsonNode; r: Option[ResolvedRole]; role: string) =
+  ## §4.4's per-repo role fields, the same four on every report that names a
+  ## role: `role` (requested), `resolvedRole` (whose declaration supplied the
+  ## branch), `roleBranch` and `fallbackPath` (EMPTY when the role was
+  ## declared directly). A repo that resolves no role carries the requested
+  ## role and empty values, so every entry has the same shape.
+  obj["role"] = %role
+  if r.isSome:
+    obj["resolvedRole"] = %r.get().resolvedRole
+    obj["roleBranch"] = %r.get().branch
+    obj["fallbackPath"] = %reportedFallbackPath(r.get())
+  else:
+    obj["resolvedRole"] = %""
+    obj["roleBranch"] = %""
+    obj["fallbackPath"] = newJArray()
+
 proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
   ## ``repro workspace sync`` argv parser. Unlike M9's ``init`` there is
   ## no required positional: sync operates on the existing workspace
@@ -42345,6 +42458,7 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
   # and the planner now also withholds it where the replay has no base to
   # work from, so a refusal never names a command that cannot act.
   result.rebaseOnForcePush = false
+  var roleChoice: RoleChoice
   var i = 0
   while i < args.len:
     let arg = args[i]
@@ -42370,8 +42484,9 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
       # ``repro workspace branch-roles`` so the workspace keeps ONE selection
       # language (``parseSyncRepoSelector``).
       discard
-    elif arg == "--mainline":
-      result.mainline = true
+    elif consumeBranchRoleFlag(args, i, roleChoice, "repro sync"):
+      # ``--to=<role>`` or a shorthand; ``--mainline`` is ``--to=mainline``.
+      discard
     elif arg == "--rebase":
       result.mainlineFlavor = msfRebase
     elif arg == "--merge":
@@ -42412,17 +42527,22 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
         result.projectName = arg
       result.scopeProjects.add(arg)
     inc i
+  result.role = roleChoice.role
+  result.roleFlag = roleChoice.flag
   # ``--rebase`` / ``--merge`` describe how to integrate a DIVERGED branch with
-  # its mainline, which is a question only ``--mainline`` asks. Accepting them
-  # bare would silently do nothing, so they are refused with the flag that
-  # makes them meaningful.
-  if result.mainlineFlavor != msfFastForwardOnly and not result.mainline:
+  # a role branch, which is a question only a role (``--to=<role>`` or a
+  # shorthand — any role, not only the mainline, §4.1) asks. Accepting them
+  # bare would silently do nothing, so they are refused with the flags that
+  # make them meaningful.
+  if result.mainlineFlavor != msfFastForwardOnly and result.role.len == 0:
     raise newException(ValueError,
       "`repro sync " &
       (if result.mainlineFlavor == msfRebase: "--rebase" else: "--merge") &
-      "` needs --mainline: the flavor says how to integrate a branch that " &
-      "has diverged from its mainline, and plain `sync` never integrates " &
-      "(it fast-forwards toward the branch's own upstream or reports).")
+      "` needs a branch role: --to=<role> or a shorthand such as " &
+      "--mainline or --unstable. The flavor says how to integrate a branch " &
+      "that has diverged from that role's branch, and plain `sync` never " &
+      "integrates (it fast-forwards toward the branch's own upstream or " &
+      "reports).")
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
@@ -49351,7 +49471,10 @@ type
     name*: string
     path*: string
     branch*: string
-    mainlineBranch*: string
+    resolvedRole*: Option[ResolvedRole]
+      ## What the requested role resolved to for this repo — branch, the role
+      ## whose declaration supplied it, the fallback path (§4.4). `none` for a
+      ## legacy fragment that resolves no role at all.
     outcome*: string
     action*: string
     headBefore*: string
@@ -49362,6 +49485,9 @@ type
   MainlineSyncReport* = object
     project*: string
     workspaceRoot*: string
+    role*: string
+      ## The role reconciled toward (`--to=<role>` or its shorthand, which
+      ## produce the same report, §4.1).
     flavor*: string
     dryRun*: bool
       ## CLI/sync.md §`--dry-run` with `--mainline`: the document is a PLAN.
@@ -49371,11 +49497,17 @@ type
     repos*: seq[MainlineSyncEntry]
     exitCode*: int
 
+proc roleBranchOf(e: MainlineSyncEntry): string =
+  if e.resolvedRole.isSome: e.resolvedRole.get().branch else: ""
+
 proc toJsonNode*(report: MainlineSyncReport): JsonNode =
   result = newJObject()
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
-  result["mainline"] = %true
+  result["role"] = %report.role
+  # Pre-role marker of this report kind, kept beside `role` until the old
+  # spellings are retired: true exactly when the role is the mainline.
+  result["mainline"] = %(report.role == "mainline")
   result["dryRun"] = %report.dryRun
   result["flavor"] = %report.flavor
   var repos = newJArray()
@@ -49386,7 +49518,11 @@ proc toJsonNode*(report: MainlineSyncReport): JsonNode =
     obj["clonePoolRoot"] = %e.clonePoolRoot
     obj["path"] = %e.path
     obj["branch"] = %e.branch
-    obj["mainlineBranch"] = %e.mainlineBranch
+    obj.addRoleFields(e.resolvedRole, report.role)
+    # The pre-role name of `roleBranch` (Workspace-Branch-Roles.md §4.4),
+    # carried with the same value until the old spellings are retired so a
+    # consumer written against `--mainline` keeps reading it.
+    obj["mainlineBranch"] = %e.roleBranchOf()
     obj["outcome"] = %e.outcome
     obj["action"] = %e.action
     obj["headBefore"] = %e.headBefore
@@ -49410,28 +49546,33 @@ proc renderMainlineSyncTextLines*(report: MainlineSyncReport;
     # refusal) render exactly as in a real run.
     let pending = report.dryRun and e.action.len > 0 and e.action != "none"
     let isRoutine = e.outcome in ["up_to_date", "fast_forwarded"]
+    # §4.4's text form: `feature/x <- agents (unstable)` when the role was
+    # declared directly, `feature/x <- latest (unstable → mainline)` when it
+    # fell back — so a sweep that lands a repo on its mainline because nobody
+    # declared the requested tier says so in text too.
+    let reconcile =
+      if e.branch.len > 0 and e.resolvedRole.isSome:
+        " " & e.branch & " <- " & roleFallbackText(e.resolvedRole.get())
+      else: ""
     if pending:
       var line = "workspace sync: " & e.path & " would " & e.action &
-        " (" & e.outcome & ")"
-      if e.branch.len > 0 and e.mainlineBranch.len > 0:
-        line.add(" " & e.branch & " <- " & e.mainlineBranch)
+        " (" & e.outcome & ")" & reconcile
       if e.diagnostic.len > 0:
         line.add(" (" & e.diagnostic & ")")
       result.add(line)
     elif verbose or not isRoutine:
-      var line = "workspace sync: " & e.path & " " & e.outcome
-      if e.branch.len > 0 and e.mainlineBranch.len > 0:
-        line.add(" " & e.branch & " <- " & e.mainlineBranch)
+      var line = "workspace sync: " & e.path & " " & e.outcome & reconcile
       if e.diagnostic.len > 0:
         line.add(" (" & e.diagnostic & ")")
       result.add(line)
   var parts: seq[string]
   for tag, n in counts:
     parts.add($n & " " & tag)
-  # Same "(dry-run)" marker the ordinary sync's summary carries.
-  let summaryPrefix =
-    if report.dryRun: "workspace sync --mainline (dry-run): "
-    else: "workspace sync --mainline: "
+  # §4.4: the tally names the role, always in its `--to=` spelling so a
+  # shorthand and its `--to=` form print the same line. Same "(dry-run)"
+  # marker the ordinary sync's summary carries.
+  let summaryPrefix = "workspace sync --to=" & report.role &
+    (if report.dryRun: " (dry-run): " else: ": ")
   result.add(summaryPrefix & parts.join(", ") &
     " (" & $report.repos.len & " repo(s))")
 
@@ -49452,6 +49593,7 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
   ## is computed against whatever remote-tracking refs the last fetch left.
   ## A stale preview is acceptable; a preview that moves refs is not.
   result.workspaceRoot = args.workspaceRoot
+  result.role = args.role
   result.flavor = mainlineFlavorTag(args.mainlineFlavor)
   result.dryRun = args.dryRun
 
@@ -49537,7 +49679,15 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
       stderr.flushFile()
     let repoAbs = args.workspaceRoot / repo.path
     var obs: MainlineSyncObservation
-    obs.mainlineBranch = repo.branch
+    # The role was resolved when the manifest loaded, from declarations only
+    # (`ResolvedRepo.roles`, `roles.nim`); nothing below re-resolves it from
+    # what the remote has. A repo that resolves no role (a legacy fragment
+    # pinning only a `revision`) keeps an empty branch and is refused.
+    obs.role = args.role
+    let roleResolved = repo.roles.findRole(args.role)
+    if roleResolved.isSome:
+      obs.roleBranch = roleResolved.get().branch
+      obs.roleDeclaredBy = roleDeclarerText(roleResolved.get())
     if not dirExists(repoAbs / ".git"):
       obs.exists = false
       observations.add(obs)
@@ -49564,21 +49714,21 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
       else:
         @["-C", repoAbs, "status", "--porcelain"]
     obs.isClean = gitRunPlainQuery(identity, statusArgs).output.strip().len == 0
-    if obs.mainlineBranch.len > 0:
-      obs.mainlineTip = revParse(identity, repoAbs,
-        "refs/remotes/" & gitRemoteNameFor(repo) & "/" & obs.mainlineBranch)
-    if obs.mainlineTip.len > 0 and obs.headSha.len > 0:
-      obs.mainlineInHead = gitRunPlain(identity, ["-C", repoAbs, "merge-base",
-        "--is-ancestor", obs.mainlineTip, obs.headSha]).code == 0
-      obs.headInMainline = gitRunPlain(identity, ["-C", repoAbs, "merge-base",
-        "--is-ancestor", obs.headSha, obs.mainlineTip]).code == 0
+    if obs.roleBranch.len > 0:
+      obs.roleTip = revParse(identity, repoAbs,
+        "refs/remotes/" & gitRemoteNameFor(repo) & "/" & obs.roleBranch)
+    if obs.roleTip.len > 0 and obs.headSha.len > 0:
+      obs.roleInHead = gitRunPlain(identity, ["-C", repoAbs, "merge-base",
+        "--is-ancestor", obs.roleTip, obs.headSha]).code == 0
+      obs.headInRole = gitRunPlain(identity, ["-C", repoAbs, "merge-base",
+        "--is-ancestor", obs.headSha, obs.roleTip]).code == 0
       # Predict the integration WITHOUT touching the tree. Only meaningful for
       # the diverged-and-a-flavor-was-chosen case, so only asked there.
       if args.mainlineFlavor != msfFastForwardOnly and
-          not obs.mainlineInHead and not obs.headInMainline and obs.isClean:
+          not obs.roleInHead and not obs.headInRole and obs.isClean:
         obs.integrationConflicts = gitRunPlain(identity,
           ["-C", repoAbs, "merge-tree", "--write-tree",
-           obs.headSha, obs.mainlineTip]).code != 0
+           obs.headSha, obs.roleTip]).code != 0
     observations.add(obs)
   if emitProgress and isTty and args.progressMode in {bpmLine, bpmBarLine}:
     stderr.write("\r\27[2K")
@@ -49624,7 +49774,7 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
         remoteUrl = cloneUrlFor(repo),
         repoPath = repo.path,
         receiptPath = receiptRel,
-        revision = decision.mainlineBranch,
+        revision = decision.roleBranch,
         cacheable = false,
         referencePath = cloneRef,
         cloneFilter = repo.cloneFilter,
@@ -49662,7 +49812,8 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
       cloneObjects: (if decision.action == msaClone: cloneObjectsLabel(
           args.cloneObjects) else: ""),
       clonePoolRoot: (if decision.action == msaClone: clonePoolRoot else: ""),
-      branch: decision.branch, mainlineBranch: decision.mainlineBranch,
+      branch: decision.branch,
+      resolvedRole: repo.roles.findRole(args.role),
       outcome: mainlineSyncCaseTag(decision.syncCase),
       action: mainlineSyncActionTag(decision.action),
       headBefore: observations[i].headSha,
@@ -49682,7 +49833,7 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
       result.repos.add(entry)
       continue
 
-    let remoteRef = gitRemoteNameFor(repo) & "/" & decision.mainlineBranch
+    let remoteRef = gitRemoteNameFor(repo) & "/" & decision.roleBranch
     case decision.action
     of msaNone:
       if decision.syncCase != mscUpToDate:
@@ -49696,9 +49847,9 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
         if outcome.status in {asSucceeded, asCacheHit, asUpToDate}:
           entry.outcome = "cloned"
           entry.action = "clone"
-          entry.branch = decision.mainlineBranch
+          entry.branch = decision.roleBranch
           entry.headAfter = revParse(identity, repoAbs, "HEAD")
-          entry.message = "cloned to '" & decision.mainlineBranch & "'"
+          entry.message = "cloned to '" & decision.roleBranch & "'"
           if emitProgress:
             stderr.writeLine("workspace sync: [cloned] " & repo.path)
         else:
@@ -49806,8 +49957,13 @@ selection:
   --filter=GLOB         repos whose name matches GLOB
   --tags=t,-u           by manifest tag (a leading '-' excludes)
 reconciliation:
-  --mainline            reconcile toward each repo's manifest-declared branch
-  --rebase | --merge    how --mainline integrates a diverged branch
+  --to=<role>           reconcile toward the branch <role> resolves to in each
+                        repo (mainline, unstable, staging, stable, production,
+                        lts, or a custom role); an undeclared role falls back
+                        toward the mainline, a declared one never does
+  --mainline, --unstable, --staging, --stable, --production, --lts
+                        shorthands for --to=<role>
+  --rebase | --merge    how --to=<role> integrates a diverged branch
   --rebase-on-force-push
                         replay local commits onto a rewritten upstream
   --force-sync          overwrite divergent/dirty checkouts (confirms)
@@ -49817,7 +49973,7 @@ execution:
   --jobs-network N      parallel fetches (default 8)
   --jobs-checkout N     parallel checkouts (default: CPU count)
   --dry-run             print the plan and exit 0; mutates nothing (no
-                        fetch, so --mainline plans against the current
+                        fetch, so --to=<role> plans against the current
                         remote-tracking refs)
   --json                one machine-readable document on stdout
   --write-report[=PATH] persist the report as sync-report.json
@@ -49889,12 +50045,21 @@ proc runWorkspaceSyncWithProjects(args: openArray[string];
     # sync` flag: --help".
     stdout.write(WorkspaceSyncUsage)
     return 0
-  let parsed = parseWorkspaceSyncArgs(args)
+  var parsed: WorkspaceSyncArgs
+  try:
+    parsed = parseWorkspaceSyncArgs(args)
+    # §4.4: a role this workspace does not declare is a usage error, decided
+    # before anything is fetched.
+    requireDeclaredRole(parsed.workspaceRoot, parsed.role, "--to")
+  except BranchRolesUsageError as err:
+    stderr.writeLine("repro sync: " & err.msg)
+    return 2
   refuseRepoPassedAsProject(parsed.workspaceRoot, parsed.scopeProjects)
-  # ``--mainline`` reconciles toward each repo's manifest-declared branch
-  # instead of its own upstream. Different target, different decision table,
-  # so a separate executor — see the block comment above it.
-  if parsed.mainline:
+  # ``--to=<role>`` (``--mainline`` and the other shorthands included)
+  # reconciles toward the branch that role resolves to in each repo instead of
+  # the branch's own upstream. Different target, different decision table, so
+  # a separate executor — see the block comment above it.
+  if parsed.role.len > 0:
     return runMainlineSyncCommand(parsed)
   let outcome = executeWorkspaceSync(parsed, prospectiveProjects)
   # RA-27: a dry run does not run any mutating step, so it does not write a
@@ -49968,11 +50133,6 @@ Exit codes: 0 printed; 1 the workspace manifests do not load; 2 usage error
 (an unknown flag, an undeclared role, two different roles).
 """
 
-const branchRoleShorthands = ["--mainline", "--unstable", "--staging",
-                              "--stable", "--production", "--lts"]
-  ## Each built-in role's shorthand, which means exactly `--to=<role>`
-  ## (Workspace-Branch-Roles.md §4.1).
-
 type
   WorkspaceBranchRolesArgs = object
     selection: WorkspaceSyncArgs
@@ -49984,10 +50144,6 @@ type
     roleFlag: string
       ## The spelling that named `role`, for the conflict diagnostic.
     json: bool
-
-  BranchRolesUsageError = object of ValueError
-    ## A command-line mistake: exit 2, as §4.4 requires for an undeclared
-    ## role, rather than the exit 1 of a workspace that does not load.
 
   BranchRolesEntry* = object
     ## One repo's roles as the query reports them.
@@ -50013,37 +50169,23 @@ type
     root*: BranchRolesEntry
     repos*: seq[BranchRolesEntry]
 
-proc branchRolesUsage(msg: string) =
-  raise newException(BranchRolesUsageError, msg)
-
 proc parseWorkspaceBranchRolesArgs(args: openArray[string]):
     WorkspaceBranchRolesArgs =
   ## Every flag this verb accepts, and nothing else: a sweep flag (`--jobs`,
   ## `--rebase`, `--dry-run`) on a query is a mistake worth naming, not an
   ## option to ignore.
   var sel = WorkspaceSyncArgs(toolProvisioning: tpmPathOnly)
-  proc chooseRole(res: var WorkspaceBranchRolesArgs; flag, role: string) =
-    # §4.1: `--to` and the shorthands are mutually exclusive. Repeating the
-    # SAME role is harmless (a script assembling argv from fragments does
-    # that); two different roles would make the answer depend on argv order.
-    if role.len == 0:
-      branchRolesUsage("--to needs a role name: --to=<role>")
-    if res.role.len > 0 and res.role != role:
-      branchRolesUsage("`repro workspace branch-roles` was given two roles (" &
-        res.roleFlag & " and " & flag & "). --to and the shorthands are " &
-        "mutually exclusive: name one role, or none to print every role.")
-    res.role = role
-    res.roleFlag = flag
+  var choice: RoleChoice
   var i = 0
   while i < args.len:
     let arg = args[i]
     if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
       sel.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--to" or arg.startsWith("--to="):
-      let role = valueFromFlag(args, i, "--to").strip()
-      chooseRole(result, "--to=" & role, role)
-    elif arg in branchRoleShorthands:
-      chooseRole(result, arg, arg[2 .. ^1])
+    elif consumeBranchRoleFlag(args, i, choice,
+        "repro workspace branch-roles"):
+      # `--to=<role>` or a shorthand, under the parser `sync`, `switch` and
+      # `branch` share (§4.1).
+      discard
     elif arg == "--json":
       result.json = true
     elif parseSyncRepoSelector(args, i, sel):
@@ -50061,6 +50203,8 @@ proc parseWorkspaceBranchRolesArgs(args: openArray[string]):
     sel.workspaceRoot = getCurrentDir()
   sel.workspaceRoot = absolutePath(sel.workspaceRoot)
   result.selection = sel
+  result.role = choice.role
+  result.roleFlag = choice.flag
 
 proc hasRepoSelector(sel: WorkspaceSyncArgs): bool =
   sel.scopeProjects.len > 0 or sel.onlyRepos.len > 0 or
@@ -50109,15 +50253,8 @@ proc executeWorkspaceBranchRoles(parsed: WorkspaceBranchRolesArgs):
   result.role = parsed.role
   # Validate the role against the workspace's declared vocabulary BEFORE the
   # manifests resolve: an undeclared custom role is a usage error (§4.4).
-  let roleSettings = workspaceRoleSettings(sel.workspaceRoot)
-  let known = declaredRoleNames(roleSettings)
-  if parsed.role.len > 0 and parsed.role notin known:
-    branchRolesUsage("role '" & parsed.role & "' is not declared in this " &
-      "workspace: the roles are " & known.join(", ") & " (a custom role is " &
-      "declared as `[branch-roles.<name>]` in " &
-      (if roleSettings.path.len > 0: roleSettings.path
-       else: "repro-workspace.toml, which this workspace does not have") &
-      ")")
+  requireDeclaredRole(sel.workspaceRoot, parsed.role, "--to")
+  let known = declaredRoleNames(workspaceRoleSettings(sel.workspaceRoot))
   result.roleNames = if parsed.role.len > 0: @[parsed.role] else: known
   try:
     refuseRepoPassedAsProject(sel.workspaceRoot, sel.scopeProjects)
@@ -75520,13 +75657,20 @@ type
       ## Fork form only: ``source_head`` when the source checkout supplied the
       ## branch point, ``declared_checkout`` when the repo was absent there and
       ## the target's normally-materialized checkout supplied it,
-      ## ``mainline_head`` under WV-7 ``--from-mainlines`` (the repo's declared
-      ## mainline tip supplied it, whichever of the two the repo is).
-    mainlineBranch*: string
-      ## WV-7 fork form only: the branch the ``mainline_head`` baseline was read
-      ## from — ``dev`` in one repo and ``latest`` in the next, since the
-      ## mainline is per repo. Empty when the baseline came from elsewhere, so a
-      ## report never asserts a mainline nothing consulted.
+      ## ``mainline_head`` under ``--from=<role>`` / ``--from-mainlines`` (the
+      ## tip of the branch the requested role resolved to supplied it, whichever
+      ## of the two the repo is).
+    roleBranch*: string
+      ## Fork form under ``--from=<role>`` only: the branch the
+      ## ``mainline_head`` baseline was read from — ``dev`` in one repo and
+      ## ``latest`` in the next, since roles resolve per repo. Empty when the
+      ## baseline came from elsewhere, so a report never asserts a role branch
+      ## nothing consulted. Reported as ``roleBranch`` and, until the old
+      ## spellings are retired, also as ``mainlineBranch``.
+    resolvedRole*: Option[ResolvedRole]
+      ## The requested role's resolution for this repo (§4.4's
+      ## ``resolvedRole`` / ``fallbackPath``); ``none`` when no role was
+      ## requested or the repo resolves none.
     publication*: string
       ## F0.3 fork form only: the source HEAD's publication verdict —
       ## ``published``, ``published_after_fetch``, ``unpublished`` or
@@ -75552,6 +75696,9 @@ type
     workspaceRoot*: string
     form*: string
     branch*: string
+    role*: string
+      ## Fork form under ``--from=<role>`` (or a shorthand, or
+      ## ``--from-mainlines``): the role every repo was cut from. "" otherwise.
     recordedBranch*: string
     repos*: seq[BranchRepoEntry]
     exitCode*: int
@@ -75581,6 +75728,9 @@ proc toJsonNode*(report: BranchReport): JsonNode =
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
   result["form"] = %report.form
+  if report.role.len > 0:
+    # The role a `--from=<role>` fork cut every repo from (§4.4).
+    result["role"] = %report.role
   result["branch"] = %report.branch
   result["recordedBranch"] = %report.recordedBranch
   var repos = newJArray()
@@ -75596,7 +75746,15 @@ proc toJsonNode*(report: BranchReport): JsonNode =
     obj["dirtyReason"] = %entry.dirtyReason
     obj["diagnostic"] = %entry.diagnostic
     obj["baselineSource"] = %entry.baselineSource
-    obj["mainlineBranch"] = %entry.mainlineBranch
+    if report.role.len > 0:
+      # §4.4's role fields. `roleBranch` is the entry's own: a repo whose
+      # role could not be resolved still names the branch that was looked
+      # for when there was one.
+      obj.addRoleFields(entry.resolvedRole, report.role)
+      obj["roleBranch"] = %entry.roleBranch
+    # The pre-role name of `roleBranch`, kept with the same value until the
+    # old spellings are retired.
+    obj["mainlineBranch"] = %entry.roleBranch
     obj["publication"] = %entry.publication
     obj["sourceBranch"] = %entry.sourceBranch
     repos.add(obj)
@@ -75621,10 +75779,17 @@ proc renderBranchTextLines*(report: BranchReport): seq[string] =
   # create form
   for entry in report.repos:
     var line = "workspace branch: " & entry.path & " " & entry.outcome
-    if entry.mainlineBranch.len > 0:
-      # WV-7 — the mainline is per repo, so which one THIS repo was cut from is
-      # the fact a reader of a 120-line digest cannot reconstruct otherwise.
-      line.add(" mainline=" & entry.mainlineBranch)
+    if entry.roleBranch.len > 0:
+      # The role branch is per repo, so which one THIS repo was cut from is
+      # the fact a reader of a 120-line digest cannot reconstruct otherwise:
+      # `mainline=dev`, `unstable=agents`, and the chain when the role fell
+      # back — `unstable=latest (unstable → mainline)` (§4.4).
+      if entry.resolvedRole.isSome:
+        let r = entry.resolvedRole.get()
+        line.add(" " & r.role & "=" & r.branch &
+          (if r.fallbackPath.len > 1: " (" & roleChainText(r) & ")" else: ""))
+      else:
+        line.add(" " & report.role & "=" & entry.roleBranch)
     if entry.headSha.len > 0:
       line.add(" head=" &
         entry.headSha[0 ..< min(8, entry.headSha.len)])
@@ -75739,12 +75904,14 @@ type
       ## inherited rather than re-derived. A non-empty value REPLACES the
       ## inherited set, which is how a developer forks a narrower (or wider)
       ## slice than they currently have checked out.
-    fromMainlines: bool
-      ## WV-7 ``--from-mainlines`` — take the repo SET from this workspace and
-      ## every repo's STARTING COMMIT from that repo's manifest-declared
-      ## mainline, rather than from its source checkout's HEAD. The two are
-      ## separable, and a fork that wants "the repos I have, starting at trunk"
-      ## is asking for exactly that separation.
+    fromRole: RoleChoice
+      ## ``--from=<role>`` (Workspace-Branch-Roles.md §4.2), a shorthand, or
+      ## WV-7 ``--from-mainlines`` (``--from=mainline``, kept as an alias until
+      ## the old spellings are retired) — take the repo SET from this
+      ## workspace and every repo's STARTING COMMIT from the branch that role
+      ## resolves to in that repo, rather than from its source checkout's
+      ## HEAD. The two are separable, and a fork that wants "the repos I have,
+      ## starting at trunk" is asking for exactly that separation.
     fetch: bool
       ## WV-7 ``--fetch`` (the default) / ``--no-fetch`` — whether the declared
       ## mainlines are refreshed before they are read. Default-on for the same
@@ -75807,6 +75974,11 @@ proc resolveInvokedWorkspaceRoot(explicit: string): string =
   let ascended = ascendToWorkspaceRoot(here)
   if ascended.len > 0: ascended else: absolutePath(here)
 
+proc cutsFromRole(parsed: BranchArgs): bool =
+  ## Whether the fork cuts every repo from a branch ROLE (``--from=<role>``,
+  ## a shorthand, ``--from-mainlines``) rather than from the source HEADs.
+  parsed.fromRole.role.len > 0
+
 proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
                       requirePath = false): BranchArgs =
   ## ``repro branch [<path>] [--branch=NAME] [--existing-branch]
@@ -75853,7 +76025,18 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
     elif arg == "--existing-branch":
       result.existingBranch = true
     elif arg == "--from-mainlines":
-      result.fromMainlines = true
+      # The pre-role spelling of ``--from=mainline``: the same role, so it
+      # conflicts with a different role exactly as a shorthand would.
+      var j = 0
+      let alias = ["--from=mainline"]
+      discard consumeBranchRoleFlag(alias, j, result.fromRole, verb,
+        roleFlag = "--from")
+      if result.fromRole.role == "mainline":
+        result.fromRole.flag = "--from-mainlines"
+    elif consumeBranchRoleFlag(args, i, result.fromRole, verb,
+        roleFlag = "--from"):
+      # ``--from=<role>`` or a shorthand (§4.2).
+      discard
     elif arg == "--fetch":
       result.fetch = true
       fetchGiven = true
@@ -75908,11 +76091,11 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
     # destination, so accepting them here would silently do nothing.
     if explicitBranch.len > 0 or result.existingBranch or
         result.includeChanges or result.projects.len > 0 or
-        result.unpublished != upRefuse or result.fromMainlines or fetchGiven:
+        result.unpublished != upRefuse or result.cutsFromRole or fetchGiven:
       raise newException(ValueError,
         "`--branch` / `--existing-branch` / `--include-changes` / " &
-          "`--unpublished` / `--projects` / `--from-mainlines` / " &
-          "`--fetch` require a " &
+          "`--unpublished` / `--projects` / `--from=<role>` (or a " &
+          "shorthand, or `--from-mainlines`) / `--fetch` require a " &
           "destination path (`" & verb & " <path>`); with no path " &
           "`repro branch` only reports the current workspace branch")
     return
@@ -75920,13 +76103,14 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
   # refreshed, so on their own they would be a flag that silently does nothing.
   # The fork's other network step (the branch-collision probe) is not optional
   # and is not what this flag governs.
-  if fetchGiven and not result.fromMainlines:
+  if fetchGiven and not result.cutsFromRole:
     raise newException(ValueError,
       "`" & (if result.fetch: "--fetch" else: "--no-fetch") &
-        "` needs `--from-mainlines`: it decides whether the declared " &
-        "mainlines are refreshed before the new branch is cut from them, " &
-        "and a fork that cuts from the source workspace's own HEADs fetches " &
-        "nothing to decide about")
+        "` needs `--from=<role>` (or a shorthand such as `--mainline`, or " &
+        "`--from-mainlines`): it decides whether the role branches are " &
+        "refreshed before the new branch is cut from them, and a fork that " &
+        "cuts from the source workspace's own HEADs fetches nothing to " &
+        "decide about")
   let destination = absolutePath(result.forkPath)
   # A destination INSIDE this workspace is refused. Nesting a workspace inside
   # a workspace is always wrong — the inner tree gets swept up by the outer
@@ -75939,11 +76123,12 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
   # choose. This is a contradiction rather than a precedence question; letting
   # either win silently would materialize a workspace somewhere the operator did
   # not ask for.
-  if result.fromMainlines and result.existingBranch:
+  if result.cutsFromRole and result.existingBranch:
     result.preflightRefusal =
-      "`--from-mainlines` and `--existing-branch` contradict each other: " &
-      "the first cuts a NEW branch from each repo's declared mainline, the " &
-      "second checks out a branch that ALREADY exists. Drop one of the two."
+      "`" & result.fromRole.flag & "` and `--existing-branch` contradict " &
+      "each other: the first cuts a NEW branch from the branch each repo's " &
+      "role resolves to, the second checks out a branch that ALREADY " &
+      "exists. Drop one of the two."
   elif pathIsCwdOrAncestor(result.workspaceRoot, destination):
     result.preflightRefusal =
       "'" & result.forkPath & "' is inside the current workspace (" &
@@ -76400,7 +76585,9 @@ proc runBranchCommand*(args: openArray[string]; verb = "repro branch";
   if args.len > 0 and args[0] in ["--help", "-h", "help"]:
     echo verb & " [<path>] [--branch=NAME] [--existing-branch] " &
       "[--include-changes] [--unpublished=refuse|carry|declared] " &
-      "[--projects=A,B] [--from-mainlines] [--fetch|--no-fetch] " &
+      "[--projects=A,B] [--from=<role> | --mainline | --unstable | " &
+      "--staging | --stable | --production | --lts | --from-mainlines] " &
+      "[--fetch|--no-fetch] " &
       "[--workspace-root=PATH] [--json] [--write-report[=PATH]]"
     echo "  (no argument)     print the current workspace branch"
     echo "  <path>            fork into a NEW workspace directory at <path>;"
@@ -76414,16 +76601,30 @@ proc runBranchCommand*(args: openArray[string]; verb = "repro branch";
     echo "                    (start that repo from its manifest revision)"
     echo "  --projects=A,B    give the new workspace THIS project set instead"
     echo "                    of inheriting the current one (repeatable)"
-    echo "  --from-mainlines  take the repo SET from this workspace but start"
-    echo "                    every repo from its declared mainline (dev /"
-    echo "                    latest / live / …) instead of from its HEAD"
-    echo "  --fetch           refresh those mainlines first (the default);"
-    echo "  --no-fetch        cut from the mainline refs already on disk"
+    echo "  --from=<role>     take the repo SET from this workspace but start"
+    echo "                    every repo from the branch <role> resolves to"
+    echo "                    there (mainline, unstable, staging, stable,"
+    echo "                    production, lts, or a custom role) instead of"
+    echo "                    from its HEAD; an undeclared role falls back"
+    echo "                    toward the mainline"
+    echo "  --mainline, --unstable, --staging, --stable, --production, --lts"
+    echo "                    shorthands for --from=<role>"
+    echo "  --from-mainlines  the older spelling of --from=mainline"
+    echo "  --fetch           refresh those role branches first (the default);"
+    echo "  --no-fetch        cut from the role refs already on disk"
     echo ""
     echo "  The new workspace inherits this workspace's enabled projects."
     echo "  To switch THIS workspace onto a branch, use `repro switch`."
     return 0
-  let parsed = parseBranchArgs(args, verb, requirePath)
+  var parsed: BranchArgs
+  try:
+    parsed = parseBranchArgs(args, verb, requirePath)
+    # §4.4: a role this workspace does not declare is a usage error, decided
+    # before anything is fetched or created.
+    requireDeclaredRole(parsed.workspaceRoot, parsed.fromRole.role, "--from")
+  except BranchRolesUsageError as err:
+    stderr.writeLine(verb & ": " & err.msg)
+    return 2
   # WV-6 — two forms only: a destination path forks, no argument shows. The
   # in-place create forms are `repro switch -b`, which reaches
   # ``executeBranchCreateAndCheckout`` on its own.
@@ -76605,8 +76806,14 @@ type
     croDivergedRefused    ## Target branch and its upstream both moved.
                           ## `switch` never repoints a branch, so this is a
                           ## refusal, not a reset.
-    croNoMainlineRefused  ## ``--mainline`` but the fragment declares no
-                          ## ``branch`` to target.
+    croNoMainlineRefused  ## A role was requested but the fragment resolves
+                          ## no role at all: a legacy ``repo.v1`` fragment
+                          ## pinning only a ``revision``. Retired with
+                          ## ``repo.v1`` reading.
+    croNoRoleRef          ## The branch the requested role resolved to is
+                          ## absent locally AND on the remote. A refusal,
+                          ## never a fallback to another branch
+                          ## (Workspace-Branch-Roles.md §2.2, §4.4).
     croDirtyRefused       ## Repo dirty; nothing scheduled.
     croBranchMissingRefused
                           ## Branch absent locally AND on every remote.
@@ -76628,9 +76835,14 @@ type
     newBranch*: string
     targetBranch*: string
       ## The branch THIS repo was aimed at. Identical to the report's
-      ## ``branch`` for an ordinary switch; under ``--mainline`` it is the
-      ## repo's own declared branch, so the report records what each repo was
-      ## actually sent to rather than one name that fits none of them.
+      ## ``branch`` for an ordinary switch; under ``--to=<role>`` (or a
+      ## shorthand such as ``--mainline``) it is the branch the role resolved
+      ## to in this repo, so the report records what each repo was actually
+      ## sent to rather than one name that fits none of them.
+    resolvedRole*: Option[ResolvedRole]
+      ## Under ``--to=<role>``: the role's resolution for this repo (§4.4's
+      ## ``resolvedRole`` / ``roleBranch`` / ``fallbackPath``). ``none`` for
+      ## an ordinary switch and for a repo that resolves no role.
     outcome*: string
     remoteHadBranch*: bool
     localHadBranch*: bool
@@ -76647,6 +76859,9 @@ type
     project*: string
     workspaceRoot*: string
     branch*: string
+    role*: string
+      ## The role switched to (``--to=<role>`` or its shorthand, which produce
+      ## the same report, §4.1); "" for an ordinary ``switch <branch>``.
     recordedBranch*: string
     repos*: seq[SwitchRepoEntry]
     exitCode*: int
@@ -76659,6 +76874,7 @@ proc switchOutcomeTag(outcome: SwitchRepoOutcome): string =
   of croFastForwarded: "fast_forwarded"
   of croDivergedRefused: "diverged_refused"
   of croNoMainlineRefused: "no_mainline_branch_refused"
+  of croNoRoleRef: "no_role_ref"
   of croDirtyRefused: "dirty_refused"
   of croBranchMissingRefused: "branch_missing_refused"
   of croProbeFailed: "probe_failed"
@@ -76671,6 +76887,7 @@ proc toJsonNode*(report: SwitchReport): JsonNode =
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
   result["branch"] = %report.branch
+  result["role"] = %report.role
   result["recordedBranch"] = %report.recordedBranch
   var repos = newJArray()
   for entry in report.repos:
@@ -76681,6 +76898,7 @@ proc toJsonNode*(report: SwitchReport): JsonNode =
     obj["previousBranch"] = %entry.previousBranch
     obj["newBranch"] = %entry.newBranch
     obj["targetBranch"] = %entry.targetBranch
+    obj.addRoleFields(entry.resolvedRole, report.role)
     obj["outcome"] = %entry.outcome
     obj["remoteHadBranch"] = %entry.remoteHadBranch
     obj["localHadBranch"] = %entry.localHadBranch
@@ -76700,6 +76918,10 @@ proc renderSwitchTextLines*(report: SwitchReport): seq[string] =
       line.add(" " & entry.previousBranch & " -> " & entry.newBranch)
     elif entry.newBranch.len > 0:
       line.add(" branch=" & entry.newBranch)
+    if entry.resolvedRole.isSome:
+      # §4.4: which branch the role named here, and through which chain —
+      # `[agents (unstable)]`, `[latest (unstable → mainline)]`.
+      line.add(" [" & roleFallbackText(entry.resolvedRole.get()) & "]")
     if entry.stashedOnLeave:
       line.add(" [stashed WIP]")
     if entry.restoredOnReturn:
@@ -76710,9 +76932,9 @@ proc renderSwitchTextLines*(report: SwitchReport): seq[string] =
       line.add(" (" & entry.diagnostic & ")")
     result.add(line)
   if report.exitCode == 0:
-    # Under ``--mainline`` there is no single branch to name in the summary —
+    # Under ``--to=<role>`` there is no single branch to name in the summary —
     # the repos landed on `dev`, `latest`, `live` and friends — so report the
-    # count instead of a name that would be wrong for most of them.
+    # role and the count instead of a name that would be wrong for most.
     if report.branch.len > 0:
       result.add("workspace switch: '" & report.branch &
         "' active across " & $report.repos.len &
@@ -76723,7 +76945,7 @@ proc renderSwitchTextLines*(report: SwitchReport): seq[string] =
         if entry.targetBranch.len > 0 and entry.targetBranch notin targets:
           targets.add(entry.targetBranch)
       sort(targets)
-      var line = "workspace switch: mainline active across " &
+      var line = "workspace switch: " & report.role & " active across " &
         $report.repos.len & " repos (" & targets.join(", ") & ")"
       if targets.len > 1:
         # No single branch describes the workspace now, so the metadata was
@@ -76741,7 +76963,9 @@ type
     projectName: string
     branchName: string
     newBranch: bool      ## WV-5 ``-b``: create the branch before switching.
-    mainline: bool       ## ``--mainline``: target is each repo's declared branch.
+    role: RoleChoice
+      ## ``--to=<role>`` or a shorthand (``--mainline``, ``--unstable``, …):
+      ## the target is the branch that role resolves to in each repo.
     fetch: bool          ## ``--fetch`` (default) / ``--no-fetch``.
     json: bool
     assumeYes: bool      ## RA-9 ``--yes``: skip the per-repo confirmation.
@@ -76772,8 +76996,9 @@ proc parseSwitchArgs*(args: openArray[string]): SwitchArgs =
         valueFromFlag(args, i, "--tool-provisioning"))
     elif arg == "-b" or arg == "--new-branch":
       result.newBranch = true
-    elif arg == "--mainline":
-      result.mainline = true
+    elif consumeBranchRoleFlag(args, i, result.role, "repro switch"):
+      # ``--to=<role>`` or a shorthand; ``--mainline`` is ``--to=mainline``.
+      discard
     elif arg == "--fetch":
       result.fetch = true
     elif arg == "--no-fetch":
@@ -76793,24 +77018,26 @@ proc parseSwitchArgs*(args: openArray[string]): SwitchArgs =
       raise newException(ValueError,
         "unexpected positional argument to `repro switch`: " & arg)
     inc i
-  # ``--mainline`` names the target per repo, so a positional branch or ``-b``
-  # alongside it is a contradiction rather than a precedence question. Refusing
-  # is the only honest answer: silently letting one win would switch the
-  # workspace somewhere the operator did not ask for.
-  if result.mainline and result.branchName.len > 0:
+  # A role names the target per repo, so a positional branch or ``-b``
+  # alongside it is a contradiction rather than a precedence question (§4.1).
+  # Refusing is the only honest answer: silently letting one win would switch
+  # the workspace somewhere the operator did not ask for.
+  let roleFlag = result.role.flag
+  if result.role.role.len > 0 and result.branchName.len > 0:
     raise newException(ValueError,
-      "`repro switch --mainline` takes no branch positional (got '" &
-      result.branchName & "'); --mainline resolves each repo's target from " &
-      "its manifest fragment. Drop one of the two.")
-  if result.mainline and result.newBranch:
+      "`repro switch " & roleFlag & "` takes no branch positional (got '" &
+      result.branchName & "'); " & roleFlag & " resolves each repo's " &
+      "target from the manifest. Drop one of the two.")
+  if result.role.role.len > 0 and result.newBranch:
     raise newException(ValueError,
-      "`repro switch --mainline` cannot be combined with -b/--new-branch: " &
-      "there is no single branch name to create when every repo has its own " &
-      "declared mainline")
-  if not result.mainline and result.branchName.len == 0:
+      "`repro switch " & roleFlag & "` cannot be combined with " &
+      "-b/--new-branch: there is no single branch name to create when every " &
+      "repo resolves the role to its own branch")
+  if result.role.role.len == 0 and result.branchName.len == 0:
     raise newException(ValueError,
       "`repro switch` requires a branch name positional argument " &
-      "(or --mainline to take each repo's declared branch)")
+      "(or --to=<role> / a shorthand such as --mainline to take each " &
+      "repo's branch for that role)")
   result.workspaceRoot = resolveInvokedWorkspaceRoot(result.workspaceRoot)
 
 proc resolveSwitchProject(parsed: SwitchArgs):
@@ -76895,9 +77122,11 @@ proc classifySwitchUpstream(identity: GitToolIdentity;
 
 proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
   result.workspaceRoot = parsed.workspaceRoot
-  # Under ``--mainline`` there is no single requested branch; the report's
+  # Under ``--to=<role>`` there is no single requested branch; the report's
   # ``branch`` stays empty and each entry's ``targetBranch`` carries the truth.
   result.branch = parsed.branchName
+  result.role = parsed.role.role
+  let byRole = parsed.role.role.len > 0
 
   let (resolved, _) = resolveSwitchProject(parsed)
   result.project = resolved.projectName
@@ -76910,12 +77139,15 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
   type
     RepoStateKind = enum
       rsReadyLocal, rsReadyFetchAndTrack, rsAlreadyOnBranch,
-      rsBranchMissing, rsDirty, rsProbeFailed, rsDiverged, rsNoMainlineBranch
+      rsBranchMissing, rsDirty, rsProbeFailed, rsDiverged, rsNoMainlineBranch,
+      rsNoRoleRef
     RepoState = object
       kind: RepoStateKind
       repo: ResolvedRepo
       repoPath: string
       target: string        ## The branch THIS repo is aimed at.
+      resolvedRole: Option[ResolvedRole]
+        ## Under ``--to=<role>``: the role's resolution for this repo.
       headSha: string
       previousBranch: string
       localHadBranch: bool
@@ -76979,20 +77211,26 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
     var state: RepoState
     state.repo = repo
     state.repoPath = parsed.workspaceRoot / repo.path
-    # ``--mainline``: the target is this repo's declared tracking branch. A
-    # fragment that declares only a ``revision`` pin has no branch to aim at;
-    # that is an operator-fixable manifest gap, so it is named rather than
+    # ``--to=<role>``: the target is the branch the role resolved to for this
+    # repo when the manifest loaded — from declarations only, never from what
+    # the remote has (Workspace-Branch-Roles.md §2.2). A legacy fragment that
+    # declares only a ``revision`` pin resolves no role, so it has no branch to
+    # aim at; that is an operator-fixable manifest gap, named rather than
     # skipped (CLI/switch.md §"--mainline").
+    if byRole:
+      state.resolvedRole = repo.roles.findRole(parsed.role.role)
     state.target =
-      if parsed.mainline: repo.branch
-      else: parsed.branchName
-    if parsed.mainline and state.target.len == 0:
+      if not byRole: parsed.branchName
+      elif state.resolvedRole.isSome: state.resolvedRole.get().branch
+      else: ""
+    if byRole and state.target.len == 0:
       state.kind = rsNoMainlineBranch
       state.reason = "repo '" & repo.path &
         "' declares no `branch` in its manifest fragment" &
         (if repo.fragmentPath.len > 0: " (" & repo.fragmentPath & ")" else: "") &
-        " — `--mainline` targets that field. Add a `branch` to the fragment, " &
-        "or name a branch explicitly instead of using --mainline."
+        " — every role falls back to that mainline, so `--to=" &
+        parsed.role.role & "` has no branch to target. Add a `branch` to " &
+        "the fragment, or name a branch explicitly instead of a role."
       states.add(state)
       continue
     if not dirExists(state.repoPath / ".git"):
@@ -77108,21 +77346,25 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
       states.add(state)
       continue
     if lsRemote.output.strip().len == 0:
-      state.kind = rsBranchMissing
       # Principle 2: name the offending repo + missing branch AND a concrete
-      # remedy. Under ``--mainline`` the branch comes from the manifest, so
-      # the fix is the fragment, not a branch-creation command — suggesting
+      # remedy. Under ``--to=<role>`` the branch comes from the manifest, so
+      # the fix is the declaration, not a branch-creation command — suggesting
       # `switch -b` there would tell the operator to invent a branch the
-      # manifest already claims exists.
+      # manifest already claims exists. And it is ``no_role_ref``, never a
+      # switch to some other branch: the role is declared, so a missing ref is
+      # a defect, not a reason to fall back (§2.2).
+      state.kind = if byRole: rsNoRoleRef else: rsBranchMissing
       state.reason =
-        if parsed.mainline:
-          "manifest-declared branch '" & state.target &
-          "' is absent locally and not present on remote '" & remoteName &
-          "' in repo '" & repo.path & "'" &
-          (if repo.fragmentPath.len > 0:
-             " — correct the `branch` field in " & repo.fragmentPath
-           else: " — correct the repo's `branch` field") &
-          ", or restore that branch on the remote"
+        if byRole:
+          "branch '" & state.target & "' (role " &
+          roleChainText(state.resolvedRole.get()) &
+          ") is absent locally and not present on remote '" & remoteName &
+          "' in repo '" & repo.path & "'. It is declared by " &
+          roleDeclarerText(state.resolvedRole.get()) &
+          (if repo.fragmentPath.len > 0: " (" & repo.fragmentPath & ")"
+           else: "") &
+          ", so it is not redirected to another branch — correct that " &
+          "declaration, or restore that branch on the remote"
         else:
           "branch '" & state.target &
           "' is absent locally and not present on remote '" &
@@ -77147,7 +77389,7 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
   for state in states:
     case state.kind
     of rsDirty: inc dirtyCount
-    of rsBranchMissing: inc missingCount
+    of rsBranchMissing, rsNoRoleRef: inc missingCount
     of rsProbeFailed: inc probeFailures
     of rsDiverged: inc divergedCount
     of rsNoMainlineBranch: inc noMainlineCount
@@ -77166,12 +77408,17 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
         headSha: state.headSha,
         previousBranch: state.previousBranch,
         targetBranch: state.target,
+        resolvedRole: state.resolvedRole,
         remoteHadBranch: state.remoteHadBranch,
         localHadBranch: state.localHadBranch)
       case state.kind
       of rsAlreadyOnBranch:
         entry.outcome = switchOutcomeTag(croAlreadyOnBranch)
         entry.newBranch = state.target
+      of rsNoRoleRef:
+        entry.outcome = switchOutcomeTag(croNoRoleRef)
+        entry.diagnostic = state.reason
+        entry.newBranch = state.previousBranch
       of rsDirty:
         entry.outcome = switchOutcomeTag(croDirtyRefused)
         entry.dirtyReason = state.reason
@@ -77215,11 +77462,11 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
   # Only the repos that would actually switch (``rsReadyLocal`` /
   # ``rsReadyFetchAndTrack``) are previewed — an all-``already_on_branch``
   # checkout is a no-op and skips the gate entirely.
-  # ``--mainline`` sends different repos to different branches, so the preview
-  # names each repo's own target. That is precisely where an operator sees
-  # `infra -> live` next to `codetracer-specs -> latest`.
+  # ``--to=<role>`` sends different repos to different branches, so the
+  # preview names each repo's own target. That is precisely where an operator
+  # sees `infra -> live` next to `codetracer-specs -> latest`.
   let targetLabel =
-    if parsed.mainline: "their declared mainline"
+    if byRole: "their '" & parsed.role.role & "' branch"
     else: "'" & parsed.branchName & "'"
   var switchPreview: seq[string]
   for state in states:
@@ -77229,7 +77476,9 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
         if state.previousBranch.len > 0: state.previousBranch
         else: "(detached)"
       switchPreview.add("  " & state.repo.path & ": " & from0 &
-        " -> " & state.target &
+        " -> " & (if state.resolvedRole.isSome:
+                    roleFallbackText(state.resolvedRole.get())
+                  else: state.target) &
         (if state.kind == rsReadyFetchAndTrack: " (fetch+track)" else: "") &
         (if state.needsFastForward: " (ff)" else: "") &
         (if state.needsStash: " (stash WIP)" else: ""))
@@ -77258,6 +77507,7 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
           previousBranch: state.previousBranch,
           newBranch: state.previousBranch,
           targetBranch: state.target,
+          resolvedRole: state.resolvedRole,
           remoteHadBranch: state.remoteHadBranch,
           localHadBranch: state.localHadBranch)
         case state.kind
@@ -77282,8 +77532,10 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
             if decision == ddRefusedNonTty:
               "non-interactive context without --yes"
             else: "operator declined"
+          # The role in its `--to=` spelling, so a shorthand and its `--to=`
+          # form produce byte-identical reports (§4.1).
           let retryArg =
-            if parsed.mainline: "--mainline"
+            if byRole: "--to=" & parsed.role.role
             else: parsed.branchName
           entry.diagnostic =
             "refused: switching repo '" & state.repo.path & "' from '" &
@@ -77490,6 +77742,7 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
       headSha: state.headSha,
       previousBranch: state.previousBranch,
       targetBranch: state.target,
+      resolvedRole: state.resolvedRole,
       remoteHadBranch: state.remoteHadBranch,
       localHadBranch: state.localHadBranch,
       stashedOnLeave: stashedOnLeave.getOrDefault(idx, false),
@@ -77549,13 +77802,13 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
   # checkout target matches the branch that was already marked started
   # (the no-op-style re-checkout case, where we keep the mark).
   # Which branch is the WORKSPACE on now? For an ordinary switch that is the
-  # requested branch. Under ``--mainline`` it is only well defined when every
-  # repo happens to track the same branch; in a mixed workspace (`dev` +
+  # requested branch. Under ``--to=<role>`` it is only well defined when every
+  # repo's role resolves to the same branch; in a mixed workspace (`dev` +
   # `latest` + `live`) there is no single answer, and inventing one would put
   # a branch in the metadata that no repo is standing on — the exact
   # incoherence `pull` leaves behind.
   var effectiveBranch = parsed.branchName
-  if parsed.mainline:
+  if byRole:
     var distinct0: seq[string]
     for state in states:
       if state.target.len > 0 and state.target notin distinct0:
@@ -77614,12 +77867,18 @@ proc runSwitchCommand*(args: openArray[string]): int =
   ## what happened, in addition to the stdout-formatted text lines.
   ## Without ``--write-report`` nothing is written to disk.
   if args.len > 0 and args[0] in ["--help", "-h", "help"]:
-    echo "repro switch <branch>|--mainline [-b|--new-branch] [--no-fetch] " &
+    echo "repro switch <branch>|--to=<role>|--mainline|--unstable|--staging|" &
+      "--stable|--production|--lts [-b|--new-branch] [--no-fetch] " &
       "[--yes] [--workspace-root=PATH] [--json] [--write-report[=PATH]]"
     echo "  <branch>          switch every participating repo onto <branch>,"
     echo "                    stashing and restoring per-repo work in progress"
-    echo "  --mainline        switch each repo onto ITS declared branch"
-    echo "                    (dev / latest / live / …) from the manifest"
+    echo "  --to=<role>       switch each repo onto the branch <role> resolves"
+    echo "                    to there (mainline, unstable, staging, stable,"
+    echo "                    production, lts, or a custom role); an undeclared"
+    echo "                    role falls back toward the mainline"
+    echo "  --mainline, --unstable, --staging, --stable, --production, --lts"
+    echo "                    shorthands for --to=<role>; --mainline puts each"
+    echo "                    repo on ITS declared mainline (dev / latest / …)"
     echo "  -b, --new-branch  create <branch> across every repo first"
     echo "  --fetch           fetch before switching, and fast-forward the"
     echo "                    branch landed on (DEFAULT)"
@@ -77628,7 +77887,15 @@ proc runSwitchCommand*(args: openArray[string]): int =
     echo ""
     echo "  To fork a NEW workspace directory instead, use `repro branch`."
     return 0
-  let parsed = parseSwitchArgs(args)
+  var parsed: SwitchArgs
+  try:
+    parsed = parseSwitchArgs(args)
+    # §4.4: a role this workspace does not declare is a usage error, decided
+    # before anything is fetched.
+    requireDeclaredRole(parsed.workspaceRoot, parsed.role.role, "--to")
+  except BranchRolesUsageError as err:
+    stderr.writeLine("repro switch: " & err.msg)
+    return 2
 
   # WV-5 ``-b`` — create the branch across every participating repo, then
   # switch onto it. The create-then-switch engine is M28's: one operation, one
@@ -78761,6 +79028,29 @@ proc executeBranchCreateAndCheckout(parsed: BranchArgs): BranchReport =
     result.repos.add(BranchRepoEntry(
       outcome: "metadata_write_failed", diagnostic: err.msg))
 
+proc forkRoleFor(resolved: ResolvedProject; repo: ResolvedRepo; role: string;
+                 roleSettings: RoleSettings): Option[ResolvedRole] =
+  ## The role ``repro branch --from=<role>`` cuts ``repo`` from: the role the
+  ## repo resolved when the manifest loaded (``ResolvedRepo.roles``, from
+  ## declarations only — the one resolver in ``roles.nim``).
+  ##
+  ## A legacy ``repo.v1`` fragment that resolves no mainline of its own still
+  ## has the mainline ``repro branch`` has always read for it — a
+  ## branch-shaped ``revision``, else the project's ``trunk``
+  ## (``declaredMainlineBranch``, CLI/branch.md §"--from-mainlines") — and
+  ## every role falls back to that, through the same resolver. ``none`` when
+  ## there is no mainline at all.
+  if repo.roles.len > 0:
+    return repo.roles.findRole(role)
+  resolveRoleFromMainline(roleSettings,
+    declaredMainlineBranch(resolved, repo.name), role)
+
+proc roleBranchLabel(r: Option[ResolvedRole]; branch: string): string =
+  ## "branch 'agents' (role unstable)", "branch 'latest' (role unstable →
+  ## mainline)": the branch a role named, and how, for a diagnostic.
+  if r.isSome: "branch '" & branch & "' (role " & roleChainText(r.get()) & ")"
+  else: "branch '" & branch & "'"
+
 proc executeBranchFork(parsed: BranchArgs): BranchReport =
   ## M27 / WV-6 — ``repro branch <path>`` (a.k.a. ``repro workspace new``):
   ## materialize a NEW workspace at ``parsed.forkPath`` on a branch named after
@@ -78811,6 +79101,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
             parsed.forkPath)
   result.branch = parsed.branchName
   result.form = "fork"
+  result.role = parsed.fromRole.role
   result.sourceWorkspaceRoot = parsed.workspaceRoot
   result.workspaceRoot = parsed.forkPath
   result.includeChanges = parsed.includeChanges
@@ -78929,12 +79220,16 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         ## F0.3 — the branch the SOURCE checkout is on. The name that gives a
         ## carried commit its meaning, and the thing the original defect threw
         ## away by naming every new branch after the destination directory.
-      mainlineBranch: string
-        ## WV-7 — the branch the MANIFEST declares this repo's mainline to be
-        ## (``declaredMainlineBranch``). Empty unless ``--from-mainlines``.
-      mainlineTip: string
-        ## WV-7 — the commit ``refs/remotes/<remote>/<mainlineBranch>`` resolves
-        ## to. This is the branch point under ``--from-mainlines``; for a repo
+      role: Option[ResolvedRole]
+        ## The requested role's resolution for this repo (``forkRoleFor``):
+        ## from declarations only, never from what the remote has. ``none``
+        ## unless ``--from=<role>``, or when the repo resolves no mainline.
+      roleBranch: string
+        ## The branch that role resolved to (``role.branch``). Empty unless
+        ## ``--from=<role>``.
+      roleTip: string
+        ## WV-7 — the commit ``refs/remotes/<remote>/<roleBranch>`` resolves
+        ## to. This is the branch point under ``--from=<role>``; for a repo
         ## absent from the source it is resolved in the TARGET after
         ## materialization, for the same reason the ``declared_checkout``
         ## baseline is.
@@ -78945,6 +79240,11 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
 
   var states: seq[ForkSourceState]
   var anyProbeFailed = false
+  # The workspace's profiles and custom roles, for the legacy-fragment arm of
+  # ``forkRoleFor``. Read only when a role is requested.
+  let sourceRoleSettings =
+    if parsed.cutsFromRole: workspaceRoleSettings(parsed.workspaceRoot)
+    else: RoleSettings()
 
   # Phase 1 is deliberately LOCAL ONLY. A broken checkout must be reported
   # before a 100+-repo workspace starts any network probe, while an ABSENT
@@ -78955,26 +79255,29 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     state.repo = repo
     state.srcPath = parsed.workspaceRoot / repo.path
     state.isClean = true
-    # WV-7 — the mainline is READ from the manifest, never inferred. The
-    # fragment's ``branch``, else a branch-shaped ``revision``, else the
-    # project's ``trunk`` (``declaredMainlineBranch``, the same resolution
-    # ``switch --mainline`` and ``sync --mainline`` use, so one run legitimately
-    # cuts from `dev`, `latest`, `live` and `codetracer` at once). A repo that
-    # declares none of the three REFUSES rather than falling back to
+    # WV-7 — the role branch is READ from the manifest, never inferred
+    # (``forkRoleFor``): the role the repo resolved when the manifest loaded,
+    # falling back toward the mainline by declaration only, so one run
+    # legitimately cuts from `dev`, `latest`, `live` and `codetracer` at once.
+    # A repo that declares no mainline REFUSES rather than falling back to
     # ``origin/HEAD``: that inference would cut a product repo from `main` in an
     # org whose product mainline is `dev`, which is the mistake this flag exists
     # to prevent.
-    if parsed.fromMainlines:
-      state.mainlineBranch = declaredMainlineBranch(resolved, repo.name)
-      if state.mainlineBranch.len == 0:
+    if parsed.cutsFromRole:
+      state.role = forkRoleFor(resolved, repo, parsed.fromRole.role,
+        sourceRoleSettings)
+      if state.role.isSome:
+        state.roleBranch = state.role.get().branch
+      else:
         state.mainlineUndeclared = true
         state.mainlineDiagnostic = "no mainline is declared for '" &
           repo.path & "': its manifest fragment" &
           (if repo.fragmentPath.len > 0: " (" & repo.fragmentPath & ")" else: "") &
           " sets no `branch`, its `revision` is a pin rather than a branch, " &
-          "and the project declares no `trunk`. `--from-mainlines` reads the " &
-          "manifest — declare `branch` in the fragment, or drop the flag to " &
-          "branch from this workspace's own HEADs"
+          "and the project declares no `trunk`. `--from=" &
+          parsed.fromRole.role & "` reads the manifest, and every role falls " &
+          "back to the mainline — declare `branch` in the fragment, or drop " &
+          "the flag to branch from this workspace's own HEADs"
     if not dirExists(state.srcPath / ".git"):
       state.sourcePresent = false
       if not parsed.existingBranch:
@@ -78982,14 +79285,14 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         # ``--from-mainlines`` it is that checkout's mainline ref rather than
         # the revision the manifest/lock materialized.
         state.baselineSource =
-          if parsed.fromMainlines: "mainline_head" else: "declared_checkout"
+          if parsed.cutsFromRole: "mainline_head" else: "declared_checkout"
         state.useDeclaredBaseline = true
       states.add(state)
       continue
     state.sourcePresent = true
     if not parsed.existingBranch:
       state.baselineSource =
-        if parsed.fromMainlines: "mainline_head" else: "source_head"
+        if parsed.cutsFromRole: "mainline_head" else: "source_head"
     let headRes = queryGitState(headShaQuery(state.srcPath), identity)
     if headRes.status != gqsOk:
       state.probeFailed = true
@@ -79020,7 +79323,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     # that is on a remote by construction. Leaving ``publicationAsked`` false
     # keeps the report's ``publication`` field EMPTY rather than asserting a
     # verdict nothing computed.
-    if not parsed.existingBranch and not parsed.fromMainlines:
+    if not parsed.existingBranch and not parsed.cutsFromRole:
       state.publication = headPublicationOf(identity, state.srcPath,
         gitRemoteNameFor(repo), allowFetch = false)
       state.publicationAsked = true
@@ -79081,10 +79384,12 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   # a failed fetch names ``--no-fetch``. Cutting from a stale ref after the
   # operator explicitly asked for a refresh would report success for a workspace
   # built on the trunk they were trying to leave behind.
-  var rootMainlineBranch = ""
-  var rootMainlineTip = ""
-  var rootMainlineRefusal = ""
-  if parsed.fromMainlines:
+  var rootRole: Option[ResolvedRole]
+    ## The requested role's resolution for the ROOT repo (§3.4).
+  var rootRoleBranch = ""
+  var rootRoleTip = ""
+  var rootRoleRefusal = ""
+  if parsed.cutsFromRole:
     # The ROOT repo carries the membership manifests, so cutting it from a stale
     # local state while every member repo starts at trunk would hand back a
     # workspace whose bill of materials disagrees with its contents. Its
@@ -79103,6 +79408,11 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     #     Neither can declare ``[workspace]``, so §3.4's rule has nothing to
     #     read there; it takes over when the workspace migrates to the new
     #     file, and the fallback goes when the old name is retired.
+    #
+    # The requested role then resolves from that: under ``settings.v1`` by
+    # the ordinary procedure over ``[workspace]`` (``resolveRootRoles``); under
+    # the old file, which can declare nothing but a mainline, every role
+    # falls back to that mainline (``resolveRoleFromMainline``).
     let bootstrapPath = findBootstrapConfigPath(parsed.workspaceRoot)
     var rootDeclaresRoles = false
     if bootstrapPath.len > 0:
@@ -79129,32 +79439,39 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       if settings.isLegacySettings:
         let declared = rootMainline(settings, legacyStoreIsRoot)
         if declared.isSome:
-          rootMainlineBranch = declared.get().strip()
+          rootRoleBranch = declared.get().strip()
       else:
         rootDeclaresRoles = true
         try:
-          rootMainlineBranch = rootMainline(settings, legacyStoreIsRoot).get()
+          rootRole = resolveRootRoles(settings).findRole(parsed.fromRole.role)
+          if rootRole.isSome:
+            rootRoleBranch = rootRole.get().branch
         except WorkspaceManifestParseError as err:
-          rootMainlineRefusal = err.msg
-    if rootMainlineBranch.len == 0 and not rootDeclaresRoles:
+          rootRoleRefusal = err.msg
+    if rootRoleBranch.len == 0 and not rootDeclaresRoles:
       let headRef = gitRunPlain(identity,
         ["-C", parsed.workspaceRoot, "symbolic-ref", "--short", "-q",
          "refs/remotes/origin/HEAD"])
       if headRef.code == 0:
         let value = headRef.output.strip()
-        rootMainlineBranch =
+        rootRoleBranch =
           if value.startsWith("origin/"): value["origin/".len .. ^1]
           else: value
-    if rootMainlineBranch.len == 0 and rootMainlineRefusal.len == 0:
-      rootMainlineRefusal = "the workspace root '" & parsed.workspaceRoot &
+    if not rootDeclaresRoles and rootRoleBranch.len > 0:
+      rootRole = resolveRoleFromMainline(sourceRoleSettings, rootRoleBranch,
+        parsed.fromRole.role)
+      if rootRole.isSome:
+        rootRoleBranch = rootRole.get().branch
+    if rootRoleBranch.len == 0 and rootRoleRefusal.len == 0:
+      rootRoleRefusal = "the workspace root '" & parsed.workspaceRoot &
         "' declares no mainline: it has no `" & settingsFileName & "` to " &
         "declare `[workspace] mainline` in, the old `.repro-workspace.toml` " &
         "(if any) sets no `[manifest] branch` for a record store that is the " &
         "root repo itself, and the root repo has no `origin/HEAD` to read one " &
         "from. Declare `[workspace] mainline` in `" & settingsFileName &
-        "`, or drop `--from-mainlines`"
+        "`, or drop `--from=" & parsed.fromRole.role & "`"
 
-  if parsed.fromMainlines and parsed.fetch:
+  if parsed.cutsFromRole and parsed.fetch:
     var fetchActions: seq[BuildAction]
     var fetchRepoIdx = initTable[string, int]()
     const RootFetchIndex = -1
@@ -79175,7 +79492,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       fetch.poolUnits = 1'u32
       fetchActions.add(fetch)
       fetchRepoIdx[actionId] = idx
-    if rootMainlineRefusal.len == 0:
+    if rootRoleRefusal.len == 0:
       let rootActionId = "workspace-branch-mainline-fetch-root"
       var rootFetch = gitFetchAction(rootActionId, identity,
         remoteName = "origin",
@@ -79208,20 +79525,22 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: "")
         let idx = fetchRepoIdx.getOrDefault(action.id, RootFetchIndex)
         if idx == RootFetchIndex:
-          rootMainlineRefusal = "could not refresh the workspace root's " &
-            "mainline '" & rootMainlineBranch & "' from `origin`: " & diag &
+          rootRoleRefusal = "could not refresh the workspace root's " &
+            parsed.fromRole.role & " branch '" & rootRoleBranch &
+            "' from `origin`: " & diag &
             ". Re-run with `--no-fetch` to cut from the mainline refs " &
             "already on disk"
         else:
           states[idx].mainlineFetchFailed = true
           states[idx].mainlineDiagnostic = "could not refresh '" &
-            states[idx].repo.path & "' mainline '" &
-            states[idx].mainlineBranch & "' from remote '" &
+            states[idx].repo.path & "' " &
+            roleBranchLabel(states[idx].role, states[idx].roleBranch) &
+            " from remote '" &
             gitRemoteNameFor(states[idx].repo) & "': " & diag &
-            ". Re-run with `--no-fetch` to cut from the mainline refs " &
+            ". Re-run with `--no-fetch` to cut from the role refs " &
             "already on disk"
 
-  if parsed.fromMainlines:
+  if parsed.cutsFromRole:
     # Read the tips. A repo ABSENT from the source has nothing to read yet — it
     # is cloned by target init below, and its mainline is resolved there, the
     # same way the ``declared_checkout`` baseline is.
@@ -79230,26 +79549,39 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           states[idx].mainlineFetchFailed:
         continue
       let remoteName = gitRemoteNameFor(states[idx].repo)
-      states[idx].mainlineTip = revParse(identity, states[idx].srcPath,
-        "refs/remotes/" & remoteName & "/" & states[idx].mainlineBranch)
-      if states[idx].mainlineTip.len == 0:
+      states[idx].roleTip = revParse(identity, states[idx].srcPath,
+        "refs/remotes/" & remoteName & "/" & states[idx].roleBranch)
+      if states[idx].roleTip.len == 0:
+        # A declared role whose branch the remote does not have is a REFUSAL,
+        # never a fallback to another branch (Workspace-Branch-Roles.md §2.2):
+        # the role was resolved from declarations, and a missing ref is a
+        # defect in them or on the remote.
         states[idx].mainlineUnresolved = true
-        states[idx].mainlineDiagnostic = "the declared mainline '" &
-          states[idx].mainlineBranch & "' of '" & states[idx].repo.path &
+        states[idx].mainlineDiagnostic = "the declared " &
+          roleBranchLabel(states[idx].role, states[idx].roleBranch) &
+          " of '" & states[idx].repo.path &
           "' has no `refs/remotes/" & remoteName & "/" &
-          states[idx].mainlineBranch & "` to cut from" &
+          states[idx].roleBranch & "` to cut from" &
+          (if states[idx].role.isSome and
+              states[idx].role.get().resolvedRole != "mainline":
+             "; it is declared by " &
+               roleDeclarerText(states[idx].role.get()) & ", so it is not " &
+               "redirected to another branch — correct that declaration, or " &
+               "restore the branch on the remote"
+           else: "") &
           (if parsed.fetch: ""
            else: "; this run was `--no-fetch` — re-run with `--fetch` if " &
              "that branch has simply never been fetched here")
       else:
-        states[idx].headSha = states[idx].mainlineTip
-    if rootMainlineRefusal.len == 0:
-      rootMainlineTip = revParse(identity, parsed.workspaceRoot,
-        "refs/remotes/origin/" & rootMainlineBranch)
-      if rootMainlineTip.len == 0:
-        rootMainlineRefusal = "the workspace root's declared mainline '" &
-          rootMainlineBranch & "' has no `refs/remotes/origin/" &
-          rootMainlineBranch & "` to cut from" &
+        states[idx].headSha = states[idx].roleTip
+    if rootRoleRefusal.len == 0:
+      rootRoleTip = revParse(identity, parsed.workspaceRoot,
+        "refs/remotes/origin/" & rootRoleBranch)
+      if rootRoleTip.len == 0:
+        rootRoleRefusal = "the workspace root's declared " &
+          roleBranchLabel(rootRole, rootRoleBranch) &
+          " has no `refs/remotes/origin/" &
+          rootRoleBranch & "` to cut from" &
           (if parsed.fetch: ""
            else: "; this run was `--no-fetch` — re-run with `--fetch`")
   var remoteProbeActions: seq[BuildAction]
@@ -79404,22 +79736,24 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
 
   if anyProbeFailed or remoteCollisions.len > 0 or missingBranch.len > 0 or
       unpublishedPaths.len > 0 or unconfirmedPaths.len > 0 or
-      mainlineBlocked > 0 or rootMainlineRefusal.len > 0:
-    if rootMainlineRefusal.len > 0:
+      mainlineBlocked > 0 or rootRoleRefusal.len > 0:
+    if rootRoleRefusal.len > 0:
       result.repos.add(BranchRepoEntry(
         name: "<workspace-root>", path: ".",
         outcome:
-          (if rootMainlineBranch.len == 0: "mainline_undeclared"
+          (if rootRoleBranch.len == 0: "mainline_undeclared"
            else: "mainline_unresolved"),
-        mainlineBranch: rootMainlineBranch,
-        diagnostic: rootMainlineRefusal))
+        roleBranch: rootRoleBranch,
+        resolvedRole: rootRole,
+        diagnostic: rootRoleRefusal))
     for state in states:
       var entry = BranchRepoEntry(
         name: state.repo.name,
         path: state.repo.path,
         headSha: state.headSha,
         baselineSource: state.baselineSource,
-        mainlineBranch: state.mainlineBranch,
+        roleBranch: state.roleBranch,
+        resolvedRole: state.role,
         publication:
           (if state.publicationAsked: $state.publication.status else: ""),
         sourceBranch: state.sourceBranch)
@@ -79508,7 +79842,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     TargetBranchState = object
       repo: ResolvedRepo
       srcIdx: int
-      mainlineBranch: string
+      role: Option[ResolvedRole]
+      roleBranch: string
       targetTip: string
       probeFailed: bool
       probeReason: string
@@ -79524,26 +79859,26 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         outcome: "root_clone_failed", diagnostic: rootClone.diagnostic))
       return
 
-  if parsed.fromMainlines:
+  if parsed.cutsFromRole:
     var co = gitRunPlain(identity,
-      ["-C", parsed.forkPath, "checkout", "--detach", "--quiet", rootMainlineTip])
+      ["-C", parsed.forkPath, "checkout", "--detach", "--quiet", rootRoleTip])
     if co.code != 0:
       discard gitRunPlain(identity,
         ["-C", parsed.forkPath, "fetch", "--quiet", "origin"])
       co = gitRunPlain(identity,
-        ["-C", parsed.forkPath, "checkout", "--detach", "--quiet", rootMainlineTip])
+        ["-C", parsed.forkPath, "checkout", "--detach", "--quiet", rootRoleTip])
       if co.code != 0:
         discard gitRunPlain(identity,
           ["-C", parsed.forkPath, "fetch", "--quiet", parsed.workspaceRoot])
         co = gitRunPlain(identity,
-          ["-C", parsed.forkPath, "checkout", "--detach", "--quiet", rootMainlineTip])
+          ["-C", parsed.forkPath, "checkout", "--detach", "--quiet", rootRoleTip])
     if co.code != 0:
       result.exitCode = 1
       result.repos.add(BranchRepoEntry(
         name: "<workspace-root>", path: ".",
         outcome: "root_checkout_failed",
         diagnostic: "could not check out target workspace root at mainline tip '" &
-          rootMainlineTip & "': " & co.output.strip()))
+          rootRoleTip & "': " & co.output.strip()))
       return
 
   if not resuming:
@@ -79587,7 +79922,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   var targetStates: seq[TargetBranchState]
   var targetBaselineProbeFailed = false
 
-  if parsed.fromMainlines:
+  if parsed.cutsFromRole:
     try:
       targetResolved = resolveProjectSet(parsed.forkPath, forkProjects)
     except CatchableError as err:
@@ -79597,14 +79932,20 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         diagnostic: "could not resolve target workspace project set: " & err.msg))
       return
 
+    # The TARGET's own declarations: the fork's root repo was just cut from the
+    # requested role, so its manifests are the ones the new workspace has.
+    let targetRoleSettings = workspaceRoleSettings(parsed.forkPath)
     var usedSource = initHashSet[int]()
     for targetRepo in targetResolved.repos:
       var ts: TargetBranchState
       ts.repo = targetRepo
       ts.srcIdx = matchSourceState(targetRepo, states, usedSource)
-      ts.mainlineBranch = declaredMainlineBranch(targetResolved, targetRepo.name)
+      ts.role = forkRoleFor(targetResolved, targetRepo, parsed.fromRole.role,
+        targetRoleSettings)
+      if ts.role.isSome:
+        ts.roleBranch = ts.role.get().branch
       let targetPath = parsed.forkPath / targetRepo.path
-      if ts.mainlineBranch.len == 0:
+      if ts.roleBranch.len == 0:
         ts.probeFailed = true
         ts.probeReason = "no mainline is declared for '" & targetRepo.path & "': " &
           "its manifest fragment sets no `branch`, its `revision` is a pin rather than a branch, " &
@@ -79613,18 +79954,18 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         targetStates.add(ts)
         continue
       let remoteName = gitRemoteNameFor(targetRepo)
-      if ts.srcIdx >= 0 and states[ts.srcIdx].mainlineBranch == ts.mainlineBranch and
-          states[ts.srcIdx].mainlineTip.len > 0:
-        ts.targetTip = states[ts.srcIdx].mainlineTip
+      if ts.srcIdx >= 0 and states[ts.srcIdx].roleBranch == ts.roleBranch and
+          states[ts.srcIdx].roleTip.len > 0:
+        ts.targetTip = states[ts.srcIdx].roleTip
       else:
         ts.targetTip = revParse(identity, targetPath,
-          "refs/remotes/" & remoteName & "/" & ts.mainlineBranch)
+          "refs/remotes/" & remoteName & "/" & ts.roleBranch)
       if ts.targetTip.len == 0:
         ts.probeFailed = true
-        ts.probeReason = "the declared mainline '" &
-          ts.mainlineBranch & "' of '" & targetRepo.path &
+        ts.probeReason = "the declared " &
+          roleBranchLabel(ts.role, ts.roleBranch) & " of '" & targetRepo.path &
           "' has no `refs/remotes/" & remoteName & "/" &
-          ts.mainlineBranch & "` in the freshly cloned checkout at '" &
+          ts.roleBranch & "` in the freshly cloned checkout at '" &
           targetPath & "'"
         targetBaselineProbeFailed = true
       targetStates.add(ts)
@@ -79645,14 +79986,15 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           states[idx].headSha = targetHead.headSha
 
   if targetBaselineProbeFailed:
-    if parsed.fromMainlines:
+    if parsed.cutsFromRole:
       for ts in targetStates:
         var entry = BranchRepoEntry(
           name: ts.repo.name,
           path: ts.repo.path,
           headSha: ts.targetTip,
           baselineSource: "mainline_head",
-          mainlineBranch: ts.mainlineBranch)
+          roleBranch: ts.roleBranch,
+          resolvedRole: ts.role)
         if ts.probeFailed:
           entry.outcome = "probe_failed"
           entry.diagnostic = ts.probeReason
@@ -79666,7 +80008,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           path: state.repo.path,
           headSha: state.headSha,
           baselineSource: state.baselineSource,
-          mainlineBranch: state.mainlineBranch,
+          roleBranch: state.roleBranch,
+          resolvedRole: state.role,
           publication:
             (if state.publicationAsked: $state.publication.status else: ""),
           sourceBranch: state.sourceBranch)
@@ -79726,7 +80069,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           # declared mainline, so the membership manifests do not lag the
           # members they declare.
           targetSha =
-            (if parsed.fromMainlines: rootMainlineTip else: rootHead.headSha),
+            (if parsed.cutsFromRole: rootRoleTip else: rootHead.headSha),
           repoPath = ".",
           receiptPath = ".repro" / "workspace" / "receipts" /
             "start-fork-root.receipt")
@@ -79734,7 +80077,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     actions.add(rootAction)
     actionRepoIndex[rootActionId] = RootEntryIndex
 
-  if parsed.fromMainlines:
+  if parsed.cutsFromRole:
     for idx, ts in targetStates:
       let receiptRel = ".repro" / "workspace" / "receipts" /
         ("start-fork-" & safeRepoIdSegment(ts.repo.name) & "-" & $idx &
@@ -79807,10 +80150,10 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     let idx = actionRepoIndex.getOrDefault(action.id, RootEntryIndex)
     if idx == RootEntryIndex:
       let rootBaselineSha =
-        if parsed.fromMainlines: rootMainlineTip else: rootHead.headSha
+        if parsed.cutsFromRole: rootRoleTip else: rootHead.headSha
       let rootBaselineSource =
         if parsed.existingBranch: ""
-        elif parsed.fromMainlines: "mainline_head"
+        elif parsed.cutsFromRole: "mainline_head"
         else: "source_head"
       if not ok:
         rootFailed = true
@@ -79820,8 +80163,10 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           outcome: "fork_failed",
           headSha: rootBaselineSha,
           baselineSource: rootBaselineSource,
-          mainlineBranch:
-            (if parsed.fromMainlines: rootMainlineBranch else: ""),
+          roleBranch:
+            (if parsed.cutsFromRole: rootRoleBranch else: ""),
+          resolvedRole: (if parsed.cutsFromRole: rootRole
+                         else: none(ResolvedRole)),
           diagnostic: "status=" & $outcome.status & " reason=" &
             outcome.reason & " " & outcome.stderr))
       else:
@@ -79829,20 +80174,23 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           name: "<workspace-root>", path: ".",
           headSha: rootBaselineSha,
           baselineSource: rootBaselineSource,
-          mainlineBranch:
-            (if parsed.fromMainlines: rootMainlineBranch else: ""),
+          roleBranch:
+            (if parsed.cutsFromRole: rootRoleBranch else: ""),
+          resolvedRole: (if parsed.cutsFromRole: rootRole
+                         else: none(ResolvedRole)),
           outcome:
-            (if parsed.fromMainlines: "branched_from_mainline"
+            (if parsed.cutsFromRole: "branched_from_mainline"
              else: "branched")))
       continue
-    if parsed.fromMainlines:
+    if parsed.cutsFromRole:
       let ts = targetStates[idx]
       var entry = BranchRepoEntry(
         name: ts.repo.name,
         path: ts.repo.path,
         headSha: ts.targetTip,
         baselineSource: "mainline_head",
-        mainlineBranch: ts.mainlineBranch,
+        roleBranch: ts.roleBranch,
+        resolvedRole: ts.role,
         publication: "",
         sourceBranch: (if ts.srcIdx >= 0: states[ts.srcIdx].sourceBranch else: ""))
       if not ok:
@@ -79872,7 +80220,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         path: state.repo.path,
         headSha: state.headSha,
         baselineSource: state.baselineSource,
-        mainlineBranch: state.mainlineBranch,
+        roleBranch: state.roleBranch,
         publication:
           (if state.publicationAsked: $state.publication.status else: ""),
         sourceBranch: state.sourceBranch)

@@ -1438,6 +1438,7 @@ tests/integration/t_dangling_symlink_in_observed_directory_does_not_abort.nim	ni
 tests/integration/t_darwin_fixture_processes_are_reaped_by_cwd.nim	nim	2
 tests/integration/t_declared_daemon_ipc_trust.nim	nim	17
 tests/integration/t_declared_platforms_change_no_existing_resolution.nim	nim	1
+tests/integration/t_declared_role_does_not_fall_back_when_ref_is_absent.nim	nim	1
 tests/integration/t_default_projects_auto_layer_on_fresh_workspace.nim	nim	3
 tests/integration/t_default_target_floor_is_conservative.nim	nim	7
 tests/integration/t_dependency_lists_resolve_reprobuild_packages_interface.nim	nim	2
@@ -1854,6 +1855,7 @@ tests/integration/t_rename_relocates_instead_of_cloning.nim	nim	6
 tests/integration/t_rename_relocation_failure_is_clean.nim	nim	1
 tests/integration/t_rename_renamed_and_rewritten_repo_relocates.nim	nim	1
 tests/integration/t_report_classifies_at_ahead_and_behind.nim	nim	1
+tests/integration/t_report_names_fallback_path.nim	nim	1
 tests/integration/t_repos_add_commit_passes_end_of_file_fixer.nim	nim	1
 tests/integration/t_repos_add_records_project_membership_by_key.nim	nim	1
 tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim	nim	6
@@ -1923,6 +1925,7 @@ tests/integration/t_shared_clone_alternates_skip_redownload.nim	nim	1
 tests/integration/t_shared_clone_cache_repacks_and_bounds_growth.nim	nim	2
 tests/integration/t_shared_clone_uses_full_repo_url_for_base_remote.nim	nim	1
 tests/integration/t_shell_entry_reports_drift_over_the_applied_overrides.nim	nim	1
+tests/integration/t_shorthand_equals_to.nim	nim	1
 tests/integration/t_sibling_exact_pin_guidance.nim	nim	4
 tests/integration/t_signer_roster_rotation_and_revocation.nim	nim	22
 tests/integration/t_single_platform_entries_declare_platforms.nim	nim	8
@@ -2022,6 +2025,7 @@ tests/integration/t_tsm_report_transport.nim	nim	39
 tests/integration/t_two_repos_on_different_policy_pins_resolve_different_rules.nim	nim	1
 tests/integration/t_unavailable_package_does_not_fall_through_to_path.nim	nim	1
 tests/integration/t_unavailable_package_fails_with_platform_reason.nim	nim	1
+tests/integration/t_undeclared_role_is_a_usage_error_before_any_fetch.nim	nim	1
 tests/integration/t_unpinned_manifest_is_not_plain_accepted.nim	nim	9
 tests/integration/t_unpublished_evidence_names_the_search_that_ran.nim	nim	1
 tests/integration/t_unrouted_private_repo_refuses_loudly.nim	nim	1
