@@ -17492,6 +17492,8 @@ proc runShellHookCommand(args: openArray[string]): int =
 type
   ParsedDevSessionCommand = object
     selection: DevEnvCliSelection
+    activitySpecified: bool
+      ## Preserve explicit scope before selection resolution supplies default.
     foreground: bool
     httpBind: string
     debounceMs: int
@@ -17546,6 +17548,7 @@ proc parseDevSessionArgs(args: openArray[string]; commandName: string;
   while i < args.len:
     let arg = args[i]
     if arg == "--activity" or arg.startsWith("--activity="):
+      result.activitySpecified = true
       selection.activity.appendActivitySelection(valueFromFlag(args, i,
         "--activity"))
     elif arg == "--work-root" or arg.startsWith("--work-root="):
@@ -19165,9 +19168,64 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
     " " & status["httpBind"].getStr()
   0
 
+proc namedDevSessionsForDown(selection: DevEnvCliSelection): seq[string] =
+  ## An implicit default is safe only after checking for named sessions in
+  ## this project's resolved work root. Inspect first, without stopping or
+  ## releasing anything: a stale default must not mask another activity's
+  ## supervisor or a resolver's holder acquired before supervisor startup.
+  let root = parentDir(selection.outDir)
+  if not dirExists(extendedPath(root)):
+    return
+  for kind, path in walkDir(extendedPath(root)):
+    if kind != pcDir or path.extractFilename == "default":
+      continue
+    let metadataPath = path.sessionMetadataPath()
+    let ledgerPath = path.sharedInstanceLedgerPath()
+    let hasHolders = readSharedInstanceLedger(path).entries.len > 0
+    var active = false
+    var activity = ""
+    if fileExists(extendedPath(metadataPath)):
+      let metadata =
+        try:
+          readJsonFileResilient(metadataPath)
+        except CatchableError as err:
+          raise newException(IOError,
+            "cannot inspect dev session metadata at " & metadataPath &
+              ": " & err.msg)
+      if metadata.isNil or metadata.kind != JObject:
+        raise newException(ValueError,
+          "dev session metadata is not a JSON object: " & metadataPath)
+      active = metadata{"status"}.getStr("") != "down"
+      activity = metadata{"activity"}.getStr("")
+    if not active and not hasHolders:
+      continue
+    # The directory segment escapes commas and other characters lossily.
+    # Only the persisted selection can supply a round-trippable CLI hint;
+    # legacy ledger-only records do not carry it, so name their exact path
+    # and require the original selectors rather than inventing a name.
+    let hint =
+      if activity.len > 0 and
+          devEnvActivitySegment(activity) == path.extractFilename:
+        q("--activity=" & activity)
+      else:
+        "use the original --activity selectors"
+    var records: seq[string] = @[]
+    if active:
+      records.add(metadataPath)
+    if hasHolders:
+      records.add(ledgerPath)
+    result.add(hint & ": " & records.join(", "))
+  result.sort()
+
 proc runDownCommand(args: openArray[string]): int =
   let parsed = parseDevSessionArgs(args, "down", acceptReadyTimeout = false,
     acceptStopTimeout = true)
+  if not parsed.activitySpecified:
+    let namedSessions = namedDevSessionsForDown(parsed.selection)
+    if namedSessions.len > 0:
+      raise newException(ValueError,
+        "named dev sessions or shared-instance holders exist; " &
+          "select an activity explicitly:\n  " & namedSessions.join("\n  "))
   let metadataPath = parsed.selection.outDir.sessionMetadataPath()
   if not fileExists(extendedPath(metadataPath)):
     # A resolver can fail after acquiring a holder but before launching the
@@ -19187,7 +19245,11 @@ proc runDownCommand(args: openArray[string]): int =
   # A failed repeat up can acquire leases while the prior session is already
   # down. Its stopped supervisor need not be contacted to release them.
   if metadata{"status"}.getStr("") == "down":
-    return releaseSharedServiceInstances(parsed.selection.outDir)
+    let released = releaseSharedServiceInstances(parsed.selection.outDir)
+    if released == 0:
+      echo "repro down: session " & metadata{"sessionId"}.getStr("(unnamed)") &
+        " already down"
+    return released
   let httpBindValue = metadata{"httpBind"}.getStr()
   if httpBindValue.len == 0:
     raise newException(ValueError,
