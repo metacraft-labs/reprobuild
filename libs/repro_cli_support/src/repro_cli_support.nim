@@ -19262,6 +19262,12 @@ proc runDownCommand(args: openArray[string]): int =
         "session stop request failed with HTTP " & $response.status &
           ": " & response.body)
   except CatchableError as err:
+    # Startup can leave failed metadata and a holder after the session's
+    # control listener has exited. The ledger remains authoritative: release
+    # its holders even when neither HTTP nor the force-file can stop a session.
+    # Release reports failures and retains the ledger for retry; the original
+    # stop error (or the force fallback) still determines this command's exit.
+    discard releaseSharedServiceInstances(parsed.selection.outDir)
     if not parsed.force:
       raise
     writeFile(extendedPath(parsed.selection.outDir.sessionDir /
