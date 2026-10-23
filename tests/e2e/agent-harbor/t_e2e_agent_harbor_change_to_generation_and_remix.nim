@@ -66,26 +66,46 @@ else:
     let intent = f.host.captureIntent(f.consent, f.sid, "make greeter say v2")
     var release = ""
     var g2 = ""
+    var stagedV2, activatedV2: seq[OpResult]
+    var activeBeforeV2 = ""
 
-    test "the accepted change is staged, then activated as a healthy generation":
+    # The suite runner runs every case in a process of its own, so a case
+    # must not rely on a release or generation an earlier case made
+    # (Test-Suite-Architecture-Guidelines, "Every case MUST pass when run
+    # alone"). Staging and activating the v2 change runs at most once per
+    # process, on first use.
+    proc acceptV2() =
+      ## Stage the v2 change and activate it; sets `release` and `g2`.
+      if stagedV2.len > 0: return
       let ws = f.changeTo(intent, greeterV2, "hello from greeter v2")
-      let staged = f.approved(intent, @[op(okGenerationStage, ws,
+      stagedV2 = f.approved(intent, @[op(okGenerationStage, ws,
         {"target": InstallTarget, "intent": "make greeter say v2",
          "health": "command-exit-zero:greeter"})],
         @["system.generation:stage"])
+      doAssert stagedV2[0].status == osCompleted, "staging v2 failed: " &
+        stagedV2[0].detail & "\n" & stagedV2[0].output
+      release = stagedV2[0].detail.split(' ')[0]["release=".len .. ^1]
+      activeBeforeV2 = f.backend.activeGeneration()
+      activatedV2 = f.approved(intent, @[op(okGenerationActivate, release)],
+                               @["system.generation:activate"])
+      doAssert activatedV2[0].status == osCompleted, "activating v2 failed: " &
+        activatedV2[0].detail
+      g2 = f.backend.activeGeneration()
+
+    test "the accepted change is staged, then activated as a healthy generation":
+      acceptV2()
+      let staged = stagedV2
       checkpoint staged[0].detail & "\n" & staged[0].output
       check staged[0].status == osCompleted
-      release = staged[0].detail.split(' ')[0]["release=".len .. ^1]
-      check f.backend.activeGeneration() == g1
-      let act = f.approved(intent, @[op(okGenerationActivate, release)],
-                           @["system.generation:activate"])
+      check activeBeforeV2 == g1
+      let act = activatedV2
       checkpoint act[0].detail
       check act[0].status == osCompleted
-      g2 = f.backend.activeGeneration()
       check g2.len > 0 and g2 != g1
       check exeOutput(launcher) == "hello from greeter v2"
 
     test "the overlay is a signed Remix and exports as a portable bundle":
+      acceptV2()
       let ws = f.checkoutGreeter(intent)
       let rs = f.approved(intent, @[op(okRemixCapture, ws, {"release": release}),
                                     op(okRemixExport, ws, {"release": release})],
@@ -112,6 +132,7 @@ else:
       check "+  puts(\"hello from greeter v2\");" in patch
 
     test "a change that fails its health check is rolled back automatically":
+      acceptV2()
       let ws = f.changeTo(intent, greeterBroken.replace("greeter v1", "greeter v3"),
                           "hello from greeter v3")
       let staged = f.approved(intent, @[op(okGenerationStage, ws,
@@ -129,6 +150,7 @@ else:
       check exeOutput(launcher) == "hello from greeter v2"
 
     test "an explicit rollback re-selects the original generation":
+      acceptV2()
       let rs = f.approved(intent, @[op(okGenerationRollback, g1)],
                           @["system.generation:rollback"])
       check rs[0].status == osCompleted
@@ -136,6 +158,7 @@ else:
       check exeOutput(launcher) == "hello from greeter v1"
 
     test "after an upstream update the change re-applies, or names its conflict":
+      acceptV2()
       # Upstream adds a line elsewhere in the file: the change still applies.
       writeFile(f.recipeDir / "src" / "main.c",
                 "/* upstream 1.0.1 */\n" & greeterV1)
