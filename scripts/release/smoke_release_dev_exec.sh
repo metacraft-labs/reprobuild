@@ -126,9 +126,25 @@ isolate_archive_runquota() {
   local v d kept_path="" path_entries
   unset RUNQUOTAD_BIN RUNQUOTA_BIN RUNQUOTA_SOCKET REPROBUILD_NO_RUNQUOTA
   for v in $(env | sed -n 's/^\(REPRO_BINARY_CACHE_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
+  # A PATH entry that holds a runquotad is replaced by a copy of itself
+  # without it, not dropped: on a merged profile directory the same entry is
+  # where `mv`, `cat` and the rest of this script's tools come from.
+  local shadow shadow_index=0 entry
   IFS=: read -r -a path_entries <<< "$PATH"
   for d in ${path_entries[@]+"${path_entries[@]}"}; do
-    [[ -n "$d" && ( -e "$d/runquotad" || -e "$d/runquotad.exe" ) ]] && continue
+    [[ -n "$d" ]] || continue
+    if [[ -e "$d/runquotad" || -e "$d/runquotad.exe" ]]; then
+      shadow_index=$((shadow_index + 1))
+      shadow="$work/path-without-runquotad-$shadow_index"
+      rm -rf "$shadow"
+      mkdir -p "$shadow"
+      for entry in "$d"/* "$d"/.[!.]*; do
+        [[ -e "$entry" || -L "$entry" ]] || continue
+        case "${entry##*/}" in runquotad|runquotad.exe) continue ;; esac
+        ln -s "$entry" "$shadow/${entry##*/}"
+      done
+      d="$shadow"
+    fi
     kept_path="${kept_path:+$kept_path:}$d"
   done
   PATH="$pkg/bin:$kept_path"
