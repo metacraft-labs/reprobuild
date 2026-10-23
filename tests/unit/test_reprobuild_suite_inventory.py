@@ -7641,6 +7641,37 @@ compileProfileBinary()
                     "shared-library sled gate is linux-x86_64-only",
                 },
             },
+            "libs/repro_home_resources/tests/t_smoke_home_resources.nim": {
+                "linux": {
+                    "Test home fence: drivers refuse writes into a fenced "
+                    "home::systemd user-unit apply and destroy refuse before "
+                    "touching a fenced home",
+                },
+                "darwin": set(),
+            },
+            "tests/e2e/hcr-linux-threads/"
+            "t_integration_hcr_linux_stack_mapping_changes_do_not_fault.nim": {
+                "linux": {
+                    "integration_hcr_linux_stack_mapping_changes_do_not_fault::"
+                    "stale readable ranges never license a faulting stack load",
+                },
+                "darwin": set(),
+            },
+            "libs/repro_interface_artifacts/tests/"
+            "t_sqlite_lib_dir_prefers_the_toolchain_sqlite.nim": {
+                "linux": {
+                    "sqlite lib dir prefers the toolchain's sqlite::built_prefix_wins_over_the_first_sorted_store_sqlite",
+                    "sqlite lib dir prefers the toolchain's sqlite::nix_ldflags_wins_over_the_first_sorted_store_sqlite",
+                    "sqlite lib dir prefers the toolchain's sqlite::missing_built_prefix_falls_through_to_nix_ldflags",
+                    "sqlite lib dir prefers the toolchain's sqlite::explicit_libdir_and_prefix_win_over_everything",
+                    "sqlite lib dir prefers the toolchain's sqlite::store_glob_remains_the_fallback",
+                    "sqlite lib dir prefers the toolchain's sqlite::host_dirs_only_without_a_nix_store",
+                    "sqlite lib dir prefers the toolchain's sqlite::real_provider_flags_link_the_build_shells_sqlite",
+                },
+                "darwin": {
+                    "sqlite lib dir prefers the toolchain's sqlite::sqlite_resolution_is_linux_only",
+                },
+            },
             "tests/e2e/hcr-linux-threads/"
             "t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim": {
                 "linux": {
@@ -7693,6 +7724,8 @@ compileProfileBinary()
             "tests/e2e/hcr-linux-threads/"
             "t_integration_hcr_linux_signal_blocked_thread_refused_by_name.nim": {
                 "linux": {
+                    "integration_hcr_linux_signal_blocked_thread_refused_by_name::a late "
+                    "handler's implicit signal mask is not permanent blocking",
                     "integration_hcr_linux_signal_blocked_thread_refused_by_name::a "
                     "thread that blocks the quiescence signal is refused by "
                     "NAME, not as a timeout",
@@ -7902,6 +7935,8 @@ compileProfileBinary()
             },
             "tests/integration/t_nix_daemon_provisioner.nim": {
                 "linux": {
+                    "Nix Evaluation Daemon and Foreign Provisioner Integration Tests::an "
+                    "edge with a relative or empty cwd sends an absolute root",
                     "Nix Evaluation Daemon and Foreign Provisioner Integration "
                     "Tests::a helper slower to start than two seconds is "
                     "waited for",
@@ -8525,7 +8560,7 @@ compileProfileBinary()
     def assert_platform_catalog_ledger_census(self, data):
         exclusive, identical = self.linux_darwin_catalog_ledger()
         self.assertEqual(self.platform_gated_test_sources(data), set(exclusive) | identical)
-        self.assertEqual(len(exclusive), 69)
+        self.assertEqual(len(exclusive), 72)
         self.assertEqual(len(identical), 20)
         specs, _ = inventory.parse_repro_tests(REPO_ROOT)
         defines_by_source = {spec.source: spec.defines for spec in specs}
