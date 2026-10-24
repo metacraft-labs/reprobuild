@@ -36,7 +36,15 @@ method runBuild(b: SlowBackend; ws: Workspace; op: Operation): OpResult =
   # `sleep` from PATH: a fixed `/bin/sleep` does not exist on every Linux
   # (NixOS has no `/bin` beyond `/bin/sh`), and a child that never starts
   # leaves the socket cases waiting for it forever.
-  let p = uncontrolledStartProcess(findExe("sleep"), args = ["30"], options = {})
+  #
+  # The PATH entry itself, not its target (`followSymlinks = false`):
+  # `findExe` follows symlinks by default, and on a multicall coreutils
+  # (NixOS) `.../bin/sleep` is a symlink to `coreutils`. Started under that
+  # name it prints a usage error and exits at once, so the build finished
+  # before a case could cancel it: the cancel was answered `plan-unknown`,
+  # and the case then read a field the refusal does not carry (SIGSEGV).
+  let p = uncontrolledStartProcess(findExe("sleep", followSymlinks = false),
+    args = ["30"], options = {})
   defer: p.close()
   b.childPid = p.processID
   b.childAlive = true
