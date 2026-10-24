@@ -5187,6 +5187,14 @@ const
     ## re-measuring them. Package ids, lock identities and the version the
     ## records carry (which the ``uses`` range check reads) are spelled from
     ## it, so they cannot disagree with one another.
+  # The unexplicit Linux/Nix default is the SAME declared Nim release as
+  # the archive/source routes. This is a deliberate bootstrap-only source
+  # exception: the catalog and bootstrap C compiler keep their canonical pin.
+  # Upstream eec3 also fixes the actual source-bootstrap phase; overriding
+  # the old recipe's version alone retains an incompatible mangling patch.
+  BootstrapNimNixpkgsRev* = "eec3e392d1862d49969beb75dd07a729002b6800"
+  BootstrapNimNixpkgsNarHash* =
+    "sha256-Wp5g3mKC+QIjiO39yuiXkSMxzvH4PO4TAuEjCvyWvcI="
   BootstrapNimPackageId = "nim@" & BootstrapNimVersion
   BootstrapNimSourcePackageId = "nim-source@" & BootstrapNimVersion
   BootstrapNimTarballUrl =
@@ -5292,18 +5300,18 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
       # The selector the Nix channel has always resolved under; the source
       # channel names its own (``nim-source@2.2.10``) when it is used.
       result.packageSelector = "nim"
-      let nixpkgsRef = "github:NixOS/nixpkgs/" & CanonicalNixpkgsRev
+      let nixpkgsRef = "github:NixOS/nixpkgs/" & BootstrapNimNixpkgsRev
       result.nixProvisioning = @[
         InterfaceNixProvisioning(
           packageName: "nim",
           selector: "nixpkgs#nim",
           executablePath: "bin/nim",
           nixpkgsRef: nixpkgsRef,
-          nixpkgsRev: CanonicalNixpkgsRev,
-          nixpkgsNarHash: CanonicalNixpkgsNarHash,
+          nixpkgsRev: BootstrapNimNixpkgsRev,
+          nixpkgsNarHash: BootstrapNimNixpkgsNarHash,
           packageId: "nixpkgs#nim",
           lockIdentity: nixpkgsRef & "?narHash=" &
-            CanonicalNixpkgsNarHash & "#nim")]
+            BootstrapNimNixpkgsNarHash & "#nim")]
     result.tarballProvisioning = @[
       InterfaceTarballProvisioning(
         packageName: "nim",
@@ -5585,7 +5593,8 @@ proc describeBootstrapNimRoute*(route: BootstrapNimRoute): string =
     except CatchableError as err:
       "the official archive for this host, of which there is none: " & err.msg
   of bnrNix:
-    "the pinned nixpkgs Nim (nixpkgs#nim at " & CanonicalNixpkgsRev &
+    "the declared Nim " & BootstrapNimVersion &
+      " (nixpkgs#nim at " & BootstrapNimNixpkgsRev &
       "), because this host has Nix"
   of bnrSource:
     "the official source archive " & BootstrapNimSourceTarballUrl &

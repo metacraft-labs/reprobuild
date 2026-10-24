@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2365,
+    "nimTestBinaries": 2367,
     "pureUnitConsolidationGroups": 68,
     "pureUnitTests": 691,
     "staticallyDetectedRuntimeCompilerFlowTests": 127,
-    "testEntries": 2402
+    "testEntries": 2404
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1389,7 +1389,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1291,
+      "integration": 1293,
       "platform/destructive": 145,
       "pure unit": 691,
       "unclassified": 257
@@ -1594,9 +1594,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2365,
+    "nimTestBinaryCount": 2367,
     "pythonTestFileCount": 37,
-    "testEntryCount": 2402
+    "testEntryCount": 2404
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -1897,7 +1897,7 @@
             "gcc",
             "source"
           ],
-          "line": 72,
+          "line": 96,
           "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
           "patterns": [
             "gcc"
@@ -1905,6 +1905,63 @@
           "snippet": "addFileExt(\"gcc\", ExeExt))"
         },
         {
+          "assignedCommandVariable": "cc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "chosen",
+            "clang",
+            "dir",
+            "gcc",
+            "source"
+          ],
+          "line": 135,
+          "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
+          "patterns": [
+            "gcc",
+            "cc"
+          ],
+          "snippet": "let cc = findExe(when defined(windows): \"gcc\" else: \"cc\")"
+        },
+        {
+          "assignedCommandVariable": "cc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "chosen",
+            "clang",
+            "dir",
+            "gcc",
+            "source"
+          ],
+          "line": 142,
+          "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
+          "patterns": [
+            "gcc",
+            "cc"
+          ],
+          "snippet": "let cc = findExe(when defined(windows): \"gcc\" else: \"cc\")"
+        },
+        {
+          "assignedCommandVariable": "cc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "chosen",
+            "clang",
+            "dir",
+            "gcc",
+            "source"
+          ],
+          "line": 150,
+          "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
+          "patterns": [
+            "gcc",
+            "cc"
+          ],
+          "snippet": "let cc = findExe(when defined(windows): \"gcc\" else: \"cc\")"
+        },
+        {
           "assignedCommandVariable": "gcc",
           "commandVariableExecuted": true,
           "directExecutionLine": false,
@@ -1915,7 +1972,7 @@
             "gcc",
             "source"
           ],
-          "line": 173,
+          "line": 238,
           "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
           "patterns": [
             "gcc"
@@ -1933,7 +1990,7 @@
             "gcc",
             "source"
           ],
-          "line": 174,
+          "line": 239,
           "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
           "patterns": [
             "clang"
@@ -1951,7 +2008,7 @@
             "gcc",
             "source"
           ],
-          "line": 211,
+          "line": 276,
           "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
           "patterns": [
             "gcc"
@@ -1969,7 +2026,7 @@
             "gcc",
             "source"
           ],
-          "line": 223,
+          "line": 288,
           "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
           "patterns": [
             "clang"
@@ -1987,7 +2044,7 @@
             "gcc",
             "source"
           ],
-          "line": 237,
+          "line": 302,
           "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
           "patterns": [
             "clang"
@@ -2005,7 +2062,7 @@
             "gcc",
             "source"
           ],
-          "line": 263,
+          "line": 328,
           "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
           "patterns": [
             "clang"
@@ -2023,7 +2080,7 @@
             "gcc",
             "source"
           ],
-          "line": 268,
+          "line": 333,
           "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
           "patterns": [
             "clang"
@@ -2137,6 +2194,54 @@
           "runtimeCompilerApi": "compileProfileToRbpi",
           "runtimeCompilerApiModule": "repro_profile_compile",
           "snippet": "discard compileProfileToRbpi(\"<abs>/home.nim\", opts)"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 632,
+          "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
+          "patterns": [
+            "repro-compile-profile-binary"
+          ],
+          "runtimeCompilerApi": "compileProfileBinary",
+          "runtimeCompilerApiModule": "repro_profile_compile",
+          "snippet": "discard compileProfileBinary(profile, dir / \"cache\","
+        },
+        {
+          "assignedCommandVariable": "gcc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "clangExe",
+            "objectFile",
+            "source"
+          ],
+          "line": 644,
+          "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "let gcc = findExe(\"gcc\")"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 650,
+          "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
+          "patterns": [
+            "repro-compile-profile-binary"
+          ],
+          "runtimeCompilerApi": "compileProfileBinary",
+          "runtimeCompilerApiModule": "repro_profile_compile",
+          "snippet": "let compiled = compileProfileBinary(profile, dir / \"cache\","
         }
       ],
       "source": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim"
@@ -15105,8 +15210,8 @@
       "owner": "libs/repro_interface_artifacts",
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 13,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -17641,8 +17746,8 @@
       "owner": "libs/repro_profile_compile",
       "requiresReproBinary": true,
       "source": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
-      "sourceSuiteCount": 7,
-      "staticCaseCount": 30,
+      "sourceSuiteCount": 8,
+      "staticCaseCount": 32,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -31194,6 +31299,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_agent_conformance_cli_portability",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_agent_protocol",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_agent_conformance_cli_portability.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_agent_mock_roundtrip",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -31908,6 +32031,24 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_behind_pin_warns_and_does_not_fail.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_bootstrap_default_nim_matches_declared_version",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_bootstrap_default_nim_matches_declared_version.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

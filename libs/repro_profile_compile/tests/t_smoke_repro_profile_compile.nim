@@ -601,6 +601,58 @@ suite "installed repro: profile compile source root and compiler":
         for path in walkDir(scratch):
           check not path.path.endsWith(".d")
 
+when defined(windows):
+  const CompilerProbeProfileBody = """
+import repro_profile
+profile "compilerCapability":
+  resources:
+    fsUserFile(hostFile = "~/compiler-capability.txt", content = "planned only")
+"""
+  suite "Windows profile compiler capability inside the compile edge":
+    test "presence-only default selection cannot admit an unusable GCC":
+      # The non-executable file is the same justified process-creation negative
+      # as the recipe compiler suite. Nim remains real; no compiler result is
+      # mocked. The predecessor selected this existing file by PATH presence
+      # and failed later in Nim instead of the named capability diagnostic.
+      let dir = createTempDir("repro-profile-bad-gcc-", "")
+      defer: removeDir(dir)
+      let fake = dir / "gcc.exe"
+      writeFile(fake, "not an executable compiler\n")
+      let realNim = resolveProfileNimCompiler()
+      let profile = writeProfileFile(dir, "home.nim", CompilerProbeProfileBody)
+      withEnv("REPRO_NIM_COMPILER", realNim):
+        withEnv("REPRO_BOOTSTRAP_CC", ""):
+          withEnv("CC", ""):
+            withEnv("PATH", dir):
+              # Explicit predecessor control: pure selection still observes
+              # presence and keeps its API. The actual compile must add proof.
+              check resolveProfileCCompiler() == ""
+              var refused = false
+              try:
+                discard compileProfileBinary(profile, dir / "cache",
+                  dir / "profile.exe", CompiledRepoRoot)
+              except CompileFailure as err:
+                refused = true
+                check fake in err.msg
+                check "selected from: first gcc.exe on PATH" in err.msg
+                check "REPRO_BOOTSTRAP_CC" in err.msg
+                check "nim compile failed" notin err.msg
+              check refused
+              check not fileExists(dir / "profile.exe")
+
+    test "a real selected GCC still compiles and runs the original profile":
+      let gcc = findExe("gcc")
+      doAssert gcc.len > 0, "enter the declared Windows GCC environment"
+      let dir = createTempDir("repro-profile-real-gcc-", "")
+      defer: removeDir(dir)
+      let profile = writeProfileFile(dir, "home.nim", CompilerProbeProfileBody)
+      withEnv("REPRO_BOOTSTRAP_CC", absolutePath(gcc)):
+        let compiled = compileProfileBinary(profile, dir / "cache",
+          dir / "profile.exe", CompiledRepoRoot)
+        check fileExists(dir / "profile.exe")
+        check compiled.jsonOutput.len > 0
+        discard parseProfileIntentJson(compiled.jsonOutput)
+
 # ---------------------------------------------------------------------------
 # An installed layout's source-only inputs (Gradual-Nix-To-Reprobuild-Migration
 # GM1w).

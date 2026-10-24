@@ -25,6 +25,9 @@ from repro_core/c_compiler import CCompilerUnusableError, explicitCCompiler,
   fallbackCCompiler, nimCCompilerFlags, clangNoTempFileCFlags,
   cCompilerAcceptsFlags, cCompilerFamily
 
+from repro_core/c_compiler_probe import CCompilerProbe, cCompilerProbeSource,
+  cCompilerProbeArgv, cCompilerUnusableMessageFor
+
 import repro_profile
 import repro_profile_intent
 
@@ -513,7 +516,8 @@ proc startProfileNim*(argv: seq[string]; repoRootAbs: string;
   ## stdout, from the reprobuild root, in `env`
   ## (`profileCompileChildEnv`). `argv[0]` is the compiler
   ## `resolveProfileNimCompiler` chose. The one place a profile's compiler is
-  ## launched; finish it with `finishProfileNim`.
+  ## launched; finish it with `finishProfileNim`. The Windows profile C
+  ## capability probe reuses this same argv/capture executor before Nim.
   startProcess(argv[0], workingDir = repoRootAbs, args = argv[1 .. ^1],
     env = env, options = {poUsePath, poStdErrToStdOut})
 
@@ -555,6 +559,51 @@ proc runProfileBinary*(outBinary: string): tuple[
   finally:
     p.close()
 
+when defined(windows):
+  proc requireProfileCCompiler(cc, nimcacheDir, repoRootAbs: string): string =
+    ## Resolve the implicit default once, then probe and pass that same image
+    ## to Nim. Presence alone admits old or wrong-target GCC installations.
+    ## This runs inside the monitored profile edge, in its existing scratch.
+    result = if cc.len > 0: cc else: uncontrolledFindExe("gcc")
+    if result.len > 0:
+      result = absolutePath(result)
+    let origin = if cc.len > 0: "configured profile C compiler"
+                 else: "first gcc.exe on PATH"
+    var probe = CCompilerProbe(compiler: result)
+    if result.len == 0 or not fileExists(extendedPath(result)):
+      probe.detail = "no such file"
+    else:
+      let scratch = absolutePath(nimcacheDir) / "cc-capability-probe"
+      let source = scratch / "probe.c"
+      let output = scratch / "probe.o"
+      try:
+        createDir(extendedPath(scratch))
+        writeFile(extendedPath(source), cCompilerProbeSource)
+        let childEnv = profileCompileChildEnv(repoRootAbs)
+        for name in ["SDKROOT", "DEVELOPER_DIR", "CPATH", "C_INCLUDE_PATH",
+                     "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "INCLUDE",
+                     "LIBRARY_PATH", "LIB"]:
+          childEnv.del(name)
+        let res = finishProfileNim(startProfileNim(
+          cCompilerProbeArgv(result, source, output), repoRootAbs, childEnv))
+        probe.usable = res.exitCode == 0
+        if not probe.usable:
+          probe.detail = "exit status " & $res.exitCode &
+            (if res.output.strip().len > 0: ":\n" & res.output.strip() else: "")
+      except CatchableError, OSError:
+        probe.detail = "could not run it: " & getCurrentExceptionMsg()
+      finally:
+        for path in [output, source]:
+          try: removeFile(extendedPath(path))
+          except CatchableError, OSError: discard
+        try: removeDir(extendedPath(scratch))
+        except CatchableError, OSError: discard
+    if not probe.usable:
+      let message = cCompilerUnusableMessageFor(probe, origin, "profile")
+      var err = newException(CompileFailure, message)
+      err.stderrText = message
+      raise err
+
 proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
                            repoRoot: string;
                            verbose: bool = false): tuple[
@@ -564,11 +613,13 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
   ## chatter on stderr and the profile binary's stdout JSON on stdout.
   ## Raises `CompileFailure` if either step exits non-zero.
   let nimExe = resolveProfileNimCompiler()
-  let cCompiler = resolveProfileCCompiler()
+  var cCompiler = resolveProfileCCompiler()
   let repoRootAbs = absolutePath(repoRoot)
   requireReprobuildSources(repoRootAbs)
   createDir(extendedPath(nimcacheDir))
   createDir(extendedPath(outBinary.parentDir))
+  when defined(windows):
+    cCompiler = requireProfileCCompiler(cCompiler, nimcacheDir, repoRootAbs)
 
   # The probe compile runs in the nimcache: the edge ignores it as an input.
   let cFlags = profileCompileCFlags(cCompiler, nimcacheDir)

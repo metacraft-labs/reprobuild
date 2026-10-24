@@ -33,6 +33,7 @@
 import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_interface_artifacts
+from repro_core/c_compiler_probe import cCompilerProbeSource, cCompilerProbeArgv
 when defined(macosx):
   import repro_core/c_compiler
 
@@ -56,7 +57,30 @@ template withEnv(names: openArray[string]; body: untyped) =
       if entry.present: putEnv(entry.name, entry.value)
       else: delEnv(entry.name)
 
+# A default third argument permits old calls but changes a Nim proc value's
+# type. Compile the original public arity assignment and call through it.
+static:
+  doAssert compiles(block:
+    let diagnostic: proc(probe: CCompilerProbe; origin: string): string =
+      cCompilerUnusableMessage
+    discard diagnostic(CCompilerProbe(compiler: "chosen", detail: "bad"),
+      "original callable API"))
+
 suite "probing the recipe-compile C compiler":
+
+  test "the original two-argument diagnostic proc remains callable":
+    let diagnostic: proc(probe: CCompilerProbe; origin: string): string =
+      cCompilerUnusableMessage
+    let probe = CCompilerProbe(compiler: "chosen", detail: "bad")
+    check diagnostic(probe, "original callable API") ==
+      "the C compiler selected for compiling the recipe cannot " &
+      "compile a trivial C file that includes <stddef.h>" &
+      (when defined(macosx): " and <Security/SecRandom.h>" else: "") &
+      "\n  compiler: chosen\n  selected from: original callable API" &
+      (when defined(macosx): "\n  SDKROOT: " & getEnv("SDKROOT", "<unset>") &
+        "\n  REPRO_BOOTSTRAP_SDKROOT: " &
+        getEnv("REPRO_BOOTSTRAP_SDKROOT", "<unset>") else: "") &
+      "\n  failure: bad\n  remedy: " & cCompilerOverrideRemedy()
 
   test "an unrunnable compiler is unusable, and the probe says why":
     let dir = createTempDir("repro-cc-probe-test-", "")
@@ -101,6 +125,47 @@ suite "probing the recipe-compile C compiler":
       for _ in walkDir(cacheDir):
         inc markers
     check markers == 0
+
+suite "shared C capability uses the real selected compiler":
+  # These are real compiler invocations, not compiler stubs. -nostdinc removes
+  # actual header search; the wrong-width mutation changes the actual C typedef.
+  # They distinguish capability checking from merely executing a file or checking
+  # its version. The same shared payload/argv is used by Windows profile compiles.
+  test "standard headers and native pointer width compile successfully":
+    let cc = findExe(when defined(windows): "gcc" else: "cc")
+    doAssert cc.len > 0, "enter the declared compiler environment"
+    let verdict = probeCCompiler(absolutePath(cc))
+    checkpoint(verdict.detail)
+    check verdict.usable
+
+  test "removing header search rejects the real compiler capability":
+    let cc = findExe(when defined(windows): "gcc" else: "cc")
+    doAssert cc.len > 0, "enter the declared compiler environment"
+    let verdict = probeCCompiler(absolutePath(cc), extraArgs = @["-nostdinc"])
+    checkpoint(verdict.detail)
+    check not verdict.usable
+    check "stddef.h" in verdict.detail
+
+  test "the real compiler rejects a changed host pointer-width assertion":
+    let cc = findExe(when defined(windows): "gcc" else: "cc")
+    doAssert cc.len > 0, "enter the declared compiler environment"
+    let dir = createTempDir("repro-real-pointer-probe-", "")
+    defer: removeDir(dir)
+    let source = dir / "probe.c"
+    let output = dir / "probe.o"
+    writeFile(source, cCompilerProbeSource)
+    var argv = cCompilerProbeArgv(absolutePath(cc), source, output)
+    # Deliberately wrong on every supported host; retain all original headers.
+    for arg in argv.mitems:
+      if arg.startsWith("-DREPRO_PROBE_POINTER_BYTES="):
+        arg = "-DREPRO_PROBE_POINTER_BYTES=" & $(sizeof(pointer) + 1)
+    var quoted: seq[string]
+    for arg in argv: quoted.add quoteShell(arg)
+    let rejected = execCmdEx(quoted.join(" "))
+    checkpoint(rejected.output)
+    check rejected.exitCode != 0
+    check "repro_probe_pointer_width" in rejected.output
+    check not fileExists(output)
 
 suite "selecting the recipe-compile C compiler":
 

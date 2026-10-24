@@ -11673,6 +11673,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_agent_conformance_cli_portability.nim",
+    binary: "build/test-bin/t_agent_conformance_cli_portability",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_agent_mock_roundtrip.nim",
     binary: "build/test-bin/t_agent_mock_roundtrip",
     defines: @[],
@@ -12053,6 +12062,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_behind_pin_warns_and_does_not_fail.nim",
     binary: "build/test-bin/t_behind_pin_warns_and_does_not_fail",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_bootstrap_default_nim_matches_declared_version.nim",
+    binary: "build/test-bin/t_bootstrap_default_nim_matches_declared_version",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

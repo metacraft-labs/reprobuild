@@ -370,6 +370,12 @@ const
     rows
 
   testFixtureArtifacts*: seq[TestGraphArtifacts] = @[
+    # Execute the enrolled production CLI, not a test-only compilation.
+    TestGraphArtifacts(
+      source: "tests/integration/t_agent_conformance_cli_portability.nim",
+      artifacts: @[TestGraphArtifact(
+        path: "build/bin/repro-agent-conformance",
+        actionId: "reprobuild.apps.repro-agent-conformance")]),
     TestGraphArtifacts(
       source: "libs/repro_build_engine/tests/t_engine_macos_sip_safe_launch.nim",
       artifacts: @[TestGraphArtifact(
@@ -1190,6 +1196,9 @@ package reprobuild:
 
   executable reproEngine:
     name: "reprobuild"
+
+  executable reproAgentConformance:
+    name: "repro-agent-conformance"
 
   executable reproPeerCacheTier2:
     name: "repro-peer-cache-tier2"
@@ -2429,6 +2438,19 @@ package reprobuild:
       nimcache = "build/nimcache/repro-install-mirror-publish",
       runInSourceDir = true,
       actionId = "reprobuild.apps.repro-install-mirror-publish"))
+
+    # This command already belongs to the bootstrap entrypoint list. Its
+    # production edge also supplies the CLI portability regression, so a
+    # focused graph run builds and fingerprints the binary it executes.
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-agent-conformance/repro_agent_conformance.nim",
+      binary = "build/bin/repro-agent-conformance",
+      defines = @["release"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/repro-agent-conformance",
+      runInSourceDir = true,
+      actionId = "reprobuild.apps.repro-agent-conformance"))
 
     # B5: the last three ``apps/entrypoints.txt`` rows that had no edge and so
     # existed only inside the ``bash scripts/build_apps.sh`` wrapper. Moving

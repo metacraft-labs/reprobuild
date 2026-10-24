@@ -25,8 +25,9 @@
 ## dependency graph, the same reason `source_root` lives here.
 ## `repro_interface_artifacts` re-exports the names it used to define.
 ##
-## What stays in `repro_interface_artifacts`: the compiler PROBE
-## (`probeCCompiler`), and the Windows last resort that takes the first
+## Capability source/argv/diagnostics live in `c_compiler_probe`, below both
+## callers. `repro_interface_artifacts` retains its cached probe executor and
+## the Windows last resort that takes the first
 ## `gcc.exe` on `PATH` with a warning. Windows has no build-time compiler
 ## constant (see `BuiltCCompilerPath`), so `resolveConfiguredCCompiler`
 ## returns "" there when neither variable names one, and each caller decides

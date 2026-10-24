@@ -75,9 +75,32 @@ suite "harness lib-path skew — which key an external reprobuild lib edit moves
     let cacheHomeEnv = when defined(windows): "LOCALAPPDATA" else: "XDG_CACHE_HOME"
     check valueIn(envA, cacheHomeEnv) / "repro-nimcache-provider" == original
     check valueIn(envB, cacheHomeEnv) / "repro-nimcache-provider" == original
-    for name in names:
+    for name in ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]:
       check valueIn(envA, name) == homeA / "tmp"
       check valueIn(envB, name) == homeB / "tmp"
+    check valueIn(envA, "HOME") == homeA
+    check valueIn(envB, "HOME") == homeB
+    # Exercise the TARGET standard library's actual home semantics, rather
+    # than pretending HOME controls Windows getHomeDir. Only this case's
+    # process environment is changed and the existing defer restores it.
+    let previousHome = getEnv("HOME")
+    let hadHome = existsEnv("HOME")
+    let previousProfile = getEnv("USERPROFILE")
+    let hadProfile = existsEnv("USERPROFILE")
+    try:
+      for env in [envA, envB]:
+        let expected = valueIn(env, "HOME")
+        putEnv("HOME", expected)
+        when defined(windows):
+          check valueIn(env, "USERPROFILE") == expected
+          putEnv("USERPROFILE", valueIn(env, "USERPROFILE"))
+        check getHomeDir().normalizedPath().strip(leading = false,
+          trailing = true, chars = {DirSep, AltSep}) == expected.normalizedPath()
+    finally:
+      if hadHome: putEnv("HOME", previousHome)
+      else: delEnv("HOME")
+      if hadProfile: putEnv("USERPROFILE", previousProfile)
+      else: delEnv("USERPROFILE")
     check original in providerCompileIgnoredInputPrefixes(scratch / "action-a")
 
   test "a cache selector never exempts the semantic root itself":
