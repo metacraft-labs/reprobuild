@@ -17492,6 +17492,8 @@ proc runShellHookCommand(args: openArray[string]): int =
 type
   ParsedDevSessionCommand = object
     selection: DevEnvCliSelection
+    activitySpecified: bool
+      ## Preserve explicit scope before selection resolution supplies default.
     foreground: bool
     httpBind: string
     debounceMs: int
@@ -17546,6 +17548,7 @@ proc parseDevSessionArgs(args: openArray[string]; commandName: string;
   while i < args.len:
     let arg = args[i]
     if arg == "--activity" or arg.startsWith("--activity="):
+      result.activitySpecified = true
       selection.activity.appendActivitySelection(valueFromFlag(args, i,
         "--activity"))
     elif arg == "--work-root" or arg.startsWith("--work-root="):
@@ -19165,9 +19168,64 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
     " " & status["httpBind"].getStr()
   0
 
+proc namedDevSessionsForDown(selection: DevEnvCliSelection): seq[string] =
+  ## An implicit default is safe only after checking for named sessions in
+  ## this project's resolved work root. Inspect first, without stopping or
+  ## releasing anything: a stale default must not mask another activity's
+  ## supervisor or a resolver's holder acquired before supervisor startup.
+  let root = parentDir(selection.outDir)
+  if not dirExists(extendedPath(root)):
+    return
+  for kind, path in walkDir(extendedPath(root)):
+    if kind != pcDir or path.extractFilename == "default":
+      continue
+    let metadataPath = path.sessionMetadataPath()
+    let ledgerPath = path.sharedInstanceLedgerPath()
+    let hasHolders = readSharedInstanceLedger(path).entries.len > 0
+    var active = false
+    var activity = ""
+    if fileExists(extendedPath(metadataPath)):
+      let metadata =
+        try:
+          readJsonFileResilient(metadataPath)
+        except CatchableError as err:
+          raise newException(IOError,
+            "cannot inspect dev session metadata at " & metadataPath &
+              ": " & err.msg)
+      if metadata.isNil or metadata.kind != JObject:
+        raise newException(ValueError,
+          "dev session metadata is not a JSON object: " & metadataPath)
+      active = metadata{"status"}.getStr("") != "down"
+      activity = metadata{"activity"}.getStr("")
+    if not active and not hasHolders:
+      continue
+    # The directory segment escapes commas and other characters lossily.
+    # Only the persisted selection can supply a round-trippable CLI hint;
+    # legacy ledger-only records do not carry it, so name their exact path
+    # and require the original selectors rather than inventing a name.
+    let hint =
+      if activity.len > 0 and
+          devEnvActivitySegment(activity) == path.extractFilename:
+        q("--activity=" & activity)
+      else:
+        "use the original --activity selectors"
+    var records: seq[string] = @[]
+    if active:
+      records.add(metadataPath)
+    if hasHolders:
+      records.add(ledgerPath)
+    result.add(hint & ": " & records.join(", "))
+  result.sort()
+
 proc runDownCommand(args: openArray[string]): int =
   let parsed = parseDevSessionArgs(args, "down", acceptReadyTimeout = false,
     acceptStopTimeout = true)
+  if not parsed.activitySpecified:
+    let namedSessions = namedDevSessionsForDown(parsed.selection)
+    if namedSessions.len > 0:
+      raise newException(ValueError,
+        "named dev sessions or shared-instance holders exist; " &
+          "select an activity explicitly:\n  " & namedSessions.join("\n  "))
   let metadataPath = parsed.selection.outDir.sessionMetadataPath()
   if not fileExists(extendedPath(metadataPath)):
     # A resolver can fail after acquiring a holder but before launching the
@@ -19187,7 +19245,11 @@ proc runDownCommand(args: openArray[string]): int =
   # A failed repeat up can acquire leases while the prior session is already
   # down. Its stopped supervisor need not be contacted to release them.
   if metadata{"status"}.getStr("") == "down":
-    return releaseSharedServiceInstances(parsed.selection.outDir)
+    let released = releaseSharedServiceInstances(parsed.selection.outDir)
+    if released == 0:
+      echo "repro down: session " & metadata{"sessionId"}.getStr("(unnamed)") &
+        " already down"
+    return released
   let httpBindValue = metadata{"httpBind"}.getStr()
   if httpBindValue.len == 0:
     raise newException(ValueError,
@@ -43392,6 +43454,7 @@ type
     repoIndex: int
     worktree: GitWorktreeDiscovery
     diagnostic: string
+    previousIdentityNotice: string
 
 proc canonicalDiscoveredGitPath(repoRoot, value: string): string =
   let candidate =
@@ -43545,6 +43608,43 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
       "worktree's filesystem identity"
     return
 
+  # A rename declaration can arrive before sync relocates this workspace.
+  # A prior path has the same structural authority as a current path, but only
+  # while the current slot is entirely absent. Never adopt an orphan over a
+  # live or corrupt canonical checkout, and never let a prior claim override
+  # a current path/common-directory claim from another declared repository.
+  var previousMatches: seq[int]
+  var previousNotices = initTable[int, string]()
+  for index, repo in repos:
+    if index notin missingDeclaredWorktrees:
+      continue
+    for prior in repo.previously:
+      let priorPath = workspaceRoot / prior.path
+      let previousWorktree = discoverGitWorktree(identity, priorPath)
+      if not previousWorktree.ok:
+        continue
+      let byPath = samePathIdentity(result.worktree.worktreeRoot, priorPath)
+      if byPath or samePathIdentity(result.worktree.commonDir,
+          previousWorktree.commonDir):
+        # Several prior spellings can identify the same physical worktree.
+        # Count repositories, not declarations, when checking ambiguity.
+        if index notin previousMatches:
+          previousMatches.add(index)
+          previousNotices[index] = "recognized '" & repo.name & "' via " &
+            "declared previous path '" & prior.path & "'" &
+            (if byPath: "" else: " (Git common directory)") &
+            "; run 'repro ws sync' to complete relocation"
+  if previousMatches.len == 1:
+    result.found = true
+    result.repoIndex = previousMatches[0]
+    result.previousIdentityNotice = previousNotices[result.repoIndex]
+    return
+  if previousMatches.len > 1:
+    result.ambiguous = true
+    result.diagnostic = "more than one declared repo shares the pushed " &
+      "worktree's declared previous filesystem identity"
+    return
+
   let actualRemotes = configuredRemoteDigests(identity,
     result.worktree.worktreeRoot)
   if actualRemotes.len == 0:
@@ -43552,17 +43652,28 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
     return
   var remoteMatches: seq[int]
   for index, repo in repos:
-    # A URL match is only a fallback for a manifest checkout that is absent.
-    # When the declared checkout exists with a different Git common directory,
-    # an arbitrary second clone of the same forge repository is not that
-    # workspace member. Treating it as one lets an explicit managed-hook root
-    # escape the workspace's structural identity boundary.
-    if index in missingDeclaredWorktrees and
-        sharesRemoteIdentity(actualRemotes, expectedRemoteDigests(repo)):
+    # Remote recovery must not turn occupancy or failed Git validation of
+    # the canonical checkout into authorization for an independent clone.
+    if index notin missingDeclaredWorktrees:
+      continue
+    if sharesRemoteIdentity(actualRemotes, expectedRemoteDigests(repo)):
       remoteMatches.add(index)
+      continue
+    for prior in repo.previously:
+      if prior.fetchUrl.len > 0 and
+          remoteLocationDigest(prior.fetchUrl) in actualRemotes:
+        remoteMatches.add(index)
+        # Identify the declaration without printing a URL that could contain
+        # embedded credentials. The canonical digest is credential-insensitive.
+        previousNotices[index] = "recognized '" & repo.name & "' via " &
+          "declared previous URL (identity " &
+          remoteLocationDigest(prior.fetchUrl) &
+          "); run 'repro ws sync' to complete relocation"
+        break
   if remoteMatches.len == 1:
     result.found = true
     result.repoIndex = remoteMatches[0]
+    result.previousIdentityNotice = previousNotices.getOrDefault(result.repoIndex)
   elif remoteMatches.len > 1:
     result.ambiguous = true
     result.diagnostic = "more than one declared repo matches the pushed " &
@@ -67989,6 +68100,8 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       let repo = resolved.repos[currentRepoMatch.repoIndex]
       currentRepoPath = repo.path
       currentRepoName = repo.name
+      if currentRepoMatch.previousIdentityNotice.len > 0:
+        result.notices.add(currentRepoMatch.previousIdentityNotice)
     elif currentRepoMatch.ambiguous:
       result.failures.add(CheckFailure(
         repo: "",
@@ -68076,6 +68189,16 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
         # ``fetchUrl`` is already the resolver's full base+relative repository
         # URL. Do not reconstruct repository identity from local branch state.
         agreedRemoteLocation = repo.fetchUrl
+        # An alias for a declared pre-rename destination is still this repo.
+        # Keep the protocol helper's exact push-destination verification: only
+        # a declared prior URL may replace the current agreed URL, never an
+        # arbitrary configured fetch URL or a different pushURL.
+        for prior in repo.previously:
+          if prior.fetchUrl.len > 0 and
+              normalizedRemoteLocation(parsed.hookRemoteLocation) ==
+                normalizedRemoteLocation(prior.fetchUrl):
+            agreedRemoteLocation = prior.fetchUrl
+            break
         break
   elif currentManifestLayer.isSome:
     # Only a URL-backed layer has a manifest-declared repository identity.

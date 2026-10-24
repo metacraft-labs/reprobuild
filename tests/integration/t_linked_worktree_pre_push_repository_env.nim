@@ -820,3 +820,290 @@ suite "linked-worktree pre-push repository-local environment isolation":
         checked["failures"][0]["evidence"].getStr()
       check checked["notices"].len == 0
       check lockStoreSnapshot(fx) == lockBefore
+
+
+proc declarePreviousApp(fx: Fixture; priorPath: string) =
+  # The old URL really serves the same objects; the new URL is deliberately
+  # different, so path and prior-URL acceptance cannot borrow current URLs.
+  createDir(fx.workspace / "url-prefixes")
+  writeFile(fx.workspace / "url-prefixes" / "historical.toml",
+    "schema = \"reprobuild.workspace.url-prefix.v1\"\n" &
+    "[url-prefix]\nname = \"historical\"\nurl = \"" &
+      fileUrl(fx.scratch) & "\"\n")
+  writeFile(fx.workspace / "repos" / "app.toml", AppToml &
+    "\n[extensions]\npreviously = [{ path = \"" & priorPath &
+      "\", url_prefix = \"historical\", url_suffix = \"app-origin.git\" }]\n")
+  let project = fx.workspace / "projects" / "app.toml"
+  writeFile(project, readFile(project).replace(fileUrl(fx.appOrigin),
+    fileUrl(fx.scratch / "renamed-origin.git")))
+
+proc dispatchApp(fx: Fixture; checkout: string): tuple[code: int; output: string] =
+  let refs = fx.scratch / "previous-identity-refs.bin"
+  writeFile(refs, refsRecord("refs/heads/main", fx.appSha,
+    "refs/heads/main", fx.appSha))
+  runProcess(fx.reproBin,
+    ["hooks", "dispatch", "pre-push", "--protocol=2",
+     "--repo-root", checkout, "--refs-file", refs, "--",
+     "origin", fileUrl(fx.appOrigin)], childEnvironment([]))
+
+suite "declared previous pre-push identity":
+  test "previous path and its linked worktree select the real dependency closure":
+    for linked in [false, true]:
+      let fx = setup(findExe("git"))
+      defer: removeDir(fx.scratch)
+      # Remove the fixture's linked worktree before moving its primary; a new
+      # linked checkout then proves the common-directory arm independently.
+      discard require(q(fx.gitBin) & " -C " & q(fx.app) &
+        " worktree remove " & q(fx.linked))
+      let prior = fx.workspace / "old-app"
+      moveDir(fx.app, prior)
+      fx.declarePreviousApp("old-app")
+      let checkout = if linked: fx.linked else: prior
+      if linked:
+        discard require(q(fx.gitBin) & " -C " & q(prior) &
+          " worktree add -b previous-linked " & q(checkout) & " HEAD")
+      # No remote match can rescue this test: it exercises only structure.
+      discard require(q(fx.gitBin) & " -C " & q(prior) &
+        " remote set-url origin " & q(fileUrl(fx.unrelatedOrigin)))
+      writeFile(fx.dep / "dirty.txt", "closure must still be checked\n")
+      let before = lockStoreSnapshot(fx)
+      let checked = fx.dispatchApp(checkout)
+      checkpoint(checked.output)
+      check checked.code == 2
+      let document = fx.report()
+      check document["failures"].len == 1
+      check document["failures"][0]["repo"].getStr() == "dep"
+      check document["failures"][0]["property"].getStr() == "dirty"
+      check "declared previous path" in noticesText(document)
+      check "repro ws sync" in noticesText(document)
+      check lockStoreSnapshot(fx) == before
+
+  test "previous URL recovers only a genuinely absent canonical checkout":
+    let fx = setup(findExe("git"))
+    defer: removeDir(fx.scratch)
+    let clone = fx.workspace / "copies" / "app"
+    createDir(clone.parentDir)
+    cloneRepo(fx.gitBin, fx.appOrigin, clone)
+    fx.declarePreviousApp("old-app")
+    writeFile(fx.dep / "dirty.txt", "closure blocker\n")
+    # A live canonical checkout, a directory, a file and a dangling symlink
+    # all forbid URL fallback, even though the old URL matches exactly.
+    for occupancy in ["checkout", "directory", "file", "symlink", "absent"]:
+      if occupancy == "directory":
+        removeDir(fx.app)
+        createDir(fx.app)
+      elif occupancy == "file":
+        removeDir(fx.app)
+        writeFile(fx.app, "occupied\n")
+      elif occupancy == "symlink":
+        removeFile(fx.app)
+        createSymlink(fx.scratch / "missing-target", fx.app)
+      elif occupancy == "absent":
+        removeFile(fx.app)
+      let before = lockStoreSnapshot(fx)
+      let checked = fx.dispatchApp(clone)
+      checkpoint(occupancy & "\n" & checked.output)
+      check checked.code == 2
+      let document = fx.report()
+      check document["failures"].len == 1
+      if occupancy == "absent":
+        check document["failures"][0]["repo"].getStr() == "dep"
+        check document["failures"][0]["property"].getStr() == "dirty"
+        check "declared previous URL" in noticesText(document)
+      else:
+        check document["failures"][0]["property"].getStr() == "current-repo-identity"
+        check document["notices"].len == 0
+      check lockStoreSnapshot(fx) == before
+
+    # Two absent members claiming the same prior URL are ambiguous even
+    # though each has a different current URL and checkout path.
+    let ghost = "schema = \"reprobuild.workspace.repo.v1\"\n" &
+      "[repo]\nname = \"ghost\"\npath = \"missing/ghost\"\n" &
+      "remote = \"dep-origin\"\nrevision = \"main\"\n" &
+      "[extensions]\npreviously = [{ path = \"missing/old-ghost\", " &
+      "url_prefix = \"historical\", url_suffix = \"app-origin.git\" }]\n"
+    writeFile(fx.workspace / "repos" / "ghost.toml", ghost)
+    let project = fx.workspace / "projects" / "app.toml"
+    writeFile(project, readFile(project).replace(
+      "\"repos/unrelated.toml\"]", "\"repos/unrelated.toml\", \"repos/ghost.toml\"]"))
+    let before = lockStoreSnapshot(fx)
+    let ambiguous = fx.dispatchApp(clone)
+    checkpoint(ambiguous.output)
+    check ambiguous.code == 2
+    let document = fx.report()
+    check document["failures"].len == 1
+    check document["failures"][0]["property"].getStr() == "current-repo-identity"
+    check "more than one declared repo" in document["failures"][0]["evidence"].getStr()
+    check document["notices"].len == 0
+    check lockStoreSnapshot(fx) == before
+
+  test "previous path cannot replace an occupied canonical checkout":
+    let fx = setup(findExe("git"))
+    defer: removeDir(fx.scratch)
+    let prior = fx.workspace / "old-app"
+    cloneRepo(fx.gitBin, fx.appOrigin, prior)
+    fx.declarePreviousApp("old-app")
+    for occupancy in ["checkout", "corrupt"]:
+      if occupancy == "corrupt":
+        removeDir(fx.app)
+        createDir(fx.app)
+      let before = lockStoreSnapshot(fx)
+      let checked = fx.dispatchApp(prior)
+      checkpoint(checked.output)
+      check checked.code == 2
+      let document = fx.report()
+      check document["failures"].len == 1
+      check document["failures"][0]["property"].getStr() == "current-repo-identity"
+      check document["notices"].len == 0
+      check lockStoreSnapshot(fx) == before
+
+
+suite "previous identity adversarial precedence":
+  test "ambiguous prior structural identities refuse without lock writes":
+    let fx = setup(findExe("git"))
+    defer: removeDir(fx.scratch)
+    let clone = fx.workspace / "copies" / "prior-shared"
+    createDir(clone.parentDir)
+    cloneRepo(fx.gitBin, fx.appOrigin, clone)
+    # Different prior path declarations can resolve to one physical checkout.
+    # Their names and prior paths are distinct; declaration order must never
+    # select an authority when physical identity makes both claims match.
+    for suffix in ["a", "b"]:
+      let prior = "old-ghost-" & suffix
+      createSymlink(clone, fx.workspace / prior)
+      writeFile(fx.workspace / "repos" / ("ghost-" & suffix & ".toml"),
+        "schema = \"reprobuild.workspace.repo.v1\"\n[repo]\n" &
+        "name = \"ghost-" & suffix & "\"\npath = \"missing/" & suffix &
+        "\"\nremote = \"dep-origin\"\nrevision = \"main\"\n" &
+        "[extensions]\npreviously = [{ path = \"" & prior & "\" }]\n")
+    let project = fx.workspace / "projects" / "app.toml"
+    writeFile(project, readFile(project).replace("\"repos/unrelated.toml\"]",
+      "\"repos/unrelated.toml\", \"repos/ghost-a.toml\", \"repos/ghost-b.toml\"]"))
+    let before = lockStoreSnapshot(fx)
+    let checked = fx.dispatchApp(clone)
+    checkpoint(checked.output)
+    check checked.code == 2
+    let document = fx.report()
+    check document["failures"].len == 1
+    check document["failures"][0]["property"].getStr() == "current-repo-identity"
+    check "more than one declared repo" in document["failures"][0]["evidence"].getStr()
+    check document["notices"].len == 0
+    check lockStoreSnapshot(fx) == before
+
+  test "current common directory wins over another repo previous path":
+    let fx = setup(findExe("git"))
+    defer: removeDir(fx.scratch)
+    removeDir(fx.app)
+    fx.declarePreviousApp("old-app")
+    # The prior path is a physical alias to another live repo. A linked
+    # worktree of that live repo must retain its current common-dir authority.
+    createSymlink(fx.unrelated, fx.workspace / "old-app")
+    let linked = fx.workspace / "worktrees" / "unrelated-linked"
+    discard require(q(fx.gitBin) & " -C " & q(fx.unrelated) &
+      " worktree add --detach " & q(linked) & " HEAD")
+    writeFile(linked / "dirty.txt", "this is the pushed unrelated checkout\n")
+    writeFile(fx.dep / "dirty.txt", "must stay outside the selected closure\n")
+    let refs = fx.scratch / "precedence-refs.bin"
+    writeFile(refs, refsRecord("HEAD", fx.unrelatedSha,
+      "refs/heads/main", fx.unrelatedSha))
+    let before = lockStoreSnapshot(fx)
+    let checked = runProcess(fx.reproBin,
+      ["hooks", "dispatch", "pre-push", "--protocol=2",
+       "--repo-root", linked, "--refs-file", refs, "--",
+       "origin", fileUrl(fx.unrelatedOrigin)], childEnvironment([]))
+    checkpoint(checked.output)
+    check checked.code == 2
+    let document = fx.report()
+    check document["failures"].len == 1
+    check document["failures"][0]["repo"].getStr() == "other/app-linked"
+    check document["failures"][0]["property"].getStr() == "dirty"
+    check "declared previous" notin noticesText(document)
+    check lockStoreSnapshot(fx) == before
+
+suite "declared previous identity publication":
+  test "old path and URL can push a new HEAD through the real managed hook":
+    for remote in ["origin", "renamed-alias"]:
+      let fx = setup(findExe("git"))
+      defer: removeDir(fx.scratch)
+      discard require(q(fx.gitBin) & " -C " & q(fx.app) &
+        " worktree remove " & q(fx.linked))
+      let prior = fx.workspace / "old-app"
+      moveDir(fx.app, prior)
+      fx.declarePreviousApp("old-app")
+      if remote != "origin":
+        discard require(q(fx.gitBin) & " -C " & q(prior) &
+          " remote rename origin " & q(remote))
+      writeFile(prior / "outgoing.txt", "unpublished outgoing HEAD\n")
+      discard require(q(fx.gitBin) & " -C " & q(prior) & " add outgoing.txt")
+      discard require(q(fx.gitBin) & " -C " & q(prior) &
+        " commit -m 'new outgoing commit before relocation'")
+      let head = require(q(fx.gitBin) & " -C " & q(prior) &
+        " rev-parse HEAD").strip()
+      check head != fx.appSha
+      discard require(q(fx.reproBin) & " hooks ensure --vcs " & q(prior))
+      let pushed = runProcess(fx.gitBin,
+        ["-C", prior, "push", remote, "main"],
+        childEnvironment([("REPROBUILD_REPRO", fx.reproBin)]))
+      checkpoint(remote & "\n" & pushed.output)
+      check pushed.code == 0
+      check require(q(fx.gitBin) & " --git-dir=" & q(fx.appOrigin) &
+        " rev-parse refs/heads/main").strip() == head
+      check not dirExists(fx.app)
+      check dirExists(prior / ".git")
+      let document = fx.report()
+      check document["exitCode"].getInt() == 0
+      check "declared previous path" in noticesText(document)
+      # The immutable record must bind the actual pushed HEAD under the
+      # canonical manifest coordinate, even though that directory is absent.
+      let record = fx.latestLock(head)
+      check head in readFile(record)
+      check "path = \"app\"" in readFile(record)
+
+  test "dirty old-path worktree remains a cleanliness refusal":
+    let fx = setup(findExe("git"))
+    defer: removeDir(fx.scratch)
+    let prior = fx.workspace / "old-app"
+    moveDir(fx.app, prior)
+    fx.declarePreviousApp("old-app")
+    writeFile(prior / "dirty.txt", "do not publish\n")
+    let before = lockStoreSnapshot(fx)
+    let checked = fx.dispatchApp(prior)
+    checkpoint(checked.output)
+    check checked.code == 2
+    let document = fx.report()
+    check document["failures"].len == 1
+    check document["failures"][0]["repo"].getStr() == "app"
+    check document["failures"][0]["property"].getStr() == "dirty"
+    check lockStoreSnapshot(fx) == before
+
+  test "prior URL alias cannot borrow authority for an unrelated pushURL":
+    let fx = setup(findExe("git"))
+    defer: removeDir(fx.scratch)
+    discard require(q(fx.gitBin) & " -C " & q(fx.app) &
+      " worktree remove " & q(fx.linked))
+    let prior = fx.workspace / "old-app"
+    moveDir(fx.app, prior)
+    fx.declarePreviousApp("old-app")
+    discard require(q(fx.gitBin) & " -C " & q(prior) &
+      " remote rename origin renamed-alias")
+    discard require(q(fx.gitBin) & " -C " & q(prior) &
+      " remote set-url --push renamed-alias " & q(fileUrl(fx.unrelatedOrigin)))
+    writeFile(prior / "outgoing.txt", "must not authorize this pushURL\n")
+    discard require(q(fx.gitBin) & " -C " & q(prior) & " add outgoing.txt")
+    discard require(q(fx.gitBin) & " -C " & q(prior) &
+      " commit -m 'unpublished hostile pushURL head'")
+    discard require(q(fx.reproBin) & " hooks ensure --vcs " & q(prior))
+    let before = lockStoreSnapshot(fx)
+    let pushed = runProcess(fx.gitBin,
+      ["-C", prior, "push", "renamed-alias", "HEAD:refs/heads/hostile"],
+      childEnvironment([("REPROBUILD_REPRO", fx.reproBin)]))
+    checkpoint(pushed.output)
+    check pushed.code != 0
+    let document = fx.report()
+    check document["failures"].len == 1
+    check document["failures"][0]["property"].getStr() == "unpublished"
+    check lockStoreSnapshot(fx) == before
+    check require(q(fx.gitBin) & " --git-dir=" & q(fx.unrelatedOrigin) &
+      " for-each-ref refs/heads/hostile").strip().len == 0
+    check require(q(fx.gitBin) & " --git-dir=" & q(fx.appOrigin) &
+      " rev-parse refs/heads/main").strip() == fx.appSha

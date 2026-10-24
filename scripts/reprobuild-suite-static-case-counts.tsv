@@ -651,7 +651,7 @@ libs/repro_project_dsl/tests/t_dsl_remove_before_run_names_only_outputs.nim	nim	
 libs/repro_project_dsl/tests/t_dsl_run_consumes_roundtrip.nim	nim	5
 libs/repro_project_dsl/tests/t_dsl_run_target_named_and_listed.nim	nim	4
 libs/repro_project_dsl/tests/t_dsl_state_group_membership.nim	nim	4
-libs/repro_project_dsl/tests/t_dss11_resolutions_reach_the_dev_env_artifact.nim	nim	30
+libs/repro_project_dsl/tests/t_dss11_resolutions_reach_the_dev_env_artifact.nim	nim	31
 libs/repro_project_dsl/tests/t_dss498_cross_activity_contribution_is_order_independent.nim	nim	13
 libs/repro_project_dsl/tests/t_dssf1_dev_env_actions_reach_the_caller.nim	nim	18
 libs/repro_project_dsl/tests/t_dssj2_two_resolvers_do_not_collide.nim	nim	14
@@ -1029,6 +1029,7 @@ tests/e2e/dev-env/t_e2e_nf4_flake_dev_shell.nim	nim	6
 tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim	nim	2
 tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim	nim	2
 tests/e2e/dev-env/t_e2e_repro_dev_sessions.nim	nim	26
+tests/e2e/dev-env/t_e2e_repro_down_activity_discovery.nim	nim	7
 tests/e2e/dev-env/t_e2e_repro_exec_does_not_leak_engine_source_root.nim	nim	3
 tests/e2e/dev-env/t_e2e_repro_exec_recipe_compiler.nim	nim	2
 tests/e2e/dev-env/t_e2e_repro_exec_shell.nim	nim	5
@@ -1645,7 +1646,7 @@ tests/integration/t_legacy_manifest_without_team_route_warns_and_scaffolds.nim	n
 tests/integration/t_level_and_its_equivalent_feature_set_select_alike.nim	nim	1
 tests/integration/t_levelless_catalog_selection_is_unchanged.nim	nim	1
 tests/integration/t_library_load_evidence_is_recorded.nim	nim	1
-tests/integration/t_linked_worktree_pre_push_repository_env.nim	nim	7
+tests/integration/t_linked_worktree_pre_push_repository_env.nim	nim	15
 tests/integration/t_local_daemons_control_plane_m0.nim	nim	3
 tests/integration/t_local_daemons_control_plane_m1.nim	nim	3
 tests/integration/t_local_daemons_control_plane_m10.nim	nim	7
@@ -2394,6 +2395,7 @@ tests/unit/test_nix_daemon_expression_file_is_never_cached.py	python	4
 tests/unit/test_nix_daemon_request_requires_workspace_root.py	python	4
 tests/unit/test_nix_evaluation_policy.py	python	1
 tests/unit/test_package_root_anchor.py	python	3
+tests/unit/test_profile_daemon_worker_syscalls.py	python	6
 tests/unit/test_prune_undeclared_test_binaries.py	python	5
 tests/unit/test_publish_surface_routing.py	python	32
 tests/unit/test_regenerate_suite_artifacts.py	python	25

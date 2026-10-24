@@ -339,6 +339,32 @@ suite "D-SS11 §4.6 — only selected activities resolve shared services":
       let env = quietDevEnv(selected)
       check env.sharedResolutions.len == (if selected == "ordinary": 0 else: 1)
 
+  test "a token-only activity resolves nothing and keeps its token":
+    # §4.6's NAMED BOUNDARY of the scoping rule. `tokenOnly` carries
+    # `@instance-attribute:issuer@` and names NO handle, which is
+    # `codetracer-ci`'s real `monolithSharedIdentity` shape with its
+    # `sso` parameter removed -- the token is a whole-argument string
+    # literal, so nothing ties it to a handle and the ownership rule
+    # cannot reach it. Before the scoping rule such an activity worked
+    # on the unconditional resolution; it must not now, AND the drop
+    # must stay loud rather than become invisible, which is why the
+    # service and its token are asserted present beside the zero.
+    # The refusal itself is `substituteMintedAttributes`' and is
+    # covered by `t_dss73_the_instance_attribute_reaches_the_argv.nim`.
+    let env = quietDevEnv("tokenOnly")
+    check env.sharedResolutions.len == 0
+    var tokens: seq[string] = @[]
+    for svc in env.services:
+      if svc.name == "tokenHost":
+        for arg in svc.typedCommand:
+          if arg.startsWith("@instance-attribute:"):
+            tokens.add(arg)
+    check tokens == @["@instance-attribute:issuer@"]
+    # The positive control for the zero above: the activity that DOES
+    # name the handle still resolves, so the zero is the attribution
+    # rule and not a fixture that resolves nothing at all.
+    check quietDevEnv("ide").sharedResolutions.len == 1
+
 suite "D-SS11 §4.6 — `resolveSharedService` refuses rather than records":
   setup:
     resetSharedServiceResolutions()

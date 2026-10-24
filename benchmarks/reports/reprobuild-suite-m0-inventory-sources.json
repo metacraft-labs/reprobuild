@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2364,
+    "nimTestBinaries": 2365,
     "pureUnitConsolidationGroups": 68,
     "pureUnitTests": 691,
     "staticallyDetectedRuntimeCompilerFlowTests": 127,
-    "testEntries": 2400
+    "testEntries": 2402
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1389,8 +1389,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1290,
-      "platform/destructive": 144,
+      "integration": 1291,
+      "platform/destructive": 145,
       "pure unit": 691,
       "unclassified": 257
     },
@@ -1594,9 +1594,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2364,
-    "pythonTestFileCount": 36,
-    "testEntryCount": 2400
+    "nimTestBinaryCount": 2365,
+    "pythonTestFileCount": 37,
+    "testEntryCount": 2402
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -19421,7 +19421,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/t_dss11_resolutions_reach_the_dev_env_artifact.nim",
       "sourceSuiteCount": 7,
-      "staticCaseCount": 30,
+      "staticCaseCount": 31,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -26248,6 +26248,23 @@
       "source": "tests/e2e/dev-env/t_e2e_repro_dev_sessions.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 26,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_repro_down_activity_discovery",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/dev-env/t_e2e_repro_down_activity_discovery.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -37275,8 +37292,8 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_linked_worktree_pre_push_repository_env.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -50536,6 +50553,21 @@
       "source": "tests/unit/test_package_root_anchor.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_profile_daemon_worker_syscalls.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
