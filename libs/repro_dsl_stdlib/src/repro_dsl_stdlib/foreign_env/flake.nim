@@ -17,7 +17,9 @@
 ##
 ## `nix print-dev-env --profile <profile> '.?submodules=1' --override-input
 ## <name> <sibling-ref> …` is exactly what `nix-direnv`'s `use_flake` runs in
-## this workspace today. Wrapping that command rather than re-deriving it means
+## this workspace today. (`'.?submodules=1'` loses its query when the checkout
+## declares a submodule it has not initialised — see `flakeProjectRef`.)
+## Wrapping that command rather than re-deriving it means
 ## a project's shell does not change when activation moves to Reprobuild —
 ## which is the entire promise of the degenerate end. `--profile` is part of the
 ## shape and not decoration: it is the gcroot that stops THE SHELL's store
@@ -63,6 +65,10 @@ const
     ## only when the flake expression names a DIRECTORY, and `.?submodules=1`
     ## is not one) — the first of the three failure modes §2b records, and the
     ## reason the default here is the one that broke rather than a tidier one.
+    ##
+    ## It is what the recipe ASKS for, not always what nix is given:
+    ## `flakeProjectRef` drops `submodules=1` when the checkout declares a
+    ## submodule it has not initialised, by the same rule as a sibling.
 
   ForeignEnvWorkDirName* = "foreign-env"
 
@@ -182,6 +188,84 @@ proc flakeSiblingOverrideRef*(dir: string; gitExe = ""): string =
   ## The same answer, classifying ``dir`` first.
   flakeSiblingOverrideRef(dir, flakeSiblingKind(dir, gitExe))
 
+proc enclosingGitCheckout(dir: string): string =
+  ## The nearest directory at or above ``dir`` that is a git checkout, or ""
+  ## when there is none. A flake in a subdirectory (``flakeRef = "./nix"``) is
+  ## fetched by nix as part of the ENCLOSING repository, so that repository's
+  ## submodules are the ones nix will try to fetch.
+  var current = os.normalizedPath(dir)
+  while current.len > 0:
+    if flakeSiblingIsGitCheckout(current):
+      return current
+    let parent = parentDir(current)
+    if parent == current or parent.len == 0:
+      break
+    current = parent
+  ""
+
+proc flakeProjectRef*(projectRoot: string; flakeRef = DefaultFlakeRef;
+                      gitExe = ""): string =
+  ## How the project's OWN flake is named to nix: ``flakeRef``, except that a
+  ## local reference asking for ``submodules=1`` drops that parameter when
+  ## the checkout declares a submodule it has not initialised.
+  ##
+  ## The question is the one `flakeSiblingOverrideRef` answers for a sibling,
+  ## and it is answered by the same classifier, `flakeSiblingKind`: with an
+  ## uninitialised submodule, `?submodules=1` makes nix try to fetch it and
+  ## abort the whole flake fetch (`…/<submodule>' does not appear to be a git
+  ## repository`), so activation fails outright. That is the default spelling
+  ## (`DefaultFlakeRef`), and a clone made without `--recurse-submodules` is
+  ## in exactly that state, so it is the ordinary case rather than an exotic
+  ## one. Every other classification keeps the reference as written: an
+  ## initialised submodule is still fetched, which is what the flag is for.
+  ##
+  ## ## Why the uninitialised arm is plain git here, not `path:`
+  ##
+  ## A sibling in that state gets `path:` — a copy of what is on disk.
+  ## The project's own root cannot: it holds `.repro/`, which contains this
+  ## very activation's profile gcroot and scratch, and the dev-env edge's own
+  ## outputs. A `path:` copy would make the flake source change on every
+  ## activation and put the edge's outputs into its observed inputs, and it
+  ## would copy gitignored build output, which is the cost §2b removed for
+  ## siblings. Dropping the parameter keeps the git fetcher, which honours
+  ## `.gitignore` and cannot fail on an absent submodule. What it omits is
+  ## the content of submodules that ARE initialised while another one is not;
+  ## those are exactly the trees the flag cannot fetch anyway while any
+  ## submodule is missing.
+  ##
+  ## Only a LOCAL reference is touched (no scheme; a `path:` reference names
+  ## a directory copy, where the parameter has no meaning to drop). Other
+  ## query parameters and the `#fragment` are preserved.
+  let hashAt = flakeRef.find('#')
+  let base = if hashAt >= 0: flakeRef[0 ..< hashAt] else: flakeRef
+  let fragment = if hashAt >= 0: flakeRef[hashAt .. ^1] else: ""
+  let queryAt = base.find('?')
+  if queryAt < 0:
+    return flakeRef
+  let localPath = base[0 ..< queryAt]
+  if localPath.contains(':'):
+    return flakeRef
+  let params = base[queryAt + 1 .. ^1].split('&')
+  var kept: seq[string]
+  var asksForSubmodules = false
+  for param in params:
+    if param in ["submodules=1", "submodules=true"]:
+      asksForSubmodules = true
+    else:
+      kept.add(param)
+  if not asksForSubmodules:
+    return flakeRef
+  let flakeDir = absolutePath(if localPath.len > 0: localPath else: ".",
+    projectRoot)
+  let checkout = enclosingGitCheckout(flakeDir)
+  if checkout.len == 0 or
+      flakeSiblingKind(checkout, gitExe) != fskGitSubmodulesUninitialised:
+    return flakeRef
+  result = localPath
+  if kept.len > 0:
+    result.add("?" & kept.join("&"))
+  result.add(fragment)
+
 proc flakePrintDevEnvArgv*(nixExe, flakeRef, profilePath: string;
                            overrideInputs: openArray[(string, string)] = [];
                            extraArgs: openArray[string] = []): seq[string] =
@@ -277,8 +361,12 @@ proc flakeDevShellOps*(projectRoot: string; flakeRef = DefaultFlakeRef;
   let profilePath =
     if profile.len > 0: profile
     else: workDir / "flake-profile"
-  let argv = flakePrintDevEnvArgv(resolveNixExe(nixExe), flakeRef, profilePath,
-    overrideInputs, extraArgs)
+  # The project's own flake goes through the same submodule rule as a
+  # sibling override (`flakeProjectRef`), or a declared-but-uninitialised
+  # submodule fails activation outright.
+  let argv = flakePrintDevEnvArgv(resolveNixExe(nixExe),
+    flakeProjectRef(projectRoot, flakeRef), profilePath, overrideInputs,
+    extraArgs)
   let split = withoutNixShellScratch(captureForeignEnvOps(argv, projectRoot,
     workDir / "print-dev-env.bash", separator = $PathSep))
   if split.scratchDir.len > 0 and dirExists(extendedPath(split.scratchDir)):

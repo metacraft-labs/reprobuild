@@ -15768,6 +15768,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_own_flake_ref_survives_an_uninitialised_submodule.nim",
+    binary: "build/test-bin/t_own_flake_ref_survives_an_uninitialised_submodule",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_path_tool_rewrite_detected.nim",
     binary: "build/test-bin/t_path_tool_rewrite_detected",
     defines: @[],
