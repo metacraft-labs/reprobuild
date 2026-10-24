@@ -3267,6 +3267,10 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
       userDaemonBackgroundService.tick(maxWaitMs)
     except CatchableError as err:
       logLine(config.logPath, "background service tick failed: " & err.msg)
+      # The IPC wait no longer blocks while the service runs; a tick that
+      # keeps failing must not turn the loop into a busy spin.
+      if maxWaitMs > 0:
+        sleep(maxWaitMs)
 
   var shuttingDown = false
   while not shuttingDown:
@@ -3289,7 +3293,14 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
       let servicePoll = max(1, userDaemonBackgroundService.pollIntervalMs)
       if servicePoll < pollMs:
         pollMs = servicePoll
-    let clientWaiting = listener.waitForClient(pollMs)
+    # With the service running, the wait belongs to the service's tick (its
+    # dispatcher wakes on a network event); the IPC listener is checked
+    # without blocking, so it is still accepted within one poll interval.
+    # Blocking here first would delay every async step of the service — a
+    # worker's hydration round trips — by up to `pollMs` each
+    # (Distributed-Execution M1 review fix, 2026-10-22).
+    let clientWaiting = listener.waitForClient(if serviceRunning: 0
+                                               else: pollMs)
     if serviceRunning:
       # Service its sockets whether or not an IPC client arrived, bounded so
       # a waiting client is accepted promptly.

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2386,
+    "nimTestBinaries": 2387,
     "pureUnitConsolidationGroups": 68,
     "pureUnitTests": 685,
     "staticallyDetectedRuntimeCompilerFlowTests": 129,
-    "testEntries": 2424
+    "testEntries": 2425
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1384,7 +1384,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1316,
+      "integration": 1317,
       "platform/destructive": 146,
       "pure unit": 685,
       "unclassified": 259
@@ -1589,9 +1589,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2386,
+    "nimTestBinaryCount": 2387,
     "pythonTestFileCount": 38,
-    "testEntryCount": 2424
+    "testEntryCount": 2425
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -17239,13 +17239,14 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_cli_support",
         "repro_peer_cache"
       ],
       "owner": "libs/repro_peer_cache",
       "requiresReproBinary": false,
       "source": "libs/repro_peer_cache/tests/t_peer_cache_multicast_cidr_allowlist_drops_off_network.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -22508,6 +22509,26 @@
       "source": "libs/repro_workspace_snapshot/tests/t_manifest_validation_and_tree_id.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_workspace_snapshot_export_and_materialize",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_distributed_worker",
+        "repro_peer_cache",
+        "repro_workspace_snapshot"
+      ],
+      "owner": "libs/repro_workspace_snapshot",
+      "requiresReproBinary": true,
+      "source": "libs/repro_workspace_snapshot/tests/t_workspace_snapshot_export_and_materialize.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

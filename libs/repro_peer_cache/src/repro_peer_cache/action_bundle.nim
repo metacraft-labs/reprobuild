@@ -276,10 +276,19 @@ proc installTwoPhaseBundle*(cas: var CasStore; cache: var ActionCache;
   ## failed install leaves the next lookup missing cleanly.
   var entry: MemoEntry
   var normalized: ActionResultRecord
+  var decodingRecord = false
   try:
     entry = decodeMemoEntry(bundle.entryBytes)
+    decodingRecord = true
     normalized = decodeActionResultRecord(entry.recordBytes)
   except CatchableError as err:
+    let newer =
+      if decodingRecord: actionRecordIsNewerFormat(entry.recordBytes)
+      else: memoEntryIsNewerFormat(bundle.entryBytes)
+    if newer.newer:
+      return (false, "the " & (if decodingRecord: "record" else: "memo entry") &
+        " is in a newer format (version " & $newer.version &
+        ") than this build reads")
     return (false, "malformed memo entry: " & err.msg)
   let pathSet = pathSetOf(normalized)
   if digestOf(bundle.pathSetBytes) != entry.pathSetDigest:

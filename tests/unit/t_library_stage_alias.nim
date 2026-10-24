@@ -1,8 +1,8 @@
 import std/unittest
+import repro_test_support/reasoned_skip
 
 when defined(reproProviderMode):
   import std/[os, osproc, strutils]
-  import repro_test_support/reasoned_skip
 
   import repro_core
   import repro_project_dsl
@@ -308,4 +308,4 @@ suite "executable stage copy writes its declared output":
             check fileExists(output)
             check readFile(output) == contents
     else:
-      skip()
+      skip("needs -d:reproProviderMode: the stage-copy action is emitted only by the provider-mode DSL")

@@ -3644,6 +3644,24 @@ proc firstUnknownActionRecordVersion*(): uint16 =
   ## deriving it rather than for grading each instance by its headroom.
   newestTrustedActionRecordVersion() + 1
 
+proc actionRecordIsNewerFormat*(payload: openArray[byte]):
+    tuple[newer: bool; version: uint16] =
+  ## Distributed-Execution M1: is `payload` an action-record frame (its magic
+  ## is the record magic) whose version word is ABOVE every version this
+  ## build reads (`firstUnknownActionRecordVersion`)? That is a record a
+  ## NEWER `repro` wrote — well formed for its writer, unreadable here — as
+  ## opposed to a malformed or forged one. A peer-cache consumer treats it
+  ## as a plain miss and does not suspect the peer that served it. A version
+  ## inside the known range that the decoder refuses (the no-evidence epoch)
+  ## is NOT newer: that refusal is a trust decision.
+  if payload.len < 6:
+    return (false, 0'u16)
+  for i in 0 ..< 4:
+    if payload[i] != byte(ord(ActionRecordMagic[i])):
+      return (false, 0'u16)
+  let version = uint16(payload[4]) or (uint16(payload[5]) shl 8)
+  (version >= firstUnknownActionRecordVersion(), version)
+
 proc actionRecordVersionsThisBuildRefuses*(): seq[uint16] =
   ## Every version number up to and including the newest frame this build
   ## WRITES that its decoder nonetheless REFUSES -- derived from

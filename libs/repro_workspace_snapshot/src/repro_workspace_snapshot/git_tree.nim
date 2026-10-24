@@ -101,6 +101,23 @@ proc parseSha1Hex*(hex: string): Sha1Bytes =
   for i in 0 ..< 20:
     result[i] = byte(parseHexInt(hex[2 * i .. 2 * i + 1]))
 
+proc treeIdFromEntries*(entries: openArray[tuple[path, mode: string;
+                                                 oid: Sha1Bytes]]): string =
+  ## The tree id of an index holding exactly `entries` (worktree-relative
+  ## `/`-separated paths, git modes, object ids) — computed without reading
+  ## any file. Distributed-Execution M1: a pooled lease's tree is the base
+  ## commit's entries with the snapshot's delta applied.
+  let top = Node(dirs: initOrderedTable[string, Node]())
+  for e in entries:
+    let parts = e.path.split('/')
+    var cur = top
+    for i in 0 ..< parts.high:
+      if not cur.dirs.hasKey(parts[i]):
+        cur.dirs[parts[i]] = Node(dirs: initOrderedTable[string, Node]())
+      cur = cur.dirs[parts[i]]
+    cur.files.add((parts[^1], e.mode, e.oid))
+  hexOf(treeOid(top))
+
 proc treeIdOf*(root: string; tracked: openArray[string];
                gitlinks: openArray[(string, string)] = []): TreeIdResult =
   ## See the module doc. `tracked` are worktree-relative `/`-separated paths.

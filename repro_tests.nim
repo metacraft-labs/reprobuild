@@ -7083,6 +7083,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_workspace_snapshot/tests/t_workspace_snapshot_export_and_materialize.nim",
+    binary: "build/test-bin/t_workspace_snapshot_export_and_materialize",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_workspace_vcs/tests/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths.nim",
     binary: "build/test-bin/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths",
     defines: @[],

@@ -163,6 +163,14 @@ type
       ## cannot change them: Linux binds the directory read-only without
       ## noexec over the noexec lease; macOS denies writes beneath it. Its
       ## path is exposed to the action as `REPRO_LEASE_INPUTS`.
+    siblingsDir*: string
+      ## Distributed-Execution M1: the snapshot's `repro develop` siblings,
+      ## each materialized and verified under `<siblingsDir>/<name>` (the
+      ## directory name is `repro_workspace_snapshot.siblingDirName` of its
+      ## repository id) inside the lease, never in the worktree; "" = none.
+      ## Exposed exactly like the input artifacts — read-only and executable
+      ## (Linux binds it read-only without noexec; macOS denies writes
+      ## beneath it) — as `REPRO_DEVELOP_SIBLINGS`.
     memfdNoexec*: bool
       ## HARDENED: the `vm.memfd_noexec = 2` policy (a memfd_create without
       ## MFD_NOEXEC_SEAL is refused and reported), enforced by the lease's
@@ -440,6 +448,8 @@ when defined(linux):
         $(10 + i) & "|" & $d.port)
     if spec.inputsDir.len > 0:
       env.add(("REPRO_LEASE_INPUTS", spec.inputsDir))
+    if spec.siblingsDir.len > 0:
+      env.add(("REPRO_DEVELOP_SIBLINGS", spec.siblingsDir))
     for (k, v) in env: buf.kv("env", k & "=" & v)
     for r in spec.readRoots: buf.kv("read", r)
     for r in spec.closureRoots:
@@ -452,6 +462,10 @@ when defined(linux):
       buf.kv("exec", spec.inputsDir)
       buf.kv("closure", spec.inputsDir)
       buf.kv("input", spec.inputsDir)
+    if spec.siblingsDir.len > 0 and not cleanup:
+      buf.kv("exec", spec.siblingsDir)
+      buf.kv("closure", spec.siblingsDir)
+      buf.kv("input", spec.siblingsDir)
     if spec.memfdNoexec and memfdNoexecSupported():
       buf.kv("memfd_noexec", "1")
     buf.kv("write", spec.leaseDir)
@@ -578,15 +592,17 @@ proc seatbeltProfile*(spec: LeaseSpec; forwarderPorts: seq[int]): string =
       " (literal \"/\")"
     for r in spec.readRoots & spec.closureRoots & spec.outputDirs:
       reads.add(" (subpath " & sbplString(realOrSelf(r)) & ")")
-    if spec.inputsDir.len > 0:
-      reads.add(" (subpath " & sbplString(realOrSelf(spec.inputsDir)) & ")")
+    for d in [spec.inputsDir, spec.siblingsDir]:
+      if d.len > 0:
+        reads.add(" (subpath " & sbplString(realOrSelf(d)) & ")")
     p.add("(allow file-read-data" & reads & ")\n")
     p.add("(deny process-exec* " & tag & ")\n")
     var execs = ""
     for r in spec.closureRoots & spec.outputDirs:
       execs.add(" (subpath " & sbplString(realOrSelf(r)) & ")")
-    if spec.inputsDir.len > 0:
-      execs.add(" (subpath " & sbplString(realOrSelf(spec.inputsDir)) & ")")
+    for d in [spec.inputsDir, spec.siblingsDir]:
+      if d.len > 0:
+        execs.add(" (subpath " & sbplString(realOrSelf(d)) & ")")
     if execs.len > 0:
       p.add("(allow process-exec*" & execs & ")\n")
   # The namespace group comes AFTER the landlock group and names
@@ -603,12 +619,15 @@ proc seatbeltProfile*(spec: LeaseSpec; forwarderPorts: seq[int]): string =
         sbplString(realOrSelf(h)) & ") " & tag & ")\n")
     p.add("(allow file-read* file-read-data file-write* (subpath " & own & ")" & stdio &
       ")\n")
-  if spec.inputsDir.len > 0 and llLandlock in spec.layers:
-    # Last word on writes beneath the input artifacts (they lie inside the
-    # lease, which the groups above re-allow): read and execute only.
-    p.add("; input artifacts: read and execute, never write\n")
-    p.add("(deny file-write* (subpath " &
-      sbplString(realOrSelf(spec.inputsDir)) & ") " & tag & ")\n")
+  if llLandlock in spec.layers:
+    # Last word on writes beneath the input artifacts and the develop
+    # siblings (they lie inside the lease, which the groups above
+    # re-allow): read and execute only.
+    for d in [spec.inputsDir, spec.siblingsDir]:
+      if d.len > 0:
+        p.add("; input artifacts / develop siblings: read and execute, never write\n")
+        p.add("(deny file-write* (subpath " &
+          sbplString(realOrSelf(d)) & ") " & tag & ")\n")
   if llFloor in spec.layers:
     p.add("; floor: no unix-socket peers (the daemon), no reach into other processes\n")
     p.add("(deny network-outbound (remote unix-socket) " & tag & ")\n")
@@ -748,6 +767,8 @@ when defined(posix):
          try: onReport(rep) except CatchableError: discard
    if spec.inputsDir.len > 0:
      env.add(("REPRO_LEASE_INPUTS", spec.inputsDir))
+   if spec.siblingsDir.len > 0:
+     env.add(("REPRO_DEVELOP_SIBLINGS", spec.siblingsDir))
    var envTable = newStringTable(modeCaseSensitive)
    for (k, v) in env: envTable[k] = v
    # stdout/stderr go to files (a pipe the daemon does not drain while the
@@ -902,6 +923,8 @@ when defined(windows):
       outcome.egressEnv.add((egressVarName(d.name), d.host & ":" & $d.port))
     if spec.inputsDir.len > 0:
       env.add(("REPRO_LEASE_INPUTS", spec.inputsDir))
+    if spec.siblingsDir.len > 0:
+      env.add(("REPRO_DEVELOP_SIBLINGS", spec.siblingsDir))
     let job = CreateJobObjectW(nil, nil)
     if job == 0:
       outcome.error = "CreateJobObject failed: " & $osLastError()

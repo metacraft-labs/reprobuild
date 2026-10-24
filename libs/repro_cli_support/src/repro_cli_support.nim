@@ -82878,16 +82878,10 @@ proc remoteCertificateIssuer*(host: PeerCacheHost): dw.CertificateIssuer =
       dw.requestCertificate(endpoint, h.leafProviderFor(), pin.anchors,
         pin.hostId, req)
 
-proc workerReposFrom(path: string): seq[(string, string)] =
+proc workerReposFrom(path: string): WorkerRepos =
   if path.len == 0 or not fileExists(path):
-    return @[]
-  for raw in readFile(path).splitLines:
-    let line = raw.strip()
-    if line.len == 0 or line.startsWith("#"):
-      continue
-    let parts = line.splitWhitespace()
-    if parts.len == 2:
-      result.add((parts[0], parts[1]))
+    return WorkerRepos()
+  parseWorkerRepos(readFile(path))
 
 proc workerEgressFrom(host: PeerCacheHost): seq[dw.EgressDestination] =
   ## FLOW-3: the lease allow-list — exactly the destinations the operator
@@ -82948,6 +82942,24 @@ proc leasePathEnv(closure: seq[string]): string =
   if keep.len == 0: keep = @["/usr/bin", "/bin"]
   keep.join($PathSep)
 
+proc workerMaterializeStatusLines*(receiver: dw.WorkerReceiver): seq[string] =
+  ## The worker's materialization lines of the status file (Distributed-
+  ## Execution M1): the worktree pool's counters — zeros and an empty clone
+  ## mode for a receiver without a pool — and the last materialization's
+  ## time.
+  let pool = receiver.pool
+  @["worker_worktree_leases=" & (if pool.isNil: "0" else: $pool.leases),
+    "worker_worktree_base_hits=" & (if pool.isNil: "0" else: $pool.baseHits),
+    "worker_worktree_base_checkouts=" &
+      (if pool.isNil: "0" else: $pool.baseCheckouts),
+    "worker_worktree_base_fetches=" &
+      (if pool.isNil: "0" else: $pool.baseFetches),
+    "worker_worktree_base_packs=" & (if pool.isNil: "0" else: $pool.basePacks),
+    "worker_worktree_clone=" & (if pool.isNil: "" else: pool.lastCloneMode),
+    "worker_materializations=" & $receiver.materializations,
+    "worker_last_materialize_ms=" &
+      receiver.lastMaterializeMs.formatFloat(ffDecimal, 1)]
+
 proc startDaemonWorkerRole*(host: PeerCacheHost; stateDir: string): string =
   ## Gives `host` the worker role: `mkReachGoalRequest` frames the gate
   ## admitted (orchestrator role only) are answered by a
@@ -83003,6 +83015,7 @@ proc startDaemonWorkerRole*(host: PeerCacheHost; stateDir: string): string =
       "the worker role is refused on this host: the executable closure of " &
       "its leases cannot be computed (" & closure.reason & ")")
   let workerDir = stateDir / "worker"
+  let repos = workerReposFrom(host.config.workerReposPath)
   var hide = @[stateDir]
   if host.config.tlsCertPath.len > 0:
     hide.add(host.config.tlsCertPath.parentDir)
@@ -83012,7 +83025,8 @@ proc startDaemonWorkerRole*(host: PeerCacheHost; stateDir: string): string =
   let config = dw.WorkerConfig(
     leaseRoot: workerDir / "leases",
     metaRoot: workerDir / "lease-meta",
-    repoCaches: workerReposFrom(host.config.workerReposPath),
+    repoCaches: repos.caches,
+    fetchRemotes: repos.remotes,
     platform: currentPlatformTag(),
     readRoots: roots.read,
     closureRoots: closure.roots,
@@ -83025,7 +83039,8 @@ proc startDaemonWorkerRole*(host: PeerCacheHost; stateDir: string): string =
     profile: host.config.trustProfile,
     workerHost: $host.selfPeerId,
     detectionLogPath: workerDir / "detections.log",
-    recordIndexPath: workerDir / "execution-records.index")
+    recordIndexPath: workerDir / "execution-records.index",
+    worktreePoolRoot: workerDir / "worktree-pool")
   createDir(config.leaseRoot)
   createDir(config.metaRoot)
   # A goal's stdout/stderr and lease reports can carry the developer's
@@ -83158,7 +83173,8 @@ proc startDaemonWorkerRole*(host: PeerCacheHost; stateDir: string): string =
       "worker_trust_profile=" & $h.config.trustProfile,
       "worker_isolation=" & dw.isolationLevelOf(dw.LeaseSpec(
         layers: config.layers, memfdNoexec: hardened)),
-      "worker_execution_records=" & $receiver.executionRecords,
+      "worker_execution_records=" & $receiver.executionRecords] &
+    workerMaterializeStatusLines(receiver) & @[
       "worker_heartbeat_ms=" & $lastHeartbeatMs,
       "worker_heartbeat_interval_ms=" & $canaryMs,
       "worker_detector_probe_ok=" & (if probeRounds == 0: "n/a"
@@ -83191,7 +83207,8 @@ proc startDaemonWorkerRole*(host: PeerCacheHost; stateDir: string): string =
     " isolation=" & isolation &
     (if conf.reason.len > 0: " (" & conf.reason & ")" else: "") &
     " lease_root=" & config.leaseRoot & " repos=" &
-    $config.repoCaches.len & " egress=" & $config.egress.len &
+    $config.repoCaches.len & " remotes=" & $config.fetchRemotes.len &
+    " egress=" & $config.egress.len &
     " closure=" & $config.closureRoots.len &
     " lease_limits=" & (if cgroups.available: "cgroup" else: "rlimit (" &
       cgroups.reason & ")") &
@@ -83216,9 +83233,15 @@ proc installUserDaemonPeerCacheService*() =
       if not parsed.ok or parsed.kind != pcsLan:
         raise newException(ValueError,
           "invalid daemon --peer-cache spec (expected lan://<CIDR>…): " & spec)
+      let logPath = config.logPath
       let host = startPeerCacheHost(parsed.config,
         daemonPeerIdFor(config.stateDir), cacheRoot = currentActionCacheRoot(),
-        stateDir = config.stateDir)
+        stateDir = config.stateDir,
+        # The daemon's stdout and stderr go to /dev/null: the node's
+        # operator diagnostics go to the daemon log instead.
+        diagnosticLog = proc(line: string) {.gcsafe, closure.} =
+          {.cast(gcsafe).}:
+            appendUserDaemonLogLine(logPath, line))
       activeDaemonPeerCacheHost = host
       var workerLine = ""
       if parsed.config.workerEnabled:

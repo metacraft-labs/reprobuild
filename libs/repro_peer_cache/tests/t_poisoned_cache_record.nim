@@ -54,6 +54,17 @@
 ## (hardened), in the consumer's local log (trusted) — and M marked
 ## suspect; the consumer rebuilds the correct binary.
 ##
+## Cases (d4) and (d5), trusted profile (Distributed-Execution M1): a memo
+## entry, or the record inside one, in a NEWER format than this build reads
+## — what an honest node of a later version serves in a mixed-version
+## fleet — is a plain miss with no detection and no suspicion, while (d1)'s
+## malformed bytes keep both. The boundary on both sides of "newer" (M1
+## review fix, 2026-10-22): (d6) a memo entry with the right magic and the
+## CURRENT version whose body is garbage, and (d7) a properly attested entry
+## whose record has the record magic and a version this build KNOWS and
+## refuses (the no-evidence epoch) — both malformed, not newer: rejected,
+## reported and suspected.
+##
 ## MOCK POLICY — none: real sockets, real TLS with host-CA leaves, the real
 ## build engine and a real C compiler, real disk stores, the real sink
 ## binary. The "malicious" behaviour uses the server's production
@@ -129,6 +140,21 @@ proc pumpFor(ms: int) =
 
 proc pumpOnce() =
   try: poll(50) except ValueError: sleep(50)
+
+proc awaitHandshakeToken() =
+  ## Every per-case consumer below is host `c` dialling M from 127.0.0.1,
+  ## and M's receiver gate budgets the connection-establishing frames PER
+  ## CALLER: the identity proof per address (`a:127.0.0.1`), the Hello per
+  ## host (`h:<c>`), each `Vocabulary` 2/s with a burst of 4. The trusted
+  ## case opens eight such connections within about two seconds, so without
+  ## pacing the last dial is refused for rate whenever the cases run a
+  ## little faster than usual (M1 landing, 2026-10-25: d5's consumer never
+  ## connected, and d5 read as "no peer holds a selector"). Waiting one
+  ## refill interval before each dial guarantees the dial a token in both
+  ## buckets, whatever happened before it.
+  let rate = min(Vocabulary[bmIdentityProof].ratePerSecond,
+                 Vocabulary[bmHello].ratePerSecond)
+  pumpFor(int(1000.0 / rate) + 50)
 
 proc fromPeer(entries: seq[EvidenceEntry]; field, value: string):
     seq[EvidenceEntry] =
@@ -607,6 +633,7 @@ suite "Distributed-Execution M7: poisoned cache records":
         writeWorkspace(ws, ConfigV1)
         let cache = base / ("cache-" & tag)
         let state = base / ("state-" & tag)
+        awaitHandshakeToken()
         let host = startPeerCacheHost(trusted(c,
           @[initEndpoint("127.0.0.1", hostM.actualPort)]), c.identity.hostId,
           cacheRoot = cache, stateDir = state)
@@ -637,10 +664,101 @@ suite "Distributed-Execution M7: poisoned cache records":
       check "selector-validation-failed" in d2Log
       check "output digests disagree" in d2Log
       check ("issuer=" & $m.identity.hostId) in d2Log
+      # (d6) The current memo-entry version with a garbage body: not a newer
+      # format (the version is this build's own), so malformed.
+      let current = encodeMemoEntry(entryA)
+      var garbled = current[0 ..< 6]
+      garbled.add(@[byte 0xde, 0xad, 0xbe, 0xef, 0x13, 0x37, 0x00, 0xff])
+      check not memoEntryIsNewerFormat(garbled).newer
+      let d6Log = consumeFromM("d6", garbled)
+      check "selector-validation-failed" in d6Log       # reported (locally)
+      check "malformed memo entry" in d6Log
+      check "mark-suspect" in d6Log
+      check "newer format" notin d6Log
+      # (d7) An attested entry whose record carries the record magic and a
+      # version this build knows and REFUSES (a trust decision, not a
+      # newer writer): malformed.
+      let refusedVersions = actionRecordVersionsThisBuildRefuses()
+      checkpoint("record versions this build refuses: " & $refusedVersions)
+      check refusedVersions.len > 0 and max(refusedVersions) >= 1
+      let refusedVersion = max(refusedVersions)
+      var refusedRecord = entryA
+      refusedRecord.recordBytes[4] = byte(refusedVersion and 0xff)
+      refusedRecord.recordBytes[5] = byte(refusedVersion shr 8)
+      attest(refusedRecord, mintNodeCredential(m.identity, lrDaemon,
+        ipPinnedHostKey))
+      check not actionRecordIsNewerFormat(refusedRecord.recordBytes).newer
+      let d7Log = consumeFromM("d7", encodeMemoEntry(refusedRecord))
+      check "selector-validation-failed" in d7Log
+      check "mark-suspect" in d7Log
+      check "newer format" notin d7Log
+
+      # (d4, d5) A mixed-version fleet (Distributed-Execution M1,
+      # landing-review carry-over): an honest NEWER node serves a memo entry
+      # in a newer format (d4), or a current entry whose record is in a
+      # newer format (d5). Neither is malformed or forged — this build just
+      # cannot read it — so it is a plain miss: the consumer rebuilds,
+      # reports NO detection and does NOT suspect the peer. (d1) above,
+      # bytes that are not a memo entry at all, still is rejected, reported
+      # and suspected.
+      var newerEntry = encodeMemoEntry(entryA)
+      let entryVersion = uint16(newerEntry[4]) or (uint16(newerEntry[5]) shl 8)
+      newerEntry[4] = byte((entryVersion + 1) and 0xff)
+      newerEntry[5] = byte((entryVersion + 1) shr 8)
+      check memoEntryIsNewerFormat(newerEntry).newer
+      var newerRecord = entryA
+      let unknownRecord = firstUnknownActionRecordVersion()
+      newerRecord.recordBytes[4] = byte(unknownRecord and 0xff)
+      newerRecord.recordBytes[5] = byte(unknownRecord shr 8)
+      attest(newerRecord, mintNodeCredential(m.identity, lrDaemon,
+        ipPinnedHostKey))
+      check actionRecordIsNewerFormat(newerRecord.recordBytes).newer
+      proc serveNewerFromM(tag: string; served: seq[byte]):
+          tuple[hooks: PeerCacheEngineHooks; host: PeerCacheHost;
+                launched: bool; output, log: string] =
+        let bytes = served
+        hostM.server.memoEntryReader = proc(w, st: BlobDigest):
+            Option[seq[byte]] {.gcsafe.} =
+          if st == s1: some(bytes) else: none(seq[byte])
+        let ws = base / ("ws-" & tag)
+        writeWorkspace(ws, ConfigV1)
+        let cache = base / ("cache-" & tag)
+        let state = base / ("state-" & tag)
+        awaitHandshakeToken()
+        result.host = startPeerCacheHost(trusted(c,
+          @[initEndpoint("127.0.0.1", hostM.actualPort)]), c.identity.hostId,
+          cacheRoot = cache, stateDir = state)
+        hosts.add(result.host)
+        # The precondition of a meaningful miss: the consumer IS connected
+        # to M (a refused dial would make "a miss" vacuous).
+        check result.host.client.connectedPeers() == @[m.identity.hostId]
+        result.hooks = newPeerCacheEngineHooks(result.host.client,
+          openPeerCacheStorage(cache), result.host.registry,
+          result.host.attestorFor())
+        let run = runBuild(helloGraph(ws), engineConfig(cache, ws,
+          result.hooks))
+        result.launched = run.byId(ActionId).launched
+        result.output = execProcess(ws / "out" / "hello").strip()
+        result.log = localLog(state)
+      for (tag, served) in [("d4", newerEntry),
+                            ("d5", encodeMemoEntry(newerRecord))]:
+        let got = serveNewerFromM(tag, served)
+        checkpoint(tag & " fetch: " & got.hooks.stats.lastFetchReason &
+          "\n" & tag & " consumer's local detection log:\n" & got.log)
+        check got.host.client.connectedPeers() == @[m.identity.hostId]
+        check got.hooks.stats.hits == 0                 # a miss
+        check got.launched                              # rebuilt locally
+        check got.output == "hello from config v1"
+        check "newer format" in got.hooks.stats.lastFetchReason
+        check got.host.client.suspectMarks == 0         # NOT suspected
+        check not got.host.registry.entries[m.identity.hostId].suspect
+        check "mark-suspect" notin got.log              # nothing reported
+        check "selector-validation-failed" notin got.log
       hostM.server.memoEntryReader = nil
 
       # -- The honest peer was never suspected --------------------------------
-      for log in [localLog(stateC1), probeLog, c2Log, d1Log, d2Log]:
+      for log in [localLog(stateC1), probeLog, c2Log, d1Log, d2Log, d6Log,
+                  d7Log]:
         for line in log.splitLines:
           if "mark-suspect" in line:
             check $a.identity.hostId notin line
