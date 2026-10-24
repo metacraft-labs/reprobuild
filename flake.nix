@@ -692,8 +692,18 @@
     # build names its results input explicitly below; it must not rely on
     # this compiler's former global paths. Riding along: two test files and a
     # doc/intern.md section (afb4372c..d2b52f7f), no compiler or stdlib change.
+    #
+    # Advanced from 73545515 to cdb6fd14 for the C backend's source maps. With
+    # line tracing on (a debug build's default), every `.c.map` mapping behind
+    # a `nimlf_` call pointed too early, because the map's byte offsets were
+    # taken before the line-trace calls were expanded. A debugger that set a
+    # Nim breakpoint through the map stopped on the wrong C line, and
+    # CodeTracer's Nim MCR flow never stopped at its breakpoint (issue
+    # 2026-10-24-d-and-nim-mcr-streaming-flow-tests-fail-once-ct-mcr-is-built).
+    # One commit, in compiler/cgen.nim plus its test; this repository builds no
+    # source maps, so only consumers that debug Nim output see the change.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=73545515fcc71eb947853e6aed366c13b196fb37";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=cdb6fd1483fcdc570f306ccfee8865f2214f46f7";
       flake = false;
     };
     nim-csources-src = {
