@@ -38,6 +38,9 @@
 #      the build went.
 #   7. ``REPRO_DEFER_SHIM_PUBLISH=1`` stays an intentional SKIP of the shim
 #      publish, not a failure.
+#   8. Both entrypoints and the DSL library receive exactly one requested
+#      --parallelBuild value, with unset/empty/0 retaining automatic mode.
+#      This stub observes argv only; it does not claim real C-job containment.
 #
 # The test drives the real ``scripts/build_apps.sh`` inside a throwaway
 # sandbox against a fake ``nim`` and a fake io-mon shim builder, so it pins
@@ -192,12 +195,28 @@ SHIM
 #!/usr/bin/env bash
 set -uo pipefail
 out=""
+parallel_count=0
+parallel_value=""
 for arg in "$@"; do
   case "${arg}" in
     --out:*) out="${arg#--out:}" ;;
+    --parallelBuild:*)
+      parallel_count=$((parallel_count + 1))
+      parallel_value="${arg#--parallelBuild:}"
+      ;;
   esac
 done
 target="$(basename "${out}")"
+if [ -n "${FAKE_NIM_PARALLEL_LOG:-}" ]; then
+  printf '%s\t%s\t%s\n' "${target}" "${parallel_count}" "${parallel_value}" \
+    >> "${FAKE_NIM_PARALLEL_LOG}"
+fi
+if [ -n "${FAKE_NIM_EXPECT_PARALLEL_BUILD:-}" ] && \
+    { [ "${parallel_count}" -ne 1 ] || \
+      [ "${parallel_value}" != "${FAKE_NIM_EXPECT_PARALLEL_BUILD}" ]; }; then
+  echo "fake nim: missing, duplicated or incorrect compiler worker request" >&2
+  exit 3
+fi
 for skipped in ${FAKE_NIM_FAIL:-}; do
   if [ "${target}" = "${skipped}" ]; then
     echo "fake nim: ld: library not found for -lcrypto" >&2
@@ -276,6 +295,35 @@ case "$(uname -s)" in
   Darwin) dsl_ext="dylib" ;;
   *) dsl_ext="so" ;;
 esac
+
+# Worker forwarding is checked through the real complete producer, not a
+# copied argument builder. The existing compiler stub requires and records
+# each invocation, so omitting the flag from either producer arm is red.
+for request in unset empty 0 1 2; do
+  sandbox="$(new_sandbox "workers_${request}")"
+  expected="${request}"
+  case "${request}" in
+    unset|empty) expected=0 ;;
+  esac
+  log="${sandbox}/parallel.log"
+  if [ "${request}" = unset ]; then
+    status="$(unset NIX_BUILD_CORES; run_build "${sandbox}" \
+      FAKE_NIM_EXPECT_PARALLEL_BUILD="${expected}" FAKE_NIM_PARALLEL_LOG="${log}")"
+  elif [ "${request}" = empty ]; then
+    status="$(run_build "${sandbox}" NIX_BUILD_CORES= \
+      FAKE_NIM_EXPECT_PARALLEL_BUILD="${expected}" FAKE_NIM_PARALLEL_LOG="${log}")"
+  else
+    status="$(run_build "${sandbox}" NIX_BUILD_CORES="${request}" \
+      FAKE_NIM_EXPECT_PARALLEL_BUILD="${expected}" FAKE_NIM_PARALLEL_LOG="${log}")"
+  fi
+  check "workers ${request}: complete producer succeeds" 0 "${status}"
+  check "workers ${request}: all three compiler calls recorded" 3 \
+    "$(wc -l < "${log}" | tr -d '[:space:]')"
+  for target in alpha beta "librepro_project_dsl_runtime.new.${dsl_ext}"; do
+    count="$(grep -Fxc "$(printf '%s\t1\t%s' "${target}" "${expected}")" "${log}" || true)"
+    check "workers ${request}: ${target} receives exactly the requested flag" 1 "${count}"
+  done
+done
 
 # ----------------------------------------------------------------------------
 # 1. Control: when every step really does produce its artifact, the script
