@@ -136,6 +136,12 @@ proc defaultConfig*(): Tier2DaemonConfig =
 
 proc parseConfig*(argv: openArray[string]): Tier2DaemonConfig =
   result = defaultConfig()
+  # An empty `argv` means "no options", not "this process's options":
+  # `std/parseopt` substitutes `commandLineParams()` for an empty
+  # sequence, so a caller passing `[]` (a test, an embedding) would
+  # otherwise be configured from whatever its own command line holds.
+  if argv.len == 0:
+    return
   var explicitCidr = false
   var p = initOptParser(@argv)
   while true:
