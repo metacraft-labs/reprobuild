@@ -56,16 +56,39 @@ proc homeRelativeId*(path, homeDir: string): string =
     return if rel.len == 0: "~" else: "~/" & rel
   p
 
-proc linkedMode*(path: string): string =
-  ## The mode a link to `path` is reported with: whether it is executable.
-  ## A link's permission bits are its target's, and a Nix store target is
-  ## read-only, so the facts carry only what both sides can mean by a
-  ## linked file: `0755` (executable by its owner) or `0644`.
-  try:
-    if fpUserExec in getFilePermissions(extendedPath(path)):
-      return "0755"
-  except OSError:
-    discard
+proc fileModeIsApplied*(platform: string): bool =
+  ## Whether a file's `mode` is a property the target `platform` (a
+  ## `HostContext.platform`: `windows`, `macos`, `linux`, `bsd`, `wsl`)
+  ## carries. Windows files have no POSIX permission bits, and the
+  ## `fs.userFile` driver records a declared `mode` there without applying
+  ## it (Home-Profile-Resource-Lifecycle.md, `fs.userFile`: "ignored on
+  ## Windows"), so on Windows a mode is never a difference between two
+  ## writers of one file.
+  platform != "windows"
+
+proc linkedMode*(path, platform: string): string =
+  ## The mode a link to `path` is reported with on the target `platform`:
+  ## whether it is executable. A link's permission bits are its target's,
+  ## and a Nix store target is read-only, so the facts carry only what both
+  ## sides can mean by a linked file: `0755` (executable by its owner) or
+  ## `0644`.
+  ##
+  ## A Windows target carries no executable bit, so there a linked file is
+  ## always `0644`. The host's bits are not read on a Windows host either:
+  ## Nim's `getFilePermissions` reports execute for EVERY file there (its
+  ## Windows branch derives the set from the read-only attribute alone),
+  ## which called every Windows stow file `0755` (reprobuild-pm issue
+  ## 2026-10-23-windows-stow-file-reads-as-0755-so-it-never-agrees-with-an-fs-user-file).
+  ## A Windows host planning for a POSIX target therefore reports `0644`
+  ## for an executable stow source too.
+  if not fileModeIsApplied(platform):
+    return "0644"
+  when not defined(windows):
+    try:
+      if fpUserExec in getFilePermissions(extendedPath(path)):
+        return "0755"
+    except OSError:
+      discard
   "0644"
 
 proc userFileDigest*(r: Resource): string =
@@ -140,11 +163,14 @@ proc showDigest(d: string): string =
 proc resolveStowResourceOverlap*(files: seq[PlannedGeneratedFile];
                                  stowEntries: seq[StowEntry];
                                  resources: DesiredSet;
-                                 profileDir, homeDir: string):
+                                 profileDir, homeDir, platform: string):
     StowResourceResolution =
   ## Apply the one-writer rule to every `$HOME` path that both a planned
   ## stow file (in `files`) and an `fs.userFile` resource in `resources`
   ## name. Paths are matched on their host-facts id (`~/<rel>`).
+  ## `platform` is the target's `HostContext.platform`. Where a file mode
+  ## is not applied (`fileModeIsApplied`: Windows), the pair is compared on
+  ## its digest alone.
   ##
   ## Raises `EApplyPlanFailed` (via `raisePlanFailed`) listing every
   ## disagreeing pair when any pair disagrees on `mode` or `digest`; a
@@ -164,11 +190,11 @@ proc resolveStowResourceOverlap*(files: seq[PlannedGeneratedFile];
     if id notin byId:
       continue
     let r = byId[id]
-    let stowMode = linkedMode(g.stowSourcePath)
+    let stowMode = linkedMode(g.stowSourcePath, platform)
     let stowDigest = sha256Digest(g.contentBytes)
     let resDigest = userFileDigest(r)
     var differing: seq[string]
-    if stowMode != r.userFileMode:
+    if fileModeIsApplied(platform) and stowMode != r.userFileMode:
       differing.add "mode (" & stowMode & " vs " & r.userFileMode & ")"
     if resDigest != stowDigest:
       differing.add "digest (" & stowDigest & " vs " &
@@ -187,7 +213,9 @@ proc resolveStowResourceOverlap*(files: seq[PlannedGeneratedFile];
         message: "IStowSameAsResource: " &
           stowOrigin(g.stowSourcePath, profileDir) & " is not linked at `" &
           id & "`: " & resourceOrigin(r.address) &
-          " writes the same file (same mode and digest)")
+          " writes the same file (same " &
+          (if fileModeIsApplied(platform): "mode and digest" else: "digest") &
+          ")")
   if conflicts.len > 0:
     raisePlanFailed("a stow file and an `fs.userFile` resource name the " &
       "same path and disagree; make them carry the same bytes and mode, " &

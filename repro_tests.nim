@@ -3258,6 +3258,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_home_apply/tests/t_stow_resource_mode_by_target_platform.nim",
+    binary: "build/test-bin/t_stow_resource_mode_by_target_platform",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_home_apply/tests/test_m1_fpc_resolves.nim",
     binary: "build/test-bin/test_m1_fpc_resolves",
     defines: @[],

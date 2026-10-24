@@ -368,6 +368,7 @@ libs/repro_home_apply/tests/t_realize_honors_requested_version.nim	nim	3
 libs/repro_home_apply/tests/t_runtime_library_binding.nim	nim	8
 libs/repro_home_apply/tests/t_runtime_library_launch_plan.nim	nim	5
 libs/repro_home_apply/tests/t_smoke_home_apply.nim	nim	8
+libs/repro_home_apply/tests/t_stow_resource_mode_by_target_platform.nim	nim	3
 libs/repro_home_apply/tests/test_m1_fpc_resolves.nim	nim	3
 libs/repro_home_apply/tests/test_m25_adapter_preference_parse.nim	nim	9
 libs/repro_home_apply/tests/test_m25_adapter_preference_plumbed.nim	nim	14

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2370,
+    "nimTestBinaries": 2371,
     "pureUnitConsolidationGroups": 68,
     "pureUnitTests": 691,
     "staticallyDetectedRuntimeCompilerFlowTests": 129,
-    "testEntries": 2407
+    "testEntries": 2408
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1390,7 +1390,7 @@
     "classificationCounts": {
       "graph-fixture": 18,
       "integration": 1296,
-      "platform/destructive": 145,
+      "platform/destructive": 146,
       "pure unit": 691,
       "unclassified": 257
     },
@@ -1594,9 +1594,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2370,
+    "nimTestBinaryCount": 2371,
     "pythonTestFileCount": 37,
-    "testEntryCount": 2407
+    "testEntryCount": 2408
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -12377,6 +12377,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_deploy_agent",
         "repro_home_intent",
         "repro_peer_cache",
@@ -14585,6 +14586,26 @@
       "source": "libs/repro_home_apply/tests/t_smoke_home_apply.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_stow_resource_mode_by_target_platform",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_home_apply",
+        "repro_home_resources",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_home_apply",
+      "requiresReproBinary": false,
+      "source": "libs/repro_home_apply/tests/t_stow_resource_mode_by_target_platform.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -54,6 +54,7 @@ import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 when not defined(windows):
   from std/nativesockets import getHostname
 
+import repro_core/process_streams
 import repro_deploy_agent
 import repro_home_intent/host_identity
 import ../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
@@ -140,7 +141,9 @@ proc baseEnv(f: Fixture): StringTableRef =
 proc runRepro(f: Fixture; args: seq[string]; env: StringTableRef): AgentRun =
   var p = startProcess(reproBinary(), args = args, env = env,
     options = {poStdErrToStdOut})
-  result.output = p.outputStream.readAll()
+  # `drainStream`, not `readAll`: on Windows a pipe read stops at the first
+  # short read, so `readAll` returned only the report's first line there.
+  result.output = drainStream(p.outputStream)
   result.exitCode = p.waitForExit()
   p.close()
   checkpoint("repro " & args.join(" ") & " -> " & $result.exitCode & "\n" &
