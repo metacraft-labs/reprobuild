@@ -5,9 +5,9 @@
     "caseDetailTracked": false,
     "caseDetailUntrackedReason": "bodyHash is a function of the project's absolute path (campaign defect #52), so tracking per-case detail would rewrite every hash per checkout path and defeat byte-level catalog diffing",
     "countSourceCounts": {
-      "catalog": 2354,
+      "catalog": 2355,
       "quarantined": 10,
-      "static": 36
+      "static": 37
     },
     "dynamicLinkFailureCount": 0,
     "enabled": true,
@@ -148,10 +148,10 @@
       "cpu": "x86_64",
       "os": "linux"
     },
-    "dirty": true,
+    "dirty": false,
     "environmentReportPath": "build/reprobuild-suite-m0-environment.md",
-    "head": "310183cc91693f1af2cdedd4dde44897eb45352c",
-    "headShort": "310183cc9",
+    "head": "e1ccfa259836ef68fd33a8211d15fa7efe053fe6",
+    "headShort": "e1ccfa259",
     "repoRoot": ".",
     "runtimeDetailPath": "build/reprobuild-suite-case-catalog.json",
     "runtimeDetailReason": "footprint, host, tool versions, the recorded environment and the sibling-checkout paths are properties of the machine and of the moment, not of the tree; keeping them here made the tracked artifact differ on every build and every host, which is the defect spec \u00a716.4 forbids for an embedded build timestamp",
@@ -181,14 +181,9 @@
         "branch": "fix-agents-tests-failing-at-43b83ff8e",
         "dirty": false,
         "head": "b0fc1bcb9c2f1cb6a7fc3a558592ae7051782c24"
-      },
-      "runquota": {
-        "branch": "fix-agents-tests-failing-at-43b83ff8e",
-        "dirty": false,
-        "head": "f9f1118cd33a27051c6fea683348f343df91e96f"
       }
     },
-    "sourceFingerprint": "4f3d9823584987fbd85b26c93c8b4788df1347ae62d0477b7ec4fd20b5da50fe"
+    "sourceFingerprint": "f72e045f64937f7e061719326c11fcef64d4ac124f2a95558cd75ac382e3be03"
   },
   "performanceAssessment": {
     "deferredMeasurementCommand": "REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/reprobuild_suite_inventory.py --run-suite --clean-first --warm-runs 2 --suite-timeout-seconds 7200",
@@ -209,12 +204,12 @@
     },
     "observedStructuralFacts": {
       "graphOwnedHelperArtifacts": 33,
-      "nimTestBinaries": 2364,
+      "nimTestBinaries": 2365,
       "pureUnitConsolidationGroups": 68,
       "pureUnitTests": 691,
-      "sourceCases": 15438,
+      "sourceCases": 15460,
       "staticallyDetectedRuntimeCompilerFlowTests": 127,
-      "testEntries": 2400
+      "testEntries": 2402
     },
     "status": "structural-inference-only"
   },
@@ -1685,8 +1680,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1290,
-      "platform/destructive": 144,
+      "integration": 1291,
+      "platform/destructive": 145,
       "pure unit": 691,
       "unclassified": 257
     },
@@ -1891,10 +1886,10 @@
       }
     ],
     "measuredProtocolAwareCaseCount": null,
-    "nimTestBinaryCount": 2364,
-    "pythonTestFileCount": 36,
-    "sourceCaseCount": 15438,
-    "testEntryCount": 2400
+    "nimTestBinaryCount": 2365,
+    "pythonTestFileCount": 37,
+    "sourceCaseCount": 15460,
+    "testEntryCount": 2402
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -22264,10 +22259,10 @@
       "owner": "libs/repro_project_dsl",
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/t_dss11_resolutions_reach_the_dev_env_artifact.nim",
-      "sourceCaseCount": 30,
+      "sourceCaseCount": 31,
       "sourceNewerThanBinary": false,
       "sourceSuiteCount": 7,
-      "staticCaseCount": 30,
+      "staticCaseCount": 31,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -30602,6 +30597,27 @@
       "sourceNewerThanBinary": false,
       "sourceSuiteCount": 1,
       "staticCaseCount": 26,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_repro_down_activity_discovery",
+      "catalogSuiteCount": 1,
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "countSource": "catalog",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/dev-env/t_e2e_repro_down_activity_discovery.nim",
+      "sourceCaseCount": 7,
+      "sourceNewerThanBinary": false,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -44082,7 +44098,7 @@
     },
     {
       "binary": "build/test-bin/t_linked_worktree_pre_push_repository_env",
-      "catalogSuiteCount": 1,
+      "catalogSuiteCount": 4,
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
       "countSource": "catalog",
@@ -44095,10 +44111,10 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_linked_worktree_pre_push_repository_env.nim",
-      "sourceCaseCount": 7,
+      "sourceCaseCount": 15,
       "sourceNewerThanBinary": false,
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -60540,6 +60556,24 @@
     },
     {
       "binary": "",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "countSource": "static",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_profile_daemon_worker_syscalls.py",
+      "sourceCaseCount": 6,
+      "sourceNewerThanBinary": false,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
       "class": "unclassified",
       "classificationReason": "imports `__future__`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "countSource": "static",
@@ -60739,7 +60773,7 @@
   ],
   "timing": {
     "complete": false,
-    "currentSourceFingerprint": "4f3d9823584987fbd85b26c93c8b4788df1347ae62d0477b7ec4fd20b5da50fe",
+    "currentSourceFingerprint": "f72e045f64937f7e061719326c11fcef64d4ac124f2a95558cd75ac382e3be03",
     "notes": [
       "No suite run was requested for this inventory."
     ],
