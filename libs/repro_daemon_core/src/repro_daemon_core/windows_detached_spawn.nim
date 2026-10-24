@@ -37,6 +37,15 @@
 ## The handles created here are closed again as soon as the child exists; the
 ## child holds its own duplicates.
 ##
+## THE SAME LAUNCH SERVES THE AUTO-STARTED `runquotad`. `repro_cli_support`'s
+## `startAutoRunQuotaIfNeeded` starts it through
+## `spawnWithOwnStdioKeepingHandle`. On Windows that daemon binds the per-user
+## pipe and is deliberately left running after the `repro` that started it
+## exits, so it is exactly the long-lived child this module is for: started
+## through `osproc`, it held the caller's stdout of `repro exec` and every
+## other verb that starts it, and `$(repro exec ...)` never returned
+## (reprobuild-pm issue 2026-10-23).
+##
 ## THE SAME LAUNCH SERVES THE POST-COMMIT CACHE PUSH. `repro_cli_support`'s
 ## `spawnDetachedNoShell` starts the detached `repro hooks cache-push` through
 ## `spawnWithOwnStdio`, with no log, because a git hook's stdout is its
@@ -117,20 +126,17 @@ when defined(windows):
     createFileW(newWideCString(path), access, shareMode, addr inheritable,
       creation, flags, 0)
 
-  proc spawnWithOwnStdio*(exe: string; args: openArray[string];
+  type OwnStdioChild* = object
+    ## A child started by `spawnWithOwnStdioKeepingHandle`: its pid and an
+    ## open handle to it, which the caller owns and must close.
+    pid*: int
+    processHandle*: Handle
+
+  proc createWithOwnStdio(exe: string; args: openArray[string];
                           env: openArray[(string, string)];
                           inheritEnvironment: bool;
                           logPath: string;
-                          workingDir: string): int =
-    ## Start `exe args` with a hidden console, stdin from `NUL` and
-    ## stdout/stderr appended to `logPath` (or `NUL` when it cannot be
-    ## opened), inheriting NO other handle of this process, in `workingDir`
-    ## (an existing absolute directory; "" keeps this process's, which a
-    ## long-lived child must not do -- see the module comment). The
-    ## environment is exactly `env` unless `inheritEnvironment` is true, in
-    ## which case it is this process's. Returns the child's pid; raises
-    ## `OSError` when the process cannot be created. The child is not waited
-    ## for and no handle to it is kept.
+                          workingDir: string): PROCESS_INFORMATION =
     var commandLine = quoteShellWindows(exe)
     for arg in args:
       commandLine.add(' ')
@@ -201,6 +207,39 @@ when defined(windows):
       spawned)
     if created == 0:
       raiseOSError(osLastError(), "CreateProcessW " & exe)
+    spawned
+
+  proc spawnWithOwnStdio*(exe: string; args: openArray[string];
+                          env: openArray[(string, string)];
+                          inheritEnvironment: bool;
+                          logPath: string;
+                          workingDir: string): int =
+    ## Start `exe args` with a hidden console, stdin from `NUL` and
+    ## stdout/stderr appended to `logPath` (or `NUL` when it cannot be
+    ## opened), inheriting NO other handle of this process, in `workingDir`
+    ## (an existing absolute directory; "" keeps this process's, which a
+    ## long-lived child must not do -- see the module comment). The
+    ## environment is exactly `env` unless `inheritEnvironment` is true, in
+    ## which case it is this process's. Returns the child's pid; raises
+    ## `OSError` when the process cannot be created. The child is not waited
+    ## for and no handle to it is kept.
+    let spawned = createWithOwnStdio(exe, args, env, inheritEnvironment,
+      logPath, workingDir)
     discard closeHandle(spawned.hThread)
     discard closeHandle(spawned.hProcess)
     int(spawned.dwProcessId)
+
+  proc spawnWithOwnStdioKeepingHandle*(exe: string; args: openArray[string];
+                                       env: openArray[(string, string)];
+                                       inheritEnvironment: bool;
+                                       logPath: string;
+                                       workingDir: string): OwnStdioChild =
+    ## `spawnWithOwnStdio`, for a caller that must watch the child after it
+    ## starts -- to notice it exiting before it became ready, and to
+    ## terminate it then. The process handle is returned open; closing it
+    ## does not affect the child.
+    let spawned = createWithOwnStdio(exe, args, env, inheritEnvironment,
+      logPath, workingDir)
+    discard closeHandle(spawned.hThread)
+    OwnStdioChild(pid: int(spawned.dwProcessId),
+      processHandle: spawned.hProcess)

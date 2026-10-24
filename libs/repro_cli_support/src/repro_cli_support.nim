@@ -3,7 +3,7 @@ import std/[algorithm, base64, hashes, json, options, os, osproc, sequtils,
     times]
 
 when defined(windows):
-  import std/winlean
+  import std/[importutils, winlean]
   import repro_daemon_core/windows_detached_spawn
 else:
   # Only these names, and only for the pipe-feeding guard in
@@ -17666,10 +17666,20 @@ proc startBackgroundSupervisor(config: DevSessionSupervisorConfig) =
   createDir(extendedPath(config.outDir.sessionDir))
   let logPath = config.outDir.sessionDir / "supervisor.log"
   when defined(windows):
-    discard startProcess(config.publicCliPath,
-      args = config.supervisorCliArgs(),
-      workingDir = config.projectRoot,
-      options = {poUsePath, poDaemon, poParentStreams})
+    # NOT `osproc.startProcess`: with `poParentStreams` it handed the
+    # supervisor our own stdout and stderr, and without it `CreateProcessW`
+    # still passes every inheritable handle we hold. The supervisor outlives
+    # this invocation, so a caller reading our output to its end -- `$(repro
+    # up)`, a test runner -- would wait for as long as the session lived.
+    # `spawnWithOwnStdio` gives it NUL stdin and the log for its output, and
+    # no other handle, which is what the POSIX arm below does.
+    var image = config.publicCliPath
+    if not isAbsolute(image):
+      let found = findExe(image)
+      image = if found.len > 0: found else: absolutePath(image)
+    discard spawnWithOwnStdio(image, config.supervisorCliArgs(),
+      env = [], inheritEnvironment = true, logPath = logPath,
+      workingDir = absolutePath(config.projectRoot))
   else:
     var fdsToClose: seq[string] = @[]
     for fd in 3 .. 64:
@@ -25543,6 +25553,55 @@ when not defined(windows):
       raiseOSError(registrationError,
         "cannot own auto-started runquotad: signal-forwarding registration failed")
 
+when defined(windows):
+  proc spawnDetachedRunQuotaDaemon(runquotad: string;
+                                   args: seq[string]): owned(Process) =
+    ## Starts the per-user `runquotad` so that it holds NONE of this
+    ## invocation's handles: stdin, stdout and stderr are `NUL`, no other
+    ## handle crosses the spawn, and it does not run in our working directory.
+    ##
+    ## WHY NOT `osproc.startProcess`. On Windows the daemon binds the shared
+    ## per-user pipe and is deliberately LEFT RUNNING when this invocation ends
+    ## (`releaseAutoRunQuotaProcess`), so it outlives us by design.
+    ## `startProcess` calls `CreateProcessW` with `bInheritHandles = TRUE` and
+    ## no handle list, which gave the daemon a copy of every inheritable handle
+    ## we held -- including the write end of the pipe our caller reads our
+    ## output from. `$(repro exec ...)`, and any process waiting for the end
+    ## of `repro`'s output, then waited for as long as the daemon lived: every
+    ## Windows CI job that ran `repro exec` hung until its job timeout
+    ## (reprobuild-pm issue 2026-10-23). `spawnWithOwnStdioKeepingHandle` is
+    ## the launch the per-user `repro-daemon` and the post-commit cache push
+    ## already use for the same reason (`repro_daemon_core/
+    ## windows_detached_spawn`): a `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` that
+    ## names only the `NUL` handles, and a hidden console of its own
+    ## (`CREATE_NO_WINDOW`, not `DETACHED_PROCESS`, so the console tools it
+    ## starts share one console instead of each opening a window). Being on a
+    ## console other than ours also keeps a Ctrl+C at the caller's end from
+    ## reaching it, which is what `CREATE_NEW_PROCESS_GROUP` would give.
+    ##
+    ## Its output goes to `NUL`, as it effectively did before: nothing read
+    ## the pipes `startProcess` made for it.
+    ##
+    ## THE WORKING DIRECTORY is the daemon binary's own directory, which its
+    ## running image already pins. Starting it in ours would keep the caller's
+    ## directory undeletable for the daemon's whole life.
+    ##
+    ## A `Process` is still returned, built around the handle the spawn
+    ## returned, because the readiness wait and the failure path below watch
+    ## and terminate it through the ordinary `osproc` calls. It owns no
+    ## stream (`poParentStreams`), so `close` releases only the process
+    ## handle.
+    var exe = runquotad
+    if not isAbsolute(exe):
+      let found = findExe(exe)
+      exe = if found.len > 0: found else: absolutePath(exe)
+    let child = spawnWithOwnStdioKeepingHandle(exe, args, env = [],
+      inheritEnvironment = true, logPath = "", workingDir = parentDir(exe))
+    privateAccess(Process)
+    result = Process(fProcessHandle: child.processHandle,
+      fThreadHandle: Handle(0), id: Handle(child.pid),
+      options: {poParentStreams})
+
 proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
   ## Exported for `tests/integration/t_derived_daemon_ipc_trust.nim` and
   ## `tests/integration/t_declared_daemon_ipc_trust.nim`, which grade the
@@ -25721,14 +25780,16 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     putEnv("RUNQUOTA_SOCKET", socket)
   # THE DAEMON'S LIFETIME. On Windows it binds the shared per-user pipe and is
   # deliberately left running for invocations that adopt it (see
-  # `releaseAutoRunQuotaProcess`), so it is started plainly. On POSIX it is
+  # `releaseAutoRunQuotaProcess`), so it must hold nothing of this invocation:
+  # `spawnDetachedRunQuotaDaemon` gives it NUL stdio and no other handle. On
+  # POSIX it is
   # OWNED by this invocation and ends with it however the invocation ends:
   # `releaseAutoRunQuotaProcess` stops it on a normal return or a raise, a
   # terminating signal is forwarded to it, and the daemon itself stops when
   # it is re-parented (the SIGKILL case) -- and it inherits none of this
   # invocation's descriptors above 2. `spawnOwnedRunQuotaDaemon` says how.
   when defined(windows):
-    result = startProcess(runquotad, args = args, options = {poUsePath})
+    result = spawnDetachedRunQuotaDaemon(runquotad, args)
   else:
     result = spawnOwnedRunQuotaDaemon(runquotad, args)
   var readinessError = ""

@@ -16920,6 +16920,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_repro_exec_runquotad_does_not_hold_callers_pipe.nim",
+    binary: "build/test-bin/t_repro_exec_runquotad_does_not_hold_callers_pipe",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_repro_exec_survives_compile_time_tmpdir_removal.nim",
     binary: "build/test-bin/t_repro_exec_survives_compile_time_tmpdir_removal",
     defines: @[],
