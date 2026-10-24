@@ -138,13 +138,13 @@ fi
 exe_suffix=""
 [[ "$archive_name" == *.zip ]] && exe_suffix=".exe"
 # These are the existing native app outputs of repro.nim's release collection,
-# not every bootstrap entrypoint. Conformance and evidence-sink binaries are
-# absent from that collection; this check does not decide their scope.
+# not every bootstrap entrypoint. The evidence-sink binary remains absent
+# from that collection; this check does not decide its scope.
 required_bins=(
   repro reprobuild
   repro-peer-cache-tier2 repro-peer-cache-admin repro-peer-cache-mint-cert
   repro-cmake-dyndep-fragment repro-cmake-trycompile-provider
-  repro-standard-provider repro-install-mirror-publish
+  repro-standard-provider repro-install-mirror-publish repro-agent-conformance
   repro-binary-cache repro-binary-cache-crosshost repro-harvest-apt
   attestation-agent
   runquotad runquota

@@ -174,7 +174,8 @@ run_packaged_repro() {
     # printf is Bash's builtin: no Python/jq or new bootstrap dependency.
     # NUL framing preserves empty, quoted and trailing-backslash arguments.
     printf '%s\0' "$repro_bin" "$@" > "$work/command.argv"
-    ${bound[@]+"${bound[@]}"} powershell -NoProfile -NonInteractive \
+    # This child-only policy leaves runner/user settings and Group Policy intact.
+    ${bound[@]+"${bound[@]}"} powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass \
       -File "$windows_helper" \
       -ArchiveDaemon "$(native "$pkg/bin/runquotad.exe")" \
       -ArgumentFile "$(native "$work/command.argv")"
