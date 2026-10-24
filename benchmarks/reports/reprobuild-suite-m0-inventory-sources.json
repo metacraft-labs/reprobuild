@@ -40468,6 +40468,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_hash",
+        "repro_interface_artifacts",
         "repro_project_dsl"
       ],
       "owner": "tests/integration",
