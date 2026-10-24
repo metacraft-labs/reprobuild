@@ -1164,6 +1164,7 @@
               runHook preBuild
               mkdir -p build/bin build/nimcache
               nim c \
+                --parallelBuild:"''${NIX_BUILD_CORES:-0}" \
                 --threads:on \
                 --mm:orc \
                 --nimcache:build/nimcache/ct-test \

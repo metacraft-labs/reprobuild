@@ -244,7 +244,10 @@ clear_set_aside_build() {
 bearssl_src="$(resolve_bearssl_src)"
 export BEARSSL_SRC="${bearssl_src}"
 
-nim_mode_flags=()
+# Nix supplies the per-build worker request; Nim's zero default otherwise
+# expands to the host-online CPU count, independently of a caller's quota.
+# Keep zero/automatic behavior when the request is absent outside Nix.
+nim_mode_flags=(--parallelBuild:"${NIX_BUILD_CORES:-0}")
 
 # The source revision the images are built from, embedded as
 # `ReprobuildSourceRevision` (libs/repro_core/src/repro_core.nim) so a binary
