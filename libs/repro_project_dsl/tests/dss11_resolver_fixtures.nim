@@ -123,6 +123,26 @@ package dss11Quiet:
     activity alternate(sso: SharedServiceHandle[LiftedServiceHandle]):
       discard
 
+    activity tokenOnly():
+      ## §4.6's named BOUNDARY of the scoping rule above: an activity that
+      ## carries §7.3's `@instance-attribute:<name>@` while naming NO
+      ## handle. The token is a whole-argument STRING LITERAL, so nothing
+      ## syntactically ties it to a handle and the ownership rule cannot
+      ## reach it -- this is `codetracer-ci`'s real
+      ## `monolithSharedIdentity` shape with its `sso` parameter removed.
+      ## Selecting it therefore resolves nothing, and the session refuses
+      ## the token BY NAME rather than launching the service with it; the
+      ## refusal itself is `t_dss73_the_instance_attribute_reaches_the_
+      ## argv.nim`'s, so what is pinned here is that the resolution is
+      ## excluded while the service and its token still reach the result.
+      service tokenHost:
+        executable executableAtPath("/bin/sh")
+        args "-c", "true"
+        args "--issuer"
+        args "@instance-attribute:issuer@"
+        identity stable "com.example.dss11.quiet-token-host"
+        scope project
+
     activity ordinary():
       discard
 
@@ -136,6 +156,7 @@ package dss11Quiet:
     enable alternate(sso = sharedSso)
     enable ordinary
     enable default
+    enable tokenOnly
 
 package dss11Unresolved:
   ## A consumer with a dev-env and NO resolver. The control for every
