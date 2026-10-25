@@ -7406,7 +7406,7 @@ proc interfaceNimcacheKeyedCompileFlags*(command: openArray[string];
     if arg notin recipeFlags:
       result.add(arg)
 
-proc recipeConfigSearchPathFlags*(modulePath: string): seq[string] =
+proc recipeConfigSearchPathFlags*(modulePath: string; cwd = ""): seq[string] =
   ## `--path:` flags for the search paths the recipe's OWN configuration
   ## files add: the `config.nims` / `nim.cfg` of the recipe's directory and
   ## of every ancestor, which Nim applies to a compile whose main module is
@@ -7429,11 +7429,18 @@ proc recipeConfigSearchPathFlags*(modulePath: string): seq[string] =
   ## its entry name follow from that, and Nim keys reuse on both, so these
   ## flags stay out of the nimcache key (`interfaceNimcacheKeyedCompileFlags`)
   ## like the recipe's own directory. A failed evaluation adds nothing.
+  ##
+  ## `cwd` is the directory the evaluation runs in. The extraction passes its
+  ## private compiler directory, like the compile itself: the compiler, and
+  ## any `config.nims` it evaluates, must not run in the caller's directory
+  ## (Hermetic-Builds-And-Path-Independence.md, "Engine-internal recipe
+  ## compiles"). With a main module named, Nim reads its configuration from
+  ## that module's directory chain, so the directory changes nothing else.
   let execution =
     try:
       runCommand(@[nimCompilerPath(), "dump", "--dump.format:json",
         "--hints:off", "--warnings:off", absolutePath(modulePath)],
-        raiseOnFailure = false)
+        cwd = cwd, raiseOnFailure = false)
     except CatchableError:
       return @[]
   if execution.exitCode != 0:
@@ -7810,7 +7817,8 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # `nim.cfg` chain; the search paths the recipe's chain adds are passed
   # explicitly instead (`recipeConfigSearchPathFlags`), after every other
   # path so they cannot shadow a reprobuild library (see TI2 above).
-  let recipeConfigFlags = recipeConfigSearchPathFlags(absoluteModulePath)
+  let recipeConfigFlags = recipeConfigSearchPathFlags(absoluteModulePath,
+    cwd = tempRoot)
   if recipeConfigFlags.len > 0:
     let runnerAt = command.find(runnerPlaceholder)
     command.insert(recipeConfigFlags, runnerAt)

@@ -127,6 +127,7 @@ tests/integration/reproos_shaped_uki.nim	gate	-	A ReproOS-shaped unified kernel 
 tests/integration/software_root_test_pki.nim	gate	-	A software-root test hierarchy, in production algorithms and
 tests/integration/t_agent_abuse_bounds.nim	gate	-	Oversized bodies and burst traffic are refused or limited, without the
 tests/integration/t_agent_mock_roundtrip.nim	gate	-	The agent answers a challenge, over a socket, with a document a
+tests/integration/t_agent_releases_the_tpm_when_start_up_fails.nim	gate	-	A daemon that refuses to start releases the TPM it had already
 tests/integration/t_agent_replay_rejected.nim	gate	-	A stale or mismatched challenge fails.
 tests/integration/t_agent_service_unit.nim	gate	-	The service unit and the daemon it starts agree about the daemon.
 tests/integration/t_attestation_fixture_lifecycle.nim	gate	-	The fixture corpus has a lifecycle, and this gate is where it is
@@ -194,8 +195,10 @@ tests/integration/t_tpm2_driver_composes_and_refuses.nim	gate	-	The tpm2 arm of 
 tests/integration/t_tpm2_evidence_composite_roundtrip.nim	gate	-	A quote, its signature and the log that explains it survive one blob
 tests/integration/t_tpm2_evidence_rejects_malformed.nim	gate	-	Every way a tpm2 evidence composite can be wrong, refused — and each
 tests/integration/t_tpm2_structure_vectors.nim	gate	-	The TPM 2.0 structure codec, against quotes a real TPM produced.
+tests/integration/t_tpm_device_descriptor_is_not_inherited.nim	gate	-	The TPM device descriptor does not outlive this process through a
 tests/integration/t_tpm_quote_comes_from_the_tpm.nim	gate	-	A quote taken from a real TPM, and the reason a recording of one
 tests/integration/t_tpm_quote_verifies.nim	gate	-	A machine attested, and the verifier accepted it.
+tests/integration/t_tpm_read_wait_tells_a_signal_from_a_timeout.nim	gate	-	A signal delivered while a TPM read is waiting is not a TPM problem.
 tests/integration/t_transparency_log_inclusion_against_a_witnessed_root.nim	gate	-	Transparency-log inclusion: RFC 6962 proofs, checked against a root
 tests/integration/t_tsm_report_transport.nim	gate	-	The kernel's attestation-report surface: the counter discipline, the
 tests/integration/t_unpinned_manifest_is_not_plain_accepted.nim	gate	-	An acceptance that read its identity out of a manifest nobody pinned

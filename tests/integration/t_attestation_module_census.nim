@@ -84,7 +84,7 @@ const
   ReproAttestVerifyModules = 18
   UmbrellaModules = 2
   MutationTools = 4
-  AttestationTestSources = 95
+  AttestationTestSources = 98
 
   AttestDir = "libs/repro_attest/src/repro_attest"
   VerifyDir = "libs/repro_attest_verify/src/repro_attest_verify"

@@ -38,8 +38,12 @@ proc cCompilerProbeArgv*(cc, source, output: string;
     "-DREPRO_PROBE_POINTER_BYTES=" & $sizeof(pointer), source, "-o", output]
 
 proc cCompilerUnusableMessageFor*(probe: CCompilerProbe; origin,
-                                  purpose: string): string =
+                                  purpose: string;
+                                  remedy = ""): string =
   ## The diagnostic for a compiler that failed ``probeCCompiler``.
+  ## ``remedy`` replaces the default ``cCompilerOverrideRemedy`` for a
+  ## compile whose fallback differs: that text offers the pinned bootstrap
+  ## compiler, which only the recipe compile provisions.
   var detail = probe.detail
   const maxDetail = 2000
   if detail.len > maxDetail:
@@ -55,7 +59,8 @@ proc cCompilerUnusableMessageFor*(probe: CCompilerProbe; origin,
       "\n  " & bootstrapSdkRootEnv & ": " & getEnv(bootstrapSdkRootEnv, "<unset>")
      else: "") &
     "\n  failure: " & detail.replace("\n", "\n    ") &
-    "\n  remedy: " & cCompilerOverrideRemedy()
+    "\n  remedy: " & (if remedy.len > 0: remedy
+                      else: cCompilerOverrideRemedy())
 
 proc cCompilerUnusableMessage*(probe: CCompilerProbe; origin: string): string =
   ## Preserve the exact public two-argument proc type, not merely call syntax.

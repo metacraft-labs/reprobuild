@@ -2138,7 +2138,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 418,
+          "line": 428,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2154,7 +2154,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 434,
+          "line": 444,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2170,7 +2170,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 439,
+          "line": 449,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2186,7 +2186,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 442,
+          "line": 452,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2202,7 +2202,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 730,
+          "line": 740,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-binary"
@@ -2220,7 +2220,7 @@
             "objectFile",
             "source"
           ],
-          "line": 742,
+          "line": 753,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "gcc"
@@ -2234,7 +2234,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 748,
+          "line": 759,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-binary"
@@ -4640,7 +4640,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 338,
+          "line": 344,
           "path": "tests/integration/t_compiler_scratch_isolation.nim",
           "patterns": [
             "repro-extract-interface"
@@ -17962,8 +17962,8 @@
       "owner": "libs/repro_profile_compile",
       "requiresReproBinary": true,
       "source": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
-      "sourceSuiteCount": 9,
-      "staticCaseCount": 37,
+      "sourceSuiteCount": 10,
+      "staticCaseCount": 41,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -33377,6 +33377,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_project_dsl",
         "repro_test_support",
         "repro_workspace_manifests"
       ],
@@ -33384,7 +33385,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_committed_lock_records_develop_set_siblings.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -37516,7 +37517,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_l7_repro_up_converges_on_one_shared_instance.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -40883,6 +40884,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_hash",
+        "repro_interface_artifacts",
         "repro_project_dsl"
       ],
       "owner": "tests/integration",

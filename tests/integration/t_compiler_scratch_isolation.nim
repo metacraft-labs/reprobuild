@@ -308,9 +308,15 @@ when defined(posix) and isNixSupported:
       # COUNT catches it.
       check objectsAfter == objectTimes.len
       let compilerCwds = readFile(cwdLog).splitLines().filterIt(it.len > 0)
-      require compilerCwds.len == 1
-      check compilerCwds[0].parentDir == scratchRoot / "m7-temp"
-      check not dirExists(compilerCwds[0])
+      # Two compiler processes per extraction: the `nim dump` that reads the
+      # recipe's configuration search paths, and the compile. BOTH run in the
+      # extraction's one private directory, never in the caller's.
+      checkpoint "compiler cwds: " & $compilerCwds
+      check compilerCwds.len == 2
+      for compilerCwd in compilerCwds:
+        check compilerCwd.parentDir == scratchRoot / "m7-temp"
+        check compilerCwd.extractFilename.startsWith("repro-interface-extract-")
+        check not dirExists(compilerCwd)
       check transientChildren(scratchRoot / "m7-temp",
         "repro-interface-extract-").len == 0
       check transientChildren(scratchRoot / "m7-temp",

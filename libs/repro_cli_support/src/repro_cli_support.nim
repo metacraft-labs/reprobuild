@@ -19262,6 +19262,12 @@ proc runDownCommand(args: openArray[string]): int =
         "session stop request failed with HTTP " & $response.status &
           ": " & response.body)
   except CatchableError as err:
+    # Startup can leave failed metadata and a holder after the session's
+    # control listener has exited. The ledger remains authoritative: release
+    # its holders even when neither HTTP nor the force-file can stop a session.
+    # Release reports failures and retains the ledger for retry; the original
+    # stop error (or the force fallback) still determines this command's exit.
+    discard releaseSharedServiceInstances(parsed.selection.outDir)
     if not parsed.force:
       raise
     writeFile(extendedPath(parsed.selection.outDir.sessionDir /
@@ -87067,6 +87073,8 @@ type
     write: bool
     allowRegression: seq[string]
       ## ``--allow-pin-regression=<sibling>[,<sibling>…]`` (refresh only)
+    allowStaleManifest: bool
+      ## Explicitly permit committed sibling removal from a known-behind manifest.
     reselectProvisioning: bool
       ## ReproOS M7 deliverable 5 — ``repro lock refresh --provisioning``:
       ## re-select the lock's provisioning records instead of carrying them
@@ -87086,7 +87094,8 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
   ## [--highest] [--registry <url>] [--write] [--json]``, plus, for
   ## ``refresh`` only, ``[--allow-pin-regression=<sibling>[,<sibling>…]]``
   ## (see `gateRefreshedSiblingPins`) and ``[--repin=<package>[,<package>…]]``
-  ## (see `runLockGenerationVerb`). Returns 0 on success, 2 on a usage error
+  ## (see `runLockGenerationVerb`), and ``--allow-stale-manifest``.
+  ## Returns 0 on success, 2 on a usage error
   ## (diagnostic already emitted).
   ##
   ## ``--lowest`` / ``--highest`` are the spellings `Locking-And-Solver.md`
@@ -87137,6 +87146,8 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
       gen.reselectProvisioning = true
     elif arg == "--json":
       asJson = true
+    elif verb == "refresh" and arg == "--allow-stale-manifest":
+      gen.allowStaleManifest = true
     elif verb == "refresh" and (arg == "--allow-pin-regression" or
         arg.startsWith("--allow-pin-regression=")):
       let parsedAllow = parsePinRegressionAllowance(
@@ -88592,6 +88603,119 @@ proc rootDeclaresAsOwn(rootSites: Table[string, string];
   if pkg notin rootSites: return false
   rootSites[pkg] != "sdsSiblingRecipe"
 
+type SiblingRemovalReport = object
+  droppedPins, behindManifests: JsonNode
+  committedDrops: bool
+
+proc inspectSiblingRemovals(projectDir, lockPath: string;
+    proposed: seq[LockedDep]): SiblingRemovalReport =
+  ## Compare identities, never checkout paths. HEAD remains authoritative even
+  ## after an earlier refresh or hand edit narrowed the working-copy lock.
+  result.droppedPins = newJArray()
+  result.behindManifests = newJArray()
+  let membership = manifestMembershipOf(projectDir)
+  let workspace =
+    if membership.resolved: membership.workspaceRoot
+    else: enclosingWorkspaceRoot(committedLockPathBase(projectDir))
+  if workspace.len == 0: return
+  let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  var manifests = newJArray()
+  var descriptions: seq[string]
+  for checkout in manifestCheckoutPaths(workspace):
+    let head = gitRunPlainQuery(identity,
+      ["-C", checkout, "rev-parse", "--verify", "HEAD"])
+    if head.code != 0: continue
+    let revision = head.output.strip()
+    let state = gitRunPlainQuery(identity,
+      ["-C", checkout, "status", "--porcelain", "--untracked-files=no"])
+    let dirty = state.code == 0 and state.output.strip().len > 0
+    manifests.add(%*{"checkout": checkout, "revision": revision,
+      "dirty": dirty})
+    descriptions.add(checkout & " at " & revision &
+      (if dirty: " (with uncommitted changes)" else: ""))
+    let upstream = gitRunPlainQuery(identity,
+      ["-C", checkout, "rev-parse", "--symbolic-full-name", "@{upstream}"])
+    if upstream.code != 0: continue
+    let upstreamRef = upstream.output.strip()
+    if not upstreamRef.startsWith("refs/remotes/"): continue
+    let target = gitRunPlainQuery(identity,
+      ["-C", checkout, "rev-parse", "--verify", upstreamRef])
+    if target.code != 0: continue
+    let upstreamRevision = target.output.strip()
+    let base = gitRunPlainQuery(identity,
+      ["-C", checkout, "merge-base", revision, upstreamRevision])
+    if base.code != 0: continue
+    let missing = gitRunPlainQuery(identity,
+      ["-C", checkout, "rev-list", "--count", revision & ".." & upstreamRevision])
+    if missing.code != 0 or missing.output.strip() == "0": continue
+    result.behindManifests.add(%*{"checkout": checkout,
+      "revision": revision, "upstream": upstreamRef,
+      "upstreamRevision": upstreamRevision})
+  if not membership.resolved: return
+  let reason = "the resolved manifest depends closure no longer names this " &
+    "sibling (manifest checkouts: " &
+    (if descriptions.len > 0: descriptions.join("; ")
+     else: membership.workspaceRoot & " (not a Git checkout)") & ")"
+  var names: seq[string]
+  for dep in proposed:
+    if not isSelfLockedDep(dep) and dep.coordinates.kind == ckVcs:
+      names.add(dep.name)
+  var reported: seq[string]
+  proc collect(text: string; committed: bool; report: var SiblingRemovalReport) =
+    for dep in parseLockedDependencies(text).deps:
+      if isSelfLockedDep(dep) or dep.coordinates.kind != ckVcs or
+          dep.name in names: continue
+      if committed: report.committedDrops = true
+      if dep.name in reported: continue
+      reported.add(dep.name)
+      report.droppedPins.add(%*{"name": dep.name,
+        "revision": dep.coordinates.revision, "committed": committed,
+        "reason": reason, "manifests": manifests})
+  let top = gitRunPlainQuery(identity,
+    ["-C", projectDir, "rev-parse", "--show-toplevel"])
+  let head = gitRunPlainQuery(identity,
+    ["-C", projectDir, "rev-parse", "--verify", "HEAD"])
+  if top.code == 0 and head.code == 0:
+    # Git canonicalizes the checkout root; an explicit --lock can use a
+    # different symlink spelling from projectDir. Relate both paths using
+    # the selected lock's spelling while executing Git at its canonical root.
+    let lockRoot = respelledUnderInvokingAncestor(top.output.strip(),
+      parentDir(lockPath))
+    let relative = relativePath(lockPath, lockRoot).replace('\\', '/')
+    if not relative.startsWith("../") and not relative.isAbsolute():
+      let entry = gitRunPlainQuery(identity,
+        ["-C", top.output.strip(), "ls-tree", "HEAD", "--", relative])
+      if entry.code != 0:
+        raise newException(IOError, "cannot inspect HEAD's committed lock: " &
+          entry.diagnostic)
+      if entry.output.strip().len > 0:
+        let blob = gitRunPlainQuery(identity,
+          ["-C", top.output.strip(), "show", "HEAD:" & relative])
+        if blob.code != 0:
+          raise newException(IOError, "cannot read HEAD's committed lock: " &
+            blob.diagnostic)
+        collect(blob.output, true, result)
+  if fileExists(extendedPath(lockPath)):
+    collect(readFile(extendedPath(lockPath)), false, result)
+
+proc announceSiblingRemovals(report: SiblingRemovalReport) =
+  for manifest in report.behindManifests:
+    stderr.writeLine("repro lock refresh: manifest checkout " &
+      manifest["checkout"].getStr() & " at " & manifest["revision"].getStr() &
+      " is behind fetched upstream " & manifest["upstream"].getStr() &
+      " at " & manifest["upstreamRevision"].getStr() &
+      "; run `repro sync` before refreshing")
+  for pin in report.droppedPins:
+    stderr.writeLine("repro lock refresh: dropping sibling '" &
+      pin["name"].getStr() & "' pinned at " & pin["revision"].getStr() &
+      ": " & pin["reason"].getStr())
+
+proc siblingRemovalJson(report: SiblingRemovalReport; lockPath,
+    status: string): JsonNode =
+  %*{"status": status, "lock": lockPath,
+    "droppedPins": report.droppedPins,
+    "behindManifests": report.behindManifests}
+
 proc runLockGenerationVerb(rest: openArray[string]; verb: string;
                            entryPoint: LockGenerationEntryPoint;
                            writeByDefault: bool): int =
@@ -88656,6 +88780,38 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
         "' (it has: " & listing.join(", ") & "); nothing was written")
       return 2
   let writeTo = if writeByDefault or gen.write: lockP else: ""
+  var removals = SiblingRemovalReport(droppedPins: newJArray(),
+    behindManifests: newJArray())
+  proc inspectRemovals(proposed: seq[LockedDep]): int =
+    try:
+      removals = inspectSiblingRemovals(projectDir, lockP, proposed)
+    except CatchableError as err:
+      stderr.writeLine("repro lock refresh: cannot inspect removed sibling " &
+        "pins: " & err.msg & "; nothing was written")
+      return 1
+    announceSiblingRemovals(removals)
+    if removals.committedDrops and removals.behindManifests.len > 0 and
+        not gen.allowStaleManifest:
+      stderr.writeLine("repro lock refresh: refusing to remove committed " &
+        "sibling pins using a behind manifest; run `repro sync`, or pass " &
+        "--allow-stale-manifest to proceed explicitly; nothing was written")
+      if asJson:
+        echo $siblingRemovalJson(removals, lockP, "refused-stale-manifest")
+      return 6
+    0
+  if entryPoint == lgeLockRefresh and
+      (gen.repin.len == 0 or gen.reselectProvisioning):
+    let inspection = inspectRemovals(request.extraDeps)
+    if inspection != 0: return inspection
+  proc report(generated: LockGenerationResult): int =
+    if asJson and entryPoint == lgeLockRefresh:
+      var node = siblingRemovalJson(removals, writeTo, "ok")
+      let parsed = parseLockedDependencies(generated.lockDocument)
+      node["lockedDeps"] = %parsed.deps.len
+      node["lockIdentity"] = %($generated.lockIdentity)
+      echo $node
+      return 0
+    reportGeneratedLock(verb, writeTo, generated)
   # A solve that could not read a develop-set sibling's recipe is a PARTIAL
   # solve: a lock written from it is one the next build in a complete
   # workspace refuses. A writing door refuses before anything is written (and
@@ -88764,20 +88920,32 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
         stderr.writeLine(renderReselectionRefusal(verb, lockP,
           outcome.refusals))
         return 1
-      stdout.writeLine(outcome.report)
+      if asJson: stderr.writeLine(outcome.report)
+      else: stdout.writeLine(outcome.report)
       createDir(parentDir(lockP))
       writeFile(lockP, outcome.document)
       generated.lockDocument = outcome.document
       generated.lockPath = lockP
-      return reportGeneratedLock(verb, lockP, generated)
-    let generated =
+      return report(generated)
+    var generated =
       if gen.repin.len > 0:
-        runLockRepin(request, committedForRepin, gen.repin, writeTo)
+        runLockRepin(request, committedForRepin, gen.repin, "")
       else:
         case entryPoint
         of lgeLockRefresh: runLockRefresh(request, writeTo)
         else: runLockSolve(request, writeTo)
-    return reportGeneratedLock(verb, writeTo, generated)
+    if gen.repin.len > 0:
+      # The writer deduplicates held and generated repository names by their
+      # checkout too. Inspect its finished document: unioning the two name
+      # sets can falsely call a HEAD-committed pin retained after this merge.
+      if entryPoint == lgeLockRefresh:
+        let inspection = inspectRemovals(
+          parseLockedDependencies(generated.lockDocument).deps)
+        if inspection != 0: return inspection
+      if writeTo.len > 0:
+        landLockDocument(writeTo, generated.lockDocument)
+        generated.lockPath = writeTo
+    return report(generated)
   except EUnsatisfiable as e:
     stderr.writeLine("repro lock " & verb & ": solver UNSAT — cannot pin a " &
       "lock: " & e.msg)
@@ -88794,7 +88962,10 @@ proc runReproLockRefresh(rest: openArray[string]): int =
   ## ``--allow-pin-regression`` / ``REPRO_ALLOW_PIN_REGRESSION`` does not
   ## name it. Exits 5 (``IncompleteSolveExitCode``), writing nothing, when a
   ## ``uses:`` names a develop-set sibling whose recipe the solve could not
-  ## read (``unreachedDevelopSiblings``).
+  ## read (``unreachedDevelopSiblings``). Exits 6 without writing when a
+  ## locally known-behind manifest would remove HEAD-committed sibling pins;
+  ## ``--allow-stale-manifest`` explicitly permits that removal. ``--json``
+  ## reports ``droppedPins`` and ``behindManifests`` on success or exit 6.
   ##
   ## The lock's ``provisioning`` records (ReproOS M7) are CARRIED FORWARD
   ## unchanged: a refresh never re-selects a contributor as a side effect
