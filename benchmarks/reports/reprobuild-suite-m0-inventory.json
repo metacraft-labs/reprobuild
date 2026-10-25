@@ -5,7 +5,7 @@
     "caseDetailTracked": false,
     "caseDetailUntrackedReason": "bodyHash is a function of the project's absolute path (campaign defect #52), so tracking per-case detail would rewrite every hash per checkout path and defeat byte-level catalog diffing",
     "countSourceCounts": {
-      "catalog": 2362,
+      "catalog": 2363,
       "quarantined": 10,
       "static": 37
     },
@@ -150,8 +150,8 @@
     },
     "dirty": false,
     "environmentReportPath": "build/reprobuild-suite-m0-environment.md",
-    "head": "07a28b5af65b7920248ffd4576dd0f9580500e59",
-    "headShort": "07a28b5af",
+    "head": "68f6660927ea5b7714c31dbadb9173addd217591",
+    "headShort": "68f666092",
     "repoRoot": ".",
     "runtimeDetailPath": "build/reprobuild-suite-case-catalog.json",
     "runtimeDetailReason": "footprint, host, tool versions, the recorded environment and the sibling-checkout paths are properties of the machine and of the moment, not of the tree; keeping them here made the tracked artifact differ on every build and every host, which is the defect spec \u00a716.4 forbids for an embedded build timestamp",
@@ -185,10 +185,10 @@
       "runquota": {
         "branch": "fix-agents-tests-failing-at-43b83ff8e",
         "dirty": false,
-        "head": "d33c48b0bcc07111419baf547c824d10c215416d"
+        "head": "dba2b9bc3db3b086753d1ae0d8922890a0ccf79e"
       }
     },
-    "sourceFingerprint": "52b40c58ee0b3e2c63b0cdc819ade10e9c75e39a1431d723868351e8a5d0ca68"
+    "sourceFingerprint": "4cdb61a2a9ac08620eaf79a26cffc98f9fd1c872342360e32ae30be8350ff121"
   },
   "performanceAssessment": {
     "deferredMeasurementCommand": "REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/reprobuild_suite_inventory.py --run-suite --clean-first --warm-runs 2 --suite-timeout-seconds 7200",
@@ -209,12 +209,12 @@
     },
     "observedStructuralFacts": {
       "graphOwnedHelperArtifacts": 33,
-      "nimTestBinaries": 2372,
+      "nimTestBinaries": 2373,
       "pureUnitConsolidationGroups": 68,
       "pureUnitTests": 691,
-      "sourceCases": 15502,
+      "sourceCases": 15511,
       "staticallyDetectedRuntimeCompilerFlowTests": 129,
-      "testEntries": 2409
+      "testEntries": 2410
     },
     "status": "structural-inference-only"
   },
@@ -1685,7 +1685,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1296,
+      "integration": 1297,
       "platform/destructive": 146,
       "pure unit": 691,
       "unclassified": 258
@@ -1891,10 +1891,10 @@
       }
     ],
     "measuredProtocolAwareCaseCount": null,
-    "nimTestBinaryCount": 2372,
+    "nimTestBinaryCount": 2373,
     "pythonTestFileCount": 37,
-    "sourceCaseCount": 15502,
-    "testEntryCount": 2409
+    "sourceCaseCount": 15511,
+    "testEntryCount": 2410
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -16706,22 +16706,23 @@
     },
     {
       "binary": "build/test-bin/t_registry_root_override",
-      "catalogSuiteCount": 1,
+      "catalogSuiteCount": 2,
       "class": "unclassified",
       "classificationReason": "mutates the process environment",
       "countSource": "catalog",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_home_resources"
+        "repro_home_resources",
+        "repro_test_support"
       ],
       "owner": "libs/repro_home_resources",
       "requiresReproBinary": false,
       "source": "libs/repro_home_resources/tests/t_registry_root_override.nim",
-      "sourceCaseCount": 12,
+      "sourceCaseCount": 18,
       "sourceNewerThanBinary": false,
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 12,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25478,7 +25479,7 @@
     },
     {
       "binary": "build/test-bin/t_home_apply_guard",
-      "catalogSuiteCount": 1,
+      "catalogSuiteCount": 2,
       "class": "integration",
       "classificationReason": "subprocess or repro CLI invocation in test body",
       "countSource": "catalog",
@@ -25490,10 +25491,10 @@
       "owner": "libs/repro_test_support",
       "requiresReproBinary": false,
       "source": "libs/repro_test_support/tests/t_home_apply_guard.nim",
-      "sourceCaseCount": 8,
+      "sourceCaseCount": 9,
       "sourceNewerThanBinary": false,
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -39438,6 +39439,27 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_concurrent_repro_exec_in_one_project_share_the_dev_env_edge",
+      "catalogSuiteCount": 1,
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "countSource": "catalog",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_concurrent_repro_exec_in_one_project_share_the_dev_env_edge.nim",
+      "sourceCaseCount": 1,
+      "sourceNewerThanBinary": false,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_config_layer_determines_tier_not_per_repo_field",
       "catalogSuiteCount": 1,
       "class": "integration",
@@ -40799,10 +40821,10 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_develop_repo_own_lock_outranks_the_root_lock.nim",
-      "sourceCaseCount": 1,
+      "sourceCaseCount": 2,
       "sourceNewerThanBinary": false,
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -61251,7 +61273,7 @@
   ],
   "timing": {
     "complete": false,
-    "currentSourceFingerprint": "52b40c58ee0b3e2c63b0cdc819ade10e9c75e39a1431d723868351e8a5d0ca68",
+    "currentSourceFingerprint": "4cdb61a2a9ac08620eaf79a26cffc98f9fd1c872342360e32ae30be8350ff121",
     "notes": [
       "No suite run was requested for this inventory."
     ],
