@@ -445,9 +445,11 @@ line of the sibling's history, is spelled out:
 `repro lock refresh <path> --allow-pin-regression=<sibling>[,<sibling>…]`
 (or `REPRO_ALLOW_PIN_REGRESSION=<sibling>`, the same variable the
 `pre-commit` re-pin honors). Each pin's `ref` is a published branch that
-contains the pinned commit (`agents` first, then `dev`, then the
-checkout's branch, the remote's default, or any other published branch
-containing it) and is empty when no published branch contains it; a
+contains the pinned commit — the branch of the repo's `unstable` role
+first, then the branch of its `mainline` role, as the workspace manifest
+and settings file declare them (no branch name is built into `repro`),
+then the checkout's branch, the remote's default, or any other published
+branch containing it — and is empty when no published branch contains it; a
 local-only branch name is never recorded. Neither is a branch the
 branching policy deletes after use: a stabilisation branch
 `agents-to-dev-<date>` is skipped, so a refresh run on one records the

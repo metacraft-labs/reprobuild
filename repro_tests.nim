@@ -13698,6 +13698,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_force_push_of_any_declared_role_is_refused.nim",
+    binary: "build/test-bin/t_force_push_of_any_declared_role_is_refused",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_framework_field_is_present_and_filtering_works.nim",
     binary: "build/test-bin/t_framework_field_is_present_and_filtering_works",
     defines: @[],
@@ -16490,6 +16499,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_public_committed_team_manifest_personal_db_mixed.nim",
     binary: "build/test-bin/t_public_committed_team_manifest_personal_db_mixed",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_published_ref_prefers_resolved_unstable.nim",
+    binary: "build/test-bin/t_published_ref_prefers_resolved_unstable",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
