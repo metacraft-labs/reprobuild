@@ -527,7 +527,7 @@ stdenv.mkDerivation (finalAttrs: {
   meta = {
     description = "Reprobuild build system";
     homepage = "https://github.com/metacraft-labs/reprobuild";
-    license = lib.licenses.mit;
+    license = lib.licenses.asl20;
     mainProgram = "repro";
     maintainers = [ ];
     # nixpkgs 26.11 dropped x86_64-darwin (see flake.nix `systems`).
