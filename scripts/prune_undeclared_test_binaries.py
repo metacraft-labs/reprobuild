@@ -65,9 +65,33 @@ def looks_like_test_stem(stem: str) -> bool:
     return stem.startswith("t_") or stem.startswith("test_")
 
 
-def declared_binary_stems(root: pathlib.Path) -> set[str]:
+def declared_binary_stems(
+    root: pathlib.Path, bin_dir: pathlib.Path | None = None
+) -> set[str]:
+    """Stems of the binaries this revision declares.
+
+    Test-Binary-Grouping M2: a grouped source's cases live in its group's
+    binary (``build/test-bin/<group>``), so the GROUP stem is declared and the
+    source's own stem is not -- a per-file binary left by an earlier revision
+    would otherwise run beside the group and count every case twice. The one
+    exception is the fallback: when the group binary is absent because it
+    failed to compile, ``scripts/test_group_fallback.py`` has built the
+    members' own binaries, and those are declared instead.
+    """
     nim_specs, _ = inventory.parse_repro_tests(root)
-    return {pathlib.PurePosixPath(spec.binary).name for spec in nim_specs}
+    declared: set[str] = set()
+    for spec in nim_specs:
+        own = pathlib.PurePosixPath(spec.binary).name
+        if not spec.group:
+            declared.add(own)
+            continue
+        declared.add(spec.group)
+        group_present = bin_dir is not None and any(
+            (bin_dir / name).exists() for name in (spec.group, spec.group + ".exe")
+        )
+        if not group_present:
+            declared.add(own)
+    return declared
 
 
 def runner_candidates(bin_dir: pathlib.Path) -> list[pathlib.Path]:
@@ -113,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
     if not bin_dir.is_absolute():
         bin_dir = root / bin_dir
 
-    declared = declared_binary_stems(root)
+    declared = declared_binary_stems(root, bin_dir)
     if not declared:
         print(
             "prune_undeclared_test_binaries: refusing: repro_tests.nim declares "

@@ -34,7 +34,7 @@ import tempfile
 import time
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -751,6 +751,8 @@ class TestSpec:
     requires_repro_binary: bool
     target_os: str
     language: str = "nim"
+    group: str = ""
+    single_reason: str = ""
 
     @property
     def stem(self) -> str:
@@ -1046,6 +1048,60 @@ def parse_string_seq(src: str) -> list[str]:
     return re.findall(r'"((?:\\"|[^"])*)"', src)
 
 
+def nim_unescape(text: str) -> str:
+    """Undo the escapes ``strutils.escape`` writes for the generator's
+    ``group`` / ``singleReason`` literals (ASCII text only)."""
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and i + 1 < len(text):
+            nxt = text[i + 1]
+            if nxt == "x" and i + 3 < len(text):
+                out.append(chr(int(text[i + 2 : i + 4], 16)))
+                i += 4
+                continue
+            out.append({"n": "\n", "t": "\t", "r": "\r"}.get(nxt, nxt))
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def hosting_binary(root: Path, spec: TestSpec) -> str:
+    """The repo-relative binary that carries ``spec``'s cases.
+
+    Test-Binary-Grouping M2: a grouped source is compiled into
+    ``build/test-bin/<group>``, not into its own ``spec.binary``. When that
+    group failed to compile, ``scripts/test_group_fallback.py`` builds the
+    source's own binary instead, so the group binary is preferred when it
+    exists, the source's own when only that exists, and the group's path is
+    reported as the missing one when neither does.
+    """
+    if not spec.group or not spec.binary:
+        return spec.binary
+    group_binary = (PurePosixPath(spec.binary).parent / spec.group).as_posix()
+    if (root / group_binary).exists() or not (root / spec.binary).exists():
+        return group_binary
+    return spec.binary
+
+
+def member_catalog(outcome: dict[str, Any], source: str) -> dict[str, Any]:
+    """A group binary's catalog narrowed to one member's cases: the rows whose
+    ``file`` is the member's file name (the ``--list-json`` ``file`` field is
+    the declaring module's file name)."""
+    if outcome.get("status") != "ok":
+        return outcome
+    name = PurePosixPath(source).name
+    cases = [
+        case
+        for case in outcome.get("cases") or []
+        if PurePosixPath(str(case.get("file") or "").replace("\\", "/")).name == name
+    ]
+    return {**outcome, "cases": cases}
+
+
 def parse_repro_tests(root: Path) -> tuple[list[TestSpec], list[TestSpec]]:
     text = (root / "repro_tests.nim").read_text(encoding="utf-8")
     spec_re = re.compile(
@@ -1057,7 +1113,12 @@ def parse_repro_tests(root: Path) -> tuple[list[TestSpec], list[TestSpec]]:
         r"extraPassC:\s*@\[(.*?)\],\s*"
         r"extraPassL:\s*@\[(.*?)\],\s*"
         r"targetOs:\s*(\w+),\s*"
-        r"selfInterposes:\s*(true|false)\)",
+        r"selfInterposes:\s*(true|false)"
+        # Test-Binary-Grouping M2. Optional so that a table (or a test
+        # fixture) written before the two fields existed still parses, as
+        # all-single.
+        r'(?:,\s*group:\s*"((?:\\.|[^"\\])*)"'
+        r'(?:,\s*singleReason:\s*"((?:\\.|[^"\\])*)")?)?\s*\)',
         re.S,
     )
     nim_specs = [
@@ -1067,6 +1128,8 @@ def parse_repro_tests(root: Path) -> tuple[list[TestSpec], list[TestSpec]]:
             defines=parse_string_seq(m.group(3)),
             requires_repro_binary=m.group(4) == "true",
             target_os=m.group(7),
+            group=nim_unescape(m.group(9) or ""),
+            single_reason=nim_unescape(m.group(10) or ""),
         )
         for m in spec_re.finditer(text)
     ]
@@ -3620,16 +3683,24 @@ def run_catalog_seed(
     # flip that lands on the wrong source is a case count attributed to the
     # wrong file -- silently, and with the right total.
     by_stem: dict[str, str | None] = {}
+    # Test-Binary-Grouping M2: a group binary carries several sources; each
+    # member takes the rows its own file declared (``member_catalog``).
+    by_group: dict[str, list[str]] = {}
     for spec in specs:
         if spec.language != "nim" or not spec.binary:
             continue
-        stem = Path(spec.binary).stem
+        host = hosting_binary(root, spec)
+        stem = Path(host).stem
+        if host != spec.binary:
+            by_group.setdefault(stem, []).append(spec.source)
+            continue
         by_stem[stem] = None if stem in by_stem else spec.source
 
     entries: dict[str, Any] = {}
     for stem, node in binaries.items():
+        members = by_group.get(stem)
         source = by_stem.get(stem)
-        if source is None or not isinstance(node, Mapping):
+        if (source is None and not members) or not isinstance(node, Mapping):
             continue
         cases = node.get("cases")
         size = node.get("size")
@@ -3657,10 +3728,12 @@ def run_catalog_seed(
             rows.append({field: entry.get(field) for field in CATALOG_CASE_FIELDS})
         if malformed:
             continue
-        entries[source] = {
-            "key": f"{size}:{mtime_ns}",
-            "result": {"status": "ok", "cases": rows},
-        }
+        outcome = {"status": "ok", "cases": rows}
+        for owner in members or [source]:
+            entries[owner] = {
+                "key": f"{size}:{mtime_ns}",
+                "result": member_catalog(outcome, owner) if members else outcome,
+            }
     report["used"] = True
     report["importedBinaries"] = len(entries)
     return entries, report
@@ -3681,6 +3754,8 @@ def specs_digest(specs: list[TestSpec]) -> str:
         digest.update(spec.source.encode("utf-8"))
         digest.update(b"\0")
         digest.update((spec.binary or "").encode("utf-8"))
+        digest.update(b"\0")
+        digest.update((spec.group or "").encode("utf-8"))
         digest.update(b"\0")
         digest.update((spec.language or "").encode("utf-8"))
         digest.update(b"\0\0")
@@ -3790,7 +3865,9 @@ def catalog_index(
     for spec in specs:
         if spec.language != "nim" or not spec.binary:
             continue
-        binary_path = root / spec.binary
+        # Test-Binary-Grouping M2: the binary that carries this source's
+        # cases, which for a grouped source is its group's.
+        binary_path = root / hosting_binary(root, spec)
         key = binary_cache_key(binary_path)
         if key is None:
             results[spec.source] = {
@@ -3832,20 +3909,33 @@ def catalog_index(
             continue
         pending.append((spec.source, binary_path))
 
+    by_source_all = {spec.source: spec for spec in specs}
     with tempfile.TemporaryDirectory(prefix="repro-catalog-probe-") as scratch:
         probe_cwd = Path(scratch)
         if pending:
             from concurrent.futures import ThreadPoolExecutor
 
-            def run_one(item: tuple[str, Path]) -> tuple[str, dict[str, Any]]:
-                source, binary_path = item
-                return source, probe_binary_catalog(
+            # One probe per BINARY: a group binary carries up to fifty
+            # sources, and each takes its own rows from the one catalog.
+            unique_binaries = sorted({binary_path for _, binary_path in pending})
+
+            def run_one(binary_path: Path) -> tuple[Path, dict[str, Any]]:
+                return binary_path, probe_binary_catalog(
                     binary_path, probe_cwd, env, timeout_seconds
                 )
 
+            probed: dict[Path, dict[str, Any]] = {}
             with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-                for source, outcome in pool.map(run_one, pending):
-                    results[source] = outcome
+                for binary_path, outcome in pool.map(run_one, unique_binaries):
+                    probed[binary_path] = outcome
+            for source, binary_path in pending:
+                outcome = probed[binary_path]
+                spec = by_source_all[source]
+                results[source] = (
+                    member_catalog(outcome, source)
+                    if hosting_binary(root, spec) != spec.binary
+                    else outcome
+                )
 
         # Serial retry pass. Environmental failures are the ones the
         # parallel pass itself can manufacture, so they are re-measured
@@ -3865,9 +3955,12 @@ def catalog_index(
                 f"({outcome.get('status')}); budget {retry_timeout_seconds}s",
                 file=sys.stderr,
             )
+            host = hosting_binary(root, spec)
             second = probe_binary_catalog(
-                root / spec.binary, probe_cwd, env, retry_timeout_seconds
+                root / host, probe_cwd, env, retry_timeout_seconds
             )
+            if host != spec.binary:
+                second = member_catalog(second, source)
             results[source] = second
             retried[source] = second
 
@@ -3898,7 +3991,7 @@ def catalog_index(
             if spec.language != "nim" or not spec.binary:
                 continue
             outcome = results.get(spec.source)
-            key = binary_cache_key(root / spec.binary)
+            key = binary_cache_key(root / hosting_binary(root, spec))
             if outcome is None or key is None:
                 continue
             # NEVER cache a non-ok probe. A cached `timeout` replays a

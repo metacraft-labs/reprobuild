@@ -895,15 +895,18 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
                 "    extraPassC: @[],\n"
                 "    extraPassL: @[],\n"
                 "    targetOs: soAny,\n"
-                "    selfInterposes: false),\n"
-                "]"
+                "    selfInterposes: false,\n"
+                '    group: "",\n'
+                '    singleReason: "")'
             )
-            marker = "    selfInterposes: false)\n]"
-            self.assertIn(marker, declarations)
+            # Appended as the table's last row, whatever the current last
+            # row's fields are (Test-Binary-Grouping M2 added two).
+            table_end = declarations.find(
+                "\n]\n", declarations.find("const reprobuildTestSpecs")
+            )
+            self.assertGreater(table_end, 0)
             (work / "repro_tests.nim").write_text(
-                declarations.replace(
-                    marker, "    selfInterposes: false),\n" + row, 1
-                ),
+                declarations[:table_end] + ",\n" + row + declarations[table_end:],
                 encoding="utf-8",
             )
             # Refresh ONLY the case-count baseline, which is what a

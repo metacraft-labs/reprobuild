@@ -137,6 +137,36 @@ class PruneUndeclaredTestBinaries(unittest.TestCase):
         self.assertIn("refusing", result.stderr)
         self.assertTrue((self.bin_dir / "t_would_be_deleted").exists())
 
+    def grouped_member(self) -> tuple[str, str]:
+        """(own binary stem, group stem) of some grouped source in the REAL
+        table (Test-Binary-Grouping M2)."""
+        match = re.search(
+            r'binary:\s*"build/test-bin/([^"]+)",(?:(?!TestSpec\().)*?group:\s*"(t_group_[^"]+)"',
+            REPRO_TESTS.read_text(), re.S)
+        self.assertIsNotNone(match, "repro_tests.nim groups no source")
+        assert match is not None
+        return match.group(1), match.group(2)
+
+    def test_a_grouped_members_own_binary_beside_its_group_is_pruned(self) -> None:
+        # A per-file binary from a revision before grouping would run every
+        # case of the member a second time beside the group binary.
+        own, group = self.grouped_member()
+        make_exe(self.bin_dir / own)
+        make_exe(self.bin_dir / group)
+        result = run_prune(ROOT, self.bin_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.bin_dir / own).exists())
+        self.assertTrue((self.bin_dir / group).exists())
+
+    def test_a_grouped_members_own_binary_is_kept_while_its_group_is_absent(self) -> None:
+        # The group failed to compile and scripts/test_group_fallback.py built
+        # the member singly: that binary is this revision's, and must run.
+        own, _group = self.grouped_member()
+        make_exe(self.bin_dir / own)
+        result = run_prune(ROOT, self.bin_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.bin_dir / own).exists())
+
     def test_the_mirrored_predicate_matches_the_runner(self) -> None:
         source = RUNNER.read_text()
         match = re.search(r"proc looksLikeTestStem\(stem: string\): bool =\n(.*?)\n\n", source, re.S)
