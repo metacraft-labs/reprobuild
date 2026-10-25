@@ -2249,10 +2249,28 @@ suite "Test home fence: drivers refuse writes into a fenced home":
         destroyManagedBlockResource(rc, "anything")
       check readFile(rc) == Initial
       # The env.userPath driver reaches the rc file through the same
-      # managed-block writer, which is the leak the issue records.
-      expect TestHomeFenceError:
-        discard applyUserPath(@["/leak/bin"], @[], rc,
-          "repro-home-userpath:home.package.leak.bin")
+      # managed-block writer, which is the leak the issue records. On
+      # Windows it writes `HKCU\Environment\Path` instead, and the
+      # registry half of the fence has to refuse it: the case unsets the
+      # `REPRO_REGISTRY_ROOT` seam a runner may have set (which would send
+      # the write to a fake hive and prove nothing) and checks that the
+      # real user PATH did not change (reprobuild-pm issue
+      # 2026-10-23-windows-home-apply-gates-leak-store-prefixes-into-the-
+      # real-user-path).
+      let priorRegistryRoot = (existsEnv(RegistryRootEnvVar),
+        getEnv(RegistryRootEnvVar))
+      delEnv(RegistryRootEnvVar)
+      try:
+        when defined(windows):
+          let realPathBefore = readUserPathRaw()
+        expect TestHomeFenceError:
+          discard applyUserPath(@["/leak/bin"], @[], rc,
+            "repro-home-userpath:home.package.leak.bin")
+        when defined(windows):
+          check readUserPathRaw() == realPathBefore
+      finally:
+        if priorRegistryRoot[0]:
+          putEnv(RegistryRootEnvVar, priorRegistryRoot[1])
       check readFile(rc) == Initial
       let userFile = home / ".config" / "tool" / "settings.toml"
       expect TestHomeFenceError:
