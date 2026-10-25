@@ -2495,6 +2495,10 @@
               # resolves its dlopen()s when run inside CodeTracer's dev shell.
               pkgs.patchelf
               pkgs.cmake
+              # `t_autotools_configure_tools` generates a real `configure`
+              # with Autoconf from the suite's own environment. The lint
+              # hook's PATH below lists it as well, but the suite runs here.
+              pkgs.autoconf
               pkgs.pkg-config
               pkgs.nix
               # git, from THIS flake's nixpkgs — the same evaluation the
