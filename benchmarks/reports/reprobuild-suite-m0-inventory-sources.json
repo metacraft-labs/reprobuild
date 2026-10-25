@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2371,
+    "nimTestBinaries": 2372,
     "pureUnitConsolidationGroups": 68,
     "pureUnitTests": 691,
     "staticallyDetectedRuntimeCompilerFlowTests": 129,
-    "testEntries": 2408
+    "testEntries": 2409
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1392,7 +1392,7 @@
       "integration": 1296,
       "platform/destructive": 146,
       "pure unit": 691,
-      "unclassified": 257
+      "unclassified": 258
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1594,9 +1594,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2371,
+    "nimTestBinaryCount": 2372,
     "pythonTestFileCount": 37,
-    "testEntryCount": 2408
+    "testEntryCount": 2409
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -17619,6 +17619,24 @@
       "owner": "libs/repro_platform",
       "requiresReproBinary": false,
       "source": "libs/repro_platform/tests/test_msvc_activation_multiline_env.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_msvc_activation_spawns_no_telemetry",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_platform",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_platform",
+      "requiresReproBinary": false,
+      "source": "libs/repro_platform/tests/test_msvc_activation_spawns_no_telemetry.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
