@@ -34,6 +34,11 @@ import std/[os, osproc, streams, strtabs, strutils, times, unittest]
 from repro_core/paths import extendedPath, runquotaEndpointPath
 from repro_core/process_streams import drainStream
 
+# The fake-registry-hive seam (`registryRootEnv`), kept in its own module so
+# `home_apply_guard` shares it without importing this one.
+import repro_test_support/registry_isolation
+export registry_isolation
+
 # Narrow, named import: ``runquota_ipc`` is RunQuota's own endpoint-trust
 # module, and ``runquotaRendezvousDir`` below delegates the "where may a
 # socket live" rule to it rather than keeping a second copy of the mode.
@@ -628,24 +633,6 @@ proc removeDirEventually*(path: string; attempts = 25; sleepMs = 40) =
       return
   if last != nil:
     raise last
-
-proc registryRootEnv*(scratchDir: string): tuple[k, v: string] =
-  ## Env-var entry that redirects HKCU registry writes made by a
-  ## `repro home apply` subprocess into a per-test fake hive under
-  ## `scratchDir / "registry"`. Intended use:
-  ##
-  ## ```nim
-  ## let baseEnv = @[
-  ##   (k: "REPRO_HOME_STATE_DIR", v: stateDir),
-  ##   ...,
-  ##   registryRootEnv(tempRoot)]
-  ## ```
-  ##
-  ## Without this, e2e tests that exercise `env.userPath` /
-  ## `env.userVariable` / `windows.registryValue` resources leak PATH
-  ## entries into the host's real `HKCU\Environment\Path` (see project
-  ## memory: reprobuild user PATH pollution, 2026-06-06).
-  (k: "REPRO_REGISTRY_ROOT", v: scratchDir / "registry")
 
 proc fileUrl*(path: string): string =
   ## Build an RFC 8089 ``file://`` URL for a fixture path that is then
