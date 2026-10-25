@@ -7148,7 +7148,11 @@ proc acquireProviderFileLock(lockPath: string): ReproFileLock =
           "CreateFileW(" & lockPath & ") failed, GetLastError=" & $error)
       sleep(50)
   else:
-    let fd = posix.open(lockPath.cstring, O_RDWR or O_CREAT, Mode(0o600))
+    # Close-on-exec: a lock fd inherited by a child keeps the flock held for
+    # as long as that child lives, so a long-lived process spawned while the
+    # lock is held (a daemon started inside a build) would hold it forever.
+    let fd = posix.open(lockPath.cstring, O_RDWR or O_CREAT or O_CLOEXEC,
+      Mode(0o600))
     if fd < 0:
       raise newException(IOError,
         "open(" & lockPath & ") failed, errno=" & $errno)
@@ -7184,7 +7188,11 @@ proc tryAcquireProviderFileLock(lockPath: string;
         "CreateFileW(" & lockPath & ") failed, GetLastError=" & $error)
     false
   else:
-    let fd = posix.open(lockPath.cstring, O_RDWR or O_CREAT, Mode(0o600))
+    # Close-on-exec: a lock fd inherited by a child keeps the flock held for
+    # as long as that child lives, so a long-lived process spawned while the
+    # lock is held (a daemon started inside a build) would hold it forever.
+    let fd = posix.open(lockPath.cstring, O_RDWR or O_CREAT or O_CLOEXEC,
+      Mode(0o600))
     if fd < 0:
       raise newException(IOError,
         "open(" & lockPath & ") failed, errno=" & $errno)
@@ -7246,6 +7254,20 @@ proc acquireInterfaceArtifactLock*(artifactPath: string):
   acquireProviderFileLock(artifactPath & ".extract.lock")
 
 proc releaseInterfaceArtifactLock*(lock: var ReproFileLock) =
+  releaseProviderNimcacheLock(lock)
+
+proc acquireExclusiveFileLock*(lockPath: string): ReproFileLock =
+  ## Block until this process holds the exclusive advisory lock named by
+  ## ``lockPath`` (created if absent, never removed). The same primitive as
+  ## the interface-artifact and nimcache locks, for a caller that names its
+  ## own lock file. The lock is not inherited by child processes (POSIX
+  ## ``O_CLOEXEC``; a Windows handle opened without inheritable security
+  ## attributes), and is released by ``releaseExclusiveFileLock`` or when the
+  ## process exits.
+  acquireProviderFileLock(lockPath)
+
+proc releaseExclusiveFileLock*(lock: var ReproFileLock) =
+  ## Release a lock taken by ``acquireExclusiveFileLock``. Idempotent.
   releaseProviderNimcacheLock(lock)
 
 proc runNimcacheCompilerCommandHeld(command: openArray[string]; cwd = ""):
