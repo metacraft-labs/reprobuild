@@ -17799,30 +17799,79 @@ proc recordSharedInstanceAcquisition(outDir, holderId, serviceName,
     address: address))
   writeSharedInstanceLedger(outDir, holderId, ledger.entries)
 
-proc liftedServiceDeclaration(interfacePath, serviceName: string):
+type
+  LiftedInterfaceCopy = object
+    ## A project interface artifact and its §4.3 provenance stamp, read
+    ## TOGETHER, so the snapshot a converge sends and the generation stamp
+    ## that vouches for it describe one lift. Either the dev-env edge's own
+    ## copies (`liftedInterfaceOfEdge`) or an owner's files read under the
+    ## lock their writer holds (`readOwnerInterfaceCandidate`).
+    path: string
+      ## Where the files were read. A NAME for diagnostics and the
+      ## generation record, never read again.
+    artifact: ProjectInterfaceArtifact
+    provenance: Option[InterfaceArtifactProvenance]
+
+proc liftedInterfaceOfEdge(edge: DevEnvEdgeResult;
+                           commandName: string): LiftedInterfaceCopy =
+  ## The interface this activation's dev-env edge extracted and the stamp
+  ## it wrote beside it, as the edge decoded them while it held
+  ## `<outDir>/dev-env.lock`.
+  ##
+  ## Not the files at `edge.interfacePath`: those are shared with every
+  ## other activation of this project and activity, and one of them may
+  ## have re-extracted them since the lock was released
+  ## (`Development-Environments-And-Control-API.md`, "Concurrent
+  ## Activations Of One Project", rule 1). The DevEnvArtifact `repro up`
+  ## converges from is the edge's copy too, so the two stay one evaluation.
+  if not edge.interfaceDecoded:
+    raise newException(ValueError,
+      "repro " & commandName & ": the dev-env edge returned no decoded " &
+      "project interface, so the shared services cannot be converged " &
+      "from the evaluation that produced its environment; this is a " &
+      "reprobuild defect (computeDevEnvEdge sets it on every return)")
+  LiftedInterfaceCopy(path: edge.interfacePath,
+    artifact: edge.interfaceArtifact, provenance: edge.interfaceProvenance)
+
+proc readOwnerInterfaceCandidate(candidate: string): LiftedInterfaceCopy =
+  ## Read an owner's lifted interface and its provenance stamp under the
+  ## lock their writer holds, so neither can be half-replaced and the two
+  ## cannot come from different lifts.
+  ##
+  ## The writer depends on the layout `ownerInterfaceCandidates` found the
+  ## file in. Under `.repro/dev-env/<segment>/` it is the owner's dev-env
+  ## edge, which writes both files while it holds that directory's
+  ## `dev-env.lock` (`computeDevEnvEdge`). Under `.repro/build/<target>/`
+  ## it is `extractInterfaceEdge`, which publishes the artifact and stamps
+  ## it while it holds the artifact's interface-extraction lock.
+  let outDir = parentDir(candidate)
+  var lock =
+    if lastPathPart(parentDir(outDir)) == "dev-env":
+      acquireExclusiveFileLock(devEnvEdgeLockPath(outDir))
+    else:
+      acquireInterfaceArtifactLock(candidate)
+  try:
+    result.path = candidate
+    result.artifact = readInterfaceArtifact(candidate)
+    result.provenance = readInterfaceArtifactProvenance(candidate)
+  finally:
+    releaseExclusiveFileLock(lock)
+
+proc liftedServiceDeclaration(artifact: ProjectInterfaceArtifact;
+                              serviceName: string):
     tuple[snapshot: ServiceInterfaceSnapshot;
           identity: ServiceIdentityDef; scope: ServiceScope] =
   ## Everything `repro up` needs about a shared service, out of the REAL
-  ## project interface artifact the dev-env edge just produced -- the
-  ## same lift L3 built, L4 put the identity and scope on, and L6
-  ## decides over. Not reconstructed and not approximated.
+  ## project interface artifact the lift produced -- the same lift L3
+  ## built, L4 put the identity and scope on, and L6 decides over. Not
+  ## reconstructed and not approximated.
   ##
-  ## ONE READ, THREE FACTS, so the interface fingerprint and the instance
-  ## key cannot come from different revisions of the same recipe. The
-  ## enum mappings are ordinal-for-ordinal on pairs that
+  ## ONE ARTIFACT, THREE FACTS, so the interface fingerprint and the
+  ## instance key cannot come from different revisions of the same recipe.
+  ## The caller hands over a decoded copy (`LiftedInterfaceCopy`) rather
+  ## than a path, because the file is shared and may be replaced between
+  ## two reads. The enum mappings are ordinal-for-ordinal on pairs that
   ## `repro_interface_artifacts` keeps in step with static asserts.
-  if not fileExists(extendedPath(interfacePath)):
-    raise newException(IOError,
-      "service `" & serviceName & "` declares a shared `instance`, and " &
-      "the project interface artifact that carries its interface " &
-      "fingerprint, identity and scope is not at " & interfacePath &
-      ". Shared-Development-Services.md §4.3 decides attach-or-refuse " &
-      "on that fingerprint, so there is nothing to decide with.")
-  let bytes = readFile(extendedPath(interfacePath))
-  var raw = newSeq[byte](bytes.len)
-  if bytes.len > 0:
-    copyMem(addr raw[0], unsafeAddr bytes[0], bytes.len)
-  let artifact = decodeProjectInterfaceArtifact(raw)
   result.snapshot = serviceInterfaceSnapshot(artifact.projectInterface,
     serviceName)
   for svc in artifact.projectInterface.publicServices:
@@ -17843,8 +17892,10 @@ proc liftedServiceDeclaration(interfacePath, serviceName: string):
     serviceName & "` but no row for it, which cannot happen; refusing " &
     "rather than resolving a default identity")
 
-proc ownerArtifactGeneration*(artifactPath, ownerRecipeDir,
-                              ownerPackage, ownerProject: string):
+proc ownerArtifactGeneration*(artifactPath: string;
+                              recorded: Option[InterfaceArtifactProvenance];
+                              ownerRecipeDir, ownerPackage,
+                              ownerProject: string):
     ServiceArtifactGenerationCheck =
   ## Shared-Development-Services §4.3's SAME-GENERATION PRECONDITION,
   ## ESTABLISHED: does the owner's lifted interface artifact correspond
@@ -17855,9 +17906,16 @@ proc ownerArtifactGeneration*(artifactPath, ownerRecipeDir,
   ## The lift records a PROVENANCE STAMP beside the artifact -- the
   ## content-addressed semantic identity of the recipe's own import
   ## closure (`recipeClosureSourceDigests`, over
-  ## `projectSourceSemanticIdentity`). This proc reads that stamp,
-  ## RE-WALKS the owner's recipe closure, and compares. Three answers,
-  ## because §4.3 names three states.
+  ## `projectSourceSemanticIdentity`). This proc takes that stamp as
+  ## `recorded`, RE-WALKS the owner's recipe closure, and compares. Three
+  ## answers, because §4.3 names three states.
+  ##
+  ## The stamp is a parameter, not read here from `artifactPath`, because
+  ## it has to describe the SAME lift as the snapshot the caller sends:
+  ## the caller reads the two together, under the lock their writer holds
+  ## (`LiftedInterfaceCopy`). A stamp read by path afterwards could belong
+  ## to a newer artifact and vouch for an older snapshot.
+  ## `artifactPath` only names the artifact in the result.
   ##
   ## The comparand is a pure function of the owner's SOURCES -- no
   ## absolute path, no `workDir`, no compiler identity, no reprobuild
@@ -17897,7 +17955,6 @@ proc ownerArtifactGeneration*(artifactPath, ownerRecipeDir,
     ownerPackage: ownerPackage,
     ownerProject: ownerProject,
     movedSources: @[])
-  let recorded = readInterfaceArtifactProvenance(artifactPath)
   if recorded.isNone:
     result.detail =
       "No readable provenance record is beside it, at " &
@@ -18114,10 +18171,17 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
     var lifted: tuple[snapshot: ServiceInterfaceSnapshot;
                       identity: ServiceIdentityDef; scope: ServiceScope]
     var liftedFrom = ""
+    # The candidate that answered, artifact and stamp read together under
+    # its writer's lock: the snapshot and the §4.3 generation stamp below
+    # both come from this copy, never from a second read of the files.
+    var liftedCopy: LiftedInterfaceCopy
     var liftErrors: seq[string] = @[]
     for candidate in candidates:
       try:
-        lifted = liftedServiceDeclaration(candidate, resolution.serviceName)
+        let copy = readOwnerInterfaceCandidate(candidate)
+        lifted = liftedServiceDeclaration(copy.artifact,
+          resolution.serviceName)
+        liftedCopy = copy
         liftedFrom = candidate
         break
       except CatchableError as err:
@@ -18185,8 +18249,9 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
         # it holds the RUNNING instance's snapshot, which is the other
         # side of the comparison.
         generationJson: encodeServiceArtifactGenerationCheck(
-          ownerArtifactGeneration(liftedFrom, resolution.ownerRecipeDir,
-            resolution.ownerPackage, lifted.snapshot.projectName))))
+          ownerArtifactGeneration(liftedFrom, liftedCopy.provenance,
+            resolution.ownerRecipeDir, resolution.ownerPackage,
+            lifted.snapshot.projectName))))
     let outcome =
       try:
         parseConvergeOutcome(response.outcome)
@@ -18465,10 +18530,14 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
     return 0
   let projectRoot = parsed.selection.projectRoot
   let holderId = serviceLeaseHolderId(projectRoot)
-  # The one artifact path this proc reads its lifted declarations from,
-  # named once so the §4.3 generation check below and
-  # `liftedServiceDeclaration` cannot be pointed at two different files.
-  let interfacePathForGeneration = edge.interfacePath
+  # The interface and the §4.3 provenance stamp this proc lifts from, as
+  # the dev-env edge decoded them under its lock. One copy, so the
+  # generation check below and `liftedServiceDeclaration` cannot describe
+  # two different lifts, and neither re-reads the shared files that a
+  # concurrent activation of this project may have replaced since
+  # (`Development-Environments-And-Control-API.md`, "Concurrent
+  # Activations Of One Project", rule 1).
+  let liftedCopy = liftedInterfaceOfEdge(edge, commandName)
   var minted: seq[tuple[serviceName, member, mintedId: string;
                         provenance: RegistrarProvenance]] = @[]
   # Shared-Development-Services §7.3: what each instance reported ABOUT
@@ -18477,7 +18546,7 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
   var attributes: seq[SharedInstanceAttributeRow] = @[]
   var refused = 0
   for item in declarations:
-    let lifted = liftedServiceDeclaration(edge.interfacePath,
+    let lifted = liftedServiceDeclaration(liftedCopy.artifact,
       item.declaration.serviceName)
     let snapshot = lifted.snapshot
     # Shared-Development-Services L8 -- ONE FACT, AND A REFUSAL IF THE
@@ -18537,8 +18606,8 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
         # converge too.
         #
         # It is tempting to claim `sagFresh` by construction here --
-        # this artifact is `edge.interfacePath`, which the dev-env edge
-        # this very command just ran produced. It is not claimed, and
+        # this interface is the one the dev-env edge this very command
+        # just ran produced. It is not claimed, and
         # the reason is measured: `repro_dev_env_engine`'s own
         # `useCachedInterface` gate is keyed by `devEnvCacheKey`, whose
         # `projectFile=` part fingerprints the recipe FILE and not its
@@ -18549,7 +18618,7 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
         # doing so -- so the owner establishes it the same way, from the
         # same stamp, rather than asserting it.
         generationJson: encodeServiceArtifactGenerationCheck(
-          ownerArtifactGeneration(interfacePathForGeneration,
+          ownerArtifactGeneration(liftedCopy.path, liftedCopy.provenance,
             projectRoot, snapshot.packageName, snapshot.projectName))))
     let outcome =
       try:

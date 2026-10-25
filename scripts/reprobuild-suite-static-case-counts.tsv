@@ -1897,6 +1897,8 @@ tests/integration/t_repro_test_runner_reporting_contract.nim	nim	0
 tests/integration/t_repro_test_runner_suiteless_case_round_trip.nim	nim	0
 tests/integration/t_repro_test_runner_survives_its_binary_being_replaced.nim	nim	2
 tests/integration/t_repro_test_workspace_mode_issues_a_content_bound_certificate.nim	nim	1
+tests/integration/t_repro_up_resolver_reads_the_owner_interface_under_its_writers_lock.nim	nim	1
+tests/integration/t_repro_up_shared_service_checks_use_the_dev_env_edge_copy.nim	nim	1
 tests/integration/t_reproos_source_bridge_inventory.nim	nim	1
 tests/integration/t_reproos_uki_through_the_cvm_path.nim	nim	8
 tests/integration/t_required_features_are_a_subset_of_host_features.nim	nim	1

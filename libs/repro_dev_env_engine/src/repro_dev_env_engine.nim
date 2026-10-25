@@ -91,6 +91,17 @@ type
       ## as ``artifact``: ``interfacePath`` is shared, so a concurrent
       ## activation may replace it once the lock is released.
     interfaceDecoded*: bool
+    interfaceProvenance*: Option[InterfaceArtifactProvenance]
+      ## The provenance stamp beside ``interfacePath``
+      ## (``interfaceArtifactProvenancePath``), read back while the edge lock
+      ## was still held, right after this computation wrote it. It records
+      ## what ``interfaceArtifact`` was lifted from, and
+      ## Shared-Development-Services §4.3's stale-lift check compares it with
+      ## the recipe on disk. It has to come from the same computation as
+      ## ``interfaceArtifact``: a stamp read from the shared sidecar later
+      ## could belong to a newer interface than the copy it vouches for.
+      ## ``none`` when the stamp could not be written or read, which that
+      ## check answers with a refusal. Set together with ``interfaceDecoded``.
     shellFragmentPath*: string
     shellNavigatorStatsPath*: string
     providerArtifactPath*: string
@@ -912,6 +923,7 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   # recorded here is the one those bytes were extracted from.
   writeInterfaceArtifactProvenance(interfacePath, active.modulePath)
   result.interfaceArtifact = interfaceArtifact
+  result.interfaceProvenance = readInterfaceArtifactProvenance(interfacePath)
   result.interfaceDecoded = true
   let effectiveProvisioning =
     active.effectiveToolProvisioning(interfaceArtifact)
