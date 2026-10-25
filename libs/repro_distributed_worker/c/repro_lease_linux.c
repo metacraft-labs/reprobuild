@@ -1050,7 +1050,19 @@ static void confined_child(int ctl) {
   hand_over_listener(ctl, listener, 'N');
   if (chdir(cfg.cwd) != 0) child_fail(ctl, "chdir");
   write_all(ctl, "X", 1);   /* "about to exec": the supervisor stops expecting fds */
-  execve(cfg.argv[0], cfg.argv, cfg.envp);
+  /* The RAW system call, not libc's execve(3). A lease's environment is
+     exactly what its descriptor names, and never LD_PRELOAD or LD_AUDIT
+     (Distributed-Execution.md, `GraphCacheDescriptor`; the threat model's
+     "a lease's environment is exactly what the descriptor names"). Through
+     libc, a library preloaded into the WORKER can interpose execve and
+     rewrite envp. The build monitor's shim does exactly that to follow its
+     children (io-mon `ct_linux_preload_env_with_exec_gen` adds
+     `LD_PRELOAD=<shim>`), so a worker run under a monitored build handed its
+     shim to every lease. The lease's confinement then refused to open it,
+     and every goal was disqualified (`fs-denied …/librepro_monitor_shim.so`).
+     A system call cannot be interposed. The seccomp supervisor still judges
+     it: the filter matches SYS_execve however it is made. */
+  syscall(SYS_execve, cfg.argv[0], cfg.argv, cfg.envp);
   _exit(126);
 }
 

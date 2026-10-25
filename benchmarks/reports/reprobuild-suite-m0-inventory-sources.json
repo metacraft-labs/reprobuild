@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2375,
+    "nimTestBinaries": 2377,
     "pureUnitConsolidationGroups": 68,
     "pureUnitTests": 691,
     "staticallyDetectedRuntimeCompilerFlowTests": 129,
-    "testEntries": 2412
+    "testEntries": 2414
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1389,7 +1389,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1299,
+      "integration": 1301,
       "platform/destructive": 146,
       "pure unit": 691,
       "unclassified": 258
@@ -1594,9 +1594,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2375,
+    "nimTestBinaryCount": 2377,
     "pythonTestFileCount": 37,
-    "testEntryCount": 2412
+    "testEntryCount": 2414
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5083,6 +5083,7 @@
           "commandVariableExecuted": true,
           "directExecutionLine": false,
           "executedVariables": [
+            "base",
             "c",
             "cc",
             "daemon",
@@ -5090,7 +5091,7 @@
             "env",
             "tools"
           ],
-          "line": 186,
+          "line": 259,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5102,6 +5103,7 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
+            "base",
             "c",
             "cc",
             "daemon",
@@ -5109,7 +5111,7 @@
             "env",
             "tools"
           ],
-          "line": 216,
+          "line": 289,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5121,6 +5123,7 @@
           "commandVariableExecuted": true,
           "directExecutionLine": false,
           "executedVariables": [
+            "base",
             "c",
             "cc",
             "daemon",
@@ -5128,7 +5131,7 @@
             "env",
             "tools"
           ],
-          "line": 485,
+          "line": 551,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5140,6 +5143,7 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
+            "base",
             "c",
             "cc",
             "daemon",
@@ -5147,7 +5151,47 @@
             "env",
             "tools"
           ],
-          "line": 504,
+          "line": 560,
+          "path": "tests/integration/t_execution_lease_confinement.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "check execCmdEx(quoteShellCommand([cc, \"-shared\", \"-fPIC\", \"-o\","
+        },
+        {
+          "assignedCommandVariable": "cc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "base",
+            "c",
+            "cc",
+            "daemon",
+            "dir",
+            "env",
+            "tools"
+          ],
+          "line": 600,
+          "path": "tests/integration/t_execution_lease_confinement.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "let cc = ccPath()"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "base",
+            "c",
+            "cc",
+            "daemon",
+            "dir",
+            "env",
+            "tools"
+          ],
+          "line": 619,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -35327,7 +35371,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_execution_lease_confinement.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -42019,6 +42063,43 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_repro_test_workspace_mode_issues_a_content_bound_certificate.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_repro_up_resolver_reads_the_owner_interface_under_its_writers_lock",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dev_env_engine",
+        "repro_interface_artifacts",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_repro_up_resolver_reads_the_owner_interface_under_its_writers_lock.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_repro_up_shared_service_checks_use_the_dev_env_edge_copy",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_repro_up_shared_service_checks_use_the_dev_env_edge_copy.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

@@ -9,7 +9,7 @@
 version = "0.2.6"
 author = "Metacraft Labs"
 description = "Reprobuild build system"
-license = "MIT"
+license = "Apache-2.0"
 requires "nim >= 2.2.0"
 
 task build, "Build all M0 application entry points":

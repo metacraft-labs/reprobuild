@@ -223,7 +223,7 @@ nim-stackable-hooks=059c549306621e2f769adf75630b0b7f29018dca
 # (scripts/release/stage_release_runquota.sh), which it exports from this
 # clone, so the clone has to contain it. It was `dev` until 2026-10-20, 14
 # commits behind the pin.
-runquota=dba2b9bc3db3b086753d1ae0d8922890a0ccf79e
+runquota=93cfd5770abc2b3ac316ee6beee80b5bfd73264a
 nim-shm-queue=91451f2250beb89d1d221f0a77be0841c19b182e
 nim-shm-gset=c9048e9a7e0ba2b11c1ec137acc5fc2c0bcfec27
 
@@ -278,4 +278,4 @@ metacraft-github-actions=dev
 # vectors would be absent the moment `latest` moved past them. A SHA entry
 # fetches exactly the pinned commit. scripts/check_workflows.sh refuses a
 # sibling pin that differs from the .pin file, so move both together.
-test-certificates-spec=bd9d1bf5a45545eab2ecd4e17c51f15dad03baa9
+test-certificates-spec=282524dad92fcc892b6b9b8dc988bd77f72edab6

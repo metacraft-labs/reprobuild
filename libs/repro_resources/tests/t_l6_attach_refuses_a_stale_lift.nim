@@ -41,8 +41,8 @@
 ##
 ## § WHAT IS NOT MEASURED HERE, SAID RATHER THAN IMPLIED
 ##
-## `ownerArtifactGeneration` reads the provenance stamp and the owner's
-## recipe; it does NOT read the artifact's bytes. So this file does not
+## `ownerArtifactGeneration` takes the provenance stamp and reads the
+## owner's recipe; it does NOT read the artifact's bytes. So this file does not
 ## need a compiled lift to measure the decision, and it does not pretend
 ## to: whether the LIFT writes the stamp in the first place is a
 ## different claim, measured in
@@ -179,7 +179,10 @@ proc liftIt(tree: OwnerTree) =
   writeInterfaceArtifactProvenance(tree.artifact, tree.recipe)
 
 proc establish(tree: OwnerTree): ServiceArtifactGenerationCheck =
-  ownerArtifactGeneration(tree.artifact, tree.root, "l6AttBase",
+  ## The stamp is read here, as `repro up` reads it (beside the artifact,
+  ## in one read with it), and handed to the check.
+  ownerArtifactGeneration(tree.artifact,
+    readInterfaceArtifactProvenance(tree.artifact), tree.root, "l6AttBase",
     "l6AttBase")
 
 # ---------------------------------------------------------------------------

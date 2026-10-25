@@ -9,8 +9,8 @@
 ## `libs/repro_resources/tests/t_l6_attach_refuses_a_stale_lift.nim`.
 ## This file measures the other side, and it is the only one that can:
 ## the decision side deliberately needs no compiled lift, because
-## `ownerArtifactGeneration` reads the stamp and the recipe and never the
-## artifact's bytes.
+## `ownerArtifactGeneration` takes the stamp, reads the recipe and never
+## the artifact's bytes.
 ##
 ## § MOCK POLICY — NO MOCKS, AND A REAL COMPILER
 ##

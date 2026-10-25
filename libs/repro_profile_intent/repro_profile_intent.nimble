@@ -1,7 +1,7 @@
 version = "0.1.0"
 author = "Metacraft Labs"
 description = "Reprobuild RBPI profile-intent binary envelope (M83 Phase B)"
-license = "MIT"
+license = "Apache-2.0"
 srcDir = "src"
 requires "nim >= 2.2.0"
 requires "repro_profile"

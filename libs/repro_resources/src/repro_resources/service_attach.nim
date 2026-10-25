@@ -375,9 +375,9 @@ type
     ## This object is DATA, not a probe: `attachDecision` neither reads
     ## the filesystem nor recomputes anything, exactly as it does not for
     ## the snapshots. Establishing the answer is the caller's -- see
-    ## `repro_cli_support`'s `ownerArtifactGeneration`, which reads the
-    ## recorded provenance beside the owner's artifact and re-walks the
-    ## owner's recipe closure. Keeping this a pure function of its
+    ## `repro_cli_support`'s `ownerArtifactGeneration`, which takes the
+    ## provenance stamp recorded beside the owner's artifact (its caller
+    ## reads the two together) and re-walks the owner's recipe closure. Keeping this a pure function of its
     ## arguments is what lets the decision be measured against a
     ## constructed record, which is what L6 established and this
     ## preserves.
