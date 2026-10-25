@@ -28,6 +28,7 @@ import repro_core/relocation
 import repro_core/ambient_execution
 import repro_core/cli_images
 import repro_core/source_root
+from repro_core/workspace_root import firstMembershipManifestPath
 import repro_core/nix_evaluation_policy
 import repro_build_engine
 import repro_cmake_trycompile
@@ -15690,22 +15691,30 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
   # contributed nothing — an activation that looks identical to a working one
   # and provisions none of what the recipe declared. Silence was the actual
   # defect; the diagnostic below is the other half of the fix.
-  var interfacePath = edge.interfacePath
-  if interfacePath.len == 0:
-    interfacePath = selection.outDir / "project-interface.rbsz"
-  if not fileExists(extendedPath(interfacePath)):
-    stderr.writeLine("repro dev-env: warning: no project interface at " &
-      interfacePath & "; the activated shell will resolve tools from the " &
-      "ambient PATH instead of the packages this recipe declares.")
-    return
+  #
+  # An edge that computed the interface carries it decoded, read while the
+  # edge lock was held (`DevEnvEdgeResult.interfaceDecoded`); the file is
+  # shared with every other activation of the project, which may replace it
+  # once that lock is released. Only the path-addressed form reads the file.
   var interfaceArtifact: ProjectInterfaceArtifact
-  try:
-    interfaceArtifact = readInterfaceArtifact(interfacePath)
-  except CatchableError as err:
-    stderr.writeLine("repro dev-env: warning: could not read the project " &
-      "interface at " & interfacePath & " (" & err.msg &
-      "); the activated shell will resolve tools from the ambient PATH.")
-    return
+  if edge.interfaceDecoded:
+    interfaceArtifact = edge.interfaceArtifact
+  else:
+    var interfacePath = edge.interfacePath
+    if interfacePath.len == 0:
+      interfacePath = selection.outDir / "project-interface.rbsz"
+    if not fileExists(extendedPath(interfacePath)):
+      stderr.writeLine("repro dev-env: warning: no project interface at " &
+        interfacePath & "; the activated shell will resolve tools from the " &
+        "ambient PATH instead of the packages this recipe declares.")
+      return
+    try:
+      interfaceArtifact = readInterfaceArtifact(interfacePath)
+    except CatchableError as err:
+      stderr.writeLine("repro dev-env: warning: could not read the project " &
+        "interface at " & interfacePath & " (" & err.msg &
+        "); the activated shell will resolve tools from the ambient PATH.")
+      return
   if interfaceArtifact.projectInterface.toolUses.len == 0:
     # Nothing declared is a legitimate state, not a failure: a recipe with no
     # `uses:` has no toolchain to provide.
@@ -16592,7 +16601,7 @@ proc runReproRunCommand(args: openArray[string];
     let edge = computePublicDevEnv(parsed.selection, publicCliPath,
     announce = true)
     writeDevEnvStats(parsed.selection.statsPath, edge, "run")
-    let artifact = readDevEnvArtifact(edge.artifactPath)
+    let artifact = edge.artifact
     if emitDevEnvDiagnostics(artifact):
       return 1
     listedTasks = artifact.tasks
@@ -16630,7 +16639,7 @@ proc runReproRunCommand(args: openArray[string];
     let edge = computePublicDevEnv(parsed.selection, publicCliPath,
     announce = true)
     writeDevEnvStats(parsed.selection.statsPath, edge, "run")
-    let artifact = readDevEnvArtifact(edge.artifactPath)
+    let artifact = edge.artifact
     if emitDevEnvDiagnostics(artifact):
       return 1
     var task = matchingTask.get()
@@ -16808,7 +16817,7 @@ proc runReproTasksCommand(args: openArray[string];
     let edge = computePublicDevEnv(parsed.selection, publicCliPath,
     announce = true)
     writeDevEnvStats(parsed.selection.statsPath, edge, "tasks")
-    let artifact = readDevEnvArtifact(edge.artifactPath)
+    let artifact = edge.artifact
     if emitDevEnvDiagnostics(artifact):
       return 1
     listedTasks = artifact.tasks
@@ -16827,7 +16836,7 @@ proc runReproExecCommand(args: openArray[string];
   let edge = computePublicDevEnv(parsed.selection, publicCliPath,
     announce = true)
   writeDevEnvStats(parsed.selection.statsPath, edge, "exec")
-  let artifact = readDevEnvArtifact(edge.artifactPath)
+  let artifact = edge.artifact
   if emitDevEnvDiagnostics(artifact):
     return 1
   # Two channels, deliberately different. Provisioned packages go in `preOps`
@@ -16865,7 +16874,7 @@ proc runReproShellCommand(args: openArray[string];
   let edge = computePublicDevEnv(parsed.selection, publicCliPath,
     announce = true)
   writeDevEnvStats(parsed.selection.statsPath, edge, "shell")
-  let artifact = readDevEnvArtifact(edge.artifactPath)
+  let artifact = edge.artifact
   if emitDevEnvDiagnostics(artifact):
     return 1
   let toolOps = devEnvToolShellOps(edge, parsed.selection)
@@ -17166,7 +17175,7 @@ proc runDevEnvExportCommand(args: openArray[string];
     except CatchableError as err:
       stderr.writeLine("repro dev-env export: " & err.msg)
       return 1
-  let artifact = readDevEnvArtifact(edge.artifactPath)
+  let artifact = edge.artifact
   if not parsed.allowStale and emitDevEnvDiagnostics(artifact):
     return 1
 
@@ -17210,8 +17219,13 @@ proc runDevEnvExportCommand(args: openArray[string];
   # declares, with every tool resolving from the ambient PATH. That is the
   # failure the whole provisioning system exists to remove, and it sat in
   # the DEFAULT activation path while `repro exec` was correct.
-  var plan = shellOpsToExportPlan(
-    devEnvToolShellOpsAt(edge.interfacePath, selection.outDir))
+  #
+  # The selection is the one `devEnvToolShellOpsAt` builds, so these ops are
+  # the ones a legacy `dev-env deactivate` re-derives from the paths; the
+  # interface comes from the edge's own decoded copy rather than the shared
+  # file (`DevEnvEdgeResult.interfaceDecoded`).
+  var plan = shellOpsToExportPlan(devEnvToolShellOpsImpl(edge,
+    DevEnvCliSelection(outDir: selection.outDir)))
   let toolOpCount = plan.len
   plan.add(devEnvArtifactToExportPlan(activationArtifactPath))
   # M77 — emit the cache-key as the ``__REPRO_APPLIED`` marker. The
@@ -18059,13 +18073,8 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
   ## any refused. Called BEFORE the supervisor is launched, for
   ## `convergeSharedServiceInstances`' reason: a refusal has to stop the
   ## session rather than arrive after it published `session.up`.
-  let artifact =
-    try:
-      readDevEnvArtifact(edge.artifactPath)
-    except CatchableError as err:
-      raise newException(IOError,
-        "could not read the dev-env artifact at " & edge.artifactPath &
-        " to find resolved shared services: " & err.msg)
+  # Decoded by the edge under its lock (`DevEnvEdgeResult.artifact`).
+  let artifact = edge.artifact
   if artifact.sharedResolutions.len == 0:
     return 0
   let projectRoot = parsed.selection.projectRoot
@@ -18425,13 +18434,8 @@ proc convergeSharedServiceInstances(parsed: ParsedDevSessionCommand;
   ## Returns 0 when every declaration converged, and 1 when any refused.
   ## A non-zero return means NOTHING was started: the supervisor has not
   ## been launched yet at this point in `runUpOrDevCommand`.
-  let artifact =
-    try:
-      readDevEnvArtifact(edge.artifactPath)
-    except CatchableError as err:
-      raise newException(IOError,
-        "could not read the dev-env artifact at " & edge.artifactPath &
-        " to find shared service instances: " & err.msg)
+  # Decoded by the edge under its lock (`DevEnvEdgeResult.artifact`).
+  let artifact = edge.artifact
   var declarations: seq[tuple[declaration: SharedServiceInstanceDeclaration;
     service: DevEnvServiceSummary]] = @[]
   for service in artifact.services:
@@ -19069,7 +19073,7 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
   # the provider's return, because a cached dev-env edge is answered
   # from the artifact and a check that lived on the provider wire would
   # fire on a cold evaluation and silently never again.
-  let upArtifact = readDevEnvArtifact(edge.artifactPath)
+  let upArtifact = edge.artifact
   if emitDevEnvDiagnostics(upArtifact):
     return 1
   # Shared-Development-Services F1 (§4.8 / D-SS15), SECOND HALF: BUILD
@@ -24260,7 +24264,7 @@ proc runReproNativeShellActivationHelper(args: openArray[string];
   let edge = computePublicDevEnv(selection, publicCliPath, renderShell = true,
     announce = true)
   writeDevEnvStats(selection.statsPath, edge, "hooks shell-native")
-  let artifact = readDevEnvArtifact(edge.artifactPath)
+  let artifact = edge.artifact
   if emitDevEnvDiagnostics(artifact):
     return 1
   stdout.write(renderNativeShellTransition(request.previousArtifact,
@@ -24294,7 +24298,7 @@ proc runReproDirenvActivationHelper(args: openArray[string];
   let edge = computePublicDevEnv(selection, publicCliPath, renderShell = true,
     announce = true)
   writeDevEnvStats(selection.statsPath, edge, "hooks shell-direnv")
-  stdout.write(readFile(extendedPath(edge.shellFragmentPath)))
+  stdout.write(edge.shellFragment)
   # W2 — REPORT the workspace's declared ``uses:`` producer pins, exactly as
   # the native-shell transition does. This is what ``repro hooks ensure
   # --shell-direnv`` installs into ``.envrc``; direnv shows an ``.envrc``'s
@@ -24308,7 +24312,7 @@ proc runReproDirenvActivationHelper(args: openArray[string];
   # ``fileExists`` calls and no artifact read.
   if devEnvProducerEdgesPossible(selection.projectRoot):
     discard devEnvProducerActivation(
-      readDevEnvArtifact(edge.artifactPath), selection.projectRoot,
+      edge.artifact, selection.projectRoot,
       appliesToPath = false)
   # W2-no-producer-ops: reports (above), does not BIND. direnv would in fact
   # unload a prepend correctly — it snapshots and restores the environment
@@ -46403,6 +46407,27 @@ proc participatingRepoCommittedLocks(workspaceRoot: string):
       result.deps.add(rebased)
       break
 
+proc developLockHasConsumer(root: string; identity: GitToolIdentity;
+                            lock: LockedDependencies): bool =
+  ## A consumer's dependency pins and a workspace inventory answer different
+  ## questions. A self record identifies a consumer even when it also carries
+  ## membership manifests. Without that identity, the flat projects/repos
+  ## layout identifies the membership inventory (which can also have recipes
+  ## for its dev shell). Elsewhere, a recipe or actual Git checkout identifies
+  ## a consumer, including legacy locks that omit the self entry.
+  ##
+  ## Do not infer a consumer from an ancestor's Git checkout. Inventory roots
+  ## may be plain directories inside a checkout; discoverGitWorktree requires
+  ## the exact root and also accepts linked worktrees.
+  for dep in lock.deps:
+    if isSelfLockedDep(dep): return true
+  if firstMembershipManifestPath(root).len > 0:
+    return false
+  if fileExists(extendedPath(root / "repro.nim")) or
+      fileExists(extendedPath(root / "flake.nix")):
+    return true
+  discoverGitWorktree(identity, root).ok
+
 proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
                            args: DevelopAllArgs): DevelopLockSet =
   let root = absolutePath(workspaceRoot)
@@ -46461,7 +46486,9 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
     ## only *replaced* entries answered just as much as one in which they added.
   if publicContributes:
     perRepo = participatingRepoCommittedLocks(root)
-    # A REPO'S OWN LOCK OUTRANKS THE ROOT REPO'S LOCK, for that repo.
+    let consumerPins = developLockHasConsumer(root, identity, result.lock)
+    # For a WORKSPACE INVENTORY, a repo's own lock outranks the root lock.
+    # Consumer-specific dependency pins are preserved before this rule applies.
     #
     # This inverts the previous rule ("the ROOT lock wins where both speak"),
     # which was never in a spec: it was stated in this comment and pinned by a
@@ -46519,6 +46546,12 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
       elif d.path.len > 0 and d.path in rootIndexByPath:
         at = rootIndexByPath[d.path]
       if at >= 0:
+        # Producer self-records describe the producer's coordinates, not the
+        # revision this consumer solved for its dependency. They may fill gaps
+        # but cannot replace a consumer pin. Workspace inventory retains its
+        # own self-record aggregation rule below; cross-backend conflicts are
+        # still checked by the later backend fold.
+        if consumerPins: continue
         # The root repo's lock also speaks about this repo. The repo's own lock
         # wins; say so whenever the two answers actually differ.
         let prev = result.lock.deps[at]

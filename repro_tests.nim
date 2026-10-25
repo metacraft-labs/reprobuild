@@ -12708,6 +12708,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_concurrent_repro_exec_in_one_project_share_the_dev_env_edge.nim",
+    binary: "build/test-bin/t_concurrent_repro_exec_in_one_project_share_the_dev_env_edge",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_config_layer_determines_tier_not_per_repo_field.nim",
     binary: "build/test-bin/t_config_layer_determines_tier_not_per_repo_field",
     defines: @[],

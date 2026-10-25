@@ -11,7 +11,9 @@
 ## real `build/bin/repro`:
 ##
 ## * `repro home facts --host gm11-desktop` lists the files of all three
-##   packages; `--host gm11-server` lists `common`'s only;
+##   packages; `--host gm11-server` lists `common`'s only when the plan
+##   targets Linux or macOS, and `common`'s and `rdp`'s when it targets
+##   Windows (the guarded claim below);
 ## * the guarded claim holds where its guard does: the server planned for a
 ##   Windows target (`--target x86_64-windows`) gets `rdp` again, and not
 ##   `kitty`;
@@ -19,8 +21,19 @@
 ##   declaration order, each with its activity and guard;
 ## * a real `repro home apply --host gm11-desktop` links all three packages
 ##   into the sandbox HOME; the next `repro home apply --host gm11-server`
-##   removes the `kitty` and `rdp` links and keeps `common`'s -- the files
-##   follow the selection.
+##   removes the `kitty` link (and the `rdp` one off Windows) and keeps
+##   `common`'s -- the files follow the selection.
+##
+## Which server files are expected. The native legs (`facts` without
+## `--target`, and the real apply) plan for the platform the test runs on,
+## so the server's expected set is computed from the `system` the facts
+## report for that plan (`expectedServerFiles`), not hard-coded: on a Windows
+## host the guarded `rdp` claim holds natively too (reprobuild-pm issue
+## 2026-10-25-gm11-stow-follows-activity-gate-assumes-a-non-windows-host).
+## The reported `system` is itself checked against the platform the test was
+## compiled for, so a planner that targeted the wrong platform cannot choose
+## its own expectation; off Windows the set is still asserted to be exactly
+## `common`'s.
 ##
 ## Negative control (same profile): the unclaimed package `common` reaches
 ## both hosts.
@@ -44,7 +57,8 @@
 ## No mocks: the real `build/bin/repro`, the real profile compile edge, the
 ## real planner and the real stow materializer, all in the harness's isolated
 ## sandbox (its own HOME, state and store). Platforms: every host -- the
-## Windows leg is a planning target, not the platform the test runs on.
+## `--target x86_64-windows` leg covers the guarded claim from any host; on a
+## Windows host the native legs cover it as well.
 
 import std/[algorithm, json, os, sequtils, strutils, unittest]
 from repro_core/paths import extendedPath
@@ -105,21 +119,41 @@ proc writeStowTree(sb: ProfileSandbox) =
   for (package, rel, content) in StowFiles:
     sb.writeProfileFile("stow/" & package & "/" & rel, content)
 
-proc stowFilesFor(sb: ProfileSandbox; host: string; target = ""): seq[string] =
-  ## The `~/...` files of the fixture's stow packages that `repro home facts`
-  ## says an apply for `host` would write.
+type StowFacts = object
+  system: string
+    ## The platform the plan targeted, as `repro home facts` reports it
+    ## (`x86_64-linux`, `aarch64-darwin`, `x86_64-windows`, ...).
+  files: seq[string]
+    ## The `~/...` files of the fixture's stow packages it would write.
+
+proc targetsWindows(system: string): bool =
+  system.endsWith("-windows")
+
+proc expectedServerFiles(system: string): seq[string] =
+  ## What `gm11-server` (`default` only) gets from a plan for `system`:
+  ## `common`, plus `rdp` where `default`'s `when windows():` claim holds.
+  if system.targetsWindows: @WindowsServerFiles else: @ServerFiles
+
+proc stowFactsFor(sb: ProfileSandbox; host: string; target = ""): StowFacts =
+  ## The platform `repro home facts` planned `host` for, and the stow files
+  ## it says an apply would write.
   var args = @["home", "facts", "--host", host]
   if target.len > 0:
     args.add ["--target", target]
   let run = sb.runRepro(args, host = "")
   show("facts --host " & host & " " & target, run)
   require run.exitCode == 0
+  let facts = parseJson(run.stdout)
+  result.system = facts["system"].getStr
   let known = StowFiles.mapIt("~/" & it[1])
-  for f in parseJson(run.stdout)["categories"]["files"]:
+  for f in facts["categories"]["files"]:
     let id = f["id"].getStr
     if id in known:
-      result.add id
-  result.sort()
+      result.files.add id
+  result.files.sort()
+
+proc stowFilesFor(sb: ProfileSandbox; host: string; target = ""): seq[string] =
+  sb.stowFactsFor(host, target).files
 
 suite "GM11: activity-scoped stow packages follow host selection":
 
@@ -130,10 +164,20 @@ suite "GM11: activity-scoped stow packages follow host selection":
 
     # --- the planner ------------------------------------------------------
     let desktop = sb.stowFilesFor("gm11-desktop")
-    let server = sb.stowFilesFor("gm11-server")
-    checkpoint("desktop gets " & $desktop & ", server gets " & $server)
+    let serverFacts = sb.stowFactsFor("gm11-server")
+    let server = serverFacts.files
+    checkpoint("desktop gets " & $desktop & ", server (" &
+      serverFacts.system & ") gets " & $server)
+    # The native plan targets the platform this test runs on, and the
+    # expected server set is derived from it, so check that it really does.
+    require serverFacts.system.len > 0
+    check serverFacts.system.targetsWindows == defined(windows)
+    let expectedServer = expectedServerFiles(serverFacts.system)
     check desktop == @DesktopFiles
-    check server == @ServerFiles
+    check server == expectedServer
+    when not defined(windows):
+      # Off Windows the native server set is exactly `common`'s.
+      check server == @ServerFiles
     # Negative control: the unclaimed package reaches both hosts.
     for f in CommonFiles:
       check f in desktop
@@ -145,8 +189,10 @@ suite "GM11: activity-scoped stow packages follow host selection":
     # --- a guarded claim holds where its guard does ------------------------
     # `default` claims `rdp` under `when windows():`; the server planned for
     # a Windows target gets it back (and still not `kitty`).
-    let windowsServer = sb.stowFilesFor("gm11-server", "x86_64-windows")
-    check windowsServer == @WindowsServerFiles
+    let windowsServer = sb.stowFactsFor("gm11-server", "x86_64-windows")
+    check windowsServer.system == "x86_64-windows"
+    check windowsServer.files == @WindowsServerFiles
+    check windowsServer.files == expectedServerFiles(windowsServer.system)
 
     # --- the export carries the claims, in declaration order ---------------
     let exported = sb.runRepro(["home", "export", "--host", "gm11-desktop",
@@ -176,7 +222,7 @@ suite "GM11: activity-scoped stow packages follow host selection":
     for (package, rel, content) in StowFiles:
       checkpoint("after server apply: " & rel)
       check fileExists(extendedPath(sb.homeDir / rel)) ==
-        (("~/" & rel) in ServerFiles)
+        (("~/" & rel) in expectedServer)
 
     # --- the falsifying mutation: no claims ---------------------------------
     let unclaimed = newProfileSandbox("gm11-unclaimed", UnclaimedProfile)

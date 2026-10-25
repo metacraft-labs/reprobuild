@@ -630,6 +630,11 @@ repro develop --all                   # substitute the lock set, exact pins exce
 repro develop --drop=<dependency> [--workspace-root=<dir>] [--project-root=<dir>]
 ```
 
+When materializing a consumer's dependencies, `repro develop` keeps the
+revisions in that consumer's `repro.lock`. A participating producer's own
+self-record may fill a missing pin, but cannot replace a consumer dependency
+pin. Workspace inventory queries continue to aggregate producer self-records.
+
 Debugging against a sibling checkout uses a develop override, which never
 writes a recipe or a lock. How it meets an exact recipe pin depends on how
 the dependency was selected:

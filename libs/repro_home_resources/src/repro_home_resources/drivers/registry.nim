@@ -18,11 +18,20 @@
 ## `repro home apply` against profiles with `env.userPath` resources
 ## were leaking PATH entries into the host's `HKCU\Environment\Path`
 ## across thousands of runs.
+##
+## Test home fence: when the seam is NOT set, every write and delete is
+## resolved through `resolveRegistryWriteTarget`, which consults the
+## suite's fence (`test_home_fence.enforceTestRegistryFence`). With
+## `REPRO_TEST_HOME_FENCE` set, a write that would reach the real user
+## hive outside `HKCU\Software\Reprobuild-Tests` raises instead of
+## changing the developer's account (reprobuild-pm issue
+## `2026-10-23-windows-home-apply-gates-leak-store-prefixes-into-the-real-user-path.md`).
 
 import std/[os, strutils]
 
 import ./../errors
 import ./../manifest_record
+import ./../test_home_fence
 import ./../types
 
 proc stripHkcuPrefix*(key: string): string =
@@ -185,7 +194,35 @@ proc registryRootOverride*(): string =
   ## Returns the fake-hive root if `REPRO_REGISTRY_ROOT` is set,
   ## else empty string. Checked at the start of each read/write/delete
   ## so a test can opt in via subprocess env without recompiling.
-  getEnv("REPRO_REGISTRY_ROOT")
+  getEnv(RegistryRootEnvVar)
+
+type
+  RegistryTargetKind* = enum
+    rtkFakeHive  ## `REPRO_REGISTRY_ROOT` redirects the operation.
+    rtkRealHive  ## The invoking user's real `HKCU`.
+
+  RegistryTarget* = object
+    ## Where a registry write or delete lands. Resolved once per
+    ## operation, before its first side effect.
+    case kind*: RegistryTargetKind
+    of rtkFakeHive:
+      root*: string
+    of rtkRealHive:
+      discard
+
+proc resolveRegistryWriteTarget*(subkey, name, operation: string):
+    RegistryTarget =
+  ## The target of a write or delete of value `name` of `HKCU\<subkey>`:
+  ## the fake hive when `REPRO_REGISTRY_ROOT` is set, else the real hive
+  ## -- unless the test home fence refuses that, in which case this
+  ## raises `TestHomeFenceError` and nothing is written. Platform
+  ## independent, so the decision is tested on every host; only the
+  ## real-hive branch of the callers is Windows-specific.
+  let override = registryRootOverride()
+  if override.len > 0:
+    return RegistryTarget(kind: rtkFakeHive, root: override)
+  enforceTestRegistryFence(subkey, name, operation)
+  RegistryTarget(kind: rtkRealHive)
 
 proc normalizeSubkey(subkey: string): string =
   ## Windows treats subkeys case-insensitively; mirror that by
@@ -428,9 +465,10 @@ when defined(windows):
                           data: openArray[byte]) =
     ## Create the subkey if missing, then set the value with the
     ## given REG_TYPE and raw bytes.
-    let override = registryRootOverride()
-    if override.len > 0:
-      writeFakeRegistryValue(override, subkey, name, regType, data)
+    let target = resolveRegistryWriteTarget(subkey, name,
+      "windows.registryValue write")
+    if target.kind == rtkFakeHive:
+      writeFakeRegistryValue(target.root, subkey, name, regType, data)
       return
     let hk = openOrCreateKey(subkey, KEY_WRITE, create = true)
     defer: discard RegCloseKey(hk)
@@ -451,9 +489,10 @@ when defined(windows):
   proc deleteRegistryValue*(subkey, name: string) =
     ## Delete the value. Silently succeeds if the value (or the
     ## subkey) was already gone.
-    let override = registryRootOverride()
-    if override.len > 0:
-      deleteFakeRegistryValue(override, subkey, name)
+    let target = resolveRegistryWriteTarget(subkey, name,
+      "windows.registryValue delete")
+    if target.kind == rtkFakeHive:
+      deleteFakeRegistryValue(target.root, subkey, name)
       return
     var hk: HKEY
     var wide = subkeyWide(subkey)
@@ -522,17 +561,19 @@ else:
 
   proc writeRegistryValue*(subkey, name: string; regType: uint32;
                           data: openArray[byte]) =
-    let override = registryRootOverride()
-    if override.len > 0:
-      writeFakeRegistryValue(override, subkey, name, regType, data)
+    let target = resolveRegistryWriteTarget(subkey, name,
+      "windows.registryValue write")
+    if target.kind == rtkFakeHive:
+      writeFakeRegistryValue(target.root, subkey, name, regType, data)
       return
     raiseResourceDriver("HKCU\\" & subkey, "windows.registryValue",
       "platform", "registry driver is Windows-only")
 
   proc deleteRegistryValue*(subkey, name: string) =
-    let override = registryRootOverride()
-    if override.len > 0:
-      deleteFakeRegistryValue(override, subkey, name)
+    let target = resolveRegistryWriteTarget(subkey, name,
+      "windows.registryValue delete")
+    if target.kind == rtkFakeHive:
+      deleteFakeRegistryValue(target.root, subkey, name)
       return
     raiseResourceDriver("HKCU\\" & subkey, "windows.registryValue",
       "platform", "registry driver is Windows-only")

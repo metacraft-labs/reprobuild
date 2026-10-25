@@ -8,12 +8,18 @@
 ##   - Deliberate value drift produces `EDrift`.
 ##   - Rollback restores or deletes per the recorded `preWriteValue`.
 ##
-## Uses real HKCU writes through the `windows.registryValue`
-## driver's `Reg*` API path; mocking the registry is explicitly
-## forbidden by the M68 anti-patterns list.
+## The driver runs unmocked, but against the `REPRO_REGISTRY_ROOT` fake
+## hive (`registry_isolation`): the apply also writes the fixture
+## package's bin directory into the user PATH, which must never reach the
+## developer's real `HKCU\Environment\Path` (reprobuild-pm issue
+## 2026-10-23-windows-home-apply-gates-leak-store-prefixes-into-the-real-user-path).
+## The fake hive stores the same typed bytes `RegSetValueExW` receives;
+## the real `Reg*` round-trip of every kind is pinned on the scratch
+## subkey `HKCU\Software\Reprobuild-Tests` by t_registry_root_override.
 
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, times, unittest]
 import repro_test_support/reasoned_skip
+import repro_test_support/registry_isolation
 
 import repro_home_generations
 import repro_home_resources
@@ -88,6 +94,14 @@ else:
       when not defined(windows):
         skip("platform-skip: Windows-only gate")
         return
+      # This case writes HKCU\Environment\Path (an env.userPath
+      # contribution), so every registry operation in it, in-process and
+      # in the spawned repro, goes to a fake hive (reprobuild-pm issue
+      # 2026-10-23-windows-home-apply-gates-leak-store-prefixes-into-the-
+      # real-user-path). The real Win32 path is covered on the scratch
+      # subkey by t_registry_root_override.
+      let registryIsolation = beginRegistryIsolation()
+      defer: endRegistryIsolation(registryIsolation)
       # Per-test subkey: timestamp keeps parallel CI runs collision-free.
       let testSubkey = "Software\\Reprobuild-Tests\\m68-gate2-" &
         $epochTime()
