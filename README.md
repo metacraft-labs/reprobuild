@@ -375,5 +375,7 @@ for this invocation. Existing checkouts keep their current object storage.
 
 ## 9. License
 
-MIT. The `repro` CLI and engine in this repository are free software;
-commercial services are optional and never required to use them.
+Apache License 2.0 — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
+Copyright 2026 Metacraft Labs. The `repro` CLI and engine in this repository
+are free software; commercial services are optional and never required to use
+them.

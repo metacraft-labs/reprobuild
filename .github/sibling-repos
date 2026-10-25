@@ -183,7 +183,8 @@ reprobuild-packages=5c2e2ce9fb19e0e4e1df530dab8753480965a188
 # flake.nix and flake.lock; 4d468bc is an ancestor.
 # Moved to 6fc4ba9 (2026-10-22), io-mon's `agents` tip, with `io-mon-src` in
 # flake.nix and flake.lock; 06ee30a is an ancestor.
-io-mon=6fc4ba9a2a9636298fc2e6c6578bc4677bd0a134
+# Raw renameat2 capture; matches io-mon-src in flake.nix and flake.lock.
+io-mon=6fccd929cb09da0bfc0844b93ced9ffb1ac0f74f
 # Must match `nim-stackable-hooks-src` in flake.nix. `release.yml` overrides
 # that input to THIS clone, so a divergent revision here silently substitutes a
 # different stackable_hooks for the one the flake pins. c6cf6ad, which stood
@@ -222,7 +223,7 @@ nim-stackable-hooks=059c549306621e2f769adf75630b0b7f29018dca
 # (scripts/release/stage_release_runquota.sh), which it exports from this
 # clone, so the clone has to contain it. It was `dev` until 2026-10-20, 14
 # commits behind the pin.
-runquota=dba2b9bc3db3b086753d1ae0d8922890a0ccf79e
+runquota=93cfd5770abc2b3ac316ee6beee80b5bfd73264a
 nim-shm-queue=91451f2250beb89d1d221f0a77be0841c19b182e
 nim-shm-gset=c9048e9a7e0ba2b11c1ec137acc5fc2c0bcfec27
 
@@ -277,4 +278,4 @@ metacraft-github-actions=dev
 # vectors would be absent the moment `latest` moved past them. A SHA entry
 # fetches exactly the pinned commit. scripts/check_workflows.sh refuses a
 # sibling pin that differs from the .pin file, so move both together.
-test-certificates-spec=bd9d1bf5a45545eab2ecd4e17c51f15dad03baa9
+test-certificates-spec=282524dad92fcc892b6b9b8dc988bd77f72edab6

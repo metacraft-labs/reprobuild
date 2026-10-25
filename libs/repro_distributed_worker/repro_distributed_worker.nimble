@@ -1,7 +1,7 @@
 version       = "0.1.0"
 author        = "Metacraft Labs"
 description   = "Distributed-Execution worker receiver: hydrated graph descriptors, ReachGoal derivation checks, confined execution leases, and certificate re-verification (M7)"
-license       = "MIT"
+license       = "Apache-2.0"
 srcDir        = "src"
 
 requires "nim >= 2.2.0"

@@ -298,7 +298,9 @@
       # ancestor. Execute-only images, a posix_spawn whose file actions change
       # the child's directory, and an exec from a thread that cannot record
       # are now graded as loss too.
-      url = "github:metacraft-labs/io-mon/6fc4ba9a2a9636298fc2e6c6578bc4677bd0a134";
+      # Capture raw renameat2 through syscall() and trapped inline sites,
+      # including both exchange paths, instead of reporting unknown loss.
+      url = "github:metacraft-labs/io-mon/6fccd929cb09da0bfc0844b93ced9ffb1ac0f74f";
       flake = false;
     };
     nim-shm-gset-src = {
