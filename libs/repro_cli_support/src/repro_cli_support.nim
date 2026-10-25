@@ -28,6 +28,7 @@ import repro_core/relocation
 import repro_core/ambient_execution
 import repro_core/cli_images
 import repro_core/source_root
+from repro_core/workspace_root import firstMembershipManifestPath
 import repro_core/nix_evaluation_policy
 import repro_build_engine
 import repro_cmake_trycompile
@@ -46333,6 +46334,27 @@ proc participatingRepoCommittedLocks(workspaceRoot: string):
       result.deps.add(rebased)
       break
 
+proc developLockHasConsumer(root: string; identity: GitToolIdentity;
+                            lock: LockedDependencies): bool =
+  ## A consumer's dependency pins and a workspace inventory answer different
+  ## questions. A self record identifies a consumer even when it also carries
+  ## membership manifests. Without that identity, the flat projects/repos
+  ## layout identifies the membership inventory (which can also have recipes
+  ## for its dev shell). Elsewhere, a recipe or actual Git checkout identifies
+  ## a consumer, including legacy locks that omit the self entry.
+  ##
+  ## Do not infer a consumer from an ancestor's Git checkout. Inventory roots
+  ## may be plain directories inside a checkout; discoverGitWorktree requires
+  ## the exact root and also accepts linked worktrees.
+  for dep in lock.deps:
+    if isSelfLockedDep(dep): return true
+  if firstMembershipManifestPath(root).len > 0:
+    return false
+  if fileExists(extendedPath(root / "repro.nim")) or
+      fileExists(extendedPath(root / "flake.nix")):
+    return true
+  discoverGitWorktree(identity, root).ok
+
 proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
                            args: DevelopAllArgs): DevelopLockSet =
   let root = absolutePath(workspaceRoot)
@@ -46391,7 +46413,9 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
     ## only *replaced* entries answered just as much as one in which they added.
   if publicContributes:
     perRepo = participatingRepoCommittedLocks(root)
-    # A REPO'S OWN LOCK OUTRANKS THE ROOT REPO'S LOCK, for that repo.
+    let consumerPins = developLockHasConsumer(root, identity, result.lock)
+    # For a WORKSPACE INVENTORY, a repo's own lock outranks the root lock.
+    # Consumer-specific dependency pins are preserved before this rule applies.
     #
     # This inverts the previous rule ("the ROOT lock wins where both speak"),
     # which was never in a spec: it was stated in this comment and pinned by a
@@ -46449,6 +46473,12 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
       elif d.path.len > 0 and d.path in rootIndexByPath:
         at = rootIndexByPath[d.path]
       if at >= 0:
+        # Producer self-records describe the producer's coordinates, not the
+        # revision this consumer solved for its dependency. They may fill gaps
+        # but cannot replace a consumer pin. Workspace inventory retains its
+        # own self-record aggregation rule below; cross-backend conflicts are
+        # still checked by the later backend fold.
+        if consumerPins: continue
         # The root repo's lock also speaks about this repo. The repo's own lock
         # wins; say so whenever the two answers actually differ.
         let prev = result.lock.deps[at]
