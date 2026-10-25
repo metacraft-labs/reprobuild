@@ -142,6 +142,25 @@ proc layerDirName(index: int; entry: ManifestLayer): string =
     else: "layer"
   "manifests-" & $index & "-" & sanitizeForPath(urlOrLocal)
 
+proc manifestCheckoutPaths*(workspaceRoot: string): seq[string] =
+  ## Existing manifest inputs, without acquisition, fetch or checkout updates.
+  ## Keep URL-layer placement identical to refresh/compose; local-path layers
+  ## also need inspection even though sync does not own their update cadence.
+  let root = absolutePath(workspaceRoot)
+  let base = manifestsRoot(root)
+  if dirExists(base / "projects") or dirExists(base / "repos"):
+    result.add(base)
+  if not fileExists(workspaceTomlPath(root)): return
+  let local = effectiveWorkspaceLocal(root)
+  for index, layer in local.manifest:
+    var path = ""
+    if layer.local_path.isSome:
+      path = absolutePath(layer.local_path.get(), root)
+    elif layer.url.isSome:
+      path = root / ".repro" / layerDirName(index, layer)
+    if path.len > 0 and dirExists(path) and path notin result:
+      result.add(path)
+
 proc q(value: string): string = quoteShell(value)
 
 proc runGit(identity: GitToolIdentity;
