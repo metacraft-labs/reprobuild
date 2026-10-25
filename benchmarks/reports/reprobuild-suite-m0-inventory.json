@@ -148,10 +148,10 @@
       "cpu": "x86_64",
       "os": "linux"
     },
-    "dirty": true,
+    "dirty": false,
     "environmentReportPath": "build/reprobuild-suite-m0-environment.md",
-    "head": "56b26d8f97b390d6571297710ed1004667623b7e",
-    "headShort": "56b26d8f9",
+    "head": "07a28b5af65b7920248ffd4576dd0f9580500e59",
+    "headShort": "07a28b5af",
     "repoRoot": ".",
     "runtimeDetailPath": "build/reprobuild-suite-case-catalog.json",
     "runtimeDetailReason": "footprint, host, tool versions, the recorded environment and the sibling-checkout paths are properties of the machine and of the moment, not of the tree; keeping them here made the tracked artifact differ on every build and every host, which is the defect spec \u00a716.4 forbids for an embedded build timestamp",
@@ -188,7 +188,7 @@
         "head": "d33c48b0bcc07111419baf547c824d10c215416d"
       }
     },
-    "sourceFingerprint": "941c48d35ed4a982848f079b87267e06926ca2c3e08b289e51152328cbc6fde8"
+    "sourceFingerprint": "52b40c58ee0b3e2c63b0cdc819ade10e9c75e39a1431d723868351e8a5d0ca68"
   },
   "performanceAssessment": {
     "deferredMeasurementCommand": "REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/reprobuild_suite_inventory.py --run-suite --clean-first --warm-runs 2 --suite-timeout-seconds 7200",
@@ -212,7 +212,7 @@
       "nimTestBinaries": 2372,
       "pureUnitConsolidationGroups": 68,
       "pureUnitTests": 691,
-      "sourceCases": 15499,
+      "sourceCases": 15502,
       "staticallyDetectedRuntimeCompilerFlowTests": 129,
       "testEntries": 2409
     },
@@ -1893,7 +1893,7 @@
     "measuredProtocolAwareCaseCount": null,
     "nimTestBinaryCount": 2372,
     "pythonTestFileCount": 37,
-    "sourceCaseCount": 15499,
+    "sourceCaseCount": 15502,
     "testEntryCount": 2409
   },
   "staticallyDetectedRuntimeCompilerFlows": [
@@ -39309,16 +39309,17 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_project_dsl",
         "repro_test_support",
         "repro_workspace_manifests"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_committed_lock_records_develop_set_siblings.nim",
-      "sourceCaseCount": 1,
+      "sourceCaseCount": 3,
       "sourceNewerThanBinary": false,
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -44354,10 +44355,10 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_l7_repro_up_converges_on_one_shared_instance.nim",
-      "sourceCaseCount": 8,
+      "sourceCaseCount": 9,
       "sourceNewerThanBinary": false,
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -61250,7 +61251,7 @@
   ],
   "timing": {
     "complete": false,
-    "currentSourceFingerprint": "941c48d35ed4a982848f079b87267e06926ca2c3e08b289e51152328cbc6fde8",
+    "currentSourceFingerprint": "52b40c58ee0b3e2c63b0cdc819ade10e9c75e39a1431d723868351e8a5d0ca68",
     "notes": [
       "No suite run was requested for this inventory."
     ],
