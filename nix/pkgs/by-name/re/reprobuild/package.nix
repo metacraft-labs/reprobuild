@@ -135,8 +135,8 @@
   shmQueueSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-shm-queue";
-    rev = "a3564c13e0b7d0c6a092c19c998cd3faee5ce20a";
-    hash = "sha256-vsqb2Ibe+4VqVug6oGJVZqX4d+z4oOY0oWZMHKc2pLk=";
+    rev = "91451f2250beb89d1d221f0a77be0841c19b182e";
+    hash = "sha256-HYS07QHtkHQ4Pm7yBuQm27dhQ3mOYquwp2GWIEuupqo=";
   },
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -162,8 +162,8 @@
   runquotaSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "runquota";
-    rev = "416274abe4cda8ec9aef7dca9165cfb8c25a1846";
-    hash = "sha256-A0+DQquMegirVLTJxokjn2Yxs9LWNef9RLUORFwXCUU=";
+    rev = "d33c48b0bcc07111419baf547c824d10c215416d";
+    hash = "sha256-XO8W6FOxdUGzmXkCmnD14Nomc9YFyLqscz3A+GLnAdE=";
   },
 }:
 let
@@ -215,7 +215,7 @@ stdenv.mkDerivation (finalAttrs: {
   # forbids. reprobuild's flake overrides it with the value it parses from the
   # nimble manifest, and `checks.nixpkgs-package-version-sync` fails the build
   # if this literal and the manifest disagree, so the two cannot drift silently.
-  version = "0.2.6";
+  version = "0.2.16";
 
   # The default source: a published commit whose `reprobuild.nimble` carries
   # `version` above and whose `flake.lock` pins the `*Src` defaults above
@@ -226,8 +226,8 @@ stdenv.mkDerivation (finalAttrs: {
   src = fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "reprobuild";
-    rev = "1f51077433102dc20df1d5a795e9644a08060101";
-    hash = "sha256-Hj/msOaQYzrxH0ETCQ1xmqOUZbJMljCVUswxBs3iLM0=";
+    rev = "1fe6c6a9c8e8481cb210077335f15ba67b784da2";
+    hash = "sha256-GHQHp2WdQqVxsvBEvf3uKbRSHrrX3FnJtHcHX5r5me4=";
   };
 
   strictDeps = true;
