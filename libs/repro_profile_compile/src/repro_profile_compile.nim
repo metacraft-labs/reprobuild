@@ -55,6 +55,8 @@ export compile.CompileFailure
 export compile.ProfileNimCompilerEnvVar
 export compile.resolveProfileNimCompiler
 export compile.resolveProfileCCompiler
+export compile.requireProfileCCompiler
+export compile.profileCCompilerRemedy
 export compile.NimDefaultCCompilerExe
 export compile.profileCompileCFlags
 export compile.ProfileDepfileTarget

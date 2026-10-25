@@ -14,6 +14,16 @@
 ##     the entropy policy of each -- the compile edge carries the provider
 ##     compile's blessing, the run edge none (reprobuild-pm
 ##     `spec/Profile-Compilation-Model.md` §2.1).
+##   - The profile C compiler capability check (`requireProfileCCompiler`).
+##
+## Stand-ins, justified per the mocks policy: the capability-check cases use
+## no fake compiler result. On Linux the unusable compiler is a two-line
+## `gcc` script that execs the real gcc with `-nostdinc`, because no host
+## here has a gcc that genuinely cannot find its headers (the failure FPC's
+## bundled gcc 2.95 shows on Windows); the probe still runs a real compile
+## that really fails. On Windows the unusable compiler is a non-executable
+## `gcc.exe`, a real process-creation failure. The working-compiler cases
+## use the real gcc. Details at each suite.
 ##
 ## The source-discovery and source-digest cases that used to open this file
 ## were removed with the procs they tested (`parseSiblingImports`,
@@ -734,6 +744,7 @@ profile "compilerCapability":
                 check fake in err.msg
                 check "selected from: first gcc.exe on PATH" in err.msg
                 check "REPRO_BOOTSTRAP_CC" in err.msg
+                check ("remedy: " & profileCCompilerRemedy()) in err.msg
                 check "nim compile failed" notin err.msg
               check refused
               check not fileExists(dir / "profile.exe")
@@ -751,6 +762,110 @@ profile "compilerCapability":
         check compiled.jsonOutput.len > 0
         discard parseProfileIntentJson(compiled.jsonOutput)
 
+when defined(linux):
+  # The same capability check, run where CI capacity is plentiful. Only the
+  # Windows compile calls `requireProfileCCompiler` (the spec keeps POSIX
+  # selection unchanged), so these cases call it directly, with the real
+  # monitored-helper executor and the real gcc.
+  #
+  # Why a wrapper script rather than an old compiler: no host here has a
+  # gcc that cannot find its own standard headers, which is what FPC's
+  # bundled gcc 2.95 does on eli-pc (`capi.c:1: stddef.h: No such file or
+  # directory`). The wrapper execs the REAL gcc with `-nostdinc`, so the
+  # refusal comes from a genuine compile that genuinely cannot see
+  # <stddef.h>; nothing about the probe's result is stubbed. The recipe
+  # suite (`t_recipe_c_compiler_selection_is_loud.nim`) covers the
+  # wrong-pointer-width arm of the shared translation unit.
+  proc headerlessGcc(dir, realGcc: string): string =
+    ## A `gcc` in `dir` that is the real compiler without header search.
+    createDir(dir)
+    result = dir / "gcc"
+    writeFile(result, "#!/bin/sh\nexec " & quoteShell(realGcc) &
+      " -nostdinc \"$@\"\n")
+    setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec})
+
+  proc realGccOrFail(): string =
+    result = findExe(NimDefaultCCompilerExe)
+    doAssert result.len > 0, "needs gcc on PATH (enter reprobuild's dev shell)"
+    result = absolutePath(result)
+
+  suite "profile C compiler capability check (requireProfileCCompiler)":
+    test "a first gcc on PATH that cannot compile <stddef.h> is refused " &
+        "by name":
+      let realGcc = realGccOrFail()
+      let dir = createTempDir("repro-profile-headerless-gcc-", "")
+      defer: removeDir(dir)
+      let bad = headerlessGcc(dir / "bad", realGcc)
+      let cache = dir / "cache"
+      createDir(cache)
+      withEnv("PATH", parentDir(bad)):
+        var refused = false
+        try:
+          discard requireProfileCCompiler("", cache, CompiledRepoRoot)
+        except CompileFailure as err:
+          refused = true
+          checkpoint(err.msg)
+          check ("compiler: " & bad) in err.msg
+          check "selected from: first gcc on PATH" in err.msg
+          check "stddef.h" in err.msg
+          check "REPRO_BOOTSTRAP_CC" in err.msg
+          # The remedy is the profile compile's own. The recipe compile's
+          # text offers "unset it to use the pinned bootstrap compiler",
+          # which the profile compile does not provision.
+          check err.msg.endsWith("\n  remedy: " & profileCCompilerRemedy())
+          check "pinned bootstrap compiler" notin err.msg
+          check "ahead of the refused one on PATH" in err.msg
+          check err.stderrText == err.msg
+        check refused
+      # The probe's scratch lives in the nimcache and is removed again.
+      check not dirExists(cache / "cc-capability-probe")
+
+    test "a working gcc later on PATH does not stand in for the refused one":
+      # Profile-Compilation-Model.md §2 step 7: the selected image is refused,
+      # never silently replaced by a later PATH entry, so the compiler
+      # identity cannot depend on which entries happen to fail.
+      let realGcc = realGccOrFail()
+      let dir = createTempDir("repro-profile-shadowed-gcc-", "")
+      defer: removeDir(dir)
+      let bad = headerlessGcc(dir / "bad", realGcc)
+      withEnv("PATH", parentDir(bad) & PathSep & parentDir(realGcc)):
+        var refused = false
+        try:
+          discard requireProfileCCompiler("", dir, CompiledRepoRoot)
+        except CompileFailure as err:
+          refused = true
+          check ("compiler: " & bad) in err.msg
+          check ("compiler: " & realGcc) notin err.msg
+        check refused
+
+    test "a configured compiler is probed too, and named as configured":
+      let realGcc = realGccOrFail()
+      let dir = createTempDir("repro-profile-configured-gcc-", "")
+      defer: removeDir(dir)
+      let bad = headerlessGcc(dir / "bad", realGcc)
+      try:
+        discard requireProfileCCompiler(bad, dir, CompiledRepoRoot)
+        check false
+      except CompileFailure as err:
+        check ("compiler: " & bad) in err.msg
+        check "selected from: configured profile C compiler" in err.msg
+      try:
+        discard requireProfileCCompiler(dir / "no-such-gcc", dir,
+          CompiledRepoRoot)
+        check false
+      except CompileFailure as err:
+        check "no such file" in err.msg
+
+    test "a working gcc is accepted and returned as an absolute image":
+      # Positive control for the refusals above: the same wrapper directory
+      # layout, the same executor, a compiler that can see its headers.
+      let realGcc = realGccOrFail()
+      let dir = createTempDir("repro-profile-working-gcc-", "")
+      defer: removeDir(dir)
+      withEnv("PATH", parentDir(realGcc)):
+        check requireProfileCCompiler("", dir, CompiledRepoRoot) == realGcc
+      check requireProfileCCompiler(realGcc, dir, CompiledRepoRoot) == realGcc
+      check not dirExists(dir / "cc-capability-probe")
 # ---------------------------------------------------------------------------
 # An installed layout's source-only inputs (Gradual-Nix-To-Reprobuild-Migration
 # GM1w).

@@ -23,7 +23,7 @@ from repro_core/source_root import installedLayoutPrefixOfSourceRoot,
   installedLayoutPackageTrees
 from repro_core/ambient_execution import uncontrolledFindExe
 from repro_core/c_compiler import CCompilerUnusableError, explicitCCompiler,
-  fallbackCCompiler, nimCCompilerFlags, clangNoTempFileCFlags,
+  bootstrapCCompilerEnv, fallbackCCompiler, nimCCompilerFlags, clangNoTempFileCFlags,
   cCompilerAcceptsFlags, cCompilerFamily
 
 from repro_core/c_compiler_probe import CCompilerProbe, cCompilerProbeSource,
@@ -620,52 +620,81 @@ proc runProfileBinary*(outBinary: string): tuple[
   finally:
     p.close()
 
-when defined(windows):
-  proc requireProfileCCompiler(cc, nimcacheDir, repoRootAbs: string): string =
-    ## Resolve the implicit default once, then probe and pass that same image
-    ## to Nim. Presence alone admits old or wrong-target GCC installations.
-    ## This runs inside the monitored profile edge, in its existing scratch.
-    result = if cc.len > 0: cc else: uncontrolledFindExe("gcc")
-    if result.len > 0:
-      result = absolutePath(result)
-    let origin = if cc.len > 0: "configured profile C compiler"
-                 else: "first gcc.exe on PATH"
-    var probe = CCompilerProbe(compiler: result)
-    if result.len == 0 or not fileExists(extendedPath(result)):
-      probe.detail = "no such file"
-    else:
-      let scratch = absolutePath(nimcacheDir) / "cc-capability-probe"
-      let source = scratch / "probe.c"
-      let output = scratch / "probe.o"
-      try:
-        createDir(extendedPath(scratch))
-        writeFile(extendedPath(source), cCompilerProbeSource)
-        # The probe sees the compile's additions with the toolchain search
-        # variables removed for the spawn only: removing them by name keeps
-        # the environment un-enumerated (`startProfileNim`).
-        let res = finishProfileNim(startProfileNim(
-          cCompilerProbeArgv(result, source, output), repoRootAbs,
-          profileCompileEnvAdditions(repoRootAbs),
-          unset = ["SDKROOT", "DEVELOPER_DIR", "CPATH", "C_INCLUDE_PATH",
-                   "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "INCLUDE",
-                   "LIBRARY_PATH", "LIB"]))
-        probe.usable = res.exitCode == 0
-        if not probe.usable:
-          probe.detail = "exit status " & $res.exitCode &
-            (if res.output.strip().len > 0: ":\n" & res.output.strip() else: "")
-      except CatchableError, OSError:
-        probe.detail = "could not run it: " & getCurrentExceptionMsg()
-      finally:
-        for path in [output, source]:
-          try: removeFile(extendedPath(path))
-          except CatchableError, OSError: discard
-        try: removeDir(extendedPath(scratch))
+proc profileCCompilerRemedy*(): string =
+  ## The remedy the profile compile's capability refusal prints. It differs
+  ## from the recipe compile's `cCompilerOverrideRemedy`, which offers to
+  ## unset the override and use the pinned bootstrap compiler: the profile
+  ## compile provisions none, so unsetting `REPRO_BOOTSTRAP_CC` only selects
+  ## the first `NimDefaultCCompilerExe` on `PATH` (`resolveProfileCCompiler`).
+  "Set " & bootstrapCCompilerEnv & " to the absolute path of a working " &
+    (when defined(windows): "64-bit MinGW-w64 gcc.exe"
+     else: "C compiler for this host") &
+    ", or put a working " & addFileExt(NimDefaultCCompilerExe, ExeExt) &
+    " ahead of the refused one on PATH. The profile compile has no " &
+    "provisioned fallback compiler."
+
+proc requireProfileCCompiler*(cc, nimcacheDir, repoRootAbs: string): string =
+  ## Resolve the implicit default once, then probe and pass that same image
+  ## to Nim. Presence alone admits old or wrong-target GCC installations.
+  ## This runs inside the monitored profile edge, in its existing scratch.
+  ##
+  ## `cc` is `resolveProfileCCompiler`'s answer; "" selects the first
+  ## `NimDefaultCCompilerExe` on `PATH`, the image Nim itself would run.
+  ## Returns that image as an absolute path, which the caller hands to Nim
+  ## so a second PATH lookup cannot pick a different compiler. An unusable
+  ## image raises `CompileFailure` naming the image, how it was selected,
+  ## the probe's output and `profileCCompilerRemedy`; it is never
+  ## replaced by a later PATH entry (reprobuild-pm
+  ## `spec/Profile-Compilation-Model.md` §2 step 7).
+  ##
+  ## Only the Windows compile calls it (`compileProfileExecutable`): the
+  ## spec keeps POSIX selection unchanged. It is defined on every platform
+  ## so its refusal and acceptance run in the Linux suite as well as on the
+  ## scarce Windows runners (`tests/t_smoke_repro_profile_compile.nim`).
+  result = if cc.len > 0: cc
+           else: uncontrolledFindExe(NimDefaultCCompilerExe)
+  if result.len > 0:
+    result = absolutePath(result)
+  let origin = if cc.len > 0: "configured profile C compiler"
+               else: "first " & addFileExt(NimDefaultCCompilerExe, ExeExt) &
+                 " on PATH"
+  var probe = CCompilerProbe(compiler: result)
+  if result.len == 0 or not fileExists(extendedPath(result)):
+    probe.detail = "no such file"
+  else:
+    let scratch = absolutePath(nimcacheDir) / "cc-capability-probe"
+    let source = scratch / "probe.c"
+    let output = scratch / "probe.o"
+    try:
+      createDir(extendedPath(scratch))
+      writeFile(extendedPath(source), cCompilerProbeSource)
+      # The probe sees the compile's additions with the toolchain search
+      # variables removed for the spawn only: removing them by name keeps
+      # the environment un-enumerated (`startProfileNim`).
+      let res = finishProfileNim(startProfileNim(
+        cCompilerProbeArgv(result, source, output), repoRootAbs,
+        profileCompileEnvAdditions(repoRootAbs),
+        unset = ["SDKROOT", "DEVELOPER_DIR", "CPATH", "C_INCLUDE_PATH",
+                 "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "INCLUDE",
+                 "LIBRARY_PATH", "LIB"]))
+      probe.usable = res.exitCode == 0
+      if not probe.usable:
+        probe.detail = "exit status " & $res.exitCode &
+          (if res.output.strip().len > 0: ":\n" & res.output.strip() else: "")
+    except CatchableError, OSError:
+      probe.detail = "could not run it: " & getCurrentExceptionMsg()
+    finally:
+      for path in [output, source]:
+        try: removeFile(extendedPath(path))
         except CatchableError, OSError: discard
-    if not probe.usable:
-      let message = cCompilerUnusableMessageFor(probe, origin, "profile")
-      var err = newException(CompileFailure, message)
-      err.stderrText = message
-      raise err
+      try: removeDir(extendedPath(scratch))
+      except CatchableError, OSError: discard
+  if not probe.usable:
+    let message = cCompilerUnusableMessageFor(probe, origin, "profile",
+      profileCCompilerRemedy())
+    var err = newException(CompileFailure, message)
+    err.stderrText = message
+    raise err
 
 proc compileProfileExecutable*(profileRoot, nimcacheDir, outBinary: string;
                                repoRoot: string;
