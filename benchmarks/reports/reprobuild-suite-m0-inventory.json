@@ -5,7 +5,7 @@
     "caseDetailTracked": false,
     "caseDetailUntrackedReason": "bodyHash is a function of the project's absolute path (campaign defect #52), so tracking per-case detail would rewrite every hash per checkout path and defeat byte-level catalog diffing",
     "countSourceCounts": {
-      "catalog": 2355,
+      "catalog": 2362,
       "quarantined": 10,
       "static": 37
     },
@@ -148,10 +148,10 @@
       "cpu": "x86_64",
       "os": "linux"
     },
-    "dirty": false,
+    "dirty": true,
     "environmentReportPath": "build/reprobuild-suite-m0-environment.md",
-    "head": "e1ccfa259836ef68fd33a8211d15fa7efe053fe6",
-    "headShort": "e1ccfa259",
+    "head": "56b26d8f97b390d6571297710ed1004667623b7e",
+    "headShort": "56b26d8f9",
     "repoRoot": ".",
     "runtimeDetailPath": "build/reprobuild-suite-case-catalog.json",
     "runtimeDetailReason": "footprint, host, tool versions, the recorded environment and the sibling-checkout paths are properties of the machine and of the moment, not of the tree; keeping them here made the tracked artifact differ on every build and every host, which is the defect spec \u00a716.4 forbids for an embedded build timestamp",
@@ -181,9 +181,14 @@
         "branch": "fix-agents-tests-failing-at-43b83ff8e",
         "dirty": false,
         "head": "b0fc1bcb9c2f1cb6a7fc3a558592ae7051782c24"
+      },
+      "runquota": {
+        "branch": "fix-agents-tests-failing-at-43b83ff8e",
+        "dirty": false,
+        "head": "d33c48b0bcc07111419baf547c824d10c215416d"
       }
     },
-    "sourceFingerprint": "f72e045f64937f7e061719326c11fcef64d4ac124f2a95558cd75ac382e3be03"
+    "sourceFingerprint": "941c48d35ed4a982848f079b87267e06926ca2c3e08b289e51152328cbc6fde8"
   },
   "performanceAssessment": {
     "deferredMeasurementCommand": "REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/reprobuild_suite_inventory.py --run-suite --clean-first --warm-runs 2 --suite-timeout-seconds 7200",
@@ -204,12 +209,12 @@
     },
     "observedStructuralFacts": {
       "graphOwnedHelperArtifacts": 33,
-      "nimTestBinaries": 2365,
+      "nimTestBinaries": 2372,
       "pureUnitConsolidationGroups": 68,
       "pureUnitTests": 691,
-      "sourceCases": 15460,
-      "staticallyDetectedRuntimeCompilerFlowTests": 127,
-      "testEntries": 2402
+      "sourceCases": 15499,
+      "staticallyDetectedRuntimeCompilerFlowTests": 129,
+      "testEntries": 2409
     },
     "status": "structural-inference-only"
   },
@@ -1680,10 +1685,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1291,
-      "platform/destructive": 145,
+      "integration": 1296,
+      "platform/destructive": 146,
       "pure unit": 691,
-      "unclassified": 257
+      "unclassified": 258
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1886,10 +1891,10 @@
       }
     ],
     "measuredProtocolAwareCaseCount": null,
-    "nimTestBinaryCount": 2365,
+    "nimTestBinaryCount": 2372,
     "pythonTestFileCount": 37,
-    "sourceCaseCount": 15460,
-    "testEntryCount": 2402
+    "sourceCaseCount": 15499,
+    "testEntryCount": 2409
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2190,7 +2195,7 @@
             "gcc",
             "source"
           ],
-          "line": 72,
+          "line": 96,
           "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
           "patterns": [
             "gcc"
@@ -2198,6 +2203,63 @@
           "snippet": "addFileExt(\"gcc\", ExeExt))"
         },
         {
+          "assignedCommandVariable": "cc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "chosen",
+            "clang",
+            "dir",
+            "gcc",
+            "source"
+          ],
+          "line": 135,
+          "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
+          "patterns": [
+            "gcc",
+            "cc"
+          ],
+          "snippet": "let cc = findExe(when defined(windows): \"gcc\" else: \"cc\")"
+        },
+        {
+          "assignedCommandVariable": "cc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "chosen",
+            "clang",
+            "dir",
+            "gcc",
+            "source"
+          ],
+          "line": 142,
+          "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
+          "patterns": [
+            "gcc",
+            "cc"
+          ],
+          "snippet": "let cc = findExe(when defined(windows): \"gcc\" else: \"cc\")"
+        },
+        {
+          "assignedCommandVariable": "cc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "chosen",
+            "clang",
+            "dir",
+            "gcc",
+            "source"
+          ],
+          "line": 150,
+          "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
+          "patterns": [
+            "gcc",
+            "cc"
+          ],
+          "snippet": "let cc = findExe(when defined(windows): \"gcc\" else: \"cc\")"
+        },
+        {
           "assignedCommandVariable": "gcc",
           "commandVariableExecuted": true,
           "directExecutionLine": false,
@@ -2208,7 +2270,7 @@
             "gcc",
             "source"
           ],
-          "line": 173,
+          "line": 238,
           "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
           "patterns": [
             "gcc"
@@ -2226,7 +2288,7 @@
             "gcc",
             "source"
           ],
-          "line": 174,
+          "line": 239,
           "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
           "patterns": [
             "clang"
@@ -2244,7 +2306,7 @@
             "gcc",
             "source"
           ],
-          "line": 211,
+          "line": 276,
           "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
           "patterns": [
             "gcc"
@@ -2262,7 +2324,7 @@
             "gcc",
             "source"
           ],
-          "line": 223,
+          "line": 288,
           "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
           "patterns": [
             "clang"
@@ -2280,7 +2342,7 @@
             "gcc",
             "source"
           ],
-          "line": 237,
+          "line": 302,
           "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
           "patterns": [
             "clang"
@@ -2298,7 +2360,7 @@
             "gcc",
             "source"
           ],
-          "line": 263,
+          "line": 328,
           "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
           "patterns": [
             "clang"
@@ -2316,7 +2378,7 @@
             "gcc",
             "source"
           ],
-          "line": 268,
+          "line": 333,
           "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
           "patterns": [
             "clang"
@@ -2374,7 +2436,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 320,
+          "line": 428,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2390,7 +2452,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 336,
+          "line": 444,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2406,7 +2468,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 341,
+          "line": 449,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2422,7 +2484,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 344,
+          "line": 452,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2430,6 +2492,54 @@
           "runtimeCompilerApi": "compileProfileToRbpi",
           "runtimeCompilerApiModule": "repro_profile_compile",
           "snippet": "discard compileProfileToRbpi(\"<abs>/home.nim\", opts)"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 740,
+          "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
+          "patterns": [
+            "repro-compile-profile-binary"
+          ],
+          "runtimeCompilerApi": "compileProfileBinary",
+          "runtimeCompilerApiModule": "repro_profile_compile",
+          "snippet": "discard compileProfileBinary(profile, dir / \"cache\","
+        },
+        {
+          "assignedCommandVariable": "gcc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "clangExe",
+            "objectFile",
+            "source"
+          ],
+          "line": 753,
+          "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "let gcc = findExe(\"gcc\")"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 759,
+          "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
+          "patterns": [
+            "repro-compile-profile-binary"
+          ],
+          "runtimeCompilerApi": "compileProfileBinary",
+          "runtimeCompilerApiModule": "repro_profile_compile",
+          "snippet": "let compiled = compileProfileBinary(profile, dir / \"cache\","
         }
       ],
       "source": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim"
@@ -3735,7 +3845,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 166,
+          "line": 237,
           "path": "tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3751,7 +3861,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 194,
+          "line": 273,
           "path": "tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3767,7 +3877,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 231,
+          "line": 310,
           "path": "tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3783,7 +3893,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 238,
+          "line": 328,
           "path": "tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3799,7 +3909,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 261,
+          "line": 352,
           "path": "tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3815,7 +3925,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 291,
+          "line": 387,
           "path": "tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3831,7 +3941,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 300,
+          "line": 396,
           "path": "tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3939,6 +4049,44 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
+          "line": 140,
+          "path": "tests/e2e/m83/t_e2e_profile_compile_runtime_read_tracked.nim",
+          "patterns": [
+            "repro-compile-profile-edge"
+          ],
+          "runtimeCompilerApi": "compileProfileToRbpi",
+          "runtimeCompilerApiModule": "repro_profile_compile",
+          "snippet": "let first = compileProfileToRbpi(sb.profilePath, opts)"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 161,
+          "path": "tests/e2e/m83/t_e2e_profile_compile_runtime_read_tracked.nim",
+          "patterns": [
+            "repro-compile-profile-edge"
+          ],
+          "runtimeCompilerApi": "compileProfileToRbpi",
+          "runtimeCompilerApiModule": "repro_profile_compile",
+          "snippet": "let second = compileProfileToRbpi(sb.profilePath, opts)"
+        }
+      ],
+      "source": "tests/e2e/m83/t_e2e_profile_compile_runtime_read_tracked.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
           "line": 155,
           "path": "tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim",
           "patterns": [
@@ -3955,7 +4103,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 169,
+          "line": 175,
           "path": "tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3971,7 +4119,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 190,
+          "line": 203,
           "path": "tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -3987,7 +4135,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 244,
+          "line": 261,
           "path": "tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4003,7 +4151,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 255,
+          "line": 272,
           "path": "tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4019,7 +4167,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 271,
+          "line": 291,
           "path": "tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4057,7 +4205,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 212,
+          "line": 219,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4073,7 +4221,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 258,
+          "line": 265,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4089,7 +4237,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 312,
+          "line": 319,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4105,7 +4253,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 335,
+          "line": 342,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4121,7 +4269,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 344,
+          "line": 351,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4137,7 +4285,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 363,
+          "line": 372,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4153,7 +4301,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 365,
+          "line": 374,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4169,7 +4317,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 413,
+          "line": 431,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4185,7 +4333,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 423,
+          "line": 441,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4201,7 +4349,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 429,
+          "line": 449,
           "path": "tests/e2e/m83/t_e2e_profile_modules.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4212,6 +4360,76 @@
         }
       ],
       "source": "tests/e2e/m83/t_e2e_profile_modules.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 101,
+          "path": "tests/e2e/m83/t_e2e_profile_run_edge_is_unblessed.nim",
+          "patterns": [
+            "repro-compile-profile-edge"
+          ],
+          "runtimeCompilerApi": "compileProfileToRbpi",
+          "runtimeCompilerApiModule": "repro_profile_compile",
+          "snippet": "let first = compileProfileToRbpi(sb.profilePath, opts)"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 112,
+          "path": "tests/e2e/m83/t_e2e_profile_run_edge_is_unblessed.nim",
+          "patterns": [
+            "repro-compile-profile-edge"
+          ],
+          "runtimeCompilerApi": "compileProfileToRbpi",
+          "runtimeCompilerApiModule": "repro_profile_compile",
+          "snippet": "let second = compileProfileToRbpi(sb.profilePath, opts)"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 144,
+          "path": "tests/e2e/m83/t_e2e_profile_run_edge_is_unblessed.nim",
+          "patterns": [
+            "repro-compile-profile-edge"
+          ],
+          "runtimeCompilerApi": "compileProfileToRbpi",
+          "runtimeCompilerApiModule": "repro_profile_compile",
+          "snippet": "let first = compileProfileToRbpi(sb.profilePath, opts)"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 164,
+          "path": "tests/e2e/m83/t_e2e_profile_run_edge_is_unblessed.nim",
+          "patterns": [
+            "repro-compile-profile-edge"
+          ],
+          "runtimeCompilerApi": "compileProfileToRbpi",
+          "runtimeCompilerApiModule": "repro_profile_compile",
+          "snippet": "let second = compileProfileToRbpi(sb.profilePath, opts)"
+        }
+      ],
+      "source": "tests/e2e/m83/t_e2e_profile_run_edge_is_unblessed.nim"
     },
     {
       "class": "platform/destructive",
@@ -4244,7 +4462,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 88,
+          "line": 107,
           "path": "tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4260,7 +4478,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 113,
+          "line": 132,
           "path": "tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4276,7 +4494,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 118,
+          "line": 149,
           "path": "tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4292,7 +4510,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 135,
+          "line": 172,
           "path": "tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4308,7 +4526,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 141,
+          "line": 178,
           "path": "tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4324,7 +4542,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 159,
+          "line": 197,
           "path": "tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4340,7 +4558,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 164,
+          "line": 202,
           "path": "tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4356,7 +4574,55 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 178,
+          "line": 218,
+          "path": "tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim",
+          "patterns": [
+            "repro-compile-profile-edge"
+          ],
+          "runtimeCompilerApi": "compileProfileToRbpi",
+          "runtimeCompilerApiModule": "repro_profile_compile",
+          "snippet": "discard compileProfileToRbpi(profilePath, compileOpts(stateDir))"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 247,
+          "path": "tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim",
+          "patterns": [
+            "repro-compile-profile-edge"
+          ],
+          "runtimeCompilerApi": "compileProfileToRbpi",
+          "runtimeCompilerApiModule": "repro_profile_compile",
+          "snippet": "let first = compileProfileToRbpi(profilePath, compileOpts(stateDir))"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 254,
+          "path": "tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim",
+          "patterns": [
+            "repro-compile-profile-edge"
+          ],
+          "runtimeCompilerApi": "compileProfileToRbpi",
+          "runtimeCompilerApiModule": "repro_profile_compile",
+          "snippet": "discard compileProfileToRbpi(profilePath, compileOpts(stateDir))"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 270,
           "path": "tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -4672,7 +4938,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 338,
+          "line": 344,
           "path": "tests/integration/t_compiler_scratch_isolation.nim",
           "patterns": [
             "repro-extract-interface"
@@ -5115,6 +5381,7 @@
           "commandVariableExecuted": true,
           "directExecutionLine": false,
           "executedVariables": [
+            "base",
             "c",
             "cc",
             "daemon",
@@ -5122,7 +5389,7 @@
             "env",
             "tools"
           ],
-          "line": 186,
+          "line": 259,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5134,6 +5401,7 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
+            "base",
             "c",
             "cc",
             "daemon",
@@ -5141,7 +5409,7 @@
             "env",
             "tools"
           ],
-          "line": 216,
+          "line": 289,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5153,6 +5421,7 @@
           "commandVariableExecuted": true,
           "directExecutionLine": false,
           "executedVariables": [
+            "base",
             "c",
             "cc",
             "daemon",
@@ -5160,7 +5429,7 @@
             "env",
             "tools"
           ],
-          "line": 485,
+          "line": 551,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5172,6 +5441,7 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
+            "base",
             "c",
             "cc",
             "daemon",
@@ -5179,7 +5449,47 @@
             "env",
             "tools"
           ],
-          "line": 504,
+          "line": 560,
+          "path": "tests/integration/t_execution_lease_confinement.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "check execCmdEx(quoteShellCommand([cc, \"-shared\", \"-fPIC\", \"-o\","
+        },
+        {
+          "assignedCommandVariable": "cc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "base",
+            "c",
+            "cc",
+            "daemon",
+            "dir",
+            "env",
+            "tools"
+          ],
+          "line": 600,
+          "path": "tests/integration/t_execution_lease_confinement.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "let cc = ccPath()"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "base",
+            "c",
+            "cc",
+            "daemon",
+            "dir",
+            "env",
+            "tools"
+          ],
+          "line": 619,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -9160,6 +9470,30 @@
       "sourceNewerThanBinary": false,
       "sourceSuiteCount": 2,
       "staticCaseCount": 14,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_declared_output_not_produced_fails_the_action",
+      "catalogSuiteCount": 1,
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "countSource": "catalog",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_hash",
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_declared_output_not_produced_fails_the_action.nim",
+      "sourceCaseCount": 7,
+      "sourceNewerThanBinary": false,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13327,6 +13661,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_deploy_agent",
         "repro_home_intent",
         "repro_peer_cache",
@@ -16009,6 +16344,30 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_stow_resource_mode_by_target_platform",
+      "catalogSuiteCount": 1,
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "countSource": "catalog",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_home_apply",
+        "repro_home_resources",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_home_apply",
+      "requiresReproBinary": false,
+      "source": "libs/repro_home_apply/tests/t_stow_resource_mode_by_target_platform.nim",
+      "sourceCaseCount": 3,
+      "sourceNewerThanBinary": false,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/test_m1_fpc_resolves",
       "catalogSuiteCount": 1,
       "class": "pure unit",
@@ -16967,7 +17326,7 @@
     },
     {
       "binary": "build/test-bin/t_recipe_c_compiler_selection_is_loud",
-      "catalogSuiteCount": 2,
+      "catalogSuiteCount": 3,
       "class": "graph-fixture",
       "classificationReason": "test body compiles or links a helper/fixture artifact",
       "countSource": "catalog",
@@ -16980,10 +17339,10 @@
       "owner": "libs/repro_interface_artifacts",
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
-      "sourceCaseCount": 6,
+      "sourceCaseCount": 10,
       "sourceNewerThanBinary": false,
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 13,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -19696,6 +20055,28 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/test_msvc_activation_spawns_no_telemetry",
+      "catalogSuiteCount": 1,
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "countSource": "catalog",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_platform",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_platform",
+      "requiresReproBinary": false,
+      "source": "libs/repro_platform/tests/test_msvc_activation_spawns_no_telemetry.nim",
+      "sourceCaseCount": 4,
+      "sourceNewerThanBinary": false,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/test_msvc_env_merge",
       "catalogSuiteCount": 1,
       "class": "pure unit",
@@ -20059,7 +20440,7 @@
     },
     {
       "binary": "build/test-bin/t_smoke_repro_profile_compile",
-      "catalogSuiteCount": 7,
+      "catalogSuiteCount": 9,
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
       "countSource": "catalog",
@@ -20068,6 +20449,7 @@
       "localDependencyShape": [
         "repro_build_engine",
         "repro_core",
+        "repro_local_store",
         "repro_profile",
         "repro_profile_compile",
         "repro_profile_intent",
@@ -20076,10 +20458,10 @@
       "owner": "libs/repro_profile_compile",
       "requiresReproBinary": true,
       "source": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
-      "sourceCaseCount": 30,
+      "sourceCaseCount": 39,
       "sourceNewerThanBinary": false,
-      "sourceSuiteCount": 7,
-      "staticCaseCount": 30,
+      "sourceSuiteCount": 10,
+      "staticCaseCount": 41,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -35045,17 +35427,19 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_build_engine",
         "repro_profile",
+        "repro_profile_compile",
         "repro_profile_intent"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": true,
       "source": "tests/e2e/m83/t_e2e_profile_compile_runtime_read_tracked.nim",
-      "sourceCaseCount": 1,
+      "sourceCaseCount": 2,
       "sourceNewerThanBinary": false,
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
-      "staticallyDetectedRuntimeCompilerFlow": false,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -35110,6 +35494,31 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_profile_run_edge_is_unblessed",
+      "catalogSuiteCount": 1,
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "countSource": "catalog",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_profile",
+        "repro_profile_compile",
+        "repro_profile_intent"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/m83/t_e2e_profile_run_edge_is_unblessed.nim",
+      "sourceCaseCount": 2,
+      "sourceNewerThanBinary": false,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_repro_profile_compile",
       "catalogSuiteCount": 1,
       "class": "platform/destructive",
@@ -35150,10 +35559,10 @@
       "owner": "tests/e2e",
       "requiresReproBinary": true,
       "source": "tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim",
-      "sourceCaseCount": 6,
+      "sourceCaseCount": 8,
       "sourceNewerThanBinary": false,
       "sourceSuiteCount": 2,
-      "staticCaseCount": 6,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -36639,6 +37048,28 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_agent_conformance_cli_portability",
+      "catalogSuiteCount": 1,
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "countSource": "catalog",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_agent_protocol",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_agent_conformance_cli_portability.nim",
+      "sourceCaseCount": 3,
+      "sourceNewerThanBinary": false,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_agent_mock_roundtrip",
       "catalogSuiteCount": 1,
       "class": "integration",
@@ -37523,6 +37954,28 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_behind_pin_warns_and_does_not_fail.nim",
+      "sourceCaseCount": 1,
+      "sourceNewerThanBinary": false,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_bootstrap_default_nim_matches_declared_version",
+      "catalogSuiteCount": 1,
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "countSource": "catalog",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_bootstrap_default_nim_matches_declared_version.nim",
       "sourceCaseCount": 1,
       "sourceNewerThanBinary": false,
       "sourceSuiteCount": 1,
@@ -41214,10 +41667,10 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_execution_lease_confinement.nim",
-      "sourceCaseCount": 3,
+      "sourceCaseCount": 4,
       "sourceNewerThanBinary": false,
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -46490,6 +46943,28 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_own_flake_ref_survives_an_uninitialised_submodule",
+      "catalogSuiteCount": 1,
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "countSource": "catalog",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_own_flake_ref_survives_an_uninitialised_submodule.nim",
+      "sourceCaseCount": 2,
+      "sourceNewerThanBinary": false,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_path_tool_rewrite_detected",
       "catalogSuiteCount": 1,
       "class": "integration",
@@ -48003,6 +48478,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_hash",
+        "repro_interface_artifacts",
         "repro_project_dsl"
       ],
       "owner": "tests/integration",
@@ -60773,7 +61250,7 @@
   ],
   "timing": {
     "complete": false,
-    "currentSourceFingerprint": "f72e045f64937f7e061719326c11fcef64d4ac124f2a95558cd75ac382e3be03",
+    "currentSourceFingerprint": "941c48d35ed4a982848f079b87267e06926ca2c3e08b289e51152328cbc6fde8",
     "notes": [
       "No suite run was requested for this inventory."
     ],

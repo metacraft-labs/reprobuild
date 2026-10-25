@@ -5083,6 +5083,7 @@
           "commandVariableExecuted": true,
           "directExecutionLine": false,
           "executedVariables": [
+            "base",
             "c",
             "cc",
             "daemon",
@@ -5090,7 +5091,7 @@
             "env",
             "tools"
           ],
-          "line": 186,
+          "line": 259,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5102,6 +5103,7 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
+            "base",
             "c",
             "cc",
             "daemon",
@@ -5109,7 +5111,7 @@
             "env",
             "tools"
           ],
-          "line": 216,
+          "line": 289,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5121,6 +5123,7 @@
           "commandVariableExecuted": true,
           "directExecutionLine": false,
           "executedVariables": [
+            "base",
             "c",
             "cc",
             "daemon",
@@ -5128,7 +5131,7 @@
             "env",
             "tools"
           ],
-          "line": 485,
+          "line": 551,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5140,6 +5143,7 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
+            "base",
             "c",
             "cc",
             "daemon",
@@ -5147,7 +5151,47 @@
             "env",
             "tools"
           ],
-          "line": 504,
+          "line": 560,
+          "path": "tests/integration/t_execution_lease_confinement.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "check execCmdEx(quoteShellCommand([cc, \"-shared\", \"-fPIC\", \"-o\","
+        },
+        {
+          "assignedCommandVariable": "cc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "base",
+            "c",
+            "cc",
+            "daemon",
+            "dir",
+            "env",
+            "tools"
+          ],
+          "line": 600,
+          "path": "tests/integration/t_execution_lease_confinement.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "let cc = ccPath()"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "base",
+            "c",
+            "cc",
+            "daemon",
+            "dir",
+            "env",
+            "tools"
+          ],
+          "line": 619,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -35308,7 +35352,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_execution_lease_confinement.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
