@@ -15,8 +15,10 @@
 ## * how many times `nim` was spawned during the run.
 ##
 ## ISOLATION. Every run gets its own `HOME`, profile directory, state
-## directory, store root and XDG roots under one temp directory. Nothing is
-## applied: `repro home plan` is non-mutating, and its `HOME` is the sandbox's.
+## directory, store root, XDG roots and fake registry hive
+## (`REPRO_REGISTRY_ROOT`) under one temp directory. `repro home plan` is
+## non-mutating; the gates that also drive `repro home apply` through
+## `runRepro` change only the sandbox, the registry included.
 ##
 ## THE `nim` SPY, AND WHY IT IS NOT A MOCK. "The second run is an action-cache
 ## hit and does not spawn nim" has to be observed, not inferred from a fast
@@ -187,6 +189,12 @@ proc sandboxEnv*(sb: ProfileSandbox; host = DefaultSandboxHost):
   result["REPRO_HOME_PROFILE_DIR"] = sb.profileDir
   result["REPRO_HOME_STATE_DIR"] = sb.stateDir
   result["REPRO_STORE_ROOT"] = sb.storeRoot
+  # The registry is part of a Windows user's home: without its own fake
+  # hive an apply writes `home.package.<id>.bin` into the real
+  # `HKCU\Environment\Path` (reprobuild-pm issue
+  # 2026-10-23-windows-home-apply-gates-leak-store-prefixes-into-the-real-user-path).
+  let registry = registryRootEnv(sb.root)
+  result[registry.k] = registry.v
   if host.len > 0:
     result["REPRO_HOST"] = host
   elif result.hasKey("REPRO_HOST"):

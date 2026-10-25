@@ -8,16 +8,17 @@
 ## This proves the `env.userPath` driver respects entries it did
 ## NOT add — the gate-4 invariant.
 ##
-## Strategy: instead of touching the real `HKCU\Environment\Path`
-## (which would contaminate the dev host's environment), we drive
-## the `env.userPath` driver directly with a temporary state +
-## a side-channel "live PATH" model. The driver reads via the
-## real `Reg*` API; the gate seeds and inspects the real
-## `HKCU\Environment\Path` value through the same driver functions
-## and restores the original at teardown.
+## Strategy: the gate seeds and inspects `HKCU\Environment\Path` through
+## the driver's own functions, against the `REPRO_REGISTRY_ROOT` fake hive
+## (`registry_isolation`) so neither the gate nor the spawned `repro`
+## touches the developer's real user PATH (reprobuild-pm issue
+## 2026-10-23-windows-home-apply-gates-leak-store-prefixes-into-the-real-user-path;
+## the earlier version wrote the real value and restored it at teardown,
+## which a crash between the two would not).
 
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
+import repro_test_support/registry_isolation
 
 import repro_home_generations
 import repro_home_resources
@@ -84,6 +85,14 @@ else:
       when not defined(windows):
         skip("platform-skip: Windows env.userPath path is the gate")
         return
+      # This case writes HKCU\Environment\Path (an env.userPath
+      # contribution), so every registry operation in it, in-process and
+      # in the spawned repro, goes to a fake hive (reprobuild-pm issue
+      # 2026-10-23-windows-home-apply-gates-leak-store-prefixes-into-the-
+      # real-user-path). The real Win32 path is covered on the scratch
+      # subkey by t_registry_root_override.
+      let registryIsolation = beginRegistryIsolation()
+      defer: endRegistryIsolation(registryIsolation)
 
       # Snapshot the real HKCU\Environment\Path so we can restore it.
       let preGate = readUserPathRaw()
