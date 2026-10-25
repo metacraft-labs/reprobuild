@@ -103,12 +103,15 @@ profile "gm10IdentSystem":
   resources:
     inlineExecCall(
       argv = @["/bin/sh", "-c", "@CMD@"],
-      cwd = "@CWD@",
+      cwd = @CWD@,
       outputs = @["out/marker.txt"],
       requiresElevation = true,
       address = "gm10IdentMarker",
       commandStatsId = "gm10.ident.marker")
-""".multiReplace(("@CMD@", cmd), ("@CWD@", markerDir))
+""".multiReplace(("@CMD@", cmd),
+    # A Nim literal, quoted and escaped: a Windows `C:\Users\...` read
+    # verbatim is a `\U` escape and fails the profile compile.
+    ("@CWD@", escape(markerDir)))
 
 type Fixture = object
   sb: ProfileSandbox

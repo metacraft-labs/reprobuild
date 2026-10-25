@@ -13,6 +13,7 @@
 ## variant gymnastics.
 
 import std/[algorithm, json, options, strutils, tables]
+from std/os import paramCount, paramStr
 
 import ./types
 
@@ -923,17 +924,51 @@ proc parsePlatformProbeRecord*(output: string; intentJson: var string): bool =
 # Entry-point helper.
 # ---------------------------------------------------------------------
 
+const ReproIntentOutFlag* = "--repro-intent-out"
+  ## THE INTENT-OUTPUT CONTRACT of a compiled profile binary. Invoked with
+  ## exactly `--repro-intent-out <path>`, the binary writes the intent
+  ## document it would otherwise print on stdout to `<path>`, and changes
+  ## nothing else: stdout and stderr stay free for the profile's own
+  ## diagnostics.
+  ##
+  ## WHY IT EXISTS. The profile compile's RUN edge (`__repro_profile_run`,
+  ## reprobuild-pm `spec/Profile-Compilation-Model.md` §2) launches the
+  ## binary directly -- no `repro` helper, no shell -- and the build engine
+  ## caches and restores DECLARED OUTPUT FILES, not a process's stdout. A
+  ## helper that captured stdout would put a `repro` process back into the
+  ## run edge's process tree, and on Windows that process draws entropy at
+  ## start-up (its OpenSSL DLLs seed a stack-protector canary), which the
+  ## unblessed run edge cannot carry. So the binary writes the declared
+  ## output itself.
+  ##
+  ## Invoked any other way -- in particular with no arguments -- the binary
+  ## prints the document on stdout exactly as Phase A defined, which is how
+  ## `repro_profile_compile.compileProfileBinary` and the tests run it.
+
+proc writeIntentDocument*(document: string) =
+  ## Deliver a compiled profile's intent document: to the file named by the
+  ## intent-output contract (`ReproIntentOutFlag`) when the binary was
+  ## invoked with exactly that flag and a path, else to stdout. The file
+  ## holds the same bytes `echo` would print (the document and a newline).
+  ## A failure to write raises, so the binary exits non-zero and the run
+  ## edge fails instead of publishing a missing or partial document.
+  if paramCount() == 2 and paramStr(1) == ReproIntentOutFlag:
+    writeFile(paramStr(2), document & "\n")
+  else:
+    echo document
+
 template emitProfileIntent*(p: ProfileIntent): typed =
-  ## Convenience: emit the JSON form to stdout and quit. Phase A's
+  ## Convenience: emit the JSON form and quit -- to stdout, or to the file
+  ## the intent-output contract names (`writeIntentDocument`). Phase A's
   ## `profile name: body` macro autogenerates a trailing invocation of
   ## this template so the user does not need a `when isMainModule:`
   ## block.
-  echo emitProfileIntentJson(p)
+  writeIntentDocument(emitProfileIntentJson(p))
   quit(0)
 
 template emitSystemIntent*(p: SystemIntent): typed =
-  ## Convenience: emit the JSON form to stdout and quit. The
-  ## ``system "<hostname>":`` macro autogenerates a trailing
-  ## invocation when called as a main module.
-  echo emitSystemIntentJson(p)
+  ## Convenience: emit the JSON form and quit, to the same destination as
+  ## `emitProfileIntent`. The ``system "<hostname>":`` macro autogenerates a
+  ## trailing invocation when called as a main module.
+  writeIntentDocument(emitSystemIntentJson(p))
   quit(0)

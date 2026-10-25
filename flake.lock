@@ -1349,17 +1349,17 @@
     "nim-fork-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1792687651,
-        "narHash": "sha256-QzKwbFDJCU9OPEICN4cq8bnT31h+1Np3AuhXTblpD3I=",
+        "lastModified": 1792872207,
+        "narHash": "sha256-lsMOcRzeRb7QvCdFneGXR97F9zT+jDVSIjgH3P9olKo=",
         "ref": "codetracer",
-        "rev": "73545515fcc71eb947853e6aed366c13b196fb37",
-        "revCount": 23141,
+        "rev": "cdb6fd1483fcdc570f306ccfee8865f2214f46f7",
+        "revCount": 23142,
         "type": "git",
         "url": "https://github.com/metacraft-labs/nim"
       },
       "original": {
         "ref": "codetracer",
-        "rev": "73545515fcc71eb947853e6aed366c13b196fb37",
+        "rev": "cdb6fd1483fcdc570f306ccfee8865f2214f46f7",
         "type": "git",
         "url": "https://github.com/metacraft-labs/nim"
       }

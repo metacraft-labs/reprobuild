@@ -216,6 +216,12 @@ class ReleaseSmokeDevExecTests(unittest.TestCase):
         powershell = self.pkg / "bin/powershell"
         powershell.write_text("#!" + shutil.which("bash") + r"""
 set -eu
+# Caller argv only: this stand-in never asserts Windows policy/lifecycle success.
+if [[ $# -lt 6 || "$1" != -NoProfile || "$2" != -NonInteractive ||
+      "$3" != -ExecutionPolicy || "$4" != Bypass || "$5" != -File ]]; then
+  echo "missing process-local PowerShell script policy" >&2
+  exit 76
+fi
 for name in RUNQUOTAD_BIN RUNQUOTA_BIN RUNQUOTA_SOCKET REPROBUILD_NO_RUNQUOTA; do
   if declare -p "$name" >/dev/null 2>&1; then echo "foreign daemon environment reached initial exec" >&2; exit 71; fi
 done
@@ -385,7 +391,7 @@ class ReleaseInventoryTests(unittest.TestCase):
         "repro", "reprobuild", "repro-peer-cache-tier2", "repro-peer-cache-admin",
         "repro-peer-cache-mint-cert", "repro-cmake-dyndep-fragment",
         "repro-cmake-trycompile-provider", "repro-standard-provider",
-        "repro-install-mirror-publish", "repro-binary-cache",
+        "repro-install-mirror-publish", "repro-agent-conformance", "repro-binary-cache",
         "repro-binary-cache-crosshost", "repro-harvest-apt", "attestation-agent",
     }
     REQUIRED = APPS | {"runquotad", "runquota"}

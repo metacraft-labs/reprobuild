@@ -98,7 +98,7 @@ proc actionEnvironment(parent: seq[(string, string)]):
     OrderedTable[string, (string, string)] =
   let shellEnv = vsDevCmdChildEnv(parent)
   let lines = parseCmdSetOutput(cmdSetDump(vsDevCmdActivate(shellEnv)))
-  var table = msvcEnvTableFromSetLines(lines)
+  var table = msvcEnvTableFromSetLines(lines, vsDevCmdInjectedNames(parent))
   table["CC"] = "cl.exe"
   let devEnv = MsvcDevEnv(available: true, env: table)
   let actionEnv = @["REPROBUILD_NO_RUNQUOTA=1", r"PWD=C:\work\profile"]
@@ -135,10 +135,14 @@ suite "MSVC activation and multi-line environment values":
     check child["PATH"][1].startsWith(r"C:\BuildTools\VC\Tools\MSVC\14.44\bin")
 
   test "vsDevCmdChildEnv drops CR/LF values and nameless entries only":
+    # The trailing ``VSCMD_SKIP_SENDTELEMETRY`` is the variable the engine
+    # adds to keep VsDevCmd from spawning PowerShell (see
+    # test_msvc_activation_spawns_no_telemetry.nim).
     let kept = vsDevCmdChildEnv(@[
       ("A", "1"), ("B", "x\ny"), ("C", "x\r\ny"), ("D", "x\ry"),
       ("", "C:=C:\\work"), ("E", "a=b;c"), ("F", "")])
-    check kept == @[("A", "1"), ("E", "a=b;c"), ("F", "")]
+    check kept == @[("A", "1"), ("E", "a=b;c"), ("F", ""),
+                    ("VSCMD_SKIP_SENDTELEMETRY", "1")]
 
   test "set output alone cannot frame a multi-line value":
     let lines = parseCmdSetOutput(cmdSetDump(parentEnv()))

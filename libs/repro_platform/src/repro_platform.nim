@@ -203,10 +203,50 @@ proc parseCmdSetOutput*(raw: string): seq[string] =
       continue
     result.add(stripped)
 
+const VsDevCmdQuietEnv* = [("VSCMD_SKIP_SENDTELEMETRY", "1")]
+  ## Variables the activation shell is started with so that ``VsDevCmd.bat``
+  ## sets the toolchain variables and starts nothing else.
+  ##
+  ## Unless ``VSCMD_SKIP_SENDTELEMETRY`` is set, ``VsDevCmd.bat`` (VS 2022,
+  ## ``Common7\Tools\VsDevCmd.bat``, the "Send Telemetry if user's VS is
+  ## opted-in" block) runs ``START "" /B powershell.exe -NoProfile -Command
+  ## "... Send-VsDevShellTelemetry ..."``: a DETACHED Windows PowerShell that
+  ## can outlive the activation. Windows PowerShell resolves its known folders
+  ## from the inherited ``%USERPROFILE%`` and creates
+  ## ``%USERPROFILE%\AppData\Roaming`` when it is missing, even with
+  ## ``APPDATA`` pointing elsewhere. The engine activates MSVC for every action
+  ## that inherits the host's PATH (the build engine's
+  ## ``actionUsesMsvcToolchain``), the profile compile edge among them, so
+  ## each ``repro home facts`` / ``apply --plan`` / refused ``apply`` created
+  ## two directories in the home it was only reading (reprobuild-pm issue
+  ## 2026-10-23-windows-home-commands-create-appdata-roaming-under-userprofile).
+  ##
+  ## The telemetry contributes nothing to the environment that is captured,
+  ## so skipping it loses nothing. Each name is added only when the parent
+  ## does not set it (``vsDevCmdInjectedNames``), and
+  ## ``msvcEnvTableFromSetLines`` drops the added ones again, so the captured
+  ## table, which is layered over action environments, does not change.
+
+proc vsDevCmdInjectedNames*(parent: openArray[(string, string)]): seq[string] =
+  ## The ``VsDevCmdQuietEnv`` names that ``vsDevCmdChildEnv`` adds for
+  ## ``parent``: those ``parent`` does not set, with names compared
+  ## case-insensitively as Windows compares them. Pass them to
+  ## ``msvcEnvTableFromSetLines`` so the additions stay out of the captured
+  ## activation table.
+  for (quietName, _) in VsDevCmdQuietEnv:
+    var present = false
+    for (name, _) in parent:
+      if cmpIgnoreCase(name, quietName) == 0:
+        present = true
+        break
+    if not present:
+      result.add(quietName)
+
 proc vsDevCmdChildEnv*(parent: openArray[(string, string)]):
     seq[(string, string)] =
   ## The environment the VsDevCmd activation shell is started with: the
-  ## parent's, minus every variable whose value spans lines.
+  ## parent's, minus every variable whose value spans lines, plus every
+  ## ``VsDevCmdQuietEnv`` variable the parent does not set.
   ##
   ## The activation's result is read back from a ``set`` dump, and ``set``
   ## frames nothing: a value ``A=1<newline>B=2`` comes back as a variable
@@ -229,6 +269,10 @@ proc vsDevCmdChildEnv*(parent: openArray[(string, string)]):
     if '\n' in value or '\r' in value:
       continue
     result.add((name, value))
+  let injected = vsDevCmdInjectedNames(parent)
+  for (name, value) in VsDevCmdQuietEnv:
+    if name in injected:
+      result.add((name, value))
 
 const MsvcSetDenylist = ["PROMPT", "_", "PWD", "OLDPWD"]
   ## Denylist matches env.ps1 line 902. ``PROMPT`` would re-style the
@@ -237,10 +281,14 @@ const MsvcSetDenylist = ["PROMPT", "_", "PWD", "OLDPWD"]
   ## does not really own; filtering them mirrors env.ps1's behaviour
   ## so the two activation paths stay observationally identical.
 
-proc msvcEnvTableFromSetLines*(envLines: openArray[string]):
+proc msvcEnvTableFromSetLines*(envLines: openArray[string];
+                               injected: openArray[string] = []):
     Table[string, string] =
   ## The captured activation table: every ``KEY=VALUE`` entry of the ``set``
-  ## dump, except the denylisted names. Later duplicates win.
+  ## dump, except the denylisted names and the ``injected`` ones, which are
+  ## the ``VsDevCmdQuietEnv`` variables the engine itself gave the activation
+  ## shell (``vsDevCmdInjectedNames``) and not part of the toolchain
+  ## environment. Later duplicates win.
   result = initTable[string, string]()
   for entry in envLines:
     let eq = entry.find('=')
@@ -250,6 +298,10 @@ proc msvcEnvTableFromSetLines*(envLines: openArray[string]):
     var skip = false
     for banned in MsvcSetDenylist:
       if cmpIgnoreCase(key, banned) == 0:
+        skip = true
+        break
+    for name in injected:
+      if cmpIgnoreCase(key, name) == 0:
         skip = true
         break
     if skip:
@@ -299,7 +351,8 @@ when defined(windows):
         return stripped
     ""
 
-  proc invokeVsDevCmd(vsDevCmd: string): seq[string] =
+  proc invokeVsDevCmd(vsDevCmd: string; injected: var seq[string]):
+      seq[string] =
     ## Write a tiny ``.bat`` wrapper that invokes ``VsDevCmd.bat`` then
     ## dumps ``set`` to ``tmpFile`` (with VsDevCmd's own stdout / stderr
     ## routed to ``vsdevcmdLog``), and execute the wrapper via
@@ -313,6 +366,10 @@ when defined(windows):
     ## external command``). Writing the literal cmd lines into a
     ## ``.bat`` file bypasses the round-trip entirely and matches the
     ## pattern env.ps1 (lines 845-877) uses on the PowerShell side.
+    ##
+    ## ``injected`` receives the ``VsDevCmdQuietEnv`` names the shell was
+    ## given on top of this process's environment; the caller drops them from
+    ## the captured table.
     let cmdExe = getEnv("SystemRoot") / "System32" / "cmd.exe"
     if not fileExists(cmdExe):
       warnOnce("MSVC dev-env activation skipped: " & cmdExe & " not found")
@@ -351,6 +408,7 @@ when defined(windows):
       for key, value in envPairs():
         parent.add((key, value))
       let shellEnv = newStringTable(modeCaseInsensitive)
+      injected = vsDevCmdInjectedNames(parent)
       for (key, value) in vsDevCmdChildEnv(parent):
         shellEnv[key] = value
       process = startProcess(cmdExe,
@@ -418,11 +476,12 @@ when defined(windows):
       warnOnce("MSVC dev-env activation skipped: " & vsDevCmd & " missing.")
       return MsvcDevEnv(available: false)
 
-    let envLines = invokeVsDevCmd(vsDevCmd)
+    var injected: seq[string] = @[]
+    let envLines = invokeVsDevCmd(vsDevCmd, injected)
     if envLines.len == 0:
       return MsvcDevEnv(available: false)
 
-    var table = msvcEnvTableFromSetLines(envLines)
+    var table = msvcEnvTableFromSetLines(envLines, injected)
     if table.len == 0:
       warnOnce("MSVC dev-env activation: VsDevCmd.bat produced no " &
         "usable variables.")

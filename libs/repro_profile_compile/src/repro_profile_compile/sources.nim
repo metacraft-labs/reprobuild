@@ -183,6 +183,28 @@ proc cachedRbpiPath*(stateDir, profileKey: string): string =
   ## content behind it is the action cache's to decide.
   profileCacheDir(stateDir) / (profileKey & ".rbpi")
 
+proc cachedProfileBinaryPath*(stateDir, profileKey: string): string =
+  ## The profile binary the compile edge (`__repro_profile_compile`)
+  ## declares as its output and the run edge (`__repro_profile_run`)
+  ## declares as its input. Deliberately NOT under the nimcache: the
+  ## nimcache is the compile edge's ignored input prefix (derived scratch),
+  ## while the binary is a product another edge consumes and keys on.
+  ##
+  ## The file keeps the name `profile-build` (`.exe` on Windows) it had in
+  ## the nimcache, in a per-profile directory: Nim names its build record
+  ## after the output (`<nimcache>/profile-build.json`), and tools and tests
+  ## that read that record find it by that name.
+  profileCacheDir(stateDir) / "bin" / profileKey /
+    addFileExt("profile-build", ExeExt)
+
+proc cachedIntentDocumentPath*(stateDir, profileKey: string): string =
+  ## The intent document the run edge declares as its output: the JSON the
+  ## profile binary writes under the intent-output contract
+  ## (`repro_profile/emit.ReproIntentOutFlag`). A build intermediate in
+  ## Phase A's wire format, read only by `compileProfileToRbpi`, which
+  ## encodes it as the `.rbpi` envelope every consumer reads.
+  profileCacheDir(stateDir) / (profileKey & ".intent.json")
+
 proc cachedNimcacheDir*(stateDir, profileKey: string): string =
   ## The per-profile Nim cache: derived state, excluded from the edge's
   ## recorded inputs.

@@ -48,6 +48,7 @@
 ## handles RUN/LIST/ENUMERATE at engine execution time.
 
 import std/os
+from std/strutils import endsWith
 
 import ct_test_interface
 export ct_test_interface
@@ -221,7 +222,22 @@ proc build*(tool: BuildNimUnittest;
   # concat form; tagging the arg with ``role = output`` makes the
   # engine register the path as a declared output and supplies the
   # implicit target name (mirrors ``nim.c``'s ``flag output``).
-  cliArgs.add(outputArg(name = "output", value = binary,
+  #
+  # On Windows `nim c --out:foo` writes `foo.exe`, so the declared output
+  # names the file nim really writes, as `nim.c` does
+  # (repro_dsl_stdlib/packages/nim.nim, `effectiveBinary`): `--out:foo.exe`
+  # produces exactly `foo.exe`. Declaring `foo` left the edge's one output
+  # absent, which the engine fails for a cacheable action
+  # (Build-Engine-And-Scheduler.md §"A declared output is an obligation").
+  # `binary` itself is unchanged for the nimcache directory, the typed
+  # output and the callers, which already add `.exe` on Windows.
+  let outputBinary =
+    when defined(windows):
+      if binary.len == 0 or binary.endsWith(".exe"): binary
+      else: binary & ".exe"
+    else:
+      binary
+  cliArgs.add(outputArg(name = "output", value = outputBinary,
     alias = "--out:", format = cafConcat))
 
   # ``source`` is the positional input to ``nim c``. ``role = input``

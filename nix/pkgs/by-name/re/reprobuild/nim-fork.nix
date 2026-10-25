@@ -189,14 +189,14 @@ stdenv.mkDerivation {
     # source hard-requires ({.error.} without it); `--skipParentCfg` does not
     # suppress a project's own cfg, only parent-directory ones.
     echo "[nim-fork] 3/4 build nimpretty from the fork (formatter/compiler skew)"
-    ./bin/nim c -d:release \
+    ./bin/nim c --parallelBuild:"''${NIX_BUILD_CORES:-0}" -d:release \
       --skipUserCfg --skipParentCfg --noNimblePath \
       --warning:BareExcept:off --warning:UnusedImport:off \
       -o:bin/nimpretty nimpretty/nimpretty.nim
     test -x bin/nimpretty
 
     echo "[nim-fork] 4/4 compile the fork compiler proper (koch-boot-free)"
-    ./bin/nim c -d:release -d:nimKochBootstrap \
+    ./bin/nim c --parallelBuild:"''${NIX_BUILD_CORES:-0}" -d:release -d:nimKochBootstrap \
       --skipUserCfg --skipParentCfg --noNimblePath \
       --warning:BareExcept:off --warning:UnusedImport:off \
       --passC:-I${zstd.dev}/include \

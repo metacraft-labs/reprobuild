@@ -3,10 +3,11 @@
 ##
 ## This module is the "interior" of the compile step — the bit that
 ## actually runs `nim c` against the user's profile source and converts
-## the emitted JSON `ProfileIntent` into the RBPI binary envelope. It is
-## invoked directly by tests and by the internal
-## `__repro-compile-profile` helper subcommand; the BuildAction-based
-## edge in `edge.nim` wraps it so the build engine can cache the result.
+## the emitted JSON `ProfileIntent` into the RBPI binary envelope. The
+## internal `__repro-compile-profile` helper (the compile edge's body) calls
+## `compileProfileExecutable`; `edge.nim` encodes the run edge's intent
+## document with `rbpiBytesFromJson`; tests call `compileProfileBinary`,
+## which compiles and runs in this process.
 ##
 ## DEVIATION from a literal "binary emit" pipeline: the Phase A
 ## `repro_profile` library emits JSON on stdout. We deliberately do NOT
@@ -114,13 +115,17 @@ proc resolveProfileCCompiler*(): string =
   ## Measured 2026-10-14 (home-pc, x86_64-linux): naming that `cc` left the
   ## edge's FIRST run unpublished (`reasons=unblessed-entropy`: clang calls
   ## `arc4random` to name the temporary file it renames onto its `-o`
-  ## output, and this edge carries no entropy blessing, see `edge.nim`); only
+  ## output, and the edge then carried no entropy blessing); only
   ## the determinism probe admits the second identical run, so an unchanged
   ## profile hit on run 3 instead of run 2 and every cache-hit gate failed.
   ## The compile now passes clang `-fno-temp-file`, which removes the draw
   ## (`profileCompileCFlags`), but only where the compiler accepts it; the
   ## order is kept so a clang that does not is never preferred. The recipe
-  ## compile blesses compiler entropy and is unaffected. A host with Nim's
+  ## compile blesses compiler entropy and is unaffected; since the profile
+  ## compile was split into a compile edge and a run edge, the compile edge
+  ## carries that same blessing (`edge.nim`), so a clang draw would no
+  ## longer cost a publication either -- the order and the flag stay because
+  ## removing a draw is preferred to waiving it. A host with Nim's
   ## default compiler keeps it; only a host without it -- where the compile
   ## could not run at all -- gets one picked.
   try:
@@ -142,10 +147,16 @@ proc profileCompileCFlags*(cCompiler, scratchDir: string): seq[string] =
   ## Clang's `-fno-temp-file`
   ## (`repro_core/c_compiler.clangNoTempFileCFlags`). Without it clang calls
   ## `arc4random` to name the temporary file it renames onto each `-o`
-  ## object, io-mon reports the call, and this edge -- which carries no
-  ## entropy blessing (`edge.nim`) -- had its first run's publish skipped:
-  ## an unchanged profile hit on run 3 instead of run 2 (reprobuild-pm issue
+  ## object, io-mon reports the call, and the edge -- which then carried no
+  ## entropy blessing -- had its first run's publish skipped: an unchanged
+  ## profile hit on run 3 instead of run 2 (reprobuild-pm issue
   ## 2026-10-14-clang-profile-compile-is-not-published-on-its-first-run).
+  ## The compile edge now carries the provider compile's blessing
+  ## (`edge.nim`), so the draw no longer withholds publication; the flag
+  ## stays because a removed draw is better than a waived one
+  ## (idiomatic-reprobuild.md §4.4), and its effect is now checked on the
+  ## edge's entropy evidence rather than on its publication
+  ## (`t_e2e_profile_compile_clang_first_run_published`).
   ## That is Nim's default on macOS, and the compiler any host gets from an
   ## explicit `$REPRO_BOOTSTRAP_CC` / `$CC` that is a clang. gcc gets
   ## nothing, and a clang that rejects the flag (probed with a real compile
@@ -252,11 +263,30 @@ proc profileCompileArgv*(nimExe, profileRoot, nimcacheDir, outBinary,
     result.add "--path:" & path
   result.add profileRoot
 
-proc profileCompileChildEnv*(repoRoot: string): StringTableRef =
-  ## The environment the profile compile hands `nim c`: this process's own,
-  ## plus the `*_SRC` source roots reprobuild's config.nims resolves its
-  ## source-only inputs from, filled in only where unset. Pure apart from
-  ## existence checks, so the probing is testable on a fixture tree.
+proc profileCompileEnvAdditions*(repoRoot: string): StringTableRef =
+  ## What the profile compile ADDS to the environment `nim` inherits: the
+  ## `*_SRC` source roots reprobuild's config.nims resolves its source-only
+  ## inputs from, each only where this process's environment leaves it unset
+  ## (or empty). ONLY the additions -- the rest of the environment is
+  ## inherited by `startProfileNim`, never copied. Pure apart from existence
+  ## checks, so the probing is testable on a fixture tree.
+  ##
+  ## WHY ADDITIONS AND NOT A COPY OF THE ENVIRONMENT. This used to return the
+  ## whole environment plus the additions, built with `envPairs()`. On
+  ## Windows `envPairs()` is `GetEnvironmentStringsW`, and io-mon's Windows
+  ## shim records an enumeration of the environment block as a read of EVERY
+  ## variable in it (a deliberate over-approximation: it cannot see which of
+  ## them the caller goes on to use). So the profile compile edge was keyed
+  ## on the value of every variable of the caller's environment -- 224 of
+  ## them in one measured capture -- and a `repro home export` after a
+  ## `repro home plan` that differed only in `$REPRO_HOST` recompiled the
+  ## profile ("input metadata changed: REPRO_HOST"). On Linux and macOS
+  ## `environ` is read without an observable call, so only the variables
+  ## Nim and the C toolchain actually look up were inputs there. Now that is
+  ## true on Windows as well, for the same reason: each variable this helper
+  ## or the compiler reads is looked up BY NAME, and io-mon records exactly
+  ## those. The edge stops depending on the others because nothing reads
+  ## them any more, not because the engine is told to ignore a read.
   let repoRootAbs = absolutePath(repoRoot)
   # NimScript's relative path resolution from a config.nims runs in
   # the PROJECT (profile) directory's CWD — not nim's process CWD.
@@ -279,12 +309,13 @@ proc profileCompileChildEnv*(repoRoot: string): StringTableRef =
   # A local, not `result`: the probing helpers below are closures, and a
   # closure cannot capture `result`.
   var env = newStringTable(modeStyleInsensitive)
-  for k, v in envPairs():
-    env[k] = v
-  # A value already in the child's environment -- the caller's, or one a
-  # line below has filled -- is never replaced.
+  # A value already in the child's environment -- the caller's (looked up by
+  # name: an observed read of that one variable), or one a line below has
+  # filled -- is never replaced.
   proc unsetInChild(envName: string): bool =
-    not env.hasKey(envName) or env[envName].len == 0
+    if env.hasKey(envName):
+      return env[envName].len == 0
+    getEnv(envName).len == 0
 
   # An INSTALLED layout first: when the source root is
   # `<prefix>/share/repro/source` (a release archive, a .deb/.rpm), the
@@ -510,16 +541,44 @@ proc stageProfileFiles*(profileRoot, repoRootAbs: string): seq[string] =
     raise
 
 proc startProfileNim*(argv: seq[string]; repoRootAbs: string;
-                      env: StringTableRef): Process =
+                      additions: StringTableRef;
+                      unset: openArray[string] = []): Process =
   ## Start one `nim` invocation over a profile -- the compile's `nim c`, the
   ## platform probe's `nim dump` / `nim check` -- with stderr merged into
-  ## stdout, from the reprobuild root, in `env`
-  ## (`profileCompileChildEnv`). `argv[0]` is the compiler
-  ## `resolveProfileNimCompiler` chose. The one place a profile's compiler is
-  ## launched; finish it with `finishProfileNim`. The Windows profile C
-  ## capability probe reuses this same argv/capture executor before Nim.
-  startProcess(argv[0], workingDir = repoRootAbs, args = argv[1 .. ^1],
-    env = env, options = {poUsePath, poStdErrToStdOut})
+  ## stdout, from the reprobuild root. `nim` INHERITS this process's
+  ## environment with `additions` (`profileCompileEnvAdditions`) laid over
+  ## it. `argv[0]` is the compiler `resolveProfileNimCompiler` chose. The one
+  ## place a profile's compiler is launched; finish it with
+  ## `finishProfileNim`. The Windows profile C capability probe reuses this
+  ## same argv/capture executor before Nim. Each name in `unset` is removed
+  ## from the environment for the spawn the same way, and restored after.
+  ##
+  ## The additions are set in this process's environment only for the
+  ## duration of the spawn and restored as they were before it returns (the
+  ## child has its own copy by then), because the alternative -- handing
+  ## `startProcess` a full environment table -- means enumerating the
+  ## environment, which on Windows io-mon records as a read of every
+  ## variable (see `profileCompileEnvAdditions`). Not thread-safe with
+  ## respect to other environment writers in this process; the callers (the
+  ## internal helpers and the tests) spawn from one thread.
+  var restore: seq[tuple[name: string; existed: bool; value: string]]
+  for name in unset:
+    restore.add((name: name, existed: existsEnv(name), value: getEnv(name)))
+    delEnv(name)
+  if additions != nil:
+    for name, value in additions:
+      restore.add((name: name, existed: existsEnv(name), value: getEnv(name)))
+      putEnv(name, value)
+  try:
+    result = startProcess(argv[0], workingDir = repoRootAbs,
+      args = argv[1 .. ^1], env = nil, options = {poUsePath, poStdErrToStdOut})
+  finally:
+    for i in countdown(restore.high, 0):
+      let saved = restore[i]
+      if saved.existed:
+        putEnv(saved.name, saved.value)
+      else:
+        delEnv(saved.name)
 
 proc finishProfileNim*(p: Process): tuple[output: string; exitCode: int] =
   ## Drain a `startProfileNim` process, wait for it and release it.
@@ -534,7 +593,9 @@ proc finishProfileNim*(p: Process): tuple[output: string; exitCode: int] =
   (output: output, exitCode: exitCode)
 
 # ---------------------------------------------------------------------------
-# Direct Nim invocation (two-phase: `nim c` then run the binary).
+# Direct Nim invocation. The compile (`compileProfileExecutable`) and the run
+# (`runProfileBinary`) are separate steps because production runs them as
+# separate edges; `compileProfileBinary` chains them for the tests.
 # ---------------------------------------------------------------------------
 
 proc runProfileBinary*(outBinary: string): tuple[
@@ -579,13 +640,15 @@ when defined(windows):
       try:
         createDir(extendedPath(scratch))
         writeFile(extendedPath(source), cCompilerProbeSource)
-        let childEnv = profileCompileChildEnv(repoRootAbs)
-        for name in ["SDKROOT", "DEVELOPER_DIR", "CPATH", "C_INCLUDE_PATH",
-                     "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "INCLUDE",
-                     "LIBRARY_PATH", "LIB"]:
-          childEnv.del(name)
+        # The probe sees the compile's additions with the toolchain search
+        # variables removed for the spawn only: removing them by name keeps
+        # the environment un-enumerated (`startProfileNim`).
         let res = finishProfileNim(startProfileNim(
-          cCompilerProbeArgv(result, source, output), repoRootAbs, childEnv))
+          cCompilerProbeArgv(result, source, output), repoRootAbs,
+          profileCompileEnvAdditions(repoRootAbs),
+          unset = ["SDKROOT", "DEVELOPER_DIR", "CPATH", "C_INCLUDE_PATH",
+                   "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "INCLUDE",
+                   "LIBRARY_PATH", "LIB"]))
         probe.usable = res.exitCode == 0
         if not probe.usable:
           probe.detail = "exit status " & $res.exitCode &
@@ -604,14 +667,20 @@ when defined(windows):
       err.stderrText = message
       raise err
 
-proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
-                           repoRoot: string;
-                           verbose: bool = false): tuple[
-    jsonOutput: string; stderrText: string] =
-  ## Two-phase invocation: `nim c` (no `-r`) emits the binary, then we
-  ## run it directly. The split keeps Nim's diagnostic
-  ## chatter on stderr and the profile binary's stdout JSON on stdout.
-  ## Raises `CompileFailure` if either step exits non-zero.
+proc compileProfileExecutable*(profileRoot, nimcacheDir, outBinary: string;
+                               repoRoot: string;
+                               verbose: bool = false): string =
+  ## The COMPILE half of a profile compile: `nim c` (no `-r`) over
+  ## `profileRoot`, linking `outBinary`. Returns Nim's transcript (its
+  ## diagnostics) and raises `CompileFailure` carrying that transcript when
+  ## the compile fails. Does NOT run the binary.
+  ##
+  ## This is the whole body of the compile edge (`__repro_profile_compile`,
+  ## through `runProfileCompileHelper`), and "does not run the binary" is the
+  ## property that edge's entropy blessing rests on: the edge's process tree
+  ## is nim and the C toolchain, never the produced program
+  ## (reprobuild-pm `spec/Profile-Compilation-Model.md` §2.1). The run is a
+  ## separate, unblessed edge. Do not add a run here.
   let nimExe = resolveProfileNimCompiler()
   var cCompiler = resolveProfileCCompiler()
   let repoRootAbs = absolutePath(repoRoot)
@@ -630,7 +699,7 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
 
   let staged = stageProfileFiles(profileRoot, repoRootAbs)
   try:
-    let childEnv = profileCompileChildEnv(repoRootAbs)
+    let childEnv = profileCompileEnvAdditions(repoRootAbs)
     # `err.stderrText` below is the ONLY thing a user sees when a profile
     # fails to compile; `finishProfileNim` drains the whole transcript.
     let compileRes = finishProfileNim(
@@ -641,23 +710,39 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
         " (exit " & $compileRes.exitCode & ")"
       err.stderrText = compileRes.output
       raise err
-
-    # Run the profile binary directly, not through a shell, for the same
-    # reason the compile is an argv: the binary sits under the nimcache, so
-    # its path carries any space the state directory has. Only stdout is
-    # intent JSON. Drain stderr concurrently so diagnostics larger than a
-    # pipe buffer cannot block the profile before it emits its intent.
-    let runRes = runProfileBinary(outBinary)
-    if runRes.exitCode != 0:
-      var err = new CompileFailure
-      err.msg = "compiled profile binary exited " & $runRes.exitCode &
-        " for " & profileRoot
-      err.stderrText = compileRes.output & runRes.stderrText & runRes.output
-      raise err
-    result.jsonOutput = runRes.output
-    result.stderrText = compileRes.output & runRes.stderrText
+    compileRes.output
   finally:
     unstageProfileFiles(staged)
+
+proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
+                           repoRoot: string;
+                           verbose: bool = false): tuple[
+    jsonOutput: string; stderrText: string] =
+  ## Compile AND run a profile in this process, unmonitored:
+  ## `compileProfileExecutable`, then `runProfileBinary` with no arguments,
+  ## so the binary prints its intent on stdout. Raises `CompileFailure` if
+  ## either step exits non-zero.
+  ##
+  ## NOT the production path. `compileProfileToRbpi` schedules the compile
+  ## and the run as two monitored edges and never calls this; it exists for
+  ## the tests (and callers) that need a profile's intent without a build
+  ## engine. Only stdout is intent JSON; diagnostics come back in
+  ## `stderrText`.
+  let transcript = compileProfileExecutable(profileRoot, nimcacheDir,
+    outBinary, repoRoot, verbose)
+  # Run the profile binary directly, not through a shell, for the same
+  # reason the compile is an argv: the binary's path carries any space the
+  # state directory has. Drain stderr concurrently so diagnostics larger than
+  # a pipe buffer cannot block the profile before it emits its intent.
+  let runRes = runProfileBinary(outBinary)
+  if runRes.exitCode != 0:
+    var err = new CompileFailure
+    err.msg = "compiled profile binary exited " & $runRes.exitCode &
+      " for " & profileRoot
+    err.stderrText = transcript & runRes.stderrText & runRes.output
+    raise err
+  result.jsonOutput = runRes.output
+  result.stderrText = transcript & runRes.stderrText
 
 proc rbpiBytesFromJson*(jsonText: string): seq[byte] =
   ## Parse the JSON ProfileIntent emitted by the compiled profile and

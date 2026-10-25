@@ -164,6 +164,12 @@ suite "profile compile edge: staticRead payload change":
     for path in first.observedInputs:
       if path.endsWith("payload.txt"):
         sawPayload = true
+    # A `staticRead` is a COMPILE-time read: it belongs to the compile edge's
+    # record, which is the one its edit must re-run.
+    var compileSawPayload = false
+    for path in first.compileEdge.observedInputs:
+      if path.endsWith("payload.txt"):
+        compileSawPayload = true
 
     let spawnsBefore = sb.nimSpawnCount()
     let second = compileProfileToRbpi(sb.profilePath, opts)
@@ -181,8 +187,15 @@ suite "profile compile edge: staticRead payload change":
     else:
       check first.cachePublishSkipReason.len == 0
       check sawPayload
+      check compileSawPayload
       check not second.edgeLaunched
       check second.cacheDecision == cdHit
+      # Answered from the cache on BOTH edges: the compile edge (nim not
+      # spawned) and the run edge (the profile binary not spawned).
+      check second.compileEdge.cacheDecision == cdHit
+      check not second.compileEdge.launched
+      check second.runEdge.cacheDecision == cdHit
+      check not second.runEdge.launched
       check sb.nimSpawnCount() == spawnsBefore
     checkSinglePayloadResource(decodeRbpi(second.rbpiBytes), "alpha")
 
@@ -191,6 +204,10 @@ suite "profile compile edge: staticRead payload change":
     checkpoint("third: decision=" & $third.cacheDecision &
       " miss=" & third.cacheMissReason)
     check third.edgeLaunched
+    # The payload edit re-runs the compile, and the new binary (it embeds the
+    # payload) re-runs the run edge through its declared input.
+    check third.compileEdge.launched
+    check third.runEdge.launched
     check sb.nimSpawnCount() > spawnsBefore
     checkSinglePayloadResource(decodeRbpi(third.rbpiBytes), "bravo")
 
@@ -262,6 +279,9 @@ suite "profile compile edge: staticRead payload change":
     else:
       check second.cacheDecision == cdHit
       check not second.edgeLaunched
+      # Both edges name the temp-directory variables as passthrough.
+      check not second.compileEdge.launched
+      check not second.runEdge.launched
     checkSinglePayloadResource(decodeRbpi(second.rbpiBytes), "alpha")
 
     # Positive control: an observed variable outside the passthrough set.
@@ -274,4 +294,7 @@ suite "profile compile edge: staticRead payload change":
     check third.edgeLaunched
     if not failedClosed:
       check third.cacheMissReason.contains(ControlVar)
+      # Nim reads it to find its configuration: the compile edge's input.
+      check third.compileEdge.launched
+      check third.compileEdge.cacheMissReason.contains(ControlVar)
     checkSinglePayloadResource(decodeRbpi(third.rbpiBytes), "alpha")

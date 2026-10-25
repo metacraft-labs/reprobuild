@@ -48,6 +48,15 @@ revision requirements; `override-status` explains why a candidate was declined.
 Use `flakeRef = "./nix"` for a nested flake or `flakeRef = ".#ci"` for another
 shell. The default profile lives in `.repro/foreign-env/flake-profile`.
 
+The default reference is `.?submodules=1`, so the flake source includes the
+repository's initialised git submodules. When the repository declares a
+submodule that is not initialised, as in a clone made without
+`--recurse-submodules`, nix cannot fetch it with that flag. In that state the
+flake is named as plain `.` instead: activation succeeds, and the flake does
+not see submodule content. Run `git submodule update --init` when the shell
+needs it. The same rule applies to any local `flakeRef` that asks for
+`submodules=1`.
+
 ### Building the example
 
 You need:

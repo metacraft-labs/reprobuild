@@ -9,8 +9,11 @@
 ##   - `compileProfileToRbpi` does NOT serve a valid `.rbpi` that is
 ##     already present without scheduling the edge (the retired
 ##     structural fast path).
-##   - `profileCompileBuildAction` shape: argv, declared inputs/outputs,
-##     dependency policy, fingerprint binding.
+##   - `profileCompileBuildAction` / `profileRunBuildAction` shape: argv,
+##     declared inputs/outputs, dependency policy, fingerprint binding, and
+##     the entropy policy of each -- the compile edge carries the provider
+##     compile's blessing, the run edge none (reprobuild-pm
+##     `spec/Profile-Compilation-Model.md` §2.1).
 ##
 ## The source-discovery and source-digest cases that used to open this file
 ## were removed with the procs they tested (`parseSiblingImports`,
@@ -45,6 +48,7 @@ from repro_core/c_compiler import BuiltCCompilerPath, cCompilerFamily,
 
 import repro_core
 import repro_build_engine
+from repro_local_store import ffpHybrid
 import repro_profile
 import repro_profile_intent
 import repro_profile_compile
@@ -145,10 +149,17 @@ suite "M83 Phase C: cache layout":
     let key = "abcdef1234"
     let rbpi = cachedRbpiPath(stateDir, key)
     let nimcache = cachedNimcacheDir(stateDir, key)
+    let binary = cachedProfileBinaryPath(stateDir, key)
+    let intent = cachedIntentDocumentPath(stateDir, key)
     check rbpi.endsWith(key & ".rbpi")
     check nimcache.endsWith(key)
-    check "profile-cache" in rbpi
-    check "profile-cache" in nimcache
+    check binary.endsWith(key / addFileExt("profile-build", ExeExt))
+    check intent.endsWith(key & ".intent.json")
+    for path in [rbpi, nimcache, binary, intent]:
+      check "profile-cache" in path
+    # The binary is a product the run edge consumes, so it must NOT lie under
+    # the nimcache, which is the compile edge's ignored input prefix.
+    check not binary.startsWith(nimcache)
 
   test "the output name follows the profile path, never its content":
     # The declared output must not move when the profile's content does: an
@@ -175,7 +186,7 @@ suite "M83 Phase C: profileCompileBuildAction":
     let weak = weakFingerprintFromText("smoke.weak")
     let act = profileCompileBuildAction(
       profileRoot = "/profile/home.nim",
-      rbpiPath = "/cache/abc.rbpi",
+      binaryPath = "/cache/abc.profile-build",
       nimcacheDir = "/cache/nimcache/abc",
       publicCliPath = "/bin/repro",
       workDir = "/profile",
@@ -225,18 +236,19 @@ suite "M83 Phase C: profileCompileBuildAction":
     check act.argv[0] == "/bin/repro"
     check act.argv[1] == "__repro-compile-profile"
     check "--profile" in act.argv
-    check "--rbpi" in act.argv
+    check "--binary" in act.argv
+    check "--rbpi" notin act.argv
     check "--nimcache" in act.argv
     check "--repo-root" in act.argv
     check "/profile/home.nim" in act.argv
-    check "/cache/abc.rbpi" in act.argv
+    check "/cache/abc.profile-build" in act.argv
     # The dependency record is the monitor's, and only the monitor's: no
     # hand-written depfile, no source manifest, no declared source list.
     check "--depfile" notin act.argv
     check "--manifest" notin act.argv
     check act.depfile.len == 0
     check act.inputs.len == 0
-    check act.outputs == @["/cache/abc.rbpi"]
+    check act.outputs == @["/cache/abc.profile-build"]
     check act.dependencyPolicy.kind == dgAutomaticMonitor
     check act.dependencyPolicy.recognizedReports.len == 0
     # The nimcache is derived state the compile reads back; it must not key
@@ -244,29 +256,52 @@ suite "M83 Phase C: profileCompileBuildAction":
     check act.dependencyPolicy.ignoredInputPrefixes ==
       @[absolutePath("/cache/nimcache/abc")]
 
+  test "the compile edge carries the provider compile's blessing, exactly":
+    # Same mechanism (action-scoped `ndpEntropyBlessed`), same scope (no
+    # per-image entries), same declaration (`ProviderCompilerEntropyJustification`
+    # from `repro_core/entropy_blessings`, which the provider-compile edges
+    # use) -- not a copy of its text.
+    let act = profileCompileBuildAction(
+      profileRoot = "/profile/home.nim",
+      binaryPath = "/cache/abc.profile-build",
+      nimcacheDir = "/cache/nimcache/abc",
+      publicCliPath = "/bin/repro",
+      workDir = "/profile",
+      repoRoot = "/repo",
+      weak = weakFingerprintFromText("smoke.blessed"))
+    check act.nonDeterminism == ndpEntropyBlessed
+    check act.nonDeterminismJustification ==
+      ProviderCompilerEntropyJustification
+    check act.entropyBlessedImages.len == 0
+    # The claim the justification makes is true of this edge only because
+    # its helper never runs what it compiled: the argv is the compile
+    # helper, and no part of it names the intent-output contract.
+    check act.argv[1] == "__repro-compile-profile"
+    check ReproIntentOutFlag notin act.argv
+
   test "weak fingerprint names compiler and output identity, not sources":
     # Reduced to what monitoring cannot supply. Each of the four identities
     # moves it; nothing about a profile's sources is an argument at all, so
     # no source edit can (or needs to) reach it.
     let base = profileCompileWeakFingerprint("/nix/a/bin/nim", "/bin/repro",
-      "/s/profile-cache/k.rbpi")
+      "/s/profile-cache/k.profile-build")
     check base == profileCompileWeakFingerprint("/nix/a/bin/nim",
-      "/bin/repro", "/s/profile-cache/k.rbpi")
+      "/bin/repro", "/s/profile-cache/k.profile-build")
     check base != profileCompileWeakFingerprint("/nix/b/bin/nim",
-      "/bin/repro", "/s/profile-cache/k.rbpi")
+      "/bin/repro", "/s/profile-cache/k.profile-build")
     check base != profileCompileWeakFingerprint("/nix/a/bin/nim",
-      "/opt/repro", "/s/profile-cache/k.rbpi")
+      "/opt/repro", "/s/profile-cache/k.profile-build")
     check base != profileCompileWeakFingerprint("/nix/a/bin/nim",
-      "/bin/repro", "/s/profile-cache/other.rbpi")
+      "/bin/repro", "/s/profile-cache/other.profile-build")
     # The C compiler is part of the compiler identity (GM1l).
     check base != profileCompileWeakFingerprint("/nix/a/bin/nim",
-      "/bin/repro", "/s/profile-cache/k.rbpi", "/nix/cc/bin/cc")
+      "/bin/repro", "/s/profile-cache/k.profile-build", "/nix/cc/bin/cc")
 
   test "verbose=true adds --verbose argv element":
     let weak = weakFingerprintFromText("smoke.weak.v")
     let act = profileCompileBuildAction(
       profileRoot = "/p/home.nim",
-      rbpiPath = "/c/a.rbpi",
+      binaryPath = "/c/a.profile-build",
       nimcacheDir = "/c/nc",
       publicCliPath = "/bin/repro",
       workDir = "",
@@ -274,6 +309,64 @@ suite "M83 Phase C: profileCompileBuildAction":
       weak = weak,
       verbose = true)
     check "--verbose" in act.argv
+
+suite "M83 Phase C: profileRunBuildAction":
+
+  test "the run edge launches the binary directly, with no helper or shell":
+    let weak = profileRunWeakFingerprint("/cache/abc.intent.json")
+    let act = profileRunBuildAction(
+      profileRoot = "/profile/home.nim",
+      binaryPath = "/cache/abc.profile-build",
+      intentPath = "/cache/abc.intent.json",
+      workDir = "",
+      weak = weak)
+    check act.id == ProfileRunActionId
+    check act.id == "__repro_profile_run"
+    check act.kind == bakProcess
+    check act.cacheable
+    # argv[0] IS the profile binary: no `repro` helper (a stranger in this
+    # edge's process tree) and no shell.
+    check act.argv == @["/cache/abc.profile-build", ReproIntentOutFlag,
+      "/cache/abc.intent.json"]
+    # The profile's directory is the cwd, as it was inside the single edge.
+    check act.cwd == "/profile/home.nim".parentDir
+    # Keyed on the binary's bytes through a declared input (which also
+    # orders it after the compile edge that produces it); its own reads are
+    # the monitor's.
+    check act.inputs == @["/cache/abc.profile-build"]
+    check act.outputs == @["/cache/abc.intent.json"]
+    check act.actionCachePolicy == ffpHybrid
+    check act.dependencyPolicy.kind == dgAutomaticMonitor
+    check act.dependencyPolicy.ignoredInputPrefixes.len == 0
+    check act.depfile.len == 0
+    # A binary that exits 0 without emitting must not leave the previous
+    # run's document to be encoded as this run's intent.
+    check act.removeBeforeRun == @["/cache/abc.intent.json"]
+    check act.envPassthrough == @["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
+    check act.weakFingerprint ==
+      keyedOnGoverningLock(
+        keyedOnActionEnvironment(weak, [], @ProfileCompileScratchEnvNames),
+        lockIdentityOutsideSolvedGraph())
+
+  test "the run edge carries no entropy blessing of any kind":
+    # The run's process tree is chosen by the profile (user code), so it must
+    # stay at the fail-closed default: no action-scoped blessing, no
+    # per-image blessing. The compile edge's blessing does not reach it --
+    # they are separate actions.
+    let act = profileRunBuildAction("/p/home.nim", "/c/a.profile-build",
+      "/c/a.intent.json", "/work", profileRunWeakFingerprint("/c/a.intent.json"))
+    check act.nonDeterminism == ndpUnblessed
+    check act.nonDeterminismJustification.len == 0
+    check act.entropyBlessedImages.len == 0
+    check act.cwd == "/work"
+
+  test "the run edge's weak fingerprint names its output, not the binary":
+    let base = profileRunWeakFingerprint("/s/profile-cache/k.intent.json")
+    check base == profileRunWeakFingerprint("/s/profile-cache/k.intent.json")
+    check base != profileRunWeakFingerprint("/s/profile-cache/o.intent.json")
+    # Distinct from the compile edge's key space.
+    check base != profileCompileWeakFingerprint("", "",
+      "/s/profile-cache/k.intent.json")
 
 # ---------------------------------------------------------------------------
 # The retired structural fast path. A valid `.rbpi` already sitting at the
@@ -305,6 +398,11 @@ suite "M83 Phase C: compileProfileToRbpi has no structural fast path":
     let rbpiPath = cachedRbpiPath(stateDir, profileCompileKey(root))
     writeBytesAtomic(rbpiPath, bytes)
     check rbpiEnvelopeIsValid(rbpiPath)
+    # And a valid intent document where the run edge publishes: the envelope
+    # is encoded from that document after the edges ran, never served from
+    # it in their place.
+    writeFile(extendedPath(cachedIntentDocumentPath(stateDir,
+      profileCompileKey(root))), emitProfileIntentJson(p) & "\n")
 
     let opts = ProfileCompileOptions(
       stateDir: stateDir,
@@ -685,7 +783,7 @@ suite "installed repro: the profile compile's source-only inputs":
       withEnv("BEARSSL_SRC", ""):
         withEnv("REPRO_TEST_ADAPTERS_SRC", ""):
           withEnv("SHM_GSET_SRC", ""):
-            let env = profileCompileChildEnv(root)
+            let env = profileCompileEnvAdditions(root)
             check env["IO_MON_SRC"] ==
               prefix / InstalledSourceTreesSubdir / "io-mon/src"
             check env["BEARSSL_SRC"] ==
@@ -702,8 +800,25 @@ suite "installed repro: the profile compile's source-only inputs":
     defer: removeDir(prefix)
     fakeInstalledPrefix(prefix, ["io-mon/src"])
     withEnv("IO_MON_SRC", "/caller/io-mon/src"):
-      let env = profileCompileChildEnv(prefix / InstalledSourceRootSubdir)
-      check env["IO_MON_SRC"] == "/caller/io-mon/src"
+      let env = profileCompileEnvAdditions(prefix / InstalledSourceRootSubdir)
+      # Nothing is added for it: `nim` inherits the caller's value.
+      check not env.hasKey("IO_MON_SRC")
+      check getEnv("IO_MON_SRC") == "/caller/io-mon/src"
+
+  test "the additions are only the source roots, never a copy of the " &
+      "environment":
+    # Copying the environment enumerates it, and on Windows io-mon records an
+    # enumeration as a read of every variable -- which keyed the profile
+    # compile edge on the whole caller environment.
+    let prefix = createTempDir("repro-installed-additions-", "")
+    defer: removeDir(prefix)
+    fakeInstalledPrefix(prefix, ["io-mon/src"])
+    withEnv("REPRO_PROFILE_ENV_MARKER", "present"):
+      let env = profileCompileEnvAdditions(prefix / InstalledSourceRootSubdir)
+      check not env.hasKey("REPRO_PROFILE_ENV_MARKER")
+      check not env.hasKey("PATH")
+      for name, _ in env:
+        check name.endsWith("_SRC")
 
   test "a source root that is not an installed layout takes nothing from " &
       "the table":
@@ -715,7 +830,7 @@ suite "installed repro: the profile compile's source-only inputs":
     fakeReprobuildTree(checkout)
     createDir(extendedPath(base / InstalledSourceTreesSubdir / "io-mon/src"))
     withEnv("IO_MON_SRC", ""):
-      let env = profileCompileChildEnv(checkout)
+      let env = profileCompileEnvAdditions(checkout)
       check not env.hasKey("IO_MON_SRC") or
         InstalledSourceTreesSubdir notin env["IO_MON_SRC"].replace("\\", "/")
 

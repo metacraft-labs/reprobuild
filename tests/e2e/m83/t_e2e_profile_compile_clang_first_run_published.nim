@@ -23,6 +23,32 @@
 ## header case changes only a header under the same warm Nim cache and asserts
 ## the new value in the actual resource intent. No monitor records are ignored.
 ##
+## SINCE THE 2026-10-22 SPLIT (reprobuild-pm
+## `spec/Profile-Compilation-Model.md` §2.1) the profile compile is a compile
+## edge that carries the provider compile's entropy blessing and an
+## unblessed run edge. clang runs in the COMPILE edge, so its draw no longer
+## withholds publication, and "is the first run published" stopped being
+## evidence that the flag works. The flags stay -- a removed draw is better
+## than a waived one (idiomatic-reprobuild.md §4.4) -- and this gate now
+## reads their effect off the compile edge's own entropy evidence, record by
+## record with the image that emitted it
+## (`ProfileEdgeOutcome.entropyObservations`).
+##
+## NOT off the bare count of records. The edge's process tree draws entropy
+## that is not clang's: a Nix clang is a wrapper script that runs coreutils
+## `mktemp` (one `getrandom`, measured on NixOS with clang 21.1.8), which the
+## per-image blessing table excuses. A count would fail the primary case on
+## that draw and let the control pass on it alone, with clang drawing
+## nothing. So each case asks two questions:
+##
+## * clang's draws -- records whose image is a clang driver (`clangDraws`).
+##   None with the flags; at least one without them.
+## * unexcused draws -- records no per-image blessing excuses
+##   (`unexcusedDraws`): what would withhold publication if this edge carried
+##   no action blessing, as it carried none before the split. None with the
+##   flags (the pre-split gate's "first run is published"); at least one
+##   without them (its `unblessed-entropy` skip reason).
+##
 ## Vacuity guards: the compile really ran clang with the flag -- the `nim c`
 ## argv the spy logged names `--cc:clang`, the chosen clang as
 ## `--clang.exe:`, and `--passC:-fno-temp-file` -- and the published intent
@@ -30,18 +56,20 @@
 ##
 ## Positive control: the same compile through a clang that DROPS
 ## `-fno-temp-file` (`exec_without_arg.nim`, a graph-built program that
-## removes it and execs the same clang) is not published on its first run,
-## with `unblessed-entropy` as the reason, and is not a hit on its second. So
-## the green primary case is the flag's doing, and the monitor still sees
-## clang's entropy draw. The wrapper is a compiled program, not a `/bin/sh`
+## removes it and execs the same clang) has clang's draw in the compile
+## edge's entropy evidence, attributed to the clang image -- and, the edge
+## being blessed, is still published. So the primary case's absence of a
+## clang draw is the flag's doing, and the monitor still sees clang's draw. The wrapper is a compiled program, not a `/bin/sh`
 ## script, so the monitor shim stays on the chain on macOS too (a SIP
 ## `/bin/sh` would drop it) and the control runs on Linux and macOS. On macOS
 ## it is also the evidence that io-mon reports that clang's `arc4random` at
 ## all: if it did not, the primary case would pass for the wrong reason.
 ##
-## Falsifying mutation (performed when this gate was written): make
-## `profileCompileCFlags` return no flags. The primary case fails: run 1 has
-## `cachePublishSkipReason` `reasons=unblessed-entropy`, run 2 is a miss.
+## Falsifying mutation (performed when this gate was written, before the
+## split): make `profileCompileCFlags` return no flags. The primary case
+## failed: run 1 had `cachePublishSkipReason` `reasons=unblessed-entropy`, run
+## 2 was a miss. After the split the same mutation fails the primary case at
+## the compile edge's entropy evidence (a clang-image draw, unexcused).
 ##
 ## No mocks. The real `build/bin/repro`, the real Nim compiler, the real clang,
 ## the real io-mon shim; the `nim` on `PATH` is the pass-through counter
@@ -61,12 +89,14 @@
 ## `CryptGenRandom`, not `arc4random` (llvm/lib/Support/Windows/Process.inc).
 ## The hosts that run this gate are home-pc (Linux) and m1 (macOS).
 
-import std/[os, strutils, tables, unittest]
+import std/[options, os, strutils, tables, unittest]
 
 import repro_build_engine
 import repro_profile_intent
 import repro_profile_compile
 from repro_core/c_compiler import cCompilerFamily, clangNoTempFileFlag
+from repro_core/entropy_blessings import entropyBlessedTool,
+  entropyBlessingImageKey
 
 import repro_test_support/reasoned_skip
 
@@ -110,6 +140,47 @@ proc findClang(): string =
       if exe.len > 0 and cCompilerFamily(exe) == "clang":
         return exe
     ""
+
+proc isClangImage(image: string): bool =
+  ## Whether `image` is a clang compiler driver: base name `clang`,
+  ## `clang++`, or `clang-<major>` (how a Nix clang's unwrapped binary is
+  ## named). Deliberately not a prefix match: the control's argument-dropping
+  ## wrapper is `clang-without-no-temp-file`, and a draw of ITS would say
+  ## nothing about clang.
+  let key = entropyBlessingImageKey(image)
+  if key in ["clang", "clang++"]:
+    return true
+  const versioned = "clang-"
+  if key.startsWith(versioned) and key.len > versioned.len:
+    for c in key[versioned.len .. ^1]:
+      if c notin Digits:
+        return false
+    return true
+  false
+
+proc describe(observation: EntropyObservation): string =
+  observation.source & " from " &
+    (if observation.image.len > 0: observation.image else: "<unattributed>")
+
+proc clangDraws(edge: ProfileEdgeOutcome): seq[string] =
+  ## The edge's entropy records emitted by a clang driver.
+  for observation in edge.entropyObservations:
+    if isClangImage(observation.image):
+      result.add(observation.describe())
+
+proc unexcusedDraws(edge: ProfileEdgeOutcome): seq[string] =
+  ## The edge's entropy records no per-image blessing (`EntropyBlessedTools`)
+  ## excuses. An unattributed record (empty image) is one of them, as it is
+  ## for the engine: a draw whose author cannot be named might be clang's.
+  for observation in edge.entropyObservations:
+    if entropyBlessedTool(observation.image).isNone:
+      result.add(observation.describe())
+
+proc allDraws(edge: ProfileEdgeOutcome): string =
+  var parts: seq[string] = @[]
+  for observation in edge.entropyObservations:
+    parts.add(observation.describe())
+  parts.join("; ")
 
 proc checkIntent(art: ProfileCompileArtifact) =
   let intent = decodeRbpi(art.rbpiBytes)
@@ -182,6 +253,14 @@ suite "profile compile edge: a clang compile is published on its first run":
           check not path.endsWith(".d.tmp")
           if path.endsWith(".o"): inc objectCount
         check objectCount > 0
+        # The flags removed clang's draw: the compile edge -- where clang
+        # runs -- observed none from a clang image, and none that only its
+        # action blessing excuses. (The blessing would excuse a draw; this
+        # checks there is none to excuse.) A Nix clang wrapper's `mktemp`
+        # may draw here; the per-image table excuses that one.
+        checkpoint("compile entropy: " & first.compileEdge.allDraws())
+        check first.compileEdge.clangDraws().len == 0
+        check first.compileEdge.unexcusedDraws().len == 0
         # Whatever else macOS monitoring may refuse, clang's entropy draw is
         # not a reason any more.
         check "entropy" notin first.cachePublishSkipReason
@@ -204,7 +283,7 @@ suite "profile compile edge: a clang compile is published on its first run":
           check sb.nimSpawnCount() == spawnsBefore
         checkIntent(second)
 
-  test "positive control: a clang that drops -fno-temp-file is not published":
+  test "positive control: a clang that drops -fno-temp-file draws entropy":
     when defined(windows):
       skip("[platform N/A] see the primary case: the defect is POSIX " &
         "clang's. Runs on home-pc (Linux) and m1 (macOS, GM0m)")
@@ -234,12 +313,24 @@ suite "profile compile edge: a clang compile is published on its first run":
         check first.edgeLaunched
         checkIntent(first)
         check ("--passC:" & clangNoTempFileFlag) in sb.lastCompileLine()
-        check "unblessed-entropy" in first.cachePublishSkipReason
+        # The monitor sees clang's OWN draw in the compile edge, attributed
+        # to the clang image -- not merely some draw, which a Nix clang
+        # wrapper's `mktemp` would supply on its own ...
+        checkpoint("compile entropy: " & first.compileEdge.allDraws())
+        check first.compileEdge.clangDraws().len > 0
+        # ... which no per-image blessing excuses (the pre-split gate's
+        # `unblessed-entropy` publish skip) ...
+        check first.compileEdge.unexcusedDraws().len > 0
+        # ... and the compile edge's blessing excuses it.
+        check "entropy" notin first.compileEdge.cachePublishSkipReason
+        let failedClosed = EdgeMayFailClosed and
+          first.compileEdge.cachePublishSkipReason.len > 0
         let second = compileProfileToRbpi(sb.profilePath, opts)
         checkpoint("second: decision=" & $second.cacheDecision &
           " miss=" & second.cacheMissReason)
-        check second.cacheDecision != cdHit
-        check second.edgeLaunched
+        if not failedClosed:
+          check second.compileEdge.cacheDecision == cdHit
+          check not second.compileEdge.launched
         checkIntent(second)
 
   test "Apple clang dependency temporaries are independently observable":
@@ -261,7 +352,12 @@ suite "profile compile edge: a clang compile is published on its first run":
         let first = compileProfileToRbpi(sb.profilePath, opts)
         check first.edgeLaunched
         checkIntent(first)
-        check "unblessed-entropy" in first.cachePublishSkipReason
+        # Dependency-file output restored: Apple clang's temporary-name draw
+        # is back in the compile edge's evidence, attributed to clang, and
+        # excused by the edge's blessing.
+        checkpoint("compile entropy: " & first.compileEdge.allDraws())
+        check first.compileEdge.clangDraws().len > 0
+        check "entropy" notin first.compileEdge.cachePublishSkipReason
         check ("--passC:" & clangNoTempFileFlag) in sb.lastCompileLine()
     else:
       skip("[platform N/A] dependency-file temporary entropy is Apple clang's " &

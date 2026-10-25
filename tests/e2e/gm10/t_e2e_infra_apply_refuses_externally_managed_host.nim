@@ -106,12 +106,15 @@ profile "gm10System":
   resources:
     inlineExecCall(
       argv = @["/bin/sh", "-c", "@CMD@"],
-      cwd = "@CWD@",
+      cwd = @CWD@,
       outputs = @["out/marker.txt"],
       requiresElevation = true,
       address = "gm10Marker",
       commandStatsId = "gm10.infra.marker")
-""".multiReplace(("@CMD@", cmd), ("@CWD@", markerDir))
+""".multiReplace(("@CMD@", cmd),
+    # A Nim literal, quoted and escaped: a Windows `C:\Users\...` read
+    # verbatim is a `\U` escape and fails the profile compile.
+    ("@CWD@", escape(markerDir)))
 
 proc stateFingerprint(stateDir: string): seq[string] =
   ## The system state directory minus the profile-compile cache: the plan

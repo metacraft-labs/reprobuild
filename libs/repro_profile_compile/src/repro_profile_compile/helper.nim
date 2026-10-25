@@ -3,35 +3,41 @@
 ## This proc is invoked by the public `repro` CLI's main dispatcher
 ## when it sees the `__repro-compile-profile` argv. The
 ## `__repro-compile-profile` argv is NEVER user-facing; it is the
-## subprocess shape that the profile-compile BuildAction expects.
+## subprocess shape that the profile COMPILE edge
+## (`__repro_profile_compile`, `edge.nim`) expects.
 ##
 ## Argv shape:
 ##
 ##   repro __repro-compile-profile
 ##     --profile <profile-root.nim>
-##     --rbpi <output-rbpi-path>
+##     --binary <output-profile-binary>
 ##     --nimcache <nimcache-dir>
 ##     --repo-root <reprobuild-repo-root>
 ##     [--verbose]
 ##
-## All paths must be absolute. The helper exits 0 on success and 1
-## on any failure; Nim diagnostics are forwarded to stderr inside a
-## bordered banner.
+## All paths must be absolute. The helper exits 0 on success, 1 on a
+## compile failure and 2 on a usage error; Nim's diagnostics are forwarded
+## to stderr (inside a bordered banner on failure).
 ##
-## THE HELPER ALWAYS COMPILES AND ALWAYS RUNS. It has no freshness check of
-## its own: when the engine spawns it, the action cache has already decided
-## the previous result is not good enough, and a short-circuit in here would
-## re-publish exactly the result the edge was re-run to replace (the provider
-## compile's child carried such a copy of its parent's gate; see
-## Compiles-Are-Normal-Edges). It also writes no depfile and no source
-## manifest — the edge's dependency record is what io-mon observes this
-## process and its children (`nim`, the C toolchain, the profile binary)
-## read.
+## THE HELPER ONLY COMPILES. It links the profile binary and stops. It does
+## not run it: the run is a separate, UNBLESSED edge (`__repro_profile_run`)
+## that launches the binary directly, while this helper's edge carries the
+## provider compile's entropy blessing. That blessing is sound only because
+## nothing in this process tree runs what it produced -- running the binary
+## here would put the profile's own behaviour under it
+## (reprobuild-pm `spec/Profile-Compilation-Model.md` §2.1).
+##
+## IT ALSO ALWAYS COMPILES. It has no freshness check of its own: when the
+## engine spawns it, the action cache has already decided the previous result
+## is not good enough, and a short-circuit in here would re-publish exactly
+## the result the edge was re-run to replace (the provider compile's child
+## carried such a copy of its parent's gate; see Compiles-Are-Normal-Edges).
+## It writes no depfile and no source manifest -- the edge's dependency
+## record is what io-mon observes this process and its children (`nim`, the
+## C toolchain) read.
 
 import std/[os, strutils]
 from repro_core/paths import extendedPath
-
-import repro_profile_intent
 
 import ./compile
 import ./platforms
@@ -53,14 +59,14 @@ proc hasFlag(args: openArray[string]; flag: string): bool =
 proc runProfileCompileHelper*(args: openArray[string]): int =
   ## Implementation of `repro __repro-compile-profile`. See module docs.
   let profileRoot = valueAfterFlag(args, "--profile")
-  let rbpiPath = valueAfterFlag(args, "--rbpi")
+  let binaryPath = valueAfterFlag(args, "--binary")
   let nimcacheDir = valueAfterFlag(args, "--nimcache")
   let repoRoot = valueAfterFlag(args, "--repo-root")
   let verbose = hasFlag(args, "--verbose")
 
   for (name, value) in [
     ("--profile", profileRoot),
-    ("--rbpi", rbpiPath),
+    ("--binary", binaryPath),
     ("--nimcache", nimcacheDir),
     ("--repo-root", repoRoot)
   ]:
@@ -73,52 +79,32 @@ proc runProfileCompileHelper*(args: openArray[string]): int =
       "not exist: " & profileRoot)
     return 1
 
-  let exeName =
-    when defined(windows): "profile-build.exe"
-    else: "profile-build"
-  let outBinary = nimcacheDir / exeName
-
-  var jsonText: string
   try:
-    let res = compileProfileBinary(profileRoot, nimcacheDir, outBinary,
-      repoRoot, verbose)
-    jsonText = res.jsonOutput
-    # Keep diagnostics visible even when the profile succeeds or its
-    # stdout subsequently fails JSON/RBPI encoding. Never parse stderr.
-    if res.stderrText.len > 0:
-      stderr.write(res.stderrText)
-      if not res.stderrText.endsWith("\n"):
+    let transcript = compileProfileExecutable(profileRoot, nimcacheDir,
+      binaryPath, repoRoot, verbose)
+    # Keep Nim's diagnostics visible when the compile succeeds too (the
+    # engine captures them with the action result).
+    if transcript.len > 0:
+      stderr.write(transcript)
+      if not transcript.endsWith('\n'):
         stderr.writeLine("")
   except CompileFailure as err:
     stderr.writeLine("repro __repro-compile-profile: " & err.msg)
     if err.stderrText.len > 0:
       stderr.writeLine("---- nim diagnostics ----")
       stderr.write(err.stderrText)
-      if not err.stderrText.endsWith("\n"):
+      if not err.stderrText.endsWith('\n'):
         stderr.writeLine("")
       stderr.writeLine("---- end nim diagnostics ----")
-    let tmpPath = rbpiPath & ".tmp"
-    if fileExists(extendedPath(tmpPath)):
-      try: removeFile(extendedPath(tmpPath)) except OSError: discard
     return 1
-
-  var rbpiBytes: seq[byte]
-  try:
-    rbpiBytes = rbpiBytesFromJson(jsonText)
-  except CatchableError as err:
-    stderr.writeLine("repro __repro-compile-profile: failed to encode " &
-      "RBPI envelope from compiled profile output: " & err.msg)
+  if not fileExists(extendedPath(binaryPath)):
+    # `nim c` exited 0 without linking the declared output: refuse here so
+    # the edge fails naming the cause, instead of the run edge failing to
+    # launch a binary that is not there.
+    stderr.writeLine("repro __repro-compile-profile: nim exited 0 but " &
+      "wrote no binary at " & binaryPath)
     return 1
-
-  try:
-    discard readEnvelope(rbpiBytes)
-  except CatchableError as err:
-    stderr.writeLine("repro __repro-compile-profile: generated RBPI " &
-      "envelope is structurally invalid: " & err.msg)
-    return 1
-
-  writeBytesAtomic(rbpiPath, rbpiBytes)
-  return 0
+  0
 
 proc runProfilePlatformProbeHelper*(args: openArray[string]): int =
   ## Implementation of `repro __repro-probe-profile-platforms`: evaluate the

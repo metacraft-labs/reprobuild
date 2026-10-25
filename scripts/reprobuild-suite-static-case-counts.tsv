@@ -67,6 +67,7 @@ libs/repro_build_engine/tests/t_daemon_check_platform_refusal.nim	nim	2
 libs/repro_build_engine/tests/t_dark_window_cache_records_are_drained.nim	nim	9
 libs/repro_build_engine/tests/t_declared_depfile_absent_is_not_cacheable.nim	nim	3
 libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim	nim	14
+libs/repro_build_engine/tests/t_declared_output_not_produced_fails_the_action.nim	nim	7
 libs/repro_build_engine/tests/t_directory_listing_above_outputs_is_the_graph_view.nim	nim	7
 libs/repro_build_engine/tests/t_endpoint_daemon_trust.nim	nim	7
 libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim	nim	4
@@ -367,6 +368,7 @@ libs/repro_home_apply/tests/t_realize_honors_requested_version.nim	nim	3
 libs/repro_home_apply/tests/t_runtime_library_binding.nim	nim	8
 libs/repro_home_apply/tests/t_runtime_library_launch_plan.nim	nim	5
 libs/repro_home_apply/tests/t_smoke_home_apply.nim	nim	8
+libs/repro_home_apply/tests/t_stow_resource_mode_by_target_platform.nim	nim	3
 libs/repro_home_apply/tests/test_m1_fpc_resolves.nim	nim	3
 libs/repro_home_apply/tests/test_m25_adapter_preference_parse.nim	nim	9
 libs/repro_home_apply/tests/test_m25_adapter_preference_plumbed.nim	nim	14
@@ -535,6 +537,7 @@ libs/repro_peer_cache/tests/t_peer_cache_tls_signed_advertisement_round_trip.nim
 libs/repro_peer_cache/tests/t_peer_cache_two_phase_lan_roundtrip.nim	nim	2
 libs/repro_peer_cache/tests/t_poisoned_cache_record.nim	nim	2
 libs/repro_platform/tests/test_msvc_activation_multiline_env.nim	nim	5
+libs/repro_platform/tests/test_msvc_activation_spawns_no_telemetry.nim	nim	5
 libs/repro_platform/tests/test_msvc_env_merge.nim	nim	9
 libs/repro_profile/tests/t_smoke_phase_g_action_edges.nim	nim	18
 libs/repro_profile/tests/t_smoke_repro_profile.nim	nim	138
@@ -550,7 +553,7 @@ libs/repro_profile_compile/tests/t_smoke_infra_apply_broker_spawn.nim	nim	7
 libs/repro_profile_compile/tests/t_smoke_module_imports.nim	nim	7
 libs/repro_profile_compile/tests/t_smoke_phase_g_action_edges_integration.nim	nim	11
 libs/repro_profile_compile/tests/t_smoke_profile_adapter.nim	nim	96
-libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	nim	32
+libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	nim	37
 libs/repro_profile_compile/tests/t_smoke_system_apply_integration.nim	nim	24
 libs/repro_profile_compile/tests/t_template_in_template_named_args.nim	nim	2
 libs/repro_profile_intent/tests/t_smoke_repro_profile_intent.nim	nim	35
@@ -1228,11 +1231,12 @@ tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim	nim	4
 tests/e2e/m83/t_e2e_profile_compile_ignores_ancestor_membership.nim	nim	2
 tests/e2e/m83/t_e2e_profile_compile_nim_path_closure.nim	nim	5
 tests/e2e/m83/t_e2e_profile_compile_path_with_spaces.nim	nim	2
-tests/e2e/m83/t_e2e_profile_compile_runtime_read_tracked.nim	nim	1
+tests/e2e/m83/t_e2e_profile_compile_runtime_read_tracked.nim	nim	2
 tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim	nim	3
 tests/e2e/m83/t_e2e_profile_modules.nim	nim	7
+tests/e2e/m83/t_e2e_profile_run_edge_is_unblessed.nim	nim	2
 tests/e2e/m83/t_e2e_repro_profile_compile.nim	nim	14
-tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim	nim	6
+tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim	nim	8
 tests/e2e/m83/t_e2e_windows_bundle_compiles_profile.nim	nim	3
 tests/e2e/m9/t_e2e_m9_linux_phase2_partials_resolve.nim	nim	7
 tests/e2e/m9_5/t_e2e_m9_5_linux_url_harvest.nim	nim	5
@@ -1759,6 +1763,7 @@ tests/integration/t_only_overridden_nodes_are_rewritten.nim	nim	1
 tests/integration/t_optin_layer_runs_under_the_engine.nim	nim	1
 tests/integration/t_orphaned_lock_draft_is_swept_never_published.nim	nim	4
 tests/integration/t_output_cleanup_executor.nim	nim	10
+tests/integration/t_own_flake_ref_survives_an_uninitialised_submodule.nim	nim	2
 tests/integration/t_path_tool_rewrite_detected.nim	nim	11
 tests/integration/t_pcr_composite_matches_tpm.nim	nim	2
 tests/integration/t_personal_workspace_restores_on_fresh_machine_from_pushed_lock_and_dotfiles.nim	nim	1

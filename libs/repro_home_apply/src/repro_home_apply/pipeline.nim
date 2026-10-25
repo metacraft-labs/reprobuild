@@ -2433,7 +2433,7 @@ proc planDesiredState*(rawOpts: ApplyOptions): PlannedDesiredState =
   # agree, refused when they do not (`resolveStowResourceOverlap`).
   let overlap = resolveStowResourceOverlap(result.plan.generatedFiles,
     result.stowDiscovery.entries, result.desiredResources, opts.profileDir,
-    opts.homeDir)
+    opts.homeDir, opts.targetContext.platform)
   result.plan.generatedFiles = overlap.files
   result.stowDiscovery.entries = overlap.stowEntries
   result.applied = appliedConcernsFor(result.profile, opts.host)
@@ -2979,7 +2979,8 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
     # for `--plan` and `repro home facts`).
     let overlap = resolveStowResourceOverlap(applyPlan.generatedFiles,
       stowEntries, composeDesiredResources(profile, opts.homeDir,
-        opts.targetContext), opts.profileDir, opts.homeDir)
+        opts.targetContext), opts.profileDir, opts.homeDir,
+      opts.targetContext.platform)
     applyPlan.generatedFiles = overlap.files
     stowEntries = overlap.stowEntries
     for d in overlap.diagnostics:

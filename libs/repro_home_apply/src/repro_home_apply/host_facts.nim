@@ -205,7 +205,7 @@ proc hostFactsFromState*(state: PlannedDesiredState; system: string):
     case g.sourceKind
     of pgfsStowFile:
       var e = entry(id, stowOrigin(g.stowSourcePath, opts.profileDir))
-      e["mode"] = %linkedMode(g.stowSourcePath)
+      e["mode"] = %linkedMode(g.stowSourcePath, opts.targetContext.platform)
       e["digest"] = %sha256Digest(g.contentBytes)
       b.add("files", e)
     of pgfsPackageOutput:

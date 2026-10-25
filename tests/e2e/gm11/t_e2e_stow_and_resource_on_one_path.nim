@@ -37,8 +37,10 @@
 ##   wrote. A file the user edited is left, the stow step refuses it as it
 ##   refuses any pre-existing target, and the user's bytes survive.
 ##
-## `e2e_conflicting_stow_and_resource_refused`: other bytes, another mode,
-## and content from a command (bytes unknown before apply) are each refused
+## `e2e_conflicting_stow_and_resource_refused`: other bytes, another mode
+## (POSIX only: Windows applies no mode, so there the same bytes under
+## another mode are checked to agree instead), and content from a command
+## (bytes unknown before apply) are each refused
 ## by `repro home facts`, `repro home apply --plan` and `repro home apply`.
 ## The refusal names the path, both sources and the differing field. HOME is
 ## unchanged by the apply (tree fingerprint): neither `c1`'s other file nor
@@ -194,6 +196,10 @@ suite "A stow file and an fs.userFile resource on one path":
     check control.len == 1
     if control.len == 1:
       check control[0]["origin"].getStr == "stow stow/c1/" & ControlRel
+      # A non-executable stow source is `0644` on every host. On Windows,
+      # where Nim reports every file as executable, this read `0755`
+      # (issue 2026-10-23-windows-stow-file-reads-as-0755-...).
+      check control[0]["mode"].getStr == "0644"
     # Two profile PATH resources write the rc file's one PATH block, so
     # facts refuses them exactly as the apply does (issue
     # 2026-10-18-home-apply-applies-two-resources-for-one-path-or-variable;
@@ -322,13 +328,19 @@ suite "A stow file and an fs.userFile resource on one path":
     check fileSha256(sourcePath) == sourceSha
 
   test "e2e_conflicting_stow_and_resource_refused":
-    for (label, resource, field) in [
+    var conflicts = @[
         ("bytes", OtherBytesResource,
          "digest (" & CachesDigest & " vs " & OtherDigest & ")"),
-        ("mode", OtherModeResource, "mode (0644 vs 0600)"),
         ("command", CommandResource,
          "digest (" & CachesDigest &
-         " vs unknown until apply (content from a command))")]:
+         " vs unknown until apply (content from a command))")]
+    # A mode is a difference only where it is applied. Windows files carry
+    # no permission bits and the `fs.userFile` driver does not apply `mode`
+    # there, so on Windows the same bytes under another mode agree; that
+    # case is checked after this loop.
+    when not defined(windows):
+      conflicts.add ("mode", OtherModeResource, "mode (0644 vs 0600)")
+    for (label, resource, field) in conflicts:
       checkpoint("conflict: " & label)
       let sb = newFixture("c1-conflict-" & label, resource)
       defer: sb.dispose()
@@ -359,6 +371,26 @@ suite "A stow file and an fs.userFile resource on one path":
       check not fileExists(extendedPath(sb.homeDir / UnrelatedRel))
       check readCurrentGenerationId(sb.stateDir).len == 0
       check fileSha256(sourcePath) == sourceSha
+
+    when defined(windows):
+      # The same bytes under another mode: one writer, the resource.
+      block:
+        let modeSb = newFixture("c1-mode-agrees", OtherModeResource)
+        defer: modeSb.dispose()
+        let facts = modeSb.runRepro(["home", "facts"])
+        show("mode only: facts", facts)
+        require facts.exitCode == 0
+        let caches = parseJson(facts.stdout).entriesFor("files", CachesId)
+        check caches.len == 1
+        if caches.len == 1:
+          check caches[0]["origin"].getStr == "resource c1Caches"
+        let applied = modeSb.runRepro(["home", "apply"])
+        show("mode only: apply", applied)
+        require applied.exitCode == 0
+        check applied.stderr.contains("IStowSameAsResource: stow stow/c1/" &
+          CachesRel & " is not linked at `" & CachesId &
+          "`: resource c1Caches writes the same file (same digest)")
+        modeSb.checkResourceFile(CachesRel, CachesBytes)
 
     # Falsifying mutation: the same fixture without the resource applies and
     # links the stow file, so the pair is what was refused.
