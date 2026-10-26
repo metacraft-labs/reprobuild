@@ -299,12 +299,14 @@ proc producedExecutablePath*(projectRoot, targetName: string): string =
 
 proc producedLibraryPath*(projectRoot, targetName: string): string =
   ## Predicted output path for a SwiftPM static-library target.
-  ## SwiftPM's ``-c release`` build writes static libraries as
-  ## ``.build/release/lib<targetName>.a`` on POSIX, or
-  ## ``.build/release/<targetName>.lib`` on Windows.
-  let libName =
-    when defined(windows): targetName & ".lib"
-    else: "lib" & targetName & ".a"
+  ## SwiftPM's ``-c release`` build writes a static library product as
+  ## ``.build/release/lib<targetName>.a`` on every platform, Windows
+  ## included: ``BuildParameters.binaryRelativePath`` names it
+  ## ``lib<name>`` + ``Triple.staticLibraryExtension``, which is ``.a``
+  ## for every triple (swift-package-manager
+  ## ``Sources/SPMBuildCore/BuildParameters/BuildParameters.swift`` and
+  ## ``Sources/Basics/Triple+Basics.swift``, release/5.10 through main).
+  let libName = "lib" & targetName & ".a"
   projectRoot / SwiftBuildSubdir / SwiftReleaseSubdir / libName
 
 proc collectSwiftInputs(projectRoot: string): seq[string] =

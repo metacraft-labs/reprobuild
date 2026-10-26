@@ -252,10 +252,9 @@ suite "swift-swiftpm convention M43":
     let projectRoot = "/some/project"
     let predicted = swift_convention.producedLibraryPath(projectRoot, "mylib")
     let unified = predicted.replace('\\', '/')
-    when defined(windows):
-      check unified.endsWith("/.build/release/mylib.lib")
-    else:
-      check unified.endsWith("/.build/release/libmylib.a")
+    # ``lib<name>.a`` on Windows too: SwiftPM's static-library extension
+    # is ``.a`` for every triple (``Triple.staticLibraryExtension``).
+    check unified.endsWith("/.build/release/libmylib.a")
 
   test "real static dynamic and automatic libraries fulfill declared outputs":
     let root = getTempDir() / "repro-swift-library-output-obligation"
@@ -289,7 +288,9 @@ suite "swift-swiftpm convention M43":
               check dirExists(line.split('\t')[2])
       let directory = project / ".build/release"
       if mode == "static":
-        let archive = when defined(windows): "Public.lib" else: "libPublic.a"
+        # ``lib<name>.a`` for every triple, Windows included
+        # (``Triple.staticLibraryExtension``).
+        let archive = "libPublic.a"
         check fileExists(directory / archive)
       elif mode == "dynamic":
         let library = when defined(windows): "Public.dll" elif defined(macosx): "libPublic.dylib" else: "libPublic.so"

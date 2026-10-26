@@ -3,7 +3,7 @@
     "graphOwnedHelperArtifacts": 33,
     "nimTestBinaries": 2383,
     "pureUnitConsolidationGroups": 68,
-    "pureUnitTests": 685,
+    "pureUnitTests": 684,
     "staticallyDetectedRuntimeCompilerFlowTests": 129,
     "testEntries": 2421
   },
@@ -1384,9 +1384,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1314,
+      "integration": 1315,
       "platform/destructive": 146,
-      "pure unit": 685,
+      "pure unit": 684,
       "unclassified": 258
     },
     "graphOwnedTestArtifacts": [
@@ -21346,7 +21346,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -48123,8 +48123,8 @@
     },
     {
       "binary": "build/test-bin/t_library_stage_alias",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [
         "reproProviderMode"
       ],
@@ -48132,13 +48132,14 @@
       "localDependencyShape": [
         "repro_core",
         "repro_dsl_stdlib",
-        "repro_project_dsl"
+        "repro_project_dsl",
+        "repro_test_support"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_library_stage_alias.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 3,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

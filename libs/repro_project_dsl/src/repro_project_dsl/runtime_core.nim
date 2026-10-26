@@ -3017,7 +3017,13 @@ proc markRegisteredActionOptionalOutputs*(action: var BuildActionDef;
     for arg in call.arguments:
       if arg.name == flagName:
         paths.addRoleValues(arg)
-  for i in 0 ..< buildActionRegistry.len:
+  # The wrapper calls this right after registering ``action``, so the
+  # entry is the LAST one with its id. Searching from the front would find
+  # an earlier registration that reused the id (a typed call repeated with
+  # the same arguments, as in one process's successive package
+  # evaluations) and hand back that entry -- without this call's ``env``
+  # and other fields -- in place of the caller's action.
+  for i in countdown(buildActionRegistry.len - 1, 0):
     if buildActionRegistry[i].id == action.id:
       for path in paths:
         if path.len == 0:
