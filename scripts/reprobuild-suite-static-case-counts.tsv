@@ -1354,7 +1354,7 @@ tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	nim	5
 tests/integration/t_behind_pin_is_never_silent.nim	nim	1
 tests/integration/t_behind_pin_warns_and_does_not_fail.nim	nim	1
 tests/integration/t_bootstrap_default_nim_matches_declared_version.nim	nim	1
-tests/integration/t_bootstrap_guard_names_the_host_artefact.nim	nim	9
+tests/integration/t_bootstrap_guard_names_the_host_artefact.nim	nim	10
 tests/integration/t_branch_fork_clones_root_submodules.nim	nim	1
 tests/integration/t_branch_fork_inherits_project_set.nim	nim	3
 tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	nim	16
@@ -1552,6 +1552,7 @@ tests/integration/t_gateway_ratchets_the_anchor_requirements.nim	nim	7
 tests/integration/t_gateway_reads_the_policy_from_the_pushed_tree_by_destination_branch.nim	nim	2
 tests/integration/t_genuine_tier_policy_refuses_emulated_cvm_evidence.nim	nim	9
 tests/integration/t_git_object_store_lookups_are_not_cache_inputs.nim	nim	10
+tests/integration/t_hcr_native_library_prerequisite.nim	nim	5
 tests/integration/t_health_fails_when_the_post_commit_lock_writer_keeps_refusing.nim	nim	7
 tests/integration/t_health_fix_remediates_safe_issues_only.nim	nim	2
 tests/integration/t_health_names_the_binary_skew_and_does_not_propose_an_older_ensure.nim	nim	1

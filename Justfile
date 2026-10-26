@@ -56,6 +56,18 @@ bootstrap:
             ;; \
     esac
 
+# Run in this producer's development environment. Freshness and both healthy
+# library paths belong to the explicitly selected graph edge. The recipe
+# compiles against this checkout's DSL, so bootstrap the source-matched CLI
+# rather than handing a newer action payload to an older ambient engine.
+# The existing bootstrap may build its app artifacts; the selected graph
+# still contains only the native library producer.
+hcr-agent-lib: bootstrap
+    ./build/bin/repro build --tool-provisioning=path --daemon=off .#hcr-agent-lib
+
+test-hcr-native-library-prerequisite:
+    nim c -r -d:reproProviderMode --parallelBuild:2 --nimcache:build/nimcache/hcr-native-library-prerequisite --out:build/test-bin/t_hcr_native_library_prerequisite tests/integration/t_hcr_native_library_prerequisite.nim
+
 test:
     mkdir -p test-logs
     bash ./scripts/run_tests.sh 2>&1 | tee test-logs/test.log

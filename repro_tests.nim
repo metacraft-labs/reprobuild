@@ -13914,6 +13914,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_hcr_native_library_prerequisite.nim",
+    binary: "build/test-bin/t_hcr_native_library_prerequisite",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_health_fails_when_the_post_commit_lock_writer_keeps_refusing.nim",
     binary: "build/test-bin/t_health_fails_when_the_post_commit_lock_writer_keeps_refusing",
     defines: @[],
