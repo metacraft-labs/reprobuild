@@ -72,9 +72,9 @@ const
   GhosttyUrl = "https://release.files.ghostty.org/1.3.1/Ghostty.dmg"
   GhosttyLock = "tarball:ghostty@1.3.1:macos-any:sha256:" &
     "18cff2b0a6cee90eead9c7d3064e808a252a40baf214aa752c1ecb793b8f5f69"
-  Iterm2Url = "https://iterm2.com/downloads/stable/iTerm2-3_7_4.zip"
-  Iterm2Lock = "tarball:iterm2@3.7.4:macos-any:sha256:" &
-    "4bf02ae616752600cd195ca504e55392afb21741cda7314199e375ed8a46f90c"
+  Iterm2Url = "https://iterm2.com/downloads/stable/iTerm2-3_7_6.zip"
+  Iterm2Lock = "tarball:iterm2@3.7.6:macos-any:sha256:" &
+    "bb6102e9f57bbe41979ba7c7b1c25d4112e9a5c2142606eeccbe18dc7ee0706f"
 
 proc profileBody(name: string; packages: openArray[string];
                  textForm = false): string =
@@ -218,7 +218,7 @@ suite "GM4c: e2e_home_profile_reaches_catalog_apps":
       let iterm2 = packageLine(res.output, "iterm2")
       checkpoint("iterm2 line: " & iterm2)
       check iterm2.startsWith("realize  iterm2  ")
-      check ("tarball " & Iterm2Url & " @3.7.4 (sha256, app-bundle)") in
+      check ("tarball " & Iterm2Url & " @3.7.6 (sha256, app-bundle)") in
         iterm2
       check packageLine(res.output, "just").startsWith("realize  just  ")
       check "unknown-package" notin res.output
