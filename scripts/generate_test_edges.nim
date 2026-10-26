@@ -1043,6 +1043,16 @@ const
     # start-up overhead".
     "tests/unit/t_m9r5a_recipe_sweep_smoke.nim",
     "tests/unit/t_m9r5b_recipe_options_sweep.nim",
+    # M2 measurement (module initialisation, median of 3 to 7 runs of an
+    # unknown --run name, 923 grouped sources, 2026-10-26): every source over
+    # the ~20 ms the spec sets. A group binary pays its members' module
+    # initialisation on every case it runs; ``test_from_source_cmake_convention``
+    # alone made each of its group's ~390 cases start 0.4 s slower.
+    "libs/repro_standard_provider/tests/test_from_source_cmake_convention.nim", # 211 ms
+    "libs/repro_agent_backend/tests/t_agent_ownership_and_checkout.nim", # 119 ms
+    "libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim", # 71 ms
+    "libs/repro_standard_provider/tests/test_from_source_meson_convention.nim", # 29 ms
+    "libs/repro_local_store/tests/t_prefix_owning_path.nim", # 23 ms
   ]
 
   ReferenceScanRoots = ["tests", "libs", "tools", "scripts", "apps", "recipes",
