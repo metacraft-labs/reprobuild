@@ -28,7 +28,7 @@
 ##     fall-back) + ``<OutputType>`` (extension selector) compose the
 ##     predicted binary path.
 
-import std/[os, strutils, unittest]
+import std/[os, osproc, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 import repro_test_support
 
@@ -292,11 +292,11 @@ suite "csharp-dotnet convention M42":
       # Output is bin/Release/<TargetFramework>/<AssemblyName>.exe
       # under the fixture root. The fixture pins TargetFramework=net8.0
       # + OutputType=Exe + AssemblyName defaults from "hello.csproj"
-      # so the binary lands at ``bin/Release/net8.0/hello.exe``.
+      # so the binary lands at ``bin/Release/net8.0/hello.dll``.
       var sawExeOutput = false
       for outPath in buildAct.outputs:
         let unified = outPath.replace('\\', '/')
-        if unified.endsWith("/bin/Release/net8.0/hello.exe"):
+        if unified.endsWith("/bin/Release/net8.0/hello.dll"):
           sawExeOutput = true
       check sawExeOutput
 
@@ -321,7 +321,7 @@ suite "csharp-dotnet convention M42":
       # Use ``<TargetFrameworks>`` (plural, semicolon-separated) to
       # exercise the first-entry pickoff; pin a custom AssemblyName
       # and ``OutputType=Exe`` so the predicted path is
-      # ``bin/Release/net9.0/customAsm.exe``.
+      # ``bin/Release/net9.0/customAsm.dll``.
       writeFile(scratch / "custom.csproj",
         "<Project Sdk=\"Microsoft.NET.Sdk\">\n" &
         "  <PropertyGroup>\n" &
@@ -353,7 +353,7 @@ suite "csharp-dotnet convention M42":
         let action = decodeBuildActionPayload(toBytes(node.payload))
         for outPath in action.outputs:
           let unified = outPath.replace('\\', '/')
-          if unified.endsWith("/bin/Release/net9.0/customAsm.exe"):
+          if unified.endsWith("/bin/Release/net9.0/customAsm.dll"):
             sawCustomBinary = true
       check sawCustomBinary
 
@@ -403,3 +403,41 @@ suite "csharp-dotnet convention M42":
           if unified.endsWith("/bin/Release/net8.0/mylib.dll"):
             sawDllOutput = true
       check sawDllOutput
+
+  test "real SDK executable produces its managed output with apphost disabled":
+    # A real SDK restore supplies the lock and framework assets before the
+    # convention's deliberately offline --no-restore build. No tool is mocked.
+    let scratch = createTempDir("repro-dotnet-output-obligation-", "")
+    defer: removeDir(scratch)
+    let dotnet = findExe("dotnet")
+    require dotnet.len > 0
+    let created = execCmdEx(@[dotnet, "new", "console", "--no-restore",
+      "--name", "OutputRegression", "--output", scratch].quoteShellCommand())
+    checkpoint created.output
+    require created.exitCode == 0
+    let project = scratch / "OutputRegression.csproj"
+    writeFile(project, readFile(project).replace("</PropertyGroup>",
+      "<UseAppHost>false</UseAppHost><UseSharedCompilation>false</UseSharedCompilation></PropertyGroup>"))
+    let restored = execCmdEx(@[dotnet, "restore", project,
+      "--use-lock-file", "--ignore-failed-sources"].quoteShellCommand())
+    checkpoint restored.output
+    require restored.exitCode == 0
+    writeFile(scratch / "reprobuild.nim", "import repro_project_dsl\npackage outputRegression:\n  uses:\n    \"dotnet >=8\"\n  executable OutputRegression:\n    discard\n")
+    let conv = dotnet_convention.cSharpDotnetConvention()
+    require conv.recognize(scratch, dummyRequest(scratch))
+    let fragment = conv.emitFragment(scratch, dummyRequest(scratch))
+    var sawBuild = false
+    for node in fragment.nodes:
+      if node.kind != gnkAction: continue
+      let action = decodeBuildActionPayload(toBytes(node.payload))
+      if action.id != "csharp-dotnet-build": continue
+      sawBuild = true
+      let built = execCmdEx(inlineArgvOf(action).quoteShellCommand(), workingDir = scratch)
+      checkpoint built.output
+      require built.exitCode == 0
+      require action.outputs.len == 1
+      check action.outputs[0].endsWith("/OutputRegression.dll")
+      check fileExists(action.outputs[0])
+      require action.optionalOutputs.len == 1
+      check not fileExists(action.optionalOutputs[0])
+    check sawBuild

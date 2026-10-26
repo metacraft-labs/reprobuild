@@ -161,6 +161,9 @@ package meson:
           alias = "--destdir=",
           format = concat,
           role = output
+        # Meson creates DESTDIR only when the project installs a file.
+        # Cache an installed tree when present, and record absence otherwise.
+        optionalOutputs destdir
         flag tags is seq[string],
           alias = "--tags=",
           format = concat,

@@ -24,6 +24,7 @@
 import std/[options, os, strutils]
 
 import repro_provider_runtime
+import repro_standard_provider/conventions/output_discovery
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/nim as nim_convention
 import repro_standard_provider/conventions/rust as rust_convention
@@ -66,6 +67,9 @@ import repro_standard_provider/conventions/ruby_bundler as ruby_bundler_conventi
 import repro_standard_provider/conventions/php_composer as php_composer_convention
 import repro_standard_provider/project_intro
 import repro_standard_provider_protocol
+
+if runOutputDiscoveryCommand(commandLineParams()):
+  quit(0)
 
 const
   StandardProviderVersion = "0.0.2-m1-framework"
