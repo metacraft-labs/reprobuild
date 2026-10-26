@@ -264,7 +264,7 @@
     "binary": "ct-test",
     "provenance": "",
     "resolvedBy": "PATH:ct-test",
-    "sha256": "8613719bc985bac0f1ed587db9779cd62a919c66cd8f7e0ddd31806a941cb37a"
+    "sha256": "76a1ba2cafa765584695a92ed60fdd8163997028739878b4c53034794f9c5b5d"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "unaddressableSources": [
