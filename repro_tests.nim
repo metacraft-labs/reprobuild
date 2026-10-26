@@ -15102,6 +15102,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_lock_refresh_keeps_a_foreign_platform_lock.nim",
+    binary: "build/test-bin/t_lock_refresh_keeps_a_foreign_platform_lock",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_lock_refresh_never_moves_a_pin_backward.nim",
     binary: "build/test-bin/t_lock_refresh_never_moves_a_pin_backward",
     defines: @[],

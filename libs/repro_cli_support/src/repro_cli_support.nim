@@ -89022,6 +89022,162 @@ proc siblingRemovalJson(report: SiblingRemovalReport; lockPath,
     "droppedPins": report.droppedPins,
     "behindManifests": report.behindManifests}
 
+proc committedLockPlatform(lockP: string): string =
+  ## The ``platform`` the committed lock at ``lockP`` was solved for, or ""
+  ## when there is no lock or it cannot be read. An unreadable lock is left to
+  ## the ordinary refresh path, which reports it.
+  if not fileExists(extendedPath(lockP)): return ""
+  try: parseLockedDependencies(readFile(extendedPath(lockP))).platform
+  except CatchableError: ""
+
+proc refreshForeignPlatformLockPins(projectDir, lockP, lockPlatform,
+    hostPlatform, verb: string; allowance: PinRegressionAllowance;
+    asJson: bool): int =
+  ## ``repro lock refresh`` of a committed lock solved for ANOTHER platform
+  ## than this host's, with no ``--platform`` given.
+  ##
+  ## The solve cannot be redone here for the lock's platform: the solver
+  ## inputs come from the recipe's provider compiled and run on THIS host, so
+  ## its platform-conditional `uses:` are this host's. A re-solve would
+  ## therefore replace the committed solve (``platform``, ``packages``,
+  ## ``inputs_digest``) with this host's — the defect recorded for macOS in
+  ## issue 2026-10-23 (lock refresh rewrites a lock committed for
+  ## amd64-linux), and measured on Windows (40 packages -> 26, platform
+  ## amd64-linux -> amd64-windows). Locking-And-Solver.md treats the platform
+  ## as a deliberate axis of the lock, so a refresh must not fold the host's
+  ## in.
+  ##
+  ## What CAN be done from any host is the develop-mode sibling re-pin of
+  ## Unified-Locking-And-Hooks.md §13.2/§13.3, which is an observation rather
+  ## than a solve. This runs exactly the commit-time re-pin
+  ## (``planCommittedLockRepin``): every sibling entry whose checkout is
+  ## present is re-observed, missing develop-set siblings are added, nothing
+  ## is removed, the root entry is untouched, and only the `deps` line is
+  ## rewritten, so the solve and the platform stay byte-identical. It is
+  ## held to the same rules as the hook: a pin never moves backward unless
+  ## ``--allow-pin-regression`` / ``REPRO_ALLOW_PIN_REGRESSION`` names it
+  ## (exit 4, nothing written), a repository `flake.lock` also resolves
+  ## moves in both locks or in neither (§16.3 H3; this verb never writes
+  ## `flake.lock`, so such a repository is held and named), a recipe
+  ## constraint excluding the observed revision refuses (§16.4), and the
+  ## result must be consistent with the recipes (§16.3 H1/H2). Unlike the
+  ## hook it stages nothing.
+  ##
+  ## ``--platform=<p>`` is the explicit way to re-solve anyway, and the
+  ## notice printed here names it.
+  let label = "repro lock " & verb
+  stderr.writeLine(label & ": " & lockP & " is solved for " & lockPlatform &
+    ", and this host is " & hostPlatform & "; a re-solve here would replace " &
+    "the " & lockPlatform & " solve with this host's, so only the sibling " &
+    "revision pins are refreshed, as the commit-time re-pin does (packages, " &
+    "inputs_digest, platform and the lock's own entry are kept, and no pin " &
+    "is removed). To re-solve, refresh on a host whose platform is " &
+    lockPlatform & ", or " &
+    "pass --platform=" & hostPlatform & " to re-target the lock to this " &
+    "host deliberately.")
+  var plan: CommittedLockRepinPlan
+  try:
+    plan = planCommittedLockRepin(projectDir, allowance.names)
+  except CatchableError as err:
+    stderr.writeLine(label & ": cannot re-pin " & lockP & ": " & err.msg &
+      " (nothing was written)")
+    return 1
+  let failure = committedLockRepinFailure(plan)
+  if failure.len > 0:
+    stderr.writeLine(label & ": " & failure & " (nothing was written)")
+    return 1
+  for w in plan.warnings:
+    stderr.writeLine(label & ": " & w)
+  var used: seq[string]
+  for r in plan.allowed: used.add(r.sibling)
+  for note in pinRegressionAllowanceNotes(allowance, used, plan.examined,
+      action = verb):
+    stderr.writeLine(label & ": note: " & note)
+  if plan.refused.len > 0:
+    var identity: GitToolIdentity
+    try: identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+    except CatchableError: discard
+    var names: seq[string]
+    for r in plan.refused:
+      if r.sibling notin names: names.add(r.sibling)
+    for n in allowance.names:
+      if n notin names: names.add(n)
+    let rerun = label & " " & quoteShell(projectDir) &
+      " --allow-pin-regression=" & pinRegressionShellWord(names.join(","))
+    for line in renderPinRegressionRefusal(plan.refused,
+        resolvePostCommitWorkspaceRoot(projectDir, ""), identity,
+        action = verb, rerun = rerun):
+      stderr.writeLine(label & ": " & line)
+    return 4
+  for r in plan.allowed:
+    stderr.writeLine(label & ": " &
+      pinRegressionAllowedLine(r, via = "--allow-pin-regression"))
+  # §16.3 H3 / §16.4 — reconciled against `flake.lock` and the recipe
+  # constraints exactly as at commit time. The `flake.lock` side is not
+  # planned: this verb never writes it.
+  let workspaceRoot = resolvePostCommitWorkspaceRoot(projectDir, "")
+  var flake: FlakeCommitRefresh
+  var coordination: CommitRepinCoordination
+  try:
+    # `true`: the repro.lock side is planned.
+    coordination = coordinateCommitRepin(projectDir, workspaceRoot, true,
+      plan, flake)
+  except CatchableError as err:
+    stderr.writeLine(label & ": the re-pin could not be reconciled with " &
+      "flake.lock and the recipe constraints (" & err.msg & "); nothing " &
+      "was written")
+    return 1
+  if coordination.exclusions.len > 0:
+    annotateSiblingGuidance(projectDir, coordination.exclusions)
+    stderr.writeLine(label & ": REFUSED: a sibling checkout is at a " &
+      "revision its recipe constraint excludes, and the re-pin moves lock " &
+      "resolutions only, never a recipe constraint; nothing was written")
+    for line in renderConsistencyRefusal(coordination.exclusions):
+      stderr.writeLine(label & ": " & line)
+    return 1
+  for n in coordination.heldNotes:
+    stderr.writeLine(label & ": WARNING: " & n)
+  let plannedReproLock =
+    if plan.changed:
+      some(splicedCommittedLockDeps(plan.text, plan.originalDepsLine,
+        plan.depsLine))
+    else: none(string)
+  var consistency: ConsistencyReport
+  try:
+    consistency = checkRecipeLockConsistency(gatherConsistencyInputs(
+      projectDir, csWorktree, none(string), plannedReproLock))
+  except CatchableError as err:
+    stderr.writeLine(label & ": the recipe/lock consistency (H1/H2) could " &
+      "not be checked: " & err.msg)
+  if consistency.hasViolations:
+    annotateSiblingGuidance(projectDir, consistency.violations)
+    stderr.writeLine(label & ": REFUSED: the recipe and the locks the " &
+      "re-pin would leave are inconsistent; nothing was written")
+    for line in renderConsistencyRefusal(consistency.violations):
+      stderr.writeLine(label & ": " & line)
+    return 1
+  let applied = applyCommittedLockRepin(plan)
+  if not applied.ok:
+    stderr.writeLine(label & ": " & applied.line)
+    return 1
+  if asJson:
+    var moved = newJArray()
+    var added = newJArray()
+    for m in plan.moves:
+      if m.added: added.add(%*{"name": m.name, "revision": m.newRev})
+      else: moved.add(%*{"name": m.name, "from": m.oldRev, "to": m.newRev})
+    echo $(%*{"status": "ok", "mode": "sibling-repin", "lock": lockP,
+      "lockPlatform": lockPlatform, "hostPlatform": hostPlatform,
+      "changed": plan.changed, "moved": moved, "added": added,
+      "held": %plan.held})
+  elif plan.changed:
+    stdout.writeLine(label & ": wrote " & lockP & " (sibling re-pin, " &
+      "platform " & lockPlatform & " kept): " & plan.line)
+  else:
+    stdout.writeLine(label & ": " & lockP & " is up to date (sibling " &
+      "re-pin, platform " & lockPlatform & " kept): " & plan.line)
+  0
+
 proc runLockGenerationVerb(rest: openArray[string]; verb: string;
                            entryPoint: LockGenerationEntryPoint;
                            writeByDefault: bool): int =
@@ -89040,6 +89196,49 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
   let lockP =
     if lockOverride.len > 0: absolutePath(lockOverride)
     else: committedLockPath(projectDir)
+  # A refresh of a lock committed for another platform re-pins siblings only
+  # (``refreshForeignPlatformLockPins``): this host cannot redo that
+  # platform's solve, and must not replace it with its own. `--platform`
+  # given explicitly is the deliberate re-solve, and is not intercepted.
+  if entryPoint == lgeLockRefresh and platformOverride.len == 0:
+    let lockPlatform = committedLockPlatform(lockP)
+    let hostPlatform = currentPlatformId()
+    if lockPlatform.len > 0 and lockPlatform != hostPlatform:
+      # Every flag that shapes a solve (what to re-solve, under which
+      # strategy, from which inputs or registries) asks for something the
+      # sibling re-pin does not do, so it is refused rather than ignored.
+      var solveFlags: seq[string]
+      for arg in rest:
+        for flag in ["--repin", "--provisioning", "--strategy", "--lowest",
+            "--highest", "--inputs", "--registry"]:
+          if (arg == flag or arg.startsWith(flag & "=")) and
+              flag notin solveFlags:
+            solveFlags.add(flag)
+      if solveFlags.len > 0:
+        stderr.writeLine("repro lock " & verb & ": " & lockP & " is solved " &
+          "for " & lockPlatform & " and this host is " & hostPlatform & "; " &
+          solveFlags.join(", ") & " shape" &
+          (if solveFlags.len == 1: "s" else: "") & " a solve, which this " &
+          "host can only do for its own platform. Run it on a host whose " &
+          "platform is " & lockPlatform & ", or pass " &
+          "--platform=" & hostPlatform & " to re-target the lock to this " &
+          "host deliberately (nothing was written)")
+        return 2
+      if cmpPaths(lockP, committedLockPath(projectDir)) != 0:
+        stderr.writeLine("repro lock " & verb & ": " & lockP & " is solved " &
+          "for " & lockPlatform & " and this host is " & hostPlatform & "; " &
+          "a sibling re-pin maintains the project's committed lock only, " &
+          "not one selected with --lock. Pass --platform=" & hostPlatform &
+          " to re-solve it for this host deliberately (nothing was written)")
+        return 2
+      let envAllowance = parsePinRegressionAllowance(
+        getEnv(PinRegressionAllowEnv))
+      var allowance = PinRegressionAllowance(names: gen.allowRegression,
+        rejected: envAllowance.rejected)
+      for n in envAllowance.names:
+        if n notin allowance.names: allowance.names.add(n)
+      return refreshForeignPlatformLockPins(projectDir, lockP, lockPlatform,
+        hostPlatform, verb, allowance, asJson)
   # `--repin` (Locking-And-Solver.md §"Targeted re-pin"): "It requires a
   # committed lock (there is nothing to hold otherwise) ... either missing is a
   # usage error (exit 2) that writes nothing." Checked BEFORE the provider

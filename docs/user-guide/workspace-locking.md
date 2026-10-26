@@ -474,6 +474,21 @@ using current manifests succeeds and still reports the removed pins.
 `--json` puts a single report on stdout with `droppedPins` and
 `behindManifests` arrays, including on this refusal; diagnostics stay on stderr.
 
+A committed lock is solved for one platform, recorded as its `platform`
+(for example `amd64-linux`). The solve reads the recipe as it evaluates on
+the host, so a host of another platform cannot redo that solve, and
+re-solving there would replace it with the host's own. On such a host,
+`repro lock refresh` therefore **re-pins sibling revisions only**, exactly as
+the managed `pre-commit` hook does. It re-observes each sibling the lock
+pins, adds develop-set siblings the lock does not carry yet, and removes
+nothing. It leaves `platform`, `packages`, `inputs_digest` and the lock's own
+entry as committed. It says so before it writes. The pin-regression gate
+(exit 4) applies as it does to a full refresh. `--repin`, `--provisioning`,
+`--strategy` (and `--lowest` / `--highest`), `--inputs` and `--registry` shape
+a solve, so on such a host they exit 2 and write nothing. To re-solve
+anyway, refresh on a host of the lock's platform, or pass
+`--platform=<host platform>` to re-target the lock to this host on purpose.
+
 `repro lock refresh` also **refuses to write a lock from an incomplete
 solve**. A recipe's `uses:` pulls sibling recipes into the solve
 transitively; when a `uses:` names a develop-set sibling (one the
