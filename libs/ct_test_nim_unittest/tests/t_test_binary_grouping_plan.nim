@@ -166,6 +166,10 @@ suite "test binary grouping: source text facts":
     check globalLinkPragma("{.passL: \"-lsqlite3\".}") == "passL"
     check globalLinkPragma("  check s.contains(\"{.passL: x\")") == ""
     check globalLinkPragma("{.localPassC: \"-O0\".}") == ""
+    # A define spelled in the source is a compile option of the whole group.
+    check globalLinkPragma("{.define: reproDaemonParentPrewarmTest.}") ==
+      "define"
+    check globalLinkPragma("{.undef: release.}") == "undef"
 
   test "compile pragma targets are repo-relative":
     check compilePragmaTargets("{.compile: \"../c/probe.c\".}",

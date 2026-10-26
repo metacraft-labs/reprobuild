@@ -77,6 +77,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="the repro executable that builds the collections")
     parser.add_argument("--timeout-seconds", type=int, default=0,
                         help="bound on each fallback build; 0 = none")
+    parser.add_argument("--only", action="append", default=[], metavar="GROUP",
+                        help="consider only these group stems (repeatable)")
     parser.add_argument("--dry-run", action="store_true",
                         help="name the groups that would fall back; build nothing")
     args = parser.parse_args(argv)
@@ -87,6 +89,13 @@ def main(argv: list[str] | None = None) -> int:
         bin_dir = root / bin_dir
 
     groups = groups_of(root)
+    if args.only:
+        unknown = sorted(set(args.only) - set(groups))
+        if unknown:
+            print(f"test_group_fallback: not a declared group: {', '.join(unknown)}",
+                  file=sys.stderr)
+            return 2
+        groups = {g: groups[g] for g in args.only}
     failed_groups = [g for g in sorted(groups) if not exe(bin_dir / g).exists()]
     print(f"test_group_fallback: {len(groups)} group binaries declared, "
           f"{len(failed_groups)} absent", file=sys.stderr)

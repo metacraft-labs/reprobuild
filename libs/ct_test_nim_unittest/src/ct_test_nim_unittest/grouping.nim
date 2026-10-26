@@ -260,9 +260,16 @@ const
     ## Process-global effects at column 0 run whenever the group binary
     ## starts, for every member's cases.
 
-  GlobalLinkPragmas* = ["{.passC", "{.passc", "{.passL", "{.passl", "{.link"]
+  GlobalLinkPragmas* = ["{.passC", "{.passc", "{.passL", "{.passl", "{.link",
+    "{.define", "{.undef"]
     ## Pragmas whose effect is the whole program's C or link flags, so they
-    ## would apply to every member of a group.
+    ## would apply to every member of a group -- and ``{.define:}`` /
+    ## ``{.undef:}``, which are compile options spelled in the source: a
+    ## library's ``when defined(x)`` sees the define only if the defining
+    ## module is processed before the library, which in a group it is not.
+    ## Found by the M2 gate: ``t_daemon_parent_prewarm`` opens with
+    ## ``{.define: reproDaemonParentPrewarmTest.}`` and its group failed with
+    ## an undeclared identifier.
 
 proc selfSpawnMarker*(text: string): string =
   for m in SelfSpawnMarkers:
