@@ -14940,6 +14940,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_local_file_enters_managed_exclude_block.nim",
+    binary: "build/test-bin/t_local_file_enters_managed_exclude_block",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_local_gateway_pre_receive_rejects_uncovered_push_even_with_no_verify.nim",
     binary: "build/test-bin/t_local_gateway_pre_receive_rejects_uncovered_push_even_with_no_verify",
     defines: @[],
@@ -17714,6 +17723,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_stale_repro_refusal_names_a_remedy_that_does_not_disarm_the_gate.nim",
     binary: "build/test-bin/t_stale_repro_refusal_names_a_remedy_that_does_not_disarm_the_gate",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_state_file_carries_no_layers.nim",
+    binary: "build/test-bin/t_state_file_carries_no_layers",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

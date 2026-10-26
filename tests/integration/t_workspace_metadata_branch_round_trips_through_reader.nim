@@ -21,7 +21,11 @@
 ## that already declares ``[[manifest]]`` layers must keep them when
 ## the writer updates the branch field — single-source-of-truth
 ## semantics require that the writer never silently drops manifest
-## layers it doesn't understand.
+## layers it doesn't understand. Since the state file carries no layers
+## (Workspace-Settings-Files.md §5), "keep" means the first write MOVES them
+## to ``repro-workspace.local.toml`` (§8 step 2); a layer that cannot live
+## there (a ``local_path`` under ``.repro/``, §4) refuses the write and
+## changes nothing rather than dropping it.
 ##
 ## This is a pure-library round-trip; no ``git`` and no compiled
 ## ``repro`` binary are involved.
@@ -133,8 +137,9 @@ suite "M13 — workspace branch round-trips through reader":
       "visibility = \"public\"\n" &
       "branch = \"main\"\n\n" &
       "[[manifest]]\n" &
-      "local_path = \".repro/manifests-personal\"\n" &
+      "local_path = \"manifests-personal\"\n" &
       "visibility = \"personal\"\n")
+    let oldBytes = readFile(tomlPath)
 
     check isCompositionalWorkspaceToml(workspaceRoot) == true
 
@@ -142,23 +147,42 @@ suite "M13 — workspace branch round-trips through reader":
     writeWorkspaceBranch(workspaceRoot,
       project = "reprobuild", branch = "develop")
 
-    # The write lands in the state file's NEW name, carrying the layers
-    # across; the old file is left as it was and is no longer read
-    # (Workspace-Settings-Files.md §8 step 1).
+    # The write lands in the state file's NEW name, without the layers,
+    # which move to the local settings file; the old file is left as it
+    # was and is no longer read (Workspace-Settings-Files.md §8).
     check workspaceTomlPath(workspaceRoot) == workspaceStatePath(workspaceRoot)
-    check readWorkspaceLocal(tomlPath).workspace.branch.get() == "main"
+    check readFile(tomlPath) == oldBytes
     let parsed = readWorkspaceLocal(workspaceTomlPath(workspaceRoot))
     check parsed.workspace.project == "reprobuild"
     check parsed.workspace.branch.isSome
     check parsed.workspace.branch.get() == "develop"
-    check parsed.manifest.len == 2
-    check parsed.manifest[0].url.isSome
-    check parsed.manifest[0].url.get() ==
-      "https://github.com/metacraft-labs/metacraft-manifests"
-    check parsed.manifest[0].visibility == "public"
-    check parsed.manifest[0].branch.isSome
-    check parsed.manifest[0].branch.get() == "main"
-    check parsed.manifest[1].local_path.isSome
-    check parsed.manifest[1].local_path.get() == ".repro/manifests-personal"
-    check parsed.manifest[1].visibility == "personal"
+    check parsed.manifest.len == 0
+    let local = readLoneLocalSettings(workspaceRoot)
+    require local.isSome
+    let layers = local.get().localLayers
+    check layers.len == 2
+    check layers[0].url ==
+      some("https://github.com/metacraft-labs/metacraft-manifests")
+    check layers[0].visibility == some("public")
+    check layers[0].branch == some("main")
+    check layers[1].local_path == some("manifests-personal")
+    check layers[1].visibility == some("personal")
     check isCompositionalWorkspaceToml(workspaceRoot) == true
+
+  test "test_m13_writer_refuses_a_layer_it_cannot_move":
+    let workspaceRoot = createTempDir("repro-m13-unmovable-", "")
+    defer: removeDir(workspaceRoot)
+    createDir(workspaceRoot / ".repro")
+    let tomlPath = workspaceRoot / ".repro" / "workspace.toml"
+    writeFile(tomlPath,
+      "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      "[workspace]\nproject = \"reprobuild\"\nbranch = \"main\"\n\n" &
+      "[[manifest]]\nlocal_path = \".repro/manifests-personal\"\n" &
+      "visibility = \"personal\"\n")
+    let oldBytes = readFile(tomlPath)
+    expect StateMigrationError:
+      writeWorkspaceBranch(workspaceRoot,
+        project = "reprobuild", branch = "develop")
+    check readFile(tomlPath) == oldBytes
+    check not fileExists(workspaceStatePath(workspaceRoot))
+    check not fileExists(workspaceRoot / "repro-workspace.local.toml")

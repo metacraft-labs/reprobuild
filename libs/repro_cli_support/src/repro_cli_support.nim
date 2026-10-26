@@ -73492,6 +73492,7 @@ type
     hfWorkspaceErgonomics ## Repair workspace-projects.md, gitignore, and AGENTS.md.
     hfEnsureVcsHooks  ## Reinstall the managed VCS hooks in every participating repo.
     hfSharedCloneLeaves ## Remove stale remote-tracking refs the shared-clone detector found.
+    hfMigrateStateFile ## Move the old state file / its layers (Workspace-Settings-Files §8 step 2).
 
   HealthCheck* = object
     ## One diagnosed layer. ``remedy`` is the exact command the user (or
@@ -75301,6 +75302,75 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         remedy: self & " health --fix",
         fixKind: hfWorkspaceErgonomics))
 
+  # 12b. The state file and the local settings file
+  #      (Workspace-Settings-Files.md §4, §5, §8 step 2).
+  #
+  #      ``workspace-state-file``: the old ``.repro/workspace.toml`` still in
+  #      use or left over, or ``[[manifest]]`` layers in
+  #      ``.repro/workspace-state.toml`` (every other verb refuses that file).
+  #      ``--fix`` moves the file and the layers — and it runs BEFORE the
+  #      diagnosis (``runHealthCommand``), because a state file carrying
+  #      layers is a file the strict reader refuses, and a refused file makes
+  #      ``--fix`` stand down. An old file an older repro changed after the
+  #      migration is reported, not fixed: which record is right is the
+  #      operator's call.
+  #
+  #      ``local-settings-file``: a TRACKED ``repro-workspace.local.toml``.
+  #      The file is per-user and never committed, and the managed exclude
+  #      block leaves a tracked path out (the tracked-probe rule), so the
+  #      mistake has to be named here. Report-only: un-tracking a file is an
+  #      index change in the user's repository, so the remedy is printed.
+  block stateFileCheck:
+    let findings = inspectWorkspaceStateFiles(parsed.workspaceRoot)
+    if findings.len == 0:
+      checks.add(HealthCheck(
+        name: "workspace-state-file",
+        status: hsOk,
+        detail:
+          (if fileExists(workspaceStatePath(parsed.workspaceRoot)):
+             workspaceStatePath(parsed.workspaceRoot) & " (" &
+               schemaWorkspaceStateV1 & "), carrying no manifest layers"
+           else: "no workspace state file recorded"),
+        remedy: "",
+        fixKind: hfNone))
+    else:
+      var skew = false
+      var details: seq[string]
+      for f in findings:
+        details.add(f.message)
+        if f.kind == sffSkew:
+          skew = true
+      checks.add(HealthCheck(
+        name: "workspace-state-file",
+        status: hsFail,
+        detail: details.join("; "),
+        remedy:
+          (if skew:
+             "inspect " & workspaceStatePath(parsed.workspaceRoot) & " and " &
+               legacyWorkspaceStatePath(parsed.workspaceRoot) & ", keep the " &
+               "right content in the first, remove the second, then `" &
+               self & " health --fix`"
+           else: self & " health --fix"),
+        fixKind: (if skew: hfNone else: hfMigrateStateFile)))
+  block localSettingsTrackedCheck:
+    if not ctx.gitOk:
+      break localSettingsTrackedCheck
+    let probe = execCmdEx(quoteShellCommand([ctx.gitIdentity.binaryPath,
+      "-C", parsed.workspaceRoot, "ls-files", "--error-unmatch", "--",
+      localSettingsFileName]), env = scrubbedGitRepositoryEnv())
+    if probe.exitCode == 0:
+      checks.add(HealthCheck(
+        name: "local-settings-file",
+        status: hsFail,
+        detail: localSettingsFileName & " is tracked by the repository at " &
+          parsed.workspaceRoot & "; it holds one person's manifest layers " &
+          "and credentialed urls and is never committed, so it is also " &
+          "left out of the " &
+          "managed ignore block while git tracks it",
+        remedy: "git -C " & quoteShell(parsed.workspaceRoot) &
+          " rm --cached " & localSettingsFileName & " (then commit)",
+        fixKind: hfNone))
+
   # 13. F0.3 — participating checkouts whose HEAD is on no remote.
   #
   #     ``repro check --mode=pre-push`` refuses a push when ANY repo in the
@@ -75855,6 +75925,10 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
           if f.kind == lfkStaleRemoteRef and f.removed:
             result.add("fix: removed " & f.refName & " in " & lr.leaf)
             stderr.writeLine(f.message)
+    of hfMigrateStateFile:
+      # Done before the diagnosis (``applyStateFileMigrationFix``); a row
+      # still failing here is one the migration refused, already reported.
+      discard
     of hfWorkspaceErgonomics:
       result.add("fix: repairing workspace ergonomics files")
       let gitignoreFile = parsed.workspaceRoot / ".gitignore"
@@ -75898,6 +75972,25 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
       except CatchableError as err:
         result.add("fix: failed generating workspace-projects.md: " & err.msg)
 
+proc applyStateFileMigrationFix(workspaceRoot: string): seq[string] =
+  ## ``--fix`` for the ``workspace-state-file`` row: move the old state file
+  ## and any ``[[manifest]]`` layers in a state file to where they belong
+  ## (``migrateWorkspaceStateFile``, Workspace-Settings-Files.md §8 step 2).
+  ## Runs BEFORE the diagnosis: a state file carrying layers is refused by
+  ## the strict reader, and a refused file makes the rest of ``--fix`` stand
+  ## down. A refusal (diverged records, a layer that cannot move) changes
+  ## nothing and is reported; the row then fails with its remedy.
+  if inspectWorkspaceStateFiles(workspaceRoot).len == 0:
+    return
+  result.add("fix: migrating the workspace state file under " &
+    workspaceRoot / ".repro")
+  try:
+    for line in migrateWorkspaceStateFile(workspaceRoot):
+      result.add("fix: " & line)
+  except StateMigrationError, WorkspaceManifestParseError, IOError, OSError:
+    result.add("fix: could NOT migrate the workspace state file: " &
+      getCurrentExceptionMsg())
+
 proc runHealthCommand*(args: openArray[string]): int =
   ## ``repro health [<project>] [--workspace-root=PATH] [--fix] [--json] [--offline]``.
   ##
@@ -75909,6 +76002,12 @@ proc runHealthCommand*(args: openArray[string]): int =
     stdout.writeLine("  --offline  Skip forge identity API probes; other checks retain their existing fetch behavior.")
     return 0
   let parsed = parseHealthArgs(args)
+  let stateFixActions =
+    if parsed.fix: applyStateFileMigrationFix(parsed.workspaceRoot)
+    else: @[]
+  if not parsed.json:
+    for line in stateFixActions:
+      stdout.writeLine(line)
   var (checks, ctx) = gatherHealthChecks(parsed)
 
   if parsed.fix and ctx.setAsideFiles > 0:

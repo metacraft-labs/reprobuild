@@ -679,11 +679,12 @@ type
     schema*: string
     workspace*: WorkspaceBody
     manifest*: seq[ManifestLayer]
-      ## Layers recorded in the STATE file — where `local.v1` kept them. Still
-      ## honoured, and carried across when the state file is rewritten under
-      ## its new name, until `repro health --fix` moves them to
+      ## Layers recorded in the OLD state file — where `local.v1` kept them.
+      ## Still honoured there until the checkout is migrated: `repro health
+      ## --fix`, or the first state write, moves them to
       ## `repro-workspace.local.toml` (Workspace-Settings-Files.md §8 step 2).
-      ## No writer adds one.
+      ## Always empty for a `state.v1` file, whose reader refuses the key
+      ## (§5). No writer adds one.
     extensions*: Extensions
 
 

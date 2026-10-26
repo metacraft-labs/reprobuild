@@ -590,26 +590,23 @@ proc stateWorkspaceEntries(body: WorkspaceBody): seq[RenderEntry] =
 
 proc workspaceStateText*(local: WorkspaceLocal): string =
   ## The per-checkout state file (``.repro/workspace-state.toml``,
-  ## ``reprobuild.workspace.state.v1``) from a typed value: ``[workspace]``
-  ## then one ``[[manifest]]`` block per layer the record carries (only a
-  ## layer list carried over from an old ``.repro/workspace.toml`` — no writer
-  ## adds one). Always ``state.v1``, whatever ``local.schema`` says. Refuses an
-  ## empty project name, which the strict reader would reject later.
+  ## ``reprobuild.workspace.state.v1``) from a typed value: the
+  ## ``[workspace]`` table. Always ``state.v1``, whatever ``local.schema``
+  ## says. Refuses an empty project name, which the strict reader would
+  ## reject later, and a record carrying ``[[manifest]]`` layers: the state
+  ## file carries none (Workspace-Settings-Files.md §5) and its reader refuses
+  ## them, so rendering one would write a file no verb can read. An old
+  ## state file's layers are moved to ``repro-workspace.local.toml`` instead
+  ## (``workspace_branch.moveLayersToLocalSettings``).
   if local.workspace.project.len == 0:
     raise editError("", "workspace.project",
       "refusing to write a workspace state file with an empty project name")
-  var blocks = @[RenderBlock(header: "[workspace]",
+  if local.manifest.len > 0:
+    raise editError("", "manifest",
+      "refusing to write `[[manifest]]` layers into the workspace state " &
+        "file: they belong in repro-workspace.local.toml")
+  let blocks = @[RenderBlock(header: "[workspace]",
     entries: stateWorkspaceEntries(local.workspace))]
-  for layer in local.manifest:
-    var e: seq[RenderEntry]
-    if layer.url.isSome and layer.url.get().len > 0:
-      e.add(entry("url", tomlStr(layer.url.get())))
-    elif layer.local_path.isSome and layer.local_path.get().len > 0:
-      e.add(entry("local_path", tomlStr(layer.local_path.get())))
-    e.add(entry("visibility", tomlStr(layer.visibility)))
-    if layer.branch.isSome and layer.branch.get().len > 0:
-      e.add(entry("branch", tomlStr(layer.branch.get())))
-    blocks.add(RenderBlock(header: "[[manifest]]", entries: e))
   assemble(schemaWorkspaceStateV1, @[], blocks, extensionsBlock(local.extensions))
 
 proc writeWorkspaceManifestFile*(path, text: string) =
@@ -1553,6 +1550,46 @@ proc ensureArrayTableEntry*(doc: var ManifestDoc; name: string;
     dec endLine
   doc.insertBlock(endLine + 1, blockLines, padBefore = true, padAfter = true)
   true
+
+proc removeArrayTable*(doc: var ManifestDoc; name: string): int =
+  ## Remove EVERY entry of the array of tables ``name`` — each ``[[name]]``
+  ## block, header and body up to the next header, and a top-level
+  ## ``name = [{ … }]`` inline-table array — and return how many entries
+  ## went. Everything else, comments included, is kept byte for byte. A
+  ## blank line left directly above a removed block goes with it, so the
+  ## file does not accumulate gaps. For moving an old state file's
+  ## ``[[manifest]]`` layers out of it (Workspace-Settings-Files.md §8 step 2).
+  let s = doc.scan
+  var spans: seq[(int, int, bool)]
+  for idx, h in s.headers:
+    if h.name != name or not h.isArray:
+      continue
+    let hasNext = idx + 1 < s.headers.len
+    let last = if hasNext: s.headers[idx + 1].line - 1
+               else: doc.lines.len - 1
+    spans.add((h.line, last, hasNext))
+  for i in countdown(spans.high, 0):
+    var (first, last, hasNext) = spans[i]
+    # Removing the block after this one took the blank line above it — this
+    # block's last line — with it.
+    last = min(last, doc.lines.len - 1)
+    # Keep a comment that directly precedes the NEXT header: it belongs to
+    # that table, not to the block being removed.
+    while hasNext and last > first and doc.lines[last].strip().startsWith("#"):
+      dec last
+    while last > first and doc.isBlank(last):
+      dec last
+    if first > 0 and doc.isBlank(first - 1):
+      dec first
+    doc.replaceLines(first, last, @[])
+    doc.changed = true
+  result = spans.len
+  let idx = doc.findEntry(doc.scan, "", name)
+  if idx >= 0:
+    let inline = doc.scan.entries[idx].value
+    if inline.kind == pvArray:
+      result += inline.elems.len
+    discard doc.removeKey("", name)
 
 proc blankTable*(text, table: string): string =
   ## ``text`` with every ``[table]`` block — header and body, up to the next
