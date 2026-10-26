@@ -47,18 +47,25 @@ fail() {
   exit 1
 }
 
+# Git for Windows may check these sources out as CRLF. Ignore only a
+# terminal CR for parsing; never rewrite the source files or version bytes.
+version_lines() {
+  local cr=$'\r'
+  sed "s/${cr}\$//" "$1"
+}
+
 if [ -z "${nimble_version}" ]; then
   # The same line shape the flake's `nimbleVersionOf` matches.
-  count=$(grep -cE '^version = "[^"]+"$' "${nimble}" || true)
+  count=$(version_lines "${nimble}" | grep -cE '^version = "[^"]+"$' || true)
   [ "${count}" = 1 ] ||
     fail "${nimble}: expected exactly 1 \`version = \"...\"\` line, found ${count}"
-  nimble_version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' "${nimble}")
+  nimble_version=$(version_lines "${nimble}" | sed -n 's/^version = "\([^"]*\)"$/\1/p')
 fi
 
-count=$(grep -c '^  version = "' "${package_nix}" || true)
+count=$(version_lines "${package_nix}" | grep -c '^  version = "' || true)
 [ "${count}" = 1 ] ||
   fail "${package_nix}: expected exactly 1 version-default line, found ${count}"
-literal=$(sed -n 's/^  version = "\(.*\)";$/\1/p' "${package_nix}")
+literal=$(version_lines "${package_nix}" | sed -n 's/^  version = "\(.*\)";$/\1/p')
 [ -n "${literal}" ] || fail "${package_nix}: could not extract the version literal"
 
 if [ "${literal}" != "${nimble_version}" ]; then

@@ -811,6 +811,11 @@ package reprobuild:
     "openssl"
     "sh"
     "bash"
+    # The version-bump regression runs the owning helper and checker.
+    "perl"
+    when defined(windows):
+      "sed"
+      "grep"
     "git"
 
     # The `reprobuild-nix-daemon` staging edge below is a `shell(...)`
@@ -2112,6 +2117,7 @@ package reprobuild:
       let hookScopeTest = source == "tests/unit/test_dev_shell_hook_scope.py"
       let nixCacheTest = source == "tests/integration/test_nix_daemon_cache.py"
       let sourceRevisionTest = source == "tests/unit/test_source_revision.py"
+      let bumpVersionTest = source == "tests/unit/test_bump_version.py"
       let ciLockCredentialsTest =
         source == "tests/unit/test_ci_reconcile_lock_credentials.py"
       let releaseSmokeTest =
@@ -2129,6 +2135,10 @@ package reprobuild:
           @["tools/reprobuild-nix-daemon/reprobuild-nix-daemon",
             "tests/fixtures/nix-daemon-local-flake/flake.nix",
             "tests/fixtures/nix-daemon-local-flake/flake.lock"]
+        elif bumpVersionTest:
+          @["scripts/bump_version.sh", "scripts/check_package_nix_version.sh",
+            "reprobuild.nimble", "nix/pkgs/by-name/re/reprobuild/package.nix",
+            "libs/repro_core/src/repro_core.nim", "tests/unit/t_version.nim"]
         elif sourceRevisionTest:
           # The script under test, and the two callers whose sources the
           # single-derivation cases read.
@@ -2162,6 +2172,9 @@ package reprobuild:
           appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "git"])
         if nixCacheTest:
           appendRegisteredActionToolIdentityRefs(pyExecute.id, ["nix"])
+      if bumpVersionTest:
+        appendRegisteredActionToolIdentityRefs(pyExecute.id,
+          ["bash", "perl", "sed", "grep"])
       # On every OS, unlike the hook-scope test: the script it runs is the one
       # the `reprobuild.apps.source-revision` probe runs on Windows too. The
       # same three tools as that probe -- its `--nim-module` cases run

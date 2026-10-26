@@ -21434,6 +21434,7 @@ const pythonTestPaths*: seq[string] = @[
   "tests/integration/test_nix_daemon_cache.py",
   "tests/test_dev_env_m9_policy.py",
   "tests/unit/test_build_report_attribution.py",
+  "tests/unit/test_bump_version.py",
   "tests/unit/test_ci_bootstrap_logs.py",
   "tests/unit/test_ci_reconcile_lock_credentials.py",
   "tests/unit/test_ci_suite_coverage.py",
