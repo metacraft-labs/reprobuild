@@ -1354,7 +1354,7 @@ tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	nim	5
 tests/integration/t_behind_pin_is_never_silent.nim	nim	1
 tests/integration/t_behind_pin_warns_and_does_not_fail.nim	nim	1
 tests/integration/t_bootstrap_default_nim_matches_declared_version.nim	nim	1
-tests/integration/t_bootstrap_guard_names_the_host_artefact.nim	nim	10
+tests/integration/t_bootstrap_guard_names_the_host_artefact.nim	nim	12
 tests/integration/t_branch_fork_clones_root_submodules.nim	nim	1
 tests/integration/t_branch_fork_inherits_project_set.nim	nim	3
 tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	nim	16
