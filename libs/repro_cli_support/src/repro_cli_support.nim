@@ -17815,6 +17815,14 @@ type
       ## generation record, never read again.
     artifact: ProjectInterfaceArtifact
     provenance: Option[InterfaceArtifactProvenance]
+    effectiveArtifact: Option[DevEnvArtifact]
+      ## Present for an owner's dev-env candidate: the effective service
+      ## declarations decoded under the SAME lock as the interface above.
+      ## A build interface has no effective dev-env declaration to supply.
+    effectiveProvenance: Option[InterfaceArtifactProvenance]
+    effectiveReadError: string
+      ## Preserve decode failures so readiness can refuse with the owning
+      ## project, activity and refresh command instead of defaulting to none.
 
 proc liftedInterfaceOfEdge(edge: DevEnvEdgeResult;
                            commandName: string): LiftedInterfaceCopy =
@@ -17839,8 +17847,10 @@ proc liftedInterfaceOfEdge(edge: DevEnvEdgeResult;
 
 proc readOwnerInterfaceCandidate(candidate: string): LiftedInterfaceCopy =
   ## Read an owner's lifted interface and its provenance stamp under the
-  ## lock their writer holds, so neither can be half-replaced and the two
-  ## cannot come from different lifts.
+  ## lock their writer holds. For a dev-env candidate, retain the effective
+  ## service artifact and its own provenance in that same read: readiness
+  ## must not reopen any of these paths after an owner activation replaces
+  ## them. Build candidates supply only their interface and stamp.
   ##
   ## The writer depends on the layout `ownerInterfaceCandidates` found the
   ## file in. Under `.repro/dev-env/<segment>/` it is the owner's dev-env
@@ -17849,8 +17859,9 @@ proc readOwnerInterfaceCandidate(candidate: string): LiftedInterfaceCopy =
   ## it is `extractInterfaceEdge`, which publishes the artifact and stamps
   ## it while it holds the artifact's interface-extraction lock.
   let outDir = parentDir(candidate)
+  let isDevEnv = lastPathPart(parentDir(outDir)) == "dev-env"
   var lock =
-    if lastPathPart(parentDir(outDir)) == "dev-env":
+    if isDevEnv:
       acquireExclusiveFileLock(devEnvEdgeLockPath(outDir))
     else:
       acquireInterfaceArtifactLock(candidate)
@@ -17858,6 +17869,16 @@ proc readOwnerInterfaceCandidate(candidate: string): LiftedInterfaceCopy =
     result.path = candidate
     result.artifact = readInterfaceArtifact(candidate)
     result.provenance = readInterfaceArtifactProvenance(candidate)
+    if isDevEnv:
+      let effectivePath = outDir / "dev-env.rbde"
+      result.effectiveProvenance = readInterfaceArtifactProvenance(effectivePath)
+      try:
+        result.effectiveArtifact = some(readDevEnvArtifact(effectivePath))
+      except CatchableError as err:
+        result.effectiveReadError = err.msg
+    else:
+      result.effectiveReadError =
+        "a build interface carries no effective dev-env declaration"
   finally:
     releaseExclusiveFileLock(lock)
 
@@ -18086,6 +18107,58 @@ proc ownerInterfaceCandidates(ownerRecipeDir: string): seq[string] =
       if fileExists(extendedPath(candidate)):
         result.add(candidate)
 
+proc ownerSharedServiceReadiness(copy: LiftedInterfaceCopy;
+                                 ownerRecipeDir, ownerPackage, ownerProject,
+                                 activityName, serviceName, environment: string):
+    ServiceReadinessProbe =
+  ## Validate the effective declaration retained by the candidate's locked
+  ## read, not just its typed signature: a servicePlaceholder may still
+  ## declare the probe. Validate its retained provenance too, because a
+  ## fresh interface can sit beside a stale effective artifact after failed
+  ## owner introspection. Paths below name facts; none is reopened here.
+  let path = parentDir(copy.path) / "dev-env.rbde"
+  try:
+    let generation = ownerArtifactGeneration(path, copy.effectiveProvenance,
+      ownerRecipeDir, ownerPackage, ownerProject)
+    if generation.generation != sagFresh:
+      raise newException(ValueError, generation.detail)
+    if copy.effectiveArtifact.isNone:
+      raise newException(ValueError,
+        if copy.effectiveReadError.len > 0: copy.effectiveReadError
+        else: "no effective dev-env declaration was retained")
+    let artifact = copy.effectiveArtifact.get()
+    if artifact.projectRoot.len == 0 or
+        expandFilename(artifact.projectRoot) != expandFilename(ownerRecipeDir):
+      raise newException(ValueError, "the artifact belongs to another project")
+    if activityName.len > 0 and activityName notin artifact.selectedActivities:
+      raise newException(ValueError,
+        "the artifact does not select activity `" & activityName & "`")
+    for service in artifact.services:
+      if service.name == serviceName:
+        let instance = sharedServiceInstanceOf(service)
+        if not instance.declared:
+          raise newException(ValueError,
+            "the effective service declares no shared instance")
+        if instance.environment.strip() != environment.strip():
+          raise newException(ValueError,
+            "the effective service selects environment `" &
+            instance.environment & "`, not `" & environment & "`")
+        # The same parser and owner-root path resolution used when the owner
+        # converges; no duplicate interpretation of typed or placeholder facts.
+        let spec = serviceSpecFromSummary(ownerRecipeDir, service)
+        return ServiceReadinessProbe(kind: spec.readinessKind,
+          path: spec.readinessPath, url: spec.readinessUrl,
+          timeoutMs: spec.readinessTimeoutMs)
+    raise newException(ValueError,
+      "the artifact carries no service `" & serviceName & "`")
+  except CatchableError as err:
+    raise newException(ValueError,
+      "the owner's effective service readiness declaration is unavailable " &
+      "or stale at " & path & ": " & err.msg &
+      " Run `REPRO_ENVIRONMENT=" & quoteShell(environment) & " repro shell --print-env=json" &
+      (if activityName.len > 0: " --activity=" & activityName else: "") &
+      "` in " & ownerRecipeDir & " to refresh it; refusing to assume readiness none.")
+
 proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
                                     edge: DevEnvEdgeResult;
                                     commandName: string): int =
@@ -18102,7 +18175,7 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
   ## the resolver's own file and line, which the resolution record
   ## carries from the consumer's compilation.
   ##
-  ## FOUR STEPS PER RESOLUTION, in this order and not interchangeable:
+  ## SIX STEPS PER RESOLUTION, in this order and not interchangeable:
   ##
   ##   1. READ THE OWNER'S LIFTED INTERFACE, from the owner's own
   ##      project-interface artifact. That is where the identity, the
@@ -18110,7 +18183,9 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
   ##      attach-or-refuse on the fingerprint, and a consumer that
   ##      invented one would be comparing the running instance against
   ##      itself. Absent is a REFUSAL naming the path and the project to
-  ##      run `repro dev-env` in.
+  ##      run `repro dev-env` in. Read the effective owner probe from its
+  ##      independently fresh dev-env artifact, for the same activity,
+  ##      project and instance environment.
   ##   2. RESOLVE THE KEY: `(identity, scope, environment)` through the
   ##      same `sharedServiceInstanceKey` the owner's converge uses, with
   ##      the environment the consumer's EVALUATION selected.
@@ -18122,10 +18197,13 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
   ##      the signature and deliberately not the `executable` or `args`.
   ##      The daemon already refuses a command-less converge that finds
   ##      no instance, by name.
-  ##   4. DEPOSIT THE CONTRIBUTIONS, validated against what the RUNNING
+  ##   4. RECONCILE THE DECLARED READINESS after recording the acquired
+  ##      lease. A failed probe refuses startup and the ledger still lets
+  ##      `repro down` release that holder.
+  ##   5. DEPOSIT THE CONTRIBUTIONS, validated against what the RUNNING
   ##      instance declares. Refused, never dropped (§4.6), including
   ##      under version skew.
-  ##   5. READ BACK WHAT THE INSTANCE MINTED, from the instance's own
+  ##   6. READ BACK WHAT THE INSTANCE MINTED, from the instance's own
   ##      durable registration record, into THIS session's minted file --
   ##      L9's **F5**. See the step's own comment at the foot of the
   ##      loop for the design and for the four alternatives it rejects.
@@ -18179,24 +18257,27 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
     # its writer's lock: the snapshot and the §4.3 generation stamp below
     # both come from this copy, never from a second read of the files.
     var liftedCopy: LiftedInterfaceCopy
+    var readinessProbe: ServiceReadinessProbe
     var liftErrors: seq[string] = @[]
     for candidate in candidates:
       try:
         let copy = readOwnerInterfaceCandidate(candidate)
         lifted = liftedServiceDeclaration(copy.artifact,
           resolution.serviceName)
+        readinessProbe = ownerSharedServiceReadiness(copy,
+          resolution.ownerRecipeDir, resolution.ownerPackage,
+          lifted.snapshot.projectName, resolution.activityName,
+          resolution.serviceName, resolution.environment)
         liftedCopy = copy
         liftedFrom = candidate
         break
       except CatchableError as err:
         liftErrors.add(candidate & ": " & err.msg)
     if liftedFrom.len == 0:
-      refuse("the owning project's lifted interface does not carry " &
-        "service `" & resolution.serviceName & "`, so this resolver " &
-        "has no identity, no scope and no interface fingerprint to " &
-        "resolve against. Shared-Development-Services.md §4.3 decides " &
-        "attach-or-refuse on that fingerprint, so there is nothing to " &
-        "decide with. " &
+      refuse("the owning project's artifacts do not provide a current " &
+        "declaration for service `" & resolution.serviceName &
+        "`. Resolving requires its lifted identity, scope and interface " &
+        "fingerprint plus its effective readiness declaration. " &
         (if candidates.len == 0:
            "No project-interface artifact was found under " &
            (resolution.ownerRecipeDir / ".repro") &
@@ -18288,6 +18369,25 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
       reference & ".shared()` " & outcomeWord(outcome) & " at " &
       response.address & " with " & $response.holders.len & " holder" &
       (if response.holders.len == 1: "" else: "s"))
+    if serviceCompletionRule(readinessProbe) == scrDeclaredReadiness:
+      # Attachment takes a lease, but readiness is a separate completion
+      # rule. Reconcile before depositing contributions or reading minted
+      # attributes, and keep the lease ledger available if the probe fails.
+      setServiceReadinessProber(
+        proc (url: string): bool {.closure.} = readinessProbeSatisfied(url))
+      setReadinessEdgeEventSink(
+        proc (kind, service, detail: string) {.closure.} =
+          appendSessionEvent(parsed.selection.outDir, kind, service, detail))
+      try:
+        discard reconcileResources(planServiceReadinessEdge(
+          resolution.serviceName, response.address, readinessProbe))
+      except CatchableError as err:
+        refuse("readiness failed: " & err.msg)
+        inc refused
+        continue
+      finally:
+        setServiceReadinessProber(nil)
+        setReadinessEdgeEventSink(nil)
     # The RUNNING instance's own declaration of its contribution points,
     # as the DAEMON answered -- not as the owner's artifact on disk
     # describes it.
@@ -18346,7 +18446,7 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
       $deposited.replaced & ", of " &
       $deposited.set.contributions.len & " on the instance")
 
-    # ── STEP 5 — L9's F5: READ WHAT THE INSTANCE MINTED, FROM THE
+    # ── STEP 6 — L9's F5: READ WHAT THE INSTANCE MINTED, FROM THE
     # INSTANCE, IN A SESSION THAT DID NOT CONVERGE IT ────────────────
     #
     # THE DEFECT, as L9 F4 measured it at `f927919fa`: the minted table

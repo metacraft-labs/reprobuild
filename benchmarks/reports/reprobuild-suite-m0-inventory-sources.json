@@ -35508,6 +35508,9 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
+        "repro_dev_env_artifacts",
+        "repro_dev_env_engine",
+        "repro_interface_artifacts",
         "repro_resources",
         "repro_test_support"
       ],
@@ -35515,7 +35518,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_f5_two_sessions_read_one_instances_minted_id.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
