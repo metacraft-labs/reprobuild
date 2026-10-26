@@ -156,6 +156,28 @@ proc reprobuildCheckoutRoot(): string =
   # <reprobuild>/libs/repro_project_dsl/src/repro_project_dsl/<this file>
   currentSourcePath().parentDir.parentDir.parentDir.parentDir.parentDir
 
+proc probeCatalogRoot(search: var ReprobuildPackagesSearch;
+                      origin, root: string) =
+  ## Record one place `reprobuildPackagesSearch` consults.
+  ##
+  ## A top-level proc on purpose, not a closure nested in the search: the
+  ## search runs inside the ``package`` macro at compile time, and Nim's VM
+  ## refuses a nested proc's captured environment ("cannot evaluate at compile
+  ## time: :env") when the macro expands in a module compiled after another
+  ## module's ``package`` block -- which is every test compiled into a group
+  ## binary (Test-Binary-Grouping M2: ``t_home_profile_lock`` then
+  ## ``t_runtime_library_binding``). The selector travels in ``search``.
+  var entry = ReprobuildPackagesProbe(origin: origin, root: root)
+  if root.len > 0:
+    entry.rootExists = dirExists(root)
+    let candidate = root / "packages" / "interfaces" / search.selector /
+      "repro.nim"
+    if entry.rootExists and fileExists(candidate):
+      entry.module = candidate.changeFileExt("")
+  search.probes.add(entry)
+  if search.module.len == 0 and entry.module.len > 0:
+    search.module = entry.module
+
 proc reprobuildPackagesSearch*(selector, consumerSourceFile: string):
     ReprobuildPackagesSearch =
   ## Look for package ``selector`` in the catalog, recording every place
@@ -177,19 +199,9 @@ proc reprobuildPackagesSearch*(selector, consumerSourceFile: string):
   result.selector = selector
   if not isBareCatalogSelector(selector):
     return
-  proc probe(search: var ReprobuildPackagesSearch; origin, root: string) =
-    var entry = ReprobuildPackagesProbe(origin: origin, root: root)
-    if root.len > 0:
-      entry.rootExists = dirExists(root)
-      let candidate = root / "packages" / "interfaces" / selector / "repro.nim"
-      if entry.rootExists and fileExists(candidate):
-        entry.module = candidate.changeFileExt("")
-    search.probes.add(entry)
-    if search.module.len == 0 and entry.module.len > 0:
-      search.module = entry.module
   result.envRoot = getEnv(ReprobuildPackagesRootEnv)
   if result.envRoot.len > 0:
-    probe(result, "$" & ReprobuildPackagesRootEnv, result.envRoot)
+    probeCatalogRoot(result, "$" & ReprobuildPackagesRootEnv, result.envRoot)
     return
   var seen: seq[string] = @[]
   if consumerSourceFile.len > 0:
@@ -200,7 +212,7 @@ proc reprobuildPackagesSearch*(selector, consumerSourceFile: string):
         break
       let root = parent / "reprobuild-packages"
       seen.add(root)
-      probe(result, "beside " & dir, root)
+      probeCatalogRoot(result, "beside " & dir, root)
       if result.module.len > 0:
         return
       dir = parent
@@ -212,13 +224,13 @@ proc reprobuildPackagesSearch*(selector, consumerSourceFile: string):
       let lockedRoot = lockDir / ".repro" / "cross-repo-producers" /
         ReprobuildPackagesRepositoryName / lockedRev
       seen.add(lockedRoot)
-      probe(result, "locked at " & lockedRev, lockedRoot)
+      probeCatalogRoot(result, "locked at " & lockedRev, lockedRoot)
       if result.module.len > 0:
         return
 
   let besideReprobuild = reprobuildCheckoutRoot().parentDir / "reprobuild-packages"
   if besideReprobuild notin seen:
-    probe(result, "beside the reprobuild checkout " & reprobuildCheckoutRoot(),
+    probeCatalogRoot(result, "beside the reprobuild checkout " & reprobuildCheckoutRoot(),
       besideReprobuild)
 
 proc reachableReprobuildPackagesRoots*(consumerSourceFile: string):
