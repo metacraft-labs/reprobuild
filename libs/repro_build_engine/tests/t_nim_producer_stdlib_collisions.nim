@@ -225,3 +225,45 @@ static:
       createSymlink(shared, producer / "pure")
       createSymlink(shared, shared / "cycle")
       check refusal(@[nim, "c", source], @[producer]).contains("os.nim")
+
+    test "query the compiler with the environment the action is launched with":
+      # A launch that is not isolated layers the action's entries over the
+      # engine's own environment, so a wrapper may locate its compiler through
+      # an inherited variable. The library query must see that variable too;
+      # an isolated launch must not.
+      let nim = uncontrolledFindExe("nim")
+      require nim.len > 0
+      let scratch = createTempDir("nim-producer-inherited-env-", "")
+      defer: removeDir(scratch)
+      let producer = scratch / "producer"
+      createDir(producer)
+      writeFile(producer / "greetlib.nim", "const greeting* = true\n")
+      writeFile(producer / "strutils.nim", "discard\n")
+      let wrapperDir = scratch / "wrapper-bin"
+      createDir(wrapperDir)
+      let wrapper = wrapperDir / "nim"
+      writeFile(wrapper, "#!/bin/sh\n" &
+        "if [ -n \"${REPRO_TEST_INHERITED_NIM:-}\" ]; then\n" &
+        "  exec \"$REPRO_TEST_INHERITED_NIM\" \"$@\"\nfi\n" &
+        "echo \"wrapper: no inherited compiler\" >&2\nexit 127\n")
+      setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
+      putEnv("REPRO_TEST_INHERITED_NIM", nim)
+      defer: delEnv("REPRO_TEST_INHERITED_NIM")
+      let argv = @["nim", "c", "app.nim"]
+      let overlay = @["PATH=" & wrapperDir]
+      proc projected(isolated: bool): string =
+        try:
+          discard applyNimPathArgs(argv, @[producer], overlay, scratch,
+            isolatedEnv = isolated)
+        except BuildEngineError as error:
+          return error.msg
+      # Inherited: the wrapper reaches the real compiler, so validation runs
+      # against the real library and finds the planted collision.
+      let inherited = projected(false)
+      check inherited.contains("collides with standard-library module")
+      check inherited.contains("strutils.nim")
+      # Isolated: the launch would not carry the variable, and neither does
+      # the query.
+      let isolated = projected(true)
+      check isolated.contains("cannot locate standard library")
+      check isolated.contains("wrapper: no inherited compiler")
