@@ -1,7 +1,8 @@
 import std/unittest
 
 when defined(reproProviderMode):
-  import std/[os, strutils]
+  import std/[os, osproc, strutils]
+  import repro_test_support/reasoned_skip
 
   import repro_core
   import repro_project_dsl
@@ -208,7 +209,8 @@ suite "executable stage aliases":
       else:
         check stage.toolIdentityRefs == @[
           "sh", "mkdir", "cp", "chmod", "ln"]
-      check regularStage.toolIdentityRefs == @["sh", "mkdir", "cp", "chmod"]
+      check regularStage.toolIdentityRefs == @[
+        "sh", "mkdir", "rm", "cp", "chmod", "mv"]
 
       when defined(windows):
         check stage.outputs == @[
@@ -226,5 +228,84 @@ suite "executable stage aliases":
         check "build/out/usr/bin/upstream-tool" in script
         check "#!/bin/sh" in script
         check "ln -sfn \"toolAlias\"" in script
+    else:
+      skip()
+
+suite "executable stage copy writes its declared output":
+  test "an installed executable is staged under the declared name":
+    # The engine fails a cacheable action that exits 0 without a declared
+    # output (reprobuild-pm Build-Engine-And-Scheduler.md, "A declared
+    # output is an obligation"). The stage copy declares
+    # `.repro/output/<name>/<name>`. On Windows the install tree holds
+    # `<name>.exe`, and MSYS `sh` resolves the bare `<name>` probe to it and
+    # `cp` appends `.exe` to the destination, so only `<name>.exe` used to
+    # be written. This runs the emitted stage-copy script for real (the
+    # host's own `sh`, `cp`, `mv`) against an install tree holding the
+    # executable the host's toolchain would install, and checks the
+    # declared output exists. No mock: the script is the one the action
+    # carries.
+    when defined(reproProviderMode):
+      let sh = findExe("sh")
+      if sh.len == 0:
+        skip("sh not on PATH: cannot run the stage-copy script")
+      else:
+        let scratch = getTempDir() / "repro-executable-stage-copy-real"
+        let projectRoot = scratch / "stageCopyRealPkg"
+        if dirExists(scratch):
+          removeDir(scratch)
+        createRecipeRoot(projectRoot)
+        defer:
+          if dirExists(scratch):
+            removeDir(scratch)
+        let pkg = PackageDef(
+          packageName: "stageCopyRealPkg",
+          sourceFile: projectRoot / "repro.nim",
+          hasDevEnv: false,
+          devEnvBodyHash: "",
+          toolUses: @[])
+        let fragment = buildPackageFragment(
+          pkg,
+          dummyRequest(projectRoot),
+          proc() =
+          setCurrentOwningPackageOverride("stageCopyRealPkg")
+          try:
+            let build = autotools_package(
+              srcDir = "./src",
+              skipConfigure = true)
+            discard build.executable("realTool")
+          finally:
+            clearCurrentOwningPackageOverride(),
+          includeDefault = false)
+        let stage = findById(extractActions(fragment),
+          "autotools-stage-executable-stageCopyRealPkg-realTool")
+        require stage.cacheable
+        require stage.outputs.len == 1
+        # What `make install` puts in the DESTDIR tree on this host.
+        let installedName =
+          when defined(windows): "realTool.exe" else: "realTool"
+        let installedPath = projectRoot / "build" / "out" / "usr" / "bin" /
+          installedName
+        createDir(parentDir(installedPath))
+        # Run twice: the second run starts with the first run's outputs
+        # in place, as a rebuild does, and the installed executable has
+        # changed in between. The declared output must carry the bytes of
+        # the run that wrote it, not the previous build's: under MSYS a
+        # copy through the bare name writes only `<out>.exe`, so a stale
+        # literal `<out>` would otherwise survive the rebuild.
+        # The script goes through a file: a Windows command line does not
+        # carry this script's quoting to MSYS `sh` intact.
+        let scriptFile = scratch / "stage-copy.sh"
+        writeFile(scriptFile, stage.inlineScriptOf())
+        for attempt in 0 .. 1:
+          let contents = "MZ-fixture-build-" & $attempt
+          writeFile(installedPath, contents)
+          let run = execCmdEx(quoteShellCommand(@[sh, scriptFile]),
+            workingDir = projectRoot)
+          checkpoint "attempt " & $attempt & ": " & run.output
+          require run.exitCode == 0
+          for output in stage.outputs:
+            checkpoint "declared output: " & output
+            check fileExists(output)
+            check readFile(output) == contents
     else:
       skip()
