@@ -1107,7 +1107,7 @@ proc withCertificatePolicy(req: LockGenerationRequest; document: string):
   ld.certificatePolicySection = req.certificatePolicySection
   serializeLockedDependencies(ld)
 
-proc landLockDocument(writeTo, document: string) =
+proc landLockDocument*(writeTo, document: string) =
   ## Write the committed lock only when its bytes change, so a refresh that
   ## finds nothing new leaves the file -- and its mtime -- alone.
   if fileExists(writeTo):

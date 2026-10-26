@@ -1,10 +1,19 @@
 ## Confinement for home-apply tests, including directly executed test binaries.
 ## The ambient home deliberately differs from the explicit apply home: a
 ## forgotten homeDir argument must fail rather than silently pass in isolation.
+##
+## The guard also points `REPRO_REGISTRY_ROOT` at a fake hive of its own
+## (`registry_isolation`), so an in-process apply on Windows writes its
+## `env.userPath` / `env.userVariable` / registry resources there and not
+## into the invoking user's real `HKCU` -- the account state a Windows
+## user's home lives in besides the files. A body that needs a different
+## hive sets its own inside the scope.
 import std/[os, tempfiles]
 
+import ./registry_isolation
+
 const HomeEnvironment = ["HOME", "USERPROFILE", "XDG_CONFIG_HOME",
-  "REPRO_HOME_POSIX_PATH_RC"]
+  "REPRO_HOME_POSIX_PATH_RC", RegistryRootEnvVar]
 
 template withHomeApplyGuard*(body: untyped) =
   ## Redirect fallback home lookups for this scope and inherited children.
@@ -23,6 +32,8 @@ template withHomeApplyGuard*(body: untyped) =
       putEnv("USERPROFILE", guardHome)
       putEnv("XDG_CONFIG_HOME", guardHome / ".config")
       delEnv("REPRO_HOME_POSIX_PATH_RC")
+      let registry = registryRootEnv(guardRoot)
+      putEnv(registry.k, registry.v)
       try:
         body
       finally:

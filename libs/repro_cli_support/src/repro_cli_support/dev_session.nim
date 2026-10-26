@@ -6,7 +6,8 @@ import repro_core
 import repro_dev_env_activation
 import repro_dev_env_artifacts
 import repro_dev_env_engine
-from repro_interface_artifacts import seededSourcePackageEnvironmentNames
+from repro_interface_artifacts import seededSourcePackageEnvironmentNames,
+  acquireExclusiveFileLock, releaseExclusiveFileLock
 import repro_provider_runtime
 import repro_project_dsl                 # ServiceIdentityDef / ServiceScope
 import repro_resources/service_identity  # the (identity, scope, environment) key
@@ -3098,7 +3099,8 @@ proc runWatchCycle(state: var SessionState; config: DevSessionSupervisorConfig;
   state.emitEvent("watch.cycle.started", cycle = cycle)
   let edge = computeFreshArtifact(config)
   artifactPath = edge.artifactPath
-  artifact = readDevEnvArtifact(artifactPath)
+  # Decoded by the edge under its lock (`DevEnvEdgeResult.artifact`).
+  artifact = edge.artifact
   for task in artifact.tasks:
     state.runTaskCommand(artifact, artifactPath, task, cycle)
   state.writeState()
@@ -3193,7 +3195,21 @@ proc runDevSessionSupervisor*(config: DevSessionSupervisorConfig;
   ## ``t_w2_activation_surfaces_declare_producer_ops.nim`` fails if a third one
   ## appears that does not.
   var artifactPath = config.artifactPath
-  var artifact = readDevEnvArtifact(artifactPath)
+  # The artifact is the dev-env edge's shared output, and this supervisor
+  # may be a detached process reading it well after the activation that
+  # launched it released the edge lock. Read it under that lock, so a
+  # concurrent activation of the same project cannot be halfway through
+  # replacing it (`computeDevEnvEdge`).
+  var artifact =
+    if config.outDir.len > 0:
+      var edgeLock = acquireExclusiveFileLock(
+        devEnvEdgeLockPath(config.outDir))
+      try:
+        readDevEnvArtifact(artifactPath)
+      finally:
+        releaseExclusiveFileLock(edgeLock)
+    else:
+      readDevEnvArtifact(artifactPath)
   var state = SessionState(
     schemaId: SessionSchemaId,
     producerOpsFor: producerOpsFor,

@@ -4,8 +4,9 @@
 ## be deleted").
 ##
 ## WHY. `ref` is a published branch containing the pinned commit, chosen in the
-## order `agents`, `dev`, the checkout's own branch, the remote's default, then
-## any other containing branch. On a stabilisation branch
+## order: the repo's resolved `unstable` and `mainline` branches, the
+## checkout's own branch, the remote's default, then any other containing
+## branch. On a stabilisation branch
 ## `agents-to-dev-<YYYY-MM-DD>` the own-branch candidate IS that branch, and the
 ## branching policy (metacraft-dev-guidelines `policies/branching-policy.md`
 ## §"Product Repository Branches") requires it to be deleted once it lands — so
@@ -21,7 +22,7 @@
 ##
 ## Cases:
 ##   * (a) sibling on `agents-to-dev-<date>`, commit also on `origin/agents` →
-##     `agents` (sanity: the preferred candidate already wins);
+##     `agents` (sanity: the one durable branch containing it wins);
 ##   * (b) commit on `origin/agents-to-dev-<date>` and on a durable `release`
 ##     branch, sibling checked out on the stabilisation branch → `release`; and
 ##     the ROOT's self-record (the `runquota` incident) on the stabilisation

@@ -13016,7 +13016,8 @@ const NimLibraryMetadataArgs* = ["dump", "--dump.format:json", "--skipCfg:on",
   ## its library must not evaluate the consumer's config.nims a second time.
 
 proc nimCompilerLibraryRoot(command, searchPath, cwd: string;
-                            env: seq[string]): tuple[libraryRoot, compilerPrefix: string] =
+                            env: seq[string]; isolatedEnv: bool):
+    tuple[libraryRoot, compilerPrefix: string] =
   var executable = command
   if not command.isAbsolute:
     if command.contains(DirSep) or command.contains(AltSep):
@@ -13044,9 +13045,19 @@ proc nimCompilerLibraryRoot(command, searchPath, cwd: string;
   # A wrapper need not share its directory with the compiler's library. This
   # is a bounded tool-metadata query, not a build action: absolute executable,
   # fixed arguments, no shell, no project/config evaluation, no emitted files.
+  #
+  # The query must see the environment the action itself will be launched
+  # with. RunQuota layers the action's entries OVER the engine's own
+  # environment unless the launch is isolated, so a wrapper that resolves its
+  # compiler from an inherited variable works at launch time; handing the
+  # query only the overlay would make that same wrapper fail here first.
   var childEnv: StringTableRef
-  if env.len > 0:
-    childEnv = newStringTable(modeCaseSensitive)
+  if env.len > 0 or isolatedEnv:
+    childEnv = newStringTable(
+      when defined(windows): modeCaseInsensitive else: modeCaseSensitive)
+    if not isolatedEnv:
+      for name, value in envPairs():
+        childEnv[name] = value
     for entry in env:
       let separator = entry.find('=')
       if separator >= 0:
@@ -13071,7 +13082,8 @@ proc nimCompilerLibraryRoot(command, searchPath, cwd: string;
 
 proc validateNimProducerRoots(argv: openArray[string]; base: int;
                               nimPathDirs: openArray[string];
-                              compilerEnv: seq[string]; cwd: string) =
+                              compilerEnv: seq[string]; cwd: string;
+                              isolatedEnv: bool) =
   var modules: seq[tuple[root, relative: string]]
   for root in nimPathDirs:
     if root.len == 0:
@@ -13100,9 +13112,13 @@ proc validateNimProducerRoots(argv: openArray[string]; base: int;
             modules.add((absoluteRoot, relativePath(path, absoluteRoot)))
   if modules.len == 0:
     return
-  let searchPath = if compilerEnv.len > 0:
-    lookupEnv(compilerEnv, "PATH").value else: getEnv("PATH")
-  let compiler = nimCompilerLibraryRoot(argv[base], searchPath, cwd, compilerEnv)
+  let declaredPath = lookupEnv(compilerEnv, "PATH")
+  let searchPath =
+    if declaredPath.present: declaredPath.value
+    elif isolatedEnv: ""
+    else: getEnv("PATH")
+  let compiler = nimCompilerLibraryRoot(argv[base], searchPath, cwd,
+    compilerEnv, isolatedEnv)
   var libraries = @[compiler.libraryRoot]
   var explicitLibrary = ""
   for i in base + 2 ..< argv.len:
@@ -13137,7 +13153,8 @@ proc validateNimProducerRoots(argv: openArray[string]; base: int;
 proc applyNimPathArgs*(argv: openArray[string];
                        nimPathDirs: openArray[string];
                        compilerEnv: seq[string] = @[];
-                       cwd = getCurrentDir()): seq[string] =
+                       cwd = getCurrentDir();
+                       isolatedEnv = false): seq[string] =
   ## Cross-Repo-Source-Consumption SC-11 (§4.2a.3) — the Nim library-source
   ## channel's argv projection. Where the C/C++ channels prepend an ENV VAR,
   ## the Nim channel prepends a compiler FLAG: for each sibling Nim library
@@ -13187,7 +13204,8 @@ proc applyNimPathArgs*(argv: openArray[string];
     "c++", "cpp", "js", "e"]
   if argv[base + 1].toLowerAscii notin compileSubcommands:
     return
-  validateNimProducerRoots(argv, base, nimPathDirs, compilerEnv, cwd)
+  validateNimProducerRoots(argv, base, nimPathDirs, compilerEnv, cwd,
+    isolatedEnv)
   var flags: seq[string] = @[]
   for d in nimPathDirs:
     if d.len > 0:
@@ -13972,8 +13990,9 @@ proc preparedRunQuotaCommand(action: BuildAction;
         "[" & nonSipShellSearchReport() & "]")
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
   let threadedEnv = preparedActionEnv(action, config, auxPaths)
+  let isolatedEnv = config.hermeticEnv or action.isolateHostEnvironment
   let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs,
-    threadedEnv, action.cwd)
+    threadedEnv, action.cwd, isolatedEnv)
   let includePaths = partitionCompilerIncludePaths(auxPaths)
   let adjustedArgv = applyCompilerSystemIncludeArgs(nimAdjustedArgv,
     includePaths.systemDirs)
@@ -13985,7 +14004,7 @@ proc preparedRunQuotaCommand(action: BuildAction;
     env: deferred.env,
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit,
-    isolatedEnv: config.hermeticEnv or action.isolateHostEnvironment)
+    isolatedEnv: isolatedEnv)
 
 # ---------------------------------------------------------------------------
 # In-Process-Monitor-Hosting HM-4 — the engine hosts io-mon's consumer itself.

@@ -81,7 +81,8 @@
 ## MOCK POLICY — none. The "daemon" is the shipped `repro daemon serve`
 ## process; its control socket and state directory are the real ones.
 
-import std/[asyncdispatch, os, osproc, posix, strtabs, strutils, times, unittest]
+import std/[asyncdispatch, os, osproc, posix, streams, strtabs, strutils, times,
+            unittest]
 
 import repro_test_support
 import repro_distributed_worker
@@ -179,6 +180,78 @@ proc startPlainDaemon(d: var WorkerDaemon) =
   let deadline = epochTime() + 60.0
   while epochTime() < deadline and not socketExists(d.endpoint):
     sleep(50)
+
+# A preloaded library in the WORKER must not reach the lease's environment.
+#
+# The suite runs this binary directly, so it never sees the build monitor.
+# This test recreates what the monitor does instead, with its own preload
+# library. The library interposes execve(3) and adds a marker variable to
+# every child it starts, which is how io-mon's shim hands `LD_PRELOAD` to its
+# children. The case re-runs this binary under that library in the child mode
+# below. The child starts one lease that dumps its environment, and, as a
+# positive control, one ordinary fork+execve child that dumps its own.
+const InterposeChildEnv = "REPRO_LEASE_EXEC_INTERPOSE_CHILD"
+const InterposeMarker = "REPRO_INTERPOSED_BY_PRELOAD=1"
+const InterposerSource = """
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <stdlib.h>
+#include <unistd.h>
+typedef int (*execve_fn)(const char *, char *const[], char *const[]);
+static execve_fn real_execve;
+__attribute__((constructor)) static void resolve(void) {
+  real_execve = (execve_fn)dlsym(RTLD_NEXT, "execve");
+}
+int execve(const char *path, char *const argv[], char *const envp[]) {
+  size_t n = 0;
+  while (envp && envp[n]) n++;
+  char **e = malloc((n + 2) * sizeof *e);
+  if (!e) return real_execve(path, argv, envp);
+  for (size_t i = 0; i < n; i++) e[i] = envp[i];
+  e[n] = "REPRO_INTERPOSED_BY_PRELOAD=1";
+  e[n + 1] = NULL;
+  return real_execve(path, argv, e);
+}
+"""
+
+when defined(linux):
+  if getEnv(InterposeChildEnv).len > 0:
+    # CHILD MODE (the case below starts this binary like this, under the
+    # interposer). `dir` is the parent's scratch directory.
+    let dir = getEnv(InterposeChildEnv)
+    # The control: an ordinary execve child, which the interposer reaches.
+    let pid = posix.fork()
+    if pid == 0:
+      var argv = allocCStringArray(["sh", "-c", "env > \"$1\"", "sh",
+        dir / "control-env.txt"])
+      var envp = allocCStringArray(["PATH=" & coreToolDir() & ":/usr/bin:/bin"])
+      discard posix.execve("/bin/sh", argv, envp)
+      quit(127)
+    var status: cint
+    discard posix.waitpid(pid, status, 0)
+    # The lease.
+    let leaseRoot = dir / "leases"
+    let leaseDir = leaseRoot / "interposed"
+    createDir(leaseDir / "wt" / "out")
+    let spec = LeaseSpec(leaseId: "interposed", leaseRoot: leaseRoot,
+      leaseDir: leaseDir, metaDir: dir / "lease-meta" / "interposed",
+      cwd: leaseDir / "wt", argv: @["/bin/sh", "-c", "env > out/env.txt"],
+      env: @[("PATH", coreToolDir() & ":/usr/bin:/bin"),
+        ("HOME", leaseDir / "home"),
+        ("TMPDIR", leaseDir / "tmp")],
+      readRoots: @["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix/store"],
+      closureRoots: @["/usr/bin", "/bin", "/usr/lib", "/lib", "/lib64",
+        "/nix/store"],
+      outputDirs: @[leaseDir / "wt" / "out"],
+      layers: DefaultLeaseLayers, timeoutMs: 60_000)
+    let outcome = waitFor runLease(spec)
+    writeFile(dir / "lease-outcome.txt", "started=" & $outcome.started &
+      " exit=" & $outcome.exitCode & " error=" & outcome.error &
+      "\nstderr: " & outcome.stderr & "\nreports: " & $outcome.reports)
+    if fileExists(leaseDir / "wt" / "out" / "env.txt"):
+      copyFile(leaseDir / "wt" / "out" / "env.txt", dir / "lease-env.txt")
+    discard cleanupLease(spec)
+    quit(0)
 
 suite "Distributed-Execution M7: execution-lease confinement, layer by layer":
 
@@ -470,6 +543,48 @@ suite "Distributed-Execution M7: execution-lease confinement, layer by layer":
         check "DEV-RAN" notin rootResult
         check "TOOLCHAIN-RAN" in rootResult
         discard cleanupLease(rootSpec)
+
+  test "a library preloaded into the worker does not reach the lease's environment":
+    when not defined(linux):
+      skip("the Linux lease's raw exec is what is under test")
+    else:
+      let cc = ccPath()
+      let available = leaseConfinementAvailable()
+      check available.ok
+      check cc.len > 0
+      if available.ok and cc.len > 0:
+        let base = m7TestBase("repro-m7-interpose")
+        defer: removeDir(base)
+        createDir(base)
+        writeFile(base / "interposer.c", InterposerSource)
+        check execCmdEx(quoteShellCommand([cc, "-shared", "-fPIC", "-o",
+          base / "interposer.so", base / "interposer.c", "-ldl"])).exitCode == 0
+        var env = newStringTable(modeCaseSensitive)
+        for k, v in envPairs(): env[k] = v
+        env["LD_PRELOAD"] = base / "interposer.so"
+        env[InterposeChildEnv] = base
+        let child = startProcess(getAppFilename(), env = env,
+          options = {poStdErrToStdOut})
+        let childOut = child.outputStream.readAll()
+        let code = child.waitForExit()
+        child.close()
+        checkpoint("child exit " & $code & ":\n" & childOut)
+        check code == 0
+        let control = if fileExists(base / "control-env.txt"):
+            readFile(base / "control-env.txt") else: ""
+        let leased = if fileExists(base / "lease-env.txt"):
+            readFile(base / "lease-env.txt") else: ""
+        checkpoint("lease: " & (if fileExists(base / "lease-outcome.txt"):
+          readFile(base / "lease-outcome.txt") else: "<no outcome>"))
+        checkpoint("lease env:\n" & leased)
+        # The control: the interposer reaches an ordinary execve child, so
+        # the lease assertion below cannot pass because nothing interposed.
+        check InterposeMarker in control
+        # The lease ran, and its environment is what its spec names: no
+        # marker and no preload.
+        check "PATH=" in leased
+        check InterposeMarker notin leased
+        check "LD_PRELOAD" notin leased
 
   test "hardened memfd policy: no executable memfd; a sealed one still works":
     when not defined(linux):

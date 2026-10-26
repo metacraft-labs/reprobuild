@@ -53,7 +53,7 @@ putting its `bin/` on your `PATH`:
 
 ```bash
 # Linux x86_64 — adjust the version and platform to taste
-VERSION=0.2.6
+VERSION=0.2.16
 PLATFORM=linux-x86_64   # or darwin-aarch64; Windows ships a .zip
 curl -fsSLO "https://github.com/metacraft-labs/reprobuild/releases/download/v${VERSION}/reprobuild-${VERSION}-${PLATFORM}.tar.gz"
 tar -xzf "reprobuild-${VERSION}-${PLATFORM}.tar.gz"
@@ -375,5 +375,7 @@ for this invocation. Existing checkouts keep their current object storage.
 
 ## 9. License
 
-MIT. The `repro` CLI and engine in this repository are free software;
-commercial services are optional and never required to use them.
+Apache License 2.0 — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
+Copyright 2026 Metacraft Labs. The `repro` CLI and engine in this repository
+are free software; commercial services are optional and never required to use
+them.

@@ -7157,6 +7157,12 @@ compileProfileBinary()
             end = len(tokens)
             for position in range(body + 1, len(tokens)):
                 token = tokens[position]
+                # A ``when`` inside brackets is an expression; its branch
+                # ends where the enclosing bracket closes, even when the
+                # expression wraps onto further lines.
+                if 0 <= depths[position] < base_depth:
+                    end = position
+                    break
                 if (
                     token.kind != "newline"
                     and token.line > tokens[body].line
@@ -7674,6 +7680,26 @@ compileProfileBinary()
                 "darwin": {
                     "sqlite lib dir prefers the toolchain's sqlite::sqlite_resolution_is_linux_only",
                 },
+            },
+            # Darwin side measured through the real --list-json at
+            # 41fb62a125b: 35 cases, none of the four below.
+            "libs/repro_profile_compile/tests/"
+            "t_smoke_repro_profile_compile.nim": {
+                "linux": {
+                    "profile C compiler capability check "
+                    "(requireProfileCCompiler)::a first gcc on PATH that "
+                    "cannot compile <stddef.h> is refused by name",
+                    "profile C compiler capability check "
+                    "(requireProfileCCompiler)::a working gcc later on PATH "
+                    "does not stand in for the refused one",
+                    "profile C compiler capability check "
+                    "(requireProfileCCompiler)::a configured compiler is "
+                    "probed too, and named as configured",
+                    "profile C compiler capability check "
+                    "(requireProfileCCompiler)::a working gcc is accepted and "
+                    "returned as an absolute image",
+                },
+                "darwin": set(),
             },
             "tests/e2e/hcr-linux-threads/"
             "t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim": {
@@ -8326,6 +8352,12 @@ compileProfileBinary()
             end = len(tokens)
             for position in range(body + 1, len(tokens)):
                 token = tokens[position]
+                # An expression ``when`` wrapped onto further lines inside
+                # brackets ends with its bracket, not at the next token that
+                # happens to share its depth and column.
+                if 0 <= depths[position] < depths[header]:
+                    end = position
+                    break
                 if (token.kind != "newline" and token.line > tokens[body].line
                         and token.column <= tokens[header].column
                         and depths[position] == depths[header]):
@@ -8563,8 +8595,17 @@ compileProfileBinary()
     def assert_platform_catalog_ledger_census(self, data):
         exclusive, identical = self.linux_darwin_catalog_ledger()
         self.assertEqual(self.platform_gated_test_sources(data), set(exclusive) | identical)
-        self.assertEqual(len(exclusive), 72)
+        self.assertEqual(len(exclusive), 73)
         self.assertEqual(len(identical), 20)
+        # The per-host totals are pure ledger arithmetic, so they are checked
+        # here, where no built binary is needed: a ledger entry added without
+        # updating them fails the cheap census, not only the post-build one.
+        # The net platform difference is derived from source-scoped names,
+        # never used as a substitute for their exact per-source assertions.
+        linux_only = sum(len(item["linux"]) for item in exclusive.values())
+        darwin_only = sum(len(item["darwin"]) for item in exclusive.values())
+        self.assertEqual((linux_only, darwin_only), (128, 156))
+        self.assertEqual(linux_only - darwin_only, -28)
         specs, _ = inventory.parse_repro_tests(REPO_ROOT)
         defines_by_source = {spec.source: spec.defines for spec in specs}
         for source in sorted(set(exclusive) | identical):
@@ -8609,6 +8650,34 @@ compileProfileBinary()
                 '    test name: discard\n', "nonliteral platform-exclusive"),
         }
         with tempfile.TemporaryDirectory(prefix="platform-ledger-controls-") as tmp:
+            # A wrapped expression-level ``when`` inside parentheses must end
+            # with its bracket: the tests after it run on every host, and
+            # neither scanner may file them under the platform branch.
+            wrapped = Path(tmp) / "wrapped_expression_when.nim"
+            wrapped.write_text(
+                "import std/unittest\n"
+                'suite "scope":\n'
+                '  test "first":\n'
+                '    check "a" == "a" &\n'
+                '      (when defined(macosx): "b" &\n'
+                '        "c" else: "")\n'
+                '  test "common":\n'
+                '    check f(g(\n'
+                '      1))\n'
+                '  test "later":\n'
+                '    check h(\n'
+                '      2)\n')
+            names = self.source_platform_case_names(str(wrapped))
+            self.assertEqual(names["linux"], names["darwin"])
+            self.assertEqual(
+                names["linux"],
+                {"scope::first", "scope::common", "scope::later"},
+            )
+            self.assertEqual(
+                self.platform_gated_test_sources({"tests": [
+                    {"source": str(wrapped), "language": "nim"}]}),
+                set(),
+            )
             for label, (text, reason) in fixtures.items():
                 with self.subTest(unsupported_source=label):
                     source = Path(tmp) / f"{label}.nim"
@@ -8619,9 +8688,9 @@ compileProfileBinary()
     def assert_linux_darwin_catalog_delta_is_exact(self, data):
         """Validate the ledger against this host's real catalog and source census.
 
-        The ledger currently covers 69 asymmetric sources and 20 sources
-        whose platform gates select identical names. Its 113 Linux-only and
-        155 Darwin-only identities yield a net 42 extra Darwin cases. Newly
+        The ledger currently covers 73 asymmetric sources and 20 sources
+        whose platform gates select identical names. Its 128 Linux-only and
+        156 Darwin-only identities yield a net 28 extra Darwin cases. Newly
         reconciled Darwin names are measured at 4f7d8624d7; their explicit
         Linux branches supply expectations checked by a Linux run, rather
         than a claim that Linux was measured on m1.
@@ -8665,13 +8734,6 @@ compileProfileBinary()
                 expected_by_host[host],
                 source,
             )
-
-        linux_only = sum(len(item["linux"]) for item in exclusive.values())
-        darwin_only = sum(len(item["darwin"]) for item in exclusive.values())
-        # The net platform difference is derived from source-scoped names,
-        # never used as a substitute for their exact per-source assertions.
-        self.assertEqual((linux_only, darwin_only), (113, 155))
-        self.assertEqual(linux_only - darwin_only, -42)
 
     def test_completed_clean_attempt_requires_one_coherent_three_run_attempt(self):
         fingerprint = "same-source"

@@ -27,7 +27,9 @@
 ## `fs.managedBlock`, `fs.userFile`, `systemd.userUnit`, `launchd.userAgent`
 ## and app-bundle drivers here, and `repro_home_apply`'s generated-file,
 ## managed-block, stow and launcher materialisers. A new writer of that
-## kind must call it too, or the suite stops covering it.
+## kind must call it too, or the suite stops covering it. Registry writes
+## have their own rule, `enforceTestRegistryFence` (below), which the
+## registry driver's write and delete primitives call.
 ##
 ## Rule. A write to `path` is refused when `path` lies inside a protected
 ## root `P` and is not inside an allowed carve-out `A` that itself lies
@@ -169,4 +171,95 @@ proc enforceTestHomeFence*(path, operation: string) =
     "ApplyOptions.homeDir, and make every host-file path derive from it).")
   e.path = path
   e.protectedRoot = root
+  raise e
+
+# ---------------------------------------------------------------------------
+# The registry half of the fence.
+#
+# On Windows the invoking user's account state also lives in
+# `HKCU`: `env.userPath`, `env.userVariable`, `windows.startup` and
+# `windows.registryValue` write it through `drivers/registry.nim`, not
+# through any path the rule above can see. Windows home-apply gates that
+# forgot the `REPRO_REGISTRY_ROOT` fake-hive seam appended their sandbox
+# store prefixes to the real `HKCU\Environment\Path` until it outgrew
+# cmd.exe's 8191-character limit (reprobuild-pm issue
+# `2026-10-23-windows-home-apply-gates-leak-store-prefixes-into-the-real-user-path.md`).
+#
+# Rule. While the fence is active (`REPRO_TEST_HOME_FENCE` set), a write
+# or delete that would reach the REAL user hive -- `REPRO_REGISTRY_ROOT`
+# unset, so the driver is not redirected into a fake hive -- is refused,
+# unless its subkey lies inside `HKCU\Software\Reprobuild-Tests`, the
+# scratch subtree the registry gates that must exercise the real Win32
+# path write their per-run subkeys under (the registry's counterpart of
+# the temp-dir carve-out). Reads are never refused: they change nothing.
+# ---------------------------------------------------------------------------
+
+const
+  RegistryRootEnvVar* = "REPRO_REGISTRY_ROOT"
+    ## Redirects every registry write, delete and read into a
+    ## filesystem-backed fake hive rooted at this directory
+    ## (`drivers/registry.nim`). Tests set it through
+    ## `repro_test_support.registryRootEnv`.
+  TestRegistryScratchSubkey* = "Software\\Reprobuild-Tests"
+    ## The only `HKCU` subtree a fenced process may write for real.
+
+proc isTestRegistryScratchSubkey*(subkey: string): bool =
+  ## Whether `subkey` (of `HKCU`) is `TestRegistryScratchSubkey` or lies
+  ## inside it, judged on the exact string the driver hands to
+  ## `RegCreateKeyExW` / `RegOpenKeyExW` relative to `HKEY_CURRENT_USER`.
+  ## Only the comparison is case-insensitive, as registry names are.
+  ## Nothing else is normalised, because Win32 normalises nothing else
+  ## (https://learn.microsoft.com/en-us/windows/win32/sysinfo/structure-of-the-registry):
+  ## `/` is an ordinary character in a key name, so
+  ## `Software/Reprobuild-Tests` is one key directly under `HKCU`; a leading
+  ## `HKCU\` would name a key called `HKCU`. Such spellings, an empty
+  ## component (a doubled, leading or trailing `\`), a `.` / `..`
+  ## component, and a sibling that only shares the prefix
+  ## (`Software\Reprobuild-TestsX`) are all outside.
+  let parts = subkey.split('\\')
+  let scratch = TestRegistryScratchSubkey.split('\\')
+  if parts.len < scratch.len:
+    return false
+  for i, part in parts:
+    if part.len == 0 or part == "." or part == ".." or '/' in part:
+      return false
+    if i < scratch.len and cmpIgnoreCase(part, scratch[i]) != 0:
+      return false
+  true
+
+proc testRegistryFenceRefuses*(subkey, fence, registryRoot: string): bool =
+  ## The decision, free of the process environment: `fence` is the value
+  ## of `REPRO_TEST_HOME_FENCE`, `registryRoot` that of
+  ## `REPRO_REGISTRY_ROOT`. True when a write or delete of `HKCU\<subkey>`
+  ## must be refused. `registryRoot` is tested exactly as the driver tests
+  ## it (non-empty means redirected), so the two can never disagree about
+  ## whether the real hive is the target.
+  fence.strip().len > 0 and registryRoot.len == 0 and
+    not isTestRegistryScratchSubkey(subkey)
+
+proc testRegistryFenceViolation*(subkey: string): bool =
+  ## `testRegistryFenceRefuses` against the current environment.
+  testRegistryFenceRefuses(subkey, getEnv(TestHomeFenceEnvVar),
+    getEnv(RegistryRootEnvVar))
+
+proc enforceTestRegistryFence*(subkey, name, operation: string) =
+  ## Raise `TestHomeFenceError` when writing or deleting value `name` of
+  ## `HKCU\<subkey>` would change the invoking user's real registry while
+  ## the fence is active. Called by `drivers/registry.nim` before the
+  ## first side effect of every write and delete that targets the real
+  ## hive.
+  if not testRegistryFenceViolation(subkey):
+    return
+  let target = "HKCU\\" & subkey & "\\" & name
+  var e = newException(TestHomeFenceError,
+    operation & ": refusing to write '" & target & "': it is the invoking " &
+    "user's real registry, which " & TestHomeFenceEnvVar & " protects, and " &
+    RegistryRootEnvVar & " is not set. A test drove a registry-backed " &
+    "resource (env.userPath, env.userVariable, windows.startup, " &
+    "windows.registryValue) without the fake-hive seam: set " &
+    RegistryRootEnvVar & " to a per-test directory " &
+    "(repro_test_support.registryRootEnv), or write under HKCU\\" &
+    TestRegistryScratchSubkey & " if the test must reach the real hive.")
+  e.path = target
+  e.protectedRoot = "HKCU"
   raise e

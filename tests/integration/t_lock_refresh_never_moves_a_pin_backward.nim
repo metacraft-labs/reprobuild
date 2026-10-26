@@ -27,9 +27,12 @@
 ##   * a DIVERGED sibling (another line of history) is refused without the
 ##     flag and written with it;
 ##   * an AHEAD sibling advances with no refusal;
-##   * `ref` is a remote-tracking branch containing the commit, preferring
-##     `agents`, then `dev`; a local-only branch is never written for a
-##     sibling or for the root; an unpublished commit records an empty `ref`;
+##   * `ref` is a remote-tracking branch containing the commit (the
+##     repo's resolved `unstable`, then `mainline`, first — covered by
+##     `t_published_ref_prefers_resolved_unstable.nim`; here lib-b declares
+##     only the mainline `main`, so the fallback order decides); a local-only
+##     branch is never written for a sibling or for the root; an unpublished
+##     commit records an empty `ref`;
 ##   * through the real `pre-commit` hook: a sibling on a local-only branch is
 ##     pinned with its published `ref`; a committed local-only `ref` over an
 ##     unmoved revision is repaired; a still-published `ref` over an unmoved
@@ -296,7 +299,10 @@ suite "a committed lock's ref names a published branch":
       check "\"n3g\"" notin body
       check "\"local-topic\"" notin body
 
-      # `agents` is preferred, then `dev`, over every other published branch.
+      # lib-b sits on the local-only `n3g`, so `advance` publishes nothing to
+      # `main`: the commit is on `dev` alone, then on `agents` and `dev`. No
+      # role of lib-b names either, so the fallback order decides — the only
+      # containing branch, then the first containing branch by name.
       let next = fx.advance("lib-b")
       discard fx.git(s.libB, "push -q origin HEAD:dev")
       discard fx.git(s.libB, "fetch -q origin")
