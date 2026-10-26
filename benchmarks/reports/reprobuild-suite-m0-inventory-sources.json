@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2377,
+    "nimTestBinaries": 2379,
     "pureUnitConsolidationGroups": 68,
-    "pureUnitTests": 691,
+    "pureUnitTests": 685,
     "staticallyDetectedRuntimeCompilerFlowTests": 129,
-    "testEntries": 2414
+    "testEntries": 2417
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -730,7 +730,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 26,
+      "count": 22,
       "defines": [
         "reproProviderMode"
       ],
@@ -744,20 +744,17 @@
       "owner": "libs/repro_standard_provider",
       "sources": [
         "libs/repro_standard_provider/tests/test_ada_direct_convention.nim",
-        "libs/repro_standard_provider/tests/test_c_cpp_cmake_convention.nim",
         "libs/repro_standard_provider/tests/test_c_cpp_direct_convention.nim",
         "libs/repro_standard_provider/tests/test_c_cpp_make_convention.nim",
         "libs/repro_standard_provider/tests/test_c_cpp_meson_convention.nim",
         "libs/repro_standard_provider/tests/test_crude_fallback.nim",
         "libs/repro_standard_provider/tests/test_crystal_convention.nim",
-        "libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim",
         "libs/repro_standard_provider/tests/test_elixir_mix_convention.nim",
         "libs/repro_standard_provider/tests/test_erlang_rebar3_convention.nim",
         "libs/repro_standard_provider/tests/test_fortran_direct_convention.nim",
         "libs/repro_standard_provider/tests/test_go_convention.nim",
         "libs/repro_standard_provider/tests/test_haskell_cabal_convention.nim",
         "libs/repro_standard_provider/tests/test_java_maven_convention.nim",
-        "libs/repro_standard_provider/tests/test_jsts_convention.nim",
         "libs/repro_standard_provider/tests/test_jsts_direct_convention.nim",
         "libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim",
         "libs/repro_standard_provider/tests/test_ocaml_dune_convention.nim",
@@ -767,8 +764,7 @@
         "libs/repro_standard_provider/tests/test_python_convention.nim",
         "libs/repro_standard_provider/tests/test_python_direct_convention.nim",
         "libs/repro_standard_provider/tests/test_ruby_bundler_convention.nim",
-        "libs/repro_standard_provider/tests/test_rust_convention.nim",
-        "libs/repro_standard_provider/tests/test_swift_swiftpm_convention.nim"
+        "libs/repro_standard_provider/tests/test_rust_convention.nim"
       ],
       "targetOs": "soAny"
     },
@@ -824,7 +820,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 194,
+      "count": 193,
       "defines": [],
       "dependencyShape": [
         "repro_project_dsl"
@@ -852,7 +848,6 @@
         "recipes/packages/source/dbus/test_dbus_source.nim",
         "recipes/packages/source/dejavu-fonts/test_dejavu_fonts_source.nim",
         "recipes/packages/source/dosfstools/test_dosfstools_source.nim",
-        "recipes/packages/source/duktape/test_duktape_source.nim",
         "recipes/packages/source/e2fsprogs/test_e2fsprogs_source.nim",
         "recipes/packages/source/eudev/test_eudev_source.nim",
         "recipes/packages/source/expat/test_expat_source.nim",
@@ -1389,9 +1384,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1301,
+      "integration": 1310,
       "platform/destructive": 146,
-      "pure unit": 691,
+      "pure unit": 685,
       "unclassified": 258
     },
     "graphOwnedTestArtifacts": [
@@ -1594,9 +1589,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2377,
-    "pythonTestFileCount": 37,
-    "testEntryCount": 2414
+    "nimTestBinaryCount": 2379,
+    "pythonTestFileCount": 38,
+    "testEntryCount": 2417
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8975,7 +8970,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
-        "repro_hash",
+        "repro_core",
         "repro_local_store",
         "repro_test_support"
       ],
@@ -8983,7 +8978,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_declared_output_not_produced_fails_the_action.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9034,13 +9029,14 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_build_engine"
+        "repro_build_engine",
+        "repro_local_store"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -11252,7 +11248,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_cli_support/tests/t_m5_peer_cache_build_wiring.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -19710,7 +19706,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/t_dsl_remove_before_run_names_only_outputs.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -20072,7 +20068,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -21133,8 +21129,8 @@
     },
     {
       "binary": "build/test-bin/test_c_cpp_autotools_convention",
-      "class": "unclassified",
-      "classificationReason": "mutates the process environment",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [
         "reproProviderMode"
       ],
@@ -21150,14 +21146,14 @@
       "requiresReproBinary": false,
       "source": "libs/repro_standard_provider/tests/test_c_cpp_autotools_convention.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 20,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
       "binary": "build/test-bin/test_c_cpp_cmake_convention",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [
         "reproProviderMode"
       ],
@@ -21170,10 +21166,10 @@
         "repro_test_support"
       ],
       "owner": "libs/repro_standard_provider",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "libs/repro_standard_provider/tests/test_c_cpp_cmake_convention.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -21247,6 +21243,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/test_cmake_output_metadata",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [
+        "reproProviderMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_standard_provider"
+      ],
+      "owner": "libs/repro_standard_provider",
+      "requiresReproBinary": false,
+      "source": "libs/repro_standard_provider/tests/test_cmake_output_metadata.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/test_convention_registry_dispatch",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -21314,8 +21329,8 @@
     },
     {
       "binary": "build/test-bin/test_csharp_dotnet_convention",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [
         "reproProviderMode"
       ],
@@ -21331,7 +21346,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -21355,6 +21370,25 @@
       "source": "libs/repro_standard_provider/tests/test_d_direct_convention.nim",
       "sourceSuiteCount": 6,
       "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_delegated_output_discovery",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [
+        "reproProviderMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_standard_provider"
+      ],
+      "owner": "libs/repro_standard_provider",
+      "requiresReproBinary": false,
+      "source": "libs/repro_standard_provider/tests/test_delegated_output_discovery.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -21696,8 +21730,8 @@
     },
     {
       "binary": "build/test-bin/test_jsts_convention",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [
         "reproProviderMode"
       ],
@@ -21713,7 +21747,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_standard_provider/tests/test_jsts_convention.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 18,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -22014,8 +22048,8 @@
     },
     {
       "binary": "build/test-bin/test_swift_swiftpm_convention",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [
         "reproProviderMode"
       ],
@@ -22028,10 +22062,10 @@
         "repro_test_support"
       ],
       "owner": "libs/repro_standard_provider",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "libs/repro_standard_provider/tests/test_swift_swiftpm_convention.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -22831,18 +22865,19 @@
     },
     {
       "binary": "build/test-bin/test_duktape_source",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_project_dsl"
       ],
       "owner": "recipes/packages/source",
       "requiresReproBinary": false,
       "source": "recipes/packages/source/duktape/test_duktape_source.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -49116,21 +49151,24 @@
     },
     {
       "binary": "build/test-bin/t_m9r2_typed_cli_surfaces",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_build_engine",
         "repro_cli_support",
         "repro_dsl_stdlib",
         "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_test_support",
         "repro_tool_profiles"
       ],
       "owner": "tests/unit",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/unit/t_m9r2_typed_cli_surfaces.nim",
       "sourceSuiteCount": 7,
-      "staticCaseCount": 18,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -50756,6 +50794,21 @@
       "source": "tests/unit/t_workspace_settings_v1_decode.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_bootstrap_dry_run_outputs.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

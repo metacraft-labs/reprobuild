@@ -3087,6 +3087,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     result.declaredOutputs = payload.declaredOutputs
     result.scratchDirs = payload.scratchDirs
     result.removeBeforeRun = payload.removeBeforeRun
+    result.optionalOutputs = payload.optionalOutputs
     result.readOnlyRoots = payload.readOnlyRoots
   let actionCachePolicy =
     case payload.actionCachePolicy
@@ -4597,7 +4598,8 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 13'u16
+  LoweredGraphCacheVersion = 14'u16
+    # v14: optional output candidates, appended after removeBeforeRun.
     # v13: ``BuildAction.removeBeforeRun``, a string list after
     # ``scratchDirs``. A v12 cache would decode every action with nothing to
     # remove, and a warm build of a ``create_dmg`` edge would fail over the
@@ -5625,6 +5627,7 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.add(if action.requiresElevation: 1'u8 else: 0'u8)
   outp.writeStringSeq(action.scratchDirs)
   outp.writeStringSeq(action.removeBeforeRun)
+  outp.writeStringSeq(action.optionalOutputs)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result = BuildAction(
@@ -5706,6 +5709,7 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result.requiresElevation = elevationByte == 1'u8
   result.scratchDirs = readStringSeq(bytes, pos)
   result.removeBeforeRun = readStringSeq(bytes, pos)
+  result.optionalOutputs = readStringSeq(bytes, pos)
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)
@@ -30323,6 +30327,7 @@ proc buildActionJson(action: BuildAction): JsonNode =
     "fixedOutput": action.fixedOutput,
     "scratchDirs": action.scratchDirs,
     "removeBeforeRun": action.removeBeforeRun,
+    "optionalOutputs": action.optionalOutputs,
     "binaryCacheKey": binaryCacheKey,
     "binaryCacheIdentityError": identityError,
     "actionCachePolicy": $action.actionCachePolicy,

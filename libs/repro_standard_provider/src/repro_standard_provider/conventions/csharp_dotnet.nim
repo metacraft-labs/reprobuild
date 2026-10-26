@@ -6,8 +6,8 @@
 ## ``dotnet`` driver for a single offline ``dotnet build -c Release
 ## --no-restore --nologo --verbosity quiet`` invocation. The action graph
 ## is intentionally coarse: one build action that produces
-## ``bin/Release/<TargetFramework>/<AssemblyName>.exe`` (or ``.dll`` for
-## libraries) per declared member.
+## ``bin/Release/<TargetFramework>/<AssemblyName>.dll`` managed assembly.
+## Executable projects may additionally produce a native apphost.
 ##
 ## **Distinction from a hypothetical future Tier 2c .NET provider.**
 ## A Tier 2c .NET provider would parse MSBuild's binary-log output and
@@ -71,9 +71,8 @@
 ##      ``packages.lock.json`` plus every ``.cs`` source file recursively
 ##      walked from the project root (excluding ``bin/`` / ``obj/`` /
 ##      ``.repro/`` / ``.git/``). Outputs: one
-##      ``bin/Release/<TargetFramework>/<AssemblyName>.<ext>`` per
-##      declared member, where ``<ext>`` is ``.exe`` when the csproj
-##      ``<OutputType>`` is ``Exe`` and ``.dll`` otherwise. Uses
+##      ``bin/Release/<TargetFramework>/<AssemblyName>.dll`` and an optional
+##      platform-native apphost for executable projects. Uses
 ##      ``automaticMonitorPolicy`` (automatic monitoring is the spec
 ##      baseline for opaque tools, Reprobuild-Development M17): ``dotnet``
 ##      spawns MSBuild worker processes and the engine monitors their
@@ -88,8 +87,8 @@
 ##     without the ``.csproj`` extension, matching MSBuild's own
 ##     default.
 ##   * ``<OutputType>`` (``Exe`` or ``Library``; defaults to
-##     ``Library`` when absent). Determines the produced file's
-##     extension (``.exe`` vs ``.dll``).
+##     ``Library`` when absent). Executables may emit an optional native
+##     apphost; the managed assembly always uses ``.dll``.
 ##   * Predicted path:
 ##     ``<projectRoot>/bin/Release/<TargetFramework>/<AssemblyName>.<ext>``.
 ##
@@ -458,13 +457,10 @@ proc sanitizeNamePart(value: string): string =
     result = "x"
 
 proc producedBinaryExtension(outputType: string): string =
-  ## ``.exe`` when the csproj declares ``<OutputType>Exe</OutputType>``,
-  ## ``.dll`` otherwise. Compared case-insensitively so ``Exe`` and
-  ## ``exe`` both work.
-  if outputType.toLowerAscii == "exe":
-    ".exe"
-  else:
-    ".dll"
+  ## SDK-style projects always produce the managed assembly. The native
+  ## apphost is optional (UseAppHost=false) and its name varies by platform.
+  discard outputType
+  ".dll"
 
 proc producedBinaryPath(projectRoot: string;
                         coords: CSharpDotnetCoordinates): string =
@@ -472,8 +468,8 @@ proc producedBinaryPath(projectRoot: string;
   ## MSBuild's default ``$(OutputPath)`` for a Release build with the
   ## SDK-style csproj is
   ## ``bin/Release/<TargetFramework>/<AssemblyName>.<ext>``. The
-  ## extension depends on ``<OutputType>`` — ``.exe`` for ``Exe`` and
-  ## ``.dll`` for ``Library`` (or any other value).
+  ## managed assembly always has a ``.dll`` extension. Native apphosts
+  ## are platform-dependent optional byproducts.
   let ext = producedBinaryExtension(coords.outputType)
   let fileName = coords.assemblyName & ext
   projectRoot / DotnetBinSubdir / DotnetReleaseSubdir /
@@ -551,11 +547,16 @@ proc emitBuildAction(projectRoot, dotnetExe: string;
                "--verbosity", "quiet",
                coords.csprojPath]
   let inputs = collectCsharpInputs(projectRoot, coords.csprojPath)
+  var optionalOutputs: seq[string]
+  if coords.outputType.toLowerAscii in ["exe", "winexe"]:
+    let apphost = binaryPath.changeFileExt(when defined(windows): ".exe" else: "")
+    optionalOutputs.add(apphost)
   buildAction(
     id = "csharp-dotnet-build",
     call = inlineExecCall(argv, projectRoot),
     inputs = inputs,
     outputs = @[binaryPath],
+    optionalOutputs = optionalOutputs,
     pool = "compile",
     # ``dotnet`` spawns MSBuild worker processes (Csc.exe, the SDK
     # resolver, the framework-pack loader, etc.) whose FS reads

@@ -27,8 +27,14 @@
 ## run log the action appends to shows whether a second build re-executed
 ## it, i.e. whether anything was recorded for the failed run.
 ##
-## MOCK POLICY: none. Real `runBuild`, the real per-edge action cache and
-## CAS, a real subprocess (`sh`), real files in a temporary tree. The
+## MOCK POLICY: the portable restore case supplies the engine's transport
+## callback by copying real produced files from a local snapshot. This isolates
+## portable result selection from network/signing services; it does not replace
+## a subprocess, cache record, fingerprint, or output-set decision. All cases use
+## real `runBuild`, the per-edge action cache and CAS, a real subprocess (`sh`),
+## and real files in a temporary tree. The directory coverage assertion supplies
+## observed-write evidence directly to the S7 predicate so its file coverage is
+## checked independently of shell-monitor availability. The
 ## dependency policy is the Make depfile the action writes, so the cases do
 ## not depend on the io-monitor and run identically on every platform that
 ## has `sh` (on Windows, the Git for Windows `sh` env.ps1 puts on PATH).
@@ -37,8 +43,8 @@ import std/[os, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
 import repro_build_engine
-import repro_hash
-from repro_local_store import ffpHybrid
+import repro_core
+from repro_local_store import ffpHybrid, LogicalRoot, lrkTracked, PortableMemoRecord
 
 const NoShell = "no `sh` on PATH; the actions under test are shell scripts"
 
@@ -141,6 +147,188 @@ suite "a declared output the action did not produce":
       let second = build(root, [producing]).byId("tool/producing")
       check not second.launched
       check runs(root, "tool/producing") == 1
+
+  test "conditional import libraries are recorded and restored only when produced":
+    let sh = findExe("sh")
+    if sh.len == 0:
+      skip(NoShell)
+    else:
+      let root = newTree("repro-optional-import-")
+      defer: removeDir(root)
+      var exported = writer(sh, root, "tool/exported",
+        ["out/module.dll", "out/module.lib"], ["out/module.dll"], true)
+      exported.optionalOutputs = @["out/module.lib"]
+      var config = defaultBuildEngineConfig(root / "cache")
+      config.bypassRunQuota = true
+      config.maxParallelism = 1
+      config.enableCachedOutputRestore()
+      let first = runBuild(graph([exported]), config).byId(exported.id)
+      checkpoint first.stderr
+      check first.status == asSucceeded
+      removeFile(root / "out/module.dll")
+      removeFile(root / "out/module.lib")
+      let restored = runBuild(graph([exported]), config).byId(exported.id)
+      checkpoint restored.stderr
+      check restored.status == asCacheHit
+      check not restored.launched
+      check readFile(root / "out/module.dll") == "built\n"
+      check readFile(root / "out/module.lib") == "built\n"
+
+      var noExports = writer(sh, root, "tool/no-exports",
+        ["out/module.dll"], ["out/module.dll"], true)
+      noExports.optionalOutputs = @["out/module.lib"]
+      # The previous exported link left a .lib; the no-export link must not
+      # record it as if it had just produced it.
+      let absent = runBuild(graph([noExports]), config).byId(noExports.id)
+      checkpoint absent.stderr
+      check absent.status == asSucceeded
+      check absent.missingOutputs.len == 0
+      check not fileExists(root / "out/module.lib")
+      removeFile(root / "out/module.dll")
+      writeFile(root / "out/module.lib", "stale\n")
+      let absentHit = runBuild(graph([noExports]), config).byId(noExports.id)
+      checkpoint absentHit.stderr
+      check absentHit.status == asCacheHit
+      check not absentHit.launched
+      check fileExists(root / "out/module.dll")
+      check not fileExists(root / "out/module.lib")
+      noExports.optionalOutputs.add("out/module.pdb")
+      let changedCandidates = runBuild(graph([noExports]), config).byId(noExports.id)
+      check changedCandidates.launched
+      check changedCandidates.status == asSucceeded
+      check runs(root, noExports.id) == 2
+
+  test "conditional directory snapshots restore nested payload and cached absence":
+    let sh = findExe("sh")
+    if sh.len == 0:
+      skip(NoShell)
+    else:
+      let root = newTree("repro-optional-directory-")
+      defer: removeDir(root)
+      let stage = root / "out/stage"
+      var populated = writer(sh, root, "tool/populated-stage",
+        ["out/witness.txt", "out/stage/sub/payload.txt"], ["out/witness.txt"], true)
+      populated.argv[2] = "mkdir -p out/stage/sub; " & populated.argv[2]
+      populated.optionalOutputs = @["out/stage"]
+      var config = defaultBuildEngineConfig(root / "cache")
+      config.bypassRunQuota = true
+      config.maxParallelism = 1
+      config.enableCachedOutputRestore()
+      let first = runBuild(graph([populated]), config).byId(populated.id)
+      checkpoint first.stderr
+      require first.status == asSucceeded
+      var writes = PathSetEvidence()
+      writes.monitorWrites.observeAll(writes.evidenceProvenance,
+        evcMonitorCapture, [stage / "sub/payload.txt"])
+      check populated.undeclaredSurvivingWrites(writes).len == 0
+      removeDir(stage)
+      removeFile(root / "out/witness.txt")
+      let restored = runBuild(graph([populated]), config).byId(populated.id)
+      checkpoint restored.stderr
+      check restored.status == asCacheHit
+      check not restored.launched
+      check readFile(stage / "sub/payload.txt") == "built\n"
+      var empty = writer(sh, root, "tool/empty-stage",
+        ["out/witness.txt"], ["out/witness.txt"], true)
+      empty.optionalOutputs = @["out/stage"]
+      let absent = runBuild(graph([empty]), config).byId(empty.id)
+      checkpoint absent.stderr
+      check absent.status == asSucceeded
+      check not dirExists(stage)
+      createDir(stage / "stale")
+      writeFile(stage / "stale/old.txt", "old\n")
+      removeFile(root / "out/witness.txt")
+      let absentHit = runBuild(graph([empty]), config).byId(empty.id)
+      checkpoint absentHit.stderr
+      check absentHit.status == asCacheHit
+      check not absentHit.launched
+      check not dirExists(stage)
+      check fileExists(root / "out/witness.txt")
+
+  test "portable restore includes a produced conditional import library":
+    let sh = findExe("sh")
+    if sh.len == 0:
+      skip(NoShell)
+    else:
+      let root = newTree("repro-portable-exported-import-")
+      defer: removeDir(root)
+      var producer = writer(sh, root, "tool/portable-exported",
+        ["out/module.dll", "out/module.lib"], ["out/module.dll"], true)
+      producer.optionalOutputs = @["out/module.lib"]
+      var config = defaultBuildEngineConfig(root / "cache")
+      config.bypassRunQuota = true
+      config.maxParallelism = 1
+      config.portableLookup = true
+      config.portableRoots = @[
+        LogicalRoot(label: "project", path: root, kind: lrkTracked),
+        LogicalRoot(label: "shell", path: parentDir(sh), kind: lrkTracked)]
+      let first = runBuild(graph([producer]), config).byId(producer.id)
+      checkpoint first.stderr & " " & first.portableReason
+      require first.status == asSucceeded
+      require first.portable
+      require first.portableOutputs.len == 2
+      let saved = root / "saved"
+      copyDir(root / "out", saved)
+      removeFile(root / "out/module.dll")
+      removeFile(root / "out/module.lib")
+      config.portableMemoRestorer = proc (roots: seq[LogicalRoot];
+          record: PortableMemoRecord): string {.gcsafe.} =
+        for output in record.outputs:
+          if output.path notin ["project:out/module.dll", "project:out/module.lib"]:
+            return "unexpected portable output " & output.path
+          copyFile(saved / extractFilename(output.path),
+            root / "out" / extractFilename(output.path))
+        ""
+      let restored = runBuild(graph([producer]), config).byId(producer.id)
+      checkpoint restored.stderr & " " & restored.reason
+      check not restored.launched
+      check restored.reason == "portable-restored"
+      check readFile(root / "out/module.dll") == "built\n"
+      check readFile(root / "out/module.lib") == "built\n"
+      check runs(root, producer.id) == 1
+
+  test "portable reuse preserves an absent conditional import library":
+    let sh = findExe("sh")
+    if sh.len == 0:
+      skip(NoShell)
+    else:
+      let root = newTree("repro-portable-optional-import-")
+      defer: removeDir(root)
+      var producer = writer(sh, root, "tool/portable-no-exports",
+        ["out/module.dll"], ["out/module.dll"], true)
+      producer.optionalOutputs = @["out/module.lib"]
+      var config = defaultBuildEngineConfig(root / "cache")
+      config.bypassRunQuota = true
+      config.maxParallelism = 1
+      config.portableLookup = true
+      config.portableRoots = @[
+        LogicalRoot(label: "project", path: root, kind: lrkTracked),
+        LogicalRoot(label: "shell", path: parentDir(sh), kind: lrkTracked)]
+      let first = runBuild(graph([producer]), config).byId(producer.id)
+      checkpoint first.stderr & " " & first.portableReason
+      require first.status == asSucceeded
+      require first.portable
+      writeFile(root / "out/module.lib", "stale\n")
+      let reused = runBuild(graph([producer]), config).byId(producer.id)
+      checkpoint reused.stderr & " " & reused.reason
+      check not reused.launched
+      check reused.reason == "portable-outputs-present"
+      check not fileExists(root / "out/module.lib")
+
+  test "optional outputs obey the destructive-path safety guard":
+    var unsafe = BuildAction(cwd: getCurrentDir(), optionalOutputs: @["/"],
+      governingLockIdentity: lockIdentityOutsideSolvedGraph())
+    check "too close to a filesystem root" in unsafe.removeBeforeRunProblem()
+    unsafe.optionalOutputs = @["/tmp"]
+    check "too close to a filesystem root" in unsafe.removeBeforeRunProblem()
+    unsafe.optionalOutputs = @["/tmp/unused/../.."]
+    check "too close to a filesystem root" in unsafe.removeBeforeRunProblem()
+    when not defined(windows):
+      let root = newTree("repro-optional-root-alias-")
+      defer: removeDir(root)
+      createSymlink("/", root / "root-link")
+      unsafe.optionalOutputs = @[root & "/root-link/tmp/../.."]
+      check "too close to a filesystem root" in unsafe.removeBeforeRunProblem()
 
   test "only the absent outputs are named":
     let sh = findExe("sh")

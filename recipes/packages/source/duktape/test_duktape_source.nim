@@ -5,6 +5,9 @@
 ## nix-stub.
 
 import std/[unittest]
+when defined(reproProviderMode):
+  import std/[os, osproc, strutils, tempfiles]
+  import repro_core
 
 import repro_project_dsl
 
@@ -33,3 +36,39 @@ suite "duktapeSource — from-source recipe smoke test":
     let spec = registeredFetchSpec("duktapeSource")
     check spec.kind == dfkTarball
     check spec.extractStrip == 1
+
+  when defined(reproProviderMode):
+    test "configure promises only files present in a Makefile-variant tarball":
+      let root = createTempDir("repro-duktape-configure-", "")
+      defer: removeDir(root)
+      createDir(root / "src")
+      writeFile(root / "repro.nim", "discard\n")
+      # Duktape ships Makefile.sharedlibrary, not a bare Makefile.
+      writeFile(root / "src/Makefile.sharedlibrary", "all:\n\t@true\n")
+      let pkg = PackageDef(packageName: "duktapeSource",
+        sourceFile: root / "repro.nim")
+      let request = ProviderGraphRequest(kind: prkGraphInvocation,
+        providerArtifactId: "test", entryPointId: "duktapeSource.root",
+        entryPointBodyHash: "test", reason: girExplicitUserRequest,
+        arguments: root, namespace: "project")
+      let fragment = buildPackageFragment(pkg, request,
+        proc() = buildDuktapeSourcePackage(), includeDefault = false)
+      var found = false
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.commandStatsId != "autotools_package.configure":
+          continue
+        found = true
+        var argv: seq[string] = @[]
+        for arg in action.call.arguments:
+          if arg.name == "argv":
+            argv = arg.encodedValue.split("\x1f")
+        let execution = execCmdEx(quoteShellCommand(argv), workingDir = root)
+        checkpoint execution.output
+        check execution.exitCode == 0
+        check action.outputs.len > 0
+        for output in action.outputs:
+          check fileExists(output)
+      check found

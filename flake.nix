@@ -2358,12 +2358,17 @@
             # why that does not work): it is for the shell to PROVIDE the
             # programs it does this to, so they come from the same nixpkgs.
             # `scripts/check_dev_shell_env.sh` holds that invariant.
-            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
-              pkgs.clingo
-              pkgs.zstd
-              pkgs.openssl
-              pkgs.pcre
-            ];
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (
+              [
+                pkgs.clingo
+                pkgs.zstd
+                pkgs.openssl
+                pkgs.pcre
+              ]
+              # SwiftPM's generated manifest executables need libdispatch;
+              # they do not inherit the SwiftPM executable's RUNPATH.
+              ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.swift-corelibs-libdispatch ]
+            );
             # The source bootstrap (`config.nims`) and the helpers Reprobuild
             # compiles for itself (`externalHashFlags`) both bake an OpenSSL
             # directory into `-L` and RPATH. Name this shell's own target
