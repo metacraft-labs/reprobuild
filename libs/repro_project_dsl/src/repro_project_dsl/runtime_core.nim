@@ -3642,7 +3642,7 @@ proc collectPreserveTree(root: string):
       of pcFile:
         result.files.add(child)
       of pcLinkToFile, pcLinkToDir:
-        result.symlinks.add((path: child, target: expandSymlink(child)))
+        result.symlinks.add((path: child, target: readSymlinkTarget(child)))
       else:
         discard
   result.dirs.sort(system.cmp[string])

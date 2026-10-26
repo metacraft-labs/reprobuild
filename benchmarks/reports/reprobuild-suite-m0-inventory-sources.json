@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2383,
+    "nimTestBinaries": 2385,
     "pureUnitConsolidationGroups": 68,
-    "pureUnitTests": 684,
+    "pureUnitTests": 685,
     "staticallyDetectedRuntimeCompilerFlowTests": 129,
-    "testEntries": 2421
+    "testEntries": 2423
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1386,8 +1386,8 @@
       "graph-fixture": 18,
       "integration": 1315,
       "platform/destructive": 146,
-      "pure unit": 684,
-      "unclassified": 258
+      "pure unit": 685,
+      "unclassified": 259
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1589,9 +1589,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2383,
+    "nimTestBinaryCount": 2385,
     "pythonTestFileCount": 38,
-    "testEntryCount": 2421
+    "testEntryCount": 2423
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -11863,6 +11863,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_link_target_reads_reparse_points",
+      "class": "unclassified",
+      "classificationReason": "mutates the process working directory",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core"
+      ],
+      "owner": "libs/repro_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_core/tests/t_link_target_reads_reparse_points.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 15,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_n51_drain_process_stream",
       "class": "integration",
       "classificationReason": "subprocess or repro CLI invocation in test body",
@@ -14626,6 +14643,24 @@
       "source": "libs/repro_home_apply/tests/t_smoke_home_apply.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_stow_reads_link_targets",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_home_apply",
+        "repro_home_generations"
+      ],
+      "owner": "libs/repro_home_apply",
+      "requiresReproBinary": false,
+      "source": "libs/repro_home_apply/tests/t_stow_reads_link_targets.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -29597,6 +29632,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_home_generations",
         "repro_local_store",
         "repro_test_support"

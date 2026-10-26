@@ -219,6 +219,7 @@ libs/repro_core/tests/t_ambient_execution_external_import.nim	nim	1
 libs/repro_core/tests/t_deps_refresh_check.nim	nim	5
 libs/repro_core/tests/t_go_dep_scanner.nim	nim	13
 libs/repro_core/tests/t_jsts_dep_scanner.nim	nim	19
+libs/repro_core/tests/t_link_target_reads_reparse_points.nim	nim	15
 libs/repro_core/tests/t_n51_drain_process_stream.nim	nim	7
 libs/repro_core/tests/t_n51_host_tar_resolution.nim	nim	5
 libs/repro_core/tests/t_nim_dep_scanner.nim	nim	19
@@ -368,6 +369,7 @@ libs/repro_home_apply/tests/t_realize_honors_requested_version.nim	nim	3
 libs/repro_home_apply/tests/t_runtime_library_binding.nim	nim	8
 libs/repro_home_apply/tests/t_runtime_library_launch_plan.nim	nim	5
 libs/repro_home_apply/tests/t_smoke_home_apply.nim	nim	8
+libs/repro_home_apply/tests/t_stow_reads_link_targets.nim	nim	7
 libs/repro_home_apply/tests/t_stow_resource_mode_by_target_platform.nim	nim	3
 libs/repro_home_apply/tests/test_m1_fpc_resolves.nim	nim	3
 libs/repro_home_apply/tests/test_m25_adapter_preference_parse.nim	nim	9

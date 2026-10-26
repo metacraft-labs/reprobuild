@@ -18,6 +18,7 @@ import repro_cli_support/repository_identities
 # `repro_core`'s re-exports on purpose: it is wanted at four named sites here
 # and at two in `git_actions.nim`, and a repo-wide re-export would put
 # `fsContainment` in the namespace of every module that touches `repro_core`.
+import repro_core/link_target
 import repro_core/path_identity
 import repro_core/relocation
 # PG-14 — the managed-hook contract handshake has to run a `repro` this build
@@ -19708,7 +19709,7 @@ proc containsNixStoreSegment(path: string): bool =
   normalized.startsWith("/nix/store/") or normalized.contains("/nix/store/")
 
 proc absoluteSymlinkTarget(linkPath: string): string =
-  let rawTarget = expandSymlink(extendedPath(linkPath))
+  let rawTarget = readSymlinkTarget(extendedPath(linkPath))
   if rawTarget.isAbsolute:
     os.normalizedPath(rawTarget)
   else:
@@ -22906,7 +22907,7 @@ proc migrateRetiredVcsHook(hooksDir, hookName: string;
             "refusing to uninstall " & hookName &
               ": cyclic preserved user hook symlink at " & cursor)
       visited.add(identity)
-      let target = expandSymlink(extendedPath(cursor))
+      let target = readSymlinkTarget(extendedPath(cursor))
       cursor = absolutePath(target, parentDir(cursor))
   # Stale sentinel-marked local file from an earlier `uninstall` run.
   if fileExists(extendedPath(local)) and isReprobuildVcsHook(local, hookName):

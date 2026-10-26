@@ -11,6 +11,7 @@ import cbor
 # docs/ambient-execution-linter.md.
 import repro_core
 import repro_core/ambient_execution
+import repro_core/link_target
 import repro_core/host_tar
 # GC roots for the store paths a Nix tool realization is recorded under.
 import repro_core/nix_store_roots
@@ -6733,25 +6734,14 @@ proc createScoopJunction(target, source: string) =
         source & ": " & err.msg)
 
 proc readJunctionTarget*(junctionPath: string): string =
-  ## Returns the resolved target of a junction/symlink, or "" if not found.
-  when defined(windows):
-    let res = execCmdEx("cmd /c dir /AL " &
-      quoteShell(junctionPath.parentDir))
-    if res.exitCode != 0:
-      return ""
-    let leaf = junctionPath.extractFilename
-    for line in res.output.splitLines:
-      if line.contains("<JUNCTION>") and line.contains(leaf):
-        let openBracket = line.find('[')
-        let closeBracket = line.rfind(']')
-        if openBracket > 0 and closeBracket > openBracket:
-          return line[openBracket + 1 ..< closeBracket].strip()
+  ## The target a junction/symlink names, or "" if it cannot be read. Read
+  ## from the reparse point itself (`repro_core/link_target`); this used to
+  ## scrape `cmd /c dir /AL` of the parent directory, which matched the
+  ## first junction whose line merely CONTAINED the leaf name.
+  try:
+    readSymlinkTarget(extendedPath(junctionPath))
+  except OSError:
     ""
-  else:
-    try:
-      expandSymlink(extendedPath(junctionPath))
-    except OSError:
-      ""
 
 proc fileTreeListing(root: string): seq[string] =
   if not dirExists(extendedPath(root)):

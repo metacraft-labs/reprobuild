@@ -1917,6 +1917,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_core/tests/t_link_target_reads_reparse_points.nim",
+    binary: "build/test-bin/t_link_target_reads_reparse_points",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_core/tests/t_n51_drain_process_stream.nim",
     binary: "build/test-bin/t_n51_drain_process_stream",
     defines: @[],
@@ -3251,6 +3260,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_home_apply/tests/t_smoke_home_apply.nim",
     binary: "build/test-bin/t_smoke_home_apply",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_home_apply/tests/t_stow_reads_link_targets.nim",
+    binary: "build/test-bin/t_stow_reads_link_targets",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

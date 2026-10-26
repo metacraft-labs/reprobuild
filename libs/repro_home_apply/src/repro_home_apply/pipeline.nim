@@ -1915,14 +1915,9 @@ proc previewStowItem(profileDir, homeDir: string;
     result.detail = "would link -> " & source
     return
   if symlinkExists(extendedPath(target)):
-    # Compare by file identity (robust across Windows reparse-point
-    # resolution quirks) — the same check the materializer uses.
-    var pointsAtSource = false
-    try:
-      pointsAtSource = fileExists(extendedPath(source)) and sameFile(target, source)
-    except OSError, IOError:
-      pointsAtSource = false
-    if pointsAtSource:
+    # The materializer's own predicate (`stow.linkPointsAtSource`): file
+    # identity, else the link's text when the link cannot be followed.
+    if linkPointsAtSource(target, source):
       result.action = piaCacheHit
       result.detail = "already correct link"
     elif stowTargetMatchesSource(target, source):
@@ -1934,12 +1929,10 @@ proc previewStowItem(profileDir, homeDir: string;
       result.detail = "existing link's resolved content is byte-identical " &
         "to the stow source"
     else:
-      var resolved = ""
-      try: resolved = expandSymlink(extendedPath(target))
-      except OSError: resolved = ""
+      let pointsAt = readLinkTargetBestEffort(target)
       result.action = piaConflictDrift
       result.detail = "existing symlink points at a different source (" &
-        resolved & ")"
+        (if pointsAt.len > 0: pointsAt else: "target unreadable") & ")"
     return
   # A regular file (or directory) at the target path.
   if fileExists(extendedPath(target)):

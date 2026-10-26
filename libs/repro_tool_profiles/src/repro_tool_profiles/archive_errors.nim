@@ -168,6 +168,9 @@ type
                                       ## "junction"
     desiredSource*: string            ## the stow source the target
                                       ## should point at
+    existingTarget*: string           ## where an existing link points
+                                      ## (absolute), or "" if not a link
+                                      ## or unreadable
 
 # ---------------------------------------------------------------------------
 # Warning / informational diagnostic records
@@ -357,15 +360,17 @@ proc raiseHomePlanCyclicDependency*(cyclePath: seq[string]) {.noreturn.} =
   e.cyclePath = cyclePath
   raise e
 
-proc raiseStowConflict*(targetPath, existingKind, desiredSource: string)
-    {.noreturn.} =
+proc raiseStowConflict*(targetPath, existingKind, desiredSource: string;
+                        existingTarget = "") {.noreturn.} =
   ## M72 Deliverable 3: a stow target pre-exists as something other
   ## than the correct link. The materializer leaves the target
   ## byte-identical; the apply must surface this as drift.
   var e = newException(EStowConflict,
     "repro home apply: step 8 (stow materialization) refused to " &
     "clobber pre-existing target '" & targetPath & "' (existing kind: " &
-    existingKind & "). It is NOT the correct stow link for source '" &
+    existingKind &
+    (if existingTarget.len > 0: ", pointing at '" & existingTarget & "'"
+     else: "") & "). It is NOT the correct stow link for source '" &
     desiredSource & "'. The target was left byte-identical. Pass " &
     "--reconcile-drift / --accept-overwrite to replace it (the prior " &
     "content is recorded so rollback can restore it).")
@@ -374,4 +379,5 @@ proc raiseStowConflict*(targetPath, existingKind, desiredSource: string)
   e.targetPath = targetPath
   e.existingKind = existingKind
   e.desiredSource = desiredSource
+  e.existingTarget = existingTarget
   raise e

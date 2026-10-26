@@ -39,6 +39,7 @@ import ./cache_key
 import ./compress
 import ./decompress
 
+import repro_core/link_target
 import repro_core/paths
 
 import ../../../repro_binary_cache_server/src/repro_binary_cache_server/types as bcsTypes
@@ -235,7 +236,7 @@ proc archiveEntryPayloadSize(plan: PrefixArchivePlan;
   case entry.kind
   of aekFile: getFileSize(extendedPath(path))
   of aekDirectory: 0
-  of aekSymlink: int64(expandSymlink(extendedPath(path)).len)
+  of aekSymlink: int64(readSymlinkTarget(extendedPath(path)).len)
 
 proc planPrefixArchive(prefix: string): PrefixArchivePlan =
   result.root = absolutePath(prefix)
@@ -334,7 +335,7 @@ proc writeArchiveFile(plan: PrefixArchivePlan; output: File): Blake3Digest =
     of aekDirectory:
       discard
     of aekSymlink:
-      writer.writeArchiveString(expandSymlink(extendedPath(path)))
+      writer.writeArchiveString(readSymlinkTarget(extendedPath(path)))
   if writer.bytesWritten != plan.size:
     raise newException(IOError,
       "rbcarc size changed while archiving: expected " & $plan.size &
@@ -360,7 +361,7 @@ proc packPrefix*(prefix: string): seq[byte] =
       case entry.kind
       of aekFile: readFile(absPath)
       of aekDirectory: ""
-      of aekSymlink: expandSymlink(absPath)
+      of aekSymlink: readSymlinkTarget(absPath)
     writeU32LE(result, uint32(pathBytes.len))
     for ch in pathBytes:
       result.add(byte(ch))
