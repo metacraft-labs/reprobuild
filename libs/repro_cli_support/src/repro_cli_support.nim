@@ -51710,7 +51710,8 @@ proc convergeRepoToManifestRevision(
   # upstream tip (pull is a network-converge op, unlike a pure checkout).
   let rName = if remoteName.len > 0: remoteName else: "origin"
   var fetched: tuple[code: int; output: string]
-  withCheckoutVcsLock(repoPath):
+  withCheckoutVcsLock(repoPath,
+      (block: return (false, "", "", "could not lock checkout: " & repoPath))):
     const MaxPullFetchLockRetries = 5
     for attempt in 0 .. MaxPullFetchLockRetries:
       fetched = gitRunPlain(identity, ["-C", repoPath, "fetch", "--quiet",
@@ -68667,7 +68668,11 @@ proc headPublicationOf*(identity: GitToolIdentity;
   # stays scoped exactly as the pre-push gate scopes it — this widens what gets
   # refreshed, never what counts as published.
   var fetched: tuple[code: int; output: string]
-  withCheckoutVcsLock(repoAbsPath):
+  template refusePublicationFetch() =
+    result.status = hpsUnknown
+    result.diagnostic = "could not lock checkout for publication fetch: " & repoAbsPath
+    return
+  withCheckoutVcsLock(repoAbsPath, refusePublicationFetch()):
     const MaxPublishFetchLockRetries = 5
     for attempt in 0 .. MaxPublishFetchLockRetries:
       fetched = gitRunPlain(identity,
@@ -76057,7 +76062,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
             continue
           if not ancestry.disjoint: continue
           if not fetched:
-            withCheckoutVcsLock(abs):
+            withCheckoutVcsLock(abs,
+                (block: fetchDiagnostic = "could not lock checkout for publication/ancestry fetch: " & abs)):
               let fetch = gitRunPlain(ctx.gitIdentity,
                 ["-C", abs, "fetch", "--all", "--quiet"])
               if fetch.code != 0:

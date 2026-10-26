@@ -107,6 +107,7 @@ const Subjects = [
   "tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim",
   "tests/integration/t_snp_expectation_reaches_the_manifest.nim",
   "tests/integration/t_teardown_runs_on_failure_path.nim",
+  "tests/integration/t_vcs_lock_failure_preserves_action_and_publication_results.nim",
   "tests/integration/t_verify_e2e_mock.nim",
   "libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim",
   "libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim",
@@ -377,6 +378,10 @@ suite "no subject's fixture outlives the process that acquired it":
       "tests/integration/t_tarball_provisioning_cold_store_extractors.nim")
   test "t_tdx_expectation_reaches_the_verifier":
     checkSubject("tests/integration/t_tdx_expectation_reaches_the_verifier.nim")
+
+  test "t_vcs_lock_failure_preserves_action_and_publication_results":
+    checkSubject(
+      "tests/integration/t_vcs_lock_failure_preserves_action_and_publication_results.nim")
 
 suite "the subject list":
   test "every subject has a case, and every case a subject":

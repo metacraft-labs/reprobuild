@@ -323,6 +323,7 @@ const
     "tests/integration/t_tarball_provisioning_cold_store_extractors.nim",
     "tests/integration/t_tdx_expectation_reaches_the_verifier.nim",
     "tests/integration/t_teardown_runs_on_failure_path.nim",
+    "tests/integration/t_vcs_lock_failure_preserves_action_and_publication_results.nim",
     "tests/integration/t_verify_e2e_mock.nim",
   ]
     ## The test files that once released their fixtures only in a final

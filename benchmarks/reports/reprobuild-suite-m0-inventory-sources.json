@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2398,
+    "nimTestBinaries": 2400,
     "pureUnitConsolidationGroups": 68,
     "pureUnitTests": 685,
     "staticallyDetectedRuntimeCompilerFlowTests": 130,
-    "testEntries": 2437
+    "testEntries": 2439
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1384,7 +1384,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1327,
+      "integration": 1329,
       "platform/destructive": 146,
       "pure unit": 685,
       "unclassified": 261
@@ -1589,9 +1589,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2398,
+    "nimTestBinaryCount": 2400,
     "pythonTestFileCount": 39,
-    "testEntryCount": 2437
+    "testEntryCount": 2439
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -45493,6 +45493,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_vcs_lock_failure_preserves_action_and_publication_results",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_vcs_lock_failure_preserves_action_and_publication_results.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_vcs_private_metadata_dir_resolves_worktree_safe",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -45561,7 +45580,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_when_each_case_runs_alone_no_fixture_outlives_its_process.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 31,
+      "staticCaseCount": 32,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -51194,6 +51213,23 @@
       "source": "tests/unit/t_unmonitorable_action_depfile_guards.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 16,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_vcs_lock_failure_excludes_protected_body",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_vcs_lock_failure_excludes_protected_body.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -730,7 +730,7 @@ proc acquireVcsFileLock*(lockFile: string;
   if parent.len > 0:
     try:
       createDir(parent)
-    except OSError:
+    except IOError, OSError:
       return VcsFileLock(acquired: false)
 
   let tid = getThreadId()
@@ -822,14 +822,38 @@ proc releaseVcsFileLock*(lock: var VcsFileLock) {.gcsafe.} =
         discard posix.close(toClose.fd)
   lock.acquired = false
 
-template withVcsFileLock*(lockFile: string; body: untyped) =
+template withVcsFileLock*(lockFile: string; onFailure, body: untyped) =
+  ## A nonempty path requires ownership before running the protected body.
+  ## Failure is a separate branch so callers retain their structured refusal
+  ## or safe fallback. An empty optional path still executes unconditionally.
   block:
-    var vcsLock = acquireVcsFileLock(lockFile)
+    let requiredLockFile = lockFile
+    var vcsLock = acquireVcsFileLock(requiredLockFile)
     defer: releaseVcsFileLock(vcsLock)
+    if requiredLockFile.len > 0 and not vcsLock.acquired:
+      onFailure
+    else:
+      body
+
+template withVcsFileLock*(lockFile: string; body: untyped) =
+  ## Raise IOError when a required lock cannot be acquired. Result-returning
+  ## callers use the explicit failure-branch overload to preserve their API.
+  block:
+    let requiredLockFile = lockFile
+    withVcsFileLock(requiredLockFile,
+        (block: raise newException(IOError, "could not acquire VCS lock: " & requiredLockFile))):
+      body
+
+template withCacheEntryVcsLock*(entryPath: string; onFailure, body: untyped) =
+  withVcsFileLock(cacheEntryLockPath(entryPath), onFailure):
     body
 
 template withCacheEntryVcsLock*(entryPath: string; body: untyped) =
   withVcsFileLock(cacheEntryLockPath(entryPath)):
+    body
+
+template withCheckoutVcsLock*(repoPath: string; onFailure, body: untyped) =
+  withVcsFileLock(checkoutLockPath(repoPath), onFailure):
     body
 
 template withCheckoutVcsLock*(repoPath: string; body: untyped) =
@@ -1059,7 +1083,9 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
   ## or forks never race on the same shared bare entry.
   let bare = sharedBarePath(cacheRoot, fetchUrl)
   var checkLeaves = false
-  withCacheEntryVcsLock(bare):
+  withCacheEntryVcsLock(bare,
+      (block: return SharedCloneResult(ok: false, sharedBarePath: bare,
+        diagnostic: "could not lock shared bare: " & bare))):
     if looksLikeGitDir(bare):
       # Migrate-then-fetch. Without the refspec the fetch below is a no-op
       # that reports success (see ``SharedBareFetchRefspec``), so installing
@@ -1334,7 +1360,9 @@ proc ensureManifestCache*(gitBin, cacheRoot, manifestUrl: string;
   ## in a refusal rather than a search.
   let primary = manifestCachePath(cacheRoot, manifestUrl)
   var entry: ManifestCacheEntry
-  withCacheEntryVcsLock(primary):
+  withCacheEntryVcsLock(primary,
+      (block: return SharedCloneResult(ok: false, sharedBarePath: primary,
+        diagnostic: "could not lock manifest cache: " & primary))):
     entry = inspectManifestCacheEntry(gitBin, primary, manifestUrl)
     case entry.status
     of mceMatches:
@@ -1350,7 +1378,9 @@ proc ensureManifestCache*(gitBin, cacheRoot, manifestUrl: string;
   # identity-digest path and ask the same question there; the incumbent is
   # left untouched, because it is a legitimate cache entry for its own URL.
   let rekeyed = disambiguatedManifestCachePath(cacheRoot, manifestUrl)
-  withCacheEntryVcsLock(rekeyed):
+  withCacheEntryVcsLock(rekeyed,
+      (block: return SharedCloneResult(ok: false, sharedBarePath: rekeyed,
+        diagnostic: "could not lock manifest cache: " & rekeyed))):
     let alt = inspectManifestCacheEntry(gitBin, rekeyed, manifestUrl)
     case alt.status
     of mceMatches:
@@ -1505,7 +1535,9 @@ proc wireAlternates*(repoPath, sharedBarePath: string;
   ## fails (Shared-Clone-Pool-Integrity §3.2). It also gets the refetch
   ## chain and ``fetch.hideRefs`` (§3.4, §3.5); a failure there is reported
   ## but does not unwire it, because it costs recovery, not safety.
-  withCheckoutVcsLock(repoPath):
+  withCheckoutVcsLock(repoPath,
+      (block: return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
+        diagnostic: "could not lock checkout: " & repoPath))):
     let sharedObjects = sharedBarePath / "objects"
     if not dirExists(sharedObjects):
       return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
@@ -1748,7 +1780,7 @@ proc registerBorrower*(pool, leaf: string): bool =
   ## write is a single short append, so two workspaces registering at once
   ## both land (``readBorrowers`` folds a duplicate); nothing here rewrites
   ## the file, so a registration can never erase another.
-  withCacheEntryVcsLock(pool):
+  withCacheEntryVcsLock(pool, (block: return false)):
     let entry = canonicalLeafPath(leaf)
     for existing in readBorrowers(pool):
       if samePathOnDisk(existing, entry):
@@ -1767,7 +1799,7 @@ proc pruneBorrowers*(pool: string): seq[string] =
   ## borrows from ``pool``, and return the removed entries. Those are the
   ## only two reasons an entry ever leaves (§3.2): a leaf that exists and
   ## still borrows stays registered no matter what else is wrong with it.
-  withCacheEntryVcsLock(pool):
+  withCacheEntryVcsLock(pool, (block: return @[])):
     let entries = readBorrowers(pool)
     var keep: seq[string]
     for entry in entries:
@@ -2612,7 +2644,9 @@ proc checkLeaf*(gitBin, leaf: string; mode: LeafCheckMode;
   ## that the detector has seen but not registered would be exactly the
   ## unprotected borrower §3.2 exists to prevent. ``mode`` governs the one
   ## destructive step, removing a stale remote-tracking ref.
-  withCheckoutVcsLock(leaf):
+  withCheckoutVcsLock(leaf,
+      (block: return LeafCheckReport(leaf: leaf, pool: pool,
+        diagnostic: "could not lock checkout: " & leaf))):
     result.leaf = leaf
     var thePool = pool
     if thePool.len == 0:
@@ -2778,7 +2812,7 @@ proc registerLeafWithPool*(gitBin, leaf, pool: string): string =
   ## What wiring a leaf to a pool must also do (§3.2, §3.4, §3.5): register it
   ## and configure it. Returns "" on success, otherwise the diagnostic. Used by
   ## ``wireAlternates`` and by the ``git clone --reference`` path.
-  withCheckoutVcsLock(leaf):
+  withCheckoutVcsLock(leaf, (block: return "could not lock checkout: " & leaf)):
     if not registerBorrower(pool, leaf):
       return "could not register " & leaf & " in " & borrowersPath(pool)
     return ensureLeafPoolConfig(gitBin, leaf, pool)
@@ -3096,7 +3130,9 @@ proc pushCacheRef*(gitBin, repoPath, sharedBarePath, workspaceName: string;
       diagnostic: "refusing to run the cache-ref push: it " & fault)
   # ``HEAD:<cacheRef>`` pushes whatever the working tree currently has
   # checked out; the cache ref is the destination in the bare.
-  withCacheEntryVcsLock(sharedBarePath):
+  withCacheEntryVcsLock(sharedBarePath,
+      (block: return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
+        diagnostic: "could not lock shared bare: " & sharedBarePath))):
     let res = runGit(gitBin, argv)
     if res.code != 0:
       return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
@@ -3316,7 +3352,9 @@ proc maintainSharedBare*(gitBin, barePath: string;
   ## trigger). When ``liveWorkspaces`` is empty the prune step is skipped (we
   ## refuse to delete every cache ref just because no live set was supplied —
   ## that would be the unsafe interpretation).
-  withCacheEntryVcsLock(barePath):
+  withCacheEntryVcsLock(barePath,
+      (block: return MaintenanceResult(ok: false, sharedBarePath: barePath,
+        diagnostic: "could not lock shared bare: " & barePath))):
     result.sharedBarePath = barePath
     if not looksLikeGitDir(barePath):
       result.ok = false

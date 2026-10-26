@@ -1290,7 +1290,8 @@ proc executeFetch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     fetchArgs.add("--depth")
     fetchArgs.add($payload.depth)
   fetchArgs.add(payload.remoteName)
-  withCheckoutVcsLock(target):
+  withCheckoutVcsLock(target,
+      (block: return failed("fetch-lock-failed", "could not lock checkout: " & target))):
     var res: tuple[exitCode: int; output: string]
     const MaxFetchLockRetries = 5
     for attempt in 0 .. MaxFetchLockRetries:
@@ -1501,7 +1502,8 @@ proc executeRefreshBare(payload: GitVcsPayload;
   let bare = payload.repoPath
   var outcome = "fetched"
   var checkLeaves = false
-  withCacheEntryVcsLock(bare):
+  withCacheEntryVcsLock(bare,
+      (block: return failed("refresh-bare-lock-failed", "could not lock shared bare: " & bare))):
     if dirExists(bare / "objects") or dirExists(bare / ".git"):
       let prepared = prepareSharedBare(payload.binaryPath, bare)
       if prepared.len > 0:

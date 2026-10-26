@@ -18675,6 +18675,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_vcs_lock_failure_preserves_action_and_publication_results.nim",
+    binary: "build/test-bin/t_vcs_lock_failure_preserves_action_and_publication_results",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_vcs_private_metadata_dir_resolves_worktree_safe.nim",
     binary: "build/test-bin/t_vcs_private_metadata_dir_resolves_worktree_safe",
     defines: @[],
@@ -21512,6 +21521,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_unmonitorable_action_depfile_guards.nim",
     binary: "build/test-bin/t_unmonitorable_action_depfile_guards",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_vcs_lock_failure_excludes_protected_body.nim",
+    binary: "build/test-bin/t_vcs_lock_failure_excludes_protected_body",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
