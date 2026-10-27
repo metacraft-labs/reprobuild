@@ -867,6 +867,16 @@ proc parseBuildTarget(target: string): ParsedBuildTarget =
         modulePath: fragmentModule,
         outputName: parts.fragment,
         fragmentKind: tfkModule)
+    # Qualified sibling selectors anchor at the canonical project FILE,
+    # rather than its directory: a same-named source module must not steal
+    # the requested target. Preserve its fragment as an action selection,
+    # just as for directory-anchored project selectors above.
+    if extractFilename(parts.base) in ProjectFileNames:
+      return ParsedBuildTarget(
+        modulePath: parts.base,
+        outputName: splitFile(parts.base).name,
+        selectedActionId: parts.fragment,
+        fragmentKind: tfkActionSelection)
     return ParsedBuildTarget(
       modulePath: parts.base,
       outputName: parts.fragment,
