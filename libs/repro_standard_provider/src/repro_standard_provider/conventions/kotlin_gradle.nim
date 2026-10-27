@@ -6,9 +6,8 @@
 ## project root and shells out to a stock ``gradle`` binary (or the
 ## project-shipped ``gradlew`` wrapper when present) for a single
 ## offline ``gradle build`` invocation. The action graph is intentionally
-## coarse: one ``gradle build --offline --no-daemon -q`` action that
-## produces ``build/libs/<projectName>-<version>.jar`` per declared
-## member.
+## coarse: one ``gradle build --offline --no-daemon -q`` action, whose
+## products Gradle itself names (see **Output paths**).
 ##
 ## **Distinction from a hypothetical future Tier 2c Gradle provider.**
 ## A Tier 2c Gradle provider would parse Gradle's tooling-API model
@@ -70,31 +69,39 @@
 ## deferred to a follow-up M (the spec calls this out).
 ##
 ## **Emitted actions**:
-##   1. ``kotlin-gradle-build`` — single ``<gradleExe> build --offline
-##      --no-daemon -q`` action under the project root. Inputs: every
-##      ``build.gradle[.kts]`` / ``settings.gradle[.kts]`` /
-##      ``gradle.properties`` at the project root plus every ``.kt`` /
-##      ``.java`` source file under ``src/main/``. Outputs: one
-##      ``build/libs/<projectName>-<version>.jar`` per declared member
-##      (M41 assumes the project produces a single jar — the convention
-##      parses ``rootProject.name`` from ``settings.gradle[.kts]`` and
-##      ``version = "..."`` from ``build.gradle[.kts]`` to predict the
-##      path). Uses ``automaticMonitorPolicy`` (automatic monitoring is
-##      the spec baseline for opaque tools, Reprobuild-Development M17):
-##      ``gradle`` spawns a fan-out of plugin processes and the engine
-##      monitors their real read-set instead of trusting only statically
-##      declared inputs.
+##   1. ``kotlin-gradle-outputs`` -- asks Gradle where the build puts its
+##      products: an init script (``output_discovery.GradleOutputsInitScript``)
+##      registers a task that reports the root project's
+##      ``layout.buildDirectory`` and its ``jar`` task's ``archiveFile``,
+##      run by the standard provider itself
+##      (``output_discovery.gradleOutputs``) with the build's own offline
+##      flags. Gradle's project cache for that query lives in the edge's
+##      scratch directory. Writes a dynamic-output fragment. Monitored.
+##   2. ``kotlin-gradle-build`` -- a single ``<gradleExe> build --offline
+##      --no-daemon -q --project-cache-dir <scratch>`` action under the
+##      project root. Inputs: every ``build.gradle[.kts]`` /
+##      ``settings.gradle[.kts]`` / ``gradle.properties`` at the project root,
+##      every ``.kt`` / ``.java`` source file under ``src/main/`` and the
+##      fragment, which is also its ``dynamicDepsFile``. Its outputs come
+##      from the fragment. Gradle's project cache (``.gradle/``) is a scratch
+##      directory under ``.repro/build``, emptied before each run: the build
+##      directory it describes is removed then too. Uses
+##      ``automaticMonitorPolicy``.
 ##
-## **Output paths**:
-##   * Executable / library: ``build/libs/<projectName>-<version>.jar``.
-##     Gradle's ``application`` + ``java`` plugins lay the produced jar
-##     at ``<projectRoot>/build/libs/${rootProject.name}-${version}.jar``
-##     by default. When the project omits the ``version`` declaration,
-##     Gradle's default is ``unspecified`` — the convention treats that
-##     as a missing-version and produces ``<projectName>.jar`` instead.
-##     The M41 fixture explicitly sets ``version = "1.0"`` so the jar
-##     lands at ``build/libs/hello-1.0.jar`` and the prediction is
-##     observable.
+## **Output paths** (Build-Engine-And-Scheduler.md §"Outputs a delegated
+## build decides"):
+##   * ``layout.buildDirectory`` (``build/`` by default) is an opaque output
+##     directory: removed before ``gradle build`` runs, recorded whole and
+##     restored exactly.
+##   * The ``jar`` task's ``archiveFile`` is the obligatory main artifact:
+##     ``rootProject.name``, ``version``, ``archiveBaseName``,
+##     ``archiveVersion``, ``archiveClassifier`` and
+##     ``destinationDirectory`` are Gradle's to apply. A build with no
+##     ``jar`` task is refused at discovery.
+##   * Gradle writes lock files, journals and compiled-script caches under
+##     ``GRADLE_USER_HOME`` on every build. They keep the S7 gate from
+##     admitting a restore of this edge: a deleted product re-runs the build
+##     (Build-Engine-And-Scheduler.md §"Restoring a delegated build").
 ##
 ## **Honest scope** (deferred):
 ##   * Multi-module Gradle projects (sub-projects via ``include`` in
@@ -122,29 +129,22 @@
 ##
 ## See ``reprobuild-specs/Mode3-Language-Expansion.milestones.org`` §M41.
 
-import std/[algorithm, os, strutils]
+import std/[algorithm, os, sequtils, strutils]
 
 import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
+import repro_standard_provider/conventions/output_discovery
 
 const
   ScratchDirName* = ".repro/build"
-    ## Top-level scratch directory under the project root. Identical to
-    ## the M40 Maven convention's value, but M41 doesn't actually use it
-    ## as a build dir — Gradle writes to ``<projectRoot>/build/`` (its
-    ## own convention). The constant is retained for consistency.
+    ## Top-level scratch directory under the project root. Gradle builds
+    ## into its own build directory; this convention keeps Gradle's
+    ## per-edge project caches and its output discovery here.
 
-  GradleBuildSubdir* = "build"
-    ## Sub-directory under the project root where Gradle lays its build
-    ## outputs. Hard-coded by Gradle's ``java`` plugin defaults; the
-    ## convention predicts the jar path under
-    ## ``<projectRoot>/build/libs/``.
-
-  GradleLibsSubdir* = "libs"
-    ## Sub-directory under ``build/`` where the ``java`` plugin's
-    ## ``jar`` task writes the produced jar.
+  ConventionName = "kotlin-gradle"
+  BuildActionId = ConventionName & "-build"
 
 type
   KotlinGradleMemberKind = enum
@@ -154,10 +154,6 @@ type
   KotlinGradleMember = object
     name: string
     kind: KotlinGradleMemberKind
-
-  GradleCoordinates = object
-    projectName: string
-    version: string
 
 proc readReprobuildSource(projectRoot: string): string =
   ## Read the project file (``repro.nim`` or legacy ``reprobuild.nim``)
@@ -332,76 +328,6 @@ proc gradleExecutable(projectRoot: string): string =
     return wrapper
   systemGradleExecutable()
 
-proc stripQuotedString(value: string): string =
-  ## Strip a leading/trailing pair of matching ``"`` or ``'`` characters.
-  ## Returns the input unchanged when it isn't quoted.
-  if value.len >= 2 and
-      (value[0] == '"' or value[0] == '\'') and
-      value[^1] == value[0]:
-    return value[1 ..< ^1]
-  value
-
-proc extractAssignmentValue(source, lhs: string): string =
-  ## Find the first line in ``source`` matching ``<lhs> = <value>`` (with
-  ## optional whitespace around the ``=``) and return the (unquoted)
-  ## value. Used to parse Gradle DSL scalar assignments like
-  ## ``rootProject.name = "hello"`` (settings.gradle[.kts]) and
-  ## ``version = "1.0"`` (build.gradle[.kts]). Intentionally crude — the
-  ## convention assumes the M41 fixture-shape (single-line scalar
-  ## assignment), matching the M40 Maven convention's
-  ## ``extractSimpleXmlTag`` pattern.
-  for rawLine in source.splitLines():
-    var line = rawLine
-    let commentIdx = line.find("//")
-    if commentIdx >= 0:
-      line = line[0 ..< commentIdx]
-    let stripped = line.strip()
-    if not stripped.startsWith(lhs):
-      continue
-    let rest = stripped[lhs.len .. ^1].strip()
-    if rest.len == 0 or rest[0] != '=':
-      continue
-    let raw = rest[1 .. ^1].strip(chars = {' ', '\t', ';'})
-    return stripQuotedString(raw)
-  ""
-
-proc readGradleFileOrEmpty(path: string): string =
-  if not fileExists(extendedPath(path)):
-    return ""
-  try:
-    readFile(extendedPath(path))
-  except CatchableError:
-    ""
-
-proc parseGradleCoordinates(projectRoot: string): GradleCoordinates =
-  ## Parse ``rootProject.name`` (from ``settings.gradle[.kts]``) and
-  ## ``version`` (from ``build.gradle[.kts]``) so we can predict the
-  ## produced jar's filename. Returns blank fields when the inputs are
-  ## unreadable or the tags are missing — callers detect the blank and
-  ## either raise or fall through.
-  let settingsKts = readGradleFileOrEmpty(projectRoot / "settings.gradle.kts")
-  let settingsGroovy = readGradleFileOrEmpty(projectRoot / "settings.gradle")
-  let buildKts = readGradleFileOrEmpty(projectRoot / "build.gradle.kts")
-  let buildGroovy = readGradleFileOrEmpty(projectRoot / "build.gradle")
-  for source in [settingsKts, settingsGroovy]:
-    if source.len == 0:
-      continue
-    let candidate = extractAssignmentValue(source, "rootProject.name")
-    if candidate.len > 0:
-      result.projectName = candidate
-      break
-  if result.projectName.len == 0:
-    # Fall back to the project root's basename, matching Gradle's own
-    # default when ``settings.gradle[.kts]`` is missing.
-    result.projectName = extractFilename(projectRoot)
-  for source in [buildKts, buildGroovy]:
-    if source.len == 0:
-      continue
-    let candidate = extractAssignmentValue(source, "version")
-    if candidate.len > 0:
-      result.version = candidate
-      break
-
 proc kotlinGradleRecognize(projectRoot: string;
                            request: ProviderGraphRequest): bool {.gcsafe.} =
   ## Recognition contract — see module docstring.
@@ -421,9 +347,6 @@ proc kotlinGradleRecognize(projectRoot: string;
     return false
   if gradleExecutable(projectRoot).len == 0:
     return false
-  let coords = parseGradleCoordinates(projectRoot)
-  if coords.projectName.len == 0:
-    return false
   true
 
 proc sanitizeNamePart(value: string): string =
@@ -434,21 +357,6 @@ proc sanitizeNamePart(value: string): string =
       result.add('_')
   if result.len == 0:
     result = "x"
-
-proc producedJarPath(projectRoot: string;
-                     coords: GradleCoordinates): string =
-  ## Predicted output path for the Gradle build's produced jar. Gradle's
-  ## ``java`` plugin lays the jar at ``build/libs/<projectName>-
-  ## <version>.jar`` by default; when the project omits ``version =
-  ## "..."`` Gradle treats the version as ``unspecified`` and produces
-  ## a jar named ``<projectName>.jar`` (no hyphen, no version segment).
-  ## The convention treats a blank version the same way.
-  let jarName =
-    if coords.version.len > 0:
-      coords.projectName & "-" & coords.version & ".jar"
-    else:
-      coords.projectName & ".jar"
-  projectRoot / GradleBuildSubdir / GradleLibsSubdir / jarName
 
 proc collectGradleInputs(projectRoot: string): seq[string] =
   ## Conservative input enumeration for the build action: every
@@ -482,35 +390,43 @@ proc collectGradleInputs(projectRoot: string): seq[string] =
   result = seen
   result.sort(system.cmp[string])
 
-proc emitBuildAction(projectRoot, gradleExe: string;
-                     coords: GradleCoordinates): BuildActionDef =
-  ## Emit the single ``gradle build --offline --no-daemon -q`` action.
-  ## Outputs the predicted ``build/libs/<projectName>-<version>.jar``
-  ## path under the project root.
+proc projectCacheDir(projectRoot, edge: string): string =
+  ## Gradle's per-build project cache (``--project-cache-dir``, normally
+  ## ``<root>/.gradle``) for one edge: a scratch directory under the
+  ## convention's ``.repro/build``, so the build leaves nothing in the
+  ## project that its declared outputs do not account for.
+  projectRoot / ScratchDirName / ConventionName / edge
+
+proc emitBuildAction(projectRoot, gradleExe, fragment,
+                     discoveryId: string): BuildActionDef =
+  ## Emit the single ``gradle build --offline --no-daemon -q`` action. Its
+  ## outputs are the ones ``kotlin-gradle-outputs`` discovered: the build
+  ## directory as an opaque output tree and the jar inside it as an
+  ## obligatory output.
   ##
   ## ``--offline`` enforces the M41 hermetic contract: Gradle MUST NOT
   ## reach the network during the action. ``--no-daemon`` enforces the
   ## per-action JVM lifecycle — Gradle daemons mutate global state
   ## across builds. ``-q`` (quiet) keeps the per-action logs readable —
   ## Gradle's default lifecycle chatter is extremely verbose.
-  let jarPath = producedJarPath(projectRoot, coords)
-  createDir(extendedPath(parentDir(jarPath)))
-  let argv = @[gradleExe, "build", "--offline", "--no-daemon", "-q"]
-  let inputs = collectGradleInputs(projectRoot)
+  let cache = projectCacheDir(projectRoot, "build")
+  let argv = @[gradleExe, "build"] & @GradleOfflineFlags &
+    @["--project-cache-dir", cache]
+  let inputs = collectGradleInputs(projectRoot) & @[fragment]
   buildAction(
-    id = "kotlin-gradle-build",
+    id = BuildActionId,
     call = inlineExecCall(argv, projectRoot),
+    deps = @[discoveryId],
     inputs = inputs,
-    outputs = @[jarPath],
+    outputs = @[],
+    dynamicDepsFile = fragment,
     pool = "compile",
     # ``gradle`` spawns a fan-out of task processes (compileKotlin,
-    # compileJava, processResources, jar, etc.) whose FS reads aren't
-    # reliably observed via the Windows DLL-interpose path. Same
-    # constraint M38/M39/M40 face for their configure / package actions.
-    # Enumerate inputs explicitly via ``collectGradleInputs`` so per-
-    # source invalidation still works without monitoring.
+    # compileJava, processResources, jar, etc.); the monitor records their
+    # real read-set on top of the enumerated build scripts and sources.
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "kotlin-gradle.build")
+    commandStatsId = "kotlin-gradle.build",
+    scratchDirs = @[cache])
 
 proc syntheticPackage(projectRoot: string;
                       members: seq[KotlinGradleMember]): PackageDef =
@@ -552,18 +468,19 @@ proc kotlinGradleEmitFragment(projectRoot: string;
       raise newException(ValueError,
         "kotlin-gradle convention: no 'gradle' on PATH and no " &
           "'gradlew[.bat]' wrapper at " & projectRoot)
-    let coords = parseGradleCoordinates(projectRoot)
-    if coords.projectName.len == 0:
-      raise newException(ValueError,
-        "kotlin-gradle convention: cannot determine project name " &
-          "(neither settings.gradle[.kts] nor a project-root basename " &
-          "yielded a non-empty rootProject.name); cannot predict " &
-          "produced jar's output path")
     let pkg = syntheticPackage(projectRoot, members)
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
-      let buildAct = emitBuildAction(projectRoot, gradleExe, coords)
-      defaultTarget(target("default", @[buildAct]))
+      let discoveryScratch = projectCacheDir(projectRoot, "outputs")
+      let discovery = delegatedOutputsAction(ConventionName, "gradle",
+        BuildActionId, projectRoot, gradleExe,
+        inputs = collectGradleInputs(projectRoot).filterIt(
+          not it.toLowerAscii.endsWith(".kt") and
+          not it.toLowerAscii.endsWith(".java")),
+        extra = @[discoveryScratch], scratchDirs = @[discoveryScratch])
+      let buildAct = emitBuildAction(projectRoot, gradleExe,
+        discovery.fragment, discovery.action.id)
+      defaultTarget(target("default", @[discovery.action, buildAct]))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)
 

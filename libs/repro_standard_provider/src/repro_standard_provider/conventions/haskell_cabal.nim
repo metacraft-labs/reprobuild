@@ -6,9 +6,8 @@
 ## ``<name>.cabal`` package manifest at the project root and shells out
 ## to the stock ``cabal`` driver for a single offline
 ## ``cabal v2-build --offline -j1`` invocation. The action graph is
-## intentionally coarse: one build action that produces
-## ``dist-newstyle/build/<platform-tuple>/ghc-<ver>/<pkg>-<ver>/x/<exe>/
-## build/<exe>/<exe>[.exe]`` per declared executable.
+## intentionally coarse: one build action, whose executables cabal itself
+## names (see **Output paths**).
 ##
 ## **Distinction from a hypothetical future Tier 2c Haskell provider.**
 ## A Tier 2c Haskell provider would re-implement Cabal's per-module
@@ -66,41 +65,40 @@
 ##     external deps.
 ##
 ## **Emitted actions**:
-##   1. ``haskell-cabal-build`` — single ``<cabal> v2-build --offline
-##      -j1 --enable-relocatable`` action under the project root.
-##      Inputs: the ``<name>.cabal`` manifest plus ``cabal.project`` /
-##      ``cabal.project.freeze`` (when present) plus every ``.hs`` /
-##      ``.lhs`` source file recursively walked under the project root
-##      (excluding ``dist-newstyle/`` / ``.repro/`` / ``.git/``).
-##      Outputs: one
-##      ``dist-newstyle/build/<platform-tuple>/ghc-<ghc-ver>/<pkg>-<pkg-ver>/
-##      x/<exe>/build/<exe>/<exe>[.exe]`` per declared executable. Uses
-##      ``automaticMonitorPolicy`` (automatic monitoring is the spec
-##      baseline for opaque tools, Reprobuild-Development M17): ``cabal
-##      v2-build`` spawns ``ghc`` worker processes and the engine monitors
-##      their real read-set instead of trusting only statically declared
-##      inputs.
+##   1. ``haskell-cabal-outputs`` -- asks cabal where each declared
+##      executable will be built: ``cabal list-bin`` with the build's own
+##      configuration flags (``output_discovery.CabalConfigFlags``), against
+##      a private ``--builddir`` in the edge's scratch directory, the answer
+##      moved onto the build's ``--builddir``
+##      (``output_discovery.cabalOutputs``). Writes a dynamic-output
+##      fragment. Monitored, so ``cabal.project`` / ``cabal.project.local``
+##      / the global config cabal reads key the answer.
+##   2. ``haskell-cabal-build`` -- a single ``<cabal> v2-build --offline
+##      --enable-relocatable -j1 --builddir=<projectRoot>/dist-newstyle``
+##      action under the project root. Inputs: the ``<name>.cabal`` manifest
+##      plus ``cabal.project`` / ``cabal.project.freeze`` /
+##      ``cabal.project.local`` (when present), every Haskell source
+##      recursively walked under the project root (excluding
+##      ``dist-newstyle/`` / ``.repro/`` / ``.git/``) and the fragment,
+##      which is also its ``dynamicDepsFile``. Its outputs come from the
+##      fragment. Uses ``automaticMonitorPolicy``: ``cabal v2-build`` spawns
+##      ``ghc`` worker processes and the engine monitors their real
+##      read-set.
 ##
-## **Output paths**:
-##   * Executable: ``<projectRoot>/dist-newstyle/build/<platform-tuple>/
-##     ghc-<ghcVersion>/<packageName>-<packageVersion>/x/<exeName>/
-##     build/<exeName>/<exeName>[.exe]``.
-##   * ``<platform-tuple>`` varies by host OS + arch (e.g.
-##     ``x86_64-windows`` on Windows; ``x86_64-linux`` on Linux;
-##     ``aarch64-osx`` on Apple Silicon macOS). The convention probes
-##     ``ghc --print-host-platform`` at emit time to compute the exact
-##     tuple, falling back to a sensible per-OS default when the probe
-##     fails (the resolved path under ``.exe`` is still findable by
-##     walking ``dist-newstyle/`` — the path-fragility note in the M55
-##     spec).
-##   * ``<ghcVersion>`` is parsed from ``ghc --numeric-version`` (e.g.
-##     ``9.10.1``); fallback ``unknown`` if the probe fails.
-##   * ``<packageName>`` / ``<packageVersion>`` parsed from the
-##     ``.cabal`` manifest's ``name:`` / ``version:`` fields.
-##   * On Windows the executable suffix is ``.exe``; on POSIX no suffix.
-##     The convention emits the platform-appropriate suffix per the
-##     host the convention is running on (matching SwiftPM's
-##     ``.exe``-on-Windows pattern).
+## **Output paths** (Build-Engine-And-Scheduler.md §"Outputs a delegated
+## build decides"):
+##   * ``--builddir`` (``dist-newstyle``, passed explicitly so the
+##     convention, not a default, decides it) is an opaque output
+##     directory: removed before the build runs, recorded whole and
+##     restored exactly.
+##   * Each declared executable is obligatory, at the path ``cabal
+##     list-bin`` names: the platform, compiler, package-version, ``opt`` /
+##     ``noopt`` segments and the ``.exe`` suffix are cabal's.
+##   * cabal appends a global build summary under its ``logs-dir`` on every
+##     build. The convention asks ``cabal path --logs-dir`` and declares that
+##     directory an ignored, machine-local derived prefix: the build never
+##     reads it, and it would otherwise keep the S7 gate from admitting a
+##     restore.
 ##
 ## **Honest scope** (deferred per M55 spec):
 ##   * Mode 3 Haskell — explicitly DEFERRED. The per-source ``ghc``
@@ -143,36 +141,28 @@
 ##
 ## See ``reprobuild-specs/Provisioning-And-Languages-Expansion.milestones.org`` §M55.
 
-import std/[algorithm, os, osproc, strutils]
+import std/[algorithm, os, strutils]
 
 import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
+import repro_standard_provider/conventions/output_discovery
 
 const
   ScratchDirName* = ".repro/build"
-    ## Top-level scratch directory under the project root. Identical to
-    ## the M40 / M41 / M42 / M43 / M46 conventions' value, but M55
-    ## doesn't actually use it as a build dir — Cabal writes to
-    ## ``<projectRoot>/dist-newstyle/`` (its own convention). The
-    ## constant is retained for consistency.
+    ## Top-level scratch directory under the project root. Cabal builds
+    ## into ``CabalBuildDirName``; this convention keeps its output
+    ## discovery (the private ``list-bin`` build directory and the
+    ## fragment) here.
 
-  CabalDistSubdir* = "dist-newstyle"
-    ## Sub-directory under the project root where Cabal v2-* lays its
-    ## build outputs. Hard-coded by Cabal (configurable via
-    ## ``--builddir`` but not exercised by M55); the convention predicts
-    ## the path under it.
+  CabalBuildDirName* = "dist-newstyle"
+    ## The build's ``--builddir`` under the project root -- cabal's own
+    ## default, passed explicitly so the opaque output tree is the
+    ## convention's choice rather than an assumption about cabal's.
 
-  DefaultPlatformTupleWindows* = "x86_64-windows"
-    ## Fallback platform tuple when ``ghc --print-host-platform`` is
-    ## unavailable. Matches the Windows 64-bit GHC binary distribution.
-
-  DefaultPlatformTuplePosix* = "x86_64-linux"
-    ## Fallback platform tuple on POSIX hosts. The actual tuple varies
-    ## by OS (Linux vs. macOS) and arch (x86_64 vs. aarch64) but
-    ## ``x86_64-linux`` is the most common shape; the convention
-    ## prefers the ``ghc --print-host-platform`` probe for accuracy.
+  ConventionName = "haskell-cabal"
+  BuildActionId = ConventionName & "-build"
 
 type
   HaskellCabalMemberKind = enum
@@ -392,132 +382,6 @@ proc sanitizeNamePart(value: string): string =
   if result.len == 0:
     result = "x"
 
-proc parseCabalField*(manifestSource, field: string): string =
-  ## Parse the first occurrence of a ``<field>:`` line from a Cabal
-  ## manifest source. Returns the trimmed RHS or the empty string when
-  ## the field isn't present. Cabal's manifest format is line-oriented
-  ## (RFC-822-ish) so a simple line scan suffices for the top-level
-  ## ``name:`` / ``version:`` fields.
-  ##
-  ## Note: this does NOT handle multi-line continuations or block
-  ## stanzas — only the simple top-level ``<field>: <value>`` form which
-  ## is sufficient for parsing the package's name and version.
-  for rawLine in manifestSource.splitLines():
-    var line = rawLine
-    let commentIdx = line.find("--")
-    if commentIdx >= 0:
-      line = line[0 ..< commentIdx]
-    let stripped = line.strip()
-    let lower = stripped.toLowerAscii
-    let prefix = field.toLowerAscii & ":"
-    if lower.startsWith(prefix):
-      return stripped[prefix.len .. ^1].strip()
-  ""
-
-proc readCabalManifest(projectRoot: string): string =
-  ## Read the discovered ``<name>.cabal`` file or return the empty
-  ## string.
-  let path = findCabalManifest(projectRoot)
-  if path.len == 0:
-    return ""
-  try:
-    readFile(extendedPath(path))
-  except CatchableError:
-    ""
-
-proc parsePackageName*(projectRoot: string): string =
-  ## Resolve the package name from the ``.cabal`` manifest's ``name:``
-  ## field. Falls back to the manifest filename stem (e.g. ``hello``
-  ## for ``hello.cabal``) when the field can't be parsed.
-  let source = readCabalManifest(projectRoot)
-  let parsed = parseCabalField(source, "name")
-  if parsed.len > 0:
-    return parsed
-  let manifestPath = findCabalManifest(projectRoot)
-  if manifestPath.len == 0:
-    return ""
-  let (_, name, _) = splitFile(manifestPath)
-  name
-
-proc parsePackageVersion*(projectRoot: string): string =
-  ## Resolve the package version from the ``.cabal`` manifest's
-  ## ``version:`` field. Falls back to ``0.0.0`` when unparseable.
-  let source = readCabalManifest(projectRoot)
-  let parsed = parseCabalField(source, "version")
-  if parsed.len > 0:
-    return parsed
-  "0.0.0"
-
-proc probeGhcNumericVersion*(ghcExe: string): string =
-  ## Probe ``<ghc> --numeric-version`` and return the trimmed first
-  ## line. Returns the empty string when the probe fails. Cached
-  ## indirectly by the calling code (the convention re-resolves the
-  ## probe per ``emitFragment`` invocation; the cost is acceptable
-  ## given how rarely the convention fires).
-  if ghcExe.len == 0:
-    return ""
-  try:
-    let (output, exitCode) = execCmdEx(quoteShellCommand(@[ghcExe,
-      "--numeric-version"]), options = {poStdErrToStdOut, poUsePath})
-    if exitCode != 0:
-      return ""
-    for line in output.splitLines():
-      let stripped = line.strip()
-      if stripped.len > 0:
-        return stripped
-  except CatchableError:
-    discard
-  ""
-
-proc probeGhcPlatformTuple*(ghcExe: string): string =
-  ## Probe ``<ghc> --print-host-platform`` and return the trimmed first
-  ## line. Returns a sensible per-OS default when the probe fails.
-  ##
-  ## GHC emits platform tuples like ``x86_64-w64-mingw32``,
-  ## ``x86_64-unknown-linux``, ``aarch64-apple-darwin``. Cabal's
-  ## ``dist-newstyle/`` layout further reshapes these to its own
-  ## convention (e.g. ``x86_64-windows`` rather than
-  ## ``x86_64-w64-mingw32``). The convention threads the GHC-reported
-  ## tuple through unchanged because the convention's only consumer
-  ## of the tuple is the predicted output path, and Cabal mirrors the
-  ## GHC tuple verbatim in newer versions.
-  if ghcExe.len > 0:
-    try:
-      let (output, exitCode) = execCmdEx(quoteShellCommand(@[ghcExe,
-        "--print-host-platform"]),
-        options = {poStdErrToStdOut, poUsePath})
-      if exitCode == 0:
-        for line in output.splitLines():
-          let stripped = line.strip()
-          if stripped.len > 0:
-            return stripped
-    except CatchableError:
-      discard
-  when defined(windows):
-    DefaultPlatformTupleWindows
-  else:
-    DefaultPlatformTuplePosix
-
-proc producedExecutablePath*(projectRoot, platformTuple, ghcVersion,
-                             packageName, packageVersion,
-                             exeName: string): string =
-  ## Predicted output path for a Cabal executable target. Cabal v2-*
-  ## writes the executable into
-  ## ``dist-newstyle/build/<platform-tuple>/ghc-<ghcVersion>/
-  ## <packageName>-<packageVersion>/x/<exeName>/build/<exeName>/
-  ## <exeName>[.exe]``.
-  ##
-  ## On Windows the binary suffix is ``.exe``; on POSIX it's no
-  ## suffix. The convention emits the suffix appropriate for the host
-  ## the convention runs on.
-  let suffix =
-    when defined(windows): ".exe"
-    else: ""
-  let pkgSlug = packageName & "-" & packageVersion
-  let ghcSlug = "ghc-" & ghcVersion
-  projectRoot / CabalDistSubdir / "build" / platformTuple / ghcSlug /
-    pkgSlug / "x" / exeName / "build" / exeName / (exeName & suffix)
-
 proc collectHaskellInputs(projectRoot: string): seq[string] =
   ## Conservative input enumeration for the build action: the
   ## ``<name>.cabal`` manifest plus ``cabal.project`` /
@@ -568,13 +432,11 @@ proc collectHaskellInputs(projectRoot: string): seq[string] =
   result = seen
   result.sort(system.cmp[string])
 
-proc emitBuildAction(projectRoot, cabalExe, platformTuple,
-                     ghcVersion, packageName, packageVersion: string;
-                     execs: seq[string]): BuildActionDef =
-  ## Emit the single ``cabal v2-build --offline -j1
-  ## --enable-relocatable`` action. Outputs the predicted
-  ## ``dist-newstyle/.../<exe>[.exe]`` path under the project root for
-  ## each declared executable.
+proc emitBuildAction(projectRoot, cabalExe, fragment, discoveryId,
+                     logsDir: string): BuildActionDef =
+  ## Emit the single ``cabal v2-build`` action. Its outputs are the ones
+  ## ``haskell-cabal-outputs`` discovered: the build directory as an opaque
+  ## output tree and each executable inside it as an obligatory output.
   ##
   ## ``v2-build`` is the modern Cabal command (Nix-style build store).
   ## ``--offline`` disables Hackage access (the M55 hermetic build
@@ -583,28 +445,23 @@ proc emitBuildAction(projectRoot, cabalExe, platformTuple,
   ## ``-j auto`` for larger projects. ``--enable-relocatable`` requests
   ## relocatable binaries (RPATH-friendly on POSIX; a no-op on Windows
   ## but harmless).
-  var outputs: seq[string] = @[]
-  for exe in execs:
-    outputs.add(producedExecutablePath(projectRoot, platformTuple,
-      ghcVersion, packageName, packageVersion, exe))
-  if outputs.len > 0:
-    createDir(extendedPath(parentDir(outputs[0])))
-  let argv = @[cabalExe, "v2-build", "--offline", "-j1",
-    "--enable-relocatable"]
-  let inputs = collectHaskellInputs(projectRoot)
+  let argv = @[cabalExe, "v2-build"] & @CabalConfigFlags &
+    @["-j1", "--builddir=" & (projectRoot / CabalBuildDirName)]
+  let inputs = collectHaskellInputs(projectRoot) & @[fragment]
   buildAction(
-    id = "haskell-cabal-build",
+    id = BuildActionId,
     call = inlineExecCall(argv, projectRoot),
+    deps = @[discoveryId],
     inputs = inputs,
-    outputs = outputs,
+    outputs = @[],
+    dynamicDepsFile = fragment,
     pool = "compile",
-    # ``cabal v2-build`` spawns ``ghc`` worker processes whose FS reads
-    # aren't reliably observed via the Windows DLL-interpose path. Same
-    # constraint M38/M39/M40/M41/M42/M43/M46 face for their configure /
-    # package / build actions. Enumerate inputs explicitly via
-    # ``collectHaskellInputs`` so per-source invalidation still works
-    # without monitoring.
-    dependencyPolicy = automaticMonitorPolicy(),
+    # ``cabal v2-build`` spawns ``ghc`` worker processes; the monitor
+    # records their real read-set on top of the enumerated sources. Cabal's
+    # logs directory is write-only machine-local state (its global build
+    # summary), the one write outside the build directory.
+    dependencyPolicy = automaticMonitorPolicy(
+      ignoredInputPrefixes = (if logsDir.len > 0: @[logsDir] else: @[])),
     commandStatsId = "haskell-cabal.build")
 
 proc syntheticPackage(projectRoot: string;
@@ -669,20 +526,24 @@ proc haskellCabalEmitFragment(projectRoot: string;
         "haskell-cabal convention: 'stack.yaml' present at project root " &
           projectRoot & " — defers to a future haskell-stack convention " &
           "(Stack and Cabal projects are not interchangeable)")
-    let packageName = parsePackageName(projectRoot)
-    let packageVersion = parsePackageVersion(projectRoot)
-    let ghcVersion = probeGhcNumericVersion(ghcExe)
-    let platformTuple = probeGhcPlatformTuple(ghcExe)
+    let logsDir = cabalLogsDirectory(cabalExe)
     let pkg = syntheticPackage(projectRoot, members)
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
+      let discoveryBuildDir =
+        projectRoot / ScratchDirName / ConventionName / "list-bin"
+      var manifests: seq[string] = @[]
+      for input in collectHaskellInputs(projectRoot):
+        let name = extractFilename(input).toLowerAscii
+        if name.endsWith(".cabal") or name.startsWith("cabal.project"):
+          manifests.add(input)
+      let discovery = delegatedOutputsAction(ConventionName, "cabal",
+        BuildActionId, projectRoot, cabalExe, inputs = manifests,
+        extra = @[discoveryBuildDir, projectRoot / CabalBuildDirName] & execs,
+        scratchDirs = @[discoveryBuildDir])
       let buildAct = emitBuildAction(projectRoot, cabalExe,
-        platformTuple,
-        if ghcVersion.len > 0: ghcVersion else: "unknown",
-        if packageName.len > 0: packageName else: "package",
-        if packageVersion.len > 0: packageVersion else: "0.0.0",
-        execs)
-      defaultTarget(target("default", @[buildAct]))
+        discovery.fragment, discovery.action.id, logsDir)
+      defaultTarget(target("default", @[discovery.action, buildAct]))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)
 

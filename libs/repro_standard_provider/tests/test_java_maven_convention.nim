@@ -16,13 +16,15 @@
 ##     - no executable / library member is declared
 ##   * ``emitFragment`` against the hello-binary fixture (skipped when
 ##     toolchain is missing):
-##     - the convention emits a single ``java-maven-package`` action.
-##     - the action's argv carries ``mvn package -o`` plus a ``-f`` flag
-##       pointing at the pom.
-##     - the action's output is ``target/<artifactId>-<version>.jar``
-##       under the project root.
-##   * Output-path resolution: ``<artifactId>`` + ``<version>`` are
-##     parsed from ``pom.xml`` and combined into the predicted jar path.
+##     - the convention emits a ``java-maven-outputs`` discovery action
+##       and a single ``java-maven-package`` action.
+##     - the package action's argv carries ``mvn package -o`` plus a
+##       ``-f`` flag pointing at the pom.
+##     - the package action declares no outputs of its own: it loads the
+##       discovery fragment, which is one of its inputs.
+##   * Where Maven puts the jar (default layout, ``<finalName>``,
+##     ``<directory>``, an inherited version) is checked by real builds in
+##     ``test_delegated_build_outputs.nim``.
 
 import std/[os, strutils, unittest]
 import repro_test_support/reasoned_skip
@@ -277,68 +279,24 @@ suite "java-maven convention M40":
       check sawOfflineFlag
       check sawFFlag
 
-      # Output is target/<artifactId>-<version>.jar under the fixture
-      # root. The fixture pins ``hello`` + ``1.0`` so the jar lands at
-      # ``target/hello-1.0.jar``.
-      var sawJarOutput = false
-      for outPath in packageAction.outputs:
-        let unified = outPath.replace('\\', '/')
-        if unified.endsWith("/target/hello-1.0.jar"):
-          sawJarOutput = true
-      check sawJarOutput
-
-  test "output-path resolution: artifactId + version compose the jar filename":
-    # Scratch project with custom <artifactId>/<version> tags to exercise
-    # the pom.xml parser without needing the Maven toolchain on PATH.
-    # ``recognize`` will fail when mvn/javac aren't installed, but
-    # emit-fragment's output-path branch is independent of that gate —
-    # we test it directly via a scratch pom + a recognise-bypassing
-    # synthetic request shape. Since ``emitFragment`` calls
-    # ``mvnExecutable()`` and raises when mvn is missing, this test
-    # SKIPs when the toolchain is unavailable; the recognize-test
-    # branch above covers the no-toolchain-on-PATH path.
-    if not mavenToolchainReady():
-      skip("mvn or javac not on PATH")
-    else:
-      let scratch = getTempDir() / "test_java_maven_convention_custom_coords"
-      if dirExists(scratch):
-        removeDir(scratch)
-      createDir(scratch)
-      createDir(scratch / "src" / "main" / "java")
-      writeFile(scratch / "src" / "main" / "java" / "Main.java",
-        "public class Main { " &
-          "public static void main(String[] args) { " &
-          "System.out.println(\"x\"); } }\n")
-      writeFile(scratch / "pom.xml",
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" &
-        "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n" &
-        "  <modelVersion>4.0.0</modelVersion>\n" &
-        "  <groupId>org.example</groupId>\n" &
-        "  <artifactId>custom-coords</artifactId>\n" &
-        "  <version>2.5.7</version>\n" &
-        "</project>\n")
-      writeFile(scratch / "reprobuild.nim",
-        "import repro_project_dsl\n" &
-        "package fakeMavenCustomCoords:\n" &
-        "  uses:\n" &
-        "    \"java >=21\"\n" &
-        "    \"mvn >=3.9\"\n" &
-        "\n" &
-        "  executable main:\n" &
-        "    discard\n")
-      defer:
-        removeDir(scratch)
-      let conv = maven_convention.javaMavenConvention()
-      let request = dummyRequest(scratch)
-      require conv.recognize(scratch, request)
-      let fragment = conv.emitFragment(scratch, request)
-      var sawCustomJar = false
+      # The build edge's outputs are discovered, not predicted
+      # (Build-Engine-And-Scheduler.md §"Outputs a delegated build
+      # decides"): it declares none itself, loads the fragment its
+      # discovery edge writes, and is keyed on it. Real builds of the
+      # default layout and of the overrides are in
+      # test_delegated_build_outputs.nim.
+      check packageAction.outputs.len == 0
+      check packageAction.dynamicDepsFile.replace('\\', '/').endsWith(
+        "/.repro/build/java-maven-outputs.dyndep")
+      check packageAction.dynamicDepsFile in packageAction.inputs
+      check "java-maven-outputs" in packageAction.deps
+      var sawDiscovery = false
       for node in fragment.nodes:
         if node.kind != gnkAction:
           continue
         let action = decodeBuildActionPayload(toBytes(node.payload))
-        for outPath in action.outputs:
-          let unified = outPath.replace('\\', '/')
-          if unified.endsWith("/target/custom-coords-2.5.7.jar"):
-            sawCustomJar = true
-      check sawCustomJar
+        if action.id == "java-maven-outputs":
+          sawDiscovery = true
+          check action.outputs == @[packageAction.dynamicDepsFile]
+          check "--delegated-outputs" in inlineArgvOf(action)
+      check sawDiscovery

@@ -284,7 +284,9 @@ suite "swift-swiftpm convention M43":
           check fileExists(output) or dirExists(output)
         if action.dynamicDepsFile.len > 0:
           for line in readFile(action.dynamicDepsFile).splitLines():
-            if line.startsWith("output\t"):
+            # The release directory is an opaque output tree
+            # (Build-Engine-And-Scheduler.md §"Opaque output directories").
+            if line.startsWith("opaque-output\t"):
               check dirExists(line.split('\t')[2])
       let directory = project / ".build/release"
       if mode == "static":

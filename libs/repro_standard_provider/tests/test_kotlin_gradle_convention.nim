@@ -18,15 +18,15 @@
 ##     - no executable / library member is declared
 ##   * ``emitFragment`` against the hello-binary fixture (skipped when
 ##     toolchain is missing):
-##     - the convention emits a single ``kotlin-gradle-build`` action.
-##     - the action's argv carries ``gradle build --offline --no-daemon
-##       -q``.
-##     - the action's output is
-##       ``build/libs/<projectName>-<version>.jar`` under the project
-##       root.
-##   * Output-path resolution: ``rootProject.name`` (from
-##     ``settings.gradle.kts``) and ``version`` (from
-##     ``build.gradle.kts``) compose the predicted jar path.
+##     - the convention emits a ``kotlin-gradle-outputs`` discovery
+##       action and a single ``kotlin-gradle-build`` action.
+##     - the build action's argv carries ``gradle build --offline
+##       --no-daemon -q``.
+##     - the build action declares no outputs of its own: it loads the
+##       discovery fragment, which is one of its inputs.
+##   * Where Gradle puts the jar (default layout, ``archiveBaseName`` /
+##     ``archiveVersion``, the build directory) is checked by real builds
+##     in ``test_delegated_build_outputs.nim``.
 
 import std/[os, strutils, unittest]
 import repro_test_support/reasoned_skip
@@ -302,62 +302,24 @@ suite "kotlin-gradle convention M41":
       check sawOfflineFlag
       check sawNoDaemonFlag
 
-      # Output is build/libs/<projectName>-<version>.jar under the
-      # fixture root. The fixture pins ``rootProject.name = "hello"``
-      # plus ``version = "1.0"`` so the jar lands at
-      # ``build/libs/hello-1.0.jar``.
-      var sawJarOutput = false
-      for outPath in buildAct.outputs:
-        let unified = outPath.replace('\\', '/')
-        if unified.endsWith("/build/libs/hello-1.0.jar"):
-          sawJarOutput = true
-      check sawJarOutput
-
-  test "output-path resolution: projectName + version compose the jar filename":
-    # Scratch project with custom ``rootProject.name`` + ``version`` to
-    # exercise the Gradle DSL parser without needing the Gradle toolchain
-    # on PATH. ``recognize`` will fail when gradle/javac aren't installed
-    # but emit-fragment's output-path branch is independent of that gate;
-    # since ``emitFragment`` calls ``gradleExecutable()`` and raises when
-    # gradle is missing, this test SKIPs when the toolchain is
-    # unavailable.
-    if findExe("javac").len == 0 or findExe("gradle").len == 0:
-      skip("javac or gradle not on PATH")
-    else:
-      let scratch = getTempDir() / "test_kotlin_gradle_convention_custom_coords"
-      if dirExists(scratch):
-        removeDir(scratch)
-      createDir(scratch)
-      createDir(scratch / "src" / "main" / "kotlin")
-      writeFile(scratch / "src" / "main" / "kotlin" / "Main.kt",
-        "fun main() { println(\"x\") }\n")
-      writeFile(scratch / "build.gradle.kts",
-        "plugins { kotlin(\"jvm\") version \"1.9.25\" }\n" &
-        "version = \"3.7.1\"\n")
-      writeFile(scratch / "settings.gradle.kts",
-        "rootProject.name = \"custom-coords\"\n")
-      writeFile(scratch / "reprobuild.nim",
-        "import repro_project_dsl\n" &
-        "package fakeGradleCustomCoords:\n" &
-        "  uses:\n" &
-        "    \"java >=21\"\n" &
-        "    \"gradle >=8\"\n" &
-        "\n" &
-        "  executable main:\n" &
-        "    discard\n")
-      defer:
-        removeDir(scratch)
-      let conv = gradle_convention.kotlinGradleConvention()
-      let request = dummyRequest(scratch)
-      require conv.recognize(scratch, request)
-      let fragment = conv.emitFragment(scratch, request)
-      var sawCustomJar = false
+      # The build edge's outputs are discovered, not predicted
+      # (Build-Engine-And-Scheduler.md §"Outputs a delegated build
+      # decides"): it declares none itself, loads the fragment its
+      # discovery edge writes, and is keyed on it. Real builds of the
+      # default layout and of the overrides are in
+      # test_delegated_build_outputs.nim.
+      check buildAct.outputs.len == 0
+      check buildAct.dynamicDepsFile.replace('\\', '/').endsWith(
+        "/.repro/build/kotlin-gradle-outputs.dyndep")
+      check buildAct.dynamicDepsFile in buildAct.inputs
+      check "kotlin-gradle-outputs" in buildAct.deps
+      var sawDiscovery = false
       for node in fragment.nodes:
         if node.kind != gnkAction:
           continue
         let action = decodeBuildActionPayload(toBytes(node.payload))
-        for outPath in action.outputs:
-          let unified = outPath.replace('\\', '/')
-          if unified.endsWith("/build/libs/custom-coords-3.7.1.jar"):
-            sawCustomJar = true
-      check sawCustomJar
+        if action.id == "kotlin-gradle-outputs":
+          sawDiscovery = true
+          check action.outputs == @[buildAct.dynamicDepsFile]
+          check "--delegated-outputs" in inlineArgvOf(action)
+      check sawDiscovery

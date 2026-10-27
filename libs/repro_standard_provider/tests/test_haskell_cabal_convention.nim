@@ -17,20 +17,15 @@
 ##     - ghc or cabal is missing from PATH (toolchain probe failure)
 ##   * ``emitFragment`` against the hello-binary fixture (skipped when
 ##     ghc/cabal missing):
-##     - the convention emits a single ``haskell-cabal-build`` action.
-##     - the action's argv carries ``cabal v2-build --offline -j1
-##       --enable-relocatable``.
-##     - the action's output ends with ``hello.exe`` (Windows) under
-##       ``dist-newstyle/`` plus the predicted platform-tuple shape.
-##   * Output-path resolution:
-##     - the predicted path matches the documented Cabal v2-build
-##       layout (``dist-newstyle/build/<tuple>/ghc-<ver>/<pkg>-<pv>/
-##       x/<exe>/build/<exe>/<exe>[.exe]``).
-##   * Cabal-manifest parsing:
-##     - ``parseCabalField`` recovers ``name:`` and ``version:`` from
-##       a minimal manifest.
-##     - ``parsePackageName`` / ``parsePackageVersion`` fall back to
-##       safe defaults when the manifest is malformed.
+##     - the convention emits a ``haskell-cabal-outputs`` discovery
+##       action and a single ``haskell-cabal-build`` action.
+##     - the build action's argv carries ``cabal v2-build --offline -j1
+##       --enable-relocatable --builddir=<root>/dist-newstyle``.
+##     - the build action declares no outputs of its own: it loads the
+##       discovery fragment, which is one of its inputs.
+##   * Where cabal puts each executable (default layout, an
+##     ``optimization`` override) is checked by real builds in
+##     ``test_delegated_build_outputs.nim``.
 ##
 ## **Toolchain-gated SKIPs**: most tests SKIP cleanly when ``ghc`` or
 ## ``cabal`` is not on PATH (which is the M55 default on Windows —
@@ -295,67 +290,25 @@ suite "haskell-cabal convention M55":
       check sawJ1Flag
       check sawRelocatableFlag
 
-      # Output ends with hello.exe (Windows) under dist-newstyle/.
-      var sawExeOutput = false
-      for outPath in buildAct.outputs:
-        let unified = outPath.replace('\\', '/')
-        if unified.contains("/dist-newstyle/") and
-            (unified.endsWith("/hello.exe") or unified.endsWith("/hello")):
-          sawExeOutput = true
-      check sawExeOutput
-
-  test "output-path resolution: predicted Cabal v2-build layout":
-    ## Exercise the executable output-path predictor against a fixed
-    ## platform tuple + GHC version. This is a pure function — no
-    ## toolchain needed. The path shape mirrors the documented Cabal
-    ## v2-build layout: ``dist-newstyle/build/<tuple>/ghc-<ver>/
-    ## <pkg>-<pv>/x/<exe>/build/<exe>/<exe>[.exe]``.
-    let projectRoot = "/some/project"
-    let predicted = haskell_convention.producedExecutablePath(
-      projectRoot,
-      platformTuple = "x86_64-windows",
-      ghcVersion = "9.10.1",
-      packageName = "hello",
-      packageVersion = "1.0",
-      exeName = "hello")
-    let unified = predicted.replace('\\', '/')
-    let expectedSuffix =
-      when defined(windows):
-        "/dist-newstyle/build/x86_64-windows/ghc-9.10.1/hello-1.0/x/hello/build/hello/hello.exe"
-      else:
-        "/dist-newstyle/build/x86_64-windows/ghc-9.10.1/hello-1.0/x/hello/build/hello/hello"
-    check unified.endsWith(expectedSuffix)
-
-  test "parseCabalField: name + version recovered from minimal manifest":
-    let manifest =
-      "cabal-version: 2.0\n" &
-      "name: hello\n" &
-      "version: 1.0\n" &
-      "executable hello\n  main-is: Main.hs\n"
-    check haskell_convention.parseCabalField(manifest, "name") == "hello"
-    check haskell_convention.parseCabalField(manifest, "version") == "1.0"
-    check haskell_convention.parseCabalField(manifest, "missing") == ""
-
-  test "parsePackageName / parsePackageVersion: read fixture manifest":
-    ## End-to-end check against the in-tree fixture — exercises the
-    ## file-read + field-parse paths together. No toolchain needed.
-    if not fileExists(HelloBinaryFixture / "hello.cabal"):
-      checkpoint "fixture missing"
-      fail()
-    let name = haskell_convention.parsePackageName(HelloBinaryFixture)
-    let version = haskell_convention.parsePackageVersion(HelloBinaryFixture)
-    check name == "hello"
-    check version == "1.0"
-
-  test "parsePackageName: filename-stem fallback when name: missing":
-    ## When the manifest lacks a ``name:`` field, fall back to the
-    ## ``.cabal`` filename stem.
-    let scratch = getTempDir() / "test_haskell_cabal_name_fallback"
-    if dirExists(scratch):
-      removeDir(scratch)
-    createDir(scratch)
-    writeFile(scratch / "weirdname.cabal",
-      "cabal-version: 2.0\n# no name: field\n")
-    defer:
-      removeDir(scratch)
-    check haskell_convention.parsePackageName(scratch) == "weirdname"
+      check "--builddir=" & (HelloBinaryFixture / "dist-newstyle") in argv
+      # The build edge's outputs are discovered, not predicted
+      # (Build-Engine-And-Scheduler.md §"Outputs a delegated build
+      # decides"): it declares none itself, loads the fragment its
+      # discovery edge writes, and is keyed on it. Real builds of the
+      # default layout and of the overrides are in
+      # test_delegated_build_outputs.nim.
+      check buildAct.outputs.len == 0
+      check buildAct.dynamicDepsFile.replace('\\', '/').endsWith(
+        "/.repro/build/haskell-cabal-outputs.dyndep")
+      check buildAct.dynamicDepsFile in buildAct.inputs
+      check "haskell-cabal-outputs" in buildAct.deps
+      var sawDiscovery = false
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id == "haskell-cabal-outputs":
+          sawDiscovery = true
+          check action.outputs == @[buildAct.dynamicDepsFile]
+          check "--delegated-outputs" in inlineArgvOf(action)
+      check sawDiscovery

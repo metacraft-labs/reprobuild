@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2394,
+    "nimTestBinaries": 2396,
     "pureUnitConsolidationGroups": 68,
     "pureUnitTests": 685,
     "staticallyDetectedRuntimeCompilerFlowTests": 130,
-    "testEntries": 2433
+    "testEntries": 2435
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1384,10 +1384,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1324,
+      "integration": 1325,
       "platform/destructive": 146,
       "pure unit": 685,
-      "unclassified": 260
+      "unclassified": 261
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1589,9 +1589,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2394,
+    "nimTestBinaryCount": 2396,
     "pythonTestFileCount": 39,
-    "testEntryCount": 2433
+    "testEntryCount": 2435
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -21565,8 +21565,8 @@
     },
     {
       "binary": "build/test-bin/test_csharp_dotnet_convention",
-      "class": "integration",
-      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "class": "unclassified",
+      "classificationReason": "imports `osproc`, which grants out-of-process reach",
       "defines": [
         "reproProviderMode"
       ],
@@ -21582,7 +21582,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -21606,6 +21606,29 @@
       "source": "libs/repro_standard_provider/tests/test_d_direct_convention.nim",
       "sourceSuiteCount": 6,
       "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_delegated_build_outputs",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [
+        "reproProviderMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_standard_provider",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_standard_provider",
+      "requiresReproBinary": false,
+      "source": "libs/repro_standard_provider/tests/test_delegated_build_outputs.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -21937,7 +21960,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_standard_provider/tests/test_haskell_cabal_convention.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 12,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -21960,7 +21983,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_standard_provider/tests/test_java_maven_convention.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -22029,7 +22052,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -34445,6 +34468,21 @@
       "source": "tests/integration/t_default_target_floor_is_conservative.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_delegated_build_outputs_restore",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_delegated_build_outputs_restore.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
