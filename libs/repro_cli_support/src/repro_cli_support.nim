@@ -6,10 +6,15 @@ when defined(windows):
   import std/[importutils, winlean]
   import repro_daemon_core/windows_detached_spawn
 else:
+  import repro_cli_support/daemon_startup_output
+  from runquota_ipc import rendezvousPolicy, defaultEndpoint,
+    directoryResolvesWithin, hostWideEndpointDir, requireTrustedEndpointDir
+  from runquota_client import connectDefault, close
   # Only these names, and only for the pipe-feeding guard in
   # ``runFeedingStdin`` — `from … import` keeps the rest of `std/posix` out of
   # this module's namespace.
-  from std/posix import sigaction, sigemptyset, Sigaction, SIGPIPE, SIG_IGN
+  from std/posix import sigaction, sigemptyset, Sigaction, SIGPIPE, SIG_IGN,
+    ENOENT
 import repro_core
 import repro_cli_support/workspace_restore
 import repro_cli_support/repository_identities
@@ -24848,7 +24853,7 @@ const
   ## exported list remains useful to callers auditing the well-known controls.
   DaemonExplicitForwardedEnvVars* = [
     "PATH", "HOME", "USER", "TMPDIR", "TEMP", "TMP",
-    "RUNQUOTA_SOCKET", "RUNQUOTAD_BIN", "RUNQUOTA_BIN",
+    "RUNQUOTA_SOCKET", "RUNQUOTA_ENDPOINT_SCOPE", "RUNQUOTAD_BIN", "RUNQUOTA_BIN",
     "REPROBUILD_STORE_ROOT", "REPROBUILD_SOURCE_ROOT",
     # Source/provider lookup overrides used by workspace builds. These are
     # distinct from REPROBUILD_SOURCE_ROOT in existing project configuration,
@@ -25292,6 +25297,29 @@ proc forgetMachineDeclaredDaemonTrust*() =
   machineDaemonTrustApplied = false
 
 when not defined(windows):
+  type AutoRunQuotaEnvironment = object
+    socket, scope: string
+    hadSocket, hadScope: bool
+
+  var ownedRunQuotaEnvironments {.threadvar.}: Table[int, AutoRunQuotaEnvironment]
+
+  proc saveRunQuotaEnvironment(): AutoRunQuotaEnvironment =
+    AutoRunQuotaEnvironment(socket: getEnv("RUNQUOTA_SOCKET"),
+      scope: getEnv("RUNQUOTA_ENDPOINT_SCOPE"),
+      hadSocket: existsEnv("RUNQUOTA_SOCKET"),
+      hadScope: existsEnv("RUNQUOTA_ENDPOINT_SCOPE"))
+
+  proc restoreRunQuotaEnvironment(previous: AutoRunQuotaEnvironment) =
+    if previous.hadSocket: putEnv("RUNQUOTA_SOCKET", previous.socket)
+    else: delEnv("RUNQUOTA_SOCKET")
+    if previous.hadScope: putEnv("RUNQUOTA_ENDPOINT_SCOPE", previous.scope)
+    else: delEnv("RUNQUOTA_ENDPOINT_SCOPE")
+
+  proc restoreOwnedRunQuotaEnvironment(pid: int) =
+    if ownedRunQuotaEnvironments.hasKey(pid):
+      restoreRunQuotaEnvironment(ownedRunQuotaEnvironments[pid])
+      ownedRunQuotaEnvironments.del(pid)
+
   const runQuotaExitWithParentEnvVar = "RUNQUOTA_EXIT_WITH_PARENT"
     ## Read by `runquotad` (runquota `runquota_daemon/parent_watch`): `1`
     ## makes the daemon stop, through its orderly SIGTERM shutdown, when its
@@ -25448,6 +25476,17 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
   applyMachineDeclaredDaemonTrust()
   if bypassRunQuota or not autoRunQuotaEnabled():
     return nil
+  when not defined(windows):
+    # Probing reachability intentionally folds failures to false. Invalid
+    # policy is a configuration error, never permission to replace it.
+    discard rendezvousPolicy()
+    let inheritedSocket = getEnv("RUNQUOTA_SOCKET")
+    if inheritedSocket.len > 0 and
+        (not isAbsolute(inheritedSocket) or '\0' in inheritedSocket):
+      raise newException(OSError,
+        "RUNQUOTA_SOCKET must name an absolute endpoint without NUL bytes")
+    if getEnv("RUNQUOTA_ENDPOINT_SCOPE") == "private":
+      requireTrustedEndpointDir(defaultEndpoint())
   # If RUNQUOTA_SOCKET is set, the user (or a parent invocation) is
   # managing the daemon explicitly. On Windows we additionally probe
   # reachability so a stale env var inherited from a previous build —
@@ -25585,6 +25624,52 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     # through the rewritten exception in ``tryEnsureInlineRunQuotaSession``
     # (M9.R.11 — see ``repro_build_engine.runQuotaUnreachableHint``).
     return nil
+  when not defined(windows):
+    # A failed probe must not convert an existing untrusted/inaccessible
+    # authority into an invocation-owned one. Missing inherited invocation
+    # sockets retain the established stale-environment recovery above.
+    let configuredEndpoint = defaultEndpoint()
+    let explicitSocket = getEnv("RUNQUOTA_SOCKET")
+    # Strip only the socket name; parentDir would lexically fold alias/..
+    # before directoryResolvesWithin can resolve the actual traversal.
+    let selectedSlash = configuredEndpoint.path.rfind('/')
+    let selectedDirectory = configuredEndpoint.path[0 .. selectedSlash]
+    var endpointExists = false
+    try:
+      discard getFileInfo(configuredEndpoint.path, followSymlink = false)
+      endpointExists = true
+    except OSError as error:
+      if error.errorCode != ENOENT:
+        raise
+    if endpointExists:
+      var client = runquota_client.connectDefault()
+      client.close()
+      warnRunQuotaMemoryOverrideNotApplied()
+      return nil
+    if explicitSocket.len > 0 and directoryResolvesWithin(
+        selectedDirectory, hostWideEndpointDir):
+      raise newException(OSError, "configured RunQuota host endpoint is unavailable at " &
+        configuredEndpoint.path & "; refusing private auto-start")
+    let declarations =
+      try: loadDeclaredDaemons()
+      except CatchableError: @[] # Trust-file syntax remains non-fatal.
+    for declaration in declarations:
+      # Keep traversal order in the parent spellings: lexical normalization
+      # before resolving an alias/.. would compare a different directory.
+      let declaredSlash = declaration.endpoint.rfind('/')
+      if declaration.kind == ddkRunQuota and declaredSlash >= 0 and
+          selectedSlash >= 0 and
+          declaration.endpoint[declaredSlash + 1 .. ^1] ==
+            configuredEndpoint.path[selectedSlash + 1 .. ^1] and
+          directoryResolvesWithin(declaration.endpoint[0 .. declaredSlash],
+            selectedDirectory) and
+          directoryResolvesWithin(selectedDirectory,
+            declaration.endpoint[0 .. declaredSlash]):
+        raise newException(OSError,
+          "declared RunQuota endpoint is unavailable at " & configuredEndpoint.path &
+          "; refusing private auto-start")
+    if explicitSocket.len == 0:
+      requireTrustedEndpointDir(configuredEndpoint)
   # Pipe-name / socket-path derivation.
   #
   # Windows: omit ``--socket`` so runquotad binds to its built-in
@@ -25627,13 +25712,16 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     putEnv("RUNQUOTA_SOCKET", "")
     let socket = ""
   else:
+    let previousRunQuotaEnvironment = saveRunQuotaEnvironment()
     let socket = runquotaEndpointPath(
       "reprobuild-runquota-" & $getCurrentProcessId())
-    # fileExists excludes Unix sockets; removeFile also accepts a missing path.
-    removeFile(socket)
     var args = @["--socket", socket]
     args.add(budget.args)
     putEnv("RUNQUOTA_SOCKET", socket)
+    # Both halves verify the same invocation-owned endpoint. Export to OUR
+    # environment too: the connecting parent, helper and managed actions must
+    # not fall back to host NSS ownership while the daemon selects private.
+    putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
   # THE DAEMON'S LIFETIME. On Windows it binds the shared per-user pipe and is
   # deliberately left running for invocations that adopt it (see
   # `releaseAutoRunQuotaProcess`), so it must hold nothing of this invocation:
@@ -25647,9 +25735,22 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
   when defined(windows):
     result = spawnDetachedRunQuotaDaemon(runquotad, args)
   else:
-    result = spawnOwnedRunQuotaDaemon(runquotad, args)
+    try:
+      result = spawnOwnedRunQuotaDaemon(runquotad, args)
+      ownedRunQuotaEnvironments[processID(result)] = previousRunQuotaEnvironment
+      prepareStartupOutput(cint(result.outputHandle))
+      prepareStartupOutput(cint(result.errorHandle))
+    except CatchableError:
+      if result != nil:
+        releaseAutoRunQuotaProcess(result)
+      restoreRunQuotaEnvironment(previousRunQuotaEnvironment)
+      raise
+    var startupStdout, startupStderr: StartupOutput
   var readinessError = ""
   for _ in 0 ..< 300:
+    when not defined(windows):
+      drainStartupOutput(startupStdout, cint(result.outputHandle))
+      drainStartupOutput(startupStderr, cint(result.errorHandle))
     if isRunQuotaDaemonReachable():
       # DA-2 — DERIVED class-3 IPC trust. We spawned this daemon, so its pid is
       # a fact this process holds rather than a claim anyone made, and
@@ -25746,18 +25847,23 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
       discard result.waitForExit()
   except CatchableError:
     discard
+  when not defined(windows):
+    drainStartupOutput(startupStdout, cint(result.outputHandle))
+    drainStartupOutput(startupStderr, cint(result.errorHandle))
+    restoreOwnedRunQuotaEnvironment(processID(result))
   try:
     result.close()
   except CatchableError:
     discard
-  when not defined(windows):
-    putEnv("RUNQUOTA_SOCKET", "")
   let endpointHint =
     when defined(windows): "default per-user named pipe"
     else: socket
   raise newException(OSError,
     "runquotad did not become reachable at " & endpointHint &
-    (if readinessError.len > 0: ": " & readinessError else: ""))
+    (if readinessError.len > 0: ": " & readinessError else: "") &
+    (when defined(windows): ""
+     else: startupDiagnostic(startupStdout, "stdout") &
+       startupDiagnostic(startupStderr, "stderr")))
 
 proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
   ## Release this invocation's handle to an automatically started RunQuota
@@ -25782,6 +25888,7 @@ proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
     return
   when not defined(windows):
     unregisterOwnedDaemon(processID(process))
+    restoreOwnedRunQuotaEnvironment(processID(process))
   try:
     when not defined(windows):
       process.terminate()

@@ -17,6 +17,10 @@
 ## candidate. "Another build" is a byte-for-byte copy of that image with
 ## bytes appended: a file whose content digest differs, which is the whole of
 ## what distinguishes two builds to this check.
+## POSIX endpoints are invocation-owned: each case selects the official
+## private policy for daemon and clients, independently of NSS service
+## accounts, then restores the caller's socket and scope. Windows keeps its
+## existing named-pipe policy. Endpoint modes remain owner-only.
 ##
 ## WHY NOT ``startAutoRunQuotaIfNeeded`` ITSELF. On Windows it reaches the
 ## fixed host-wide pipe the host's own daemon serves; driving it would retire
@@ -36,6 +40,7 @@ import std/[os, osproc, strutils, unittest]
 
 import repro_runquota
 import repro_test_support
+import repro_test_support/process_fixtures
 import runquota_client
 import runquota_core
 import runquota_core/image_digest
@@ -57,8 +62,15 @@ proc startDaemon(repoRoot, root, socket: string): Process =
       "--no-write-stats", "--ambient-sample-interval-millis", "0",
       "--memory-pressure-source", "unavailable"],
     options = {poUsePath, poParentStreams})
+  when defined(posix):
+    # Own failure before start() can return its Fixture to a caller's defer.
+    terminateAtProcessExit(processID(result))
   for _ in 0 ..< 400:
     if isRunQuotaDaemonReachable():
+      when defined(posix):
+        doAssert getFilePermissions(socket.parentDir) ==
+          {fpUserRead, fpUserWrite, fpUserExec}
+        doAssert getFilePermissions(socket) == {fpUserRead, fpUserWrite}
       return
     sleep(25)
   raise newException(OSError, "runquotad did not become reachable at " &
@@ -67,11 +79,13 @@ proc startDaemon(repoRoot, root, socket: string): Process =
 proc start(repoRoot, tag: string): Fixture =
   result.root = getTempDir() / ("repro-rq-makeway-" & tag & "-" &
     $getCurrentProcessId())
+  releaseDirAtProcessExit(result.root)
   removeDir(result.root)
   createDir(result.root)
   result.socket = runquotaSocketEndpoint("repro-rq-makeway-" & tag & "-" &
     $getCurrentProcessId())
   when not defined(windows):
+    releaseDirAtProcessExit(result.socket.parentDir)
     removeDir(result.socket.parentDir)
   putEnv("RUNQUOTA_SOCKET", result.socket)
   result.daemon = startDaemon(repoRoot, result.root, result.socket)
@@ -103,6 +117,19 @@ proc anotherBuild(image, root: string): string =
 suite "a runquotad from another build makes way":
   let repoRoot = getCurrentDir()
   let image = requireRunQuotaDaemonBin(repoRoot)
+  setup:
+    let socketWasSet = existsEnv("RUNQUOTA_SOCKET")
+    let priorSocket = getEnv("RUNQUOTA_SOCKET")
+    when defined(posix):
+      let scopeWasSet = existsEnv("RUNQUOTA_ENDPOINT_SCOPE")
+      let priorScope = getEnv("RUNQUOTA_ENDPOINT_SCOPE")
+      putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
+  teardown:
+    if socketWasSet: putEnv("RUNQUOTA_SOCKET", priorSocket)
+    else: delEnv("RUNQUOTA_SOCKET")
+    when defined(posix):
+      if scopeWasSet: putEnv("RUNQUOTA_ENDPOINT_SCOPE", priorScope)
+      else: delEnv("RUNQUOTA_ENDPOINT_SCOPE")
 
   test "the daemon this install would start is adopted, held, and keeps running":
     var fixture = start(repoRoot, "same")

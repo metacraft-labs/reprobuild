@@ -11961,6 +11961,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim",
+    binary: "build/test-bin/t_auto_runquota_uses_private_endpoint_policy",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_autotools_configure_cache.nim",
     binary: "build/test-bin/t_autotools_configure_cache",
     defines: @[],

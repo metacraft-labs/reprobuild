@@ -1418,11 +1418,11 @@
     "nim-shm-lease": {
       "flake": false,
       "locked": {
-        "lastModified": 1790356205,
-        "narHash": "sha256-0xcjZnJbb3rgM9ybuiB8QE2IM5LRH3192J261Olz70Y=",
+        "lastModified": 1790618872,
+        "narHash": "sha256-hjlaK5aECxEbCGhG9CSPVOhTQoyFdF64m9nieVapDD8=",
         "owner": "metacraft-labs",
         "repo": "nim-shm-lease",
-        "rev": "e3254b7ba1c501de6e64dbb41c96306be5ca6058",
+        "rev": "22e3100cdb4fbc374689ddac55b4b32c90654140",
         "type": "github"
       },
       "original": {
@@ -2612,16 +2612,16 @@
         "runquota-package-catalog": "runquota-package-catalog"
       },
       "locked": {
-        "lastModified": 1793067208,
-        "narHash": "sha256-gLoCSqZTycI43QU2QOB3v+pJ3I0fUiHTluLoM4n+8Lk=",
+        "lastModified": 1793080768,
+        "narHash": "sha256-b8gZqy5EpKbKdBAU3BdjmbgtFfGWO5LCdxJAH17EGis=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "f5a644cde174234af8e193413e17b0e47d29e6f5",
+        "rev": "35b9dfe4af6e18f3f2a2242ece7cff330eb581e2",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
-        "ref": "dev",
+        "ref": "agents",
         "repo": "runquota",
         "type": "github"
       }

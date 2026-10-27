@@ -26,12 +26,11 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     runquota-src = {
-      # runquota's mainline is ``dev``; ``main`` is stale and lacks the
-      # bounded grant-stream API (``pollNextGrantBounded`` / ``GrantPollResult``)
-      # that repro_runquota now compiles against. The ``test`` CI job already
-      # overrides this to the ``dev`` sibling clone; pin the default here so the
-      # override-free ``lint`` and ``nix-build`` jobs resolve the same source.
-      url = "github:metacraft-labs/runquota/dev";
+      # Invocation-owned POSIX daemons and their clients require RunQuota's
+      # explicit private endpoint policy, currently published on ``agents``.
+      # Keep standalone builds on that API too: a newer sibling must not mask
+      # an older packaged daemon that ignores RUNQUOTA_ENDPOINT_SCOPE.
+      url = "github:metacraft-labs/runquota/agents";
       # A FLAKE INPUT, NOT A BARE SOURCE TREE. Both uses are served by the one
       # pin: ``${runquota-src}`` still coerces to the fetched source root (so
       # ``RUNQUOTA_SRC`` and every ``--path:`` into ``libs/*/src`` are
