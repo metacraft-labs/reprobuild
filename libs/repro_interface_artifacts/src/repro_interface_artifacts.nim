@@ -6656,10 +6656,17 @@ proc externalHashFlags(workDir = ""): seq[string] =
         "vendor"
       let xxhashInc = workDir / "libs" / "xxh3" / "src" / "xxh3" /
         "vendor"
+      # Quoted, as `config.nims` quotes the same directories: Nim splices
+      # `passC` text into the C compiler's command line verbatim, so a source
+      # root containing a space -- a release unpacked under
+      # `C:\Users\<First Last>\...` -- came apart into a stray `vendor`
+      # "linker input" and every extract runner and provider compile failed
+      # in gcc (reprobuild-pm issue 2026-10-27-interface-extraction-splits-a-
+      # spaced-install-path-in-the-vendored-hash-include).
       if fileExists(extendedPath(blake3Inc / "blake3.h")):
-        result.add("--passC:-I" & blake3Inc)
+        result.add("--passC:-I" & quoteShell(blake3Inc))
       if fileExists(extendedPath(xxhashInc / "xxhash.h")):
-        result.add("--passC:-I" & xxhashInc)
+        result.add("--passC:-I" & quoteShell(xxhashInc))
       if not useSystem and
          fileExists(extendedPath(blake3Inc / "blake3.c")) and
          fileExists(extendedPath(xxhashInc / "xxhash.c")):

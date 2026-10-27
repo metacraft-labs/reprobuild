@@ -1228,6 +1228,7 @@ tests/e2e/m83/t_e2e_home_facts_from_isolated_plan.nim	nim	1
 tests/e2e/m83/t_e2e_home_host_flag_resolved_once.nim	nim	5
 tests/e2e/m83/t_e2e_home_planner_refuses_system_scope_resource.nim	nim	2
 tests/e2e/m83/t_e2e_home_set_writes_guarded_config.nim	nim	1
+tests/e2e/m83/t_e2e_installed_layout_plans_catalog_only_package.nim	nim	3
 tests/e2e/m83/t_e2e_nix_package_compiles_profile.nim	nim	3
 tests/e2e/m83/t_e2e_nix_package_compiles_profile_clean_env.nim	nim	4
 tests/e2e/m83/t_e2e_nix_reads_data_like_profile.nim	nim	1
@@ -1244,7 +1245,7 @@ tests/e2e/m83/t_e2e_profile_modules.nim	nim	7
 tests/e2e/m83/t_e2e_profile_run_edge_is_unblessed.nim	nim	2
 tests/e2e/m83/t_e2e_repro_profile_compile.nim	nim	14
 tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim	nim	8
-tests/e2e/m83/t_e2e_windows_bundle_compiles_profile.nim	nim	3
+tests/e2e/m83/t_e2e_windows_bundle_compiles_profile.nim	nim	5
 tests/e2e/m9/t_e2e_m9_linux_phase2_partials_resolve.nim	nim	7
 tests/e2e/m9_5/t_e2e_m9_5_linux_url_harvest.nim	nim	5
 tests/e2e/m9_5/t_e2e_m9_5_smoke_chain_resolve_gh_linux.nim	nim	5
@@ -1592,6 +1593,7 @@ tests/integration/t_inference_commitment_is_hiding_and_binding.nim	nim	15
 tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim	nim	3
 tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim	nim	5
 tests/integration/t_install_mirror_atomic_patching.nim	nim	9
+tests/integration/t_installed_engine_reaches_the_catalog_its_release_ships.nim	nim	6
 tests/integration/t_installed_engine_read_only_source_tree.nim	nim	5
 tests/integration/t_installed_reprobuild_resolves_moved_packages_from_its_own_catalog.nim	nim	3
 tests/integration/t_installer_tarball_shared_cache.nim	nim	2
@@ -2260,7 +2262,7 @@ tests/unit/t_m9r12_3_runquota_standard_pools.nim	nim	5
 tests/unit/t_m9r12_4_autotools_emits_fetch.nim	nim	3
 tests/unit/t_m9r12_sh_inline_exec_and_typed_tool_fallback.nim	nim	15
 tests/unit/t_m9r13a_provider_compile_sharing.nim	nim	20
-tests/unit/t_m9r13b_1_toolchain_pin.nim	nim	4
+tests/unit/t_m9r13b_1_toolchain_pin.nim	nim	5
 tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	nim	9
 tests/unit/t_m9r13c_2_shim_lib_resolution.nim	nim	4
 tests/unit/t_m9r14c_1_autotools_parallel_make.nim	nim	12

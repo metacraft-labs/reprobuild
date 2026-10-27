@@ -9,8 +9,10 @@
 # compile without it (Provisioning-Contributions.md, "Catalog Lookup And
 # Provisioning"). In a workspace the catalog is a sibling checkout; an
 # installed reprobuild has no workspace, so it carries one. The lookup's last
-# place is "beside the reprobuild checkout the DSL was compiled from", which
-# for the installed layout is
+# place is "beside the reprobuild source tree" -- the tree a recipe compiles
+# the DSL from, or the one the running engine resolves for a profile lookup
+# (reprobuild_packages_catalog.reprobuildSourceTree) -- which for the
+# installed layout is, either way,
 #
 #   <pkg>/share/repro/source  ->  <pkg>/share/repro/reprobuild-packages
 #
