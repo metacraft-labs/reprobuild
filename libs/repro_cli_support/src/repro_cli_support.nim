@@ -23831,8 +23831,26 @@ proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
 # ``repro check --mode=pre-push`` gate; the implementation lives further
 # down (after ``runWorkspaceLockCommand``, which the gate calls to
 # create / refresh the workspace lock).
+type
+  PushPreflightRepo = object
+    branch: string
+    headSha: string
+    remoteName: string
+    remoteLocationFingerprint: string
+    destinationRef: string
+    advertisementFingerprint: string
+    published: bool
+    pushable: bool
+
+proc revalidatePushRepo(identity: GitToolIdentity; workspaceRoot: string;
+    repo: ResolvedRepo; expected: PushPreflightRepo;
+    sourceHookLocationDigest = ""):
+    tuple[ok: bool; diagnostic: string; remediation: string]
+
 proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
-                      hookRemoteLocation = ""): int
+                      hookRemoteLocation = "";
+                      publicationMembers: seq[HookPublicationMember] = @[];
+                      publicationWorkspace = ""): int
 proc validateCommittedLockAdvisory(repoRoot: string)
 # Test-Certificates TC-9b: `certificate_policy_snapshot_stale`, reported by
 # the pre-push gate and `repro health`; defined beside `repro lock refresh`,
@@ -24066,7 +24084,26 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     let remoteName = hookArgs[0]
     let remoteLocation = hookArgs[1]
     let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
-    let capability = getEnv(HookCapabilityEnv)
+    var capability = getEnv(HookCapabilityEnv)
+    # A plural push runs one hook per URL. Each destination gets an independent
+    # one-use token; select it without carrying any destination credentials.
+    if capability.startsWith("component:"):
+      let locationDigest = remoteLocationDigest(remoteLocation)
+      var selected = ""
+      for binding in capability["component:".len .. ^1].split(','):
+        let fields = binding.split('=')
+        if fields.len != 2 or fields[0].len != 64 or fields[1].len != 64:
+          stderr.writeLine("repro hooks: malformed source component capability envelope")
+          return 1
+        if fields[0] == locationDigest:
+          if selected.len > 0:
+            stderr.writeLine("repro hooks: duplicate source component destination")
+            return 1
+          selected = fields[1]
+      if selected.len == 0:
+        stderr.writeLine("repro hooks: source component destination is not authorized")
+        return 1
+      capability = selected
     # Scrub before any helper or gate work. Only the typed consumer below sees
     # the captured value, and it deletes a successfully claimed record before
     # returning authorization.
@@ -24092,11 +24129,17 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
           except CatchableError:
             discard
       return 0
+    var componentMembers: seq[HookPublicationMember]
+    var componentWorkspace = ""
     if capability.len > 0:
       let consumed = consumeHookCapability(identity.binaryPath, repoRoot,
         capability, remoteName, remoteLocation, refsFile)
       if consumed.authorized:
-        return 0
+        if consumed.purpose == SourceComponentCapabilityPurpose:
+          componentMembers = consumed.publicationMembers
+          componentWorkspace = consumed.publicationWorkspace
+        else:
+          return 0
       elif not consumed.claimLost:
         stderr.writeLine("repro hooks: nested publication capability refused: " &
           consumed.diagnostic)
@@ -24115,7 +24158,8 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     # refusal always leaves machine-readable evidence behind. Operator
     # invocations of `repro check` stay opt-in.
     checkArgs.add("--write-report")
-    return runCheckCommand(checkArgs, remoteName, remoteLocation)
+    return runCheckCommand(checkArgs, remoteName, remoteLocation,
+      componentMembers, componentWorkspace)
   of "post-commit":
     # M19 best-effort lock refresh. Always exits 0 even when the lock
     # writer refuses, no workspace.toml exists, or the workspace is
@@ -24180,13 +24224,17 @@ proc runHooksCommand(args: openArray[string]): int =
       let arg = args[i]
       if arg == "--require=2":
         requireSeen = true
+      elif arg == "--require-source-component":
+        # This build understands source-component capabilities. Old engines
+        # reject the flag, so callers can prove support before any transport.
+        discard
       elif arg.startsWith("--hook-contract="):
         contractSeen = true
         contract = arg["--hook-contract=".len .. ^1]
       else:
         raise newException(ValueError,
           "repro hooks protocol accepts only --require=2 " &
-          "[--hook-contract=TOKEN]")
+          "[--hook-contract=TOKEN] [--require-source-component]")
     if not requireSeen:
       raise newException(ValueError,
         "repro hooks protocol requires exactly --require=2")
@@ -68631,7 +68679,9 @@ proc roleHistoryRewriteFailure(declared: tuple[role, branch: string];
       declaredFor & ", and this update is not a fast-forward: it would make " &
       discarded & " unreachable there, including " & remoteOldOid)
 
-proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
+proc executeCheckPrePush(parsed: CheckArgs;
+    publicationMembers: seq[HookPublicationMember] = @[];
+    publicationWorkspace = ""): CheckReport =
   ## Collect independent read-only refusals before attempting lock writes.
   ## Identity, scope and protocol failures still stop checks that need them.
   ## Each reported blocker names its own offender and remedy. RA-3 removed the
@@ -69228,11 +69278,96 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       result.exitCode = 2
 
 
+  var provisional = initHashSet[string]()
+  if publicationMembers.len > 0:
+    var valid = outgoing.outgoingCurrent and
+      sameFilesystemPath(publicationWorkspace, parsed.workspaceRoot)
+    var plannedNames = initHashSet[string]()
+    let currentClosure = developSetClosure(resolved.repos, currentRepoName)
+    var componentNames = initHashSet[string]()
+    for repo in resolved.repos:
+      if repo.name in currentClosure and
+          currentRepoName in developSetClosure(resolved.repos, repo.name):
+        componentNames.incl(repo.name)
+    for member in publicationMembers:
+      plannedNames.incl(member.name)
+      var found = false
+      for repo in resolved.repos:
+        if repo.name != member.name: continue
+        found = true
+        let peerRoot =
+          if member.name == currentRepoName: parsed.currentRepo
+          else: parsed.workspaceRoot / repo.path
+        if not sameFilesystemPath(peerRoot, member.worktree):
+          valid = false
+          continue
+        let common = gitRunPlain(identity, ["-C", member.worktree,
+          "rev-parse", "--path-format=absolute", "--git-common-dir"])
+        let format = gitRunPlain(identity, ["-C", member.worktree,
+          "rev-parse", "--show-object-format=storage"])
+        if common.code != 0 or format.code != 0 or
+            not sameFilesystemPath(common.output.strip(), member.commonDir) or
+            format.output.strip() != member.objectFormat or
+            member.remoteName != gitRemoteNameFor(repo) or
+            (member.remoteRef != "refs/heads/" & member.branch and not
+             (member.published and member.branch.len == 0 and member.remoteRef.len == 0)):
+          valid = false
+          continue
+        var observedRepo = repo
+        observedRepo.path = relativePath(peerRoot, parsed.workspaceRoot)
+        let stable = revalidatePushRepo(identity, parsed.workspaceRoot, observedRepo,
+          PushPreflightRepo(branch: member.branch, headSha: member.headOid,
+            remoteName: member.remoteName,
+            remoteLocationFingerprint: member.remoteLocationsDigest,
+            destinationRef: member.remoteRef,
+            advertisementFingerprint: member.advertisementFingerprint,
+            published: member.published, pushable: member.pushable),
+          sourceHookLocationDigest =
+            (if member.name == currentRepoName:
+               remoteLocationDigest(parsed.hookRemoteLocation)
+             else: ""))
+        if not stable.ok: valid = false
+      if not found: valid = false
+    if plannedNames != componentNames or componentNames.len < 2:
+      valid = false
+    for obs in observations:
+      for member in publicationMembers:
+        if obs.name == member.name and
+            (not obs.hasGit or not obs.isClean or obs.headSha != member.headOid or
+             not sameFilesystemPath(obs.absPath, member.worktree)):
+          valid = false
+    if not valid:
+      result.failures.add(CheckFailure(repo: currentRepoPath,
+        property: "source-component-publication",
+        remediation: "review the changed component and retry 'repro push'",
+        evidence: "publication component changed after preflight"))
+      result.exitCode = 2
+      return
+    let pins = committedLockRevisions(parsed.currentRepo)
+    for member in publicationMembers:
+      if member.name != currentRepoName and
+          flakeClassifyPublication(identity, member.worktree,
+            member.headOid).unpublished:
+        # Future publication is not proof that an exact committed pin can be
+        # obtained now. Retain the lock stages' remote-availability invariant
+        # even when the current checkout already agrees with that pin.
+        if not pins.ok or member.headOid.toLowerAscii() in pins.revs:
+          result.failures.add(CheckFailure(repo: member.name,
+            property: "source-component-unpublished-pin",
+            remediation: "keep committed pins on published revisions, then retry 'repro push'",
+            evidence: "committed lock names an unpublished component peer HEAD"))
+          result.exitCode = 2
+          return
+      provisional.incl(member.name)
+    result.notices.add("source component publication in progress: " &
+      publicationMembers.mapIt(it.name).join(", ") &
+      "; planned peers are provisional until their source pushes succeed")
+
   # ---- 2. unpublished ----------------------------------------------------
   for obs in observations:
     if not obs.hasGit:
       continue
-    if not obs.isPublished and not
+    if not obs.isPublished and obs.name notin provisional and not
         (outgoing.outgoingCurrent and obs.name == currentRepoName and
          obs.headSha == outgoing.headOid) and not
         (parsed.issuingForCurrentHead and currentRepoName.len > 0 and
@@ -70702,7 +70837,9 @@ proc runRecordStorePrePushGuard(repoRoot, refsFile, remoteLocation: string): int
   0
 
 proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
-                      hookRemoteLocation = ""): int =
+                      hookRemoteLocation = "";
+                      publicationMembers: seq[HookPublicationMember] = @[];
+                      publicationWorkspace = ""): int =
   ## ``repro check --mode=pre-push [--workspace-root=PATH]
   ## [--current-repo=PATH] [--pushed-refs=FILE]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
@@ -70799,7 +70936,7 @@ proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
       else: parsed.workspaceRoot, "repro check")
     var report: CheckReport
     try:
-      report = executeCheckPrePush(parsed)
+      report = executeCheckPrePush(parsed, publicationMembers, publicationWorkspace)
     except CatchableError as err:
       stderr.writeLine("repro check: error: " & err.msg)
       return 1
@@ -71113,16 +71250,6 @@ type
     retryCommand: string
     exitCode: int
 
-  PushPreflightRepo = object
-    branch: string
-    headSha: string
-    remoteName: string
-    remoteLocationFingerprint: string
-    destinationRef: string
-    advertisementFingerprint: string
-    published: bool
-    pushable: bool
-
   PushLockBackendPlan = object
     root: string
     backendKind: string
@@ -71288,71 +71415,68 @@ proc developOverrideRepoNames(workspaceRoot: string;
           result.add(repo.name)
         break
 
-proc topoSortClosure(repos: seq[ResolvedRepo];
-                     closure: HashSet[string];
-                     extraDepends: Table[string, seq[string]] =
-                       initTable[string, seq[string]]()): seq[string] =
-  ## Kahn topological sort of the closure over the per-repo ``depends``
-  ## edges, DEPENDENCY-FIRST: a repo is emitted only after every dependency
-  ## it names (that is also in the closure) has been emitted. This is the
-  ## load-bearing guarantee of ``repro push`` — a dependent is NEVER pushed
-  ## before its dependency (CLI/push.md High-Level Rules).
-  ##
-  ## ``extraDepends`` adds edges the manifest does not declare but the gate
-  ## enforces: each member of the pushed repo's closure "depends on" every
-  ## develop override `repro push` brought in, because each member's own gate
-  ## refuses until that override is published (``developOverrideRepoNames``).
-  ##
-  ## Edges are restricted to the closure (an out-of-closure ``depends``
-  ## target cannot gate a member). Ties are broken by declaration order so
-  ## the push order is deterministic. A dependency cycle (which the manifest
-  ## should never contain) is surfaced by appending the unresolved remainder
-  ## in declaration order rather than silently dropping repos — the push
-  ## still runs, and the lock publish + gate remain the correctness backstop.
+proc pushComponents(repos: seq[ResolvedRepo]; closure: HashSet[string];
+    extraDepends: Table[string, seq[string]] =
+      initTable[string, seq[string]]()): seq[seq[string]] =
+  ## Condense strongly connected components before ordering dependencies.
+  ## Reachability keeps the implementation small; workspace graphs are small
+  ## enough that one traversal per member is insignificant beside Git probes.
   var byName = initTable[string, ResolvedRepo]()
-  var declOrder: seq[string]
+  var names: seq[string]
   for repo in repos:
     if repo.name in closure and repo.name notin byName:
       byName[repo.name] = repo
-      declOrder.add(repo.name)
-  # In-degree = number of (in-closure) dependencies each node still waits on.
-  var indeg = initTable[string, int]()
-  var dependents = initTable[string, seq[string]]()  # dep -> nodes that need it
-  for name in declOrder:
-    indeg[name] = 0
-  for name in declOrder:
-    var deps = byName[name].depends
-    for extra in extraDepends.getOrDefault(name):
-      if extra notin deps: deps.add(extra)
-    for dep in deps:
-      if dep.len > 0 and dep in byName:
-        inc indeg[name]
-        dependents.mgetOrPut(dep, @[]).add(name)
-  # Seed the ready set with zero-dependency nodes, preserving declaration
-  # order for determinism.
-  var ready: seq[string]
-  for name in declOrder:
-    if indeg[name] == 0:
-      ready.add(name)
-  var emitted = initHashSet[string]()
+      names.add(repo.name)
+  var reachable = initTable[string, HashSet[string]]()
+  for name in names:
+    var seen = initHashSet[string]()
+    var pending = @[name]
+    while pending.len > 0:
+      let next = pending.pop()
+      if next in seen or next notin byName: continue
+      seen.incl(next)
+      for dep in byName[next].depends & extraDepends.getOrDefault(next):
+        pending.add(dep)
+    reachable[name] = seen
+  var groups: seq[seq[string]]
+  var groupOf = initTable[string, int]()
+  for name in names:
+    if name in groupOf: continue
+    let index = groups.len
+    var group: seq[string]
+    for peer in names:
+      if peer in reachable[name] and name in reachable[peer]:
+        group.add(peer)
+        groupOf[peer] = index
+    groups.add(group)
+  var waiting = newSeq[HashSet[int]](groups.len)
+  for name in names:
+    for dep in byName[name].depends & extraDepends.getOrDefault(name):
+      if dep in groupOf and groupOf[dep] != groupOf[name]:
+        waiting[groupOf[name]].incl(groupOf[dep])
+  var ready: seq[int]
+  for index in 0 ..< groups.len:
+    if waiting[index].len == 0: ready.add(index)
+  var emitted = initHashSet[int]()
   while ready.len > 0:
-    let name = ready[0]
+    let index = ready[0]
     ready.delete(0)
-    if name in emitted:
-      continue
-    result.add(name)
-    emitted.incl(name)
-    if name in dependents:
-      for dependent in dependents[name]:
-        dec indeg[dependent]
-        if indeg[dependent] == 0:
-          ready.add(dependent)
-  # Cycle / unresolved remainder safety net (never expected in practice).
-  if emitted.len < declOrder.len:
-    for name in declOrder:
-      if name notin emitted:
-        result.add(name)
-        emitted.incl(name)
+    if index in emitted: continue
+    emitted.incl(index)
+    result.add(groups[index])
+    for dependent in 0 ..< groups.len:
+      if index in waiting[dependent]:
+        waiting[dependent].excl(index)
+        if waiting[dependent].len == 0: ready.add(dependent)
+
+proc topoSortClosure(repos: seq[ResolvedRepo]; closure: HashSet[string];
+    extraDepends: Table[string, seq[string]] =
+      initTable[string, seq[string]]()): seq[string] =
+  ## Dependencies precede dependents between components. Within a cycle there
+  ## is no dependency-first order; use declaration order under a separately
+  ## authenticated, fully preflighted publication component.
+  for component in pushComponents(repos, closure, extraDepends):
+    result.add(component)
 
 proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
                             repo: ResolvedRepo;
@@ -71884,7 +72008,8 @@ proc preflightPushRepo(identity: GitToolIdentity; workspaceRoot: string;
   result.ok = true
 
 proc revalidatePushRepo(identity: GitToolIdentity; workspaceRoot: string;
-    repo: ResolvedRepo; expected: PushPreflightRepo):
+    repo: ResolvedRepo; expected: PushPreflightRepo;
+    sourceHookLocationDigest = ""):
     tuple[ok: bool; diagnostic: string; remediation: string] =
   ## Run immediately before this repository's transport. A preserved hook on
   ## an earlier dependency, another process, or an operator can change a later
@@ -71950,8 +72075,30 @@ proc revalidatePushRepo(identity: GitToolIdentity; workspaceRoot: string;
       "; transport output was withheld because remotes may contain credentials",
       "fix connectivity, credentials, or remote configuration and retry " &
         "'repro push --sync --rebase'")
-  if published.advertisementFingerprint !=
-      expected.advertisementFingerprint or
+  var sameAdvertisement = published.advertisementFingerprint ==
+    expected.advertisementFingerprint
+  if not sameAdvertisement and sourceHookLocationDigest.len > 0:
+    # A plural Git push visits its URLs serially. Earlier destinations of
+    # THIS source may already carry the exact bound HEAD when a later hook
+    # runs. Only that monotonic progress is admissible; the destination whose
+    # hook is running and every peer retain their exact old advertisement.
+    let before = expected.advertisementFingerprint.splitLines()
+    let after = published.advertisementFingerprint.splitLines()
+    sameAdvertisement = before.len == after.len
+    if sameAdvertisement:
+      for index in 0 ..< before.len:
+        if before[index] == after[index]: continue
+        let oldFields = before[index].split('\t')
+        let newFields = after[index].split('\t')
+        let oldShape = oldFields.len == 3 or
+          (oldFields.len == 5 and oldFields[2] == "<missing>" and
+           oldFields[3] == "contained-by" and oldFields[4].startsWith("refs/heads/"))
+        if not oldShape or newFields.len != 3 or
+            oldFields[0] == sourceHookLocationDigest or
+            oldFields[0] != newFields[0] or oldFields[1] != newFields[1] or
+            newFields[2] != expected.headSha:
+          sameAdvertisement = false
+  if not sameAdvertisement or
       published.published != expected.published or
       published.pushable != expected.pushable:
     return (false, "exact destination advertisement changed after " &
@@ -72372,6 +72519,38 @@ proc executePush(args: PushArgs): PushReport =
       result.exitCode = 2
       return
     preflight[name] = observed.observed
+  # A protocol-v2 interpreter can predate source component publication. Probe
+  # the interpreter the installed hook will actually execute for every source
+  # component member, before publishing even an earlier acyclic dependency.
+  for name in result.order:
+    if preflight[name].published: continue
+    let ownClosure = developSetClosure(resolved.repos, name)
+    var cyclic = false
+    for peer in ownClosure:
+      if peer != name and name in developSetClosure(resolved.repos, peer):
+        cyclic = true
+        break
+    if not cyclic: continue
+    let repoAbs = args.workspaceRoot / byName[name].path
+    let hookCli = resolveHookReproCli(repoAbs)
+    let probe = execCmdEx(shellCommand(@[hookCli, "hooks", "protocol",
+      "--require=2", "--require-source-component",
+      "--hook-contract=" & managedHookContract("pre-push")]),
+      options = {poStdErrToStdOut, poUsePath}, env = scrubbedGitChildEnv())
+    if probe.exitCode != 0 or probe.output.strip() != "2":
+      let remedy = "set REPROBUILD_REPRO=" & publicCliImagePath() &
+        " (or update PATH), run '" & publicCliImagePath() &
+        " hooks ensure --vcs " & repoAbs & "', then retry 'repro push'"
+      result.repos.add(PushRepoResult(name: name, path: byName[name].path,
+        branch: preflight[name].branch, headSha: preflight[name].headSha,
+        outcome: proFailed,
+        diagnostic: "hook-resolved repro does not support source component publication",
+        remediation: remedy))
+      result.stoppedRepo = name
+      result.stoppedStage = "source-component-hook-preflight"
+      result.retryCommand = remedy
+      result.exitCode = 2
+      return
   var backendPlans: seq[PushLockBackendPlan]
   try:
     backendPlans = pushLockBackendPlans(identity, args.workspaceRoot, resolved,
@@ -72511,6 +72690,41 @@ proc executePush(args: PushArgs): PushReport =
         result.exitCode = 2
         return
 
+  var sourceComponentPeers = initTable[string, seq[string]]()
+  for component in pushComponents(resolved.repos, closure):
+    if component.len > 1:
+      for member in component: sourceComponentPeers[member] = component
+  var carriedComponents = initHashSet[string]()
+  template carrySourceNotes(sourceName, sourceAbs, sourcePath,
+      sourceRemote: untyped) =
+    # A notes-only push has no provisional source authority. Wait until the
+    # entire component is actually published, then transport its notes through
+    # the ordinary gate before moving on to dependent components. Published
+    # prefix members on retry take part too, so no notes are stranded.
+    if sourceName in sourceComponentPeers:
+      let peers = sourceComponentPeers[sourceName]
+      var ready = true
+      for peer in peers:
+        if not preflight[peer].published: ready = false
+      if ready and peers[0] notin carriedComponents:
+        for peer in peers:
+          let peerRepo = byName[peer]
+          let stable = revalidatePushRepo(identity, args.workspaceRoot,
+            peerRepo, preflight[peer])
+          if not stable.ok:
+            if result.certNotesDiagnostic.len > 0:
+              result.certNotesDiagnostic.add("; ")
+            result.certNotesDiagnostic.add(peerRepo.path &
+              ": certificate notes not carried: " & stable.diagnostic)
+            continue
+          carryCertNotes(result, identity.binaryPath,
+            args.workspaceRoot / peerRepo.path, peerRepo.path,
+            preflight[peer].remoteName)
+        carriedComponents.incl(peers[0])
+    else:
+      carryCertNotes(result, identity.binaryPath, sourceAbs, sourcePath,
+        sourceRemote)
+
   # ---- 3. closure push in topological order ------------------------------
   # Walk dependency-first. A dirty/divergent member STOPS the push with an
   # actionable {offender, remedy} diagnostic (never silently discarded). A
@@ -72542,7 +72756,7 @@ proc executePush(args: PushArgs): PushReport =
       result.repos.add(entry)
       # TC-2: ship any attached certificates even though the commit is already
       # published (the cert may have been issued/attached after the push).
-      carryCertNotes(result, identity.binaryPath, repoAbs, repo.path, rName)
+      carrySourceNotes(name, repoAbs, repo.path, rName)
       continue
     if entry.branch.len == 0:
       # Unpublished work on a detached HEAD: we have no branch to push. STOP
@@ -72556,8 +72770,108 @@ proc executePush(args: PushArgs): PushReport =
       result.repos.add(entry)
       result.exitCode = 2
       return
-    let pushRes = gitRunPlainEnv(identity,
-      ["-C", repoAbs, "push", rName, "HEAD:" & entry.branch])
+    var component: seq[string]
+    let ownClosure = developSetClosure(resolved.repos, name)
+    for peer in result.order:
+      if peer in ownClosure and
+          name in developSetClosure(resolved.repos, peer):
+        component.add(peer)
+    var members: seq[HookPublicationMember]
+    if component.len > 1:
+      for peer in component:
+        let peerRepo = byName[peer]
+        let peerRoot = args.workspaceRoot / peerRepo.path
+        let snapshot = preflight[peer]
+        let stable = revalidatePushRepo(identity, args.workspaceRoot,
+          peerRepo, snapshot)
+        if not stable.ok:
+          entry.outcome = proFailed
+          entry.diagnostic = stable.diagnostic
+          entry.remediation = stable.remediation
+          result.repos.add(entry)
+          result.stoppedRepo = peer
+          result.stoppedStage = "source-component-revalidation"
+          result.retryCommand = "review the changed component and retry 'repro push'"
+          result.exitCode = 2
+          return
+        let common = commonGitDir(identity.binaryPath, peerRoot)
+        let format = gitRunPlain(identity, ["-C", peerRoot, "rev-parse",
+          "--show-object-format=storage"])
+        if common.len == 0 or format.code != 0:
+          entry.outcome = proFailed
+          entry.diagnostic = "cannot bind publication component identity"
+          entry.remediation = "restore component checkouts and retry 'repro push'"
+          result.repos.add(entry)
+          result.stoppedRepo = peer
+          result.stoppedStage = "source-component-revalidation"
+          result.retryCommand = entry.remediation
+          result.exitCode = 2
+          return
+        let firstDestination = snapshot.advertisementFingerprint.splitLines()[0].split('\t')
+        let oldOid =
+          if snapshot.destinationRef.len == 0 or firstDestination[2] == "<missing>":
+            repeat('0', snapshot.headSha.len)
+          else: firstDestination[2]
+        members.add(HookPublicationMember(name: peer,
+          worktree: os.normalizedPath(expandFilename(peerRoot)).replace('\\', '/'),
+          commonDir: common,
+          objectFormat: format.output.strip(), headOid: snapshot.headSha,
+          branch: snapshot.branch, remoteName: snapshot.remoteName,
+          remoteLocationsDigest: snapshot.remoteLocationFingerprint,
+          remoteRef: snapshot.destinationRef, remoteOid: oldOid,
+          advertisementFingerprint: snapshot.advertisementFingerprint,
+          published: snapshot.published, pushable: snapshot.pushable))
+    var issuedTokens: seq[string]
+    var pushRes: tuple[code: int; output: string]
+    try:
+      var capabilityEnvelope = ""
+      if members.len > 0:
+        let locations = configuredPushLocationValues(identity, repoAbs, rName)
+        if not locations.ok:
+          raise newException(ValueError, "cannot bind source component destinations")
+        var bindings: seq[string]
+        var uniqueLocations = initHashSet[string]()
+        for location in locations.values:
+          let digest = remoteLocationDigest(location)
+          if digest in uniqueLocations:
+            raise newException(ValueError, "duplicate source component push destination")
+          uniqueLocations.incl(digest)
+          var oldOid = ""
+          for destination in observed.advertisementFingerprint.splitLines():
+            let fields = destination.split('\t')
+            if fields[0] == digest:
+              oldOid = if fields[2] == "<missing>": repeat('0', entry.headSha.len)
+                else: fields[2]
+          if oldOid.len == 0:
+            raise newException(ValueError, "source component destination changed")
+          var boundMembers = members
+          for index in 0 ..< boundMembers.len:
+            if boundMembers[index].name == name:
+              boundMembers[index].remoteOid = oldOid
+          let issued = issueHookCapability(identity.binaryPath, repoAbs,
+            rName, location, "HEAD", entry.headSha, observed.destinationRef,
+            oldOid, boundMembers, args.workspaceRoot)
+          if not issued.ok:
+            raise newException(ValueError, issued.diagnostic)
+          issuedTokens.add(issued.token)
+          bindings.add(digest & "=" & issued.token)
+        capabilityEnvelope = "component:" & bindings.join(",")
+      pushRes = gitRunPlainEnv(identity,
+        ["-C", repoAbs, "push", rName, "HEAD:" & entry.branch],
+        capability = capabilityEnvelope)
+    except CatchableError as err:
+      entry.outcome = proFailed
+      entry.diagnostic = "source component authorization failed: " & err.msg
+      entry.remediation = "repair the publication component and retry 'repro push'"
+      result.repos.add(entry)
+      result.stoppedRepo = name
+      result.stoppedStage = "source-component-authorization"
+      result.retryCommand = entry.remediation
+      result.exitCode = 2
+      return
+    finally:
+      for token in issuedTokens:
+        discardHookCapability(identity.binaryPath, repoAbs, token)
     if pushRes.code != 0:
       entry.outcome = proFailed
       entry.diagnostic = "git push " & rName & " HEAD:" & entry.branch &
@@ -72585,11 +72899,29 @@ proc executePush(args: PushArgs): PushReport =
       return
     entry.outcome = proPushed
     result.repos.add(entry)
+    if members.len > 0:
+      # The next component member must see the prefix that actually landed,
+      # while its source identity stays fixed to the original plan.
+      let refreshed = preflightPushRepo(identity, args.workspaceRoot, repo)
+      if not refreshed.ok or refreshed.observed.headSha != observed.headSha or
+          refreshed.observed.branch != observed.branch or
+          refreshed.observed.remoteName != observed.remoteName or
+          refreshed.observed.remoteLocationFingerprint != observed.remoteLocationFingerprint or
+          refreshed.observed.destinationRef != observed.destinationRef or
+          not refreshed.observed.published:
+        result.repos[^1].diagnostic = "published component member changed after transport"
+        result.repos[^1].remediation = "review the published prefix and retry 'repro push'"
+        result.stoppedRepo = name
+        result.stoppedStage = "source-component-revalidation"
+        result.retryCommand = result.repos[^1].remediation
+        result.exitCode = 2
+        return
+      preflight[name] = refreshed.observed
     # TC-2: carry any certificates attached to the just-pushed commits to the
     # SAME upstream by pushing the certificate notes ref alongside the branch.
     # Notes are not pushed by default, so this is the explicit step that makes
     # the attestations travel.
-    carryCertNotes(result, identity.binaryPath, repoAbs, repo.path, rName)
+    carrySourceNotes(name, repoAbs, repo.path, rName)
 
   # ---- 4. certificate slot (FLAG only; obtain+attach deferred to TC) -----
   runPushCertifyStub(result, args.certify)

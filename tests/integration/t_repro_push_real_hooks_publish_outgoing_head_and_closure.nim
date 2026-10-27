@@ -17,8 +17,11 @@
 ## existing remote branch of the checkout's own name that is behind HEAD is
 ## still advanced. The manifest's preserved hooks observe
 ## no capability/context, while successful nested pushes and empty capability
-## storage prove one-use authorization was exercised. Nothing is mocked: only
-## local Git processes, filesystem hooks, worktrees, and bare remotes are used.
+## storage prove one-use authorization was exercised. All source publication
+## uses local Git processes, filesystem hooks, worktrees, and bare remotes.
+## The interpreter-skew case alone stubs an obsolete CLI's protocol handshake:
+## this isolates version negotiation without embedding an old release binary,
+## and it refuses before any source Git transport can run.
 ## It runs cross-platform wherever Git supplies its hook shell; POSIX capability
 ## metadata has a dedicated suite. Wrong ordering, an advanced unrelated bare,
 ## a missing exact lock blob, or a hidden partial failure each falsifies a case.
@@ -30,6 +33,18 @@ import repro_cli_support/push_hook_protocol
 import repro_test_support
 import repro_test_support/reasoned_skip
 import repro_workspace_manifests
+
+const ObsoleteComponentProtocolEnv = "REPRO_TEST_OBSOLETE_COMPONENT_PROTOCOL"
+
+# A native helper mode keeps the deliberately obsolete protocol peer usable
+# on Windows too; CreateProcess cannot execute a bare POSIX script there.
+if getEnv(ObsoleteComponentProtocolEnv) == "1":
+  let args = commandLineParams()
+  if args.len >= 2 and args[0] == "hooks" and args[1] == "protocol":
+    if "--require-source-component" in args: quit(2)
+    stdout.writeLine("2")
+    quit(0)
+  quit(87)
 
 proc q(value: string): string = quoteShell(value)
 
@@ -454,6 +469,20 @@ proc capabilityDir(gitBin: string; fx: Fixture): string =
   let absCommon = if common.isAbsolute: common else: fx.manifests / common
   absCommon / "reprobuild" / "hook-capabilities"
 
+proc checkSourceCapabilitiesEmpty(fx: Fixture; gitBin: string) =
+  for repo in [fx.app, fx.lib, fx.core]:
+    let common = require(q(gitBin) & " -C " & q(repo) &
+      " rev-parse --path-format=absolute --git-common-dir").strip()
+    let directory = common / "reprobuild" / "hook-capabilities"
+    if dirExists(directory): check toSeq(walkDir(directory)).len == 0
+
+proc configureCycle(fx: Fixture; gitBin: string) =
+  writeFile(fx.manifests / "repos" / "core.toml",
+    repoToml("core", "core-origin", @["app"]))
+  discard require(q(gitBin) & " -C " & q(fx.manifests) & " add repos")
+  discard require(q(gitBin) & " -C " & q(fx.manifests) & " commit -m cycle")
+  discard require(q(gitBin) & " -C " & q(fx.manifests) & " push origin main")
+
 suite "protocol v2 real-hook repro push closure":
   test "routing config isolation restores exact ambient values after exception":
     let original = snapshotRoutingConfig()
@@ -611,6 +640,356 @@ suite "protocol v2 real-hook repro push closure":
       let capDir = capabilityDir(gitBin, fx)
       if dirExists(capDir):
         check toSeq(walkDir(capDir)).len == 0
+
+  test "cyclic project siblings publish as a preflighted component":
+    let gitBin = findExe("git")
+    check gitBin.len > 0
+    let fx = setup(gitBin, "cyclic-component")
+    defer: removeDir(fx.scratch)
+    # app -> lib -> core -> app is the reduced project-sibling deadlock.
+    # The separate other member stays outside the publication closure.
+    configureCycle(fx, gitBin)
+    let appSha = commit(fx, gitBin, fx.app, "cyclic-app")
+    let libSha = commit(fx, gitBin, fx.lib, "cyclic-lib")
+    let coreSha = commit(fx, gitBin, fx.core, "cyclic-core")
+    var noteTips: seq[tuple[bare, oid: string]]
+    for member in [(fx.app, fx.appBare), (fx.lib, fx.libBare), (fx.core, fx.coreBare)]:
+      discard require(q(gitBin) & " -C " & q(member[0]) &
+        " notes --ref=refs/notes/test-certificates/certificates add -m " &
+        q("cyclic component note transport"))
+      noteTips.add((member[1], require(q(gitBin) & " -C " & q(member[0]) &
+        " rev-parse refs/notes/test-certificates/certificates").strip()))
+    let otherBefore = remoteHead(gitBin, fx.otherBare)
+    discard commit(fx, gitBin, fx.other, "unrelated-cycle-work")
+    installHooks(fx)
+    # Raw pushes have no component authorization and retain the ordinary gate.
+    for member in [(fx.app, "lib"), (fx.lib, "core"), (fx.core, "app")]:
+      let refused = fx.withHookCli(q(gitBin) & " -C " & q(member[0]) &
+        " push origin HEAD:main")
+      check refused.code != 0
+      check ("repro check: " & member[1] & ": unpublished") in refused.output
+    let pushed = invokePush(fx)
+    if pushed.code != 0: checkpoint(pushed.output)
+    check pushed.code == 0
+    check remoteHead(gitBin, fx.appBare) == appSha
+    check remoteHead(gitBin, fx.libBare) == libSha
+    check remoteHead(gitBin, fx.coreBare) == coreSha
+    check remoteHead(gitBin, fx.otherBare) == otherBefore
+    for member in [("app", appSha), ("lib", libSha), ("core", coreSha)]:
+      check remoteHasLock(gitBin, fx, member[0], member[1])
+    check report(fx)["order"] == %*["app", "lib", "core"]
+    for note in noteTips:
+      let actual = run(q(gitBin) & " -C " & q(note.bare) &
+        " rev-parse refs/notes/test-certificates/certificates")
+      check actual.code == 0
+      check actual.output.strip() == note.oid
+    check report(fx)["certNotesDiagnostic"].getStr() == ""
+    check report(fx)["lockPublished"].getBool()
+    check fileExists(fx.manifestPrePushLog)
+    if fileExists(fx.manifestPrePushLog):
+      check readFile(fx.manifestPrePushLog).splitLines().allIt(
+        it.len == 0 or it == "cap= legacy= context=")
+    let capDir = capabilityDir(gitBin, fx)
+    if dirExists(capDir): check toSeq(walkDir(capDir)).len == 0
+    checkSourceCapabilitiesEmpty(fx, gitBin)
+
+  test "two unpublished members of a cycle retain its published intermediate":
+    let gitBin = findExe("git")
+    check gitBin.len > 0
+    let fx = setup(gitBin, "cycle-published-intermediate")
+    defer: removeDir(fx.scratch)
+    configureCycle(fx, gitBin)
+    let coreBefore = remoteHead(gitBin, fx.coreBare)
+    let locked = fx.withHookCli(q(fx.reproBin) & " workspace lock app" &
+      " --trigger-repo=core --workspace-root=" & q(fx.workspace))
+    if locked.code != 0: checkpoint(locked.output)
+    check locked.code == 0
+    # The issue's pushed repository carries an older, published sibling pin.
+    # Its source push must retain the existing mutual-pin deferral while the
+    # peer's new HEAD is still unpublished; a future HEAD is never pinned here.
+    proc row(name, path, sha, depends, url: string): string =
+      "{ name = \"" & name & "\", path = \"" & path &
+        "\", coord_kind = \"vcs\", url = \"" & url &
+        "\", ref = \"main\", revision = \"" & sha &
+        "\", integrity = \"git-sha1:" & sha &
+        "\", version = \"\", visibility = \"public\", participation = \"\", " &
+        "depends = \"" & depends & "\", groups = \"\" }"
+    let appBefore = remoteHead(gitBin, fx.appBare)
+    let libBefore = remoteHead(gitBin, fx.libBare)
+    writeFile(fx.app / "repro.lock",
+      "schema = \"reprobuild.solved-graph-lock.v2\"\n[lock]\n" &
+      "platform = \"x86_64-linux\"\noptimal = true\n" &
+      "inputs_digest = \"published-cycle-pin\"\nvariants = []\npackages = []\n" &
+      "deps = [" & row("app", ".", appBefore, "lib", fileUrl(fx.appBare)) &
+      ", " & row("lib", "../lib", libBefore, "core", fileUrl(fx.libBare)) &
+      ", " & row("core", "../core", coreBefore, "app", fileUrl(fx.coreBare)) & "]\n")
+    discard require(q(gitBin) & " -C " & q(fx.app) & " add repro.lock")
+    let appSha = commit(fx, gitBin, fx.app, "pair-app")
+    let libSha = commit(fx, gitBin, fx.lib, "pair-lib")
+    installHooks(fx)
+    let raw = fx.withHookCli(q(gitBin) & " -C " & q(fx.app) &
+      " push origin HEAD:main")
+    check raw.code != 0
+    check "repro.lock pin DEFERRED" in raw.output
+    let pushed = invokePush(fx)
+    if pushed.code != 0: checkpoint(pushed.output)
+    check pushed.code == 0
+    check remoteHead(gitBin, fx.appBare) == appSha
+    check remoteHead(gitBin, fx.libBare) == libSha
+    check remoteHead(gitBin, fx.coreBare) == coreBefore
+    let r = report(fx)
+    check r["repos"][2]["outcome"].getStr() == "already-published"
+    check r["lockPublished"].getBool()
+
+  test "a component receive failure reports its prefix and retry completes":
+    let gitBin = findExe("git")
+    check gitBin.len > 0
+    let fx = setup(gitBin, "cycle-retry")
+    defer: removeDir(fx.scratch)
+    configureCycle(fx, gitBin)
+    let libBefore = remoteHead(gitBin, fx.libBare)
+    let coreBefore = remoteHead(gitBin, fx.coreBare)
+    let appSha = commit(fx, gitBin, fx.app, "retry-cycle-app")
+    let libSha = commit(fx, gitBin, fx.lib, "retry-cycle-lib")
+    let coreSha = commit(fx, gitBin, fx.core, "retry-cycle-core")
+    discard require(q(gitBin) & " -C " & q(fx.app) &
+      " notes --ref=refs/notes/test-certificates/certificates add -m " &
+      q("published prefix note transport"))
+    let appNote = require(q(gitBin) & " -C " & q(fx.app) &
+      " rev-parse refs/notes/test-certificates/certificates").strip()
+    executable(fx.libBare / "hooks" / "pre-receive", "#!/bin/sh\nexit 73\n")
+    installHooks(fx)
+    let stopped = invokePush(fx)
+    check stopped.code != 0
+    check report(fx)["stoppedStage"].getStr() == "source-push"
+    check remoteHead(gitBin, fx.appBare) == appSha
+    check remoteHead(gitBin, fx.libBare) == libBefore
+    check remoteHead(gitBin, fx.coreBare) == coreBefore
+    checkSourceCapabilitiesEmpty(fx, gitBin)
+    removeFile(fx.libBare / "hooks" / "pre-receive")
+    let retried = invokePush(fx)
+    if retried.code != 0: checkpoint(retried.output)
+    check retried.code == 0
+    check remoteHead(gitBin, fx.appBare) == appSha
+    check remoteHead(gitBin, fx.libBare) == libSha
+    check remoteHead(gitBin, fx.coreBare) == coreSha
+    check report(fx)["repos"][0]["outcome"].getStr() == "already-published"
+    let carried = run(q(gitBin) & " -C " & q(fx.appBare) &
+      " rev-parse refs/notes/test-certificates/certificates")
+    check carried.code == 0
+    check carried.output.strip() == appNote
+    check report(fx)["certNotesDiagnostic"].getStr() == ""
+    check report(fx)["lockPublished"].getBool()
+    checkSourceCapabilitiesEmpty(fx, gitBin)
+
+  test "a dirty component peer refuses before the first source publication":
+    let gitBin = findExe("git")
+    check gitBin.len > 0
+    let fx = setup(gitBin, "cycle-dirty")
+    defer: removeDir(fx.scratch)
+    configureCycle(fx, gitBin)
+    let before = [remoteHead(gitBin, fx.appBare),
+      remoteHead(gitBin, fx.libBare), remoteHead(gitBin, fx.coreBare)]
+    discard commit(fx, gitBin, fx.app, "dirty-cycle-app")
+    discard commit(fx, gitBin, fx.lib, "dirty-cycle-lib")
+    discard commit(fx, gitBin, fx.core, "dirty-cycle-core")
+    writeFile(fx.core / "dirty.txt", "uncommitted\n")
+    installHooks(fx)
+    check invokePush(fx).code != 0
+    check [remoteHead(gitBin, fx.appBare), remoteHead(gitBin, fx.libBare),
+      remoteHead(gitBin, fx.coreBare)] == before
+
+  test "component authority never proves an unpublished exact committed pin":
+    let gitBin = findExe("git")
+    check gitBin.len > 0
+    for kind in ["repro", "flake"]:
+      let fx = setup(gitBin, "cycle-pin-" & kind)
+      defer: removeDir(fx.scratch)
+      configureCycle(fx, gitBin)
+      let before = [remoteHead(gitBin, fx.appBare),
+        remoteHead(gitBin, fx.libBare), remoteHead(gitBin, fx.coreBare)]
+      let libSha = commit(fx, gitBin, fx.lib, "pin-cycle-lib")
+      if kind == "repro":
+        writeFile(fx.app / "repro.lock",
+          "schema = \"reprobuild.solved-graph-lock.v2\"\n[lock]\n" &
+          "platform = \"x86_64-linux\"\noptimal = true\n" &
+          "inputs_digest = \"fixture\"\nvariants = []\npackages = []\n" &
+          "deps = [{name = \"lib\", path = \"../lib\", coord_kind = \"vcs\", " &
+          "url = \"" & fileUrl(fx.libBare) & "\", ref = \"main\", revision = \"" &
+          libSha & "\", integrity = \"git-sha1:" & libSha &
+          "\", version = \"\", visibility = \"public\", participation = \"\", " &
+          "depends = \"\", groups = \"\"}]\n")
+      else:
+        writeFile(fx.app / "flake.lock", $(%*{
+          "version": 7, "root": "root", "nodes": {
+            "root": {"inputs": {"lib": "lib"}},
+            "lib": {"locked": {"type": "git", "url": fileUrl(fx.libBare),
+              "rev": libSha}, "original": {"type": "git", "url": fileUrl(fx.libBare)}}}}))
+      discard require(q(gitBin) & " -C " & q(fx.app) & " add " & kind & ".lock")
+      discard commit(fx, gitBin, fx.app, "pin-cycle-app")
+      discard commit(fx, gitBin, fx.core, "pin-cycle-core")
+      installHooks(fx)
+      let stopped = invokePush(fx)
+      check stopped.code != 0
+      check [remoteHead(gitBin, fx.appBare), remoteHead(gitBin, fx.libBare),
+        remoteHead(gitBin, fx.coreBare)] == before
+      let gate = parseFile(fx.workspace / ".repro" / "build" / "reports" /
+        "check-report.json")
+      check gate["failures"].anyIt(
+        it["property"].getStr() == "source-component-unpublished-pin")
+
+  test "a cyclic member publishes every configured push destination":
+    let gitBin = findExe("git")
+    check gitBin.len > 0
+    let fx = setup(gitBin, "cycle-plural-destinations")
+    defer: removeDir(fx.scratch)
+    configureCycle(fx, gitBin)
+    let secondBare = fx.scratch / "app-second.git"
+    discard require(q(gitBin) & " clone --bare " & q(fileUrl(fx.appBare)) &
+      " " & q(secondBare))
+    discard require(q(gitBin) & " -C " & q(fx.app) &
+      " remote set-url --add --push origin " & q(fileUrl(fx.appBare)))
+    discard require(q(gitBin) & " -C " & q(fx.app) &
+      " remote set-url --add --push origin " & q(fileUrl(secondBare)))
+    let secondBefore = remoteHead(gitBin, secondBare)
+    let libBefore = remoteHead(gitBin, fx.libBare)
+    let coreBefore = remoteHead(gitBin, fx.coreBare)
+    let appSha = commit(fx, gitBin, fx.app, "plural-cycle-app")
+    let libSha = commit(fx, gitBin, fx.lib, "plural-cycle-lib")
+    let coreSha = commit(fx, gitBin, fx.core, "plural-cycle-core")
+    executable(secondBare / "hooks" / "pre-receive", "#!/bin/sh\nexit 73\n")
+    installHooks(fx)
+    let stopped = invokePush(fx)
+    check stopped.code != 0
+    check report(fx)["stoppedStage"].getStr() == "source-push"
+    check remoteHead(gitBin, fx.appBare) == appSha
+    check remoteHead(gitBin, secondBare) == secondBefore
+    check remoteHead(gitBin, fx.libBare) == libBefore
+    check remoteHead(gitBin, fx.coreBare) == coreBefore
+    checkSourceCapabilitiesEmpty(fx, gitBin)
+    removeFile(secondBare / "hooks" / "pre-receive")
+    # URL1 is now a Git no-op; its unused token still must be removed while
+    # URL2 and the remaining component members finish on retry.
+    let pushed = invokePush(fx)
+    if pushed.code != 0: checkpoint(pushed.output)
+    check pushed.code == 0
+    check remoteHead(gitBin, fx.appBare) == appSha
+    check remoteHead(gitBin, secondBare) == appSha
+    check remoteHead(gitBin, fx.libBare) == libSha
+    check remoteHead(gitBin, fx.coreBare) == coreSha
+    check report(fx)["lockPublished"].getBool()
+    checkSourceCapabilitiesEmpty(fx, gitBin)
+
+  test "a preserved hook cannot change a component peer after preflight":
+    let gitBin = findExe("git")
+    check gitBin.len > 0
+    for drift in ["head", "dirty", "remote"]:
+      let fx = setup(gitBin, "cycle-drift-" & drift)
+      defer: removeDir(fx.scratch)
+      configureCycle(fx, gitBin)
+      let before = [remoteHead(gitBin, fx.appBare),
+        remoteHead(gitBin, fx.libBare), remoteHead(gitBin, fx.coreBare)]
+      discard commit(fx, gitBin, fx.app, "drift-cycle-app")
+      discard commit(fx, gitBin, fx.lib, "drift-cycle-lib")
+      discard commit(fx, gitBin, fx.core, "drift-cycle-core")
+      let mutation = case drift
+        of "head": q(gitBin) & " -C " & q(fx.core) & " update-ref HEAD " & before[2]
+        of "dirty": "printf dirty > " & q(fx.core / "dirty.txt")
+        else: q(gitBin) & " -C " & q(fx.core) &
+          " remote set-url --push origin " & q(fileUrl(fx.otherBare))
+      executable(fx.app / ".git" / "hooks" / "pre-push",
+        "#!/bin/sh\nset -eu\n" & mutation & "\ncat >/dev/null\n")
+      installHooks(fx)
+      check invokePush(fx).code != 0
+      check [remoteHead(gitBin, fx.appBare), remoteHead(gitBin, fx.libBare),
+        remoteHead(gitBin, fx.coreBare)] == before
+      let gate = parseFile(fx.workspace / ".repro" / "build" / "reports" /
+        "check-report.json")
+      check gate["failures"].anyIt(
+        it["property"].getStr() == "source-component-publication")
+
+  test "external dependencies publish before a cyclic component":
+    let gitBin = findExe("git")
+    check gitBin.len > 0
+    let fx = setup(gitBin, "cycle-external-dependency")
+    defer: removeDir(fx.scratch)
+    writeFile(fx.manifests / "repos" / "core.toml",
+      repoToml("core", "core-origin", @["app", "other"]))
+    discard require(q(gitBin) & " -C " & q(fx.manifests) & " add repos")
+    discard require(q(gitBin) & " -C " & q(fx.manifests) & " commit -m cycle")
+    discard require(q(gitBin) & " -C " & q(fx.manifests) & " push origin main")
+    let appSha = commit(fx, gitBin, fx.app, "external-cycle-app")
+    let libSha = commit(fx, gitBin, fx.lib, "external-cycle-lib")
+    let coreSha = commit(fx, gitBin, fx.core, "external-cycle-core")
+    let otherSha = commit(fx, gitBin, fx.other, "external-cycle-other")
+    installHooks(fx)
+    let pushed = invokePush(fx)
+    if pushed.code != 0: checkpoint(pushed.output)
+    check pushed.code == 0
+    check report(fx)["order"] == %*["other", "app", "lib", "core"]
+    for member in [("app", fx.appBare, appSha), ("lib", fx.libBare, libSha),
+        ("core", fx.coreBare, coreSha), ("other", fx.otherBare, otherSha)]:
+      check remoteHead(gitBin, member[1]) == member[2]
+      check remoteHasLock(gitBin, fx, member[0], member[2])
+    check report(fx)["lockPublished"].getBool()
+    checkSourceCapabilitiesEmpty(fx, gitBin)
+
+  test "an obsolete hook interpreter refuses cyclic publication before any source":
+    let gitBin = findExe("git")
+    check gitBin.len > 0
+    let fx = setup(gitBin, "cycle-interpreter-skew")
+    defer: removeDir(fx.scratch)
+    configureCycle(fx, gitBin)
+    let handshake = runShell(shellCommand(@[fx.reproBin, "hooks", "protocol",
+      "--require=2", "--require-source-component"]))
+    check handshake.code == 0
+    check handshake.output.strip() == "2"
+    let before = [remoteHead(gitBin, fx.appBare),
+      remoteHead(gitBin, fx.libBare), remoteHead(gitBin, fx.coreBare)]
+    discard commit(fx, gitBin, fx.app, "skew-cycle-app")
+    discard commit(fx, gitBin, fx.lib, "skew-cycle-lib")
+    discard commit(fx, gitBin, fx.core, "skew-cycle-core")
+    installHooks(fx)
+    let oldCli = getAppFilename()
+    let stopped = runShell(shellCommand(@[fx.reproBin, "push", "app",
+      "--no-certify", "--write-report", "--workspace-root=" & fx.workspace,
+      "--current-repo=" & fx.app, "--json"],
+      @[(name: "REPROBUILD_REPRO", value: oldCli),
+        (name: ObsoleteComponentProtocolEnv, value: "1")]))
+    check stopped.code != 0
+    check report(fx)["stoppedStage"].getStr() == "source-component-hook-preflight"
+    check "REPROBUILD_REPRO=" in report(fx)["retryCommand"].getStr()
+    check [remoteHead(gitBin, fx.appBare), remoteHead(gitBin, fx.libBare),
+      remoteHead(gitBin, fx.coreBare)] == before
+    checkSourceCapabilitiesEmpty(fx, gitBin)
+
+  test "deferred component notes revalidate each peer before transport":
+    let gitBin = findExe("git")
+    check gitBin.len > 0
+    let fx = setup(gitBin, "cycle-notes-redirect")
+    defer: removeDir(fx.scratch)
+    configureCycle(fx, gitBin)
+    # All source HEADs are already published. The first notes hook changes
+    # a later peer's destination between global preflight and notes transport.
+    for member in [fx.app, fx.lib, fx.core]:
+      discard require(q(gitBin) & " -C " & q(member) &
+        " notes --ref=refs/notes/test-certificates/certificates add -m " &
+        q("deferred notes destination control"))
+    let foreignBefore = remoteHead(gitBin, fx.otherBare)
+    executable(fx.app / ".git" / "hooks" / "pre-push",
+      "#!/bin/sh\nset -eu\n" & q(gitBin) & " -C " & q(fx.lib) &
+      " remote set-url --push origin " & q(fileUrl(fx.otherBare)) &
+      "\ncat >/dev/null\n")
+    installHooks(fx)
+    let stopped = invokePush(fx)
+    check stopped.code != 0
+    check report(fx)["stoppedStage"].getStr() == "source-revalidation"
+    check "certificate notes not carried" in
+      report(fx)["certNotesDiagnostic"].getStr()
+    check remoteHead(gitBin, fx.otherBare) == foreignBefore
+    check run(q(gitBin) & " -C " & q(fx.otherBare) &
+      " rev-parse --verify refs/notes/test-certificates/certificates").code != 0
+    checkSourceCapabilitiesEmpty(fx, gitBin)
 
   test "raw dependent refuses unpublished dependency":
     let gitBin = findExe("git")
