@@ -16722,7 +16722,7 @@ proc runReproExecCommand(args: openArray[string];
   # started by the command (`cd A && B/build/bin/repro exec -- A/...`)
   # resolves its libraries from B. Caller values are not seeds and stay.
   clearSeededSourcePackageEnvironment()
-  return runActivatedCommand(artifact, edge.artifactPath, parsed.command,
+  return execActivatedCommand(artifact, edge.artifactPath, parsed.command,
     parsed.selection.projectRoot, producerOps, toolOps)
 
 proc defaultInteractiveShell(): string =
