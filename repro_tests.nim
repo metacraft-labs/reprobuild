@@ -17325,6 +17325,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_runquota_daemon_from_another_build_makes_way.nim",
+    binary: "build/test-bin/t_runquota_daemon_from_another_build_makes_way",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_runquota_long_temp_rendezvous.nim",
     binary: "build/test-bin/t_runquota_long_temp_rendezvous",
     defines: @[],

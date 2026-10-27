@@ -25634,8 +25634,30 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
   # ``connectDefault`` on Windows, so when it returns true the daemon
   # is genuinely accepting connections.
   if isRunQuotaDaemonReachable():
-    warnRunQuotaMemoryOverrideNotApplied()
-    return nil
+    # A DAEMON FROM ANOTHER BUILD MAKES WAY (Windows). It outlives every
+    # build there, so one an installer replaced would otherwise keep serving
+    # this install's `repro` from the old image until its user logged off.
+    # Asked to retire, it exits once no client is connected; when that is
+    # already true the endpoint is free and this invocation falls through
+    # to start its own `runquotad` below. Otherwise this build adopts it as
+    # before, and is told why. POSIX is not asked: its auto-started daemon
+    # ends with its invocation, and the service there is the package
+    # manager's to restart. See `decideRunQuotaHandover` and
+    # reprobuild-specs/RunQuota-Host-Configuration.md, "A daemon from
+    # another build makes way".
+    when defined(windows):
+      let candidate =
+        try: findRunQuotaDaemonBin()
+        except OSError: ""
+      let report = decideRunQuotaHandover(candidate)
+      if report.note.len > 0:
+        stderr.writeLine("repro: note: " & report.note)
+      if report.handover == rhAdopt:
+        warnRunQuotaMemoryOverrideNotApplied()
+        return nil
+    else:
+      warnRunQuotaMemoryOverrideNotApplied()
+      return nil
   # M9.R.13c.1 — **deterministic stale-pipe recovery**. The wedge that
   # blocked every M9.R.13b iter past iter 11 (and forced the operator
   # to manually ``Stop-Process`` ``runquotad.exe`` between every build)
@@ -25917,6 +25939,11 @@ proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
   ## withdrawn FIRST, before the terminate and the reap, so the handler can
   ## never signal the pid once it may belong to another process; the last
   ## release restores the signal dispositions the invocation had before.
+  ##
+  ## An ADOPTED retiring daemon (Windows) is let go here too: the connection
+  ## that kept it alive for this invocation is closed, so it can exit once
+  ## its other clients are gone (`decideRunQuotaHandover`).
+  releaseAdoptedDaemonHold()
   if process == nil:
     return
   when not defined(windows):
