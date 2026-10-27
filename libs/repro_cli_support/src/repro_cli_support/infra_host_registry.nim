@@ -31,7 +31,7 @@ import repro_profile
 import repro_profile_intent
 import repro_profile_compile
 import repro_home_intent/host_identity as hostIdentityMod
-from repro_core/source_root import publicCliImagePath
+from repro_cli_support/self_spawn_image import selfSpawnIoMonitorPath
 
 type
   HostRegistryVerdict* = object
@@ -74,7 +74,9 @@ proc readHostRegistry*(registryPath, host, stateDir: string):
     return
   let opts = ProfileCompileOptions(
     stateDir: stateDir,
-    publicCliPath: publicCliImagePath(),
+    # Guarded like every internal-verb spawn: the compile wraps its actions
+    # in `<publicCliPath> internal io monitor` (`self_spawn_image`).
+    publicCliPath: selfSpawnIoMonitorPath(),
     repoRoot: "",
     workDir: registryPath.parentDir,
     verbose: false,

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2388,
+    "nimTestBinaries": 2389,
     "pureUnitConsolidationGroups": 68,
     "pureUnitTests": 685,
-    "staticallyDetectedRuntimeCompilerFlowTests": 129,
-    "testEntries": 2426
+    "staticallyDetectedRuntimeCompilerFlowTests": 130,
+    "testEntries": 2427
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1384,7 +1384,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1318,
+      "integration": 1319,
       "platform/destructive": 146,
       "pure unit": 685,
       "unclassified": 259
@@ -1589,9 +1589,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2388,
+    "nimTestBinaryCount": 2389,
     "pythonTestFileCount": 38,
-    "testEntryCount": 2426
+    "testEntryCount": 2427
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -1615,6 +1615,60 @@
         }
       ],
       "source": "libs/repro_build_engine/tests/test_monitor_finish_handoff_is_exclusive.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 91,
+          "path": "libs/repro_cli_support/tests/t_in_process_profile_compile_never_spawns_its_caller.nim",
+          "patterns": [
+            "repro-compile-home-profile"
+          ],
+          "runtimeCompilerApi": "compileAndAdaptHomeProfile",
+          "runtimeCompilerApiModule": "repro_cli_support/home",
+          "snippet": "let outcome = cli_home.compileAndAdaptHomeProfile(f.profilePath,"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 102,
+          "path": "libs/repro_cli_support/tests/t_in_process_profile_compile_never_spawns_its_caller.nim",
+          "patterns": [
+            "repro-compile-home-profile"
+          ],
+          "runtimeCompilerApi": "compileAndAdaptHomeProfile",
+          "runtimeCompilerApiModule": "repro_cli_support/home",
+          "snippet": "let outcome = cli_home.compileAndAdaptHomeProfile(f.profilePath,"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 111,
+          "path": "libs/repro_cli_support/tests/t_in_process_profile_compile_never_spawns_its_caller.nim",
+          "patterns": [
+            "repro-compile-home-profile"
+          ],
+          "runtimeCompilerApi": "compileAndAdaptHomeProfile",
+          "runtimeCompilerApiModule": "repro_cli_support/home",
+          "snippet": "let outcome = cli_home.compileAndAdaptHomeProfile(f.profilePath,"
+        }
+      ],
+      "source": "libs/repro_cli_support/tests/t_in_process_profile_compile_never_spawns_its_caller.nim"
     },
     {
       "class": "graph-fixture",
@@ -3499,7 +3553,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 312,
+          "line": 334,
           "path": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
           "patterns": [
             "repro-compile-home-profile"
@@ -11002,6 +11056,26 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_in_process_profile_compile_never_spawns_its_caller",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_core",
+        "repro_profile_compile",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cli_support/tests/t_in_process_profile_compile_never_spawns_its_caller.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {

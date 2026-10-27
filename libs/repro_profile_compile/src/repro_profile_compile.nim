@@ -108,6 +108,7 @@ export edge.ProfileCompileScratchEnvNames
 export edge.ProfileCompileEnvPassthrough
 export edge.profileCompileEngineConfig
 export edge.compileProfileToRbpi
+export edge.MissingPublicCliPathReason
 export edge.ProfilePlatformProbeActionId
 export edge.ProfilePlatformProbeArtifact
 export edge.cachedPlatformProbePath

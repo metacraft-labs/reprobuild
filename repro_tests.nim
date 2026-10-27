@@ -1503,6 +1503,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_in_process_profile_compile_never_spawns_its_caller.nim",
+    binary: "build/test-bin/t_in_process_profile_compile_never_spawns_its_caller",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim",
     binary: "build/test-bin/t_infra_apply_profile_without_live_state",
     defines: @[],
