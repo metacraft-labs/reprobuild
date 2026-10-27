@@ -482,6 +482,20 @@ proc moduleLevelWork*(text: string): string =
       continue
     if inTripleQuote or line.len == 0 or line[0] notin {'a' .. 'z'}:
       continue
+    if line.startsWith("let ") or line.startsWith("var "):
+      # ``let x = f(...)`` at module level runs ``f`` at every start-up:
+      # ``let markedSnp = sharedSnpTestHierarchy(…)`` generates RSA-4096
+      # keys, ~33 CPU-s for every case of its group. A capitalised callee is
+      # an object constructor and does no work.
+      let eq = line.find('=')
+      if eq > 0 and (eq + 1 >= line.len or line[eq + 1] != '='):
+        let rhs = line[eq + 1 .. ^1].strip()
+        var k = 0
+        while k < rhs.len and (rhs[k].isAlphaNumeric or rhs[k] in {'_', '.'}):
+          inc k
+        if k > 0 and k < rhs.len and rhs[k] == '(' and rhs[0] in {'a' .. 'z'}:
+          return line
+      continue
     var i = 0
     while i < line.len and (line[i].isAlphaNumeric or line[i] in {'_', '.'}):
       inc i

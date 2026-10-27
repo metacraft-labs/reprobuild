@@ -201,12 +201,18 @@ suite "test binary grouping: source text facts":
     # at column 0 runs at every process start.
     check moduleLevelWork(["let root = createTempDir(\"x\", \"\")",
       "createDir(root / \"payload\")", ""].join("\n")) ==
-      "createDir(root / \"payload\")"
+      "let root = createTempDir(\"x\", \"\")"
     check moduleLevelWork(["import std/os", "proc helper() = discard",
       "let x = 1", "when isMainModule:", "  main()", ""].join("\n")) == ""
     let q = "\"\"\""
     check moduleLevelWork(["const fixture = " & q, "console.log(1)", q,
       ""].join("\n")) == ""
+    # A module-level initialiser that calls a proc runs it at start-up; an
+    # object constructor does not.
+    check moduleLevelWork("let marked = sharedSnpTestHierarchy(now)") ==
+      "let marked = sharedSnpTestHierarchy(now)"
+    check moduleLevelWork("let cfg = TrustConfig(strict: true)") == ""
+    check moduleLevelWork("var n = 0") == ""
 
   test "compile pragma targets are repo-relative":
     check compilePragmaTargets("{.compile: \"../c/probe.c\".}",
