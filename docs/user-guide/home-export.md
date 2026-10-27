@@ -322,6 +322,13 @@ selections and must stay out of version control, even when multiple hosts
 share a profile and target. Adding, removing or changing the local lock
 cannot change a committed export or its `--check` result.
 
+If a catalog definition or an imported contribution catalog cannot be
+projected, export exits `1`, names the affected package and failed extraction,
+and prints no document. This also applies to `--check` and `--target`:
+`--check` reports the projection error instead of snapshot drift. A successful
+projection that offers no realization for a target can still classify a
+reference as `unresolved` for that target.
+
 A reference no definition it can see
 names at all might be an application defined in the `reprobuild-packages`
 catalog, so when there is one and no catalog checkout is reachable (beside

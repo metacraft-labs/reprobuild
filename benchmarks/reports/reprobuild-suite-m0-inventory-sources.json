@@ -30257,13 +30257,14 @@
         "repro_home_intent",
         "repro_profile",
         "repro_profile_compile",
-        "repro_profile_intent"
+        "repro_profile_intent",
+        "repro_project_dsl"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": true,
       "source": "tests/e2e/m83/t_e2e_home_export_matches_compiled_intent.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

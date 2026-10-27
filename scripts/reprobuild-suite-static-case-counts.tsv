@@ -1223,7 +1223,7 @@ tests/e2e/m83/t_e2e_export_refuses_compile_time_dependent_intent.nim	nim	4
 tests/e2e/m83/t_e2e_home_add_appends_data_row.nim	nim	2
 tests/e2e/m83/t_e2e_home_export_check_detects_stale_snapshot.nim	nim	1
 tests/e2e/m83/t_e2e_home_export_expands_data_files.nim	nim	1
-tests/e2e/m83/t_e2e_home_export_matches_compiled_intent.nim	nim	2
+tests/e2e/m83/t_e2e_home_export_matches_compiled_intent.nim	nim	4
 tests/e2e/m83/t_e2e_home_facts_from_isolated_plan.nim	nim	1
 tests/e2e/m83/t_e2e_home_host_flag_resolved_once.nim	nim	5
 tests/e2e/m83/t_e2e_home_planner_refuses_system_scope_resource.nim	nim	2
