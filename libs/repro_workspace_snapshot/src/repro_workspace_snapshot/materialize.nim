@@ -31,8 +31,31 @@
 ## No write ever follows a symlink: every parent component of a written or
 ## deleted path must be a real directory under `dest` (a manifest that first
 ## creates `a -> /etc` and then writes `a/passwd` is refused).
+##
+## Distributed-Execution M1 review fixes (2026-10-22):
+##
+## * CANONICAL BYTES. The fresh checkout writes blob bytes itself
+##   (`checkoutBaseTree`, above). The worktree pool's base checkout
+##   (`pool.resetBase`) runs git's own `read-tree -u` with `git_process.
+##   canonicalCheckoutArgs` (attributes from the empty tree, no attributes
+##   file, `core.autocrlf=false`; git >= 2.40) and refuses a cache holding
+##   `info/attributes` (which git applies regardless), then hashes every file
+##   it wrote. Every git here runs with `GIT_NO_REPLACE_OBJECTS`
+##   (`git_process.gitEnvironment`).
+## * BASE PACKS. A base commit the cache lacks is completed from the
+##   snapshot's base pack, when it names one (`ensureBaseObjects`): the pack
+##   is checked by BLAKE3 and size, indexed into the cache with
+##   `index-pack --fsck-objects`, and the commit and its whole tree must then
+##   be present.
+## * A deletion that empties a directory removes the directory, so a
+##   snapshot that replaces a directory with a file materializes.
+## * BOUNDED BASE TREE (round 2): a base pack is capped compressed only, so
+##   before any checkout the base tree's blob sizes are summed
+##   (`git ls-tree -r -l`): a blob over `MaxBlobBytes` or a total over
+##   `maxTreeBytes` (default `DefaultMaxBaseTreeBytes`, 4 GiB) refuses the
+##   snapshot with the reason, before a byte of it is written to disk.
 
-import std/[options, os, osproc, sets, streams, strtabs, strutils, tables]
+import std/[options, os, osproc, sets, streams, strutils, tables]
 when defined(posix):
   import std/posix
 
@@ -40,6 +63,7 @@ import blake3
 
 import repro_core/ambient_execution
 
+import ./git_process
 import ./git_tree
 import ./manifest
 
@@ -71,38 +95,6 @@ type
       ## The regular-file and symlink paths written under `dest`.
     gitlinks*: seq[(string, string)]
       ## Submodule entries (path, commit id); nothing is written for them.
-
-proc gitEnv(extraEnv: openArray[(string, string)]): StringTableRef =
-  ## The environment of every git this module runs: a fresh table, so no
-  ## ambient `GIT_*` variable (`GIT_DIR`, `GIT_OBJECT_DIRECTORY`,
-  ## `GIT_REPLACE_REF_BASE`, …) reaches it.
-  result = newStringTable(modeCaseSensitive)
-  for key in ["PATH", "HOME", "TMPDIR", "SYSTEMROOT"]:
-    if existsEnv(key): result[key] = getEnv(key)
-  result["GIT_CONFIG_NOSYSTEM"] = "1"
-  result["GIT_TERMINAL_PROMPT"] = "0"
-  # Read the objects the ids NAME, never a `refs/replace/*` substitute: a
-  # replace ref in the cache would otherwise make `ls-tree` list another
-  # tree for the base commit and `cat-file` return another blob's bytes
-  # (https://git-scm.com/docs/git-replace). Grafts change only a commit's
-  # parents, which nothing here reads.
-  result["GIT_NO_REPLACE_OBJECTS"] = "1"
-  for (k, v) in extraEnv: result[k] = v
-
-proc runGit(gitExe: string; args: openArray[string];
-            extraEnv: openArray[(string, string)] = []): tuple[code: int;
-                                                            output: string] =
-  # The worker's OWN repository cache, read with the git the caller names
-  # (`gitExe`; production passes the daemon's resolved git). Nothing here
-  # runs a binary a caller supplied over the wire.
-  let p = uncontrolledStartProcess(gitExe, args = @args, env = gitEnv(extraEnv),
-    options = {poUsePath, poStdErrToStdOut})
-  defer: p.close()
-  let output = p.outputStream.readAll()
-  (p.waitForExit(), output)
-
-proc gitDirOf(repoCache: string): string =
-  if dirExists(repoCache / ".git"): repoCache / ".git" else: repoCache
 
 proc treeEntriesAt*(repoCache, commit: string;
                     gitExe = "git"): tuple[ok: bool;
@@ -188,6 +180,61 @@ proc ensureParents(dest, rel: string) =
     if not dirExists(cur):
       createDir(cur)
 
+proc pruneEmptyParents(dest, rel: string) =
+  ## Removes the directories above `rel` that its deletion left empty (git
+  ## tracks no empty directory), innermost first, never `dest` itself. The
+  ## parents were checked to be real directories (`safeParentChain`).
+  var parts = rel.split('/')
+  while parts.len > 1:
+    parts.setLen(parts.len - 1)
+    let dir = dest / parts.join("/")
+    if symlinkExists(dir) or not dirExists(dir):
+      return
+    var empty = true
+    for _ in walkDir(dir):
+      empty = false
+      break
+    if not empty:
+      return
+    try: removeDir(dir) except OSError: return
+
+proc deleteSnapshotPath*(dest, rel: string; allowEmptyDirectory = false): string =
+  ## Removes the file or symlink a snapshot deletes, never through a
+  ## non-directory parent, and the directories that leaves empty. "" on
+  ## success, else the reason. Gitlink deletion/type transitions may opt in
+  ## to removing their empty checkout directory. Never remove its contents.
+  let bad = safeParentChain(dest, rel)
+  if bad.len > 0:
+    return "refusing to delete through a non-directory component: " & bad
+  if fileExists(dest / rel) or symlinkExists(dest / rel):
+    removeFile(dest / rel)
+  elif allowEmptyDirectory and dirExists(dest / rel):
+    for _ in walkDir(dest / rel, checkDir = true):
+      return "refusing to remove a non-empty gitlink directory: " & rel
+    removeDir(dest / rel)
+  pruneEmptyParents(dest, rel)
+  ""
+
+proc verifiedBlob*(m: ModifiedFileEntry; readBlob: BlobReader):
+    tuple[ok: bool; bytes: seq[byte]; reason: string] =
+  ## The bytes of a modified entry, checked three ways before anything is
+  ## written: BLAKE3 (what they were fetched by), size, and git blob id
+  ## (what the tree id is computed over).
+  let blob = readBlob(m.blake3Digest)
+  if blob.isNone:
+    return (false, @[], "blob " & digestHex(m.blake3Digest) & " for " &
+      m.relPath & " is unavailable")
+  let bytes = blob.get()
+  if blake3.digest(bytes) != m.blake3Digest:
+    return (false, @[], "blob for " & m.relPath &
+      " does not hash to its BLAKE3 digest")
+  if uint64(bytes.len) != m.size:
+    return (false, @[], "blob for " & m.relPath & " has the wrong size")
+  if gitBlobOid(bytes) != m.gitOid:
+    return (false, @[], "blob for " & m.relPath &
+      " does not hash to its git blob id")
+  (true, bytes, "")
+
 proc writeTracked(dest, rel: string; mode: uint32; content: string): string =
   ## Writes `content` — blob bytes, verbatim — at `dest/rel` as git mode
   ## `mode` would check it out (a symlink's content is its target). "" on
@@ -210,6 +257,22 @@ proc writeTracked(dest, rel: string; mode: uint32; content: string): string =
     setFilePermissions(target, perms)
   ""
 
+proc writeSnapshotEntry*(dest: string; m: ModifiedFileEntry;
+                         readBlob: BlobReader): string =
+  ## Writes one verified, non-submodule modified entry under `dest`, never
+  ## through a non-directory parent. "" on success, else the reason.
+  let blob = verifiedBlob(m, readBlob)
+  if not blob.ok:
+    return blob.reason
+  var text = newString(blob.bytes.len)
+  if blob.bytes.len > 0:
+    copyMem(addr text[0], unsafeAddr blob.bytes[0], blob.bytes.len)
+  writeTracked(dest, m.relPath, m.mode, text)
+
+proc toText(bytes: openArray[byte]): string =
+  result = newString(bytes.len)
+  if bytes.len > 0: copyMem(addr result[0], unsafeAddr bytes[0], bytes.len)
+
 proc readExactly(s: Stream; n: int): string =
   ## Up to `n` bytes of `s`, fewer only at end of stream. One `readData` is
   ## not enough: on Windows a pipe read returns what one `ReadFile` call
@@ -226,18 +289,19 @@ proc checkoutBaseTree*(repoCache, commit, dest: string;
                        gitExe = "git"): BaseCheckout =
   ## Writes `commit`'s tree from the repository cache into `dest` (created
   ## when absent) as BLOB BYTES — see the module doc for why no git
-  ## conversion may run. The one definition of a base checkout: materializing
-  ## a snapshot uses it, and so must anything that resets a worktree to a
-  ## base commit. Gitlinks are reported, not written. A filesystem error
-  ## while writing (a blob path where `dest` already holds a directory, …)
-  ## raises, as it does from `materializeRepoSnapshot`.
+  ## conversion may run. Gitlinks are reported, not written. A filesystem
+  ## error while writing (a blob path where `dest` already holds a
+  ## directory, …) raises, as it does from `materializeRepoSnapshot`.
+  ## (The worktree pool's base checkout uses git's own canonical checkout
+  ## instead, `pool.resetBase`, and hashes every file it wrote.)
   ##
   ## Blobs are read through ONE `git cat-file --batch` (never `--filters` or
   ## `--textconv`, which would apply the very conversions this avoids), one
   ## request at a time: write an id, read its response, so neither pipe can
   ## fill while the other side waits. `--batch` flushes after every object
   ## unless `--buffer` is given (https://git-scm.com/docs/git-cat-file). Each
-  ## blob must hash to the id the tree names before it is written.
+  ## blob must hash to the id the tree names before it is written. The
+  ## caller bounds the tree's sizes first (`baseTreeSizeRefusal`).
   let entries = treeEntriesAt(repoCache, commit, gitExe)
   if not entries.ok:
     return BaseCheckout(reason: "base commit " & commit &
@@ -246,7 +310,7 @@ proc checkoutBaseTree*(repoCache, commit, dest: string;
   if entries.blobs.len > 0:
     let p = uncontrolledStartProcess(gitExe,
       args = ["--git-dir=" & gitDirOf(repoCache), "cat-file", "--batch"],
-      env = gitEnv([]), options = {poUsePath})
+      env = gitEnvironment([]), options = {poUsePath})
     # POSIX: a git that died (a corrupt pack, a full disk) leaves our next
     # request on a pipe with no reader, and SIGPIPE's DEFAULT disposition
     # kills the whole worker, silently. Ignored for the batch, the write
@@ -321,14 +385,157 @@ proc checkoutBaseTree*(repoCache, commit, dest: string;
   result.gitlinks = entries.gitlinks
   result.ok = true
 
+const
+  DefaultMaxBaseTreeBytes* = 4'u64 * 1024'u64 * 1024'u64 * 1024'u64
+    ## The most bytes a base commit's checkout may write (sum of its blobs).
+
+proc baseTreeSizeRefusal*(gitExe, gitDir, commit: string;
+                          maxTreeBytes = DefaultMaxBaseTreeBytes;
+                          maxBlobBytes = MaxBlobBytes): string =
+  ## "" when every blob of `commit`'s tree is at most `maxBlobBytes` and
+  ## all of them together at most `maxTreeBytes`, else the reason. Reads
+  ## object sizes only (`ls-tree -l`); nothing is inflated to disk.
+  let res = runGit(gitExe, ["--git-dir=" & gitDir, "ls-tree", "-r", "-l",
+    "-z", "--full-tree", commit], mergeStderr = false)
+  if res.code != 0:
+    return "listing the base tree failed: " & describe(res)
+  var total = 0'u64
+  for rec in nulRecords(res.output):
+    # `<mode> SP <type> SP <object> SP+ <size> TAB <path>`
+    let tab = rec.find('\t')
+    if tab < 0: continue
+    let meta = rec[0 ..< tab].splitWhitespace()
+    if meta.len != 4 or meta[1] != "blob": continue
+    var size: uint64
+    try: size = uint64(parseBiggestUInt(meta[3]))
+    except ValueError:
+      return "the base tree lists an unreadable size for " & rec[tab + 1 .. ^1]
+    if size > maxBlobBytes:
+      return "base commit " & commit & " holds " & rec[tab + 1 .. ^1] &
+        " of " & $size & " bytes, more than a worker checks out (" &
+        $maxBlobBytes & ")"
+    total += size
+    if total > maxTreeBytes:
+      return "base commit " & commit & " checks out to more than " &
+        $maxTreeBytes & " bytes, more than a worker checks out"
+  ""
+
+proc commitPresent*(gitExe, gitDir, commit: string): bool =
+  runGit(gitExe, ["--git-dir=" & gitDir, "cat-file", "-e",
+    commit & "^{commit}"]).code == 0
+
+proc baseComplete*(gitExe, gitDir, commit: string): bool =
+  ## The commit is in the cache with every object of its tree (what a
+  ## checkout of it reads; its history is not needed).
+  if not commitPresent(gitExe, gitDir, commit):
+    return false
+  let res = runGit(gitExe, ["--git-dir=" & gitDir, "rev-list", "--objects",
+    "--missing=print", commit & "^{tree}"], mergeStderr = false)
+  if res.code != 0:
+    return false
+  for line in res.output.splitLines:
+    if line.startsWith("?"):
+      return false
+  true
+
+proc cacheNeedsBasePack*(repoCache: string; snap: RepoSnapshot;
+                         gitExe = "git"): bool =
+  ## Whether materializing `snap` from `repoCache` without a worktree pool
+  ## would need its base pack (it carries one and the cache lacks the base
+  ## commit or objects of its tree).
+  snap.hasBasePack and not baseComplete(gitExe, gitDirOf(repoCache),
+    snap.baseCommitSha)
+
+proc applyBasePack*(gitExe, gitDir: string; snap: RepoSnapshot;
+                    readBlob: BlobReader): string =
+  ## Indexes the snapshot's base pack into the repository cache. "" or the
+  ## reason.
+  if not snap.hasBasePack:
+    return "the snapshot carries no base pack"
+  let blob = readBlob(snap.basePack)
+  if blob.isNone:
+    return "base pack " & digestHex(snap.basePack) & " is unavailable"
+  let bytes = blob.get()
+  if blake3.digest(bytes) != snap.basePack:
+    return "base pack does not hash to its BLAKE3 digest"
+  if uint64(bytes.len) != snap.basePackSize or
+      snap.basePackSize > MaxBasePackBytes:
+    return "base pack has the wrong size"
+  let res = runGit(gitExe, ["--git-dir=" & gitDir, "index-pack", "--stdin",
+    "--fsck-objects"], input = toText(bytes))
+  if res.code != 0:
+    return "indexing the base pack failed: " & describe(res)
+  ""
+
+proc ensureBaseObjectsUnbounded(gitExe, gitDir: string; snap: RepoSnapshot;
+                                 readBlob: BlobReader; remote: string;
+                                 packsApplied, remoteFetches: var int): string =
+  let commit = snap.baseCommitSha
+  if baseComplete(gitExe, gitDir, commit):
+    return ""
+  var why: seq[string] = @[]
+  if snap.hasBasePack:
+    let bad = applyBasePack(gitExe, gitDir, snap, readBlob)
+    if bad.len == 0:
+      inc packsApplied
+      if baseComplete(gitExe, gitDir, commit):
+        return ""
+      why.add("the base pack left objects of the base tree missing")
+    else:
+      why.add(bad)
+  if remote.len > 0:
+    inc remoteFetches
+    var res = runGit(gitExe, ["--git-dir=" & gitDir, "fetch", "-q",
+      "--no-tags", "--no-write-fetch-head", remote, commit])
+    if res.code != 0 or not baseComplete(gitExe, gitDir, commit):
+      # A glob refspec needs a destination: the remote's branch heads land
+      # under a namespace of the cache's own (`refs/reprobuild-remote/`),
+      # never over a branch of the cache.
+      res = runGit(gitExe, ["--git-dir=" & gitDir, "fetch", "-q",
+        "--no-tags", "--no-write-fetch-head", remote,
+        "+refs/heads/*:refs/reprobuild-remote/*"])
+    if baseComplete(gitExe, gitDir, commit):
+      return ""
+    why.add("fetching from the configured remote did not complete it: " &
+      describe(res))
+  elif not snap.hasBasePack:
+    why.add("the snapshot carries no base pack and no remote is configured " &
+      "to fetch it from")
+  "base commit " & commit & " is not available in the repository cache (" &
+    why.join("; ") & ")"
+
+proc ensureBaseObjects*(gitExe, gitDir: string; snap: RepoSnapshot;
+                        readBlob: BlobReader; remote = "";
+                        packsApplied, remoteFetches: var int;
+                        maxTreeBytes = DefaultMaxBaseTreeBytes;
+                        maxBlobBytes = MaxBlobBytes): string =
+  ## "" when `snap.baseCommitSha` and its tree are in the repository cache
+  ## — already, or after indexing the snapshot's base pack, or after
+  ## fetching from `remote` (an operator-configured remote; by object id,
+  ## then its branch heads) — and its tree is within the checkout bounds
+  ## (`baseTreeSizeRefusal`), else the reason.
+  result = ensureBaseObjectsUnbounded(gitExe, gitDir, snap, readBlob, remote,
+    packsApplied, remoteFetches)
+  if result.len == 0:
+    result = baseTreeSizeRefusal(gitExe, gitDir, snap.baseCommitSha,
+      maxTreeBytes, maxBlobBytes)
+
 proc materializeRepoSnapshot*(repoCache: string; snap: RepoSnapshot;
                               dest: string; readBlob: BlobReader;
-                              gitExe = "git"): MaterializeResult =
+                              gitExe = "git";
+                              maxTreeBytes = DefaultMaxBaseTreeBytes;
+                              maxBlobBytes = MaxBlobBytes): MaterializeResult =
   ## See the module doc. `snap` must already have passed
   ## `validateManifest`. `dest` must not exist.
   result.worktree = dest
   if dirExists(dest) or fileExists(dest):
     return MaterializeResult(reason: "materialization target exists: " & dest)
+  let gitDir = gitDirOf(repoCache)
+  var packs, fetches = 0
+  let missing = ensureBaseObjects(gitExe, gitDir, snap, readBlob, "", packs,
+    fetches, maxTreeBytes, maxBlobBytes)
+  if missing.len > 0:
+    return MaterializeResult(reason: missing)
   let base = checkoutBaseTree(repoCache, snap.baseCommitSha, dest, gitExe)
   if not base.ok:
     return MaterializeResult(reason: base.reason)
@@ -337,41 +544,26 @@ proc materializeRepoSnapshot*(repoCache: string; snap: RepoSnapshot;
   var gitlinks = initTable[string, string]()
   for (p, commit) in base.gitlinks: gitlinks[p] = commit
   for rel in snap.deleted:
-    if gitlinks.hasKey(rel):
-      gitlinks.del(rel)
-      continue
-    let bad = safeParentChain(dest, rel)
+    let bad = deleteSnapshotPath(dest, rel,
+      allowEmptyDirectory = gitlinks.hasKey(rel))
     if bad.len > 0:
-      return MaterializeResult(reason: "refusing to delete through a " &
-        "non-directory component: " & bad)
-    if fileExists(dest / rel) or symlinkExists(dest / rel):
-      removeFile(dest / rel)
+      return MaterializeResult(reason: bad)
+    gitlinks.del(rel)
     tracked.excl(rel)
   for m in snap.modified:
+    if gitlinks.hasKey(m.relPath) or m.mode == ModeGitlink:
+      let bad = deleteSnapshotPath(dest, m.relPath, allowEmptyDirectory = true)
+      if bad.len > 0:
+        return MaterializeResult(reason: bad)
     if m.mode == ModeGitlink:
       # A submodule moved to another commit: metadata only, no blob.
       gitlinks[m.relPath] = m.gitOid
       tracked.excl(m.relPath)
       continue
-    let blob = readBlob(m.blake3Digest)
-    if blob.isNone:
-      return MaterializeResult(reason: "blob " & digestHex(m.blake3Digest) &
-        " for " & m.relPath & " is unavailable")
-    let bytes = blob.get()
-    if blake3.digest(bytes) != m.blake3Digest:
-      return MaterializeResult(reason: "blob for " & m.relPath &
-        " does not hash to its BLAKE3 digest")
-    if uint64(bytes.len) != m.size:
-      return MaterializeResult(reason: "blob for " & m.relPath &
-        " has the wrong size")
-    if gitBlobOid(bytes) != m.gitOid:
-      return MaterializeResult(reason: "blob for " & m.relPath &
-        " does not hash to its git blob id")
-    var text = newString(bytes.len)
-    if bytes.len > 0: copyMem(addr text[0], unsafeAddr bytes[0], bytes.len)
-    let refused = writeTracked(dest, m.relPath, m.mode, text)
-    if refused.len > 0:
-      return MaterializeResult(reason: refused)
+    gitlinks.del(m.relPath)
+    let bad = writeSnapshotEntry(dest, m, readBlob)
+    if bad.len > 0:
+      return MaterializeResult(reason: bad)
     tracked.incl(m.relPath)
   for p in tracked: result.tracked.add(p)
   for p, commit in gitlinks.pairs: result.gitlinks.add((p, commit))

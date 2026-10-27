@@ -16,9 +16,9 @@
 ##     swift is missing):
 ##     - the convention emits a single ``swift-swiftpm-build`` action.
 ##     - the action's argv carries ``swift build -c release --quiet``.
-##     - the action's output is
-##       ``.build/release/hello[.exe]`` under the project root.
-##   * Output-path resolution: executable yields ``.build/release/<name>``
+##     - an output discovery edge asks SwiftPM for the actual release
+##       directory; the build consumes it as a dynamic directory output.
+##   * Legacy static output-name helpers: executable yields ``.build/release/<name>``
 ##     (with ``.exe`` on Windows); library yields
 ##     ``.build/release/lib<name>.a``.
 ##
@@ -28,7 +28,7 @@
 ## that don't depend on the toolchain still exercise the convention's
 ## gate-only paths and run unconditionally.
 
-import std/[os, strutils, unittest]
+import std/[os, osproc, strutils, unittest]
 import repro_test_support/reasoned_skip
 import repro_test_support
 
@@ -231,16 +231,9 @@ suite "swift-swiftpm convention M43":
       check sawReleaseConfig
       check sawQuietFlag
 
-      # Output is .build/release/hello[.exe] under the fixture root.
-      var sawExeOutput = false
-      let expectedSuffix =
-        when defined(windows): "/.build/release/hello.exe"
-        else: "/.build/release/hello"
-      for outPath in buildAct.outputs:
-        let unified = outPath.replace('\\', '/')
-        if unified.endsWith(expectedSuffix):
-          sawExeOutput = true
-      check sawExeOutput
+      check buildAct.outputs.len == 0
+      check buildAct.dynamicDepsFile.endsWith("swift-outputs.dyndep")
+      check "swift-swiftpm-outputs" in buildAct.deps
 
   test "output-path resolution: executable target ⇒ .build/release/<name>[.exe]":
     ## Exercise the executable output-path predictor. This is a pure
@@ -259,4 +252,52 @@ suite "swift-swiftpm convention M43":
     let projectRoot = "/some/project"
     let predicted = swift_convention.producedLibraryPath(projectRoot, "mylib")
     let unified = predicted.replace('\\', '/')
+    # ``lib<name>.a`` on Windows too: SwiftPM's static-library extension
+    # is ``.a`` for every triple (``Triple.staticLibraryExtension``).
     check unified.endsWith("/.build/release/libmylib.a")
+
+  test "real static dynamic and automatic libraries fulfill declared outputs":
+    let root = getTempDir() / "repro-swift-library-output-obligation"
+    if dirExists(root): removeDir(root)
+    createDir(root)
+    defer: removeDir(root)
+    for mode in ["static", "dynamic", "automatic"]:
+      let project = root / mode
+      createDir(project / "Sources/Internal")
+      writeFile(project / "Sources/Internal/Lib.swift", "public func answer() -> Int { 42 }\n")
+      let productType = if mode == "automatic": "" else: ", type: ." & mode
+      writeFile(project / "Package.swift", "// swift-tools-version: 5.9\nimport PackageDescription\nlet package = Package(name: \"OutputTest\", products: [.library(name: \"Public\"" & productType & ", targets: [\"Internal\"])], targets: [.target(name: \"Internal\")])\n")
+      writeFile(project / "reprobuild.nim", "import repro_project_dsl\npackage swiftOutputTest:\n  uses:\n    \"swift >=5.9\"\n  library Public:\n    discard\n")
+      let fragment = swift_convention.swiftSwiftpmConvention().emitFragment(project, dummyRequest(project))
+      for node in fragment.nodes:
+        if node.kind != gnkAction: continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        var argv = inlineArgvOf(action)
+        for token in argv.mitems:
+          token = token.replace(getAppFilename(), ReprobuildRoot / "build/bin/repro-standard-provider")
+        if "build" in argv: argv.add(@["--jobs", "2"])
+        let outcome = execCmdEx("cd " & quoteShell(project) & " && " & argv.quoteShellCommand())
+        checkpoint mode & "\n" & outcome.output
+        require outcome.exitCode == 0
+        for output in action.outputs:
+          checkpoint mode & " declared output " & output
+          check fileExists(output) or dirExists(output)
+        if action.dynamicDepsFile.len > 0:
+          for line in readFile(action.dynamicDepsFile).splitLines():
+            if line.startsWith("output\t"):
+              check dirExists(line.split('\t')[2])
+      let directory = project / ".build/release"
+      if mode == "static":
+        # ``lib<name>.a`` for every triple, Windows included
+        # (``Triple.staticLibraryExtension``).
+        let archive = "libPublic.a"
+        check fileExists(directory / archive)
+      elif mode == "dynamic":
+        let library = when defined(windows): "Public.dll" elif defined(macosx): "libPublic.dylib" else: "libPublic.so"
+        check fileExists(directory / library)
+      else:
+        check not fileExists(directory / "libPublic.a")
+        var sawModule = false
+        for file in walkDirRec(directory):
+          if file.endsWith("Internal.swiftmodule"): sawModule = true
+        check sawModule

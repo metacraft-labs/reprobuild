@@ -31,7 +31,7 @@ import repro_cli_support/disk as cli_disk
 import repro_cli_support/infra_install_root
 import repro_cli_support/infra_host_registry
 from repro_home_intent/host_identity import selectHost, EHostIdentity
-from repro_core/source_root import publicCliImagePath
+from repro_cli_support/self_spawn_image import selfSpawnIoMonitorPath
 
 # ---------------------------------------------------------------------------
 # M83 Phase D + F3: compile-then-adapt path for `system.nim` profiles.
@@ -88,7 +88,9 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string):
   ## not that it failed to compile.
   let opts = ProfileCompileOptions(
     stateDir: stateDir,
-    publicCliPath: publicCliImagePath(),
+    # Guarded like every internal-verb spawn: the compile wraps its actions
+    # in `<publicCliPath> internal io monitor` (`self_spawn_image`).
+    publicCliPath: selfSpawnIoMonitorPath(),
     # Empty: `compileProfileToRbpi` resolves the sources through
     # `reprobuildRepoRoot()`, which honours `$REPROBUILD_REPO_ROOT` and the
     # installed package's `$REPROBUILD_SOURCE_ROOT` alike.
@@ -483,7 +485,14 @@ proc reproExePath(): string =
   ## The `repro` binary the broker re-execs: the running engine, by the path
   ## that re-enters it (`publicCliImagePath`; under the portable Linux
   ## launcher `getAppFilename()` names the glibc loader instead).
-  publicCliImagePath()
+  ##
+  ## The broker runs as `<this> --privileged-broker …`, a mode only `repro`
+  ## implements, so the path goes through the same self-spawn guard as the
+  ## internal verbs (Distribution-And-Packaging.md §5.2): for the CLI it is
+  ## exactly `publicCliImagePath()`, and an embedded caller that has not
+  ## declared itself `repro` gets "", which `launchAndDriveBroker` refuses
+  ## instead of launching the caller's own image as the broker.
+  selfSpawnIoMonitorPath()
 
 proc takeInfraApplyLock(stateDir, command: string;
                         flags: InfraCliFlags): bool =

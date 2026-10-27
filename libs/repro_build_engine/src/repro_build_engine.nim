@@ -1,5 +1,5 @@
 import std/[algorithm, json, locks, monotimes, options, os, osproc, net,
-    nativesockets, parsecfg, sets, streams, strtabs, strutils, tables,
+    nativesockets, parsecfg, sequtils, sets, streams, strtabs, strutils, tables,
     tempfiles, times]
 
 # The OS is reached through a named symbol list on both platforms, never
@@ -375,6 +375,13 @@ type
     deps*: seq[string]
     inputs*: seq[string]
     outputs*: seq[string]
+    optionalOutputs*: seq[string]
+      ## Tool-owned output candidates whose existence depends on the tool's
+      ## result (for example an MSVC import library for a DLL with exports).
+      ## Absent candidates are successful; present candidates are cached and
+      ## restored. Ordinary ``outputs`` remain obligatory. The engine removes
+      ## old candidates before execution and restores their recorded absence
+      ## on a cache hit, so stale artifacts cannot impersonate fresh output.
     argv*: seq[string]
     cwd*: string
     env*: seq[string]
@@ -2447,6 +2454,7 @@ type
   DynamicGraphFragment = object
     deps: Table[string, seq[string]]
     outputs: Table[string, seq[string]]
+    optionalOutputs: Table[string, seq[string]]
     # M25: action-create records. Each entry describes a new BuildAction
     # that the engine materialises into the running graph mid-build. The
     # producer of the .rbdyn file emits one record per new action; the
@@ -3306,6 +3314,7 @@ proc legacyDepfileGatheringPolicy(depfile: string;
 proc action*(id: string; argv: openArray[string]; cwd = "";
              deps: openArray[string] = []; inputs: openArray[string] = [];
              outputs: openArray[string] = []; pool = ""; poolUnits = 1'u32;
+             optionalOutputs: openArray[string] = [];
              cpuMilli = 1000'u32; memoryBytes = 0'u64;
              commandStatsId = ""; cacheable = false;
              weakFingerprint = weakFingerprintFromText(id);
@@ -3356,6 +3365,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     deps: @deps,
     inputs: @inputs,
     outputs: @outputs,
+    optionalOutputs: @optionalOutputs,
     argv: @argv,
     cwd: cwd,
     env: @env,
@@ -3589,6 +3599,24 @@ proc normalizeWriteRoot(p: string): string =
   while s.len > 1 and s[^1] == '/':
     s.setLen(s.len - 1)
   s
+
+proc canonicalPolicyPath(path: string): string
+
+proc outputRemovalLocation(root, path: string): string =
+  ## Resolve the directory entry cleanup will remove. Ancestor symlinks and
+  ## parent walks affect its location, but the final symlink is itself the
+  ## output: removing that entry must not claim ownership of its target.
+  if path.len == 0:
+    return ""
+  var physical =
+    if path.isAbsolute or root.len == 0: path
+    else: root / path
+  if not physical.isAbsolute:
+    physical = getCurrentDir() & "/" & physical
+  let parent = canonicalPolicyPath(parentDir(physical))
+  result = normalizeWriteRoot(os.normalizedPath(parent / extractFilename(physical)))
+  when defined(windows):
+    result = result.toLowerAscii()
 
 proc writeRootsOverlap(a, b: string): bool =
   ## M9.R.75 — R7 intersection predicate. Two declared write roots
@@ -3991,9 +4019,9 @@ proc validateGraph(g: BuildGraph) =
       raiseEngine("duplicate action id: " & action.id)
     ids.incl(action.id)
     byId[action.id] = action
-    if action.kind == bakProcess and action.argv.len == 0 and action.outputs.len == 0:
+    if action.kind == bakProcess and action.argv.len == 0 and action.outputs.len == 0 and action.optionalOutputs.len == 0:
       raiseEngine("action has neither command nor outputs: " & action.id)
-    for output in action.outputs:
+    for output in action.outputs & action.optionalOutputs:
       if outputs.contains(output):
         raiseEngine("duplicate declared output: " & output)
       outputs.incl(output)
@@ -4037,16 +4065,60 @@ proc validateGraph(g: BuildGraph) =
             stack.add(dep)
     false
 
-  var declaredIndex: seq[tuple[actionId: string; root: string]] = @[]
+  var declaredIndex: seq[tuple[actionId: string; root: string;
+    optional: bool; ordinary: bool]] = @[]
+  let hasOptionalCandidates = g.actions.anyIt(it.optionalOutputs.len > 0)
   for action in g.actions:
+    let actionCwd = action.cwd
+    let actionId = action.id
+    proc indexRoot(raw: string; optional = false; ordinary = false) =
+      let physical = if raw.isAbsolute or actionCwd.len == 0: raw
+        else: actionCwd / raw
+      let root = outputRemovalLocation("", physical)
+      if root.len > 0:
+        declaredIndex.add((actionId: actionId, root: root,
+          optional: optional, ordinary: ordinary))
     for raw in action.declaredOutputs:
-      let root = normalizeWriteRoot(raw)
-      if root.len == 0:
-        continue
-      declaredIndex.add((actionId: action.id, root: root))
+      indexRoot(raw)
+    for raw in action.optionalOutputs:
+      if raw.len == 0:
+        raiseEngine("optional output path is empty for " & action.id)
+      let removalRoot = outputRemovalLocation(action.cwd, raw)
+      var cwdRoot = normalizeWriteRoot(canonicalPolicyPath(
+        absolutePath(if action.cwd.len > 0: action.cwd else: getCurrentDir())))
+      when defined(windows):
+        cwdRoot = cwdRoot.toLowerAscii()
+      if removalRoot == cwdRoot or cwdRoot.startsWith(removalRoot & "/"):
+        raiseEngine("optional output contains the action's cwd: " & raw &
+          " for " & action.id)
+      indexRoot(raw, optional = true)
+      for required in action.outputs:
+        if outputRemovalLocation(action.cwd, raw) ==
+            outputRemovalLocation(action.cwd, required):
+          raiseEngine("optional output is also an obligatory output: " & raw &
+            " for " & action.id)
+      for input in action.inputs:
+        let physicalInput = if input.isAbsolute or action.cwd.len == 0: input
+          else: action.cwd / input
+        let physicalOutput = if raw.isAbsolute or action.cwd.len == 0: raw
+          else: action.cwd / raw
+        let inputRoot = outputRemovalLocation("", physicalInput)
+        let outputRoot = outputRemovalLocation("", physicalOutput)
+        if inputRoot == outputRoot or inputRoot.startsWith(outputRoot & "/"):
+          raiseEngine("optional output contains a declared input: " & raw &
+            " contains " & input & " for " & action.id)
+    if hasOptionalCandidates:
+      for raw in action.outputs:
+        indexRoot(raw, ordinary = true)
   for i in 0 ..< declaredIndex.len:
     for j in (i + 1) ..< declaredIndex.len:
       if declaredIndex[i].actionId == declaredIndex[j].actionId:
+        continue
+      # Optional candidates are removed recursively before execution and on
+      # cache hits. Protect ordinary outputs inside those roots too, without
+      # widening the established declared-root check for unrelated actions.
+      if (declaredIndex[i].ordinary or declaredIndex[j].ordinary) and
+          not (declaredIndex[i].optional or declaredIndex[j].optional):
         continue
       if not writeRootsOverlap(declaredIndex[i].root, declaredIndex[j].root):
         continue
@@ -4203,6 +4275,46 @@ proc refusesRecordWithNoInputs*(action: BuildAction): bool =
   action.cacheable and action.kind == bakProcess and
     action.dependencyPolicy.kind in MonitorPolicyKinds
 
+proc materialPath(root, path: string): string
+proc removePathNoFollow(path: string)
+proc removeBeforeRunProblem*(action: BuildAction): string
+
+proc recordedOutputPaths*(action: BuildAction): seq[string] =
+  ## Conditional tool byproducts participate in the record only when produced.
+  ## Their complete candidate set remains part of the graph and cache identity.
+  result = action.outputs
+  for path in action.optionalOutputs:
+    if pathExists(materialPath(action.cwd, path)) and path notin result:
+      result.add(path)
+
+proc ownedRecordOutputPaths(action: BuildAction;
+                            record: ActionResultRecord): seq[string] =
+  ## Required paths must all be recorded; a conditional path may be absent.
+  result = action.outputs
+  for candidate in action.optionalOutputs:
+    for output in record.outputs:
+      if materialPath(action.cwd, candidate) ==
+          materialPath(action.cwd, output.path):
+        if candidate notin result:
+          result.add(candidate)
+        break
+
+proc removeAbsentOptionalOutputs(action: BuildAction;
+                                  recordedPaths: openArray[string]) =
+  ## Absence is part of a cached result. Do not leave an old exported DLL's
+  ## import library beside a restored DLL whose link produced no import library.
+  let problem = action.removeBeforeRunProblem()
+  if problem.len > 0:
+    raise newException(ValueError, problem)
+  for candidate in action.optionalOutputs:
+    var present = false
+    for output in recordedPaths:
+      if materialPath(action.cwd, candidate) == materialPath(action.cwd, output):
+        present = true
+        break
+    if not present:
+      removePathNoFollow(extendedPath(materialPath(action.cwd, candidate)))
+
 proc unservableCacheRecordReason*(action: BuildAction;
                                   record: ActionResultRecord): string =
   ## Why this RECORD must not be served to this ACTION, or `""`.
@@ -4246,7 +4358,8 @@ proc unservableCacheRecordReason*(action: BuildAction;
   ## does not own — the outcome a weak-fingerprint collision across locations
   ## must never have. Equally record-intrinsic: it compares the record with
   ## the action in hand and nothing else.
-  let foreign = recordOutputsNotOwnedBy(record, action.cwd, action.outputs)
+  let foreign = recordOutputsNotOwnedBy(record, action.cwd,
+    action.ownedRecordOutputPaths(record))
   if foreign.len > 0:
     return "action '" & action.id & "': " & foreign & ". Re-running. " &
       "Spec: Incremental-Invalidation.md §\"Minimum check set per target " &
@@ -4387,9 +4500,9 @@ proc restoreWouldOverwriteMatchingOutputs(action: BuildAction;
   ## record that describes nothing would otherwise answer "matching"
   ## vacuously. An edge that declares no outputs answers false and keeps the
   ## restore path it has today.
-  if action.declaresNoOutputs():
+  if action.declaresNoOutputs() and action.optionalOutputs.len == 0:
     return false
-  if not action.allOutputsExist():
+  if action.outputs.len > 0 and not action.allOutputsExist():
     return false
   outputStateMismatch(record, action.cwd,
     action.containerDirectoryOutputs()).len == 0
@@ -4599,7 +4712,7 @@ proc inferDeclaredActionDeps(g: BuildGraph): BuildGraph =
   result = g
   var outputProducer = initTable[string, string]()
   for action in g.actions:
-    for output in action.outputs:
+    for output in action.outputs & action.optionalOutputs:
       let normalized = normalizedDeclaredActionPath(action, output)
       if normalized.len > 0 and not outputProducer.hasKey(normalized):
         outputProducer[normalized] = action.id
@@ -4760,7 +4873,8 @@ proc parseCreateActionRecord(payload, path: string; lineNo: int;
   let cacheable = boolField("cacheable", default = false)
   let weakFingerprint = weakFingerprintFromText(id)
   result = action(id, argv, cwd = cwd, deps = deps, inputs = inputs,
-    outputs = outputs, pool = pool, poolUnits = poolUnits, cpuMilli = cpuMilli,
+    outputs = outputs, optionalOutputs = stringSeqField("optionalOutputs"),
+    pool = pool, poolUnits = poolUnits, cpuMilli = cpuMilli,
     commandStatsId = commandStatsId, cacheable = cacheable,
     weakFingerprint = weakFingerprint, env = env,
     governingLockIdentity = governingLockIdentity)
@@ -4788,15 +4902,17 @@ proc readDynamicGraphFragment(path: string;
     let kind = line[0 ..< firstTab]
     let rest = line[firstTab + 1 .. ^1]
     case kind
-    of "dep", "output":
+    of "dep", "output", "optional-output":
       let fields = rest.split('\t')
       if fields.len != 2:
         raiseEngine(path & ":" & $(lineNo + 1) &
           ": dynamic graph " & kind & " record must have 3 tab-separated fields")
       if kind == "dep":
         result.deps.mgetOrPut(fields[0], @[]).addUnique(fields[1])
-      else:
+      elif kind == "output":
         result.outputs.mgetOrPut(fields[0], @[]).addUnique(fields[1])
+      else:
+        result.optionalOutputs.mgetOrPut(fields[0], @[]).addUnique(fields[1])
     of "create-action":
       # M25: action-create record. The payload is a single-line JSON
       # object describing the BuildAction to materialise. Validation
@@ -8737,7 +8853,7 @@ proc isOwnOutput*(action: BuildAction; path: string): bool =
     key = key.toLowerAscii()
   # `outputs` plus `declaredOutputs`, as `portablePhysicalOutputsOf`
   # (defined further down) names them.
-  for output in action.outputs & action.declaredOutputs:
+  for output in action.outputs & action.optionalOutputs & action.declaredOutputs:
     var root = materialContainmentPath(action.cwd, output).replace('\\', '/')
     while root.len > 1 and root.endsWith("/"):
       root.setLen(root.len - 1)
@@ -8822,7 +8938,7 @@ proc scratchDirProblem*(action: BuildAction): string =
   for input in action.inputs:
     let why = overlaps(input, "declared input")
     if why.len > 0: return why
-  for output in action.outputs & action.declaredOutputs:
+  for output in action.outputs & action.optionalOutputs & action.declaredOutputs:
     let why = overlaps(output, "declared output")
     if why.len > 0: return why
   ""
@@ -8899,10 +9015,10 @@ proc ensureOutputParents*(action: BuildAction) =
   ## the action's own to create. Best effort: a parent that cannot be made
   ## is the action's to report.
   var outputKeys: seq[string] = @[]
-  for output in action.outputs & action.declaredOutputs:
+  for output in action.outputs & action.optionalOutputs & action.declaredOutputs:
     if output.len > 0:
       outputKeys.add(scratchKey(materialPath(action.cwd, output)))
-  for output in action.outputs & action.declaredOutputs:
+  for output in action.outputs & action.optionalOutputs & action.declaredOutputs:
     if output.len == 0:
       continue
     let parent = materialPath(action.cwd, output).parentDir
@@ -8927,13 +9043,13 @@ proc removeBeforeRunProblem*(action: BuildAction): string =
   ## parent of one, not an input -- so the removal can only ever destroy
   ## what this action is about to make again.
   var owned: seq[string] = @[]
-  for output in action.outputs & action.declaredOutputs:
+  for output in action.outputs & action.optionalOutputs & action.declaredOutputs:
     if output.len > 0:
-      owned.add(scratchKey(materialPath(action.cwd, output)))
-  for path in action.removeBeforeRun:
+      owned.add(scratchKey(outputRemovalLocation(action.cwd, output)))
+  for path in action.removeBeforeRun & action.optionalOutputs:
     if path.len == 0:
       continue
-    let key = scratchKey(materialPath(action.cwd, path))
+    let key = scratchKey(outputRemovalLocation(action.cwd, path))
     if key notin owned:
       return "'" & path & "' is listed to be removed before the action " &
         "runs, but it is not a declared output of the action"
@@ -8949,7 +9065,7 @@ proc removeOutputsBeforeRun*(action: BuildAction): string =
   let problem = action.removeBeforeRunProblem()
   if problem.len > 0:
     return problem
-  for path in action.removeBeforeRun:
+  for path in action.removeBeforeRun & action.optionalOutputs:
     if path.len == 0:
       continue
     try:
@@ -9507,8 +9623,21 @@ proc selfWrittenOutputKeys(action: BuildAction): HashSet[string] =
   ## ``collectEvidence`` name such an action in a diagnostic so the
   ## permanent miss that follows does not read as a caching bug.
   result = initHashSet[string]()
-  for output in action.outputs:
+  for output in action.outputs & action.optionalOutputs:
     result.incl(materialPath(action.cwd, output).replace('\\', '/'))
+
+proc isUnderCanonicalPolicyRoot(path: string; roots: openArray[string]): bool
+
+proc isOptionalOutputPath(action: BuildAction; path: string): bool =
+  ## A conditional directory is an owned recursive product, removed before
+  ## execution. Reads/probes while filling it cannot become prior inputs.
+  for candidate in action.optionalOutputs:
+    let root = materialPath(action.cwd, candidate)
+    if path == root.replace('\\', '/'):
+      return true
+    if dirExists(extendedPath(root)) and not symlinkExists(extendedPath(root)) and
+        path.isUnderCanonicalPolicyRoot(@[root]):
+      return true
 
 proc outputAncestorDirectoryKeys(action: BuildAction;
                                  evidence: PathSetEvidence): HashSet[string]
@@ -9535,17 +9664,20 @@ proc evidenceInputPaths(action: BuildAction;
     result.addUnique(seen, input)
   for input in evidence.depfileInputs:
     let key = materialPath(action.cwd, input).replace('\\', '/')
-    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
+    if selfWritten.contains(key) or action.isOptionalOutputPath(key) or
+        ancestors.isOutputAncestorObservation(key):
       continue
     result.addUnique(seen, input)
   for input in evidence.monitorReads:
     let key = materialPath(action.cwd, input).replace('\\', '/')
-    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
+    if selfWritten.contains(key) or action.isOptionalOutputPath(key) or
+        ancestors.isOutputAncestorObservation(key):
       continue
     result.addUnique(seen, input)
   for probe in evidence.monitorProbes:
     let key = materialPath(action.cwd, probe).replace('\\', '/')
-    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
+    if selfWritten.contains(key) or action.isOptionalOutputPath(key) or
+        ancestors.isOutputAncestorObservation(key):
       continue
     result.addUnique(seen, probe)
 
@@ -10745,7 +10877,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   for input in evidence.depfileInputs:
     let path = materialContainmentPath(action.cwd, input)
     let key = path.replace('\\', '/')
-    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
+    if selfWritten.contains(key) or action.isOptionalOutputPath(key) or
+        ancestors.isOutputAncestorObservation(key):
       continue
     if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or
@@ -10758,7 +10891,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   for input in evidence.monitorReads:
     let path = materialContainmentPath(action.cwd, input)
     let key = path.replace('\\', '/')
-    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
+    if selfWritten.contains(key) or action.isOptionalOutputPath(key) or
+        ancestors.isOutputAncestorObservation(key):
       continue
     if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or
@@ -10771,7 +10905,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   for probe in evidence.monitorProbes:
     let path = materialContainmentPath(action.cwd, probe)
     let key = path.replace('\\', '/')
-    if selfWritten.contains(key) or ancestors.isOutputAncestorObservation(key):
+    if selfWritten.contains(key) or action.isOptionalOutputPath(key) or
+        ancestors.isOutputAncestorObservation(key):
       continue
     if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or
@@ -11045,8 +11180,9 @@ proc undeclaredSurvivingWrites*(action: BuildAction;
   ## * the action's own DECLARED outputs — those are exactly what a restore
   ##   puts back, so writing them is the action doing its job.
   ##   ``selfWrittenOutputKeys`` supplies the same normalized, exact-match
-  ##   set S5's input filter uses, for the same reason: no directory rule,
-  ##   no prefix rule.
+  ##   set S5's input filter uses. Explicit directory products additionally
+  ##   cover their descendants: the cache snapshots and restores their whole
+  ##   trees. Conditional candidates follow the same rule when present.
   ## * anything at or under one of the action's HONOURED derived prefixes —
   ##   see ``honouredDerivedPrefixes``, which is where the whole of that
   ##   exclusion's safety argument lives. It is NOT simply
@@ -11083,20 +11219,27 @@ proc undeclaredSurvivingWrites*(action: BuildAction;
   ## here only in the OPPOSITE direction, to DISQUALIFY a derived prefix
   ## that covers one.
   ##
-  ## Comparison is by exact string equality after separator normalization,
-  ## and is therefore case-SENSITIVE even on Windows. That direction is the
-  ## safe one: a declared output observed under a different case spelling is
-  ## reported here, which costs the action its blobs and a rebuild. The
-  ## reverse — case-folding, and so matching a path that is not the declared
-  ## output — would hand back a hit.
+  ## File-output comparison uses exact equality after separator normalization,
+  ## case-sensitive even on Windows. Directory products use the canonical
+  ## containment predicate also used for derived roots. Write scopes alone
+  ## never acquire this recursive exemption.
   let selfWritten = action.selfWrittenOutputKeys()
   let derivedRoots = action.honouredDerivedPrefixes()
+  # Explicit directory products are snapshotted recursively by the cache.
+  # This does not apply to write scopes (`declaredOutputs`), which carry no
+  # payload and must continue to expose undeclared surviving products.
+  var recordedTrees: seq[string] = @[]
+  for output in action.outputs & action.optionalOutputs:
+    let path = materialPath(action.cwd, output)
+    if dirExists(extendedPath(path)) and not symlinkExists(extendedPath(path)):
+      recordedTrees.add(path)
   var seen = initHashSet[string]()
   for write in evidence.monitorWrites:
     let path = materialPath(action.cwd, write)
     if selfWritten.contains(path.replace('\\', '/')):
       continue
-    if path.isUnderCanonicalPolicyRoot(derivedRoots):
+    if path.isUnderCanonicalPolicyRoot(derivedRoots) or
+        path.isUnderCanonicalPolicyRoot(recordedTrees):
       continue
     # A symbolic link is a product whatever it points at -- a directory,
     # nothing at all -- so it is tested before the two tests below, which
@@ -13016,7 +13159,8 @@ const NimLibraryMetadataArgs* = ["dump", "--dump.format:json", "--skipCfg:on",
   ## its library must not evaluate the consumer's config.nims a second time.
 
 proc nimCompilerLibraryRoot(command, searchPath, cwd: string;
-                            env: seq[string]): tuple[libraryRoot, compilerPrefix: string] =
+                            env: seq[string]; isolatedEnv: bool):
+    tuple[libraryRoot, compilerPrefix: string] =
   var executable = command
   if not command.isAbsolute:
     if command.contains(DirSep) or command.contains(AltSep):
@@ -13044,9 +13188,19 @@ proc nimCompilerLibraryRoot(command, searchPath, cwd: string;
   # A wrapper need not share its directory with the compiler's library. This
   # is a bounded tool-metadata query, not a build action: absolute executable,
   # fixed arguments, no shell, no project/config evaluation, no emitted files.
+  #
+  # The query must see the environment the action itself will be launched
+  # with. RunQuota layers the action's entries OVER the engine's own
+  # environment unless the launch is isolated, so a wrapper that resolves its
+  # compiler from an inherited variable works at launch time; handing the
+  # query only the overlay would make that same wrapper fail here first.
   var childEnv: StringTableRef
-  if env.len > 0:
-    childEnv = newStringTable(modeCaseSensitive)
+  if env.len > 0 or isolatedEnv:
+    childEnv = newStringTable(
+      when defined(windows): modeCaseInsensitive else: modeCaseSensitive)
+    if not isolatedEnv:
+      for name, value in envPairs():
+        childEnv[name] = value
     for entry in env:
       let separator = entry.find('=')
       if separator >= 0:
@@ -13071,7 +13225,8 @@ proc nimCompilerLibraryRoot(command, searchPath, cwd: string;
 
 proc validateNimProducerRoots(argv: openArray[string]; base: int;
                               nimPathDirs: openArray[string];
-                              compilerEnv: seq[string]; cwd: string) =
+                              compilerEnv: seq[string]; cwd: string;
+                              isolatedEnv: bool) =
   var modules: seq[tuple[root, relative: string]]
   for root in nimPathDirs:
     if root.len == 0:
@@ -13100,9 +13255,13 @@ proc validateNimProducerRoots(argv: openArray[string]; base: int;
             modules.add((absoluteRoot, relativePath(path, absoluteRoot)))
   if modules.len == 0:
     return
-  let searchPath = if compilerEnv.len > 0:
-    lookupEnv(compilerEnv, "PATH").value else: getEnv("PATH")
-  let compiler = nimCompilerLibraryRoot(argv[base], searchPath, cwd, compilerEnv)
+  let declaredPath = lookupEnv(compilerEnv, "PATH")
+  let searchPath =
+    if declaredPath.present: declaredPath.value
+    elif isolatedEnv: ""
+    else: getEnv("PATH")
+  let compiler = nimCompilerLibraryRoot(argv[base], searchPath, cwd,
+    compilerEnv, isolatedEnv)
   var libraries = @[compiler.libraryRoot]
   var explicitLibrary = ""
   for i in base + 2 ..< argv.len:
@@ -13137,7 +13296,8 @@ proc validateNimProducerRoots(argv: openArray[string]; base: int;
 proc applyNimPathArgs*(argv: openArray[string];
                        nimPathDirs: openArray[string];
                        compilerEnv: seq[string] = @[];
-                       cwd = getCurrentDir()): seq[string] =
+                       cwd = getCurrentDir();
+                       isolatedEnv = false): seq[string] =
   ## Cross-Repo-Source-Consumption SC-11 (§4.2a.3) — the Nim library-source
   ## channel's argv projection. Where the C/C++ channels prepend an ENV VAR,
   ## the Nim channel prepends a compiler FLAG: for each sibling Nim library
@@ -13187,7 +13347,8 @@ proc applyNimPathArgs*(argv: openArray[string];
     "c++", "cpp", "js", "e"]
   if argv[base + 1].toLowerAscii notin compileSubcommands:
     return
-  validateNimProducerRoots(argv, base, nimPathDirs, compilerEnv, cwd)
+  validateNimProducerRoots(argv, base, nimPathDirs, compilerEnv, cwd,
+    isolatedEnv)
   var flags: seq[string] = @[]
   for d in nimPathDirs:
     if d.len > 0:
@@ -13972,8 +14133,9 @@ proc preparedRunQuotaCommand(action: BuildAction;
         "[" & nonSipShellSearchReport() & "]")
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
   let threadedEnv = preparedActionEnv(action, config, auxPaths)
+  let isolatedEnv = config.hermeticEnv or action.isolateHostEnvironment
   let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs,
-    threadedEnv, action.cwd)
+    threadedEnv, action.cwd, isolatedEnv)
   let includePaths = partitionCompilerIncludePaths(auxPaths)
   let adjustedArgv = applyCompilerSystemIncludeArgs(nimAdjustedArgv,
     includePaths.systemDirs)
@@ -13985,7 +14147,7 @@ proc preparedRunQuotaCommand(action: BuildAction;
     env: deferred.env,
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit,
-    isolatedEnv: config.hermeticEnv or action.isolateHostEnvironment)
+    isolatedEnv: isolatedEnv)
 
 # ---------------------------------------------------------------------------
 # In-Process-Monitor-Hosting HM-4 — the engine hosts io-mon's consumer itself.
@@ -17320,7 +17482,7 @@ proc publishMaterializedBinaryCacheEntries*(g: BuildGraph;
       cwd: action.cwd,
       publishPrefix: prefix,
       declaredOutputs: action.outputs,
-      recordOutputs: @[])
+      recordOutputs: action.recordedOutputPaths())
     let publishResult =
       try: publisher(request)
       except CatchableError as e:
@@ -17680,6 +17842,26 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if config.statsEnabled:
       stats.addCountedMetric("repro child cpu", 1,
         childCpuUs() - childCpuAtStart)
+  proc withOptionalOutputIdentity(action: BuildAction): BuildAction =
+    ## Candidates affect both recorded presence and absence. Key their full
+    ## declaration before any cache route (including dynamically added edges)
+    ## so a record made before a candidate was added cannot answer that edge.
+    result = action
+    if action.optionalOutputs.len == 0:
+      return
+    var candidates: seq[string] = @[]
+    for path in action.optionalOutputs:
+      let physical = materialPath(action.cwd, path)
+      candidates.add(if action.relocatable and action.cwd.len > 0:
+          relativePath(physical, action.cwd).replace('\\', '/')
+        else: physical.replace('\\', '/'))
+    candidates.sort()
+    var framed = "optional-outputs-v1\x1e" & toHex(action.weakFingerprint.bytes)
+    for path in candidates:
+      framed.add("\x1e" & $path.len & "\x1f" & path)
+    result.weakFingerprint = blake3DomainDigest(framed.textBytes(),
+      hdActionFingerprint)
+
   let inferStart = statStart()
   # `var` because M25 ``create-action`` dyndep records grow ``buildGraph.actions``
   # mid-build. ``applyDynamicDeps`` appends to it; downstream readers iterate
@@ -17688,6 +17870,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # the loop alive.
   var buildGraph = inferDeclaredActionDeps(
     withProvisioningReceiptInputs(g, config.toolIdentityResolver))
+  for i in 0 ..< buildGraph.actions.len:
+    buildGraph.actions[i] = withOptionalOutputIdentity(buildGraph.actions[i])
   # NOTE: an earlier ``REPRO_MACOS_DISABLE_ACTION_MONITOR`` opt-in lived here and
   # downgraded every monitored action to a declared-only (unmonitored) policy
   # on macOS. That was an unapproved soundness hole — it marked actions
@@ -18242,7 +18426,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         up = graphParentKey(up)
     for declared in buildGraph.actions:
       let action = actionsById.getOrDefault(declared.id, declared)
-      for output in action.outputs & action.declaredOutputs:
+      for output in action.outputs & action.optionalOutputs & action.declaredOutputs:
         if output.len > 0:
           add(action.id, materialPath(action.cwd, output), false)
       for dir in action.scratchDirs:
@@ -18500,7 +18684,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       key.add(variable.name & "=" & $variable.present & ":" &
         variable.value & "\0")
     var outputs: seq[string] = @[]
-    for output in action.outputs & action.declaredOutputs:
+    for output in action.outputs & action.optionalOutputs & action.declaredOutputs:
       let path = materialPath(action.cwd, output)
       outputs.add(path & "\t" &
         (if fileExists(extendedPath(path)): fileContentHex(path)
@@ -18559,6 +18743,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var outputs: seq[string] = @[]
     for output in action.outputs:
       outputs.add("output=" & materialPath(action.cwd, output))
+    for output in action.optionalOutputs:
+      outputs.add("optionalOutput=" & materialPath(action.cwd, output))
     for output in action.declaredOutputs:
       outputs.add("declaredOutput=" & materialPath(action.cwd, output))
     for dir in action.scratchDirs:
@@ -18628,7 +18814,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## its declared output. A record that left the prefix out would not
     ## describe the package at all.
     var seen = initHashSet[string]()
-    for output in action.outputs & action.declaredOutputs:
+    for output in action.outputs & action.optionalOutputs & action.declaredOutputs:
       let physical = materialPath(action.cwd, output)
       let key = physical.replace('\\', '/')
       if key notin seen:
@@ -18653,7 +18839,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if fp.portable:
       # P3.2: a record is only shareable if its RESULT can be named too.
       let outs = portableOutputs(config.portableRoots,
-        portablePhysicalOutputsOf(action))
+        portablePhysicalOutputsOf(action).filterIt(
+          it notin action.optionalOutputs.mapIt(materialPath(action.cwd, it)) or
+          pathExists(it)))
       if outs.portable:
         runResult.results[idx].portableOutputs = outs.outputs
         # P3.3: persist the memo record beside the shared action cache so
@@ -19090,7 +19278,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         return none(BuildRunResult)
       # A `dynamicDepsFile` edge's input set is not known until it has run, so
       # the prefix has nothing it could revalidate against.
-      if action.dynamicDepsFile.len > 0:
+      if action.dynamicDepsFile.len > 0 or action.optionalOutputs.len > 0:
         return none(BuildRunResult)
     var fastResult: BuildRunResult
     fastResult.traceEnabled = not config.suppressTrace
@@ -20004,22 +20192,23 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # static graph and grows as ``create-action`` records land.
   var declaredOutputs = initHashSet[string]()
   for action in buildGraph.actions:
-    for output in action.outputs:
+    for output in action.outputs & action.optionalOutputs:
       declaredOutputs.incl(output)
 
-  proc registerDynamicAction(producerId: string; newAction: BuildAction) =
+  proc registerDynamicAction(producerId: string; incomingAction: BuildAction) =
     ## M25: materialise a ``create-action`` record into the running graph.
     ## Validates uniqueness, dep-target existence, and self-cycle freedom
     ## before threading the new action through every scheduler bookkeeping
     ## structure. The producer id participates only in the trace message
     ## so the materialisation can be attributed back to its source.
+    let newAction = withOptionalOutputIdentity(incomingAction)
     if newAction.id.len == 0:
       raiseEngine("dynamic action-create record from " & producerId &
         ": id must be non-empty")
     if actionsById.hasKey(newAction.id):
       raiseEngine("dynamic action-create record from " & producerId &
         ": action id " & newAction.id & " already exists in the graph")
-    for output in newAction.outputs:
+    for output in newAction.outputs & newAction.optionalOutputs:
       if declaredOutputs.contains(output):
         raiseEngine("dynamic action-create record from " & producerId &
           ": declared output " & output & " is already produced by another action")
@@ -20031,10 +20220,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         raiseEngine("dynamic action-create record from " & producerId &
           ": action " & newAction.id & " depends on unknown action " & dep)
 
+    var conditionalOwnership = newAction.optionalOutputs.len > 0
+    for existing in actionsById.values:
+      conditionalOwnership = conditionalOwnership or existing.optionalOutputs.len > 0
+    if conditionalOwnership:
+      var expanded = buildGraph
+      expanded.actions = @[]
+      for original in buildGraph.actions:
+        expanded.actions.add(actionsById.getOrDefault(original.id, original))
+      expanded.actions.add(newAction)
+      validateGraph(expanded)
+
     let newIndex = buildGraph.actions.len
     buildGraph.actions.add(newAction)
     idToIndex[newAction.id] = newIndex
     actionsById[newAction.id] = newAction
+    declaredActions[newAction.id] = newAction
     graphPathIndexStale = true
     statuses[newAction.id] = asPending
     runResult.results.add(ActionResult(
@@ -20042,7 +20243,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       status: asPending,
       dependencyPolicyKind: newAction.dependencyPolicy.kind,
       cacheDecision: if newAction.cacheable: cdMiss else: cdNotCacheable))
-    for output in newAction.outputs:
+    for output in newAction.outputs & newAction.optionalOutputs:
       declaredOutputs.incl(output)
     # Compute initial ``remaining`` only against deps that are not yet
     # terminal-success — the producer of the .rbdyn (which is the consumer
@@ -20098,6 +20299,20 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var addedWaiting = 0
     for output in fragment.outputs.getOrDefault(id):
       action.outputs.addUnique(output)
+    let optional = fragment.optionalOutputs.getOrDefault(id)
+    for output in optional:
+      action.optionalOutputs.addUnique(output)
+    if optional.len > 0:
+      # Discovery may claim conditional paths only under the same ownership
+      # rules as static declarations. Check against actions already discovered
+      # too, so optional tree cleanup cannot erase another producer's output.
+      var expanded = buildGraph
+      expanded.actions = @[]
+      for original in buildGraph.actions:
+        expanded.actions.add(if original.id == id: action
+          else: actionsById.getOrDefault(original.id, original))
+      validateGraph(expanded)
+      action = withOptionalOutputIdentity(action)
     for dep in fragment.deps.getOrDefault(id):
       if not actionsById.hasKey(dep):
         raiseEngine("dynamic dependency " & dep & " for " & id &
@@ -20125,6 +20340,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         return false
       else:
         inc addedWaiting
+    # Portable publication needs the configured product too. Retain this
+    # prelaunch action before monitor/RunQuota wrappers rewrite its argv.
+    declaredActions[id] = action
     actionsById[id] = action
     graphPathIndexStale = true
     dynamicDepsLoaded.incl(id)
@@ -20364,6 +20582,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       var named: seq[string] = @[]
       for output in hit.get().outputs:
         named.add(output.path)
+      var optionalKeys: seq[string] = @[]
+      for output in action.optionalOutputs:
+        optionalKeys.add(logicalKey(materialPath(action.cwd, output)))
+      expected = expected.filterIt(it notin optionalKeys or it in named)
       expected.sort()
       named.sort()
       if expected != named or not manifestsConsistent(hit.get()):
@@ -20397,6 +20619,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         if not sink and id notin demanded:
           continue
         let record = resolved[id]
+        var physicalRecorded: seq[string] = @[]
+        for candidate in actionsById[id].optionalOutputs:
+          let physical = materialPath(actionsById[id].cwd, candidate)
+          for output in record.outputs:
+            if logicalKey(physical) == output.path:
+              physicalRecorded.add(physical)
+              break
+        actionsById[id].removeAbsentOptionalOutputs(physicalRecorded)
         if outputsOnDiskReason(roots, record).len == 0:
           materialized[id] = "portable-outputs-present"
           continue
@@ -20764,6 +20994,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                   message: reason, changedInputPath: blocked)
           case lookup.status
           of aclHit:
+            var recordedPaths: seq[string] = @[]
+            for output in lookup.record.outputs:
+              recordedPaths.add(output.path)
+            action.removeAbsentOptionalOutputs(recordedPaths)
             if config.rebuildMissingOutputsOnCacheHit and reusableInPlace:
               assignCacheHitEvidence(
                 runResult.results[idToIndex.resultIndex(id)], action,
@@ -20814,6 +21048,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               launchedAny = true
               continue
           of aclHybridCutoff:
+            var recordedPaths: seq[string] = @[]
+            for output in lookup.record.outputs:
+              recordedPaths.add(output.path)
+            action.removeAbsentOptionalOutputs(recordedPaths)
             if config.rebuildMissingOutputsOnCacheHit and reusableInPlace:
               assignCacheHitEvidence(
                 runResult.results[idToIndex.resultIndex(id)], action,
@@ -20904,7 +21142,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           let outputStatStart = statStart()
           outputsPresent = action.allOutputsExist()
           finishStat("repro output stat", outputStatStart)
-        if outputsPresent and not cacheMissInputChanged and
+        if outputsPresent and action.optionalOutputs.len == 0 and
+            not cacheMissInputChanged and
             not cacheRejectedOutput and
             not cacheInvalidatedByPolicy and
             not dependencyLaunched and
@@ -21076,7 +21315,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                   action.actionCachePolicy,
                   action.recordedInputNames(
                     action.cacheInputPaths(evidence.evidence)),
-                  action.outputs, action.cwd,
+                  action.recordedOutputPaths(), action.cwd,
                   storeOutputBlobs = storeOutputBlobs,
                   metadataCache = addr fileMetadataCache,
                   envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
@@ -21190,7 +21429,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             completed = terminalCount()
             launchedAny = true
             continue
-        if action.removeBeforeRun.len > 0:
+        if action.removeBeforeRun.len > 0 or action.optionalOutputs.len > 0:
           let removeProblem = action.removeOutputsBeforeRun()
           if removeProblem.len > 0:
             statuses[id] = asFailed
@@ -21319,7 +21558,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                   plan.action.actionCachePolicy,
                   plan.action.recordedInputNames(
                     plan.action.cacheInputPaths(evidence.evidence)),
-                  plan.action.outputs, plan.action.cwd,
+                  plan.action.recordedOutputPaths(), plan.action.cwd,
                   storeOutputBlobs = storeOutputBlobs,
                   metadataCache = addr fileMetadataCache,
                   envInputs = plan.action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
@@ -21943,7 +22182,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             let record = cache.recordActionResult(cas.inner, action.weakFingerprint,
               action.actionCachePolicy,
               action.recordedInputNames(action.cacheInputPaths(evidence.evidence)),
-              action.outputs, action.cwd,
+              action.recordedOutputPaths(), action.cwd,
               storeOutputBlobs = storeOutputBlobs,
               metadataCache = addr fileMetadataCache,
               envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),

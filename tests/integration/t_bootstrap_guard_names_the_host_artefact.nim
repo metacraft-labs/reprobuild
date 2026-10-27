@@ -274,6 +274,33 @@ suite "W15 bootstrap guard":
     check after.startsWith("skip")
     check after == before
 
+  test "HCR library outputs keep a fresh CLI fresh, but its source does not":
+    # The native producer bootstraps its engine BEFORE writing these graph
+    # outputs. Their newer mtimes must not trigger another engine bootstrap;
+    # its canonical header remains an engine-source freshness witness.
+    let root = newFixtureRoot("hcr-outputs")
+    defer: removeDirEventually(root)
+    ageSources(root, 600)
+    stage(root / "build" / "bin" / HostBinName, hostImage(), true)
+    touchAt(root / "build" / "bin" / HostBinName, 60)
+    stageHostPair(root, 60)
+    let header = root / "libs/repro_hcr_agent/c/repro_hcr_agent.h"
+    stage(header, "/* source */\n", false)
+    touchAt(header, 600)
+    stage(root / "libs/repro_hcr_agent/build/librepro_hcr_agent.so",
+      "primary graph output", false)
+    stage(root / "libs/repro_hcr_agent/build/lib/librepro_hcr_agent.so",
+      "healthy mirror graph output", false)
+    let generated = decisionFor(root)
+    checkpoint("newer graph outputs: " & generated)
+    check generated.startsWith("skip")
+
+    touchAt(header, 10)
+    let changedSource = decisionFor(root)
+    checkpoint("newer canonical header: " & changedSource)
+    check changedSource.startsWith("bootstrap stale:")
+    check "libs/repro_hcr_agent/c/repro_hcr_agent.h" in changedSource
+
   test "a thin client with no engine beside it is not a bootstrapped tree":
     ## THE SECOND HOST ARTEFACT, and why its absence cannot be left to the
     ## clauses above. `build/bin/repro` is the thin daemon client; it routes a

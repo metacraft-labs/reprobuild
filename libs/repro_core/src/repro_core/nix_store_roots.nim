@@ -80,6 +80,7 @@ when defined(posix):
   import std/posix
 
 import ./ambient_execution
+import ./link_target
 import ./paths
 
 const
@@ -302,7 +303,7 @@ proc scanPath(s: var StoreRefScanner; path: string) =
   ## the plainest reference an output can carry.
   if symlinkExists(extendedPath(path)):
     try:
-      discard s.scanBuffer(expandSymlink(extendedPath(path)), final = true)
+      discard s.scanBuffer(readSymlinkTarget(extendedPath(path)), final = true)
     except OSError:
       discard
   elif dirExists(extendedPath(path)):
@@ -469,7 +470,7 @@ proc readRootLinks(dir: string; storeDir: string): RootLinks =
     if kind notin {pcLinkToFile, pcLinkToDir}:
       continue
     try:
-      let target = expandSymlink(child)
+      let target = readSymlinkTarget(child)
       if target.isUnderStoreDir(storeDir):
         result.byTarget.add((link: child, target: target))
     except OSError:

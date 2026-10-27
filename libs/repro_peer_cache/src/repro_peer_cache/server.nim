@@ -99,6 +99,11 @@ type
       ## emits a first-time off-CIDR warning. Tracks the "warning is
       ## logged exactly once per peer ID per session" assertion in
       ## the M2 CIDR-allowlist test independent of `stderr` capture.
+    diagnosticLog*: proc(line: string) {.gcsafe, closure.}
+      ## Where the server's operator diagnostics go (today the first-time
+      ## off-CIDR multicast warning). nil = stderr. A node hosted by
+      ## `repro-daemon` routes them to the daemon log, because the daemon's
+      ## stdout and stderr go to /dev/null.
     capTier2*: bool
       ## Peer-Cache-Scale M2: this server's tier-2 capability. Echoed
       ## back to peers in `mkHelloOk` so clients can record us as a
@@ -1145,11 +1150,14 @@ proc multicastReceiveLoop(server: PeerCacheServer;
       if helloOk and hello.peerId notin server.multicastWarnedPeers:
         server.multicastWarnedPeers.incl(hello.peerId)
         inc server.warningEmitCount
+        let line = "peer-cache: dropping multicast announcement from " &
+          triple.address & " (peer " & $hello.peerId &
+          ") — outside configured CIDR allowlist"
         try:
-          stderr.writeLine(
-            "peer-cache: dropping multicast announcement from " &
-            triple.address & " (peer " & $hello.peerId &
-            ") — outside configured CIDR allowlist")
+          if server.diagnosticLog.isNil:
+            stderr.writeLine(line)
+          else:
+            server.diagnosticLog(line)
         except CatchableError:
           discard
       continue

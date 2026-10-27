@@ -53,7 +53,22 @@
 ## refuses and reports any connect/send naming another destination. On macOS
 ## Seatbelt allows only the forwarders' loopback ports and the kernel reports
 ## every denial to the unified log, tagged with the lease id, which the
-## supervisor collects (`log stream`).
+## supervisor collects (`log stream`). That report channel is LOSSY: it is
+## shared with every sandboxed process on the host, and under report load
+## the kernel's reports are dropped before they reach the log (measured
+## 2026-10-27; threat model G8, G41). The denial itself always holds; a
+## macOS lease's reports are best-effort, which the trusted profile accepts
+## (the hardened profile refuses macOS workers). The loss-free path is M8's
+## VM boundary, where the guest's network is a host-side attachment the
+## supervisor reads in process.
+##
+## A forwarded connection is TCP end to end on both platforms: what arrives
+## is forwarded at once (no buffering for a fuller read), an EOF in one
+## direction is passed on as a half-close while the other keeps flowing,
+## and the sockets are closed once both directions finished or either
+## failed — so a request/response or interactive protocol works through it,
+## and a lease closing early cannot crash the supervisor
+## (`startEgressForwarder`; Linux: `c/repro_lease_linux.c`, `pump`).
 ##
 ## DETECTION (DET-1, DET-2): every denied egress attempt, every exec outside
 ## the closure, every syscall the floor refuses, every file access the
@@ -163,6 +178,14 @@ type
       ## cannot change them: Linux binds the directory read-only without
       ## noexec over the noexec lease; macOS denies writes beneath it. Its
       ## path is exposed to the action as `REPRO_LEASE_INPUTS`.
+    siblingsDir*: string
+      ## Distributed-Execution M1: the snapshot's `repro develop` siblings,
+      ## each materialized and verified under `<siblingsDir>/<name>` (the
+      ## directory name is `repro_workspace_snapshot.siblingDirName` of its
+      ## repository id) inside the lease, never in the worktree; "" = none.
+      ## Exposed exactly like the input artifacts — read-only and executable
+      ## (Linux binds it read-only without noexec; macOS denies writes
+      ## beneath it) — as `REPRO_DEVELOP_SIBLINGS`.
     memfdNoexec*: bool
       ## HARDENED: the `vm.memfd_noexec = 2` policy (a memfd_create without
       ## MFD_NOEXEC_SEAL is refused and reported), enforced by the lease's
@@ -440,6 +463,8 @@ when defined(linux):
         $(10 + i) & "|" & $d.port)
     if spec.inputsDir.len > 0:
       env.add(("REPRO_LEASE_INPUTS", spec.inputsDir))
+    if spec.siblingsDir.len > 0:
+      env.add(("REPRO_DEVELOP_SIBLINGS", spec.siblingsDir))
     for (k, v) in env: buf.kv("env", k & "=" & v)
     for r in spec.readRoots: buf.kv("read", r)
     for r in spec.closureRoots:
@@ -452,6 +477,10 @@ when defined(linux):
       buf.kv("exec", spec.inputsDir)
       buf.kv("closure", spec.inputsDir)
       buf.kv("input", spec.inputsDir)
+    if spec.siblingsDir.len > 0 and not cleanup:
+      buf.kv("exec", spec.siblingsDir)
+      buf.kv("closure", spec.siblingsDir)
+      buf.kv("input", spec.siblingsDir)
     if spec.memfdNoexec and memfdNoexecSupported():
       buf.kv("memfd_noexec", "1")
     buf.kv("write", spec.leaseDir)
@@ -578,15 +607,17 @@ proc seatbeltProfile*(spec: LeaseSpec; forwarderPorts: seq[int]): string =
       " (literal \"/\")"
     for r in spec.readRoots & spec.closureRoots & spec.outputDirs:
       reads.add(" (subpath " & sbplString(realOrSelf(r)) & ")")
-    if spec.inputsDir.len > 0:
-      reads.add(" (subpath " & sbplString(realOrSelf(spec.inputsDir)) & ")")
+    for d in [spec.inputsDir, spec.siblingsDir]:
+      if d.len > 0:
+        reads.add(" (subpath " & sbplString(realOrSelf(d)) & ")")
     p.add("(allow file-read-data" & reads & ")\n")
     p.add("(deny process-exec* " & tag & ")\n")
     var execs = ""
     for r in spec.closureRoots & spec.outputDirs:
       execs.add(" (subpath " & sbplString(realOrSelf(r)) & ")")
-    if spec.inputsDir.len > 0:
-      execs.add(" (subpath " & sbplString(realOrSelf(spec.inputsDir)) & ")")
+    for d in [spec.inputsDir, spec.siblingsDir]:
+      if d.len > 0:
+        execs.add(" (subpath " & sbplString(realOrSelf(d)) & ")")
     if execs.len > 0:
       p.add("(allow process-exec*" & execs & ")\n")
   # The namespace group comes AFTER the landlock group and names
@@ -603,12 +634,15 @@ proc seatbeltProfile*(spec: LeaseSpec; forwarderPorts: seq[int]): string =
         sbplString(realOrSelf(h)) & ") " & tag & ")\n")
     p.add("(allow file-read* file-read-data file-write* (subpath " & own & ")" & stdio &
       ")\n")
-  if spec.inputsDir.len > 0 and llLandlock in spec.layers:
-    # Last word on writes beneath the input artifacts (they lie inside the
-    # lease, which the groups above re-allow): read and execute only.
-    p.add("; input artifacts: read and execute, never write\n")
-    p.add("(deny file-write* (subpath " &
-      sbplString(realOrSelf(spec.inputsDir)) & ") " & tag & ")\n")
+  if llLandlock in spec.layers:
+    # Last word on writes beneath the input artifacts and the develop
+    # siblings (they lie inside the lease, which the groups above
+    # re-allow): read and execute only.
+    for d in [spec.inputsDir, spec.siblingsDir]:
+      if d.len > 0:
+        p.add("; input artifacts / develop siblings: read and execute, never write\n")
+        p.add("(deny file-write* (subpath " &
+          sbplString(realOrSelf(d)) & ") " & tag & ")\n")
   if llFloor in spec.layers:
     p.add("; floor: no unix-socket peers (the daemon), no reach into other processes\n")
     p.add("(deny network-outbound (remote unix-socket) " & tag & ")\n")
@@ -621,34 +655,114 @@ proc seatbeltProfile*(spec: LeaseSpec; forwarderPorts: seq[int]): string =
     p.add("(allow network-outbound (remote ip \"localhost:" & $port & "\"))\n")
   p
 
-proc splice(a, b: AsyncSocket) {.async.} =
-  try:
-    while true:
-      let data = await a.recv(16384)
-      if data.len == 0: break
-      await b.send(data)
-  except CatchableError:
-    discard
-  try: b.close() except CatchableError: discard
-  try: a.close() except CatchableError: discard
+when defined(posix):
+  # The egress forwarder (macOS; Linux forwards in `c/repro_lease_linux.c`
+  # with the same rules). One forwarded connection is two directions, each
+  # pumped by its own task, and the connection is a TCP connection end to
+  # end, half-close included:
+  #
+  # * a read returns whatever has arrived (unbuffered sockets) and it is
+  #   sent on at once, so a request/response or interactive protocol never
+  #   waits for a buffer to fill;
+  # * when one direction reaches EOF, only the WRITE side of its peer is
+  #   shut down (the EOF is passed on) and the other direction keeps
+  #   flowing — a client that half-closes after its request still gets the
+  #   response;
+  # * a direction that fails shuts both sockets down, which ends the other
+  #   direction's pending read instead of closing the socket under it;
+  # * the sockets are closed once, by whichever direction finishes LAST, so
+  #   no task ever reads or writes a closed socket (asyncnet asserts on that,
+  #   and an AssertionDefect is not a CatchableError: it used to escape and
+  #   kill the worker daemon).
+  const EgressReadChunk = 16384
 
-proc forwardLoop(listener: AsyncSocket; dest: EgressDestination;
-                 running: ref bool) {.async.} =
-  while running[]:
-    var inner: AsyncSocket
+  type ForwardedConnection = ref object
+    inner, outer: AsyncSocket
+    directionsLeft: int
+
+  proc shutdownSide(s: AsyncSocket; how: cint) =
+    ## Never raises: the peer may already be gone (ENOTCONN), which is fine.
+    discard posix.shutdown(s.getFd, how)
+
+  proc directionFinished(c: ForwardedConnection) =
+    dec c.directionsLeft
+    if c.directionsLeft == 0:
+      try: c.inner.close() except CatchableError: discard
+      try: c.outer.close() except CatchableError: discard
+
+  proc pumpDirection(c: ForwardedConnection; src, dst: AsyncSocket) {.async.} =
+    var reachedEof = false
     try:
-      inner = await listener.accept()
+      while true:
+        # No `SafeDisconn`: a reset or a send to a peer that is gone is a
+        # failure of this direction, not a silent EOF or a silent drop.
+        let data = await src.recv(EgressReadChunk, flags = {})
+        if data.len == 0:
+          reachedEof = true
+          break
+        await dst.send(data, flags = {})
     except CatchableError:
-      break
-    let outer = newAsyncSocket()
+      discard
+    if reachedEof:
+      shutdownSide(dst, SHUT_WR)
+    else:
+      shutdownSide(src, SHUT_RDWR)
+      shutdownSide(dst, SHUT_RDWR)
+    directionFinished(c)
+
+  proc forwardConnection(inner: AsyncSocket;
+                         dest: EgressDestination) {.async.} =
+    when defined(macosx):
+      # An accepted socket does not inherit SO_NOSIGPIPE: a send to a lease
+      # that went away must be an error here, not a SIGPIPE to the daemon.
+      try: inner.getFd.setSockOptInt(SOL_SOCKET, SO_NOSIGPIPE, 1)
+      except CatchableError: discard
+    var outer: AsyncSocket
     try:
+      # Inside the try: out of descriptors is a refused connection, not an
+      # exception escaping `asyncCheck` into the daemon's dispatcher.
+      outer = newAsyncSocket(buffered = false)
       await outer.connect(dest.host, Port(dest.port))
     except CatchableError:
       try: inner.close() except CatchableError: discard
-      try: outer.close() except CatchableError: discard
-      continue
-    asyncCheck splice(inner, outer)
-    asyncCheck splice(outer, inner)
+      if outer != nil:
+        try: outer.close() except CatchableError: discard
+      return
+    let c = ForwardedConnection(inner: inner, outer: outer, directionsLeft: 2)
+    # Neither task raises (each catches every error and finishes through
+    # `directionFinished`), so `asyncCheck` cannot take the daemon down.
+    asyncCheck pumpDirection(c, inner, outer)
+    asyncCheck pumpDirection(c, outer, inner)
+
+  proc forwardLoop(listener: AsyncSocket; dest: EgressDestination;
+                   running: ref bool) {.async.} =
+    ## `listener` must be unbuffered (`newAsyncSocket(buffered = false)`):
+    ## an accepted socket inherits it, and a buffered recv waits for a full
+    ## chunk.
+    while running[]:
+      var inner: AsyncSocket
+      try:
+        inner = await listener.accept()
+      except CatchableError:
+        break
+      if not running[]:
+        try: inner.close() except CatchableError: discard
+        break
+      # Each connection dials on its own, so a slow destination does not
+      # hold up the next accept.
+      asyncCheck forwardConnection(inner, dest)
+
+  proc startEgressForwarder*(dest: EgressDestination; running: ref bool):
+      tuple[listener: AsyncSocket; port: int] =
+    ## A forwarder for `dest` on an ephemeral loopback port, served on the
+    ## current dispatcher until `running[]` is false and the listener is
+    ## closed. Exported for `runLeaseSeatbelt` and its tests.
+    let l = newAsyncSocket(buffered = false)
+    l.setSockOpt(OptReuseAddr, true)
+    l.bindAddr(Port(0), "127.0.0.1")
+    l.listen()
+    result = (l, int(getLocalAddr(l.getFd(), Domain.AF_INET)[1]))
+    asyncCheck forwardLoop(l, dest, running)
 
 proc parseSandboxLog(text, leaseId: string): seq[LeaseReport] =
   let marker = "repro-lease-" & leaseId
@@ -699,16 +813,11 @@ when defined(posix):
    var ports: seq[int] = @[]
    var env = spec.env
    for d in spec.egress:
-     let l = newAsyncSocket()
-     l.setSockOpt(OptReuseAddr, true)
-     l.bindAddr(Port(0), "127.0.0.1")
-     l.listen()
-     let port = int(getLocalAddr(l.getFd(), Domain.AF_INET)[1])
+     let (l, port) = startEgressForwarder(d, running)
      listeners.add(l)
      ports.add(port)
      env.add((egressVarName(d.name), "127.0.0.1:" & $port))
      outcome.egressEnv.add((egressVarName(d.name), "127.0.0.1:" & $port))
-     asyncCheck forwardLoop(l, d, running)
    let profilePath = spec.metaDir / "lease.sb"
    writeFile(profilePath, seatbeltProfile(spec, ports))
    # Collect the kernel's Seatbelt denials for this lease (tagged) before the
@@ -748,6 +857,8 @@ when defined(posix):
          try: onReport(rep) except CatchableError: discard
    if spec.inputsDir.len > 0:
      env.add(("REPRO_LEASE_INPUTS", spec.inputsDir))
+   if spec.siblingsDir.len > 0:
+     env.add(("REPRO_DEVELOP_SIBLINGS", spec.siblingsDir))
    var envTable = newStringTable(modeCaseSensitive)
    for (k, v) in env: envTable[k] = v
    # stdout/stderr go to files (a pipe the daemon does not drain while the
@@ -902,6 +1013,8 @@ when defined(windows):
       outcome.egressEnv.add((egressVarName(d.name), d.host & ":" & $d.port))
     if spec.inputsDir.len > 0:
       env.add(("REPRO_LEASE_INPUTS", spec.inputsDir))
+    if spec.siblingsDir.len > 0:
+      env.add(("REPRO_DEVELOP_SIBLINGS", spec.siblingsDir))
     let job = CreateJobObjectW(nil, nil)
     if job == 0:
       outcome.error = "CreateJobObject failed: " & $osLastError()

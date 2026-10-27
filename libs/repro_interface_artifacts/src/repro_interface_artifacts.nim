@@ -79,15 +79,11 @@ when defined(windows):
 else:
   import std/posix
 
-  const
-    ProviderLockExclusive = 2.cint
-    ProviderLockNonBlocking = 4.cint
-
-  proc providerLockFlock(fd: cint; operation: cint): cint
-    {.importc: "flock", header: "<sys/file.h>".}
 
 import cbor
 import repro_core
+import repro_core/file_lock
+export file_lock.ReproFileLock
 import repro_core/ambient_execution
 import repro_core/paths as corepaths
 import repro_core/relocation
@@ -7113,13 +7109,6 @@ proc boundedNimCompileCommand*(): seq[string] =
     "--parallelBuild:" & $providerParallelBuildCount()
   ]
 
-type ReproFileLock* = object
-  held: bool
-  when defined(windows):
-    handle: ProviderLockHandle
-  else:
-    fd: cint
-
 proc providerNimcachePath(command: openArray[string]): string =
   for arg in command:
     if arg.startsWith("--nimcache:"):
@@ -7128,78 +7117,11 @@ proc providerNimcachePath(command: openArray[string]): string =
     "provider compiler command has no --nimcache path")
 
 proc acquireProviderFileLock(lockPath: string): ReproFileLock =
-  createDir(extendedPath(parentDir(lockPath)))
-  when defined(windows):
-    let wide = newWideCString(lockPath)
-    while true:
-      let handle = providerLockCreateFileW(
-        wide,
-        ProviderLockGenericRead or ProviderLockGenericWrite,
-        0,
-        nil,
-        ProviderLockOpenAlways,
-        ProviderLockFileAttributeNormal,
-        nil)
-      if cast[int](handle) != cast[int](ProviderLockInvalidHandle):
-        return ReproFileLock(held: true, handle: handle)
-      let error = providerLockGetLastError()
-      if error != ProviderLockSharingViolation:
-        raise newException(IOError,
-          "CreateFileW(" & lockPath & ") failed, GetLastError=" & $error)
-      sleep(50)
-  else:
-    let fd = posix.open(lockPath.cstring, O_RDWR or O_CREAT, Mode(0o600))
-    if fd < 0:
-      raise newException(IOError,
-        "open(" & lockPath & ") failed, errno=" & $errno)
-    while providerLockFlock(fd, ProviderLockExclusive) != 0:
-      if errno == EINTR:
-        continue
-      let lockError = errno
-      discard posix.close(fd)
-      raise newException(IOError,
-        "flock(" & lockPath & ") failed, errno=" & $lockError)
-    return ReproFileLock(held: true, fd: fd)
+  file_lock.acquireExclusiveFileLock(lockPath)
 
 proc tryAcquireProviderFileLock(lockPath: string;
                                 lock: var ReproFileLock): bool =
-  ## Non-blocking `acquireProviderFileLock`: true and `lock` held when the
-  ## lock was free, false (nothing held) when another holder has it.
-  createDir(extendedPath(parentDir(lockPath)))
-  when defined(windows):
-    let handle = providerLockCreateFileW(
-      newWideCString(lockPath),
-      ProviderLockGenericRead or ProviderLockGenericWrite,
-      0,
-      nil,
-      ProviderLockOpenAlways,
-      ProviderLockFileAttributeNormal,
-      nil)
-    if cast[int](handle) != cast[int](ProviderLockInvalidHandle):
-      lock = ReproFileLock(held: true, handle: handle)
-      return true
-    let error = providerLockGetLastError()
-    if error != ProviderLockSharingViolation:
-      raise newException(IOError,
-        "CreateFileW(" & lockPath & ") failed, GetLastError=" & $error)
-    false
-  else:
-    let fd = posix.open(lockPath.cstring, O_RDWR or O_CREAT, Mode(0o600))
-    if fd < 0:
-      raise newException(IOError,
-        "open(" & lockPath & ") failed, errno=" & $errno)
-    while providerLockFlock(fd, ProviderLockExclusive or
-        ProviderLockNonBlocking) != 0:
-      if errno == EINTR:
-        continue
-      let lockError = errno
-      discard posix.close(fd)
-      if lockError == EWOULDBLOCK or lockError == EAGAIN:
-        return false
-      raise newException(IOError,
-        "flock(" & lockPath & ") failed, errno=" & $lockError)
-    lock = ReproFileLock(held: true, fd: fd)
-    true
+  file_lock.tryAcquireExclusiveFileLock(lockPath, lock)
 
 proc acquireProviderNimcacheLock(command: openArray[string]):
     ReproFileLock =
@@ -7225,17 +7147,7 @@ proc acquireProviderNimcacheLock(command: openArray[string]):
   acquireProviderFileLock(providerNimcachePath(command) & ".compile.lock")
 
 proc releaseProviderNimcacheLock(lock: var ReproFileLock) =
-  if not lock.held:
-    return
-  when defined(windows):
-    if cast[int](lock.handle) != cast[int](ProviderLockInvalidHandle):
-      discard providerLockCloseHandle(lock.handle)
-      lock.handle = ProviderLockInvalidHandle
-  else:
-    if lock.fd >= 0:
-      discard posix.close(lock.fd)
-      lock.fd = -1
-  lock.held = false
+  file_lock.releaseExclusiveFileLock(lock)
 
 proc acquireInterfaceArtifactLock*(artifactPath: string):
     ReproFileLock =
@@ -7246,6 +7158,20 @@ proc acquireInterfaceArtifactLock*(artifactPath: string):
   acquireProviderFileLock(artifactPath & ".extract.lock")
 
 proc releaseInterfaceArtifactLock*(lock: var ReproFileLock) =
+  releaseProviderNimcacheLock(lock)
+
+proc acquireExclusiveFileLock*(lockPath: string): ReproFileLock =
+  ## Block until this process holds the exclusive advisory lock named by
+  ## ``lockPath`` (created if absent, never removed). The same primitive as
+  ## the interface-artifact and nimcache locks, for a caller that names its
+  ## own lock file. The lock is not inherited by child processes (POSIX
+  ## ``O_CLOEXEC``; a Windows handle opened without inheritable security
+  ## attributes), and is released by ``releaseExclusiveFileLock`` or when the
+  ## process exits.
+  acquireProviderFileLock(lockPath)
+
+proc releaseExclusiveFileLock*(lock: var ReproFileLock) =
+  ## Release a lock taken by ``acquireExclusiveFileLock``. Idempotent.
   releaseProviderNimcacheLock(lock)
 
 proc runNimcacheCompilerCommandHeld(command: openArray[string]; cwd = ""):
@@ -7406,7 +7332,7 @@ proc interfaceNimcacheKeyedCompileFlags*(command: openArray[string];
     if arg notin recipeFlags:
       result.add(arg)
 
-proc recipeConfigSearchPathFlags*(modulePath: string): seq[string] =
+proc recipeConfigSearchPathFlags*(modulePath: string; cwd = ""): seq[string] =
   ## `--path:` flags for the search paths the recipe's OWN configuration
   ## files add: the `config.nims` / `nim.cfg` of the recipe's directory and
   ## of every ancestor, which Nim applies to a compile whose main module is
@@ -7429,11 +7355,18 @@ proc recipeConfigSearchPathFlags*(modulePath: string): seq[string] =
   ## its entry name follow from that, and Nim keys reuse on both, so these
   ## flags stay out of the nimcache key (`interfaceNimcacheKeyedCompileFlags`)
   ## like the recipe's own directory. A failed evaluation adds nothing.
+  ##
+  ## `cwd` is the directory the evaluation runs in. The extraction passes its
+  ## private compiler directory, like the compile itself: the compiler, and
+  ## any `config.nims` it evaluates, must not run in the caller's directory
+  ## (Hermetic-Builds-And-Path-Independence.md, "Engine-internal recipe
+  ## compiles"). With a main module named, Nim reads its configuration from
+  ## that module's directory chain, so the directory changes nothing else.
   let execution =
     try:
       runCommand(@[nimCompilerPath(), "dump", "--dump.format:json",
         "--hints:off", "--warnings:off", absolutePath(modulePath)],
-        raiseOnFailure = false)
+        cwd = cwd, raiseOnFailure = false)
     except CatchableError:
       return @[]
   if execution.exitCode != 0:
@@ -7810,7 +7743,8 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # `nim.cfg` chain; the search paths the recipe's chain adds are passed
   # explicitly instead (`recipeConfigSearchPathFlags`), after every other
   # path so they cannot shadow a reprobuild library (see TI2 above).
-  let recipeConfigFlags = recipeConfigSearchPathFlags(absoluteModulePath)
+  let recipeConfigFlags = recipeConfigSearchPathFlags(absoluteModulePath,
+    cwd = tempRoot)
   if recipeConfigFlags.len > 0:
     let runnerAt = command.find(runnerPlaceholder)
     command.insert(recipeConfigFlags, runnerAt)

@@ -57,7 +57,8 @@ import repro_core
 
 const
   TryCompileMetadataMagic* = "RBCT"
-  TryCompileMetadataVersion* = 4'u16
+  TryCompileMetadataVersion* = 5'u16
+  ## v5 appends optionalOutputs to each action; earlier readers reject it.
   ## v1: single target (legacy, TryCompile probes only).
   ## v2: multi-target with optional default + all aggregator (Tier 2c
   ##     — main CMake-generated projects). v1 readers should reject v2;
@@ -89,11 +90,11 @@ const
   ## for the provider artifact itself. Bumping ``Version`` invalidates
   ## that share — keep it in lockstep with the binary protocol.
   TryCompileProviderArtifactId* =
-    "repro-cmake-trycompile-provider.v3"
+    "repro-cmake-trycompile-provider.v5"
   TryCompileProviderRootEntryPointId* =
     "cmakeReprobuildTryCompile.root"
   TryCompileProviderRootBodyHash* =
-    "cmakeReprobuildTryCompile.root.v3"
+    "cmakeReprobuildTryCompile.root.v5"
   TryCompileProviderPackageName* = "cmakeReprobuildTryCompile"
   TryCompileProviderNamespace* = "project"
 
@@ -108,6 +109,7 @@ type
     deps*: seq[string]
     inputs*: seq[string]
     outputs*: seq[string]
+    optionalOutputs*: seq[string]
     pool*: string
     poolUnits*: uint32
     depfile*: string
@@ -228,8 +230,9 @@ proc writeAction(outp: var seq[byte]; action: TryCompileActionDef) =
   outp.writeString(action.dynamicDepsFile)
   outp.writeBool(action.cacheable)
   outp.writeString(action.commandStatsId)
+  outp.writeStringSeq(action.optionalOutputs)
 
-proc readAction(bytes: openArray[byte]; pos: var int): TryCompileActionDef =
+proc readAction(bytes: openArray[byte]; pos: var int; version: uint16): TryCompileActionDef =
   result.id = readString(bytes, pos)
   result.inline = readBool(bytes, pos)
   result.inlineArgv = readStringSeq(bytes, pos)
@@ -245,6 +248,8 @@ proc readAction(bytes: openArray[byte]; pos: var int): TryCompileActionDef =
   result.dynamicDepsFile = readString(bytes, pos)
   result.cacheable = readBool(bytes, pos)
   result.commandStatsId = readString(bytes, pos)
+  if version >= 5'u16:
+    result.optionalOutputs = readStringSeq(bytes, pos)
 
 proc encodeTryCompileMetadata*(meta: TryCompileMetadata): seq[byte] =
   var payload: seq[byte] = @[]
@@ -317,7 +322,7 @@ proc decodeTryCompileMetadata*(bytes: openArray[byte]): TryCompileMetadata =
   let actionCount = int(actionCountRaw)
   result.actions = newSeq[TryCompileActionDef](actionCount)
   for i in 0 ..< actionCount:
-    result.actions[i] = readAction(bytes, pos)
+    result.actions[i] = readAction(bytes, pos, version)
   if version == 1'u16:
     # Legacy single-target envelope. Hoist the target into the v2-shape
     # ``targets`` array so consumers see a uniform view.

@@ -69,6 +69,7 @@
 
 import std/[algorithm, os, sets, strutils, tables]
 from repro_core/paths import extendedPath
+import repro_core/link_target
 
 import blake3
 import repro_home_generations
@@ -309,33 +310,75 @@ type
     existingKind: string              ## human label for the diagnostic
     existingTarget: string            ## resolved link target, if a link
 
-proc linkPointsAtSource(linkPath, desiredSource: string): bool =
+proc readLinkTargetBestEffort*(linkPath: string): string =
+  ## Where the link at `linkPath` points, absolute (a relative target is
+  ## joined to the link's directory), or "" when it cannot be read. Read
+  ## from the link itself and never followed (`repro_core/link_target`),
+  ## so a dangling link and an untraversable one still answer. Never the
+  ## link's own path: `os.expandSymlink` returns its argument on Windows,
+  ## which printed every drift row's link as its own "different source"
+  ## (reprobuild-pm issue
+  ## 2026-10-26-windows-stow-drift-names-the-link-itself-as-its-different-source).
+  try:
+    result = resolvedSymlinkTarget(linkPath)
+  except OSError, IOError:
+    result = ""
+
+proc linkTextNames(linkPath, path: string): bool =
+  ## Whether the link at `linkPath`, read without following it, names
+  ## `path`.
+  ##
+  ## On Windows the text is resolved against the link's directory and
+  ## compared as a path (`cmpPaths`: case-insensitive) after
+  ## `normalizedPath` folds separators, `.` and `..`: Win32 path
+  ## normalization is lexical, which is how a relative reparse target is
+  ## resolved there.
+  ##
+  ## On POSIX the raw `readlink` text must equal `path` exactly. The kernel
+  ## resolves `..` PHYSICALLY — after following the link's parent if that
+  ## is itself a symlink — so a lexical join could name `path` while the
+  ## link really leads elsewhere, and this predicate decides ownership.
+  if path.len == 0:
+    return false
+  when defined(windows):
+    let text = readLinkTargetBestEffort(linkPath)
+    text.len > 0 and cmpPaths(normalizedPath(text), normalizedPath(path)) == 0
+  else:
+    var text = ""
+    try: text = readSymlinkTarget(linkPath)
+    except OSError, IOError: return false
+    text == path
+
+proc linkPointsAtSource*(linkPath, desiredSource: string): bool =
   ## Decide whether the link at `linkPath` resolves to the SAME file
   ## as `desiredSource`. Uses `os.sameFile` (file-identity comparison
   ## by volume serial + file index on Windows, inode on POSIX) — a
   ## symlink resolves to its target's identity, so this is true iff
-  ## the link points at the stow source. This is robust where
-  ## `expandSymlink` is not: `GetFinalPathNameByHandle` on Windows
-  ## can return the link's own canonical path rather than the
-  ## reparse-point target, which would misclassify a correct link as
-  ## a wrong link.
+  ## the link points at the stow source, however the link spells it (a
+  ## relative target, a parent junction, a case variant).
+  ##
+  ## On Windows only, when `sameFile` cannot follow the link at all —
+  ## Windows refuses to traverse some links over an SSH logon ("untrusted
+  ## mount point") — the link's own text is the evidence left: a link
+  ## whose target names `desiredSource` (an existing file) is a link to it
+  ## (`linkTextNames`). Only a positive answer is taken from the text; a
+  ## text that names something else stays "not the same". On POSIX a link
+  ## the kernel cannot follow is not a correct link, whatever it says.
   try:
     if not fileExists(extendedPath(desiredSource)):
       return false
-    # `sameFile` follows the link on both arguments. If `linkPath`'s
-    # target was deleted it will raise; treat that as "not the same".
-    sameFile(linkPath, desiredSource)
   except OSError, IOError:
-    false
-
-proc readLinkTargetBestEffort(linkPath: string): string =
-  ## Best-effort resolution of a link's target, only for the
-  ## human-readable diagnostic. `sameFile` already drives the
-  ## decision; this is purely cosmetic.
+    return false
   try:
-    result = expandSymlink(extendedPath(linkPath))
+    # `sameFile` follows the link on both arguments. If `linkPath`'s
+    # target was deleted it will raise; fall through to the link text.
+    return sameFile(linkPath, desiredSource)
   except OSError, IOError:
-    result = ""
+    discard
+  when defined(windows):
+    linkTextNames(linkPath, desiredSource)
+  else:
+    false
 
 proc isRecordedStowTarget*(target, desiredSource: string;
                            rec: GeneratedFile): bool =
@@ -361,7 +404,7 @@ proc isRecordedStowTarget*(target, desiredSource: string;
       if not symlinkExists(extendedPath(target)):
         return false
       return linkPointsAtSource(target, rec.stowSource) or
-        readLinkTargetBestEffort(target) == rec.stowSource
+        linkTextNames(target, rec.stowSource)
     of gfoStowCopy:
       if symlinkExists(extendedPath(target)) or
           not fileExists(extendedPath(target)):
@@ -487,7 +530,8 @@ proc tryCreateSymlink(target, source: string;
       outCacheHit = true
       return true
     if reconcile != srpReconcileDrift:
-      raiseStowConflict(target, inspection.existingKind, source)
+      raiseStowConflict(target, inspection.existingKind, source,
+        inspection.existingTarget)
     # Reconcile: the caller already captured the prior content
     # digest via `readPreWriteDigest`. Remove the conflicting target
     # so the link can be created in its place.
@@ -639,7 +683,7 @@ proc materializeStowEntry*(profileDir, homeDir: string;
       return
     if reconcile != srpReconcileDrift:
       raiseStowConflict(entry.targetAbsolutePath, inspection.existingKind,
-        entry.sourceAbsolutePath)
+        entry.sourceAbsolutePath, inspection.existingTarget)
     result.wasReconciled = true
     try: removeFile(extendedPath(entry.targetAbsolutePath))
     except OSError:

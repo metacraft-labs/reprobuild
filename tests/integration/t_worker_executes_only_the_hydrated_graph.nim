@@ -46,14 +46,18 @@
 ## (`fs-denied`). And FLOW-1 (D4): the worker hydrated everything over the
 ## orchestrator's connection and opened none of its own.
 ##
-## A snapshot that names `repro develop` siblings is refused before anything
-## is materialized (`goal-schema-invalid`, reported off-host with the
-## request captured): this worker materializes the primary repository only,
-## and a goal run without the siblings must not be certified as their state.
-## The control is the same manifest without the sibling, which passes that
-## check and is refused only at the next one (no repository cache for its
-## repo id) — so the sibling is what refused the first, and neither case
-## needs an execution lease (the second test case).
+## A snapshot that names a `repro develop` sibling this worker holds no
+## repository cache for is refused before anything is materialized
+## (`goal-descriptor-unbound`, reported off-host with the request captured):
+## since Distributed-Execution M1 the worker materializes siblings into the
+## lease (a goal never runs without them), so a sibling it cannot
+## materialize refuses the goal. The control is the same manifest without
+## the sibling, which materializes and runs — so the sibling is what refused
+## the first (the second test case). Materializing siblings into the lease,
+## read-only, and withholding the certificate while they are present is
+## asserted end to end through the shipped daemon in the M1 gate
+## (`t_workspace_snapshot_export_and_materialize`, trusted profile — macOS
+## and Linux).
 ##
 ## TRUST PROFILES (2026-10-20). The derivation check is kept in BOTH
 ## profiles. The first case runs a HARDENED worker (refusals and lease
@@ -374,7 +378,7 @@ suite "Distributed-Execution M7 gate: the worker executes only the hydrated grap
         # -- FLOW-1: the worker opened no connection of its own -----------------
         check worker.statusInt("peers_connected") == 0
 
-  test "a snapshot naming develop siblings is refused before materializing":
+  test "a snapshot naming an uncached develop sibling is refused before materializing":
     if not hardenedWorkerHere():
       echo HardenedWorkerNA
       skip("platform N/A: hardened workers are Linux-only")
@@ -401,10 +405,9 @@ suite "Distributed-Execution M7 gate: the worker executes only the hydrated grap
       orch = newOrchestrator(base, o, worker.peerCachePort(), sink.endpoint)
       let workerId = w.identity.hostId
       check orch.waitConnected(workerId, worker)
-      # A repo id this worker holds no cache for, in BOTH manifests: the only
-      # difference between them is the sibling.
-      var plain = repo.snapshotOf("fixture", []).manifest
-      plain.primaryRepo.repoId = "not-cached"
+      # The primary is cached; the sibling's repo id is not. The only
+      # difference between the two manifests is the sibling.
+      let plain = repo.snapshotOf("fixture", []).manifest
       var withSibling = plain
       withSibling.developSiblings = @[RepoSnapshot(repoId: "sibling",
         baseCommitSha: repeat('a', 40), gitTreeSha1: repeat('b', 40))]
@@ -428,22 +431,22 @@ suite "Distributed-Execution M7 gate: the worker executes only the hydrated grap
             result.reason)
       let refused = goalFor(withSibling, "siblings")
       check refused.status == gsRefused
-      check refused.trigger == "goal-schema-invalid"
-      check "develop" in refused.reason
+      check refused.trigger == "goal-descriptor-unbound"
+      check "no repository cache for repro develop sibling 'sibling'" in
+        refused.reason
       var reported = false
-      for e in sink.waitForDetection("goal-schema-invalid", pump = proc() =
+      for e in sink.waitForDetection("goal-descriptor-unbound", pump = proc() =
           orch.host.tick(50)):
-        if e.senderHostId == workerId and "develop" in e.record.field("reason") and
+        if e.senderHostId == workerId and
+            "develop sibling" in e.record.field("reason") and
             e.record.payload.len > 0:
           reported = true
       check reported
       check worker.statusInt("worker_goals_executed") == 0
-      # Control: without the sibling, the sibling check passes and the next
-      # one refuses.
+      # Control: without the sibling, the snapshot materializes and the
+      # goal runs.
       let control = goalFor(plain, "control")
-      check control.status == gsRefused
-      check control.trigger == "goal-descriptor-unbound"
-      check "no repository cache" in control.reason
+      check control.status == gsCompleted
       check "develop" notin control.reason
 
   test "trusted profile: the gate refuses and records; the legitimate goal runs":
@@ -581,6 +584,17 @@ suite "Distributed-Execution M7 gate: the worker executes only the hydrated grap
       let ok = goal("ok1", "build-hello")
       check ok.status == gsCompleted
       check ok.treeBefore == snap.manifest.primaryRepo.gitTreeSha1
+      # Distributed-Execution M1: the goal's worktree was a lease of the
+      # worker's worktree pool (a copy-on-write clone of a base worktree),
+      # verified like any other materialization.
+      var pooled = 0
+      let poolDeadline = epochTime() + 10.0
+      while pooled == 0 and epochTime() < poolDeadline:
+        orch.host.tick(50)
+        pooled = worker.statusInt("worker_worktree_leases")
+      checkpoint("worktree pool: " & $worker.status())
+      check pooled >= 1
+      check worker.status().getOrDefault("worker_worktree_clone", "").len > 0
       check ok.outputs.len == 1
       # What this host's trusted worker can run (Linux: Landlock and the
       # floor when present — `linux-namespace+landlock+floor` on a host with

@@ -1,7 +1,7 @@
 version = "0.1.0"
 author = "Metacraft Labs"
 description = "Reprobuild backend of the ReproOS agent integration host: ownership, checkout, build, preview"
-license = "MIT"
+license = "Apache-2.0"
 srcDir = "src"
 requires "nim >= 2.2.0"
 requires "blake3"

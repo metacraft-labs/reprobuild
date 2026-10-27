@@ -17,9 +17,14 @@
 ##     ``workspace.toml`` (``workspaceTomlPath``).
 ##   * WRITES go to ``workspace-state.toml`` only. The first write in a
 ##     checkout that has only the old file creates the new one FROM the old
-##     one — its text, comments and any ``[[manifest]]`` layers included — with
-##     the schema line changed, and then applies the edit. Nothing is lost and
-##     nothing is copied twice.
+##     one — its text and comments — with the schema line changed and its
+##     ``[[manifest]]`` layers moved to ``repro-workspace.local.toml`` (the
+##     state file carries no layers, §5), and then applies the edit. Nothing
+##     is lost and nothing is copied twice. A write to an old file that
+##     carries layers and that records nothing new writes nothing at all
+##     (``recordWorkspaceState``): moving the layers changes how the
+##     workspace composes, which only a real change — or
+##     ``repro health --fix`` — may do.
 ##   * The OLD FILE IS LEFT UNTOUCHED, and once the new file exists THIS
 ##     repro ignores it: every read stops at the new name.
 ##
@@ -34,8 +39,9 @@
 ## shipped — so it DETECTS it and says so (``workspaceStateSkew``): every
 ## state read through ``workspaceTomlPath`` reports, on stderr and once per
 ## process, that an older repro changed a file this one does not read. The
-## remedy until ``repro health --fix`` reconciles the two (BR6) is to inspect
-## both and remove the stale one.
+## remedy is to inspect both and remove the stale one: ``repro health --fix``
+## (``migrateWorkspaceStateFile``) removes a left-over old file only when it
+## holds nothing unseen, and refuses to choose between two diverged records.
 ##
 ## Detection keys on a SNAPSHOT, not on mtimes: when a write migrates the old
 ## file it also saves the old file's exact bytes beside it
@@ -128,9 +134,9 @@ proc workspaceStateSkew*(workspaceRoot: string): string =
     "An older repro has changed " & legacy & " since this repro last " &
     "migrated it, so the active project set, branch or feature mark it " &
     "recorded is NOT seen here, and each repro now reports a different " &
-    "state. `repro health --fix` will reconcile the two once it is " &
-    "available; until then inspect both files, keep the right content in " &
-    current & ", and remove " & legacy & "."
+    "state. Inspect both files, keep the right content in " & current &
+    ", and remove " & legacy & " (`repro health --fix` removes it only " &
+    "when it holds nothing this repro does not read)."
 
 var printedNotices {.threadvar.}: seq[string]
   ## Notices this process already printed. A notice is about the checkout, not
@@ -205,6 +211,18 @@ proc reportWorkspaceNotices(workspaceRoot: string) =
         composeSettingsLayers(readWorkspaceSettings(settingsPath)).skipped)
   except CatchableError:
     discard
+
+proc layerSettingsFor(workspaceRoot: string): Option[WorkspaceSettings] =
+  ## The settings whose ``[[manifest]]`` layers ``workspaceRoot`` composes:
+  ## the shared settings file governing it (with its local file beside it),
+  ## else a local settings file standing alone at the root
+  ## (``readLoneLocalSettings`` — where ``repro health --fix`` puts an old
+  ## state file's layers in a workspace that has no shared file). ``none``
+  ## when there is neither. A malformed file raises.
+  let settingsPath = findWorkspaceSettingsPath(workspaceRoot)
+  if settingsPath.len > 0:
+    return some(readWorkspaceSettings(settingsPath))
+  readLoneLocalSettings(workspaceRoot)
 
 proc isSettingsMarkedRoot(dir: string): bool =
   ## Whether ``dir`` is a workspace root by a settings file (§6): it holds one,
@@ -297,12 +315,12 @@ proc withSettingsLayers*(local: WorkspaceLocal;
   ## a declared layer. A workspace whose settings declare no layer gets back
   ## exactly the state file it passed in.
   result.local = local
-  let settingsPath = findWorkspaceSettingsPath(workspaceRoot)
-  if settingsPath.len == 0:
-    return
   var settings: WorkspaceSettings
   try:
-    settings = readWorkspaceSettings(settingsPath)
+    let found = layerSettingsFor(workspaceRoot)
+    if found.isNone:
+      return
+    settings = found.get()
   except WorkspaceManifestParseError as err:
     # Only inside ``toleratingMalformedWorkspaceFiles`` (``repro health``),
     # which reports what it set aside; everywhere else it propagates.
@@ -534,24 +552,362 @@ proc readWorkspaceBranch*(workspaceRoot: string): Option[string] =
     return some(local.workspace.branch.get())
   none(string)
 
+# ---- moving an old state file's layers (§8 step 2) --------------------------
+
+type
+  StateMigrationError* = object of CatchableError
+    ## A migration step that cannot be taken without guessing — a layer the
+    ## local settings file already declares differently, a layer that cannot
+    ## live in that file, two state files that disagree. The message names
+    ## the files and what to do. Raised BEFORE anything is written.
+
+  LayerMoveOutcome* = object
+    ## What ``moveLayersToLocalSettings`` did, one description per layer.
+    localPath*: string
+      ## The local settings file the layers were moved to.
+    added*: seq[string]
+      ## Layers appended to it.
+    present*: seq[string]
+      ## Layers it (or the shared file) already composes identically: not
+      ## written twice.
+    dropped*: seq[string]
+      ## Layers naming the root repository's own manifests, which the root
+      ## contributes as the base layer anyway (§3).
+
+proc describeLayer(layer: ManifestLayer): string =
+  ## ``url '<u>'`` / ``local_path '<p>'``, with the branch and visibility.
+  result =
+    if layer.url.isSome: "url '" & layer.url.get() & "'"
+    else: "local_path '" & layer.local_path.get("") & "'"
+  if layer.branch.isSome:
+    result.add(" (branch " & layer.branch.get() & ")")
+  result.add(" [" & layer.visibility & "]")
+
+proc layerSourceKey(layer: ManifestLayer; baseDir: string): string =
+  ## The identity of a layer's source: its url, or its ``local_path``
+  ## resolved against ``baseDir`` (both files resolve it against the
+  ## workspace root) and normalized, so ``./m`` and ``m`` are one layer.
+  if layer.url.isSome and layer.url.get().len > 0:
+    return "url:" & layer.url.get()
+  let raw = layer.local_path.get("")
+  "path:" & normalizedPath(if isAbsolute(raw): raw else: baseDir / raw)
+
+proc moveLayersToLocalSettings*(workspaceRoot, fromPath: string;
+                                layers: seq[ManifestLayer]): LayerMoveOutcome =
+  ## Move ``layers`` — the ``[[manifest]]`` list of the old state file
+  ## ``fromPath`` — into ``repro-workspace.local.toml`` at ``workspaceRoot``
+  ## (Workspace-Settings-Files.md §8 step 2), through the manifest editor:
+  ## an existing local file is edited, never rewritten, so its comments and
+  ## entries survive; a missing one is created. ``fromPath`` itself is not
+  ## touched — the caller removes the layers from it.
+  ##
+  ## Each layer, in order:
+  ##
+  ##   * names the root's own manifests (a ``local_path`` resolving to the
+  ##     workspace root or its manifest directory) — DROPPED: the root is
+  ##     always the base layer (§3), so moving it would compose it twice;
+  ##   * the settings files already compose a layer with the same source
+  ##     (url, or resolved ``local_path``) and the same branch and
+  ##     visibility — PRESENT, not written again (so a repeated migration,
+  ##     or one after the first state write already moved the layers, is a
+  ##     no-op);
+  ##   * the same source with a different branch or visibility, or supplied
+  ##     as the url of a shared named layer — a CONFLICT;
+  ##   * a ``local_path`` under ``.repro/`` other than the manifest directory
+  ##     — a CONFLICT: §4 forbids it in the local file;
+  ##   * otherwise appended (``url`` / ``local_path``, ``branch``,
+  ##     ``visibility``).
+  ##
+  ## A conflict, and a shared settings file that governs the root from an
+  ## ANCESTOR directory (a local file at the root would not be read; one
+  ## beside the ancestor's file would change that other workspace), raise
+  ## ``StateMigrationError`` before anything is written. A layer listed in
+  ## the old file kept the M8 rule that it must declare the workspace's
+  ## project; once moved it composes additively per project like every
+  ## settings-file layer (§4 "Layers are additive per project").
+  let root = absolutePath(workspaceRoot)
+  result.localPath = root / localSettingsFileName
+  if layers.len == 0:
+    return
+  let sharedPath = findWorkspaceSettingsPath(root)
+  if sharedPath.len > 0 and
+      cmpPaths(parentDir(absolutePath(sharedPath)), root) != 0:
+    raise newException(StateMigrationError,
+      fromPath & " carries " & $layers.len & " `[[manifest]]` layer(s), " &
+      "but the settings file governing " & root & " is " & sharedPath &
+      ", in another directory: a " & localSettingsFileName & " here would " &
+      "not be read, and one beside it would add the layers to that " &
+      "workspace too. Move the layers by hand into the " &
+      localSettingsFileName & " the workspace should read, then remove " &
+      "them from " & fromPath)
+  # What the settings files compose today, by source.
+  var composed: seq[(string, ManifestLayer)]
+  var namedSupplies: seq[(string, string)]
+  let settings = layerSettingsFor(root)
+  if settings.isSome:
+    for layer in composeSettingsLayers(settings.get()).layers:
+      composed.add((layerSourceKey(layer, root), layer))
+    for entry in settings.get().localLayers:
+      if entry.name.isSome and entry.url.isSome:
+        namedSupplies.add(("url:" & entry.url.get(), entry.name.get()))
+  let baseKeys = ["path:" & normalizedPath(root),
+                  "path:" & normalizedPath(absolutePath(manifestsRoot(root)))]
+  let reproDirPath = normalizedPath(root / ".repro")
+  var toAdd: seq[ManifestLayer]
+  var conflicts: seq[string]
+  for layer in layers:
+    let key = layerSourceKey(layer, root)
+    if key in baseKeys:
+      result.dropped.add(describeLayer(layer))
+      continue
+    if key.startsWith("path:") and (key == "path:" & reproDirPath or
+        key.startsWith("path:" & reproDirPath & DirSep)):
+      conflicts.add(describeLayer(layer) & " lies under .repro/, which " &
+        localSettingsFileName & " may not name; move that directory " &
+        "out of .repro/ and list it by hand")
+      continue
+    var handled = false
+    for (supplied, name) in namedSupplies:
+      if supplied == key:
+        conflicts.add(describeLayer(layer) & " is already the url " &
+          result.localPath & " supplies for the shared layer '" & name & "'")
+        handled = true
+    for (k, existing) in composed:
+      if handled or k != key:
+        continue
+      handled = true
+      if existing.branch == layer.branch and
+          existing.visibility == layer.visibility:
+        result.present.add(describeLayer(layer))
+      else:
+        conflicts.add(describeLayer(layer) & " is already composed by the " &
+          "settings files as " & describeLayer(existing))
+    for queued in toAdd:
+      if not handled and layerSourceKey(queued, root) == key:
+        handled = true
+        if queued.branch == layer.branch and
+            queued.visibility == layer.visibility:
+          result.present.add(describeLayer(layer))
+        else:
+          conflicts.add(describeLayer(layer) & " repeats the source of " &
+            describeLayer(queued) & " with a different branch or visibility")
+    if not handled:
+      toAdd.add(layer)
+  if conflicts.len > 0:
+    raise newException(StateMigrationError,
+      "cannot move the `[[manifest]]` layers of " & fromPath & " to " &
+      result.localPath & ": " & conflicts.join("; ") & ". Nothing was " &
+      "changed. Reconcile the two files by hand — keep the declaration you " &
+      "want in " & result.localPath & " and delete the layers from " &
+      fromPath & " — then rerun `repro health --fix`")
+  if toAdd.len == 0:
+    return
+  var doc =
+    if fileExists(result.localPath): loadManifestDoc(result.localPath)
+    else: manifestDocFromText("schema = " &
+      tomlQuote(schemaWorkspaceSettingsLocalV1) & "\n", result.localPath)
+  for layer in toAdd:
+    var fields: seq[TomlEditField]
+    if layer.url.isSome:
+      fields.add(tomlField("url", tomlStr(layer.url.get())))
+    else:
+      fields.add(tomlField("local_path", tomlStr(layer.local_path.get())))
+    if layer.branch.isSome:
+      fields.add(tomlField("branch", tomlStr(layer.branch.get())))
+    fields.add(tomlField("visibility", tomlStr(layer.visibility)))
+    if doc.ensureArrayTableEntry("manifest", fields):
+      result.added.add(describeLayer(layer))
+    else:
+      result.present.add(describeLayer(layer))
+  doc.changed = true
+  doc.saveManifestDoc()
+
+# ---- the state file's migration (§8 step 2) ---------------------------------
+
+type
+  StateFileFindingKind* = enum
+    sffOldNameOnly   ## only ``.repro/workspace.toml`` exists
+    sffOldLeftover   ## the old file (or its migration snapshot) is left over
+                     ## beside the new one, and holds nothing unseen
+    sffSkew          ## both exist and an older repro changed the old one
+    sffLayersInState ## ``[[manifest]]`` layers in ``workspace-state.toml``
+
+  StateFileFinding* = object
+    kind*: StateFileFindingKind
+    message*: string
+
+proc inspectWorkspaceStateFiles*(workspaceRoot: string): seq[StateFileFinding] =
+  ## What ``migrateWorkspaceStateFile`` would have to do in this checkout, in
+  ## words — for ``repro health``'s row. Reads raw (``readStateFileForMigration``)
+  ## so layers the strict reader refuses are still counted; a file that does
+  ## not parse at all is left to the malformed-file row and not reported
+  ## here. Empty when the checkout is migrated, or records no state.
+  let current = workspaceStatePath(workspaceRoot)
+  let legacy = legacyWorkspaceStatePath(workspaceRoot)
+  let snapshot = legacyStateSnapshotPath(workspaceRoot)
+  proc layerCount(path: string): int =
+    try: readStateFileForMigration(path).manifest.len
+    except CatchableError: 0
+  if fileExists(current):
+    let n = layerCount(current)
+    if n > 0:
+      result.add(StateFileFinding(kind: sffLayersInState, message:
+        current & " carries " & $n & " `[[manifest]]` layer(s); the state " &
+        "file carries none, so every repro verb refuses it until they are " &
+        "moved to " & localSettingsFileName))
+    if fileExists(legacy):
+      let skew = workspaceStateSkew(workspaceRoot)
+      if skew.len > 0:
+        result.add(StateFileFinding(kind: sffSkew, message: skew))
+      else:
+        result.add(StateFileFinding(kind: sffOldLeftover, message:
+          "the old state file " & legacy & " is left over beside " & current &
+          " and records nothing this repro does not read"))
+    elif fileExists(snapshot):
+      result.add(StateFileFinding(kind: sffOldLeftover, message:
+        "the migration snapshot " & snapshot & " is left over"))
+  elif fileExists(legacy):
+    let n = layerCount(legacy)
+    result.add(StateFileFinding(kind: sffOldNameOnly, message:
+      "the state file has its old name " & legacy &
+      (if n > 0: " and carries " & $n & " `[[manifest]]` layer(s) that " &
+         "belong in " & localSettingsFileName
+       else: "")))
+
+proc migrateWorkspaceStateFile*(workspaceRoot: string): seq[string] =
+  ## Bring a checkout's state file to Workspace-Settings-Files.md §5, as
+  ## ``repro health --fix`` does (§8 step 2), and return one line per action:
+  ##
+  ##   * ``.repro/workspace.toml`` is MOVED to ``.repro/workspace-state.toml``
+  ##     (``state.v1``): its text through the manifest editor — comments and
+  ##     the ``[workspace]`` table kept — re-labelled, without its
+  ##     ``[[manifest]]`` layers, which go to ``repro-workspace.local.toml``
+  ##     (``moveLayersToLocalSettings``). The old file and its migration
+  ##     snapshot are removed.
+  ##   * layers found in ``workspace-state.toml`` (left there by the release
+  ##     that carried an old file's layers across) are moved the same way.
+  ##   * an old file left over beside the new one, holding nothing unseen, is
+  ##     removed after its layers (if any) are moved — a layer the first state
+  ##     write already moved is found present and not written twice.
+  ##
+  ## Refuses with ``StateMigrationError``, before writing anything, when an
+  ## older repro changed the old file after the migration (``sffSkew``): which
+  ## of the two records is right is the operator's call, not this one's. A
+  ## state file that does not parse raises the strict reader's diagnostic.
+  ## Idempotent: a migrated checkout yields no actions.
+  let findings = inspectWorkspaceStateFiles(workspaceRoot)
+  if findings.len == 0:
+    return
+  for f in findings:
+    if f.kind == sffSkew:
+      raise newException(StateMigrationError, f.message &
+        " `repro health --fix` does not choose between the two records")
+  let current = workspaceStatePath(workspaceRoot)
+  let legacy = legacyWorkspaceStatePath(workspaceRoot)
+  let snapshot = legacyStateSnapshotPath(workspaceRoot)
+  proc report(outcome: LayerMoveOutcome; source: string): seq[string] =
+    for d in outcome.added:
+      result.add("moved manifest layer " & d & " from " & source & " to " &
+        outcome.localPath)
+    for d in outcome.present:
+      result.add("manifest layer " & d & " of " & source & " is already in " &
+        "the settings files; not added twice")
+    for d in outcome.dropped:
+      result.add("dropped manifest layer " & d & " of " & source & ": it " &
+        "names the workspace root's own manifests, the base layer")
+    if outcome.added.len > 0:
+      result.add("the workspace root is now the base layer, and so the " &
+        "lock record store unless repro-workspace.toml declares " &
+        "`[records]`; the moved layers compose additively per project. " &
+        "If lock records were published to the first layer of the old " &
+        "file, declare it as `[records]` in repro-workspace.toml")
+  # Read both files first, so a malformed one stops the migration before any
+  # file changes. Each layer move checks its conflicts before writing; the
+  # one partial outcome is a left-over old file whose layers conflict with
+  # layers already moved from the new file — the new file is then migrated,
+  # the old one is kept, and a rerun reports the same conflict.
+  let legacyLayers =
+    if fileExists(legacy): readStateFileForMigration(legacy).manifest
+    else: @[]
+  let currentLayers =
+    if fileExists(current): readStateFileForMigration(current).manifest
+    else: @[]
+  if fileExists(current):
+    if currentLayers.len > 0:
+      result.add(report(moveLayersToLocalSettings(workspaceRoot, current,
+        currentLayers), current))
+      var doc = loadManifestDoc(current)
+      discard doc.removeArrayTable("manifest")
+      doc.saveManifestDoc()
+      result.add("removed the `[[manifest]]` layers from " & current)
+    if fileExists(legacy):
+      if legacyLayers.len > 0:
+        result.add(report(moveLayersToLocalSettings(workspaceRoot, legacy,
+          legacyLayers), legacy))
+      removeFile(legacy)
+      result.add("removed the old state file " & legacy & " (" & current &
+        " is the state file)")
+  else:
+    result.add(report(moveLayersToLocalSettings(workspaceRoot, legacy,
+      legacyLayers), legacy))
+    var doc = loadManifestDoc(legacy)
+    doc.path = current
+    discard doc.setKey("", "schema", tomlStr(schemaWorkspaceStateV1))
+    discard doc.removeArrayTable("manifest")
+    doc.changed = true
+    doc.saveManifestDoc()
+    removeFile(legacy)
+    result.add("moved the state file " & legacy & " to " & current &
+      " (" & schemaWorkspaceStateV1 & ")")
+  if fileExists(snapshot):
+    removeFile(snapshot)
+    result.add("removed the migration snapshot " & snapshot)
+
 proc recordWorkspaceState(workspaceRoot: string; local: WorkspaceLocal) =
   ## Write ``local`` to the state file through the manifest editor, ALWAYS
   ## under the new name (``workspaceStatePath``). See the module note for the
   ## rule; in short:
   ##
-  ##   * the new file exists — edit it key by key (a hand-added comment or a
-  ##     carried-over manifest layer survives);
+  ##   * the new file exists — edit it key by key (a hand-added comment
+  ##     survives);
   ##   * only the old file exists — start the new file from the old file's
-  ##     text, re-labelled ``state.v1``, and edit that; the old file is not
-  ##     written, its bytes are snapshotted (``legacyStateSnapshotPath``), and
-  ##     this repro ignores it from now on because reads stop at the new name
-  ##     — an OLDER repro does not, which the snapshot lets us report;
+  ##     text, re-labelled ``state.v1`` and WITHOUT its ``[[manifest]]``
+  ##     layers, which move to ``repro-workspace.local.toml``
+  ##     (``moveLayersToLocalSettings``: the state file carries no layers,
+  ##     §5), and edit that; the old file is not written, its bytes are
+  ##     snapshotted (``legacyStateSnapshotPath``), and this repro ignores it
+  ##     from now on because reads stop at the new name — an OLDER repro does
+  ##     not, which the snapshot lets us report. A layer that cannot be moved
+  ##     (``StateMigrationError``) fails the write before any file changes;
   ##   * neither exists — render a new file from the typed value.
   let target = workspaceStatePath(workspaceRoot)
   let legacy = legacyWorkspaceStatePath(workspaceRoot)
   if fileExists(target) or fileExists(legacy):
     var doc = loadManifestDoc(if fileExists(target): target else: legacy)
     let migrating = doc.path != target
+    if migrating and local.manifest.len > 0:
+      # The old file carries layers, and moving them changes how the
+      # workspace composes: the root becomes the base layer and the moved
+      # layers compose additively (§3, §4), where the old file's first layer
+      # was the base. A write that records nothing new — a verb re-recording
+      # the same project set or branch — must not make that change behind the
+      # operator's back, so it writes nothing at all and the old file stays
+      # the state this repro reads. A write that records something new moves
+      # the layers (``local`` was read from the old file, layers included)
+      # and says so.
+      var probe = doc
+      if not probe.applyWorkspaceState(local.workspace):
+        return
+      let moved = moveLayersToLocalSettings(workspaceRoot, legacy,
+        local.manifest)
+      emitWorkspaceNotice("note: " & legacy & " carried " &
+        $local.manifest.len & " `[[manifest]]` layer(s); they now live in " &
+        moved.localPath & " (the state file carries none), and the " &
+        "workspace root is now the base layer, and so the lock record " &
+        "store unless repro-workspace.toml declares `[records]`. The old " &
+        "file is left for older repro builds; `repro health --fix` " &
+        "removes it")
+      discard doc.removeArrayTable("manifest")
     if migrating:
       # Remember exactly what was migrated, so a later write to the old file
       # by an older repro is detectable (``workspaceStateSkew``).

@@ -2,6 +2,7 @@ import std/[options, os, sets, strutils, times]
 
 import repro_build_engine
 import repro_core
+import repro_dev_env_artifacts
 import repro_dev_env_engine/cache_key as devEnvCacheKey
 export devEnvCacheKey.PromptWatchEntry, devEnvCacheKey.promptWatchManifestPathFor,
   devEnvCacheKey.writePromptWatchManifest,
@@ -62,6 +63,19 @@ type
 
   DevEnvEdgeResult* = object
     artifactPath*: string
+      ## Where the edge's ``DevEnvArtifact`` lives. Shared by every activation
+      ## of this project and activity, so a concurrent activation may replace
+      ## it the moment ``computeDevEnvEdge`` returns: read ``artifact`` instead
+      ## of this file. The path stays for what needs a NAME (the activation
+      ## metadata, stats, diagnostics).
+    artifact*: DevEnvArtifact
+      ## The artifact this computation produced, decoded while the edge lock
+      ## was still held (``devEnvEdgeLockPath``). This is the copy consumers
+      ## activate from.
+    shellFragment*: string
+      ## The rendered shell fragment, read while the edge lock was still held.
+      ## Empty unless ``renderShell`` was requested. The same rule as
+      ## ``artifact``: ``shellFragmentPath`` is shared, this copy is not.
     interfacePath*: string
       ## The ``ProjectInterfaceArtifact`` this edge extracted, on disk.
       ##
@@ -71,6 +85,23 @@ type
       ## The path is deterministic (``<outDir>/project-interface.rbsz``) but
       ## deriving it at each call site is how two spellings of one location
       ## drift apart.
+    interfaceArtifact*: ProjectInterfaceArtifact
+      ## The interface this computation extracted, decoded while the edge lock
+      ## was still held. Valid when ``interfaceDecoded`` is set. The same rule
+      ## as ``artifact``: ``interfacePath`` is shared, so a concurrent
+      ## activation may replace it once the lock is released.
+    interfaceDecoded*: bool
+    interfaceProvenance*: Option[InterfaceArtifactProvenance]
+      ## The provenance stamp beside ``interfacePath``
+      ## (``interfaceArtifactProvenancePath``), read back while the edge lock
+      ## was still held, right after this computation wrote it. It records
+      ## what ``interfaceArtifact`` was lifted from, and
+      ## Shared-Development-Services §4.3's stale-lift check compares it with
+      ## the recipe on disk. It has to come from the same computation as
+      ## ``interfaceArtifact``: a stamp read from the shared sidecar later
+      ## could belong to a newer interface than the copy it vouches for.
+      ## ``none`` when the stamp could not be written or read, which that
+      ## check answers with a refusal. Set together with ``interfaceDecoded``.
     shellFragmentPath*: string
     shellNavigatorStatsPath*: string
     providerArtifactPath*: string
@@ -785,7 +816,37 @@ proc devEnvNixProvisioningActions*(toolUses: openArray[InterfaceToolUse];
       result.add(edge)
 
 
+proc devEnvEdgeLockPath*(outDir: string): string =
+  ## The lock that serialises computations of the dev-env edge sharing
+  ## ``outDir``. See ``computeDevEnvEdge``.
+  outDir / "dev-env.lock"
+
 proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
+  ## Bring the project's development environment up to date and return it.
+  ##
+  ## CONCURRENT ACTIVATIONS OF ONE PROJECT ARE SERIALISED HERE
+  ## (`Development-Environments-And-Control-API.md`, "Concurrent Activations
+  ## Of One Project"). Everything this edge keeps lives in ``config.outDir``,
+  ## at fixed paths: the extracted interface, the provider binary and its
+  ## compile artifact, the introspection edge's protocol transcript
+  ## (``dev-env-protocol/``, whose request and response names are fixed so the
+  ## edge's identity and evidence are stable), the edge's declared
+  ## ``DevEnvArtifact`` output and the rendered shell fragment. Two processes
+  ## computing the edge at once used to interleave over those paths; measured
+  ## (reprobuild-pm issue 2026-10-25, concurrent `repro exec` racing on the
+  ## provider response file), one run's helper removed the response file the
+  ## other run's provider had just written, and that run failed with
+  ## "provider did not write response".
+  ##
+  ## Per-run protocol file names would have repaired that one file and none
+  ## of the others, so the whole computation holds an exclusive lock on
+  ## ``devEnvEdgeLockPath(outDir)``, from before the interface extraction
+  ## until the artifact (and the shell fragment, when rendered) has been read
+  ## into the result. A concurrent activation waits, and then normally finds
+  ## a cache hit on the record the holder published. The lock is not
+  ## inherited by anything the edge spawns, and it is released before this
+  ## returns, so the activated command itself never holds it: a command that
+  ## activates the same project again does not wait on its parent.
   if config.modulePath.len == 0:
     raiseDevEnvEdge("modulePath is required")
   if config.projectRoot.len == 0:
@@ -802,6 +863,8 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   result.shellNavigatorStatsPath = config.outDir / "dev-env.env.navigator.json"
 
   createDir(extendedPath(config.outDir))
+  var edgeLock = acquireExclusiveFileLock(devEnvEdgeLockPath(config.outDir))
+  defer: releaseExclusiveFileLock(edgeLock)
   # This process is the activation itself (`repro exec`, the shell hook), not
   # a monitored action, so it may keep a stamp-validated memo of the library
   # source fingerprint: re-hashing reprobuild's whole libs tree was most of
@@ -859,6 +922,9 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   # it against that closure (or after re-extracting it), so the closure
   # recorded here is the one those bytes were extracted from.
   writeInterfaceArtifactProvenance(interfacePath, active.modulePath)
+  result.interfaceArtifact = interfaceArtifact
+  result.interfaceProvenance = readInterfaceArtifactProvenance(interfacePath)
+  result.interfaceDecoded = true
   let effectiveProvisioning =
     active.effectiveToolProvisioning(interfaceArtifact)
 
@@ -999,3 +1065,14 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   if not fileExists(extendedPath(result.artifactPath)):
     raiseDevEnvEdge("dev-env edge did not write artifact: " &
       result.artifactPath)
+  # Read while the lock is held: once it is released, the next activation
+  # may replace these files, and a reader would see a torn one.
+  result.artifact = readDevEnvArtifact(result.artifactPath)
+  if active.renderShell:
+    result.shellFragment = readFile(extendedPath(result.shellFragmentPath))
+
+  # A consumer's resolver reads the effective service summary, including
+  # legacy placeholder probes. Stamp only a successful introspection (or
+  # a validated cache replay), so an older adjacent artifact cannot inherit
+  # the interface's newer generation after an introspection failure.
+  writeInterfaceArtifactProvenance(result.artifactPath, active.modulePath)

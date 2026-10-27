@@ -1192,7 +1192,8 @@ proc readSnapshot*(path: string): Snapshot =
 
 # ---- .repro/workspace-state.toml (and the old .repro/workspace.toml) -------
 
-proc readWorkspaceLocalStrict(path: string): WorkspaceLocal =
+proc readWorkspaceLocalStrict(path: string;
+                              acceptStateLayers = false): WorkspaceLocal =
   ## Read a per-checkout state file: `.repro/workspace-state.toml`
   ## (`reprobuild.workspace.state.v1`) or the old `.repro/workspace.toml`
   ## (`reprobuild.workspace.local.v1`) it replaces. Both carry the same
@@ -1200,11 +1201,15 @@ proc readWorkspaceLocalStrict(path: string): WorkspaceLocal =
   ## care which file the state came from. Which file to read is decided by
   ## `workspaceTomlPath` (`workspace_branch.nim`), not here.
   ##
-  ## `[[manifest]]` layers are still accepted in either schema: the old file
-  ## kept the layer list here, and the state-file writer carries an existing
-  ## list across when it rewrites the state under the new name, so a
-  ## checkout's layers survive until `repro health --fix` moves them to
-  ## `repro-workspace.local.toml` (Workspace-Settings-Files.md §8 step 2).
+  ## `[[manifest]]` layers are accepted ONLY in the old schema (`local.v1`),
+  ## which kept the layer list here. The state file carries no layers
+  ## (Workspace-Settings-Files.md §5): they live in the two settings files,
+  ## and `repro health --fix` — or the first state write of a repro that
+  ## migrates the old file — moves an old file's layers to
+  ## `repro-workspace.local.toml` (§8 step 2). A `[[manifest]]` in a
+  ## `state.v1` file is therefore refused, naming the file and the key, with
+  ## that remedy: the transitional release that carried an old file's layers
+  ## into the new one left exactly such files behind.
   ## `name` and `revision` are settings-file layer keys and are refused here.
   let content = slurpManifest(path, schemaWorkspaceStateV1)
   let schema = validateSchemaOneOf(path, content,
@@ -1231,6 +1236,23 @@ proc readWorkspaceLocalStrict(path: string): WorkspaceLocal =
           "`" & key & "` is a key of a `repro-workspace.toml` / " &
             "`repro-workspace.local.toml` layer, not of a layer recorded in " &
             "the state file")
+  # After the per-layer checks, so a layer that would be refused anyway is
+  # named by its own key first.
+  if schema == schemaWorkspaceStateV1 and result.manifest.len > 0 and
+      not acceptStateLayers:
+    raiseManifestError(path, "manifest", schema, schema,
+      "the state file carries no `[[manifest]]` layers: layers belong in " &
+        "`repro-workspace.toml` (shared) or `repro-workspace.local.toml` " &
+        "(yours). Run `repro health --fix` to move these " &
+        $result.manifest.len & " layer(s) to `repro-workspace.local.toml`")
+
+proc readStateFileForMigration*(path: string): WorkspaceLocal =
+  ## Read a state file of either schema with every rule of the strict reader
+  ## EXCEPT the refusal of `[[manifest]]` layers in a `state.v1` file — for
+  ## the one path that moves such layers out (`repro health --fix`,
+  ## `workspace_branch.migrateWorkspaceStateFile`) and the health row that
+  ## reports them. Every other reader refuses the file.
+  readWorkspaceLocalStrict(path, acceptStateLayers = true)
 
 proc readWorkspaceLocal*(path: string): WorkspaceLocal =
   ## Read a per-checkout state file (``readWorkspaceLocalStrict``). A file

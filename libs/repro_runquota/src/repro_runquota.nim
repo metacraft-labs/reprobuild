@@ -12,6 +12,7 @@ import runquota_client
 export runquota_client.RunQuotaLease
 import runquota_codec
 import runquota_core
+import runquota_core/image_digest
 import runquota_ipc except connectDefault
 import runquota_process
 import runquota_protocol
@@ -1203,6 +1204,222 @@ proc isRunQuotaDaemonReachable*(): bool =
     true
   except CatchableError:
     false
+
+type
+  RunQuotaHandover* = enum
+    ## What became of a running ``runquotad`` this invocation would adopt.
+    rhAdopt
+      ## Keep using it: it runs the image this install would start, it may
+      ## not or cannot be retired, or it is still serving other clients and
+      ## will make way once they leave. The caller adopts it as before.
+    rhVacated
+      ## It ran another build, retired, and has exited: the endpoint is free
+      ## and the caller starts this install's ``runquotad``.
+
+  RunQuotaHandoverReport* = object
+    handover*: RunQuotaHandover
+    note*: string
+      ## What the operator should know, or ``""`` when there is nothing to
+      ## say (the daemon is this install's, or a service manager owns it).
+
+# ---------------------------------------------------------------------------
+# The hold on the daemon this invocation adopted.
+#
+# AN ADOPTED DAEMON IS KEPT. A daemon that has been asked to retire -- by
+# this invocation, or later by another install's -- exits the moment no
+# client connection is open, and the connection this invocation's build will
+# use is not opened until its first lease: seconds later, after the graph is
+# loaded. Without a connection of our own in between, the daemon could exit
+# in that gap with nobody starting its replacement, and the build would find
+# no daemon at all. So whenever ``decideRunQuotaHandover`` adopts a daemon
+# that can be asked to retire, the connection it asked on is KEPT OPEN for
+# the rest of the invocation (``releaseAdoptedDaemonHold``): no daemon
+# retires under an invocation that adopted it.
+#
+# PER THREAD, because an invocation is: the user daemon runs builds on
+# threads of one process, and each pairs ``startAutoRunQuotaIfNeeded`` with
+# ``releaseAutoRunQuotaProcess`` on its own thread. A process-wide hold would
+# let one build's release drop the hold another build still relies on.
+# ---------------------------------------------------------------------------
+
+var
+  adoptedDaemonHold {.threadvar.}: RunQuotaClient
+  adoptedDaemonHeld {.threadvar.}: bool
+
+proc releaseAdoptedDaemonHold*() =
+  ## Close the connection that keeps an adopted daemon from retiring, if
+  ## this thread holds one. Idempotent; called when the invocation is done
+  ## with RunQuota (``releaseAutoRunQuotaProcess``). Process exit closes it
+  ## as well, so a path that never calls this only keeps the old daemon
+  ## until the process ends.
+  if adoptedDaemonHeld:
+    adoptedDaemonHold.close()
+    adoptedDaemonHeld = false
+
+proc holdsAdoptedDaemon*(): bool =
+  ## Whether this thread holds a connection to a daemon it adopted.
+  adoptedDaemonHeld
+
+proc holdAdoptedDaemon(client: var RunQuotaClient) =
+  ## Keep ``client`` open until ``releaseAdoptedDaemonHold``. A hold this
+  ## thread already had is closed first: one is enough to keep the daemon,
+  ## and the newer one is the connection to the daemon now serving.
+  releaseAdoptedDaemonHold()
+  adoptedDaemonHold = client
+  adoptedDaemonHeld = true
+
+proc decideRunQuotaHandover*(candidate: string;
+                             vacateWaitMs = 5_000): RunQuotaHandoverReport =
+  ## Ask the ``runquotad`` at the default endpoint to make way for
+  ## ``candidate`` -- the ``runquotad`` this invocation would start in its
+  ## place -- unless it already runs that image
+  ## (reprobuild-specs/RunQuota-Host-Configuration.md, "A daemon from another
+  ## build makes way").
+  ##
+  ## WHY. On Windows the daemon outlives every build, so after an installer
+  ## replaced the bundle it kept serving the new ``repro`` from the old image
+  ## for as long as its user stayed logged on (reprobuild-pm issue
+  ## 2026-10-26-windows-runquotad-from-a-replaced-bundle-keeps-serving-the-new-repro).
+  ##
+  ## WHAT IT NEVER DOES is end work in flight. A daemon that retires keeps
+  ## serving every client it has and exits once none is connected. When it
+  ## reports no other client, this proc waits for the exit, at most
+  ## ``vacateWaitMs``, asking again while it waits so that a daemon some
+  ## other client reached meanwhile -- or this install's daemon, already
+  ## started by a concurrent invocation -- is recognised at once instead of
+  ## after the whole wait. Whenever the caller is to adopt a daemon that
+  ## can retire -- this install's, or one serving others -- this proc HOLDS
+  ## a connection to it (see
+  ## ``releaseAdoptedDaemonHold``), so it cannot exit under the build that
+  ## adopted it; a later build starts the new one.
+  ##
+  ## Identity is the image's content digest (``imageDigestOf``), never a
+  ## version string: two installs can share a version and differ by many
+  ## commits. A candidate that cannot be digested proves nothing, so nothing
+  ## is asked.
+  result = RunQuotaHandoverReport(handover: rhAdopt)
+  if candidate.len == 0:
+    return
+  let digest = imageDigestOf(candidate)
+  if digest.len == 0:
+    return
+  let endpoint = defaultEndpoint()
+  let reason = "repro would start " & candidate
+  var client: RunQuotaClient
+  try:
+    client = connectDefault()
+  except CatchableError:
+    # Gone between the caller's probe and here: nothing to adopt, and the
+    # caller's own spawn path is what handles an absent daemon.
+    result.handover = rhVacated
+    return
+  if not client.supportsRetirement():
+    let version = client.daemonVersion
+    let minor = client.capabilities.protocolMinor
+    client.close()
+    result.note = "the running runquotad (" & version & ", protocol minor " &
+      $minor & ") predates RetireDaemon, so it cannot be asked to make way " &
+      "for " & candidate & "; if it is from a replaced install, stop it " &
+      "once no build is running and the next build starts this one's"
+    return
+  var answer: DaemonRetirementMessage
+  try:
+    answer = client.retireDaemon(expectedImageDigest = digest,
+      reason = reason)
+  except CatchableError as error:
+    client.close()
+    if not daemonReachable(endpoint):
+      # It went while being asked: the endpoint is free, as on the arm above.
+      result.handover = rhVacated
+      return
+    result.note = "could not ask the running runquotad to make way for " &
+      candidate & ": " & error.msg
+    return
+  case answer.decision
+  of retirementManaged:
+    # The service manager owns its lifetime; no client can retire it, so
+    # there is nothing to hold it against.
+    client.close()
+    return
+  of retirementCurrent:
+    # THIS INSTALL'S DAEMON, adopted and held: another install's `repro`
+    # could otherwise retire it in the gap before this build's session.
+    holdAdoptedDaemon(client)
+    return
+  of retirementRefused:
+    holdAdoptedDaemon(client)
+    result.note = "the running runquotad (pid " & $answer.daemonProcessId &
+      ") is from another build than " & candidate & " and did not make " &
+      "way: " & answer.detail
+    return
+  of retirementRetiring:
+    if answer.otherConnections > 0'u32:
+      # ADOPTED, AND HELD: this connection stays open until the invocation is
+      # done, so the daemon cannot exit between now and the build's session.
+      holdAdoptedDaemon(client)
+      result.note = "the running runquotad (pid " & $answer.daemonProcessId &
+        ") is from another build than " & candidate & "; it serves this " &
+        "build and exits once its " & $answer.otherConnections &
+        " other client(s) and this build disconnect, and the next build " &
+        "starts this install's"
+      return
+    # CLOSED BEFORE THE WAIT: this connection is one of the daemon's clients,
+    # and a retiring daemon exits only once none is left.
+    client.close()
+    var waited = 0
+    while waited <= vacateWaitMs:
+      var probe: RunQuotaClient
+      try:
+        probe = connectDefault()
+      except CatchableError:
+        # Nothing answers (or the answer was the close of a daemon that has
+        # decided to go): the endpoint is being freed for this install's.
+        result.handover = rhVacated
+        return
+      var again: DaemonRetirementMessage
+      var asked = false
+      if probe.supportsRetirement():
+        try:
+          again = probe.retireDaemon(expectedImageDigest = digest,
+            reason = reason)
+          asked = true
+        except CatchableError:
+          discard
+      if asked and again.decision in {retirementCurrent, retirementManaged}:
+        # A concurrent invocation already replaced it with a daemon this
+        # install would start (or one a service manager owns): adopt that,
+        # held as on the first arm when it is ours.
+        if again.decision == retirementCurrent:
+          holdAdoptedDaemon(probe)
+        else:
+          probe.close()
+        return
+      if asked and again.decision == retirementRetiring and
+          again.otherConnections > 0'u32:
+        # Another client reached the retiring daemon before it went, so it
+        # serves on; adopt it and hold it, as above, without waiting longer.
+        holdAdoptedDaemon(probe)
+        result.note = "the running runquotad (pid " &
+          $again.daemonProcessId & ") is from another build than " &
+          candidate & " and is retiring, but another client reached it " &
+          "first; it serves this build and exits after it"
+        return
+      probe.close()
+      sleep(50)
+      waited += 50
+    # STILL ANSWERING AFTER THE WHOLE WAIT, with nobody else on it each time
+    # it was asked: it is serving clients too short-lived to be counted. It
+    # is retiring and serves this build; hold it so it stays for the build.
+    var last: RunQuotaClient
+    try:
+      last = connectDefault()
+    except CatchableError:
+      result.handover = rhVacated
+      return
+    holdAdoptedDaemon(last)
+    result.note = "the running runquotad (pid " & $answer.daemonProcessId &
+      ") is from another build than " & candidate & " and is retiring, " &
+      "but did not exit within " & $vacateWaitMs & " ms; it serves this build"
 
 type
   RunQuotaPoolDeclaration* = object

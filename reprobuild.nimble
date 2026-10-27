@@ -6,10 +6,10 @@
 # bare basenames silently. See the matching note beside `switch("path", ".")`
 # in `config.nims`, and `tests/unit/test_package_root_anchor.py`.
 
-version = "0.2.6"
+version = "0.2.17"
 author = "Metacraft Labs"
 description = "Reprobuild build system"
-license = "MIT"
+license = "Apache-2.0"
 requires "nim >= 2.2.0"
 
 task build, "Build all M0 application entry points":

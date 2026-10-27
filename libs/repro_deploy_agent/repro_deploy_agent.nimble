@@ -1,7 +1,7 @@
 version = "0.1.0"
 author = "Metacraft Labs"
 description = "Reprobuild signed desired-state manifest pull agent (Windows-Runner-Binary-Cache-Deploy M5)"
-license = "MIT"
+license = "Apache-2.0"
 srcDir = "src"
 requires "nim >= 2.2.0"
 requires "repro_peer_cache"

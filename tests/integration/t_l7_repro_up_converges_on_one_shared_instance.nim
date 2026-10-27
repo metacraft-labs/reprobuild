@@ -576,3 +576,70 @@ suite "L7 §4.5 — `repro up` in three projects converges on one instance":
     let events = readFile(eventsPath)
     check events.contains("service.readiness.timeout")
     check not events.contains("session.up")
+
+
+  test "unreachable failed sessions release holders with and without force":
+    # Fail REAL startup after convergence took a holder: the session cannot
+    # concretize an unavailable instance attribute. Its HTTP child shuts down
+    # while failed metadata and the authoritative holder ledger remain.
+    let owner = c.projects[0]
+    let started = c.up(owner)
+    checkpoint(started.output)
+    require started.exitCode == 0
+    let pid = parseInt(fieldAfter(convergeLine(started.output), "pid"))
+    defer:
+      # A negative-control run must also clean the process the broken down
+      # command strands. This signal is teardown only, after every oracle.
+      if processAlive(pid):
+        discard runProgram("sh", @["-c", "kill -TERM " & $pid],
+          c.workspaceRoot, c.envFor())
+        for attempt in 0 ..< 100:
+          if not processAlive(pid): break
+          sleep(50)
+    for index in 1 .. 2:
+      let project = c.projects[index]
+      writeFile(project / "reprobuild.nim",
+        readFile(project / "reprobuild.nim") &
+        "    servicePlaceholder \"consumer\",\n" &
+        "      metadata = \"\"\"{\"command\":[\"sh\",\"@instance-attribute:unavailable@\"]}\"\"\",\n" &
+        "      activities = [\"default\"]\n")
+      let failed = c.up(project)
+      checkpoint(failed.output)
+      require failed.exitCode == 1
+      require failed.output.contains("instance attribute `unavailable` is NOT AVAILABLE")
+      require holderCountOf(convergeLine(failed.output)) == index + 1
+      require fileExists(ledgerPath(project))
+      let metadataPath = parentDir(ledgerPath(project)) / "session.json"
+      let metadata = parseJson(readFile(metadataPath))
+      require metadata{"status"}.getStr() == "failed"
+      require metadata{"httpBind"}.getStr().len > 0
+      let httpPid = metadata{"httpPid"}.getInt()
+      require httpPid > 0
+      let deadline = epochTime() + 60.0
+      while processAlive(httpPid) and epochTime() < deadline: sleep(50)
+      require not processAlive(httpPid)
+    for index in 1 .. 2:
+      let project = c.projects[index]
+      let args = if index == 1: @["down"]
+                 else: @["down", "--force", "--stop-timeout=100"]
+      let stopped = c.runRepro(project, args)
+      checkpoint(stopped.output)
+      # A stop error stays an error, including the force-file timeout.
+      check stopped.exitCode == 1
+      if index == 1:
+        check stopped.output.toLowerAscii().contains("refused")
+      else:
+        check stopped.output.contains("HTTP stop failed; wrote stop request file")
+        check stopped.output.contains("did not stop:")
+      check outcomeWordOf(convergeLine(stopped.output)) == "DroppedHolder"
+      check remainingCountOf(convergeLine(stopped.output)) == 3 - index
+      check not fileExists(ledgerPath(project))
+      check processAlive(pid)
+    # The daemon's last-holder result independently proves both releases
+    # reached its real lease store; deleting only the local ledgers fails it.
+    let last = c.down(owner)
+    checkpoint(last.output)
+    check last.exitCode == 0
+    check outcomeWordOf(convergeLine(last.output)) == "ReleasedLastHolder"
+    check remainingCountOf(convergeLine(last.output)) == 0
+    check not processAlive(pid)

@@ -445,15 +445,49 @@ line of the sibling's history, is spelled out:
 `repro lock refresh <path> --allow-pin-regression=<sibling>[,<sibling>…]`
 (or `REPRO_ALLOW_PIN_REGRESSION=<sibling>`, the same variable the
 `pre-commit` re-pin honors). Each pin's `ref` is a published branch that
-contains the pinned commit (`agents` first, then `dev`, then the
-checkout's branch, the remote's default, or any other published branch
-containing it) and is empty when no published branch contains it; a
+contains the pinned commit — the branch of the repo's `unstable` role
+first, then the branch of its `mainline` role, as the workspace manifest
+and settings file declare them (no branch name is built into `repro`),
+then the checkout's branch, the remote's default, or any other published
+branch containing it — and is empty when no published branch contains it; a
 local-only branch name is never recorded. Neither is a branch the
 branching policy deletes after use: a stabilisation branch
 `agents-to-dev-<date>` is skipped, so a refresh run on one records the
 next durable branch containing the commit, or an empty `ref` when only
 the stabilisation branch contains it, and a lock that already records
 one has it replaced on the next refresh or commit.
+
+Refresh also names every sibling pin it removes, including pins in HEAD's
+committed lock that a previous working-copy refresh already removed. The
+report gives the pinned revision and the manifest checkout revisions whose
+resolved `depends` closure no longer names the sibling.
+
+Before writing, refresh checks local remote-tracking refs for the flat
+manifest checkout and configured manifest layers. A manifest that lacks
+commits already fetched from its upstream gets a warning naming both
+revisions and `repro sync` as the remedy; refresh does not fetch or move
+manifest checkouts itself. If committed sibling pins would disappear while
+any manifest is known behind (including divergence), refresh leaves the lock
+untouched and exits 6. To proceed deliberately, pass
+`--allow-stale-manifest`; the warnings still appear. An intentional removal
+using current manifests succeeds and still reports the removed pins.
+`--json` puts a single report on stdout with `droppedPins` and
+`behindManifests` arrays, including on this refusal; diagnostics stay on stderr.
+
+A committed lock is solved for one platform, recorded as its `platform`
+(for example `amd64-linux`). The solve reads the recipe as it evaluates on
+the host, so a host of another platform cannot redo that solve, and
+re-solving there would replace it with the host's own. On such a host,
+`repro lock refresh` therefore **re-pins sibling revisions only**, exactly as
+the managed `pre-commit` hook does. It re-observes each sibling the lock
+pins, adds develop-set siblings the lock does not carry yet, and removes
+nothing. It leaves `platform`, `packages`, `inputs_digest` and the lock's own
+entry as committed. It says so before it writes. The pin-regression gate
+(exit 4) applies as it does to a full refresh. `--repin`, `--provisioning`,
+`--strategy` (and `--lowest` / `--highest`), `--inputs` and `--registry` shape
+a solve, so on such a host they exit 2 and write nothing. To re-solve
+anyway, refresh on a host of the lock's platform, or pass
+`--platform=<host platform>` to re-target the lock to this host on purpose.
 
 `repro lock refresh` also **refuses to write a lock from an incomplete
 solve**. A recipe's `uses:` pulls sibling recipes into the solve
@@ -610,6 +644,11 @@ repro develop --only=<dependency>     # substitute one dependency, pinned or not
 repro develop --all                   # substitute the lock set, exact pins excepted
 repro develop --drop=<dependency> [--workspace-root=<dir>] [--project-root=<dir>]
 ```
+
+When materializing a consumer's dependencies, `repro develop` keeps the
+revisions in that consumer's `repro.lock`. A participating producer's own
+self-record may fill a missing pin, but cannot replace a consumer dependency
+pin. Workspace inventory queries continue to aggregate producer self-records.
 
 Debugging against a sibling checkout uses a develop override, which never
 writes a recipe or a lock. How it meets an exact recipe pin depends on how

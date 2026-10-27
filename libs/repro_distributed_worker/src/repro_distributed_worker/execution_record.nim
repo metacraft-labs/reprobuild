@@ -122,11 +122,18 @@ const
     ## The plan's DET triggers (Distributed-Execution M7): in the TRUSTED
     ## profile only these withhold a certificate.
 
+const
+  DevelopSiblingsWithheld* = "certificate-withheld-develop-siblings"
+    ## Distributed-Execution M1: the goal ran with `repro develop` siblings,
+    ## which a certificate (one `git-tree-sha1`) cannot bind yet. Not a DET
+    ## trigger — nothing misbehaved — but it withholds a certificate in both
+    ## profiles until M2 binds siblings into certification.
+
 proc blocksCertificate*(trigger, detail: string; hardened: bool): bool =
   ## Whether a detection withholds a certificate (see the module doc).
   ## `detail` matters for a folded flood (`reports-suppressed`), whose
   ## detail names the kind it folded.
-  if hardened:
+  if hardened or trigger == DevelopSiblingsWithheld:
     return true
   if trigger in CertificateBlockingTriggers:
     return true

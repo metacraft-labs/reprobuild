@@ -35,7 +35,7 @@
 
 import std/[json, options, os, osproc, sets, streams, strutils, tables, tempfiles, times]
 from repro_core/paths import extendedPath
-from repro_core/source_root import publicCliImagePath
+from repro_cli_support/self_spawn_image import selfSpawnIoMonitorPath
 from repro_core/process_streams import drainStream
 from repro_profile/data_refs import dataFilePathProblem
 
@@ -250,11 +250,23 @@ proc normalizeTargetArch(raw: string): string =
 # ---------------------------------------------------------------------------
 
 proc defaultProfileCompileOptionsFor(profileRoot: string;
-                                     stateDir: string):
+                                     stateDir: string;
+                                     publicCliPath = ""):
     ProfileCompileOptions =
+  ## `publicCliPath` is the `repro` image the compile's engine wraps every
+  ## action with (`<publicCliPath> internal io monitor`). It goes through the
+  ## self-spawn guard like every other internal-verb spawn
+  ## (Distribution-And-Packaging.md §5.2): an explicit path or
+  ## `REPRO_PUBLIC_CLI_PATH` is used as given, and the running image only
+  ## when it has declared itself `repro`. An embedded caller that names
+  ## neither gets "" here, which `compileProfileToRbpi` refuses with
+  ## `MissingPublicCliPathReason` -- instead of re-executing the caller's own
+  ## image as its monitor driver, which ran nothing and surfaced as
+  ## "iomon file is too short" (reprobuild-pm issue
+  ## 2026-10-27-windows-m76-differing-regular-file-case-fails-in-the-profile-compile).
   result = ProfileCompileOptions(
     stateDir: stateDir,
-    publicCliPath: publicCliImagePath(),
+    publicCliPath: selfSpawnIoMonitorPath(publicCliPath),
     # Empty: `compileProfileToRbpi` resolves the sources through
     # `reprobuildRepoRoot()`, which honours `$REPROBUILD_REPO_ROOT` and the
     # installed package's `$REPROBUILD_SOURCE_ROOT` alike.
@@ -274,10 +286,15 @@ type
     cacheHit*: bool             ## informational
 
 proc compileAndAdaptHomeProfile*(profilePath: string;
-                                 stateDir: string): CompileAdaptOutcome =
+                                 stateDir: string;
+                                 publicCliPath = ""): CompileAdaptOutcome =
   ## Run the Phase C build-engine edge against `profilePath`, decode
   ## the RBPI artifact, and adapt it to the `Profile` shape the apply
   ## pipeline consumes.
+  ##
+  ## `publicCliPath` names the `repro` image that runs the compile; the CLI
+  ## leaves it empty (it IS that image), an in-process caller passes one. See
+  ## `defaultProfileCompileOptionsFor`.
   ##
   ## On success: `result.profile` is non-nil; the caller threads it
   ## through `ApplyOptions.preLoadedProfile`.
@@ -290,7 +307,8 @@ proc compileAndAdaptHomeProfile*(profilePath: string;
   ## after the compile edge (`expandedHomeProfile`), so a data edit
   ## re-plans without recompiling. A data-file failure sets `dataError`.
   result = CompileAdaptOutcome()
-  var opts = defaultProfileCompileOptionsFor(profilePath, stateDir)
+  var opts = defaultProfileCompileOptionsFor(profilePath, stateDir,
+    publicCliPath)
   # The files the compile read, on a cache hit too: the apply records the
   # ones under the profile directory in the generation's intent snapshot,
   # helper modules in subdirectories included (`Profile.compiledFrom`;

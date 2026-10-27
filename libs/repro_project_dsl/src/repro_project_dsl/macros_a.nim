@@ -563,6 +563,7 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
                    parentOutputFlags: openArray[string];
                    parentTypedOutputs: openArray[TypedOutputDef];
                    parentRemoveBeforeRun: openArray[string];
+                   parentOptionalOutputs: openArray[string];
                    parentPolicy: BuildActionDependencyPolicy;
                    parentNonDeterminism: NonDeterminismDecl;
                    wholeBody: NimNode;
@@ -600,6 +601,7 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
   result.outputFlags = @parentOutputFlags
   result.typedOutputs = @parentTypedOutputs
   result.removeBeforeRunFlags = @parentRemoveBeforeRun
+  result.optionalOutputFlags = @parentOptionalOutputs
 
   for stmt in body:
     let head = calleeName(stmt).normalize
@@ -715,6 +717,33 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
             "positional visible in this cli scope", operand)
         if result.removeBeforeRunFlags.find(flagName) < 0:
           result.removeBeforeRunFlags.add(flagName)
+    of "optionaloutputs":
+      # Only the tool can declare an optional candidate. Require an output
+      # parameter so arbitrary input paths cannot be removed or claimed.
+      if stmt.len < 2:
+        error("optionalOutputs requires at least one output flag name", stmt)
+      var operands: seq[NimNode] = @[]
+      for i in 1 ..< stmt.len:
+        collectOutputsOperands(stmt[i], operands)
+      for operand in operands:
+        if operand.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+          error("optionalOutputs expects a flag name identifier, got: " &
+            operand.repr, operand)
+        let flagName = identText(operand)
+        var found = false
+        for param in result.params:
+          if param.name == flagName:
+            found = true
+            if param.role != carOutput:
+              error("optionalOutputs: '" & flagName & "' is not an output " &
+                "(declare it with `role = output`); only an edge's own " &
+                "outputs may be optional", operand)
+            break
+        if not found:
+          error("optionalOutputs: '" & flagName & "' is not a flag or " &
+            "positional visible in this cli scope", operand)
+        if result.optionalOutputFlags.find(flagName) < 0:
+          result.optionalOutputFlags.add(flagName)
     of "subtools":
       if not isRoot:
         error("subTools is a property of the TOOL: declare it once, " &
@@ -729,6 +758,7 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
       discard parseCliScope(packageName, executableName, childBody,
         childPath, false, result.params, result.outputFlags,
         result.typedOutputs, result.removeBeforeRunFlags,
+        result.optionalOutputFlags,
         result.dependencyPolicy,
         (result.nonDeterminism, result.nonDeterminismJustification),
         wholeBody, commands)
@@ -824,7 +854,7 @@ proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
       # directly under ``cli:`` and seeds the cumulative output set that
       # each subcommand inherits, all in one source-order pass.
       let rootCmd = parseCliScope(packageName, result.exportName, cliBody,
-        @[], true, @[], @[], @[], @[], defaultDependencyPolicy(),
+        @[], true, @[], @[], @[], @[], @[], defaultDependencyPolicy(),
         # M6: every tool starts UNBLESSED. A tool is blessed only where its
         # own spec says so, in writing, with a reason.
         (ndpUnblessed, ""), cliBody,
@@ -3155,6 +3185,7 @@ proc packageLiteral(pkg: PackageDef): string =
         ", subTools: @[" & escapedCodeList(cmd.subTools) &
         "], removeBeforeRunFlags: @[" &
           escapedCodeList(cmd.removeBeforeRunFlags) &
+        "], optionalOutputFlags: @[" & escapedCodeList(cmd.optionalOutputFlags) &
         "], outputFlags: @[")
       for ofIndex, flagName in cmd.outputFlags:
         if ofIndex > 0:
@@ -3652,6 +3683,9 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
     if cmd.removeBeforeRunFlags.len > 0:
       result.add("  appendRegisteredActionRemoveBeforeRun(" & actionRef &
         ".id, call, [" & escapedCodeList(cmd.removeBeforeRunFlags) & "])\n")
+    if cmd.optionalOutputFlags.len > 0:
+      result.add("  markRegisteredActionOptionalOutputs(" & actionRef &
+        ", call, [" & escapedCodeList(cmd.optionalOutputFlags) & "])\n")
     # Typed-Outputs M1: bind each typed-output field by evaluating its
     # ``pathExpr`` in the call-site flag scope. The shared
     # ``emitTypedOutputBindings`` helper handles both the typed-handle

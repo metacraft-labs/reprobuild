@@ -314,12 +314,17 @@ suite "manifest editor edge cases":
     local.workspace.project = "a"
     local.workspace.projects = @["a", "b"]
     local.workspace.branch = some("feature/x")
-    local.manifest = @[ManifestLayer(url: some("https://m"), visibility: "public")]
     writeWorkspaceManifestFile(dir / "state.toml", workspaceStateText(local))
     let st = readWorkspaceLocal(dir / "state.toml")
     check st.workspace.projects == @["a", "b"]
     check st.workspace.branch == some("feature/x")
-    check st.manifest.len == 1
+    check st.manifest.len == 0
+    # The state file carries no layers (Workspace-Settings-Files.md §5): the
+    # renderer refuses to write one rather than produce a file the strict
+    # reader rejects.
+    local.manifest = @[ManifestLayer(url: some("https://m"), visibility: "public")]
+    expect ManifestEditError:
+      discard workspaceStateText(local)
 
   test "the renderers reproduce the layouts the CLI stubs used to write":
     check repoFragmentText(RepoFragment(repo: RepoBody(name: "r", path: "r",

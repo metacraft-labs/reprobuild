@@ -575,6 +575,36 @@ proc findWorkspaceSettings*(workspaceRoot: string): Option[WorkspaceSettings] =
     return none(WorkspaceSettings)
   some(readWorkspaceSettings(path))
 
+proc readLoneLocalSettings*(workspaceRoot: string): Option[WorkspaceSettings] =
+  ## The local settings file at ``workspaceRoot`` when NO shared settings file
+  ## governs the root (``findWorkspaceSettingsPath`` finds none), as a
+  ## ``WorkspaceSettings`` carrying only its layers; ``none`` when there is no
+  ## such file. A malformed file raises the strict reader's diagnostic.
+  ##
+  ## Why a local file can stand alone: ``repro health --fix`` (and the first
+  ## state write of a repro that migrates the old state file) moves the
+  ## layers an old ``.repro/workspace.toml`` carried into
+  ## ``repro-workspace.local.toml`` (Workspace-Settings-Files.md §8 step 2).
+  ## A workspace from before the settings files has no shared file for it to
+  ## sit beside, and its layers must keep applying after the move. Its
+  ## entries can only be unnamed layers: a ``name`` supplies the url of a
+  ## shared layer, and there is no shared file to declare one.
+  ##
+  ## Only for layer composition. It is deliberately not returned by
+  ## ``findWorkspaceSettings``: the record declares no policy, and a caller
+  ## reading roles or the root's mainline from it would read an empty
+  ## ``settings.v1`` as a declaration.
+  if workspaceRoot.len == 0 or findWorkspaceSettingsPath(workspaceRoot).len > 0:
+    return none(WorkspaceSettings)
+  let localPath = absolutePath(workspaceRoot) / localSettingsFileName
+  if not fileExists(localPath):
+    return none(WorkspaceSettings)
+  var s = WorkspaceSettings(schema: schemaWorkspaceSettingsLocalV1,
+    localPath: localPath)
+  s.localLayers = readLocalSettingsLayers(localPath,
+    absolutePath(workspaceRoot) / settingsFileName & " (absent)", @[])
+  some(s)
+
 # ---- layer resolution ---------------------------------------------------------
 
 type

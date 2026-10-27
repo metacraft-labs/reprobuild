@@ -16,7 +16,7 @@
 ## Tree entries are sorted by name, a subtree comparing as `name + "/"`;
 ## modes are 100644, 100755, 120000 (symlink, content = target) and 40000.
 
-import std/[algorithm, os, strutils, tables]
+import std/[algorithm, os, sets, strutils, tables]
 when defined(posix):
   import std/posix
 
@@ -100,6 +100,56 @@ proc parseSha1Hex*(hex: string): Sha1Bytes =
     raise newException(ValueError, "not a 40-hex object id: " & hex)
   for i in 0 ..< 20:
     result[i] = byte(parseHexInt(hex[2 * i .. 2 * i + 1]))
+
+proc treeIdFromEntries*(entries: openArray[tuple[path, mode: string;
+                                                 oid: Sha1Bytes]]): string =
+  ## The tree id of an index holding exactly `entries` (worktree-relative
+  ## `/`-separated paths, git modes, object ids) — computed without reading
+  ## any file. Distributed-Execution M1: a pooled lease's tree is the base
+  ## commit's entries with the snapshot's delta applied.
+  let top = Node(dirs: initOrderedTable[string, Node]())
+  for e in entries:
+    let parts = e.path.split('/')
+    var cur = top
+    for i in 0 ..< parts.high:
+      if not cur.dirs.hasKey(parts[i]):
+        cur.dirs[parts[i]] = Node(dirs: initOrderedTable[string, Node]())
+      cur = cur.dirs[parts[i]]
+    cur.files.add((parts[^1], e.mode, e.oid))
+  hexOf(treeOid(top))
+
+proc unexpectedTreeEntry*(root: string;
+    entries: openArray[tuple[path, mode: string; oid: Sha1Bytes]]): string =
+  ## A pre-execution inventory check, separate from the tracked-only hash
+  ## used after a goal may have written outputs. Reuse that hash's entry
+  ## format, but inspect names and directory structure without hashing bytes.
+  ## walkDir never descends through a symlink; symlinks are expected leaves.
+  ## Gitlinks may have an empty checkout directory, never undeclared content.
+  var leaves, directories, gitlinks = initHashSet[string]()
+  for e in entries:
+    if e.mode == "160000": gitlinks.incl(e.path)
+    else: leaves.incl(e.path)
+    var parent = e.path.parentDir.replace('\\', '/')
+    while parent.len > 0 and parent != ".":
+      directories.incl(parent)
+      parent = parent.parentDir.replace('\\', '/')
+  if symlinkExists(root) or not dirExists(root):
+    return "."
+  var pending = @[""]
+  while pending.len > 0:
+    let parent = pending.pop()
+    var children: seq[tuple[kind: PathComponent; path: string]] = @[]
+    for kind, name in walkDir(root / parent, relative = true, checkDir = true):
+      children.add((kind, (parent / name).replace('\\', '/')))
+    children.sort(proc(a, b: auto): int = cmp(a.path, b.path))
+    for child in children:
+      if child.kind == pcDir:
+        if child.path notin directories and child.path notin gitlinks:
+          return child.path
+        pending.add(child.path)
+      elif child.path notin leaves:
+        return child.path
+  ""
 
 proc treeIdOf*(root: string; tracked: openArray[string];
                gitlinks: openArray[(string, string)] = []): TreeIdResult =

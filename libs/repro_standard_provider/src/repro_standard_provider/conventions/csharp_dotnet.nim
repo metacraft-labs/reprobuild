@@ -6,8 +6,8 @@
 ## ``dotnet`` driver for a single offline ``dotnet build -c Release
 ## --no-restore --nologo --verbosity quiet`` invocation. The action graph
 ## is intentionally coarse: one build action that produces
-## ``bin/Release/<TargetFramework>/<AssemblyName>.exe`` (or ``.dll`` for
-## libraries) per declared member.
+## ``bin/Release/<TargetFramework>/<AssemblyName>.dll`` managed assembly.
+## Executable projects may additionally produce a native apphost.
 ##
 ## **Distinction from a hypothetical future Tier 2c .NET provider.**
 ## A Tier 2c .NET provider would parse MSBuild's binary-log output and
@@ -71,9 +71,8 @@
 ##      ``packages.lock.json`` plus every ``.cs`` source file recursively
 ##      walked from the project root (excluding ``bin/`` / ``obj/`` /
 ##      ``.repro/`` / ``.git/``). Outputs: one
-##      ``bin/Release/<TargetFramework>/<AssemblyName>.<ext>`` per
-##      declared member, where ``<ext>`` is ``.exe`` when the csproj
-##      ``<OutputType>`` is ``Exe`` and ``.dll`` otherwise. Uses
+##      ``bin/Release/<TargetFramework>/<AssemblyName>.dll`` and an optional
+##      platform-native apphost for executable projects. Uses
 ##      ``automaticMonitorPolicy`` (automatic monitoring is the spec
 ##      baseline for opaque tools, Reprobuild-Development M17): ``dotnet``
 ##      spawns MSBuild worker processes and the engine monitors their
@@ -87,11 +86,16 @@
 ##   * ``<AssemblyName>`` (optional). Defaults to the csproj filename
 ##     without the ``.csproj`` extension, matching MSBuild's own
 ##     default.
-##   * ``<OutputType>`` (``Exe`` or ``Library``; defaults to
-##     ``Library`` when absent). Determines the produced file's
-##     extension (``.exe`` vs ``.dll``).
-##   * Predicted path:
-##     ``<projectRoot>/bin/Release/<TargetFramework>/<AssemblyName>.<ext>``.
+##   * ``<OutputType>`` (``Exe``, ``WinExe`` or ``Library``; defaults
+##     to ``Library`` when absent). Executables may emit an optional
+##     native apphost; the managed assembly uses ``.dll``, except for a
+##     .NET Framework executable, which is itself the ``.exe``.
+##   * ``<RuntimeIdentifier>``,
+##     ``<AppendTargetFrameworkToOutputPath>`` and
+##     ``<AppendRuntimeIdentifierToOutputPath>`` when set explicitly.
+##   * Declared path: ``producedBinaryPath`` under ``producedOutputDir``,
+##     ``<projectRoot>/bin/Release/[<TargetFramework>/][<rid>/]``. A
+##     ``<OutputPath>`` / ``<BaseOutputPath>`` override is NOT read.
 ##
 ## **Honest scope** (deferred):
 ##   * Multi-target ``<TargetFrameworks>`` (plural) — M42 picks the
@@ -178,7 +182,17 @@ type
     outputType: string
       ## Value of ``<OutputType>`` when present, otherwise
       ## ``DefaultOutputType``. Compared case-insensitively against
-      ## ``Exe`` to decide the produced file's extension.
+      ## ``Exe`` / ``WinExe`` to decide whether an apphost may be written.
+    runtimeIdentifier: string
+      ## ``<RuntimeIdentifier>`` (e.g. ``linux-x64``, ``win-x64``), or "".
+      ## When set, it names the apphost (``win-*`` -> ``.exe``) and adds a
+      ## ``<rid>/`` segment to the output directory.
+    appendRuntimeIdentifierToOutputPath: bool
+      ## False only for an explicit
+      ## ``<AppendRuntimeIdentifierToOutputPath>false``.
+    appendTargetFrameworkToOutputPath: bool
+      ## False only for an explicit
+      ## ``<AppendTargetFrameworkToOutputPath>false``.
 
 proc readReprobuildSource(projectRoot: string): string =
   ## Read the project file (``repro.nim`` or legacy ``reprobuild.nim``)
@@ -416,6 +430,20 @@ proc parseCsprojCoordinates(projectRoot: string): CSharpDotnetCoordinates =
     let outType = extractSimpleXmlTag(csprojSource, "OutputType")
     if outType.len > 0:
       result.outputType = outType
+    # The SDK defaults for these are all "true" / "" (Microsoft.NET.Sdk
+    # targets); only an explicit value in the csproj changes what
+    # ``dotnet build`` writes, so only an explicit value is honoured.
+    result.runtimeIdentifier =
+      extractSimpleXmlTag(csprojSource, "RuntimeIdentifier")
+    result.appendRuntimeIdentifierToOutputPath = extractSimpleXmlTag(
+      csprojSource, "AppendRuntimeIdentifierToOutputPath").toLowerAscii !=
+        "false"
+    result.appendTargetFrameworkToOutputPath = extractSimpleXmlTag(
+      csprojSource, "AppendTargetFrameworkToOutputPath").toLowerAscii !=
+        "false"
+  else:
+    result.appendRuntimeIdentifierToOutputPath = true
+    result.appendTargetFrameworkToOutputPath = true
   if result.targetFramework.len == 0:
     result.targetFramework = DefaultTargetFramework
   if result.assemblyName.len == 0:
@@ -457,27 +485,73 @@ proc sanitizeNamePart(value: string): string =
   if result.len == 0:
     result = "x"
 
-proc producedBinaryExtension(outputType: string): string =
-  ## ``.exe`` when the csproj declares ``<OutputType>Exe</OutputType>``,
-  ## ``.dll`` otherwise. Compared case-insensitively so ``Exe`` and
-  ## ``exe`` both work.
-  if outputType.toLowerAscii == "exe":
-    ".exe"
-  else:
-    ".dll"
+proc isExecutableOutputType(outputType: string): bool =
+  ## ``Exe`` and ``WinExe`` are the SDK's executable output types (its
+  ## ``_IsExecutable``); everything else (``Library``, ``Module``) builds
+  ## a library. Compared case-insensitively, as MSBuild does.
+  outputType.toLowerAscii in ["exe", "winexe"]
+
+proc isDotnetFrameworkTfm(targetFramework: string): bool =
+  ## True for a .NET Framework TFM (``net48``, ``net472``, ``net35``):
+  ## ``net`` followed by digits only. .NET (Core) TFMs carry a dot
+  ## (``net8.0``, ``netcoreapp3.1``) or a platform suffix
+  ## (``net8.0-windows``), and ``netstandard*`` is neither.
+  ## https://learn.microsoft.com/dotnet/standard/frameworks#supported-target-frameworks
+  let lower = targetFramework.toLowerAscii
+  lower.len > 3 and lower.startsWith("net") and
+    lower[3 .. ^1].allCharsInSet(Digits)
+
+proc producedOutputDir(projectRoot: string;
+                       coords: CSharpDotnetCoordinates): string =
+  ## MSBuild's default ``$(OutputPath)`` for ``-c Release`` with an
+  ## SDK-style csproj: ``bin/Release/<TargetFramework>/[<rid>/]``. The two
+  ## optional segments follow ``AppendTargetFrameworkToOutputPath`` and
+  ## ``AppendRuntimeIdentifierToOutputPath`` (both default true).
+  ## (Measured with SDK 8.0: ``RuntimeIdentifier=linux-x64`` writes under
+  ## ``bin/Release/net8.0/linux-x64/``.)
+  result = projectRoot / DotnetBinSubdir / DotnetReleaseSubdir
+  if coords.appendTargetFrameworkToOutputPath:
+    result = result / coords.targetFramework
+  if coords.runtimeIdentifier.len > 0 and
+      coords.appendRuntimeIdentifierToOutputPath:
+    result = result / coords.runtimeIdentifier
 
 proc producedBinaryPath(projectRoot: string;
                         coords: CSharpDotnetCoordinates): string =
-  ## Predicted output path for the dotnet build's produced binary.
-  ## MSBuild's default ``$(OutputPath)`` for a Release build with the
-  ## SDK-style csproj is
-  ## ``bin/Release/<TargetFramework>/<AssemblyName>.<ext>``. The
-  ## extension depends on ``<OutputType>`` — ``.exe`` for ``Exe`` and
-  ## ``.dll`` for ``Library`` (or any other value).
-  let ext = producedBinaryExtension(coords.outputType)
-  let fileName = coords.assemblyName & ext
-  projectRoot / DotnetBinSubdir / DotnetReleaseSubdir /
-    coords.targetFramework / fileName
+  ## The assembly ``dotnet build`` always writes, which the build action
+  ## declares as its required output: ``<AssemblyName>.dll`` -- for a
+  ## .NET (Core) executable too, whose native apphost is a separate,
+  ## optional file -- except for a .NET Framework executable, where the
+  ## assembly is itself ``<AssemblyName>.exe`` and no ``.dll`` exists.
+  let ext =
+    if isExecutableOutputType(coords.outputType) and
+        isDotnetFrameworkTfm(coords.targetFramework): ".exe"
+    else: ".dll"
+  producedOutputDir(projectRoot, coords) / (coords.assemblyName & ext)
+
+proc producedAppHostPath(projectRoot: string;
+                         coords: CSharpDotnetCoordinates): string =
+  ## The native apphost the SDK may write beside a .NET (Core)
+  ## executable's ``.dll``, or "" when none can be written (a library or
+  ## a .NET Framework executable). Its name is
+  ## ``<AssemblyName>.exe`` for a Windows runtime and the bare
+  ## ``<AssemblyName>`` everywhere else; the runtime is the csproj's
+  ## ``<RuntimeIdentifier>`` when set, and the host the build runs on
+  ## otherwise (a RID-less ``dotnet build`` targets its own RID). It is
+  ## declared optional: whether the SDK writes it also depends on
+  ## ``UseAppHost`` and on defaults this convention does not evaluate
+  ## (``netcoreapp2.x`` writes none without a RID).
+  if not isExecutableOutputType(coords.outputType) or
+      isDotnetFrameworkTfm(coords.targetFramework):
+    return ""
+  let windowsRuntime =
+    if coords.runtimeIdentifier.len > 0:
+      coords.runtimeIdentifier.toLowerAscii.startsWith("win")
+    else:
+      defined(windows)
+  producedOutputDir(projectRoot, coords) /
+    (if windowsRuntime: coords.assemblyName & ".exe"
+     else: coords.assemblyName)
 
 proc collectCsharpInputs(projectRoot: string;
                         csprojPath: string): seq[string] =
@@ -551,11 +625,16 @@ proc emitBuildAction(projectRoot, dotnetExe: string;
                "--verbosity", "quiet",
                coords.csprojPath]
   let inputs = collectCsharpInputs(projectRoot, coords.csprojPath)
+  var optionalOutputs: seq[string]
+  let apphost = producedAppHostPath(projectRoot, coords)
+  if apphost.len > 0:
+    optionalOutputs.add(apphost)
   buildAction(
     id = "csharp-dotnet-build",
     call = inlineExecCall(argv, projectRoot),
     inputs = inputs,
     outputs = @[binaryPath],
+    optionalOutputs = optionalOutputs,
     pool = "compile",
     # ``dotnet`` spawns MSBuild worker processes (Csc.exe, the SDK
     # resolver, the framework-pack loader, etc.) whose FS reads

@@ -37,6 +37,7 @@ import std/[os, sequtils, strutils]
 # ``extendedPath`` is the Windows ``\\?\`` long-path spelling every
 # filesystem probe in this tree goes through; a declared path inside a store
 # prefix is exactly the case that overruns MAX_PATH.
+import repro_core/link_target
 import repro_core/paths
 
 type
@@ -141,7 +142,7 @@ proc symlinkComponentOf*(root, relativePath: string):
           {pcLinkToFile, pcLinkToDir}:
         var target = ""
         try:
-          target = expandSymlink(extendedPath(current))
+          target = readSymlinkTarget(extendedPath(current))
         except OSError, IOError:
           discard
         return (component: walked, target: target)

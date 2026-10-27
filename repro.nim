@@ -794,6 +794,7 @@ package reprobuild:
       "date"
       "mv"
       "dirname"
+      "nm"
       "timeout"
     # ``just lint`` ends in ``scripts/check_workflows.sh``, which runs
     # actionlint over ``.github/workflows``. The flake shell carries it on
@@ -1775,6 +1776,10 @@ package reprobuild:
         extraEnv = sourceOnlyEnv,
         )
       reprobuildTestBuildActions.add(edge.action)
+      if spec.source == "tests/integration/t_hcr_native_library_prerequisite.nim":
+        # The legacy bare default excludes direct test members only. Keep
+        # this additive regression's compile edge out of that default too.
+        reprobuildTestExecuteActions.add(edge.action)
       if spec.source.startsWith("tests/bundles/"):
         pureUnitBundleArtifacts.add(TestGraphArtifact(
           path:
@@ -2206,6 +2211,43 @@ package reprobuild:
       if nixCacheTest:
         discard target("test-nix-daemon-cache", pyExecute)
       reprobuildTestExecuteActions.add(pyExecute)
+
+    # A native consumer requests this one producer, without selecting our
+    # shipping apps or SDK. The canonical script has two healthy outputs;
+    # declaring both makes deletion of either invalidate this edge. Its entire
+    # C/header tree is an input, including the platform translation units.
+    when defined(linux) or defined(macosx):
+      const hcrAgentRoot = "libs/repro_hcr_agent"
+      const hcrAgentCompiler = when defined(macosx): "clang" else: "gcc"
+      const hcrAgentName = when defined(macosx):
+        "librepro_hcr_agent.dylib" else: "librepro_hcr_agent.so"
+      const hcrAgentOutput = hcrAgentRoot & "/build/" & hcrAgentName
+      let hcrAgentLib = shell(
+        # Fail before build_lib.sh's historical cc fallback. Do not accept
+        # ambient CC either: this action must use its declared compiler role.
+        command = "command -v " & hcrAgentCompiler &
+          " >/dev/null 2>&1 || { echo 'hcr-agent-lib requires declared " &
+          hcrAgentCompiler & "' >&2; exit 1; }; CC=" & hcrAgentCompiler &
+          " bash " & hcrAgentRoot & "/build_lib.sh",
+        actionId = "reprobuild.hcr_agent.lib",
+        extraInputs = @[hcrAgentRoot & "/build_lib.sh", hcrAgentRoot & "/c"],
+        extraOutputs = @[hcrAgentOutput,
+          hcrAgentRoot & "/build/lib/" & hcrAgentName])
+      appendRegisteredActionToolIdentityRefs(hcrAgentLib.id,
+        ["bash", hcrAgentCompiler, "dirname", "uname", "mkdir", "cp"])
+      discard collect("hcr-agent-lib", @[hcrAgentLib])
+      let hcrAgentSymbols = shell(
+        command = "bash " & hcrAgentRoot & "/check_symbols.sh",
+        actionId = "reprobuild.hcr_agent.symbols",
+        after = @[hcrAgentLib],
+        extraInputs = @[hcrAgentRoot & "/check_symbols.sh", hcrAgentOutput])
+      appendRegisteredActionToolIdentityRefs(hcrAgentSymbols.id,
+        ["bash", "nm", "dirname", "uname", "grep"])
+      discard target("test-hcr-agent-lib", hcrAgentSymbols)
+      # Both are DIRECT test members: the legacy bare-default exclusion
+      # removes test members, not their entire transitive prerequisite closure.
+      reprobuildTestExecuteActions.add(hcrAgentLib)
+      reprobuildTestExecuteActions.add(hcrAgentSymbols)
 
     # Spec-Implementation M0: the ``test`` build graph collection
     # (per reprobuild-specs/Build-Graph-Collections.md). ``repro test``

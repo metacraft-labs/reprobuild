@@ -123,8 +123,8 @@
   ioMonSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "io-mon";
-    rev = "6fc4ba9a2a9636298fc2e6c6578bc4677bd0a134";
-    hash = "sha256-VvujIm5p39wuIuNtv0080ZSaX4lSGT0xYf07rio0Ba8=";
+    rev = "6fccd929cb09da0bfc0844b93ced9ffb1ac0f74f";
+    hash = "sha256-icTohrpTUcX6H+AHQlcC2uB6nAMJs0dTAwIi/Uaxc5E=";
   },
   shmGsetSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -135,8 +135,8 @@
   shmQueueSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-shm-queue";
-    rev = "a3564c13e0b7d0c6a092c19c998cd3faee5ce20a";
-    hash = "sha256-vsqb2Ibe+4VqVug6oGJVZqX4d+z4oOY0oWZMHKc2pLk=";
+    rev = "91451f2250beb89d1d221f0a77be0841c19b182e";
+    hash = "sha256-HYS07QHtkHQ4Pm7yBuQm27dhQ3mOYquwp2GWIEuupqo=";
   },
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -162,8 +162,8 @@
   runquotaSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "runquota";
-    rev = "416274abe4cda8ec9aef7dca9165cfb8c25a1846";
-    hash = "sha256-A0+DQquMegirVLTJxokjn2Yxs9LWNef9RLUORFwXCUU=";
+    rev = "f5a644cde174234af8e193413e17b0e47d29e6f5";
+    hash = "sha256-gLoCSqZTycI43QU2QOB3v+pJ3I0fUiHTluLoM4n+8Lk=";
   },
 }:
 let
@@ -215,7 +215,7 @@ stdenv.mkDerivation (finalAttrs: {
   # forbids. reprobuild's flake overrides it with the value it parses from the
   # nimble manifest, and `checks.nixpkgs-package-version-sync` fails the build
   # if this literal and the manifest disagree, so the two cannot drift silently.
-  version = "0.2.6";
+  version = "0.2.17";
 
   # The default source: a published commit whose `reprobuild.nimble` carries
   # `version` above and whose `flake.lock` pins the `*Src` defaults above
@@ -226,8 +226,8 @@ stdenv.mkDerivation (finalAttrs: {
   src = fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "reprobuild";
-    rev = "1f51077433102dc20df1d5a795e9644a08060101";
-    hash = "sha256-Hj/msOaQYzrxH0ETCQ1xmqOUZbJMljCVUswxBs3iLM0=";
+    rev = "bc474ec2976a220049a6f22c7211105ea24d093a";
+    hash = "sha256-t3yD9kNYCpp3nPzVAUyv0coZ9rqPLgoClMibZb7mPQE=";
   };
 
   strictDeps = true;
@@ -527,7 +527,7 @@ stdenv.mkDerivation (finalAttrs: {
   meta = {
     description = "Reprobuild build system";
     homepage = "https://github.com/metacraft-labs/reprobuild";
-    license = lib.licenses.mit;
+    license = lib.licenses.asl20;
     mainProgram = "repro";
     maintainers = [ ];
     # nixpkgs 26.11 dropped x86_64-darwin (see flake.nix `systems`).

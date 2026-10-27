@@ -39,9 +39,18 @@
 ##   report; in the TRUSTED profile the plan's DET triggers only
 ##   (`execution_record.blocksCertificate`) — a macOS `fs-denied` is
 ##   recorded, not disqualifying;
-## * a manifest that names `repro develop` siblings is refused until they
-##   are materialized (M1): running without them and certifying the
-##   primary tree alone would describe a state nobody tested (G32);
+## * `repro develop` SIBLINGS (Distributed-Execution M1 review fix,
+##   2026-10-22): each sibling the manifest names is materialized and
+##   verified against its own `gitTreeSha1` (a pool lease, or a fresh
+##   checkout without a pool) under `<lease>/siblings/<siblingDirName>`,
+##   beside the worktree, and exposed to the action read-only and
+##   executable as `REPRO_DEVELOP_SIBLINGS` (`LeaseSpec.siblingsDir`). A
+##   certificate binds the primary tree only (`content` is one
+##   `git-tree-sha1`), so while siblings are present NO certificate is
+##   issued: the goal's execution record carries
+##   `certificate-withheld-develop-siblings` (which withholds signing in
+##   both profiles, `blocksCertificate`) and the response says why. M2 binds
+##   the siblings into certification and lifts this (G32);
 ## * the signer is not on this host (EDGE-5, threat model D5): the issuer
 ##   asks the certificate signer, which holds the signing CA.
 ##
@@ -79,14 +88,14 @@
 ## a build node produced, while the writable worktree, /tmp and /dev/shm
 ## stay noexec.
 
-import std/[asyncdispatch, options, os, strutils, times]
+import std/[asyncdispatch, monotimes, options, os, strutils, tables, times]
 
 import blake3
 when defined(posix):
   import std/posix
   var O_NOFOLLOW {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
 
-import repro_peer_cache/[boundary, evidence_record, types]
+import repro_peer_cache/[boundary, evidence_record, snapshot_blobs, types]
 import repro_workspace_snapshot
 
 import ./execution_record
@@ -123,6 +132,11 @@ type
       ## Lease supervisor output; must not be under `leaseRoot`.
     repoCaches*: seq[(string, string)]
       ## `repoId` -> local repository cache holding the base commits.
+    fetchRemotes*: seq[(string, string)]
+      ## `repoId` -> the remote (URL or path) a base commit missing from its
+      ## repository cache is fetched from (the worktree pool's
+      ## `fetchRemotes`; the daemon's `repos=` file, third column).
+      ## Operator configuration, never a request field.
     platform*: string
     readRoots*: seq[string]
     closureRoots*: seq[string]
@@ -151,6 +165,12 @@ type
       ## Concurrent leases (each its own slot, and on Linux its own
       ## subordinate uid); 0 = `DefaultLeaseSlots`. The canary lease uses
       ## the slot after the last.
+    worktreePoolRoot*: string
+      ## Distributed-Execution M1: the worktree pool (`repro_workspace_snapshot/
+      ## pool`) — base worktrees per repository, kept outside every lease;
+      ## each goal's worktree is a copy-on-write clone of one, with the
+      ## snapshot's delta applied and its tree verified. "" = check the base
+      ## commit out afresh for every goal (`materializeRepoSnapshot`).
 
   WorkerReceiver* = ref object
     config*: WorkerConfig
@@ -171,6 +191,14 @@ type
     executionRecords*: int
     leaseCounter: int
     slots: seq[bool]
+    pool*: WorktreePool
+      ## Created from `config.worktreePoolRoot` (nil without one).
+    materializations*: int
+      ## Snapshots materialized and verified (primary and siblings).
+    lastMaterializeMs*: float
+      ## Wall time of the last one, from the goal's arrival: hydrating the
+      ## descriptor, the manifest and the snapshot's blobs, then every
+      ## repository's materialization and verification.
 
 const
   DefaultLeaseSlots* = 16
@@ -192,8 +220,13 @@ proc newWorkerReceiver*(config: WorkerConfig; fetchBlob: BlobFetcher;
       "lease supervisor output must live outside the lease root")
   if cfg.leaseSlots <= 0:
     cfg.leaseSlots = DefaultLeaseSlots
-  WorkerReceiver(config: cfg, fetchBlob: fetchBlob, storeOutput: storeOutput,
-    issuer: issuer, reporter: reporter, slots: newSeq[bool](cfg.leaseSlots))
+  result = WorkerReceiver(config: cfg, fetchBlob: fetchBlob,
+    storeOutput: storeOutput, issuer: issuer, reporter: reporter,
+    slots: newSeq[bool](cfg.leaseSlots))
+  if cfg.worktreePoolRoot.len > 0:
+    result.pool = newWorktreePool(cfg.worktreePoolRoot)
+    for (id, remote) in cfg.fetchRemotes:
+      result.pool.fetchRemotes[id] = remote
 
 proc acquireSlot(r: WorkerReceiver): int =
   for i in 0 ..< r.slots.len:
@@ -437,7 +470,7 @@ proc isWorkerOwned*(owned: seq[(string, string)]; name: string): bool =
 
 proc leaseSpecFor(r: WorkerReceiver; leaseId: string; node: GraphNode;
                   worktree: string; egress: seq[EgressDestination];
-                  slot: int; inputsDir = ""): LeaseSpec =
+                  slot: int; inputsDir = "", siblingsDir = ""): LeaseSpec =
   let leaseDir = r.config.leaseRoot / leaseId
   var outputDirs: seq[string] = @[]
   for o in node.outputs:
@@ -457,7 +490,28 @@ proc leaseSpecFor(r: WorkerReceiver; leaseId: string; node: GraphNode;
     closureRoots: r.config.closureRoots, outputDirs: outputDirs,
     hidePaths: r.config.hidePaths, egress: egress,
     layers: r.config.layers, timeoutMs: r.config.timeoutMs, slot: slot,
-    inputsDir: inputsDir, memfdNoexec: r.config.profile == tpHardened)
+    inputsDir: inputsDir, siblingsDir: siblingsDir,
+    memfdNoexec: r.config.profile == tpHardened)
+
+proc openSiblingTree(root: string) =
+  ## The develop siblings are bound read-only into the lease and stay the
+  ## daemon's files (on Linux the lease runs as another uid): directories
+  ## searchable and files readable by everyone, executables executable.
+  when defined(posix):
+    let dirPerms = {fpUserRead, fpUserWrite, fpUserExec, fpGroupRead,
+      fpGroupExec, fpOthersRead, fpOthersExec}
+    setFilePermissions(root, dirPerms)
+    for path in walkDirRec(root, yieldFilter = {pcFile, pcDir}):
+      if symlinkExists(path):
+        continue
+      if dirExists(path):
+        setFilePermissions(path, dirPerms)
+      else:
+        var perms = getFilePermissions(path) + {fpUserRead, fpGroupRead,
+          fpOthersRead}
+        if fpUserExec in perms:
+          perms.incl({fpGroupExec, fpOthersExec})
+        setFilePermissions(path, perms)
 
 proc handleReachGoal*(r: WorkerReceiver; caller: CallerIdentity;
                       payload: seq[byte];
@@ -466,6 +520,7 @@ proc handleReachGoal*(r: WorkerReceiver; caller: CallerIdentity;
   ## See the module doc. `fetchBlob` hydrates over the caller's own
   ## connection; nil = the receiver's default fetcher.
   let fetch = if fetchBlob.isNil: r.fetchBlob else: fetchBlob
+  let goalArrived = getMonoTime()
   let log = GoalLog()
   var req: ReachGoalRequest
   try:
@@ -517,12 +572,6 @@ proc handleReachGoal*(r: WorkerReceiver; caller: CallerIdentity;
     return r.refuse(caller, req, "goal-schema-invalid", badSnap, payload,
       rec = rec, log = log)
   rec.snapshotContentId = contentIdOf(snap)
-  if snap.developSiblings.len > 0:
-    return r.refuse(caller, req, "goal-schema-invalid",
-      "the snapshot names " & $snap.developSiblings.len & " repro develop " &
-      "sibling(s); this worker materializes the primary repository only " &
-      "(M1 adds siblings), and a goal run without them must not be " &
-      "certified as their state", payload, rec = rec, log = log)
   if desc.snapshotContentId != contentIdOf(snap):
     return r.refuse(caller, req, "goal-descriptor-unbound",
       "the descriptor was evaluated from " & desc.snapshotContentId &
@@ -533,25 +582,43 @@ proc handleReachGoal*(r: WorkerReceiver; caller: CallerIdentity;
     return r.refuse(caller, req, "goal-descriptor-unbound",
       "this worker holds no repository cache for '" &
       snap.primaryRepo.repoId & "'", payload, rec = rec, log = log)
+  for sib in snap.developSiblings:
+    if r.repoCacheFor(sib.repoId).len == 0:
+      return r.refuse(caller, req, "goal-descriptor-unbound",
+        "this worker holds no repository cache for repro develop sibling '" &
+        sib.repoId & "'", payload, rec = rec, log = log)
   # 3. Materialize into a fresh lease and verify the tree.
   inc r.leaseCounter
   let leaseId = "g" & $getCurrentProcessId() & "-" & $r.leaseCounter & "-" &
     $int64(epochTime() * 1000)
   let worktree = r.config.leaseRoot / leaseId / "wt"
+  let siblingsRoot =
+    if snap.developSiblings.len > 0: r.config.leaseRoot / leaseId / "siblings"
+    else: ""
   createDir(r.config.leaseRoot / leaseId)
-  # Fetch every modified blob first (asynchronously, each BLAKE3-verified by
-  # the fetcher), so materialization itself never blocks the dispatcher.
-  var fetched: seq[(Blake3Digest, seq[byte])] = @[]
-  for m in snap.primaryRepo.modified:
-    if m.mode == ModeGitlink:
-      continue   # a submodule commit carries no blob
-    let blob = await fetch(m.blake3Digest)
-    if blob.isSome:
-      fetched.add((m.blake3Digest, blob.get()))
+  # Fetch exactly the snapshot's modified blobs first (asynchronously, each
+  # BLAKE3-verified), so materialization itself never blocks the dispatcher.
+  # They stay in memory: the worker's own stores never hold a snapshot's
+  # uncommitted source (EVID-6). A repository's base pack (the requester's
+  # unpushed history) is fetched only when this worker lacks its base
+  # commit.
+  let rr0 = r
+  let needsPack = proc(repo: RepoSnapshot): bool {.gcsafe, closure.} =
+    {.cast(gcsafe).}:
+      let c = rr0.repoCacheFor(repo.repoId)
+      if c.len == 0:
+        false
+      elif rr0.pool.isNil:
+        cacheNeedsBasePack(c, repo)
+      else:
+        rr0.pool.needsBasePack(c, repo)
+  let hydrated = await fetchSnapshotBlobs(snap,
+    proc(d: array[32, byte]): Future[Option[seq[byte]]] {.gcsafe.} =
+      fetch(d), needsPack)
   let blobReader = proc(d: Blake3Digest): Option[seq[byte]] {.gcsafe, closure.} =
-    for (k, v) in fetched:
-      if k == d: return some(v)
-    none(seq[byte])
+    {.cast(gcsafe).}:
+      if hydrated.blobs.hasKey(d): some(hydrated.blobs[d])
+      else: none(seq[byte])
   var slot = -1
   var spec = LeaseSpec(leaseId: leaseId, leaseRoot: r.config.leaseRoot,
     leaseDir: r.config.leaseRoot / leaseId, metaDir: r.config.metaRoot / leaseId,
@@ -565,8 +632,30 @@ proc handleReachGoal*(r: WorkerReceiver; caller: CallerIdentity;
     try: removeDir(spec.metaDir) except OSError: discard
   var mat: MaterializeResult
   try:
-    mat = materializeRepoSnapshot(cache, snap.primaryRepo, worktree,
-      blobReader)
+    if r.pool.isNil:
+      mat = materializeRepoSnapshot(cache, snap.primaryRepo, worktree,
+        blobReader)
+      if mat.ok and siblingsRoot.len > 0:
+        createDir(siblingsRoot)
+        for sib in snap.developSiblings:
+          let sm = materializeRepoSnapshot(r.repoCacheFor(sib.repoId), sib,
+            siblingsRoot / siblingDirName(sib.repoId), blobReader)
+          if not sm.ok:
+            mat = MaterializeResult(worktree: worktree,
+              reason: "repro develop sibling " & sib.repoId & ": " & sm.reason)
+            break
+    else:
+      let rr1 = r
+      let all = r.pool.materializeWorkspaceSnapshot(snap,
+        proc(id: string): string {.gcsafe, closure.} =
+          {.cast(gcsafe).}: rr1.repoCacheFor(id),
+        worktree, siblingsRoot, blobReader)
+      mat = all.primary
+      if not all.ok:
+        mat.ok = false
+        mat.reason = all.reason
+    if mat.ok and siblingsRoot.len > 0:
+      openSiblingTree(siblingsRoot)
   except CatchableError as err:
     # A snapshot whose entries collide with the base tree (a file where the
     # base has a directory, …) raises from the filesystem calls. It is still
@@ -582,6 +671,9 @@ proc handleReachGoal*(r: WorkerReceiver; caller: CallerIdentity;
       "snapshot verification failed: " & mat.reason, payload, rec = rec,
       log = log)
   rec.treeBefore = mat.observedTree
+  inc r.materializations
+  r.lastMaterializeMs = float((getMonoTime() - goalArrived).inMicroseconds) /
+    1000.0
   # 4. Derivation.
   let verdict = checkDerivation(req, desc, snap, mat.tracked)
   if not verdict.ok:
@@ -665,7 +757,7 @@ proc handleReachGoal*(r: WorkerReceiver; caller: CallerIdentity;
   # 5. Execute the descriptor's argv in the lease, its detections recorded
   # (and, hardened, leaving the host) as they happen (G21).
   spec = r.leaseSpecFor(leaseId, node, worktree, leaseEgress, slot,
-    inputsDir)
+    inputsDir, siblingsRoot)
   for (k, _) in spec.env: rec.envNames.add(k)
   let cg = leaseCgroupFor(r.config.cgroups, leaseId)
   if not cg.ok:
@@ -768,6 +860,17 @@ proc handleReachGoal*(r: WorkerReceiver; caller: CallerIdentity;
       [("peer", callerOf(caller)), ("goalNode", node.id),
        ("expectedTree", snap.primaryRepo.gitTreeSha1),
        ("observedTree", after.observed), ("leaseId", leaseId)], log = log)
+  if snap.developSiblings.len > 0:
+    # A certificate's content is the primary tree alone; it cannot vouch
+    # for the siblings this goal ran with. Recorded in the execution record
+    # (which withholds signing in both profiles) until M2 binds siblings
+    # into certification.
+    r.report("certificate-issuance", DevelopSiblingsWithheld,
+      [("peer", callerOf(caller)), ("goalNode", node.id),
+       ("leaseId", leaseId), ("count", $snap.developSiblings.len),
+       ("reason", "the snapshot names " & $snap.developSiblings.len &
+         " repro develop sibling(s); a certificate binds the primary " &
+         "tree only (M2 binds siblings)")], log = log)
   var blocking: seq[LeaseReport] = @[]
   for rep in outcome.reports:
     if blocksCertificate(rep.kind, rep.detail,
@@ -778,6 +881,11 @@ proc handleReachGoal*(r: WorkerReceiver; caller: CallerIdentity;
       inc r.certificatesWithheld
       resp.reason = "no certificate: the worktree's tree changed during the " &
         "goal (" & snap.primaryRepo.gitTreeSha1 & " -> " & after.observed & ")"
+    elif snap.developSiblings.len > 0:
+      inc r.certificatesWithheld
+      resp.reason = "no certificate: the snapshot names " &
+        $snap.developSiblings.len & " repro develop sibling(s), which a " &
+        "certificate cannot bind yet (M2)"
     elif not node.isTest:
       resp.reason = "no certificate: node '" & node.id & "' is not a test node"
     elif blocking.len > 0:

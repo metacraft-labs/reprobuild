@@ -58,6 +58,7 @@ import nimcrypto/sha2 as ncSha2
 import repro_binary_cache_client/cache_key
 import repro_binary_cache_server/types as bcsTypes
 import repro_project_dsl/install_mirror_resolver
+from repro_core/link_target import readSymlinkTarget
 from repro_core/relocation import recipeSourceName
 import repro_project_dsl/install_mirror_runtime
 import repro_project_dsl/shell_fetch

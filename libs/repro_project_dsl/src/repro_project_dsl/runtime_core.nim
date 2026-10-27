@@ -260,7 +260,8 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion* = 31'u16
+  BuildActionPayloadVersion* = 32'u16
+    ## v32: optional output candidates, appended after removeBeforeRun.
     ## v31: ``removeBeforeRun`` — declared outputs the engine removes before
     ## the action runs, a string list appended last.
     ## v30: ``scratchDirs`` — the action's scratch directories (BuildXL's pip
@@ -2038,7 +2039,8 @@ proc buildAction*(id: string; call: PublicCliCall;
                   declaredOutputs: openArray[string] = [];
                   readOnlyRoots: openArray[string] = [];
                   scratchDirs: openArray[string] = [];
-                  removeBeforeRun: openArray[string] = []):
+                  removeBeforeRun: openArray[string] = [];
+                  optionalOutputs: openArray[string] = []):
     BuildActionDef {.dynOrStatic.} =
   ## ``outputTag`` (Recipe-Val M8): which package-output this edge
   ## contributes to. Defaults to the empty string which the closure
@@ -2097,6 +2099,7 @@ proc buildAction*(id: string; call: PublicCliCall;
     deps: @deps,
     inputs: @inputs,
     outputs: @outputs,
+    optionalOutputs: @optionalOutputs,
     pool: pool,
     poolUnits: poolUnits,
     depfile: depfile,
@@ -3004,6 +3007,37 @@ proc appendRegisteredActionRemoveBeforeRun*(actionId: string;
           buildActionRegistry[i].removeBeforeRun.add(path)
       return
 
+proc markRegisteredActionOptionalOutputs*(action: var BuildActionDef;
+                                           call: PublicCliCall;
+                                           flags: openArray[string]) {.dynOrStatic.} =
+  ## Reclassify only tool-declared output parameters; present candidates
+  ## remain owned cache artifacts, while an absent candidate is no promise.
+  var paths: seq[string] = @[]
+  for flagName in flags:
+    for arg in call.arguments:
+      if arg.name == flagName:
+        paths.addRoleValues(arg)
+  # The wrapper calls this right after registering ``action``, so the
+  # entry is the LAST one with its id. Searching from the front would find
+  # an earlier registration that reused the id (a typed call repeated with
+  # the same arguments, as in one process's successive package
+  # evaluations) and hand back that entry -- without this call's ``env``
+  # and other fields -- in place of the caller's action.
+  for i in countdown(buildActionRegistry.len - 1, 0):
+    if buildActionRegistry[i].id == action.id:
+      for path in paths:
+        if path.len == 0:
+          continue
+        if path notin buildActionRegistry[i].optionalOutputs:
+          buildActionRegistry[i].optionalOutputs.add(path)
+        var required: seq[string] = @[]
+        for output in buildActionRegistry[i].outputs:
+          if output != path:
+            required.add(output)
+        buildActionRegistry[i].outputs = required
+      action = buildActionRegistry[i]
+      return
+
 proc appendRegisteredActionSubToolRefs*(actionId: string;
                                         refs: openArray[string]) {.dynOrStatic.} =
   ## Record the typed tool's own bare-name sub-tools (``cli: subTools``) on
@@ -3608,7 +3642,7 @@ proc collectPreserveTree(root: string):
       of pcFile:
         result.files.add(child)
       of pcLinkToFile, pcLinkToDir:
-        result.symlinks.add((path: child, target: expandSymlink(child)))
+        result.symlinks.add((path: child, target: readSymlinkTarget(child)))
       else:
         discard
   result.dirs.sort(system.cmp[string])
@@ -3696,7 +3730,7 @@ proc refuseGeneratedPreserveTreeSource(sourceRoot, outputRoot, actionId: string;
       if action.id == producer.id:
         current = action
         break
-    for output in current.outputs & current.declaredOutputs:
+    for output in current.outputs & current.optionalOutputs & current.declaredOutputs:
       if overlaps(output):
         let caller =
           if actionId.len > 0: "fs.preserveTree '" & actionId & "'"
@@ -3778,7 +3812,7 @@ proc inferDeclaredActionDeps*(actions: openArray[BuildActionDef];
   result = @actions
   var outputProducer = initTable[string, string]()
   for action in actions:
-    for output in action.outputs:
+    for output in action.outputs & action.optionalOutputs:
       let normalized = declaredOutputProjectPath(projectRoot, action, output)
       if normalized.len > 0 and not outputProducer.hasKey(normalized):
         outputProducer[normalized] = action.id
@@ -4295,6 +4329,8 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
   # v31: declared outputs the engine removes before the action runs.
   if version >= 31'u16:
     payload.writeStringSeq(action.removeBeforeRun)
+  if version >= 32'u16:
+    payload.writeStringSeq(action.optionalOutputs)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(version)
@@ -4567,6 +4603,8 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     # Absence of the list is absence of the request: the engine then removes
     # nothing, which is what every action did before the field existed.
     result.removeBeforeRun = @[]
+  if version >= 32'u16:
+    result.optionalOutputs = readStringSeq(bytes, pos)
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

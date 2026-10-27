@@ -189,10 +189,18 @@ proc buildZipArgvWindows*(archive, destination: string): seq[string] =
   ## anything that would prompt fail instead of waiting.
   # Explicit CP437 preserves unflagged ZIP names; flagged UTF-8 still wins.
   # https://learn.microsoft.com/en-us/dotnet/api/system.io.compression.zipfile.open
+  #
+  # Both assemblies are required: ``ZipFile``/``ZipFileExtensions`` live in
+  # System.IO.Compression.FileSystem, but ``ZipArchiveMode`` (referenced
+  # below) lives in System.IO.Compression itself. Loading only the first
+  # leaves the second type unresolved -- "Unable to find type
+  # [System.IO.Compression.ZipArchiveMode]" -- on a Windows PowerShell 5.1
+  # session that has not already loaded it some other way.
   let command =
     "$ProgressPreference = 'SilentlyContinue'; " &
     "$ErrorActionPreference = 'Stop'; " &
     "Add-Type -AssemblyName System.IO.Compression.FileSystem; " &
+    "Add-Type -AssemblyName System.IO.Compression; " &
     "$root = [System.IO.Directory]::CreateDirectory(" &
       powershellSingleQuotedLiteral(destination) & ").FullName; " &
     "$root = $root.TrimEnd([char[]]'\\/') + " &

@@ -20,6 +20,7 @@ when defined(posix):
     {.importc: "flock", header: "<sys/file.h>".}
 
 import repro_core
+import repro_core/link_target
 import repro_core/relocation
 import repro_hash
 
@@ -881,7 +882,7 @@ proc collectDirectorySnapshotEntries(root, current: string;
           relativePath: relative,
           permissions: {},
           sourcePath: path,
-          symlinkTarget: expandSymlink(path)))
+          symlinkTarget: readSymlinkTarget(path)))
 
 proc directorySnapshotPayload*(root: string): seq[byte] =
   ## Encode a directory output as one deterministic CAS payload. Traversal
@@ -1192,7 +1193,7 @@ proc linkedDirectoryIdentity(path: string): uint64 =
   ## differs from the stable state's identity: the conservative direction.
   var target = ""
   try:
-    target = expandSymlink(extendedPath(path))
+    target = readSymlinkTarget(extendedPath(path))
   except OSError:
     target = ""
   let text = LinkedDirectoryIdentityDomain & "\0" & target
@@ -1550,7 +1551,7 @@ proc symlinkTargetOf(path: string): string =
     var st: Stat
     if lstat(extendedPath(path).cstring, st) == 0 and S_ISLNK(st.st_mode):
       try:
-        return expandSymlink(extendedPath(path))
+        return readSymlinkTarget(extendedPath(path))
       except OSError:
         return ""
   ""
@@ -1904,7 +1905,7 @@ proc observeOutputWitness(path: string; metadata: FileMetadata): OutputWitness =
         1_000_000_000'u64 + uint64(st.st_ctim.tv_nsec)
       if S_ISLNK(st.st_mode):
         try:
-          result.linkTarget = expandSymlink(extendedPath(path))
+          result.linkTarget = readSymlinkTarget(extendedPath(path))
         except OSError:
           discard
   if metadata.kind == ffkDirectory:
@@ -2174,7 +2175,7 @@ proc unresolvedSymlinkIdentity(path: string): seq[byte] =
   ## one recorded for the stable state, which is the conservative direction.
   var target = ""
   try:
-    target = expandSymlink(extendedPath(path))
+    target = readSymlinkTarget(extendedPath(path))
   except OSError:
     target = ""
   var reason = "resolves"
@@ -2220,7 +2221,7 @@ proc linkedFileIdentity(path: string): seq[byte] =
       return @[]
   var target = ""
   try:
-    target = expandSymlink(extendedPath(path))
+    target = readSymlinkTarget(extendedPath(path))
   except OSError:
     target = ""
   let text = LinkedFileIdentityDomain & "\0" & target & "\0"
@@ -3642,6 +3643,24 @@ proc firstUnknownActionRecordVersion*(): uint16 =
   ## that was not harmless three sites over, which is the argument for
   ## deriving it rather than for grading each instance by its headroom.
   newestTrustedActionRecordVersion() + 1
+
+proc actionRecordIsNewerFormat*(payload: openArray[byte]):
+    tuple[newer: bool; version: uint16] =
+  ## Distributed-Execution M1: is `payload` an action-record frame (its magic
+  ## is the record magic) whose version word is ABOVE every version this
+  ## build reads (`firstUnknownActionRecordVersion`)? That is a record a
+  ## NEWER `repro` wrote — well formed for its writer, unreadable here — as
+  ## opposed to a malformed or forged one. A peer-cache consumer treats it
+  ## as a plain miss and does not suspect the peer that served it. A version
+  ## inside the known range that the decoder refuses (the no-evidence epoch)
+  ## is NOT newer: that refusal is a trust decision.
+  if payload.len < 6:
+    return (false, 0'u16)
+  for i in 0 ..< 4:
+    if payload[i] != byte(ord(ActionRecordMagic[i])):
+      return (false, 0'u16)
+  let version = uint16(payload[4]) or (uint16(payload[5]) shl 8)
+  (version >= firstUnknownActionRecordVersion(), version)
 
 proc actionRecordVersionsThisBuildRefuses*(): seq[uint16] =
   ## Every version number up to and including the newest frame this build

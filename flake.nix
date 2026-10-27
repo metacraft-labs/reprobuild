@@ -298,7 +298,9 @@
       # ancestor. Execute-only images, a posix_spawn whose file actions change
       # the child's directory, and an exec from a thread that cannot record
       # are now graded as loss too.
-      url = "github:metacraft-labs/io-mon/6fc4ba9a2a9636298fc2e6c6578bc4677bd0a134";
+      # Capture raw renameat2 through syscall() and trapped inline sites,
+      # including both exchange paths, instead of reporting unknown loss.
+      url = "github:metacraft-labs/io-mon/6fccd929cb09da0bfc0844b93ced9ffb1ac0f74f";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -2356,12 +2358,17 @@
             # why that does not work): it is for the shell to PROVIDE the
             # programs it does this to, so they come from the same nixpkgs.
             # `scripts/check_dev_shell_env.sh` holds that invariant.
-            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
-              pkgs.clingo
-              pkgs.zstd
-              pkgs.openssl
-              pkgs.pcre
-            ];
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (
+              [
+                pkgs.clingo
+                pkgs.zstd
+                pkgs.openssl
+                pkgs.pcre
+              ]
+              # SwiftPM's generated manifest executables need libdispatch;
+              # they do not inherit the SwiftPM executable's RUNPATH.
+              ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.swift-corelibs-libdispatch ]
+            );
             # The source bootstrap (`config.nims`) and the helpers Reprobuild
             # compiles for itself (`externalHashFlags`) both bake an OpenSSL
             # directory into `-L` and RPATH. Name this shell's own target
@@ -2495,6 +2502,12 @@
               # resolves its dlopen()s when run inside CodeTracer's dev shell.
               pkgs.patchelf
               pkgs.cmake
+              # `t_autotools_configure_tools` generates a real `configure`
+              # with Autoconf from the suite's own environment. The lint
+              # hook's PATH below lists it as well, but the suite runs here.
+              pkgs.autoconf
+              # The version-bump helper and its regression invoke Perl.
+              pkgs.perl
               pkgs.pkg-config
               pkgs.nix
               # git, from THIS flake's nixpkgs — the same evaluation the

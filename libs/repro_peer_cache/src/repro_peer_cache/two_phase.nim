@@ -95,6 +95,9 @@ type
     strongMisses*: int
       ## PathSets whose recomputed strong fingerprint matched no offered
       ## selector — the "dynamic input changed" case.
+    newerFormatMisses*: int
+      ## Entries skipped because a newer node wrote them in a format this
+      ## build does not read (a miss, never a rejection).
 
 const
   TwoPhaseBundleMagic = "RPTB"
@@ -572,10 +575,27 @@ proc fetchTwoPhase*(client: PeerCacheClient; ctx: TwoPhaseContext;
       template reject(trigger, why: string) =
         report(trigger, why)
         client.markPeerSuspect(item.peerId, trigger, why)
+      var decodingRecord = false
       try:
         entry = decodeMemoEntry(entryBytes.get())
+        decodingRecord = true
         record = decodeActionResultRecord(entry.recordBytes)
       except CatchableError as err:
+        # A mixed-version fleet: an honest NEWER peer serves an entry (or a
+        # record inside one) in a format this build does not read. Well
+        # formed for its writer, so a plain miss — no detection, no
+        # suspicion (Distributed-Execution M1). Anything else that fails to
+        # decode is malformed or forged, and rejected as before.
+        let newer =
+          if decodingRecord: actionRecordIsNewerFormat(entry.recordBytes)
+          else: memoEntryIsNewerFormat(entryBytes.get())
+        if newer.newer:
+          inc outcome.newerFormatMisses
+          outcome.reason = "peer " & $item.peerId & " serves a " &
+            (if decodingRecord: "record" else: "memo entry") &
+            " in a newer format (version " & $newer.version &
+            ") than this build reads: a miss"
+          continue
         reject("selector-validation-failed", "malformed memo entry: " &
           err.msg)
         continue
