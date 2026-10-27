@@ -5135,12 +5135,13 @@
             "base",
             "c",
             "cc",
+            "d",
             "daemon",
             "dir",
             "env",
             "tools"
           ],
-          "line": 259,
+          "line": 392,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5155,12 +5156,13 @@
             "base",
             "c",
             "cc",
+            "d",
             "daemon",
             "dir",
             "env",
             "tools"
           ],
-          "line": 289,
+          "line": 422,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5175,12 +5177,13 @@
             "base",
             "c",
             "cc",
+            "d",
             "daemon",
             "dir",
             "env",
             "tools"
           ],
-          "line": 551,
+          "line": 684,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5195,12 +5198,13 @@
             "base",
             "c",
             "cc",
+            "d",
             "daemon",
             "dir",
             "env",
             "tools"
           ],
-          "line": 560,
+          "line": 693,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5215,12 +5219,13 @@
             "base",
             "c",
             "cc",
+            "d",
             "daemon",
             "dir",
             "env",
             "tools"
           ],
-          "line": 600,
+          "line": 733,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5235,17 +5240,102 @@
             "base",
             "c",
             "cc",
+            "d",
             "daemon",
             "dir",
             "env",
             "tools"
           ],
-          "line": 619,
+          "line": 752,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
           ],
           "snippet": "check execCmdEx(quoteShellCommand([cc, \"-o\", tools / \"memfd\","
+        },
+        {
+          "assignedCommandVariable": "cc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "base",
+            "c",
+            "cc",
+            "d",
+            "daemon",
+            "dir",
+            "env",
+            "tools"
+          ],
+          "line": 815,
+          "path": "tests/integration/t_execution_lease_confinement.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "let cc = ccPath()"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "base",
+            "c",
+            "cc",
+            "d",
+            "daemon",
+            "dir",
+            "env",
+            "tools"
+          ],
+          "line": 825,
+          "path": "tests/integration/t_execution_lease_confinement.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "check execCmdEx(quoteShellCommand([cc, \"-o\", tools / \"egress_probe\","
+        },
+        {
+          "assignedCommandVariable": "cc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "base",
+            "c",
+            "cc",
+            "d",
+            "daemon",
+            "dir",
+            "env",
+            "tools"
+          ],
+          "line": 1050,
+          "path": "tests/integration/t_execution_lease_confinement.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "let cc = ccPath()"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "base",
+            "c",
+            "cc",
+            "d",
+            "daemon",
+            "dir",
+            "env",
+            "tools"
+          ],
+          "line": 1060,
+          "path": "tests/integration/t_execution_lease_confinement.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "check execCmdEx(quoteShellCommand([cc, \"-o\", tools / \"deny_probe\","
         }
       ],
       "source": "tests/integration/t_execution_lease_confinement.nim"
@@ -35537,7 +35627,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_execution_lease_confinement.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

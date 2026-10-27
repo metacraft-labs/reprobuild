@@ -1570,7 +1570,13 @@ static void handle_notification(int nfd) {
 }
 
 #define RL_MAX_SPLICE 64
-struct splice { int a, b; };
+/* One forwarded connection: `a` the lease's side, `b` the destination's.
+ * It is a TCP connection end to end, half-close included: when one side
+ * reaches EOF only the WRITE side of the other is shut down (the EOF is
+ * passed on) and the reverse direction keeps flowing — a client that
+ * half-closes after its request still gets the response. Both are closed
+ * once both directions reached EOF, or at once when either fails. */
+struct splice { int a, b; int a_eof, b_eof; };
 
 static int dial_dest(const struct rl_dest *d) {
   int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -1586,15 +1592,20 @@ static int dial_dest(const struct rl_dest *d) {
 /* Moves what is ready on `from` to `to`. Never blocks on `from` (a spurious
  * or stale readiness must not park the supervisor, which also answers the
  * child's seccomp notifications): EAGAIN is "nothing yet", not an error.
- * Returns -1 when `from` reached EOF or failed. */
+ * What arrived is sent on at once (no buffering for a fuller read).
+ * Returns 0 for data moved or nothing yet, 1 when `from` reached EOF, -1
+ * when `from` or `to` failed. The send uses MSG_NOSIGNAL: a peer that went
+ * away is an error of this connection, never a SIGPIPE that kills the
+ * supervisor (and with it the lease). */
 static int pump(int from, int to) {
   char buf[16384];
   ssize_t n = recv(from, buf, sizeof buf, MSG_DONTWAIT);
   if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return 0;
-  if (n <= 0) return -1;
+  if (n == 0) return 1;
+  if (n < 0) return -1;
   ssize_t off = 0;
   while (off < n) {
-    ssize_t w = write(to, buf + off, (size_t)(n - off));
+    ssize_t w = send(to, buf + off, (size_t)(n - off), MSG_NOSIGNAL);
     if (w < 0) { if (errno == EINTR) continue; return -1; }
     off += w;
   }
@@ -1744,8 +1755,10 @@ static void supervise(void) {
     for (int i = 0; i < cfg.n_dest; i++) { pf[np].fd = cfg.dests[i].listen_fd; pf[np++].events = POLLIN; }
     s_base = np;
     for (int i = 0; i < nsp; i++) {
-      pf[np].fd = sp[i].a; pf[np++].events = POLLIN;
-      pf[np].fd = sp[i].b; pf[np++].events = POLLIN;
+      /* A side that reached EOF is not polled again (poll skips a negative
+         fd): it would report readable forever. */
+      pf[np].fd = sp[i].a_eof ? -1 : sp[i].a; pf[np++].events = POLLIN;
+      pf[np].fd = sp[i].b_eof ? -1 : sp[i].b; pf[np++].events = POLLIN;
     }
     /* Only the splices that were in `pf` this round have valid revents; a
      * splice accepted below joins the poll set on the next round. */
@@ -1787,16 +1800,24 @@ static void supervise(void) {
           if (in >= 0) {
             int out = dial_dest(&cfg.dests[i]);
             if (out < 0 || nsp >= RL_MAX_SPLICE) { close(in); if (out >= 0) close(out); }
-            else { sp[nsp].a = in; sp[nsp].b = out; nsp++; }
+            else { sp[nsp].a = in; sp[nsp].b = out; sp[nsp].a_eof = sp[nsp].b_eof = 0; nsp++; }
           }
         }
       }
       for (int i = nsp_polled - 1; i >= 0; i--) {
         int ra = pf[s_base + 2 * i].revents, rb = pf[s_base + 2 * i + 1].revents;
-        int dead = 0;
-        if ((ra & (POLLIN | POLLHUP)) && pump(sp[i].a, sp[i].b) != 0) dead = 1;
-        if (!dead && (rb & (POLLIN | POLLHUP)) && pump(sp[i].b, sp[i].a) != 0) dead = 1;
-        if (dead) { close(sp[i].a); close(sp[i].b); sp[i] = sp[--nsp]; }
+        int dead = 0, r;
+        if (ra & (POLLIN | POLLHUP | POLLERR)) {
+          r = pump(sp[i].a, sp[i].b);
+          if (r < 0) dead = 1;
+          else if (r > 0) { sp[i].a_eof = 1; shutdown(sp[i].b, SHUT_WR); }
+        }
+        if (!dead && (rb & (POLLIN | POLLHUP | POLLERR))) {
+          r = pump(sp[i].b, sp[i].a);
+          if (r < 0) dead = 1;
+          else if (r > 0) { sp[i].b_eof = 1; shutdown(sp[i].a, SHUT_WR); }
+        }
+        if (dead || (sp[i].a_eof && sp[i].b_eof)) { close(sp[i].a); close(sp[i].b); sp[i] = sp[--nsp]; }
       }
     }
     for (int k = 0; k < RK_COUNT; k++)
