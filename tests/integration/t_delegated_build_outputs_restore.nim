@@ -21,6 +21,7 @@
 ## comment at the check).
 
 import std/[algorithm, json, os, osproc, sequtils, strutils, tables, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 const reproBinary =
   when defined(windows): "build/bin/repro.exe" else: "build/bin/repro"
@@ -153,11 +154,9 @@ suite "a delegated build's output tree is restored from the cache":
   for testCase in cases():
     test "restore after deleting the output tree: " & testCase.name:
       if not fileExists(repro):
-        checkpoint "repro binary not built: " & repro
-        skip()
+        skip("repro binary not built: " & repro)
       elif testCase.missing.len > 0:
-        checkpoint testCase.missing
-        skip()
+        skip(testCase.missing)
       else:
         let scratch = createTempDir("repro-delegated-restore-" & testCase.name & "-", "")
         defer: removeDir(scratch)
@@ -201,9 +200,8 @@ suite "a delegated build's output tree is restored from the cache":
           "monitor loss" in first.diagnostics or
           "monitor-loss" in first.diagnostics
         if unpublished:
-          checkpoint "restore not exercised: the edge was not published " &
-            "(monitor loss): " & first.diagnostics[0 ..< min(400, first.diagnostics.len)]
-          skip()
+          skip("restore not exercised: the edge was not published " &
+            "(monitor loss): " & first.diagnostics[0 ..< min(400, first.diagnostics.len)])
         else:
           let unchanged = build("unchanged")
           check not unchanged.launched
