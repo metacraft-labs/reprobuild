@@ -364,6 +364,8 @@ proc reprobuildPackagesRemedy*(): string =
   ## How to make the catalog reachable. Shared by the compile-time diagnostic
   ## and the tool resolver's missing-provisioning errors.
   "Provide the catalog in one of these ways:\n" &
+    "  - in a workspace whose project declares reprobuild-packages, run" &
+    " `repro sync --only=reprobuild-packages` from the workspace root;\n" &
     "  - clone " & ReprobuildPackagesRepositoryUrl & " as `reprobuild-packages`" &
     " beside the project, or beside any directory above it (a workspace" &
     " sibling);\n" &

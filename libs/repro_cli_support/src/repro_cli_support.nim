@@ -5187,6 +5187,13 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
       " but no ``git`` binary is on PATH.")
   let checkoutRoot =
     lockPinnedProducerCacheRoot(workspaceRoot) / dep.name / revision
+  # A .git directory appears before fetch and checkout have finished. Serialize
+  # both creation and reuse so another activation cannot verify an unfinished
+  # tree. Keep the lock beside the revision directory: partial-checkout cleanup
+  # must never unlink the lock another process is waiting on.
+  var materializationLock = acquireExclusiveFileLock(
+    checkoutRoot & ".materialize.lock")
+  defer: releaseExclusiveFileLock(materializationLock)
 
   proc git(args: openArray[string]; cwd = ""): tuple[code: int; output: string] =
     var cmd = quoteShell(gitBin)
@@ -6816,7 +6823,7 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
       @ProviderCompileIsolatedPassthrough,
     # The same edge as the dev-env engine's, so the same declared environment
     # (see `providerCompileLaunchEnv`).
-    env = providerCompileLaunchEnv(compilerCwd / "home"),
+    env = providerCompileLaunchEnv(compilerCwd / "home", modulePath),
     # Dev-Env-Warm-Entry.md §2: the compile starts from the environment
     # declared above and nothing else, so no caller variable can be an input.
     isolateHostEnvironment = true,
@@ -10703,7 +10710,7 @@ proc recipeRelativeProviderCompileAction(edge: RecipeRelativeProviderCompile;
     actionCachePolicy = ffpHybrid,
     envPassthrough = @ProviderCompileEnvironmentPassthrough &
       @ProviderCompileIsolatedPassthrough,
-    env = providerCompileLaunchEnv(scratchDir / "home"),
+    env = providerCompileLaunchEnv(scratchDir / "home", modulePath),
     isolateHostEnvironment = true,
     nonDeterminism = ndpEntropyBlessed,
     nonDeterminismJustification = ProviderCompilerEntropyJustification,
@@ -10829,7 +10836,7 @@ proc ensureLockPinnedCatalog*(modulePath, consumerRoot: string): string =
       if dep.name == ReprobuildPackagesRepositoryName and dep.coordinates.kind == ckVcs:
         return fetchLockPinnedProducer(dep, lockDir)
   except CatchableError as err:
-    if err of OSError:
+    if err of OSError or err of IOError:
       raise
     discard
   return ""
@@ -13990,6 +13997,11 @@ proc runProviderCompileHelper(args: openArray[string]): int =
       stderr.writeLine("repro provider compile: missing " & name)
       return 2
   try:
+    # Both provider edges share this compile boundary. Prepare even when the
+    # caller did not extract an interface through the CLI first. The parent
+    # normally fetched already; this also verifies the cached source pin.
+    discard ensureLockPinnedCatalog(absolutePath(modulePath),
+      absolutePath(modulePath).parentDir)
     let interfaceFingerprint =
       if interfaceFingerprintArg.len > 0:
         decodeInterfaceFingerprintArg(interfaceFingerprintArg)
@@ -15029,6 +15041,10 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
   # neither, and failed with `CreateProcessW failed (2)` for `nim c` while
   # `repro build` of the same recipe succeeded. Which modes it provisions
   # under is `bootstrapToolchainProvisioned` (every mode, on every host).
+  # Dev-env activation extracts directly through the library, before either
+  # CLI compile helper can prepare the catalog. Fetch outside the isolated
+  # compile so network access and credentials belong to preparation.
+  discard ensureLockPinnedCatalog(selection.modulePath, selection.projectRoot)
   ensureBootstrapToolchainEnv(toolProvisioning, resolveStoreRoot() / "tool-store")
   let monitor = publicDevEnvMonitor(publicCliPath)
   let config = DevEnvEdgeConfig(

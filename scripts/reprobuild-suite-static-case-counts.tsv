@@ -1697,7 +1697,7 @@ tests/integration/t_lock_refresh_and_validate_without_building.nim	nim	5
 tests/integration/t_lock_refresh_folds_uses_sibling_producer_deps.nim	nim	2
 tests/integration/t_lock_refresh_keeps_a_foreign_platform_lock.nim	nim	6
 tests/integration/t_lock_refresh_never_moves_a_pin_backward.nim	nim	7
-tests/integration/t_lock_refresh_provider_compile_finds_the_consumers_catalog.nim	nim	2
+tests/integration/t_lock_refresh_provider_compile_finds_the_consumers_catalog.nim	nim	5
 tests/integration/t_lock_refresh_reads_solver_inputs_from_compiled_provider.nim	nim	2
 tests/integration/t_lock_refresh_records_the_catalog_a_package_resolved_from.nim	nim	2
 tests/integration/t_lock_refresh_refuses_a_solve_missing_a_develop_sibling_recipe.nim	nim	2
@@ -2357,7 +2357,7 @@ tests/unit/t_provider_snapshot_binary_binding.nim	nim	3
 tests/unit/t_provider_startup_body_containment.nim	nim	14
 tests/unit/t_python3_provides_its_own_name.nim	nim	2
 tests/unit/t_reasoned_skip_compiles_on_any_unittest.nim	nim	3
-tests/unit/t_recipe_compile_honours_the_reprobuild_libs_override.nim	nim	5
+tests/unit/t_recipe_compile_honours_the_reprobuild_libs_override.nim	nim	6
 tests/unit/t_recipe_constraint_reader.nim	nim	33
 tests/unit/t_recipe_lock_consistency_check.nim	nim	23
 tests/unit/t_recipe_pin_edit.nim	nim	19

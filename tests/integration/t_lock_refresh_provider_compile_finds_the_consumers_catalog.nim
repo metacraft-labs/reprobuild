@@ -14,8 +14,12 @@
 
 import std/[os, osproc, strtabs, strutils, tempfiles, unittest]
 
+import repro_lock
+import repro_test_support/process_fixtures
+
 const ReprobuildRepoRoot = currentSourcePath().parentDir.parentDir.parentDir
-const reproBinary = ReprobuildRepoRoot / "build/bin/repro".addFileExt(ExeExt)
+let reproBinary = getEnv("REPROBUILD_TEST_CLI",
+  ReprobuildRepoRoot / "build/bin/repro".addFileExt(ExeExt))
 
 const CatalogInterface = """
 import std/os
@@ -205,3 +209,154 @@ suite "lock refresh compiles providers using the consumer's catalog":
     check missing in refused.output
     check readFile(consumer / "repro.lock") == previousLock
     check not fileExists(scratch / "catalog-witness")
+
+proc pinCatalog(consumer, remote, revision: string; integrity = "") =
+  var lock = LockedDependencies(schema: "reprobuild.solved-graph-lock.v2",
+    platform: currentPlatformId(), optimal: true,
+    inputsDigest: inputsDigestOf("pinned-catalog-fixture"))
+  lock.deps.add(LockedDep(name: "reprobuild-packages",
+    coordinates: Coordinates(kind: ckVcs, url: remote, revision: revision),
+    integrity: (if integrity.len > 0: integrity else:
+      gitObjectMultihash("sha1", revision)), visibility: "public"))
+  writeFile(consumer / "repro.lock", serializeLockedDependencies(lock))
+  discard git(consumer, "add", "repro.lock")
+  discard git(consumer, "commit", "-q", "-m", "pin catalog")
+
+suite "provider compilation materializes the lock-pinned catalog":
+  test "cold exec fetches the pinned catalog before compiling its recipe":
+    let scratch = createTempDir("repro-exec-pinned-catalog-", "")
+    defer: removeDir(scratch)
+    let remote = scratch / "remote-catalog"
+    let revision = commitCatalog(remote, "locked-catalog")
+    let consumer = makeConsumer(scratch)
+    writeFile(consumer / "repro.nim", ConsumerRecipe & "  devEnv:\n    setEnv \"PINNED_CATALOG_TEST\", \"ready\"\n")
+    discard git(consumer, "add", ".")
+    discard git(consumer, "commit", "-q", "-m", "recipe")
+    pinCatalog(consumer, remote, revision)
+    let installedLibs = scratch / "installed/share/repro/source/libs"
+    copyDir(ReprobuildRepoRoot / "libs", installedLibs)
+    let fetched = consumer / ".repro/cross-repo-producers/reprobuild-packages" / revision
+    require not dirExists(fetched)
+    let result = run(quoteShellCommand([reproBinary, "exec", consumer,
+      "--", "sh", "-c", "test \"$PINNED_CATALOG_TEST\" = ready"]), libsRoot = installedLibs,
+      actionCacheRoot = scratch / "action-cache")
+    checkpoint(result.output)
+    require result.code == 0
+    check git(fetched, "rev-parse", "HEAD") == revision
+    require fileExists(scratch / "catalog-witness")
+    check readFile(scratch / "catalog-witness") == "locked-catalog"
+
+  test "a direct provider helper fetches the pinned catalog and refuses wrong integrity":
+    let scratch = createTempDir("repro-helper-pinned-catalog-", "")
+    defer: removeDir(scratch)
+    let remote = scratch / "remote-catalog"
+    let revision = commitCatalog(remote, "helper-catalog")
+    let consumer = makeConsumer(scratch)
+    pinCatalog(consumer, remote, revision)
+    let installedLibs = scratch / "installed/share/repro/source/libs"
+    copyDir(ReprobuildRepoRoot / "libs", installedLibs)
+    let extracted = run(quoteShellCommand([reproBinary,
+      "__repro-extract-interface", "--module", consumer / "repro.nim",
+      "--artifact", scratch / "interface.rbsz", "--stub", scratch / "interface.nim",
+      "--work-dir", ReprobuildRepoRoot, "--consumer-root", consumer]),
+      catalogRoot = remote, libsRoot = installedLibs)
+    checkpoint(extracted.output)
+    require extracted.code == 0
+    let fetched = consumer / ".repro/cross-repo-producers/reprobuild-packages" / revision
+    require not dirExists(fetched)
+    let command = quoteShellCommand([reproBinary, "__repro-compile-provider",
+      "--module", consumer / "repro.nim", "--out", scratch / "provider",
+      "--artifact", scratch / "provider.rbsz", "--interface", scratch / "interface.rbsz",
+      "--work-dir", ReprobuildRepoRoot])
+    let compiled = run(command, libsRoot = installedLibs)
+    checkpoint(compiled.output)
+    require compiled.code == 0
+    check git(fetched, "rev-parse", "HEAD") == revision
+    require fileExists(scratch / "provider")
+    removeDir(fetched)
+    removeFile(scratch / "provider")
+    pinCatalog(consumer, remote, revision,
+      gitObjectMultihash("sha1", repeat('0', 40)))
+    let refused = run(command, libsRoot = installedLibs)
+    checkpoint(refused.output)
+    check refused.code != 0
+    check "integrity" in refused.output.toLowerAscii()
+    check not fileExists(scratch / "provider")
+    # Lock acquisition failures are materialization failures too. A directory
+    # cannot be opened as an exclusive lock file on supported platforms; the
+    # helper must propagate that error instead of compiling from a fallback.
+    pinCatalog(consumer, remote, revision)
+    let materializationLock = fetched & ".materialize.lock"
+    if fileExists(materializationLock):
+      removeFile(materializationLock)
+    createDir(materializationLock)
+    let lockRefused = run(command, libsRoot = installedLibs)
+    checkpoint(lockRefused.output)
+    check lockRefused.code != 0
+    check materializationLock in lockRefused.output
+    check not fileExists(scratch / "provider")
+
+  test "concurrent cold execs share one verified catalog materialization":
+    # Real concurrent public invocations, with no mocked Git or transport. A
+    # substantial incompressible Git object keeps the first cold fetch open
+    # long enough to start the second invocation after Git init. This is the
+    # legitimate in-progress state that must be protected by the shared lock.
+    let scratch = getTempDir() /
+      ("repro-concurrent-pinned-catalog-" & $getCurrentProcessId())
+    require not dirExists(scratch)
+    releaseDirAtProcessExit(scratch)
+    createDir(scratch)
+    let remote = scratch / "remote-catalog"
+    discard commitCatalog(remote, "concurrent-catalog")
+    discard git(remote, "config", "pack.threads", "2")
+    var payload = newString(32 * 1024 * 1024)
+    var state = 0x9e3779b9'u32
+    for i in 0 ..< payload.len:
+      state = state xor (state shl 13)
+      state = state xor (state shr 17)
+      state = state xor (state shl 5)
+      payload[i] = char(state and 255)
+    writeFile(remote / "catalog-payload.bin", payload)
+    payload.setLen(0)
+    discard git(remote, "add", "catalog-payload.bin")
+    discard git(remote, "commit", "-q", "-m", "substantial catalog source")
+    let revision = git(remote, "rev-parse", "HEAD")
+    let consumer = makeConsumer(scratch)
+    writeFile(consumer / "repro.nim", ConsumerRecipe &
+      "  devEnv:\n    setEnv \"PINNED_CATALOG_TEST\", \"ready\"\n")
+    discard git(consumer, "add", ".")
+    discard git(consumer, "commit", "-q", "-m", "activation recipe")
+    pinCatalog(consumer, remote, revision)
+    let installedLibs = scratch / "installed/share/repro/source/libs"
+    copyDir(ReprobuildRepoRoot / "libs", installedLibs)
+    let fetched = consumer / ".repro/cross-repo-producers/reprobuild-packages" / revision
+    require not dirExists(fetched)
+    let command = @["exec", consumer, "--", "sh", "-c",
+      "test \"$PINNED_CATALOG_TEST\" = ready"]
+    let env = childEnv(libsRoot = installedLibs,
+      actionCacheRoot = scratch / "action-cache")
+    let first = startProcess(reproBinary, args = command, env = env,
+      options = {poUsePath, poParentStreams})
+    terminateAtProcessExit(processID(first))
+    defer: close(first)
+    while not fileExists(fetched / ".git/HEAD") and peekExitCode(first) == -1:
+      sleep(1)
+    # If the first request exited before the rendezvous, report its actual
+    # failure instead of waiting forever for a directory it will not create.
+    if not fileExists(fetched / ".git/HEAD"):
+      check waitForExit(first) == 0
+      fail()
+    else:
+      check peekExitCode(first) == -1
+      check readFile(fetched / ".git/HEAD").strip().startsWith("ref: ")
+      let second = startProcess(reproBinary, args = command, env = env,
+        options = {poUsePath, poParentStreams})
+      terminateAtProcessExit(processID(second))
+      defer: close(second)
+      let secondCode = waitForExit(second)
+      let firstCode = waitForExit(first)
+      check firstCode == 0
+      check secondCode == 0
+      check git(fetched, "rev-parse", "HEAD") == revision
+      require fileExists(scratch / "catalog-witness")
+      check readFile(scratch / "catalog-witness") == "concurrent-catalog"

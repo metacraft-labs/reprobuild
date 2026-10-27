@@ -92,6 +92,8 @@ suite "a moved package with no catalog is a named compile error":
     check "Provide the catalog" in output
     check ReprobuildPackagesRepositoryUrl in output
     check ".github/sibling-repos" in output
+    check "repro sync --only=reprobuild-packages" in output
+    check "workspace whose project declares" in output
 
   test "a catalog path that does not exist is reported as such":
     let missing = scratch / "no-such-catalog"

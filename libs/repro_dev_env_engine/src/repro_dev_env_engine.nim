@@ -240,7 +240,7 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
       @ProviderCompileIsolatedPassthrough,
     # Declared, so the caller's shell does not decide the edge's key; see
     # `providerCompileLaunchEnv`.
-    env = providerCompileLaunchEnv(compilerCwd / "home"),
+    env = providerCompileLaunchEnv(compilerCwd / "home", modulePath),
     # Dev-Env-Warm-Entry.md §2: the compile starts from the environment
     # declared above and nothing else, so no caller variable can be an input.
     isolateHostEnvironment = true,
