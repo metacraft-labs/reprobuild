@@ -630,6 +630,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_engine_opaque_output_directory.nim",
+    binary: "build/test-bin/t_engine_opaque_output_directory",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_engine_target_export_table_records_ambiguity.nim",
     binary: "build/test-bin/t_engine_target_export_table_records_ambiguity",
     defines: @["reproProviderMode"],

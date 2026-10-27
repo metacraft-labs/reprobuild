@@ -76,6 +76,7 @@ libs/repro_build_engine/tests/t_engine_implicit_target_name_hook_overrides_canon
 libs/repro_build_engine/tests/t_engine_macos_sip_safe_launch.nim	nim	9
 libs/repro_build_engine/tests/t_engine_method_call_on_typed_field_emits_execution_edge.nim	nim	1
 libs/repro_build_engine/tests/t_engine_multiple_outputs_produce_multiple_names.nim	nim	1
+libs/repro_build_engine/tests/t_engine_opaque_output_directory.nim	nim	6
 libs/repro_build_engine/tests/t_engine_target_export_table_records_ambiguity.nim	nim	1
 libs/repro_build_engine/tests/t_engine_typed_output_recorded_in_normalized_graph.nim	nim	1
 libs/repro_build_engine/tests/t_ensure_snippet_leaves_an_up_to_date_file_untouched.nim	nim	15

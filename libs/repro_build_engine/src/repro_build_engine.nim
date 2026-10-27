@@ -542,6 +542,16 @@ type
       ## target left alone) and touches only the action's own outputs: an
       ## entry that is not exactly one of ``outputs`` / ``declaredOutputs``
       ## is refused and the action fails (``removeBeforeRunProblem``).
+      ##
+      ## A directory output listed here is an OPAQUE OUTPUT DIRECTORY
+      ## (Build-Engine-And-Scheduler.md §"Opaque output directories"):
+      ## removed recursively before each run, recorded whole, restored
+      ## exactly, and exclusive to this action -- ``validateGraph`` refuses
+      ## anything another action declares at or under it, and a tree that
+      ## contains this action's cwd or inputs. Reads under it are this run's
+      ## own writes and never key the action (``isRemovedOutputTreePath``).
+      ## A dynamic ``opaque-output`` fragment record adds a path to both
+      ## ``outputs`` and this list.
     fixedOutput*: bool
       ## Cache-Scope P3.4 — a FIXED-OUTPUT action (BuildXL's download pip,
       ## Nix's fixed-output derivation): its outputs are determined by
@@ -2458,6 +2468,10 @@ type
     deps: Table[string, seq[string]]
     outputs: Table[string, seq[string]]
     optionalOutputs: Table[string, seq[string]]
+    # Opaque output directories (``opaque-output`` records): obligatory
+    # outputs whose whole tree is the action's product, removed before it
+    # runs. Build-Engine-And-Scheduler.md §"Opaque output directories".
+    opaqueOutputs: Table[string, seq[string]]
     # M25: action-create records. Each entry describes a new BuildAction
     # that the engine materialises into the running graph mid-build. The
     # producer of the .rbdyn file emits one record per new action; the
@@ -3596,9 +3610,24 @@ proc normalizeWriteRoot(p: string): string =
   ## and strips a trailing ``/`` so ``"$b/build"`` and ``"$b/build/"``
   ## compare equal. Empty in → empty out; empty entries are ignored
   ## by the caller.
+  ##
+  ## A `.` component names the directory it is in, so it is dropped:
+  ## the monitor reports a tool's `opendir(".")` and `stat("./.")` in the
+  ## action's cwd as `<cwd>/.` and `<cwd>/./.`, and those spellings must
+  ## meet the output-ancestor and self-written-directory filters that are
+  ## keyed on `<cwd>` (measured with `cabal v2-build`, which lists and
+  ## probes its working directory: the project root stayed a keyed input
+  ## of the build edge and every deletion of its build directory missed the
+  ## record). `..` is left alone: what it names depends on links.
   if p.len == 0:
     return ""
   var s = p.replace("\\", "/")
+  while "/./" in s:
+    s = s.replace("/./", "/")
+  while s.len >= 2 and s.endsWith("/."):
+    s.setLen(s.len - 2)
+  if s.len == 0:
+    return "/"
   while s.len > 1 and s[^1] == '/':
     s.setLen(s.len - 1)
   s
@@ -4113,6 +4142,63 @@ proc validateGraph(g: BuildGraph) =
     if hasOptionalCandidates:
       for raw in action.outputs:
         indexRoot(raw, ordinary = true)
+
+  # Outputs removed before their action runs -- opaque output directories
+  # and any other ``removeBeforeRun`` entry -- are deleted recursively, so
+  # each is EXCLUSIVE to its action: nothing another action declares may lie
+  # at or under it, whatever the dependency order (a removal before every
+  # run would destroy it), and it may not contain its own action's working
+  # directory or declared inputs. BuildXL's exclusive opaque directory has
+  # the same rule ("Only one process can write to a single OD", Documentation/
+  # Wiki/Advanced-Features/Sealed-Directories/Opaque-Sealed-Directories.md).
+  # Build-Engine-And-Scheduler.md §"Opaque output directories".
+  # An entry that is not one of the action's own outputs is left to
+  # `removeBeforeRunProblem`, which fails that action at launch without
+  # removing anything; only a removal that WILL happen is checked here.
+  var removalRoots: seq[tuple[actionId, raw, root: string]] = @[]
+  for action in g.actions:
+    if action.removeBeforeRun.len == 0:
+      continue
+    var cwdRoot = normalizeWriteRoot(canonicalPolicyPath(
+      absolutePath(if action.cwd.len > 0: action.cwd else: getCurrentDir())))
+    when defined(windows):
+      cwdRoot = cwdRoot.toLowerAscii()
+    var owned = initHashSet[string]()
+    for output in action.outputs & action.optionalOutputs &
+        action.declaredOutputs:
+      if output.len > 0:
+        owned.incl(outputRemovalLocation(action.cwd, output))
+    for raw in action.removeBeforeRun:
+      if raw.len == 0:
+        continue
+      let root = outputRemovalLocation(action.cwd, raw)
+      if root notin owned:
+        continue
+      if root == cwdRoot or cwdRoot.startsWith(root & "/"):
+        raiseEngine("output removed before run contains the action's cwd: " &
+          raw & " for " & action.id)
+      for input in action.inputs:
+        let inputRoot = outputRemovalLocation(action.cwd, input)
+        if inputRoot == root or inputRoot.startsWith(root & "/"):
+          raiseEngine("output removed before run contains a declared input: " &
+            raw & " contains " & input & " for " & action.id)
+      removalRoots.add((actionId: action.id, raw: raw, root: root))
+  if removalRoots.len > 0:
+    for action in g.actions:
+      for raw in action.outputs & action.optionalOutputs &
+          action.declaredOutputs & action.removeBeforeRun:
+        if raw.len == 0:
+          continue
+        let key = outputRemovalLocation(action.cwd, raw)
+        for removal in removalRoots:
+          if removal.actionId == action.id:
+            continue
+          if key == removal.root or key.startsWith(removal.root & "/"):
+            raiseEngine("'" & raw & "', an output of '" & action.id &
+              "', lies in '" & removal.raw & "', which '" & removal.actionId &
+              "' removes before it runs: an opaque output directory belongs " &
+              "to one action. Spec: Build-Engine-And-Scheduler.md " &
+              "§\"Opaque output directories\".")
   for i in 0 ..< declaredIndex.len:
     for j in (i + 1) ..< declaredIndex.len:
       if declaredIndex[i].actionId == declaredIndex[j].actionId:
@@ -4905,7 +4991,7 @@ proc readDynamicGraphFragment(path: string;
     let kind = line[0 ..< firstTab]
     let rest = line[firstTab + 1 .. ^1]
     case kind
-    of "dep", "output", "optional-output":
+    of "dep", "output", "optional-output", "opaque-output":
       let fields = rest.split('\t')
       if fields.len != 2:
         raiseEngine(path & ":" & $(lineNo + 1) &
@@ -4914,6 +5000,11 @@ proc readDynamicGraphFragment(path: string;
         result.deps.mgetOrPut(fields[0], @[]).addUnique(fields[1])
       elif kind == "output":
         result.outputs.mgetOrPut(fields[0], @[]).addUnique(fields[1])
+      elif kind == "opaque-output":
+        if fields[1].len == 0:
+          raiseEngine(path & ":" & $(lineNo + 1) &
+            ": dynamic graph opaque-output record names an empty path")
+        result.opaqueOutputs.mgetOrPut(fields[0], @[]).addUnique(fields[1])
       else:
         result.optionalOutputs.mgetOrPut(fields[0], @[]).addUnique(fields[1])
     of "create-action":
@@ -9631,10 +9722,18 @@ proc selfWrittenOutputKeys(action: BuildAction): HashSet[string] =
 
 proc isUnderCanonicalPolicyRoot(path: string; roots: openArray[string]): bool
 
-proc isOptionalOutputPath(action: BuildAction; path: string): bool =
-  ## A conditional directory is an owned recursive product, removed before
-  ## execution. Reads/probes while filling it cannot become prior inputs.
-  for candidate in action.optionalOutputs:
+proc isRemovedOutputTreePath(action: BuildAction; path: string): bool =
+  ## Whether `path` is at or under an output the engine REMOVES before the
+  ## action runs: an optional candidate (a conditional byproduct) or a
+  ## ``removeBeforeRun`` entry (an opaque output directory, Build-Engine-And-
+  ## Scheduler.md §"Opaque output directories"). Such a tree is empty when
+  ## the action starts, so whatever the action reads, probes or enumerates
+  ## there it wrote itself in this run: it cannot be a prior input, and
+  ## keying on it would make a deleted tree unrestorable (the lookup would
+  ## find the "input" absent). BuildXL adds an opaque directory to the
+  ## untracked scope for the same reason (Opaque-Sealed-Directories.md
+  ## §Internals).
+  for candidate in action.optionalOutputs & action.removeBeforeRun:
     let root = materialPath(action.cwd, candidate)
     if path == root.replace('\\', '/'):
       return true
@@ -9667,19 +9766,19 @@ proc evidenceInputPaths(action: BuildAction;
     result.addUnique(seen, input)
   for input in evidence.depfileInputs:
     let key = materialPath(action.cwd, input).replace('\\', '/')
-    if selfWritten.contains(key) or action.isOptionalOutputPath(key) or
+    if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
         ancestors.isOutputAncestorObservation(key):
       continue
     result.addUnique(seen, input)
   for input in evidence.monitorReads:
     let key = materialPath(action.cwd, input).replace('\\', '/')
-    if selfWritten.contains(key) or action.isOptionalOutputPath(key) or
+    if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
         ancestors.isOutputAncestorObservation(key):
       continue
     result.addUnique(seen, input)
   for probe in evidence.monitorProbes:
     let key = materialPath(action.cwd, probe).replace('\\', '/')
-    if selfWritten.contains(key) or action.isOptionalOutputPath(key) or
+    if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
         ancestors.isOutputAncestorObservation(key):
       continue
     result.addUnique(seen, probe)
@@ -10880,7 +10979,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   for input in evidence.depfileInputs:
     let path = materialContainmentPath(action.cwd, input)
     let key = path.replace('\\', '/')
-    if selfWritten.contains(key) or action.isOptionalOutputPath(key) or
+    if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
         ancestors.isOutputAncestorObservation(key):
       continue
     if not declaredMaterialized.contains(key) and
@@ -10894,7 +10993,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   for input in evidence.monitorReads:
     let path = materialContainmentPath(action.cwd, input)
     let key = path.replace('\\', '/')
-    if selfWritten.contains(key) or action.isOptionalOutputPath(key) or
+    if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
         ancestors.isOutputAncestorObservation(key):
       continue
     if not declaredMaterialized.contains(key) and
@@ -10908,7 +11007,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   for probe in evidence.monitorProbes:
     let path = materialContainmentPath(action.cwd, probe)
     let key = path.replace('\\', '/')
-    if selfWritten.contains(key) or action.isOptionalOutputPath(key) or
+    if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
         ancestors.isOutputAncestorObservation(key):
       continue
     if not declaredMaterialized.contains(key) and
@@ -11335,6 +11434,11 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
     # unaffected, and the exact declared outputs stay excluded by
     # `selfWrittenOutputKeys` as before.
     if selfWrittenDirs.contains(normalizeWriteRoot(location)):
+      continue
+    # A directory inside a tree removed before the action ran: its entries
+    # are all this run's writes, and `cacheInputPaths` drops the directory
+    # from the key for the same reason (`isRemovedOutputTreePath`).
+    if action.isRemovedOutputTreePath(location.replace('\\', '/')):
       continue
     result.addUnique(seen, path)
 proc evidenceFromRecord*(action: BuildAction;
@@ -20302,9 +20406,38 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var addedWaiting = 0
     for output in fragment.outputs.getOrDefault(id):
       action.outputs.addUnique(output)
+    let opaque = fragment.opaqueOutputs.getOrDefault(id)
+    if opaque.len > 0:
+      # An opaque output directory changes what the action promises and what
+      # it removes before running, so the fragment that declares it must key
+      # the action (Ninja's dyndep rule: the dyndep file is an input of the
+      # edge it extends). Build-Engine-And-Scheduler.md §"Discovery".
+      let fragmentKey = scratchKey(materialPath(action.cwd,
+        action.dynamicDepsFile))
+      var keyed = false
+      for input in action.inputs:
+        if scratchKey(materialPath(action.cwd, input)) == fragmentKey:
+          keyed = true
+          break
+      if not keyed:
+        raiseEngine("dynamic fragment " & action.dynamicDepsFile &
+          " declares an opaque output directory for " & id &
+          " but is not one of its declared inputs")
+    for output in opaque:
+      action.outputs.addUnique(output)
+      action.removeBeforeRun.addUnique(output)
     let optional = fragment.optionalOutputs.getOrDefault(id)
     for output in optional:
       action.optionalOutputs.addUnique(output)
+    if opaque.len > 0 and optional.len == 0:
+      # Ownership of the removed trees is checked against every action,
+      # including ones discovered earlier in this run.
+      var expanded = buildGraph
+      expanded.actions = @[]
+      for original in buildGraph.actions:
+        expanded.actions.add(if original.id == id: action
+          else: actionsById.getOrDefault(original.id, original))
+      validateGraph(expanded)
     if optional.len > 0:
       # Discovery may claim conditional paths only under the same ownership
       # rules as static declarations. Check against actions already discovered
