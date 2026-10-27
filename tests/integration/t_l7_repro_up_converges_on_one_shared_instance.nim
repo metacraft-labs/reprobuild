@@ -21,11 +21,11 @@
 ## `libs/repro_resources/tests/t_l7_instance_registry_converges_in_any_order.nim`,
 ## which runs in seconds because it does not compile a provider. Here a
 ## single cold `repro up` spends about 40 s in `repro dev-env` on this
-## host, so this file runs TWO orders over three projects whose provider
-## compile is warm after the first, and says which clauses it covers.
+## host, so the order case runs TWO orders over three projects whose
+## provider compile is warm after the first, and says which clauses it covers.
 ##
 ## ISOLATION. `REPRO_DAEMON_ENDPOINT`, `REPRO_DAEMON_STATE_DIR` and the
-## daemon's `--state-root` are all per-run, under one temp root. The
+## daemon's `--state-root` are all per-case, under one temp root. The
 ## `--state-root` is load-bearing and not hygiene theatre: without it the
 ## daemon's lease store would be `$HOME/.cache/repro/state`, i.e. the
 ## developer's live state, which the campaign's working agreement forbids
@@ -322,34 +322,27 @@ proc checkGatedReadiness(c: L7Case; project: string): string =
   checkpoint(output)
   check process.waitForExit() == 0
   check fileExists(project / "state" / "sso.ready")
-  require fileExists(eventsPath)
+  doAssert fileExists(eventsPath)
   result = readFile(eventsPath)
 
 suite "L7 §4.5 — `repro up` in three projects converges on one instance":
-  # Prepared on the first case's `setup`, NOT in the suite body. The suite
-  # body runs at registration, in every process this binary starts --
-  # including `--list` / `--list-json`, which only enumerates and is run
-  # from a scratch working directory. Preparing here made enumeration
-  # resolve `<cwd>/build/bin/repro` (raising from any other directory, so
-  # no case was listed) and start a daemon just to print case names. The
-  # runner executes each case in its own process, so a case still prepares
-  # the fixture and starts the daemon exactly once, and the deferred
-  # cleanup below still runs in that process -- only if a case prepared.
-  var prepared = false
+  # Acquire in setup so enumeration never starts a daemon or resolves a
+  # cwd-relative binary. Each case owns its recipe, script and markers:
+  # readiness cases rewrite them, and a shared fixture would make later
+  # cases attach against a different probe from the materialising owner.
   var c: L7Case
   var daemon: owned(Process)
 
   setup:
-    if not prepared:
-      c = prepareCase()
-      prepared = true
-      daemon = c.startDaemon()
+    c = prepareCase()
+    daemon = c.startDaemon()
 
-  defer:
-    if prepared:
-      downEveryProject(c)
-      c.closeDaemon(daemon)
-      try: removeDir(c.tempRoot) except OSError, IOError: discard
+  # Preconditions use always-enabled doAssert: unlike require, it throws
+  # instead of quitting, so a failed precondition still runs this cleanup.
+  teardown:
+    downEveryProject(c)
+    c.closeDaemon(daemon)
+    try: removeDir(c.tempRoot) except OSError, IOError: discard
 
   test "two orders, each ending with one instance, one pid and three holders":
     ## The gate's headline clause through the CLI: "`repro up` run in
@@ -514,7 +507,7 @@ suite "L7 §4.5 — `repro up` in three projects converges on one instance":
     check response.output.contains("readiness probe (fileExists")
     check not response.output.contains(" up http://")
     check not fileExists(project / "state" / "sso.ready")
-    require fileExists(eventsPath)
+    doAssert fileExists(eventsPath)
     let events = readFile(eventsPath)
     check events.contains("service.readiness.waiting")
     check events.contains("service.readiness.timeout")
@@ -555,11 +548,11 @@ suite "L7 §4.5 — `repro up` in three projects converges on one instance":
       "trap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n")
     let first = c.up(project)
     checkpoint(first.output)
-    require first.exitCode == 0
+    doAssert first.exitCode == 0
     let firstLine = convergeLine(first.output)
-    require outcomeWordOf(firstLine) == "Materialise"
+    doAssert outcomeWordOf(firstLine) == "Materialise"
     let pid = parseInt(fieldAfter(firstLine, "pid"))
-    require fileExists(project / "state" / "sso.ready")
+    doAssert fileExists(project / "state" / "sso.ready")
     removeFile(project / "state" / "sso.ready")
     check processAlive(pid)
     let eventsPath = parentDir(ledgerPath(project)) / "events.jsonl"
@@ -572,7 +565,7 @@ suite "L7 §4.5 — `repro up` in three projects converges on one instance":
     check attached.output.contains("readiness probe (fileExists")
     check not attached.output.contains(" up http://")
     check processAlive(pid)
-    require fileExists(eventsPath)
+    doAssert fileExists(eventsPath)
     let events = readFile(eventsPath)
     check events.contains("service.readiness.timeout")
     check not events.contains("session.up")
@@ -585,7 +578,10 @@ suite "L7 §4.5 — `repro up` in three projects converges on one instance":
     let owner = c.projects[0]
     let started = c.up(owner)
     checkpoint(started.output)
-    require started.exitCode == 0
+    doAssert started.exitCode == 0
+    # Both consumers probe this shared marker. A prior case's owner-local
+    # probe must not let startup pass while their readiness is unsatisfied.
+    doAssert fileExists(c.workspaceRoot / "sso.ready")
     let pid = parseInt(fieldAfter(convergeLine(started.output), "pid"))
     defer:
       # A negative-control run must also clean the process the broken down
@@ -605,19 +601,19 @@ suite "L7 §4.5 — `repro up` in three projects converges on one instance":
         "      activities = [\"default\"]\n")
       let failed = c.up(project)
       checkpoint(failed.output)
-      require failed.exitCode == 1
-      require failed.output.contains("instance attribute `unavailable` is NOT AVAILABLE")
-      require holderCountOf(convergeLine(failed.output)) == index + 1
-      require fileExists(ledgerPath(project))
+      doAssert failed.exitCode == 1
+      doAssert failed.output.contains("instance attribute `unavailable` is NOT AVAILABLE")
+      doAssert holderCountOf(convergeLine(failed.output)) == index + 1
+      doAssert fileExists(ledgerPath(project))
       let metadataPath = parentDir(ledgerPath(project)) / "session.json"
       let metadata = parseJson(readFile(metadataPath))
-      require metadata{"status"}.getStr() == "failed"
-      require metadata{"httpBind"}.getStr().len > 0
+      doAssert metadata{"status"}.getStr() == "failed"
+      doAssert metadata{"httpBind"}.getStr().len > 0
       let httpPid = metadata{"httpPid"}.getInt()
-      require httpPid > 0
+      doAssert httpPid > 0
       let deadline = epochTime() + 60.0
       while processAlive(httpPid) and epochTime() < deadline: sleep(50)
-      require not processAlive(httpPid)
+      doAssert not processAlive(httpPid)
     for index in 1 .. 2:
       let project = c.projects[index]
       let args = if index == 1: @["down"]
