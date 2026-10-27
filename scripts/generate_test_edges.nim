@@ -1006,6 +1006,12 @@ const
      "it executes its subjects' own binaries by path"),
     ("tests/integration/t_pcr_composite_matches_tpm.nim",
      "it has a second, opt-in-layer execute edge"),
+    # Added on fix/bootstrap-guard-ignores-build-output (164fa306cf), whose
+    # recipe puts this source's own compile edge in the `test` collection;
+    # listed here ahead of that branch so a merge of the two needs no
+    # judgement.
+    ("tests/integration/t_hcr_native_library_prerequisite.nim",
+     "its own compile edge is a member of the test collection"),
   ]
 
   PerCaseFixtureGateSubjectsMirror = [
@@ -1169,6 +1175,11 @@ proc assignGroups(repoRoot: string; edges: var seq[TestEdge]) =
     if reason.len == 0:
       let effect = moduleLevelSideEffect(text)
       if effect.len > 0: reason = "module-level " & effect
+    if reason.len == 0:
+      let work = moduleLevelWork(text)
+      if work.len > 0:
+        let shown = if work.len > 60: work[0 ..< 60] & "..." else: work
+        reason = "module-level statement runs at every start-up: " & shown
     if reason.len == 0:
       let work = suiteScopeWork(text)
       if work.len > 0:

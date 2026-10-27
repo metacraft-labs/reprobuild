@@ -467,3 +467,24 @@ proc suiteScopeWork*(text: string): string =
     if not declared:
       return t
   ""
+
+proc moduleLevelWork*(text: string): string =
+  ## The first bare call statement at column 0 (``createDir(…)``,
+  ## ``writeFile(…)``, ``register(…)``), outside string literals, or "".
+  ## Like suite-scope work it runs whenever the binary starts, for every case
+  ## of every member of a group: ``t_e2e_home_profile_imports_contribution_catalog``
+  ## builds its fixture tree and extracts a recipe at module level, and its
+  ## group could not reach a first case within 120 s.
+  var inTripleQuote = false
+  for line in text.splitLines:
+    if line.count("\"\"\"") mod 2 == 1:
+      inTripleQuote = not inTripleQuote
+      continue
+    if inTripleQuote or line.len == 0 or line[0] notin {'a' .. 'z'}:
+      continue
+    var i = 0
+    while i < line.len and (line[i].isAlphaNumeric or line[i] in {'_', '.'}):
+      inc i
+    if i < line.len and line[i] == '(':
+      return line
+  ""

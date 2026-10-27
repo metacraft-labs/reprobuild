@@ -196,6 +196,18 @@ suite "test binary grouping: source text facts":
     check suiteScopeWork(["let src = " & q, "suite \"x\":", "  doWork()",
       q, ""].join("\n")) == ""
 
+  test "module-level bare calls are found; declarations and string text are not":
+    # t_e2e_home_profile_imports_contribution_catalog's shape: fixture setup
+    # at column 0 runs at every process start.
+    check moduleLevelWork(["let root = createTempDir(\"x\", \"\")",
+      "createDir(root / \"payload\")", ""].join("\n")) ==
+      "createDir(root / \"payload\")"
+    check moduleLevelWork(["import std/os", "proc helper() = discard",
+      "let x = 1", "when isMainModule:", "  main()", ""].join("\n")) == ""
+    let q = "\"\"\""
+    check moduleLevelWork(["const fixture = " & q, "console.log(1)", q,
+      ""].join("\n")) == ""
+
   test "compile pragma targets are repo-relative":
     check compilePragmaTargets("{.compile: \"../c/probe.c\".}",
       "libs/h/tests/t_a.nim") == @["libs/h/c/probe.c"]

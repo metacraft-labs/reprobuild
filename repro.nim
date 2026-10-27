@@ -1827,7 +1827,9 @@ package reprobuild:
             spec.source != PerCaseFixtureGate and
             spec.source notin PerCaseFixtureGateSubjects and
             not spec.source.startsWith("tests/bundles/") and
-            not spec.source.contains("nix_daemon"),
+            not spec.source.contains("nix_daemon") and
+            spec.source !=
+              "tests/integration/t_hcr_native_library_prerequisite.nim",
           spec.source & " is grouped into " & spec.group & ", but repro.nim " &
           "gives it an execute edge a group cannot carry; keep it single in " &
           "scripts/generate_test_edges.nim and regenerate"
