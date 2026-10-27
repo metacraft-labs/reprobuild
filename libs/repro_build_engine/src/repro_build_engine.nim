@@ -377,7 +377,10 @@ type
     outputs*: seq[string]
     optionalOutputs*: seq[string]
       ## Tool-owned output candidates whose existence depends on the tool's
-      ## result (for example an MSVC import library for a DLL with exports).
+      ## result (for example the ``meson install --destdir`` tree, which is
+      ## absent when the project installs nothing). Not for an output a
+      ## consumer needs: an edge whose tool may skip such an output makes it
+      ## itself (the CMake generator's MSVC import library).
       ## Absent candidates are successful; present candidates are cached and
       ## restored. Ordinary ``outputs`` remain obligatory. The engine removes
       ## old candidates before execution and restores their recorded absence

@@ -50,6 +50,10 @@ proc cmakeTargetArtifacts(buildDir, target: string): DiscoveredOutputs =
           # also lists linker byproducts (notably import libraries and PDBs)
           # which it predicts even when a successful link will not emit them.
           # Keep them restorable when present without weakening the primary.
+          # This convention delegates to stock CMake and its own generator,
+          # whose MSVC link writes no import library for a DLL without
+          # exports; only the Reprobuild CMake generator's link step creates
+          # that library and so declares it obligatory.
           result.optionalOutputs.add(output)
       if result.outputs.len == 0:
         raise newException(ValueError, "CMake target has no primary artifact: " & target)
