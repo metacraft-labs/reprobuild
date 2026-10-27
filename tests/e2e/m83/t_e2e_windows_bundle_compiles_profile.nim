@@ -69,6 +69,16 @@
 ## exactly one `.rbpi` is published under the state directory, and the planned
 ## file is not written.
 ##
+## The same bundle also plans a profile whose package reference only the
+## catalog it ships defines (`bfg-repo-cleaner`): reprobuild-pm issue
+## 2026-10-27-installed-repro-profile-package-lookup-never-reaches-the-
+## shipped-catalog, where the engine looked for that catalog beside the
+## checkout the RELEASE was built in, and reported the name unknown. That case
+## requires a missing realization or a resolution, never `unknown-package`,
+## and a `catalog-projection` whose recorded inputs name the bundle's
+## `share\repro\reprobuild-packages`; its control deletes that directory and
+## requires `unknown-package`.
+##
 ## Negative control: the same run after deleting `share\repro` from the
 ## extracted bundle fails, and its diagnostic names the probed
 ## `...\share\repro\source` and the variables that would select a tree -- it
@@ -104,6 +114,17 @@ profile "gm1wWindowsBundle":
   resources:
     fsUserFile(hostFile = "~/""" & MarkerName & """",
       content = "planned by the extracted Windows bundle\n")
+"""
+
+const CatalogOnlyPackage = "bfg-repo-cleaner"
+  ## Defined by the catalog the bundle ships and by no linked definition.
+const CatalogProfileBody = """
+import repro_profile
+
+profile "gm1wShippedCatalog":
+  activity default:
+    `bfg-repo-cleaner`
+    just
 """
 
 type RunResult = tuple[exitCode: int; output: string]
@@ -238,7 +259,8 @@ else:
     root, homeDir, stateDir, profileDir: string
     res: RunResult
 
-  proc planWithBundle(bundle, label: string): Scenario =
+  proc planWithBundle(bundle, label: string; profileBody = ProfileBody;
+                      extraArgs: openArray[string] = []): Scenario =
     ## One `repro home apply --plan` of the minimal profile with the
     ## extracted bundle's `bin\repro.exe`, in fresh scratch state.
     result.root = createTempDir("gm1w-" & label & "-", "")
@@ -249,14 +271,14 @@ else:
     for dir in [result.homeDir, stateBase, result.profileDir, storeRoot]:
       createDir(extendedPath(dir))
     doAssert not isUnder(result.root, WorkspaceRoot)
-    writeFile(extendedPath(result.profileDir / "home.nim"), ProfileBody)
+    writeFile(extendedPath(result.profileDir / "home.nim"), profileBody)
     result.stateDir = stateBase / "repro" / "home"
     doAssert ' ' in result.stateDir
     let env = scrubbedEnv(result.homeDir, stateBase, result.profileDir,
       storeRoot)
     assertScrubbed(env)
-    result.res = run(bundle / "bin" / "repro.exe", ["home", "apply", "--plan"],
-      result.root, env)
+    result.res = run(bundle / "bin" / "repro.exe",
+      @["home", "apply", "--plan"] & @extraArgs, result.root, env)
 
   proc rbpiCount(stateDir: string): int =
     let cacheDir = stateDir / "profile-cache"
@@ -265,6 +287,14 @@ else:
     for kind, path in walkDir(cacheDir):
       if kind == pcFile and path.endsWith(".rbpi"):
         inc result
+
+  proc packageLine(output, packageId: string): string =
+    for line in output.splitLines():
+      let t = line.strip()
+      for action in ["realize  ", "cache-hit  ", "missing  "]:
+        if t.startsWith(action & packageId & "  "):
+          return t
+    ""
 
   proc nimcacheDirOf(stateDir: string): string =
     for path in walkDirRec(stateDir / "profile-cache" / "nimcache"):
@@ -325,6 +355,54 @@ else:
         check fromLibs.len > 0
         check fromSrc.len > 0
         check fromWorkspace.len == 0
+
+    test "the extracted bundle plans a catalog-only package from the " &
+        "catalog it ships":
+      let shipped = bundle / "share" / "repro" / "reprobuild-packages"
+      require fileExists(shipped / "packages" / "interfaces" /
+        CatalogOnlyPackage / "repro.nim")
+      let s = planWithBundle(bundle, "catalog", CatalogProfileBody,
+        ["--allow-drift"])
+      defer:
+        try: removeDir(s.root) except OSError: discard
+      checkpoint(s.res.output)
+      check s.res.exitCode == 0
+      # Vacuity: the profile compiled and a stdlib package was planned.
+      check packageLine(s.res.output, "just").startsWith("realize  just  ")
+      let line = packageLine(s.res.output, CatalogOnlyPackage)
+      checkpoint(line)
+      check line.len > 0
+      check "unknown-package" notin line
+      check line.startsWith("realize  ") or "missing-realization" in line
+      # The projection's recorded inputs name the shipped catalog, not this
+      # workspace's sibling.
+      let projection = s.stateDir / "catalog-projection"
+      check dirExists(projection)
+      var fromShipped, fromWorkspace = false
+      if dirExists(projection):
+        for path in walkDirRec(projection):
+          let text = lower(readFile(path).replace("\\\\", "\\"))
+          if lower(shipped) in text: fromShipped = true
+          if lower(WorkspaceRoot / "reprobuild-packages") in text:
+            fromWorkspace = true
+      check fromShipped
+      check not fromWorkspace
+
+    test "negative control: without share\\repro\\reprobuild-packages the " &
+        "catalog-only package is unknown":
+      let shipped = bundle / "share" / "repro" / "reprobuild-packages"
+      removeDir(shipped)
+      doAssert not dirExists(shipped)
+      let s = planWithBundle(bundle, "nocatalog", CatalogProfileBody,
+        ["--allow-drift"])
+      defer:
+        try: removeDir(s.root) except OSError: discard
+      checkpoint(s.res.output)
+      check s.res.exitCode == 0
+      check packageLine(s.res.output, "just").startsWith("realize  just  ")
+      check packageLine(s.res.output, CatalogOnlyPackage).startsWith(
+        "missing  " & CatalogOnlyPackage & "  (unknown-package: ")
+      check not dirExists(s.stateDir / "catalog-projection")
 
     test "e2e_windows_bundle_compiles_profile: negative control - without " &
         "share\\repro the bundle refuses and names the missing sources":

@@ -1,8 +1,11 @@
 ## A state file that exists but is rejected is reported as such, never as
 ## "neither was present".
 ##
-## `.repro/workspace-state.toml` records the workspace's project and, for a
-## workspace that predates the settings files, its `[[manifest]]` layers. The
+## The OLD state file `.repro/workspace.toml` (`local.v1`) records the
+## workspace's project and, for a workspace that predates the settings files,
+## its `[[manifest]]` layers (the new `.repro/workspace-state.toml` carries no
+## layers at all — Workspace-Settings-Files.md §5 — so the fixture uses the
+## old file, where a layer is still read until it is migrated). The
 ## strict reader rejects a key a recorded layer may not carry — `revision`
 ## (a settings-file layer key) or `from_settings` (internal provenance no file
 ## may declare) — with a diagnostic that names the file and the key. That
@@ -68,7 +71,7 @@ proc seedBareRepo(gitBin, scratch, barePath: string) =
   requireSuccess(q(gitBin) & " clone -q --bare " & q(work) & " " & q(barePath))
 
 proc stateText(extraLayerKey: string): string =
-  "schema = \"reprobuild.workspace.state.v1\"\n\n[workspace]\n" &
+  "schema = \"reprobuild.workspace.local.v1\"\n\n[workspace]\n" &
     "project = \"demo\"\n\n[[manifest]]\nlocal_path = \".\"\n" &
     "visibility = \"public\"\n" & extraLayerKey
 
@@ -96,7 +99,7 @@ suite "a malformed state file is reported accurately":
         "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
         "name = \"core\"\npath = \"core\"\nremote = \"acme\"\n" &
         "mainline = \"main\"\n")
-      let state = root / ".repro" / "workspace-state.toml"
+      let state = root / ".repro" / "workspace.toml"
 
       # Control: without a rejected key the recorded project resolves.
       writeFile(state, stateText(""))

@@ -14,6 +14,17 @@
 ## or `.` components, any `.git` component, backslashes, NUL, duplicate or
 ## unsorted entries, unknown modes, malformed hex. Validation happens before
 ## a single byte is written.
+##
+## BASE PACK (Distributed-Execution M1 review fix, 2026-10-22). A snapshot's
+## base commit is often the requester's unpushed local `HEAD`, which no
+## remote the worker can fetch from has. A repository may then carry a
+## BASE PACK: a git pack of the objects reachable from `baseCommitSha` and
+## not from the requester's remote-tracking refs (`capture`), published for
+## the goal like a modified blob (`basePack` = its BLAKE3 digest, at most
+## `MaxBasePackBytes`). The worker indexes it into its repository cache only
+## when that cache lacks the base commit (`pool` / `materialize`). An
+## encoding with no base pack anywhere is version 1, byte for byte what M7
+## wrote; one with a base pack is version 2.
 
 import std/[algorithm, sets, strutils]
 
@@ -24,12 +35,18 @@ const
   ManifestSchema* = "repro.workspace-snapshot.v1"
   ManifestMagic = "RWSM"
   ManifestVersion = 1'u16
+  ManifestVersionWithBasePacks = 2'u16
   MaxPathBytes* = 4_096
   MaxModifiedEntries* = 200_000
   MaxDeletedEntries* = 200_000
   MaxSiblings* = 64
   MaxBlobBytes* = 512'u64 * 1024'u64 * 1024'u64
   MaxRepoIdBytes* = 512
+  MaxBasePackBytes* = 64'u64 * 1024'u64 * 1024'u64
+    ## The largest base pack a manifest may name (and a capture produces).
+  MaxSnapshotBlobBytes* = 4'u64 * 1024'u64 * 1024'u64 * 1024'u64
+    ## The most blob bytes one manifest may name, over every repository's
+    ## modified entries and base packs (a worker hydrates them into memory).
   ModeRegular* = 0o100644'u32
   ModeExecutable* = 0o100755'u32
   ModeSymlink* = 0o120000'u32
@@ -63,6 +80,10 @@ type
       ## Sorted by `relPath`, unique.
     deleted*: seq[string]
       ## Sorted, unique, disjoint from `modified`.
+    basePack*: Blake3Digest
+      ## BLAKE3 of a git pack holding the base commit's objects the worker
+      ## may lack (see the module doc); all zero = none.
+    basePackSize*: uint64
 
   WorkspaceSnapshotManifest* = object
     schema*: string
@@ -126,6 +147,11 @@ proc validateRepo(r: RepoSnapshot; what: string): string =
     if m.size > MaxBlobBytes:
       return what & ": " & m.relPath & " is too large"
     seen.incl(m.relPath)
+  var zeroDigest: Blake3Digest
+  if (r.basePack == zeroDigest) != (r.basePackSize == 0):
+    return what & ": a base pack needs both a digest and a size"
+  if r.basePackSize > MaxBasePackBytes:
+    return what & ": base pack is larger than " & $MaxBasePackBytes & " bytes"
   prev = ""
   for i, d in r.deleted:
     let bad = validateRelPath(d)
@@ -148,6 +174,18 @@ proc validateManifest*(m: WorkspaceSnapshotManifest): string =
   for i, s in m.developSiblings:
     result = validateRepo(s, "develop sibling " & $i)
     if result.len > 0: return
+  # Each size is already bounded (MaxBlobBytes, MaxBasePackBytes), so the
+  # sum cannot overflow before it is compared.
+  var total = 0'u64
+  for r in @[m.primaryRepo] & m.developSiblings:
+    total += r.basePackSize
+    for e in r.modified:
+      total += e.size
+      if total > MaxSnapshotBlobBytes:
+        break
+    if total > MaxSnapshotBlobBytes:
+      return "the snapshot names more than " & $MaxSnapshotBlobBytes &
+        " bytes of blobs"
 
 proc sortedEntries*(r: var RepoSnapshot) =
   ## Puts a manifest the CALLER is building into canonical order.
@@ -200,7 +238,10 @@ proc getCount(data: openArray[byte]; pos: var int; minimumBytes: int): int =
     raise newException(ManifestError, "snapshot manifest element count exceeds remaining bytes")
   int(raw)
 
-proc encodeRepo(d: var seq[byte]; r: RepoSnapshot) =
+proc hasBasePack*(r: RepoSnapshot): bool =
+  r.basePackSize > 0
+
+proc encodeRepo(d: var seq[byte]; r: RepoSnapshot; version: uint16) =
   d.putStr(r.repoId)
   d.putStr(r.baseCommitSha)
   d.putStr(r.gitTreeSha1)
@@ -213,8 +254,12 @@ proc encodeRepo(d: var seq[byte]; r: RepoSnapshot) =
     d.putU64(m.size)
   d.putU32(uint32(r.deleted.len))
   for p in r.deleted: d.putStr(p)
+  if version >= ManifestVersionWithBasePacks:
+    for b in r.basePack: d.add(b)
+    d.putU64(r.basePackSize)
 
-proc decodeRepo(data: openArray[byte]; pos: var int): RepoSnapshot =
+proc decodeRepo(data: openArray[byte]; pos: var int;
+                version: uint16): RepoSnapshot =
   result.repoId = getStr(data, pos, MaxRepoIdBytes)
   result.baseCommitSha = getStr(data, pos, 40)
   result.gitTreeSha1 = getStr(data, pos, 40)
@@ -237,14 +282,28 @@ proc decodeRepo(data: openArray[byte]; pos: var int): RepoSnapshot =
     raise newException(ManifestError, "too many deleted entries")
   for _ in 0 ..< nd:
     result.deleted.add(getStr(data, pos, MaxPathBytes))
+  if version >= ManifestVersionWithBasePacks:
+    need(data, pos, 32)
+    for i in 0 ..< 32: result.basePack[i] = data[pos + i]
+    pos += 32
+    result.basePackSize = getU64(data, pos)
+
+proc anyBasePack(m: WorkspaceSnapshotManifest): bool =
+  if m.primaryRepo.hasBasePack: return true
+  for s in m.developSiblings:
+    if s.hasBasePack: return true
+  false
 
 proc encodeManifest*(m: WorkspaceSnapshotManifest): seq[byte] =
+  ## Version 1 unless a repository carries a base pack (then version 2).
+  let version = if m.anyBasePack: ManifestVersionWithBasePacks
+                else: ManifestVersion
   for ch in ManifestMagic: result.add(byte(ord(ch)))
-  result.putU16(ManifestVersion)
+  result.putU16(version)
   result.putStr(m.schema)
-  result.encodeRepo(m.primaryRepo)
+  result.encodeRepo(m.primaryRepo, version)
   result.putU32(uint32(m.developSiblings.len))
-  for s in m.developSiblings: result.encodeRepo(s)
+  for s in m.developSiblings: result.encodeRepo(s, version)
 
 proc decodeManifest*(data: openArray[byte]): WorkspaceSnapshotManifest =
   ## Strict, bounded decode. Call `validateManifest` before acting on it.
@@ -253,18 +312,23 @@ proc decodeManifest*(data: openArray[byte]): WorkspaceSnapshotManifest =
     if data[i] != byte(ord(ch)):
       raise newException(ManifestError, "not a snapshot manifest")
   var pos = ManifestMagic.len
-  if getU16(data, pos) != ManifestVersion:
+  let version = getU16(data, pos)
+  if version notin [ManifestVersion, ManifestVersionWithBasePacks]:
     raise newException(ManifestError, "unsupported snapshot manifest version")
   result.schema = getStr(data, pos, 64)
-  result.primaryRepo = decodeRepo(data, pos)
+  result.primaryRepo = decodeRepo(data, pos, version)
   # A repo: three strings and two counts, a u32 each.
   let ns = getCount(data, pos, 20)
   if ns > MaxSiblings:
     raise newException(ManifestError, "too many develop siblings")
   for _ in 0 ..< ns:
-    result.developSiblings.add(decodeRepo(data, pos))
+    result.developSiblings.add(decodeRepo(data, pos, version))
   if pos != data.len:
     raise newException(ManifestError, "trailing bytes after snapshot manifest")
+  if version == ManifestVersionWithBasePacks and not result.anyBasePack:
+    # One encoding per manifest: without a base pack it is version 1.
+    raise newException(ManifestError,
+      "non-canonical snapshot manifest (version 2 without a base pack)")
 
 proc manifestDigest*(m: WorkspaceSnapshotManifest): Blake3Digest =
   ## The manifest's content address (BLAKE3-256 of its canonical encoding):

@@ -3,6 +3,7 @@
 ## and any missing evidence keeps the ordinary dirty refusal.
 import std/[os, sets, strutils, tables]
 import git_tool
+import repro_core/link_target
 when defined(windows):
   import winlean
 else:
@@ -68,7 +69,7 @@ proc worktreeMatches(identity: GitToolIdentity; repo, path: string;
   var content: string
   if entry.mode == "120000":
     if info.info.kind notin {pcLinkToFile, pcLinkToDir}: return false
-    content = expandSymlink(absolute)
+    content = readSymlinkTarget(absolute)
   else:
     if info.info.kind != pcFile or info.info.isSpecial: return false
     when not defined(windows):

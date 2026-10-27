@@ -284,6 +284,21 @@ proc encodeMemoEntry*(entry: MemoEntry): seq[byte] =
   for b in entry.issuerSignature:
     result.add(b)
 
+proc memoEntryIsNewerFormat*(data: openArray[byte]):
+    tuple[newer: bool; version: uint16] =
+  ## Distributed-Execution M1: a memo entry with the right magic whose
+  ## version is above `MemoEntryVersion` — what a NEWER node writes, well
+  ## formed for its writer and unreadable here (a mixed-version fleet), as
+  ## opposed to malformed or forged bytes. A consumer treats it as a plain
+  ## miss without suspecting the peer that served it.
+  if data.len < MemoEntryMagic.len + 2:
+    return (false, 0'u16)
+  for i, ch in MemoEntryMagic:
+    if data[i] != byte(ord(ch)):
+      return (false, 0'u16)
+  let version = uint16(data[4]) or (uint16(data[5]) shl 8)
+  (version > MemoEntryVersion, version)
+
 proc decodeMemoEntryHeader(data: openArray[byte]):
     tuple[weak, pathSet, strong: BlobDigest; pos: int; version: uint16] =
   checkMagic(data, MemoEntryMagic, "memo entry")

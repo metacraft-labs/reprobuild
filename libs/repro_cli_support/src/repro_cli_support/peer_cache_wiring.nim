@@ -747,6 +747,29 @@ proc deleteExecutionRecordBlob*(casRoot: string; digest: array[32, byte]):
     try: removeFile(path) except CatchableError: return false
   not fileExists(path)
 
+type
+  WorkerRepos* = object
+    caches*: seq[(string, string)]
+      ## `repoId` -> local repository cache.
+    remotes*: seq[(string, string)]
+      ## `repoId` -> the remote a missing base commit is fetched from.
+
+proc parseWorkerRepos*(text: string): WorkerRepos =
+  ## The daemon's `repos=` file: one repository per line,
+  ## `<repoId> <cache path> [<remote>]` — the remote (a URL or a path) is
+  ## where the worktree pool fetches a base commit the cache lacks
+  ## (Distributed-Execution M1). Blank lines and `#` comments are skipped;
+  ## a line with another number of fields is ignored.
+  for raw in text.splitLines:
+    let line = raw.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    let parts = line.splitWhitespace()
+    if parts.len in 2 .. 3:
+      result.caches.add((parts[0], parts[1]))
+      if parts.len == 3:
+        result.remotes.add((parts[0], parts[2]))
+
 proc writeStatus(host: PeerCacheHost) =
   if host.stateDir.len == 0:
     return
@@ -847,7 +870,9 @@ proc validateListenerPolicy*(config: PeerCacheConfig;
 
 proc startPeerCacheHost*(config: PeerCacheConfig; selfPeerId: PeerId;
                          cacheRoot: string; listenAddr = "";
-                         stateDir = ""): PeerCacheHost =
+                         stateDir = "";
+                         diagnosticLog: proc(line: string) {.gcsafe,
+                           closure.} = nil): PeerCacheHost =
   ## Boots a peer-cache node serving `cacheRoot`: server bound on the
   ## declared interface (`config.bindSpec`, or `listenAddr` when given —
   ## either way never a wildcard) and `config.listenPort` (0 = ephemeral),
@@ -946,6 +971,9 @@ proc startPeerCacheHost*(config: PeerCacheConfig; selfPeerId: PeerId;
       readBlobFrom(host.storages, digest)
   result.server.memoSelectorReader = selectorReaderFor(result)
   result.server.memoEntryReader = entryReaderFor(result)
+  # Operator diagnostics: the daemon passes its log (its stderr is
+  # /dev/null); a CLI-owned node keeps stderr.
+  result.server.diagnosticLog = diagnosticLog
   result.server.start()
   let useMulticast =
     config.discoveryMode == pdmMulticast and not config.multicastDisabled

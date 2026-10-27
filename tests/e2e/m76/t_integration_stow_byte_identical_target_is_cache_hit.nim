@@ -91,6 +91,8 @@ else:
   # parser, so this test cannot rely on `runApply`'s default source-
   # text load path.
   import repro_cli_support/home as cli_home
+  from repro_home_apply/junction_aware_remove import removeJunctionAware
+  from repro_test_support import removeDirEventually
 
   const ProjectRoot = currentSourcePath().parentDir().parentDir()
     .parentDir().parentDir()
@@ -104,6 +106,22 @@ else:
       "repro binary not found at " & candidate &
       "; build with `just build` first"
     candidate
+
+  proc removeTempRoot(root: string) =
+    ## Remove a case's scratch root, and fail the case if that does not
+    ## work. A bare `removeDir` here, with its error swallowed, left every
+    ## root behind on Windows for two reasons: the engine's action-cache
+    ## records (`…\hot-records\0-1-<64 hex>.rbar\<64 hex>.rec`) lie past
+    ## MAX_PATH under `%TEMP%`, which `removeDir` without the `\\?\` form
+    ## cannot enumerate ("The directory is not empty"), and the junction
+    ## case's `$HOME\.ssh\config.d` is a directory junction, which
+    ## `removeDir` hands to `DeleteFile` ("Access is denied") -- and would
+    ## otherwise walk into its target. `removeJunctionAware` unlinks
+    ## junctions without following them and uses the extended-length form;
+    ## `removeDirEventually` then raises whatever is still in the way.
+    removeJunctionAware(root)
+    if dirExists(root):
+      removeDirEventually(root)
 
   proc copyTree(src, dst: string) =
     createDir(dst)
@@ -183,7 +201,7 @@ else:
         return
       let tempRoot = createTempDir("repro-m76-byteident-", "")
       defer:
-        try: removeDir(tempRoot) except OSError: discard
+        removeTempRoot(tempRoot)
       let f = setup(tempRoot)
       let target = f.homeDir / ".m76stowrc"
 
@@ -228,7 +246,7 @@ else:
         return
       let tempRoot = createTempDir("repro-m76-wronglink-ident-", "")
       defer:
-        try: removeDir(tempRoot) except OSError: discard
+        removeTempRoot(tempRoot)
       let f = setup(tempRoot)
       let target = f.homeDir / ".m76stowrc"
 
@@ -271,7 +289,7 @@ else:
         return
       let tempRoot = createTempDir("repro-m76-differs-", "")
       defer:
-        try: removeDir(tempRoot) except OSError: discard
+        removeTempRoot(tempRoot)
       let f = setup(tempRoot)
       let target = f.homeDir / ".m76stowrc"
 
@@ -309,8 +327,12 @@ else:
         opts.homeDir = f.homeDir
         opts.host = "m76-gate-host"
         let profilePath = f.profileDir / "home.nim"
+        # The REAL `repro` runs the compile: this test binary has not
+        # declared itself `repro`, so it may not be spawned as the compile's
+        # `internal io monitor` driver (self_spawn_image), and leaving the
+        # path implicit is refused rather than defaulted to its own image.
         let compiled = cli_home.compileAndAdaptHomeProfile(profilePath,
-          f.stateDir)
+          f.stateDir, publicCliPath = reproBinary())
         doAssert compiled.profile != nil,
           "in-process compile failed for the migrated m76 fixture: " &
           compiled.compileError
@@ -347,7 +369,7 @@ else:
         return
       let tempRoot = createTempDir("repro-m76-parentjunction-", "")
       defer:
-        try: removeDir(tempRoot) except OSError: discard
+        removeTempRoot(tempRoot)
       let f = setup(tempRoot)
 
       # Replicate the `~/.ssh/config.d` real-host layout: `$HOME/.ssh`

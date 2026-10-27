@@ -1973,6 +1973,13 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     # that here for executables.
     let snakeName = m9r14fPascalToSnake(name).replace("\"", "\\\"")
     let strippedSnake = m9r14fPascalToSnake(strippedName).replace("\"", "\\\"")
+    # Start from an empty destination. Under MSYS a copy whose source
+    # resolved to `<n>.exe` writes `<out>.exe` even when a literal `<out>`
+    # from an earlier run is present, and the listing below then sees
+    # `<out>` and leaves it -- the declared output would keep the
+    # previous build's bytes. Removing both names first makes every run
+    # write the declared output afresh.
+    script.add("rm -f \"" & escapedOut & "\" \"" & escapedOut & ".exe\"; ")
     var first = true
     for dir in candidateDirs:
       let leader = (if first: "if" else: "elif")
@@ -2013,6 +2020,26 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
         rootBinSrcDir & " or " & rootSbinSrcDir & " or " & libexecSrcDir &
         " or " & libLibexecSrcDir & " or " & libSystemdSrcDir & " or " &
         libPolkit1SrcDir & "\" >&2; exit 1; fi")
+    # MSYS/Cygwin (the `sh` of a Windows build) resolves a bare `<dir>/<n>`
+    # to `<dir>/<n>.exe`: the first probe above matches an installed
+    # `<n>.exe`, and `cp` then appends the suffix to the destination too,
+    # writing `<out>.exe` and never the declared `<out>` -- so the `.exe`
+    # branch above is unreachable there (measured with MINGW64 3.6 bash and
+    # GNU cp 8.32). The engine fails a cacheable action that exits 0
+    # without a declared output (Build-Engine-And-Scheduler.md §"A declared
+    # output is an obligation"). Existence tests cannot tell the two names
+    # apart under MSYS, so the directory listing (a glob, which yields the
+    # real names) decides; the literal name is written through a temporary
+    # file, because copying `<out>.exe` onto `<out>` is a copy onto itself.
+    # On POSIX `<out>` always exists here and this is a no-op.
+    let escapedBase = name.replace("\"", "\\\"")
+    script.add("; lit=0; exe=0; for f in \"" & escapedOutDir & "\"/*; do " &
+      "case \"${f##*/}\" in \"" & escapedBase & "\") lit=1;; \"" &
+      escapedBase & ".exe\") exe=1;; esac; done; " &
+      "if [ \"$exe\" = 1 ] && [ \"$lit\" = 0 ]; then " &
+      "cp -fL \"" & escapedOut & ".exe\" \"" & escapedOut & ".repro-tmp\" && " &
+      "mv -f \"" & escapedOut & ".repro-tmp\" \"" & escapedOut & "\" && " &
+      "chmod +x \"" & escapedOut & "\"; fi")
   let argv = @["sh", "-c", script]
   let stageId = "autotools-stage-" & kind & "-" & sanitizeStageCopyName(
       packageName) &
@@ -2020,7 +2047,7 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
   let stageToolRefs =
     if kind == "library": @[
       "sh", "mkdir", "cp", "ls", "sort", "head"]
-    else: @["sh", "mkdir", "cp", "chmod"]
+    else: @["sh", "mkdir", "rm", "cp", "chmod", "mv"]
   discard buildAction(
     id = stageId,
     call = inlineExecCall(argv),

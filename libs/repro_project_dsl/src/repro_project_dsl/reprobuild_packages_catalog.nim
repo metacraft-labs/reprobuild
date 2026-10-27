@@ -8,11 +8,18 @@
 ## ``<catalog>/packages/interfaces/<name>/repro.nim``.
 ##
 ## This module holds the lookup itself, the record of where it looked, and the
-## diagnostic for a moved package that no catalog defines. It depends on
-## ``std/[os, strutils]`` only, so the macro layer runs it at compile time and
-## the tool resolver can quote the same remedy at run time.
+## diagnostic for a moved package that no catalog defines. The macro layer runs
+## it at compile time, and the engine runs it at run time (the home planner's
+## catalog projection, `repro home export`). The one place the two differ is
+## how the reprobuild source tree is found (`reprobuildSourceTree`).
 
 import std/[os, strutils]
+# Relative, not `repro_core/source_root`: several consumers compile this module
+# with no search path for `repro_core` (it was std-only until it needed the
+# run-time source root), and the relative spelling resolves to the same file,
+# so it is the same module wherever both spellings meet.
+from ../../../repro_core/src/repro_core/source_root import
+  resolveReprobuildSourceRoot
 
 const ReprobuildPackagesRootEnv* = "REPROBUILD_PACKAGES_ROOT"
   ## Where the `reprobuild-packages` catalog checkout lives, when it is not a
@@ -152,9 +159,44 @@ proc findEnclosingLockPinnedCatalog*(consumerSourceFile: string):
     dir = parent
   return ("", "")
 
-proc reprobuildCheckoutRoot(): string =
-  # <reprobuild>/libs/repro_project_dsl/src/repro_project_dsl/<this file>
-  currentSourcePath().parentDir.parentDir.parentDir.parentDir.parentDir
+proc reprobuildSourceTree(): string =
+  ## The reprobuild source tree whose sibling `reprobuild-packages` is the
+  ## lookup's last place, or "" when none is known.
+  ##
+  ## At COMPILE time (a recipe's ``uses:`` expanding in the macro layer) it is
+  ## the tree this module is being compiled from: ``currentSourcePath()`` five
+  ## levels up. That is a source checkout, or ``<prefix>/share/repro/source``
+  ## for an installed reprobuild, whose sibling is the catalog the release
+  ## ships at ``<prefix>/share/repro/reprobuild-packages``.
+  ##
+  ## At RUN time ``currentSourcePath()`` is still that compile-time constant.
+  ## Inside a released engine image it names the checkout the RELEASE was
+  ## built in, which does not exist on the user's machine, so an installed
+  ## engine never reached its own shipped catalog (reprobuild-pm issue
+  ## 2026-10-27-installed-repro-profile-package-lookup-never-reaches-the-
+  ## shipped-catalog). The running image therefore asks
+  ## `resolveReprobuildSourceRoot`, the resolver every post-install compile
+  ## uses: the explicit variables, the installed layout's
+  ## ``share/repro/source`` beside the image's ``bin/``, the current
+  ## directory, and the build checkout only while the image runs from inside
+  ## it. That last rule matters here as well: an engine copied out of its
+  ## checkout must not silently read whatever catalog sits beside that
+  ## checkout now. A Nix-store install resolves to the store copy of its
+  ## sources, which has no catalog beside it; Nix hosts name theirs in
+  ## ``$REPROBUILD_PACKAGES_ROOT``.
+  ##
+  ## The resolver's current-directory arm grants nothing new here. It is
+  ## reached only when no variable names a tree and the image has no
+  ## installed layout, and whichever tree it selects is also the tree the
+  ## profile compile builds against -- so the catalog beside it is the one
+  ## that compile's own ``uses:`` lookup reaches at compile time. Choosing a
+  ## different tree at run time would make the planner and the compile
+  ## disagree about which catalog defines a package.
+  when nimvm:
+    # <reprobuild>/libs/repro_project_dsl/src/repro_project_dsl/<this file>
+    currentSourcePath().parentDir.parentDir.parentDir.parentDir.parentDir
+  else:
+    resolveReprobuildSourceRoot()
 
 proc probeCatalogRoot(search: var ReprobuildPackagesSearch;
                       origin, root: string) =
@@ -190,8 +232,12 @@ proc reprobuildPackagesSearch*(selector, consumerSourceFile: string):
   ##    `setup-dev-env` clones a `.github/sibling-repos` entry in CI;
   ## 3. the lock-pinned catalog, under
   ##    ``<consumerRoot>/.repro/cross-repo-producers/reprobuild-packages/<rev>``;
-  ## 4. a ``reprobuild-packages`` directory beside the reprobuild checkout
-  ##    this module was compiled from.
+  ## 4. a ``reprobuild-packages`` directory beside the reprobuild source tree
+  ##    (`reprobuildSourceTree`): at compile time the tree this module is
+  ##    compiled from, at run time the one the running image resolves. For an
+  ##    installed reprobuild both are ``<prefix>/share/repro/source``, so this
+  ##    finds the catalog its release ships at
+  ##    ``<prefix>/share/repro/reprobuild-packages``.
   ##
   ## A checkout that lacks the interface does not end the walk; the next place
   ## is consulted. A selector that is not a bare package name is never looked
@@ -228,9 +274,12 @@ proc reprobuildPackagesSearch*(selector, consumerSourceFile: string):
       if result.module.len > 0:
         return
 
-  let besideReprobuild = reprobuildCheckoutRoot().parentDir / "reprobuild-packages"
+  let sourceTree = reprobuildSourceTree()
+  if sourceTree.len == 0:
+    return
+  let besideReprobuild = sourceTree.parentDir / ReprobuildPackagesRepositoryName
   if besideReprobuild notin seen:
-    probeCatalogRoot(result, "beside the reprobuild checkout " & reprobuildCheckoutRoot(),
+    probeCatalogRoot(result, "beside the reprobuild sources " & sourceTree,
       besideReprobuild)
 
 proc reachableReprobuildPackagesRoots*(consumerSourceFile: string):

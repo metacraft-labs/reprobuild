@@ -34,6 +34,7 @@
 
 import std/[algorithm, options, os, strutils]
 
+from repro_core/link_target import readSymlinkTarget
 from repro_core/paths import extendedPath
 import ./pattern_scoped_enumeration
 
@@ -562,7 +563,7 @@ proc treeEntries*(dir: string): seq[TreeEntry] =
     case info.kind
     of pcLinkToFile, pcLinkToDir:
       let target =
-        try: expandSymlink(full).replace('\\', '/')
+        try: readSymlinkTarget(full).replace('\\', '/')
         except CatchableError: ""
       let toDir = info.kind == pcLinkToDir or dirExists(full)
       result.add(TreeEntry(rel: rel,

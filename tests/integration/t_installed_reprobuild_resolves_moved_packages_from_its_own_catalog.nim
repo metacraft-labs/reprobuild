@@ -13,14 +13,23 @@
 ## The fixture is real throughout: a git repository stands in for the catalog,
 ## `scripts/release/stage_release_catalog.sh` (the script the release legs run)
 ## stages its PINNED commit into a fresh install prefix, and the lookup module
-## itself is copied into that prefix's source tree, compiled there, and run
-## from a directory with no catalog above it. Nothing is mocked.
+## itself (with the `repro_core` modules it imports) is copied into that
+## prefix's source tree and compiled there, from a directory with no catalog
+## above it. The lookup runs at COMPILE time, as it does when a recipe's
+## `uses:` expands: that is the path on which `currentSourcePath()` names the
+## installed tree. The engine's RUN-time lookup, where it does not, is pinned by
+## `t_installed_engine_reaches_the_catalog_its_release_ships`. Nothing is
+## mocked.
 
 import std/[os, osproc, strtabs, strutils, tempfiles, unittest]
 
 const RepoRoot = currentSourcePath().parentDir.parentDir.parentDir
 const CatalogModuleRel = "libs/repro_project_dsl/src/repro_project_dsl/" &
   "reprobuild_packages_catalog.nim"
+const CoreSrcRel = "libs/repro_core/src"
+const CoreModulesRel = ["repro_core/source_root.nim", "repro_core/paths.nim"]
+  ## What the lookup module imports beyond std, shipped beside it in the
+  ## installed tree exactly as `stage_release_sources.sh` ships `libs/`.
 const StageScript = RepoRoot / "scripts" / "release" / "stage_release_catalog.sh"
 
 const FixtureInterface = """
@@ -40,11 +49,12 @@ const Probe = """
 import std/os
 import "$1"
 
-let search = reprobuildPackagesSearch("rpinstalledfixture",
-  getCurrentDir() / "consumer" / "repro.nim")
+# At compile time, as a recipe's `uses:` performs it.
+const search = reprobuildPackagesSearch("rpinstalledfixture",
+  "$2" / "consumer" / "repro.nim")
 echo "module=", search.module
-let root = search.module.parentDir.parentDir.parentDir.parentDir
-let marker = readCatalogRevisionMarker(root)
+const root = search.module.parentDir.parentDir.parentDir.parentDir
+const marker = readCatalogRevisionMarker(root)
 echo "url=", marker.url
 echo "revision=", marker.revision
 """
@@ -104,6 +114,10 @@ suite "an installed reprobuild carries the catalog it was released with":
   let installedModule = prefix / "share" / "repro" / "source" / CatalogModuleRel
   createDir(installedModule.parentDir)
   copyFile(RepoRoot / CatalogModuleRel, installedModule)
+  let installedCoreSrc = prefix / "share" / "repro" / "source" / CoreSrcRel
+  for rel in CoreModulesRel:
+    createDir((installedCoreSrc / rel).parentDir)
+    copyFile(RepoRoot / CoreSrcRel / rel, installedCoreSrc / rel)
 
   let staged = prefix / "share" / "repro" / "reprobuild-packages"
 
@@ -135,7 +149,8 @@ suite "an installed reprobuild carries the catalog it was released with":
     let probeDir = scratch / "elsewhere"
     createDir(probeDir / "consumer")
     writeFile(probeDir / "probe.nim",
-      Probe % installedModule.changeFileExt("").replace('\\', '/'))
+      Probe % [installedModule.changeFileExt("").replace('\\', '/'),
+        probeDir.replace('\\', '/')])
     let (output, exitCode) = run("nim c -r --hints:off --warnings:off " &
       "--skipParentCfg:on --skipUserCfg:on --skipProjCfg:on " &
       quoteShell("--nimcache:" & (probeDir / "nimcache")) & " " &

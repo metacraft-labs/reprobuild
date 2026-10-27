@@ -46,6 +46,7 @@ suite "lowered graph cache action round trip":
       deps: @["install-zlib"],
       inputs: @["install.stamp"],
       outputs: @["mirror.stamp"],
+      optionalOutputs: @["optional.lib"],
       argv: @["sh", "-c", "true"],
       cwd: "/recipe/zlib",
       env: @["A=B", "PATH=/tool/bin"],
@@ -84,6 +85,7 @@ suite "lowered graph cache action round trip":
     let roundTrip = decoded[0]
     check roundTrip.governingLockIdentity == action.governingLockIdentity
     check roundTrip.id == action.id
+    check roundTrip.optionalOutputs == @["optional.lib"]
     check roundTrip.targetNames == action.targetNames
     check roundTrip.typedOutputs.len == 1
     check roundTrip.typedOutputs[0].types == @["Library"]
@@ -187,7 +189,7 @@ suite "lowered graph cache action round trip":
       id: "codec-version-test")
     var encoded = loweredGraphCacheBytesForTest(@[action])
     let versionOffset = loweredGraphCacheVersionOffsetForTest()
-    check encoded[versionOffset] == 13'u8
+    check encoded[versionOffset] == 14'u8
     check encoded[versionOffset + 1] == 0'u8
     # An older version could not carry the newer per-action fields (v5:
     # `envPassthrough`; v6: the dependency-policy event-interest opt-ins;
@@ -197,7 +199,7 @@ suite "lowered graph cache action round trip":
     # sentinel, one byte after the cache identity, whose absence would shift
     # every later field; v12: the scratch-directory list, after the elevation
     # sentinel; v13: the remove-before-run output list, after the scratch
-    # directories). Decoding such a record under
+    # directories; v14: optional output candidates). Decoding such a record under
     # the current layout would silently return defaults for every action rather
     # than failing, so the rejection below is what makes a field's absence
     # impossible instead of invisible.
@@ -211,7 +213,7 @@ suite "lowered graph cache action round trip":
     # what that value now spells. Poking an ancient version instead would leave
     # the one skew that can silently mis-restore a warm edge's capture unasserted
     # by anything.
-    encoded[versionOffset] = 12'u8
+    encoded[versionOffset] = 13'u8
     var rejected = false
     try:
       discard loweredGraphCacheActionsForTest(encoded)

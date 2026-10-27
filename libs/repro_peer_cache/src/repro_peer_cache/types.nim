@@ -549,7 +549,9 @@ type
     workerReposPath*: string
       ## Distributed-Execution M7: a file of `<repoId> <local repository
       ## cache path>` lines naming the base-commit caches the worker
-      ## materializes snapshots from (`repos=<path>`).
+      ## materializes snapshots from (`repos=<path>`). M1: an optional third
+      ## field names the remote a missing base commit is fetched from
+      ## (`repro_cli_support/peer_cache_wiring.parseWorkerRepos`).
     workerEgress*: seq[string]
       ## Distributed-Execution M7 (FLOW-3): the execution-lease egress
       ## allow-list, `name@ipv4:port` each (`egress=a@1.2.3.4:80,...`).

@@ -19,6 +19,7 @@ when defined(posix):
 
 when defined(windows):
   import std/winlean
+  import repro_daemon_core/windows_detached_spawn
 
   const
     LOCKFILE_EXCLUSIVE_LOCK = 0x00000002'i32
@@ -593,16 +594,27 @@ proc startDevDaemon*(publicCliPath: string; config: DevDaemonConfig):
       discard execv(cstring(exe), argv)
       quit(127)
   else:
-    var env = newStringTable()
+    # NOT `osproc.startProcess`: on Windows it creates the child with
+    # `bInheritHandles = TRUE` and no handle list, so this daemon -- which
+    # outlives the `repro` that starts it -- would hold every inheritable
+    # handle we have, including the pipe our caller reads our output from,
+    # and that caller would never see an end of file. `spawnWithOwnStdio`
+    # gives it NUL stdio and nothing else, the Windows form of the POSIX arm
+    # above, and starts it outside our working directory.
+    var env: seq[(string, string)] = @[]
     for key, value in envPairs():
-      env[key] = value
-    env["REPROSTORED_ENDPOINT"] = config.endpoint
-    let process = startProcess(exe,
-      args = @["store", "serve", "--dev", "--store-root", config.storeRoot,
+      if cmpIgnoreCase(key, "REPROSTORED_ENDPOINT") != 0:
+        env.add((key, value))
+    env.add(("REPROSTORED_ENDPOINT", config.endpoint))
+    var image = exe
+    if not isAbsolute(image):
+      let found = findExe(image)
+      image = if found.len > 0: found else: absolutePath(image)
+    discard spawnWithOwnStdio(image,
+      ["store", "serve", "--dev", "--store-root", config.storeRoot,
         "--endpoint", config.endpoint],
-      env = env,
-      options = {poUsePath, poDaemon})
-    process.close()
+      env, inheritEnvironment = false, logPath = "",
+      workingDir = parentDir(image))
   waitForDevStatus(config.endpoint, config.storeRoot)
 
 proc stopDevDaemon*(endpoint = defaultDevEndpoint()) =

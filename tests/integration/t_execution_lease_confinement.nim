@@ -78,10 +78,30 @@
 ## (positive control), and the same lease without the policy creates both
 ## (the policy, not the kernel, refused the first).
 ##
+## The fifth and sixth tests are the EGRESS FORWARDER (both platforms; M7
+## defect fixed 2026-10-27): a lease's probe runs small interactive rounds,
+## a request followed by a half-close, and thirty streams it abandons (half
+## of them with a reset) through the supervisor's forwarders, then the
+## half-close exchange again; and the forwarder (`startEgressForwarder`) is
+## driven into the round that used to kill the worker daemon — data in
+## flight in one direction while the other end closes, both seen in one
+## dispatcher round. Neuters: closing both sockets on the first EOF loses
+## the response; a buffered read stalls the interactive rounds; base's
+## `splice` dies of an AssertionDefect (macOS) or loses the response
+## (Linux).
+##
+## The last test is the REPORT of a denied connect, end to end into
+## `LeaseOutcome.reports`. On macOS the kernel's Seatbelt report is the
+## only witness and the channel is lossy (threat model G41), so what is
+## asserted is that every kernel network denial the supervisor RECEIVED
+## (its raw `sandbox-log.ndjson`) became an `egress-denied` report (up to
+## five leases until one is received); every lease's denial is asserted.
+##
 ## MOCK POLICY — none. The "daemon" is the shipped `repro daemon serve`
 ## process; its control socket and state directory are the real ones.
 
-import std/[asyncdispatch, os, osproc, posix, streams, strtabs, strutils, times,
+import std/[asyncdispatch, asyncnet, nativesockets, net, os, osproc, posix, streams,
+            strtabs, strutils, times,
             unittest]
 
 import repro_test_support
@@ -137,6 +157,119 @@ int main(int argc, char **argv) {
     if (read(inherited, buf, sizeof buf) > 0) puts("BREACH-fd");
   }
   puts("probe-ran");
+  return 0;
+}
+"""
+
+const DenyProbeSource = """
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+/* argv[1]: a loopback port no egress rule allows. */
+int main(int argc, char **argv) {
+  if (argc < 2) return 2;
+  struct sockaddr_in a; memset(&a, 0, sizeof a);
+  a.sin_family = AF_INET; a.sin_port = htons((unsigned short)atoi(argv[1]));
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  int s = socket(AF_INET, SOCK_STREAM, 0);
+  puts(s >= 0 && connect(s, (struct sockaddr *)&a, sizeof a) == 0 ?
+    "EXFIL-OPEN" : "EXFIL-DENIED");
+  return 0;
+}
+"""
+
+const ForwarderProbeSource = """
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+/* argv: ECHO REQ STREAM, each "ip:port" (the lease's forwarder addresses).
+   Every read waits at most 5 s (10 s for a whole response): a forwarder
+   that stalls makes this print a failure, never hang the test. */
+static int dial(const char *hp) {
+  char host[64]; const char *colon = strrchr(hp, ':');
+  if (!colon || colon - hp >= (int)sizeof host) return -1;
+  memcpy(host, hp, (size_t)(colon - hp)); host[colon - hp] = 0;
+  struct sockaddr_in a; memset(&a, 0, sizeof a);
+  a.sin_family = AF_INET; a.sin_port = htons((unsigned short)atoi(colon + 1));
+  if (inet_pton(AF_INET, host, &a.sin_addr) != 1) return -1;
+  int s = socket(AF_INET, SOCK_STREAM, 0);
+  if (s < 0) return -1;
+  if (connect(s, (struct sockaddr *)&a, sizeof a) != 0) { close(s); return -1; }
+  return s;
+}
+static int wait_readable(int s, int ms) {
+  struct pollfd p = { s, POLLIN, 0 };
+  return poll(&p, 1, ms) > 0;
+}
+/* Reads until EOF (or `cap`, or the deadline); returns the byte count. */
+static int read_to_eof(int s, char *buf, int cap, int ms) {
+  int n = 0;
+  while (n < cap - 1 && wait_readable(s, ms)) {
+    ssize_t r = recv(s, buf + n, (size_t)(cap - 1 - n), 0);
+    if (r <= 0) break;
+    n += (int)r;
+  }
+  buf[n] = 0;
+  return n;
+}
+static void half_close_exchange(const char *hp, const char *label) {
+  char req[1000], resp[256] = "";
+  memset(req, 'r', sizeof req);
+  int s = dial(hp);
+  if (s >= 0) {
+    if (send(s, req, sizeof req, 0) == (ssize_t)sizeof req &&
+        shutdown(s, SHUT_WR) == 0)
+      read_to_eof(s, resp, sizeof resp, 10000);
+    close(s);
+  }
+  char *nl = strchr(resp, '\n'); if (nl) *nl = 0;
+  printf("%s %s\n", label, resp); fflush(stdout);
+}
+int main(int argc, char **argv) {
+  if (argc < 4) return 2;
+  signal(SIGPIPE, SIG_IGN);
+  /* 1. Small interactive rounds. */
+  int ok = 0, s = dial(argv[1]);
+  for (int i = 0; s >= 0 && i < 20; i++) {
+    char msg[32], got[32]; int len = snprintf(msg, sizeof msg, "ping-%d\n", i), n = 0;
+    if (send(s, msg, (size_t)len, 0) != len) break;
+    while (n < len && wait_readable(s, 5000)) {
+      ssize_t r = recv(s, got + n, (size_t)(len - n), 0);
+      if (r <= 0) break;
+      n += (int)r;
+    }
+    if (n != len || memcmp(msg, got, (size_t)len) != 0) break;
+    ok++;
+  }
+  if (s >= 0) close(s);
+  printf(ok == 20 ? "INTERACTIVE-OK %d\n" : "INTERACTIVE-STALL %d\n", ok); fflush(stdout);
+  /* 2. Request, half-close, response. */
+  half_close_exchange(argv[2], "HALFCLOSE-RESPONSE");
+  /* 3. Abandon streams mid-flight (every other one with a reset). */
+  int done = 0;
+  for (int k = 0; k < 30; k++) {
+    int t = dial(argv[3]);
+    if (t < 0) continue;
+    char b[100];
+    if (wait_readable(t, 5000) && recv(t, b, sizeof b, 0) > 0) done++;
+    if (k % 2) { struct linger l = { 1, 0 }; setsockopt(t, SOL_SOCKET, SO_LINGER, &l, sizeof l); }
+    close(t);
+  }
+  printf("ABANDON-DONE %d\n", done); fflush(stdout);
+  usleep(200000);
+  /* 4. The forwarder still serves. */
+  half_close_exchange(argv[2], "AFTER-RESPONSE");
   return 0;
 }
 """
@@ -658,3 +791,352 @@ int main(void) {
         check plain.outcome.isolation == "linux-namespace+landlock+floor"
         check "MEMFD-EXEC-CREATED" in plain.output      # the policy refused it
         check "MEMFD-SEALED-CREATED" in plain.output
+
+  test "egress forwarder: half-close, interactive traffic, one-sided close":
+    # The supervisor's egress forwarder (macOS: `lease.nim`, in THIS
+    # process; Linux: `c/repro_lease_linux.c`, the lease supervisor) carries
+    # a TCP connection end to end. Three servers outside the lease:
+    #   ECHO   echoes whatever arrives, at once;
+    #   REQ    reads the request to EOF, then answers and closes;
+    #   STREAM streams until its peer goes away.
+    # The lease's probe (a closure tool) runs, through the forwarders:
+    #   1. 20 small request/reply rounds with ECHO, each with a 5 s limit — a
+    #      forwarder that waits for a fuller read stalls here;
+    #   2. a request to REQ followed by shutdown(SHUT_WR) — a forwarder that
+    #      closes both sockets on the first EOF loses the response;
+    #   3. 30 connections to STREAM that each read a little and close
+    #      (every other one with a reset) — one-sided closes with data in
+    #      flight, the traffic that used to kill the worker daemon on macOS
+    #      (an AssertionDefect in `splice`; the deterministic form of that
+    #      crash is the next test);
+    #   4. the half-close exchange of (2) again: the forwarder still serves.
+    # This test process surviving to its assertions is part of the claim
+    # on macOS, where the forwarder runs here.
+    let cc = ccPath()
+    let available = leaseConfinementAvailable()
+    check available.ok
+    check cc.len > 0
+    if available.ok and cc.len > 0:
+      let base = m7TestBase("repro-m7-forwarder")
+      defer: removeDir(base)
+      let tools = base / "tools"
+      createDir(tools)
+      writeFile(tools / "egress_probe.c", ForwarderProbeSource)
+      check execCmdEx(quoteShellCommand([cc, "-o", tools / "egress_probe",
+        tools / "egress_probe.c"])).exitCode == 0
+
+      proc listenLoopback(): tuple[sock: AsyncSocket; port: int] =
+        let l = newAsyncSocket(buffered = false)
+        l.setSockOpt(OptReuseAddr, true)
+        l.bindAddr(Port(0), "127.0.0.1")
+        l.listen()
+        (l, int(getLocalAddr(l.getFd(), Domain.AF_INET)[1]))
+
+      let echoL = listenLoopback()
+      let reqL = listenLoopback()
+      let streamL = listenLoopback()
+      let serving = new(bool)
+      serving[] = true
+      let streamConns = new(int)
+
+      proc echoConn(c: AsyncSocket) {.async.} =
+        try:
+          while true:
+            let d = await c.recv(4096, flags = {})
+            if d.len == 0: break
+            await c.send(d, flags = {})
+        except CatchableError: discard
+        try: c.close() except CatchableError: discard
+
+      proc reqConn(c: AsyncSocket) {.async.} =
+        var got = 0
+        try:
+          while true:
+            let d = await c.recv(4096, flags = {})
+            if d.len == 0: break
+            got += d.len
+          await c.send("GOT " & $got & " bytes\n", flags = {})
+        except CatchableError: discard
+        try: c.close() except CatchableError: discard
+
+      proc streamConn(c: AsyncSocket) {.async.} =
+        inc streamConns[]
+        let chunk = repeat('s', 16384)
+        try:
+          # Bounded (64 MiB) so a forwarder that keeps reading for a lease
+          # that went away cannot keep this task alive for ever.
+          for _ in 0 ..< 4096:
+            await c.send(chunk, flags = {})
+        except CatchableError: discard
+        try: c.close() except CatchableError: discard
+
+      proc serve(l: AsyncSocket; kind: int) {.async.} =
+        while serving[]:
+          var c: AsyncSocket
+          try: c = await l.accept()
+          except CatchableError: break
+          case kind
+          of 0: asyncCheck echoConn(c)
+          of 1: asyncCheck reqConn(c)
+          else: asyncCheck streamConn(c)
+
+      asyncCheck serve(echoL.sock, 0)
+      asyncCheck serve(reqL.sock, 1)
+      asyncCheck serve(streamL.sock, 2)
+
+      let leaseRoot = base / "worker-state" / "leases"
+      let leaseDir = leaseRoot / "forwarder"
+      createDir(leaseDir / "wt")
+      let roots = (when defined(macosx):
+          (@["/usr", "/bin", "/System", "/Library", "/private/etc",
+             "/private/var/db/timezone", "/nix/store"],
+           @["/usr/bin", "/bin", "/usr/libexec", "/nix/store"])
+        else:
+          (@["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix/store"],
+           @["/usr/bin", "/bin", "/usr/lib", "/lib", "/lib64", "/nix/store"]))
+      let spec = LeaseSpec(leaseId: "forwarder", leaseRoot: leaseRoot,
+        leaseDir: leaseDir, metaDir: base / "lease-meta" / "forwarder",
+        cwd: leaseDir / "wt",
+        argv: @["/bin/sh", "-c", "\"$TOOL\" \"$REPRO_LEASE_EGRESS_ECHO\" " &
+          "\"$REPRO_LEASE_EGRESS_REQ\" \"$REPRO_LEASE_EGRESS_STREAM\" > out.txt"],
+        env: @[("PATH", "/usr/bin:/bin"), ("TOOL", tools / "egress_probe"),
+          ("HOME", leaseDir / "home"), ("TMPDIR", leaseDir / "tmp")],
+        readRoots: roots[0] & @[tools],
+        closureRoots: roots[1] & @[tools],
+        egress: @[
+          EgressDestination(name: "ECHO", host: "127.0.0.1", port: echoL.port),
+          EgressDestination(name: "REQ", host: "127.0.0.1", port: reqL.port),
+          EgressDestination(name: "STREAM", host: "127.0.0.1",
+            port: streamL.port)],
+        layers: availableLeaseLayers().layers, timeoutMs: 120_000)
+      let outcome = waitFor runLease(spec)
+      let outPath = leaseDir / "wt" / "out.txt"
+      let output = if fileExists(outPath): readFile(outPath) else: ""
+      checkpoint("forwarder lease: started=" & $outcome.started & " exit=" &
+        $outcome.exitCode & " signal=" & $outcome.signal & " error=" &
+        outcome.error & " isolation=" & outcome.isolation & "\n  out: " &
+        output & "\n  stderr: " & outcome.stderr & "\n  reports: " &
+        $outcome.reports)
+      discard cleanupLease(spec)
+      serving[] = false
+      for l in [echoL.sock, reqL.sock, streamL.sock]:
+        try: l.close() except CatchableError: discard
+      check outcome.started
+      check outcome.exitCode == 0
+      check "INTERACTIVE-OK 20" in output
+      check "HALFCLOSE-RESPONSE GOT 1000 bytes" in output
+      check "ABANDON-DONE 30" in output
+      check streamConns[] == 30          # every abandon reached the server
+      check "AFTER-RESPONSE GOT 1000 bytes" in output
+
+  test "egress forwarder: a close in the same poll as data in flight does not kill the process":
+    # The worker daemon used to die here (macOS, 2026-10-25/27: 6 of 35
+    # loaded runs of `t_daemon_listener_and_lease_egress_surface` on base
+    # 76982f2fa): each direction closed BOTH sockets at its EOF, and the
+    # other direction, woken in the SAME dispatcher round with data, read
+    # the closed socket again — an AssertionDefect from std/asyncnet, which
+    # `except CatchableError` does not catch. This drives exactly that
+    # round: with the dispatcher stopped, one end writes and the other
+    # closes (a FIN, or a reset), and only then does the dispatcher run, so
+    # both readinesses arrive together — in both orders (client closes /
+    # server closes). The forwarder is the one `runLeaseSeatbelt` starts
+    # (`startEgressForwarder`; it is posix code, exercised on Linux too,
+    # where production leases forward in the C supervisor). Afterwards the
+    # same forwarder still carries a half-closed request/response.
+    when not defined(posix):
+      skip("the egress forwarder is posix code")
+    else:
+      let srv = newSocket()
+      srv.setSockOpt(OptReuseAddr, true)
+      srv.bindAddr(Port(0), "127.0.0.1")
+      srv.listen()
+      let srvPort = int(getLocalAddr(srv.getFd(), Domain.AF_INET)[1])
+      let running = new(bool)
+      running[] = true
+      let (fwd, fwdPort) = startEgressForwarder(EgressDestination(name: "X",
+        host: "127.0.0.1", port: srvPort), running)
+
+      proc readable(fd: SocketHandle): bool =
+        var p = TPollfd(fd: cint(fd), events: POLLIN)
+        posix.poll(addr p, 1, 0) > 0
+
+      proc spin(rounds: int) =
+        for _ in 0 ..< rounds:
+          if hasPendingOperations(): poll(10)
+
+      proc connectedPair(): tuple[cli, srvSide: Socket; ok: bool] =
+        ## A client connected through the forwarder and the server's side
+        ## of the forwarded connection, both pumps of the forwarder running.
+        let cli = newSocket()
+        cli.connect("127.0.0.1", Port(fwdPort))
+        var waited = 0
+        while not readable(srv.getFd()) and waited < 500:
+          spin(1)
+          inc waited
+        if not readable(srv.getFd()):
+          return (cli, nil, false)
+        var s: Socket
+        srv.accept(s)
+        spin(10)     # the forwarder's connect completes; both pumps start
+        (cli, s, true)
+
+      proc recvPumping(s: Socket; deadlineMs: int): string =
+        ## Everything up to EOF, running the dispatcher while waiting.
+        var buf: array[4096, char]
+        s.getFd().setBlocking(false)
+        let start = epochTime()
+        while (epochTime() - start) * 1000 < float(deadlineMs):
+          spin(1)
+          let n = posix.recv(s.getFd(), addr buf[0], buf.len, 0)
+          if n == 0: break
+          if n > 0:
+            let old = result.len
+            result.setLen(old + n)
+            copyMem(addr result[old], addr buf[0], n)
+
+      var rounds = 0
+      for round in 0 ..< 24:
+        let (cli, srvSide, ok) = connectedPair()
+        check ok
+        if not ok: break
+        # Dispatcher stopped: one end writes, the other goes away.
+        let reset = round mod 4 >= 2
+        let (writer, closer) =
+          if round mod 2 == 0: (srvSide, cli) else: (cli, srvSide)
+        writer.send(repeat('d', 100))
+        if reset:
+          var l = TLinger(l_onoff: 1, l_linger: 0)
+          discard setsockopt(closer.getFd(), SOL_SOCKET, SO_LINGER, addr l,
+            SockLen(sizeof(l)))
+        closer.close()
+        spin(20)     # both readinesses are handled in the same round
+        writer.close()
+        spin(5)
+        inc rounds
+      check rounds == 24
+      # Still alive (an escaped Defect would have ended this process), and
+      # the forwarder still serves a half-closed request/response.
+      let (cli, srvSide, ok) = connectedPair()
+      check ok
+      if ok:
+        cli.send("request")
+        check posix.shutdown(cli.getFd(), SHUT_WR) == 0
+        check recvPumping(srvSide, 10_000) == "request"
+        srvSide.send("response")
+        srvSide.close()
+        check recvPumping(cli, 10_000) == "response"
+        cli.close()
+      running[] = false
+      fwd.close()
+      srv.close()
+
+  test "denied egress is reported by the lease supervisor":
+    # The end-to-end report path for a denied connect, from the kernel (or
+    # the Linux supervisor) to `LeaseOutcome.reports`, as `egress-denied`
+    # naming the destination port. Linux: the supervisor refuses the connect
+    # itself (seccomp) and reports it — every lease, asserted on the first.
+    # macOS: the only witness is the kernel's Seatbelt report in the unified
+    # log, a channel shared with every sandboxed process on the host and
+    # LOSSY under report load (threat model G8, G41; measured 2026-10-27:
+    # with another process producing Sandbox reports, 8 of 30 tagged leases
+    # lost every network report, and under a sustained flood all five leases
+    # of one run can lose theirs — the losses are correlated). So the macOS
+    # assertion is about what the supervisor RECEIVED: it keeps the raw
+    # stream it read (`<metaDir>/sandbox-log.ndjson`), and every kernel
+    # network denial in it must have become an `egress-denied` report naming
+    # the port. Up to five leases run until one's kernel report arrives; if
+    # none does, that is printed, not failed (the channel, not the code).
+    # The DENIAL is asserted in every lease.
+    let cc = ccPath()
+    let available = leaseConfinementAvailable()
+    check available.ok
+    check cc.len > 0
+    if available.ok and cc.len > 0:
+      let base = m7TestBase("repro-m7-egress-report")
+      defer: removeDir(base)
+      let tools = base / "tools"
+      createDir(tools)
+      writeFile(tools / "deny_probe.c", DenyProbeSource)
+      check execCmdEx(quoteShellCommand([cc, "-o", tools / "deny_probe",
+        tools / "deny_probe.c"])).exitCode == 0
+      let exfil = newAsyncSocket(buffered = false)
+      exfil.setSockOpt(OptReuseAddr, true)
+      exfil.bindAddr(Port(0), "127.0.0.1")
+      exfil.listen()
+      let exfilPort = int(getLocalAddr(exfil.getFd(), Domain.AF_INET)[1])
+      let exfilHits = new(int)
+      proc countHits() {.async.} =
+        while true:
+          var c: AsyncSocket
+          try: c = await exfil.accept()
+          except CatchableError: break
+          inc exfilHits[]
+          try: c.close() except CatchableError: discard
+      asyncCheck countHits()
+      let leaseRoot = base / "worker-state" / "leases"
+      let roots = (when defined(macosx):
+          (@["/usr", "/bin", "/System", "/Library", "/private/etc",
+             "/private/var/db/timezone", "/nix/store"],
+           @["/usr/bin", "/bin", "/usr/libexec", "/nix/store"])
+        else:
+          (@["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix/store"],
+           @["/usr/bin", "/bin", "/usr/lib", "/lib", "/lib64", "/nix/store"]))
+      let attempts = when defined(macosx): 5 else: 1
+      var reportedIn = 0
+      var kernelDelivered = 0
+      for attempt in 1 .. attempts:
+        let id = "deny-" & $attempt
+        let leaseDir = leaseRoot / id
+        createDir(leaseDir / "wt")
+        let spec = LeaseSpec(leaseId: id, leaseRoot: leaseRoot,
+          leaseDir: leaseDir, metaDir: base / "lease-meta" / id,
+          cwd: leaseDir / "wt",
+          argv: @["/bin/sh", "-c", "\"$TOOL\" \"$1\" > out.txt", "sh",
+            $exfilPort],
+          env: @[("PATH", "/usr/bin:/bin"), ("TOOL", tools / "deny_probe"),
+            ("HOME", leaseDir / "home"), ("TMPDIR", leaseDir / "tmp")],
+          readRoots: roots[0] & @[tools],
+          closureRoots: roots[1] & @[tools],
+          layers: availableLeaseLayers().layers, timeoutMs: 60_000)
+        let outcome = waitFor runLease(spec)
+        let outPath = leaseDir / "wt" / "out.txt"
+        let output = if fileExists(outPath): readFile(outPath) else: ""
+        checkpoint(id & ": started=" & $outcome.started & " error=" &
+          outcome.error & " out=" & output.strip & " reports=" &
+          $outcome.reports)
+        discard cleanupLease(spec)
+        check outcome.started
+        check "EXFIL-DENIED" in output        # the denial, every lease
+        var reported = false
+        for r in outcome.reports:
+          if r.kind == "egress-denied" and r.detail.endsWith(":" & $exfilPort):
+            reported = true
+        when defined(macosx):
+          # What the supervisor received from the kernel for this lease.
+          let rawPath = base / "lease-meta" / id / "sandbox-log.ndjson"
+          var delivered = false
+          if fileExists(rawPath):
+            for line in readFile(rawPath).splitLines:
+              if "network-outbound" in line and (":" & $exfilPort) in line:
+                delivered = true
+          if delivered:
+            kernelDelivered = attempt
+            check reported      # every received kernel denial is reported
+            if reported: reportedIn = attempt
+            break
+          echo "[lossy channel G41] lease " & id & ": the denial held, the " &
+            "kernel's report never reached the supervisor"
+        else:
+          check reported        # Linux: the supervisor's own refusal
+          if reported: reportedIn = attempt
+      when defined(macosx):
+        if kernelDelivered == 0:
+          echo "[lossy channel G41] no kernel report in " & $attempts &
+            " leases; the report path was not exercised in this run"
+        else:
+          check reportedIn == kernelDelivered
+      else:
+        check reportedIn == 1
+      waitFor sleepAsync(50)
+      check exfilHits[] == 0                  # denied below the server
+      exfil.close()

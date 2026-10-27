@@ -123,8 +123,8 @@
   ioMonSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "io-mon";
-    rev = "6fc4ba9a2a9636298fc2e6c6578bc4677bd0a134";
-    hash = "sha256-VvujIm5p39wuIuNtv0080ZSaX4lSGT0xYf07rio0Ba8=";
+    rev = "6fccd929cb09da0bfc0844b93ced9ffb1ac0f74f";
+    hash = "sha256-icTohrpTUcX6H+AHQlcC2uB6nAMJs0dTAwIi/Uaxc5E=";
   },
   shmGsetSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -162,8 +162,8 @@
   runquotaSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "runquota";
-    rev = "d33c48b0bcc07111419baf547c824d10c215416d";
-    hash = "sha256-XO8W6FOxdUGzmXkCmnD14Nomc9YFyLqscz3A+GLnAdE=";
+    rev = "f5a644cde174234af8e193413e17b0e47d29e6f5";
+    hash = "sha256-gLoCSqZTycI43QU2QOB3v+pJ3I0fUiHTluLoM4n+8Lk=";
   },
 }:
 let
@@ -215,7 +215,7 @@ stdenv.mkDerivation (finalAttrs: {
   # forbids. reprobuild's flake overrides it with the value it parses from the
   # nimble manifest, and `checks.nixpkgs-package-version-sync` fails the build
   # if this literal and the manifest disagree, so the two cannot drift silently.
-  version = "0.2.16";
+  version = "0.2.17";
 
   # The default source: a published commit whose `reprobuild.nimble` carries
   # `version` above and whose `flake.lock` pins the `*Src` defaults above
@@ -226,8 +226,8 @@ stdenv.mkDerivation (finalAttrs: {
   src = fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "reprobuild";
-    rev = "1fe6c6a9c8e8481cb210077335f15ba67b784da2";
-    hash = "sha256-GHQHp2WdQqVxsvBEvf3uKbRSHrrX3FnJtHcHX5r5me4=";
+    rev = "bc474ec2976a220049a6f22c7211105ea24d093a";
+    hash = "sha256-t3yD9kNYCpp3nPzVAUyv0coZ9rqPLgoClMibZb7mPQE=";
   };
 
   strictDeps = true;

@@ -82,6 +82,7 @@
 ## ----------------------------------------------------------------------
 
 import std/[algorithm, options, os, sequtils, strutils, tables, times]
+from repro_core/link_target import readSymlinkTarget
 from repro_core/paths import extendedPath
 
 import ./errors
@@ -1336,7 +1337,7 @@ proc readCurrentGeneration*(stateDir: string): int =
     # POSIX symlink: the target's last path component is the generation
     # directory name (the integer generation number).
     let target =
-      try: expandSymlink(extPath)
+      try: readSymlinkTarget(extPath)
       except OSError: return 0
     last = target.strip().lastPathPart
   elif fileExists(extPath):

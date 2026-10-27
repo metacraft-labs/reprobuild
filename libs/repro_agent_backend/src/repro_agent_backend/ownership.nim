@@ -26,6 +26,7 @@
 import std/[algorithm, os, strutils]
 
 import blake3
+import repro_core/link_target
 import repro_local_store
 import repro_project_dsl/install_mirror_resolver
 
@@ -100,7 +101,7 @@ proc recipeTreeDigest*(dir: string): string =
   for rel in recipeFiles(dir):
     let p = dir / rel
     if symlinkExists(p):
-      manifest.add rel & "\tlink\t" & expandSymlink(p) & "\n"
+      manifest.add rel & "\tlink\t" & readSymlinkTarget(p) & "\n"
     else:
       let exec = fpUserExec in getFilePermissions(p)
       manifest.add rel & "\t" & (if exec: "exec" else: "file") & "\t" &

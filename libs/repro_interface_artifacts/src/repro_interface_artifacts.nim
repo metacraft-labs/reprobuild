@@ -79,15 +79,11 @@ when defined(windows):
 else:
   import std/posix
 
-  const
-    ProviderLockExclusive = 2.cint
-    ProviderLockNonBlocking = 4.cint
-
-  proc providerLockFlock(fd: cint; operation: cint): cint
-    {.importc: "flock", header: "<sys/file.h>".}
 
 import cbor
 import repro_core
+import repro_core/file_lock
+export file_lock.ReproFileLock
 import repro_core/ambient_execution
 import repro_core/paths as corepaths
 import repro_core/relocation
@@ -6660,10 +6656,17 @@ proc externalHashFlags(workDir = ""): seq[string] =
         "vendor"
       let xxhashInc = workDir / "libs" / "xxh3" / "src" / "xxh3" /
         "vendor"
+      # Quoted, as `config.nims` quotes the same directories: Nim splices
+      # `passC` text into the C compiler's command line verbatim, so a source
+      # root containing a space -- a release unpacked under
+      # `C:\Users\<First Last>\...` -- came apart into a stray `vendor`
+      # "linker input" and every extract runner and provider compile failed
+      # in gcc (reprobuild-pm issue 2026-10-27-interface-extraction-splits-a-
+      # spaced-install-path-in-the-vendored-hash-include).
       if fileExists(extendedPath(blake3Inc / "blake3.h")):
-        result.add("--passC:-I" & blake3Inc)
+        result.add("--passC:-I" & quoteShell(blake3Inc))
       if fileExists(extendedPath(xxhashInc / "xxhash.h")):
-        result.add("--passC:-I" & xxhashInc)
+        result.add("--passC:-I" & quoteShell(xxhashInc))
       if not useSystem and
          fileExists(extendedPath(blake3Inc / "blake3.c")) and
          fileExists(extendedPath(xxhashInc / "xxhash.c")):
@@ -7113,13 +7116,6 @@ proc boundedNimCompileCommand*(): seq[string] =
     "--parallelBuild:" & $providerParallelBuildCount()
   ]
 
-type ReproFileLock* = object
-  held: bool
-  when defined(windows):
-    handle: ProviderLockHandle
-  else:
-    fd: cint
-
 proc providerNimcachePath(command: openArray[string]): string =
   for arg in command:
     if arg.startsWith("--nimcache:"):
@@ -7128,86 +7124,11 @@ proc providerNimcachePath(command: openArray[string]): string =
     "provider compiler command has no --nimcache path")
 
 proc acquireProviderFileLock(lockPath: string): ReproFileLock =
-  createDir(extendedPath(parentDir(lockPath)))
-  when defined(windows):
-    let wide = newWideCString(lockPath)
-    while true:
-      let handle = providerLockCreateFileW(
-        wide,
-        ProviderLockGenericRead or ProviderLockGenericWrite,
-        0,
-        nil,
-        ProviderLockOpenAlways,
-        ProviderLockFileAttributeNormal,
-        nil)
-      if cast[int](handle) != cast[int](ProviderLockInvalidHandle):
-        return ReproFileLock(held: true, handle: handle)
-      let error = providerLockGetLastError()
-      if error != ProviderLockSharingViolation:
-        raise newException(IOError,
-          "CreateFileW(" & lockPath & ") failed, GetLastError=" & $error)
-      sleep(50)
-  else:
-    # Close-on-exec: a lock fd inherited by a child keeps the flock held for
-    # as long as that child lives, so a long-lived process spawned while the
-    # lock is held (a daemon started inside a build) would hold it forever.
-    let fd = posix.open(lockPath.cstring, O_RDWR or O_CREAT or O_CLOEXEC,
-      Mode(0o600))
-    if fd < 0:
-      raise newException(IOError,
-        "open(" & lockPath & ") failed, errno=" & $errno)
-    while providerLockFlock(fd, ProviderLockExclusive) != 0:
-      if errno == EINTR:
-        continue
-      let lockError = errno
-      discard posix.close(fd)
-      raise newException(IOError,
-        "flock(" & lockPath & ") failed, errno=" & $lockError)
-    return ReproFileLock(held: true, fd: fd)
+  file_lock.acquireExclusiveFileLock(lockPath)
 
 proc tryAcquireProviderFileLock(lockPath: string;
                                 lock: var ReproFileLock): bool =
-  ## Non-blocking `acquireProviderFileLock`: true and `lock` held when the
-  ## lock was free, false (nothing held) when another holder has it.
-  createDir(extendedPath(parentDir(lockPath)))
-  when defined(windows):
-    let handle = providerLockCreateFileW(
-      newWideCString(lockPath),
-      ProviderLockGenericRead or ProviderLockGenericWrite,
-      0,
-      nil,
-      ProviderLockOpenAlways,
-      ProviderLockFileAttributeNormal,
-      nil)
-    if cast[int](handle) != cast[int](ProviderLockInvalidHandle):
-      lock = ReproFileLock(held: true, handle: handle)
-      return true
-    let error = providerLockGetLastError()
-    if error != ProviderLockSharingViolation:
-      raise newException(IOError,
-        "CreateFileW(" & lockPath & ") failed, GetLastError=" & $error)
-    false
-  else:
-    # Close-on-exec: a lock fd inherited by a child keeps the flock held for
-    # as long as that child lives, so a long-lived process spawned while the
-    # lock is held (a daemon started inside a build) would hold it forever.
-    let fd = posix.open(lockPath.cstring, O_RDWR or O_CREAT or O_CLOEXEC,
-      Mode(0o600))
-    if fd < 0:
-      raise newException(IOError,
-        "open(" & lockPath & ") failed, errno=" & $errno)
-    while providerLockFlock(fd, ProviderLockExclusive or
-        ProviderLockNonBlocking) != 0:
-      if errno == EINTR:
-        continue
-      let lockError = errno
-      discard posix.close(fd)
-      if lockError == EWOULDBLOCK or lockError == EAGAIN:
-        return false
-      raise newException(IOError,
-        "flock(" & lockPath & ") failed, errno=" & $lockError)
-    lock = ReproFileLock(held: true, fd: fd)
-    true
+  file_lock.tryAcquireExclusiveFileLock(lockPath, lock)
 
 proc acquireProviderNimcacheLock(command: openArray[string]):
     ReproFileLock =
@@ -7233,17 +7154,7 @@ proc acquireProviderNimcacheLock(command: openArray[string]):
   acquireProviderFileLock(providerNimcachePath(command) & ".compile.lock")
 
 proc releaseProviderNimcacheLock(lock: var ReproFileLock) =
-  if not lock.held:
-    return
-  when defined(windows):
-    if cast[int](lock.handle) != cast[int](ProviderLockInvalidHandle):
-      discard providerLockCloseHandle(lock.handle)
-      lock.handle = ProviderLockInvalidHandle
-  else:
-    if lock.fd >= 0:
-      discard posix.close(lock.fd)
-      lock.fd = -1
-  lock.held = false
+  file_lock.releaseExclusiveFileLock(lock)
 
 proc acquireInterfaceArtifactLock*(artifactPath: string):
     ReproFileLock =

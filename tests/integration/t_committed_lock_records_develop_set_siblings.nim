@@ -520,9 +520,18 @@ suite "the committed lock records the develop-set siblings":
     createDir(layer)
     for name in [".git", "projects", "repos"]:
       moveDir(workspace / name, layer / name)
-    let state = workspaceTomlPath(workspace)
-    writeFile(state, readFile(state) & "\n[[manifest]]\nlocal_path = \"" &
-      layer.replace('\\', '/') & "\"\nvisibility = \"public\"\n")
+    # The layer is recorded the way a workspace from before the settings
+    # files recorded it: in the OLD state file (`local.v1`), the only state
+    # file that may carry layers (Workspace-Settings-Files.md §5). Its layer
+    # indexes — and so the url layer's placement below — are the ones that
+    # file always gave them.
+    let stateNow = workspaceTomlPath(workspace)
+    let state = legacyWorkspaceStatePath(workspace)
+    writeFile(state, readFile(stateNow).replace(
+      "reprobuild.workspace.state.v1", "reprobuild.workspace.local.v1") &
+      "\n[[manifest]]\nlocal_path = \"" & layer.replace('\\', '/') &
+      "\"\nvisibility = \"public\"\n")
+    removeFile(stateNow)
     writeFile(app / "repro.lock", original)
     discard requireGit(q(gitBin) & " -C " & q(app) & " add repro.lock")
     discard requireGit(q(gitBin) & " -C " & q(app) & " commit -qm wider-lock")

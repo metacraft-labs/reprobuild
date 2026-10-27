@@ -1070,3 +1070,9 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   result.artifact = readDevEnvArtifact(result.artifactPath)
   if active.renderShell:
     result.shellFragment = readFile(extendedPath(result.shellFragmentPath))
+
+  # A consumer's resolver reads the effective service summary, including
+  # legacy placeholder probes. Stamp only a successful introspection (or
+  # a validated cache replay), so an older adjacent artifact cannot inherit
+  # the interface's newer generation after an introspection failure.
+  writeInterfaceArtifactProvenance(result.artifactPath, active.modulePath)

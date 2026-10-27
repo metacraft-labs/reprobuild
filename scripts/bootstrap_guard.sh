@@ -179,8 +179,14 @@ decide() {
     fi
   done
   if [ -n "${existing}" ]; then
+    # The native HCR producer bootstraps its source-matched engine before
+    # writing these graph-owned outputs. They are not bootstrap sources:
+    # considering their newer mtimes would bootstrap all apps again on the
+    # next library request. Keep its canonical c/ source tree in the scan.
     # shellcheck disable=SC2086
-    newer="$(find ${existing} -type f -newer "${target}" -print -quit 2>/dev/null || true)"
+    newer="$(find ${existing} \
+      -path "${root}/libs/repro_hcr_agent/build" -prune -o \
+      -type f -newer "${target}" -print -quit 2>/dev/null || true)"
     if [ -n "${newer}" ]; then
       printf 'bootstrap stale:%s newer than build/bin/repro%s\n' \
         "${newer#"${root}/"}" "${suffix}"

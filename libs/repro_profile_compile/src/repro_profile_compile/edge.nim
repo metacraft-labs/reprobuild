@@ -188,6 +188,19 @@ type
 proc raiseProfileCompile(message: string) {.noreturn.} =
   raise newException(ProfileCompileError, message)
 
+const MissingPublicCliPathReason* =
+  " (the `repro` image that runs this compile's actions under " &
+  "`internal io monitor`). An embedded caller -- a binary that links this " &
+  "library and has not declared itself `repro` -- must name one: pass " &
+  "`publicCliPath`, or set REPRO_PUBLIC_CLI_PATH. Its own image is never " &
+  "used, because it would be re-executed with an internal verb it does " &
+  "not implement, run nothing, and leave the monitor capture empty."
+  ## Why an empty `publicCliPath` is refused rather than defaulted. The CLI
+  ## callers resolve it through `repro_cli_support/self_spawn_image`, which
+  ## answers "" for an image that has not declared itself `repro`
+  ## (Distribution-And-Packaging.md §5.2), so this is the sentence such a
+  ## caller sees.
+
 proc hasFailedActions(run: BuildRunResult): bool =
   for item in run.results:
     if item.status in {asFailed, asBlocked}:
@@ -589,7 +602,8 @@ proc compileProfileToRbpi*(profileRoot: string;
   if opts.stateDir.len == 0:
     raiseProfileCompile("compileProfileToRbpi: stateDir is required")
   if opts.publicCliPath.len == 0:
-    raiseProfileCompile("compileProfileToRbpi: publicCliPath is required")
+    raiseProfileCompile("compileProfileToRbpi: publicCliPath is required" &
+      MissingPublicCliPathReason)
 
   let absProfile = absolutePath(profileRoot)
   if not fileExists(extendedPath(absProfile)):
@@ -794,7 +808,8 @@ proc probeProfilePlatforms*(profileRoot: string;
   if opts.stateDir.len == 0:
     raiseProfileCompile("probeProfilePlatforms: stateDir is required")
   if opts.publicCliPath.len == 0:
-    raiseProfileCompile("probeProfilePlatforms: publicCliPath is required")
+    raiseProfileCompile("probeProfilePlatforms: publicCliPath is required" &
+      MissingPublicCliPathReason)
   let absProfile = absolutePath(profileRoot)
   if not fileExists(extendedPath(absProfile)):
     raiseProfileCompile("probeProfilePlatforms: profile root does not " &

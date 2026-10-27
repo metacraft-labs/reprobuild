@@ -3,7 +3,7 @@ import std/[algorithm, base64, hashes, json, options, os, osproc, sequtils,
     times]
 
 when defined(windows):
-  import std/winlean
+  import std/[importutils, winlean]
   import repro_daemon_core/windows_detached_spawn
 else:
   # Only these names, and only for the pipe-feeding guard in
@@ -18,6 +18,7 @@ import repro_cli_support/repository_identities
 # `repro_core`'s re-exports on purpose: it is wanted at four named sites here
 # and at two in `git_actions.nim`, and a repo-wide re-export would put
 # `fsContainment` in the namespace of every module that touches `repro_core`.
+import repro_core/link_target
 import repro_core/path_identity
 import repro_core/relocation
 # PG-14 — the managed-hook contract handshake has to run a `repro` this build
@@ -29,6 +30,16 @@ import repro_core/ambient_execution
 import repro_core/cli_images
 import repro_core/source_root
 from repro_core/workspace_root import firstMembershipManifestPath
+# The self-spawn image guard. `{.all.}` is how `runThinApp` (below) reaches
+# the module-private ``markRunningImageAsReproCli``: no ordinary import can
+# name the setter, so no embedded caller can grant itself the mark. See
+# `repro_cli_support/self_spawn_image`.
+import repro_cli_support/self_spawn_image {.all.}
+export self_spawn_image.selfSpawnIoMonitorPath,
+  self_spawn_image.internalIoMonitorArgs
+when defined(reproImageIdentityTest):
+  export self_spawn_image.markRunningImageAsReproCliForTest,
+    self_spawn_image.resetRunningImageReproCliMarkForTest
 import repro_core/nix_evaluation_policy
 import repro_build_engine
 import repro_cmake_trycompile
@@ -3087,6 +3098,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     result.declaredOutputs = payload.declaredOutputs
     result.scratchDirs = payload.scratchDirs
     result.removeBeforeRun = payload.removeBeforeRun
+    result.optionalOutputs = payload.optionalOutputs
     result.readOnlyRoots = payload.readOnlyRoots
   let actionCachePolicy =
     case payload.actionCachePolicy
@@ -4597,7 +4609,8 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 13'u16
+  LoweredGraphCacheVersion = 14'u16
+    # v14: optional output candidates, appended after removeBeforeRun.
     # v13: ``BuildAction.removeBeforeRun``, a string list after
     # ``scratchDirs``. A v12 cache would decode every action with nothing to
     # remove, and a warm build of a ``create_dmg`` edge would fail over the
@@ -5625,6 +5638,7 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.add(if action.requiresElevation: 1'u8 else: 0'u8)
   outp.writeStringSeq(action.scratchDirs)
   outp.writeStringSeq(action.removeBeforeRun)
+  outp.writeStringSeq(action.optionalOutputs)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result = BuildAction(
@@ -5706,6 +5720,7 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result.requiresElevation = elevationByte == 1'u8
   result.scratchDirs = readStringSeq(bytes, pos)
   result.removeBeforeRun = readStringSeq(bytes, pos)
+  result.optionalOutputs = readStringSeq(bytes, pos)
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)
@@ -8704,186 +8719,10 @@ proc stablePublicCliPath(): string =
   ## needs the same answer for its ``-d:reproBin``.
   publicCliImagePath()
 
-var runningImageIsReproCliFlag = false
-  ## Set by ``markRunningImageAsReproCli`` — see ``runningImageIsReproCli``.
-
-proc markRunningImageAsReproCli() =
-  ## Record that the process this code is running in IS the `repro` CLI: the
-  ## image that dispatches ``internal io monitor``,
-  ## ``__repro-extract-interface`` and ``__repro-compile-provider``.
-  ##
-  ## Called from ``runThinApp`` when the entry point declares itself `repro`,
-  ## which `apps/repro/repro.nim` does as a LITERAL in its own source
-  ## (``quit runThinApp("repro")``). That literal is the CLI's own statement
-  ## about what it is; the filename it happens to be invoked under is not.
-  ##
-  ## NOT EXPORTED, and that is the point. This is the DANGEROUS direction:
-  ## setting the mark is what makes the engine willing to re-execute the
-  ## running image with an internal verb, so an exported setter lets any
-  ## module that links the engine be accepted as `repro` without ever having
-  ## reached ``runThinApp("repro")`` — which is exactly the embedded test
-  ## binary the refusal exists to stop, granting itself the permission by
-  ## calling one proc. ``runThinApp`` is in THIS module, so the export bought
-  ## nothing but that hole. The counterpart clear
-  ## (``resetRunningImageReproCliMarkForTest``) was already gated behind
-  ## ``-d:reproImageIdentityTest`` for the weaker version of the same reason;
-  ## the set is gated below under the same define, so the pair is symmetric
-  ## and NO ordinary build can either set or clear the mark off the real
-  ## dispatch path.
-  runningImageIsReproCliFlag = true
-
-when defined(reproImageIdentityTest):
-  ## The test-only handles on the mark, both compiled ONLY under
-  ## ``-d:reproImageIdentityTest``, which one test turns on for itself
-  ## through its own ``.nim.cfg``.
-  ##
-  ## Two directions, one reason. The mark is what permits self-spawning: an
-  ## image that can SET it is an image the engine will re-execute with an
-  ## internal verb without that image ever having declared itself through
-  ## ``runThinApp("repro")``, and an image that can CLEAR it and leaves it
-  ## clear is fine — but one that sets it and leaves it set is the unbounded
-  ## self-exec chain this whole predicate exists to prevent. So the
-  ## regression test that must observe the refusal in BOTH directions gets
-  ## both handles here and restores the refusal in a ``finally``, and no
-  ## ordinary build has a way to reach either.
-
-  proc markRunningImageAsReproCliForTest*() =
-    ## Set the mark without going through ``runThinApp``. The only caller is
-    ## the image-identity regression test, which has to observe the accept
-    ## side of the predicate from a binary that is not named `repro` and
-    ## cannot dispatch the real CLI to get there.
-    markRunningImageAsReproCli()
-
-  proc resetRunningImageReproCliMarkForTest*() =
-    ## Undo ``markRunningImageAsReproCliForTest`` — called from the test's
-    ## ``finally`` so the refusal is restored and the rest of the process is
-    ## as safe as it was before the case ran.
-    runningImageIsReproCliFlag = false
-
-proc runningImageIsReproCli(): bool =
-  ## Does the running image implement the internal verbs?
-  ##
-  ## This used to be asked as ``extractFilename(getAppFilename()) == "repro"``
-  ## — a program identifying itself by the name it was invoked under — and
-  ## that has now failed three times in three different disguises:
-  ##
-  ##   * N36: Nix's ``wrapProgram`` renames the real image to
-  ##     ``.repro-wrapped`` and puts a shell wrapper at `repro`. Every wrapped
-  ##     package therefore ran with ``getAppFilename()`` = ``.repro-wrapped``
-  ##     and silently lost its io-monitor driver — silently, because "" is a
-  ##     SUPPORTED answer here (fall back to declared inputs/outputs).
-  ##   * The M5 trampoline: a bootstrap installed as ``repro-bootstrap.exe``
-  ##     answers "no `repro` image to spawn it with", which is why
-  ##     ``apps/repro-trampoline/repro_trampoline.nim`` is forced to hide the
-  ##     bootstrap in a DIRECTORY named `reprobuild` rather than give the file
-  ##     a distinct name.
-  ##   * ``scripts/run_tests.sh``: Windows cannot relink a running image, so
-  ##     the suite copies ``repro.exe`` to ``repro_run.exe`` and runs the copy
-  ##     — a byte-identical `repro` that this predicate refused, killing the
-  ##     entire Windows suite in its build phase for 55 days.
-  ##
-  ## In all three the image IS `repro` and only the filename says otherwise.
-  ## So the question is answered from the image's own declaration instead.
-  ## The old filename test is kept as an additional ACCEPT (it can only widen,
-  ## never narrow, so it cannot regress a caller that relies on it) for images
-  ## that reach the engine without going through ``runThinApp``.
-  ##
-  ## THIS IS WHAT MADE THE ENGINE RENAMEABLE. The engine image now installs as
-  ## ``reprobuild`` (``repro`` on `PATH` is the thin daemon client), and it
-  ## needed no change here: it declares itself with the literal ``"repro"`` in
-  ## `apps/repro/repro.nim`, so the FIRST arm answers yes whatever the file is
-  ## called. Had this still been a filename test, the rename would have broken
-  ## provider compile LOUDLY (``providerCompileBuildAction`` raises "no `repro`
-  ## image to spawn it with") and interface extraction SILENTLY (it falls back
-  ## in-process).
-  ##
-  ## ``reprobuild`` IS DELIBERATELY *NOT* ADDED to the filename arm, and the
-  ## restraint is the point. The arm exists only for images that reach the
-  ## engine WITHOUT going through ``runThinApp``, and the real engine always
-  ## goes through it — so adding the new name would buy nothing and would
-  ## widen the fork-bomb hole by exactly one filename: an engine-linked binary
-  ## that is not the CLI (`repro-standard-provider`,
-  ## `repro-cmake-trycompile-provider`, any test binary) would be granted
-  ## self-spawn permission by being *called* ``reprobuild``. The arm keeps
-  ## the LEGACY name because a bootstrap tree still has a real engine there
-  ## (`tools/multi-distro-harness/bootstrap-*.sh` compile one straight to
-  ## ``<dir>/bin/repro``, with no thin client beside it).
-  ##
-  ## What still says NO — and is the whole reason this predicate exists — is
-  ## the embedded caller: a TEST BINARY that links the engine in-process never
-  ## calls ``runThinApp("repro")`` and is not named ``repro``, so it is still
-  ## refused, and the unbounded self-exec chain that refusal prevents stays
-  ## prevented.
-  runningImageIsReproCliFlag or
-    extractFilename(getAppFilename()) == reproLegacyEngineExeName()
-
-proc spawnableWithInternalVerb(candidate: string): bool =
-  ## May ``candidate`` be spawned with an internal selector — ``internal io
-  ## monitor``, ``__repro-extract-interface``, ``__repro-compile-provider``?
-  ##
-  ## Only ``repro`` implements those. The dangerous case is spawning THIS
-  ## process's own image when it is something else: a test binary that links
-  ## the engine in-process gets re-executed with arguments it does not
-  ## understand, ignores them, runs its suite, re-enters the engine, and
-  ## spawns itself again — an unbounded chain, one child per generation, that
-  ## ends only when the machine runs out of processes or memory. Each
-  ## generation also leaves a pid-named scratch directory behind.
-  ##
-  ## Checking only the ARGUMENT is not enough and that is why this exists as a
-  ## separate predicate: ``publicCliPath`` looks explicit at the call site but
-  ## is itself derived from ``getAppFilename()`` further up, so "the caller
-  ## passed a path" is not evidence that the path is `repro`. The test is
-  ## therefore about identity with the running image, not about provenance.
-  ##
-  ## A path that is NOT this image is left alone — a fixture may legitimately
-  ## point at some other binary, and this predicate is not in the business of
-  ## validating those.
-  if candidate.len == 0:
-    return false
-  if os.normalizedPath(candidate) != os.normalizedPath(getAppFilename()):
-    return true
-  runningImageIsReproCli()
-
-# Executable-Consolidation M1: the internal io-monitor driver is no longer a
-# standalone monitor binary. ``repro`` self-spawns its own image with this
-# subcommand selector (``repro internal io monitor …``). The
-# executable path is ``getAppFilename()`` (more robust than argv[0]/sibling
-# lookup) and the selector below is prepended by the build engine via
-# ``BuildEngineConfig.monitorCliArgs``.
-const internalIoMonitorArgs* = @["internal", "io", "monitor"]
-
-proc selfSpawnIoMonitorPath*(publicCliPath = ""): string =
-  ## Path to the running ``repro`` image used to self-spawn the internal
-  ## io-monitor role, or "" when no such image can be named.
-  ##
-  ## "" is a SUPPORTED state, not an error: the engine documents an empty
-  ## ``monitorCliPath`` as "no io-monitor driver wired" and falls back to the
-  ## statically declared inputs/outputs (see ``monitorEvidenceRequired``).
-  ##
-  ## The name check on the last arm is the load-bearing part. This used to end
-  ## at ``getAppFilename()`` unconditionally — and ``stablePublicCliPath()``
-  ## also ends there — so an embedded caller, meaning a TEST BINARY that links
-  ## the engine in-process, had ITSELF wrapped as
-  ## ``<test-binary> internal io monitor -- …``. A unittest binary does not
-  ## implement that selector: it ignores the arguments, runs its suite, and
-  ## re-enters here, wrapping itself again. One child per generation, growing
-  ## without bound, each generation also leaving a pid-named scratch directory
-  ## behind. It stops when the machine does.
-  ##
-  ## So the only images accepted are ones somebody has ASSERTED are `repro` —
-  ## an explicit ``publicCliPath``, or ``REPRO_PUBLIC_CLI_PATH`` — plus the
-  ## running image when it has DECLARED itself `repro`, which
-  ## ``runThinApp("repro")`` does for the real CLI and a test binary linking
-  ## the engine never does. See ``runningImageIsReproCli``: the assertion is
-  ## the image's own, not the name it was invoked under.
-  let candidate =
-    if publicCliPath.len > 0:
-      os.normalizedPath(publicCliPath)
-    else:
-      stablePublicCliPath()
-  if spawnableWithInternalVerb(candidate):
-    return candidate
-  ""
+# The self-spawn image guard (the mark, ``spawnableWithInternalVerb``,
+# ``selfSpawnIoMonitorPath``) lives in `repro_cli_support/self_spawn_image`,
+# so the profile-compile sites in `repro_cli_support/home` and `infra`, which
+# this module imports, resolve their helper through the same guard.
 
 proc internalReproHelperCliPath(publicCliPath: string): string =
   ## Use the same guarded public image as the monitor role. In a portable
@@ -17661,10 +17500,20 @@ proc startBackgroundSupervisor(config: DevSessionSupervisorConfig) =
   createDir(extendedPath(config.outDir.sessionDir))
   let logPath = config.outDir.sessionDir / "supervisor.log"
   when defined(windows):
-    discard startProcess(config.publicCliPath,
-      args = config.supervisorCliArgs(),
-      workingDir = config.projectRoot,
-      options = {poUsePath, poDaemon, poParentStreams})
+    # NOT `osproc.startProcess`: with `poParentStreams` it handed the
+    # supervisor our own stdout and stderr, and without it `CreateProcessW`
+    # still passes every inheritable handle we hold. The supervisor outlives
+    # this invocation, so a caller reading our output to its end -- `$(repro
+    # up)`, a test runner -- would wait for as long as the session lived.
+    # `spawnWithOwnStdio` gives it NUL stdin and the log for its output, and
+    # no other handle, which is what the POSIX arm below does.
+    var image = config.publicCliPath
+    if not isAbsolute(image):
+      let found = findExe(image)
+      image = if found.len > 0: found else: absolutePath(image)
+    discard spawnWithOwnStdio(image, config.supervisorCliArgs(),
+      env = [], inheritEnvironment = true, logPath = logPath,
+      workingDir = absolutePath(config.projectRoot))
   else:
     var fdsToClose: seq[string] = @[]
     for fd in 3 .. 64:
@@ -17811,6 +17660,14 @@ type
       ## generation record, never read again.
     artifact: ProjectInterfaceArtifact
     provenance: Option[InterfaceArtifactProvenance]
+    effectiveArtifact: Option[DevEnvArtifact]
+      ## Present for an owner's dev-env candidate: the effective service
+      ## declarations decoded under the SAME lock as the interface above.
+      ## A build interface has no effective dev-env declaration to supply.
+    effectiveProvenance: Option[InterfaceArtifactProvenance]
+    effectiveReadError: string
+      ## Preserve decode failures so readiness can refuse with the owning
+      ## project, activity and refresh command instead of defaulting to none.
 
 proc liftedInterfaceOfEdge(edge: DevEnvEdgeResult;
                            commandName: string): LiftedInterfaceCopy =
@@ -17835,8 +17692,10 @@ proc liftedInterfaceOfEdge(edge: DevEnvEdgeResult;
 
 proc readOwnerInterfaceCandidate(candidate: string): LiftedInterfaceCopy =
   ## Read an owner's lifted interface and its provenance stamp under the
-  ## lock their writer holds, so neither can be half-replaced and the two
-  ## cannot come from different lifts.
+  ## lock their writer holds. For a dev-env candidate, retain the effective
+  ## service artifact and its own provenance in that same read: readiness
+  ## must not reopen any of these paths after an owner activation replaces
+  ## them. Build candidates supply only their interface and stamp.
   ##
   ## The writer depends on the layout `ownerInterfaceCandidates` found the
   ## file in. Under `.repro/dev-env/<segment>/` it is the owner's dev-env
@@ -17845,8 +17704,9 @@ proc readOwnerInterfaceCandidate(candidate: string): LiftedInterfaceCopy =
   ## it is `extractInterfaceEdge`, which publishes the artifact and stamps
   ## it while it holds the artifact's interface-extraction lock.
   let outDir = parentDir(candidate)
+  let isDevEnv = lastPathPart(parentDir(outDir)) == "dev-env"
   var lock =
-    if lastPathPart(parentDir(outDir)) == "dev-env":
+    if isDevEnv:
       acquireExclusiveFileLock(devEnvEdgeLockPath(outDir))
     else:
       acquireInterfaceArtifactLock(candidate)
@@ -17854,6 +17714,16 @@ proc readOwnerInterfaceCandidate(candidate: string): LiftedInterfaceCopy =
     result.path = candidate
     result.artifact = readInterfaceArtifact(candidate)
     result.provenance = readInterfaceArtifactProvenance(candidate)
+    if isDevEnv:
+      let effectivePath = outDir / "dev-env.rbde"
+      result.effectiveProvenance = readInterfaceArtifactProvenance(effectivePath)
+      try:
+        result.effectiveArtifact = some(readDevEnvArtifact(effectivePath))
+      except CatchableError as err:
+        result.effectiveReadError = err.msg
+    else:
+      result.effectiveReadError =
+        "a build interface carries no effective dev-env declaration"
   finally:
     releaseExclusiveFileLock(lock)
 
@@ -18082,6 +17952,58 @@ proc ownerInterfaceCandidates(ownerRecipeDir: string): seq[string] =
       if fileExists(extendedPath(candidate)):
         result.add(candidate)
 
+proc ownerSharedServiceReadiness(copy: LiftedInterfaceCopy;
+                                 ownerRecipeDir, ownerPackage, ownerProject,
+                                 activityName, serviceName, environment: string):
+    ServiceReadinessProbe =
+  ## Validate the effective declaration retained by the candidate's locked
+  ## read, not just its typed signature: a servicePlaceholder may still
+  ## declare the probe. Validate its retained provenance too, because a
+  ## fresh interface can sit beside a stale effective artifact after failed
+  ## owner introspection. Paths below name facts; none is reopened here.
+  let path = parentDir(copy.path) / "dev-env.rbde"
+  try:
+    let generation = ownerArtifactGeneration(path, copy.effectiveProvenance,
+      ownerRecipeDir, ownerPackage, ownerProject)
+    if generation.generation != sagFresh:
+      raise newException(ValueError, generation.detail)
+    if copy.effectiveArtifact.isNone:
+      raise newException(ValueError,
+        if copy.effectiveReadError.len > 0: copy.effectiveReadError
+        else: "no effective dev-env declaration was retained")
+    let artifact = copy.effectiveArtifact.get()
+    if artifact.projectRoot.len == 0 or
+        expandFilename(artifact.projectRoot) != expandFilename(ownerRecipeDir):
+      raise newException(ValueError, "the artifact belongs to another project")
+    if activityName.len > 0 and activityName notin artifact.selectedActivities:
+      raise newException(ValueError,
+        "the artifact does not select activity `" & activityName & "`")
+    for service in artifact.services:
+      if service.name == serviceName:
+        let instance = sharedServiceInstanceOf(service)
+        if not instance.declared:
+          raise newException(ValueError,
+            "the effective service declares no shared instance")
+        if instance.environment.strip() != environment.strip():
+          raise newException(ValueError,
+            "the effective service selects environment `" &
+            instance.environment & "`, not `" & environment & "`")
+        # The same parser and owner-root path resolution used when the owner
+        # converges; no duplicate interpretation of typed or placeholder facts.
+        let spec = serviceSpecFromSummary(ownerRecipeDir, service)
+        return ServiceReadinessProbe(kind: spec.readinessKind,
+          path: spec.readinessPath, url: spec.readinessUrl,
+          timeoutMs: spec.readinessTimeoutMs)
+    raise newException(ValueError,
+      "the artifact carries no service `" & serviceName & "`")
+  except CatchableError as err:
+    raise newException(ValueError,
+      "the owner's effective service readiness declaration is unavailable " &
+      "or stale at " & path & ": " & err.msg &
+      " Run `REPRO_ENVIRONMENT=" & quoteShell(environment) & " repro shell --print-env=json" &
+      (if activityName.len > 0: " --activity=" & activityName else: "") &
+      "` in " & ownerRecipeDir & " to refresh it; refusing to assume readiness none.")
+
 proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
                                     edge: DevEnvEdgeResult;
                                     commandName: string): int =
@@ -18098,7 +18020,7 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
   ## the resolver's own file and line, which the resolution record
   ## carries from the consumer's compilation.
   ##
-  ## FOUR STEPS PER RESOLUTION, in this order and not interchangeable:
+  ## SIX STEPS PER RESOLUTION, in this order and not interchangeable:
   ##
   ##   1. READ THE OWNER'S LIFTED INTERFACE, from the owner's own
   ##      project-interface artifact. That is where the identity, the
@@ -18106,7 +18028,9 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
   ##      attach-or-refuse on the fingerprint, and a consumer that
   ##      invented one would be comparing the running instance against
   ##      itself. Absent is a REFUSAL naming the path and the project to
-  ##      run `repro dev-env` in.
+  ##      run `repro dev-env` in. Read the effective owner probe from its
+  ##      independently fresh dev-env artifact, for the same activity,
+  ##      project and instance environment.
   ##   2. RESOLVE THE KEY: `(identity, scope, environment)` through the
   ##      same `sharedServiceInstanceKey` the owner's converge uses, with
   ##      the environment the consumer's EVALUATION selected.
@@ -18118,10 +18042,13 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
   ##      the signature and deliberately not the `executable` or `args`.
   ##      The daemon already refuses a command-less converge that finds
   ##      no instance, by name.
-  ##   4. DEPOSIT THE CONTRIBUTIONS, validated against what the RUNNING
+  ##   4. RECONCILE THE DECLARED READINESS after recording the acquired
+  ##      lease. A failed probe refuses startup and the ledger still lets
+  ##      `repro down` release that holder.
+  ##   5. DEPOSIT THE CONTRIBUTIONS, validated against what the RUNNING
   ##      instance declares. Refused, never dropped (§4.6), including
   ##      under version skew.
-  ##   5. READ BACK WHAT THE INSTANCE MINTED, from the instance's own
+  ##   6. READ BACK WHAT THE INSTANCE MINTED, from the instance's own
   ##      durable registration record, into THIS session's minted file --
   ##      L9's **F5**. See the step's own comment at the foot of the
   ##      loop for the design and for the four alternatives it rejects.
@@ -18175,24 +18102,27 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
     # its writer's lock: the snapshot and the §4.3 generation stamp below
     # both come from this copy, never from a second read of the files.
     var liftedCopy: LiftedInterfaceCopy
+    var readinessProbe: ServiceReadinessProbe
     var liftErrors: seq[string] = @[]
     for candidate in candidates:
       try:
         let copy = readOwnerInterfaceCandidate(candidate)
         lifted = liftedServiceDeclaration(copy.artifact,
           resolution.serviceName)
+        readinessProbe = ownerSharedServiceReadiness(copy,
+          resolution.ownerRecipeDir, resolution.ownerPackage,
+          lifted.snapshot.projectName, resolution.activityName,
+          resolution.serviceName, resolution.environment)
         liftedCopy = copy
         liftedFrom = candidate
         break
       except CatchableError as err:
         liftErrors.add(candidate & ": " & err.msg)
     if liftedFrom.len == 0:
-      refuse("the owning project's lifted interface does not carry " &
-        "service `" & resolution.serviceName & "`, so this resolver " &
-        "has no identity, no scope and no interface fingerprint to " &
-        "resolve against. Shared-Development-Services.md §4.3 decides " &
-        "attach-or-refuse on that fingerprint, so there is nothing to " &
-        "decide with. " &
+      refuse("the owning project's artifacts do not provide a current " &
+        "declaration for service `" & resolution.serviceName &
+        "`. Resolving requires its lifted identity, scope and interface " &
+        "fingerprint plus its effective readiness declaration. " &
         (if candidates.len == 0:
            "No project-interface artifact was found under " &
            (resolution.ownerRecipeDir / ".repro") &
@@ -18284,6 +18214,25 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
       reference & ".shared()` " & outcomeWord(outcome) & " at " &
       response.address & " with " & $response.holders.len & " holder" &
       (if response.holders.len == 1: "" else: "s"))
+    if serviceCompletionRule(readinessProbe) == scrDeclaredReadiness:
+      # Attachment takes a lease, but readiness is a separate completion
+      # rule. Reconcile before depositing contributions or reading minted
+      # attributes, and keep the lease ledger available if the probe fails.
+      setServiceReadinessProber(
+        proc (url: string): bool {.closure.} = readinessProbeSatisfied(url))
+      setReadinessEdgeEventSink(
+        proc (kind, service, detail: string) {.closure.} =
+          appendSessionEvent(parsed.selection.outDir, kind, service, detail))
+      try:
+        discard reconcileResources(planServiceReadinessEdge(
+          resolution.serviceName, response.address, readinessProbe))
+      except CatchableError as err:
+        refuse("readiness failed: " & err.msg)
+        inc refused
+        continue
+      finally:
+        setServiceReadinessProber(nil)
+        setReadinessEdgeEventSink(nil)
     # The RUNNING instance's own declaration of its contribution points,
     # as the DAEMON answered -- not as the owner's artifact on disk
     # describes it.
@@ -18342,7 +18291,7 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
       $deposited.replaced & ", of " &
       $deposited.set.contributions.len & " on the instance")
 
-    # ── STEP 5 — L9's F5: READ WHAT THE INSTANCE MINTED, FROM THE
+    # ── STEP 6 — L9's F5: READ WHAT THE INSTANCE MINTED, FROM THE
     # INSTANCE, IN A SESSION THAT DID NOT CONVERGE IT ────────────────
     #
     # THE DEFECT, as L9 F4 measured it at `f927919fa`: the minted table
@@ -19604,7 +19553,7 @@ proc containsNixStoreSegment(path: string): bool =
   normalized.startsWith("/nix/store/") or normalized.contains("/nix/store/")
 
 proc absoluteSymlinkTarget(linkPath: string): string =
-  let rawTarget = expandSymlink(extendedPath(linkPath))
+  let rawTarget = readSymlinkTarget(extendedPath(linkPath))
   if rawTarget.isAbsolute:
     os.normalizedPath(rawTarget)
   else:
@@ -22802,7 +22751,7 @@ proc migrateRetiredVcsHook(hooksDir, hookName: string;
             "refusing to uninstall " & hookName &
               ": cyclic preserved user hook symlink at " & cursor)
       visited.add(identity)
-      let target = expandSymlink(extendedPath(cursor))
+      let target = readSymlinkTarget(extendedPath(cursor))
       cursor = absolutePath(target, parentDir(cursor))
   # Stale sentinel-marked local file from an earlier `uninstall` run.
   if fileExists(extendedPath(local)) and isReprobuildVcsHook(local, hookName):
@@ -25438,6 +25387,55 @@ when not defined(windows):
       raiseOSError(registrationError,
         "cannot own auto-started runquotad: signal-forwarding registration failed")
 
+when defined(windows):
+  proc spawnDetachedRunQuotaDaemon(runquotad: string;
+                                   args: seq[string]): owned(Process) =
+    ## Starts the per-user `runquotad` so that it holds NONE of this
+    ## invocation's handles: stdin, stdout and stderr are `NUL`, no other
+    ## handle crosses the spawn, and it does not run in our working directory.
+    ##
+    ## WHY NOT `osproc.startProcess`. On Windows the daemon binds the shared
+    ## per-user pipe and is deliberately LEFT RUNNING when this invocation ends
+    ## (`releaseAutoRunQuotaProcess`), so it outlives us by design.
+    ## `startProcess` calls `CreateProcessW` with `bInheritHandles = TRUE` and
+    ## no handle list, which gave the daemon a copy of every inheritable handle
+    ## we held -- including the write end of the pipe our caller reads our
+    ## output from. `$(repro exec ...)`, and any process waiting for the end
+    ## of `repro`'s output, then waited for as long as the daemon lived: every
+    ## Windows CI job that ran `repro exec` hung until its job timeout
+    ## (reprobuild-pm issue 2026-10-23). `spawnWithOwnStdioKeepingHandle` is
+    ## the launch the per-user `repro-daemon` and the post-commit cache push
+    ## already use for the same reason (`repro_daemon_core/
+    ## windows_detached_spawn`): a `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` that
+    ## names only the `NUL` handles, and a hidden console of its own
+    ## (`CREATE_NO_WINDOW`, not `DETACHED_PROCESS`, so the console tools it
+    ## starts share one console instead of each opening a window). Being on a
+    ## console other than ours also keeps a Ctrl+C at the caller's end from
+    ## reaching it, which is what `CREATE_NEW_PROCESS_GROUP` would give.
+    ##
+    ## Its output goes to `NUL`, as it effectively did before: nothing read
+    ## the pipes `startProcess` made for it.
+    ##
+    ## THE WORKING DIRECTORY is the daemon binary's own directory, which its
+    ## running image already pins. Starting it in ours would keep the caller's
+    ## directory undeletable for the daemon's whole life.
+    ##
+    ## A `Process` is still returned, built around the handle the spawn
+    ## returned, because the readiness wait and the failure path below watch
+    ## and terminate it through the ordinary `osproc` calls. It owns no
+    ## stream (`poParentStreams`), so `close` releases only the process
+    ## handle.
+    var exe = runquotad
+    if not isAbsolute(exe):
+      let found = findExe(exe)
+      exe = if found.len > 0: found else: absolutePath(exe)
+    let child = spawnWithOwnStdioKeepingHandle(exe, args, env = [],
+      inheritEnvironment = true, logPath = "", workingDir = parentDir(exe))
+    privateAccess(Process)
+    result = Process(fProcessHandle: child.processHandle,
+      fThreadHandle: Handle(0), id: Handle(child.pid),
+      options: {poParentStreams})
+
 proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
   ## Exported for `tests/integration/t_derived_daemon_ipc_trust.nim` and
   ## `tests/integration/t_declared_daemon_ipc_trust.nim`, which grade the
@@ -25470,8 +25468,30 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
   # ``connectDefault`` on Windows, so when it returns true the daemon
   # is genuinely accepting connections.
   if isRunQuotaDaemonReachable():
-    warnRunQuotaMemoryOverrideNotApplied()
-    return nil
+    # A DAEMON FROM ANOTHER BUILD MAKES WAY (Windows). It outlives every
+    # build there, so one an installer replaced would otherwise keep serving
+    # this install's `repro` from the old image until its user logged off.
+    # Asked to retire, it exits once no client is connected; when that is
+    # already true the endpoint is free and this invocation falls through
+    # to start its own `runquotad` below. Otherwise this build adopts it as
+    # before, and is told why. POSIX is not asked: its auto-started daemon
+    # ends with its invocation, and the service there is the package
+    # manager's to restart. See `decideRunQuotaHandover` and
+    # reprobuild-specs/RunQuota-Host-Configuration.md, "A daemon from
+    # another build makes way".
+    when defined(windows):
+      let candidate =
+        try: findRunQuotaDaemonBin()
+        except OSError: ""
+      let report = decideRunQuotaHandover(candidate)
+      if report.note.len > 0:
+        stderr.writeLine("repro: note: " & report.note)
+      if report.handover == rhAdopt:
+        warnRunQuotaMemoryOverrideNotApplied()
+        return nil
+    else:
+      warnRunQuotaMemoryOverrideNotApplied()
+      return nil
   # M9.R.13c.1 — **deterministic stale-pipe recovery**. The wedge that
   # blocked every M9.R.13b iter past iter 11 (and forced the operator
   # to manually ``Stop-Process`` ``runquotad.exe`` between every build)
@@ -25616,14 +25636,16 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     putEnv("RUNQUOTA_SOCKET", socket)
   # THE DAEMON'S LIFETIME. On Windows it binds the shared per-user pipe and is
   # deliberately left running for invocations that adopt it (see
-  # `releaseAutoRunQuotaProcess`), so it is started plainly. On POSIX it is
+  # `releaseAutoRunQuotaProcess`), so it must hold nothing of this invocation:
+  # `spawnDetachedRunQuotaDaemon` gives it NUL stdio and no other handle. On
+  # POSIX it is
   # OWNED by this invocation and ends with it however the invocation ends:
   # `releaseAutoRunQuotaProcess` stops it on a normal return or a raise, a
   # terminating signal is forwarded to it, and the daemon itself stops when
   # it is re-parented (the SIGKILL case) -- and it inherits none of this
   # invocation's descriptors above 2. `spawnOwnedRunQuotaDaemon` says how.
   when defined(windows):
-    result = startProcess(runquotad, args = args, options = {poUsePath})
+    result = spawnDetachedRunQuotaDaemon(runquotad, args)
   else:
     result = spawnOwnedRunQuotaDaemon(runquotad, args)
   var readinessError = ""
@@ -25751,6 +25773,11 @@ proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
   ## withdrawn FIRST, before the terminate and the reap, so the handler can
   ## never signal the pid once it may belong to another process; the last
   ## release restores the signal dispositions the invocation had before.
+  ##
+  ## An ADOPTED retiring daemon (Windows) is let go here too: the connection
+  ## that kept it alive for this invocation is closed, so it can exit once
+  ## its other clients are gone (`decideRunQuotaHandover`).
+  releaseAdoptedDaemonHold()
   if process == nil:
     return
   when not defined(windows):
@@ -30323,6 +30350,7 @@ proc buildActionJson(action: BuildAction): JsonNode =
     "fixedOutput": action.fixedOutput,
     "scratchDirs": action.scratchDirs,
     "removeBeforeRun": action.removeBeforeRun,
+    "optionalOutputs": action.optionalOutputs,
     "binaryCacheKey": binaryCacheKey,
     "binaryCacheIdentityError": identityError,
     "actionCachePolicy": $action.actionCachePolicy,
@@ -73492,6 +73520,7 @@ type
     hfWorkspaceErgonomics ## Repair workspace-projects.md, gitignore, and AGENTS.md.
     hfEnsureVcsHooks  ## Reinstall the managed VCS hooks in every participating repo.
     hfSharedCloneLeaves ## Remove stale remote-tracking refs the shared-clone detector found.
+    hfMigrateStateFile ## Move the old state file / its layers (Workspace-Settings-Files §8 step 2).
 
   HealthCheck* = object
     ## One diagnosed layer. ``remedy`` is the exact command the user (or
@@ -75301,6 +75330,75 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         remedy: self & " health --fix",
         fixKind: hfWorkspaceErgonomics))
 
+  # 12b. The state file and the local settings file
+  #      (Workspace-Settings-Files.md §4, §5, §8 step 2).
+  #
+  #      ``workspace-state-file``: the old ``.repro/workspace.toml`` still in
+  #      use or left over, or ``[[manifest]]`` layers in
+  #      ``.repro/workspace-state.toml`` (every other verb refuses that file).
+  #      ``--fix`` moves the file and the layers — and it runs BEFORE the
+  #      diagnosis (``runHealthCommand``), because a state file carrying
+  #      layers is a file the strict reader refuses, and a refused file makes
+  #      ``--fix`` stand down. An old file an older repro changed after the
+  #      migration is reported, not fixed: which record is right is the
+  #      operator's call.
+  #
+  #      ``local-settings-file``: a TRACKED ``repro-workspace.local.toml``.
+  #      The file is per-user and never committed, and the managed exclude
+  #      block leaves a tracked path out (the tracked-probe rule), so the
+  #      mistake has to be named here. Report-only: un-tracking a file is an
+  #      index change in the user's repository, so the remedy is printed.
+  block stateFileCheck:
+    let findings = inspectWorkspaceStateFiles(parsed.workspaceRoot)
+    if findings.len == 0:
+      checks.add(HealthCheck(
+        name: "workspace-state-file",
+        status: hsOk,
+        detail:
+          (if fileExists(workspaceStatePath(parsed.workspaceRoot)):
+             workspaceStatePath(parsed.workspaceRoot) & " (" &
+               schemaWorkspaceStateV1 & "), carrying no manifest layers"
+           else: "no workspace state file recorded"),
+        remedy: "",
+        fixKind: hfNone))
+    else:
+      var skew = false
+      var details: seq[string]
+      for f in findings:
+        details.add(f.message)
+        if f.kind == sffSkew:
+          skew = true
+      checks.add(HealthCheck(
+        name: "workspace-state-file",
+        status: hsFail,
+        detail: details.join("; "),
+        remedy:
+          (if skew:
+             "inspect " & workspaceStatePath(parsed.workspaceRoot) & " and " &
+               legacyWorkspaceStatePath(parsed.workspaceRoot) & ", keep the " &
+               "right content in the first, remove the second, then `" &
+               self & " health --fix`"
+           else: self & " health --fix"),
+        fixKind: (if skew: hfNone else: hfMigrateStateFile)))
+  block localSettingsTrackedCheck:
+    if not ctx.gitOk:
+      break localSettingsTrackedCheck
+    let probe = execCmdEx(quoteShellCommand([ctx.gitIdentity.binaryPath,
+      "-C", parsed.workspaceRoot, "ls-files", "--error-unmatch", "--",
+      localSettingsFileName]), env = scrubbedGitRepositoryEnv())
+    if probe.exitCode == 0:
+      checks.add(HealthCheck(
+        name: "local-settings-file",
+        status: hsFail,
+        detail: localSettingsFileName & " is tracked by the repository at " &
+          parsed.workspaceRoot & "; it holds one person's manifest layers " &
+          "and credentialed urls and is never committed, so it is also " &
+          "left out of the " &
+          "managed ignore block while git tracks it",
+        remedy: "git -C " & quoteShell(parsed.workspaceRoot) &
+          " rm --cached " & localSettingsFileName & " (then commit)",
+        fixKind: hfNone))
+
   # 13. F0.3 — participating checkouts whose HEAD is on no remote.
   #
   #     ``repro check --mode=pre-push`` refuses a push when ANY repo in the
@@ -75855,6 +75953,10 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
           if f.kind == lfkStaleRemoteRef and f.removed:
             result.add("fix: removed " & f.refName & " in " & lr.leaf)
             stderr.writeLine(f.message)
+    of hfMigrateStateFile:
+      # Done before the diagnosis (``applyStateFileMigrationFix``); a row
+      # still failing here is one the migration refused, already reported.
+      discard
     of hfWorkspaceErgonomics:
       result.add("fix: repairing workspace ergonomics files")
       let gitignoreFile = parsed.workspaceRoot / ".gitignore"
@@ -75898,6 +76000,25 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
       except CatchableError as err:
         result.add("fix: failed generating workspace-projects.md: " & err.msg)
 
+proc applyStateFileMigrationFix(workspaceRoot: string): seq[string] =
+  ## ``--fix`` for the ``workspace-state-file`` row: move the old state file
+  ## and any ``[[manifest]]`` layers in a state file to where they belong
+  ## (``migrateWorkspaceStateFile``, Workspace-Settings-Files.md §8 step 2).
+  ## Runs BEFORE the diagnosis: a state file carrying layers is refused by
+  ## the strict reader, and a refused file makes the rest of ``--fix`` stand
+  ## down. A refusal (diverged records, a layer that cannot move) changes
+  ## nothing and is reported; the row then fails with its remedy.
+  if inspectWorkspaceStateFiles(workspaceRoot).len == 0:
+    return
+  result.add("fix: migrating the workspace state file under " &
+    workspaceRoot / ".repro")
+  try:
+    for line in migrateWorkspaceStateFile(workspaceRoot):
+      result.add("fix: " & line)
+  except StateMigrationError, WorkspaceManifestParseError, IOError, OSError:
+    result.add("fix: could NOT migrate the workspace state file: " &
+      getCurrentExceptionMsg())
+
 proc runHealthCommand*(args: openArray[string]): int =
   ## ``repro health [<project>] [--workspace-root=PATH] [--fix] [--json] [--offline]``.
   ##
@@ -75909,6 +76030,12 @@ proc runHealthCommand*(args: openArray[string]): int =
     stdout.writeLine("  --offline  Skip forge identity API probes; other checks retain their existing fetch behavior.")
     return 0
   let parsed = parseHealthArgs(args)
+  let stateFixActions =
+    if parsed.fix: applyStateFileMigrationFix(parsed.workspaceRoot)
+    else: @[]
+  if not parsed.json:
+    for line in stateFixActions:
+      stdout.writeLine(line)
   var (checks, ctx) = gatherHealthChecks(parsed)
 
   if parsed.fix and ctx.setAsideFiles > 0:
@@ -82612,16 +82739,10 @@ proc remoteCertificateIssuer*(host: PeerCacheHost): dw.CertificateIssuer =
       dw.requestCertificate(endpoint, h.leafProviderFor(), pin.anchors,
         pin.hostId, req)
 
-proc workerReposFrom(path: string): seq[(string, string)] =
+proc workerReposFrom(path: string): WorkerRepos =
   if path.len == 0 or not fileExists(path):
-    return @[]
-  for raw in readFile(path).splitLines:
-    let line = raw.strip()
-    if line.len == 0 or line.startsWith("#"):
-      continue
-    let parts = line.splitWhitespace()
-    if parts.len == 2:
-      result.add((parts[0], parts[1]))
+    return WorkerRepos()
+  parseWorkerRepos(readFile(path))
 
 proc workerEgressFrom(host: PeerCacheHost): seq[dw.EgressDestination] =
   ## FLOW-3: the lease allow-list — exactly the destinations the operator
@@ -82682,6 +82803,24 @@ proc leasePathEnv(closure: seq[string]): string =
   if keep.len == 0: keep = @["/usr/bin", "/bin"]
   keep.join($PathSep)
 
+proc workerMaterializeStatusLines*(receiver: dw.WorkerReceiver): seq[string] =
+  ## The worker's materialization lines of the status file (Distributed-
+  ## Execution M1): the worktree pool's counters — zeros and an empty clone
+  ## mode for a receiver without a pool — and the last materialization's
+  ## time.
+  let pool = receiver.pool
+  @["worker_worktree_leases=" & (if pool.isNil: "0" else: $pool.leases),
+    "worker_worktree_base_hits=" & (if pool.isNil: "0" else: $pool.baseHits),
+    "worker_worktree_base_checkouts=" &
+      (if pool.isNil: "0" else: $pool.baseCheckouts),
+    "worker_worktree_base_fetches=" &
+      (if pool.isNil: "0" else: $pool.baseFetches),
+    "worker_worktree_base_packs=" & (if pool.isNil: "0" else: $pool.basePacks),
+    "worker_worktree_clone=" & (if pool.isNil: "" else: pool.lastCloneMode),
+    "worker_materializations=" & $receiver.materializations,
+    "worker_last_materialize_ms=" &
+      receiver.lastMaterializeMs.formatFloat(ffDecimal, 1)]
+
 proc startDaemonWorkerRole*(host: PeerCacheHost; stateDir: string): string =
   ## Gives `host` the worker role: `mkReachGoalRequest` frames the gate
   ## admitted (orchestrator role only) are answered by a
@@ -82737,6 +82876,7 @@ proc startDaemonWorkerRole*(host: PeerCacheHost; stateDir: string): string =
       "the worker role is refused on this host: the executable closure of " &
       "its leases cannot be computed (" & closure.reason & ")")
   let workerDir = stateDir / "worker"
+  let repos = workerReposFrom(host.config.workerReposPath)
   var hide = @[stateDir]
   if host.config.tlsCertPath.len > 0:
     hide.add(host.config.tlsCertPath.parentDir)
@@ -82746,7 +82886,8 @@ proc startDaemonWorkerRole*(host: PeerCacheHost; stateDir: string): string =
   let config = dw.WorkerConfig(
     leaseRoot: workerDir / "leases",
     metaRoot: workerDir / "lease-meta",
-    repoCaches: workerReposFrom(host.config.workerReposPath),
+    repoCaches: repos.caches,
+    fetchRemotes: repos.remotes,
     platform: currentPlatformTag(),
     readRoots: roots.read,
     closureRoots: closure.roots,
@@ -82759,7 +82900,8 @@ proc startDaemonWorkerRole*(host: PeerCacheHost; stateDir: string): string =
     profile: host.config.trustProfile,
     workerHost: $host.selfPeerId,
     detectionLogPath: workerDir / "detections.log",
-    recordIndexPath: workerDir / "execution-records.index")
+    recordIndexPath: workerDir / "execution-records.index",
+    worktreePoolRoot: workerDir / "worktree-pool")
   createDir(config.leaseRoot)
   createDir(config.metaRoot)
   # A goal's stdout/stderr and lease reports can carry the developer's
@@ -82892,7 +83034,8 @@ proc startDaemonWorkerRole*(host: PeerCacheHost; stateDir: string): string =
       "worker_trust_profile=" & $h.config.trustProfile,
       "worker_isolation=" & dw.isolationLevelOf(dw.LeaseSpec(
         layers: config.layers, memfdNoexec: hardened)),
-      "worker_execution_records=" & $receiver.executionRecords,
+      "worker_execution_records=" & $receiver.executionRecords] &
+    workerMaterializeStatusLines(receiver) & @[
       "worker_heartbeat_ms=" & $lastHeartbeatMs,
       "worker_heartbeat_interval_ms=" & $canaryMs,
       "worker_detector_probe_ok=" & (if probeRounds == 0: "n/a"
@@ -82925,7 +83068,8 @@ proc startDaemonWorkerRole*(host: PeerCacheHost; stateDir: string): string =
     " isolation=" & isolation &
     (if conf.reason.len > 0: " (" & conf.reason & ")" else: "") &
     " lease_root=" & config.leaseRoot & " repos=" &
-    $config.repoCaches.len & " egress=" & $config.egress.len &
+    $config.repoCaches.len & " remotes=" & $config.fetchRemotes.len &
+    " egress=" & $config.egress.len &
     " closure=" & $config.closureRoots.len &
     " lease_limits=" & (if cgroups.available: "cgroup" else: "rlimit (" &
       cgroups.reason & ")") &
@@ -82950,9 +83094,15 @@ proc installUserDaemonPeerCacheService*() =
       if not parsed.ok or parsed.kind != pcsLan:
         raise newException(ValueError,
           "invalid daemon --peer-cache spec (expected lan://<CIDR>…): " & spec)
+      let logPath = config.logPath
       let host = startPeerCacheHost(parsed.config,
         daemonPeerIdFor(config.stateDir), cacheRoot = currentActionCacheRoot(),
-        stateDir = config.stateDir)
+        stateDir = config.stateDir,
+        # The daemon's stdout and stderr go to /dev/null: the node's
+        # operator diagnostics go to the daemon log instead.
+        diagnosticLog = proc(line: string) {.gcsafe, closure.} =
+          {.cast(gcsafe).}:
+            appendUserDaemonLogLine(logPath, line))
       activeDaemonPeerCacheHost = host
       var workerLine = ""
       if parsed.config.workerEnabled:
@@ -88818,6 +88968,162 @@ proc siblingRemovalJson(report: SiblingRemovalReport; lockPath,
     "droppedPins": report.droppedPins,
     "behindManifests": report.behindManifests}
 
+proc committedLockPlatform(lockP: string): string =
+  ## The ``platform`` the committed lock at ``lockP`` was solved for, or ""
+  ## when there is no lock or it cannot be read. An unreadable lock is left to
+  ## the ordinary refresh path, which reports it.
+  if not fileExists(extendedPath(lockP)): return ""
+  try: parseLockedDependencies(readFile(extendedPath(lockP))).platform
+  except CatchableError: ""
+
+proc refreshForeignPlatformLockPins(projectDir, lockP, lockPlatform,
+    hostPlatform, verb: string; allowance: PinRegressionAllowance;
+    asJson: bool): int =
+  ## ``repro lock refresh`` of a committed lock solved for ANOTHER platform
+  ## than this host's, with no ``--platform`` given.
+  ##
+  ## The solve cannot be redone here for the lock's platform: the solver
+  ## inputs come from the recipe's provider compiled and run on THIS host, so
+  ## its platform-conditional `uses:` are this host's. A re-solve would
+  ## therefore replace the committed solve (``platform``, ``packages``,
+  ## ``inputs_digest``) with this host's — the defect recorded for macOS in
+  ## issue 2026-10-23 (lock refresh rewrites a lock committed for
+  ## amd64-linux), and measured on Windows (40 packages -> 26, platform
+  ## amd64-linux -> amd64-windows). Locking-And-Solver.md treats the platform
+  ## as a deliberate axis of the lock, so a refresh must not fold the host's
+  ## in.
+  ##
+  ## What CAN be done from any host is the develop-mode sibling re-pin of
+  ## Unified-Locking-And-Hooks.md §13.2/§13.3, which is an observation rather
+  ## than a solve. This runs exactly the commit-time re-pin
+  ## (``planCommittedLockRepin``): every sibling entry whose checkout is
+  ## present is re-observed, missing develop-set siblings are added, nothing
+  ## is removed, the root entry is untouched, and only the `deps` line is
+  ## rewritten, so the solve and the platform stay byte-identical. It is
+  ## held to the same rules as the hook: a pin never moves backward unless
+  ## ``--allow-pin-regression`` / ``REPRO_ALLOW_PIN_REGRESSION`` names it
+  ## (exit 4, nothing written), a repository `flake.lock` also resolves
+  ## moves in both locks or in neither (§16.3 H3; this verb never writes
+  ## `flake.lock`, so such a repository is held and named), a recipe
+  ## constraint excluding the observed revision refuses (§16.4), and the
+  ## result must be consistent with the recipes (§16.3 H1/H2). Unlike the
+  ## hook it stages nothing.
+  ##
+  ## ``--platform=<p>`` is the explicit way to re-solve anyway, and the
+  ## notice printed here names it.
+  let label = "repro lock " & verb
+  stderr.writeLine(label & ": " & lockP & " is solved for " & lockPlatform &
+    ", and this host is " & hostPlatform & "; a re-solve here would replace " &
+    "the " & lockPlatform & " solve with this host's, so only the sibling " &
+    "revision pins are refreshed, as the commit-time re-pin does (packages, " &
+    "inputs_digest, platform and the lock's own entry are kept, and no pin " &
+    "is removed). To re-solve, refresh on a host whose platform is " &
+    lockPlatform & ", or " &
+    "pass --platform=" & hostPlatform & " to re-target the lock to this " &
+    "host deliberately.")
+  var plan: CommittedLockRepinPlan
+  try:
+    plan = planCommittedLockRepin(projectDir, allowance.names)
+  except CatchableError as err:
+    stderr.writeLine(label & ": cannot re-pin " & lockP & ": " & err.msg &
+      " (nothing was written)")
+    return 1
+  let failure = committedLockRepinFailure(plan)
+  if failure.len > 0:
+    stderr.writeLine(label & ": " & failure & " (nothing was written)")
+    return 1
+  for w in plan.warnings:
+    stderr.writeLine(label & ": " & w)
+  var used: seq[string]
+  for r in plan.allowed: used.add(r.sibling)
+  for note in pinRegressionAllowanceNotes(allowance, used, plan.examined,
+      action = verb):
+    stderr.writeLine(label & ": note: " & note)
+  if plan.refused.len > 0:
+    var identity: GitToolIdentity
+    try: identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+    except CatchableError: discard
+    var names: seq[string]
+    for r in plan.refused:
+      if r.sibling notin names: names.add(r.sibling)
+    for n in allowance.names:
+      if n notin names: names.add(n)
+    let rerun = label & " " & quoteShell(projectDir) &
+      " --allow-pin-regression=" & pinRegressionShellWord(names.join(","))
+    for line in renderPinRegressionRefusal(plan.refused,
+        resolvePostCommitWorkspaceRoot(projectDir, ""), identity,
+        action = verb, rerun = rerun):
+      stderr.writeLine(label & ": " & line)
+    return 4
+  for r in plan.allowed:
+    stderr.writeLine(label & ": " &
+      pinRegressionAllowedLine(r, via = "--allow-pin-regression"))
+  # §16.3 H3 / §16.4 — reconciled against `flake.lock` and the recipe
+  # constraints exactly as at commit time. The `flake.lock` side is not
+  # planned: this verb never writes it.
+  let workspaceRoot = resolvePostCommitWorkspaceRoot(projectDir, "")
+  var flake: FlakeCommitRefresh
+  var coordination: CommitRepinCoordination
+  try:
+    # `true`: the repro.lock side is planned.
+    coordination = coordinateCommitRepin(projectDir, workspaceRoot, true,
+      plan, flake)
+  except CatchableError as err:
+    stderr.writeLine(label & ": the re-pin could not be reconciled with " &
+      "flake.lock and the recipe constraints (" & err.msg & "); nothing " &
+      "was written")
+    return 1
+  if coordination.exclusions.len > 0:
+    annotateSiblingGuidance(projectDir, coordination.exclusions)
+    stderr.writeLine(label & ": REFUSED: a sibling checkout is at a " &
+      "revision its recipe constraint excludes, and the re-pin moves lock " &
+      "resolutions only, never a recipe constraint; nothing was written")
+    for line in renderConsistencyRefusal(coordination.exclusions):
+      stderr.writeLine(label & ": " & line)
+    return 1
+  for n in coordination.heldNotes:
+    stderr.writeLine(label & ": WARNING: " & n)
+  let plannedReproLock =
+    if plan.changed:
+      some(splicedCommittedLockDeps(plan.text, plan.originalDepsLine,
+        plan.depsLine))
+    else: none(string)
+  var consistency: ConsistencyReport
+  try:
+    consistency = checkRecipeLockConsistency(gatherConsistencyInputs(
+      projectDir, csWorktree, none(string), plannedReproLock))
+  except CatchableError as err:
+    stderr.writeLine(label & ": the recipe/lock consistency (H1/H2) could " &
+      "not be checked: " & err.msg)
+  if consistency.hasViolations:
+    annotateSiblingGuidance(projectDir, consistency.violations)
+    stderr.writeLine(label & ": REFUSED: the recipe and the locks the " &
+      "re-pin would leave are inconsistent; nothing was written")
+    for line in renderConsistencyRefusal(consistency.violations):
+      stderr.writeLine(label & ": " & line)
+    return 1
+  let applied = applyCommittedLockRepin(plan)
+  if not applied.ok:
+    stderr.writeLine(label & ": " & applied.line)
+    return 1
+  if asJson:
+    var moved = newJArray()
+    var added = newJArray()
+    for m in plan.moves:
+      if m.added: added.add(%*{"name": m.name, "revision": m.newRev})
+      else: moved.add(%*{"name": m.name, "from": m.oldRev, "to": m.newRev})
+    echo $(%*{"status": "ok", "mode": "sibling-repin", "lock": lockP,
+      "lockPlatform": lockPlatform, "hostPlatform": hostPlatform,
+      "changed": plan.changed, "moved": moved, "added": added,
+      "held": %plan.held})
+  elif plan.changed:
+    stdout.writeLine(label & ": wrote " & lockP & " (sibling re-pin, " &
+      "platform " & lockPlatform & " kept): " & plan.line)
+  else:
+    stdout.writeLine(label & ": " & lockP & " is up to date (sibling " &
+      "re-pin, platform " & lockPlatform & " kept): " & plan.line)
+  0
+
 proc runLockGenerationVerb(rest: openArray[string]; verb: string;
                            entryPoint: LockGenerationEntryPoint;
                            writeByDefault: bool): int =
@@ -88836,6 +89142,49 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
   let lockP =
     if lockOverride.len > 0: absolutePath(lockOverride)
     else: committedLockPath(projectDir)
+  # A refresh of a lock committed for another platform re-pins siblings only
+  # (``refreshForeignPlatformLockPins``): this host cannot redo that
+  # platform's solve, and must not replace it with its own. `--platform`
+  # given explicitly is the deliberate re-solve, and is not intercepted.
+  if entryPoint == lgeLockRefresh and platformOverride.len == 0:
+    let lockPlatform = committedLockPlatform(lockP)
+    let hostPlatform = currentPlatformId()
+    if lockPlatform.len > 0 and lockPlatform != hostPlatform:
+      # Every flag that shapes a solve (what to re-solve, under which
+      # strategy, from which inputs or registries) asks for something the
+      # sibling re-pin does not do, so it is refused rather than ignored.
+      var solveFlags: seq[string]
+      for arg in rest:
+        for flag in ["--repin", "--provisioning", "--strategy", "--lowest",
+            "--highest", "--inputs", "--registry"]:
+          if (arg == flag or arg.startsWith(flag & "=")) and
+              flag notin solveFlags:
+            solveFlags.add(flag)
+      if solveFlags.len > 0:
+        stderr.writeLine("repro lock " & verb & ": " & lockP & " is solved " &
+          "for " & lockPlatform & " and this host is " & hostPlatform & "; " &
+          solveFlags.join(", ") & " shape" &
+          (if solveFlags.len == 1: "s" else: "") & " a solve, which this " &
+          "host can only do for its own platform. Run it on a host whose " &
+          "platform is " & lockPlatform & ", or pass " &
+          "--platform=" & hostPlatform & " to re-target the lock to this " &
+          "host deliberately (nothing was written)")
+        return 2
+      if cmpPaths(lockP, committedLockPath(projectDir)) != 0:
+        stderr.writeLine("repro lock " & verb & ": " & lockP & " is solved " &
+          "for " & lockPlatform & " and this host is " & hostPlatform & "; " &
+          "a sibling re-pin maintains the project's committed lock only, " &
+          "not one selected with --lock. Pass --platform=" & hostPlatform &
+          " to re-solve it for this host deliberately (nothing was written)")
+        return 2
+      let envAllowance = parsePinRegressionAllowance(
+        getEnv(PinRegressionAllowEnv))
+      var allowance = PinRegressionAllowance(names: gen.allowRegression,
+        rejected: envAllowance.rejected)
+      for n in envAllowance.names:
+        if n notin allowance.names: allowance.names.add(n)
+      return refreshForeignPlatformLockPins(projectDir, lockP, lockPlatform,
+        hostPlatform, verb, allowance, asJson)
   # `--repin` (Locking-And-Solver.md §"Targeted re-pin"): "It requires a
   # committed lock (there is nothing to hold otherwise) ... either missing is a
   # usage error (exit 2) that writes nothing." Checked BEFORE the provider

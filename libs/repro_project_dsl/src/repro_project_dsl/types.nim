@@ -169,6 +169,8 @@ type
       ## through to the engine so ``repro why`` can print the reason a
       ## tool's randomness was ignored instead of leaving it to folklore.
     providerEntrypointId*: string
+    optionalOutputFlags*: seq[string]
+      ## Output parameters that the tool may legitimately leave absent.
     removeBeforeRunFlags*: seq[string]
       ## The output flags (``role = output`` parameters) whose values the
       ## engine removes before every edge of this command runs, declared
@@ -1558,6 +1560,16 @@ type
     deps*: seq[string]
     inputs*: seq[string]
     outputs*: seq[string]
+    optionalOutputs*: seq[string]
+      ## Tool-owned output candidates whose existence depends on the tool's
+      ## result (for example the ``meson install --destdir`` tree, which is
+      ## absent when the project installs nothing). Not for an output a
+      ## consumer needs: an edge whose tool may skip such an output makes it
+      ## itself (the CMake generator's MSVC import library).
+      ## Absent candidates are successful; present candidates are cached and
+      ## restored. Ordinary ``outputs`` remain obligatory. The engine removes
+      ## old candidates before execution and restores their recorded absence
+      ## on a cache hit, so stale artifacts cannot impersonate fresh output.
     pool*: string
     poolUnits*: uint32
     depfile*: string

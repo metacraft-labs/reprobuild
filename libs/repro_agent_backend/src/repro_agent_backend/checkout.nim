@@ -17,6 +17,7 @@
 import std/[os, osproc, streams, strtabs, strutils]
 
 import repro_core/ambient_execution
+import repro_core/link_target
 
 import ./ownership
 
@@ -75,7 +76,7 @@ proc copyDefinition(src, dst: string) =
     let d = dst / rel
     createDir(d.parentDir)
     if symlinkExists(s):
-      createSymlink(expandSymlink(s), d)
+      createSymlink(readSymlinkTarget(s), d)
     else:
       copyFileWithPermissions(s, d)
 

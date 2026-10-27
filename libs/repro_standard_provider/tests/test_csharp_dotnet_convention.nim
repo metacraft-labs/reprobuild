@@ -28,7 +28,7 @@
 ##     fall-back) + ``<OutputType>`` (extension selector) compose the
 ##     predicted binary path.
 
-import std/[os, strutils, unittest]
+import std/[os, osproc, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 import repro_test_support
 
@@ -65,6 +65,60 @@ proc inlineArgvOf(action: BuildActionDef): seq[string] =
         return @[]
       return arg.encodedValue.split("\x1f")
   @[]
+
+proc unifiedPaths(paths: seq[string]): seq[string] =
+  for path in paths:
+    result.add(path.replace('\\', '/'))
+
+proc scratchProject(name, csproj: string): string =
+  ## A one-file C# project under the temp dir with ``csproj`` as its
+  ## project file and an ``app`` executable member, for emit-only cases.
+  result = createTempDir(name & "-", "")
+  writeFile(result / "Program.cs",
+    "using System;\nConsole.WriteLine(\"x\");\n")
+  writeFile(result / "app.csproj", csproj)
+  writeFile(result / "packages.lock.json", "{\n  \"version\": 1\n}\n")
+  writeFile(result / "reprobuild.nim",
+    "import repro_project_dsl\n" &
+    "package fakeDotnetScratch:\n" &
+    "  uses:\n" &
+    "    \"dotnet >=8\"\n" &
+    "\n" &
+    "  executable app:\n" &
+    "    discard\n")
+
+proc exeCsproj(tfm: string; extra = ""): string =
+  "<Project Sdk=\"Microsoft.NET.Sdk\">\n" &
+  "  <PropertyGroup>\n" &
+  "    <OutputType>Exe</OutputType>\n" &
+  "    <TargetFramework>" & tfm & "</TargetFramework>\n" &
+  extra &
+  "  </PropertyGroup>\n" &
+  "</Project>\n"
+
+proc emittedBuildAction(projectRoot: string): BuildActionDef =
+  let conv = dotnet_convention.csharpDotnetConvention()
+  let request = dummyRequest(projectRoot)
+  doAssert conv.recognize(projectRoot, request)
+  let fragment = conv.emitFragment(projectRoot, request)
+  for node in fragment.nodes:
+    if node.kind != gnkAction:
+      continue
+    let action = decodeBuildActionPayload(toBytes(node.payload))
+    if action.id == "csharp-dotnet-build":
+      return action
+  raise newException(ValueError, "no csharp-dotnet-build action emitted")
+
+proc hostRid(): string =
+  ## The RID a RID-less ``dotnet build`` on this host targets.
+  let os =
+    when defined(windows): "win"
+    elif defined(macosx): "osx"
+    else: "linux"
+  let arch =
+    when defined(arm64): "arm64"
+    else: "x64"
+  os & "-" & arch
 
 proc dotnetToolchainReady(): bool =
   ## True when ``dotnet`` is on PATH. The convention's ``recognize``
@@ -292,11 +346,11 @@ suite "csharp-dotnet convention M42":
       # Output is bin/Release/<TargetFramework>/<AssemblyName>.exe
       # under the fixture root. The fixture pins TargetFramework=net8.0
       # + OutputType=Exe + AssemblyName defaults from "hello.csproj"
-      # so the binary lands at ``bin/Release/net8.0/hello.exe``.
+      # so the binary lands at ``bin/Release/net8.0/hello.dll``.
       var sawExeOutput = false
       for outPath in buildAct.outputs:
         let unified = outPath.replace('\\', '/')
-        if unified.endsWith("/bin/Release/net8.0/hello.exe"):
+        if unified.endsWith("/bin/Release/net8.0/hello.dll"):
           sawExeOutput = true
       check sawExeOutput
 
@@ -321,7 +375,7 @@ suite "csharp-dotnet convention M42":
       # Use ``<TargetFrameworks>`` (plural, semicolon-separated) to
       # exercise the first-entry pickoff; pin a custom AssemblyName
       # and ``OutputType=Exe`` so the predicted path is
-      # ``bin/Release/net9.0/customAsm.exe``.
+      # ``bin/Release/net9.0/customAsm.dll``.
       writeFile(scratch / "custom.csproj",
         "<Project Sdk=\"Microsoft.NET.Sdk\">\n" &
         "  <PropertyGroup>\n" &
@@ -353,7 +407,7 @@ suite "csharp-dotnet convention M42":
         let action = decodeBuildActionPayload(toBytes(node.payload))
         for outPath in action.outputs:
           let unified = outPath.replace('\\', '/')
-          if unified.endsWith("/bin/Release/net9.0/customAsm.exe"):
+          if unified.endsWith("/bin/Release/net9.0/customAsm.dll"):
             sawCustomBinary = true
       check sawCustomBinary
 
@@ -403,3 +457,123 @@ suite "csharp-dotnet convention M42":
           if unified.endsWith("/bin/Release/net8.0/mylib.dll"):
             sawDllOutput = true
       check sawDllOutput
+
+  test "real SDK executable produces its managed output with apphost disabled":
+    # A real SDK restore supplies the lock and framework assets before the
+    # convention's deliberately offline --no-restore build. No tool is mocked.
+    let scratch = createTempDir("repro-dotnet-output-obligation-", "")
+    defer: removeDir(scratch)
+    let dotnet = findExe("dotnet")
+    require dotnet.len > 0
+    let created = execCmdEx(@[dotnet, "new", "console", "--no-restore",
+      "--name", "OutputRegression", "--output", scratch].quoteShellCommand())
+    checkpoint created.output
+    require created.exitCode == 0
+    let project = scratch / "OutputRegression.csproj"
+    writeFile(project, readFile(project).replace("</PropertyGroup>",
+      "<UseAppHost>false</UseAppHost><UseSharedCompilation>false</UseSharedCompilation></PropertyGroup>"))
+    let restored = execCmdEx(@[dotnet, "restore", project,
+      "--use-lock-file", "--ignore-failed-sources"].quoteShellCommand())
+    checkpoint restored.output
+    require restored.exitCode == 0
+    writeFile(scratch / "reprobuild.nim", "import repro_project_dsl\npackage outputRegression:\n  uses:\n    \"dotnet >=8\"\n  executable OutputRegression:\n    discard\n")
+    let conv = dotnet_convention.cSharpDotnetConvention()
+    require conv.recognize(scratch, dummyRequest(scratch))
+    let fragment = conv.emitFragment(scratch, dummyRequest(scratch))
+    var sawBuild = false
+    for node in fragment.nodes:
+      if node.kind != gnkAction: continue
+      let action = decodeBuildActionPayload(toBytes(node.payload))
+      if action.id != "csharp-dotnet-build": continue
+      sawBuild = true
+      let built = execCmdEx(inlineArgvOf(action).quoteShellCommand(), workingDir = scratch)
+      checkpoint built.output
+      require built.exitCode == 0
+      require action.outputs.len == 1
+      check action.outputs[0].replace('\\', '/').endsWith(
+        "/OutputRegression.dll")
+      check fileExists(action.outputs[0])
+      require action.optionalOutputs.len == 1
+      check not fileExists(action.optionalOutputs[0])
+    check sawBuild
+
+  test "output-path resolution: RuntimeIdentifier names the apphost and the directory":
+    if not dotnetToolchainReady():
+      skip("dotnet not on PATH: emitFragment refuses without a driver")
+    else:
+      for (rid, appHost) in [("linux-x64", "app"), ("win-x64", "app.exe")]:
+        let scratch = scratchProject(
+          "test_csharp_dotnet_convention_rid_" & rid,
+          exeCsproj("net8.0",
+            "    <RuntimeIdentifier>" & rid & "</RuntimeIdentifier>\n"))
+        defer: removeDir(scratch)
+        let action = emittedBuildAction(scratch)
+        checkpoint "rid " & rid & ": " & action.outputs.unifiedPaths.join(", ") &
+          " optional: " & action.optionalOutputs.unifiedPaths.join(", ")
+        check action.outputs.unifiedPaths.len == 1
+        check action.outputs.unifiedPaths[0].endsWith(
+          "/bin/Release/net8.0/" & rid & "/app.dll")
+        check action.optionalOutputs.unifiedPaths ==
+          @[action.outputs.unifiedPaths[0].parentDir.replace('\\', '/') &
+            "/" & appHost]
+
+  test "output-path resolution: AppendTargetFrameworkToOutputPath=false drops the TFM segment":
+    if not dotnetToolchainReady():
+      skip("dotnet not on PATH: emitFragment refuses without a driver")
+    else:
+      let scratch = scratchProject("test_csharp_dotnet_convention_no_tfm_dir",
+        exeCsproj("net8.0", "    <AppendTargetFrameworkToOutputPath>" &
+          "false</AppendTargetFrameworkToOutputPath>\n"))
+      defer: removeDir(scratch)
+      let action = emittedBuildAction(scratch)
+      check action.outputs.unifiedPaths.len == 1
+      check action.outputs.unifiedPaths[0].endsWith("/bin/Release/app.dll")
+
+  test "output-path resolution: a .NET Framework executable is the .exe assembly itself":
+    if not dotnetToolchainReady():
+      skip("dotnet not on PATH: emitFragment refuses without a driver")
+    else:
+      let scratch = scratchProject("test_csharp_dotnet_convention_netfx",
+        exeCsproj("net48"))
+      defer: removeDir(scratch)
+      let action = emittedBuildAction(scratch)
+      check action.outputs.unifiedPaths.len == 1
+      check action.outputs.unifiedPaths[0].endsWith(
+        "/bin/Release/net48/app.exe")
+      check action.optionalOutputs.len == 0
+
+  test "real SDK build with a RuntimeIdentifier writes the declared outputs":
+    # The engine fails a cacheable action that exits 0 without a required
+    # output (Build-Engine-And-Scheduler.md, "A declared output is an
+    # obligation"). A RuntimeIdentifier moves the build output into a
+    # ``<rid>/`` sub-directory; only a real SDK build can show that the
+    # declared paths are the ones it writes. The host's own RID needs only
+    # the in-box apphost pack, so the restore does not reach for a runtime
+    # pack. No tool is mocked.
+    if not dotnetToolchainReady():
+      skip("dotnet not on PATH: the real-build case needs the .NET SDK")
+    else:
+      let dotnet = findExe("dotnet")
+      let scratch = scratchProject("test_csharp_dotnet_convention_rid_real",
+        exeCsproj("net8.0", "    <RuntimeIdentifier>" & hostRid() &
+          "</RuntimeIdentifier>\n" &
+          "    <UseSharedCompilation>false</UseSharedCompilation>\n"))
+      defer: removeDir(scratch)
+      removeFile(scratch / "packages.lock.json")
+      let restored = execCmdEx(@[dotnet, "restore", scratch / "app.csproj",
+        "--use-lock-file"].quoteShellCommand())
+      checkpoint restored.output
+      require restored.exitCode == 0
+      let action = emittedBuildAction(scratch)
+      let built = execCmdEx(inlineArgvOf(action).quoteShellCommand(),
+        workingDir = scratch)
+      checkpoint built.output
+      require built.exitCode == 0
+      require action.outputs.len == 1
+      check action.outputs[0].replace('\\', '/').endsWith(
+        "/bin/Release/net8.0/" & hostRid() & "/app.dll")
+      check fileExists(action.outputs[0])
+      # The host RID writes the apphost; it is optional only because some
+      # configurations do not.
+      require action.optionalOutputs.len == 1
+      check fileExists(action.optionalOutputs[0])

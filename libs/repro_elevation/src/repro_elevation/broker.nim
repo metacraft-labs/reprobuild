@@ -477,6 +477,14 @@ proc launchAndDriveBroker*(reproExe: string;
   ## Raises `EElevationDeclined` if the user declines the prompt
   ## (the caller treats that as `--no-elevate`), `EBrokerLaunch` /
   ## `EBrokerLost` / `EChannelAuth` on the respective failures.
+  ##
+  ## An empty `reproExe` is refused before anything is launched: the CLI
+  ## resolves it through the self-spawn guard, which answers "" for an
+  ## embedded caller that has not declared itself `repro`, and such an image
+  ## does not implement `--privileged-broker`.
+  if reproExe.len == 0:
+    raiseBrokerLaunch("no `repro` image to launch it with (an embedded " &
+      "caller must name one; its own image is never used as the broker)")
   let nonce = generateNonce()
   var ch = createListeningChannel(nonce)
   var channelClosed = false

@@ -46,6 +46,13 @@
 ##   be strictly worse than the refusal it replaces, and it would pass a test
 ##   that only checked that `@issuer-minted:` failed.
 ##
+## RESOLVER READINESS. The attachment cases withdraw the live owner's
+## seed marker, verify that the consumer launches nothing, release the
+## failed attachment's real lease, and restore the marker for a ready
+## control. They cover typed and legacy probes, with and without any
+## registration. A separate case retains an old effective artifact beside
+## a fresh interface and challenges missing/corrupt declarations too.
+##
 ## § WHAT IS REAL
 ##
 ##   * a real workspace on a real filesystem, with a real
@@ -85,12 +92,16 @@
 ## test.
 
 import std/[json, options, os, osproc, strtabs, streams, strutils, tempfiles,
-    times, unittest]
+    times, typedthreads, unittest]
 
 import repro_cli_support/dev_session      # the two argv token families
 import repro_cli_support/service_registrar  # the declared-program protocol
 import repro_resources/service_registry
 import repro_resources/state_store
+import repro_dev_env_artifacts
+from repro_dev_env_engine import devEnvEdgeLockPath
+from repro_interface_artifacts import acquireExclusiveFileLock,
+  releaseExclusiveFileLock
 import repro_test_support
 import repro_test_support/fixture_processes
 
@@ -508,6 +519,16 @@ proc clientIdFromArgv(project: string): string =
   raise newException(ValueError,
     "no `--client-id` on the argv of " & project & ": " & $argv)
 
+type F5OutputDrain = object
+  stream: Stream
+  output: string
+
+proc drainF5Output(target: ptr F5OutputDrain) {.thread.} =
+  # A blocked output pipe must not masquerade as waiting for the owner lock.
+  # Drain concurrently while the parent holds the publication rendezvous.
+  {.cast(gcsafe).}:
+    target.output = target.stream.readAll()
+
 suite "L9 F5 — two sessions read one instance's minted identifier":
   # Every case owns a fresh workspace and daemon, whether run alone or as
   # part of the whole binary. Setup stays lazy so --list/--list-json never
@@ -550,7 +571,7 @@ suite "L9 F5 — two sessions read one instance's minted identifier":
     # and so writes its project-interface artifact -- WITHOUT converging
     # any shared instance; converging is `repro up` / `repro dev`.
     let lift = c.runRepro(c.issuerOwner,
-      @["shell", "--activity=" & Activity, "--print-env=json"])
+      @["shell", "--print-env=json", "--activity=" & Activity])
     checkpoint("owner lift (no converge):\n" & lift.output)
     check lift.exitCode == 0
 
@@ -845,3 +866,254 @@ suite "L9 F5 — two sessions read one instance's minted identifier":
     let ownerDown = c.runRepro(c.issuerOwner, @["down", "--activity=" & Activity])
     check ownerDown.exitCode == 0
     check ownerDown.output.contains("ReleasedLastHolder")
+
+
+  template consumerRechecksReadiness(withRegistrations: bool; legacyProbe = false) =
+    # Keep the owner process alive but withdraw the seed marker. A resolver
+    # must observe the OWNER's path, not its own cwd, and cannot launch its
+    # app while the shared instance is unready.
+    let recipe = c.devOwner / "repro.nim"
+    writeFile(recipe, readFile(recipe).replace(
+      "readiness fileExists(\"state/idp.ready\", timeoutMs = 60000)",
+      "readiness fileExists(\"state/idp.ready\", timeoutMs = 1000)"))
+    when not withRegistrations:
+      # Neither session can consume a minted id when this instance has no
+      # registration resources. Keep their real supervised apps, with a
+      # literal argv value that the ready controls check independently.
+      writeFile(recipe, readFile(recipe).replace(
+        "        converge " & ConvergedPoint & "\n", "").replace(
+        MintedAttributeTokenPrefix & Member & MintedAttributeTokenSuffix,
+        "no-registration"))
+    when legacyProbe:
+      writeFile(recipe, readFile(recipe).replace(
+        "        readiness fileExists(\"state/idp.ready\", timeoutMs = 1000)\n", "").replace(
+        "    enable " & Activity,
+        "    servicePlaceholder \"" & ServiceName & "\",\n" &
+        "      metadata = \"\"\"{\"readiness\":{\"kind\":\"fileExists\",\"path\":\"state/idp.ready\",\"timeoutMs\":1000}}\"\"\",\n" &
+        "      activities = [\"" & Activity & "\"]\n" &
+        "    enable " & Activity))
+    let ownerUp = c.runRepro(c.devOwner, @["up", "--activity=" & Activity])
+    checkpoint(ownerUp.output)
+    require ownerUp.exitCode == 0
+    removeFile(c.devOwner / "state" / "idp.ready")
+    # The development token accepts this instance's real registration stamp.
+    let consumer = c.devConsumer / "repro.nim"
+    writeFile(consumer, readFile(consumer).replace(
+      IssuerMintedAttributeTokenPrefix, MintedAttributeTokenPrefix))
+    when not withRegistrations:
+      writeFile(consumer, readFile(consumer).replace(
+        ".shared(\n      " & ConvergedPoint & " = append(\"" & ConsumerMember & "\"))",
+        ".shared()").replace(MintedAttributeTokenPrefix & Member &
+        MintedAttributeTokenSuffix, "no-registration"))
+    let attached = c.runRepro(c.devConsumer,
+      @["up", "--activity=" & ConsumerActivity])
+    checkpoint(attached.output)
+    check attached.output.contains("AttachSilently")
+    check attached.exitCode == 1
+    check attached.output.contains("readiness")
+    check attached.output.contains("fileExists")
+    check not fileExists(c.devConsumer / "state" / "app.argv")
+    let eventsPath = sessionDirOf(c.devConsumer, ConsumerActivity) / "events.jsonl"
+    require fileExists(eventsPath)
+    check readFile(eventsPath).contains("timeoutMs=1000")
+    check readFile(eventsPath).contains("service.readiness.timeout")
+    check not readFile(eventsPath).contains("session.up")
+    let released = c.runRepro(c.devConsumer,
+      @["down", "--activity=" & ConsumerActivity])
+    checkpoint(released.output)
+    check released.exitCode == 0
+    check released.output.contains("DroppedHolder")
+    # Restore the owner's marker and use the same consumer and same live
+    # instance. This control detects a probe incorrectly rebased to the
+    # consumer directory, and proves a ready attachment can still start.
+    writeFile(c.devOwner / "state" / "idp.ready", "ready\n")
+    let ready = c.runRepro(c.devConsumer,
+      @["up", "--activity=" & ConsumerActivity])
+    checkpoint(ready.output)
+    check ready.exitCode == 0
+    check ready.output.contains("AttachSilently")
+    check fileExists(c.devConsumer / "state" / "app.argv")
+    check readFile(eventsPath).contains("session.up")
+
+
+  test "a pure consumer rechecks its owner's readiness before starting":
+    consumerRechecksReadiness(true)
+    let durable = c.registrationFor("com.example.f5.dev", Member)
+    require durable.isSome
+    check clientIdFromArgv(c.devConsumer) == durable.get.mintedId
+
+  test "a pure consumer rechecks readiness without any registration":
+    consumerRechecksReadiness(false)
+    check clientIdFromArgv(c.devConsumer) == "no-registration"
+
+
+  test "a pure consumer rechecks a legacy placeholder readiness probe":
+    consumerRechecksReadiness(false, legacyProbe = true)
+    check clientIdFromArgv(c.devConsumer) == "no-registration"
+
+  test "a fresh interface cannot bless stale or unavailable effective readiness":
+    let ownerUp = c.runRepro(c.devOwner, @["up", "--activity=" & Activity])
+    checkpoint(ownerUp.output)
+    require ownerUp.exitCode == 0
+    let consumer = c.devConsumer / "repro.nim"
+    writeFile(consumer, readFile(consumer).replace(
+      IssuerMintedAttributeTokenPrefix, MintedAttributeTokenPrefix))
+    let effectivePath = parentDir(sessionDirOf(c.devOwner, Activity)) /
+      "dev-env.rbde"
+    let provenancePath = effectivePath & ".provenance"
+    let oldBytes = readFile(effectivePath)
+    let oldProvenance = readFile(provenancePath)
+    let recipe = c.devOwner / "repro.nim"
+    writeFile(recipe, readFile(recipe).replace(
+      "timeoutMs = 60000", "timeoutMs = 60001"))
+    let refreshed = c.runRepro(c.devOwner,
+      @["shell", "--print-env=json", "--activity=" & Activity])
+    checkpoint(refreshed.output)
+    require refreshed.exitCode == 0
+    let currentBytes = readFile(effectivePath)
+    let currentProvenance = readFile(provenancePath)
+    require oldProvenance != currentProvenance
+    # Model an interface refreshed before failed introspection left the old
+    # effective declaration behind. Its OWN generation must decide freshness.
+    writeFile(effectivePath, oldBytes)
+    writeFile(provenancePath, oldProvenance)
+    for invalid in ["stale", "unreadable", "missing-provenance",
+                    "missing-artifact", "wrong-project", "wrong-activity",
+                    "missing-service", "wrong-environment", "not-shared"]:
+      if invalid == "unreadable":
+        writeFile(provenancePath, currentProvenance)
+        writeFile(effectivePath, "not an artifact")
+      elif invalid == "missing-provenance":
+        writeFile(effectivePath, currentBytes)
+        removeFile(provenancePath)
+      elif invalid == "missing-artifact":
+        writeFile(provenancePath, currentProvenance)
+        removeFile(effectivePath)
+      elif invalid in ["wrong-project", "wrong-activity", "missing-service",
+                        "wrong-environment", "not-shared"]:
+        writeFile(effectivePath, currentBytes)
+        var changed = readDevEnvArtifact(effectivePath)
+        case invalid
+        of "wrong-project": changed.projectRoot = c.devConsumer
+        of "wrong-activity": changed.selectedActivities = @["unselected"]
+        of "wrong-environment":
+          for service in changed.services.mitems:
+            if service.name == ServiceName:
+              service.instanceEnvironment = "another-environment"
+        of "not-shared":
+          for service in changed.services.mitems:
+            if service.name == ServiceName:
+              service.instanceDeclared = false
+        else: changed.services.setLen(0)
+        writeDevEnvArtifact(effectivePath, changed)
+      let refused = c.runRepro(c.devConsumer,
+        @["up", "--activity=" & ConsumerActivity])
+      checkpoint(invalid & ": " & refused.output)
+      check refused.exitCode == 1
+      check refused.output.contains("effective service readiness")
+      check refused.output.contains("repro shell --print-env=json")
+      case invalid
+      of "wrong-project":
+        check refused.output.contains("belongs to another project")
+      of "wrong-activity":
+        check refused.output.contains("does not select activity")
+      of "missing-service":
+        check refused.output.contains("carries no service")
+      of "wrong-environment":
+        check refused.output.contains("selects environment")
+      of "not-shared":
+        check refused.output.contains("declares no shared instance")
+      else: discard
+      check not fileExists(c.devConsumer / "state" / "app.argv")
+      check not fileExists(sessionDirOf(c.devConsumer, ConsumerActivity) /
+        "shared-instances.json")
+    writeFile(effectivePath, currentBytes)
+    writeFile(provenancePath, currentProvenance)
+    let ready = c.runRepro(c.devConsumer,
+      @["up", "--activity=" & ConsumerActivity])
+    checkpoint(ready.output)
+    check ready.exitCode == 0
+    check ready.output.contains("AttachSilently")
+    check fileExists(c.devConsumer / "state" / "app.argv")
+
+
+  test "a resolver waits for coherent owner publication before reading its probe":
+    let consumerRecipePath = c.devConsumer / "repro.nim"
+    writeFile(consumerRecipePath, readFile(consumerRecipePath).replace(
+      IssuerMintedAttributeTokenPrefix, MintedAttributeTokenPrefix))
+    let ownerUp = c.runRepro(c.devOwner, @["up", "--activity=" & Activity])
+    checkpoint(ownerUp.output)
+    require ownerUp.exitCode == 0
+    # Warm the actual consumer through a full up/down, so a cold provider
+    # compile cannot hide a missing read lock during the rendezvous.
+    let warm = c.runRepro(c.devConsumer,
+      @["up", "--activity=" & ConsumerActivity])
+    checkpoint(warm.output)
+    require warm.exitCode == 0
+    let down = c.runRepro(c.devConsumer,
+      @["down", "--activity=" & ConsumerActivity])
+    checkpoint(down.output)
+    require down.exitCode == 0
+    let eventsPath = sessionDirOf(c.devConsumer, ConsumerActivity) / "events.jsonl"
+    removeFile(eventsPath)
+    removeFile(c.devConsumer / "state" / "app.argv")
+    let appReady = c.devConsumer / "state" / "app.ready"
+    if fileExists(appReady): removeFile(appReady)
+    let outDir = parentDir(sessionDirOf(c.devOwner, Activity))
+    let effectivePath = outDir / "dev-env.rbde"
+    let published = readFile(effectivePath)
+    var ownerLock = acquireExclusiveFileLock(devEnvEdgeLockPath(outDir))
+    var child: owned(Process)
+    var output: F5OutputDrain
+    var drainThread: Thread[ptr F5OutputDrain]
+    var draining = false
+    defer:
+      # Restore/release before terminating or joining a child that may be
+      # waiting on this lock. Both success and every failure clean up here.
+      try:
+        writeFile(effectivePath, published)
+      finally:
+        releaseExclusiveFileLock(ownerLock)
+      if not child.isNil:
+        if child.running():
+          child.terminate()
+          discard child.waitForExit()
+        if draining:
+          joinThread(drainThread)
+        child.close()
+    try:
+      # This is a real transient filesystem state while its writer holds the
+      # real publication lock, not a mocked artifact reader or daemon.
+      writeFile(effectivePath, "publication still in progress")
+      child = startProcess(c.reproBin,
+        args = @["up", "--activity=" & ConsumerActivity],
+        workingDir = c.devConsumer, env = c.envFor(),
+        options = {poUsePath, poStdErrToStdOut})
+      output.stream = child.outputStream
+      createThread(drainThread, drainF5Output, addr output)
+      draining = true
+      # A fixture rendezvous, not a timeout on the test: the warm reader has
+      # fifteen seconds to encounter the held lock. The absent-lock control
+      # exits here with an explicit malformed-effective-artifact refusal.
+      let releaseAt = epochTime() + 15.0
+      while child.running() and epochTime() < releaseAt:
+        sleep(25)
+      check child.running()
+      check not fileExists(c.devConsumer / "state" / "app.argv")
+      if fileExists(eventsPath):
+        check not readFile(eventsPath).contains("session.up")
+    finally:
+      writeFile(effectivePath, published)
+      releaseExclusiveFileLock(ownerLock)
+    joinThread(drainThread)
+    draining = false
+    checkpoint(output.output)
+    check child.waitForExit() == 0
+    child.close()
+    child = nil
+    check output.output.contains("AttachSilently")
+    let durable = c.registrationFor("com.example.f5.dev", Member)
+    require durable.isSome
+    check clientIdFromArgv(c.devConsumer) == durable.get.mintedId
+    require fileExists(eventsPath)
+    check readFile(eventsPath).contains("session.up")

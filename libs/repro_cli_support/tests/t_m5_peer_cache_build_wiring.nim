@@ -164,6 +164,56 @@ proc consumerConfig(cacheRoot: string;
 
 suite "LDRV-M5 peer-cache action-bundle build wiring":
 
+  test "peer bundles restore conditional presence and remove recorded absence":
+    # Keep the existing justified in-process network seam; the producer,
+    # action cache, CAS and filesystem process are real. A fresh consumer
+    # store proves these results came through peer installation, not a local hit.
+    resetTmp()
+    defer: removeDir(TmpDir)
+    let work = absolutePath(TmpDir / "work")
+    createDir(work)
+    createDir(work / "out")
+    writeFile(work / "input.txt", "peer product\n")
+    let sh = findExe("sh")
+    require sh.len > 0
+    for present in [false, true]:
+      let mode = if present: "exported" else: "no-exports"
+      let peer: PeerTable = newTable[string, seq[byte]]()
+      let command = "cat input.txt > out/module.dll; " &
+        (if present: "cp out/module.dll out/module.lib; " else: "") &
+        "printf 'out/module.dll: input.txt\\n' > artifact.d"
+      let link = action("conditional-" & mode, @[sh, "-c", command],
+        cwd = work, inputs = @["input.txt"], outputs = @["out/module.dll"],
+        optionalOutputs = @["out/module.lib"], depfile = "artifact.d",
+        cacheable = true, actionCachePolicy = ffpHybrid,
+        weakFingerprint = fingerprintForPayload(mode),
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
+      var sourceConfig = producerConfig(TmpDir / ("source-" & mode), peer)
+      sourceConfig.bypassRunQuota = true
+      sourceConfig.enableCachedOutputRestore()
+      let source = runBuild(graph([link]), sourceConfig)
+      checkpoint source.results[0].stderr
+      require source.results[0].status == asSucceeded
+      require peer[].len == 1
+      removeFile(work / "out/module.dll")
+      if present:
+        removeFile(work / "out/module.lib")
+      else:
+        writeFile(work / "out/module.lib", "stale export\n")
+      var targetConfig = consumerConfig(TmpDir / ("target-" & mode), peer)
+      targetConfig.bypassRunQuota = true
+      targetConfig.enableCachedOutputRestore()
+      let restored = runBuild(graph([link]), targetConfig)
+      checkpoint restored.results[0].stderr
+      check restored.results[0].status == asCacheHit
+      check restored.results[0].cacheDecision == cdHit
+      check not restored.results[0].launched
+      check readFile(work / "out/module.dll") == "peer product\n"
+      if present:
+        check readFile(work / "out/module.lib") == "peer product\n"
+      else:
+        check not fileExists(work / "out/module.lib")
+
   test "consumer build hits peer cache after producer publishes bundle":
     resetTmp()
     let sourceRoot = TmpDir / "source"

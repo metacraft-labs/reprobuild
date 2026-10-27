@@ -16,7 +16,7 @@
 import std/unittest
 import ./dsl_port/service_block_compile_probe
 
-proc recipe(removed: string): string =
+proc recipe(removed: string; directive = "removeBeforeRun"): string =
   ## A one-tool package whose `cli:` declares `removeBeforeRun <removed>`
   ## over an output positional `image` and an input positional `source`.
   "import repro_project_dsl\n" &
@@ -28,7 +28,7 @@ proc recipe(removed: string): string =
     "      pos image is string, role = output\n" &
     "      pos source is string, role = input\n" &
     "      outputs image\n" &
-    "      removeBeforeRun " & removed & "\n"
+    "      " & directive & " " & removed & "\n"
 
 suite "t_dsl_remove_before_run_names_only_outputs":
   test "an output parameter is accepted":
@@ -52,3 +52,17 @@ suite "t_dsl_remove_before_run_names_only_outputs":
     check not rejected.ok
     check rejected.mentions("removeBeforeRun: 'missing' is not a flag or " &
       "positional visible in this cli scope")
+
+  test "optional output declaration accepts an output parameter":
+    let accepted = checkRecipeSource(recipe("image", "optionalOutputs"),
+      "optional-output-accepted")
+    checkpoint accepted.output
+    check accepted.ok
+
+  test "optional output declaration refuses input and unknown parameters":
+    for name in ["source", "missing"]:
+      let rejected = checkRecipeSource(recipe(name, "optionalOutputs"),
+        "optional-output-refused-" & name)
+      checkpoint rejected.output
+      check not rejected.ok
+      check rejected.mentions("optionalOutputs: '" & name & "' is not")
