@@ -264,8 +264,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_agent_protocol_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let committed = parse(readFile(VectorFile))"),
   TestSpec(
     source: "libs/repro_agent_protocol/tests/t_agent_protocol_socket_transport.nim",
     binary: "build/test-bin/t_agent_protocol_socket_transport",
@@ -275,8 +275,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_agent_protocol_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let h = newHost(DirBackend(), dir / \"workspaces\")"),
   TestSpec(
     source: "libs/repro_agent_protocol/tests/t_agent_provider_conformance.nim",
     binary: "build/test-bin/t_agent_provider_conformance",
@@ -550,8 +550,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_build_engine_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: type"),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_annotation_perturbs_no_fingerprint.nim",
     binary: "build/test-bin/t_annotation_perturbs_no_fingerprint",
@@ -836,8 +836,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_build_engine_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: putEnv(LeakVar, \"from-the-invoking-shell\")"),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_ignored_root_survives_a_symlinked_prefix.nim",
     binary: "build/test-bin/t_ignored_root_survives_a_symlinked_prefix",
@@ -869,8 +869,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_build_engine_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let sh = findExe(\"sh\")"),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_m4_publisher_path_stores_output_blobs.nim",
     binary: "build/test-bin/t_m4_publisher_path_stores_output_blobs",
@@ -1045,7 +1045,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_build_engine_tests_g02",
+    group: "t_group_libs_repro_build_engine_tests_g01",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_preserve_tree_rerun_never_writes_through_links.nim",
@@ -1166,8 +1166,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_build_engine_tests_g02",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: for arm in Arms:"),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_whole_graph_prefix_warm_state_reaches_the_scheduler.nim",
     binary: "build/test-bin/t_whole_graph_prefix_warm_state_reaches_the_scheduler",
@@ -1177,8 +1177,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_build_engine_tests_g02",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: for arm in Arms:"),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_whole_graph_shortcut_matches_per_edge_verdict.nim",
     binary: "build/test-bin/t_whole_graph_shortcut_matches_per_edge_verdict",
@@ -1947,7 +1947,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_cli_support_tests_g01",
+    group: "t_group_libs_repro_cli_support_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim",
@@ -2101,8 +2101,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_cli_support_tests_g02",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: for entry in [\"executeBuildTarget\", \"runDevelopCommand\","),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_provisioning_lock_reselect_and_diff.nim",
     binary: "build/test-bin/t_provisioning_lock_reselect_and_diff",
@@ -2145,8 +2145,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_cli_support_tests_g02",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let previous = getEnv(MemoryKey)"),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim",
     binary: "build/test-bin/t_s7_build_paths_reach_the_restore_config",
@@ -2992,8 +2992,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_dsl_stdlib_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let ps = findPowerShell()"),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim",
     binary: "build/test-bin/t_isonim_ssg_render_edge",
@@ -3465,8 +3465,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_dsl_stdlib_tests_g02",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: var pkg: PackageDef"),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim",
     binary: "build/test-bin/t_s7_nim_c_declares_its_nimcache_as_derived",
@@ -3630,8 +3630,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_dsl_stdlib_tests_g02",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: for tool in WorkspaceFloor:"),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/test_m69_package_macro.nim",
     binary: "build/test-bin/test_m69_package_macro",
@@ -3729,8 +3729,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_home_apply_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let savedCache = getEnv(\"REPRO_CACHE_DISABLE\")"),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_builtin_adapter.nim",
     binary: "build/test-bin/t_builtin_adapter",
@@ -3839,8 +3839,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_home_apply_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let ps = findPowerShell()"),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_home_gc.nim",
     binary: "build/test-bin/t_home_gc",
@@ -3894,8 +3894,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_home_apply_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let root = createTempDir(\"repro-gm4c-archives-\", \"\")"),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_macos_installer_app_realize.nim",
     binary: "build/test-bin/t_macos_installer_app_realize",
@@ -3905,8 +3905,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_home_apply_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: var store = openStore(root / \"store\")"),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_plan_topological_sort.nim",
     binary: "build/test-bin/t_plan_topological_sort",
@@ -4136,8 +4136,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_home_resources_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let root = createTempDir(\"repro-gm4c-verify-\", \"\")"),
   TestSpec(
     source: "libs/repro_home_resources/tests/t_macos_app_folder_placement.nim",
     binary: "build/test-bin/t_macos_app_folder_placement",
@@ -4147,8 +4147,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_home_resources_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let root = createTempDir(\"repro-folder-placement-\", \"\")"),
   TestSpec(
     source: "libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim",
     binary: "build/test-bin/t_macos_app_vendor_updates",
@@ -4609,8 +4609,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_interface_artifacts_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: removeDir(root)"),
   TestSpec(
     source: "libs/repro_interface_artifacts/tests/test_library_codec_roundtrip.nim",
     binary: "build/test-bin/test_library_codec_roundtrip",
@@ -4631,8 +4631,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_interface_artifacts_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let lockedA = readBack(@[rec(idA(), basis = lsrCuratorPolicy..."),
   TestSpec(
     source: "libs/repro_interface_artifacts/tests/test_provisioning_realization_lock_record.nim",
     binary: "build/test-bin/test_provisioning_realization_lock_record",
@@ -5269,8 +5269,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_lock_gen_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let identity = emptySolvedGraphIdentity(currentPlatformId())"),
   TestSpec(
     source: "libs/repro_peer_cache/tests/t_evidence_sink_append_only_and_liveness.nim",
     binary: "build/test-bin/t_evidence_sink_append_only_and_liveness",
@@ -6446,8 +6446,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_project_dsl_tests_dsl_port_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let packages = registeredPackages()"),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_lifted_export_names_are_reserved.nim",
     binary: "build/test-bin/t_dsl_lifted_export_names_are_reserved",
@@ -6545,8 +6545,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_project_dsl_tests_dsl_port_g02",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let packages = registeredPackages()"),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_provisioning_literal_unchanged.nim",
     binary: "build/test-bin/t_dsl_provisioning_literal_unchanged",
@@ -6732,8 +6732,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_project_dsl_tests_dsl_port_g02",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: check declared(NoPackageUses)"),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_validate.nim",
     binary: "build/test-bin/t_dsl_validate",
@@ -6875,8 +6875,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_project_dsl_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let packages = registeredPackages()"),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim",
     binary: "build/test-bin/t_dsl_cross_project_binding_guard",
@@ -6908,8 +6908,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_project_dsl_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let packages = registeredPackages()"),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_m5_composition_smoke.nim",
     binary: "build/test-bin/t_dsl_m5_composition_smoke",
@@ -6952,8 +6952,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_project_dsl_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let packages = registeredPackages()"),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_lexical_scope_root_flag_inherited.nim",
     binary: "build/test-bin/t_dsl_outputs_lexical_scope_root_flag_inherited",
@@ -6963,8 +6963,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_project_dsl_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let packages = registeredPackages()"),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_multiple_flags_one_statement.nim",
     binary: "build/test-bin/t_dsl_outputs_multiple_flags_one_statement",
@@ -6974,8 +6974,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_project_dsl_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let packages = registeredPackages()"),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_sibling_scope_invisible_error.nim",
     binary: "build/test-bin/t_dsl_outputs_sibling_scope_invisible_error",
@@ -6997,7 +6997,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "its binary is named by tests/integration/t_b3_repro_test_runs_through_engine.nim"),
+    singleReason: "suite-scope statement runs at every start-up: let packages = registeredPackages()"),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_statements_accumulate.nim",
     binary: "build/test-bin/t_dsl_outputs_statements_accumulate",
@@ -7007,8 +7007,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_project_dsl_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let packages = registeredPackages()"),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_typed_complex_path_expression.nim",
     binary: "build/test-bin/t_dsl_outputs_typed_complex_path_expression",
@@ -7018,8 +7018,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_project_dsl_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let packages = registeredPackages()"),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_typed_field_emitted_on_subtype.nim",
     binary: "build/test-bin/t_dsl_outputs_typed_field_emitted_on_subtype",
@@ -7040,8 +7040,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_project_dsl_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let packages = registeredPackages()"),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_typed_multiple_interfaces.nim",
     binary: "build/test-bin/t_dsl_outputs_typed_multiple_interfaces",
@@ -7052,7 +7052,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "its binary is named by tests/integration/t_b3_test_template_emits_two_edges.nim"),
+    singleReason: "suite-scope statement runs at every start-up: let packages = registeredPackages()"),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_outputs_unknown_flag_error.nim",
     binary: "build/test-bin/t_dsl_outputs_unknown_flag_error",
@@ -7073,8 +7073,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_project_dsl_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let packages = registeredPackages()"),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_dsl_platforms_resolved_form.nim",
     binary: "build/test-bin/t_dsl_platforms_resolved_form",
@@ -7326,8 +7326,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_project_dsl_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let packages = registeredPackages()"),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_preserve_tree_refuses_a_generated_source.nim",
     binary: "build/test-bin/t_preserve_tree_refuses_a_generated_source",
@@ -7337,8 +7337,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_project_dsl_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: var root = \"\""),
   TestSpec(
     source: "libs/repro_project_dsl/tests/t_service_config_is_a_cached_build_output.nim",
     binary: "build/test-bin/t_service_config_is_a_cached_build_output",
@@ -7426,7 +7426,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "its binary is named by tests/unit/test_reprobuild_suite_inventory.py"),
+    singleReason: "suite-scope statement runs at every start-up: let packages = registeredPackages()"),
   TestSpec(
     source: "libs/repro_remix/tests/t_malicious_remix_bundle_parser_bounds.nim",
     binary: "build/test-bin/t_malicious_remix_bundle_parser_bounds",
@@ -7502,8 +7502,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_remix_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let root = createTempDir(\"remix-lower-\", \"\")"),
   TestSpec(
     source: "libs/repro_remix/tests/t_remix_manifest_canonical_roundtrip_and_identity.nim",
     binary: "build/test-bin/t_remix_manifest_canonical_roundtrip_and_identity",
@@ -8096,8 +8096,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_standard_provider_tests_o757f6dd4_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: for example in PopulatedExamples:"),
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_fortran_direct_convention.nim",
     binary: "build/test-bin/test_fortran_direct_convention",
@@ -8536,8 +8536,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_tool_profiles_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: var scratch: string"),
   TestSpec(
     source: "libs/repro_tool_profiles/tests/t_provisioning_pin_selects_and_keys.nim",
     binary: "build/test-bin/t_provisioning_pin_selects_and_keys",
@@ -8547,8 +8547,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_tool_profiles_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: delEnv(RemovedContributorSelectorEnv)"),
   TestSpec(
     source: "libs/repro_tool_profiles/tests/t_realization_selection.nim",
     binary: "build/test-bin/t_realization_selection",
@@ -8569,8 +8569,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_tool_profiles_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let gnuTar = gnuTarOnPath()"),
   TestSpec(
     source: "libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim",
     binary: "build/test-bin/t_tool_archive_missing_decompressor_is_named",
@@ -8602,8 +8602,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_tool_profiles_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let ps = findPowerShell()"),
   TestSpec(
     source: "libs/repro_workspace_snapshot/tests/t_manifest_validation_and_tree_id.nim",
     binary: "build/test-bin/t_manifest_validation_and_tree_id",
@@ -10945,8 +10945,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_agent_harbor_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let f = newFixture(\"m5\", @[\"workspace.create:greeter\","),
   TestSpec(
     source: "tests/e2e/agent-harbor/t_e2e_agent_harbor_combines_and_augments_remixes.nim",
     binary: "build/test-bin/t_e2e_agent_harbor_combines_and_augments_remixes",
@@ -10956,8 +10956,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_agent_harbor_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let f = newFixture(\"m6\", @[\"workspace.create:greeter\","),
   TestSpec(
     source: "tests/e2e/agent-harbor/t_e2e_agent_harbor_modifies_installed_source_package.nim",
     binary: "build/test-bin/t_e2e_agent_harbor_modifies_installed_source_package",
@@ -10967,8 +10967,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_agent_harbor_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let f = newFixture(\"m3\", @[\"context.active-app\","),
   TestSpec(
     source: "tests/e2e/agent-harbor/t_e2e_agent_harbor_preview_accept_reject.nim",
     binary: "build/test-bin/t_e2e_agent_harbor_preview_accept_reject",
@@ -10978,8 +10978,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_agent_harbor_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let f = newFixture(\"m4\", @[\"workspace.create:greeter\","),
   TestSpec(
     source: "tests/e2e/cmake-develop/t_e2e_repro_develop_cmake.nim",
     binary: "build/test-bin/t_e2e_repro_develop_cmake",
@@ -11001,7 +11001,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "no other source shares its compile options"),
+    singleReason: "suite-scope statement runs at every start-up: let repoRoot = getCurrentDir()"),
   TestSpec(
     source: "tests/e2e/codetracer-subset/t_e2e_codetracer_build_subset_without_tup.nim",
     binary: "build/test-bin/t_e2e_codetracer_build_subset_without_tup",
@@ -11594,8 +11594,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_gm4b_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let scratch = createTempDir(\"repro-gm4b-like-uses-\", \"\")"),
   TestSpec(
     source: "tests/e2e/gm4c/t_e2e_dmg_app_bundle_install_and_rollback.nim",
     binary: "build/test-bin/t_e2e_dmg_app_bundle_install_and_rollback",
@@ -12155,8 +12155,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_home_generations_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let storeRoot = absolutePath(FixtureDir / \"store\")"),
   TestSpec(
     source: "tests/e2e/home-generations/t_integration_apply_lock_serializes.nim",
     binary: "build/test-bin/t_integration_apply_lock_serializes",
@@ -12166,8 +12166,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_home_generations_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let stateDir = absolutePath(FixtureDir / \"state\")"),
   TestSpec(
     source: "tests/e2e/home-generations/t_integration_pointer_envelope_and_history_enumeration.nim",
     binary: "build/test-bin/t_integration_pointer_envelope_and_history_enumeration",
@@ -12177,8 +12177,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_home_generations_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let storeRoot = absolutePath(FixtureDir / \"store\")"),
   TestSpec(
     source: "tests/e2e/home-intent/t_e2e_home_get_reads_only_config.nim",
     binary: "build/test-bin/t_e2e_home_get_reads_only_config",
@@ -13552,8 +13552,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_m83_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let scratch = createTempDir(\"gm1w-pkg-\", \"\")"),
   TestSpec(
     source: "tests/e2e/m9/t_e2e_m9_linux_phase2_partials_resolve.nim",
     binary: "build/test-bin/t_e2e_m9_linux_phase2_partials_resolve",
@@ -14091,8 +14091,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let platform = currentPlatformId()"),
   TestSpec(
     source: "tests/integration/t_a_pushed_sibling_is_still_recorded.nim",
     binary: "build/test-bin/t_a_pushed_sibling_is_still_recorded",
@@ -14553,7 +14553,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g02",
+    group: "t_group_tests_integration_g01",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_b0_develop_mode_uses_local_source.nim",
@@ -15235,7 +15235,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g03",
+    group: "t_group_tests_integration_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_ci_plan_reads_ci_trust_from_the_base_not_the_candidate.nim",
@@ -15873,7 +15873,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g04",
+    group: "t_group_tests_integration_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_default_projects_auto_layer_on_fresh_workspace.nim",
@@ -16324,8 +16324,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g04",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: var prepared = false"),
   TestSpec(
     source: "tests/integration/t_dssf1_repro_up_builds_the_rendered_config.nim",
     binary: "build/test-bin/t_dssf1_repro_up_builds_the_rendered_config",
@@ -16335,8 +16335,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g04",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: var c: UpCase"),
   TestSpec(
     source: "tests/integration/t_e2e_authenticated_inference_local_and_cloud.nim",
     binary: "build/test-bin/t_e2e_authenticated_inference_local_and_cloud",
@@ -16379,8 +16379,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g04",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: putEnv(\"REPRO_CACHE_DISABLE\", \"1\")"),
   TestSpec(
     source: "tests/integration/t_e2e_local_attestation_emulator_all_protocol_paths.nim",
     binary: "build/test-bin/t_e2e_local_attestation_emulator_all_protocol_paths",
@@ -16401,8 +16401,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g04",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: delEnv(RemovedContributorSelectorEnv)"),
   TestSpec(
     source: "tests/integration/t_e2e_selectable_toolchain_fixture.nim",
     binary: "build/test-bin/t_e2e_selectable_toolchain_fixture",
@@ -16456,8 +16456,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g04",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let manifestText = sampleManifestText()"),
   TestSpec(
     source: "tests/integration/t_edge_attestation_quorum_is_k_of_n.nim",
     binary: "build/test-bin/t_edge_attestation_quorum_is_k_of_n",
@@ -16467,8 +16467,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g04",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let manifestText = sampleManifestText()"),
   TestSpec(
     source: "tests/integration/t_emit_refuses_rather_than_guessing_when_the_workspace_is_unreadable.nim",
     binary: "build/test-bin/t_emit_refuses_rather_than_guessing_when_the_workspace_is_unreadable",
@@ -16478,7 +16478,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_emitted_overrides_match_the_develop_set.nim",
@@ -16489,7 +16489,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_emulator_is_not_a_verifier_bypass.nim",
@@ -16500,7 +16500,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_engine_embeds_the_trees_source_revision.nim",
@@ -16511,7 +16511,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_entrypoints.nim",
@@ -16522,7 +16522,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_enumerated_directory_evidence_producers.nim",
@@ -16544,7 +16544,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_envrc_needs_no_override_env_vars.nim",
@@ -16555,7 +16555,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_event_log_parser_rejects_malformed.nim",
@@ -16742,8 +16742,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: loadGolden()"),
   TestSpec(
     source: "tests/integration/t_finish_outcome_reaches_the_spine.nim",
     binary: "build/test-bin/t_finish_outcome_reaches_the_spine",
@@ -16797,8 +16797,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let savedPath = getEnv(\"PATH\")"),
   TestSpec(
     source: "tests/integration/t_force_push_of_any_declared_role_is_refused.nim",
     binary: "build/test-bin/t_force_push_of_any_declared_role_is_refused",
@@ -16984,8 +16984,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let hex40 = \"0123456789abcdef0123456789abcdef01234567\""),
   TestSpec(
     source: "tests/integration/t_health_fails_when_the_post_commit_lock_writer_keeps_refusing.nim",
     binary: "build/test-bin/t_health_fails_when_the_post_commit_lock_writer_keeps_refusing",
@@ -17061,7 +17061,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_health_reports_a_worktree_unsafe_hooks_path.nim",
@@ -17072,7 +17072,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_health_reports_disjoint_local_branches.nim",
@@ -17083,7 +17083,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_health_reports_each_layer_status_with_remedy.nim",
@@ -17094,7 +17094,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_health_reports_forge_repository_renames.nim",
@@ -17116,7 +17116,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_hermetic_published_catalog_fixture.nim",
@@ -17127,8 +17127,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: putEnv(\"REPRO_CACHE_DISABLE\", \"1\")"),
   TestSpec(
     source: "tests/integration/t_highest_satisfied_floor_wins.nim",
     binary: "build/test-bin/t_highest_satisfied_floor_wins",
@@ -17138,7 +17138,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_hook_protocol_v2_mixed_version_fails_closed.nim",
@@ -17149,7 +17149,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_hooks_consult_only_the_repos_own_dependencies.nim",
@@ -17160,7 +17160,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_hooks_ensure_coexists_with_pre_commit_shim.nim",
@@ -17171,7 +17171,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_hooks_ensure_generates_the_gate_from_the_imported_policy.nim",
@@ -17182,7 +17182,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_hooks_ensure_installs_a_managed_pre_commit_hook.nim",
@@ -17303,8 +17303,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let scratch = createTempDir(\"repro-moved-module-import-\", \"\"..."),
   TestSpec(
     source: "tests/integration/t_in_package_realization_keys.nim",
     binary: "build/test-bin/t_in_package_realization_keys",
@@ -17314,8 +17314,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: putEnv(\"REPRO_CACHE_DISABLE\", \"1\")"),
   TestSpec(
     source: "tests/integration/t_inference_commitment_is_hiding_and_binding.nim",
     binary: "build/test-bin/t_inference_commitment_is_hiding_and_binding",
@@ -17380,8 +17380,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let scratch = createTempDir(\"repro-installed-catalog-\", \"\")"),
   TestSpec(
     source: "tests/integration/t_installer_tarball_shared_cache.nim",
     binary: "build/test-bin/t_installer_tarball_shared_cache",
@@ -17743,7 +17743,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integration_solver_resolves_variants.nim",
@@ -17754,7 +17754,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integration_target_export_table_v2_schema.nim",
@@ -17765,7 +17765,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integration_test_runner_adapter_registered.nim",
@@ -17776,7 +17776,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integration_test_runner_interface.nim",
@@ -17787,7 +17787,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integration_toolchain_interface.nim",
@@ -17798,7 +17798,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integration_variant_cli_flag.nim",
@@ -17809,7 +17809,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integration_variant_conditional_uses_static_value.nim",
@@ -17820,7 +17820,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integration_variant_conditioned_uses.nim",
@@ -17831,7 +17831,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integration_variant_declaration_basic.nim",
@@ -17842,7 +17842,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integration_variant_override_priorities.nim",
@@ -17853,7 +17853,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integration_variant_value_accessor.nim",
@@ -17864,7 +17864,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integrity_mismatch_surfaces_per_tier.nim",
@@ -17875,7 +17875,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integrity_uses_vcs_native_hash_else_own_file_hash_both_multihash.nim",
@@ -17886,7 +17886,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_interface_extraction_follows_the_selected_catalog.nim",
@@ -18040,8 +18040,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: var prepared = false"),
   TestSpec(
     source: "tests/integration/t_leaked_instance_is_reaped.nim",
     binary: "build/test-bin/t_leaked_instance_is_reaped",
@@ -18271,8 +18271,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let gitBin = findExe(\"git\")"),
   TestSpec(
     source: "tests/integration/t_local_store_prune_keeps_newest_and_head_tree.nim",
     binary: "build/test-bin/t_local_store_prune_keeps_newest_and_head_tree",
@@ -18326,7 +18326,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_foreign_coords.nim",
@@ -18337,7 +18337,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_from_a_v3_host_resolves_on_a_v2_host.nim",
@@ -18348,7 +18348,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_is_read_from_the_content_under_evaluation.nim",
@@ -18359,7 +18359,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_publish_hook_refusal_is_not_read_as_connectivity.nim",
@@ -18370,7 +18370,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim",
@@ -18381,7 +18381,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_ref_skips_policy_ephemeral_branches.nim",
@@ -18392,7 +18392,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_refresh_and_validate_without_building.nim",
@@ -18403,7 +18403,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_refresh_folds_uses_sibling_producer_deps.nim",
@@ -18414,7 +18414,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_refresh_never_moves_a_pin_backward.nim",
@@ -18425,7 +18425,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_refresh_provider_compile_finds_the_consumers_catalog.nim",
@@ -18436,7 +18436,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_refresh_reads_solver_inputs_from_compiled_provider.nim",
@@ -18447,7 +18447,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_refresh_records_the_catalog_a_package_resolved_from.nim",
@@ -18458,7 +18458,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_refresh_refuses_a_solve_missing_a_develop_sibling_recipe.nim",
@@ -18469,7 +18469,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_refresh_refuses_an_unreadable_recipe.nim",
@@ -18480,7 +18480,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_refresh_repin_clears_a_conflict_from_a_newly_declared_producer.nim",
@@ -18502,7 +18502,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_repin_after_testing_makes_the_commit_uncovered.nim",
@@ -18601,8 +18601,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let scratch = createTempDir(\"repro-locked-catalog-\", \"\")"),
   TestSpec(
     source: "tests/integration/t_locking_explain_reports_resolved_tier_backend_and_layer.nim",
     binary: "build/test-bin/t_locking_explain_reports_resolved_tier_backend_and_layer",
@@ -18689,8 +18689,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let repoRoot = getCurrentDir()"),
   TestSpec(
     source: "tests/integration/t_macro_time_shell_out_needs_no_shell_on_the_path.nim",
     binary: "build/test-bin/t_macro_time_shell_out_needs_no_shell_on_the_path",
@@ -18700,8 +18700,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let repoRoot = findRepoRoot()"),
   TestSpec(
     source: "tests/integration/t_malformed_settings_file_is_an_error.nim",
     binary: "build/test-bin/t_malformed_settings_file_is_an_error",
@@ -18898,7 +18898,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_membership_model_retired_names_fail_as_unknown.nim",
@@ -18909,7 +18909,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_membership_model_schemas_round_trip.nim",
@@ -18920,7 +18920,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_membership_model_sets_cli.nim",
@@ -18931,7 +18931,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_membership_model_templates_scaffold_sets.nim",
@@ -18942,7 +18942,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_membership_repo_push_anchors_no_foreign_lock_record.nim",
@@ -18953,7 +18953,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_microarch_lives_in_the_key_not_the_namespace.nim",
@@ -18964,7 +18964,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_migrate_leaves_a_pinned_checkout_on_its_pin.nim",
@@ -18975,7 +18975,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_migrated_repo_workspace_real_pre_push.nim",
@@ -18986,7 +18986,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_migration_refuses_when_the_hook_writer_is_not_the_hook_runner.nim",
@@ -19008,7 +19008,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_mixed_public_clean_team_unpublished_refuses.nim",
@@ -19019,7 +19019,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_mixed_workspace_each_record_in_its_own_backend_only.nim",
@@ -19030,7 +19030,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_mock_refused_by_prod_policy.nim",
@@ -19041,7 +19041,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_monitor_depfile_reader.nim",
@@ -19052,7 +19052,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim",
@@ -19074,7 +19074,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_monitored_zero_output_edge_input_completeness.nim",
@@ -19085,7 +19085,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_moved_package_without_catalog_names_where_it_looked.nim",
@@ -19096,8 +19096,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let scratch = createTempDir(\"repro-moved-package-\", \"\")"),
   TestSpec(
     source: "tests/integration/t_mutually_pinned_flake_siblings_land_through_repro_push.nim",
     binary: "build/test-bin/t_mutually_pinned_flake_siblings_land_through_repro_push",
@@ -19107,7 +19107,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_named_layer_url_supplied_locally.nim",
@@ -19118,7 +19118,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_named_pool_capacity_enforced_once_via_runquota_not_double_counted.nim",
@@ -19140,7 +19140,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_nested_bootstrap_runtime_closure.nim",
@@ -19459,8 +19459,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: refuses \"an unknown top-level key is refused\","),
   TestSpec(
     source: "tests/integration/t_policy_imported_from_a_shared_package_is_snapshotted_into_the_lock.nim",
     binary: "build/test-bin/t_policy_imported_from_a_shared_package_is_snapshotted_into_the_lock",
@@ -19536,7 +19536,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_post_commit_lock_survives_a_repo_local_repro_dir.nim",
@@ -19547,7 +19547,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_post_commit_publishes_evidence_and_excludes_from_cache_push.nim",
@@ -19558,7 +19558,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_post_commit_refreshes_lock_and_pushes_cache.nim",
@@ -19569,7 +19569,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_post_commit_report_lands_in_the_disposable_build_tree.nim",
@@ -19580,7 +19580,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_post_commit_reports_the_hook_path_it_will_not_rewrite.nim",
@@ -19591,7 +19591,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_post_merge_hook_reconciles_local_state.nim",
@@ -19602,7 +19602,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_commit_gate_ignores_the_record_store_lock.nim",
@@ -19613,7 +19613,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_commit_gate_is_advisory_when_the_dispatcher_is_displaced.nim",
@@ -19624,7 +19624,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_commit_gate_judges_the_index_being_committed.nim",
@@ -19635,7 +19635,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_commit_gate_names_the_re_pin_as_the_cause.nim",
@@ -19646,7 +19646,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_commit_gate_requires_what_the_branch_rule_names.nim",
@@ -19657,7 +19657,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_commit_gate_stands_down_during_replay.nim",
@@ -19668,7 +19668,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_commit_hook_keeps_unstaged_work_when_interrupted.nim",
@@ -19679,7 +19679,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_commit_lock_refresh_runs_after_a_finished_rebase.nim",
@@ -19690,7 +19690,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_migration_certificate_is_rejected_with_a_reissue_remedy.nim",
@@ -19701,7 +19701,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_push_accepts_source_expression_local_ref.nim",
@@ -19712,7 +19712,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks.nim",
@@ -19723,7 +19723,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_push_consumes_evidence_and_applies_tier_unreachable_policy.nim",
@@ -19734,7 +19734,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_push_currency_read_routes_per_backend.nim",
@@ -19745,7 +19745,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_push_gate_checks_only_pushed_repo_dependency_closure.nim",
@@ -19756,7 +19756,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_push_gate_enforces_inside_a_linked_worktree.nim",
@@ -19767,7 +19767,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_push_lock_records_unmaterialized_declared_repo.nim",
@@ -19778,8 +19778,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let gitBin = findExe(\"git\")"),
   TestSpec(
     source: "tests/integration/t_pre_push_membership_repo_scopes_to_touched_fragments.nim",
     binary: "build/test-bin/t_pre_push_membership_repo_scopes_to_touched_fragments",
@@ -19789,8 +19789,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let gitBin = findExe(\"git\")"),
   TestSpec(
     source: "tests/integration/t_pre_push_passes_on_heterogeneous_branches.nim",
     binary: "build/test-bin/t_pre_push_passes_on_heterogeneous_branches",
@@ -19833,8 +19833,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let gitBin = findExe(\"git\")"),
   TestSpec(
     source: "tests/integration/t_pre_push_publishes_only_when_publish_locks_opted_in.nim",
     binary: "build/test-bin/t_pre_push_publishes_only_when_publish_locks_opted_in",
@@ -19921,8 +19921,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let gitBin = findExe(\"git\")"),
   TestSpec(
     source: "tests/integration/t_pre_push_warns_and_allows_on_unreachable_personal_backend.nim",
     binary: "build/test-bin/t_pre_push_warns_and_allows_on_unreachable_personal_backend",
@@ -19954,8 +19954,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let gitBin = findExe(\"git\")"),
   TestSpec(
     source: "tests/integration/t_pre_receive_rejects_public_lock_with_private_ref_and_integrity_mismatch.nim",
     binary: "build/test-bin/t_pre_receive_rejects_public_lock_with_private_ref_and_integrity_mismatch",
@@ -19965,8 +19965,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let gitBin = findExe(\"git\")"),
   TestSpec(
     source: "tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim",
     binary: "build/test-bin/t_preloaded_monitor_shim_is_loader_inert",
@@ -20086,7 +20086,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_protocol_document_survives_suite_body_echo.nim",
@@ -20097,7 +20097,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_provider_compile_follows_the_recipe.nim",
@@ -20108,7 +20108,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_provider_compile_key_ignores_the_callers_shell.nim",
@@ -20119,7 +20119,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_provider_compile_reporting_distinguishes_compile_from_reuse.nim",
@@ -20130,7 +20130,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_provider_file_driven_fanout_cleanup.nim",
@@ -20152,7 +20152,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_provider_library_c_abi_reconcile.nim",
@@ -20163,7 +20163,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim",
@@ -20174,7 +20174,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_provider_link_never_puts_a_host_lib_dir_in_rpath.nim",
@@ -20196,7 +20196,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_provision_policy_gate.nim",
@@ -20207,7 +20207,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_provision_roundtrip.nim",
@@ -20218,7 +20218,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_provisioning_contributions.nim",
@@ -20229,7 +20229,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_public_committed_team_manifest_personal_db_mixed.nim",
@@ -20240,7 +20240,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_published_ref_prefers_resolved_unstable.nim",
@@ -20251,7 +20251,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pull_refuses_to_rewind_unpublished_work.nim",
@@ -20262,7 +20262,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_push_gateway_opt_out_is_a_settings_key.nim",
@@ -20273,7 +20273,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_push_refuses_when_the_lock_disagrees_with_the_siblings.nim",
@@ -20284,7 +20284,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_r2_iso_boot.nim",
@@ -20295,7 +20295,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_r9_systemd_boot.nim",
@@ -20306,7 +20306,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_recertify_is_noop_when_no_executed_function_changed.nim",
@@ -20317,7 +20317,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_recipe_lock_consistency_refuses.nim",
@@ -20328,7 +20328,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim",
@@ -20339,7 +20339,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_remote_unseal_boot.nim",
@@ -20383,7 +20383,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rename_alternates_keeps_old_bare_reachable.nim",
@@ -20394,7 +20394,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rename_force_pushes_record_is_rekeyed.nim",
@@ -20405,7 +20405,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rename_fork_at_previous_path_is_refused.nim",
@@ -20416,7 +20416,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rename_old_reader_parses_fragment.nim",
@@ -20427,7 +20427,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rename_orphan_is_reported.nim",
@@ -20438,7 +20438,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rename_refusals.nim",
@@ -20449,7 +20449,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rename_refuses_nested_declared_checkout.nim",
@@ -20669,7 +20669,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_runtime_dlopen_without_library_path.nim",
@@ -20680,7 +20680,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_test_issues_certificate_by_default_in_clean_state.nim",
@@ -20691,7 +20691,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_test_reports_no_certificate_with_remedy_when_dirty_or_unpushed.nim",
@@ -20702,7 +20702,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_aggregate_exit_code.nim",
@@ -20713,7 +20713,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_catalog_selection.nim",
@@ -20724,7 +20724,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_consumes_result_document.nim",
@@ -20735,7 +20735,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_counts_whole_binary_skips.nim",
@@ -20746,7 +20746,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_keys_cases_by_source.nim",
@@ -20757,8 +20757,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let runner = findRepoRoot() / \"build\" / \"bin\" /"),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_parallel_n_workers.nim",
     binary: "build/test-bin/t_repro_test_runner_parallel_n_workers",
@@ -20768,7 +20768,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_process_group_cleanup.nim",
@@ -20790,7 +20790,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_reporting_contract.nim",
@@ -20801,7 +20801,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_suiteless_case_round_trip.nim",
@@ -20812,7 +20812,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_survives_its_binary_being_replaced.nim",
@@ -20834,7 +20834,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_up_resolver_reads_the_owner_interface_under_its_writers_lock.nim",
@@ -20845,8 +20845,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: var c: LockCase"),
   TestSpec(
     source: "tests/integration/t_repro_up_shared_service_checks_use_the_dev_env_edge_copy.nim",
     binary: "build/test-bin/t_repro_up_shared_service_checks_use_the_dev_env_edge_copy",
@@ -20856,8 +20856,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: var c: UpCase"),
   TestSpec(
     source: "tests/integration/t_reproos_source_bridge_inventory.nim",
     binary: "build/test-bin/t_reproos_source_bridge_inventory",
@@ -20867,7 +20867,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_reproos_uki_through_the_cvm_path.nim",
@@ -20878,7 +20878,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_required_features_are_a_subset_of_host_features.nim",
@@ -20889,7 +20889,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_reseal_on_generation_switch.nim",
@@ -20900,7 +20900,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_role_validation_refused_through_repro.nim",
@@ -20911,7 +20911,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_roles_resolve_from_settings_committed_at_the_revision.nim",
@@ -20922,7 +20922,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rp1_provider_compile_edge_materializes.nim",
@@ -20933,7 +20933,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rp2_provider_session_invoke.nim",
@@ -20944,7 +20944,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rp3_bind_deps_and_sharing.nim",
@@ -20955,7 +20955,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rp5a_consumer_imports_resource_contract_no_driver.nim",
@@ -20966,7 +20966,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rp5a_producer_exports_resource_contract_across_workspace.nim",
@@ -20977,7 +20977,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rp5b_resource_driver_via_protocol.nim",
@@ -20988,7 +20988,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim",
@@ -20999,7 +20999,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_run_consumes_opaque_out_of_tree.nim",
@@ -21010,7 +21010,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_run_consumes_session_store_out_of_tree.nim",
@@ -21021,7 +21021,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_run_edge_session_resolver_auto.nim",
@@ -21032,7 +21032,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_runner_cpu_progress_liveness.nim",
@@ -21076,8 +21076,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let repoRoot = getCurrentDir()"),
   TestSpec(
     source: "tests/integration/t_runquota_bypass_is_reported_in_build_header_and_report.nim",
     binary: "build/test-bin/t_runquota_bypass_is_reported_in_build_header_and_report",
@@ -21263,7 +21263,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sevenzip_extractor_falls_back_to_standalone_decoder.nim",
@@ -21274,8 +21274,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: putEnv(\"REPRO_CACHE_DISABLE\", \"1\")"),
   TestSpec(
     source: "tests/integration/t_shared_bare_refresh_keeps_objects_borrowers_reference.nim",
     binary: "build/test-bin/t_shared_bare_refresh_keeps_objects_borrowers_reference",
@@ -21285,7 +21285,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_shared_clone_alternates_skip_redownload.nim",
@@ -21296,7 +21296,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_shared_clone_cache_repacks_and_bounds_growth.nim",
@@ -21307,7 +21307,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_shared_clone_uses_full_repo_url_for_base_remote.nim",
@@ -21318,7 +21318,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_shared_clones_sweep_repairs_every_bare_in_the_cache.nim",
@@ -21329,7 +21329,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_shell_entry_reports_drift_over_the_applied_overrides.nim",
@@ -21340,7 +21340,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_shorthand_equals_to.nim",
@@ -21351,7 +21351,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sibling_exact_pin_guidance.nim",
@@ -21362,7 +21362,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_signer_roster_rotation_and_revocation.nim",
@@ -21373,8 +21373,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let keyA = newTestKey()"),
   TestSpec(
     source: "tests/integration/t_single_platform_entries_declare_platforms.nim",
     binary: "build/test-bin/t_single_platform_entries_declare_platforms",
@@ -21384,7 +21384,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_skip_lock_refresh_leaves_the_flake_lock_alone.nim",
@@ -21395,7 +21395,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_skip_lock_refresh_leaves_the_repro_lock_alone.nim",
@@ -21406,7 +21406,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_snp_agent_backend.nim",
@@ -21417,7 +21417,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_snp_chain_requires_amd_root.nim",
@@ -21505,7 +21505,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_source_hash_runtime_paths.nim",
@@ -21516,7 +21516,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_source_interface_openssl_runtime.nim",
@@ -21527,7 +21527,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_source_producer_revalidation.nim",
@@ -21538,7 +21538,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_source_revalidation_invocation_scope.nim",
@@ -21560,7 +21560,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_spec_example_fixtures_compile.nim",
@@ -21571,7 +21571,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_spec_example_fixtures_present.nim",
@@ -21582,8 +21582,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let repro = readFixture(\"simple-test-collection/repro.nim\")"),
   TestSpec(
     source: "tests/integration/t_spi_leaf_detector_messages.nim",
     binary: "build/test-bin/t_spi_leaf_detector_messages",
@@ -21593,7 +21593,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_spi_leaf_fetches_thin_pack_over_partial_pool.nim",
@@ -21604,7 +21604,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_spi_leaf_refetches_through_pool.nim",
@@ -21615,7 +21615,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_spi_migrates_existing_pool_and_leaves.nim",
@@ -21626,7 +21626,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_spi_pool_retains_registered_leaf_objects.nim",
@@ -21637,7 +21637,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_ssl_edges_carry_openssl_link_path.nim",
@@ -21648,7 +21648,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_stackable_hooks_extracted_process_tree.nim",
@@ -21681,7 +21681,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_stats_reads_shared_store.nim",
@@ -21692,7 +21692,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_status_health_add_remove_use_unified_resolver.nim",
@@ -21703,7 +21703,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_stdlib_catalog_tarball_arms_realize.nim",
@@ -21714,8 +21714,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: putEnv(\"REPRO_CACHE_DISABLE\", \"1\")"),
   TestSpec(
     source: "tests/integration/t_stdlib_python_tarball_arms_realize.nim",
     binary: "build/test-bin/t_stdlib_python_tarball_arms_realize",
@@ -21725,8 +21725,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: putEnv(\"REPRO_CACHE_DISABLE\", \"1\")"),
   TestSpec(
     source: "tests/integration/t_store_and_registry_deps_carry_coordinates_and_integrity.nim",
     binary: "build/test-bin/t_store_and_registry_deps_carry_coordinates_and_integrity",
@@ -21736,7 +21736,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_store_daemon_m66_dev.nim",
@@ -21769,7 +21769,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_switch_new_branch_marks_feature_branch.nim",
@@ -21780,7 +21780,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_switch_stashes_and_restores_per_repo_wip.nim",
@@ -21791,7 +21791,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sync_and_hooks_help_print_usage.nim",
@@ -21802,7 +21802,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sync_check_operate_from_committed_lock_without_manifests.nim",
@@ -21890,8 +21890,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: for role in [false, true]:"),
   TestSpec(
     source: "tests/integration/t_sync_mainline_reconcile.nim",
     binary: "build/test-bin/t_sync_mainline_reconcile",
@@ -21934,7 +21934,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sync_scoped_to_named_project_touches_only_that_project.nim",
@@ -21945,7 +21945,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sync_skips_fetch_when_locked_sha_already_present.nim",
@@ -21956,7 +21956,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tampered_uki_detected.nim",
@@ -21967,7 +21967,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tampered_uki_fails_unseal.nim",
@@ -21978,7 +21978,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tarball_mode_builds_a_fall_through_source_recipe.nim",
@@ -21989,7 +21989,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tarball_provisioning_cold_store_extractors.nim",
@@ -22011,7 +22011,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_targets_are_sorted_and_deduplicated_in_the_signed_payload.nim",
@@ -22022,7 +22022,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tdx_agent_backend.nim",
@@ -22044,7 +22044,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tdx_collateral_and_verifier_arm.nim",
@@ -22055,7 +22055,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tdx_expectation_reaches_the_verifier.nim",
@@ -22088,7 +22088,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tdx_quote_fixture_verify.nim",
@@ -22099,7 +22099,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_team_backend_routed_lock_reads_back_and_is_idempotent.nim",
@@ -22110,7 +22110,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_team_repo_record_only_no_checkout.nim",
@@ -22121,7 +22121,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_teardown_runs_on_failure_path.nim",
@@ -22143,7 +22143,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_test_edge_migration_covers_all_test_files.nim",
@@ -22154,7 +22154,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_test_execute_edge_declares_repro_binary_reached_via_helper.nim",
@@ -22165,7 +22165,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_the_bootstrap_hands_over_to_the_pinned_reprobuild.nim",
@@ -22176,7 +22176,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_the_release_launcher_does_not_make_the_engine_self_spawn_the_loader.nim",
@@ -22198,7 +22198,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_the_status_report_does_not_call_an_unpublished_row_recordable.nim",
@@ -22209,7 +22209,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_the_unpushed_skip_names_the_push_that_would_make_it_lockable.nim",
@@ -22220,7 +22220,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_thin_client_refuses_to_exec_itself.nim",
@@ -22231,7 +22231,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_thin_daemon_client.nim",
@@ -22264,7 +22264,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim",
@@ -22275,7 +22275,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_ti3_fingerprint_split.nim",
@@ -22286,7 +22286,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tool_acquisition_does_not_inherit_the_loader_env.nim",
@@ -22319,7 +22319,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_top_level_sync_pull_shortcuts_match_workspace_forms.nim",
@@ -22330,7 +22330,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tpm2_codec_rejects_malformed.nim",
@@ -22341,7 +22341,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tpm2_driver_composes_and_refuses.nim",
@@ -22352,7 +22352,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tpm2_evidence_composite_roundtrip.nim",
@@ -22363,7 +22363,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tpm2_evidence_rejects_malformed.nim",
@@ -22374,7 +22374,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tpm2_structure_vectors.nim",
@@ -22385,7 +22385,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tpm_device_descriptor_is_not_inherited.nim",
@@ -22396,7 +22396,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tpm_quote_comes_from_the_tpm.nim",
@@ -22407,7 +22407,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tpm_quote_verifies.nim",
@@ -22418,7 +22418,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tpm_read_wait_tells_a_signal_from_a_timeout.nim",
@@ -22429,7 +22429,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_transparency_log_inclusion_against_a_witnessed_root.nim",
@@ -22440,8 +22440,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let manifestText = sampleManifestText()"),
   TestSpec(
     source: "tests/integration/t_tsm_report_transport.nim",
     binary: "build/test-bin/t_tsm_report_transport",
@@ -22451,7 +22451,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_two_repos_on_different_policy_pins_resolve_different_rules.nim",
@@ -22462,7 +22462,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_unavailable_package_does_not_fall_through_to_path.nim",
@@ -22473,7 +22473,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_unavailable_package_fails_with_platform_reason.nim",
@@ -22539,8 +22539,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let scratch = createTempDir(\"repro-pmc4-path-\", \"\")"),
   TestSpec(
     source: "tests/integration/t_unsigned_or_wrong_key_certificate_is_rejected.nim",
     binary: "build/test-bin/t_unsigned_or_wrong_key_certificate_is_rejected",
@@ -22572,7 +22572,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_uses_resolves_sqlite3_from_real_reprobuild_packages.nim",
@@ -22583,7 +22583,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_v2_artifact_resolves_on_a_v3_host.nim",
@@ -22594,7 +22594,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_v3_artifact_refused_on_a_v2_host.nim",
@@ -22605,7 +22605,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_vcs_private_metadata_dir_resolves_worktree_safe.nim",
@@ -22616,7 +22616,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_verdict_enumerates_checks.nim",
@@ -22627,7 +22627,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_verify_e2e_mock.nim",
@@ -22660,7 +22660,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_worker_executes_only_the_hydrated_graph.nim",
@@ -22671,7 +22671,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_worker_hydrates_over_the_callers_connection.nim",
@@ -22682,7 +22682,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_worker_message_authorization.nim",
@@ -22693,7 +22693,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_working_tree_certificate_covers_the_commit_made_from_it.nim",
@@ -22704,7 +22704,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_bootstrap_provisions_toolchain_on_windows.nim",
@@ -22715,7 +22715,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_bootstrap_reads_host_repo_config_no_hardcoded_defaults.nim",
@@ -22726,7 +22726,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_bootstrap_scaffolds_host_files.nim",
@@ -22737,7 +22737,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_branch_create_records_metadata.nim",
@@ -22748,7 +22748,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_branch_roles_query.nim",
@@ -22759,7 +22759,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_clone_auto_trusts_per_repo_envrc.nim",
@@ -22770,7 +22770,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_clone_object_policy.nim",
@@ -22781,7 +22781,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_definition_projects_repos.nim",
@@ -22792,7 +22792,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_develop_clones_and_registers_override.nim",
@@ -22803,7 +22803,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_develop_overrides_round_trip.nim",
@@ -22814,7 +22814,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_enable_materializes_added_projects.nim",
@@ -22825,7 +22825,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_forall_runs_command_in_every_participating_repo.nim",
@@ -22836,7 +22836,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_git_tool_identity.nim",
@@ -22847,7 +22847,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_hooks_ensure_is_idempotent_across_three_runs.nim",
@@ -22858,7 +22858,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_init_bootstraps_manifest_cache_outside_workspace.nim",
@@ -22869,7 +22869,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_init_clones_missing_and_reports_existing.nim",
@@ -22880,7 +22880,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_init_clones_org_root_repo_and_syncs_into_named_path.nim",
@@ -22891,7 +22891,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_init_resolves_url_shorthand_and_default_host.nim",
@@ -22902,7 +22902,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_list_walks_resolved_repos.nim",
@@ -22913,7 +22913,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_lock_latest_resolves_via_git_history_per_repo.nim",
@@ -22924,7 +22924,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_lock_partition_resolves_a_sibling_for_ci.nim",
@@ -22935,7 +22935,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_lock_public_only_reports_it_recorded_nothing.nim",
@@ -22946,7 +22946,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_lock_round_trips_through_resolver.nim",
@@ -22957,7 +22957,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_manifest_refresh_after_post_merge.nim",
@@ -22968,7 +22968,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_manifest_refresh_skips_when_divergent.nim",
@@ -22979,7 +22979,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_manifest_refresh_skips_when_locally_dirty.nim",
@@ -22990,7 +22990,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_develop_overrides_round_trip.nim",
@@ -23001,8 +23001,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let dir = createTempDir(\"reprobuild-m5-develop-overrides-\", ..."),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_enumerates_layers.nim",
     binary: "build/test-bin/t_workspace_manifests_enumerates_layers",
@@ -23012,7 +23012,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_lock_index_round_trip.nim",
@@ -23023,8 +23023,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let dir = createTempDir(\"reprobuild-m5-lock-index-\", \"\")"),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_lock_round_trip.nim",
     binary: "build/test-bin/t_workspace_manifests_lock_round_trip",
@@ -23034,8 +23034,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let dir = createTempDir(\"reprobuild-m5-lock-\", \"\")"),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_private_override_shadows_public.nim",
     binary: "build/test-bin/t_workspace_manifests_private_override_shadows_public",
@@ -23045,7 +23045,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_project_manifest_round_trip.nim",
@@ -23067,8 +23067,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let dir = createTempDir(\"reprobuild-m5-repo-\", \"\")"),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_resolve_collision.nim",
     binary: "build/test-bin/t_workspace_manifests_resolve_collision",
@@ -23078,7 +23078,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_resolve_reprobuild_project.nim",
@@ -23089,7 +23089,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_resolve_variant_overrides_revision.nim",
@@ -23111,8 +23111,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let dir = createTempDir(\"reprobuild-m5-snapshot-\", \"\")"),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_variant_manifest_round_trip.nim",
     binary: "build/test-bin/t_workspace_manifests_variant_manifest_round_trip",
@@ -23122,8 +23122,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let dir = createTempDir(\"reprobuild-m5-variant-\", \"\")"),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_workspace_local_round_trip.nim",
     binary: "build/test-bin/t_workspace_manifests_workspace_local_round_trip",
@@ -23133,8 +23133,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let dir = createTempDir(\"reprobuild-m5-workspace-local-\", \"\"..."),
   TestSpec(
     source: "tests/integration/t_workspace_marker_accepts_committed_lock_only_repo.nim",
     binary: "build/test-bin/t_workspace_marker_accepts_committed_lock_only_repo",
@@ -23144,7 +23144,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_membership_enable_disable.nim",
@@ -23155,7 +23155,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_metadata_branch_round_trips_through_reader.nim",
@@ -23166,7 +23166,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_metadata_branch_survives_init_and_status.nim",
@@ -23177,7 +23177,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_metadata_resolves_at_a_git_revision.nim",
@@ -23188,7 +23188,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_migrate_reconciles_local_state.nim",
@@ -23199,7 +23199,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_migrate_refuses_to_endanger_work.nim",
@@ -23210,7 +23210,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_override_shadows_upstream_in_resolver.nim",
@@ -23221,7 +23221,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim",
@@ -23232,7 +23232,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_pre_push_blocks_lock_with_private_only_refs.nim",
@@ -23243,7 +23243,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_pre_push_blocks_on_develop_override_cleanliness.nim",
@@ -23254,7 +23254,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_pre_push_blocks_when_head_unpublished.nim",
@@ -23265,7 +23265,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_pre_push_blocks_when_repo_dirty.nim",
@@ -23276,7 +23276,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_pre_push_passes_when_clean_and_published_and_locked.nim",
@@ -23287,7 +23287,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_pre_push_refreshes_lock_when_missing.nim",
@@ -23298,7 +23298,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_private_layer_e2e.nim",
@@ -23309,7 +23309,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_project_set_conflict_refused.nim",
@@ -23320,7 +23320,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_project_set_unions_repos.nim",
@@ -23331,7 +23331,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_projects_index_tracks_enabled_set.nim",
@@ -23342,7 +23342,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_pull_continues_past_a_failing_repo.nim",
@@ -23353,7 +23353,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_pull_converges_each_repo_to_manifest_revision_tracking_branch.nim",
@@ -23364,7 +23364,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_remotes_alignment.nim",
@@ -23375,7 +23375,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_remove_prompts_on_dirty_and_refuses_in_non_tty.nim",
@@ -23386,7 +23386,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_resolution_names_the_manifest_data_it_found.nim",
@@ -23397,7 +23397,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_restore_lock_pins.nim",
@@ -23408,7 +23408,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_root_discovered_from_settings_file.nim",
@@ -23419,7 +23419,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_routes_repo_sets_to_distinct_backends.nim",
@@ -23430,7 +23430,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_sets_resolve_reports_closure.nim",
@@ -23441,7 +23441,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_shared_clones_list_and_rewire.nim",
@@ -23452,7 +23452,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_status_shows_active_branch_and_drift.nim",
@@ -23463,7 +23463,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_switch_switches_all_repos.nim",
@@ -23474,7 +23474,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_sync_does_not_rewrite_a_force_pushed_checkout_unasked.nim",
@@ -23485,7 +23485,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_sync_fetches_repos_in_parallel.nim",
@@ -23496,7 +23496,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_sync_force_push.nim",
@@ -23507,7 +23507,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_sync_jobs_network_pool_bounds_concurrency.nim",
@@ -23518,7 +23518,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_sync_never_advises_pushing_onto_a_rewritten_remote.nim",
@@ -23529,7 +23529,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_sync_progress_modes.nim",
@@ -23540,7 +23540,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_sync_refuses_to_classify_on_a_failed_fetch.nim",
@@ -23551,7 +23551,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_sync_selectors_narrow_the_default_path.nim",
@@ -23562,7 +23562,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_sync_seven_corner_cases.nim",
@@ -23573,7 +23573,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_sync_summary_counts_a_force_reset.nim",
@@ -23584,7 +23584,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_vcs_clone_cacheable.nim",
@@ -23595,7 +23595,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_vcs_evidence_round_trips_through_build_report.nim",
@@ -23606,7 +23606,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_vcs_fetch_no_op_when_up_to_date.nim",
@@ -23617,7 +23617,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_vcs_hybrid_workspace_clone.nim",
@@ -23628,7 +23628,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_vcs_switch_preserves_dirty_state.nim",
@@ -23639,7 +23639,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim",
@@ -23650,7 +23650,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_action_compatibility_key.nim",
@@ -23914,8 +23914,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: putEnv(\"REPRO_CACHE_DISABLE\", \"1\")"),
   TestSpec(
     source: "tests/unit/t_cmake_direct_tool_identity.nim",
     binary: "build/test-bin/t_cmake_direct_tool_identity",
@@ -23925,8 +23925,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: var root: string"),
   TestSpec(
     source: "tests/unit/t_config_nims_lib_resolution.nim",
     binary: "build/test-bin/t_config_nims_lib_resolution",
@@ -23947,8 +23947,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let root = reproRoot()"),
   TestSpec(
     source: "tests/unit/t_configure_build_tree_cleanup.nim",
     binary: "build/test-bin/t_configure_build_tree_cleanup",
@@ -24024,8 +24024,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: var root, original: string"),
   TestSpec(
     source: "tests/unit/t_declared_package_deps_from_recipe.nim",
     binary: "build/test-bin/t_declared_package_deps_from_recipe",
@@ -24101,8 +24101,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let root = expandFilename(createTempDir(\"t_dev_env_prompt_wa..."),
   TestSpec(
     source: "tests/unit/t_dev_env_prompt_watch_key.nim",
     binary: "build/test-bin/t_dev_env_prompt_watch_key",
@@ -24178,8 +24178,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let visibility = readVisibility(visibilityPath)"),
   TestSpec(
     source: "tests/unit/t_fragment_beats_profile_beats_default_profile.nim",
     binary: "build/test-bin/t_fragment_beats_profile_beats_default_profile",
@@ -24277,8 +24277,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let rows = baselineRows()"),
   TestSpec(
     source: "tests/unit/t_hcr_agent_coordinator.nim",
     binary: "build/test-bin/t_hcr_agent_coordinator",
@@ -24299,7 +24299,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g02",
+    group: "t_group_tests_unit_g01",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_hcr_agent_ipc.nim",
@@ -24310,7 +24310,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g02",
+    group: "t_group_tests_unit_g01",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_hcr_agent_process_target.nim",
@@ -24387,8 +24387,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g02",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: for command in [\"cut\", \"uname\"]:"),
   TestSpec(
     source: "tests/unit/t_infra_apply_lock_hung_owner.nim",
     binary: "build/test-bin/t_infra_apply_lock_hung_owner",
@@ -24926,7 +24926,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g02",
+    group: "t_group_tests_unit_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_m9r15q_3_kf6_umbrella_config.nim",
@@ -25476,7 +25476,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g03",
+    group: "t_group_tests_unit_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_missing_json_evidence.nim",
@@ -25498,8 +25498,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g03",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: putEnv(\"REPRO_CACHE_DISABLE\", \"1\")"),
   TestSpec(
     source: "tests/unit/t_nimcache_is_worktree_local.nim",
     binary: "build/test-bin/t_nimcache_is_worktree_local",
@@ -25509,7 +25509,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g03",
+    group: "t_group_tests_unit_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_nix_daemon_spawn_wait.nim",
@@ -25531,7 +25531,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g03",
+    group: "t_group_tests_unit_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_nonredistributable_publish_gate.nim",
@@ -25542,7 +25542,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g03",
+    group: "t_group_tests_unit_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_npm_vendor_action.nim",
@@ -25553,8 +25553,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g04",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let sh = findExe(\"sh\")"),
   TestSpec(
     source: "tests/unit/t_prefix_env_ops.nim",
     binary: "build/test-bin/t_prefix_env_ops",
@@ -25674,8 +25674,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g04",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let candidates = @["),
   TestSpec(
     source: "tests/unit/t_repo_fragment_role_keys.nim",
     binary: "build/test-bin/t_repo_fragment_role_keys",
@@ -25839,8 +25839,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g04",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: var root, project, other, previousDir: string"),
   TestSpec(
     source: "tests/unit/t_script_launcher.nim",
     binary: "build/test-bin/t_script_launcher",
@@ -25850,8 +25850,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g04",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: putEnv(\"REPRO_CACHE_DISABLE\", \"1\")"),
   TestSpec(
     source: "tests/unit/t_shared_mime_info_dev_stub.nim",
     binary: "build/test-bin/t_shared_mime_info_dev_stub",
@@ -25872,8 +25872,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g04",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: putEnv(\"REPRO_CACHE_DISABLE\", \"1\")"),
   TestSpec(
     source: "tests/unit/t_sibling_source_paths_are_spelled_relative.nim",
     binary: "build/test-bin/t_sibling_source_paths_are_spelled_relative",
@@ -25960,8 +25960,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g04",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let scratch = createTempDir(\"repro-tarball-from-source-\", \"\"..."),
   TestSpec(
     source: "tests/unit/t_tarball_non_redistributable.nim",
     binary: "build/test-bin/t_tarball_non_redistributable",
@@ -25982,8 +25982,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g04",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: putEnv(\"REPRO_CACHE_DISABLE\", \"1\")"),
   TestSpec(
     source: "tests/unit/t_tarball_prune_paths.nim",
     binary: "build/test-bin/t_tarball_prune_paths",
@@ -25993,8 +25993,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g04",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: putEnv(\"REPRO_CACHE_DISABLE\", \"1\")"),
   TestSpec(
     source: "tests/unit/t_tarball_refuses_binary_host_cannot_start.nim",
     binary: "build/test-bin/t_tarball_refuses_binary_host_cannot_start",
@@ -26004,8 +26004,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g04",
-    singleReason: ""),
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: putEnv(\"REPRO_CACHE_DISABLE\", \"1\")"),
   TestSpec(
     source: "tests/unit/t_test_execute_edge_receives_a_usable_path.nim",
     binary: "build/test-bin/t_test_execute_edge_receives_a_usable_path",

@@ -410,3 +410,60 @@ proc caseSourceOf*(index: CaseSourceIndex; binaryStem, catalogFile: string):
 proc memberStems*(index: CaseSourceIndex; binaryStem: string): seq[string] =
   for member in index.groupMembers.getOrDefault(binaryStem):
     result.add(splitFile(member).name)
+
+const
+  SuiteScopeDeclarations = ["test ", "test(", "setup:", "teardown:",
+    "proc ", "func ", "template ", "macro ", "iterator ", "converter ",
+    "const ", "type ", "#", "discard", "when ", "else:", "elif ", "of "]
+    ## What may stand directly in a ``suite`` body without running at module
+    ## initialisation. ``when`` is allowed as a line (its branches are deeper
+    ## and are scanned only for their own statement keyword, not followed).
+
+proc suiteScopeWork*(text: string): string =
+  ## The first statement that runs in a ``suite`` body outside any ``test``
+  ## (or ``setup`` / ``teardown``), or "". ``std/unittest`` runs a suite body
+  ## when the module initialises, so such a statement runs in EVERY process
+  ## the binary starts. Grouped, that is every case of every member: full-suite
+  ## run 41 measured minutes per case in ``t_group_tests_integration_g05``,
+  ## whose member ``t_federated_catalog_diagnostics_are_actionable`` builds
+  ## and publishes fixture catalogs (spawning ``nim c``) at suite scope.
+  var suiteIndent = -1
+  var bodyIndent = -1
+  var inTripleQuote = false
+  for line in text.splitLines:
+    if line.count("\"\"\"") mod 2 == 1:
+      inTripleQuote = not inTripleQuote
+      continue
+    if inTripleQuote: continue
+    let t = line.strip(trailing = false)
+    if t.len == 0: continue
+    let indent = line.len - t.len
+    if t.startsWith("suite ") or t.startsWith("suite("):
+      suiteIndent = indent
+      bodyIndent = -1
+      continue
+    if suiteIndent < 0: continue
+    if indent <= suiteIndent:
+      if not t.startsWith("#"):
+        suiteIndent = -1
+      continue
+    if bodyIndent < 0: bodyIndent = indent
+    if indent != bodyIndent: continue
+    var declared = t.startsWith("\"")
+      # a continuation of a string expression begun on an earlier line
+    for d in SuiteScopeDeclarations:
+      if t.startsWith(d):
+        declared = true
+        break
+    if not declared:
+      # A test-defining template (``gatedTest "name":``,
+      # ``testWithReturn "name":``): an identifier, a string literal, a
+      # block. It registers a case like ``test`` does; it is not work.
+      var i = 0
+      while i < t.len and (t[i].isAlphaNumeric or t[i] == '_'): inc i
+      if i > 0 and i + 1 < t.len and t[i] == ' ' and t[i + 1] == '"' and
+          t.endsWith(":"):
+        declared = true
+    if not declared:
+      return t
+  ""

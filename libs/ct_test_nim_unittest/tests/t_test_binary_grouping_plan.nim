@@ -171,6 +171,31 @@ suite "test binary grouping: source text facts":
       "define"
     check globalLinkPragma("{.undef: release.}") == "undef"
 
+  test "suite-scope work is found; tests, setup and declarations are not":
+    # The shape that made full-suite run 41 crawl: fixture setup in the suite
+    # body, outside any test, runs at every process start.
+    # Fixture texts are line lists, so that no line of THIS file begins with
+    # a suite or test declaration the static case scanners would count.
+    let heavy = ["suite \"federated catalog diagnostics are actionable\":",
+      "  loadGolden()", "  putEnv(\"REPRO_CACHE_DISABLE\", \"1\")",
+      "  test \"a\":", "    check true", ""].join("\n")
+    check suiteScopeWork(heavy) == "loadGolden()"
+    let clean = ["suite \"clean\":", "  setup:", "    let x = 1",
+      "  teardown:", "    discard", "  proc helper(): int = 1",
+      "  const answer = 42", "  # a comment", "  when defined(linux):",
+      "    test \"linux only\":", "      check helper() == 1",
+      "  test \"b\":", "    let y = createTempDir(\"x\", \"\")",
+      "    check y.len > 0", "  gatedTest \"a test-defining template\":",
+      "    check true", ""].join("\n")
+    check suiteScopeWork(clean) == ""
+    # Module-level code after the suite is not the suite's body.
+    check suiteScopeWork(["suite \"s\":", "  test \"t\":", "    discard",
+      "let afterwards = 1", ""].join("\n")) == ""
+    # A suite body inside a triple-quoted fixture is not this file's suite.
+    let q = "\"\"\""
+    check suiteScopeWork(["let src = " & q, "suite \"x\":", "  doWork()",
+      q, ""].join("\n")) == ""
+
   test "compile pragma targets are repo-relative":
     check compilePragmaTargets("{.compile: \"../c/probe.c\".}",
       "libs/h/tests/t_a.nim") == @["libs/h/c/probe.c"]

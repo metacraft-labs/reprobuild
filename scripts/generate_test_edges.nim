@@ -1170,6 +1170,11 @@ proc assignGroups(repoRoot: string; edges: var seq[TestEdge]) =
       let effect = moduleLevelSideEffect(text)
       if effect.len > 0: reason = "module-level " & effect
     if reason.len == 0:
+      let work = suiteScopeWork(text)
+      if work.len > 0:
+        let shown = if work.len > 60: work[0 ..< 60] & "..." else: work
+        reason = "suite-scope statement runs at every start-up: " & shown
+    if reason.len == 0:
       let pragma = globalLinkPragma(text)
       if pragma.len > 0: reason = "program-wide pragma {." & pragma
     if reason.len == 0 and stem in referenced:
