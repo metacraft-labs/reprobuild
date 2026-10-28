@@ -81,3 +81,6 @@ benchmarks/reports/reprobuild-suite-m0-inventory-sources.json -merge
 recipes/cache/*.sh text eol=lf
 recipes/cache/systemd-units/* text eol=lf
 tools/bootstrap-linux-smoke.sh text eol=lf
+
+# Signed relay conformance fixtures are byte-exact, including on Windows.
+/tests/integration/certificate_relay_vectors/** -text

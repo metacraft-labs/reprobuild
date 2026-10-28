@@ -38106,7 +38106,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_local_store_prune_keeps_newest_and_head_tree.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

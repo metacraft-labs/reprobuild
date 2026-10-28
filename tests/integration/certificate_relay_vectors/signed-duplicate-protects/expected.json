@@ -1,0 +1,19 @@
+{
+  "pieces": [
+    {
+      "payload": "schema = \"test-certificate.v1\"\n\n[certificate]\nframework = \"example-framework\"\nproject = \"example\"\nplatform = \"linux/amd64\"\ntargets = [\"t-integration\", \"t-unit\"]\nresult = \"passed\"\nissued_at = \"2026-06-23T10:14:33Z\"\nissuer = \"example-runner@build-host-1\"\nkey_id = \"example-key-2026-q2\"\n\n[certificate.vcs]\nrepo = \"example\"\ncontent = \"git-tree-sha1:9f8e7d6c5b4a3928170695e4d3c2b1a099887766\"\nuntracked = false\n\n[[certificate.command]]\nargv = [\"example-test\", \"run\", \"--targets\", \"t-integration,t-unit\"]\n",
+      "payload_vector": "signed",
+      "signed": false
+    },
+    {
+      "payload": "schema = \"test-certificate.v1\"\n\n[certificate]\nframework = \"example-framework\"\nproject = \"example\"\nplatform = \"linux/amd64\"\ntargets = [\"t-integration\", \"t-unit\"]\nresult = \"passed\"\nissued_at = \"2026-06-23T10:14:33Z\"\nissuer = \"example-runner@build-host-1\"\nkey_id = \"example-key-2026-q2\"\n\n[certificate.vcs]\nrepo = \"example\"\ncontent = \"git-tree-sha1:9f8e7d6c5b4a3928170695e4d3c2b1a099887766\"\nuntracked = false\n\n[[certificate.command]]\nargv = [\"example-test\", \"run\", \"--targets\", \"t-integration,t-unit\"]\n",
+      "payload_vector": "signed",
+      "signed": true
+    },
+    {
+      "payload": "schema = \"test-certificate.v1\"\n\n[certificate]\nframework = \"example-framework\"\nproject = \"example\"\nplatform = \"linux/amd64\"\ntargets = [\"t-integration\", \"t-unit\"]\nresult = \"passed\"\nissued_at = \"2026-06-23T10:14:33Z\"\nissuer = \"example-runner@build-host-1\"\n\n[certificate.vcs]\nrepo = \"example\"\ncontent = \"git-tree-sha1:9f8e7d6c5b4a3928170695e4d3c2b1a099887766\"\nuntracked = false\n\n[[certificate.command]]\nargv = [\"example-test\", \"run\", \"--targets\", \"t-integration,t-unit\"]\n",
+      "payload_vector": "minimal",
+      "signed": false
+    }
+  ]
+}
