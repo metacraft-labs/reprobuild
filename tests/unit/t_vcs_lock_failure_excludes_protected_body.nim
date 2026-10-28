@@ -55,7 +55,7 @@ suite "required VCS locks exclude mutations on failure":
     let upstream = root / "upstream.git"
     let gitBin = findExe("git")
     require gitBin.len > 0
-    require execCmdEx(quoteShell(gitBin) & " init --bare --quiet " &
+    require execCmdEx(quoteShell(gitBin) & " init --template= --bare --quiet " &
       quoteShell(upstream)).exitCode == 0
     let holder = startProcess(getAppFilename(),
       args = @["--hold-vcs-lock", root, upstream], options = {poStdErrToStdOut})

@@ -31,8 +31,12 @@ if paramCount() == 3 and paramStr(1) == "--fetch-contender":
   doAssert not fileExists(receipt)
   quit(0)
 
-proc git(args: varargs[string]) =
+proc git(fixtureHooks: string; args: varargs[string]) =
+  # Disposable fixture commits do not invoke the user's signer or hooks.
+  # Command-local settings leave the product repo and user configuration alone.
   var command = quoteShell(findExe("git"))
+  for arg in ["-c", "commit.gpgsign=false", "-c", "core.hooksPath=" & fixtureHooks]:
+    command.add(" " & quoteShell(arg))
   for arg in args:
     command.add(" " & quoteShell(arg))
   let res = execCmdEx(command)
@@ -47,12 +51,15 @@ suite "lock refusal preserves action and publication contracts":
     let upstream = root / "upstream.git"
     let checkout = root / "checkout"
     let receipt = root / "fetch-receipt"
-    git("init", "--bare", "--quiet", upstream)
-    git("init", "--quiet", "-b", "main", checkout)
-    git("-C", checkout, "-c", "user.name=Lock Test",
+    let fixtureHooks = root / "empty-hooks"
+    createDir(fixtureHooks)
+    # An explicit empty template also excludes GIT_TEMPLATE_DIR.
+    git(fixtureHooks, "init", "--template=", "--bare", "--quiet", upstream)
+    git(fixtureHooks, "init", "--template=", "--quiet", "-b", "main", checkout)
+    git(fixtureHooks, "-C", checkout, "-c", "user.name=Lock Test",
       "-c", "user.email=lock@example.invalid", "commit", "--quiet",
       "--allow-empty", "-m", "unpublished")
-    git("-C", checkout, "remote", "add", "origin", upstream)
+    git(fixtureHooks, "-C", checkout, "remote", "add", "origin", upstream)
     let gitBin = findExe("git")
     let identity = ensureGitToolResolvable(tpmPathOnly, gitBin.parentDir)
     let before = headPublicationOf(identity, checkout, "origin", allowFetch = false)
