@@ -597,6 +597,7 @@ proc renderInternalUsage*(programName: string): string =
     "usage: " & programName & " internal <subcommand> [args...]\n\n" &
     "internal subcommands (role processes; not part of `" & programName &
       " help`):\n" &
+    "  shared-pool-upload-pack <pool>              Shared-clone Git transport\n" &
     "  io monitor [options] -- <command> [args...] filesystem-monitor shim " &
       "(user form: " & programName & " debug io monitor)\n" &
     "  runquota-helper …                           RunQuota lease helper " &
@@ -100506,6 +100507,19 @@ proc runThinAppDispatch(programName: string): int =
       else:
         putEnv("PATH", appDir)
   let publicCliPath = stablePublicCliPath()
+  # A checkout's persistent transport must re-enter the engine configuring
+  # it, even when an older installed repro appears first on PATH. Use the
+  # existing image guard so embedded library callers never persist their
+  # test/provider executable as a CLI. Keep the hint scoped to this dispatch.
+  let previousPoolCli = getEnv("REPRO_SHARED_POOL_CLI")
+  let poolCli = internalReproHelperCliPath(publicCliPath)
+  if poolCli.len > 0:
+    putEnv("REPRO_SHARED_POOL_CLI", poolCli)
+  defer:
+    if previousPoolCli.len > 0:
+      putEnv("REPRO_SHARED_POOL_CLI", previousPoolCli)
+    else:
+      delEnv("REPRO_SHARED_POOL_CLI")
   if programName == "repro" and args.len > 0 and
       args[0] == BrokerModeFlag:
     return runPrivilegedBrokerMode(args)
@@ -100556,6 +100570,20 @@ proc runThinAppDispatch(programName: string): int =
   # the right handler.) ``repro internal`` is intentionally absent from
   # the primary ``repro help`` body; it is documented via
   # ``renderInternalUsage`` (and ``CLI/internal/`` in the specs).
+  if args.len >= 2 and args[0] == "internal" and
+      args[1] == "shared-pool-upload-pack":
+    # Git invokes this transport through remote.repro-pool.uploadpack.
+    # Keep stdout exclusively for Git's wire protocol: even a usage error
+    # must go to stderr rather than corrupting the client's advertisement.
+    if args.len != 3:
+      stderr.writeLine("repro internal shared-pool-upload-pack: expected one pool path")
+      return 2
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      stderr.writeLine("repro internal shared-pool-upload-pack: git was not found on PATH")
+      return 1
+    return serveSharedPoolUploadPack(gitBin, args[2])
+
   if args.len >= 4 and args[0] == "internal" and args[1] == "resolve-package":
     # ``repro internal resolve-package <consumerDir> <name>``
     #
