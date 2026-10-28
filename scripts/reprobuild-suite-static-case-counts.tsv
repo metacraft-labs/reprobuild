@@ -2346,6 +2346,7 @@ tests/unit/t_m9r9_auto_recurse.nim	nim	20
 tests/unit/t_manifest_editor_edge_cases.nim	nim	28
 tests/unit/t_manifest_editor_keeps_a_fragment_in_one_schema.nim	nim	5
 tests/unit/t_manifest_editor_member_edits_target_the_named_array.nim	nim	3
+tests/unit/t_manifest_editor_places_a_new_scalar_with_the_scalars.nim	nim	1
 tests/unit/t_manifest_editor_preserves_unrelated_text.nim	nim	5
 tests/unit/t_measurement_axes.nim	nim	21
 tests/unit/t_missing_json_evidence.nim	nim	6

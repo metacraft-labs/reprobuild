@@ -67,11 +67,13 @@ suite "the manifest editor keeps a fragment in one schema":
     doc.saveManifestDoc()
     let text = readFile(path)
     # The schema line and the key were changed together; the comment that
-    # rode on the renamed key, and every other line, survived.
+    # rode on the renamed key, and every other line, survived. The new
+    # scalar lands with the table's other scalars, below `mainline` and
+    # above the `depends` array (t_manifest_editor_places_a_new_scalar_with_
+    # the_scalars).
     check text == v1Fragment.replace("repo.v1", "repo.v2").replace(
-      "branch = \"dev\"   # our patch branch",
-      "mainline = \"dev\"   # our patch branch").replace(
-      "depends = [\"gizmo\"]\n", "depends = [\"gizmo\"]\nunstable = \"agents\"\n")
+      "branch = \"dev\"   # our patch branch\n",
+      "mainline = \"dev\"   # our patch branch\nunstable = \"agents\"\n")
     let f = readRepoFragment(path)
     check f.schema == schemaRepoFragmentV2
     check f.repo.mainline == some("dev")

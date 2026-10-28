@@ -21033,6 +21033,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_manifest_editor_places_a_new_scalar_with_the_scalars.nim",
+    binary: "build/test-bin/t_manifest_editor_places_a_new_scalar_with_the_scalars",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_manifest_editor_preserves_unrelated_text.nim",
     binary: "build/test-bin/t_manifest_editor_preserves_unrelated_text",
     defines: @[],

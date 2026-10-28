@@ -1164,9 +1164,11 @@ proc insertBlock(doc: var ManifestDoc; at: int; block0: seq[string];
 
 proc insertEntry(doc: var ManifestDoc; s: DocScan; table: string;
                  ordinal: int; entryLines: seq[string];
-                 after: openArray[string]) =
+                 after: openArray[string]; scalar: bool) =
   ## Insert a NEW entry. This is where the key-order rule is enforced: a
-  ## top-level entry always lands above the first table header.
+  ## top-level entry always lands above the first table header. ``scalar``
+  ## says the value is neither an array nor an inline table, which decides
+  ## where an entry with no ``after`` key goes (below).
   let multi = entryLines.len > 1
   let region = doc.tableRegion(s, table, ordinal)
   if not region.found:
@@ -1196,10 +1198,32 @@ proc insertEntry(doc: var ManifestDoc; s: DocScan; table: string;
         padAfter = multi)
       return
   if anchor < 0 and after.len == 0:
+    # With no key named to follow, a new SCALAR key goes with the other
+    # scalar keys of its table — after the last of them, before the arrays
+    # and inline tables that follow them — the order every renderer here
+    # writes (``repoFragmentText``: identity and roles first, ``remotes`` /
+    # ``copyfile`` / ``tags`` after). Appending it after the last key put a
+    # fragment's ``profile`` below a multi-line ``remotes`` array, where a
+    # reader looking for the repo's scalar settings does not look. A new
+    # array still goes after the table's last key. A table that holds only
+    # arrays gets a new scalar first.
+    var lastScalar = -1
+    var firstEntry = -1
     for e in s.entries:
       if e.table == table and e.ordinal == ordinal and
           e.first > region.header and e.last <= region.endLine:
         anchor = max(anchor, e.last)
+        if firstEntry < 0: firstEntry = e.first
+        if e.value.kind notin {pvArray, pvTable}:
+          lastScalar = max(lastScalar, e.last)
+    if scalar and anchor >= 0:
+      if lastScalar >= 0:
+        anchor = lastScalar
+      elif table.len > 0:
+        # Only arrays / inline tables so far: the scalar goes first.
+        doc.insertBlock(firstEntry, entryLines, padBefore = false,
+          padAfter = false)
+        return
   if anchor >= 0:
     doc.insertBlock(anchor + 1, entryLines, padBefore = multi,
       padAfter = multi)
@@ -1341,7 +1365,8 @@ proc setKey*(doc: var ManifestDoc; table, key: string; value: TomlEditValue;
     doc.replaceValue(pv, renderValueLines(value,
       if value.isArray: keep else: alInline))
     return true
-  doc.insertEntry(s, table, -1, renderEntryLines(key, value, layout), after)
+  doc.insertEntry(s, table, -1, renderEntryLines(key, value, layout), after,
+    scalar = not value.isArray)
   true
 
 proc removeKey*(doc: var ManifestDoc; table, key: string): bool =
@@ -1450,7 +1475,7 @@ proc addArrayMember*(doc: var ManifestDoc; table, key, member: string;
   let idx = doc.findEntry(s, table, key)
   if idx < 0:
     doc.insertEntry(s, table, -1,
-      renderEntryLines(key, tomlStrings([member]), layout), [])
+      renderEntryLines(key, tomlStrings([member]), layout), [], scalar = false)
     return true
   let pv = doc.arrayValue(s, idx, table, key)
   doc.requireStrings(pv, table, key)

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2402,
+    "nimTestBinaries": 2403,
     "pureUnitConsolidationGroups": 68,
-    "pureUnitTests": 685,
+    "pureUnitTests": 686,
     "staticallyDetectedRuntimeCompilerFlowTests": 130,
-    "testEntries": 2441
+    "testEntries": 2442
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1242,7 +1242,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 11,
+      "count": 12,
       "defines": [],
       "dependencyShape": [
         "repro_workspace_manifests"
@@ -1254,6 +1254,7 @@
         "tests/unit/t_manifest_editor_edge_cases.nim",
         "tests/unit/t_manifest_editor_keeps_a_fragment_in_one_schema.nim",
         "tests/unit/t_manifest_editor_member_edits_target_the_named_array.nim",
+        "tests/unit/t_manifest_editor_places_a_new_scalar_with_the_scalars.nim",
         "tests/unit/t_manifest_editor_preserves_unrelated_text.nim",
         "tests/unit/t_repo_fragment_role_keys.nim",
         "tests/unit/t_repo_fragment_writer_emits_v1_when_v1_can_say_it.nim",
@@ -1386,7 +1387,7 @@
       "graph-fixture": 18,
       "integration": 1332,
       "platform/destructive": 146,
-      "pure unit": 685,
+      "pure unit": 686,
       "unclassified": 260
     },
     "graphOwnedTestArtifacts": [
@@ -1589,9 +1590,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2402,
+    "nimTestBinaryCount": 2403,
     "pythonTestFileCount": 39,
-    "testEntryCount": 2441
+    "testEntryCount": 2442
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -49904,6 +49905,23 @@
       "source": "tests/unit/t_manifest_editor_member_edits_target_the_named_array.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_manifest_editor_places_a_new_scalar_with_the_scalars",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_manifest_editor_places_a_new_scalar_with_the_scalars.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
