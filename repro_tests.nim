@@ -21243,7 +21243,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     source: "tests/unit/t_role_falls_back_toward_mainline.nim",
     binary: "build/test-bin/t_role_falls_back_toward_mainline",
     defines: @[],
-    requiresReproBinary: false,
+    requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny,

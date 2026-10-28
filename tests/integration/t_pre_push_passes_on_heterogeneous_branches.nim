@@ -274,3 +274,37 @@ suite "RA-3 — pre-push gate: no branch-name enforcement":
       # No failure carries the retired ``branch-mismatch`` property.
       for failure in report["failures"]:
         check failure["property"].getStr() != "branch-mismatch"
+
+  test "pre push derives absent workspace branch from root mainline":
+    # No mocks: the same real published siblings as the heterogeneous case,
+    # but state carries only project membership and the project has no trunk.
+    let gitBin = findExe("git")
+    require gitBin.len > 0
+    let fx = setupFixture(gitBin, "root-default")
+    defer: removeDir(fx.scratch)
+    cloneAll(gitBin, fx)
+    let project = fx.workspaceRoot / "projects" / "lib-a.toml"
+    writeFile(project, readFile(project).replace("trunk = \"dev\"\n", ""))
+    writeFile(fx.workspaceRoot / "repro-workspace.toml",
+      "schema = \"reprobuild.workspace.settings.v1\"\n" &
+      "[workspace]\nmainline = \"root-dev\"\n")
+    writeWorkspaceProjects(fx.workspaceRoot, @["lib-a"])
+    let lockRes = invokeWorkspaceLock(fx)
+    checkpoint(lockRes.output)
+    require lockRes.code == 0
+    let refsFile = fx.scratch / "pushed-refs.txt"
+    writeRefsFile(refsFile, "refs/heads/live", fx.libC.sha)
+    let checked = invokeCheckPrePush(fx, fx.workspaceRoot / "lib-c", refsFile)
+    checkpoint(checked.output)
+    require checked.code == 0
+    check readReport(fx)["activeBranch"].getStr() == "root-dev"
+
+    # A declared project trunk remains the compatibility override; recorded
+    # feature state in turn wins over both declarations.
+    writeFile(project, readFile(project).replace("[project]\n",
+      "[project]\ntrunk = \"legacy-trunk\"\n"))
+    require invokeCheckPrePush(fx, fx.workspaceRoot / "lib-c", refsFile).code == 0
+    check readReport(fx)["activeBranch"].getStr() == "legacy-trunk"
+    seedMetadataBranch(fx, "recorded-feature")
+    require invokeCheckPrePush(fx, fx.workspaceRoot / "lib-c", refsFile).code == 0
+    check readReport(fx)["activeBranch"].getStr() == "recorded-feature"

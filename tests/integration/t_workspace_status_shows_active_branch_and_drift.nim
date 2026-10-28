@@ -25,9 +25,10 @@
 ## Skip rule: only when ``git`` is missing from PATH (same convention
 ## as M2 / M3 / M8 / M9 / M10 / M11).
 
-import std/[json, os, osproc, strutils, tempfiles, unittest]
+import std/[json, options, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_workspace_manifests
 
 # ---- repro binary build ---------------------------------------------------
 
@@ -617,3 +618,155 @@ suite "M12 — repro workspace status (active branch + drift)":
       check "added.txt" in paths
       check "README.md" in paths
       check "untracked.txt" in paths
+
+  test "workspace root mainline replaces absent trunk in init pull and lock":
+    # Real local git remotes; no mocks. Each repo pins main, while the root
+    # profile names a different workspace default. No repository profile may
+    # substitute for the root declaration.
+    let gitBin = findExe("git")
+    require gitBin.len > 0
+    let fx = setupFixture(gitBin, "root-default-lifecycle")
+    defer: removeDir(fx.scratch)
+    let project = fx.workspaceRoot / "projects" / "lib-a.toml"
+    writeFile(project, readFile(project).replace("trunk = \"main\"\n", "")
+      .replace("default_revision = \"main\"", "default_revision = \"legacy-revision\""))
+    writeFile(fx.workspaceRoot / "repro-workspace.toml",
+      "schema = \"reprobuild.workspace.settings.v1\"\n" &
+      "[workspace]\nprofile = \"root\"\n" &
+      "[profiles.root]\nmainline = \"root-dev\"\n")
+
+    let initialized = runShell(shellCommand(@[fx.reproBin, "workspace", "init",
+      "lib-a", "--workspace-root=" & fx.workspaceRoot]))
+    checkpoint(initialized.output)
+    require initialized.code == 0
+    check readWorkspaceBranch(fx.workspaceRoot).get("") == "root-dev"
+
+    # Without a recorded branch, locking must use the same declared default.
+    removeFile(workspaceTomlPath(fx.workspaceRoot))
+    let locked = runShell(shellCommand(@[fx.reproBin, "workspace", "lock",
+      "lib-a", "--write-report", "--workspace-root=" & fx.workspaceRoot]))
+    checkpoint(locked.output)
+    require locked.code == 0
+    let lockReport = fx.workspaceRoot / ".repro" / "build" / "reports" /
+      "lock-report.json"
+    check parseFile(lockReport)["workspaceBranch"].getStr() == "root-dev"
+
+    let pulled = runShell(shellCommand(@[fx.reproBin, "workspace", "pull",
+      "lib-a", "--workspace-root=" & fx.workspaceRoot]))
+    checkpoint(pulled.output)
+    require pulled.code == 0
+    check readWorkspaceBranch(fx.workspaceRoot).get("") == "root-dev"
+
+    # Existing trunk declarations still take precedence over the new default.
+    writeFile(project, readFile(project).replace("[project]\n",
+      "[project]\ntrunk = \"legacy-trunk\"\n"))
+    let legacy = runShell(shellCommand(@[fx.reproBin, "workspace", "pull",
+      "lib-a", "--workspace-root=" & fx.workspaceRoot]))
+    checkpoint(legacy.output)
+    require legacy.code == 0
+    check readWorkspaceBranch(fx.workspaceRoot).get("") == "legacy-trunk"
+
+    # Unmigrated workspaces retain init/pull's historical revision fallback.
+    removeFile(fx.workspaceRoot / "repro-workspace.toml")
+    writeFile(project, readFile(project).replace("trunk = \"legacy-trunk\"\n", ""))
+    let historical = runShell(shellCommand(@[fx.reproBin, "workspace", "pull",
+      "lib-a", "--workspace-root=" & fx.workspaceRoot]))
+    checkpoint(historical.output)
+    require historical.code == 0
+    check readWorkspaceBranch(fx.workspaceRoot).get("") == "legacy-revision"
+
+  test "status uses root workspace default and each repos mainline":
+    # Real git refs distinguish three concepts: the root default, each repo's
+    # integration branch, and each checkout's upstream. Unmerged queries use
+    # integration branches; ahead/behind continues to measure the upstream.
+    let gitBin = findExe("git")
+    require gitBin.len > 0
+    let fx = setupFixture(gitBin, "root-default-status")
+    defer: removeDir(fx.scratch)
+    cloneAll(gitBin, fx)
+    let project = fx.workspaceRoot / "projects" / "lib-a.toml"
+    writeFile(project, readFile(project).replace("trunk = \"main\"\n", ""))
+    writeFile(fx.workspaceRoot / "repro-workspace.toml",
+      "schema = \"reprobuild.workspace.settings.v1\"\n" &
+      "[workspace]\nmainline = \"root-dev\"\n")
+    let a = fx.workspaceRoot / "lib-a"
+    let b = fx.workspaceRoot / "lib-b"
+    discard requireGit(q(gitBin) & " -C " & q(a) & " checkout -b feature-a")
+    discard advanceCommit(gitBin, a)
+    discard requireGit(q(gitBin) & " -C " & q(a) &
+      " branch --set-upstream-to=origin/main feature-a")
+    discard requireGit(q(gitBin) & " -C " & q(b) & " checkout -b feature-b")
+    discard advanceCommit(gitBin, b)
+    discard requireGit(q(gitBin) & " -C " & q(b) & " branch latest")
+    discard requireGit(q(gitBin) & " -C " & q(b) & " push origin latest")
+    discard requireGit(q(gitBin) & " -C " & q(b) & " checkout main")
+    let fragment = fx.workspaceRoot / "repos" / "lib-b.toml"
+    writeFile(fragment, readFile(fragment) & "branch = \"latest\"\n")
+
+    let observed = invokeStatus(fx, ["--unmerged", "--ahead-behind"])
+    checkpoint(observed.output)
+    require observed.code == 0
+    let report = readReport(fx)
+    check report["activeBranch"].getStr() == "root-dev"
+    let aReport = findRepo(report, "lib-a")
+    let bReport = findRepo(report, "lib-b")
+    check aReport["unmergedBranches"] == %*["feature-a"]
+    check bReport["unmergedBranches"].len == 0
+    check aReport["aheadCount"].getInt() == 1
+    check bReport["aheadCount"].getInt() == 0
+
+    writeFile(project, readFile(project).replace("[project]\n",
+      "[project]\ntrunk = \"legacy-trunk\"\n"))
+    require invokeStatus(fx, ["--unmerged"]).code == 0
+    let legacy = readReport(fx)
+    check legacy["activeBranch"].getStr() == "legacy-trunk"
+    check findRepo(legacy, "lib-a")["unmergedBranches"] == %*["feature-a"]
+    check findRepo(legacy, "lib-b")["unmergedBranches"].len == 0
+
+    writeWorkspaceBranch(fx.workspaceRoot, "lib-a", "recorded-feature")
+    require invokeStatus(fx).code == 0
+    check readReport(fx)["activeBranch"].getStr() == "recorded-feature"
+    let locked = runShell(shellCommand(@[fx.reproBin, "workspace", "lock",
+      "lib-a", "--write-report", "--workspace-root=" & fx.workspaceRoot]))
+    checkpoint(locked.output)
+    require locked.code == 0
+    check parseFile(fx.workspaceRoot / ".repro" / "build" / "reports" /
+      "lock-report.json")["workspaceBranch"].getStr() == "recorded-feature"
+
+    # Pin-only legacy fragments inherit the declared root mainline as their
+    # unmerged baseline. Make that baseline contain all existing features,
+    # then leave one distinct branch beyond it as a positive query control.
+    removeFile(workspaceTomlPath(fx.workspaceRoot))
+    writeFile(project, readFile(project)
+      .replace("trunk = \"legacy-trunk\"\n", "")
+      .replace("default_revision = \"main\"\n", ""))
+    for (name, sha) in [("lib-a", fx.libA.sha), ("lib-b", fx.libB.sha),
+                        ("lib-c", fx.libC.sha)]:
+      let path = fx.workspaceRoot / "repos" / (name & ".toml")
+      writeFile(path, readFile(path)
+        .replace("revision = \"main\"", "revision = \"" & sha & "\"")
+        .replace("branch = \"latest\"\n", ""))
+    for (name, baseline) in [("lib-a", "feature-a"), ("lib-b", "feature-b"),
+                             ("lib-c", "main")]:
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / name) &
+        " branch root-dev " & baseline)
+    discard requireGit(q(gitBin) & " -C " & q(a) & " checkout -b beyond-root")
+    writeFile(a / "beyond-root.txt", "after the declared root baseline\n")
+    discard requireGit(q(gitBin) & " -C " & q(a) & " add beyond-root.txt")
+    discard requireGit(q(gitBin) & " -C " & q(a) & " commit -m beyond-root")
+    discard requireGit(q(gitBin) & " -C " & q(a) & " checkout feature-a")
+    require invokeStatus(fx, ["--unmerged"]).code == 0
+    let inherited = readReport(fx)
+    check inherited["activeBranch"].getStr() == "root-dev"
+    check findRepo(inherited, "lib-a")["unmergedBranches"] == %*["beyond-root"]
+    check findRepo(inherited, "lib-b")["unmergedBranches"].len == 0
+    check findRepo(inherited, "lib-c")["unmergedBranches"].len == 0
+
+    # Without root/trunk declarations there is no baseline, even though both
+    # main and root-dev refs exist with unmerged branches beyond them.
+    removeFile(fx.workspaceRoot / "repro-workspace.toml")
+    require invokeStatus(fx, ["--unmerged"]).code == 0
+    let undeclared = readReport(fx)
+    check undeclared["activeBranch"].getStr() == ""
+    for entry in undeclared["repos"]:
+      check entry["unmergedBranches"].len == 0

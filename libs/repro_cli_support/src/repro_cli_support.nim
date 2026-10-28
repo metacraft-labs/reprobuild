@@ -42086,15 +42086,15 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # M13: record the active workspace branch in .repo/workspace.toml so
   # downstream commands (``repro workspace status``, M14 ``repro branch``,
   # M15 ``repro switch``) can read it back as a single source of truth.
-  # The branch value is the resolver's ``trunk`` (the manifest's
-  # documented default branch); when ``trunk`` is empty we fall back to
-  # ``defaultRevision``. We only write when we have a meaningful value
-  # AND no clone failures (writing on a half-broken init would record a
+  # The branch value is the declared workspace default (explicit project
+  # trunk, otherwise the root repository's mainline); when neither exists,
+  # retain the historical fallback to ``defaultRevision``. We only write when
+  # we have a meaningful value AND no clone failures (writing on a half-broken init would record a
   # branch the workspace cannot honor). The write is idempotent — if the
   # composer mode already produced a workspace.toml with a branch, this
   # call is a no-op (the writer preserves any pre-existing branch when
   # we pass the same value, and the value comes from the same composed
-  # ``resolved.trunk``).
+  # declared workspace default).
   if cloneFailures == 0:
     # THE MARKER IS RECORDED WHETHER OR NOT THERE IS A BRANCH TO RECORD WITH
     # IT. "This directory is an initialized workspace" is not a fact about
@@ -42133,7 +42133,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
         stderr.writeLine(
           "workspace init: could not record the workspace marker: " & e.msg)
     let branchValue =
-      if resolved.trunk.len > 0: resolved.trunk
+      if resolved.defaultWorkspaceBranch.len > 0: resolved.defaultWorkspaceBranch
       elif resolved.defaultRevision.len > 0: resolved.defaultRevision
       else: ""
     if branchValue.len > 0:
@@ -51986,7 +51986,7 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
     # On full success, record the converged branch in workspace metadata
     # so downstream commands read a coherent active branch (mirrors init).
     let branchValue =
-      if resolved.trunk.len > 0: resolved.trunk
+      if resolved.defaultWorkspaceBranch.len > 0: resolved.defaultWorkspaceBranch
       elif resolved.defaultRevision.len > 0: resolved.defaultRevision
       else: ""
     if branchValue.len > 0:
@@ -53091,11 +53091,17 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
 
   let createdAt = isoTimestampNow()
   let createdBy = "repro workspace lock"
+  # Named-project resolution need not return composer metadata, but recorded
+  # feature state has the same precedence in both resolution modes.
   var workspaceBranch = ""
-  if workspaceLocal.isSome and workspaceLocal.get().workspace.branch.isSome:
+  let recordedBranch = readWorkspaceBranch(args.workspaceRoot)
+  if recordedBranch.isSome:
+    workspaceBranch = recordedBranch.get()
+  elif workspaceLocal.isSome and workspaceLocal.get().workspace.branch.isSome and
+      workspaceLocal.get().workspace.branch.get().len > 0:
     workspaceBranch = workspaceLocal.get().workspace.branch.get()
-  elif resolved.trunk.len > 0:
-    workspaceBranch = resolved.trunk
+  else:
+    workspaceBranch = resolved.defaultWorkspaceBranch
 
   # Record every repo we actually observed. A declared repo we could not
   # observe is not silently dropped: it was collected into
@@ -61518,7 +61524,7 @@ proc deriveCheckActiveBranch(parsed: CheckArgs;
   ##   1. ``.repo/workspace.toml``'s ``[workspace].branch`` (M13).
   ##   2. The ``workspaceLocal`` we already loaded (composer-mode
   ##      shortcut that avoids re-reading the file).
-  ##   3. The resolver's ``trunk``.
+  ##   3. The declared workspace default (project trunk, else root mainline).
   ##
   ## A malformed state file raises the strict reader's diagnostic: the gate
   ## must not guess the branch from a file it could not read.
@@ -61529,7 +61535,7 @@ proc deriveCheckActiveBranch(parsed: CheckArgs;
       workspaceLocal.get().workspace.branch.isSome and
       workspaceLocal.get().workspace.branch.get().len > 0:
     return workspaceLocal.get().workspace.branch.get()
-  resolved.trunk
+  resolved.defaultWorkspaceBranch
 
 # ---- M26 helpers: lock-visibility classification --------------------------
 #
@@ -68330,7 +68336,8 @@ proc declaredMainlineBranch(resolved: ResolvedProject;
     repoName: string): string =
   ## The branch the MANIFEST declares this repo's mainline to be: the repo
   ## fragment's ``branch``, else its ``revision`` when that names a branch
-  ## rather than a pin, else the project's ``trunk``. Returns "" when the
+  ## rather than a pin, else the declared workspace default (explicit project
+  ## trunk, otherwise the root's mainline). Returns "" when the
   ## manifest declares nothing — the caller must not infer one, because a
   ## blanket refusal justified by an inference is exactly the shape that
   ## teaches operators to reach for ``--no-verify``.
@@ -68341,7 +68348,7 @@ proc declaredMainlineBranch(resolved: ResolvedProject;
     if repo.revision.len > 0 and not looksLikeCommitOid(repo.revision):
       return repo.revision
     break
-  resolved.trunk
+  resolved.defaultWorkspaceBranch
 
 proc addDirectlyDeclaredRoles(branches: var seq[tuple[role, branch: string]];
     roles: openArray[ResolvedRole]) =
@@ -73666,9 +73673,9 @@ proc deriveActiveBranch(workspaceRoot: string;
   ##      (the original M12 heuristic — typical case: a clean
   ##      workspace where every repo is on the same branch). Used for
   ##      legacy workspaces created before M13 wrote the metadata.
-  ##   3. The resolver's ``trunk`` field (the manifest's documented
-  ##      default branch, e.g. ``main``). Used when no live repo
-  ##      checkout reports a current branch.
+  ##   3. The declared workspace default: explicit project trunk, else the
+  ##      root repository's mainline. Used when live branches do not agree
+  ##      or no checkout reports a current branch.
   ##   4. Empty string.
   ##
   ## A malformed state file raises the strict reader's diagnostic rather
@@ -73691,7 +73698,7 @@ proc deriveActiveBranch(workspaceRoot: string;
   # workspace whose repos legitimately sit on different branches (e.g.
   # dev/live/main) has no single active branch, so returning the first repo's
   # branch would misreport it (and disagree with `repro branch`, which reports
-  # `<none recorded>`). On divergence, defer to the manifest trunk instead.
+  # `<none recorded>`). On divergence, defer to the declared workspace default.
   var uniform = ""
   for entry in repos:
     if entry.branch.len == 0: continue
@@ -73702,7 +73709,7 @@ proc deriveActiveBranch(workspaceRoot: string;
       break
   if uniform.len > 0:
     return uniform
-  resolved.trunk
+  resolved.defaultWorkspaceBranch
 
 proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
   var report: WorkspaceStatusReport
@@ -73776,9 +73783,9 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
       report.repos.add(entry)
       continue
 
-    let trunkBranch = if resolved.trunk.len > 0: resolved.trunk else: "main"
+    let mainlineBranch = declaredMainlineBranch(resolved, repo.name)
     # `--file-details` implies file querying (it reads the same porcelain).
-    let extQuery = extendedStatusQuery(repoAbsPath, trunkBranch,
+    let extQuery = extendedStatusQuery(repoAbsPath, mainlineBranch,
       args.stashes, args.files or args.fileDetails, args.aheadBehind,
       args.unmerged, queryFileDetails = args.fileDetails)
     let res = queryGitState(extQuery, identity)

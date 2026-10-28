@@ -2552,9 +2552,11 @@ proc queryGitState*(query: GitQueryAction;
           except CatchableError:
             discard
 
-    # 6. Unmerged Branches
-    if query.queryUnmerged:
-      let trunkBranch = if query.trunkBranch.len > 0: query.trunkBranch else: "main"
+    # 6. Unmerged Branches. A legacy pin-only manifest can declare no
+    # comparison branch at all. Do not turn that absence into an inferred
+    # `main`: it may exist while being unrelated to the intended mainline.
+    if query.queryUnmerged and query.trunkBranch.len > 0:
+      let trunkBranch = query.trunkBranch
       let remoteName = if query.remoteName.len > 0: query.remoteName else: "origin"
       let remoteRef = remoteName & "/" & trunkBranch
       var targetRef = trunkBranch

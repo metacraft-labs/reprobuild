@@ -1384,10 +1384,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1330,
+      "integration": 1331,
       "platform/destructive": 146,
       "pure unit": 685,
-      "unclassified": 261
+      "unclassified": 260
     },
     "graphOwnedTestArtifacts": [
       {
@@ -40598,7 +40598,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_pre_push_passes_on_heterogeneous_branches.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -46582,13 +46582,14 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_test_support"
+        "repro_test_support",
+        "repro_workspace_manifests"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_workspace_status_shows_active_branch_and_drift.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -50321,18 +50322,18 @@
     },
     {
       "binary": "build/test-bin/t_role_falls_back_toward_mainline",
-      "class": "unclassified",
-      "classificationReason": "mutates the process environment (through `tests/unit/branch_roles_fixture.nim`)",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
         "repro_workspace_manifests"
       ],
       "owner": "tests/unit",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/unit/t_role_falls_back_toward_mainline.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

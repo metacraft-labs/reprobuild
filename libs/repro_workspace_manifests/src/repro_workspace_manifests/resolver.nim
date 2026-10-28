@@ -281,6 +281,9 @@ type
     projectName*: string
     defaultRevision*: string
     trunk*: string
+    workspaceMainline*: string
+      ## The root repository's resolved mainline, supplied by workspace
+      ## settings rather than inferred from any member repository.
     repos*: seq[ResolvedRepo]
     projectFile*: string
     # Test-Certificates TC-9d: no certificate policy is resolved here any
@@ -288,6 +291,15 @@ type
     # `repro.lock` of the content a gate judges, and a project manifest that
     # still carries the old `[certificates]` table does not resolve
     # (`refuseLegacyCertificatesTable`).
+
+proc defaultWorkspaceBranch*(project: ResolvedProject): string =
+  ## The declared workspace branch default: explicit legacy project trunk,
+  ## otherwise the root repository's mainline. Recorded feature state and
+  ## unanimous live branches belong to callers' active-branch derivation.
+  ## defaultRevision remains a checkout revision, not a workspace declaration;
+  ## only init/pull retain their historical last-resort fallback to it.
+  if project.trunk.len > 0: project.trunk
+  else: project.workspaceMainline
 
 const
   defaultRepoVcs* = "git"
@@ -1505,6 +1517,7 @@ proc resolveProjectAt*(source: ManifestSource; projectRel: string;
 
   result.projectFile = absProject
   result.projectName = project.project.name
+  result.workspaceMainline = roles.workspaceMainline
   if project.project.default_revision.isSome:
     result.defaultRevision = project.project.default_revision.get()
   if project.project.trunk.isSome:
@@ -1645,6 +1658,7 @@ proc resolveRepoSetAt*(source: ManifestSource; setRel: string;
 
   result.projectFile = absSet
   result.projectName = manifest.`repo-set`.name
+  result.workspaceMainline = roles.workspaceMainline
 
   let ctx = FragmentContext(
     remotes: initTable[string, string](),
