@@ -18927,6 +18927,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_workspace_init_cold_starts_a_flat_settings_root.nim",
+    binary: "build/test-bin/t_workspace_init_cold_starts_a_flat_settings_root",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_workspace_init_resolves_url_shorthand_and_default_host.nim",
     binary: "build/test-bin/t_workspace_init_resolves_url_shorthand_and_default_host",
     defines: @[],

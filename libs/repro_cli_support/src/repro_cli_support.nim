@@ -40286,7 +40286,10 @@ type
       ## form of ``repro branch``, whose new workspace must contain the same
       ## repos as the workspace it was cut from. Without it the fork clones the
       ## primary project only and every repo belonging to the other enabled
-      ## projects has no checkout to branch.
+      ## projects has no checkout to branch. An ``init`` given NO positional
+      ## project sets it too (``resolveBootstrapConfig``): the settings file's
+      ## ``[projects] default`` beyond its first entry, so the whole default
+      ## set is materialized and recorded.
     verifySpec: ManifestVerifySpec
       ## RA-17 — manifest provenance trust anchor resolved from the host
       ## bootstrap config's ``[manifest] revision`` + ``[verify]`` table. When
@@ -41120,34 +41123,54 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
   ## If none resolves, ``init`` later fails loud — the ``repro`` binary ships
   ## NO built-in/hardcoded manifest URL fallback.
   ##
-  ## When the workspace already has a ``.repo/manifests`` checkout (a sibling
-  ## checkout or a prior bootstrap), no manifest URL is needed at all and the
-  ## resolution is skipped; ``init`` reads the existing checkout directly.
-  if dirExists(args.workspaceRoot / "projects"):
-    return
+  ## When the workspace root already holds the manifests (``projects/`` —
+  ## the flat layout, where the root workspace repository IS the manifest
+  ## repository, which is exactly what a cold-start ``init <url>`` has just
+  ## cloned), no manifest URL is needed and none is resolved; ``init`` reads
+  ## the manifests in place. The settings file's ``[projects] default`` is
+  ## still read there: it is the only thing that names WHICH projects a
+  ## workspace joined without a positional project consists of, and skipping
+  ## it made every cold start of a flat-layout root fail for want of a
+  ## project name.
+  ##
+  ## With no positional project, the WHOLE default set is materialized and
+  ## recorded as the active set — its first entry as the primary project,
+  ## the rest as ``additionalProjects`` — matching what ``repro workspace
+  ## enable --default`` gives an existing checkout.
+  let flatLayout = dirExists(args.workspaceRoot / "projects")
 
   # (1) Explicit flag wins outright — and may still pull default projects /
   # a private URL from the config below without overriding the URL/branch.
   let configPath = findBootstrapConfigPath(args.workspaceRoot)
   if configPath.len > 0:
     let cfg = readWorkspaceSettings(configPath)
-    if not args.manifestUrlExplicit:
-      args.manifestUrl = cfg.records.url.get("")
-      if cfg.records.branch.isSome and args.manifestBranch.len == 0:
-        args.manifestBranch = cfg.records.branch.get()
-    if args.privateManifestUrl.len == 0 and cfg.privateManifestUrl.isSome:
-      args.privateManifestUrl = cfg.privateManifestUrl.get()
+    if not flatLayout:
+      if not args.manifestUrlExplicit:
+        args.manifestUrl = cfg.records.url.get("")
+        if cfg.records.branch.isSome and args.manifestBranch.len == 0:
+          args.manifestBranch = cfg.records.branch.get()
+      if args.privateManifestUrl.len == 0 and cfg.privateManifestUrl.isSome:
+        args.privateManifestUrl = cfg.privateManifestUrl.get()
+      # RA-17 — resolve the manifest-provenance trust anchor from the config's
+      # ``[manifest] revision`` + ``[verify]`` table. Paths in
+      # ``allowed_signers`` are resolved relative to the config's directory.
+      # The resulting spec is a no-op unless the config opts into
+      # verification. (A flat-layout root clones no manifest repository, so
+      # there is nothing for it to verify.)
+      args.verifySpec = resolveVerifySpec(cfg, configPath.parentDir)
     if cfg.projects.default.len > 0:
       args.defaultProjects = cfg.projects.default
-    # Fill the project-to-init from the config default when no positional
+    # Fill the project set to init from the config default when no positional
     # project name was supplied.
     if args.projectName.len == 0 and args.defaultProjects.len > 0:
       args.projectName = args.defaultProjects[0]
-    # RA-17 — resolve the manifest-provenance trust anchor from the config's
-    # ``[manifest] revision`` + ``[verify]`` table. Paths in ``allowed_signers``
-    # are resolved relative to the config's directory. The resulting spec is a
-    # no-op unless the config opts into verification.
-    args.verifySpec = resolveVerifySpec(cfg, configPath.parentDir)
+      for name in args.defaultProjects[1 .. ^1]:
+        if name.len > 0 and name != args.projectName and
+            name notin args.additionalProjects:
+          args.additionalProjects.add(name)
+
+  if flatLayout:
+    return
 
   # (3) Host repo origin — only when neither an explicit flag nor the config
   # supplied a manifest URL.
@@ -42127,8 +42150,16 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
     # one the previous engine wrote.
     if resolved.projectName.len > 0 and
         not fileExists(workspaceTomlPath(args.workspaceRoot)):
+      # The set this init materialized: the primary, then every additional
+      # project (the settings file's `[projects] default` beyond its first
+      # entry, or a fork's inherited set), so the recorded membership names
+      # every project whose repos were just cloned.
+      var initSet = @[resolved.projectName]
+      for name in args.additionalProjects:
+        if name.len > 0 and name notin initSet:
+          initSet.add(name)
       try:
-        writeWorkspaceProjects(args.workspaceRoot, @[resolved.projectName])
+        writeWorkspaceProjects(args.workspaceRoot, initSet)
       except WorkspaceManifestParseError as e:
         stderr.writeLine(
           "workspace init: could not record the workspace marker: " & e.msg)
