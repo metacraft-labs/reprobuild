@@ -63053,12 +63053,11 @@ proc certificateStoreRelativePath*(cert: TestCertificate): string =
   ## ``:`` (Content-Id §1); ``<payload-hash>`` is the lowercase hex SHA-256 of
   ## the CANONICAL PAYLOAD — never of a file, so neither the rendering nor the
   ## signature block moves the name. Components are joined with ``/`` on
-  ## every platform. "" when ``vcs.content`` has no ``:`` to split at.
-  let colon = cert.vcs.content.find(':')
-  if colon <= 0 or colon == cert.vcs.content.high:
+  ## every platform. "" when ``vcs.content`` is malformed.
+  let directory = storeContentDir(cert.vcs.content)
+  if not directory.ok:
     return ""
-  "v1/" & cert.vcs.content[0 ..< colon] & "/" &
-    cert.vcs.content[colon + 1 .. ^1] & "/" &
+  directory.relative & "/" &
     content_id.sha256Hex(canonicalCertificatePayload(cert)) & ".toml"
 
 proc certificateMayDescribe*(cert: TestCertificate;

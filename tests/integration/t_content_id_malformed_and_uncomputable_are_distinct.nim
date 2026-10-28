@@ -51,6 +51,20 @@ suite "malformed and uncomputable content ids are distinct":
       ("digest one too long", "git-tree-sha1:" & digest & "0"),
       ("no algorithm", digest),
       ("empty algorithm", ":" & digest),
+      ("algorithm in the wrong case", "GIT-TREE-SHA1:" & digest),
+      ("traversal algorithm", "../escape:" & digest),
+      ("separator algorithm", "future/hash:" & digest),
+      ("backslash algorithm", "future\\hash:" & digest),
+      ("dot algorithm", ".:" & digest),
+      ("whitespace algorithm", "future hash:" & digest),
+      ("control algorithm", "future\n:" & digest),
+      ("nul algorithm", "future\0:" & digest),
+      ("non-ASCII algorithm", "futuré:" & digest),
+      ("overlong algorithm", repeat('a', 65) & ":" & digest),
+      ("reserved con algorithm", "con:" & digest),
+      ("reserved prn algorithm", "prn:" & digest),
+      ("reserved aux algorithm", "aux:" & digest),
+      ("reserved nul algorithm", "nul:" & digest),
       ("second colon", "git-tree-sha1:sha1:" & digest),
       ("empty digest", "git-tree-sha1:"),
       ("non-hex digest", "git-tree-sha1:" & digest[0 ..< 39] & "g"),
@@ -67,6 +81,14 @@ suite "malformed and uncomputable content ids are distinct":
       check claim.evaluation == ceMalformed
       check claim.evaluation != ceMatches
 
+    for prefix in ["com", "lpt"]:
+      for number in 1 .. 9:
+        let text = prefix & $number & ":" & digest
+        checkpoint(text)
+        check parseContentId(text).form == cifMalformed
+        check evaluateClaimedContentId(text, sha1Repo,
+          workingTreeState()).evaluation == ceMalformed
+
     # The split is at the FIRST colon: with a second one, the algorithm is
     # still `git-tree-sha1`, and the digest is what fails.
     let second = parseContentId("git-tree-sha1:sha1:" & digest)
@@ -77,7 +99,11 @@ suite "malformed and uncomputable content ids are distinct":
     let unknown = [
       ("unknown algorithm", "git-tree-sha512:" & digest & digest),
       ("unknown algorithm, short digest", "vcs-snapshot:abc123"),
-      ("algorithm in the wrong case", "GIT-TREE-SHA1:" & digest)]
+      ("maximum length algorithm", repeat('a', 64) & ":" & digest),
+      ("one-character algorithm", "-:" & digest),
+      ("device-like algorithm", "com0:" & digest),
+      ("device-like printer algorithm", "lpt0:" & digest),
+      ("device-like algorithm above reserved range", "lpt10:" & digest)]
     for (label, text) in unknown:
       checkpoint(label & ": " & text)
       let parsed = parseContentId(text)

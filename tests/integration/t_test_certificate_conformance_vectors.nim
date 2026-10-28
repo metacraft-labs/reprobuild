@@ -372,6 +372,66 @@ suite "test-certificate.v1 conformance vectors":
                       "earlier-draft-record=not-covered"]:
         check reached in verifyOutcomes
 
+      # Direct API callers must obey the same content-id grammar as record
+      # verification. Rejection happens before any store directory is touched.
+      var invalidStoreIds = @["git-tree-sha1:abc", "future:xyz", "future:AB"]
+      for algorithm in ["../escape", "future/hash", "future\\hash", ".", "..",
+          "Upper", "future_hash", "future hash", "future\n", "future\0",
+          "futuré", repeat('a', 65), "con", "prn", "aux", "nul"]:
+        invalidStoreIds.add(algorithm & ":abc")
+      for prefix in ["com", "lpt"]:
+        for number in 1 .. 9:
+          invalidStoreIds.add(prefix & $number & ":abc")
+      let templateCert = readCertificateRecord(readFile(root / "store" /
+        "unsigned" / "certificate.toml"))
+      require templateCert.status == crsOk
+      for id in invalidStoreIds:
+        checkpoint("invalid store content id: " & id.escape())
+        var cert = templateCert.cert
+        cert.vcs.content = id
+        check certificateStoreRelativePath(cert) == ""
+        check not storeContentDir(id).ok
+        let writeRoot = scratch / "invalid-store-root"
+        # JSON string quoting supplies TOML-compatible escapes even for NUL,
+        # which the canonical serializer rightly refuses to emit.
+        let document = serializeCertificateToToml(templateCert.cert).replace(
+          "content = " & $(%templateCert.cert.vcs.content),
+          "content = " & $(%id))
+        let published = publishCertificateDocument(writeRoot, document)
+        check published.error.len > 0
+        check published.path == ""
+        check not dirExists(writeRoot)
+        let roots = CertificateStoreRoots(user: writeRoot)
+        let issued = publishCertificateToLocalStore(cert, "", roots)
+        check not issued.written
+        check issued.error.len > 0
+        check issued.path == ""
+        let state = stateWithKnownContent(@[KnownContentId(id: id)])
+        let lookup = findCertificatesInLocalStore(state, roots)
+        check lookup.searched.len == 0
+        check lookup.problems.len > 0
+        check not dirExists(writeRoot)
+
+      # Relaying an opaque but well-formed claim must remain possible through
+      # the same public APIs that reject the malformed inputs above.
+      var unknownCert = templateCert.cert
+      unknownCert.vcs.content = "future-v2:a"
+      let unknownRoot = scratch / "unknown-store-root"
+      let unknownPath = certificateStoreRelativePath(unknownCert)
+      check unknownPath.startsWith("v1/future-v2/a/")
+      let unknownDocument = serializeCertificateToToml(unknownCert)
+      let relayed = publishCertificateDocument(unknownRoot, unknownDocument)
+      check relayed.error == ""
+      check relayed.path == unknownRoot / unknownPath.replace('/', DirSep)
+      check fileExists(relayed.path)
+      let unknownState = stateWithKnownContent(@[
+        KnownContentId(algorithm: "future-v2", id: "future-v2:a")])
+      let foundUnknown = findCertificatesInLocalStore(unknownState,
+        CertificateStoreRoots(user: unknownRoot))
+      check foundUnknown.problems.len == 0
+      require foundUnknown.found.len == 1
+      check foundUnknown.found[0].read.cert.vcs.content == "future-v2:a"
+
       # --- group 5: store/ — where the local store keeps a certificate ----
       for path in caseDirs(root, "store"):
         let name = path.extractFilename

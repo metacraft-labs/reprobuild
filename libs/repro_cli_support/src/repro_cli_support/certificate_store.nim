@@ -51,6 +51,8 @@
 
 import std/[algorithm, atomics, os, strutils, times]
 
+import repro_cli_support/content_id
+
 when defined(windows):
   import std/winlean
 else:
@@ -279,26 +281,16 @@ proc certificateStoreRetention*(env: StoreEnvironment):
 # Layout (§2.2)
 # ---------------------------------------------------------------------------
 
-proc isSafeComponent(text: string): bool =
-  ## One path component that names a directory inside its parent: non-empty,
-  ## not dot-named (dot-names are never content directories), no separator.
-  text.len > 0 and text[0] != '.' and '/' notin text and '\\' notin text and
-    '\0' notin text and ':' notin text
-
 proc storeContentDir*(contentId: string):
     tuple[ok: bool; relative, problem: string] =
-  ## ``v1/<algorithm>/<digest>`` for a content id, split at its FIRST ``:``.
-  ## Joined with ``/`` on every platform; the caller converts.
-  let colon = contentId.find(':')
-  if colon <= 0 or colon == contentId.high:
-    return (false, "", "content id '" & contentId & "' has no '<algorithm>:" &
-      "<digest>' form to name a store directory by")
-  let algorithm = contentId[0 ..< colon]
-  let digest = contentId[colon + 1 .. ^1]
-  if not isSafeComponent(algorithm) or not isSafeComponent(digest):
+  ## ``v1/<algorithm>/<digest>`` for a well-formed content id, including an
+  ## unknown algorithm. Joined with ``/`` on every platform.
+  let parsed = parseContentId(contentId)
+  if parsed.form == cifMalformed:
     return (false, "", "content id '" & contentId & "' cannot name a store " &
-      "directory")
-  (true, LocalStoreLayout & "/" & algorithm & "/" & digest, "")
+      "directory: " & parsed.problem)
+  (true, LocalStoreLayout & "/" & parsed.algorithmName & "/" &
+    parsed.digest, "")
 
 proc toNative(relative: string): string = relative.replace('/', DirSep)
 
