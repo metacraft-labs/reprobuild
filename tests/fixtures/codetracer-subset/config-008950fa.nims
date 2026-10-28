@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Pinned verbatim payload from CodeTracer commit
-# f1745b89e93179eca20778943bbafae91ebb6dfd, config.nims.
-# Source: https://github.com/metacraft-labs/codetracer/blob/f1745b89e93179eca20778943bbafae91ebb6dfd/config.nims
+# Pinned payload from CodeTracer commit
+# 008950fa91fdd68a44f77f9c454eff5b7bf139fa, config.nims.
+# Source: https://github.com/metacraft-labs/codetracer/blob/008950fa91fdd68a44f77f9c454eff5b7bf139fa/config.nims
 #
-# Keep every byte after this provenance header identical to the public source.
+# The public source, byte for byte.
 import std/[os, strutils]
 
 proc addPathIfDir(path: string) =

@@ -7,7 +7,7 @@ Reprobuild project and builds it through the public `repro build` command with
 The macOS gate does not invoke `tup`. Homebrew marks `tup` Linux-only and
 nixpkgs marks it broken on this host. Instead, the test parses and fingerprints
 the command-semantics fixture pinned from CodeTracer commit
-`f1745b89e93179eca20778943bbafae91ebb6dfd`, the revision this repository's
+`008950fa91fdd68a44f77f9c454eff5b7bf139fa`, the revision this repository's
 `flake.lock` pins for `codetracer-src`; using a Reprobuild-owned fixture keeps
 the oracle independent of an adjacent CodeTracer checkout's branch or
 uncommitted state. The fixture covers the exact
@@ -28,20 +28,24 @@ requires its live `src/Tuprules.tup` fingerprints to match the fixture. This
 keeps command drift visible on CI's contracted `codetracer=dev` checkout
 without letting an unrelated local branch silently redefine the oracle.
 
+Each case selects invocation-private RunQuota policy for its daemon and child
+clients, then restores the caller's environment. Native-library package lookups
+use this repository's locked flake inputs rather than a moving global registry.
+
 The source slice itself is still copied from the real sibling CodeTracer
 checkout. Its Nim fixture uses CodeTracer's committed `nim.cfg` search paths so
 that the selected source slice resolves the same checked-in libraries.
 
 The in-place project-file tests use exact `repro.nim` and `config.nims`
 payloads pinned from reviewed CodeTracer commit
-`f1745b89e93179eca20778943bbafae91ebb6dfd`. The files retain CodeTracer's
+`008950fa91fdd68a44f77f9c454eff5b7bf139fa`. The files retain CodeTracer's
 `AGPL-3.0-or-later` license in explicit SPDX/provenance headers. Every byte
 after those headers is identical to the corresponding public source:
 
-- `https://github.com/metacraft-labs/codetracer/blob/f1745b89e93179eca20778943bbafae91ebb6dfd/repro.nim`
-- `https://github.com/metacraft-labs/codetracer/blob/f1745b89e93179eca20778943bbafae91ebb6dfd/config.nims`
+- `https://github.com/metacraft-labs/codetracer/blob/008950fa91fdd68a44f77f9c454eff5b7bf139fa/repro.nim`
+- `https://github.com/metacraft-labs/codetracer/blob/008950fa91fdd68a44f77f9c454eff5b7bf139fa/config.nims`
 
-`f1745b89` is not an arbitrary newer commit. It is the revision this
+`008950fa` is not an arbitrary newer commit. It is the revision this
 repository's `flake.lock` pins for its `codetracer-src` input, so the vendored
 project contract, the Tup command-semantics extract and the flake-pinned
 CodeTracer source all name one reviewed commit instead of three. The previous
@@ -52,6 +56,16 @@ adding the build-graph gate edges and the development-environment
 activation), `config.nims` (sibling-then-override search-path order) and the
 `NIM_REPO_PATH_FLAGS` feeding `!nim_js` (the runquota library paths). The
 remedy is to refresh the fixtures, not to relax the comparison.
+
+The `008950fa` refresh consumes the signed-certificate writer fix. Compared
+with `f1745b89`, `config.nims` is byte-identical and `src/Tuprules.tup` adds
+only `export TMPDIR`, outside the extracted rules, so all three rule
+fingerprints remain unchanged. `repro.nim` adds the `image_diff` source
+dependency and two sibling-pin lint gates, and carries the generated-app DMG
+staging fix that the old fixture had represented with a marked deviation.
+The refreshed project fixture now matches the public source byte for byte;
+the obsolete deviation restoration and alternative-source acceptance are
+removed, while the full payload SHA-256 and live-source checks remain.
 
 The `f1745b89` refresh caught up with four `codetracer-src` moves
 (222a4a009 → 23d5af70f → 6b6d05a08 → 2097ae648 → f1745b89e) that had left the

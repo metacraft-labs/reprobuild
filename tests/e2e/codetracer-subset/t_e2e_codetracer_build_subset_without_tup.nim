@@ -4,6 +4,10 @@ import repro_tool_profiles
 import repro_test_support
 import io_mon/[reader, types]
 
+when defined(posix):
+  from std/posix import Stat, lstat, getuid, S_ISDIR, S_ISSOCK
+  import runquota_client
+
 const
   NimFirstFlag = "-d:asyncBackend=asyncdispatch"
   NimSubcmdProc = "subcmd_2d_d_3a_asyncBackend_3d_asyncdispatch"
@@ -31,13 +35,16 @@ const
   # ``!nim_js`` expands. ``cf5abd87a80ad4de`` is also what the live sibling's
   # ``src/Tuprules.tup`` hashed to when the stale pin reported the drift.
   # ``!trace_object_file`` is unchanged, so its hash is too.
+  # Refreshed at 008950fa: the only Tuprules change from f1745b89 is
+  # `export TMPDIR`, outside every extracted definition. Both complete rule
+  # fingerprints and the compiler-flag mutation fingerprint remain unchanged.
   NimJsSemanticsHash = "cf5abd87a80ad4de"
   NimJsWithoutOldCaseObjectsHash = "75caac0be4d67d5c"
   TraceObjectFileSemanticsHash = "3d1a52e3befe61cf"
   CodeTracerTupSemanticsCommit =
-    "f1745b89e93179eca20778943bbafae91ebb6dfd"
+    "008950fa91fdd68a44f77f9c454eff5b7bf139fa"
   PinnedTupSemanticsFixture =
-    "tests/fixtures/codetracer-subset/Tuprules-f1745b89.tup"
+    "tests/fixtures/codetracer-subset/Tuprules-008950fa.tup"
 
 type
   TupRules = object
@@ -108,28 +115,84 @@ proc mustCompareLiveTupSemantics(codeTracerRoot: string): bool =
     CodeTracerTupSemanticsCommit, "HEAD"
   ])).code == 0
 
-proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
-    socket: string] =
-  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
-  let socketPath = runquotaSocketEndpoint(
-    "repro-m20-rq-" & $getCurrentProcessId())
-  if fileExists(socketPath):
-    removeFile(socketPath)
-  let daemon = startProcess(daemonBin, args = [
-    "--socket", socketPath,
-    "--cpu-milli", "16000",
-    "--memory-bytes", "17179869184",
-    # Test daemon: keep it out of the host-wide observation store, which
-    # it would otherwise open (and write) before it binds its socket.
-    "--no-write-stats"
-  ], options = {poUsePath})
-  putEnv("RUNQUOTA_SOCKET", socketPath)
-  for _ in 0 ..< 200:
-    if pathExists(socketPath):
-      return (process: daemon, socket: socketPath)
-    sleep(25)
-  daemon.terminate()
-  raise newException(OSError, "runquotad socket did not appear")
+type PrivateRunQuotaFixture = object
+  process: owned(Process)
+  socket: string
+  hadScope, hadSocket: bool
+  previousScope, previousSocket: string
+
+proc stopRunQuotaDaemon(daemon: var PrivateRunQuotaFixture) =
+  ## Only this invocation's daemon and endpoint are ours. Restore the caller's
+  ## policy even when shutdown or startup fails; no host daemon is touched.
+  try:
+    if daemon.process != nil:
+      try:
+        if daemon.process.running(): daemon.process.terminate()
+        discard daemon.process.waitForExit()
+      finally:
+        daemon.process.close()
+  finally:
+    try:
+      if daemon.socket.len > 0 and pathExists(daemon.socket):
+        removeFile(daemon.socket)
+      if daemon.socket.len > 0 and dirExists(daemon.socket.parentDir):
+        removeDir(daemon.socket.parentDir)
+    finally:
+      if daemon.hadScope: putEnv("RUNQUOTA_ENDPOINT_SCOPE", daemon.previousScope)
+      else: delEnv("RUNQUOTA_ENDPOINT_SCOPE")
+      if daemon.hadSocket: putEnv("RUNQUOTA_SOCKET", daemon.previousSocket)
+      else: delEnv("RUNQUOTA_SOCKET")
+
+proc ensureRunQuotaDaemon(repoRoot: string): PrivateRunQuotaFixture =
+  ## A real invocation-private daemon must use the same policy as its clients,
+  ## even on hosts with an NSS RunQuota service identity. Environment selection
+  ## remains in force for every child launched by this case, then is restored.
+  result.hadScope = existsEnv("RUNQUOTA_ENDPOINT_SCOPE")
+  result.previousScope = getEnv("RUNQUOTA_ENDPOINT_SCOPE")
+  result.hadSocket = existsEnv("RUNQUOTA_SOCKET")
+  result.previousSocket = getEnv("RUNQUOTA_SOCKET")
+  try:
+    let daemonBin = requireRunQuotaDaemonBin(repoRoot)
+    result.socket = runquotaSocketEndpoint(
+      "repro-m20-rq-" & $getCurrentProcessId())
+    putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
+    putEnv("RUNQUOTA_SOCKET", result.socket)
+    if pathExists(result.socket): removeFile(result.socket)
+    result.process = startProcess(daemonBin, args = [
+      "--socket", result.socket,
+      "--cpu-milli", "16000",
+      "--memory-bytes", "17179869184",
+      # No test traffic in the host-wide observation store.
+      "--no-write-stats"
+    ], options = {poUsePath})
+    var readinessProblem = "socket did not appear"
+    for _ in 0 ..< 200:
+      if pathExists(result.socket):
+        when defined(posix):
+          var directory, socket: Stat
+          doAssert lstat(result.socket.parentDir.cstring, directory) == 0
+          doAssert lstat(result.socket.cstring, socket) == 0
+          doAssert S_ISDIR(directory.st_mode) and S_ISSOCK(socket.st_mode)
+          doAssert directory.st_uid == getuid() and socket.st_uid == getuid()
+          doAssert (directory.st_mode and 0o7777) == 0o700
+          doAssert (socket.st_mode and 0o7777) == 0o600
+          try:
+            # Existence alone is not readiness: complete the real protocol's
+            # Hello handshake under the same private policy as child clients.
+            var client = runquota_client.connectDefault()
+            client.close()
+            return
+          except CatchableError as err:
+            readinessProblem = err.msg
+        else:
+          return
+      if result.process.peekExitCode() != -1:
+        raise newException(OSError, "runquotad exited before readiness")
+      sleep(25)
+    raise newException(OSError, "runquotad was not ready: " & readinessProblem)
+  except:
+    stopRunQuotaDaemon(result)
+    raise
 
 proc nimString(value: string): string =
   value.escape()
@@ -592,12 +655,7 @@ suite "e2e_codetracer_build_subset_without_tup":
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = reproBinary()
 
