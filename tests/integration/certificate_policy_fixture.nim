@@ -119,6 +119,9 @@ proc newPolicyWorkspace*(label, policyModule, consumer: string;
   result.policyPkg = result.root / "certpolicy"
   result.consumer = result.root / "consumer"
   result.initRepo(result.policyPkg)
+  # Stable coordinates keep copied-workspace tests independent of scratch paths.
+  discard result.git(result.policyPkg, "remote", "add", "origin",
+    "https://example.invalid/certpolicy.git")
   createDir(result.policyPkg / "policy")
   writeFile(result.policyPkg / "repro.nim", policyPackageRecipe)
   result.writePolicyModule(policyModule, "seed")

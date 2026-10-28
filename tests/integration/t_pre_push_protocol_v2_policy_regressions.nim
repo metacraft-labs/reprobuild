@@ -215,7 +215,7 @@ proc writeDevelopOverride(workspace, package, path: string) =
       path.replace('\\', '/') & "\"\nstate = \"editable\"\n" &
     "created_at = \"2026-07-22T00:00:00Z\"\n")
 
-proc requiredCertificateLock(depRevision: string): string =
+proc requiredCertificateLock(depRevision, depUrl: string): string =
   ## A committed ``repro.lock`` that pins the develop-set sibling ``dep`` at
   ## its checkout (as the committed-lock gate requires) and records a
   ## certificate policy requiring t-unit on this host for every branch
@@ -224,7 +224,7 @@ proc requiredCertificateLock(depRevision: string): string =
   replaceCertificatePolicySection(serializeLockedDependencies(
     LockedDependencies(schema: "reprobuild.solved-graph-lock.v2", deps: @[
       LockedDep(name: "dep", path: "../dep",
-        coordinates: Coordinates(kind: ckVcs, gitRef: "main",
+        coordinates: Coordinates(kind: ckVcs, url: depUrl, gitRef: "main",
           revision: depRevision),
         integrity: "git-sha1:" & depRevision, visibility: "public")])),
     everyBranchSnapshot(pmRequired, ["t-unit"],
@@ -538,7 +538,7 @@ suite "pre-push protocol v2 policy regressions":
       # The outgoing commit gains a policy requiring an uncovered t-unit; the
       # policy commit is made with --no-verify so only pre-push judges it.
       writeFile(fx.app / "repro.lock", requiredCertificateLock(require(
-        q(gitBin) & " -C " & q(fx.dep) & " rev-parse HEAD").strip()))
+        q(gitBin) & " -C " & q(fx.dep) & " rev-parse HEAD").strip(), fx.depOrigin))
       discard require(q(gitBin) & " -C " & q(fx.app) & " add repro.lock")
       discard require(q(gitBin) & " -C " & q(fx.app) &
         " commit -q --no-verify -m certificate-policy")

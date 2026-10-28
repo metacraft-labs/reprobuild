@@ -227,6 +227,23 @@ suite "a written lock document reads back":
 
 suite "the unified lock document reads back":
 
+  test "the writer refuses an external VCS dependency without a fetch URL":
+    for url in ["", "   "]:
+      let dep = LockedDep(name: "unfetchable", path: "../unfetchable",
+        coordinates: Coordinates(kind: ckVcs, url: url, revision: "abc"))
+      try:
+        discard serializeLockedDependencies(LockedDependencies(deps: @[dep]))
+        check false
+      except SolvedGraphLockParseError as error:
+        check "unfetchable" in error.msg
+        check "url" in error.msg.toLowerAscii()
+
+  test "the writer still permits an unpublished self repository":
+    let dep = LockedDep(name: "local", path: SelfLockedDepPath,
+      coordinates: Coordinates(kind: ckVcs, url: "", revision: "abc"))
+    check "self = \"true\"" in
+      serializeLockedDependencies(LockedDependencies(deps: @[dep]))
+
   test "serializeLockedDependencies round-trips over every coordinate kind":
     var written = lockedDepsFromSolved(solvedGraph(
       @[("libfoo", "1.4.2"), ("nim", "2.2.0")], @[("compiler", "clang")]))

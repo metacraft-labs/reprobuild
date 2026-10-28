@@ -38,7 +38,8 @@ proc lockWith(packages: openArray[(string, string)];
 
 proc vcsDep(name, path, revision: string): LockedDep =
   LockedDep(name: name, path: path,
-    coordinates: Coordinates(kind: ckVcs, revision: revision),
+    coordinates: Coordinates(kind: ckVcs,
+      url: "https://example.invalid/" & name & ".git", revision: revision),
     integrity: "git-sha1:" & revision, visibility: "public")
 
 proc storeDep(name, version, hash: string): LockedDep =

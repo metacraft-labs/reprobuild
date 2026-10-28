@@ -28564,6 +28564,32 @@ proc computeDepIntegrity*(repoAbsPath, headSha: string): string =
     return gitObjectMultihash(gitObjectFormatOf(repoAbsPath), headSha)
   narStyleTreeMultihash(collectTreeEntries(repoAbsPath))
 
+proc cachedProducerLockedDep(checkoutRoot, consumerRoot, pathBase: string;
+                            existingDeps: seq[LockedDep]): Option[LockedDep] =
+  ## A fetched checkout is a materialization of a pin, not a new repository
+  ## identity. It deliberately has no remote and its leaf is the revision.
+  ## Match the exact cache location for that pin, then verify its content
+  ## before carrying the original coordinates forward. Matching only a SHA
+  ## would conflate unrelated repositories that happen to share a commit.
+  for pinned in existingDeps:
+    if isSelfLockedDep(pinned) or pinned.coordinates.kind != ckVcs or
+        pinned.coordinates.revision.len == 0:
+      continue
+    let expected = lockPinnedProducerCacheRoot(consumerRoot) / pinned.name /
+      pinned.coordinates.revision
+    if not dirExists(extendedPath(expected)):
+      continue
+    if cmpPaths(os.normalizedPath(expandFilename(expected)),
+        os.normalizedPath(expandFilename(checkoutRoot))) != 0:
+      continue
+    verifyLockPinnedProducerSource(pinned, checkoutRoot, consumerRoot)
+    var kept = pinned
+    kept.path = relativePath(checkoutRoot, pathBase).replace('\\', '/')
+    if isPolicyEphemeralBranch(kept.coordinates.gitRef):
+      kept.coordinates.gitRef = ""
+    return some(kept)
+  none(LockedDep)
+
 proc usesProducerLockedDep(selector, root, pathBase: string;
                            existingDeps: seq[LockedDep];
                            refView: PublishedRefView = nil):
@@ -28587,6 +28613,9 @@ proc usesProducerLockedDep(selector, root, pathBase: string;
     except CatchableError: ""
   if srcRoot.len > 0 and dirExists(extendedPath(srcRoot)):
     let depAbs = absolutePath(srcRoot)
+    let cached = cachedProducerLockedDep(depAbs, root, pathBase, existingDeps)
+    if cached.isSome:
+      return cached
     let facts = committedLockRepoFacts(depAbs, refView)
     # Discovered from the invoking tree, held relative to the committed
     # lock's frame of reference (``committedLockPathBase``).
@@ -28720,6 +28749,9 @@ proc catalogLockedDep*(catalogRoot, root: string;
   if top.len > 0:
     let depAbs = absolutePath(top)
     let targetBase = if pathBase.len > 0: pathBase else: root
+    let cached = cachedProducerLockedDep(depAbs, root, targetBase, existingDeps)
+    if cached.isSome:
+      return cached
     let targetTop = gitTopLevel(targetBase)
     let canonTargetBase = if targetTop.len > 0: absolutePath(targetTop) else: absolutePath(targetBase)
     if cmpPaths(depAbs, canonTargetBase) == 0 or canonTargetBase.isRelativeTo(depAbs):
@@ -29193,6 +29225,14 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
       continue
     let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     if observedKey(rel) in observedCheckouts:
+      continue
+    let cached = cachedProducerLockedDep(depAbs, root, pathBase, existingDeps)
+    if cached.isSome:
+      let dep = cached.get()
+      if dep.name notin seenNames:
+        siblingDeps.add(dep)
+        observedCheckouts.add(observedKey(rel))
+        seenNames.add(dep.name)
       continue
     let facts = committedLockRepoFacts(depAbs, refView)
     let bareName = extractFilename(depAbs.strip(

@@ -78,7 +78,8 @@
 ## Test-double policy: NO mocks, doubles, or fakes — real git repositories,
 ## the real built ``repro`` binary, real provider compiles, real solves and a
 ## real ``nim c``. The develop override file is the real on-disk contract a
-## ``repro develop`` writes, authored directly so the fixture needs no remote.
+## ``repro develop`` writes, authored directly with each local Git repository
+## as its fetch origin.
 ##
 ## Hermetic: every repo lives in a fresh tempdir; nothing touches $HOME.
 ## Skip rule: ``git`` or ``nim`` missing on PATH, repro unbuilt, or no
@@ -160,6 +161,7 @@ proc initRepo(gitBin, dir: string) =
   check git(gitBin, "", "init -q -b main " & q(dir)).code == 0
   check git(gitBin, dir, "config user.email t@example.invalid").code == 0
   check git(gitBin, dir, "config user.name Tester").code == 0
+  check git(gitBin, dir, "remote add origin " & q(dir)).code == 0
   # The build's own output tree is not source; keeping it out of the commits
   # keeps the root dep's integrity about the recipe, not about build products.
   writeFile(dir / ".gitignore", ".repro/build/\nbuild/\n")

@@ -114,6 +114,9 @@ proc initRepo(gitBin, dir: string) =
   check git(gitBin, "", "init -q -b main " & q(dir)).code == 0
   check git(gitBin, dir, "config user.email t@example.invalid").code == 0
   check git(gitBin, dir, "config user.name Tester").code == 0
+  # Every sibling pin needs fetch coordinates; the real local repository
+  # itself is a fetchable origin for this hermetic fixture.
+  check git(gitBin, dir, "remote add origin " & q(dir)).code == 0
 
 suite "FUP-M: lock refresh folds uses: sibling producer deps":
 
@@ -145,7 +148,7 @@ suite "FUP-M: lock refresh folds uses: sibling producer deps":
       createDir(consumer)
       initRepo(gitBin, consumer)
       check git(gitBin, consumer,
-        "remote add origin https://example.invalid/acme/consumer.git").code == 0
+        "remote set-url origin https://example.invalid/acme/consumer.git").code == 0
       writeFile(consumer / "repro.nim", consumerRecipe)
       check git(gitBin, consumer, "add repro.nim").code == 0
       check git(gitBin, consumer, "commit -q -m consumer").code == 0

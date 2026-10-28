@@ -175,7 +175,8 @@ proc lockWithPrivateRef(objFmt, selfRev: string): string =
         integrity: gitObjectMultihash(objFmt, selfRev),
         visibility: "public"),
       LockedDep(name: "secret-internal", path: "secret-internal",
-        coordinates: Coordinates(kind: ckVcs, gitRef: "main",
+        coordinates: Coordinates(kind: ckVcs,
+          url: "https://example.invalid/secret-internal.git", gitRef: "main",
           revision: selfRev),
         integrity: "", visibility: "personal")]))
 

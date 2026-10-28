@@ -26,6 +26,7 @@
 ## without them.
 
 import std/[os, osproc, strtabs, strutils, tempfiles, unittest]
+import repro_lock
 
 const ReprobuildRepoRoot = currentSourcePath().parentDir.parentDir.parentDir
 const reproBinary = ReprobuildRepoRoot / "build/bin/repro".addFileExt(ExeExt)
@@ -113,6 +114,63 @@ proc rootDepends(lockBody: string): string =
   lockBody[start ..< lockBody.find('"', start)]
 
 suite "lock refresh records the catalog a package resolved from":
+
+  test "a fetched catalog is refreshed by repository name rather than revision":
+    require findExe("git").len > 0
+    require fileExists(reproBinary)
+    let scratch = createTempDir("repro-lock-catalog-fetched-", "")
+    defer: removeDir(scratch)
+    # No sibling catalog: the provider must fetch the committed pin itself.
+    let source = scratch / "catalog-source"
+    initRepo(source, "https://example.invalid/reprobuild-packages.git")
+    writeCatalog(source)
+    discard git(source, "add", ".")
+    discard git(source, "commit", "-q", "-m", "catalog")
+    let head = git(source, "rev-parse", "HEAD")
+    let consumer = makeConsumer(scratch)
+    let pin = LockedDep(name: "reprobuild-packages",
+      coordinates: Coordinates(kind: ckVcs, url: source, revision: head),
+      integrity: "git-sha1:" & head, visibility: "public")
+    writeFile(consumer / "repro.lock",
+      serializeLockedDependencies(LockedDependencies(deps: @[pin])))
+    let refresh = run(quoteShell(reproBinary) & " lock refresh " &
+      quoteShell(consumer))
+    checkpoint(refresh.output)
+    require refresh.code == 0
+    let deps = parseLockedDependencies(readFile(consumer / "repro.lock")).deps
+    check deps.len == 2
+    for dep in deps:
+      check dep.name != head
+      if not isSelfLockedDep(dep):
+        check dep.name == pin.name
+        check dep.coordinates.url == pin.coordinates.url
+        check dep.coordinates.revision == head
+        check dep.integrity == pin.integrity
+    let cached = consumer / ".repro" / "cross-repo-producers" / pin.name / head
+    check dirExists(cached / ".git")
+    check git(cached, "remote").len == 0
+
+  test "an external catalog with no fetch URL refuses without replacing the lock":
+    require findExe("git").len > 0
+    require fileExists(reproBinary)
+    let scratch = createTempDir("repro-lock-catalog-no-url-", "")
+    defer: removeDir(scratch)
+    let catalog = scratch / "reprobuild-packages"
+    initRepo(catalog, "https://example.invalid/reprobuild-packages.git")
+    writeCatalog(catalog)
+    discard git(catalog, "add", ".")
+    discard git(catalog, "commit", "-q", "-m", "catalog")
+    discard git(catalog, "remote", "remove", "origin")
+    let consumer = makeConsumer(scratch)
+    let original = serializeLockedDependencies(LockedDependencies())
+    writeFile(consumer / "repro.lock", original)
+    let refresh = run(quoteShell(reproBinary) & " lock refresh " &
+      quoteShell(consumer))
+    checkpoint(refresh.output)
+    check refresh.code != 0
+    check "reprobuild-packages" in refresh.output
+    check "url" in refresh.output.toLowerAscii()
+    check readFile(consumer / "repro.lock") == original
 
   test "a sibling catalog checkout is recorded at its revision":
     require findExe("git").len > 0
