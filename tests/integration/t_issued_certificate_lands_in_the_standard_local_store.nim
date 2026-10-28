@@ -67,7 +67,11 @@ suite "TC-8c — issued certificates land in the standard local store":
     let contentDir = fx.userRoot / "v1" / "git-tree-sha1" / tree
     let files = storedCertificateFiles(fx.userRoot, "git-tree-sha1:" & tree)
     check files.len == 1
-    check filesUnder(fx.userRoot).len == 1   # nothing else in the store
+    # The only metadata is the persistent inter-producer lock (§2.3).
+    # Keep the generic inventory helper strict for the separate keys-dir check.
+    var expectedFiles = @[files[0].relativePath(fx.userRoot), ".write-lock"]
+    expectedFiles.sort()
+    check filesUnder(fx.userRoot) == expectedFiles
     let cert = readCertificateFile(files[0])
     check cert.vcs.content == "git-tree-sha1:" & tree
     check cert.vcs.base == head

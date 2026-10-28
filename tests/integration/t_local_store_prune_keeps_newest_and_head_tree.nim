@@ -154,6 +154,25 @@ suite "TC-8c — local store retention":
     expected2.sort()
     check contentDirs(root2) == expected2
 
+  when defined(linux):
+    test "a native publish holds the shared root lock through rename":
+      let scratch = createTempDir("repro-store-shared-lock-", "")
+      defer: removeDir(scratch)
+      let root = scratch / "store"
+      let relative = "v1/git-tree-sha1/" & "a".repeat(40) & "/" &
+        "1".repeat(64) & ".toml"
+      var observed = false
+      let published = publishStoreRecord(root, relative, "[certificate]\n",
+        signed = false, beforeRename = proc(attempt: int) =
+          observed = true
+          let contender = execCmdEx(quoteShellCommand(
+            ["flock", "--exclusive", "--nonblock", root / ".write-lock", "true"]))
+          check contender.exitCode == 1)
+      check observed and published.error.len == 0
+      let released = execCmdEx(quoteShellCommand(
+        ["flock", "--exclusive", "--nonblock", root / ".write-lock", "true"]))
+      check released.exitCode == 0
+
   test "a prune that takes the directory mid-write costs the writer one retry":
     let scratch = createTempDir("repro-tc8c-race-", "")
     defer: removeDir(scratch)
@@ -163,7 +182,7 @@ suite "TC-8c — local store retention":
     var prunedDuring: seq[string]
     var calls: seq[int]
     let published = publishStoreRecord(root, relative, "[certificate]\n",
-      signed = true,
+      signed = true, signatureMade = true,
       beforeRename = proc(attempt: int) =
         calls.add(attempt)
         if attempt == 0:

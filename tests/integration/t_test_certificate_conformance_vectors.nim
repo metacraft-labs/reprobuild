@@ -49,7 +49,7 @@
 ## object store, FAILS naming what to fetch; it never skips.
 ## ``TEST_CERTIFICATES_SPEC`` still overrides where the sibling is.
 
-import std/[algorithm, base64, json, os, sequtils, sets, strutils, tempfiles,
+import std/[algorithm, base64, json, os, osproc, sequtils, sets, strutils, tempfiles,
             unittest]
 
 import repro_cli_support
@@ -431,6 +431,97 @@ suite "test-certificate.v1 conformance vectors":
         let third = publishCertificateDocument(twins, unsignedDoc)
         check third.error == "" and third.kept
         check readFile(third.path) == signedDoc
+        var damaged = readCertificateRecord(signedDoc).cert
+        damaged.signature.value = "U1NIU0lHAAAAAg"
+        let damagedDoc = serializeCertificateToToml(damaged)
+        let relayed = publishCertificateDocument(twins, damagedDoc)
+        check relayed.error == "" and relayed.kept
+        check readFile(relayed.path) == signedDoc
+        let originalNote = certificateNoteDelimiter & "\n" &
+          certificateNoteRecord(readCertificateRecord(signedDoc).cert)
+        let relayedNote = addCertificateToNote(originalNote, damaged)
+        check not relayedNote.changed
+        check relayedNote.note == originalNote
+        # Only a signer can repair a previously damaged signed copy.
+        writeFile(first.path, damagedDoc)
+        let reissued = publishCertificateDocument(twins, signedDoc,
+          signatureMade = true)
+        check reissued.error == "" and not reissued.kept
+        check readFile(reissued.path) == signedDoc
+        let damagedNote = certificateNoteDelimiter & "\n" &
+          certificateNoteRecord(damaged)
+        let reissuedNote = addCertificateToNote(damagedNote,
+          readCertificateRecord(signedDoc).cert, signatureMade = true)
+        check reissuedNote.changed
+        check reissuedNote.note == originalNote
+        # A relay cannot establish that malformed or misfiled bytes are an
+        # unsigned twin; leave those bytes untouched and report the failure.
+        for bad in ["not a certificate\n", unsignedDoc.replace(
+            "2026-", "2025-")]:
+          writeFile(first.path, bad)
+          for incoming in [signedDoc, unsignedDoc]:
+            let refused = publishCertificateDocument(twins, incoming)
+            check refused.error.len > 0
+            check readFile(first.path) == bad
+        when not defined(windows):
+          writeFile(first.path, signedDoc)
+          let permissions = getFilePermissions(first.path)
+          setFilePermissions(first.path, {})
+          try:
+            for incoming in [signedDoc, unsignedDoc]:
+              let refused = publishCertificateDocument(twins, incoming)
+              check refused.error.len > 0
+              check getFilePermissions(first.path) == {}
+          finally:
+            setFilePermissions(first.path, permissions)
+          check readFile(first.path) == signedDoc
+
+      # A relay that built a note against an unsigned snapshot must retry
+      # after a concurrent signer publishes; the new signed copy survives.
+      block:
+        let repo = scratch / "notes-cas"
+        createDir(repo)
+        proc git(args: varargs[string]): string =
+          let run = execCmdEx(quoteShellCommand(@["git", "-C", repo] & @args))
+          doAssert run.exitCode == 0, run.output
+          run.output.strip()
+        discard git("init", "-q")
+        discard git("config", "user.name", "Certificate test")
+        discard git("config", "user.email", "certificate@example.invalid")
+        let signedDoc = readFile(root / "store" / "signed" / "certificate.toml")
+        let cert = readCertificateRecord(signedDoc).cert
+        var unsigned = cert
+        unsigned.signature.value = ""
+        unsigned.signature.algorithm = ""
+        let blob = repo / "object"
+        writeFile(blob, "certificate race object\n")
+        let annotated = git("hash-object", "-w", "--", blob)
+        check attachCertificateRecord("git", repo, annotated, unsigned).ok
+        var damaged = cert
+        damaged.signature.value = "U1NIU0lHAAAAAg"
+        var interleaved = false
+        let relayed = attachCertificateRecord("git", repo, annotated, damaged,
+          beforePublish = proc(attempt: int) =
+            if not interleaved:
+              interleaved = true
+              check attachCertificateRecord("git", repo, annotated, cert,
+                signatureMade = true).ok)
+        check interleaved and relayed.ok
+        let final = readNoteBlob("git", repo, annotated, certificateNotesRef)
+        check final.status == gorPresent
+        check final.body == certificateNoteDelimiter & "\n" & certificateNoteRecord(cert)
+
+      # Focused, vendored relay fixtures from spec 71ab19e7 (provenance in
+      # certificate_relay_vectors/README.md), independent of the complete
+      # conformance suite's revision. Every selected case is exercised.
+      for name in ["signed-copy-not-replaced", "signed-duplicate-protects"]:
+        let path = currentSourcePath().parentDir / "certificate_relay_vectors" / name
+        let note = readFile(path / "note.txt")
+        let incoming = readCertificateRecord(readFile(path / "add.txt"))
+        check incoming.status == crsOk
+        let relayed = addCertificateToNote(note, incoming.cert)
+        check relayed.note == readFile(path / "expected-note.txt")
+        check not relayed.changed
 
       # --- group 6: notes/ — note framing (Transport §3.1) ----------------
       # Through reprobuild's REAL note reader and writer — the code that reads

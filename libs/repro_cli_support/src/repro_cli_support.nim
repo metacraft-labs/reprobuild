@@ -64323,13 +64323,15 @@ proc findCertificatesInLocalStore*(state: CertificateState;
         result.found.add(FoundCertificate(name: file.path, read: read))
 
 proc publishCertificateDocument*(root, document: string;
-                                 beforeRename: PublishStepHook = nil):
+                                 beforeRename: PublishStepHook = nil;
+                                 signatureMade = false):
     StorePublish =
   ## Write one rendered certificate into ``root`` under its §2.2 name. The
   ## name is derived from the PARSED record's canonical payload — never from
-  ## the bytes — and whether it is signed, which decides between replacing
-  ## and keeping an existing file of that name, is read from the record, not
-  ## taken from the caller. The bytes written are ``document``, verbatim.
+  ## the bytes. By default this is a relay: a signed document upgrades only
+  ## an unsigned twin, preserving an existing signed copy. ``signatureMade``
+  ## may be true only when this caller made the incoming signature. The bytes
+  ## written are ``document``, verbatim.
   let read = readCertificateRecord(document)
   if read.status != crsOk:
     result.error = "not a test-certificate.v1 record (" & $read.status &
@@ -64344,7 +64346,15 @@ proc publishCertificateDocument*(root, document: string;
     result.error = "no store path for content '" & read.cert.vcs.content & "'"
     return
   publishStoreRecord(root, relative, document, read.cert.isSigned,
-    beforeRename)
+    beforeRename, signatureMade,
+    proc(bytes: string): bool =
+      let existing = readCertificateRecord(bytes)
+      if existing.status != crsOk:
+        raise newException(IOError, "existing certificate is malformed: " &
+          existing.detail)
+      if certificateStoreRelativePath(existing.cert) != relative:
+        raise newException(IOError, "existing certificate does not match its store name")
+      not existing.cert.isSigned)
 
 type
   LocalStorePublishOutcome* = object
@@ -64391,7 +64401,7 @@ proc headContentDir*(repository: string): string =
 
 proc publishCertificateToLocalStore*(cert: TestCertificate;
     repository: string; roots = nativeCertificateStoreRoots();
-    keep = -1): LocalStorePublishOutcome =
+    keep = -1; signatureMade = false): LocalStorePublishOutcome =
   ## Deliver one issued certificate to the USER root and prune that root
   ## (Transport §2.3, §2.5). ``repository`` is the checkout the tests ran in:
   ## the root must not lie inside it (a certificate never belongs in the
@@ -64417,7 +64427,7 @@ proc publishCertificateToLocalStore*(cert: TestCertificate;
         "TEST_CERTIFICATES_DIR outside the repository"
       return
   let published = publishCertificateDocument(roots.user,
-    serializeCertificateToToml(cert))
+    serializeCertificateToToml(cert), signatureMade = signatureMade)
   result.retried = published.retried
   if published.error.len > 0:
     result.error = published.error
@@ -64954,14 +64964,15 @@ proc readCertificateNote*(note: string): seq[CertificateNoteEntry] =
       result.add(CertificateNoteEntry(piece: piece,
         read: readCertificateRecord(piece.text)))
 
-proc addCertificateToNote*(note: string; cert: TestCertificate):
+proc addCertificateToNote*(note: string; cert: TestCertificate;
+                           signatureMade = false):
     tuple[note: string; changed: bool] =
   ## Add ``cert`` to a note blob as Transport §3.1 requires a writer to:
   ##
   ##   * a piece whose payload — rebuilt from its parsed fields — equals
-  ##     ``cert``'s is the same claim. A SIGNED ``cert`` replaces that piece in
-  ##     place (its signature may be absent or may fail); an unsigned one
-  ##     never replaces it, and nothing is added;
+  ##     ``cert``'s is the same claim. A signed relay upgrades an unsigned
+  ##     piece and preserves a signed one. Only ``signatureMade = true``
+  ##     permits replacing a signed piece; an unsigned copy never replaces;
   ##   * otherwise the record goes after the last piece, behind its own
   ##     delimiter line;
   ##   * every other piece — a record not touched, one that does not parse,
@@ -64974,14 +64985,16 @@ proc addCertificateToNote*(note: string; cert: TestCertificate):
   let record = certificateNoteRecord(cert)
   let pieces = splitCertificateNote(note)
   var match = -1
+  var existingSigned = false
   for i, piece in pieces:
     if piece.leading: continue
     let read = readCertificateRecord(piece.text)
     if read.status == crsOk and
         canonicalCertificatePayload(read.cert) == payload:
-      match = i
-      break
-  if match >= 0 and not cert.isSigned:
+      if match < 0: match = i
+      existingSigned = existingSigned or read.cert.isSigned
+  if match >= 0 and (not cert.isSigned or
+      (not signatureMade and existingSigned)):
     return (note, false)
   if match < 0:
     var updated = note
@@ -65203,53 +65216,87 @@ proc readNotedCertificates*(gitBin, repoPath, annotated, notesRef: string;
     result.found.add(FoundCertificate(name: name, read: rec))
 
 proc attachCertificateRecord*(gitBin, repoPath, annotated: string;
-                              cert: TestCertificate):
+                              cert: TestCertificate; signatureMade = false;
+                              beforePublish: PublishStepHook = nil):
     tuple[ok: bool; diagnostic: string] =
   ## Add ``cert`` to the note on ``annotated`` (any object id) under
   ## ``certificateNotesRef`` in ``repoPath`` (Transport §3.1 —
   ## ``addCertificateToNote``), so several platforms' certificates accumulate
   ## on one object without overwriting each other. ``attachCertificate`` is
   ## the producer's call; this one is the bare carrier operation, which can
-  ## also misattach a record on purpose.
+  ## also misattach a record on purpose. ``signatureMade`` asserts this caller
+  ## made the signature. ``beforePublish`` interleaves a concurrent ref update
+  ## in tests; production leaves it nil.
   ##
   ## The new blob is stored with ``hash-object`` and attached with
   ## ``notes add -f -C``, which takes the blob VERBATIM: ``notes append`` and
   ## ``-m``/``-F`` clean the message up (blank lines, trailing whitespace),
   ## which would rewrite pieces the writer must keep byte for byte. A note
   ## that cannot be read is never overwritten.
-  let current = readNoteBlob(gitBin, repoPath, annotated, certificateNotesRef)
-  if current.status == gorUnreadable:
-    return (ok: false, diagnostic: current.diagnostic)
-  let existing = if current.status == gorPresent: current.body else: ""
-  var added: tuple[note: string; changed: bool]
-  try:
-    added = addCertificateToNote(existing, cert)
-  except CertificateSerializationError as err:
-    return (ok: false, diagnostic: err.msg)
-  if not added.changed:
-    return (ok: true, diagnostic: "")
-  let (file, blobPath) = createTempFile("repro-cert-note-", ".txt")
-  try:
-    file.write(added.note)
-    file.close()
-    let blob = gitNoteRun(gitBin,
-      ["-C", repoPath, "hash-object", "-w", "--", blobPath])
-    let oid = blob.output.strip()
-    if blob.code != 0 or oid.len == 0 or not oid.allCharsInSet(HexDigits):
-      return (ok: false, diagnostic: "git hash-object of the note failed: " &
-        blob.output.strip())
-    let res = gitNoteRun(gitBin,
-      ["-C", repoPath, "notes", "--ref", certificateNotesRef,
-       "add", "-f", "-C", oid, annotated])
-    if res.code != 0:
-      return (ok: false, diagnostic: "git notes add failed: " &
-        res.output.strip())
-  finally:
-    removeFile(blobPath)
-  (ok: true, diagnostic: "")
+  # Build each update against an immutable snapshot, then compare-and-swap
+  # the public ref. A losing relay must re-evaluate the newer signed copy.
+  let (tokenFile, token) = createTempFile("repro-note-cas-", ".tmp")
+  tokenFile.close()
+  removeFile(token)
+  let workRef = "refs/notes/test-certificates-work/" & token.extractFilename
+  defer:
+    discard gitNoteRun(gitBin, ["-C", repoPath, "update-ref", "-d", workRef])
+  for attempt in 0 .. 4:
+    let refRead = gitNoteQuery(gitBin,
+      ["-C", repoPath, "rev-parse", "--verify", "--quiet", certificateNotesRef])
+    if refRead.code notin [0, 1]:
+      return (false, "cannot read certificate notes ref: " & refRead.diagnostic)
+    let old = refRead.output.strip()
+    let current = if old.len > 0:
+      readNoteBlob(gitBin, repoPath, annotated, old)
+      else: GitNoteRead(status: gorAbsent)
+    if current.status == gorUnreadable:
+      return (false, current.diagnostic)
+    let existing = if current.status == gorPresent: current.body else: ""
+    var added: tuple[note: string; changed: bool]
+    try:
+      added = addCertificateToNote(existing, cert, signatureMade)
+    except CertificateSerializationError as err:
+      return (false, err.msg)
+    if not added.changed:
+      return (true, "")
+    discard gitNoteRun(gitBin, ["-C", repoPath, "update-ref", "-d", workRef])
+    if old.len > 0:
+      let seeded = gitNoteRun(gitBin,
+        ["-C", repoPath, "update-ref", workRef, old])
+      if seeded.code != 0: return (false, seeded.output)
+    let (file, blobPath) = createTempFile("repro-cert-note-", ".txt")
+    var oid: string
+    try:
+      file.write(added.note)
+      file.close()
+      let blob = gitNoteRun(gitBin,
+        ["-C", repoPath, "hash-object", "-w", "--", blobPath])
+      oid = blob.output.strip()
+      if blob.code != 0 or oid.len == 0 or not oid.allCharsInSet(HexDigits):
+        return (false, "git hash-object of the note failed: " & blob.output.strip())
+    finally:
+      removeFile(blobPath)
+    let written = gitNoteRun(gitBin,
+      ["-C", repoPath, "notes", "--ref", workRef, "add", "-f", "-C", oid, annotated])
+    if written.code != 0: return (false, written.output)
+    let fresh = gitNoteQuery(gitBin,
+      ["-C", repoPath, "rev-parse", "--verify", workRef])
+    if fresh.code != 0: return (false, fresh.diagnostic)
+    if beforePublish != nil: beforePublish(attempt)
+    let updated = gitNoteRun(gitBin,
+      ["-C", repoPath, "update-ref", certificateNotesRef,
+       fresh.output.strip(), old])
+    if updated.code == 0: return (true, "")
+    let latest = gitNoteQuery(gitBin,
+      ["-C", repoPath, "rev-parse", "--verify", "--quiet", certificateNotesRef])
+    if latest.code notin [0, 1] or latest.output.strip() == old:
+      return (false, "cannot update certificate notes ref: " & updated.output.strip())
+  (false, "certificate notes changed concurrently five times; nothing overwritten")
 
 proc attachCertificate*(gitBin, repoPath: string;
-                        cert: TestCertificate): tuple[ok: bool; diagnostic: string] =
+                        cert: TestCertificate; signatureMade = false):
+    tuple[ok: bool; diagnostic: string] =
   ## Attach ``cert`` as a git note on the tree its ``content`` names, under
   ## ``certificateNotesRef`` in ``repoPath``. The tree object need not exist
   ## in the repository: a verifier computes the id of the state in front of
@@ -65257,7 +65304,7 @@ proc attachCertificate*(gitBin, repoPath: string;
   let key = certificateNoteKey(cert.vcs.content)
   if not key.ok:
     return (ok: false, diagnostic: key.problem)
-  attachCertificateRecord(gitBin, repoPath, key.oid, cert)
+  attachCertificateRecord(gitBin, repoPath, key.oid, cert, signatureMade)
 
 proc commitTreeOid*(gitBin, repoPath, commit: string;
                     received = ReceivedObjectStore()):
@@ -85931,7 +85978,8 @@ proc issueForCertificateNode(pre: IssuancePreconditions; name: string;
       "daemon could not sign it (" & err.msg & "); the attestation is " &
       "withheld")
     return false
-  let delivered = publishCertificateToLocalStore(cert, pre.repository)
+  let delivered = publishCertificateToLocalStore(cert, pre.repository,
+    signatureMade = true)
   if delivered.error.len > 0:
     stderr.writeLine("repro test: no certificate for '" & name & "' — it " &
       "was issued but could not be written to the local certificate store: " &
@@ -85957,7 +86005,7 @@ proc issueForCertificateNode(pre: IssuancePreconditions; name: string;
       if existing.signature.value == cert.signature.value:
         alreadyNoted = true
     if not alreadyNoted:
-      let att = attachCertificate(gitBin, pre.repository, cert)
+      let att = attachCertificate(gitBin, pre.repository, cert, signatureMade = true)
       if not att.ok:
         stderr.writeLine("repro test: certificate for '" & name & "' is in " &
           "the local store but attaching it as a git note failed: " &
@@ -86719,7 +86767,8 @@ proc runReproTestCommand*(args: openArray[string];
       # This process runs as the user; nothing here writes the system root.
       # Signing is in-process today (DEFER-TC5-PRIV-DAEMON); a privileged
       # signer will return the certificate to this same client code.
-      let delivered = publishCertificateToLocalStore(cert, pre.repository)
+      let delivered = publishCertificateToLocalStore(cert, pre.repository,
+        signatureMade = true)
       if delivered.error.len > 0:
         stderr.writeLine("repro test: no certificate — it was issued but " &
           "could not be written to the local certificate store: " &
