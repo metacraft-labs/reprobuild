@@ -784,11 +784,10 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   # SELECTED actions reference -- so a fragment build such as
   # ``repro build .#apps`` still resolves it.
   #
-  # This covers the edges ``nim.c(...)`` lowers -- 26 of this
-  # repository's 1397 nim edges. The other 1371 go through
-  # ``buildNimUnittest.build``, a typed tool from a pinned external
-  # package, and declare the same ref at their call site in
-  # ``repro.nim``.
+  # This covers edges lowered by nim.c. The in-tree shared
+  # ct_test_nim_unittest adapter records the native backend on its own
+  # unittest compile edges too; consumers need not repeat this default
+  # compiler attachment at each call site.
   #
   # An unmatched ref is inert: the resolver returns ``none`` for a name
   # no ``uses:`` entry declares, so a recipe that does not declare its C

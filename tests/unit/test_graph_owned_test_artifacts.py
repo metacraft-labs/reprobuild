@@ -398,6 +398,18 @@ class TheRatchetHasNoWalkableBypass(unittest.TestCase):
         )
         return result
 
+    def test_quoted_compiler_variable_names_are_not_references(self):
+        # These names are literal path/argument bytes, not reads of the
+        # compiler-valued variable. The paired real variable flow must still
+        # be detected, so blanking every compiler string cannot satisfy this.
+        for name in ("compiler_named_path_literal", "compiler_named_executor_literal"):
+            with self.subTest(name=name):
+                self.assertFalse(self.spawns(fixture(name), "t_" + name))
+        for name in ("compiler_variable_spawns", "compiler_fmt_variable_spawns",
+                     "compiler_amp_variable_spawns", "nim_fmt_fragment_spawns"):
+            with self.subTest(name=name):
+                self.assertTrue(self.spawns(fixture(name), "t_" + name))
+
     def test_nim_check_is_detected(self):
         self.assertTrue(
             self.spawns(NIM_CHECK_TEST, "t_nim_check"),

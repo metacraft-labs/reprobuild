@@ -1919,10 +1919,17 @@ package reprobuild:
           if artifact.actionId notin executeDeps:
             executeDeps.add(artifact.actionId)
       when defined(linux) or defined(macosx):
-        if spec.source == "libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim":
+        if spec.source == "libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim" or
+            spec.source == "tests/integration/t_nim_unittest_edge_reaches_declared_c_backend.nim":
           # These cases load a shared library, not an executable fixture.
+          # The backend case also needs it for nested interface extraction
+          # before the fixture's compiler action can run.
           requiredBinaries.add("build/lib/" & (when defined(macosx):
             "librepro_monitor_shim.dylib" else: "librepro_monitor_shim.so"))
+          executeDeps.add("reprobuild.test_fixtures.monitor_shim")
+      when defined(windows):
+        if spec.source == "tests/integration/t_nim_unittest_edge_reaches_declared_c_backend.nim":
+          requiredBinaries.add(monitorArtifactPath(MonitorShim64Name))
           executeDeps.add("reprobuild.test_fixtures.monitor_shim")
       when defined(linux):
         if spec.source == "tests/unit/t_m9r83_install_mirror_action_shapes.nim":

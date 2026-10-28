@@ -1768,6 +1768,7 @@ tests/integration/t_nested_lock_push_capability_security.nim	nim	15
 tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim	nim	1
 tests/integration/t_nf4_foreign_env_contract.nim	nim	16
 tests/integration/t_nim_package_path_handling.nim	nim	1
+tests/integration/t_nim_unittest_edge_reaches_declared_c_backend.nim	nim	1
 tests/integration/t_nitro_enclave_attestation_surface.nim	nim	27
 tests/integration/t_nix_daemon_ipc.nim	nim	7
 tests/integration/t_nix_daemon_provisioner.nim	nim	12
@@ -2210,7 +2211,7 @@ tests/unit/t_config_package_paths_resolve.nim	nim	5
 tests/unit/t_configure_build_tree_cleanup.nim	nim	13
 tests/unit/t_constructor_fetch_tool_refs.nim	nim	9
 tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	2
-tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	5
+tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	6
 tests/unit/t_custom_role_fallback_cycle_is_rejected.nim	nim	1
 tests/unit/t_da1i_evidence_help_names_the_hazard.nim	nim	9
 tests/unit/t_daemon_request_working_directory.nim	nim	4
@@ -2422,7 +2423,7 @@ tests/unit/test_ct_test_surface_addressability.py	python	14
 tests/unit/test_daemon_worker_confinement_systemd_analyze.py	python	8
 tests/unit/test_dev_shell_hook_scope.py	python	7
 tests/unit/test_generated_artifact_merge_policy.py	python	19
-tests/unit/test_graph_owned_test_artifacts.py	python	24
+tests/unit/test_graph_owned_test_artifacts.py	python	25
 tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py	python	13
 tests/unit/test_hcr_replay_gate_monitor_policy.py	python	2
 tests/unit/test_install_nix_paths.py	python	14

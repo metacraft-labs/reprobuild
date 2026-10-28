@@ -1,0 +1,3 @@
+let backend = "gcc"
+let tool = "repro"
+discard execCmdEx(tool & " backend")

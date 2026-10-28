@@ -284,6 +284,16 @@ proc build*(tool: BuildNimUnittest;
     actionCachePolicy = actionCachePolicy,
     extraEnv = extraEnv)
 
+  # Match the standard nim.c wrapper: Nim invokes its native C backend by
+  # bare name. A package-level uses declaration alone is scoped away unless
+  # the selected compile action references it. Keep the backend in the normal
+  # tool-identity resolver so both its PATH and identity reach this edge;
+  # undeclared selectors remain inert. No ambient compiler is substituted.
+  let backendCompiler =
+    when defined(macosx): "clang"
+    else: "gcc"
+  appendRegisteredActionToolIdentityRefs(result.action.id, [backendCompiler])
+
   # Typed-Outputs M1 binding: populate ``edge.testBinary`` with a
   # ``NimUnittestBinary`` whose ``path`` is the resolved binary path so
   # UFCS dispatch (``edge.testBinary.run(...)``) reaches the run/list

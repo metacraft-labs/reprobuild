@@ -15858,6 +15858,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_nim_unittest_edge_reaches_declared_c_backend.nim",
+    binary: "build/test-bin/t_nim_unittest_edge_reaches_declared_c_backend",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_nitro_enclave_attestation_surface.nim",
     binary: "build/test-bin/t_nitro_enclave_attestation_surface",
     defines: @[],

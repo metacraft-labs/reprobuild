@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2400,
+    "nimTestBinaries": 2401,
     "pureUnitConsolidationGroups": 68,
     "pureUnitTests": 685,
     "staticallyDetectedRuntimeCompilerFlowTests": 130,
-    "testEntries": 2439
+    "testEntries": 2440
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1384,7 +1384,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1329,
+      "integration": 1330,
       "platform/destructive": 146,
       "pure unit": 685,
       "unclassified": 261
@@ -1589,9 +1589,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2400,
+    "nimTestBinaryCount": 2401,
     "pythonTestFileCount": 39,
-    "testEntryCount": 2439
+    "testEntryCount": 2440
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -1814,7 +1814,6 @@
           "directExecutionLine": true,
           "executedVariables": [
             "probe",
-            "r",
             "source",
             "tempRoot"
           ],
@@ -1831,7 +1830,6 @@
           "directExecutionLine": true,
           "executedVariables": [
             "probe",
-            "r",
             "source",
             "tempRoot"
           ],
@@ -1871,13 +1869,11 @@
       "matches": [
         {
           "assignedCommandVariable": "cc",
-          "commandVariableExecuted": true,
+          "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
-            "cc",
             "exe",
-            "root",
-            "runner"
+            "root"
           ],
           "line": 129,
           "path": "libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim",
@@ -1936,87 +1932,11 @@
       "class": "graph-fixture",
       "matches": [
         {
-          "assignedCommandVariable": "probe",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "chosen",
-            "clang",
-            "dir",
-            "gcc",
-            "source"
-          ],
-          "line": 96,
-          "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
-          "patterns": [
-            "gcc"
-          ],
-          "snippet": "addFileExt(\"gcc\", ExeExt))"
-        },
-        {
-          "assignedCommandVariable": "cc",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "chosen",
-            "clang",
-            "dir",
-            "gcc",
-            "source"
-          ],
-          "line": 135,
-          "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
-          "patterns": [
-            "gcc",
-            "cc"
-          ],
-          "snippet": "let cc = findExe(when defined(windows): \"gcc\" else: \"cc\")"
-        },
-        {
-          "assignedCommandVariable": "cc",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "chosen",
-            "clang",
-            "dir",
-            "gcc",
-            "source"
-          ],
-          "line": 142,
-          "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
-          "patterns": [
-            "gcc",
-            "cc"
-          ],
-          "snippet": "let cc = findExe(when defined(windows): \"gcc\" else: \"cc\")"
-        },
-        {
-          "assignedCommandVariable": "cc",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "chosen",
-            "clang",
-            "dir",
-            "gcc",
-            "source"
-          ],
-          "line": 150,
-          "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
-          "patterns": [
-            "gcc",
-            "cc"
-          ],
-          "snippet": "let cc = findExe(when defined(windows): \"gcc\" else: \"cc\")"
-        },
-        {
           "assignedCommandVariable": "gcc",
           "commandVariableExecuted": true,
           "directExecutionLine": false,
           "executedVariables": [
             "chosen",
-            "clang",
             "dir",
             "gcc",
             "source"
@@ -2029,30 +1949,11 @@
           "snippet": "let gcc = getEnv(\"REPRO_TEST_DARWIN_GCC\", findExe(\"gcc\"))"
         },
         {
-          "assignedCommandVariable": "clang",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "chosen",
-            "clang",
-            "dir",
-            "gcc",
-            "source"
-          ],
-          "line": 239,
-          "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
-          "patterns": [
-            "clang"
-          ],
-          "snippet": "let clang = findExe(\"clang\")"
-        },
-        {
           "assignedCommandVariable": "gcc",
           "commandVariableExecuted": true,
           "directExecutionLine": false,
           "executedVariables": [
             "chosen",
-            "clang",
             "dir",
             "gcc",
             "source"
@@ -2063,78 +1964,6 @@
             "gcc"
           ],
           "snippet": "let gcc = getEnv(\"REPRO_TEST_DARWIN_GCC\", findExe(\"gcc\"))"
-        },
-        {
-          "assignedCommandVariable": "clang",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "chosen",
-            "clang",
-            "dir",
-            "gcc",
-            "source"
-          ],
-          "line": 288,
-          "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
-          "patterns": [
-            "clang"
-          ],
-          "snippet": "let clang = findExe(\"clang\")"
-        },
-        {
-          "assignedCommandVariable": "clang",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "chosen",
-            "clang",
-            "dir",
-            "gcc",
-            "source"
-          ],
-          "line": 302,
-          "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
-          "patterns": [
-            "clang"
-          ],
-          "snippet": "let clang = findExe(\"clang\")"
-        },
-        {
-          "assignedCommandVariable": "wrappedClang",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "chosen",
-            "clang",
-            "dir",
-            "gcc",
-            "source"
-          ],
-          "line": 328,
-          "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
-          "patterns": [
-            "clang"
-          ],
-          "snippet": "let wrappedClang = findExe(\"clang\")"
-        },
-        {
-          "assignedCommandVariable": "unwrappedClang",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "chosen",
-            "clang",
-            "dir",
-            "gcc",
-            "source"
-          ],
-          "line": 333,
-          "path": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
-          "patterns": [
-            "clang"
-          ],
-          "snippet": "let unwrappedClang = readFile(origCcPath).strip() / \"bin\" / \"clang\""
         }
       ],
       "source": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim"
@@ -2259,22 +2088,6 @@
           "runtimeCompilerApi": "compileProfileBinary",
           "runtimeCompilerApiModule": "repro_profile_compile",
           "snippet": "discard compileProfileBinary(profile, dir / \"cache\","
-        },
-        {
-          "assignedCommandVariable": "gcc",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "clangExe",
-            "objectFile",
-            "source"
-          ],
-          "line": 753,
-          "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
-          "patterns": [
-            "gcc"
-          ],
-          "snippet": "let gcc = findExe(\"gcc\")"
         },
         {
           "assignedCommandVariable": "",
@@ -2496,10 +2309,9 @@
       "matches": [
         {
           "assignedCommandVariable": "cc",
-          "commandVariableExecuted": true,
+          "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
-            "cc",
             "helper",
             "root"
           ],
@@ -2603,42 +2415,15 @@
       "class": "integration",
       "matches": [
         {
-          "assignedCommandVariable": "gcc",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "PatchableCompileFlags",
-            "PatchableLinkFlags",
-            "a",
-            "caseDir",
-            "ctMcr",
-            "env",
-            "gcc",
-            "output",
-            "patchObj",
-            "repoRoot",
-            "targetBin"
-          ],
-          "line": 292,
-          "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
-          "patterns": [
-            "gcc"
-          ],
-          "snippet": "let gcc = findExe(\"gcc\")"
-        },
-        {
           "assignedCommandVariable": "",
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
             "PatchableCompileFlags",
             "PatchableLinkFlags",
-            "a",
             "caseDir",
             "ctMcr",
             "env",
-            "gcc",
-            "output",
             "patchObj",
             "repoRoot",
             "targetBin"
@@ -2657,12 +2442,9 @@
           "executedVariables": [
             "PatchableCompileFlags",
             "PatchableLinkFlags",
-            "a",
             "caseDir",
             "ctMcr",
             "env",
-            "gcc",
-            "output",
             "patchObj",
             "repoRoot",
             "targetBin"
@@ -2882,7 +2664,6 @@
             "env",
             "linkFlags",
             "oldPath",
-            "output",
             "prepared",
             "raw",
             "repoRoot",
@@ -2911,7 +2692,6 @@
             "compileFlags",
             "env",
             "linkFlags",
-            "output",
             "prepared",
             "raw",
             "repoRoot",
@@ -2934,7 +2714,6 @@
             "compileFlags",
             "env",
             "linkFlags",
-            "output",
             "prepared",
             "raw",
             "repoRoot",
@@ -2980,31 +2759,6 @@
       "class": "integration",
       "matches": [
         {
-          "assignedCommandVariable": "gcc",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "agentDir",
-            "caseDir",
-            "compileFlags",
-            "directDir",
-            "env",
-            "gcc",
-            "libPath",
-            "linkFlags",
-            "patchObj",
-            "repoRoot",
-            "result",
-            "targetBin"
-          ],
-          "line": 105,
-          "path": "tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim",
-          "patterns": [
-            "gcc"
-          ],
-          "snippet": "let gcc = findExe(\"gcc\")"
-        },
-        {
           "assignedCommandVariable": "",
           "commandVariableExecuted": false,
           "directExecutionLine": true,
@@ -3014,7 +2768,6 @@
             "compileFlags",
             "directDir",
             "env",
-            "gcc",
             "libPath",
             "linkFlags",
             "patchObj",
@@ -3039,7 +2792,6 @@
             "compileFlags",
             "directDir",
             "env",
-            "gcc",
             "libPath",
             "linkFlags",
             "patchObj",
@@ -3064,7 +2816,6 @@
             "compileFlags",
             "directDir",
             "env",
-            "gcc",
             "libPath",
             "linkFlags",
             "patchObj",
@@ -3123,8 +2874,7 @@
             "reproBin",
             "shim",
             "socketPath",
-            "target",
-            "watch"
+            "target"
           ],
           "line": 173,
           "path": "tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.nim",
@@ -3144,7 +2894,6 @@
           "commandVariableExecuted": true,
           "directExecutionLine": false,
           "executedVariables": [
-            "agent",
             "artifacts",
             "command",
             "gccPath",
@@ -3169,7 +2918,6 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
-            "agent",
             "artifacts",
             "command",
             "gccPath",
@@ -3407,18 +3155,15 @@
           "executedVariables": [
             "args",
             "checkArgs",
-            "daemon",
             "daemonBin",
             "entries",
             "invalidRoot",
             "loweredGraphCachePath",
             "missingRoot",
-            "path",
             "pathValue",
             "projectEnv",
             "projectRoot",
             "repoRoot",
-            "report",
             "reproBin",
             "socketPath",
             "sourcePath",
@@ -3441,18 +3186,15 @@
           "executedVariables": [
             "args",
             "checkArgs",
-            "daemon",
             "daemonBin",
             "entries",
             "invalidRoot",
             "loweredGraphCachePath",
             "missingRoot",
-            "path",
             "pathValue",
             "projectEnv",
             "projectRoot",
             "repoRoot",
-            "report",
             "reproBin",
             "socketPath",
             "sourcePath",
@@ -3475,18 +3217,15 @@
           "executedVariables": [
             "args",
             "checkArgs",
-            "daemon",
             "daemonBin",
             "entries",
             "invalidRoot",
             "loweredGraphCachePath",
             "missingRoot",
-            "path",
             "pathValue",
             "projectEnv",
             "projectRoot",
             "repoRoot",
-            "report",
             "reproBin",
             "socketPath",
             "sourcePath",
@@ -4449,7 +4188,6 @@
           "executedVariables": [
             "clangPath",
             "codeTracerRoot",
-            "daemon",
             "daemonBin",
             "destPath",
             "gccPath",
@@ -4477,7 +4215,6 @@
           "executedVariables": [
             "clangPath",
             "codeTracerRoot",
-            "daemon",
             "daemonBin",
             "destPath",
             "gccPath",
@@ -4505,7 +4242,6 @@
           "executedVariables": [
             "clangPath",
             "codeTracerRoot",
-            "daemon",
             "daemonBin",
             "destPath",
             "gccPath",
@@ -4533,7 +4269,6 @@
           "executedVariables": [
             "clangPath",
             "codeTracerRoot",
-            "daemon",
             "daemonBin",
             "destPath",
             "gccPath",
@@ -5133,11 +4868,8 @@
           "directExecutionLine": false,
           "executedVariables": [
             "base",
-            "c",
             "cc",
             "d",
-            "daemon",
-            "dir",
             "env",
             "tools"
           ],
@@ -5154,11 +4886,8 @@
           "directExecutionLine": true,
           "executedVariables": [
             "base",
-            "c",
             "cc",
             "d",
-            "daemon",
-            "dir",
             "env",
             "tools"
           ],
@@ -5175,11 +4904,8 @@
           "directExecutionLine": false,
           "executedVariables": [
             "base",
-            "c",
             "cc",
             "d",
-            "daemon",
-            "dir",
             "env",
             "tools"
           ],
@@ -5196,11 +4922,8 @@
           "directExecutionLine": true,
           "executedVariables": [
             "base",
-            "c",
             "cc",
             "d",
-            "daemon",
-            "dir",
             "env",
             "tools"
           ],
@@ -5217,11 +4940,8 @@
           "directExecutionLine": false,
           "executedVariables": [
             "base",
-            "c",
             "cc",
             "d",
-            "daemon",
-            "dir",
             "env",
             "tools"
           ],
@@ -5238,11 +4958,8 @@
           "directExecutionLine": true,
           "executedVariables": [
             "base",
-            "c",
             "cc",
             "d",
-            "daemon",
-            "dir",
             "env",
             "tools"
           ],
@@ -5259,11 +4976,8 @@
           "directExecutionLine": false,
           "executedVariables": [
             "base",
-            "c",
             "cc",
             "d",
-            "daemon",
-            "dir",
             "env",
             "tools"
           ],
@@ -5280,11 +4994,8 @@
           "directExecutionLine": true,
           "executedVariables": [
             "base",
-            "c",
             "cc",
             "d",
-            "daemon",
-            "dir",
             "env",
             "tools"
           ],
@@ -5301,11 +5012,8 @@
           "directExecutionLine": false,
           "executedVariables": [
             "base",
-            "c",
             "cc",
             "d",
-            "daemon",
-            "dir",
             "env",
             "tools"
           ],
@@ -5322,11 +5030,8 @@
           "directExecutionLine": true,
           "executedVariables": [
             "base",
-            "c",
             "cc",
             "d",
-            "daemon",
-            "dir",
             "env",
             "tools"
           ],
@@ -6012,7 +5717,6 @@
             "launcher",
             "launcherCopy",
             "outBin",
-            "p",
             "src",
             "tmp"
           ],
@@ -6033,7 +5737,6 @@
             "launcher",
             "launcherCopy",
             "outBin",
-            "p",
             "src",
             "tmp"
           ],
@@ -6076,7 +5779,6 @@
           "directExecutionLine": true,
           "executedVariables": [
             "codeProject",
-            "daemon",
             "daemonBin",
             "fixtureProject",
             "helperBin",
@@ -6104,8 +5806,6 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
-            "before",
-            "daemon",
             "daemonBin",
             "outputPath",
             "socketPath"
@@ -6182,8 +5882,7 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
-            "root",
-            "runner"
+            "root"
           ],
           "line": 14,
           "path": "tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim",
@@ -6355,8 +6054,6 @@
           "executedVariables": [
             "binDir",
             "cmd",
-            "dir",
-            "summary",
             "summaryPath"
           ],
           "line": 224,
@@ -6486,10 +6183,7 @@
           "executedVariables": [
             "cmd",
             "fabShim",
-            "lib",
-            "needed",
             "pair",
-            "probe",
             "reproBin",
             "scratch",
             "subject"
@@ -6967,20 +6661,14 @@
           "executedVariables": [
             "binDir",
             "buildArgs",
-            "child",
-            "churner",
             "command",
             "endpoint",
-            "grandchild",
             "ownerToken",
-            "replacement",
             "repro",
             "root",
             "runner",
             "scratch",
-            "sidecar",
             "sourceExe",
-            "status",
             "stopPath",
             "summary",
             "unitConfig"
@@ -7358,7 +7046,6 @@
           "directExecutionLine": false,
           "executedVariables": [
             "cmd",
-            "mid",
             "runnerCmd"
           ],
           "line": 207,
@@ -7374,7 +7061,6 @@
           "directExecutionLine": false,
           "executedVariables": [
             "cmd",
-            "mid",
             "runnerCmd"
           ],
           "line": 234,
@@ -7900,10 +7586,8 @@
             "expectedRpath",
             "fixtureEnv",
             "installScript",
-            "interpreter",
             "mirrorMain",
             "patchelfPath",
-            "rpath",
             "scratch"
           ],
           "line": 167,
@@ -7922,10 +7606,8 @@
             "expectedRpath",
             "fixtureEnv",
             "installScript",
-            "interpreter",
             "mirrorMain",
             "patchelfPath",
-            "rpath",
             "scratch"
           ],
           "line": 168,
@@ -7944,10 +7626,8 @@
             "expectedRpath",
             "fixtureEnv",
             "installScript",
-            "interpreter",
             "mirrorMain",
             "patchelfPath",
-            "rpath",
             "scratch"
           ],
           "line": 356,
@@ -7966,10 +7646,8 @@
             "expectedRpath",
             "fixtureEnv",
             "installScript",
-            "interpreter",
             "mirrorMain",
             "patchelfPath",
-            "rpath",
             "scratch"
           ],
           "line": 357,
@@ -7988,10 +7666,8 @@
             "expectedRpath",
             "fixtureEnv",
             "installScript",
-            "interpreter",
             "mirrorMain",
             "patchelfPath",
-            "rpath",
             "scratch"
           ],
           "line": 374,
@@ -8010,10 +7686,8 @@
             "expectedRpath",
             "fixtureEnv",
             "installScript",
-            "interpreter",
             "mirrorMain",
             "patchelfPath",
-            "rpath",
             "scratch"
           ],
           "line": 379,
@@ -8038,8 +7712,7 @@
             "mirrorUsr",
             "patchelfPath",
             "scratch",
-            "script",
-            "sh"
+            "script"
           ],
           "line": 112,
           "path": "tests/unit/t_m9r15q_5_rpath_nix_stub_deps.nim",
@@ -8057,8 +7730,7 @@
             "mirrorUsr",
             "patchelfPath",
             "scratch",
-            "script",
-            "sh"
+            "script"
           ],
           "line": 113,
           "path": "tests/unit/t_m9r15q_5_rpath_nix_stub_deps.nim",
@@ -8076,8 +7748,7 @@
             "mirrorUsr",
             "patchelfPath",
             "scratch",
-            "script",
-            "sh"
+            "script"
           ],
           "line": 125,
           "path": "tests/unit/t_m9r15q_5_rpath_nix_stub_deps.nim",
@@ -8095,8 +7766,7 @@
             "mirrorUsr",
             "patchelfPath",
             "scratch",
-            "script",
-            "sh"
+            "script"
           ],
           "line": 130,
           "path": "tests/unit/t_m9r15q_5_rpath_nix_stub_deps.nim",
@@ -39926,6 +39596,30 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_nim_unittest_edge_reaches_declared_c_backend",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "ct_test_nim_unittest",
+        "repro_cli_support",
+        "repro_core",
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_nim_unittest_edge_reaches_declared_c_backend.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_nitro_enclave_attestation_surface",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -47787,7 +47481,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -51560,7 +51254,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_graph_owned_test_artifacts.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 24,
+      "staticCaseCount": 25,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

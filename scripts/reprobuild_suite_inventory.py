@@ -505,7 +505,8 @@ def nim_code_only(text: str) -> str:
     modules live in triple-quoted strings — so a scan of the raw bytes answers
     "what does this file MENTION" rather than "what does this file DO".
 
-    Used here for the disqualifying-SYMBOL scan only. The import scan below
+    Used for code-symbol references, including compiler-flow variable references.
+    The import scan below
     deliberately still reads the raw text, because blanking string literals
     also blanks a quoted import path (`import "../../libs/x"`), and losing
     those would silently narrow the very closure this predicate walks.
@@ -4416,6 +4417,24 @@ def nim_runtime_compiler_api_invocations(
     return matches
 
 
+def compiler_reference_code(text: str) -> str:
+    """Code references plus conservative interpolation-capable string refs.
+
+    Plain quoted path/argument names are not variable reads. Braced strings
+    can contain real Nim strformat expressions (fmt"{compiler}", &"...",
+    or an imported formatting macro). Retain their reference text rather than
+    pretending a code-only lexer parses arbitrary macro interpolation. This
+    deliberately preserves conservative detection for literal braces too.
+    Compiler-pattern matching still consumes the original command strings.
+    """
+    braced_strings = [
+        token.value
+        for token in nim_tokens(text)
+        if token.kind == "string" and "{" in token.value and "}" in token.value
+    ]
+    return nim_code_only(text) + "\n" + "\n".join(braced_strings)
+
+
 def compiler_invocations(path: str, text: str) -> list[dict[str, Any]]:
     lines = text.splitlines()
     assignment_blocks: dict[str, tuple[int, int, str]] = {}
@@ -4449,11 +4468,16 @@ def compiler_invocations(path: str, text: str) -> list[dict[str, Any]]:
     assignment_names = set(assignment_blocks)
     dependencies: dict[str, set[str]] = {}
     for name, (_, _, block) in assignment_blocks.items():
+        # A quoted path component or comment is not a variable reference.
+        # Keep raw command strings for COMPILER_PATTERNS below; only this
+        # reference graph ignores ordinary literal/comment text and retains
+        # braced formatter strings conservatively.
+        block_code = compiler_reference_code(block)
         dependencies[name] = {
             candidate
             for candidate in assignment_names
             if candidate != name
-            and re.search(r"\b" + re.escape(candidate) + r"\b", block)
+            and re.search(r"\b" + re.escape(candidate) + r"\b", block_code)
         }
 
     executed_vars: set[str] = set()
@@ -4468,10 +4492,11 @@ def compiler_invocations(path: str, text: str) -> list[dict[str, Any]]:
             expression += "\n" + lines[cursor]
             balance += lines[cursor].count("(") - lines[cursor].count(")")
             cursor += 1
+        expression_code = compiler_reference_code(expression)
         executed_vars.update(
             name
             for name in assignment_names
-            if re.search(r"\b" + re.escape(name) + r"\b", expression)
+            if re.search(r"\b" + re.escape(name) + r"\b", expression_code)
         )
 
     flows_to_executor: dict[str, bool] = {}
