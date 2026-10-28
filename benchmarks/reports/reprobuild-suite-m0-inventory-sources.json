@@ -43596,7 +43596,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_spi_leaf_refetches_through_pool.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
