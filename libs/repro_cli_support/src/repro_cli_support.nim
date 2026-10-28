@@ -10796,8 +10796,11 @@ proc ensureLockPinnedCatalog*(modulePath, consumerRoot: string): string =
     return ""
 
   let startDir =
-    if modulePath.len > 0: modulePath.parentDir
-    elif consumerRoot.len > 0: consumerRoot
+    # Recipe-relative helpers deliberately receive a bare module filename.
+    # Resolve the lookup anchor against their cwd before walking ancestors;
+    # keep the compiler's location-independent argv unchanged.
+    if modulePath.len > 0: absolutePath(modulePath).parentDir
+    elif consumerRoot.len > 0: absolutePath(consumerRoot)
     else: getCurrentDir()
 
   # Develop-mode sibling beside consumer or any ancestor

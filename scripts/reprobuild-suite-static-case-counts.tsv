@@ -155,6 +155,7 @@ libs/repro_cli_support/tests/t_action_cache_root_resolution.nim	nim	3
 libs/repro_cli_support/tests/t_audit_holds_at_the_gate_rate.nim	nim	3
 libs/repro_cli_support/tests/t_build_report_is_streamed_not_held_in_memory.nim	nim	6
 libs/repro_cli_support/tests/t_build_worker_holds_no_daemon_key.nim	nim	1
+libs/repro_cli_support/tests/t_catalog_preparation_anchor.nim	nim	4
 libs/repro_cli_support/tests/t_catalog_publication.nim	nim	9
 libs/repro_cli_support/tests/t_connection_ends_with_its_leaf.nim	nim	3
 libs/repro_cli_support/tests/t_daemon_carried_environment.nim	nim	14
