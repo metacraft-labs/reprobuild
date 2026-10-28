@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2404,
+    "nimTestBinaries": 2405,
     "pureUnitConsolidationGroups": 68,
     "pureUnitTests": 686,
     "staticallyDetectedRuntimeCompilerFlowTests": 130,
-    "testEntries": 2443
+    "testEntries": 2444
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1385,7 +1385,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1333,
+      "integration": 1334,
       "platform/destructive": 146,
       "pure unit": 686,
       "unclassified": 260
@@ -1590,9 +1590,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2404,
+    "nimTestBinaryCount": 2405,
     "pythonTestFileCount": 39,
-    "testEntryCount": 2443
+    "testEntryCount": 2444
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -45018,6 +45018,23 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_undeclared_role_is_a_usage_error_before_any_fetch.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_unknown_project_error_names_the_verb_invoked",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_unknown_project_error_names_the_verb_invoked.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

@@ -18603,6 +18603,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_unknown_project_error_names_the_verb_invoked.nim",
+    binary: "build/test-bin/t_unknown_project_error_names_the_verb_invoked",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_unpinned_manifest_is_not_plain_accepted.nim",
     binary: "build/test-bin/t_unpinned_manifest_is_not_plain_accepted",
     defines: @[],

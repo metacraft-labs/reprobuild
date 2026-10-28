@@ -2073,6 +2073,7 @@ tests/integration/t_two_repos_on_different_policy_pins_resolve_different_rules.n
 tests/integration/t_unavailable_package_does_not_fall_through_to_path.nim	nim	1
 tests/integration/t_unavailable_package_fails_with_platform_reason.nim	nim	1
 tests/integration/t_undeclared_role_is_a_usage_error_before_any_fetch.nim	nim	1
+tests/integration/t_unknown_project_error_names_the_verb_invoked.nim	nim	1
 tests/integration/t_unpinned_manifest_is_not_plain_accepted.nim	nim	9
 tests/integration/t_unpublished_evidence_names_the_search_that_ran.nim	nim	1
 tests/integration/t_unrouted_private_repo_refuses_loudly.nim	nim	1
