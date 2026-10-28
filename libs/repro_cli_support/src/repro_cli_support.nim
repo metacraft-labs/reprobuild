@@ -43426,7 +43426,8 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
       manifestsRoot & "' (looked for '" & projectFile & "', '" &
       variantFile & "' and '" & repoSetFile & "')")
 
-proc resolveWorkspaceSyncProject(parsed: WorkspaceSyncArgs): ResolvedProject =
+proc resolveWorkspaceSyncProject(parsed: WorkspaceSyncArgs;
+    command: string): ResolvedProject =
   ## MO-9 — delegates to the shared ``resolveWorkspaceProjectShared`` ladder
   ## (collapsed from the former per-op copies). Same dispatch rule as M9:
   ## prefer ``.repro/workspace.toml`` when it
@@ -43438,16 +43439,17 @@ proc resolveWorkspaceSyncProject(parsed: WorkspaceSyncArgs): ResolvedProject =
   ## manifest layers. A missing workspace.toml AND a missing project
   ## argument is a structured error.
   resolveWorkspaceProjectShared(parsed.workspaceRoot, parsed.projectName,
-    "`repro workspace sync`").resolved
+    "`" & command & "`").resolved
 
-proc repoPassedAsProjectMessage(name: string): string =
+proc repoPassedAsProjectMessage(name, command: string): string =
   "'" & name & "' is a repo, not a project: a positional argument to " &
-    "`repro sync` names a project (or variant, or repo-set). To sync " &
-    "only this repo, run `repro sync --only=" & name & "` (--only takes " &
+    "`" & command & "` names a project (or variant, or repo-set). To select " &
+    "only this repo, run `" & command & " --only=" & name & "` (--only takes " &
     "a comma-separated list; --filter takes a glob)"
 
 proc refuseRepoPassedAsProject(workspaceRoot: string;
-                               scopeProjects: openArray[string]) =
+                               scopeProjects: openArray[string];
+                               command: string) =
   ## Up-front form of the refusal in ``resolveNamedProjectOrVariant``, for the
   ## paths that resolve a positional BEFORE any participating set exists: a
   ## workspace with no recorded metadata (the positional is the resolution
@@ -43463,9 +43465,9 @@ proc refuseRepoPassedAsProject(workspaceRoot: string;
         fileExists(root / repoSetsDirName / (name & ".toml")):
       continue
     if fileExists(root / "repos" / (name & ".toml")):
-      raise newException(ValueError, repoPassedAsProjectMessage(name))
+      raise newException(ValueError, repoPassedAsProjectMessage(name, command))
 
-proc resolveNamedProjectOrVariant(workspaceRoot, name: string;
+proc resolveNamedProjectOrVariant(workspaceRoot, name, command: string;
     participatingRepos: openArray[string] = []): ResolvedProject =
   ## RA-27 scoped sync: resolve ONE named project (or variant, or repo-set)
   ## from the manifest layer so its repo set can scope the participating set.
@@ -43519,28 +43521,29 @@ proc resolveNamedProjectOrVariant(workspaceRoot, name: string;
     return resolveRepoSet(repoSetFile)
   if name in participatingRepos or
       fileExists(manifestsRoot / "repos" / (name & ".toml")):
-    raise newException(ValueError, repoPassedAsProjectMessage(name))
+    raise newException(ValueError, repoPassedAsProjectMessage(name, command))
   raise newException(ValueError,
-    "unknown project '" & name & "' passed to `repro workspace sync` " &
+    "unknown project '" & name & "' passed to `" & command & "` " &
       "(no `projects/" & name & ".toml`, `variants/" & name &
       ".toml` or `" & repoSetsDirName & "/" & name & ".toml` under '" &
       manifestsRoot &
-      "'); run `repro workspace sync` with no project to sync the whole " &
+      "'); run `" & command & "` with no project for the whole " &
       "workspace, pass a known project name, or select repos with " &
       "--only / --filter")
 
 proc scopeRepoPathSet(workspaceRoot: string;
-    scopeProjects: openArray[string];
+    scopeProjects: openArray[string]; command: string;
     participatingRepos: openArray[string] = []): HashSet[string] =
   ## The union of repo ``path`` values declared by the named projects.
   ## ``executeWorkspaceSync`` filters the workspace's participating repo
   ## set to this union — the resolver already knows project→repos, so a
   ## scoped sync is exactly "keep only repos that belong to a named
   ## project". An unknown name raises (see ``resolveNamedProjectOrVariant``);
-  ## ``participatingRepos`` lets that error recognise a repo name.
+  ## ``participatingRepos`` lets that error recognise a repo name. The caller
+  ## supplies its command so the error and remedy name the operation it ran.
   result = initHashSet[string]()
   for name in scopeProjects:
-    let proj = resolveNamedProjectOrVariant(workspaceRoot, name,
+    let proj = resolveNamedProjectOrVariant(workspaceRoot, name, command,
       participatingRepos)
     for repo in proj.repos:
       result.incl(repo.path)
@@ -48550,9 +48553,11 @@ proc applyRepoSelectors(repos: seq[ResolvedRepo];
 
 proc narrowSyncRepoSet(args: WorkspaceSyncArgs;
                        workspaceRoot: string;
-                       repos: seq[ResolvedRepo]): seq[ResolvedRepo] =
+                       repos: seq[ResolvedRepo];
+                       command: string): seq[ResolvedRepo] =
   ## THE one place a ``repro workspace sync`` repo set is narrowed, for every
-  ## sync executor there is.
+  ## sync executor there is, and for the branch-roles query. ``command`` is
+  ## required so every consumer supplies the name for its own diagnostics.
   ##
   ## It exists because the three narrowing steps used to be open-coded twice.
   ## ``executeMainlineSync`` applied all three; ``executeWorkspaceSync`` --
@@ -48579,7 +48584,7 @@ proc narrowSyncRepoSet(args: WorkspaceSyncArgs;
     for repo in repos:
       repoNames.add(repo.name)
     let scopePaths = scopeRepoPathSet(workspaceRoot, args.scopeProjects,
-      repoNames)
+      command, repoNames)
     var kept: seq[ResolvedRepo]
     for repo in result:
       if repo.path in scopePaths:
@@ -49268,7 +49273,7 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
         "' -> '" & repo.path & "' (" & identityEvidence & ")")
     result[repoIdx] = outcome
 
-proc resolveSyncBaseProject(args: WorkspaceSyncArgs;
+proc resolveSyncBaseProject(args: WorkspaceSyncArgs; command: string;
     prospectiveProjects: seq[string] = @[]): ResolvedProject =
   # RA-27 scoped sync: ``repro workspace sync <projectA> <projectB>`` syncs
   # ONLY the named projects' repos. When scope projects are given we resolve
@@ -49297,7 +49302,7 @@ proc resolveSyncBaseProject(args: WorkspaceSyncArgs;
     if prospectiveProjects.len > 0:
       resolveProjectSet(args.workspaceRoot, prospectiveProjects)
     else:
-      resolveWorkspaceSyncProject(resolveArgs)
+      resolveWorkspaceSyncProject(resolveArgs, command)
 
 proc executeWorkspaceSync(args: WorkspaceSyncArgs;
     prospectiveProjects: seq[string] = @[]): WorkspaceSyncOutcome =
@@ -49334,7 +49339,8 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
 
   # Step 2: resolve (or compose) the project.
   #
-  var resolved = resolveSyncBaseProject(args, prospectiveProjects)
+  var resolved = resolveSyncBaseProject(args, "repro workspace sync",
+    prospectiveProjects)
   report.project = resolved.projectName
   report.scopeProjects = args.scopeProjects
   report.dryRun = args.dryRun
@@ -49343,7 +49349,8 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
   # then ``--only`` / ``--except`` / ``--filter``. All three go through
   # ``narrowSyncRepoSet`` -- see the comment on it for why applying them in
   # two hand-written copies is what made the selectors a no-op here.
-  resolved.repos = narrowSyncRepoSet(args, args.workspaceRoot, resolved.repos)
+  resolved.repos = narrowSyncRepoSet(args, args.workspaceRoot, resolved.repos,
+    "repro workspace sync")
 
   # RA-27 Principle 1: ANNOUNCE the plan before acting. Build a real
   # preview from the now-final participating repo set + the cheap on-disk
@@ -50507,10 +50514,11 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
   result.flavor = mainlineFlavorTag(args.mainlineFlavor)
   result.dryRun = args.dryRun
 
-  var resolved = resolveSyncBaseProject(args)
+  var resolved = resolveSyncBaseProject(args, "repro workspace sync")
   result.project = resolved.projectName
 
-  resolved.repos = narrowSyncRepoSet(args, args.workspaceRoot, resolved.repos)
+  resolved.repos = narrowSyncRepoSet(args, args.workspaceRoot, resolved.repos,
+    "repro workspace sync")
 
   let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
   installGitVcsExecutor()
@@ -50975,7 +50983,8 @@ proc runWorkspaceSyncWithProjects(args: openArray[string];
   except BranchRolesUsageError as err:
     stderr.writeLine("repro sync: " & err.msg)
     return 2
-  refuseRepoPassedAsProject(parsed.workspaceRoot, parsed.scopeProjects)
+  refuseRepoPassedAsProject(parsed.workspaceRoot, parsed.scopeProjects,
+    "repro sync")
   # ``--to=<role>`` (``--mainline`` and the other shorthands included)
   # reconciles toward the branch that role resolves to in each repo instead of
   # the branch's own upstream. Different target, different decision table, so
@@ -51178,13 +51187,15 @@ proc executeWorkspaceBranchRoles(parsed: WorkspaceBranchRolesArgs):
   let known = declaredRoleNames(workspaceRoleSettings(sel.workspaceRoot))
   result.roleNames = if parsed.role.len > 0: @[parsed.role] else: known
   try:
-    refuseRepoPassedAsProject(sel.workspaceRoot, sel.scopeProjects)
+    refuseRepoPassedAsProject(sel.workspaceRoot, sel.scopeProjects,
+      "repro workspace branch-roles")
   except ValueError as err:
     # A repo named where a project belongs is a command-line mistake.
     branchRolesUsage(err.msg)
-  var resolved = resolveSyncBaseProject(sel)
+  var resolved = resolveSyncBaseProject(sel, "repro workspace branch-roles")
   result.project = resolved.projectName
-  resolved.repos = narrowSyncRepoSet(sel, sel.workspaceRoot, resolved.repos)
+  resolved.repos = narrowSyncRepoSet(sel, sel.workspaceRoot, resolved.repos,
+    "repro workspace branch-roles")
   if not hasRepoSelector(sel):
     let root = workspaceRootRolesEntry(sel.workspaceRoot, parsed.role)
     result.hasRoot = root.present
