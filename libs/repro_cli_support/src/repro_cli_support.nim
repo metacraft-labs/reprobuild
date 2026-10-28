@@ -28073,7 +28073,8 @@ type
     cause*: LockedIntegrityCause
     diagnostic*: string
 
-proc populateLockedDeps*(source: LockSource): LockedDependencies
+proc populateLockedDeps*(source: LockSource;
+                         strictCommittedRead = false): LockedDependencies
 proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
     ld: LockedDependencies): seq[LockedIntegrityFailure]
 
@@ -46343,7 +46344,8 @@ proc lockedDepFromStoreRepo(source: LockSource; repo: ResolvedRepo): LockedDep =
     participation: repo.participation, depends: repo.depends,
     tags: repo.tags)
 
-proc populateLockedDeps*(source: LockSource): LockedDependencies =
+proc populateLockedDeps*(source: LockSource;
+                         strictCommittedRead: bool): LockedDependencies =
   ## MO-9 — the ONE entry point that fills the MO-8 ``LockedDependencies`` model
   ## from ANY source. Each branch yields the SAME per-dependency shape (a
   ## ``LockedDep`` with checkout COORDINATES + a self-describing INTEGRITY
@@ -46356,7 +46358,8 @@ proc populateLockedDeps*(source: LockSource): LockedDependencies =
   ##     ``git HEAD``), each dependency placed where this machine has it
   ##     (``localizeLockedDeps`` — the lock records no location). A missing /
   ##     unparseable / unsupported lock yields an empty ``deps`` set so callers
-  ##     fall back cleanly.
+  ##     fall back cleanly. Develop opts into ``strictCommittedRead`` to
+  ##     preserve present-file failures for its fail-closed backend report.
   ##   * ``lskManifestRepo`` / ``lskExternalStore`` — for each repo in the
   ##     source's repo-set, read its locked revision from the backend
   ##     ``LockStore`` (the manifest-repo SHA lock, or the external DB) and emit
@@ -46366,7 +46369,24 @@ proc populateLockedDeps*(source: LockSource): LockedDependencies =
   case source.kind
   of lskCommittedLock:
     let lockP = committedLockPath(absolutePath(source.workspaceRoot))
-    if not fileExists(extendedPath(lockP)):
+    if strictCommittedRead:
+      # Develop must distinguish optional absence from a failed OS probe. A
+      # dangling final symlink is present and its later read must fail loud.
+      try:
+        discard getFileInfo(extendedPath(lockP), followSymlink = false)
+      except OSError as error:
+        when defined(windows):
+          # Win32 ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND.
+          let absent = error.errorCode in [2'i32, 3'i32]
+        else:
+          let absent = error.errorCode == ENOENT
+        if absent:
+          return LockedDependencies(schema: SolvedGraphLockSchemaV3, deps: @[])
+        raise
+      let target = getFileInfo(extendedPath(lockP))
+      if target.kind != pcFile or target.isSpecial:
+        raise newException(IOError, "committed lock is not a regular file: " & lockP)
+    elif not fileExists(extendedPath(lockP)):
       return LockedDependencies(schema: SolvedGraphLockSchemaV3, deps: @[])
     try:
       # Placed where THIS machine has each dependency: the lock records
@@ -46382,6 +46402,7 @@ proc populateLockedDeps*(source: LockSource): LockedDependencies =
       # lock set is empty" further down. Fail loud, at the reader.
       raise
     except CatchableError:
+      if strictCommittedRead: raise
       return LockedDependencies(schema: SolvedGraphLockSchemaV3, deps: @[])
   of lskManifestRepo, lskExternalStore:
     result = LockedDependencies(schema: SolvedGraphLockSchemaV3, deps: @[])
@@ -46589,6 +46610,14 @@ proc lockRecordAtCommitOrAncestor*(store: LockStore; project, repo, sha: string;
     if rec.isSome:
       return (rec: rec, foundAt: ancestor, distance: idx)
 
+proc unreadableCommittedLockMessage(lockPath, diagnostic: string): string =
+  ## Preserve the actual parser/OS cause; validate existing recorded revisions
+  ## rather than advising blind regeneration of an unreadable document.
+  "public lock backend (kind=committed-lock location=" & lockPath &
+    ") could not be read: " & diagnostic &
+    " — inspect the file and its access permissions, then run `repro lock " &
+    "validate --lock=" & quoteShell(lockPath) & "`"
+
 type
   PublicTierCommittedLocks = object
     ## The PUBLIC tier's committed-lock medium, read across the workspace.
@@ -46621,6 +46650,8 @@ type
     deps: seq[LockedDep]        ## the per-repo self-records, workspace-rebased
     probed: seq[string]         ## repo paths whose checkout was probed
     carrying: seq[string]       ## repo paths that actually carried a lock
+    refusals: seq[string]       ## present media that failed to read or parse
+    unreadable: seq[DevelopBackendReport] ## exact failed public media
 
 proc participatingRepoCommittedLocks(workspaceRoot: string):
     PublicTierCommittedLocks =
@@ -46639,8 +46670,9 @@ proc participatingRepoCommittedLocks(workspaceRoot: string):
   ## reading ("the repo's own public coordinates") and conflict-free by
   ## construction.
   ##
-  ## Best-effort by design: this is the *public* tier's medium, whose absence is
-  ## never a refusal ("An ABSENT `repro.lock` … is recorded as a backend that
+  ## Absence contributes nothing; a present medium that cannot be read or
+  ## parsed is a DS-3 refusal. Membership discovery remains best-effort here:
+  ## a public lock's absence is never a refusal ("An ABSENT `repro.lock` … is recorded as a backend that
   ## contributed nothing — NOT as a refusal"). A workspace whose membership
   ## cannot be resolved at all contributes no per-repo records and is reported
   ## by the composer's own membership refusal further down, not here.
@@ -46656,18 +46688,22 @@ proc participatingRepoCommittedLocks(workspaceRoot: string):
     # every dep it holds.
     if repo.path.len == 0 or repo.path == ".": continue
     let repoRoot = root / repo.path
-    if not dirExists(extendedPath(repoRoot)): continue
-    result.probed.add(repo.path)
     let lockP = committedLockPath(repoRoot)
-    if not fileExists(extendedPath(lockP)): continue
     var parsed: LockedDependencies
     try:
-      parsed = parseWorkspaceLockedDeps(readFile(extendedPath(lockP)), lockP)
-    except CatchableError:
-      # An unparseable in-repo lock is the lock verbs' loud business (`repro
-      # lock validate`), not a reason to refuse the whole develop set — the
-      # same judgement `collectLockCoherence` makes about the same file.
+      parsed = populateLockedDeps(LockSource(kind: lskCommittedLock,
+        workspaceRoot: repoRoot), strictCommittedRead = true)
+    except CatchableError as error:
+      result.refusals.add(unreadableCommittedLockMessage(lockP, error.msg))
+      result.unreadable.add(DevelopBackendReport(tier: "public",
+        backendKind: "committed-lock", location: lockP,
+        reachable: false, diagnostic: error.msg))
       continue
+    # Only after the checked read may optional checkout bookkeeping use a
+    # soft probe: dirExists also returns false on EACCES, not only ENOENT.
+    if not dirExists(extendedPath(repoRoot)): continue
+    result.probed.add(repo.path)
+    if not fileExists(extendedPath(lockP)): continue
     result.carrying.add(repo.path)
     for dep in parsed.deps:
       # The lock's OWN repo: its self entry (``isSelfLockedDep``), the one
@@ -46743,8 +46779,16 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
   let committedLockPresent = fileExists(extendedPath(committedLockP))
   let publicContributes = tierContributes("public")
   if publicContributes:
-    result.lock = populateLockedDeps(
-      LockSource(kind: lskCommittedLock, workspaceRoot: root))
+    try:
+      result.lock = populateLockedDeps(
+        LockSource(kind: lskCommittedLock, workspaceRoot: root),
+        strictCommittedRead = true)
+    except CatchableError as error:
+      result.backends.add(DevelopBackendReport(tier: "public",
+        backendKind: "committed-lock", location: committedLockP,
+        reachable: false, diagnostic: error.msg))
+      result.refusals.add(unreadableCommittedLockMessage(committedLockP, error.msg))
+      return
   # …and the SAME medium at every OTHER participating repo. The public tier's
   # backend is the in-repo committed lock, and in a multi-repo workspace there
   # is one per repo, not one at the root (see
@@ -46764,6 +46808,10 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
     ## only *replaced* entries answered just as much as one in which they added.
   if publicContributes:
     perRepo = participatingRepoCommittedLocks(root)
+    if perRepo.refusals.len > 0:
+      result.refusals.add(perRepo.refusals)
+      result.backends.add(perRepo.unreadable)
+      return
     let consumerPins = developLockHasConsumer(root, identity, result.lock)
     # For a WORKSPACE INVENTORY, a repo's own lock outranks the root lock.
     # Consumer-specific dependency pins are preserved before this rule applies.

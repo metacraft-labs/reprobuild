@@ -13392,6 +13392,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_develop_reports_committed_lock_read_failures.nim",
+    binary: "build/test-bin/t_develop_reports_committed_lock_read_failures",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_develop_selectors_compose_in_fixed_order.nim",
     binary: "build/test-bin/t_develop_selectors_compose_in_fixed_order",
     defines: @[],
