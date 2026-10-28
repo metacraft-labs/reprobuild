@@ -7223,6 +7223,14 @@ compileProfileBinary()
         The census and live-name gate below validate both sides on their host.
         """
         exclusive = {
+            # The shared-root flock observation is declared only on Linux;
+            # the remaining retention cases are common to both hosts.
+            "tests/integration/t_local_store_prune_keeps_newest_and_head_tree.nim": {
+                "linux": {
+                    "TC-8c — local store retention::a native publish holds the shared root lock through rename",
+                },
+                "darwin": set(),
+            },
             "libs/repro_build_engine/tests/"
             "t_engine_macos_sip_safe_launch.nim": {
                 "linux": set(),
@@ -8319,6 +8327,9 @@ compileProfileBinary()
             "t_auto_started_daemon_does_not_hold_callers_pipe.nim",
             "libs/repro_daemon_core/tests/"
             "t_auto_started_daemon_does_not_hold_callers_working_directory.nim",
+            # Both hosts take the native branch and declare the same four
+            # cases; their inner platform gates select artifact names only.
+            "tests/integration/t_hcr_native_library_prerequisite.nim",
         }
         return exclusive, catalog_identical
 
@@ -8592,8 +8603,8 @@ compileProfileBinary()
     def assert_platform_catalog_ledger_census(self, data):
         exclusive, identical = self.linux_darwin_catalog_ledger()
         self.assertEqual(self.platform_gated_test_sources(data), set(exclusive) | identical)
-        self.assertEqual(len(exclusive), 73)
-        self.assertEqual(len(identical), 20)
+        self.assertEqual(len(exclusive), 74)
+        self.assertEqual(len(identical), 21)
         # The per-host totals are pure ledger arithmetic, so they are checked
         # here, where no built binary is needed: a ledger entry added without
         # updating them fails the cheap census, not only the post-build one.
@@ -8601,8 +8612,8 @@ compileProfileBinary()
         # never used as a substitute for their exact per-source assertions.
         linux_only = sum(len(item["linux"]) for item in exclusive.values())
         darwin_only = sum(len(item["darwin"]) for item in exclusive.values())
-        self.assertEqual((linux_only, darwin_only), (128, 156))
-        self.assertEqual(linux_only - darwin_only, -28)
+        self.assertEqual((linux_only, darwin_only), (129, 156))
+        self.assertEqual(linux_only - darwin_only, -27)
         specs, _ = inventory.parse_repro_tests(REPO_ROOT)
         defines_by_source = {spec.source: spec.defines for spec in specs}
         for source in sorted(set(exclusive) | identical):

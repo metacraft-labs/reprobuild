@@ -18132,7 +18132,7 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
     # The candidate that answered, artifact and stamp read together under
     # its writer's lock: the snapshot and the §4.3 generation stamp below
     # both come from this copy, never from a second read of the files.
-    var liftedCopy: LiftedInterfaceCopy
+    var liftGeneration: ServiceArtifactGenerationCheck
     var readinessProbe: ServiceReadinessProbe
     var liftErrors: seq[string] = @[]
     for candidate in candidates:
@@ -18140,11 +18140,18 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
         let copy = readOwnerInterfaceCandidate(candidate)
         lifted = liftedServiceDeclaration(copy.artifact,
           resolution.serviceName)
-        readinessProbe = ownerSharedServiceReadiness(copy,
+        liftGeneration = ownerArtifactGeneration(candidate, copy.provenance,
           resolution.ownerRecipeDir, resolution.ownerPackage,
-          lifted.snapshot.projectName, resolution.activityName,
-          resolution.serviceName, resolution.environment)
-        liftedCopy = copy
+          lifted.snapshot.projectName)
+        # A nonfresh lift must reach the daemon's canonical §4.3 refusal
+        # before a stale effective declaration can hide it. For a fresh lift,
+        # readiness still has its own provenance and must validate before
+        # acquiring a lease: freshness of one artifact cannot bless the other.
+        if liftGeneration.generation == sagFresh:
+          readinessProbe = ownerSharedServiceReadiness(copy,
+            resolution.ownerRecipeDir, resolution.ownerPackage,
+            lifted.snapshot.projectName, resolution.activityName,
+            resolution.serviceName, resolution.environment)
         liftedFrom = candidate
         break
       except CatchableError as err:
@@ -18209,10 +18216,7 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
         # under it answered (`liftedFrom`). The daemon knows neither --
         # it holds the RUNNING instance's snapshot, which is the other
         # side of the comparison.
-        generationJson: encodeServiceArtifactGenerationCheck(
-          ownerArtifactGeneration(liftedFrom, liftedCopy.provenance,
-            resolution.ownerRecipeDir, resolution.ownerPackage,
-            lifted.snapshot.projectName))))
+        generationJson: encodeServiceArtifactGenerationCheck(liftGeneration)))
     let outcome =
       try:
         parseConvergeOutcome(response.outcome)

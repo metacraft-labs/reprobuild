@@ -120,6 +120,7 @@ proc markedAction(): BuildActionDef =
   result.toolIdentityRefKinds = @[tirkBuild]
   result.scratchDirs = @["scratchMarker"]
   result.removeBeforeRun = @["removeMarker"]
+  result.optionalOutputs = @["optionalMarker"]
 
 suite "project DSL build action payload":
   setup:
@@ -335,7 +336,8 @@ suite "project DSL build action payload":
       ("tool identity refs", countBefore(encoded, "toolRefMarker")),
       ("tool identity ref kinds", countAfter(encoded, "readOnlyMarker")),
       ("scratch dirs", countBefore(encoded, "scratchMarker")),
-      ("remove-before-run outputs", countBefore(encoded, "removeMarker"))]
+      ("remove-before-run outputs", countBefore(encoded, "removeMarker")),
+      ("optional outputs", countBefore(encoded, "optionalMarker"))]
     for (site, offset) in sites:
       checkpoint site
       check offset >= 0
@@ -368,6 +370,7 @@ suite "project DSL build action payload":
     var action = markedAction()
     action.scratchDirs = @["", "", ""]
     action.removeBeforeRun = @["", "", ""]
+    action.optionalOutputs = @["", "", ""]
     for version in 1'u16 .. BuildActionPayloadVersion:
       checkpoint "version " & $version
       let decoded = decodeBuildActionPayload(
@@ -380,10 +383,15 @@ suite "project DSL build action payload":
         check decoded.env == action.env
       if version >= 23'u16:
         check decoded.toolIdentityRefKinds == action.toolIdentityRefKinds
+      if version >= 32'u16:
+        check decoded.optionalOutputs == action.optionalOutputs
+      else:
+        check decoded.optionalOutputs.len == 0
     let currentImage = encodeBuildActionPayload(action)
     let current = decodeBuildActionPayload(currentImage)
     check current.scratchDirs == action.scratchDirs
     check current.removeBeforeRun == action.removeBeforeRun
+    check current.optionalOutputs == action.optionalOutputs
     check current.toolIdentityRefs == action.toolIdentityRefs
     check current.readOnlyRoots == action.readOnlyRoots
     check current.cacheEntryIdentity.isSome

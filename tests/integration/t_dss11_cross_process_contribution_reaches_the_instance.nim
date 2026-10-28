@@ -584,6 +584,7 @@ suite "D-SS11 §4.6 — a consumer in another process contributes to the instanc
     checkpoint("consumer up (stale lift):\n" & stale.output)
     check stale.exitCode == 1
     check stale.output.contains("THE LIFT IS STALE")
+    check not stale.output.contains("effective service readiness")
     # It NAMES the artifact it read, the source that moved, and the
     # command to re-run -- §4.3's "naming what to re-run".
     check stale.output.contains("project-interface.rbsz")
