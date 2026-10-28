@@ -4855,6 +4855,47 @@ ScheduleStartAt=2030-01-01T00:00:00Z
     check obs.schedule.everyMinutes == 15
     check obs.schedule.startAt == "2030-01-01T00:00:00Z"
 
+  test "scheduledTaskMatchesDesired: multi-argument task read back through the probe converges":
+    # Regression, win-ci-bare-001 2026-10-28 12:50Z: the first registration
+    # of `\Reprobuild\CacheRoute` failed its post-apply check with
+    # "observation disagrees with desired state" while the observed and
+    # desired renderings were byte-identical. Task Scheduler stores ONE
+    # argument string, the probe returns it as `Arguments=<line>`, and the
+    # comparator used to compare that one-element list against the
+    # eight-element desired list. Driven through the real parser on purpose.
+    let probe = "TaskName=\\Reprobuild\\CacheRoute\r\n" &
+      "Executable=powershell.exe\r\n" &
+      "Arguments=-NoProfile -NonInteractive -ExecutionPolicy Bypass " &
+        "-File C:\\ProgramData\\repro\\cache-route\\cache-route.ps1 " &
+        "-StateDir C:\\ProgramData\\repro\\cache-route\r\n" &
+      "WorkingDirectory=\r\n" &
+      "RunAsUser=SYSTEM\r\n" &
+      "RunWithHighestPrivileges=True\r\n" &
+      "Enabled=True\r\n" &
+      "ScheduleKind=interval\r\n" &
+      "ScheduleEveryMinutes=5\r\n" &
+      "ScheduleStartAt=1970-01-01T00:00:00+00:00\r\n"
+    let wantArgs = @["-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+      "Bypass", "-File",
+      "C:\\ProgramData\\repro\\cache-route\\cache-route.ps1",
+      "-StateDir", "C:\\ProgramData\\repro\\cache-route"]
+    let want = ScheduledTaskScheduleSpec(kind: wstskInterval,
+      everyMinutes: 5, startAt: "")
+    let obs = parseScheduledTaskQuery(probe)
+    check obs.present
+    check canonicalScheduledTaskState(obs) ==
+      canonicalScheduledTaskDesired("\\Reprobuild\\CacheRoute",
+        "powershell.exe", wantArgs, "", "SYSTEM", true, want, true)
+    check scheduledTaskMatchesDesired(obs, "\\Reprobuild\\CacheRoute",
+      "powershell.exe", wantArgs, "", "SYSTEM", true, want, true)
+    # Still a real drift detector on the argument line.
+    var otherArgs = wantArgs
+    otherArgs[^1] = "C:\\elsewhere"
+    check not scheduledTaskMatchesDesired(obs, "\\Reprobuild\\CacheRoute",
+      "powershell.exe", otherArgs, "", "SYSTEM", true, want, true)
+    check not scheduledTaskMatchesDesired(obs, "\\Reprobuild\\CacheRoute",
+      "powershell.exe", wantArgs[0 ..< ^1], "", "SYSTEM", true, want, true)
+
   test "canonicalScheduledTaskState == canonicalScheduledTaskDesired on convergence":
     # Drift-digest equality property: the broker's digest computation
     # of an observed task that matches the desired state produces the

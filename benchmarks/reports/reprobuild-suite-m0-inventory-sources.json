@@ -13913,7 +13913,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_elevation/tests/t_smoke_repro_elevation.nim",
       "sourceSuiteCount": 42,
-      "staticCaseCount": 394,
+      "staticCaseCount": 395,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
