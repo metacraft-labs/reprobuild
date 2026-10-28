@@ -107,6 +107,9 @@ type
     profiles*: seq[(string, BranchRoleDecls)]
     customRoles*: seq[CustomRoleDecl]
     defaultProfile*: Option[string]
+    workspaceMainline*: string
+      ## The root repository's declared mainline, independent of member repo
+      ## profiles. Empty when the settings declare no root mainline.
 
   RoleDeclarer* = object
     ## One declarer consulted by the resolution order of §3.3.
@@ -124,6 +127,20 @@ proc roleSettingsFrom*(s: WorkspaceSettings): RoleSettings =
   result.profiles = s.profiles
   result.customRoles = s.customRoles
   result.defaultProfile = s.workspace.default_profile
+  # The workspace branch default needs only mainline: unlike optional roles,
+  # it has no fallback chain. Match rootDeclarers' own-key / named-profile /
+  # default-profile precedence, without requiring a root declaration from
+  # settings used only to resolve member repos.
+  result.workspaceMainline = s.workspace.roles.mainline.get("")
+  if result.workspaceMainline.len == 0:
+    let profile =
+      if s.workspace.profile.isSome: s.workspace.profile
+      else: s.workspace.default_profile
+    if profile.isSome:
+      for (name, decls) in s.profiles:
+        if name == profile.get():
+          result.workspaceMainline = decls.mainline.get("")
+          break
 
 proc findProfile*(rs: RoleSettings; name: string): Option[BranchRoleDecls] =
   for (n, decls) in rs.profiles:

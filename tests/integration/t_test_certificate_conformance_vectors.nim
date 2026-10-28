@@ -49,7 +49,7 @@
 ## object store, FAILS naming what to fetch; it never skips.
 ## ``TEST_CERTIFICATES_SPEC`` still overrides where the sibling is.
 
-import std/[algorithm, base64, json, os, sequtils, sets, strutils, tempfiles,
+import std/[algorithm, base64, json, os, osproc, sequtils, sets, strutils, tempfiles,
             unittest]
 
 import repro_cli_support
@@ -372,6 +372,66 @@ suite "test-certificate.v1 conformance vectors":
                       "earlier-draft-record=not-covered"]:
         check reached in verifyOutcomes
 
+      # Direct API callers must obey the same content-id grammar as record
+      # verification. Rejection happens before any store directory is touched.
+      var invalidStoreIds = @["git-tree-sha1:abc", "future:xyz", "future:AB"]
+      for algorithm in ["../escape", "future/hash", "future\\hash", ".", "..",
+          "Upper", "future_hash", "future hash", "future\n", "future\0",
+          "futuré", repeat('a', 65), "con", "prn", "aux", "nul"]:
+        invalidStoreIds.add(algorithm & ":abc")
+      for prefix in ["com", "lpt"]:
+        for number in 1 .. 9:
+          invalidStoreIds.add(prefix & $number & ":abc")
+      let templateCert = readCertificateRecord(readFile(root / "store" /
+        "unsigned" / "certificate.toml"))
+      require templateCert.status == crsOk
+      for id in invalidStoreIds:
+        checkpoint("invalid store content id: " & id.escape())
+        var cert = templateCert.cert
+        cert.vcs.content = id
+        check certificateStoreRelativePath(cert) == ""
+        check not storeContentDir(id).ok
+        let writeRoot = scratch / "invalid-store-root"
+        # JSON string quoting supplies TOML-compatible escapes even for NUL,
+        # which the canonical serializer rightly refuses to emit.
+        let document = serializeCertificateToToml(templateCert.cert).replace(
+          "content = " & $(%templateCert.cert.vcs.content),
+          "content = " & $(%id))
+        let published = publishCertificateDocument(writeRoot, document)
+        check published.error.len > 0
+        check published.path == ""
+        check not dirExists(writeRoot)
+        let roots = CertificateStoreRoots(user: writeRoot)
+        let issued = publishCertificateToLocalStore(cert, "", roots)
+        check not issued.written
+        check issued.error.len > 0
+        check issued.path == ""
+        let state = stateWithKnownContent(@[KnownContentId(id: id)])
+        let lookup = findCertificatesInLocalStore(state, roots)
+        check lookup.searched.len == 0
+        check lookup.problems.len > 0
+        check not dirExists(writeRoot)
+
+      # Relaying an opaque but well-formed claim must remain possible through
+      # the same public APIs that reject the malformed inputs above.
+      var unknownCert = templateCert.cert
+      unknownCert.vcs.content = "future-v2:a"
+      let unknownRoot = scratch / "unknown-store-root"
+      let unknownPath = certificateStoreRelativePath(unknownCert)
+      check unknownPath.startsWith("v1/future-v2/a/")
+      let unknownDocument = serializeCertificateToToml(unknownCert)
+      let relayed = publishCertificateDocument(unknownRoot, unknownDocument)
+      check relayed.error == ""
+      check relayed.path == unknownRoot / unknownPath.replace('/', DirSep)
+      check fileExists(relayed.path)
+      let unknownState = stateWithKnownContent(@[
+        KnownContentId(algorithm: "future-v2", id: "future-v2:a")])
+      let foundUnknown = findCertificatesInLocalStore(unknownState,
+        CertificateStoreRoots(user: unknownRoot))
+      check foundUnknown.problems.len == 0
+      require foundUnknown.found.len == 1
+      check foundUnknown.found[0].read.cert.vcs.content == "future-v2:a"
+
       # --- group 5: store/ — where the local store keeps a certificate ----
       for path in caseDirs(root, "store"):
         let name = path.extractFilename
@@ -431,6 +491,97 @@ suite "test-certificate.v1 conformance vectors":
         let third = publishCertificateDocument(twins, unsignedDoc)
         check third.error == "" and third.kept
         check readFile(third.path) == signedDoc
+        var damaged = readCertificateRecord(signedDoc).cert
+        damaged.signature.value = "U1NIU0lHAAAAAg"
+        let damagedDoc = serializeCertificateToToml(damaged)
+        let relayed = publishCertificateDocument(twins, damagedDoc)
+        check relayed.error == "" and relayed.kept
+        check readFile(relayed.path) == signedDoc
+        let originalNote = certificateNoteDelimiter & "\n" &
+          certificateNoteRecord(readCertificateRecord(signedDoc).cert)
+        let relayedNote = addCertificateToNote(originalNote, damaged)
+        check not relayedNote.changed
+        check relayedNote.note == originalNote
+        # Only a signer can repair a previously damaged signed copy.
+        writeFile(first.path, damagedDoc)
+        let reissued = publishCertificateDocument(twins, signedDoc,
+          signatureMade = true)
+        check reissued.error == "" and not reissued.kept
+        check readFile(reissued.path) == signedDoc
+        let damagedNote = certificateNoteDelimiter & "\n" &
+          certificateNoteRecord(damaged)
+        let reissuedNote = addCertificateToNote(damagedNote,
+          readCertificateRecord(signedDoc).cert, signatureMade = true)
+        check reissuedNote.changed
+        check reissuedNote.note == originalNote
+        # A relay cannot establish that malformed or misfiled bytes are an
+        # unsigned twin; leave those bytes untouched and report the failure.
+        for bad in ["not a certificate\n", unsignedDoc.replace(
+            "2026-", "2025-")]:
+          writeFile(first.path, bad)
+          for incoming in [signedDoc, unsignedDoc]:
+            let refused = publishCertificateDocument(twins, incoming)
+            check refused.error.len > 0
+            check readFile(first.path) == bad
+        when not defined(windows):
+          writeFile(first.path, signedDoc)
+          let permissions = getFilePermissions(first.path)
+          setFilePermissions(first.path, {})
+          try:
+            for incoming in [signedDoc, unsignedDoc]:
+              let refused = publishCertificateDocument(twins, incoming)
+              check refused.error.len > 0
+              check getFilePermissions(first.path) == {}
+          finally:
+            setFilePermissions(first.path, permissions)
+          check readFile(first.path) == signedDoc
+
+      # A relay that built a note against an unsigned snapshot must retry
+      # after a concurrent signer publishes; the new signed copy survives.
+      block:
+        let repo = scratch / "notes-cas"
+        createDir(repo)
+        proc git(args: varargs[string]): string =
+          let run = execCmdEx(quoteShellCommand(@["git", "-C", repo] & @args))
+          doAssert run.exitCode == 0, run.output
+          run.output.strip()
+        discard git("init", "-q")
+        discard git("config", "user.name", "Certificate test")
+        discard git("config", "user.email", "certificate@example.invalid")
+        let signedDoc = readFile(root / "store" / "signed" / "certificate.toml")
+        let cert = readCertificateRecord(signedDoc).cert
+        var unsigned = cert
+        unsigned.signature.value = ""
+        unsigned.signature.algorithm = ""
+        let blob = repo / "object"
+        writeFile(blob, "certificate race object\n")
+        let annotated = git("hash-object", "-w", "--", blob)
+        check attachCertificateRecord("git", repo, annotated, unsigned).ok
+        var damaged = cert
+        damaged.signature.value = "U1NIU0lHAAAAAg"
+        var interleaved = false
+        let relayed = attachCertificateRecord("git", repo, annotated, damaged,
+          beforePublish = proc(attempt: int) =
+            if not interleaved:
+              interleaved = true
+              check attachCertificateRecord("git", repo, annotated, cert,
+                signatureMade = true).ok)
+        check interleaved and relayed.ok
+        let final = readNoteBlob("git", repo, annotated, certificateNotesRef)
+        check final.status == gorPresent
+        check final.body == certificateNoteDelimiter & "\n" & certificateNoteRecord(cert)
+
+      # Focused, vendored relay fixtures from spec 71ab19e7 (provenance in
+      # certificate_relay_vectors/README.md), independent of the complete
+      # conformance suite's revision. Every selected case is exercised.
+      for name in ["signed-copy-not-replaced", "signed-duplicate-protects"]:
+        let path = currentSourcePath().parentDir / "certificate_relay_vectors" / name
+        let note = readFile(path / "note.txt")
+        let incoming = readCertificateRecord(readFile(path / "add.txt"))
+        check incoming.status == crsOk
+        let relayed = addCertificateToNote(note, incoming.cert)
+        check relayed.note == readFile(path / "expected-note.txt")
+        check not relayed.changed
 
       # --- group 6: notes/ — note framing (Transport §3.1) ----------------
       # Through reprobuild's REAL note reader and writer — the code that reads

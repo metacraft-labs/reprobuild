@@ -23,6 +23,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import sys
 import textwrap
 import unittest
 
@@ -102,7 +103,7 @@ class ReleaseSmokeDevExecTests(unittest.TestCase):
 
     BUILD_BODY = (
         "  command -v runquotad >/dev/null 2>&1 && exit 0\n"
-        "  echo 'runquota daemon unreachable and bypass is disabled.' >&2\n"
+        "  echo 'runquota daemon unreachable and bypass is disabled. Underlying error: No such file or directory' >&2\n"
         "  exit 1\n"
     )
 
@@ -248,6 +249,59 @@ exit 23
         self.assertNotEqual(0, result.returncode)
         self.assertIn("initial archive exec isolation verified", result.stdout + result.stderr)
         self.assertNotIn("repro build smoke test PASSED", result.stdout)
+
+    def test_deep_runner_root_keeps_only_the_private_socket_short(self):
+        """Real filesystem/kernel probe of test data; not a RunQuota handshake."""
+        deep = self.work / ("runner-" + "a" * 100) / ("work-" + "b" * 100)
+        deep.mkdir(parents=True)
+        audit = self.work / "socket-audit.jsonl"
+        probe = self.work / "probe_socket.py"
+        probe.write_text("""import json, os, socket, stat
+path = os.environ['RUNQUOTA_SOCKET']
+parent = os.path.dirname(path)
+metadata = os.stat(parent)
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as endpoint:
+    endpoint.bind(path)
+os.unlink(path)
+print(json.dumps({'path': path, 'uid': metadata.st_uid,
+                  'mode': stat.S_IMODE(metadata.st_mode), 'cwd': os.getcwd()}))
+""", encoding="utf-8")
+        binary = self.pkg / "bin/repro"
+        prefix = ('  "$REPRO_TEST_PYTHON" "$REPRO_TEST_SOCKET_PROBE" '
+                  '>> "$REPRO_TEST_SOCKET_AUDIT"\n')
+        binary.write_text(binary.read_text().replace(self.BUILD_BODY,
+                          prefix + self.BUILD_BODY), encoding="utf-8")
+        env = self._env_with()
+        env.update(RUNNER_TEMP=str(deep), REPRO_TEST_PYTHON=sys.executable,
+                   REPRO_TEST_SOCKET_PROBE=str(probe), REPRO_TEST_SOCKET_AUDIT=str(audit))
+        result = self._run_smoke(shutil.which("bash") or "/bin/bash", env)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        records = [json.loads(row) for row in audit.read_text().splitlines()]
+        self.assertEqual(2, len(records), "both hidden and restored arms probed")
+        self.assertEqual(records[0]['path'], records[1]['path'])
+        for record in records:
+            self.assertLessEqual(len(os.fsencode(record['path'])), 91)
+            self.assertEqual(os.getuid(), record['uid'])
+            self.assertEqual(0o700, record['mode'])
+            self.assertTrue(record['cwd'].startswith(str(deep)))
+            self.assertFalse(Path(record['path']).parent.exists(), "owned socket root cleaned")
+
+    def test_wrong_cause_cannot_satisfy_the_hidden_daemon_control(self):
+        for cause in ("socket path too long", "Permission denied", "handshake failed"):
+            with self.subTest(cause=cause):
+                binary = self.pkg / "bin/repro"
+                original = binary.read_text(encoding="utf-8")
+                wrong = ("  command -v runquotad >/dev/null 2>&1 && exit 0\n"
+                         "  echo 'runquota daemon unreachable and bypass is disabled. "
+                         f"Underlying error: {cause}' >&2\n  exit 1\n")
+                binary.write_text(original.replace(self.BUILD_BODY, wrong), encoding="utf-8")
+                try:
+                    result = self._run_smoke(shutil.which("bash") or "/bin/bash", self._env_with())
+                    self.assertNotEqual(0, result.returncode, result.stdout)
+                    self.assertIn("valid endpoint", result.stderr)
+                    self.assertNotIn("repro build smoke test PASSED", result.stdout)
+                finally:
+                    binary.write_text(original, encoding="utf-8")
 
     def test_a_build_that_is_never_refused_fails_the_control(self):
         """If the hidden-daemon build still succeeds, something else served it."""

@@ -24,6 +24,10 @@
 ## private host file (``--host-config``), a scratch host identity, and no
 ## observation capture or pressure sampling. Nothing here talks to the host's
 ## daemon or reads its ``runquotad.toml``.
+## On POSIX the fixture also selects RUNQUOTA_ENDPOINT_SCOPE=private for
+## daemon and clients, as production auto-start does. Installed NSS service
+## accounts do not own these invocation-only sockets. The selection is local
+## to each case, with the caller's socket and scope restored afterwards.
 ##
 ## WHY NOT ``startAutoRunQuotaIfNeeded`` ITSELF. On Windows it binds the fixed
 ## host-wide pipe, which the host's own daemon already serves, and it reads the
@@ -45,6 +49,7 @@ import repro_build_engine
 import repro_cli_support
 import repro_runquota
 import repro_test_support
+import repro_test_support/process_fixtures
 import runquota_client
 import runquota_daemon/host_config
 
@@ -68,6 +73,7 @@ proc startAutoSpawnedShape(repoRoot, tag, hostText: string): Fixture =
   # itself, exactly as the product's own spawn does.
   result.root = getTempDir() / ("repro-rq-autospawn-files-" & tag & "-" &
     $getCurrentProcessId())
+  releaseDirAtProcessExit(result.root)
   removeDir(result.root)
   createDir(result.root)
   result.hostFile = result.root / "runquotad.toml"
@@ -76,6 +82,7 @@ proc startAutoSpawnedShape(repoRoot, tag, hostText: string): Fixture =
   result.socket = runquotaSocketEndpoint("repro-rq-autospawn-" & tag & "-" &
     $getCurrentProcessId())
   when not defined(windows):
+    releaseDirAtProcessExit(result.socket.parentDir)
     removeDir(result.socket.parentDir)
   # The production budget argv, over the file this daemon will read.
   let budget = autoRunQuotaBudgetArgs(readHostConfig(result.hostFile))
@@ -87,8 +94,16 @@ proc startAutoSpawnedShape(repoRoot, tag, hostText: string): Fixture =
   putEnv("RUNQUOTA_SOCKET", result.socket)
   result.daemon = startProcess(requireRunQuotaDaemonBin(repoRoot),
     args = args, options = {poUsePath, poParentStreams})
+  when defined(posix):
+    # startAutoSpawnedShape can raise before returning its Fixture, before a
+    # caller has a daemon handle it could defer. Own that failure path too.
+    terminateAtProcessExit(processID(result.daemon))
   for _ in 0 ..< 400:
     if isRunQuotaDaemonReachable():
+      when defined(posix):
+        doAssert getFilePermissions(result.socket.parentDir) ==
+          {fpUserRead, fpUserWrite, fpUserExec}
+        doAssert getFilePermissions(result.socket) == {fpUserRead, fpUserWrite}
       return
     sleep(25)
   raise newException(OSError, "runquotad did not become reachable at " &
@@ -152,6 +167,19 @@ proc runquotaCli(repoRoot: string; args: varargs[string]):
 suite "a runquotad reprobuild starts follows the host configuration":
   let repoRoot = getCurrentDir()
   let defaultCpu = max(1, cpuinfo.countProcessors()) * 1000
+  setup:
+    let socketWasSet = existsEnv("RUNQUOTA_SOCKET")
+    let priorSocket = getEnv("RUNQUOTA_SOCKET")
+    when defined(posix):
+      let scopeWasSet = existsEnv("RUNQUOTA_ENDPOINT_SCOPE")
+      let priorScope = getEnv("RUNQUOTA_ENDPOINT_SCOPE")
+      putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
+  teardown:
+    if socketWasSet: putEnv("RUNQUOTA_SOCKET", priorSocket)
+    else: delEnv("RUNQUOTA_SOCKET")
+    when defined(posix):
+      if scopeWasSet: putEnv("RUNQUOTA_ENDPOINT_SCOPE", priorScope)
+      else: delEnv("RUNQUOTA_ENDPOINT_SCOPE")
 
   test "no cpu_milli in the host file: config set + reload changes the CPU budget":
     var fixture = startAutoSpawnedShape(repoRoot, "cpu", "")
@@ -218,8 +246,12 @@ suite "a runquotad reprobuild starts follows the host configuration":
 
   test "the memory override is the one flag, and the daemon reports it pinned":
     let key = "REPROBUILD_RUNQUOTA_MEMORY_BYTES"
+    let overrideWasSet = existsEnv(key)
+    let priorOverride = getEnv(key)
     putEnv(key, $(3'u64 * GiB))
-    defer: delEnv(key)
+    defer:
+      if overrideWasSet: putEnv(key, priorOverride)
+      else: delEnv(key)
     var fixture = startAutoSpawnedShape(repoRoot, "override", "")
     defer: fixture.stop()
     check localMachine()["memory_bytes"].getBiggestInt ==

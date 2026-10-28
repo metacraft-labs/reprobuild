@@ -2182,6 +2182,13 @@ proc classifyPackages*(references: seq[PlannedPackage];
   ## `packageConcern`. `repro home apply` on a host that splits `packages`
   ## from `applications` computes it too and refuses when its own selection
   ## disagrees (`refuseClassificationDisagreement`).
+  # Preview retains failures as per-package diagnostics for a plan. A
+  # classification publishes ownership, so it cannot turn a failed catalog
+  # projection into an ordinary missing realization and guess its concern.
+  for reference in references:
+    if reference.packageId in catalog.failures:
+      raise newException(ValueError, "cannot classify package '" &
+        reference.packageId & "': " & catalog.failures[reference.packageId])
   let ctx = profileResolutionContext(adapterPreference, platform, arch,
     false, catalog = catalog)
   let previews = previewPackageResolutions(references, ctx)

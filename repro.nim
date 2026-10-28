@@ -311,6 +311,11 @@ const
     "libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim",
     "libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim",
     "tests/integration/t_auto_runquota_daemon_ends_with_its_invocation.nim",
+    "tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim",
+    "tests/integration/t_runquota_long_temp_rendezvous.nim",
+    "tests/integration/t_runquota_auto_spawned_daemon_follows_host_config.nim",
+    "tests/integration/t_build_declares_its_pools_to_runquota.nim",
+    "tests/integration/t_runquota_daemon_from_another_build_makes_way.nim",
     "tests/integration/t_cloud_adapter_launches_nothing_in_ci.nim",
     "tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim",
     "tests/integration/t_leaked_instance_is_reaped.nim",
@@ -321,6 +326,7 @@ const
     "tests/integration/t_tarball_provisioning_cold_store_extractors.nim",
     "tests/integration/t_tdx_expectation_reaches_the_verifier.nim",
     "tests/integration/t_teardown_runs_on_failure_path.nim",
+    "tests/integration/t_vcs_lock_failure_preserves_action_and_publication_results.nim",
     "tests/integration/t_verify_e2e_mock.nim",
   ]
     ## The test files that once released their fixtures only in a final
@@ -1993,10 +1999,17 @@ package reprobuild:
           if artifact.actionId notin executeDeps:
             executeDeps.add(artifact.actionId)
       when defined(linux) or defined(macosx):
-        if spec.source == "libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim":
+        if spec.source == "libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim" or
+            spec.source == "tests/integration/t_nim_unittest_edge_reaches_declared_c_backend.nim":
           # These cases load a shared library, not an executable fixture.
+          # The backend case also needs it for nested interface extraction
+          # before the fixture's compiler action can run.
           requiredBinaries.add("build/lib/" & (when defined(macosx):
             "librepro_monitor_shim.dylib" else: "librepro_monitor_shim.so"))
+          executeDeps.add("reprobuild.test_fixtures.monitor_shim")
+      when defined(windows):
+        if spec.source == "tests/integration/t_nim_unittest_edge_reaches_declared_c_backend.nim":
+          requiredBinaries.add(monitorArtifactPath(MonitorShim64Name))
           executeDeps.add("reprobuild.test_fixtures.monitor_shim")
       when defined(linux):
         if spec.source == "tests/unit/t_m9r83_install_mirror_action_shapes.nim":

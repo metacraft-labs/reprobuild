@@ -103,12 +103,25 @@ const
 
 proc lookupContentAlgorithm*(name: string):
     tuple[known: bool; algorithm: ContentAlgorithm] =
-  ## The §4 algorithm ``name`` identifies, by exact string equality, so
-  ## ``Git-Tree-SHA1`` is an unknown algorithm, not ``git-tree-sha1``.
+  ## The §4 algorithm ``name`` identifies, by exact string equality.
+  ## ``parseContentId`` validates the identifier grammar before this lookup.
   for algorithm in ContentAlgorithm:
     if $algorithm == name:
       return (true, algorithm)
   (false, caGitTreeSha1)
+
+proc algorithmNameProblem(name: string): string =
+  # Content-Id §1 keeps unknown identifiers safe as portable store directory
+  # components too; algorithm support must not bypass that syntax contract.
+  if name.len notin 1 .. 64:
+    return "an algorithm identifier has 1 to 64 ASCII characters"
+  for ch in name:
+    if ch notin {'a'..'z', '0'..'9', '-'}:
+      return "an algorithm identifier contains only `a`-`z`, `0`-`9` and `-`"
+  if name in ["con", "prn", "aux", "nul"] or
+      (name.len == 4 and name[0 .. 2] in ["com", "lpt"] and
+       name[3] in {'1'..'9'}):
+    return "the algorithm identifier is a reserved Windows device name"
 
 proc isLowerHex(text: string): bool =
   for ch in text:
@@ -128,9 +141,10 @@ proc parseContentId*(text: string): ParsedContentId =
     return
   result.algorithmName = text[0 ..< colon]
   result.digest = text[colon + 1 .. ^1]
-  if result.algorithmName.len == 0:
+  let algorithmProblem = algorithmNameProblem(result.algorithmName)
+  if algorithmProblem.len > 0:
     result.form = cifMalformed
-    result.problem = "nothing precedes the `:`, so it names no algorithm"
+    result.problem = algorithmProblem
     return
   if result.digest.len == 0:
     result.form = cifMalformed

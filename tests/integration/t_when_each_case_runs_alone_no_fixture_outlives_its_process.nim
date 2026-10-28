@@ -95,6 +95,11 @@ const Subjects = [
   "libs/repro_cas_store/tests/t_link_capability_facts.nim",
   "libs/repro_cas_store/tests/t_cas_ingest_link.nim",
   "tests/integration/t_auto_runquota_daemon_ends_with_its_invocation.nim",
+  "tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim",
+  "tests/integration/t_runquota_long_temp_rendezvous.nim",
+  "tests/integration/t_runquota_auto_spawned_daemon_follows_host_config.nim",
+  "tests/integration/t_build_declares_its_pools_to_runquota.nim",
+  "tests/integration/t_runquota_daemon_from_another_build_makes_way.nim",
   "tests/integration/t_cloud_adapter_launches_nothing_in_ci.nim",
   "tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim",
   "tests/integration/t_leaked_instance_is_reaped.nim",
@@ -102,6 +107,7 @@ const Subjects = [
   "tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim",
   "tests/integration/t_snp_expectation_reaches_the_manifest.nim",
   "tests/integration/t_teardown_runs_on_failure_path.nim",
+  "tests/integration/t_vcs_lock_failure_preserves_action_and_publication_results.nim",
   "tests/integration/t_verify_e2e_mock.nim",
   "libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim",
   "libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim",
@@ -323,6 +329,21 @@ suite "no subject's fixture outlives the process that acquired it":
     checkSubject("libs/repro_cas_store/tests/t_cas_ingest_link.nim")
   test "t_auto_runquota_daemon_ends_with_its_invocation":
     checkSubject("tests/integration/t_auto_runquota_daemon_ends_with_its_invocation.nim")
+  test "t_auto_runquota_uses_private_endpoint_policy":
+    require fileExists(binaryOf("tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim"))
+    checkSubject("tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim")
+  test "t_runquota_long_temp_rendezvous":
+    require fileExists(binaryOf("tests/integration/t_runquota_long_temp_rendezvous.nim"))
+    checkSubject("tests/integration/t_runquota_long_temp_rendezvous.nim")
+  test "t_runquota_auto_spawned_daemon_follows_host_config":
+    require fileExists(binaryOf("tests/integration/t_runquota_auto_spawned_daemon_follows_host_config.nim"))
+    checkSubject("tests/integration/t_runquota_auto_spawned_daemon_follows_host_config.nim")
+  test "t_build_declares_its_pools_to_runquota":
+    require fileExists(binaryOf("tests/integration/t_build_declares_its_pools_to_runquota.nim"))
+    checkSubject("tests/integration/t_build_declares_its_pools_to_runquota.nim")
+  test "t_runquota_daemon_from_another_build_makes_way":
+    require fileExists(binaryOf("tests/integration/t_runquota_daemon_from_another_build_makes_way.nim"))
+    checkSubject("tests/integration/t_runquota_daemon_from_another_build_makes_way.nim")
   test "t_cloud_adapter_launches_nothing_in_ci":
     checkSubject("tests/integration/t_cloud_adapter_launches_nothing_in_ci.nim")
   test "t_inline_launch_refuses_unhostable_monitor_hosting":
@@ -357,6 +378,10 @@ suite "no subject's fixture outlives the process that acquired it":
       "tests/integration/t_tarball_provisioning_cold_store_extractors.nim")
   test "t_tdx_expectation_reaches_the_verifier":
     checkSubject("tests/integration/t_tdx_expectation_reaches_the_verifier.nim")
+
+  test "t_vcs_lock_failure_preserves_action_and_publication_results":
+    checkSubject(
+      "tests/integration/t_vcs_lock_failure_preserves_action_and_publication_results.nim")
 
 suite "the subject list":
   test "every subject has a case, and every case a subject":

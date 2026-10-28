@@ -30,6 +30,10 @@
 ##
 ## The actions declare a recognized ``.d`` report rather than the automatic
 ## monitor, so this needs no monitor tools and runs on Windows as well.
+## POSIX fixture endpoints use the official invocation-owned private policy,
+## selected before the daemon and both inline/helper clients start. Restore
+## the caller's socket/scope afterwards; NSS service accounts and groups do
+## not own this test's endpoint. Windows keeps its named-pipe behavior.
 ##
 ## NO MOCKS.
 
@@ -41,6 +45,7 @@ import repro_depfile
 import repro_runquota
 
 import repro_test_support
+import repro_test_support/process_fixtures
 
 proc fixtureWrite(path, content: string) =
   createDir(path.splitPath.head)
@@ -88,6 +93,8 @@ proc startFlaglessDaemon(repoRoot, root: string): Process =
   ## host file's and the daemon's own defaults.
   let socket = runquotaSocketEndpoint("repro-pooldecl-" &
     $getCurrentProcessId() & "-" & root.extractFilename)
+  when defined(posix):
+    releaseDirAtProcessExit(socket.parentDir)
   if fileExists(socket):
     removeFile(socket)
   writeFile(root / "runquotad.toml", "schema = \"runquota.host-config.v1\"\n")
@@ -98,8 +105,15 @@ proc startFlaglessDaemon(repoRoot, root: string): Process =
     "--ambient-sample-interval-millis", "0",
     "--memory-pressure-source", "unavailable"],
     options = {poUsePath, poParentStreams})
+  when defined(posix):
+    # The start helper can fail before its caller receives the process.
+    terminateAtProcessExit(processID(result))
   for _ in 0 ..< 400:
     if isRunQuotaDaemonReachable():
+      when defined(posix):
+        doAssert getFilePermissions(socket.parentDir) ==
+          {fpUserRead, fpUserWrite, fpUserExec}
+        doAssert getFilePermissions(socket) == {fpUserRead, fpUserWrite}
       return
     sleep(25)
   raise newException(OSError, "runquotad did not become reachable")
@@ -133,19 +147,32 @@ proc runPooledBuild(repoRoot, tag: string; inline: bool): PooledOutcome =
   ## Returns what happened; the CHECKS are in the test bodies, where a failed
   ## one marks the case failed (a `check` in a helper proc is reported but
   ## leaves the case `[OK]`).
+  let socketWasSet = existsEnv("RUNQUOTA_SOCKET")
+  let priorSocket = getEnv("RUNQUOTA_SOCKET")
+  when defined(posix):
+    let scopeWasSet = existsEnv("RUNQUOTA_ENDPOINT_SCOPE")
+    let priorScope = getEnv("RUNQUOTA_ENDPOINT_SCOPE")
+    putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
+  defer:
+    if socketWasSet: putEnv("RUNQUOTA_SOCKET", priorSocket)
+    else: delEnv("RUNQUOTA_SOCKET")
+    when defined(posix):
+      if scopeWasSet: putEnv("RUNQUOTA_ENDPOINT_SCOPE", priorScope)
+      else: delEnv("RUNQUOTA_ENDPOINT_SCOPE")
   let root = createTempDir("repro-pooldecl-" & tag, "")
+  releaseDirAtProcessExit(root)
   defer: removeDir(root)
+  let timeoutWasSet = existsEnv("REPRO_RUNQUOTA_DENIAL_TIMEOUT")
   let oldTimeout = getEnv("REPRO_RUNQUOTA_DENIAL_TIMEOUT", "")
   putEnv("REPRO_RUNQUOTA_DENIAL_TIMEOUT", "3000")
   defer:
-    if oldTimeout.len > 0: putEnv("REPRO_RUNQUOTA_DENIAL_TIMEOUT", oldTimeout)
+    if timeoutWasSet: putEnv("REPRO_RUNQUOTA_DENIAL_TIMEOUT", oldTimeout)
     else: delEnv("REPRO_RUNQUOTA_DENIAL_TIMEOUT")
   var daemon = startFlaglessDaemon(repoRoot, root)
   defer:
     daemon.terminate()
     discard daemon.waitForExit(5000)
     daemon.close()
-    delEnv("RUNQUOTA_SOCKET")
   let app = getAppFilename()
   let workRoot = root / "work"
   createDir(workRoot)

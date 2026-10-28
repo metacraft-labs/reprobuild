@@ -6,10 +6,15 @@ when defined(windows):
   import std/[importutils, winlean]
   import repro_daemon_core/windows_detached_spawn
 else:
+  import repro_cli_support/daemon_startup_output
+  from runquota_ipc import rendezvousPolicy, defaultEndpoint,
+    directoryResolvesWithin, hostWideEndpointDir, requireTrustedEndpointDir
+  from runquota_client import connectDefault, close
   # Only these names, and only for the pipe-feeding guard in
   # ``runFeedingStdin`` — `from … import` keeps the rest of `std/posix` out of
   # this module's namespace.
-  from std/posix import sigaction, sigemptyset, Sigaction, SIGPIPE, SIG_IGN
+  from std/posix import sigaction, sigemptyset, Sigaction, SIGPIPE, SIG_IGN,
+    ENOENT
 import repro_core
 import repro_cli_support/workspace_restore
 import repro_cli_support/repository_identities
@@ -592,6 +597,7 @@ proc renderInternalUsage*(programName: string): string =
     "usage: " & programName & " internal <subcommand> [args...]\n\n" &
     "internal subcommands (role processes; not part of `" & programName &
       " help`):\n" &
+    "  shared-pool-upload-pack <pool>              Shared-clone Git transport\n" &
     "  io monitor [options] -- <command> [args...] filesystem-monitor shim " &
       "(user form: " & programName & " debug io monitor)\n" &
     "  runquota-helper …                           RunQuota lease helper " &
@@ -862,6 +868,16 @@ proc parseBuildTarget(target: string): ParsedBuildTarget =
         modulePath: fragmentModule,
         outputName: parts.fragment,
         fragmentKind: tfkModule)
+    # Qualified sibling selectors anchor at the canonical project FILE,
+    # rather than its directory: a same-named source module must not steal
+    # the requested target. Preserve its fragment as an action selection,
+    # just as for directory-anchored project selectors above.
+    if extractFilename(parts.base) in ProjectFileNames:
+      return ParsedBuildTarget(
+        modulePath: parts.base,
+        outputName: splitFile(parts.base).name,
+        selectedActionId: parts.fragment,
+        fragmentKind: tfkActionSelection)
     return ParsedBuildTarget(
       modulePath: parts.base,
       outputName: parts.fragment,
@@ -5172,6 +5188,13 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
       " but no ``git`` binary is on PATH.")
   let checkoutRoot =
     lockPinnedProducerCacheRoot(workspaceRoot) / dep.name / revision
+  # A .git directory appears before fetch and checkout have finished. Serialize
+  # both creation and reuse so another activation cannot verify an unfinished
+  # tree. Keep the lock beside the revision directory: partial-checkout cleanup
+  # must never unlink the lock another process is waiting on.
+  var materializationLock = acquireExclusiveFileLock(
+    checkoutRoot & ".materialize.lock")
+  defer: releaseExclusiveFileLock(materializationLock)
 
   proc git(args: openArray[string]; cwd = ""): tuple[code: int; output: string] =
     var cmd = quoteShell(gitBin)
@@ -6801,7 +6824,7 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
       @ProviderCompileIsolatedPassthrough,
     # The same edge as the dev-env engine's, so the same declared environment
     # (see `providerCompileLaunchEnv`).
-    env = providerCompileLaunchEnv(compilerCwd / "home"),
+    env = providerCompileLaunchEnv(compilerCwd / "home", modulePath),
     # Dev-Env-Warm-Entry.md §2: the compile starts from the environment
     # declared above and nothing else, so no caller variable can be an input.
     isolateHostEnvironment = true,
@@ -10688,7 +10711,7 @@ proc recipeRelativeProviderCompileAction(edge: RecipeRelativeProviderCompile;
     actionCachePolicy = ffpHybrid,
     envPassthrough = @ProviderCompileEnvironmentPassthrough &
       @ProviderCompileIsolatedPassthrough,
-    env = providerCompileLaunchEnv(scratchDir / "home"),
+    env = providerCompileLaunchEnv(scratchDir / "home", modulePath),
     isolateHostEnvironment = true,
     nonDeterminism = ndpEntropyBlessed,
     nonDeterminismJustification = ProviderCompilerEntropyJustification,
@@ -10814,7 +10837,7 @@ proc ensureLockPinnedCatalog*(modulePath, consumerRoot: string): string =
       if dep.name == ReprobuildPackagesRepositoryName and dep.coordinates.kind == ckVcs:
         return fetchLockPinnedProducer(dep, lockDir)
   except CatchableError as err:
-    if err of OSError:
+    if err of OSError or err of IOError:
       raise
     discard
   return ""
@@ -13975,6 +13998,11 @@ proc runProviderCompileHelper(args: openArray[string]): int =
       stderr.writeLine("repro provider compile: missing " & name)
       return 2
   try:
+    # Both provider edges share this compile boundary. Prepare even when the
+    # caller did not extract an interface through the CLI first. The parent
+    # normally fetched already; this also verifies the cached source pin.
+    discard ensureLockPinnedCatalog(absolutePath(modulePath),
+      absolutePath(modulePath).parentDir)
     let interfaceFingerprint =
       if interfaceFingerprintArg.len > 0:
         decodeInterfaceFingerprintArg(interfaceFingerprintArg)
@@ -15014,6 +15042,10 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
   # neither, and failed with `CreateProcessW failed (2)` for `nim c` while
   # `repro build` of the same recipe succeeded. Which modes it provisions
   # under is `bootstrapToolchainProvisioned` (every mode, on every host).
+  # Dev-env activation extracts directly through the library, before either
+  # CLI compile helper can prepare the catalog. Fetch outside the isolated
+  # compile so network access and credentials belong to preparation.
+  discard ensureLockPinnedCatalog(selection.modulePath, selection.projectRoot)
   ensureBootstrapToolchainEnv(toolProvisioning, resolveStoreRoot() / "tool-store")
   let monitor = publicDevEnvMonitor(publicCliPath)
   let config = DevEnvEdgeConfig(
@@ -16691,7 +16723,7 @@ proc runReproExecCommand(args: openArray[string];
   # started by the command (`cd A && B/build/bin/repro exec -- A/...`)
   # resolves its libraries from B. Caller values are not seeds and stay.
   clearSeededSourcePackageEnvironment()
-  return runActivatedCommand(artifact, edge.artifactPath, parsed.command,
+  return execActivatedCommand(artifact, edge.artifactPath, parsed.command,
     parsed.selection.projectRoot, producerOps, toolOps)
 
 proc defaultInteractiveShell(): string =
@@ -18101,7 +18133,7 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
     # The candidate that answered, artifact and stamp read together under
     # its writer's lock: the snapshot and the §4.3 generation stamp below
     # both come from this copy, never from a second read of the files.
-    var liftedCopy: LiftedInterfaceCopy
+    var liftGeneration: ServiceArtifactGenerationCheck
     var readinessProbe: ServiceReadinessProbe
     var liftErrors: seq[string] = @[]
     for candidate in candidates:
@@ -18109,11 +18141,18 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
         let copy = readOwnerInterfaceCandidate(candidate)
         lifted = liftedServiceDeclaration(copy.artifact,
           resolution.serviceName)
-        readinessProbe = ownerSharedServiceReadiness(copy,
+        liftGeneration = ownerArtifactGeneration(candidate, copy.provenance,
           resolution.ownerRecipeDir, resolution.ownerPackage,
-          lifted.snapshot.projectName, resolution.activityName,
-          resolution.serviceName, resolution.environment)
-        liftedCopy = copy
+          lifted.snapshot.projectName)
+        # A nonfresh lift must reach the daemon's canonical §4.3 refusal
+        # before a stale effective declaration can hide it. For a fresh lift,
+        # readiness still has its own provenance and must validate before
+        # acquiring a lease: freshness of one artifact cannot bless the other.
+        if liftGeneration.generation == sagFresh:
+          readinessProbe = ownerSharedServiceReadiness(copy,
+            resolution.ownerRecipeDir, resolution.ownerPackage,
+            lifted.snapshot.projectName, resolution.activityName,
+            resolution.serviceName, resolution.environment)
         liftedFrom = candidate
         break
       except CatchableError as err:
@@ -18178,10 +18217,7 @@ proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
         # under it answered (`liftedFrom`). The daemon knows neither --
         # it holds the RUNNING instance's snapshot, which is the other
         # side of the comparison.
-        generationJson: encodeServiceArtifactGenerationCheck(
-          ownerArtifactGeneration(liftedFrom, liftedCopy.provenance,
-            resolution.ownerRecipeDir, resolution.ownerPackage,
-            lifted.snapshot.projectName))))
+        generationJson: encodeServiceArtifactGenerationCheck(liftGeneration)))
     let outcome =
       try:
         parseConvergeOutcome(response.outcome)
@@ -23816,8 +23852,26 @@ proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
 # ``repro check --mode=pre-push`` gate; the implementation lives further
 # down (after ``runWorkspaceLockCommand``, which the gate calls to
 # create / refresh the workspace lock).
+type
+  PushPreflightRepo = object
+    branch: string
+    headSha: string
+    remoteName: string
+    remoteLocationFingerprint: string
+    destinationRef: string
+    advertisementFingerprint: string
+    published: bool
+    pushable: bool
+
+proc revalidatePushRepo(identity: GitToolIdentity; workspaceRoot: string;
+    repo: ResolvedRepo; expected: PushPreflightRepo;
+    sourceHookLocationDigest = ""):
+    tuple[ok: bool; diagnostic: string; remediation: string]
+
 proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
-                      hookRemoteLocation = ""): int
+                      hookRemoteLocation = "";
+                      publicationMembers: seq[HookPublicationMember] = @[];
+                      publicationWorkspace = ""): int
 proc validateCommittedLockAdvisory(repoRoot: string)
 # Test-Certificates TC-9b: `certificate_policy_snapshot_stale`, reported by
 # the pre-push gate and `repro health`; defined beside `repro lock refresh`,
@@ -24051,7 +24105,26 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     let remoteName = hookArgs[0]
     let remoteLocation = hookArgs[1]
     let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
-    let capability = getEnv(HookCapabilityEnv)
+    var capability = getEnv(HookCapabilityEnv)
+    # A plural push runs one hook per URL. Each destination gets an independent
+    # one-use token; select it without carrying any destination credentials.
+    if capability.startsWith("component:"):
+      let locationDigest = remoteLocationDigest(remoteLocation)
+      var selected = ""
+      for binding in capability["component:".len .. ^1].split(','):
+        let fields = binding.split('=')
+        if fields.len != 2 or fields[0].len != 64 or fields[1].len != 64:
+          stderr.writeLine("repro hooks: malformed source component capability envelope")
+          return 1
+        if fields[0] == locationDigest:
+          if selected.len > 0:
+            stderr.writeLine("repro hooks: duplicate source component destination")
+            return 1
+          selected = fields[1]
+      if selected.len == 0:
+        stderr.writeLine("repro hooks: source component destination is not authorized")
+        return 1
+      capability = selected
     # Scrub before any helper or gate work. Only the typed consumer below sees
     # the captured value, and it deletes a successfully claimed record before
     # returning authorization.
@@ -24077,11 +24150,17 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
           except CatchableError:
             discard
       return 0
+    var componentMembers: seq[HookPublicationMember]
+    var componentWorkspace = ""
     if capability.len > 0:
       let consumed = consumeHookCapability(identity.binaryPath, repoRoot,
         capability, remoteName, remoteLocation, refsFile)
       if consumed.authorized:
-        return 0
+        if consumed.purpose == SourceComponentCapabilityPurpose:
+          componentMembers = consumed.publicationMembers
+          componentWorkspace = consumed.publicationWorkspace
+        else:
+          return 0
       elif not consumed.claimLost:
         stderr.writeLine("repro hooks: nested publication capability refused: " &
           consumed.diagnostic)
@@ -24100,7 +24179,8 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     # refusal always leaves machine-readable evidence behind. Operator
     # invocations of `repro check` stay opt-in.
     checkArgs.add("--write-report")
-    return runCheckCommand(checkArgs, remoteName, remoteLocation)
+    return runCheckCommand(checkArgs, remoteName, remoteLocation,
+      componentMembers, componentWorkspace)
   of "post-commit":
     # M19 best-effort lock refresh. Always exits 0 even when the lock
     # writer refuses, no workspace.toml exists, or the workspace is
@@ -24165,13 +24245,17 @@ proc runHooksCommand(args: openArray[string]): int =
       let arg = args[i]
       if arg == "--require=2":
         requireSeen = true
+      elif arg == "--require-source-component":
+        # This build understands source-component capabilities. Old engines
+        # reject the flag, so callers can prove support before any transport.
+        discard
       elif arg.startsWith("--hook-contract="):
         contractSeen = true
         contract = arg["--hook-contract=".len .. ^1]
       else:
         raise newException(ValueError,
           "repro hooks protocol accepts only --require=2 " &
-          "[--hook-contract=TOKEN]")
+          "[--hook-contract=TOKEN] [--require-source-component]")
     if not requireSeen:
       raise newException(ValueError,
         "repro hooks protocol requires exactly --require=2")
@@ -24848,7 +24932,7 @@ const
   ## exported list remains useful to callers auditing the well-known controls.
   DaemonExplicitForwardedEnvVars* = [
     "PATH", "HOME", "USER", "TMPDIR", "TEMP", "TMP",
-    "RUNQUOTA_SOCKET", "RUNQUOTAD_BIN", "RUNQUOTA_BIN",
+    "RUNQUOTA_SOCKET", "RUNQUOTA_ENDPOINT_SCOPE", "RUNQUOTAD_BIN", "RUNQUOTA_BIN",
     "REPROBUILD_STORE_ROOT", "REPROBUILD_SOURCE_ROOT",
     # Source/provider lookup overrides used by workspace builds. These are
     # distinct from REPROBUILD_SOURCE_ROOT in existing project configuration,
@@ -25292,6 +25376,29 @@ proc forgetMachineDeclaredDaemonTrust*() =
   machineDaemonTrustApplied = false
 
 when not defined(windows):
+  type AutoRunQuotaEnvironment = object
+    socket, scope: string
+    hadSocket, hadScope: bool
+
+  var ownedRunQuotaEnvironments {.threadvar.}: Table[int, AutoRunQuotaEnvironment]
+
+  proc saveRunQuotaEnvironment(): AutoRunQuotaEnvironment =
+    AutoRunQuotaEnvironment(socket: getEnv("RUNQUOTA_SOCKET"),
+      scope: getEnv("RUNQUOTA_ENDPOINT_SCOPE"),
+      hadSocket: existsEnv("RUNQUOTA_SOCKET"),
+      hadScope: existsEnv("RUNQUOTA_ENDPOINT_SCOPE"))
+
+  proc restoreRunQuotaEnvironment(previous: AutoRunQuotaEnvironment) =
+    if previous.hadSocket: putEnv("RUNQUOTA_SOCKET", previous.socket)
+    else: delEnv("RUNQUOTA_SOCKET")
+    if previous.hadScope: putEnv("RUNQUOTA_ENDPOINT_SCOPE", previous.scope)
+    else: delEnv("RUNQUOTA_ENDPOINT_SCOPE")
+
+  proc restoreOwnedRunQuotaEnvironment(pid: int) =
+    if ownedRunQuotaEnvironments.hasKey(pid):
+      restoreRunQuotaEnvironment(ownedRunQuotaEnvironments[pid])
+      ownedRunQuotaEnvironments.del(pid)
+
   const runQuotaExitWithParentEnvVar = "RUNQUOTA_EXIT_WITH_PARENT"
     ## Read by `runquotad` (runquota `runquota_daemon/parent_watch`): `1`
     ## makes the daemon stop, through its orderly SIGTERM shutdown, when its
@@ -25448,6 +25555,17 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
   applyMachineDeclaredDaemonTrust()
   if bypassRunQuota or not autoRunQuotaEnabled():
     return nil
+  when not defined(windows):
+    # Probing reachability intentionally folds failures to false. Invalid
+    # policy is a configuration error, never permission to replace it.
+    discard rendezvousPolicy()
+    let inheritedSocket = getEnv("RUNQUOTA_SOCKET")
+    if inheritedSocket.len > 0 and
+        (not isAbsolute(inheritedSocket) or '\0' in inheritedSocket):
+      raise newException(OSError,
+        "RUNQUOTA_SOCKET must name an absolute endpoint without NUL bytes")
+    if getEnv("RUNQUOTA_ENDPOINT_SCOPE") == "private":
+      requireTrustedEndpointDir(defaultEndpoint())
   # If RUNQUOTA_SOCKET is set, the user (or a parent invocation) is
   # managing the daemon explicitly. On Windows we additionally probe
   # reachability so a stale env var inherited from a previous build —
@@ -25585,6 +25703,52 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     # through the rewritten exception in ``tryEnsureInlineRunQuotaSession``
     # (M9.R.11 — see ``repro_build_engine.runQuotaUnreachableHint``).
     return nil
+  when not defined(windows):
+    # A failed probe must not convert an existing untrusted/inaccessible
+    # authority into an invocation-owned one. Missing inherited invocation
+    # sockets retain the established stale-environment recovery above.
+    let configuredEndpoint = defaultEndpoint()
+    let explicitSocket = getEnv("RUNQUOTA_SOCKET")
+    # Strip only the socket name; parentDir would lexically fold alias/..
+    # before directoryResolvesWithin can resolve the actual traversal.
+    let selectedSlash = configuredEndpoint.path.rfind('/')
+    let selectedDirectory = configuredEndpoint.path[0 .. selectedSlash]
+    var endpointExists = false
+    try:
+      discard getFileInfo(configuredEndpoint.path, followSymlink = false)
+      endpointExists = true
+    except OSError as error:
+      if error.errorCode != ENOENT:
+        raise
+    if endpointExists:
+      var client = runquota_client.connectDefault()
+      client.close()
+      warnRunQuotaMemoryOverrideNotApplied()
+      return nil
+    if explicitSocket.len > 0 and directoryResolvesWithin(
+        selectedDirectory, hostWideEndpointDir):
+      raise newException(OSError, "configured RunQuota host endpoint is unavailable at " &
+        configuredEndpoint.path & "; refusing private auto-start")
+    let declarations =
+      try: loadDeclaredDaemons()
+      except CatchableError: @[] # Trust-file syntax remains non-fatal.
+    for declaration in declarations:
+      # Keep traversal order in the parent spellings: lexical normalization
+      # before resolving an alias/.. would compare a different directory.
+      let declaredSlash = declaration.endpoint.rfind('/')
+      if declaration.kind == ddkRunQuota and declaredSlash >= 0 and
+          selectedSlash >= 0 and
+          declaration.endpoint[declaredSlash + 1 .. ^1] ==
+            configuredEndpoint.path[selectedSlash + 1 .. ^1] and
+          directoryResolvesWithin(declaration.endpoint[0 .. declaredSlash],
+            selectedDirectory) and
+          directoryResolvesWithin(selectedDirectory,
+            declaration.endpoint[0 .. declaredSlash]):
+        raise newException(OSError,
+          "declared RunQuota endpoint is unavailable at " & configuredEndpoint.path &
+          "; refusing private auto-start")
+    if explicitSocket.len == 0:
+      requireTrustedEndpointDir(configuredEndpoint)
   # Pipe-name / socket-path derivation.
   #
   # Windows: omit ``--socket`` so runquotad binds to its built-in
@@ -25627,13 +25791,16 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     putEnv("RUNQUOTA_SOCKET", "")
     let socket = ""
   else:
+    let previousRunQuotaEnvironment = saveRunQuotaEnvironment()
     let socket = runquotaEndpointPath(
       "reprobuild-runquota-" & $getCurrentProcessId())
-    # fileExists excludes Unix sockets; removeFile also accepts a missing path.
-    removeFile(socket)
     var args = @["--socket", socket]
     args.add(budget.args)
     putEnv("RUNQUOTA_SOCKET", socket)
+    # Both halves verify the same invocation-owned endpoint. Export to OUR
+    # environment too: the connecting parent, helper and managed actions must
+    # not fall back to host NSS ownership while the daemon selects private.
+    putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
   # THE DAEMON'S LIFETIME. On Windows it binds the shared per-user pipe and is
   # deliberately left running for invocations that adopt it (see
   # `releaseAutoRunQuotaProcess`), so it must hold nothing of this invocation:
@@ -25647,9 +25814,22 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
   when defined(windows):
     result = spawnDetachedRunQuotaDaemon(runquotad, args)
   else:
-    result = spawnOwnedRunQuotaDaemon(runquotad, args)
+    try:
+      result = spawnOwnedRunQuotaDaemon(runquotad, args)
+      ownedRunQuotaEnvironments[processID(result)] = previousRunQuotaEnvironment
+      prepareStartupOutput(cint(result.outputHandle))
+      prepareStartupOutput(cint(result.errorHandle))
+    except CatchableError:
+      if result != nil:
+        releaseAutoRunQuotaProcess(result)
+      restoreRunQuotaEnvironment(previousRunQuotaEnvironment)
+      raise
+    var startupStdout, startupStderr: StartupOutput
   var readinessError = ""
   for _ in 0 ..< 300:
+    when not defined(windows):
+      drainStartupOutput(startupStdout, cint(result.outputHandle))
+      drainStartupOutput(startupStderr, cint(result.errorHandle))
     if isRunQuotaDaemonReachable():
       # DA-2 — DERIVED class-3 IPC trust. We spawned this daemon, so its pid is
       # a fact this process holds rather than a claim anyone made, and
@@ -25746,18 +25926,23 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
       discard result.waitForExit()
   except CatchableError:
     discard
+  when not defined(windows):
+    drainStartupOutput(startupStdout, cint(result.outputHandle))
+    drainStartupOutput(startupStderr, cint(result.errorHandle))
+    restoreOwnedRunQuotaEnvironment(processID(result))
   try:
     result.close()
   except CatchableError:
     discard
-  when not defined(windows):
-    putEnv("RUNQUOTA_SOCKET", "")
   let endpointHint =
     when defined(windows): "default per-user named pipe"
     else: socket
   raise newException(OSError,
     "runquotad did not become reachable at " & endpointHint &
-    (if readinessError.len > 0: ": " & readinessError else: ""))
+    (if readinessError.len > 0: ": " & readinessError else: "") &
+    (when defined(windows): ""
+     else: startupDiagnostic(startupStdout, "stdout") &
+       startupDiagnostic(startupStderr, "stderr")))
 
 proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
   ## Release this invocation's handle to an automatically started RunQuota
@@ -25782,6 +25967,7 @@ proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
     return
   when not defined(windows):
     unregisterOwnedDaemon(processID(process))
+    restoreOwnedRunQuotaEnvironment(processID(process))
   try:
     when not defined(windows):
       process.terminate()
@@ -27892,7 +28078,8 @@ type
     cause*: LockedIntegrityCause
     diagnostic*: string
 
-proc populateLockedDeps*(source: LockSource): LockedDependencies
+proc populateLockedDeps*(source: LockSource;
+                         strictCommittedRead = false): LockedDependencies
 proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
     ld: LockedDependencies): seq[LockedIntegrityFailure]
 
@@ -28378,6 +28565,32 @@ proc computeDepIntegrity*(repoAbsPath, headSha: string): string =
     return gitObjectMultihash(gitObjectFormatOf(repoAbsPath), headSha)
   narStyleTreeMultihash(collectTreeEntries(repoAbsPath))
 
+proc cachedProducerLockedDep(checkoutRoot, consumerRoot, pathBase: string;
+                            existingDeps: seq[LockedDep]): Option[LockedDep] =
+  ## A fetched checkout is a materialization of a pin, not a new repository
+  ## identity. It deliberately has no remote and its leaf is the revision.
+  ## Match the exact cache location for that pin, then verify its content
+  ## before carrying the original coordinates forward. Matching only a SHA
+  ## would conflate unrelated repositories that happen to share a commit.
+  for pinned in existingDeps:
+    if isSelfLockedDep(pinned) or pinned.coordinates.kind != ckVcs or
+        pinned.coordinates.revision.len == 0:
+      continue
+    let expected = lockPinnedProducerCacheRoot(consumerRoot) / pinned.name /
+      pinned.coordinates.revision
+    if not dirExists(extendedPath(expected)):
+      continue
+    if cmpPaths(os.normalizedPath(expandFilename(expected)),
+        os.normalizedPath(expandFilename(checkoutRoot))) != 0:
+      continue
+    verifyLockPinnedProducerSource(pinned, checkoutRoot, consumerRoot)
+    var kept = pinned
+    kept.path = relativePath(checkoutRoot, pathBase).replace('\\', '/')
+    if isPolicyEphemeralBranch(kept.coordinates.gitRef):
+      kept.coordinates.gitRef = ""
+    return some(kept)
+  none(LockedDep)
+
 proc usesProducerLockedDep(selector, root, pathBase: string;
                            existingDeps: seq[LockedDep];
                            refView: PublishedRefView = nil):
@@ -28401,6 +28614,9 @@ proc usesProducerLockedDep(selector, root, pathBase: string;
     except CatchableError: ""
   if srcRoot.len > 0 and dirExists(extendedPath(srcRoot)):
     let depAbs = absolutePath(srcRoot)
+    let cached = cachedProducerLockedDep(depAbs, root, pathBase, existingDeps)
+    if cached.isSome:
+      return cached
     let facts = committedLockRepoFacts(depAbs, refView)
     # Discovered from the invoking tree, held relative to the committed
     # lock's frame of reference (``committedLockPathBase``).
@@ -28534,6 +28750,9 @@ proc catalogLockedDep*(catalogRoot, root: string;
   if top.len > 0:
     let depAbs = absolutePath(top)
     let targetBase = if pathBase.len > 0: pathBase else: root
+    let cached = cachedProducerLockedDep(depAbs, root, targetBase, existingDeps)
+    if cached.isSome:
+      return cached
     let targetTop = gitTopLevel(targetBase)
     let canonTargetBase = if targetTop.len > 0: absolutePath(targetTop) else: absolutePath(targetBase)
     if cmpPaths(depAbs, canonTargetBase) == 0 or canonTargetBase.isRelativeTo(depAbs):
@@ -29007,6 +29226,14 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
       continue
     let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     if observedKey(rel) in observedCheckouts:
+      continue
+    let cached = cachedProducerLockedDep(depAbs, root, pathBase, existingDeps)
+    if cached.isSome:
+      let dep = cached.get()
+      if dep.name notin seenNames:
+        siblingDeps.add(dep)
+        observedCheckouts.add(observedKey(rel))
+        seenNames.add(dep.name)
       continue
     let facts = committedLockRepoFacts(depAbs, refView)
     let bareName = extractFilename(depAbs.strip(
@@ -40060,7 +40287,10 @@ type
       ## form of ``repro branch``, whose new workspace must contain the same
       ## repos as the workspace it was cut from. Without it the fork clones the
       ## primary project only and every repo belonging to the other enabled
-      ## projects has no checkout to branch.
+      ## projects has no checkout to branch. An ``init`` given NO positional
+      ## project sets it too (``resolveBootstrapConfig``): the settings file's
+      ## ``[projects] default`` beyond its first entry, so the whole default
+      ## set is materialized and recorded.
     verifySpec: ManifestVerifySpec
       ## RA-17 — manifest provenance trust anchor resolved from the host
       ## bootstrap config's ``[manifest] revision`` + ``[verify]`` table. When
@@ -40894,34 +41124,54 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
   ## If none resolves, ``init`` later fails loud — the ``repro`` binary ships
   ## NO built-in/hardcoded manifest URL fallback.
   ##
-  ## When the workspace already has a ``.repo/manifests`` checkout (a sibling
-  ## checkout or a prior bootstrap), no manifest URL is needed at all and the
-  ## resolution is skipped; ``init`` reads the existing checkout directly.
-  if dirExists(args.workspaceRoot / "projects"):
-    return
+  ## When the workspace root already holds the manifests (``projects/`` —
+  ## the flat layout, where the root workspace repository IS the manifest
+  ## repository, which is exactly what a cold-start ``init <url>`` has just
+  ## cloned), no manifest URL is needed and none is resolved; ``init`` reads
+  ## the manifests in place. The settings file's ``[projects] default`` is
+  ## still read there: it is the only thing that names WHICH projects a
+  ## workspace joined without a positional project consists of, and skipping
+  ## it made every cold start of a flat-layout root fail for want of a
+  ## project name.
+  ##
+  ## With no positional project, the WHOLE default set is materialized and
+  ## recorded as the active set — its first entry as the primary project,
+  ## the rest as ``additionalProjects`` — matching what ``repro workspace
+  ## enable --default`` gives an existing checkout.
+  let flatLayout = dirExists(args.workspaceRoot / "projects")
 
   # (1) Explicit flag wins outright — and may still pull default projects /
   # a private URL from the config below without overriding the URL/branch.
   let configPath = findBootstrapConfigPath(args.workspaceRoot)
   if configPath.len > 0:
     let cfg = readWorkspaceSettings(configPath)
-    if not args.manifestUrlExplicit:
-      args.manifestUrl = cfg.records.url.get("")
-      if cfg.records.branch.isSome and args.manifestBranch.len == 0:
-        args.manifestBranch = cfg.records.branch.get()
-    if args.privateManifestUrl.len == 0 and cfg.privateManifestUrl.isSome:
-      args.privateManifestUrl = cfg.privateManifestUrl.get()
+    if not flatLayout:
+      if not args.manifestUrlExplicit:
+        args.manifestUrl = cfg.records.url.get("")
+        if cfg.records.branch.isSome and args.manifestBranch.len == 0:
+          args.manifestBranch = cfg.records.branch.get()
+      if args.privateManifestUrl.len == 0 and cfg.privateManifestUrl.isSome:
+        args.privateManifestUrl = cfg.privateManifestUrl.get()
+      # RA-17 — resolve the manifest-provenance trust anchor from the config's
+      # ``[manifest] revision`` + ``[verify]`` table. Paths in
+      # ``allowed_signers`` are resolved relative to the config's directory.
+      # The resulting spec is a no-op unless the config opts into
+      # verification. (A flat-layout root clones no manifest repository, so
+      # there is nothing for it to verify.)
+      args.verifySpec = resolveVerifySpec(cfg, configPath.parentDir)
     if cfg.projects.default.len > 0:
       args.defaultProjects = cfg.projects.default
-    # Fill the project-to-init from the config default when no positional
+    # Fill the project set to init from the config default when no positional
     # project name was supplied.
     if args.projectName.len == 0 and args.defaultProjects.len > 0:
       args.projectName = args.defaultProjects[0]
-    # RA-17 — resolve the manifest-provenance trust anchor from the config's
-    # ``[manifest] revision`` + ``[verify]`` table. Paths in ``allowed_signers``
-    # are resolved relative to the config's directory. The resulting spec is a
-    # no-op unless the config opts into verification.
-    args.verifySpec = resolveVerifySpec(cfg, configPath.parentDir)
+      for name in args.defaultProjects[1 .. ^1]:
+        if name.len > 0 and name != args.projectName and
+            name notin args.additionalProjects:
+          args.additionalProjects.add(name)
+
+  if flatLayout:
+    return
 
   # (3) Host repo origin — only when neither an explicit flag nor the config
   # supplied a manifest URL.
@@ -41860,15 +42110,15 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # M13: record the active workspace branch in .repo/workspace.toml so
   # downstream commands (``repro workspace status``, M14 ``repro branch``,
   # M15 ``repro switch``) can read it back as a single source of truth.
-  # The branch value is the resolver's ``trunk`` (the manifest's
-  # documented default branch); when ``trunk`` is empty we fall back to
-  # ``defaultRevision``. We only write when we have a meaningful value
-  # AND no clone failures (writing on a half-broken init would record a
+  # The branch value is the declared workspace default (explicit project
+  # trunk, otherwise the root repository's mainline); when neither exists,
+  # retain the historical fallback to ``defaultRevision``. We only write when
+  # we have a meaningful value AND no clone failures (writing on a half-broken init would record a
   # branch the workspace cannot honor). The write is idempotent — if the
   # composer mode already produced a workspace.toml with a branch, this
   # call is a no-op (the writer preserves any pre-existing branch when
   # we pass the same value, and the value comes from the same composed
-  # ``resolved.trunk``).
+  # declared workspace default).
   if cloneFailures == 0:
     # THE MARKER IS RECORDED WHETHER OR NOT THERE IS A BRANCH TO RECORD WITH
     # IT. "This directory is an initialized workspace" is not a fact about
@@ -41901,13 +42151,21 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
     # one the previous engine wrote.
     if resolved.projectName.len > 0 and
         not fileExists(workspaceTomlPath(args.workspaceRoot)):
+      # The set this init materialized: the primary, then every additional
+      # project (the settings file's `[projects] default` beyond its first
+      # entry, or a fork's inherited set), so the recorded membership names
+      # every project whose repos were just cloned.
+      var initSet = @[resolved.projectName]
+      for name in args.additionalProjects:
+        if name.len > 0 and name notin initSet:
+          initSet.add(name)
       try:
-        writeWorkspaceProjects(args.workspaceRoot, @[resolved.projectName])
+        writeWorkspaceProjects(args.workspaceRoot, initSet)
       except WorkspaceManifestParseError as e:
         stderr.writeLine(
           "workspace init: could not record the workspace marker: " & e.msg)
     let branchValue =
-      if resolved.trunk.len > 0: resolved.trunk
+      if resolved.defaultWorkspaceBranch.len > 0: resolved.defaultWorkspaceBranch
       elif resolved.defaultRevision.len > 0: resolved.defaultRevision
       else: ""
     if branchValue.len > 0:
@@ -43200,7 +43458,8 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
       manifestsRoot & "' (looked for '" & projectFile & "', '" &
       variantFile & "' and '" & repoSetFile & "')")
 
-proc resolveWorkspaceSyncProject(parsed: WorkspaceSyncArgs): ResolvedProject =
+proc resolveWorkspaceSyncProject(parsed: WorkspaceSyncArgs;
+    command: string): ResolvedProject =
   ## MO-9 — delegates to the shared ``resolveWorkspaceProjectShared`` ladder
   ## (collapsed from the former per-op copies). Same dispatch rule as M9:
   ## prefer ``.repro/workspace.toml`` when it
@@ -43212,16 +43471,17 @@ proc resolveWorkspaceSyncProject(parsed: WorkspaceSyncArgs): ResolvedProject =
   ## manifest layers. A missing workspace.toml AND a missing project
   ## argument is a structured error.
   resolveWorkspaceProjectShared(parsed.workspaceRoot, parsed.projectName,
-    "`repro workspace sync`").resolved
+    "`" & command & "`").resolved
 
-proc repoPassedAsProjectMessage(name: string): string =
+proc repoPassedAsProjectMessage(name, command: string): string =
   "'" & name & "' is a repo, not a project: a positional argument to " &
-    "`repro sync` names a project (or variant, or repo-set). To sync " &
-    "only this repo, run `repro sync --only=" & name & "` (--only takes " &
+    "`" & command & "` names a project (or variant, or repo-set). To select " &
+    "only this repo, run `" & command & " --only=" & name & "` (--only takes " &
     "a comma-separated list; --filter takes a glob)"
 
 proc refuseRepoPassedAsProject(workspaceRoot: string;
-                               scopeProjects: openArray[string]) =
+                               scopeProjects: openArray[string];
+                               command: string) =
   ## Up-front form of the refusal in ``resolveNamedProjectOrVariant``, for the
   ## paths that resolve a positional BEFORE any participating set exists: a
   ## workspace with no recorded metadata (the positional is the resolution
@@ -43237,9 +43497,9 @@ proc refuseRepoPassedAsProject(workspaceRoot: string;
         fileExists(root / repoSetsDirName / (name & ".toml")):
       continue
     if fileExists(root / "repos" / (name & ".toml")):
-      raise newException(ValueError, repoPassedAsProjectMessage(name))
+      raise newException(ValueError, repoPassedAsProjectMessage(name, command))
 
-proc resolveNamedProjectOrVariant(workspaceRoot, name: string;
+proc resolveNamedProjectOrVariant(workspaceRoot, name, command: string;
     participatingRepos: openArray[string] = []): ResolvedProject =
   ## RA-27 scoped sync: resolve ONE named project (or variant, or repo-set)
   ## from the manifest layer so its repo set can scope the participating set.
@@ -43293,28 +43553,29 @@ proc resolveNamedProjectOrVariant(workspaceRoot, name: string;
     return resolveRepoSet(repoSetFile)
   if name in participatingRepos or
       fileExists(manifestsRoot / "repos" / (name & ".toml")):
-    raise newException(ValueError, repoPassedAsProjectMessage(name))
+    raise newException(ValueError, repoPassedAsProjectMessage(name, command))
   raise newException(ValueError,
-    "unknown project '" & name & "' passed to `repro workspace sync` " &
+    "unknown project '" & name & "' passed to `" & command & "` " &
       "(no `projects/" & name & ".toml`, `variants/" & name &
       ".toml` or `" & repoSetsDirName & "/" & name & ".toml` under '" &
       manifestsRoot &
-      "'); run `repro workspace sync` with no project to sync the whole " &
+      "'); run `" & command & "` with no project for the whole " &
       "workspace, pass a known project name, or select repos with " &
       "--only / --filter")
 
 proc scopeRepoPathSet(workspaceRoot: string;
-    scopeProjects: openArray[string];
+    scopeProjects: openArray[string]; command: string;
     participatingRepos: openArray[string] = []): HashSet[string] =
   ## The union of repo ``path`` values declared by the named projects.
   ## ``executeWorkspaceSync`` filters the workspace's participating repo
   ## set to this union — the resolver already knows project→repos, so a
   ## scoped sync is exactly "keep only repos that belong to a named
   ## project". An unknown name raises (see ``resolveNamedProjectOrVariant``);
-  ## ``participatingRepos`` lets that error recognise a repo name.
+  ## ``participatingRepos`` lets that error recognise a repo name. The caller
+  ## supplies its command so the error and remedy name the operation it ran.
   result = initHashSet[string]()
   for name in scopeProjects:
-    let proj = resolveNamedProjectOrVariant(workspaceRoot, name,
+    let proj = resolveNamedProjectOrVariant(workspaceRoot, name, command,
       participatingRepos)
     for repo in proj.repos:
       result.incl(repo.path)
@@ -46162,7 +46423,8 @@ proc lockedDepFromStoreRepo(source: LockSource; repo: ResolvedRepo): LockedDep =
     participation: repo.participation, depends: repo.depends,
     tags: repo.tags)
 
-proc populateLockedDeps*(source: LockSource): LockedDependencies =
+proc populateLockedDeps*(source: LockSource;
+                         strictCommittedRead: bool): LockedDependencies =
   ## MO-9 — the ONE entry point that fills the MO-8 ``LockedDependencies`` model
   ## from ANY source. Each branch yields the SAME per-dependency shape (a
   ## ``LockedDep`` with checkout COORDINATES + a self-describing INTEGRITY
@@ -46175,7 +46437,8 @@ proc populateLockedDeps*(source: LockSource): LockedDependencies =
   ##     ``git HEAD``), each dependency placed where this machine has it
   ##     (``localizeLockedDeps`` — the lock records no location). A missing /
   ##     unparseable / unsupported lock yields an empty ``deps`` set so callers
-  ##     fall back cleanly.
+  ##     fall back cleanly. Develop opts into ``strictCommittedRead`` to
+  ##     preserve present-file failures for its fail-closed backend report.
   ##   * ``lskManifestRepo`` / ``lskExternalStore`` — for each repo in the
   ##     source's repo-set, read its locked revision from the backend
   ##     ``LockStore`` (the manifest-repo SHA lock, or the external DB) and emit
@@ -46185,7 +46448,24 @@ proc populateLockedDeps*(source: LockSource): LockedDependencies =
   case source.kind
   of lskCommittedLock:
     let lockP = committedLockPath(absolutePath(source.workspaceRoot))
-    if not fileExists(extendedPath(lockP)):
+    if strictCommittedRead:
+      # Develop must distinguish optional absence from a failed OS probe. A
+      # dangling final symlink is present and its later read must fail loud.
+      try:
+        discard getFileInfo(extendedPath(lockP), followSymlink = false)
+      except OSError as error:
+        when defined(windows):
+          # Win32 ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND.
+          let absent = error.errorCode in [2'i32, 3'i32]
+        else:
+          let absent = error.errorCode == ENOENT
+        if absent:
+          return LockedDependencies(schema: SolvedGraphLockSchemaV3, deps: @[])
+        raise
+      let target = getFileInfo(extendedPath(lockP))
+      if target.kind != pcFile or target.isSpecial:
+        raise newException(IOError, "committed lock is not a regular file: " & lockP)
+    elif not fileExists(extendedPath(lockP)):
       return LockedDependencies(schema: SolvedGraphLockSchemaV3, deps: @[])
     try:
       # Placed where THIS machine has each dependency: the lock records
@@ -46201,6 +46481,7 @@ proc populateLockedDeps*(source: LockSource): LockedDependencies =
       # lock set is empty" further down. Fail loud, at the reader.
       raise
     except CatchableError:
+      if strictCommittedRead: raise
       return LockedDependencies(schema: SolvedGraphLockSchemaV3, deps: @[])
   of lskManifestRepo, lskExternalStore:
     result = LockedDependencies(schema: SolvedGraphLockSchemaV3, deps: @[])
@@ -46408,6 +46689,14 @@ proc lockRecordAtCommitOrAncestor*(store: LockStore; project, repo, sha: string;
     if rec.isSome:
       return (rec: rec, foundAt: ancestor, distance: idx)
 
+proc unreadableCommittedLockMessage(lockPath, diagnostic: string): string =
+  ## Preserve the actual parser/OS cause; validate existing recorded revisions
+  ## rather than advising blind regeneration of an unreadable document.
+  "public lock backend (kind=committed-lock location=" & lockPath &
+    ") could not be read: " & diagnostic &
+    " — inspect the file and its access permissions, then run `repro lock " &
+    "validate --lock=" & quoteShell(lockPath) & "`"
+
 type
   PublicTierCommittedLocks = object
     ## The PUBLIC tier's committed-lock medium, read across the workspace.
@@ -46440,6 +46729,8 @@ type
     deps: seq[LockedDep]        ## the per-repo self-records, workspace-rebased
     probed: seq[string]         ## repo paths whose checkout was probed
     carrying: seq[string]       ## repo paths that actually carried a lock
+    refusals: seq[string]       ## present media that failed to read or parse
+    unreadable: seq[DevelopBackendReport] ## exact failed public media
 
 proc participatingRepoCommittedLocks(workspaceRoot: string):
     PublicTierCommittedLocks =
@@ -46458,8 +46749,9 @@ proc participatingRepoCommittedLocks(workspaceRoot: string):
   ## reading ("the repo's own public coordinates") and conflict-free by
   ## construction.
   ##
-  ## Best-effort by design: this is the *public* tier's medium, whose absence is
-  ## never a refusal ("An ABSENT `repro.lock` … is recorded as a backend that
+  ## Absence contributes nothing; a present medium that cannot be read or
+  ## parsed is a DS-3 refusal. Membership discovery remains best-effort here:
+  ## a public lock's absence is never a refusal ("An ABSENT `repro.lock` … is recorded as a backend that
   ## contributed nothing — NOT as a refusal"). A workspace whose membership
   ## cannot be resolved at all contributes no per-repo records and is reported
   ## by the composer's own membership refusal further down, not here.
@@ -46475,18 +46767,22 @@ proc participatingRepoCommittedLocks(workspaceRoot: string):
     # every dep it holds.
     if repo.path.len == 0 or repo.path == ".": continue
     let repoRoot = root / repo.path
-    if not dirExists(extendedPath(repoRoot)): continue
-    result.probed.add(repo.path)
     let lockP = committedLockPath(repoRoot)
-    if not fileExists(extendedPath(lockP)): continue
     var parsed: LockedDependencies
     try:
-      parsed = parseWorkspaceLockedDeps(readFile(extendedPath(lockP)), lockP)
-    except CatchableError:
-      # An unparseable in-repo lock is the lock verbs' loud business (`repro
-      # lock validate`), not a reason to refuse the whole develop set — the
-      # same judgement `collectLockCoherence` makes about the same file.
+      parsed = populateLockedDeps(LockSource(kind: lskCommittedLock,
+        workspaceRoot: repoRoot), strictCommittedRead = true)
+    except CatchableError as error:
+      result.refusals.add(unreadableCommittedLockMessage(lockP, error.msg))
+      result.unreadable.add(DevelopBackendReport(tier: "public",
+        backendKind: "committed-lock", location: lockP,
+        reachable: false, diagnostic: error.msg))
       continue
+    # Only after the checked read may optional checkout bookkeeping use a
+    # soft probe: dirExists also returns false on EACCES, not only ENOENT.
+    if not dirExists(extendedPath(repoRoot)): continue
+    result.probed.add(repo.path)
+    if not fileExists(extendedPath(lockP)): continue
     result.carrying.add(repo.path)
     for dep in parsed.deps:
       # The lock's OWN repo: its self entry (``isSelfLockedDep``), the one
@@ -46562,8 +46858,16 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
   let committedLockPresent = fileExists(extendedPath(committedLockP))
   let publicContributes = tierContributes("public")
   if publicContributes:
-    result.lock = populateLockedDeps(
-      LockSource(kind: lskCommittedLock, workspaceRoot: root))
+    try:
+      result.lock = populateLockedDeps(
+        LockSource(kind: lskCommittedLock, workspaceRoot: root),
+        strictCommittedRead = true)
+    except CatchableError as error:
+      result.backends.add(DevelopBackendReport(tier: "public",
+        backendKind: "committed-lock", location: committedLockP,
+        reachable: false, diagnostic: error.msg))
+      result.refusals.add(unreadableCommittedLockMessage(committedLockP, error.msg))
+      return
   # …and the SAME medium at every OTHER participating repo. The public tier's
   # backend is the in-repo committed lock, and in a multi-repo workspace there
   # is one per repo, not one at the root (see
@@ -46583,6 +46887,10 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
     ## only *replaced* entries answered just as much as one in which they added.
   if publicContributes:
     perRepo = participatingRepoCommittedLocks(root)
+    if perRepo.refusals.len > 0:
+      result.refusals.add(perRepo.refusals)
+      result.backends.add(perRepo.unreadable)
+      return
     let consumerPins = developLockHasConsumer(root, identity, result.lock)
     # For a WORKSPACE INVENTORY, a repo's own lock outranks the root lock.
     # Consumer-specific dependency pins are preserved before this rule applies.
@@ -48277,9 +48585,11 @@ proc applyRepoSelectors(repos: seq[ResolvedRepo];
 
 proc narrowSyncRepoSet(args: WorkspaceSyncArgs;
                        workspaceRoot: string;
-                       repos: seq[ResolvedRepo]): seq[ResolvedRepo] =
+                       repos: seq[ResolvedRepo];
+                       command: string): seq[ResolvedRepo] =
   ## THE one place a ``repro workspace sync`` repo set is narrowed, for every
-  ## sync executor there is.
+  ## sync executor there is, and for the branch-roles query. ``command`` is
+  ## required so every consumer supplies the name for its own diagnostics.
   ##
   ## It exists because the three narrowing steps used to be open-coded twice.
   ## ``executeMainlineSync`` applied all three; ``executeWorkspaceSync`` --
@@ -48306,7 +48616,7 @@ proc narrowSyncRepoSet(args: WorkspaceSyncArgs;
     for repo in repos:
       repoNames.add(repo.name)
     let scopePaths = scopeRepoPathSet(workspaceRoot, args.scopeProjects,
-      repoNames)
+      command, repoNames)
     var kept: seq[ResolvedRepo]
     for repo in result:
       if repo.path in scopePaths:
@@ -48995,7 +49305,7 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
         "' -> '" & repo.path & "' (" & identityEvidence & ")")
     result[repoIdx] = outcome
 
-proc resolveSyncBaseProject(args: WorkspaceSyncArgs;
+proc resolveSyncBaseProject(args: WorkspaceSyncArgs; command: string;
     prospectiveProjects: seq[string] = @[]): ResolvedProject =
   # RA-27 scoped sync: ``repro workspace sync <projectA> <projectB>`` syncs
   # ONLY the named projects' repos. When scope projects are given we resolve
@@ -49024,7 +49334,7 @@ proc resolveSyncBaseProject(args: WorkspaceSyncArgs;
     if prospectiveProjects.len > 0:
       resolveProjectSet(args.workspaceRoot, prospectiveProjects)
     else:
-      resolveWorkspaceSyncProject(resolveArgs)
+      resolveWorkspaceSyncProject(resolveArgs, command)
 
 proc executeWorkspaceSync(args: WorkspaceSyncArgs;
     prospectiveProjects: seq[string] = @[]): WorkspaceSyncOutcome =
@@ -49061,7 +49371,8 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
 
   # Step 2: resolve (or compose) the project.
   #
-  var resolved = resolveSyncBaseProject(args, prospectiveProjects)
+  var resolved = resolveSyncBaseProject(args, "repro workspace sync",
+    prospectiveProjects)
   report.project = resolved.projectName
   report.scopeProjects = args.scopeProjects
   report.dryRun = args.dryRun
@@ -49070,7 +49381,8 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
   # then ``--only`` / ``--except`` / ``--filter``. All three go through
   # ``narrowSyncRepoSet`` -- see the comment on it for why applying them in
   # two hand-written copies is what made the selectors a no-op here.
-  resolved.repos = narrowSyncRepoSet(args, args.workspaceRoot, resolved.repos)
+  resolved.repos = narrowSyncRepoSet(args, args.workspaceRoot, resolved.repos,
+    "repro workspace sync")
 
   # RA-27 Principle 1: ANNOUNCE the plan before acting. Build a real
   # preview from the now-final participating repo set + the cheap on-disk
@@ -50234,10 +50546,11 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
   result.flavor = mainlineFlavorTag(args.mainlineFlavor)
   result.dryRun = args.dryRun
 
-  var resolved = resolveSyncBaseProject(args)
+  var resolved = resolveSyncBaseProject(args, "repro workspace sync")
   result.project = resolved.projectName
 
-  resolved.repos = narrowSyncRepoSet(args, args.workspaceRoot, resolved.repos)
+  resolved.repos = narrowSyncRepoSet(args, args.workspaceRoot, resolved.repos,
+    "repro workspace sync")
 
   let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
   installGitVcsExecutor()
@@ -50702,7 +51015,8 @@ proc runWorkspaceSyncWithProjects(args: openArray[string];
   except BranchRolesUsageError as err:
     stderr.writeLine("repro sync: " & err.msg)
     return 2
-  refuseRepoPassedAsProject(parsed.workspaceRoot, parsed.scopeProjects)
+  refuseRepoPassedAsProject(parsed.workspaceRoot, parsed.scopeProjects,
+    "repro sync")
   # ``--to=<role>`` (``--mainline`` and the other shorthands included)
   # reconciles toward the branch that role resolves to in each repo instead of
   # the branch's own upstream. Different target, different decision table, so
@@ -50905,13 +51219,15 @@ proc executeWorkspaceBranchRoles(parsed: WorkspaceBranchRolesArgs):
   let known = declaredRoleNames(workspaceRoleSettings(sel.workspaceRoot))
   result.roleNames = if parsed.role.len > 0: @[parsed.role] else: known
   try:
-    refuseRepoPassedAsProject(sel.workspaceRoot, sel.scopeProjects)
+    refuseRepoPassedAsProject(sel.workspaceRoot, sel.scopeProjects,
+      "repro workspace branch-roles")
   except ValueError as err:
     # A repo named where a project belongs is a command-line mistake.
     branchRolesUsage(err.msg)
-  var resolved = resolveSyncBaseProject(sel)
+  var resolved = resolveSyncBaseProject(sel, "repro workspace branch-roles")
   result.project = resolved.projectName
-  resolved.repos = narrowSyncRepoSet(sel, sel.workspaceRoot, resolved.repos)
+  resolved.repos = narrowSyncRepoSet(sel, sel.workspaceRoot, resolved.repos,
+    "repro workspace branch-roles")
   if not hasRepoSelector(sel):
     let root = workspaceRootRolesEntry(sel.workspaceRoot, parsed.role)
     result.hasRoot = root.present
@@ -51481,7 +51797,8 @@ proc convergeRepoToManifestRevision(
   # upstream tip (pull is a network-converge op, unlike a pure checkout).
   let rName = if remoteName.len > 0: remoteName else: "origin"
   var fetched: tuple[code: int; output: string]
-  withCheckoutVcsLock(repoPath):
+  withCheckoutVcsLock(repoPath,
+      (block: return (false, "", "", "could not lock checkout: " & repoPath))):
     const MaxPullFetchLockRetries = 5
     for attempt in 0 .. MaxPullFetchLockRetries:
       fetched = gitRunPlain(identity, ["-C", repoPath, "fetch", "--quiet",
@@ -51712,7 +52029,7 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
     # On full success, record the converged branch in workspace metadata
     # so downstream commands read a coherent active branch (mirrors init).
     let branchValue =
-      if resolved.trunk.len > 0: resolved.trunk
+      if resolved.defaultWorkspaceBranch.len > 0: resolved.defaultWorkspaceBranch
       elif resolved.defaultRevision.len > 0: resolved.defaultRevision
       else: ""
     if branchValue.len > 0:
@@ -52817,11 +53134,17 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
 
   let createdAt = isoTimestampNow()
   let createdBy = "repro workspace lock"
+  # Named-project resolution need not return composer metadata, but recorded
+  # feature state has the same precedence in both resolution modes.
   var workspaceBranch = ""
-  if workspaceLocal.isSome and workspaceLocal.get().workspace.branch.isSome:
+  let recordedBranch = readWorkspaceBranch(args.workspaceRoot)
+  if recordedBranch.isSome:
+    workspaceBranch = recordedBranch.get()
+  elif workspaceLocal.isSome and workspaceLocal.get().workspace.branch.isSome and
+      workspaceLocal.get().workspace.branch.get().len > 0:
     workspaceBranch = workspaceLocal.get().workspace.branch.get()
-  elif resolved.trunk.len > 0:
-    workspaceBranch = resolved.trunk
+  else:
+    workspaceBranch = resolved.defaultWorkspaceBranch
 
   # Record every repo we actually observed. A declared repo we could not
   # observe is not silently dropped: it was collected into
@@ -61244,7 +61567,7 @@ proc deriveCheckActiveBranch(parsed: CheckArgs;
   ##   1. ``.repo/workspace.toml``'s ``[workspace].branch`` (M13).
   ##   2. The ``workspaceLocal`` we already loaded (composer-mode
   ##      shortcut that avoids re-reading the file).
-  ##   3. The resolver's ``trunk``.
+  ##   3. The declared workspace default (project trunk, else root mainline).
   ##
   ## A malformed state file raises the strict reader's diagnostic: the gate
   ## must not guess the branch from a file it could not read.
@@ -61255,7 +61578,7 @@ proc deriveCheckActiveBranch(parsed: CheckArgs;
       workspaceLocal.get().workspace.branch.isSome and
       workspaceLocal.get().workspace.branch.get().len > 0:
     return workspaceLocal.get().workspace.branch.get()
-  resolved.trunk
+  resolved.defaultWorkspaceBranch
 
 # ---- M26 helpers: lock-visibility classification --------------------------
 #
@@ -62823,12 +63146,11 @@ proc certificateStoreRelativePath*(cert: TestCertificate): string =
   ## ``:`` (Content-Id §1); ``<payload-hash>`` is the lowercase hex SHA-256 of
   ## the CANONICAL PAYLOAD — never of a file, so neither the rendering nor the
   ## signature block moves the name. Components are joined with ``/`` on
-  ## every platform. "" when ``vcs.content`` has no ``:`` to split at.
-  let colon = cert.vcs.content.find(':')
-  if colon <= 0 or colon == cert.vcs.content.high:
+  ## every platform. "" when ``vcs.content`` is malformed.
+  let directory = storeContentDir(cert.vcs.content)
+  if not directory.ok:
     return ""
-  "v1/" & cert.vcs.content[0 ..< colon] & "/" &
-    cert.vcs.content[colon + 1 .. ^1] & "/" &
+  directory.relative & "/" &
     content_id.sha256Hex(canonicalCertificatePayload(cert)) & ".toml"
 
 proc certificateMayDescribe*(cert: TestCertificate;
@@ -64093,13 +64415,15 @@ proc findCertificatesInLocalStore*(state: CertificateState;
         result.found.add(FoundCertificate(name: file.path, read: read))
 
 proc publishCertificateDocument*(root, document: string;
-                                 beforeRename: PublishStepHook = nil):
+                                 beforeRename: PublishStepHook = nil;
+                                 signatureMade = false):
     StorePublish =
   ## Write one rendered certificate into ``root`` under its §2.2 name. The
   ## name is derived from the PARSED record's canonical payload — never from
-  ## the bytes — and whether it is signed, which decides between replacing
-  ## and keeping an existing file of that name, is read from the record, not
-  ## taken from the caller. The bytes written are ``document``, verbatim.
+  ## the bytes. By default this is a relay: a signed document upgrades only
+  ## an unsigned twin, preserving an existing signed copy. ``signatureMade``
+  ## may be true only when this caller made the incoming signature. The bytes
+  ## written are ``document``, verbatim.
   let read = readCertificateRecord(document)
   if read.status != crsOk:
     result.error = "not a test-certificate.v1 record (" & $read.status &
@@ -64114,7 +64438,15 @@ proc publishCertificateDocument*(root, document: string;
     result.error = "no store path for content '" & read.cert.vcs.content & "'"
     return
   publishStoreRecord(root, relative, document, read.cert.isSigned,
-    beforeRename)
+    beforeRename, signatureMade,
+    proc(bytes: string): bool =
+      let existing = readCertificateRecord(bytes)
+      if existing.status != crsOk:
+        raise newException(IOError, "existing certificate is malformed: " &
+          existing.detail)
+      if certificateStoreRelativePath(existing.cert) != relative:
+        raise newException(IOError, "existing certificate does not match its store name")
+      not existing.cert.isSigned)
 
 type
   LocalStorePublishOutcome* = object
@@ -64161,7 +64493,7 @@ proc headContentDir*(repository: string): string =
 
 proc publishCertificateToLocalStore*(cert: TestCertificate;
     repository: string; roots = nativeCertificateStoreRoots();
-    keep = -1): LocalStorePublishOutcome =
+    keep = -1; signatureMade = false): LocalStorePublishOutcome =
   ## Deliver one issued certificate to the USER root and prune that root
   ## (Transport §2.3, §2.5). ``repository`` is the checkout the tests ran in:
   ## the root must not lie inside it (a certificate never belongs in the
@@ -64187,7 +64519,7 @@ proc publishCertificateToLocalStore*(cert: TestCertificate;
         "TEST_CERTIFICATES_DIR outside the repository"
       return
   let published = publishCertificateDocument(roots.user,
-    serializeCertificateToToml(cert))
+    serializeCertificateToToml(cert), signatureMade = signatureMade)
   result.retried = published.retried
   if published.error.len > 0:
     result.error = published.error
@@ -64724,14 +65056,15 @@ proc readCertificateNote*(note: string): seq[CertificateNoteEntry] =
       result.add(CertificateNoteEntry(piece: piece,
         read: readCertificateRecord(piece.text)))
 
-proc addCertificateToNote*(note: string; cert: TestCertificate):
+proc addCertificateToNote*(note: string; cert: TestCertificate;
+                           signatureMade = false):
     tuple[note: string; changed: bool] =
   ## Add ``cert`` to a note blob as Transport §3.1 requires a writer to:
   ##
   ##   * a piece whose payload — rebuilt from its parsed fields — equals
-  ##     ``cert``'s is the same claim. A SIGNED ``cert`` replaces that piece in
-  ##     place (its signature may be absent or may fail); an unsigned one
-  ##     never replaces it, and nothing is added;
+  ##     ``cert``'s is the same claim. A signed relay upgrades an unsigned
+  ##     piece and preserves a signed one. Only ``signatureMade = true``
+  ##     permits replacing a signed piece; an unsigned copy never replaces;
   ##   * otherwise the record goes after the last piece, behind its own
   ##     delimiter line;
   ##   * every other piece — a record not touched, one that does not parse,
@@ -64744,14 +65077,16 @@ proc addCertificateToNote*(note: string; cert: TestCertificate):
   let record = certificateNoteRecord(cert)
   let pieces = splitCertificateNote(note)
   var match = -1
+  var existingSigned = false
   for i, piece in pieces:
     if piece.leading: continue
     let read = readCertificateRecord(piece.text)
     if read.status == crsOk and
         canonicalCertificatePayload(read.cert) == payload:
-      match = i
-      break
-  if match >= 0 and not cert.isSigned:
+      if match < 0: match = i
+      existingSigned = existingSigned or read.cert.isSigned
+  if match >= 0 and (not cert.isSigned or
+      (not signatureMade and existingSigned)):
     return (note, false)
   if match < 0:
     var updated = note
@@ -64973,53 +65308,87 @@ proc readNotedCertificates*(gitBin, repoPath, annotated, notesRef: string;
     result.found.add(FoundCertificate(name: name, read: rec))
 
 proc attachCertificateRecord*(gitBin, repoPath, annotated: string;
-                              cert: TestCertificate):
+                              cert: TestCertificate; signatureMade = false;
+                              beforePublish: PublishStepHook = nil):
     tuple[ok: bool; diagnostic: string] =
   ## Add ``cert`` to the note on ``annotated`` (any object id) under
   ## ``certificateNotesRef`` in ``repoPath`` (Transport §3.1 —
   ## ``addCertificateToNote``), so several platforms' certificates accumulate
   ## on one object without overwriting each other. ``attachCertificate`` is
   ## the producer's call; this one is the bare carrier operation, which can
-  ## also misattach a record on purpose.
+  ## also misattach a record on purpose. ``signatureMade`` asserts this caller
+  ## made the signature. ``beforePublish`` interleaves a concurrent ref update
+  ## in tests; production leaves it nil.
   ##
   ## The new blob is stored with ``hash-object`` and attached with
   ## ``notes add -f -C``, which takes the blob VERBATIM: ``notes append`` and
   ## ``-m``/``-F`` clean the message up (blank lines, trailing whitespace),
   ## which would rewrite pieces the writer must keep byte for byte. A note
   ## that cannot be read is never overwritten.
-  let current = readNoteBlob(gitBin, repoPath, annotated, certificateNotesRef)
-  if current.status == gorUnreadable:
-    return (ok: false, diagnostic: current.diagnostic)
-  let existing = if current.status == gorPresent: current.body else: ""
-  var added: tuple[note: string; changed: bool]
-  try:
-    added = addCertificateToNote(existing, cert)
-  except CertificateSerializationError as err:
-    return (ok: false, diagnostic: err.msg)
-  if not added.changed:
-    return (ok: true, diagnostic: "")
-  let (file, blobPath) = createTempFile("repro-cert-note-", ".txt")
-  try:
-    file.write(added.note)
-    file.close()
-    let blob = gitNoteRun(gitBin,
-      ["-C", repoPath, "hash-object", "-w", "--", blobPath])
-    let oid = blob.output.strip()
-    if blob.code != 0 or oid.len == 0 or not oid.allCharsInSet(HexDigits):
-      return (ok: false, diagnostic: "git hash-object of the note failed: " &
-        blob.output.strip())
-    let res = gitNoteRun(gitBin,
-      ["-C", repoPath, "notes", "--ref", certificateNotesRef,
-       "add", "-f", "-C", oid, annotated])
-    if res.code != 0:
-      return (ok: false, diagnostic: "git notes add failed: " &
-        res.output.strip())
-  finally:
-    removeFile(blobPath)
-  (ok: true, diagnostic: "")
+  # Build each update against an immutable snapshot, then compare-and-swap
+  # the public ref. A losing relay must re-evaluate the newer signed copy.
+  let (tokenFile, token) = createTempFile("repro-note-cas-", ".tmp")
+  tokenFile.close()
+  removeFile(token)
+  let workRef = "refs/notes/test-certificates-work/" & token.extractFilename
+  defer:
+    discard gitNoteRun(gitBin, ["-C", repoPath, "update-ref", "-d", workRef])
+  for attempt in 0 .. 4:
+    let refRead = gitNoteQuery(gitBin,
+      ["-C", repoPath, "rev-parse", "--verify", "--quiet", certificateNotesRef])
+    if refRead.code notin [0, 1]:
+      return (false, "cannot read certificate notes ref: " & refRead.diagnostic)
+    let old = refRead.output.strip()
+    let current = if old.len > 0:
+      readNoteBlob(gitBin, repoPath, annotated, old)
+      else: GitNoteRead(status: gorAbsent)
+    if current.status == gorUnreadable:
+      return (false, current.diagnostic)
+    let existing = if current.status == gorPresent: current.body else: ""
+    var added: tuple[note: string; changed: bool]
+    try:
+      added = addCertificateToNote(existing, cert, signatureMade)
+    except CertificateSerializationError as err:
+      return (false, err.msg)
+    if not added.changed:
+      return (true, "")
+    discard gitNoteRun(gitBin, ["-C", repoPath, "update-ref", "-d", workRef])
+    if old.len > 0:
+      let seeded = gitNoteRun(gitBin,
+        ["-C", repoPath, "update-ref", workRef, old])
+      if seeded.code != 0: return (false, seeded.output)
+    let (file, blobPath) = createTempFile("repro-cert-note-", ".txt")
+    var oid: string
+    try:
+      file.write(added.note)
+      file.close()
+      let blob = gitNoteRun(gitBin,
+        ["-C", repoPath, "hash-object", "-w", "--", blobPath])
+      oid = blob.output.strip()
+      if blob.code != 0 or oid.len == 0 or not oid.allCharsInSet(HexDigits):
+        return (false, "git hash-object of the note failed: " & blob.output.strip())
+    finally:
+      removeFile(blobPath)
+    let written = gitNoteRun(gitBin,
+      ["-C", repoPath, "notes", "--ref", workRef, "add", "-f", "-C", oid, annotated])
+    if written.code != 0: return (false, written.output)
+    let fresh = gitNoteQuery(gitBin,
+      ["-C", repoPath, "rev-parse", "--verify", workRef])
+    if fresh.code != 0: return (false, fresh.diagnostic)
+    if beforePublish != nil: beforePublish(attempt)
+    let updated = gitNoteRun(gitBin,
+      ["-C", repoPath, "update-ref", certificateNotesRef,
+       fresh.output.strip(), old])
+    if updated.code == 0: return (true, "")
+    let latest = gitNoteQuery(gitBin,
+      ["-C", repoPath, "rev-parse", "--verify", "--quiet", certificateNotesRef])
+    if latest.code notin [0, 1] or latest.output.strip() == old:
+      return (false, "cannot update certificate notes ref: " & updated.output.strip())
+  (false, "certificate notes changed concurrently five times; nothing overwritten")
 
 proc attachCertificate*(gitBin, repoPath: string;
-                        cert: TestCertificate): tuple[ok: bool; diagnostic: string] =
+                        cert: TestCertificate; signatureMade = false):
+    tuple[ok: bool; diagnostic: string] =
   ## Attach ``cert`` as a git note on the tree its ``content`` names, under
   ## ``certificateNotesRef`` in ``repoPath``. The tree object need not exist
   ## in the repository: a verifier computes the id of the state in front of
@@ -65027,7 +65396,7 @@ proc attachCertificate*(gitBin, repoPath: string;
   let key = certificateNoteKey(cert.vcs.content)
   if not key.ok:
     return (ok: false, diagnostic: key.problem)
-  attachCertificateRecord(gitBin, repoPath, key.oid, cert)
+  attachCertificateRecord(gitBin, repoPath, key.oid, cert, signatureMade)
 
 proc commitTreeOid*(gitBin, repoPath, commit: string;
                     received = ReceivedObjectStore()):
@@ -68010,7 +68379,8 @@ proc declaredMainlineBranch(resolved: ResolvedProject;
     repoName: string): string =
   ## The branch the MANIFEST declares this repo's mainline to be: the repo
   ## fragment's ``branch``, else its ``revision`` when that names a branch
-  ## rather than a pin, else the project's ``trunk``. Returns "" when the
+  ## rather than a pin, else the declared workspace default (explicit project
+  ## trunk, otherwise the root's mainline). Returns "" when the
   ## manifest declares nothing — the caller must not infer one, because a
   ## blanket refusal justified by an inference is exactly the shape that
   ## teaches operators to reach for ``--no-verify``.
@@ -68021,7 +68391,7 @@ proc declaredMainlineBranch(resolved: ResolvedProject;
     if repo.revision.len > 0 and not looksLikeCommitOid(repo.revision):
       return repo.revision
     break
-  resolved.trunk
+  resolved.defaultWorkspaceBranch
 
 proc addDirectlyDeclaredRoles(branches: var seq[tuple[role, branch: string]];
     roles: openArray[ResolvedRole]) =
@@ -68438,7 +68808,11 @@ proc headPublicationOf*(identity: GitToolIdentity;
   # stays scoped exactly as the pre-push gate scopes it — this widens what gets
   # refreshed, never what counts as published.
   var fetched: tuple[code: int; output: string]
-  withCheckoutVcsLock(repoAbsPath):
+  template refusePublicationFetch() =
+    result.status = hpsUnknown
+    result.diagnostic = "could not lock checkout for publication fetch: " & repoAbsPath
+    return
+  withCheckoutVcsLock(repoAbsPath, refusePublicationFetch()):
     const MaxPublishFetchLockRetries = 5
     for attempt in 0 .. MaxPublishFetchLockRetries:
       fetched = gitRunPlain(identity,
@@ -68514,7 +68888,9 @@ proc roleHistoryRewriteFailure(declared: tuple[role, branch: string];
       declaredFor & ", and this update is not a fast-forward: it would make " &
       discarded & " unreachable there, including " & remoteOldOid)
 
-proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
+proc executeCheckPrePush(parsed: CheckArgs;
+    publicationMembers: seq[HookPublicationMember] = @[];
+    publicationWorkspace = ""): CheckReport =
   ## Collect independent read-only refusals before attempting lock writes.
   ## Identity, scope and protocol failures still stop checks that need them.
   ## Each reported blocker names its own offender and remedy. RA-3 removed the
@@ -69111,11 +69487,96 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
       result.exitCode = 2
 
 
+  var provisional = initHashSet[string]()
+  if publicationMembers.len > 0:
+    var valid = outgoing.outgoingCurrent and
+      sameFilesystemPath(publicationWorkspace, parsed.workspaceRoot)
+    var plannedNames = initHashSet[string]()
+    let currentClosure = developSetClosure(resolved.repos, currentRepoName)
+    var componentNames = initHashSet[string]()
+    for repo in resolved.repos:
+      if repo.name in currentClosure and
+          currentRepoName in developSetClosure(resolved.repos, repo.name):
+        componentNames.incl(repo.name)
+    for member in publicationMembers:
+      plannedNames.incl(member.name)
+      var found = false
+      for repo in resolved.repos:
+        if repo.name != member.name: continue
+        found = true
+        let peerRoot =
+          if member.name == currentRepoName: parsed.currentRepo
+          else: parsed.workspaceRoot / repo.path
+        if not sameFilesystemPath(peerRoot, member.worktree):
+          valid = false
+          continue
+        let common = gitRunPlain(identity, ["-C", member.worktree,
+          "rev-parse", "--path-format=absolute", "--git-common-dir"])
+        let format = gitRunPlain(identity, ["-C", member.worktree,
+          "rev-parse", "--show-object-format=storage"])
+        if common.code != 0 or format.code != 0 or
+            not sameFilesystemPath(common.output.strip(), member.commonDir) or
+            format.output.strip() != member.objectFormat or
+            member.remoteName != gitRemoteNameFor(repo) or
+            (member.remoteRef != "refs/heads/" & member.branch and not
+             (member.published and member.branch.len == 0 and member.remoteRef.len == 0)):
+          valid = false
+          continue
+        var observedRepo = repo
+        observedRepo.path = relativePath(peerRoot, parsed.workspaceRoot)
+        let stable = revalidatePushRepo(identity, parsed.workspaceRoot, observedRepo,
+          PushPreflightRepo(branch: member.branch, headSha: member.headOid,
+            remoteName: member.remoteName,
+            remoteLocationFingerprint: member.remoteLocationsDigest,
+            destinationRef: member.remoteRef,
+            advertisementFingerprint: member.advertisementFingerprint,
+            published: member.published, pushable: member.pushable),
+          sourceHookLocationDigest =
+            (if member.name == currentRepoName:
+               remoteLocationDigest(parsed.hookRemoteLocation)
+             else: ""))
+        if not stable.ok: valid = false
+      if not found: valid = false
+    if plannedNames != componentNames or componentNames.len < 2:
+      valid = false
+    for obs in observations:
+      for member in publicationMembers:
+        if obs.name == member.name and
+            (not obs.hasGit or not obs.isClean or obs.headSha != member.headOid or
+             not sameFilesystemPath(obs.absPath, member.worktree)):
+          valid = false
+    if not valid:
+      result.failures.add(CheckFailure(repo: currentRepoPath,
+        property: "source-component-publication",
+        remediation: "review the changed component and retry 'repro push'",
+        evidence: "publication component changed after preflight"))
+      result.exitCode = 2
+      return
+    let pins = committedLockRevisions(parsed.currentRepo)
+    for member in publicationMembers:
+      if member.name != currentRepoName and
+          flakeClassifyPublication(identity, member.worktree,
+            member.headOid).unpublished:
+        # Future publication is not proof that an exact committed pin can be
+        # obtained now. Retain the lock stages' remote-availability invariant
+        # even when the current checkout already agrees with that pin.
+        if not pins.ok or member.headOid.toLowerAscii() in pins.revs:
+          result.failures.add(CheckFailure(repo: member.name,
+            property: "source-component-unpublished-pin",
+            remediation: "keep committed pins on published revisions, then retry 'repro push'",
+            evidence: "committed lock names an unpublished component peer HEAD"))
+          result.exitCode = 2
+          return
+      provisional.incl(member.name)
+    result.notices.add("source component publication in progress: " &
+      publicationMembers.mapIt(it.name).join(", ") &
+      "; planned peers are provisional until their source pushes succeed")
+
   # ---- 2. unpublished ----------------------------------------------------
   for obs in observations:
     if not obs.hasGit:
       continue
-    if not obs.isPublished and not
+    if not obs.isPublished and obs.name notin provisional and not
         (outgoing.outgoingCurrent and obs.name == currentRepoName and
          obs.headSha == outgoing.headOid) and not
         (parsed.issuingForCurrentHead and currentRepoName.len > 0 and
@@ -70585,7 +71046,9 @@ proc runRecordStorePrePushGuard(repoRoot, refsFile, remoteLocation: string): int
   0
 
 proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
-                      hookRemoteLocation = ""): int =
+                      hookRemoteLocation = "";
+                      publicationMembers: seq[HookPublicationMember] = @[];
+                      publicationWorkspace = ""): int =
   ## ``repro check --mode=pre-push [--workspace-root=PATH]
   ## [--current-repo=PATH] [--pushed-refs=FILE]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
@@ -70682,7 +71145,7 @@ proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
       else: parsed.workspaceRoot, "repro check")
     var report: CheckReport
     try:
-      report = executeCheckPrePush(parsed)
+      report = executeCheckPrePush(parsed, publicationMembers, publicationWorkspace)
     except CatchableError as err:
       stderr.writeLine("repro check: error: " & err.msg)
       return 1
@@ -70996,16 +71459,6 @@ type
     retryCommand: string
     exitCode: int
 
-  PushPreflightRepo = object
-    branch: string
-    headSha: string
-    remoteName: string
-    remoteLocationFingerprint: string
-    destinationRef: string
-    advertisementFingerprint: string
-    published: bool
-    pushable: bool
-
   PushLockBackendPlan = object
     root: string
     backendKind: string
@@ -71171,71 +71624,68 @@ proc developOverrideRepoNames(workspaceRoot: string;
           result.add(repo.name)
         break
 
-proc topoSortClosure(repos: seq[ResolvedRepo];
-                     closure: HashSet[string];
-                     extraDepends: Table[string, seq[string]] =
-                       initTable[string, seq[string]]()): seq[string] =
-  ## Kahn topological sort of the closure over the per-repo ``depends``
-  ## edges, DEPENDENCY-FIRST: a repo is emitted only after every dependency
-  ## it names (that is also in the closure) has been emitted. This is the
-  ## load-bearing guarantee of ``repro push`` — a dependent is NEVER pushed
-  ## before its dependency (CLI/push.md High-Level Rules).
-  ##
-  ## ``extraDepends`` adds edges the manifest does not declare but the gate
-  ## enforces: each member of the pushed repo's closure "depends on" every
-  ## develop override `repro push` brought in, because each member's own gate
-  ## refuses until that override is published (``developOverrideRepoNames``).
-  ##
-  ## Edges are restricted to the closure (an out-of-closure ``depends``
-  ## target cannot gate a member). Ties are broken by declaration order so
-  ## the push order is deterministic. A dependency cycle (which the manifest
-  ## should never contain) is surfaced by appending the unresolved remainder
-  ## in declaration order rather than silently dropping repos — the push
-  ## still runs, and the lock publish + gate remain the correctness backstop.
+proc pushComponents(repos: seq[ResolvedRepo]; closure: HashSet[string];
+    extraDepends: Table[string, seq[string]] =
+      initTable[string, seq[string]]()): seq[seq[string]] =
+  ## Condense strongly connected components before ordering dependencies.
+  ## Reachability keeps the implementation small; workspace graphs are small
+  ## enough that one traversal per member is insignificant beside Git probes.
   var byName = initTable[string, ResolvedRepo]()
-  var declOrder: seq[string]
+  var names: seq[string]
   for repo in repos:
     if repo.name in closure and repo.name notin byName:
       byName[repo.name] = repo
-      declOrder.add(repo.name)
-  # In-degree = number of (in-closure) dependencies each node still waits on.
-  var indeg = initTable[string, int]()
-  var dependents = initTable[string, seq[string]]()  # dep -> nodes that need it
-  for name in declOrder:
-    indeg[name] = 0
-  for name in declOrder:
-    var deps = byName[name].depends
-    for extra in extraDepends.getOrDefault(name):
-      if extra notin deps: deps.add(extra)
-    for dep in deps:
-      if dep.len > 0 and dep in byName:
-        inc indeg[name]
-        dependents.mgetOrPut(dep, @[]).add(name)
-  # Seed the ready set with zero-dependency nodes, preserving declaration
-  # order for determinism.
-  var ready: seq[string]
-  for name in declOrder:
-    if indeg[name] == 0:
-      ready.add(name)
-  var emitted = initHashSet[string]()
+      names.add(repo.name)
+  var reachable = initTable[string, HashSet[string]]()
+  for name in names:
+    var seen = initHashSet[string]()
+    var pending = @[name]
+    while pending.len > 0:
+      let next = pending.pop()
+      if next in seen or next notin byName: continue
+      seen.incl(next)
+      for dep in byName[next].depends & extraDepends.getOrDefault(next):
+        pending.add(dep)
+    reachable[name] = seen
+  var groups: seq[seq[string]]
+  var groupOf = initTable[string, int]()
+  for name in names:
+    if name in groupOf: continue
+    let index = groups.len
+    var group: seq[string]
+    for peer in names:
+      if peer in reachable[name] and name in reachable[peer]:
+        group.add(peer)
+        groupOf[peer] = index
+    groups.add(group)
+  var waiting = newSeq[HashSet[int]](groups.len)
+  for name in names:
+    for dep in byName[name].depends & extraDepends.getOrDefault(name):
+      if dep in groupOf and groupOf[dep] != groupOf[name]:
+        waiting[groupOf[name]].incl(groupOf[dep])
+  var ready: seq[int]
+  for index in 0 ..< groups.len:
+    if waiting[index].len == 0: ready.add(index)
+  var emitted = initHashSet[int]()
   while ready.len > 0:
-    let name = ready[0]
+    let index = ready[0]
     ready.delete(0)
-    if name in emitted:
-      continue
-    result.add(name)
-    emitted.incl(name)
-    if name in dependents:
-      for dependent in dependents[name]:
-        dec indeg[dependent]
-        if indeg[dependent] == 0:
-          ready.add(dependent)
-  # Cycle / unresolved remainder safety net (never expected in practice).
-  if emitted.len < declOrder.len:
-    for name in declOrder:
-      if name notin emitted:
-        result.add(name)
-        emitted.incl(name)
+    if index in emitted: continue
+    emitted.incl(index)
+    result.add(groups[index])
+    for dependent in 0 ..< groups.len:
+      if index in waiting[dependent]:
+        waiting[dependent].excl(index)
+        if waiting[dependent].len == 0: ready.add(dependent)
+
+proc topoSortClosure(repos: seq[ResolvedRepo]; closure: HashSet[string];
+    extraDepends: Table[string, seq[string]] =
+      initTable[string, seq[string]]()): seq[string] =
+  ## Dependencies precede dependents between components. Within a cycle there
+  ## is no dependency-first order; use declaration order under a separately
+  ## authenticated, fully preflighted publication component.
+  for component in pushComponents(repos, closure, extraDepends):
+    result.add(component)
 
 proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
                             repo: ResolvedRepo;
@@ -71767,7 +72217,8 @@ proc preflightPushRepo(identity: GitToolIdentity; workspaceRoot: string;
   result.ok = true
 
 proc revalidatePushRepo(identity: GitToolIdentity; workspaceRoot: string;
-    repo: ResolvedRepo; expected: PushPreflightRepo):
+    repo: ResolvedRepo; expected: PushPreflightRepo;
+    sourceHookLocationDigest = ""):
     tuple[ok: bool; diagnostic: string; remediation: string] =
   ## Run immediately before this repository's transport. A preserved hook on
   ## an earlier dependency, another process, or an operator can change a later
@@ -71833,8 +72284,30 @@ proc revalidatePushRepo(identity: GitToolIdentity; workspaceRoot: string;
       "; transport output was withheld because remotes may contain credentials",
       "fix connectivity, credentials, or remote configuration and retry " &
         "'repro push --sync --rebase'")
-  if published.advertisementFingerprint !=
-      expected.advertisementFingerprint or
+  var sameAdvertisement = published.advertisementFingerprint ==
+    expected.advertisementFingerprint
+  if not sameAdvertisement and sourceHookLocationDigest.len > 0:
+    # A plural Git push visits its URLs serially. Earlier destinations of
+    # THIS source may already carry the exact bound HEAD when a later hook
+    # runs. Only that monotonic progress is admissible; the destination whose
+    # hook is running and every peer retain their exact old advertisement.
+    let before = expected.advertisementFingerprint.splitLines()
+    let after = published.advertisementFingerprint.splitLines()
+    sameAdvertisement = before.len == after.len
+    if sameAdvertisement:
+      for index in 0 ..< before.len:
+        if before[index] == after[index]: continue
+        let oldFields = before[index].split('\t')
+        let newFields = after[index].split('\t')
+        let oldShape = oldFields.len == 3 or
+          (oldFields.len == 5 and oldFields[2] == "<missing>" and
+           oldFields[3] == "contained-by" and oldFields[4].startsWith("refs/heads/"))
+        if not oldShape or newFields.len != 3 or
+            oldFields[0] == sourceHookLocationDigest or
+            oldFields[0] != newFields[0] or oldFields[1] != newFields[1] or
+            newFields[2] != expected.headSha:
+          sameAdvertisement = false
+  if not sameAdvertisement or
       published.published != expected.published or
       published.pushable != expected.pushable:
     return (false, "exact destination advertisement changed after " &
@@ -72255,6 +72728,38 @@ proc executePush(args: PushArgs): PushReport =
       result.exitCode = 2
       return
     preflight[name] = observed.observed
+  # A protocol-v2 interpreter can predate source component publication. Probe
+  # the interpreter the installed hook will actually execute for every source
+  # component member, before publishing even an earlier acyclic dependency.
+  for name in result.order:
+    if preflight[name].published: continue
+    let ownClosure = developSetClosure(resolved.repos, name)
+    var cyclic = false
+    for peer in ownClosure:
+      if peer != name and name in developSetClosure(resolved.repos, peer):
+        cyclic = true
+        break
+    if not cyclic: continue
+    let repoAbs = args.workspaceRoot / byName[name].path
+    let hookCli = resolveHookReproCli(repoAbs)
+    let probe = execCmdEx(shellCommand(@[hookCli, "hooks", "protocol",
+      "--require=2", "--require-source-component",
+      "--hook-contract=" & managedHookContract("pre-push")]),
+      options = {poStdErrToStdOut, poUsePath}, env = scrubbedGitChildEnv())
+    if probe.exitCode != 0 or probe.output.strip() != "2":
+      let remedy = "set REPROBUILD_REPRO=" & publicCliImagePath() &
+        " (or update PATH), run '" & publicCliImagePath() &
+        " hooks ensure --vcs " & repoAbs & "', then retry 'repro push'"
+      result.repos.add(PushRepoResult(name: name, path: byName[name].path,
+        branch: preflight[name].branch, headSha: preflight[name].headSha,
+        outcome: proFailed,
+        diagnostic: "hook-resolved repro does not support source component publication",
+        remediation: remedy))
+      result.stoppedRepo = name
+      result.stoppedStage = "source-component-hook-preflight"
+      result.retryCommand = remedy
+      result.exitCode = 2
+      return
   var backendPlans: seq[PushLockBackendPlan]
   try:
     backendPlans = pushLockBackendPlans(identity, args.workspaceRoot, resolved,
@@ -72394,6 +72899,41 @@ proc executePush(args: PushArgs): PushReport =
         result.exitCode = 2
         return
 
+  var sourceComponentPeers = initTable[string, seq[string]]()
+  for component in pushComponents(resolved.repos, closure):
+    if component.len > 1:
+      for member in component: sourceComponentPeers[member] = component
+  var carriedComponents = initHashSet[string]()
+  template carrySourceNotes(sourceName, sourceAbs, sourcePath,
+      sourceRemote: untyped) =
+    # A notes-only push has no provisional source authority. Wait until the
+    # entire component is actually published, then transport its notes through
+    # the ordinary gate before moving on to dependent components. Published
+    # prefix members on retry take part too, so no notes are stranded.
+    if sourceName in sourceComponentPeers:
+      let peers = sourceComponentPeers[sourceName]
+      var ready = true
+      for peer in peers:
+        if not preflight[peer].published: ready = false
+      if ready and peers[0] notin carriedComponents:
+        for peer in peers:
+          let peerRepo = byName[peer]
+          let stable = revalidatePushRepo(identity, args.workspaceRoot,
+            peerRepo, preflight[peer])
+          if not stable.ok:
+            if result.certNotesDiagnostic.len > 0:
+              result.certNotesDiagnostic.add("; ")
+            result.certNotesDiagnostic.add(peerRepo.path &
+              ": certificate notes not carried: " & stable.diagnostic)
+            continue
+          carryCertNotes(result, identity.binaryPath,
+            args.workspaceRoot / peerRepo.path, peerRepo.path,
+            preflight[peer].remoteName)
+        carriedComponents.incl(peers[0])
+    else:
+      carryCertNotes(result, identity.binaryPath, sourceAbs, sourcePath,
+        sourceRemote)
+
   # ---- 3. closure push in topological order ------------------------------
   # Walk dependency-first. A dirty/divergent member STOPS the push with an
   # actionable {offender, remedy} diagnostic (never silently discarded). A
@@ -72425,7 +72965,7 @@ proc executePush(args: PushArgs): PushReport =
       result.repos.add(entry)
       # TC-2: ship any attached certificates even though the commit is already
       # published (the cert may have been issued/attached after the push).
-      carryCertNotes(result, identity.binaryPath, repoAbs, repo.path, rName)
+      carrySourceNotes(name, repoAbs, repo.path, rName)
       continue
     if entry.branch.len == 0:
       # Unpublished work on a detached HEAD: we have no branch to push. STOP
@@ -72439,8 +72979,108 @@ proc executePush(args: PushArgs): PushReport =
       result.repos.add(entry)
       result.exitCode = 2
       return
-    let pushRes = gitRunPlainEnv(identity,
-      ["-C", repoAbs, "push", rName, "HEAD:" & entry.branch])
+    var component: seq[string]
+    let ownClosure = developSetClosure(resolved.repos, name)
+    for peer in result.order:
+      if peer in ownClosure and
+          name in developSetClosure(resolved.repos, peer):
+        component.add(peer)
+    var members: seq[HookPublicationMember]
+    if component.len > 1:
+      for peer in component:
+        let peerRepo = byName[peer]
+        let peerRoot = args.workspaceRoot / peerRepo.path
+        let snapshot = preflight[peer]
+        let stable = revalidatePushRepo(identity, args.workspaceRoot,
+          peerRepo, snapshot)
+        if not stable.ok:
+          entry.outcome = proFailed
+          entry.diagnostic = stable.diagnostic
+          entry.remediation = stable.remediation
+          result.repos.add(entry)
+          result.stoppedRepo = peer
+          result.stoppedStage = "source-component-revalidation"
+          result.retryCommand = "review the changed component and retry 'repro push'"
+          result.exitCode = 2
+          return
+        let common = commonGitDir(identity.binaryPath, peerRoot)
+        let format = gitRunPlain(identity, ["-C", peerRoot, "rev-parse",
+          "--show-object-format=storage"])
+        if common.len == 0 or format.code != 0:
+          entry.outcome = proFailed
+          entry.diagnostic = "cannot bind publication component identity"
+          entry.remediation = "restore component checkouts and retry 'repro push'"
+          result.repos.add(entry)
+          result.stoppedRepo = peer
+          result.stoppedStage = "source-component-revalidation"
+          result.retryCommand = entry.remediation
+          result.exitCode = 2
+          return
+        let firstDestination = snapshot.advertisementFingerprint.splitLines()[0].split('\t')
+        let oldOid =
+          if snapshot.destinationRef.len == 0 or firstDestination[2] == "<missing>":
+            repeat('0', snapshot.headSha.len)
+          else: firstDestination[2]
+        members.add(HookPublicationMember(name: peer,
+          worktree: os.normalizedPath(expandFilename(peerRoot)).replace('\\', '/'),
+          commonDir: common,
+          objectFormat: format.output.strip(), headOid: snapshot.headSha,
+          branch: snapshot.branch, remoteName: snapshot.remoteName,
+          remoteLocationsDigest: snapshot.remoteLocationFingerprint,
+          remoteRef: snapshot.destinationRef, remoteOid: oldOid,
+          advertisementFingerprint: snapshot.advertisementFingerprint,
+          published: snapshot.published, pushable: snapshot.pushable))
+    var issuedTokens: seq[string]
+    var pushRes: tuple[code: int; output: string]
+    try:
+      var capabilityEnvelope = ""
+      if members.len > 0:
+        let locations = configuredPushLocationValues(identity, repoAbs, rName)
+        if not locations.ok:
+          raise newException(ValueError, "cannot bind source component destinations")
+        var bindings: seq[string]
+        var uniqueLocations = initHashSet[string]()
+        for location in locations.values:
+          let digest = remoteLocationDigest(location)
+          if digest in uniqueLocations:
+            raise newException(ValueError, "duplicate source component push destination")
+          uniqueLocations.incl(digest)
+          var oldOid = ""
+          for destination in observed.advertisementFingerprint.splitLines():
+            let fields = destination.split('\t')
+            if fields[0] == digest:
+              oldOid = if fields[2] == "<missing>": repeat('0', entry.headSha.len)
+                else: fields[2]
+          if oldOid.len == 0:
+            raise newException(ValueError, "source component destination changed")
+          var boundMembers = members
+          for index in 0 ..< boundMembers.len:
+            if boundMembers[index].name == name:
+              boundMembers[index].remoteOid = oldOid
+          let issued = issueHookCapability(identity.binaryPath, repoAbs,
+            rName, location, "HEAD", entry.headSha, observed.destinationRef,
+            oldOid, boundMembers, args.workspaceRoot)
+          if not issued.ok:
+            raise newException(ValueError, issued.diagnostic)
+          issuedTokens.add(issued.token)
+          bindings.add(digest & "=" & issued.token)
+        capabilityEnvelope = "component:" & bindings.join(",")
+      pushRes = gitRunPlainEnv(identity,
+        ["-C", repoAbs, "push", rName, "HEAD:" & entry.branch],
+        capability = capabilityEnvelope)
+    except CatchableError as err:
+      entry.outcome = proFailed
+      entry.diagnostic = "source component authorization failed: " & err.msg
+      entry.remediation = "repair the publication component and retry 'repro push'"
+      result.repos.add(entry)
+      result.stoppedRepo = name
+      result.stoppedStage = "source-component-authorization"
+      result.retryCommand = entry.remediation
+      result.exitCode = 2
+      return
+    finally:
+      for token in issuedTokens:
+        discardHookCapability(identity.binaryPath, repoAbs, token)
     if pushRes.code != 0:
       entry.outcome = proFailed
       entry.diagnostic = "git push " & rName & " HEAD:" & entry.branch &
@@ -72468,11 +73108,29 @@ proc executePush(args: PushArgs): PushReport =
       return
     entry.outcome = proPushed
     result.repos.add(entry)
+    if members.len > 0:
+      # The next component member must see the prefix that actually landed,
+      # while its source identity stays fixed to the original plan.
+      let refreshed = preflightPushRepo(identity, args.workspaceRoot, repo)
+      if not refreshed.ok or refreshed.observed.headSha != observed.headSha or
+          refreshed.observed.branch != observed.branch or
+          refreshed.observed.remoteName != observed.remoteName or
+          refreshed.observed.remoteLocationFingerprint != observed.remoteLocationFingerprint or
+          refreshed.observed.destinationRef != observed.destinationRef or
+          not refreshed.observed.published:
+        result.repos[^1].diagnostic = "published component member changed after transport"
+        result.repos[^1].remediation = "review the published prefix and retry 'repro push'"
+        result.stoppedRepo = name
+        result.stoppedStage = "source-component-revalidation"
+        result.retryCommand = result.repos[^1].remediation
+        result.exitCode = 2
+        return
+      preflight[name] = refreshed.observed
     # TC-2: carry any certificates attached to the just-pushed commits to the
     # SAME upstream by pushing the certificate notes ref alongside the branch.
     # Notes are not pushed by default, so this is the explicit step that makes
     # the attestations travel.
-    carryCertNotes(result, identity.binaryPath, repoAbs, repo.path, rName)
+    carrySourceNotes(name, repoAbs, repo.path, rName)
 
   # ---- 4. certificate slot (FLAG only; obtain+attach deferred to TC) -----
   runPushCertifyStub(result, args.certify)
@@ -73058,9 +73716,9 @@ proc deriveActiveBranch(workspaceRoot: string;
   ##      (the original M12 heuristic — typical case: a clean
   ##      workspace where every repo is on the same branch). Used for
   ##      legacy workspaces created before M13 wrote the metadata.
-  ##   3. The resolver's ``trunk`` field (the manifest's documented
-  ##      default branch, e.g. ``main``). Used when no live repo
-  ##      checkout reports a current branch.
+  ##   3. The declared workspace default: explicit project trunk, else the
+  ##      root repository's mainline. Used when live branches do not agree
+  ##      or no checkout reports a current branch.
   ##   4. Empty string.
   ##
   ## A malformed state file raises the strict reader's diagnostic rather
@@ -73083,7 +73741,7 @@ proc deriveActiveBranch(workspaceRoot: string;
   # workspace whose repos legitimately sit on different branches (e.g.
   # dev/live/main) has no single active branch, so returning the first repo's
   # branch would misreport it (and disagree with `repro branch`, which reports
-  # `<none recorded>`). On divergence, defer to the manifest trunk instead.
+  # `<none recorded>`). On divergence, defer to the declared workspace default.
   var uniform = ""
   for entry in repos:
     if entry.branch.len == 0: continue
@@ -73094,7 +73752,7 @@ proc deriveActiveBranch(workspaceRoot: string;
       break
   if uniform.len > 0:
     return uniform
-  resolved.trunk
+  resolved.defaultWorkspaceBranch
 
 proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
   var report: WorkspaceStatusReport
@@ -73168,9 +73826,9 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
       report.repos.add(entry)
       continue
 
-    let trunkBranch = if resolved.trunk.len > 0: resolved.trunk else: "main"
+    let mainlineBranch = declaredMainlineBranch(resolved, repo.name)
     # `--file-details` implies file querying (it reads the same porcelain).
-    let extQuery = extendedStatusQuery(repoAbsPath, trunkBranch,
+    let extQuery = extendedStatusQuery(repoAbsPath, mainlineBranch,
       args.stashes, args.files or args.fileDetails, args.aheadBehind,
       args.unmerged, queryFileDetails = args.fileDetails)
     let res = queryGitState(extQuery, identity)
@@ -75544,7 +76202,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
             continue
           if not ancestry.disjoint: continue
           if not fetched:
-            withCheckoutVcsLock(abs):
+            withCheckoutVcsLock(abs,
+                (block: fetchDiagnostic = "could not lock checkout for publication/ancestry fetch: " & abs)):
               let fetch = gitRunPlain(ctx.gitIdentity,
                 ["-C", abs, "fetch", "--all", "--quiet"])
               if fetch.code != 0:
@@ -85412,7 +86071,8 @@ proc issueForCertificateNode(pre: IssuancePreconditions; name: string;
       "daemon could not sign it (" & err.msg & "); the attestation is " &
       "withheld")
     return false
-  let delivered = publishCertificateToLocalStore(cert, pre.repository)
+  let delivered = publishCertificateToLocalStore(cert, pre.repository,
+    signatureMade = true)
   if delivered.error.len > 0:
     stderr.writeLine("repro test: no certificate for '" & name & "' — it " &
       "was issued but could not be written to the local certificate store: " &
@@ -85438,7 +86098,7 @@ proc issueForCertificateNode(pre: IssuancePreconditions; name: string;
       if existing.signature.value == cert.signature.value:
         alreadyNoted = true
     if not alreadyNoted:
-      let att = attachCertificate(gitBin, pre.repository, cert)
+      let att = attachCertificate(gitBin, pre.repository, cert, signatureMade = true)
       if not att.ok:
         stderr.writeLine("repro test: certificate for '" & name & "' is in " &
           "the local store but attaching it as a git note failed: " &
@@ -86200,7 +86860,8 @@ proc runReproTestCommand*(args: openArray[string];
       # This process runs as the user; nothing here writes the system root.
       # Signing is in-process today (DEFER-TC5-PRIV-DAEMON); a privileged
       # signer will return the certificate to this same client code.
-      let delivered = publishCertificateToLocalStore(cert, pre.repository)
+      let delivered = publishCertificateToLocalStore(cert, pre.repository,
+        signatureMade = true)
       if delivered.error.len > 0:
         stderr.writeLine("repro test: no certificate — it was issued but " &
           "could not be written to the local certificate store: " &
@@ -99877,6 +100538,19 @@ proc runThinAppDispatch(programName: string): int =
       else:
         putEnv("PATH", appDir)
   let publicCliPath = stablePublicCliPath()
+  # A checkout's persistent transport must re-enter the engine configuring
+  # it, even when an older installed repro appears first on PATH. Use the
+  # existing image guard so embedded library callers never persist their
+  # test/provider executable as a CLI. Keep the hint scoped to this dispatch.
+  let previousPoolCli = getEnv("REPRO_SHARED_POOL_CLI")
+  let poolCli = internalReproHelperCliPath(publicCliPath)
+  if poolCli.len > 0:
+    putEnv("REPRO_SHARED_POOL_CLI", poolCli)
+  defer:
+    if previousPoolCli.len > 0:
+      putEnv("REPRO_SHARED_POOL_CLI", previousPoolCli)
+    else:
+      delEnv("REPRO_SHARED_POOL_CLI")
   if programName == "repro" and args.len > 0 and
       args[0] == BrokerModeFlag:
     return runPrivilegedBrokerMode(args)
@@ -99927,6 +100601,20 @@ proc runThinAppDispatch(programName: string): int =
   # the right handler.) ``repro internal`` is intentionally absent from
   # the primary ``repro help`` body; it is documented via
   # ``renderInternalUsage`` (and ``CLI/internal/`` in the specs).
+  if args.len >= 2 and args[0] == "internal" and
+      args[1] == "shared-pool-upload-pack":
+    # Git invokes this transport through remote.repro-pool.uploadpack.
+    # Keep stdout exclusively for Git's wire protocol: even a usage error
+    # must go to stderr rather than corrupting the client's advertisement.
+    if args.len != 3:
+      stderr.writeLine("repro internal shared-pool-upload-pack: expected one pool path")
+      return 2
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      stderr.writeLine("repro internal shared-pool-upload-pack: git was not found on PATH")
+      return 1
+    return serveSharedPoolUploadPack(gitBin, args[2])
+
   if args.len >= 4 and args[0] == "internal" and args[1] == "resolve-package":
     # ``repro internal resolve-package <consumerDir> <name>``
     #

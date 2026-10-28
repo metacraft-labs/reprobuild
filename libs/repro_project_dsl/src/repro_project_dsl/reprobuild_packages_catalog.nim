@@ -116,7 +116,13 @@ proc findLockedCatalogRevision*(lockContent: string): string =
         let lineEnd = lockContent.find('\n', idx)
         lockContent[(if lineStart >= 0: lineStart else: 0) .. (if lineEnd >= 0: lineEnd else: lockContent.len - 1)]
 
-    if ("\"" & ReprobuildPackagesRepositoryName & "\"") in slice:
+    # The entry must BE the catalog's: its `name` names it. Matching the quoted
+    # name anywhere in the entry also matched a project whose self record
+    # `depends = "reprobuild-packages"` and returned the PROJECT's own
+    # revision as the catalog's, so the lock-pinned catalog was looked for
+    # under a revision it was never fetched at.
+    if ("name = \"" & ReprobuildPackagesRepositoryName & "\"") in slice or
+        ("name=\"" & ReprobuildPackagesRepositoryName & "\"") in slice:
       var searchRegion = slice
       if entryStart < 0 or entryEnd <= entryStart:
         let nextTable = lockContent.find('[', idx)
@@ -376,6 +382,8 @@ proc reprobuildPackagesRemedy*(): string =
   ## How to make the catalog reachable. Shared by the compile-time diagnostic
   ## and the tool resolver's missing-provisioning errors.
   "Provide the catalog in one of these ways:\n" &
+    "  - in a workspace whose project declares reprobuild-packages, run" &
+    " `repro sync --only=reprobuild-packages` from the workspace root;\n" &
     "  - clone " & ReprobuildPackagesRepositoryUrl & " as `reprobuild-packages`" &
     " beside the project, or beside any directory above it (a workspace" &
     " sibling);\n" &

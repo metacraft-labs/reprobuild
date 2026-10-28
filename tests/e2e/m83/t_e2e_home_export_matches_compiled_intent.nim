@@ -417,3 +417,98 @@ content = "x\n"
         shapes.add element["kind"].getStr & ":" & keysOf(element).join(",")
     check shapes == @["packageRef:kind,name,version",
       "packageRef:kind,name,version", "whenGuard:body,kind,predicate"]
+
+
+suite "repro home export: catalog projection failures":
+  test "a failed catalog compile aborts export instead of reclassifying an application":
+    # Real filesystem, compiler and CLI; the invalid Nim declaration causes
+    # only the separate catalog projection to fail, after profile compilation.
+    let sb = newProfileSandbox("export-catalog-failure", """
+import repro_profile
+profile "catalogFailure":
+  activity default:
+    exportcatalogapp
+  hosts:
+    "catalog-host":
+      applies: [applications]
+""")
+    defer: sb.dispose()
+    let catalog = sb.root / "catalog"
+    let moduleDir = catalog / "packages" / "interfaces" / "exportcatalogapp"
+    createDir(moduleDir)
+    let modulePath = moduleDir / "repro.nim"
+    let validModule = """
+import repro_project_dsl
+package exportcatalogapp:
+  provisioning:
+    tarball url = "https://example.invalid/Export.app.zip",
+      sha256 = "5555555555555555555555555555555555555555555555555555555555555555",
+      archiveType = "zip", installMethod = "app-bundle",
+      appBundle = "Export.app", bundleId = "dev.reprobuild.exportfixture",
+      teamId = "RPBTEST123", version = "1.0", cpu = "any", os = "macos",
+      executablePath = "Export.app/Contents/MacOS/Export",
+      packageId = "exportcatalogapp@1.0", lockIdentity = "fixture:export-app"
+"""
+    writeFile(modulePath, validModule)
+    let extraEnv = [("REPROBUILD_PACKAGES_ROOT", catalog)]
+    let args = @["home", "export", "--host", "catalog-host"]
+    let valid = sb.runRepro(args, host = "", extraEnv = extraEnv)
+    checkpoint("valid catalog exit " & $valid.exitCode & "\n" & valid.stderr)
+    require valid.exitCode == 0
+    let doc = parseJson(valid.stdout)
+    check doc["concerns"]["packages"]["aarch64-darwin"]["applications"] ==
+      %*["exportcatalogapp"]
+    # Lack of a realization on Linux is valid unresolved input, unlike a
+    # definition whose projection could not be computed.
+    check doc["concerns"]["packages"]["x86_64-linux"]["unresolved"] ==
+      %*["exportcatalogapp"]
+    let snapshot = sb.root / "home-export.json"
+    writeFile(snapshot, valid.stdout)
+    writeFile(modulePath, validModule &
+      "\n{.error: \"catalog projection regression sentinel\".}\n")
+    for mode in [newSeq[string](), @["--check", snapshot],
+                 @["--target", "aarch64-darwin"]]:
+      let failed = sb.runRepro(args & mode, host = "", extraEnv = extraEnv)
+      checkpoint("broken catalog mode " & $mode & " exit " &
+        $failed.exitCode & "\n" & failed.stderr)
+      if failed.exitCode == 0:
+        checkpoint("unexpected classification: " &
+          $parseJson(failed.stdout)["concerns"]["packages"])
+      check failed.exitCode == 1
+      check failed.stdout.len == 0
+      check "exportcatalogapp" in failed.stderr
+      check "interface extraction failed" in failed.stderr
+      check "catalog projection regression sentinel" in failed.stderr
+      check "stale" notin failed.stderr
+      check readFile(snapshot) == valid.stdout
+    # Removing the compile error repairs the projection, including cache
+    # invalidation: classification returns exactly to its previous value.
+    writeFile(modulePath, validModule)
+    let repaired = sb.runRepro(args, host = "", extraEnv = extraEnv)
+    require repaired.exitCode == 0
+    check parseJson(repaired.stdout)["concerns"] == doc["concerns"]
+
+  test "an imported contribution catalog compile failure also aborts classification":
+    let sb = newProfileSandbox("export-contribution-failure", """
+import repro_profile
+profile "contributionFailure":
+  catalogs:
+    "contributions"
+  activity default:
+    ripgrep
+  hosts:
+    "catalog-host":
+      applies: [applications]
+""")
+    defer: sb.dispose()
+    sb.writeProfileFile("contributions.nim", "import repro_project_dsl\n" &
+      "{.error: \"contribution projection regression sentinel\".}\n")
+    let failed = sb.runRepro(["home", "export", "--host", "catalog-host"],
+      host = "")
+    checkpoint("contribution catalog exit " & $failed.exitCode & "\n" &
+      failed.stderr)
+    check failed.exitCode == 1
+    check failed.stdout.len == 0
+    check "ripgrep" in failed.stderr
+    check "interface extraction" in failed.stderr
+    check "contribution projection regression sentinel" in failed.stderr

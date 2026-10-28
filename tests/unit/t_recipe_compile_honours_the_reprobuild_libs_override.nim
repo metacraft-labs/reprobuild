@@ -34,6 +34,7 @@ import std/[os, strutils, unittest]
 import std/tempfiles
 
 import repro_interface_artifacts
+import repro_lock
 import repro_dev_env_engine/cache_key
 import repro_cli_support
 
@@ -115,3 +116,52 @@ suite "the reprobuild libs override reaches the recipe compile":
     # Without an override, nothing changes.
     delEnv("REPROBUILD_LIBS_DIR")
     check reprobuildLibraryWorkDir() == getCurrentDir()
+
+  test "only a selected lock-pinned catalog adds resolved Git to the isolated PATH":
+    # Use the real Git executable in its own directory so the assertion cannot
+    # pass because Git happens to share a directory with Nim or the C compiler.
+    # Nothing is mocked or spawned: this grades the actual launch declaration.
+    let gitBinary = findExe("git")
+    require gitBinary.len > 0
+    let scratch = createTempDir("repro-catalog-git-launch-", "")
+    defer: removeDir(scratch)
+    let gitDir = scratch / "git-bin"
+    let ambientDir = scratch / "ambient-bin"
+    createDir(gitDir)
+    createDir(ambientDir)
+    copyFile(gitBinary, gitDir / addFileExt("git", ExeExt))
+    setFilePermissions(gitDir / addFileExt("git", ExeExt),
+      getFilePermissions(gitBinary))
+    let savedPath = getEnv("PATH")
+    defer: putEnv("PATH", savedPath)
+    putEnv("PATH", gitDir & $PathSep & ambientDir & $PathSep & savedPath)
+    delEnv("REPROBUILD_PACKAGES_ROOT")
+    let consumer = scratch / "consumer"
+    createDir(consumer)
+    let modulePath = consumer / "repro.nim"
+    writeFile(modulePath, "import repro_project_dsl\npackage consumer:\n  build:\n    discard\n")
+    let revision = repeat('a', 40)
+    var lock = LockedDependencies(schema: "reprobuild.solved-graph-lock.v2",
+      platform: currentPlatformId(), optimal: true,
+      inputsDigest: inputsDigestOf("catalog-git-launch"))
+    lock.deps.add(LockedDep(name: "reprobuild-packages",
+      coordinates: Coordinates(kind: ckVcs,
+        url: "https://example.invalid/catalog.git", revision: revision),
+      integrity: gitObjectMultihash("sha1", revision), visibility: "public"))
+    writeFile(consumer / "repro.lock", serializeLockedDependencies(lock))
+    let base = providerCompileLaunchEnv(home).valueIn("PATH").split(PathSep)
+    check gitDir notin base
+    let pinned = providerCompileLaunchEnv(home, modulePath).
+      valueIn("PATH").split(PathSep)
+    check gitDir in pinned
+    check ambientDir notin pinned
+    putEnv("REPROBUILD_PACKAGES_ROOT", scratch / "explicit-catalog")
+    check providerCompileLaunchEnv(home, modulePath).valueIn("PATH").
+      split(PathSep) == base
+    delEnv("REPROBUILD_PACKAGES_ROOT")
+    let siblingInterface = scratch / "reprobuild-packages/packages/interfaces/sqlite3"
+    createDir(siblingInterface)
+    writeFile(siblingInterface / "repro.nim",
+      "import repro_project_dsl\npackage sqlite3:\n  build:\n    discard\n")
+    check providerCompileLaunchEnv(home, modulePath).valueIn("PATH").
+      split(PathSep) == base

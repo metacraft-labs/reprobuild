@@ -717,6 +717,18 @@ proc scheduleMatchesDesired*(observed, desired: ScheduledTaskScheduleSpec): bool
     observed.everyMinutes == desired.everyMinutes and
       (desired.startAt.len == 0 or observed.startAt == desired.startAt)
 
+proc scheduledTaskArgumentLine*(arguments: seq[string]): string =
+  ## The single argument string Task Scheduler stores for an action.
+  ##
+  ## A scheduled task's action has ONE `Arguments` string, not an argv: the
+  ## driver registers `New-ScheduledTaskAction -Argument <line>` with the
+  ## desired list joined by single spaces, and the probe reads that same
+  ## string back as `Arguments=<line>`. So the line is the only form in which
+  ## desired and observed can be compared, and every renderer (the register
+  ## command, both canonical digests, the drift comparator) goes through this
+  ## one join so they cannot disagree.
+  arguments.join(" ")
+
 proc scheduledTaskMatchesDesired*(obs: ScheduledTaskObservation;
                                   wantTaskName: string;
                                   wantExecutable: string;
@@ -737,7 +749,16 @@ proc scheduledTaskMatchesDesired*(obs: ScheduledTaskObservation;
     return false
   if obs.executable != wantExecutable:
     return false
-  if obs.arguments != wantArguments:
+  # Compared as the stored LINE, not element-wise. The probe can only ever
+  # return Task Scheduler's one `Arguments` string, which the parser keeps as
+  # a single element, so an element-wise `!=` against a multi-element desired
+  # list was false for every task with two or more arguments -- even though
+  # both canonical renderings (which join) printed byte-identical strings.
+  # Measured on win-ci-bare-001, 2026-10-28 12:50Z: registering
+  # `\Reprobuild\CacheRoute` (8 arguments) failed its post-apply check with
+  # "observation disagrees with desired state" and two identical strings.
+  if scheduledTaskArgumentLine(obs.arguments) !=
+     scheduledTaskArgumentLine(wantArguments):
     return false
   if wantWorkingDirectory.len > 0 and
      obs.workingDirectory != wantWorkingDirectory:
@@ -758,11 +779,7 @@ proc canonicalScheduledTaskState*(obs: ScheduledTaskObservation): string =
   ## with the schedule encoded as its canonical wire token.
   if not obs.present:
     return "scheduledTask:absent"
-  var argv = ""
-  for i, a in obs.arguments:
-    if i > 0:
-      argv.add(' ')
-    argv.add(a)
+  let argv = scheduledTaskArgumentLine(obs.arguments)
   "scheduledTask:" & obs.taskName & ":" & obs.executable & ":" &
     argv & ":" & obs.workingDirectory & ":" & obs.runAsUser & ":" &
     (if obs.runWithHighestPrivileges: "highest" else: "limited") &
@@ -779,11 +796,7 @@ proc canonicalScheduledTaskDesired*(taskName, executable: string;
   ## `canonicalScheduledTaskState` so an observed-matches-desired
   ## comparison reduces to a byte-equality check on the rendered
   ## strings.
-  var argv = ""
-  for i, a in arguments:
-    if i > 0:
-      argv.add(' ')
-    argv.add(a)
+  let argv = scheduledTaskArgumentLine(arguments)
   "scheduledTask:" & taskName & ":" & executable & ":" & argv & ":" &
     workingDirectory & ":" & runAsUser & ":" &
     (if runWithHighestPrivileges: "highest" else: "limited") & ":" &

@@ -1,0 +1,63 @@
+# --- test-certificate ---
+schema = "test-certificate.v1"
+
+[certificate]
+framework = "example-framework"
+project = "example"
+platform = "linux/amd64"
+targets = ["t-integration", "t-unit"]
+result = "passed"
+issued_at = "2026-06-23T10:14:33Z"
+issuer = "example-runner@build-host-1"
+key_id = "example-key-2026-q2"
+
+[certificate.vcs]
+repo = "example"
+content = "git-tree-sha1:9f8e7d6c5b4a3928170695e4d3c2b1a099887766"
+untracked = false
+
+[[certificate.command]]
+argv = ["example-test", "run", "--targets", "t-integration,t-unit"]
+# --- test-certificate ---
+schema = "test-certificate.v1"
+
+[certificate]
+framework = "example-framework"
+project = "example"
+platform = "linux/amd64"
+targets = ["t-integration", "t-unit"]
+result = "passed"
+issued_at = "2026-06-23T10:14:33Z"
+issuer = "example-runner@build-host-1"
+key_id = "example-key-2026-q2"
+
+[certificate.vcs]
+repo = "example"
+content = "git-tree-sha1:9f8e7d6c5b4a3928170695e4d3c2b1a099887766"
+untracked = false
+
+[[certificate.command]]
+argv = ["example-test", "run", "--targets", "t-integration,t-unit"]
+
+[certificate.signature]
+algorithm = "ed25519"
+value = "U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgSa1gu6oa5lWVsehQfeJyRXKh2hWgKxjbzb+im4XAlAsAAAATdGVzdC1jZXJ0aWZpY2F0ZS12MQAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gtZWQyNTUxOQAAAEBdxux8YXnHQGiL3dII9i27FbBylnXLd3aA/GM59//57AfM4783AOfnEl93gg+jrYWXirSKG6SXZAt8Hu+YrsAL"
+# --- test-certificate ---
+schema = "test-certificate.v1"
+
+[certificate]
+framework = "example-framework"
+project = "example"
+platform = "linux/amd64"
+targets = ["t-integration", "t-unit"]
+result = "passed"
+issued_at = "2026-06-23T10:14:33Z"
+issuer = "example-runner@build-host-1"
+
+[certificate.vcs]
+repo = "example"
+content = "git-tree-sha1:9f8e7d6c5b4a3928170695e4d3c2b1a099887766"
+untracked = false
+
+[[certificate.command]]
+argv = ["example-test", "run", "--targets", "t-integration,t-unit"]

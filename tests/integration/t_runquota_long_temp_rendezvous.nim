@@ -1,3 +1,9 @@
+## These endpoints belong to the test invocation, including the directories
+## runquotaRendezvousDir creates. Select RunQuota's official private policy for
+## the entire case so the real daemon, connecting clients and helper agree on
+## owner-only modes even when the host has a runquota service account/group.
+## Restore the caller's scope after each case; no host owner/group override or
+## shared fixture helper is changed. All daemons and connections remain real.
 import std/[monotimes, os, osproc, streams, strutils, tempfiles, times, unittest]
 import repro_core/paths
 import repro_test_support
@@ -83,6 +89,16 @@ when defined(posix):
       path & ": " & diagnostic)
 
 suite "RunQuota long temp rendezvous":
+  setup:
+    when defined(posix):
+      let scopeWasSet = existsEnv("RUNQUOTA_ENDPOINT_SCOPE")
+      let priorScope = getEnv("RUNQUOTA_ENDPOINT_SCOPE")
+      putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
+  teardown:
+    when defined(posix):
+      if scopeWasSet: putEnv("RUNQUOTA_ENDPOINT_SCOPE", priorScope)
+      else: delEnv("RUNQUOTA_ENDPOINT_SCOPE")
+
   test "two callers connect to independent real daemons under a long TMPDIR":
     when defined(posix):
       withLongTemp:
@@ -102,8 +118,9 @@ suite "RunQuota long temp rendezvous":
         awaitDaemon(a, first)
         awaitDaemon(b, second)
         for path in [first, second]:
-          check fpGroupWrite notin getFilePermissions(path.parentDir)
-          check fpOthersWrite notin getFilePermissions(path.parentDir)
+          check getFilePermissions(path.parentDir) ==
+            {fpUserRead, fpUserWrite, fpUserExec}
+          check getFilePermissions(path) == {fpUserRead, fpUserWrite}
           check endpointDirectoryRefusal(unixEndpoint(path)).len == 0
         var clientA = connect(unixEndpoint(first), "long-temp-first")
         defer: clientA.close()
@@ -145,8 +162,7 @@ suite "RunQuota long temp rendezvous":
       check dir == runquotaRendezvousDir(longRoot)
       check dir.isAbsolute
       check dirExists(dir)
-      check fpGroupWrite notin getFilePermissions(dir)
-      check fpOthersWrite notin getFilePermissions(dir)
+      check getFilePermissions(dir) == {fpUserRead, fpUserWrite, fpUserExec}
       let socket = dir / "runquota.sock"
       check endpointDirectoryRefusal(unixEndpoint(socket)).len == 0
       let state = scratch / "daemon-state"
@@ -154,6 +170,7 @@ suite "RunQuota long temp rendezvous":
       var daemon = startDaemon(socket, state)
       defer: stopDaemon(daemon)
       awaitDaemon(daemon, socket)
+      check getFilePermissions(socket) == {fpUserRead, fpUserWrite}
       var client = connect(unixEndpoint(socket), "fixture-long-root")
       defer: client.close()
       check client.daemonStatus(timeoutMs = 5_000).activeLeases == 0
@@ -187,6 +204,7 @@ suite "RunQuota long temp rendezvous":
         checkpoint(output)
         check "refusing" in output
         check "endpoint directory" in output
+        check "required 0700" in output
     else:
       skip()
 
@@ -201,6 +219,8 @@ suite "RunQuota long temp rendezvous":
           if dirExists(path.parentDir): removeDir(path.parentDir)
         awaitDaemon(daemon, path)
         let priorMode = getFilePermissions(path.parentDir)
+        check priorMode == {fpUserRead, fpUserWrite, fpUserExec}
+        check getFilePermissions(path) == {fpUserRead, fpUserWrite}
         setFilePermissions(path.parentDir, priorMode + {fpOthersWrite})
         defer: setFilePermissions(path.parentDir, priorMode)
         expect EndpointTrustError:

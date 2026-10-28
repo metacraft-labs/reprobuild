@@ -553,6 +553,7 @@ proc composeManifestLayersWithOptions*(
       composed.projectName = layerResolved.projectName
       composed.defaultRevision = layerResolved.defaultRevision
       composed.trunk = layerResolved.trunk
+      composed.workspaceMainline = layerResolved.workspaceMainline
       composed.projectFile = layerResolved.projectFile
       firstLayerSeen = true
 

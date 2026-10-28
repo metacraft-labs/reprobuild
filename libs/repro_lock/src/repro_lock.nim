@@ -996,6 +996,15 @@ proc serializeLockedDependencies*(ld: LockedDependencies): string =
   ## Deterministic: a write -> read -> write
   ## round-trip is byte-identical.
   validateV3Deps(ld.deps)
+  # A self record can describe a project that has never been published. An
+  # external VCS dependency, however, must be fetchable from the committed
+  # coordinates; serializing an empty URL would publish an unusable pin.
+  for dep in ld.deps:
+    if dep.coordinates.kind == ckVcs and not isSelfLockedDep(dep) and
+        dep.coordinates.url.strip().len == 0:
+      raise newException(SolvedGraphLockParseError,
+        "refusing to write VCS dependency '" & dep.name &
+        "' with an empty fetch url")
   result = newStringOfCap(1024)
   result.add("schema = \"" & tomlEscape(SolvedGraphLockSchemaV3) & "\"\n\n")
   result.add("[lock]\n")

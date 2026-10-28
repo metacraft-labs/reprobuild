@@ -303,6 +303,20 @@ suite "repro workspace branch-roles":
       check repoAsProject.code == 2
       check repoAsProject.stdout.len == 0
       check "--only=core" in repoAsProject.stderr
+      # The shared project resolver must keep this query's own command in
+      # the error body and remedy, even though sync uses the same resolver.
+      let unknownProject = roles(["nosuchproject"])
+      check unknownProject.code != 0
+      check unknownProject.stdout.len == 0
+      check "unknown project 'nosuchproject' passed to " &
+        "`repro workspace branch-roles`" in unknownProject.stderr
+      check "run `repro workspace branch-roles` with no project" in
+        unknownProject.stderr
+      check "--only / --filter" in unknownProject.stderr
+      check "repro workspace sync" notin unknownProject.stderr
+      check "repro sync" notin unknownProject.stderr
+      check "repro sync" notin repoAsProject.stderr
+      check "`repro workspace branch-roles --only=core`" in repoAsProject.stderr
       let sameRoleTwice = roles(["--to=unstable", "--unstable"])
       check sameRoleTwice.code == 0
       check sameRoleTwice.stdout == unstable.stdout
@@ -317,6 +331,16 @@ suite "repro workspace branch-roles":
         check onlyDoc["repos"][0]["name"].getStr() == "docs"
       check roles(["--only=docs", "--stable"]).stdout ==
         "docs  latest (stable → mainline)\n"
+
+      # Without recorded membership, the positional is the initial resolution
+      # target rather than a filter. This path must not borrow sync's name.
+      removeFile(root / ".repro" / "workspace.toml")
+      let unknownUnrecorded = roles(["nosuchproject"])
+      check unknownUnrecorded.code != 0
+      check unknownUnrecorded.stdout.len == 0
+      check "nosuchproject" in unknownUnrecorded.stderr
+      check "repro workspace sync" notin unknownUnrecorded.stderr
+      check "repro sync" notin unknownUnrecorded.stderr
 
       # ---- 6. nothing was fetched ----------------------------------------------
       check refsSnapshot(gitBin, root / "core") == refsBefore

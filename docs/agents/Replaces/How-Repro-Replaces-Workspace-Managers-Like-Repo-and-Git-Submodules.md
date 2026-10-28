@@ -42,6 +42,21 @@ Reprobuild replaces multi-repo wrappers (like Google's `repo` tool or Git submod
   when you want to see the plan first (`--dry-run`) or re-read a report that
   scrolled past.
 
+### The workspace branch and repository branches
+
+The default workspace branch comes from an explicit project `trunk`, or from
+its root repository's `mainline` in `repro-workspace.toml` when `trunk` is
+absent. The root can declare that mainline directly in `[workspace]` or through
+its `profile` or `default_profile`. Member repositories keep their own mainlines;
+a member's product profile does not determine the workspace branch.
+
+`workspace init` and a fully successful `workspace pull` record this default.
+`workspace lock` and pre-push checks prefer a recorded workspace branch, then
+the declared default. Status also prefers recorded state, then a live branch
+shared by every checkout, then the declared default. Its `--unmerged` query uses
+each repository's mainline, while ahead/behind counts use that checkout's
+remote-tracking upstream.
+
 ### Keeping an existing checkout current
 
 When a manifest changes what a repository is *called* — its primary remote's

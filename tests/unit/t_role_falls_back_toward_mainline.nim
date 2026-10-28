@@ -78,3 +78,71 @@ suite "role_falls_back_toward_mainline":
     check s.role("unstable").branch == "dev"
     check s.role("beta").branch == "release"
     check s.branch == "dev"
+
+  test "workspace branch defaults to root declarations independently of repos":
+    # Every case resolves real manifests. A member repo's product profile must
+    # never become the root's workspace default merely because it resolves first.
+    for (rootKeys, expected) in [
+        ("mainline = \"root-direct\"\nprofile = \"root\"", "root-direct"),
+        ("profile = \"root\"", "root-profile"),
+        ("default_profile = \"root\"", "root-profile"),
+        ("", "")]:
+      var fx = newRolesFixture("repro-workspace-default-")
+      defer: fx.dispose()
+      fx.writeSettings("[workspace]\n" & rootKeys &
+        "\n[profiles.root]\nmainline = \"root-profile\"\n" &
+        "[profiles.product]\nmainline = \"member-mainline\"\n")
+      fx.addRepo("core", "profile = \"product\"")
+      let project = fx.resolveDemo()
+      check project.workspaceMainline == expected
+      check project.defaultWorkspaceBranch == expected
+      check project.repo("core").branch == "member-mainline"
+
+      # Explicit trunk is retained in the source-facing field and overrides
+      # the root for every consumer of the effective workspace default.
+      let path = fx.projectFile()
+      writeFile(path, readFile(path) & "trunk = \"legacy-trunk\"\n")
+      let legacy = resolveProject(path)
+      check legacy.workspaceMainline == expected
+      check legacy.trunk == "legacy-trunk"
+      check legacy.defaultWorkspaceBranch == "legacy-trunk"
+
+  test "repo sets and variants carry the same root workspace default":
+    var fx = newRolesFixture("repro-workspace-default-forms-")
+    defer: fx.dispose()
+    fx.writeSettings("[workspace]\nmainline = \"root-dev\"\n" &
+      "[profiles.member]\nmainline = \"member-mainline\"\n")
+    fx.addRepo("core", "mainline = \"member-mainline\"")
+    discard fx.projectFile()
+    createDir(fx.root / "repo-sets")
+    let setPath = fx.root / "repo-sets" / "all.toml"
+    writeFile(setPath, "schema = \"reprobuild.workspace.repo-set.v1\"\n" &
+      "member_repos = [\"core\"]\n[repo-set]\nname = \"all\"\n")
+    check resolveRepoSet(setPath).defaultWorkspaceBranch == "root-dev"
+    createDir(fx.root / "variants")
+    let variantPath = fx.root / "variants" / "local.toml"
+    writeFile(variantPath, "schema = \"reprobuild.workspace.variant.v1\"\n" &
+      "[variant]\nname = \"local\"\nbase = \"projects/demo.toml\"\n")
+    check resolveVariant(variantPath).defaultWorkspaceBranch == "root-dev"
+
+    # Composition carries the root policy across real local_path layers.
+    # The external layer declares deliberately conflicting root/profile
+    # settings: neither may replace the workspace root's policy.
+    var layer = newRolesFixture("repro-workspace-default-layer-")
+    defer: layer.dispose()
+    layer.writeSettings("[workspace]\nmainline = \"layer-root-wrong\"\n" &
+      "[profiles.member]\nmainline = \"layer-member-wrong\"\n")
+    layer.addRepo("extra", "profile = \"member\"")
+    discard layer.projectFile()
+    let local = WorkspaceLocal(workspace: WorkspaceBody(project: "demo"),
+      manifest: @[ManifestLayer(local_path: some(fx.root), visibility: "public"),
+                  ManifestLayer(local_path: some(layer.root), visibility: "public")])
+    let composed = composeManifestLayers(local, fx.root)
+    check composed.trunk == ""
+    # Mutation control: removing only the composer's workspaceMainline copy
+    # fails these default assertions while both member mainlines remain valid.
+    check composed.workspaceMainline == "root-dev"
+    check composed.defaultWorkspaceBranch == "root-dev"
+    check composed.repos.len == 2
+    check composed.repo("core").branch == "member-mainline"
+    check composed.repo("extra").branch == "member-mainline"

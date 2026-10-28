@@ -371,6 +371,13 @@ remote. It does not make an unpublished dependency publishable. Use
 $ repro push --sync --rebase
 ```
 
+When repository dependencies form a cycle, `repro push` preflights the exact
+clean commits and publishes that component together in a deterministic order.
+Each hook still checks the lock pins and other publication policies. A raw
+`git push` cannot authorize the other unpublished members of the component.
+If a later member fails, the command reports the published prefix and the
+remaining work; fix the cause and retry.
+
 Unrelated repositories outside that closure do not block the operation.
 
 ### A source push succeeded but a later step failed

@@ -1290,7 +1290,8 @@ proc executeFetch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     fetchArgs.add("--depth")
     fetchArgs.add($payload.depth)
   fetchArgs.add(payload.remoteName)
-  withCheckoutVcsLock(target):
+  withCheckoutVcsLock(target,
+      (block: return failed("fetch-lock-failed", "could not lock checkout: " & target))):
     var res: tuple[exitCode: int; output: string]
     const MaxFetchLockRetries = 5
     for attempt in 0 .. MaxFetchLockRetries:
@@ -1501,7 +1502,8 @@ proc executeRefreshBare(payload: GitVcsPayload;
   let bare = payload.repoPath
   var outcome = "fetched"
   var checkLeaves = false
-  withCacheEntryVcsLock(bare):
+  withCacheEntryVcsLock(bare,
+      (block: return failed("refresh-bare-lock-failed", "could not lock shared bare: " & bare))):
     if dirExists(bare / "objects") or dirExists(bare / ".git"):
       let prepared = prepareSharedBare(payload.binaryPath, bare)
       if prepared.len > 0:
@@ -2550,9 +2552,11 @@ proc queryGitState*(query: GitQueryAction;
           except CatchableError:
             discard
 
-    # 6. Unmerged Branches
-    if query.queryUnmerged:
-      let trunkBranch = if query.trunkBranch.len > 0: query.trunkBranch else: "main"
+    # 6. Unmerged Branches. A legacy pin-only manifest can declare no
+    # comparison branch at all. Do not turn that absence into an inferred
+    # `main`: it may exist while being unrelated to the intended mainline.
+    if query.queryUnmerged and query.trunkBranch.len > 0:
+      let trunkBranch = query.trunkBranch
       let remoteName = if query.remoteName.len > 0: query.remoteName else: "origin"
       let remoteRef = remoteName & "/" & trunkBranch
       var targetRef = trunkBranch

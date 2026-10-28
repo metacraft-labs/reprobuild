@@ -4587,7 +4587,7 @@ proc providerCompileNimcacheRoot*(): string =
       "cannot resolve the user cache directory for the provider nimcache")
   absolutePath(cache) / "repro-nimcache-provider"
 
-proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
+proc providerCompileLaunchEnv*(homeDir: string; modulePath = ""): seq[string] =
   ## The environment values the provider-compile edge DECLARES, so that the
   ## caller's shell stops deciding what the edge is.
   ##
@@ -4607,8 +4607,10 @@ proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
   ##     paths. Both are the helper's existing overrides, so it never searches
   ##     `PATH` itself. Their identities are already in the edge's key
   ##     (`nimCompilerIdentity`, the `--gcc.exe` flag);
-  ##   * `PATH`: only those two directories. A compile that needs a tool
-  ##     outside them fails loudly, and nothing on the caller's `PATH` can
+  ##   * `PATH`: those two directories, plus resolved Git when `modulePath`
+  ##     selects a lock-pinned catalog that the helper must verify. A compile
+  ##     that needs a tool outside them fails loudly, and nothing on the
+  ##     caller's `PATH` can
   ##     shadow a tool the compile does use;
   ##   * `TERM=dumb`, `LANG=C`: diagnostics only, pinned so a terminal or a
   ##     locale is not a cache key;
@@ -4645,7 +4647,14 @@ proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
     try: hostCCompilerPath()
     except CatchableError: ""
   var dirs: seq[string] = @[]
-  for tool in [nim, cc]:
+  # A lock-pinned catalog is verified by the compile helper. Resolve Git
+  # here, before isolation, and declare only that tool directory rather than
+  # inheriting the shell PATH. Other compiles retain their original PATH.
+  let catalogGit =
+    if catalogSelectionIdentity(modulePath).startsWith("catalog-locked:"):
+      findExe("git")
+    else: ""
+  for tool in [nim, cc, catalogGit]:
     if tool.len > 0 and tool.isAbsolute:
       let dir = parentDir(tool)
       if dir notin dirs:

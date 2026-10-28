@@ -282,7 +282,10 @@ proc packageClassificationDocument*(intent: ProfileIntent;
   ## intent; catalog projections are staged under `stateDir`. The host-local
   ## lock is not read: one host's selections must not change a shared export.
   ##
-  ## Raises `ValueError` when a reference is defined nowhere this process can
+  ## Raises `ValueError` when a referenced catalog definition or contribution
+  ## catalog could not be projected: classification must not publish a missing
+  ## realization in place of a failed extraction. Also raises when a reference
+  ## is defined nowhere this process can
   ## see and no `reprobuild-packages` catalog is reachable: the catalog might
   ## define it as an application, and publishing `packages` for it would be
   ## a guess the Nix side then acts on.

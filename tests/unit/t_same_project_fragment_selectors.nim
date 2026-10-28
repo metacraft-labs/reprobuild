@@ -72,3 +72,19 @@ suite "same-project fragment selection":
   test "unselected second roots cannot silently widen a selection":
     expect ValueError:
       discard parseAndResolveSelectors([".#test#alpha", "."], "repro build")
+
+  test "explicit project files retain action fragments when unioned":
+    for projectFile in ["repro.nim", "reprobuild.nim"]:
+      if projectFile == "reprobuild.nim":
+        moveFile(project / "repro.nim", project / projectFile)
+      let anchor = project / projectFile & "#alpha"
+      let selected = parseAndResolveSelectors(
+        [anchor, ".#beta"], "repro build")
+      check selected.target == anchor
+      check selected.extraNameSelectors == @["beta"]
+
+  test "non-project file fragments retain legacy module semantics":
+    writeFile(project / "legacy.nim", "discard\n")
+    expect ValueError:
+      discard parseAndResolveSelectors(
+        [project / "legacy.nim" & "#alpha", ".#beta"], "repro build")

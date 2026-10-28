@@ -7,39 +7,20 @@ import repro_project_dsl/install_mirror_resolver
 import repro_tool_profiles
 import repro_test_support
 
+when defined(posix):
+  from std/posix import Stat, lstat, getuid, S_ISDIR, S_ISSOCK
+  import runquota_client
+
 const
   CodeTracerProjectContractCommit =
-    "f1745b89e93179eca20778943bbafae91ebb6dfd"
+    "008950fa91fdd68a44f77f9c454eff5b7bf139fa"
   PinnedCodeTracerProjectFile =
-    "tests/fixtures/codetracer-subset/repro-f1745b89.nim"
+    "tests/fixtures/codetracer-subset/repro-008950fa.nim"
   PinnedCodeTracerConfigFile =
-    "tests/fixtures/codetracer-subset/config-f1745b89.nims"
+    "tests/fixtures/codetracer-subset/config-008950fa.nims"
   PinnedCodeTracerFixtureHeaderLines = 6
   PinnedCodeTracerProjectPayloadSha256 =
-    "91305a29434b1e120bcf78ed7e77e5226b7d4d62ac0842f2bf673f4ff0623b68"
-  # The project fixture departs from the pinned commit in ONE marked block:
-  # its `stage-app-for-dmg` is the process action CodeTracer stages the app
-  # with, because the pinned commit's `fs.preserveTree` over the `.app` that
-  # `macos-app` generates in the same graph is refused when the recipe is
-  # evaluated. `upstreamProjectPayload` puts the pinned stanza back, and the
-  # result must hash to the pinned commit's `repro.nim`, so the deviation can
-  # neither grow past its markers nor hide a drift elsewhere.
-  # `deviatedProjectPayload` drops the fixture's own lines instead (the
-  # markers and the `#:` notes), which leaves the recipe CodeTracer carries
-  # once it stages the app with the process action.
-  FixtureDeviationBegin = "        # --- begin Reprobuild fixture deviation"
-  FixtureDeviationEnd = "        # --- end Reprobuild fixture deviation"
-  FixtureNotePrefix = "        #:"
-  PinnedStageAppStanza =
-    "        let stagingApp = fs.preserveTree(\n" &
-    "          sourceRoot = \"non-nix-build/CodeTracer.app\",\n" &
-    "          outputRoot = \"non-nix-build/dmg-staging/CodeTracer.app\",\n" &
-    "          actionId = \"stage-app-for-dmg\",\n" &
-    "          after = @[macosApp]\n" &
-    "        )\n" &
-    "\n"
-  PinnedCodeTracerUpstreamProjectSha256 =
-    "3561c345dd330cc80cf749e7496f8d0a6e8e21c9dd1734442dac5511e31c14f8"
+    "0428fc213dee954c3b1569f4f185322f9f7ac72bc21993bfa75b3859669f6ac4"
   PinnedCodeTracerConfigPayloadSha256 =
     "469f008a005d9d0d6b274fca8f8422b9f96bc78156567e269b35b0f3ce625a80"
   # `reprobuild-provision` used to live in THIS repo, at
@@ -162,13 +143,15 @@ else:
 # Tool `uses:` entries no PATH fixture provides, because the native edges that
 # reference them resolve them themselves: `zstd-dev` is a header/library
 # channel, not an executable (CodeTracer 01d8b6e54), and `dsymutil` is the
-# macOS debug-info pass (CodeTracer 3be367fc1). They count toward the declared
-# tool total but are not in `CodeTracerDevToolExecutables`, whose members must
-# each resolve to a fixture.
+# macOS debug-info pass (CodeTracer 3be367fc1). The C1 pinned contract also
+# declares `image_diff` for the parity gate's FLIP producer C ABI; no selected
+# source-slice action references it. These count toward the declared tool total
+# but are not in `CodeTracerDevToolExecutables`, whose members must each
+# resolve to an executable fixture.
 when defined(macosx):
-  const CodeTracerNonFixtureToolUses: seq[string] = @["zstd-dev", "dsymutil"]
+  const CodeTracerNonFixtureToolUses: seq[string] = @["zstd-dev", "dsymutil", "image_diff"]
 else:
-  const CodeTracerNonFixtureToolUses: seq[string] = @["zstd-dev"]
+  const CodeTracerNonFixtureToolUses: seq[string] = @["zstd-dev", "image_diff"]
 
 const CodeTracerSourcePackages = [
   "isonim",
@@ -447,8 +430,7 @@ proc sha256Hex(data: string): string =
 
 proc pinnedCodeTracerPayload(path, expectedSha256: string): string =
   ## The retained fixture carries its own AGPL/provenance header. The payload
-  ## after that header is the pinned public source, except the project
-  ## fixture's one declared deviation (see `upstreamProjectPayload`).
+  ## after that header is the pinned public source, byte for byte.
   let lines = readFile(path).splitLines(keepEol = true)
   if lines.len <= PinnedCodeTracerFixtureHeaderLines or
       not lines[0].contains("SPDX-License-Identifier: AGPL-3.0-or-later") or
@@ -463,58 +445,8 @@ proc pinnedCodeTracerPayload(path, expectedSha256: string): string =
       "pinned CodeTracer fixture payload differs from reviewed commit " &
       CodeTracerProjectContractCommit & ": " & path)
 
-proc fixtureDeviationSpan(payload: string): tuple[first, last: int] =
-  ## Byte span of the project fixture's one marked deviation block, from the
-  ## start of its begin-marker line to the end of its end-marker line
-  ## (newline included). Refuses a payload whose markers are missing,
-  ## repeated, out of order or not at the start of a line.
-  let begin = payload.find(FixtureDeviationBegin)
-  let finish = payload.find(FixtureDeviationEnd)
-  if begin < 0 or finish < begin or
-      payload.find(FixtureDeviationBegin, begin + 1) >= 0 or
-      payload.find(FixtureDeviationEnd, finish + 1) >= 0 or
-      (begin > 0 and payload[begin - 1] != '\n') or
-      payload[finish - 1] != '\n':
-    raise newException(ValueError,
-      "pinned CodeTracer fixture must carry exactly one marked deviation " &
-      "block: " & PinnedCodeTracerProjectFile)
-  let lineEnd = payload.find('\n', finish)
-  if lineEnd < 0:
-    raise newException(ValueError,
-      "pinned CodeTracer fixture deviation block is not terminated: " &
-      PinnedCodeTracerProjectFile)
-  (first: begin, last: lineEnd)
-
-proc upstreamProjectPayload(payload: string): string =
-  ## The project fixture's payload with its one declared deviation undone:
-  ## the marked block, markers included, replaced by the pinned commit's
-  ## `stage-app-for-dmg` stanza. Refuses a restored form that is not the
-  ## pinned commit's `repro.nim` byte for byte.
-  let span = fixtureDeviationSpan(payload)
-  result = payload[0 ..< span.first] & PinnedStageAppStanza &
-    payload[span.last + 1 .. ^1]
-  if sha256Hex(result) != PinnedCodeTracerUpstreamProjectSha256:
-    raise newException(ValueError,
-      "pinned CodeTracer fixture differs from commit " &
-      CodeTracerProjectContractCommit & " outside its declared deviation: " &
-      PinnedCodeTracerProjectFile)
-
-proc deviatedProjectPayload(payload: string): string =
-  ## The project fixture's payload as CodeTracer carries it with the
-  ## deviation landed: the block's markers and its `#:` note lines dropped,
-  ## every other byte kept.
-  let span = fixtureDeviationSpan(payload)
-  result = payload[0 ..< span.first]
-  for line in payload[span.first .. span.last].splitLines(keepEol = true):
-    if line.startsWith(FixtureDeviationBegin) or
-        line.startsWith(FixtureDeviationEnd) or
-        line.startsWith(FixtureNotePrefix):
-      continue
-    result.add(line)
-  result.add(payload[span.last + 1 .. ^1])
-
 proc pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot: string): string =
-  ## Use a Reprobuild-owned snapshot of CodeTracer's reviewed ``dev`` graph so
+  ## Use a Reprobuild-owned snapshot of CodeTracer's reviewed published graph so
   ## an adjacent checkout's branch or uncommitted state cannot silently change
   ## the integration oracle. The real sibling still supplies every source file
   ## copied and built by the cases below.
@@ -525,8 +457,6 @@ proc pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot: string): string =
       "pinned CodeTracer project contract fixtures are missing")
   let fixturePayload = pinnedCodeTracerPayload(projectFixture,
     PinnedCodeTracerProjectPayloadSha256)
-  let upstreamPayload = upstreamProjectPayload(fixturePayload)
-  let deviatedPayload = deviatedProjectPayload(fixturePayload)
   let configPayload = pinnedCodeTracerPayload(configFixture,
     PinnedCodeTracerConfigPayloadSha256)
 
@@ -537,12 +467,8 @@ proc pinnedCodeTracerProjectFile(repoRoot, codeTracerRoot: string): string =
       raise newException(ValueError,
         "canonical CodeTracer project contract files are missing at " &
         codeTracerRoot)
-    # A live checkout matches when it is the pinned commit's recipe, or that
-    # recipe with the deviation CodeTracer itself carries once it stages the
-    # app with the process action -- the two reviewed states of the file.
-    let liveProjectText = readFile(liveProject)
-    if (liveProjectText != upstreamPayload and
-        liveProjectText != deviatedPayload) or
+    # A live checkout must match the single reviewed source byte for byte.
+    if readFile(liveProject) != fixturePayload or
         readFile(liveConfig) != configPayload:
       raise newException(ValueError,
         "live CodeTracer project contract differs from pinned commit " &
@@ -584,28 +510,84 @@ when defined(macosx) or defined(linux):
     result.shim = requireBinary(monitorShimPath(repoRoot),
       "reprobuild.test_fixtures.monitor_shim")
 
-proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
-    socket: string] =
-  let daemonBin = requireRunQuotaDaemonBin(repoRoot)
-  let socketPath = runquotaSocketEndpoint(
-    "repro-m29-rq-" & $getCurrentProcessId())
-  if fileExists(socketPath):
-    removeFile(socketPath)
-  let daemon = startProcess(daemonBin, args = [
-    "--socket", socketPath,
-    "--cpu-milli", "16000",
-    "--memory-bytes", "17179869184",
-    # Test daemon: keep it out of the host-wide observation store, which
-    # it would otherwise open (and write) before it binds its socket.
-    "--no-write-stats"
-  ], options = {poUsePath})
-  putEnv("RUNQUOTA_SOCKET", socketPath)
-  for _ in 0 ..< 200:
-    if pathExists(socketPath):
-      return (process: daemon, socket: socketPath)
-    sleep(25)
-  daemon.terminate()
-  raise newException(OSError, "runquotad socket did not appear")
+type PrivateRunQuotaFixture = object
+  process: owned(Process)
+  socket: string
+  hadScope, hadSocket: bool
+  previousScope, previousSocket: string
+
+proc stopRunQuotaDaemon(daemon: var PrivateRunQuotaFixture) =
+  ## Only this invocation's daemon and endpoint are ours. Restore the caller's
+  ## policy even when shutdown or startup fails; no host daemon is touched.
+  try:
+    if daemon.process != nil:
+      try:
+        if daemon.process.running(): daemon.process.terminate()
+        discard daemon.process.waitForExit()
+      finally:
+        daemon.process.close()
+  finally:
+    try:
+      if daemon.socket.len > 0 and pathExists(daemon.socket):
+        removeFile(daemon.socket)
+      if daemon.socket.len > 0 and dirExists(daemon.socket.parentDir):
+        removeDir(daemon.socket.parentDir)
+    finally:
+      if daemon.hadScope: putEnv("RUNQUOTA_ENDPOINT_SCOPE", daemon.previousScope)
+      else: delEnv("RUNQUOTA_ENDPOINT_SCOPE")
+      if daemon.hadSocket: putEnv("RUNQUOTA_SOCKET", daemon.previousSocket)
+      else: delEnv("RUNQUOTA_SOCKET")
+
+proc ensureRunQuotaDaemon(repoRoot: string): PrivateRunQuotaFixture =
+  ## A real invocation-private daemon must use the same policy as its clients,
+  ## even on hosts with an NSS RunQuota service identity. Environment selection
+  ## remains in force for every child launched by this case, then is restored.
+  result.hadScope = existsEnv("RUNQUOTA_ENDPOINT_SCOPE")
+  result.previousScope = getEnv("RUNQUOTA_ENDPOINT_SCOPE")
+  result.hadSocket = existsEnv("RUNQUOTA_SOCKET")
+  result.previousSocket = getEnv("RUNQUOTA_SOCKET")
+  try:
+    let daemonBin = requireRunQuotaDaemonBin(repoRoot)
+    result.socket = runquotaSocketEndpoint(
+      "repro-m29-rq-" & $getCurrentProcessId())
+    putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
+    putEnv("RUNQUOTA_SOCKET", result.socket)
+    if pathExists(result.socket): removeFile(result.socket)
+    result.process = startProcess(daemonBin, args = [
+      "--socket", result.socket,
+      "--cpu-milli", "16000",
+      "--memory-bytes", "17179869184",
+      # No test traffic in the host-wide observation store.
+      "--no-write-stats"
+    ], options = {poUsePath})
+    var readinessProblem = "socket did not appear"
+    for _ in 0 ..< 200:
+      if pathExists(result.socket):
+        when defined(posix):
+          var directory, socket: Stat
+          doAssert lstat(result.socket.parentDir.cstring, directory) == 0
+          doAssert lstat(result.socket.cstring, socket) == 0
+          doAssert S_ISDIR(directory.st_mode) and S_ISSOCK(socket.st_mode)
+          doAssert directory.st_uid == getuid() and socket.st_uid == getuid()
+          doAssert (directory.st_mode and 0o7777) == 0o700
+          doAssert (socket.st_mode and 0o7777) == 0o600
+          try:
+            # Existence alone is not readiness: complete the real protocol's
+            # Hello handshake under the same private policy as child clients.
+            var client = runquota_client.connectDefault()
+            client.close()
+            return
+          except CatchableError as err:
+            readinessProblem = err.msg
+        else:
+          return
+      if result.process.peekExitCode() != -1:
+        raise newException(OSError, "runquotad exited before readiness")
+      sleep(25)
+    raise newException(OSError, "runquotad was not ready: " & readinessProblem)
+  except:
+    stopRunQuotaDaemon(result)
+    raise
 
 proc copyTree(sourceRoot, destRoot: string) =
   for sourcePath in walkDirRec(sourceRoot):
@@ -1274,8 +1256,10 @@ proc nixStorePaths(output: string): seq[string] =
       result.add(item)
 
 proc nativeLibraryEnv(repoRoot: string): seq[(string, string)] =
+  # Resolve these package references against the reviewed flake's nixpkgs,
+  # independently of the operator's moving global registry.
   var packages = @[
-    "nix", "build", "--no-link", "--print-out-paths",
+    "nix", "build", "--no-link", "--print-out-paths", "--inputs-from", repoRoot,
     "nixpkgs#openssl.out",
     "nixpkgs#sqlite.out",
     "nixpkgs#pcre.out",
@@ -1638,12 +1622,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -1720,12 +1699,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -1840,12 +1814,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -1948,12 +1917,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -2073,12 +2037,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -2173,12 +2132,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -2312,12 +2266,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -2508,12 +2457,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -2599,12 +2543,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -2734,12 +2673,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
       let projectRoot = tempRoot / "codetracer"
@@ -2773,12 +2707,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       let reproBin = compilePublicReproTestBin(repoRoot)
 
@@ -2798,7 +2727,7 @@ when defined(macosx) or defined(linux):
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         monitorEnv)
       check first.contains("selectedTarget: frontend")
-      # The pinned recipe's `frontend` aggregate (CodeTracer f1745b89) is the
+      # The pinned recipe's `frontend` aggregate (CodeTracer 008950fa) is the
       # 14 `frontendActions` plus the `frontend-styles` target's 6:
       #   frontend-ui-js, frontend-public-ui-js, frontend-index-js,
       #   frontend-src-index-js, frontend-server-index-js,
@@ -3000,12 +2929,7 @@ when defined(macosx) or defined(linux):
       defer: removeDir(tempRoot)
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
-      defer:
-        daemon.process.terminate()
-        discard daemon.process.waitForExit()
-        daemon.process.close()
-        if pathExists(daemon.socket):
-          removeFile(daemon.socket)
+      defer: stopRunQuotaDaemon(daemon)
 
       # Test-Fixtures-In-Build-Graph M1: assert the graph-built ``repro``
       # instead of recompiling ``apps/repro/repro.nim`` into tempRoot.
@@ -3037,7 +2961,7 @@ when defined(macosx) or defined(linux):
       check first.contains("providerCompile:")
       check first.contains("providerGraphSnapshot:")
       # THE ACTION COUNT FOLLOWS THE PINNED RECIPE, so it is derived from
-      # `PinnedCodeTracerProjectFile` (CodeTracer f1745b89) rather than from
+      # `PinnedCodeTracerProjectFile` (CodeTracer 008950fa) rather than from
       # the last value that passed. `repro build <projectRoot>` names a
       # target, so the recipe's `defaultBuildAction` is NOT consulted, and
       # the unselected lowering (`lowerProviderSnapshot` with no selector)
@@ -3071,7 +2995,8 @@ when defined(macosx) or defined(linux):
       #                                 `src/config/` exists
       #   ct-test                       84df173fd (2026-08-11)
       #
-      # Not counted: the ten `codetracer.gate.*` shell gates (996f9b122),
+      # Not counted: the twelve `codetracer.gate.*` shell gates (the original
+      # ten from 996f9b122 and the two real-tree sibling-pin guards),
       # which are members of the `test`/`lint` collections, and every action
       # whose inputs this subset does not copy (the `fileExists` branches for
       # webpack, cargo, `db-backend-record`, `ct`, the app bundles and the

@@ -49,6 +49,8 @@ suite "daemon carried environment":
       "REPRO_DAEMON_RUNTIME_DIR",
       "RUNQUOTAD_BIN",
       "RUNQUOTA_BIN",
+      "RUNQUOTA_SOCKET",
+      "RUNQUOTA_ENDPOINT_SCOPE",
       "REPROBUILD_RUNQUOTA_MEMORY_BYTES",
       "STACKABLE_HOOKS_SRC",
       "CLINGO_PREFIX",
@@ -80,6 +82,8 @@ suite "daemon carried environment":
     putEnv("REPRO_DAEMON_RUNTIME_DIR", runtimeDir)
     putEnv("RUNQUOTAD_BIN", runquotadBin)
     putEnv("RUNQUOTA_BIN", runquotaBin)
+    putEnv("RUNQUOTA_SOCKET", getTempDir() / "private-invocation.sock")
+    putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
     putEnv("REPROBUILD_RUNQUOTA_MEMORY_BYTES", runquotaMemoryBytes)
     putEnv("STACKABLE_HOOKS_SRC", stackableHooksSrc)
     putEnv("CLINGO_PREFIX", clingoPrefix)
@@ -92,6 +96,8 @@ suite "daemon carried environment":
     check carried.hasEnvPair("REPRO_DAEMON_RUNTIME_DIR", runtimeDir)
     check carried.hasEnvPair("RUNQUOTAD_BIN", runquotadBin)
     check carried.hasEnvPair("RUNQUOTA_BIN", runquotaBin)
+    check carried.hasEnvPair("RUNQUOTA_SOCKET", getTempDir() / "private-invocation.sock")
+    check carried.hasEnvPair("RUNQUOTA_ENDPOINT_SCOPE", "private")
     check carried.hasEnvPair("REPROBUILD_RUNQUOTA_MEMORY_BYTES",
       runquotaMemoryBytes)
     check carried.hasEnvPair("STACKABLE_HOOKS_SRC", stackableHooksSrc)
@@ -194,8 +200,11 @@ suite "daemon carried environment":
       "PATH=/daemon-actions",
       OwnerTokenEnv & "=" & OwnerToken,
       "HOME=/daemon-home",
+      "RUNQUOTA_SOCKET=/private/invocation.sock",
+      "RUNQUOTA_ENDPOINT_SCOPE=private",
     ]
-    let expected = @["PATH=/daemon-actions", "HOME=/daemon-home"]
+    let expected = @["PATH=/daemon-actions", "HOME=/daemon-home",
+      "RUNQUOTA_SOCKET=/private/invocation.sock", "RUNQUOTA_ENDPOINT_SCOPE=private"]
 
     let buildBody = buildRequestBody(UserDaemonBuildRequest(
       runId: "build-owner-filter",

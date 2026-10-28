@@ -26,12 +26,11 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     runquota-src = {
-      # runquota's mainline is ``dev``; ``main`` is stale and lacks the
-      # bounded grant-stream API (``pollNextGrantBounded`` / ``GrantPollResult``)
-      # that repro_runquota now compiles against. The ``test`` CI job already
-      # overrides this to the ``dev`` sibling clone; pin the default here so the
-      # override-free ``lint`` and ``nix-build`` jobs resolve the same source.
-      url = "github:metacraft-labs/runquota/dev";
+      # Invocation-owned POSIX daemons and their clients require RunQuota's
+      # explicit private endpoint policy, currently published on ``agents``.
+      # Keep standalone builds on that API too: a newer sibling must not mask
+      # an older packaged daemon that ignores RUNQUOTA_ENDPOINT_SCOPE.
+      url = "github:metacraft-labs/runquota/agents";
       # A FLAKE INPUT, NOT A BARE SOURCE TREE. Both uses are served by the one
       # pin: ``${runquota-src}`` still coerces to the fetched source root (so
       # ``RUNQUOTA_SRC`` and every ``--path:`` into ``libs/*/src`` are
@@ -592,7 +591,23 @@
       # revision of reprobuild adds. Its ``repro.lock`` names trace-format
       # b4794ba6, so ``ct-trace-format-src`` moves with it in the same step
       # (``checks.<system>.ct-trace-format-pin-coherence`` confirms the pair).
-      url = "github:metacraft-labs/codetracer/f1745b89e93179eca20778943bbafae91ebb6dfd";
+      #
+      # At 008950fa9 (2026-10-28, the published `agents` tip; f1745b89e is an
+      # ancestor) ``config.nims`` and ``src/ct_incremental_adapter.nim`` are
+      # unchanged. ``src/Tuprules.tup`` only exports ``TMPDIR`` to its rules.
+      # ``repro.nim`` adds a ``uses: "image_diff >=0"`` entry, stages the
+      # macOS app for the DMG with a process action instead of
+      # ``fs.preserveTree``, and adds two lint gates over the CI workflows'
+      # sibling pins; the ``ct-test`` target is unchanged. ``src/ct_test/``
+      # changes in its own sources only, with no new import outside it:
+      # certificate content ids, local-store publishing that keeps a relayed
+      # signature, a ``test run --events <path>`` option that writes the
+      # per-test events, and release-gate and run-orchestration additions. Its
+      # ``repro.lock`` names trace-format 31be9a10, the revision that compiles
+      # under ``nimPreviewSlimSystem``, so ``ct-trace-format-src`` moves with
+      # it in the same step (``checks.<system>.ct-trace-format-pin-coherence``
+      # confirms the pair).
+      url = "github:metacraft-labs/codetracer/008950fa91fdd68a44f77f9c454eff5b7bf139fa";
       flake = false;
     };
 
@@ -740,7 +755,12 @@
       # f1745b89e's ``repro.lock`` names (d8cd2ed5 is an ancestor; fails the
       # writer when a write fails in the final flush or close, and retries the
       # managed finalize with a timeout sized to the upload).
-      url = "github:metacraft-labs/codetracer-trace-format-nim/b4794ba69fa7ccb0b568de7c582a576994c63e5b";
+      # Moved with ``codetracer-src`` to 31be9a10, the revision CodeTracer
+      # 008950fa9's ``repro.lock`` names (b4794ba6 is an ancestor; every library
+      # module now compiles under ``nimPreviewSlimSystem``, which the fork's
+      # koch needs to build nifler, and the guarded imports change nothing
+      # outside slim-system).
+      url = "github:metacraft-labs/codetracer-trace-format-nim/31be9a10007c007af429951616c13bc275587c76";
       flake = false;
     };
     nim-stew-src = {

@@ -213,6 +213,9 @@ proc configureIdentity(gitBin, work: string) =
 proc initRepo(gitBin, dir: string) =
   discard requireGit(q(gitBin) & " init -q -b main " & q(dir))
   configureIdentity(gitBin, dir)
+  discard requireGit(q(gitBin) & " -C " & q(dir) &
+    " remote add origin " &
+    q("https://example.invalid/acme/" & extractFilename(dir) & ".git"))
 
 proc headOf(gitBin, work: string): string =
   requireGit(q(gitBin) & " -C " & q(work) & " rev-parse HEAD").strip()
@@ -270,7 +273,7 @@ proc seedProducerAndConsumer(gitBin, scratch: string; projectSubdir = ""):
   createDir(result.consumer)
   initRepo(gitBin, result.consumer)
   discard requireGit(q(gitBin) & " -C " & q(result.consumer) &
-    " remote add origin https://example.invalid/acme/consumer.git")
+    " remote set-url origin https://example.invalid/acme/consumer.git")
   writeFile(result.consumer / ".gitignore", ".repro/\n.claude/\n")
   result.project =
     if projectSubdir.len > 0: result.consumer / projectSubdir

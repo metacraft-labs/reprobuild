@@ -121,4 +121,92 @@ suite "the lock records the catalog revision":
     check catalogDep(lockedDepsForWorkspace(consumer,
       catalogRoots = catalogRootsOfToolUses([catalogUse(file)]))).isNone
 
+  test "a fetched catalog keeps its locked identity through both discovery routes":
+    let temp = createTempDir("repro-fetched-catalog-", "")
+    defer: removeDir(temp)
+    let source = temp / "catalog-source"
+    initRepo(source, "https://example.invalid/reprobuild-packages.git")
+    discard writeInterface(source)
+    commitAll(source)
+    let app = temp / "app"
+    initRepo(app, "https://example.invalid/app.git")
+    writeFile(app / "repro.nim", "# app\n")
+    commitAll(app)
+    let head = git(source, "rev-parse", "HEAD")
+    let pin = LockedDep(name: "reprobuild-packages", path: "../reprobuild-packages",
+      coordinates: Coordinates(kind: ckVcs, url: source,
+        gitRef: "main", revision: head), integrity: "git-sha1:" & head,
+      visibility: "public")
+    writeFile(app / "repro.lock",
+      serializeLockedDependencies(LockedDependencies(deps: @[pin])))
+    # The real fetch deliberately creates no remote. Its directory leaf is
+    # the revision, which must never become a dependency identity.
+    let fetched = fetchLockPinnedProducer(pin, app)
+    check git(fetched, "remote").len == 0
+    check fetched.extractFilename == head
+    for route in 0 .. 2:
+      let deps = lockedDepsForWorkspace(app,
+        sourceRecipeRoots = (if route != 1: @[fetched / "packages"] else: @[]),
+        catalogRoots = (if route != 0: @[fetched] else: @[]))
+      let dep = catalogDep(deps)
+      check deps.len == 2
+      check dep.isSome
+      for entry in deps:
+        check entry.name != head
+        if isSelfLockedDep(entry):
+          check entry.depends == @[pin.name]
+      if dep.isSome:
+        check dep.get.coordinates.url == pin.coordinates.url
+        check dep.get.coordinates.gitRef == pin.coordinates.gitRef
+        check dep.get.coordinates.revision == head
+        check dep.get.integrity == pin.integrity
+      discard serializeLockedDependencies(LockedDependencies(deps: deps))
+    var ephemeral = pin
+    ephemeral.coordinates.gitRef = "agents-to-dev-2026-10-03"
+    writeFile(app / "repro.lock",
+      serializeLockedDependencies(LockedDependencies(deps: @[ephemeral])))
+    let normalized = catalogDep(lockedDepsForWorkspace(app,
+      catalogRoots = @[fetched]))
+    require normalized.isSome
+    check normalized.get.coordinates.gitRef == ""
+    writeFile(app / "repro.lock",
+      serializeLockedDependencies(LockedDependencies(deps: @[pin])))
+    # The directory's spelling alone is not proof of the pin: an altered
+    # cached checkout must fail instead of being certified with old metadata.
+    discard git(fetched, "-c", "user.name=Tester", "-c",
+      "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+      "commit", "--allow-empty", "-q", "-m", "alter cached HEAD")
+    for route in 0 .. 1:
+      expect OSError:
+        discard lockedDepsForWorkspace(app,
+          sourceRecipeRoots = (if route == 0: @[fetched / "packages"] else: @[]),
+          catalogRoots = (if route == 1: @[fetched] else: @[]))
+
+  test "a detached sibling at the pinned commit preserves its advisory ref":
+    let temp = createTempDir("repro-detached-catalog-", "")
+    defer: removeDir(temp)
+    let app = temp / "app"
+    initRepo(app, "https://example.invalid/app.git")
+    writeFile(app / "repro.nim", "# app\n")
+    commitAll(app)
+    let catalog = temp / "reprobuild-packages"
+    initRepo(catalog, "https://example.invalid/reprobuild-packages.git")
+    discard writeInterface(catalog)
+    commitAll(catalog)
+    let head = git(catalog, "rev-parse", "HEAD")
+    let pin = LockedDep(name: "reprobuild-packages", path: "../reprobuild-packages",
+      coordinates: Coordinates(kind: ckVcs,
+        url: "https://example.invalid/reprobuild-packages.git",
+        gitRef: "main", revision: head),
+      integrity: "git-sha1:" & head, visibility: "public")
+    writeFile(app / "repro.lock",
+      serializeLockedDependencies(LockedDependencies(deps: @[pin])))
+    discard git(catalog, "checkout", "--detach", head)
+    discard git(catalog, "fetch", ".", "main:refs/remotes/origin/main")
+    let dep = catalogDep(lockedDepsForWorkspace(app, catalogRoots = @[catalog]))
+    require dep.isSome
+    check dep.get.coordinates.gitRef == pin.coordinates.gitRef
+    check dep.get.coordinates.url == pin.coordinates.url
+    check dep.get.coordinates.revision == head
+
   removeDir(scratch)

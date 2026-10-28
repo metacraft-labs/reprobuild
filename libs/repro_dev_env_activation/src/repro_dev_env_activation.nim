@@ -1,5 +1,8 @@
 import std/[os, osproc, sequtils, strtabs, strutils]
 
+when defined(posix):
+  import std/posix
+
 import repro_dev_env_artifacts
 import repro_provider_runtime
 
@@ -396,6 +399,51 @@ proc runActivatedCommand*(artifact: DevEnvArtifact; artifactPath: string;
     options = {poUsePath, poParentStreams})
   result = process.waitForExit()
   process.close()
+
+proc execActivatedCommand*(artifact: DevEnvArtifact; artifactPath: string;
+                           command: openArray[string];
+                           defaultWorkingDirectory = "";
+                           extraOps: openArray[DevEnvShellOp] = [];
+                           preOps: openArray[DevEnvShellOp] = []): int =
+  ## Replace the caller with one activated command on POSIX, preserving its
+  ## PID and direct signal/exit status for supervisors. Use
+  ## ``runActivatedCommand`` when the library caller needs to resume afterward.
+  ## Windows has no equivalent process replacement, so it retains spawn/wait.
+  when not defined(posix):
+    return runActivatedCommand(artifact, artifactPath, command,
+      defaultWorkingDirectory, extraOps, preOps)
+  else:
+    if command.len == 0:
+      raise newException(ValueError, "dev-env command is empty")
+    let activation = activatedEnvironment(artifact, artifactPath,
+      defaultWorkingDirectory, extraOps, preOps)
+    let executable = resolveFromActivatedPath(command[0], activation.env,
+      activation.workingDirectory)
+    # A bare unresolved name must not accidentally execute a file in cwd
+    # when cwd is absent from the activated PATH.
+    if not executable.containsPathSeparator():
+      raiseOSError(OSErrorCode(ENOENT), "cannot execute " & command[0])
+    var environment: seq[string] = @[]
+    for key, value in activation.env.pairs:
+      environment.add(key & "=" & value)
+    let previousDirectory = getCurrentDir()
+    let argv = allocCStringArray(command)
+    let envp = allocCStringArray(environment)
+    try:
+      if activation.workingDirectory.len > 0:
+        setCurrentDir(activation.workingDirectory)
+      stdout.flushFile()
+      stderr.flushFile()
+      # execve uses the activated environment explicitly: mutating the
+      # engine's ambient environment first could leave a library caller in a
+      # partially activated state if replacement fails.
+      discard execve(executable.cstring, argv, envp)
+      let error = osLastError()
+      raiseOSError(error, "cannot execute " & command[0])
+    finally:
+      deallocCStringArray(argv)
+      deallocCStringArray(envp)
+      setCurrentDir(previousDirectory)
 
 proc spawnActivatedShell*(artifact: DevEnvArtifact; artifactPath,
                           shellPath: string;

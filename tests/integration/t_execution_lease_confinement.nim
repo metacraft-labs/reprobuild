@@ -591,45 +591,59 @@ suite "Distributed-Execution M7: execution-lease confinement, layer by layer":
         let base = m7TestBase("repro-m7-noexec")
         defer: removeDir(base)
         let leaseRoot = base / "worker-state" / "leases"
-        let leaseDir = leaseRoot / "noexec"
-        createDir(leaseDir / "wt" / "out")
-        # The written binary goes into the DECLARED OUTPUT directory: the
-        # closure check and Landlock's EXECUTE rule both allow executing
-        # from there, so only the mount's noexec flag can stop it.
-        let script = "set -u; cp \"$TRUE\" out/written-true; " &
-          "chmod +x out/written-true; " &
-          "if ./out/written-true; then echo WRITTEN-RAN; " &
-          "else echo WRITTEN-BLOCKED; fi > out/result.txt; " &
-          "if \"$TRUE\"; then echo TOOLCHAIN-RAN >> out/result.txt; fi"
-        let spec = LeaseSpec(leaseId: "noexec", leaseRoot: leaseRoot,
-          leaseDir: leaseDir, metaDir: base / "lease-meta" / "noexec",
-          cwd: leaseDir / "wt", argv: @["/bin/sh", "-c", script],
-          env: @[("PATH", coreToolDir() & ":/usr/bin:/bin"),
-            ("TRUE", coreToolDir() / "true"), ("HOME", leaseDir / "home"),
-            ("TMPDIR", leaseDir / "tmp")],
-          readRoots: @["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix/store"],
-          closureRoots: @["/usr/bin", "/bin", "/usr/lib", "/lib", "/lib64",
-            "/nix/store"],
-          outputDirs: @[leaseDir / "wt" / "out"],
-          layers: DefaultLeaseLayers, timeoutMs: 60_000)
-        let outcome = waitFor runLease(spec)
-        let resultPath = leaseDir / "wt" / "out" / "result.txt"
-        let observed = if fileExists(resultPath): readFile(resultPath) else: ""
-        checkpoint("noexec lease: started=" & $outcome.started & " exit=" &
-          $outcome.exitCode & " error=" & outcome.error & "\n  result: " &
-          observed & "\n  stderr: " & outcome.stderr & "\n  reports: " &
-          $outcome.reports)
-        check outcome.started
-        check outcome.isolation == "linux-namespace+landlock+floor"
-        check fileExists(leaseDir / "wt" / "out" / "written-true")  # written
-        check "WRITTEN-BLOCKED" in observed     # the mount stopped it
-        check "WRITTEN-RAN" notin observed
-        check "TOOLCHAIN-RAN" in observed       # positive control
-        # Not the closure check: the supervisor saw nothing to refuse.
-        for r in outcome.reports:
-          check not (r.kind == "exec-outside-closure" and
-            "written-true" in r.detail)
-        discard cleanupLease(spec)
+        proc runWritten(layers: set[LeaseLayer]; id: string):
+            tuple[output: string; outcome: LeaseOutcome] =
+          let leaseDir = leaseRoot / id
+          createDir(leaseDir / "wt" / "out")
+          # The written binary goes into the DECLARED OUTPUT directory: the
+          # closure check and Landlock's EXECUTE rule both allow executing
+          # from there, so only the mount's noexec flag can stop it.
+          # `/bin/sh -c` works under the copied name. A multi-call `true`
+          # may fail solely because argv[0] changed, even on an exec mount.
+          # Fail setup errors directly rather than mistaking them for denial.
+          let script = "set -eu; cp /bin/sh out/written-sh; " &
+            "chmod +x out/written-sh; " &
+            "if ./out/written-sh -c 'exit 0'; then echo WRITTEN-RAN; " &
+            "else echo WRITTEN-BLOCKED; fi > out/result.txt; " &
+            "if \"$TRUE\"; then echo TOOLCHAIN-RAN >> out/result.txt; fi"
+          let spec = LeaseSpec(leaseId: id, leaseRoot: leaseRoot,
+            leaseDir: leaseDir, metaDir: base / "lease-meta" / id,
+            cwd: leaseDir / "wt", argv: @["/bin/sh", "-c", script],
+            env: @[("PATH", coreToolDir() & ":/usr/bin:/bin"),
+              ("TRUE", coreToolDir() / "true"), ("HOME", leaseDir / "home"),
+              ("TMPDIR", leaseDir / "tmp")],
+            readRoots: @["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix/store"],
+            closureRoots: @["/usr/bin", "/bin", "/usr/lib", "/lib", "/lib64",
+              "/nix/store"],
+            outputDirs: @[leaseDir / "wt" / "out"],
+            layers: layers, timeoutMs: 60_000)
+          result.outcome = waitFor runLease(spec)
+          let outcome = result.outcome
+          let resultPath = leaseDir / "wt" / "out" / "result.txt"
+          result.output = if fileExists(resultPath): readFile(resultPath) else: ""
+          let observed = result.output
+          checkpoint(id & " lease: started=" & $outcome.started & " exit=" &
+            $outcome.exitCode & " error=" & outcome.error & "\n  result: " &
+            observed & "\n  stderr: " & outcome.stderr & "\n  reports: " &
+            $outcome.reports)
+          check outcome.started
+          check outcome.exitCode == 0
+          check fileExists(leaseDir / "wt" / "out" / "written-sh")
+          check "TOOLCHAIN-RAN" in observed
+          for r in outcome.reports:
+            check not (r.kind == "exec-outside-closure" and
+              "written-sh" in r.detail)
+          discard cleanupLease(spec)
+        # Identical payload, with the namespace's noexec mounts absent:
+        # a renamed multi-call `true` must not make the denial vacuous.
+        let executable = runWritten(DefaultLeaseLayers - {llNamespace},
+          "exec-control")
+        check "WRITTEN-RAN" in executable.output
+        check "WRITTEN-BLOCKED" notin executable.output
+        let blocked = runWritten(DefaultLeaseLayers, "noexec")
+        check blocked.outcome.isolation == "linux-namespace+landlock+floor"
+        check "WRITTEN-BLOCKED" in blocked.output
+        check "WRITTEN-RAN" notin blocked.output
         # Without the floor (and without Landlock) the lease is the
         # namespace's root and owns the top level of its new root: that
         # tmpfs is READ-ONLY once entered (and noexec), so nothing can be
@@ -642,10 +656,10 @@ suite "Distributed-Execution M7: execution-lease confinement, layer by layer":
         let rootDir = leaseRoot / "noexec-root"
         createDir(rootDir / "wt")
         let rootScript = "set -u; " &
-          "if cp \"$TRUE\" /root-true 2>/dev/null; then echo ROOT-WRITTEN; " &
+          "if cp /bin/sh /root-sh 2>/dev/null; then echo ROOT-WRITTEN; " &
           "else echo ROOT-WRITE-BLOCKED; fi > result.txt; " &
-          "if /root-true 2>/dev/null; then echo ROOT-RAN >> result.txt; fi; " &
-          "if cp \"$TRUE\" /dev/dev-true 2>/dev/null && /dev/dev-true; " &
+          "if /root-sh -c 'exit 0' 2>/dev/null; then echo ROOT-RAN >> result.txt; fi; " &
+          "if cp /bin/sh /dev/dev-sh 2>/dev/null && /dev/dev-sh -c 'exit 0'; " &
           "then echo DEV-RAN >> result.txt; fi; " &
           "if \"$TRUE\"; then echo TOOLCHAIN-RAN >> result.txt; fi"
         let rootSpec = LeaseSpec(leaseId: "noexec-root", leaseRoot: leaseRoot,

@@ -1,6 +1,6 @@
 ## Deferred Item D2: ``<pkg>:<target>`` cross-project selector recognised.
 ##
-## Two arms:
+## Three arms:
 ##
 ## 1. **Structural.** Read the CLI target-resolver source and assert it
 ##    contains the sibling-discovery codepath. This guards against
@@ -24,12 +24,16 @@
 ##    gone — under it, a selector that resolved and then built nothing was
 ##    indistinguishable from one that worked.
 ##
+## 3. An isolated sibling project checks exact target closure selection in
+##    dry runs and real builds, for both project-file aliases. No mocks are
+##    used: the real CLI compiles providers and writes real filesystem outputs.
+##
 ## The B0 ``t_b0_repro_build_runquota_daemon`` test already covers the
 ## end-to-end "binary is executable and responds to ``--version``"
-## assertion; D2's job here is the structural-guard half so the
-## resolver doesn't silently regress to the pre-D2 "usage dump" shape.
+## assertion; these cases check sibling recognition and precise selection
+## of the requested target's dependency closure.
 
-import std/[os, osproc, strutils, unittest]
+import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
 import runquota_case_fixture
@@ -177,3 +181,71 @@ echo "findSiblingProjectFile"                             # NOT a literal
       check fileExists(runquotadBinary)
       if fileExists(runquotadBinary):
         check getFileInfo(runquotadBinary).size > 0
+
+  test "a qualified sibling target selects only its dependency closure":
+    # No mocks: the real engine compiles a sibling provider and materializes
+    # filesystem edges. Test builds deliberately remain outside the test
+    # execute aggregate, as in recipes which compile tests during `build`.
+    let reproBin = requireBinary(findRepoRoot() / "build" / "bin" /
+      addFileExt("repro", ExeExt), "reprobuild.apps.repro")
+    let root = createTempDir("repro-qualified-sibling-", "")
+    defer: removeDir(root)
+    let consumer = root / "consumer"
+    let sibling = root / "sibling"
+    createDir(consumer)
+    createDir(sibling)
+    writeFile(consumer / "repro.nim", "import repro_project_dsl\npackage consumer:\n  discard\n")
+    # A same-named source file must not turn the named target into a legacy
+    # directory#module selector when routing to the sibling project.
+    writeFile(sibling / "ctPrint.nim", "echo \"this is a source file, not the recipe\"\n")
+    const recipe = """
+import repro_project_dsl
+package sibling:
+  build:
+    let prepare = fs.writeText(actionId = "prepare", output = "out/prepare.txt",
+      text = "dependency")
+    let writer = fs.writeText(actionId = "ct-print", output = "out/ct-print.txt",
+      text = "selected", after = @[prepare])
+    discard aggregate("ctPrint", actions = @[writer])
+    let testBuild = fs.writeText(actionId = "test_build.unrelated",
+      output = "out/test-build.txt", text = "unrelated")
+    let testRun = fs.writeText(actionId = "test_execute.unrelated",
+      output = "out/test-run.txt", text = "test", after = @[testBuild])
+    discard aggregate("test", actions = @[testRun])
+"""
+    for projectFile in ["repro.nim", "reprobuild.nim"]:
+      writeFile(sibling / projectFile, recipe)
+      let baseArgs = @[reproBin, "build", "sibling:ctPrint",
+        "--tool-provisioning=path", "--daemon=off", "--no-runquota",
+        "--progress=quiet", "--log=actions"]
+      let planned = execCmdEx(quoteShellCommand(baseArgs & @["--dry-run"]),
+        workingDir = consumer)
+      checkpoint(projectFile & " dry run:\n" & planned.output)
+      require planned.exitCode == 0
+      check "selectedTarget: ctPrint" in planned.output
+      check "action: prepare " in planned.output
+      check "action: ctPrint " in planned.output
+      check "action: test_build.unrelated " notin planned.output
+      check "action: test_execute.unrelated " notin planned.output
+      var plannedActions = 0
+      for line in planned.output.splitLines():
+        if line.startsWith("action: "):
+          inc plannedActions
+      check plannedActions == 2
+      check not fileExists(sibling / "out/ct-print.txt")
+      let built = execCmdEx(quoteShellCommand(baseArgs), workingDir = consumer)
+      if built.exitCode != 0:
+        checkpoint(built.output)
+      require built.exitCode == 0
+      check readFile(sibling / "out/prepare.txt") == "dependency"
+      check readFile(sibling / "out/ct-print.txt") == "selected"
+      check not fileExists(sibling / "out/test-build.txt")
+      check not fileExists(sibling / "out/test-run.txt")
+      let unknown = execCmdEx(quoteShellCommand(@[reproBin, "build",
+        "sibling:missing-target", "--daemon=off", "--tool-provisioning=path",
+        "--no-runquota", "--dry-run", "--progress=quiet"]),
+        workingDir = consumer)
+      check unknown.exitCode != 0
+      check "unknown_target" in unknown.output
+      removeDir(sibling / "out")
+      removeFile(sibling / projectFile)

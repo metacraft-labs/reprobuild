@@ -19,13 +19,11 @@
 ##   so a user who set it can see why it had no effect. reprobuild's
 ##   ``repro test`` runs as the user, so it writes the user root and never the
 ##   system root, which belongs to a privileged producer.
-## * **Writing (§2.3).** Directories this code creates are owner-only. The
-##   record goes to a temporary name in the SAME directory that begins with
-##   ``.`` and does not end in ``.toml``, is flushed to stable storage, and is
-##   renamed onto its final name. When the final name exists, a SIGNED record
-##   always replaces it (its signature was just made; the existing copy may be
-##   unsigned or carry a signature that fails), and an UNSIGNED record keeps
-##   it (the existing file is the same claim, or the same claim signed).
+## * **Writing (§2.3).** Owner-only directories hold atomic, flushed record
+##   renames. Every writer holds the root's persistent `.write-lock` through
+##   inspecting and publishing. Unsigned copies keep an existing record;
+##   relayed signed copies replace only a well-formed unsigned twin. Only a
+##   caller that made the new signature can replace an existing signed copy.
 ## * **Reading (§2.4).** A missing root or directory is "nothing found",
 ##   never an error. A directory that exists and cannot be listed is
 ##   UNREADABLE and is said so: ``walkDir`` is called with ``checkDir``,
@@ -50,6 +48,8 @@
 ## Nothing here runs a program.
 
 import std/[algorithm, atomics, os, strutils, times]
+
+import repro_cli_support/content_id
 
 when defined(windows):
   import std/winlean
@@ -279,26 +279,16 @@ proc certificateStoreRetention*(env: StoreEnvironment):
 # Layout (§2.2)
 # ---------------------------------------------------------------------------
 
-proc isSafeComponent(text: string): bool =
-  ## One path component that names a directory inside its parent: non-empty,
-  ## not dot-named (dot-names are never content directories), no separator.
-  text.len > 0 and text[0] != '.' and '/' notin text and '\\' notin text and
-    '\0' notin text and ':' notin text
-
 proc storeContentDir*(contentId: string):
     tuple[ok: bool; relative, problem: string] =
-  ## ``v1/<algorithm>/<digest>`` for a content id, split at its FIRST ``:``.
-  ## Joined with ``/`` on every platform; the caller converts.
-  let colon = contentId.find(':')
-  if colon <= 0 or colon == contentId.high:
-    return (false, "", "content id '" & contentId & "' has no '<algorithm>:" &
-      "<digest>' form to name a store directory by")
-  let algorithm = contentId[0 ..< colon]
-  let digest = contentId[colon + 1 .. ^1]
-  if not isSafeComponent(algorithm) or not isSafeComponent(digest):
+  ## ``v1/<algorithm>/<digest>`` for a well-formed content id, including an
+  ## unknown algorithm. Joined with ``/`` on every platform.
+  let parsed = parseContentId(contentId)
+  if parsed.form == cifMalformed:
     return (false, "", "content id '" & contentId & "' cannot name a store " &
-      "directory")
-  (true, LocalStoreLayout & "/" & algorithm & "/" & digest, "")
+      "directory: " & parsed.problem)
+  (true, LocalStoreLayout & "/" & parsed.algorithmName & "/" &
+    parsed.digest, "")
 
 proc toNative(relative: string): string = relative.replace('/', DirSep)
 
@@ -471,13 +461,62 @@ proc directoryIdentity(dir: string): string =
   except OSError:
     ""
 
+# Writers in every implementation share this persistent root lock (Transport
+# §2.3). Never unlink it: another process may already hold its inode open.
+when defined(windows):
+  proc storeCreateFile(path: WideCString; access, share: uint32; security: pointer;
+                       disposition, flags: uint32; templateFile: pointer): pointer
+    {.stdcall, dynlib: "kernel32", importc: "CreateFileW".}
+  proc storeCloseHandle(handle: pointer): int32
+    {.stdcall, dynlib: "kernel32", importc: "CloseHandle".}
+  proc storeLastError(): uint32
+    {.stdcall, dynlib: "kernel32", importc: "GetLastError".}
+  type StoreWriteLock = pointer
+else:
+  import std/posix except Time
+  var storeNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
+  proc storeFlock(fd, operation: cint): cint
+    {.importc: "flock", header: "<sys/file.h>".}
+  type StoreWriteLock = cint
+
+proc acquireStoreWriteLock(root: string): StoreWriteLock =
+  let path = root / ".write-lock"
+  when defined(windows):
+    while true:
+      result = storeCreateFile(newWideCString(path), 0xC0000000'u32, 0,
+        nil, 4, 0x80, nil)
+      if result != cast[pointer](-1): return
+      let error = storeLastError()
+      if error != 32: raiseOSError(OSErrorCode(error), path)
+      sleep(10)
+  else:
+    result = posix.open(path.cstring, O_RDWR or O_CREAT or storeNoFollow or
+      O_CLOEXEC, Mode(0o600))
+    if result < 0: raiseOSError(osLastError(), path)
+    while storeFlock(result, 2) != 0: # LOCK_EX
+      if errno == EINTR: continue
+      let error = osLastError()
+      discard posix.close(result)
+      raiseOSError(error, path)
+
+proc releaseStoreWriteLock(lock: StoreWriteLock) =
+  when defined(windows):
+    discard storeCloseHandle(lock)
+  else:
+    discard posix.close(lock)
+
 proc publishStoreRecord*(root, relative, bytes: string; signed: bool;
-                         beforeRename: PublishStepHook = nil): StorePublish =
+                         beforeRename: PublishStepHook = nil;
+                         signatureMade = false;
+                         existingUnsigned: proc(bytes: string): bool {.closure.} = nil): StorePublish =
   ## Steps 1–3 of §2.3 for ``<root>/<relative>`` (``/``-separated, the record
   ## file's store-relative path), with the one retry §2.5 allows when a
   ## concurrent prune took the directory between its creation and the rename.
   ## No root resolution, no guard, no prune: the certificate-aware caller in
   ## ``repro_cli_support`` does those.
+  ## ``signatureMade`` is true only for the immediate signer. A relay must
+  ## supply ``existingUnsigned`` to validate a same-name record and decide
+  ## whether it is an unsigned twin; errors leave the stored bytes untouched.
   result.path = root / toNative(relative)
   let slash = relative.rfind('/')
   if slash <= 0:
@@ -485,13 +524,32 @@ proc publishStoreRecord*(root, relative, bytes: string; signed: bool;
     return
   let contentDir = relative[0 ..< slash]
   let dir = result.path.parentDir
+  var writeLock: StoreWriteLock
+  try:
+    createOwnerOnlyDirs(root, "")
+    writeLock = acquireStoreWriteLock(root)
+  except CatchableError as err:
+    result.error = err.msg
+    return
+  defer: releaseStoreWriteLock(writeLock)
   for attempt in 0 .. 1:
     var temporaryVanished = false
     var identity = directoryIdentity(dir)
     try:
       createOwnerOnlyDirs(root, contentDir)
       identity = directoryIdentity(dir)
-      if not signed and fileExists(result.path):
+      if symlinkExists(result.path) or dirExists(result.path):
+        raise newException(IOError, "existing certificate is not a regular file")
+      var keepExisting = false
+      if fileExists(result.path):
+        if not signatureMade:
+          if existingUnsigned == nil:
+            raise newException(IOError, "relay cannot inspect existing certificate")
+          let unsignedTwin = existingUnsigned(readFile(result.path))
+          keepExisting = not signed or not unsignedTwin
+        elif not signed:
+          keepExisting = true
+      if keepExisting:
         touchDirectory(dir)
         result.kept = true
         result.retried = attempt > 0

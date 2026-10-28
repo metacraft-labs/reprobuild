@@ -105,8 +105,8 @@ package nim:
       # ``nimgrab`` is built by ``koch tools`` from ``tools/nimgrab.nim``,
       # which is the only thing in the archive under that name, so the
       # declaration bound an exported executable the realization cannot
-      # produce. Measured by the catalog conformance sweep; the other arms
-      # keep the claim because only a host of their platform can decide it.
+      # produce. The macOS bundles likewise omit it; Windows declarations
+      # remain unchanged. Native platform conformance is a separate check.
       extraExecutable = "bin/nimgrep",
       extraExecutable = "bin/nimpretty",
       extraExecutable = "bin/nimsuggest",
@@ -123,7 +123,6 @@ package nim:
       version = "2.2.10",
       extraExecutable = "bin/atlas",
       extraExecutable = "bin/nimble",
-      extraExecutable = "bin/nimgrab",
       extraExecutable = "bin/nimgrep",
       extraExecutable = "bin/nimpretty",
       extraExecutable = "bin/nimsuggest",
@@ -140,7 +139,6 @@ package nim:
       version = "2.2.10",
       extraExecutable = "bin/atlas",
       extraExecutable = "bin/nimble",
-      extraExecutable = "bin/nimgrab",
       extraExecutable = "bin/nimgrep",
       extraExecutable = "bin/nimpretty",
       extraExecutable = "bin/nimsuggest",
@@ -786,11 +784,10 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   # SELECTED actions reference -- so a fragment build such as
   # ``repro build .#apps`` still resolves it.
   #
-  # This covers the edges ``nim.c(...)`` lowers -- 26 of this
-  # repository's 1397 nim edges. The other 1371 go through
-  # ``buildNimUnittest.build``, a typed tool from a pinned external
-  # package, and declare the same ref at their call site in
-  # ``repro.nim``.
+  # This covers edges lowered by nim.c. The in-tree shared
+  # ct_test_nim_unittest adapter records the native backend on its own
+  # unittest compile edges too; consumers need not repeat this default
+  # compiler attachment at each call site.
   #
   # An unmatched ref is inert: the resolver returns ``none`` for a name
   # no ``uses:`` entry declares, so a recipe that does not declare its C
