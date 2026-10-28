@@ -1,6 +1,6 @@
 {
   "observedStructuralFacts": {
-    "graphOwnedHelperArtifacts": 33,
+    "graphOwnedHelperArtifacts": 34,
     "nimTestBinaries": 2406,
     "pureUnitConsolidationGroups": 68,
     "pureUnitTests": 686,
@@ -1552,6 +1552,12 @@
         "kind": "test-helper",
         "output": "build/test-bin/nim_spy",
         "source": "tests/e2e/m83/nim_spy.nim"
+      },
+      {
+        "actionId": "reprobuild.test_helpers.pm3_cas_probe",
+        "kind": "test-helper",
+        "output": "build/test-bin/pm3_cas_probe",
+        "source": "tests/integration/pm3_cas_probe.nim"
       },
       {
         "actionId": "reprobuild.test_helpers.repro_binary_cache",
