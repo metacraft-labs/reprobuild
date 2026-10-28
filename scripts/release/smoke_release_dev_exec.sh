@@ -40,7 +40,8 @@ work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/repro-release-smoke-XXXXXX")
 # Best-effort: on Windows a helper the run started can still hold the
 # project directory open for a moment ("Device or resource busy"), and a
 # leftover temp dir must not turn a passed check into a failed step.
-trap 'rm -rf "$work" 2>/dev/null || true' EXIT
+quota_runtime=''
+trap 'rm -rf "$work" 2>/dev/null || true; if [[ -n "$quota_runtime" ]]; then rm -rf "$quota_runtime" 2>/dev/null || true; fi' EXIT
 
 # Where the sources come from. The engine resolves the tree it compiles a
 # recipe against from, in order: the REPROBUILD_LIBS_DIR / REPROBUILD_REPO_ROOT
@@ -267,8 +268,13 @@ isolate_archive_runquota
 # POSIX auto-start owns a private socket. Windows retains the real default
 # discovery path through the helper; an occupied endpoint refuses qualification.
 if [[ -z "$exe" ]]; then
-  RUNQUOTA_SOCKET="$work/runquota-smoke.sock"
-  export RUNQUOTA_SOCKET
+  # Keep the consumer project/archive under its original (possibly deep) work
+  # root. Only this fixture-owned rendezvous needs a short, private parent:
+  # Nim's Darwin Unix-socket binding allows 91 bytes, including the pathname.
+  quota_runtime=$(umask 077; mktemp -d /tmp/repro-release-rq-XXXXXX)
+  RUNQUOTA_SOCKET="$quota_runtime/runquota.sock"
+  RUNQUOTA_ENDPOINT_SCOPE=private
+  export RUNQUOTA_SOCKET RUNQUOTA_ENDPOINT_SCOPE
 fi
 
 run_build() { # run_build <log>
@@ -289,9 +295,21 @@ control_rc=0
 run_build "$work/build-control.log" || control_rc=$?
 mv "$pkg/bin/runquotad$exe.hidden" "$pkg/bin/runquotad$exe"
 cat "$work/build-control.log"
-if [[ $control_rc -eq 0 ]] || ! grep -q "runquota daemon unreachable" "$work/build-control.log"; then
+missing_daemon=no
+if [[ $control_rc -ne 0 ]] &&
+    grep -Fq "runquota daemon unreachable and bypass is disabled." "$work/build-control.log" &&
+    ! grep -Fq "socket path too long" "$work/build-control.log"; then
+  # POSIX must actually report the absent endpoint, not an unrelated failure
+  # wrapped in the same high-level unreachable diagnostic. Windows keeps its
+  # existing native helper's default-pipe/owned-process control unchanged.
+  if [[ "$windows_repro" == yes ]] ||
+      grep -Fq "Underlying error: No such file or directory" "$work/build-control.log"; then
+    missing_daemon=yes
+  fi
+fi
+if [[ "$missing_daemon" != yes ]]; then
   echo "smoke_release_dev_exec: ERROR: with the archive's runquotad hidden, the build was not refused" >&2
-  echo "  for want of a daemon (exit $control_rc), so the build below could not show that the" >&2
+  echo "  for want of a daemon at a valid endpoint (exit $control_rc), so the build below could not show that the" >&2
   echo "  archive's runquotad is the one found." >&2
   exit 1
 fi

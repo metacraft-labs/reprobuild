@@ -51565,7 +51565,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_smoke_dev_exec.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 15,
+      "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
