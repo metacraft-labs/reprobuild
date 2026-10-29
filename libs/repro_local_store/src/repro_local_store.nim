@@ -20,6 +20,7 @@ when defined(posix):
     {.importc: "flock", header: "<sys/file.h>".}
 
 import repro_core
+import repro_core/evidence_level
 import repro_core/link_target
 import repro_core/relocation
 import repro_hash
@@ -39,6 +40,7 @@ import ./repro_local_store/portable_fingerprint
 import ./repro_local_store/portable_memo
 import ./repro_local_store/pattern_scoped_enumeration
 export action_index
+export evidence_level
 export sqlite3_binding
 export store
 export lru_eviction
@@ -260,6 +262,15 @@ type
     reads*: seq[string]
     probes*: seq[string]
     enumerations*: seq[string]
+    evidenceLevel*: EvidenceLevel
+      ## The monitor-evidence level of the execution these accesses came
+      ## from (Edge-Derived-Identities.md §3.4 item 1). A local hit serves a
+      ## Level-1 record exactly as before, but the portable record derived
+      ## from that hit must not be published, and nothing else that survives
+      ## the session says it was Level 1: the record frame cannot grow, and
+      ## the downstream narrowing lives in session memory. `elUnstated` for a
+      ## sidecar written before the field (version 1), which therefore
+      ## derives a record that stays on this host.
 
   ActionResultRecord* = object
     weakFingerprint*: ContentDigest
@@ -2320,6 +2331,66 @@ proc requireContentIdentity(input: FileFingerprint; location: string) =
       "read, so a content-keyed cache record cannot describe it; the " &
       "action's result is not published and it re-executes next time")
 
+proc publicationRefusal*(policy: FileFingerprintPolicy;
+                         inputs: openArray[FileFingerprint];
+                         level: EvidenceLevel;
+                         observations: int): string =
+  ## Why a record may NOT leave this host, or "" when it may. ONE rule for
+  ## every publisher and every consumer of an action result across hosts
+  ## (Edge-Derived-Identities.md §3.3a, §3.4 item 1 and §3.6; §10 decisions
+  ## 11 and 13): the portable memo publisher, the two-phase peer-cache
+  ## producer, and the peer-cache consumer judging a record another host
+  ## sent. It decides from what the record already carries, and computes no
+  ## identity: publication never hashes a record's inputs after the fact to
+  ## make it publishable.
+  ##
+  ## In order, the record is refused when:
+  ##   1. it was made under `ffpTimestamp`. Its local evidence is metadata,
+  ##      and timestamp-only evidence MUST NOT cross a machine
+  ##      (Caching-Architecture.md). A project that wants an edge shared
+  ##      selects `checksum` or `hybrid` for it;
+  ##   2. a regular-file input carries no content hash, which no conforming
+  ##      checksum or hybrid record has (`requireContentIdentity`), so only a
+  ##      forged or damaged record reaches this;
+  ##   3. its monitor evidence is not Level 0. Level 1 serves locally, but its
+  ##      narrowing lives in session memory and travels with nothing; an
+  ##      unstated level is refused because Level 1 is what it could hide;
+  ##   4. it names no observed input at all (`observations == 0`): a record
+  ##      keyed on its weak fingerprint alone, which any host with the same
+  ##      static description would accept.
+  ##
+  ## The reason names the policy, the level or the missing evidence, because
+  ## a refusal at publication is a diagnostic, never an error: the record
+  ## stays local and keeps serving this host.
+  if policy notin {ffpChecksum, ffpHybrid}:
+    return "the record was made under the " & $policy & " input-check " &
+      "policy; only ffpChecksum and ffpHybrid records leave this host " &
+      "(Edge-Derived-Identities.md §3.3a). Select checksum or hybrid for " &
+      "an edge whose results should be shared"
+  for input in inputs:
+    if input.metadata.kind == ffkRegular and not input.hasLocalHash:
+      return "input " & input.path & " is a regular file the record " &
+        "carries no content hash for, under the " & $policy & " policy; " &
+        "such a record does not leave this host " &
+        "(Edge-Derived-Identities.md §3.3a)"
+  if level != elComplete:
+    return "the record's monitor evidence is " &
+      describeEvidenceLevel(level) & "; only Level-0 records leave this " &
+      "host (Edge-Derived-Identities.md §3.4 item 1)"
+  if observations <= 0:
+    return "the record names no observed input (zero evidence), so it " &
+      "would be accepted on its weak fingerprint alone; it does not leave " &
+      "this host (Edge-Derived-Identities.md §3.4 item 1)"
+  ""
+
+proc publicationRefusal*(record: ActionResultRecord;
+                         level: EvidenceLevel): string =
+  ## `publicationRefusal` over a local action record exactly as it would be
+  ## sent: its own policy and inputs, and its recorded inputs and observed
+  ## environment as the observations.
+  publicationRefusal(record.policy, record.inputs, level,
+    record.inputs.len + record.envInputs.len)
+
 proc digestHex*(digest: ContentDigest): string =
   toHex(digest.bytes)
 
@@ -2723,7 +2794,9 @@ proc observedExecutionNames(raw: openArray[byte];
 
 const
   InputAccessMagic = "RBIA"
-  InputAccessVersion = 1'u16
+  InputAccessVersion = 2'u16
+    ## v2 (campaign M17) appends the execution's evidence level. A v1
+    ## sidecar still decodes, with `elUnstated`.
   InputAccessFileExt* = ".acc"
     ## Exported so tests and tooling can find the sidecar without re-deriving
     ## the extension. Not `.rec`, `.octime` or `.det`, so every older reader
@@ -2783,6 +2856,7 @@ proc encodeInputAccesses*(strongHex: string;
   result.writeFrontCoded(accesses.reads)
   result.writeFrontCoded(accesses.probes)
   result.writeFrontCoded(accesses.enumerations)
+  result.add(evidenceLevelByte(accesses.evidenceLevel))
 
 proc decodeInputAccesses*(raw: openArray[byte]; strongHex: string):
     Option[InputAccesses] =
@@ -2796,7 +2870,8 @@ proc decodeInputAccesses*(raw: openArray[byte]; strongHex: string):
       return none(InputAccesses)
   try:
     var pos = 4
-    if readU16Le(raw, pos) != InputAccessVersion:
+    let version = readU16Le(raw, pos)
+    if version != InputAccessVersion and version != 1'u16:
       return none(InputAccesses)
     if readString(raw, pos) != strongHex:
       return none(InputAccesses)
@@ -2804,6 +2879,11 @@ proc decodeInputAccesses*(raw: openArray[byte]; strongHex: string):
     accesses.reads = readFrontCoded(raw, pos)
     accesses.probes = readFrontCoded(raw, pos)
     accesses.enumerations = readFrontCoded(raw, pos)
+    if version >= 2'u16:
+      if pos >= raw.len or
+          not evidenceLevelFromByte(raw[pos], accesses.evidenceLevel):
+        return none(InputAccesses)
+      inc pos
     if pos != raw.len:
       return none(InputAccesses)
     some(accesses)
