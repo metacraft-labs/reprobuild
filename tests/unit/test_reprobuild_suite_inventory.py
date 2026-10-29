@@ -32,9 +32,17 @@ def built_test_binaries(root):
     Everything in `SuiteInventoryTests` that reads a per-binary catalog needs
     `present == declared`; a tree with 97 of 1240 cannot answer those
     questions at all.
+
+    A grouped source (Test-Binary-Grouping) counts as built only through its
+    GROUP binary, and only when the group's generated module imports it:
+    `inventory.built_binary_for`. A missing group binary is a build defect
+    exactly as a missing single binary is, so a single-file binary of a
+    grouped source does not stand in for it.
     """
     nim_specs, _ = inventory.parse_repro_tests(root)
-    present = sum(1 for spec in nim_specs if (root / spec.binary).is_file())
+    present = sum(
+        1 for spec in nim_specs if inventory.built_binary_for(root, spec)
+    )
     return present, len(nim_specs)
 
 
@@ -203,6 +211,85 @@ class BuiltTreeCapabilityTests(unittest.TestCase):
         live_present, live_declared = built_test_binaries(REPO_ROOT)
         self.assertEqual(live_declared, declared)
         self.assertLessEqual(live_present, live_declared)
+
+    def test_a_grouped_source_is_built_only_through_its_group_binary(self):
+        """Grouped sources are counted through the group binary that carries them.
+
+        Two grouped members and one single source, against a real tree. A
+        member is built when the group binary exists and the group's
+        generated module imports it. It is missing when the binary is
+        absent, even if a single-file binary of the same source is on disk,
+        and when the module does not import it.
+        """
+        spec = (
+            "  TestSpec(\n"
+            '    source: "{source}",\n'
+            '    binary: "build/test-bin/{stem}",\n'
+            "    defines: @[],\n"
+            "    requiresReproBinary: false,\n"
+            "    extraPassC: @[],\n"
+            "    extraPassL: @[],\n"
+            "    targetOs: soAny,\n"
+            "    selfInterposes: false,\n"
+            '    group: "{group}",\n'
+            '    singleReason: ""),\n'
+        )
+        group = "t_group_tests_unit_g01"
+        sources = {
+            "tests/unit/t_member_a.nim": group,
+            "tests/unit/t_member_b.nim": group,
+            "tests/unit/t_single.nim": "",
+        }
+
+        def tree(root, *, group_binary, imported, single_binaries):
+            (root / "repro_tests.nim").write_text(
+                "const reprobuildTestSpecs*: seq[TestSpec] = @[\n"
+                + "".join(
+                    spec.format(source=src, stem=Path(src).stem, group=grp)
+                    for src, grp in sources.items()
+                )
+                + "]\nconst pythonTestPaths*: seq[string] = @[\n]\n",
+                encoding="utf-8",
+            )
+            bin_dir = root / "build/test-bin"
+            bin_dir.mkdir(parents=True)
+            modules = root / inventory.GROUP_MODULE_DIR
+            modules.mkdir(parents=True)
+            (modules / f"{group}.nim").write_text(
+                "## GENERATED\n"
+                + "".join(
+                    f'import "../../{Path(src).with_suffix("").as_posix()}"\n'
+                    for src in imported
+                ),
+                encoding="utf-8",
+            )
+            if group_binary:
+                (bin_dir / group).write_bytes(b"")
+            for src in single_binaries:
+                (bin_dir / Path(src).stem).write_bytes(b"")
+            return root
+
+        cases = {
+            "group binary importing both members": (
+                dict(group_binary=True, imported=list(sources)[:2],
+                     single_binaries=["tests/unit/t_single.nim"]),
+                3,
+            ),
+            "group binary missing, single binaries present": (
+                dict(group_binary=False, imported=list(sources)[:2],
+                     single_binaries=list(sources)),
+                1,
+            ),
+            "group module does not import one member": (
+                dict(group_binary=True, imported=["tests/unit/t_member_a.nim"],
+                     single_binaries=["tests/unit/t_single.nim"]),
+                2,
+            ),
+        }
+        for name, (layout, expected) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as scratch:
+                root = tree(Path(scratch), **layout)
+                self.assertEqual(built_test_binaries(root), (expected, 3))
 
 
 class StaticCaseCountBaselineTests(unittest.TestCase):
@@ -4584,7 +4671,8 @@ test "incomplete name" and:
     # mtime. A rebuild re-probes exactly the binaries that changed.
 
     LIST_CROSSCHECK_CACHE = Path("build/reprobuild-suite-list-crosscheck.json")
-    LIST_CROSSCHECK_VERSION = 1
+    # 2: entries keyed by hosting binary rather than by source.
+    LIST_CROSSCHECK_VERSION = 2
 
     _INVENTORY = None
 
@@ -4643,8 +4731,15 @@ test "incomplete name" and:
     def _first_missing_binary():
         nim_specs, _ = inventory.parse_repro_tests(REPO_ROOT)
         for spec in nim_specs:
-            if not (REPO_ROOT / spec.binary).is_file():
-                return spec.binary
+            if inventory.built_binary_for(REPO_ROOT, spec):
+                continue
+            if spec.group:
+                group_binary = (Path(spec.binary).parent / spec.group).as_posix()
+                return (
+                    f"{group_binary} (the group binary of {spec.source}, "
+                    "absent or not importing it)"
+                )
+            return spec.binary
         return "(none)"
 
     @classmethod
@@ -4708,15 +4803,32 @@ test "incomplete name" and:
         except (OSError, ValueError):
             cached = {}
 
+        # Test-Binary-Grouping: a grouped source has no binary of its own.
+        # Its cases come from the GROUP binary, whose `--list` prints every
+        # member's cases. So `--list` runs once per HOSTING binary, and a
+        # group is checked from both sides. Per member: the catalog names,
+        # in order, are a subsequence of the group's `--list`. Per binary:
+        # the members' catalogs together are exactly the `--list` multiset.
+        # A single source's binary must still match its catalog exactly.
+        specs, _ = inventory.parse_repro_tests(REPO_ROOT)
+        spec_by_source = {spec.source: spec for spec in specs}
+        hosts = {}
+        for item in catalog_entries:
+            host = inventory.built_binary_for(
+                REPO_ROOT, spec_by_source[item["source"]]
+            )
+            self.assertIsNotNone(
+                host, f"catalog-counted binary is missing: {item['binary']}"
+            )
+            hosts.setdefault(host, []).append(item)
+
         pending = []
         resolved = {}
-        for item in catalog_entries:
-            binary_path = REPO_ROOT / item["binary"]
+        for host in hosts:
+            binary_path = REPO_ROOT / host
             key = inventory.binary_cache_key(binary_path)
-            self.assertIsNotNone(
-                key, f"catalog-counted binary is missing: {item['binary']}"
-            )
-            entry = cached.get(item["source"])
+            self.assertIsNotNone(key, f"catalog-counted binary is missing: {host}")
+            entry = cached.get(host)
             # Only a POSITIVE entry may be reused. A cached `None` is a
             # cached failure, and a failure recorded on a loaded host is
             # not a fact about the binary — the same rule `catalog_index`
@@ -4726,9 +4838,9 @@ test "incomplete name" and:
                 and entry.get("key") == key
                 and entry.get("names") is not None
             ):
-                resolved[item["source"]] = entry.get("names")
+                resolved[host] = entry.get("names")
             else:
-                pending.append((item["source"], binary_path, key))
+                pending.append((host, binary_path, key))
 
         if pending:
             from concurrent.futures import ThreadPoolExecutor
@@ -4737,19 +4849,19 @@ test "incomplete name" and:
             self.addCleanup(scratch.cleanup)
 
             def run_one(job):
-                source, binary_path, key = job
-                return source, key, self._list_names(
+                host, binary_path, key = job
+                return host, key, self._list_names(
                     binary_path, env, scratch.name
                 )
 
             with ThreadPoolExecutor(max_workers=16) as pool:
-                for source, key, names in pool.map(run_one, pending):
-                    resolved[source] = names
+                for host, key, names in pool.map(run_one, pending):
+                    resolved[host] = names
                     if names is None:
                         # Never persist a negative result.
-                        cached.pop(source, None)
+                        cached.pop(host, None)
                     else:
-                        cached[source] = {"key": key, "names": names}
+                        cached[host] = {"key": key, "names": names}
             try:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 cache_path.write_text(
@@ -4765,25 +4877,52 @@ test "incomplete name" and:
             except OSError:
                 pass
 
+        def is_subsequence(needle, haystack):
+            remaining = iter(haystack)
+            return all(any(name == candidate for candidate in remaining)
+                       for name in needle)
+
         mismatches = []
-        for item in catalog_entries:
-            names = resolved.get(item["source"])
+        listed_by_source = {}
+        for host, items in sorted(hosts.items()):
+            names = resolved.get(host)
             if names is None:
-                mismatches.append(
-                    f"{item['source']}: --list did not produce a case list, "
-                    "but the inventory counted it from the catalog"
-                )
+                for item in items:
+                    mismatches.append(
+                        f"{item['source']}: --list of {host} did not produce "
+                        "a case list, but the inventory counted it from the "
+                        "catalog"
+                    )
                 continue
-            catalog_names = [case["name"] for case in item["catalogCases"]]
-            if catalog_names != names:
+            grouped = any(spec_by_source[item["source"]].group for item in items)
+            combined = []
+            for item in items:
+                catalog_names = [case["name"] for case in item["catalogCases"]]
+                combined.extend(catalog_names)
+                if not grouped and catalog_names != names:
+                    mismatches.append(
+                        f"{item['source']}: catalog {len(catalog_names)} cases "
+                        f"!= --list {len(names)} cases"
+                    )
+                    continue
+                if grouped and not is_subsequence(catalog_names, names):
+                    mismatches.append(
+                        f"{item['source']}: its {len(catalog_names)} catalog "
+                        f"cases are not, in order, in the --list of {host}"
+                    )
+                    continue
+                if item["sourceCaseCount"] != len(catalog_names):
+                    mismatches.append(
+                        f"{item['source']}: sourceCaseCount "
+                        f"{item['sourceCaseCount']} != --list "
+                        f"{len(catalog_names)}"
+                    )
+                    continue
+                listed_by_source[item["source"]] = catalog_names
+            if grouped and sorted(combined) != sorted(names):
                 mismatches.append(
-                    f"{item['source']}: catalog {len(catalog_names)} cases != "
-                    f"--list {len(names)} cases"
-                )
-            elif item["sourceCaseCount"] != len(names):
-                mismatches.append(
-                    f"{item['source']}: sourceCaseCount "
-                    f"{item['sourceCaseCount']} != --list {len(names)}"
+                    f"{host}: its members' catalogs hold {len(combined)} cases, "
+                    f"its --list {len(names)}"
                 )
         self.assertEqual(mismatches, [], "\n".join(mismatches[:40]))
 
@@ -4807,7 +4946,7 @@ test "incomplete name" and:
             with self.subTest(source=source):
                 self.assertEqual(by_source[source]["countSource"], "catalog")
                 self.assertEqual(by_source[source]["sourceCaseCount"], expected)
-                self.assertEqual(len(resolved[source]), expected)
+                self.assertEqual(len(listed_by_source[source]), expected)
 
     @staticmethod
     def catalog_quarantine_by_os():
@@ -4816,7 +4955,30 @@ test "incomplete name" and:
         Linux exclusions come from explicit macOS-only whole-file branches;
         Darwin exclusions are checked against real built binaries on m1.
         A new member must be reviewed rather than absorbed into a count.
+
+        The REASON follows the binary that carries the source. A source with
+        a binary of its own registers no protocol (`no-protocol-support`). A
+        source grouped into a test binary (Test-Binary-Grouping) sits in a
+        binary that does enumerate, and declares none of its cases
+        (`no-member-cases`). The membership is the same either way.
         """
+        pinned = SuiteInventoryTests._pinned_catalog_quarantine_by_os()
+        specs, _ = inventory.parse_repro_tests(REPO_ROOT)
+        by_source = {spec.source: spec for spec in specs}
+
+        def reason(source, base):
+            spec = by_source.get(source)
+            if spec is not None and inventory.hosting_binary(REPO_ROOT, spec) != spec.binary:
+                return inventory.NO_MEMBER_CASES_STATUS
+            return base
+
+        return {
+            host: {source: reason(source, base) for source, base in members.items()}
+            for host, members in pinned.items()
+        }
+
+    @staticmethod
+    def _pinned_catalog_quarantine_by_os():
         no_protocol = "no-protocol-support"
         windows_only = {
             "libs/repro_build_engine/tests/test_m10_observed_env_live_windows.nim": no_protocol,

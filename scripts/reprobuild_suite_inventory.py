@@ -1088,10 +1088,75 @@ def hosting_binary(root: Path, spec: TestSpec) -> str:
     return spec.binary
 
 
+# Where the recipe writes each group's generated module
+# (``ct_test_nim_unittest/grouping.GroupModuleDir``).
+GROUP_MODULE_DIR = "build/test-groups"
+
+_GROUP_IMPORT_RE = re.compile(r'^import\s+"([^"]+)"\s*$', re.M)
+
+
+def group_module_members(root: Path, group: str) -> set[str] | None:
+    """The repo-relative sources the generated module of ``group`` imports.
+
+    That module is the group binary's only compile input, so the sources it
+    imports are exactly the members the binary carries. ``None`` when the
+    module is absent: nothing can then be said about membership.
+    """
+    module = root / GROUP_MODULE_DIR / f"{group}.nim"
+    try:
+        text = module.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    members: set[str] = set()
+    for target in _GROUP_IMPORT_RE.findall(text):
+        path = PurePosixPath(GROUP_MODULE_DIR, target + ".nim")
+        parts: list[str] = []
+        for part in path.parts:
+            if part == "..":
+                if parts:
+                    parts.pop()
+            elif part != ".":
+                parts.append(part)
+        members.add("/".join(parts))
+    return members
+
+
+def built_binary_for(root: Path, spec: TestSpec) -> str | None:
+    """The built binary that carries ``spec``'s cases, or ``None``.
+
+    A single source is built when its own binary exists. A grouped source
+    is built only when its GROUP binary exists AND the group's generated
+    module imports it: the group binary is what the suite builds for it, so
+    a missing group binary is a build defect even when a single-file binary
+    of the same source happens to be on disk.
+    """
+    if not spec.binary:
+        return None
+    if not spec.group:
+        return spec.binary if (root / spec.binary).is_file() else None
+    group_binary = (PurePosixPath(spec.binary).parent / spec.group).as_posix()
+    if not (root / group_binary).is_file():
+        return None
+    members = group_module_members(root, spec.group)
+    if members is None or spec.source not in members:
+        return None
+    return group_binary
+
+
+# Quarantine reason for a grouped source that contributes no case to the
+# catalog of the group binary carrying it.
+NO_MEMBER_CASES_STATUS = "no-member-cases"
+
+
 def member_catalog(outcome: dict[str, Any], source: str) -> dict[str, Any]:
     """A group binary's catalog narrowed to one member's cases: the rows whose
     ``file`` is the member's file name (the ``--list-json`` ``file`` field is
-    the declaring module's file name)."""
+    the declaring module's file name).
+
+    The result may be an ``ok`` catalog of zero cases; that is the probe's
+    fact and is what the disk cache stores. ``classify_member_outcomes``
+    turns it into the inventory's verdict.
+    """
     if outcome.get("status") != "ok":
         return outcome
     name = PurePosixPath(source).name
@@ -1101,6 +1166,39 @@ def member_catalog(outcome: dict[str, Any], source: str) -> dict[str, Any]:
         if PurePosixPath(str(case.get("file") or "").replace("\\", "/")).name == name
     ]
     return {**outcome, "cases": cases}
+
+
+def classify_member_outcomes(
+    root: Path, specs: list[TestSpec], results: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Report a grouped source that declares no case as ``no-member-cases``.
+
+    On its own such a source builds a binary that registers nothing, which
+    the probe quarantines as ``no-protocol-support``. Inside a group the
+    binary enumerates its other members, so the member's narrowed catalog is
+    an ``ok`` of zero rows; counting that as ``catalog`` with 0 cases would
+    silently move the source out of the pinned quarantine. Applied after the
+    cache is written, so the cache keeps holding only ``ok`` probe results.
+    """
+    classified = dict(results)
+    for spec in specs:
+        outcome = results.get(spec.source)
+        if (
+            outcome is None
+            or outcome.get("status") != "ok"
+            or outcome.get("cases")
+            or hosting_binary(root, spec) == spec.binary
+        ):
+            continue
+        classified[spec.source] = {
+            "status": NO_MEMBER_CASES_STATUS,
+            "detail": (
+                f"{hosting_binary(root, spec)} enumerates, and none of its "
+                f"cases is declared by {PurePosixPath(spec.source).name} on "
+                "this host"
+            ),
+        }
+    return classified
 
 
 def parse_repro_tests(root: Path) -> tuple[list[TestSpec], list[TestSpec]]:
@@ -3119,6 +3217,11 @@ QUARANTINE_REASON_DESCRIPTIONS = {
     "timeout": "--list-json exceeded the per-binary wall-clock bound",
     "unparseable-json": "--list-json stdout contained no decodable catalog document",
     "malformed-catalog": "the catalog document has no `tests` array",
+    "no-member-cases": (
+        "the source is grouped into a test binary that enumerates, and none "
+        "of that binary's cases is declared by this source on this host "
+        "(on its own it would build a binary with no protocol support)"
+    ),
 }
 
 # Probe-failure taxonomy, split by WHAT THE FAILURE IS A FACT ABOUT. This
@@ -3137,6 +3240,9 @@ INTRINSIC_QUARANTINE_REASONS = frozenset(
         # binary's output, not the host's.
         "unparseable-json",
         "malformed-catalog",
+        # The group binary answered; this source declared nothing in it.
+        # A fact about the source and the binary's bytes, like the above.
+        "no-member-cases",
     }
 )
 
@@ -4006,6 +4112,7 @@ def catalog_index(
             refreshed[spec.source] = {"key": key, "result": outcome}
         store_catalog_cache(cache_path, refreshed)
 
+    results = classify_member_outcomes(root, specs, results)
     _CATALOG_INDEX_MEMO[memo_key] = results
     return results
 
