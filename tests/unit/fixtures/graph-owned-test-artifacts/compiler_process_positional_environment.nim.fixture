@@ -1,0 +1,3 @@
+let compiler = "rustc"
+let metadata = newStringTable("CC", compiler)
+discard startProcess(getAppFilename(), "", @["--observe"], metadata)

@@ -19944,6 +19944,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_dev_env_msvc_activation.nim",
+    binary: "build/test-bin/t_dev_env_msvc_activation",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_dev_env_path_ops.nim",
     binary: "build/test-bin/t_dev_env_path_ops",
     defines: @[],

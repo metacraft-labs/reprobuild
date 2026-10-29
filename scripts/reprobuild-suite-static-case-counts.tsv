@@ -2225,6 +2225,7 @@ tests/unit/t_default_daemon_endpoints_fit_the_socket_address_limit.nim	nim	5
 tests/unit/t_dev_env_cache_key_frame.nim	nim	4
 tests/unit/t_dev_env_cache_key_store_root.nim	nim	4
 tests/unit/t_dev_env_large_values.nim	nim	5
+tests/unit/t_dev_env_msvc_activation.nim	nim	6
 tests/unit/t_dev_env_path_ops.nim	nim	9
 tests/unit/t_dev_env_prompt_watch_entries.nim	nim	3
 tests/unit/t_dev_env_prompt_watch_key.nim	nim	14
@@ -2429,7 +2430,7 @@ tests/unit/test_ct_test_surface_addressability.py	python	14
 tests/unit/test_daemon_worker_confinement_systemd_analyze.py	python	8
 tests/unit/test_dev_shell_hook_scope.py	python	7
 tests/unit/test_generated_artifact_merge_policy.py	python	19
-tests/unit/test_graph_owned_test_artifacts.py	python	25
+tests/unit/test_graph_owned_test_artifacts.py	python	26
 tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py	python	13
 tests/unit/test_hcr_replay_gate_monitor_policy.py	python	2
 tests/unit/test_install_nix_paths.py	python	14

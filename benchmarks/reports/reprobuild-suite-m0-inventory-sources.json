@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2407,
+    "nimTestBinaries": 2408,
     "pureUnitConsolidationGroups": 68,
     "pureUnitTests": 686,
     "staticallyDetectedRuntimeCompilerFlowTests": 130,
-    "testEntries": 2446
+    "testEntries": 2447
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1385,7 +1385,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1336,
+      "integration": 1337,
       "platform/destructive": 146,
       "pure unit": 686,
       "unclassified": 260
@@ -1596,9 +1596,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2407,
+    "nimTestBinaryCount": 2408,
     "pythonTestFileCount": 39,
-    "testEntryCount": 2446
+    "testEntryCount": 2447
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -1685,8 +1685,7 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
-            "path",
-            "root"
+            "path"
           ],
           "line": 197,
           "path": "libs/repro_dsl_stdlib/tests/t_nim_entropy_blessing.nim",
@@ -1762,8 +1761,7 @@
           "executedVariables": [
             "addCmd",
             "candleCmd",
-            "lightCmd",
-            "stagingDir"
+            "lightCmd"
           ],
           "line": 227,
           "path": "libs/repro_home_apply/tests/t_builtin_adapter_installer.nim",
@@ -1779,8 +1777,7 @@
           "executedVariables": [
             "addCmd",
             "candleCmd",
-            "lightCmd",
-            "stagingDir"
+            "lightCmd"
           ],
           "line": 234,
           "path": "libs/repro_home_apply/tests/t_builtin_adapter_installer.nim",
@@ -2430,7 +2427,6 @@
             "PatchableLinkFlags",
             "caseDir",
             "ctMcr",
-            "env",
             "patchObj",
             "repoRoot",
             "targetBin"
@@ -2451,7 +2447,6 @@
             "PatchableLinkFlags",
             "caseDir",
             "ctMcr",
-            "env",
             "patchObj",
             "repoRoot",
             "targetBin"
@@ -2477,7 +2472,6 @@
             "PatchableCompileFlags",
             "PatchableLinkFlags",
             "caseDir",
-            "env",
             "patchObj",
             "repoRoot",
             "targetBin"
@@ -2497,7 +2491,6 @@
             "PatchableCompileFlags",
             "PatchableLinkFlags",
             "caseDir",
-            "env",
             "patchObj",
             "repoRoot",
             "targetBin"
@@ -2524,7 +2517,6 @@
             "caseDir",
             "compileFlags",
             "directDir",
-            "env",
             "linkFlags",
             "patchObj",
             "repoRoot",
@@ -2546,7 +2538,6 @@
             "caseDir",
             "compileFlags",
             "directDir",
-            "env",
             "linkFlags",
             "patchObj",
             "repoRoot",
@@ -2574,7 +2565,6 @@
             "caseDir",
             "compileFlags",
             "directDir",
-            "env",
             "linkFlags",
             "patchObj",
             "repoRoot",
@@ -2596,7 +2586,6 @@
             "caseDir",
             "compileFlags",
             "directDir",
-            "env",
             "linkFlags",
             "patchObj",
             "repoRoot",
@@ -2623,7 +2612,6 @@
             "PatchableCompileFlags",
             "PatchableLinkFlags",
             "caseDir",
-            "env",
             "patchObj",
             "repoRoot",
             "targetBin"
@@ -2643,7 +2631,6 @@
             "PatchableCompileFlags",
             "PatchableLinkFlags",
             "caseDir",
-            "env",
             "patchObj",
             "repoRoot",
             "targetBin"
@@ -2668,7 +2655,6 @@
           "executedVariables": [
             "caseDir",
             "compileFlags",
-            "env",
             "linkFlags",
             "oldPath",
             "prepared",
@@ -2697,7 +2683,6 @@
           "executedVariables": [
             "caseDir",
             "compileFlags",
-            "env",
             "linkFlags",
             "prepared",
             "raw",
@@ -2719,7 +2704,6 @@
           "executedVariables": [
             "caseDir",
             "compileFlags",
-            "env",
             "linkFlags",
             "prepared",
             "raw",
@@ -2774,7 +2758,6 @@
             "caseDir",
             "compileFlags",
             "directDir",
-            "env",
             "libPath",
             "linkFlags",
             "patchObj",
@@ -2798,7 +2781,6 @@
             "caseDir",
             "compileFlags",
             "directDir",
-            "env",
             "libPath",
             "linkFlags",
             "patchObj",
@@ -2822,7 +2804,6 @@
             "caseDir",
             "compileFlags",
             "directDir",
-            "env",
             "libPath",
             "linkFlags",
             "patchObj",
@@ -2849,7 +2830,6 @@
           "directExecutionLine": true,
           "executedVariables": [
             "caseDir",
-            "env",
             "repoRoot",
             "targetBin"
           ],
@@ -2874,7 +2854,6 @@
             "args",
             "artifacts",
             "command",
-            "env",
             "logPath",
             "projectRoot",
             "repoRoot",
@@ -2908,7 +2887,6 @@
             "monitorTools",
             "pathValue",
             "projectRoot",
-            "repoRoot",
             "reproBin",
             "socketPath",
             "sourcePath"
@@ -2932,7 +2910,6 @@
             "monitorTools",
             "pathValue",
             "projectRoot",
-            "repoRoot",
             "reproBin",
             "socketPath",
             "sourcePath"
@@ -2964,7 +2941,6 @@
             "metadataB",
             "monitorTools",
             "pathValue",
-            "projectRoot",
             "reproBin",
             "socketA",
             "socketB",
@@ -2991,7 +2967,6 @@
             "metadataB",
             "monitorTools",
             "pathValue",
-            "projectRoot",
             "reproBin",
             "socketA",
             "socketB",
@@ -3024,7 +2999,6 @@
             "metadataB",
             "monitorTools",
             "pathValue",
-            "projectRoot",
             "reproBin",
             "socketA",
             "socketB",
@@ -3051,7 +3025,6 @@
             "metadataB",
             "monitorTools",
             "pathValue",
-            "projectRoot",
             "reproBin",
             "socketA",
             "socketB",
@@ -4328,8 +4301,7 @@
           "commandVariableExecuted": true,
           "directExecutionLine": false,
           "executedVariables": [
-            "cmd",
-            "env"
+            "cmd"
           ],
           "line": 85,
           "path": "tests/integration/t_b0_runquota_repro_nim_compiles.nim",
@@ -4877,7 +4849,6 @@
             "base",
             "cc",
             "d",
-            "env",
             "tools"
           ],
           "line": 392,
@@ -4895,7 +4866,6 @@
             "base",
             "cc",
             "d",
-            "env",
             "tools"
           ],
           "line": 422,
@@ -4913,7 +4883,6 @@
             "base",
             "cc",
             "d",
-            "env",
             "tools"
           ],
           "line": 698,
@@ -4931,7 +4900,6 @@
             "base",
             "cc",
             "d",
-            "env",
             "tools"
           ],
           "line": 707,
@@ -4949,7 +4917,6 @@
             "base",
             "cc",
             "d",
-            "env",
             "tools"
           ],
           "line": 747,
@@ -4967,7 +4934,6 @@
             "base",
             "cc",
             "d",
-            "env",
             "tools"
           ],
           "line": 766,
@@ -4985,7 +4951,6 @@
             "base",
             "cc",
             "d",
-            "env",
             "tools"
           ],
           "line": 829,
@@ -5003,7 +4968,6 @@
             "base",
             "cc",
             "d",
-            "env",
             "tools"
           ],
           "line": 839,
@@ -5021,7 +4985,6 @@
             "base",
             "cc",
             "d",
-            "env",
             "tools"
           ],
           "line": 1064,
@@ -5039,7 +5002,6 @@
             "base",
             "cc",
             "d",
-            "env",
             "tools"
           ],
           "line": 1074,
@@ -5180,7 +5142,6 @@
           "commandVariableExecuted": true,
           "directExecutionLine": false,
           "executedVariables": [
-            "env",
             "parts"
           ],
           "line": 35,
@@ -6082,10 +6043,8 @@
           "directExecutionLine": false,
           "executedVariables": [
             "args",
-            "childEnv",
             "cmd",
-            "command",
-            "env"
+            "command"
           ],
           "line": 197,
           "path": "tests/integration/t_m21_point_in_time_queries.nim",
@@ -6106,9 +6065,7 @@
           "directExecutionLine": false,
           "executedVariables": [
             "cmd",
-            "composed",
-            "dir",
-            "hermeticPath"
+            "composed"
           ],
           "line": 220,
           "path": "tests/integration/t_macro_time_shell_out_needs_no_shell_on_the_path.nim",
@@ -6146,7 +6103,6 @@
           "commandVariableExecuted": true,
           "directExecutionLine": false,
           "executedVariables": [
-            "env",
             "parts"
           ],
           "line": 52,
@@ -6396,9 +6352,7 @@
             "cmd",
             "errPath",
             "outPath",
-            "repoRoot",
-            "runCmd",
-            "work"
+            "runCmd"
           ],
           "line": 106,
           "path": "tests/integration/t_protocol_document_survives_suite_body_echo.nim",
@@ -6417,9 +6371,7 @@
             "cmd",
             "errPath",
             "outPath",
-            "repoRoot",
-            "runCmd",
-            "work"
+            "runCmd"
           ],
           "line": 151,
           "path": "tests/integration/t_protocol_document_survives_suite_body_echo.nim",
@@ -6461,9 +6413,7 @@
           "executedVariables": [
             "cmd",
             "hcmd",
-            "pcmd",
-            "repoRoot",
-            "tempRoot"
+            "pcmd"
           ],
           "line": 280,
           "path": "tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim",
@@ -6479,9 +6429,7 @@
           "executedVariables": [
             "cmd",
             "hcmd",
-            "pcmd",
-            "repoRoot",
-            "tempRoot"
+            "pcmd"
           ],
           "line": 303,
           "path": "tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim",
@@ -6742,7 +6690,6 @@
             "binDir",
             "fixture",
             "fixtureSource",
-            "root",
             "runner",
             "scratch",
             "summary"
@@ -7591,7 +7538,6 @@
           "executedVariables": [
             "ccPath",
             "expectedRpath",
-            "fixtureEnv",
             "installScript",
             "mirrorMain",
             "patchelfPath",
@@ -7611,7 +7557,6 @@
           "executedVariables": [
             "ccPath",
             "expectedRpath",
-            "fixtureEnv",
             "installScript",
             "mirrorMain",
             "patchelfPath",
@@ -7631,7 +7576,6 @@
           "executedVariables": [
             "ccPath",
             "expectedRpath",
-            "fixtureEnv",
             "installScript",
             "mirrorMain",
             "patchelfPath",
@@ -7651,7 +7595,6 @@
           "executedVariables": [
             "ccPath",
             "expectedRpath",
-            "fixtureEnv",
             "installScript",
             "mirrorMain",
             "patchelfPath",
@@ -7671,7 +7614,6 @@
           "executedVariables": [
             "ccPath",
             "expectedRpath",
-            "fixtureEnv",
             "installScript",
             "mirrorMain",
             "patchelfPath",
@@ -7691,7 +7633,6 @@
           "executedVariables": [
             "ccPath",
             "expectedRpath",
-            "fixtureEnv",
             "installScript",
             "mirrorMain",
             "patchelfPath",
@@ -7793,8 +7734,7 @@
           "commandVariableExecuted": true,
           "directExecutionLine": false,
           "executedVariables": [
-            "cmd",
-            "scratchRoot"
+            "cmd"
           ],
           "line": 106,
           "path": "tests/unit/t_windows_system_hash_mode.nim",
@@ -7808,8 +7748,7 @@
           "commandVariableExecuted": true,
           "directExecutionLine": false,
           "executedVariables": [
-            "cmd",
-            "scratchRoot"
+            "cmd"
           ],
           "line": 142,
           "path": "tests/unit/t_windows_system_hash_mode.nim",
@@ -47723,6 +47662,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_dev_env_msvc_activation",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dev_env_activation",
+        "repro_dev_env_artifacts",
+        "repro_platform",
+        "repro_provider_runtime"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_dev_env_msvc_activation.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_dev_env_path_ops",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -51368,7 +51327,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_graph_owned_test_artifacts.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 25,
+      "staticCaseCount": 26,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

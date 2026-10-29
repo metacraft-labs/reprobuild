@@ -410,6 +410,17 @@ class TheRatchetHasNoWalkableBypass(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertTrue(self.spawns(fixture(name), "t_" + name))
 
+    def test_process_metadata_is_not_command_data(self):
+        for name in ("compiler_process_environment",
+                     "compiler_process_positional_environment",
+                     "compiler_exec_environment"):
+            with self.subTest(name=name):
+                self.assertFalse(self.spawns(fixture(name), "t_" + name))
+        for name in ("compiler_process_arguments", "compiler_shell_stdin",
+                     "compiler_nested_environment"):
+            with self.subTest(name=name):
+                self.assertTrue(self.spawns(fixture(name), "t_" + name))
+
     def test_nim_check_is_detected(self):
         self.assertTrue(
             self.spawns(NIM_CHECK_TEST, "t_nim_check"),

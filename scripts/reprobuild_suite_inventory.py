@@ -4435,6 +4435,72 @@ def compiler_reference_code(text: str) -> str:
     return nim_code_only(text) + "\n" + "\n".join(braced_strings)
 
 
+def executor_command_expression(expression: str, executor: str) -> str:
+    """Keep command-bearing arguments of known std/osproc executors.
+
+    Environment/options/working-directory values are not executable argv.
+    Unknown wrappers remain conservative. In particular, execCmdEx's input
+    stays visible: a shell can execute compiler commands supplied on stdin.
+    Mask by lexer positions so existing raw command patterns and line numbers
+    retain their exact spelling, including interpolation and multiline text.
+    """
+    ignored_positions = {
+        "startProcess": {1, 3, 4},
+        "execProcess": {1, 3, 4},
+        "execCmdEx": {1, 2, 3},
+        "execCmd": set(),
+    }
+    if executor not in ignored_positions:
+        return expression
+    tokens = nim_tokens(expression)
+    opening = next((i for i, token in enumerate(tokens) if token.value == "("), None)
+    if opening is None:
+        return expression
+    lines = expression.splitlines(keepends=True)
+    starts = [0]
+    for line in lines:
+        starts.append(starts[-1] + len(line))
+
+    def offset(token: NimToken) -> int:
+        index = starts[token.line - 1]
+        column = 0
+        while index < len(expression) and column < token.column:
+            column = ((column // 8 + 1) * 8 if expression[index] == "\t"
+                      else column + 1)
+            index += 1
+        return index
+
+    masked = list(expression)
+    depth = 0
+    argument_start = opening + 1
+    argument_index = 0
+    for i in range(opening + 1, len(tokens)):
+        token = tokens[i]
+        if token.kind == "string":
+            continue
+        boundary = depth == 0 and token.value in {",", ")"}
+        if boundary:
+            argument = [item for item in tokens[argument_start:i]
+                        if item.kind != "newline"]
+            if argument:
+                named = (len(argument) > 1 and argument[1].value == "=")
+                ignored = (nim_name_key(argument[0].value) in {"env", "options", "workingdir"}
+                           if named else argument_index in ignored_positions[executor])
+                if ignored:
+                    for position in range(offset(argument[0]), offset(token)):
+                        if masked[position] != "\n":
+                            masked[position] = " "
+            if token.value == ")":
+                break
+            argument_start = i + 1
+            argument_index += 1
+        elif token.value in {"(", "[", "{"}:
+            depth += 1
+        elif token.value in {")", "]", "}"}:
+            depth -= 1
+    return "".join(masked)
+
+
 def compiler_invocations(path: str, text: str) -> list[dict[str, Any]]:
     lines = text.splitlines()
     assignment_blocks: dict[str, tuple[int, int, str]] = {}
@@ -4481,23 +4547,27 @@ def compiler_invocations(path: str, text: str) -> list[dict[str, Any]]:
         }
 
     executed_vars: set[str] = set()
+    executor_command_lines: dict[int, list[str]] = {}
     for line_idx, line in enumerate(lines):
-        executor = EXECUTOR_PATTERN.search(line)
-        if executor is None:
-            continue
-        expression = line[executor.start() :]
-        balance = expression.count("(") - expression.count(")")
-        cursor = line_idx + 1
-        while balance > 0 and cursor < len(lines):
-            expression += "\n" + lines[cursor]
-            balance += lines[cursor].count("(") - lines[cursor].count(")")
-            cursor += 1
-        expression_code = compiler_reference_code(expression)
-        executed_vars.update(
-            name
-            for name in assignment_names
-            if re.search(r"\b" + re.escape(name) + r"\b", expression_code)
-        )
+        # Include nested calls too: a compiler spawned while constructing an
+        # environment is still a real spawn, unlike passive environment data.
+        for executor in EXECUTOR_PATTERN.finditer(line):
+            expression = line[executor.start() :]
+            balance = expression.count("(") - expression.count(")")
+            cursor = line_idx + 1
+            while balance > 0 and cursor < len(lines):
+                expression += "\n" + lines[cursor]
+                balance += lines[cursor].count("(") - lines[cursor].count(")")
+                cursor += 1
+            command = executor_command_expression(expression, executor.group(1))
+            for offset, command_line in enumerate(command.splitlines()):
+                executor_command_lines.setdefault(line_idx + offset + 1, []).append(command_line)
+            expression_code = compiler_reference_code(command)
+            executed_vars.update(
+                name
+                for name in assignment_names
+                if re.search(r"\b" + re.escape(name) + r"\b", expression_code)
+            )
 
     flows_to_executor: dict[str, bool] = {}
 
@@ -4588,6 +4658,12 @@ def compiler_invocations(path: str, text: str) -> list[dict[str, Any]]:
             EXECUTOR_PATTERN.search(stripped)
             or inside_multiline_executor
         )
+        if direct_exec and idx in executor_command_lines:
+            direct_exec = any(
+                pattern.search(command_line)
+                for command_line in executor_command_lines[idx]
+                for name, pattern in COMPILER_PATTERNS if name in pattern_names
+            )
         matches.append(
             {
                 "path": path,
