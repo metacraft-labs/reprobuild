@@ -421,7 +421,7 @@ suite "L4: daemon-hosted lease registry + wall-clock reaping":
   test "(e) an unmarshallable record neither aborts the tick nor floods the log":
     ## The measured defect (reprobuild-specs/issues/
     ## 2026-09-29-lease-reap-tick-has-never-once-succeeded.md): the live
-    ## per-user daemon's tick raised on its FIRST record — a `vm_harness.nic`
+    ## per-user daemon's tick raised on its FIRST record — a `gosti.nic`
     ## whose attrs marshaller the daemon does not link — reaped nothing, and
     ## logged the identical sentence 141,895 times over 60 days (62 MB of an
     ## unrotated 385 MB log). Two failures in one: the tick never ran, and the
@@ -1076,21 +1076,21 @@ suite "L4: daemon-hosted lease registry + wall-clock reaping":
     let request = DaemonLeaseReapProvidersRequest(
       scope: dlsUser,
       providers: @[
-        DaemonLeaseReapProvider(typeId: "vm_harness.nic",
+        DaemonLeaseReapProvider(typeId: "gosti.nic",
           binaryPath: "/nix/store/p/bin/prov", providerArtifactId: "aa11",
           workingDir: "/work"),
-        DaemonLeaseReapProvider(typeId: "vm_harness.container",
+        DaemonLeaseReapProvider(typeId: "gosti.container",
           binaryPath: "/nix/store/p/bin/prov", providerArtifactId: "aa11",
           workingDir: "/work")])
     let back = parseLeaseReapProvidersRequestBody(
       leaseReapProvidersRequestBody(request))
     check back.scope == dlsUser
     check back.providers.len == 2
-    check back.providers[0].typeId == "vm_harness.nic"
+    check back.providers[0].typeId == "gosti.nic"
     check back.providers[0].binaryPath == "/nix/store/p/bin/prov"
     check back.providers[0].providerArtifactId == "aa11"
     check back.providers[0].workingDir == "/work"
-    check back.providers[1].typeId == "vm_harness.container"
+    check back.providers[1].typeId == "gosti.container"
 
     # The system scope survives the hop too (the daemon logs it; a client
     # routes by endpoint).

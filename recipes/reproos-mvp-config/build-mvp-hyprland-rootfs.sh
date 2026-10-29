@@ -556,7 +556,7 @@ if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
 fi
 
 # Headless mode: WLR_BACKENDS=headless skips DRM, renders to off-screen
-# pixman surface. Used by DE-H2's vm-harness boot test when the DRM
+# pixman surface. Used by DE-H2's gosti boot test when the DRM
 # backend doesn't behave on Hyper-V SyntheticVideo.
 if [ "${REPRO_HEADLESS:-0}" = "1" ]; then
   export WLR_BACKENDS=headless
@@ -726,7 +726,7 @@ Planted config:
   /etc/profile.d/glvnd.sh                  (__EGL_VENDOR_LIBRARY_DIRS export)
 
 Next step:
-  DE-H2 : vm-harness Hyper-V boot test (boots ISO, autologin, exec
+  DE-H2 : gosti Hyper-V boot test (boots ISO, autologin, exec
           repro-start-hyprland.sh, assert compositor up).
 EOF
 

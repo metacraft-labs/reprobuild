@@ -78,14 +78,14 @@
 ##   the ``mergedLdConf`` file content + the ``displayManagerSymlink``
 ##   intent record + the generation manifest. The activation layer that
 ##   plants the live ``/etc/`` symlinks into the booted system + swaps
-##   the symlink farm on rollback is deferred to NDEM2 (vm-harness gate)
+##   the symlink farm on rollback is deferred to NDEM2 (gosti gate)
 ##   + a follow-up activation runtime milestone.
 ##
 ## * **Bootloader integration is DEFERRED.** Spec NDEM1 requires GRUB
 ##   menu entries per generation. v1 emits ``grubMenuEntries``
 ##   ``ManagedFiles`` (one entry per generation), but the actual
 ##   ``grub-mkconfig`` invocation + the bootable-ISO lift is NDEM2 work
-##   alongside the vm-harness e2e test.
+##   alongside the gosti e2e test.
 ##
 ## * **Multi-generation persistence is DEFERRED.** v1 emits a SINGLE
 ##   generation manifest per ``materializeReproosDesktop`` call. The
@@ -467,7 +467,7 @@ proc emitDisplayManagerSymlink(cfg: ReproosDesktopConfig): ManagedFiles =
 
 # ---------------------------------------------------------------------------
 # GRUB menu entries (single-generation v1 emission; multi-generation
-# persistence lands in NDEM2 alongside the vm-harness gate).
+# persistence lands in NDEM2 alongside the gosti gate).
 # ---------------------------------------------------------------------------
 
 proc renderGrubMenuEntry(cfg: ReproosDesktopConfig;

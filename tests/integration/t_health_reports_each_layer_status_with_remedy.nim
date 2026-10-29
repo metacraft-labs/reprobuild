@@ -391,9 +391,9 @@ suite "RA-30 — repro health reports each layer status with remedy":
         let store = openStateStore(leaseStore)
         writeStateRecord(store, ResourceStateRecord(
           address: "nic0",
-          typeId: "vm_harness.nic",
+          typeId: "gosti.nic",
           determinism: rdVolatile,
-          attrsTypeId: "vm_harness.nic",
+          attrsTypeId: "gosti.nic",
           attrsJson: "\x01\x00\x00\x00\x00\x00",
           dependsOn: @[],
           identity: "incus:nic0",
@@ -463,9 +463,9 @@ suite "RA-30 — repro health reports each layer status with remedy":
           "totalTicks=131882\n" &
           "consecutiveUnsuccessful=131882\n" &
           "elidedStuck=3\n" &
-          "stuck.0=cannot reap address=nic0 typeId=vm_harness.nic: no " &
+          "stuck.0=cannot reap address=nic0 typeId=gosti.nic: no " &
           "attribute marshaller registered for resource typeId " &
-          "'vm_harness.nic'\n")
+          "'gosti.nic'\n")
         let report = healthWithFixtureHome()
         let row = findCheck(report, "lease-reaper")
         check row["status"].getStr() == "fail"
@@ -478,7 +478,7 @@ suite "RA-30 — repro health reports each layer status with remedy":
         check row["detail"].getStr().contains("131882 consecutive ticks")
         # It names the stuck record, so the finding is actionable without
         # opening the daemon log...
-        check row["detail"].getStr().contains("vm_harness.nic")
+        check row["detail"].getStr().contains("gosti.nic")
         check row["detail"].getStr().contains("address=nic0")
         # ...and ADMITS to what the VERDICT never recorded. That is the tick's
         # persistence cap, which is a different elision from the row's digest

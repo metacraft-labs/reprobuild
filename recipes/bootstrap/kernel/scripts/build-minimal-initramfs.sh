@@ -42,7 +42,7 @@ echo "================================================================"
 echo "R8-INIT-REACHED: from-source kernel reached userspace init"
 echo "================================================================"
 echo
-# Brief sleep then power off -- vm-harness expects an orderly shutdown.
+# Brief sleep then power off -- gosti expects an orderly shutdown.
 sleep 1
 poweroff -f 2>/dev/null || halt -f 2>/dev/null || exit 1
 EOF

@@ -36,7 +36,7 @@
 #   - The DEM2 sentinel /var/lib/reproos-dem2-multi-de-sddm-done lands.
 #   - Re-applying is a no-op (sentinel short-circuit).
 #
-# What this test does NOT gate (covered by the optional vm-harness test):
+# What this test does NOT gate (covered by the optional gosti test):
 #   - Booting the ISO and verifying the SDDM greeter UI lists 3 sessions.
 #   - Actual DE banner attempts (blocked by cascade G + linker cascade).
 #

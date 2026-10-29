@@ -621,7 +621,7 @@ fi
 
 # Headless mode: MUTTER_DEBUG_DUMMY_MODE_SPECS bypasses the DRM
 # backend and renders to a dummy in-memory output. Used by DE-G2's
-# vm-harness boot test when the DRM backend doesn't behave on
+# gosti boot test when the DRM backend doesn't behave on
 # Hyper-V SyntheticVideo.
 if [ "${REPRO_HEADLESS:-0}" = "1" ]; then
   export MUTTER_DEBUG_DUMMY_MODE_SPECS="1024x768@60"
@@ -809,7 +809,7 @@ Planted config:
   /var/lib/gdm3/                                                       (gdm stateful dir)
 
 Next step:
-  DE-G2 : vm-harness Hyper-V GNOME boot test (boots ISO, autologin, exec
+  DE-G2 : gosti Hyper-V GNOME boot test (boots ISO, autologin, exec
           repro-start-gnome.sh, assert gnome-shell up).
 EOF
 

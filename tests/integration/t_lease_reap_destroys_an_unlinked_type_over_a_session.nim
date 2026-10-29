@@ -16,7 +16,7 @@
 ## ticks, because the transport falls back to it when no provider artifact is
 ## known and, at the time, nothing in the shipped tree could make one known
 ## (reprobuild-pm/issues/2026-10-14-no-production-path-enables-the-daemons-session-reap-transport.md).
-## Its `vm_harness.nic` record had neither a linked driver nor a linked codec
+## Its `gosti.nic` record had neither a linked driver nor a linked codec
 ## there, so no change to the reconstruction could have reaped it. What this
 ## case pins is the second, independent defect that would have produced the
 ## identical symptom in a daemon that DID have the artifact — and the
@@ -75,7 +75,7 @@ import repro_resources
 const ReapTypeId = "reapsess.fileworld"
 
 # The engine side needs the attrs codec only to WRITE the record in step 2 —
-# exactly as the process that materialized the live `vm_harness.nic` record did.
+# exactly as the process that materialized the live `gosti.nic` record did.
 # It is dropped again before the reap, which is the state under test.
 type
   FileWorldAttrs = object
@@ -237,7 +237,7 @@ suite "lease reap destroys an unlinked type over a provider session":
     # ── Step 2: materialize over the session, WITH the codec present. ──────
     # The engine holds only the attrs codec, never the driver — the RP5a
     # "consumer has the contract, not the impl" boundary. This is the process
-    # that wrote the live `vm_harness.nic` record.
+    # that wrote the live `gosti.nic` record.
     registerExtension[FileWorldAttrs](ReapTypeId)
     check extensionRegistry.contains(ReapTypeId)
     let inst = desiredInstance(worldPath, "up")

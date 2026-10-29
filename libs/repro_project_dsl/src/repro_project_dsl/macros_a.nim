@@ -3867,7 +3867,7 @@ proc workspaceProducerLocation(selector, consumerSourceFile: string):
   # WORKSPACE-ROOT sibling convention so a DEEP out-of-tree consumer (e.g. an
   # ``infra/tests/rp5c2/recipe.nim`` several dirs below the workspace root) can
   # still bind a producer checked out as a top-level workspace sibling
-  # (``<workspace>/vm-harness``) — the RP5c2 shape. It is purely additive: a
+  # (``<workspace>/gosti``) — the RP5c2 shape. It is purely additive: a
   # direct sibling is still found at the first level, so no existing discovery
   # changes; only the previously-unresolvable deeper case now resolves. The
   # nearest ancestor that owns a ``<selector>`` project wins, so a same-named
@@ -3915,7 +3915,7 @@ proc parseResourceModuleDecl*(reproSource, projectRoot: string):
   ## in the Nim VM at CONSUMER macro-expansion and never imports the producer.
   ##
   ## Grammar (indentation-delimited, matching the marker macro):
-  ##   resourceModule "src/vm_harness/repro/resources.nim":
+  ##   resourceModule "src/gosti/repro/resources.nim":
   ##     path "src"
   ##     path "vendor/foo"
   ##
@@ -4014,9 +4014,9 @@ proc workspaceProducerDeclaresResourceType(selector,
   ## grain ``workspaceProducerModule`` above already uses. It is deliberately
   ## conservative: any line whose first token is ``resourceType`` counts.
   ##
-  ## TI2 (separate-module producer — the RP5c2 vm-harness shape): a producer that
+  ## TI2 (separate-module producer — the RP5c2 gosti shape): a producer that
   ## keeps its ``resourceType`` blocks in a SEPARATE module (e.g.
-  ## ``src/vm_harness/repro/resources.nim``) and NAMES it via a
+  ## ``src/gosti/repro/resources.nim``) and NAMES it via a
   ## ``resourceModule "<path>"`` surface entry in ``repro.nim`` is ALSO detected
   ## here — its ``repro.nim`` has no inline ``resourceType`` line, so without
   ## this branch it would fall to SC-9's wholesale module import (dragging the
@@ -4225,7 +4225,7 @@ proc dslScratchRootFor*(workspaceRoot, consumerSourceFile: string): string =
   ## ancestor whose child the producer actually is — and NOT from counting
   ## directories up from the consumer's source file. Those two agree only when
   ## the consumer's ``uses:`` sits in its project's root module. ReproOS's does
-  ## not: its ``uses: "vm-harness"`` is in ``reproos/repro/workflows.nim`` and
+  ## not: its ``uses: "gosti"`` is in ``reproos/repro/workflows.nim`` and
   ## the producer resolves two levels up, at the workspace root.
   ##
   ## The fallback is the consumer's own project directory, used only when no
@@ -4809,7 +4809,7 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   # ``resourceType`` AND an ``executable``/``library`` is routed here and the
   # ``continue`` above SKIPS the SC-9 wholesale-module import, so its exec/lib
   # typed wrappers do NOT cross alongside its resource contract. Acceptable for
-  # the resource-only gate (and vm-harness, whose providers are resource-shaped);
+  # the resource-only gate (and gosti, whose providers are resource-shaped);
   # unifying the exec/lib SC-9 path onto the same cached-artifact read is a TI2
   # follow-up (emit BOTH the accessor splice AND the module import for such a
   # sibling).

@@ -253,7 +253,7 @@ Two properties were checked, both by the test rather than by inspection:
   `identityCollisions`. They fall across seven files, and every one of them is a
   pair of declarations in *mutually exclusive* arms of a `when`: `when not
   defined(windows): … else: …` in four files (m74, m75, m76, m83), `when
-  defined(vmHarnessAvailable)` in two (`t_r2_iso_boot`, `t_r9_systemd_boot`),
+  defined(gostiAvailable)` in two (`t_r2_iso_boot`, `t_r9_systemd_boot`),
   and `when defined(macosx) or defined(linux)` in the last
   (`t_e2e_repro_watch_multiple_named_targets`). At most one of each pair exists
   in any build — the compiled binary has one case with that name and nothing to

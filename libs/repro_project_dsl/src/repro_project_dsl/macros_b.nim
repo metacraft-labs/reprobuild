@@ -9620,13 +9620,13 @@ proc emitM9R3LibraryApis*(packageName: string;
 
 macro resourceModule*(modulePath: static string; body: untyped = nil): untyped =
   ## TI2 producer-surface declaration: a producer's ``repro.nim`` NAMES the
-  ## separate module carrying its ``resourceType`` blocks (the RP5c2 vm-harness
-  ## shape — ``src/vm_harness/repro/resources.nim`` — NOT inline in
+  ## separate module carrying its ``resourceType`` blocks (the RP5c2 gosti
+  ## shape — ``src/gosti/repro/resources.nim`` — NOT inline in
   ## ``repro.nim``), plus any extra ``--path`` search roots that module's imports
   ## need, WITHOUT importing it into the core build:
   ##
   ## .. code-block:: nim
-  ##   resourceModule "src/vm_harness/repro/resources.nim":
+  ##   resourceModule "src/gosti/repro/resources.nim":
   ##     path "src"
   ##
   ## This is a PURE MARKER. It expands to nothing, so a producer's core

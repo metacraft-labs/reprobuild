@@ -151,7 +151,7 @@ const BuiltSourcePackageRoots = [
   ("STINT_SRC", compileTimeSourceRoot("STINT_SRC")),
   ("IO_MON_SRC", compileTimeSourceRoot("IO_MON_SRC")),
   ("STACKABLE_HOOKS_SRC", compileTimeSourceRoot("STACKABLE_HOOKS_SRC")),
-  ("VM_HARNESS_SRC", compileTimeSourceRoot("VM_HARNESS_SRC")),
+  ("GOSTI_SRC", compileTimeSourceRoot("GOSTI_SRC")),
   ("SHM_QUEUE_SRC", compileTimeSourceRoot("SHM_QUEUE_SRC")),
   ("SHM_GSET_SRC", compileTimeSourceRoot("SHM_GSET_SRC")),
   ("REPRO_CT_TEST_RUNNER_SRC",
@@ -5057,9 +5057,9 @@ proc bootstrapSiblingPackagePathFlags*(reprobuildRoot: string;
     ("STACKABLE_HOOKS_SRC", anchored([
       ".." / "nim-stackable-hooks" / "src",
     ]), "stackable_hooks.nim"),
-    ("VM_HARNESS_SRC", anchored([
-      ".." / "vm-harness" / "src",
-    ]), "vm_harness.nim"),
+    ("GOSTI_SRC", anchored([
+      ".." / "gosti" / "src",
+    ]), "gosti.nim"),
     # SHM-QUEUE-MIGRATE: ``shm_queue`` — the extracted single MPSC ring —
     # reaches this closure through io-mon. ``config.nims`` registers it via
     # ``addPackagePath("SHM_QUEUE_SRC", …, useDevShellFallback = true)``, so it
@@ -7574,7 +7574,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   ## value is baked into the compiled recipe, would do so silently.
   ##
   ## TI1 (Project-Provider-Runtime-Protocol.milestones.org) — a producer may
-  ## declare a RESOURCE MODULE (e.g. vm-harness's ``src/vm_harness/repro/
+  ## declare a RESOURCE MODULE (e.g. gosti's ``src/gosti/repro/
   ## resources.nim``) that carries its ``resourceType`` blocks, plus the extra
   ## ``--path``s that module's imports need. When ``resourceModule`` is given
   ## the extraction runner ALSO imports that module so its module-init
