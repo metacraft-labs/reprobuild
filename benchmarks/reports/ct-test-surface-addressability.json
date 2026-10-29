@@ -11,6 +11,16 @@
       "source": "libs/repro_dsl_stdlib/tests/t_workspace_floor_windows_tarball_arms.nim"
     },
     {
+      "ctTestCaseCount": 21,
+      "inventoryStaticCaseCount": 16,
+      "source": "libs/repro_standard_provider/tests/test_delegated_build_outputs.nim"
+    },
+    {
+      "ctTestCaseCount": 9,
+      "inventoryStaticCaseCount": 8,
+      "source": "libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim"
+    },
+    {
       "ctTestCaseCount": 2,
       "inventoryStaticCaseCount": 3,
       "source": "libs/repro_tool_profiles/tests/t_tar_listing_ignores_tar_warnings.nim"
@@ -19,6 +29,11 @@
       "ctTestCaseCount": 4,
       "inventoryStaticCaseCount": 5,
       "source": "tests/e2e/m68/t_e2e_repro_home_depends_on_topological.nim"
+    },
+    {
+      "ctTestCaseCount": 5,
+      "inventoryStaticCaseCount": 4,
+      "source": "tests/integration/t_flake_inputs_match_original_coordinates.nim"
     },
     {
       "ctTestCaseCount": 0,
@@ -33,20 +48,21 @@
   ],
   "command": "ct-test test discover --workspace <repo> --json",
   "counts": {
-    "catalogs": 4,
+    "catalogs": 5,
     "itemsByKind": {
-      "case": 15507,
-      "suite": 3584
+      "case": 15794,
+      "suite": 3631
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 18537,
-      "python-unittest": 551
+      "nim-unittest": 18841,
+      "python-pytest": 7,
+      "python-unittest": 574
     },
-    "itemsTotal": 19091,
+    "itemsTotal": 19425,
     "responseDiagnostics": {
       "info": 1,
-      "warning": 34
+      "warning": 33
     }
   },
   "discoveryScope": "auto (the surface's default: the workspace's own VCS inventory; vendored and ignored trees excluded)",
@@ -146,7 +162,7 @@
         },
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 179
+          "startLine": 197
         }
       ]
     },
@@ -161,7 +177,7 @@
         },
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 267
+          "startLine": 285
         }
       ]
     },
@@ -176,7 +192,7 @@
         },
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 343
+          "startLine": 365
         }
       ]
     },
@@ -191,7 +207,7 @@
         },
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 224
+          "startLine": 242
         }
       ]
     },
@@ -242,29 +258,29 @@
     }
   ],
   "reconciliation": {
-    "caseCoveragePercent": 97.34,
-    "caseItemsInCatalog": 15507,
-    "casesAddressableThroughTheSurface": 14615,
+    "caseCoveragePercent": 97.42,
+    "caseItemsInCatalog": 15794,
+    "casesAddressableThroughTheSurface": 14867,
     "collidingIdentities": 12,
-    "distinctCaseIdentities": 15493,
+    "distinctCaseIdentities": 15780,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 2363,
-      "compared": 2369,
-      "disagree": 6
+      "agree": 2390,
+      "compared": 2399,
+      "disagree": 9
     },
-    "sourceCoveragePercent": 99.66,
-    "sourcesAddressableThroughTheSurface": 2369,
+    "sourceCoveragePercent": 99.67,
+    "sourcesAddressableThroughTheSurface": 2399,
     "sourcesNotAddressable": 8,
-    "trackedNimSuiteSources": 2377,
-    "trackedStaticCaseCount": 15015
+    "trackedNimSuiteSources": 2407,
+    "trackedStaticCaseCount": 15260
   },
   "schemaVersion": 1,
   "surface": {
     "binary": "ct-test",
     "provenance": "",
     "resolvedBy": "PATH:ct-test",
-    "sha256": "76a1ba2cafa765584695a92ed60fdd8163997028739878b4c53034794f9c5b5d"
+    "sha256": "d25b63e4f99ee2c19922c4cb67677b13cc276e2a36ca3c74e9c9027ccdc97e94"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "unaddressableSources": [
