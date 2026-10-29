@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2419,
+    "nimTestBinaries": 2421,
     "pureUnitConsolidationGroups": 69,
     "pureUnitTests": 688,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2459
+    "testEntries": 2461
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1398,7 +1398,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1346,
+      "integration": 1348,
       "platform/destructive": 146,
       "pure unit": 688,
       "unclassified": 261
@@ -1609,9 +1609,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2419,
+    "nimTestBinaryCount": 2421,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2459
+    "testEntryCount": 2461
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -38730,6 +38730,42 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_lock_store_inside_another_repo_is_not_publishable.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_lock_update_node_failure_withholds_only_the_certificate",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_lock_update_node_failure_withholds_only_the_certificate.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_lock_update_node_refreshes_the_flake_lock_through_repro_test",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_lock_update_node_refreshes_the_flake_lock_through_repro_test.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

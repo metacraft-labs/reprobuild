@@ -60496,6 +60496,83 @@ proc commitTimeConsistencyRefusalLines*(repoRoot: string;
     for line in renderConsistencyRefusal(outcome.inconsistencies):
       result.add(line)
 
+proc lockDiffersFromIndex(repoRoot, lockPath: string):
+    tuple[differs: bool; problem: string] =
+  ## Whether the TRACKED lock at ``lockPath`` carries working-tree changes the
+  ## repository's index does not have (``git diff --quiet``: exit 1). An
+  ## untracked lock is not in the content a certificate covers (Content-Id
+  ## §4.1 updates tracked paths only), so it never "differs" here.
+  var identity: GitToolIdentity
+  try:
+    identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  except CatchableError as err:
+    return (false, "git is not resolvable (" & err.msg & ")")
+  let env = scrubbedGitRepositoryEnv()
+  let prefix = quoteShell(identity.binaryPath) & " -C " & quoteShell(repoRoot)
+  try:
+    let tracked = execCmdEx(prefix & " ls-files --error-unmatch -- " &
+      quoteShell(lockPath), options = {poStdErrToStdOut, poUsePath}, env = env)
+    if tracked.exitCode != 0:
+      return (false, "")
+    let diff = execCmdEx(prefix & " diff --quiet -- " & quoteShell(lockPath),
+      options = {poStdErrToStdOut, poUsePath}, env = env)
+    case diff.exitCode
+    of 0: (false, "")
+    of 1: (true, "")
+    else: (false, "`git diff --quiet -- " & lockPath & "` failed (exit " &
+      $diff.exitCode & "): " & diff.output.strip())
+  except CatchableError as err:
+    (false, "`git diff -- " & lockPath & "` could not be run: " & err.msg)
+
+proc stageCurrentUnstagedLocks(workspaceRoot, repoRoot, timestamp: string;
+    hasReproLock, hasFlake: bool; outcome: var CommitTimeWritersOutcome) =
+  ## The lock-update node's last step (HL-10, Test-Certificates "It writes
+  ## the working tree and stages what it wrote"): a lock the writers did not
+  ## rewrite THIS run, because it is already current, but whose working-tree
+  ## state the index lacks is staged now. That is the lock an EARLIER run
+  ## rewrote and could not stage (its run withheld the certificate and said
+  ## `git add` it): without this step the next run finds nothing to write,
+  ## issues a certificate for a working tree whose refreshed lock a plain
+  ## `git commit` would still leave behind — exactly the "one tested file
+  ## the commit forgot" the staging rule exists to prevent. A lock that
+  ## cannot be staged is ``notStaged``, which withholds the certificate as
+  ## for a lock written this run. Nothing but the two managed locks is ever
+  ## staged. Never raises.
+  let label = commitTimeWriterLabel(ctwsLockUpdateNode)
+  var locks: seq[string]
+  if hasReproLock: locks.add(committedLockPath(repoRoot))
+  if hasFlake: locks.add(repoRoot / "flake.lock")
+  var written: seq[string]
+  for w in outcome.written:
+    written.add(os.normalizedPath(absolutePath(w)))
+  for lockPath in locks:
+    if os.normalizedPath(absolutePath(lockPath)) in written:
+      continue                      # staged (or reported) by its writer
+    let state = lockDiffersFromIndex(repoRoot, lockPath)
+    if state.problem.len > 0:
+      outcome.failures.add("lock-stage check: " & state.problem)
+      appendCommitTimeWriterLog(ctwsLockUpdateNode, workspaceRoot,
+        timestamp & " lock-stage check failed: " & state.problem)
+      continue
+    if not state.differs:
+      continue
+    let staged = stageRefreshedFlakeLock(repoRoot, lockPath,
+      useHookIndex = false)
+    var line = timestamp & " lock-stage " & lockPath &
+      " was current but not staged"
+    if staged.ok:
+      line.add("; staged")
+      stderr.writeLine(label & ": " & lockPath & " is current but was not " &
+        "staged (an earlier run refreshed it); staged it")
+    else:
+      line.add("; NOT STAGED: " & staged.diagnostic)
+      outcome.notStaged.add(lockPath & ": " & staged.diagnostic)
+      stderr.writeLine(label & ": " & lockPath & " is current but not " &
+        "staged, and could NOT be staged: " & staged.diagnostic)
+      stderr.writeLine(label & ": remedy: `git add " & lockPath &
+        "`, then run the tests again")
+    appendCommitTimeWriterLog(ctwsLockUpdateNode, workspaceRoot, line)
+
 proc applyCommitTimeLockWriters*(site: CommitTimeWriterSite;
     workspaceRoot, repoRoot: string; toolProvisioning: ToolProvisioningMode;
     timestamp: string; allowance: PinRegressionAllowance;
@@ -60637,6 +60714,12 @@ proc applyCommitTimeLockWriters*(site: CommitTimeWriterSite;
       hasReproLock and not refused:
     applyCertificatePolicySnapshot(site, workspaceRoot, repoRoot, timestamp,
       certificatePolicy, result)
+  # HL-10: a lock that is already current but was never staged (an earlier
+  # run rewrote it and could not stage it) is staged now, so the content a
+  # plain `git commit` records is the content the tests ran on.
+  if site == ctwsLockUpdateNode and not refused:
+    stageCurrentUnstagedLocks(workspaceRoot, repoRoot, timestamp,
+      hasReproLock, hasFlake, result)
   if not refused:
     # A repository moved in neither lock is a sibling left unrecorded; said
     # on both channels, like every other withheld pin.
