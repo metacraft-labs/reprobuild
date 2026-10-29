@@ -134,7 +134,8 @@ proc build*(tool: BuildNimUnittest;
             dependencyPolicy = defaultDependencyPolicy();
             actionCachePolicy = defaultActionCachePolicy();
             commandStatsId = "";
-            extraEnv: openArray[(string, string)] = []):
+            extraEnv: openArray[(string, string)] = [];
+            typedTestBinary = true):
     BuildNimUnittestBuildEdge {.discardable.} =
   ## M4 rewrite of the pre-M4 ``defineCliInterface buildNimUnittest`` /
   ## engine-shim pair. Records a ``PublicCliCall`` against the ``nim``
@@ -298,10 +299,18 @@ proc build*(tool: BuildNimUnittest;
   # ``NimUnittestBinary`` whose ``path`` is the resolved binary path so
   # UFCS dispatch (``edge.testBinary.run(...)``) reaches the run/list
   # procs below.
+  #
+  # ``typedTestBinary = false`` leaves the TYPED OUTPUT off the graph (the
+  # handle is still returned). Test-Binary-Grouping M2 registers every
+  # grouped source's own compile as a FALLBACK edge, built only when its
+  # group fails to compile; consumers that enumerate the graph's test
+  # binaries by this type (``repro test --shard``) must not see those as a
+  # second copy of the group's cases.
   result.testBinary = NimUnittestBinary(path: binary)
-  appendRegisteredActionTypedOutput(
-    result.action.id, "testBinary",
-    @["NimUnittestBinary"], binary)
+  if typedTestBinary:
+    appendRegisteredActionTypedOutput(
+      result.action.id, "testBinary",
+      @["NimUnittestBinary"], binary)
 
   # Named-Targets M1: compute the implicit target name from the output
   # path basename and stamp it onto the edge so ``repro why`` / the

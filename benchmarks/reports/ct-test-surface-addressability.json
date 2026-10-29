@@ -33,20 +33,21 @@
   ],
   "command": "ct-test test discover --workspace <repo> --json",
   "counts": {
-    "catalogs": 4,
+    "catalogs": 5,
     "itemsByKind": {
-      "case": 15507,
-      "suite": 3584
+      "case": 15794,
+      "suite": 3631
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 18537,
-      "python-unittest": 551
+      "nim-unittest": 18841,
+      "python-pytest": 7,
+      "python-unittest": 574
     },
-    "itemsTotal": 19091,
+    "itemsTotal": 19425,
     "responseDiagnostics": {
       "info": 1,
-      "warning": 34
+      "warning": 33
     }
   },
   "discoveryScope": "auto (the surface's default: the workspace's own VCS inventory; vendored and ignored trees excluded)",
@@ -146,7 +147,7 @@
         },
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 179
+          "startLine": 197
         }
       ]
     },
@@ -161,7 +162,7 @@
         },
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 267
+          "startLine": 285
         }
       ]
     },
@@ -176,7 +177,7 @@
         },
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 343
+          "startLine": 365
         }
       ]
     },
@@ -191,7 +192,7 @@
         },
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 224
+          "startLine": 242
         }
       ]
     },
@@ -242,29 +243,29 @@
     }
   ],
   "reconciliation": {
-    "caseCoveragePercent": 97.34,
-    "caseItemsInCatalog": 15507,
-    "casesAddressableThroughTheSurface": 14615,
+    "caseCoveragePercent": 97.38,
+    "caseItemsInCatalog": 15794,
+    "casesAddressableThroughTheSurface": 14876,
     "collidingIdentities": 12,
-    "distinctCaseIdentities": 15493,
+    "distinctCaseIdentities": 15780,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 2363,
-      "compared": 2369,
+      "agree": 2395,
+      "compared": 2401,
       "disagree": 6
     },
-    "sourceCoveragePercent": 99.66,
-    "sourcesAddressableThroughTheSurface": 2369,
+    "sourceCoveragePercent": 99.67,
+    "sourcesAddressableThroughTheSurface": 2401,
     "sourcesNotAddressable": 8,
-    "trackedNimSuiteSources": 2377,
-    "trackedStaticCaseCount": 15015
+    "trackedNimSuiteSources": 2409,
+    "trackedStaticCaseCount": 15276
   },
   "schemaVersion": 1,
   "surface": {
     "binary": "ct-test",
     "provenance": "",
     "resolvedBy": "PATH:ct-test",
-    "sha256": "76a1ba2cafa765584695a92ed60fdd8163997028739878b4c53034794f9c5b5d"
+    "sha256": "d25b63e4f99ee2c19922c4cb67677b13cc276e2a36ca3c74e9c9027ccdc97e94"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "unaddressableSources": [

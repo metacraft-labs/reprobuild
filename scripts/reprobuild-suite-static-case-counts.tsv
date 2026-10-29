@@ -18,6 +18,7 @@
 apps/repro-harvest-apt/tests/t_c2_signature.nim	nim	6
 libs/ct_test_interface/tests/t_smoke_ct_test_interface.nim	nim	1
 libs/ct_test_nim_unittest/tests/t_smoke_ct_test_nim_unittest.nim	nim	1
+libs/ct_test_nim_unittest/tests/t_test_binary_grouping_plan.nim	nim	24
 libs/ct_test_surface/tests/t_ct_test_surface_locator.nim	nim	9
 libs/ct_test_unittest_parallel/tests/t_backward_compat_std_unittest_test_runs_unchanged.nim	nim	1
 libs/ct_test_unittest_parallel/tests/t_ct_test_runner_full_suite_parity.nim	nim	1
@@ -1364,7 +1365,7 @@ tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	nim	5
 tests/integration/t_behind_pin_is_never_silent.nim	nim	1
 tests/integration/t_behind_pin_warns_and_does_not_fail.nim	nim	1
 tests/integration/t_bootstrap_default_nim_matches_declared_version.nim	nim	1
-tests/integration/t_bootstrap_guard_names_the_host_artefact.nim	nim	10
+tests/integration/t_bootstrap_guard_names_the_host_artefact.nim	nim	12
 tests/integration/t_branch_fork_clones_root_submodules.nim	nim	1
 tests/integration/t_branch_fork_inherits_project_set.nim	nim	3
 tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	nim	16
@@ -1915,6 +1916,7 @@ tests/integration/t_repro_test_runner_aggregate_exit_code.nim	nim	2
 tests/integration/t_repro_test_runner_catalog_selection.nim	nim	0
 tests/integration/t_repro_test_runner_consumes_result_document.nim	nim	0
 tests/integration/t_repro_test_runner_counts_whole_binary_skips.nim	nim	2
+tests/integration/t_repro_test_runner_keys_cases_by_source.nim	nim	6
 tests/integration/t_repro_test_runner_parallel_n_workers.nim	nim	2
 tests/integration/t_repro_test_runner_process_group_cleanup.nim	nim	9
 tests/integration/t_repro_test_runner_relative_results_git_config.nim	nim	1
@@ -2441,16 +2443,17 @@ tests/unit/test_nix_daemon_request_requires_workspace_root.py	python	4
 tests/unit/test_nix_evaluation_policy.py	python	1
 tests/unit/test_package_root_anchor.py	python	3
 tests/unit/test_profile_daemon_worker_syscalls.py	python	6
-tests/unit/test_prune_undeclared_test_binaries.py	python	5
+tests/unit/test_prune_undeclared_test_binaries.py	python	7
 tests/unit/test_publish_surface_routing.py	python	32
 tests/unit/test_regenerate_suite_artifacts.py	python	25
 tests/unit/test_release_git.py	python	5
 tests/unit/test_release_native_packages.py	python	8
 tests/unit/test_release_smoke_dev_exec.py	python	17
-tests/unit/test_reprobuild_suite_inventory.py	python	109
+tests/unit/test_reprobuild_suite_inventory.py	python	110
 tests/unit/test_sibling_lock_pins.py	python	10
 tests/unit/test_source_revision.py	python	18
 tests/unit/test_suite_drift_attribution.py	python	12
+tests/unit/test_test_group_fallback.py	python	6
 tests/unit/test_wrapper_default_provenance.py	python	3
 tools/catalog-harvester/tests/test_gh_releases_source.nim	nim	26
 tools/catalog-harvester/tests/test_harvester_app_name_validation.nim	nim	8

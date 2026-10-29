@@ -1,13 +1,26 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2408,
-    "pureUnitConsolidationGroups": 68,
-    "pureUnitTests": 686,
-    "staticallyDetectedRuntimeCompilerFlowTests": 130,
-    "testEntries": 2447
+    "nimTestBinaries": 2410,
+    "pureUnitConsolidationGroups": 69,
+    "pureUnitTests": 687,
+    "staticallyDetectedRuntimeCompilerFlowTests": 131,
+    "testEntries": 2450
   },
   "pureUnitConsolidationCandidates": [
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "ct_test_nim_unittest"
+      ],
+      "owner": "libs/ct_test_nim_unittest",
+      "sources": [
+        "libs/ct_test_nim_unittest/tests/t_smoke_ct_test_nim_unittest.nim",
+        "libs/ct_test_nim_unittest/tests/t_test_binary_grouping_plan.nim"
+      ],
+      "targetOs": "soAny"
+    },
     {
       "count": 2,
       "defines": [],
@@ -1385,10 +1398,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1337,
+      "integration": 1338,
       "platform/destructive": 146,
-      "pure unit": 686,
-      "unclassified": 260
+      "pure unit": 687,
+      "unclassified": 261
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1596,9 +1609,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2408,
-    "pythonTestFileCount": 39,
-    "testEntryCount": 2447
+    "nimTestBinaryCount": 2410,
+    "pythonTestFileCount": 40,
+    "testEntryCount": 2450
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -6596,6 +6609,26 @@
           "executedVariables": [
             "cmd"
           ],
+          "line": 71,
+          "path": "tests/integration/t_repro_test_runner_keys_cases_by_source.nim",
+          "patterns": [
+            "nim-c"
+          ],
+          "snippet": "let cmd = \"nim c --threads:on --hints:off --warnings:off \" &"
+        }
+      ],
+      "source": "tests/integration/t_repro_test_runner_keys_cases_by_source.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "cmd",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "cmd"
+          ],
           "line": 95,
           "path": "tests/integration/t_repro_test_runner_parallel_n_workers.nim",
           "patterns": [
@@ -7810,6 +7843,23 @@
       "source": "libs/ct_test_nim_unittest/tests/t_smoke_ct_test_nim_unittest.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_test_binary_grouping_plan",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "ct_test_nim_unittest"
+      ],
+      "owner": "libs/ct_test_nim_unittest",
+      "requiresReproBinary": false,
+      "source": "libs/ct_test_nim_unittest/tests/t_test_binary_grouping_plan.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 24,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32202,7 +32252,9 @@
       "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_b5_bootstrap_idempotent.nim",
@@ -32340,7 +32392,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_bootstrap_guard_names_the_host_artefact.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -42153,6 +42205,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_repro_test_runner_keys_cases_by_source",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_repro_test_runner_keys_cases_by_source.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_repro_test_runner_parallel_n_workers",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -51492,7 +51561,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_prune_undeclared_test_binaries.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -51582,7 +51651,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_reprobuild_suite_inventory.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 109,
+      "staticCaseCount": 110,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -51628,6 +51697,21 @@
       "source": "tests/unit/test_suite_drift_attribution.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `this repository per case (CPU-hours on the shared host)`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_test_group_fallback.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

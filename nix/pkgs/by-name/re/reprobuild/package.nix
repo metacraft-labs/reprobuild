@@ -105,8 +105,8 @@
   ctTraceFormatSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer-trace-format-nim";
-    rev = "b4794ba69fa7ccb0b568de7c582a576994c63e5b";
-    hash = "sha256-RGX61GRKRYBM/BY4ua/xDpzxwhDo5EQ/CLjqLmBScPU=";
+    rev = "31be9a10007c007af429951616c13bc275587c76";
+    hash = "sha256-xEqzwMISwpA/JwzhSKK+TRU67Dj/F7Z8rSwOoYj/Cv4=";
   },
   # THIS DEFAULT HAD DRIFTED 46 COMMITS BEHIND `flake.lock`, and the drift is
   # exactly what the "Every entry mirrors a `flake.lock` pin" note above is
@@ -141,8 +141,8 @@
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer";
-    rev = "f1745b89e93179eca20778943bbafae91ebb6dfd";
-    hash = "sha256-ndmzx0UL212fTATeBur6lf+i35exffgv4oBWr8GEiLo=";
+    rev = "008950fa91fdd68a44f77f9c454eff5b7bf139fa";
+    hash = "sha256-zoUpXtJicwLQjvG/CiGlFkC6BucIOsV7OKpOFflXTuA=";
   },
   ctTestRunnerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -162,8 +162,8 @@
   runquotaSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "runquota";
-    rev = "f5a644cde174234af8e193413e17b0e47d29e6f5";
-    hash = "sha256-gLoCSqZTycI43QU2QOB3v+pJ3I0fUiHTluLoM4n+8Lk=";
+    rev = "35b9dfe4af6e18f3f2a2242ece7cff330eb581e2";
+    hash = "sha256-b8gZqy5EpKbKdBAU3BdjmbgtFfGWO5LCdxJAH17EGis=";
   },
 }:
 let
@@ -226,8 +226,8 @@ stdenv.mkDerivation (finalAttrs: {
   src = fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "reprobuild";
-    rev = "bc474ec2976a220049a6f22c7211105ea24d093a";
-    hash = "sha256-t3yD9kNYCpp3nPzVAUyv0coZ9rqPLgoClMibZb7mPQE=";
+    rev = "413830138a7a73293dfc551d623f7bf2cb0ab62c";
+    hash = "sha256-BWzQFwTN+Z/SvONo6FpRbrZusXJZfP+qDcz7qD677Ek=";
   };
 
   strictDeps = true;

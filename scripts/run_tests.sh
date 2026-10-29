@@ -675,6 +675,15 @@ if (( test_builds_status != 0 )); then
   printf '::error:: .#test-builds failed (exit %d); running every test that built, failure re-raised at the end\n' \
     "${test_builds_status}" >&2
 fi
+# Test-Binary-Grouping M2: `.#test-builds` compiles up to fifty test sources
+# into each `t_group_*` binary. A group that did not build -- one member that
+# does not compile fails its whole group -- has its members compiled singly
+# here, so the failure costs time rather than the other members' coverage, and
+# is reported against the member that broke it. A no-op when every group built.
+# Its status is re-raised at the end like the build phase's.
+group_fallback_status=0
+python3 scripts/test_group_fallback.py --root . --bin-dir build/test-bin \
+  --repro "./build/bin/repro${exe_ext}" || group_fallback_status=$?
 
 REPROBUILD_BIN_ABS="$(cd build/bin && pwd)"
 export PATH="${REPROBUILD_BIN_ABS}:${PATH}"
@@ -923,6 +932,11 @@ if (( test_builds_status != 0 )); then
   printf '\n.#test-builds failed (exit %d); see the NOT BUILT lines above\n' \
     "${test_builds_status}" >&2
   (( suite_status != 0 )) || suite_status="${test_builds_status}"
+fi
+if (( group_fallback_status != 0 )); then
+  printf '\nsingle-file fallback for a failed group test binary failed (exit %d); see the ::error:: lines above\n' \
+    "${group_fallback_status}" >&2
+  (( suite_status != 0 )) || suite_status="${group_fallback_status}"
 fi
 if (( cross_repo_fixtures_status != 0 )); then
   printf '\n.#test-cross-repo-fixtures failed (exit %d); see its build report above\n' \

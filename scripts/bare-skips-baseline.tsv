@@ -242,7 +242,6 @@ tests/integration/t_b2_helpers_built_by_engine.nim	each helper binary loads and 
 tests/integration/t_b2_helpers_built_by_engine.nim	engine materialises every test-helper binary via .#test-helpers	1
 tests/integration/t_b3_repro_test_runs_through_engine.nim	alias forwards ordinary build flags to the test collection	1
 tests/integration/t_b3_repro_test_runs_through_engine.nim	engine: small test runs end-to-end through repro build .#test#<name>	1
-tests/integration/t_b5_bootstrap_idempotent.nim	behavioural: just bootstrap no-ops when ./build/bin/repro exists	1
 tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	t_checkout_with_the_module_tree_is_accepted	1
 tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	t_nothing_reachable_fails_naming_the_dev_shell	1
 tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	t_sibling_checkout_is_found_with_no_value_set	1
