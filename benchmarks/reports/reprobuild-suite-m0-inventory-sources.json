@@ -4424,6 +4424,22 @@
           "runtimeCompilerApi": "extractInterfaceFromModule",
           "runtimeCompilerApiModule": "repro_interface_artifacts",
           "snippet": "discard extractInterfaceFromModule(source, artifactPath,"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 395,
+          "path": "tests/integration/t_compiler_scratch_isolation.nim",
+          "patterns": [
+            "repro-extract-interface"
+          ],
+          "runtimeCompilerApi": "extractInterfaceFromModule",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "discard extractInterfaceFromModule(modulePath, artifact,"
         }
       ],
       "source": "tests/integration/t_compiler_scratch_isolation.nim"
@@ -33660,7 +33676,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_compiler_scratch_isolation.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

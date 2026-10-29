@@ -345,3 +345,67 @@ when defined(posix) and isNixSupported:
             root / ($value & ".nim"), getCurrentDir(), root / "scratch",
             useExtractionCache = false, consumerRoot = root)
           check fileExists(artifactPath)
+
+    test "SDK dependencies outrank configuration and extra paths without losing recipe imports":
+      # Real module trees and the real compiler: either competing module emits
+      # a compile error if selected. Successful extraction/link must therefore
+      # use the actual SDK closure, not a simulated resolver or compiler.
+      let root = createTempDir("repro-sdk-path-priority-", "")
+      let project = root / "consumer"
+      let configured = project / "configured imports"
+      let extra = project / "extra imports"
+      createDir(configured / "stew")
+      createDir(extra)
+      createDir(root / "scratch")
+      createDir(root / "tmp")
+      let oldTmp = getEnv("TMPDIR")
+      let oldCache = getEnv("XDG_CACHE_HOME")
+      putEnv("TMPDIR", root / "tmp")
+      putEnv("XDG_CACHE_HOME", root / "cache")
+      defer:
+        if oldTmp.len > 0: putEnv("TMPDIR", oldTmp) else: delEnv("TMPDIR")
+        if oldCache.len > 0: putEnv("XDG_CACHE_HOME", oldCache)
+        else: delEnv("XDG_CACHE_HOME")
+        removeDir(root)
+      writeFile(configured / "stew/ptrops.nim",
+        "{.error: \"consumer stew must not replace the SDK dependency\".}\n")
+      writeFile(extra / "repro_core.nim",
+        "{.error: \"extra path must not replace the SDK library\".}\n")
+      writeFile(configured / "config_only.nim", "const configValue* = 37\n")
+      writeFile(extra / "extra_only.nim", "const extraValue* = 19\n")
+      writeFile(project / "config.nims", "switch(\"path\", " &
+        configured.escape & ")\nswitch(\"define\", \"recipeConfigurationOnly\")\n")
+      let modulePath = project / "repro.nim"
+      writeFile(modulePath, """
+import repro_project_dsl
+import config_only, extra_only
+static:
+  doAssert configValue == 37 and extraValue == 19
+when defined(reproInterfaceMode):
+  static: doAssert not defined(recipeConfigurationOnly)
+when defined(reproProviderMode):
+  static: doAssert defined(recipeConfigurationOnly)
+package namespaceFixture:
+  build:
+    discard
+""")
+      let artifact = root / "interface.rbsz"
+      var extracted = false
+      try:
+        discard extractInterfaceFromModule(modulePath, artifact,
+          root / "interface.nim", getCurrentDir(), root / "scratch",
+          extraPaths = @[extra], useExtractionCache = false,
+          consumerRoot = project)
+        extracted = true
+      except OSError as err:
+        checkpoint(err.msg)
+      check extracted
+      check fileExists(artifact)
+      let binary = root / "provider"
+      let command = providerCompileCommand(modulePath, binary, getCurrentDir(),
+        root / "scratch", extraFlags = @["--path:" & extra])
+      let compiled = repro_interface_artifacts.runCommand(command,
+        cwd = root / "scratch", raiseOnFailure = false)
+      checkpoint(compiled.output)
+      check compiled.exitCode == 0
+      check fileExists(binary)
