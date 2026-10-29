@@ -63,8 +63,8 @@
   traceFormatSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer-trace-format-nim";
-    rev = "b4794ba69fa7ccb0b568de7c582a576994c63e5b";
-    hash = "sha256-RGX61GRKRYBM/BY4ua/xDpzxwhDo5EQ/CLjqLmBScPU=";
+    rev = "31be9a10007c007af429951616c13bc275587c76";
+    hash = "sha256-xEqzwMISwpA/JwzhSKK+TRU67Dj/F7Z8rSwOoYj/Cv4=";
   },
   stewSrc ? fetchFromGitHub {
     owner = "status-im";
