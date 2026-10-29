@@ -2013,7 +2013,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_cli_support_tests_g01",
+    group: "t_group_libs_repro_cli_support_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim",
@@ -2134,8 +2134,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_cli_support_tests_g02",
-    singleReason: ""),
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_peer_cache_tls_wiring_round_trip.nim",
     binary: "build/test-bin/t_peer_cache_tls_wiring_round_trip",

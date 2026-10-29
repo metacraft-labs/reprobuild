@@ -11332,7 +11332,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_cli_support/tests/t_path_mode_dev_env_provides_realized_tools.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

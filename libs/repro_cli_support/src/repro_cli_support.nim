@@ -15512,6 +15512,31 @@ proc emitDevEnvProducerNotices(pins: openArray[DevEnvProducerPin];
     except IOError:
       discard
 
+proc writePartialToolInspection(artifact: ProjectInterfaceArtifact;
+                                mode: ToolProvisioningMode; outDir: string;
+                                identity: PathOnlyBuildIdentity;
+                                unresolved: JsonNode; batchFailure: string) =
+  ## The fallback's observations are diagnostics, never a complete identity.
+  ## Reuse the full profile serializer, including failed probe results, but
+  ## touch none of the binary/keyed identity or current-key publication paths.
+  let path = identityPaths(outDir, mode).inspectionPath
+  try:
+    let doc = parseJson(inspectionJson(identity))
+    doc["partial"] = %true
+    var requested = newJArray()
+    for useDef in artifact.projectInterface.toolUses:
+      requested.add(%(if useDef.rawConstraint.len > 0: useDef.rawConstraint
+                     else: useDef.packageSelector))
+    doc["requestedToolUses"] = requested
+    doc["unresolvedToolUses"] = unresolved
+    doc["batchFailure"] = %batchFailure
+    replaceFile(path, proc (staged: string) =
+      writeFile(extendedPath(staged), doc.pretty()))
+  except CatchableError as err:
+    stderr.writeLine("repro dev-env: warning: could not write partial tool " &
+      "inspection at " & path & " (" & err.msg &
+      "); an earlier inspection may be stale.")
+
 proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
                             selection: DevEnvCliSelection): seq[DevEnvShellOp] =
   ## The PATH contribution that makes a dev-env activation PROVIDE the
@@ -15660,6 +15685,10 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
     # evaluated first. The cost is paid only when something is already wrong.
     var failures: seq[string] = @[]
     var absentInPathMode = 0
+    var partial = PathOnlyBuildIdentity(
+      projectName: interfaceArtifact.projectInterface.projectName,
+      interfaceFingerprint: interfaceArtifact.interfaceFingerprint)
+    var unresolved = newJArray()
     for useDef in interfaceArtifact.projectInterface.toolUses:
       var single = interfaceArtifact
       single.projectInterface.toolUses = @[useDef]
@@ -15667,15 +15696,22 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
         # The SAME pins as the batch: a single-tool artifact keeps every
         # contribution record, so a pin for another package is accepted and
         # stamped nowhere, and this package stays pinned.
-        let singleIdentity = contributed(toolBuildIdentity(single, mode,
-          storeRoot = storeRoot, pins = provisioningPins))
-        for dir in binDirsForDevelop(singleIdentity, storeRoot = storeRoot):
+        let singleIdentity = toolBuildIdentity(single, mode,
+          storeRoot = storeRoot, pins = provisioningPins)
+        # PATH-only filtering is an activation decision. Keep the unfiltered
+        # profiles in inspection, including tools already supplied by PATH.
+        partial.profiles.add(singleIdentity.profiles)
+        partial.actionIdentities.add(singleIdentity.actionIdentities)
+        let pathIdentity = contributed(singleIdentity)
+        for dir in binDirsForDevelop(pathIdentity, storeRoot = storeRoot):
           if dir notin binDirs:
             binDirs.add(dir)
-        for op in prefixEnvOpsForDevelop(singleIdentity):
+        for op in prefixEnvOpsForDevelop(pathIdentity):
           if not prefixOps.anyIt(it.name == op.name):
             prefixOps.add(op)
       except CatchableError as toolErr:
+        unresolved.add(%*{"packageSelector": useDef.packageSelector,
+          "rawConstraint": useDef.rawConstraint, "reason": toolErr.msg})
         # In path mode a tool that is neither on the caller's PATH nor
         # realizable is merely absent -- that mode's ordinary state, and what
         # it reported before it provided anything at all. Only a tool the
@@ -15684,6 +15720,8 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
           inc absentInPathMode
           continue
         failures.add(useDef.packageSelector & " (" & toolErr.msg & ")")
+    writePartialToolInspection(interfaceArtifact, mode, selection.outDir,
+      partial, unresolved, batchErr.msg)
     if failures.len == 0 and absentInPathMode == 0:
       # The per-tool pass found nothing wrong, so the failure was in the
       # batch path itself rather than in any one package. Report the original.

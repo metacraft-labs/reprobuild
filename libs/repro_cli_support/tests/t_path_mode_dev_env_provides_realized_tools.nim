@@ -27,11 +27,17 @@
 ## Windows shell takes; case 1 then also holds that one absent tool does not
 ## cost the shell the tools that WERE realized.
 ##
-## No mocks. The archive is a real file served through the resolver's own
+## The mixed-resolution case also checks the diagnostic's actual path/hash
+## and probe output/status, including a nonzero probe, while the incomplete
+## environment must publish no complete identity or cache marker.
+##
+## No mocks. Tool payloads are copies of this native test executable with a
+## bounded --version mode; neither shell scripts named .exe nor mocked probes
+## stand in for a Windows process. The archive is a real file served through the resolver's own
 ## ``file://`` arm, realized into a real tool store under a temporary root, and
 ## the ops are the ones ``repro dev-env export`` renders.
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[algorithm, json, os, sequtils, strutils, tempfiles, unittest]
 
 import repro_cli_support
 import repro_interface_artifacts
@@ -42,16 +48,20 @@ import repro_core/paths
 
 const ExeSuffix = when defined(windows): ".exe" else: ""
 
-proc writeExecutable(path, body: string) =
+if commandLineParams() == @["--version"]:
+  echo "fixture-tool 1.0"
+  quit(if getAppFilename().extractFilename.startsWith("probe-fails"): 7 else: 0)
+
+proc writeExecutable(path: string) =
   createDir(parentDir(path))
-  writeFile(path, body)
+  copyFile(getAppFilename(), path)
   setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec,
     fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
 proc rawTarballUse(root, name: string): InterfaceToolUse =
   ## `name`, declared with one raw-executable archive served from `root`.
   let payload = root / "archives" / (name & "-payload")
-  writeExecutable(payload, "#!/bin/sh\necho " & name & "\n")
+  writeExecutable(payload)
   result = InterfaceToolUse(rawConstraint: name, packageSelector: name,
     executableName: name)
   result.tarballProvisioning = @[InterfaceTarballProvisioning(
@@ -110,7 +120,7 @@ suite "path-mode dev environment":
     delEnv("REPRO_TOOL_PROVISIONING")
     # The caller's PATH holds exactly one of the two tools.
     let ambient = root / "ambient"
-    writeExecutable(ambient / ("present" & ExeSuffix), "#!/bin/sh\nexit 0\n")
+    writeExecutable(ambient / ("present" & ExeSuffix))
     putEnv("PATH", ambient)
     let outDir = root / "out"
     createDir(outDir)
@@ -149,3 +159,71 @@ suite "path-mode dev environment":
     for dir in prepended:
       check not fileExists(dir / ("present" & ExeSuffix))
       check os.normalizedPath(dir) != os.normalizedPath(ambient)
+
+  test "mixed fallback replaces stale inspection with actual partial observations":
+    var mixed = readInterfaceArtifact(interfacePath).projectInterface
+    mixed.toolUses.add(rawTarballUse(root, "probe-fails"))
+    var complete = mixed
+    complete.toolUses = complete.toolUses.filterIt(it.packageSelector == "present")
+    let inspection = outDir / "path-only-tool-identities.inspect.json"
+    let completeOut = root / "complete-out"
+    let completeInterface = completeOut / "project-interface.rbsz"
+    writeInterfaceArtifact(completeInterface, artifactFor(complete))
+    discard devEnvToolShellOpsAt(completeInterface, completeOut)
+    let completeFiles = toSeq(walkDirRec(completeOut))
+    # The same real path publishes authoritative artifacts when all requests
+    # resolve, so the absence checks below cannot pass merely because the
+    # fixture disabled identity caching. Only shared-prefix publication is off.
+    check completeFiles.anyIt(it.endsWith(".rbtp"))
+    check completeFiles.anyIt(it.endsWith(".current-key"))
+    copyFile(completeOut / "path-only-tool-identities.inspect.json", inspection)
+    writeInterfaceArtifact(interfacePath, artifactFor(mixed))
+    discard devEnvToolShellOpsAt(interfacePath, outDir)
+    let doc = parseFile(inspection)
+    let partial = doc{"partial"}.getBool()
+    check partial
+    let requested = doc{"requestedToolUses"}
+    let hasRequested = not requested.isNil
+    require hasRequested
+    check requested.getElems.mapIt(it.getStr()).sorted ==
+      @["absent", "present", "probe-fails", "unprovisioned"]
+    let unresolved = doc{"unresolvedToolUses"}
+    let hasUnresolved = not unresolved.isNil
+    require hasUnresolved
+    require unresolved.len == 1
+    check unresolved[0]{"packageSelector"}.getStr() == "unprovisioned"
+    check unresolved[0]{"reason"}.getStr().len > 0
+    check doc{"batchFailure"}.getStr().len > 0
+    let profiles = doc["profiles"].getElems
+    require profiles.len == 3
+    for selector in ["absent", "present", "probe-fails"]:
+      let matches = profiles.filterIt(it{"packageSelector"}.getStr() == selector)
+      require matches.len == 1
+      let profile = matches[0]
+      let path = profile{"resolvedExecutablePath"}.getStr()
+      check fileExists(extendedPath(path))
+      check profile{"resolvedExecutableDigest"}.getStr() ==
+        resolvedExecutableContentDigest(path)
+      let probes = profile["probes"].getElems
+      require probes.len == 1
+      check probes[0]{"args"}.getElems.mapIt(it.getStr()) == @["--version"]
+      check probes[0]{"output"}.getStr().strip() == "fixture-tool 1.0"
+      check probes[0]{"exitCode"}.getInt() ==
+        (if selector == "probe-fails": 7 else: 0)
+      check not probes[0]{"timedOut"}.getBool()
+      if selector == "present":
+        check profile{"installMethod"}.getStr() == "path"
+    for path in walkDirRec(outDir):
+      check not path.endsWith(".rbtp")
+      check not path.endsWith(".current-key")
+
+  test "an inspection write failure does not take away resolved tools":
+    # A real directory where the diagnostic file belongs makes the atomic
+    # replacement fail without depending on root-sensitive permission bits.
+    createDir(outDir / "path-only-tool-identities.inspect.json")
+    let prepended = prependedPaths(devEnvToolShellOpsAt(interfacePath, outDir))
+    check prepended.anyIt(fileExists(extendedPath(it / ("absent" & ExeSuffix))))
+    check not fileExists(outDir / "path-only-tool-identities.inspect.json")
+    for path in walkDirRec(outDir):
+      check not path.endsWith(".rbtp")
+      check not path.endsWith(".current-key")
