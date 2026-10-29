@@ -864,6 +864,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_portable_memo_hybrid_hit_publishes_only_recorded_content.nim",
+    binary: "build/test-bin/t_portable_memo_hybrid_hit_publishes_only_recorded_content",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_portable_record_from_local_hit.nim",
     binary: "build/test-bin/t_portable_record_from_local_hit",
     defines: @[],

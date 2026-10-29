@@ -102,6 +102,7 @@ libs/repro_build_engine/tests/t_package_identity_is_the_producing_action.nim	nim
 libs/repro_build_engine/tests/t_path_mutation_evidence.nim	nim	4
 libs/repro_build_engine/tests/t_pattern_scoped_enumeration_keys_only_matching_entries.nim	nim	9
 libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim	nim	10
+libs/repro_build_engine/tests/t_portable_memo_hybrid_hit_publishes_only_recorded_content.nim	nim	2
 libs/repro_build_engine/tests/t_portable_record_from_local_hit.nim	nim	5
 libs/repro_build_engine/tests/t_preserve_tree_rerun_never_writes_through_links.nim	nim	10
 libs/repro_build_engine/tests/t_publishers_refuse_level1_records.nim	nim	3

@@ -19194,6 +19194,26 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       runResult.trace(action.id, "portable-fingerprint-unavailable",
         runResult.results[idx].portableReason)
       return
+    if record.policy == ffpHybrid:
+      # A hybrid hit trusted every input whose metadata is unchanged without
+      # reading it, and the portable record below takes each input's content
+      # identity NOW. Derived from bytes the execution never saw, it would
+      # bind them to this record's outputs for every host that reads it
+      # (Edge-Derived-Identities.md §3.3a). Derive it only while the inputs
+      # still have the content the record was made from. The hit itself is
+      # served as the hybrid policy decided. (A checksum hit re-hashed every
+      # input in its lookup; a timestamp record is never published.)
+      let still = inputContentStillRecorded(record, action.cwd)
+      if not still.ok:
+        runResult.results[idx].portable = false
+        runResult.results[idx].portableReason =
+          "input " & still.changed & " no longer has the content this " &
+          "ffpHybrid record was made from (the hit was served on its " &
+          "unchanged metadata), so no portable record is derived from it " &
+          "and nothing is published (Edge-Derived-Identities.md §3.3a)"
+        runResult.trace(action.id, "portable-fingerprint-unavailable",
+          runResult.results[idx].portableReason)
+        return
     var observed: seq[ObservedEnv] = @[]
     for variable in record.envInputs:
       observed.add(ObservedEnv(name: variable.name,

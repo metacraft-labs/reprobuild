@@ -5703,6 +5703,36 @@ proc sameContentIdentity(recorded, current: FileFingerprint): bool =
     recorded.metadata.kind == current.metadata.kind and
     recorded.localHash == current.localHash
 
+proc inputContentStillRecorded*(record: ActionResultRecord;
+                                inputRoot = ""): tuple[ok: bool;
+                                                      changed: string] =
+  ## Whether every input of `record` still has the content identity the
+  ## record carries for it, read now: the entry kind and the local content
+  ## hash (`sameContentIdentity`), and an enumerated directory's membership.
+  ## `changed` names the first input that does not.
+  ##
+  ## A lookup does not establish this for an `ffpHybrid` record: an input
+  ## whose kind, size and mtime are unchanged is trusted without being read
+  ## (`refreshedInputs`). That is the policy's local trade-off. A caller
+  ## about to take a content identity of the inputs for ANOTHER host -- the
+  ## portable record derived from a local hit -- asks this first, so that it
+  ## never pairs the record's outputs with bytes the execution did not see
+  ## (Edge-Derived-Identities.md §3.3a: publication computes no content
+  ## claim the record does not make). An input without a recorded hash
+  ## cannot be compared, and does not pass.
+  for input in record.inputs:
+    let location = recordedInputLocation(inputRoot, input.path)
+    let current =
+      if membershipTrackedDirectory(input.metadata):
+        observeEnumeratedDirectory(location, ffpChecksum)
+      else:
+        observeFile(location, ffpChecksum)
+    if not sameContentIdentity(input, current) or
+        (membershipTrackedDirectory(input.metadata) and
+         current.metadata != input.metadata):
+      return (false, input.path)
+  (true, "")
+
 proc refreshedInputs(record: ActionResultRecord; changed: var bool;
                      hybridCutoff: var bool;
                      changedInputPath: var string;
