@@ -6624,110 +6624,77 @@ proc resolveSqliteLibDir*(explicitLibDir, explicitPrefix, builtPrefix,
   firstExistingLibDir(hostDirs, SqliteLibraryNames)
 
 proc externalHashFlags(workDir = ""): seq[string] =
-  # Windows: there is no homebrew/nix prefix that ships libblake3 or libxxhash.
-  # The reprobuild repo vendors portable C sources for both inside the
-  # package-local source trees, and config.nims wires the include paths +
-  # `{.compile:.}` pragmas accordingly. When repro is run as a CLI against an
-  # arbitrary project, the project's nim invocation does NOT pick up
-  # reprobuild's config.nims (different working directory), so we have to
-  # propagate the same define/include flags here. The vendored sources live
-  # alongside the reprobuild library tree, so resolve the include dirs relative
-  # to workDir (which is the reprobuildLibraryWorkDir).
-  # Installed wrappers publish this build-time-only search path. It is never
-  # assigned to LD_LIBRARY_PATH/DYLD_*: those variables would leak package
-  # libraries into arbitrary user actions. Instead, bake the package's
-  # complete runtime closure into the two binaries reprobuild compiles for
-  # itself after installation (the interface runner and project provider).
+  # Generated helpers live outside config.nims. Replay its default portable
+  # hash policy on every host: a release carries these sources, whereas its
+  # consumer need not have hash-library development packages installed.
   result.add(runtimeRpathCompilerFlags(
     getEnv("REPROBUILD_RUNTIME_LIBRARY_PATH").split(PathSep),
     hostRuntimeLinkTarget()))
-
-  when defined(windows):
-    # M9.R.13b.1 — propagate `--define:reproVendoredHash` so the vendored
-    # path in `blake3.nim` / `xxh3.nim` (a `when defined(reproVendoredHash):
-    # {.compile: ...c.}` block guarding the inclusion of the portable C
-    # implementations) actually fires when the interface-extract runner
-    # and the provider compile run outside the reprobuild project's
-    # `config.nims` scope. Without this define the runner picks up only
-    # the `-I` include flags below — `xxh3/capi.c` resolves `XXH3_64bits`
-    # through `xxhash.h` but no implementation translation unit is
-    # compiled, so the link step fails with `undefined reference to
-    # XXH3_64bits` / `XXH3_64bits_withSeed` (the symptom that blocked the
-    # wayland from-source smoke at the interface-extract LINK stage,
-    # M9.R.13a → M9.R.13b handover). The non-Windows branch below
-    # delegates to system-installed libblake3 / libxxhash via `-L` + `-l`
-    # so it doesn't need the define; Windows has no such system install
-    # so the vendored path is the only one available.
-    let envSystem = getEnv("REPROBUILD_USE_SYSTEM_HASH_LIBS").toLowerAscii()
-    let useSystem = envSystem in ["1", "true", "yes", "on"]
+  let useSystem = getEnv("REPROBUILD_USE_SYSTEM_HASH_LIBS").toLowerAscii() in
+    ["1", "true", "yes", "on"]
+  let blake3Inc = workDir / "libs/blake3/src/blake3/vendor"
+  let xxhashInc = workDir / "libs/xxh3/src/xxh3/vendor"
+  let vendored = not useSystem and workDir.len > 0 and
+    fileExists(extendedPath(blake3Inc / "blake3.h")) and
+    fileExists(extendedPath(blake3Inc / "blake3.c")) and
+    fileExists(extendedPath(xxhashInc / "xxhash.h")) and
+    fileExists(extendedPath(xxhashInc / "xxhash.c"))
+  if vendored or defined(windows):
+    # Nim splices passC text into the compiler command verbatim. Preserve a
+    # relocated source root containing spaces as one include argument.
     if workDir.len > 0:
-      let blake3Inc = workDir / "libs" / "blake3" / "src" / "blake3" /
-        "vendor"
-      let xxhashInc = workDir / "libs" / "xxh3" / "src" / "xxh3" /
-        "vendor"
-      # Quoted, as `config.nims` quotes the same directories: Nim splices
-      # `passC` text into the C compiler's command line verbatim, so a source
-      # root containing a space -- a release unpacked under
-      # `C:\Users\<First Last>\...` -- came apart into a stray `vendor`
-      # "linker input" and every extract runner and provider compile failed
-      # in gcc (reprobuild-pm issue 2026-10-27-interface-extraction-splits-a-
-      # spaced-install-path-in-the-vendored-hash-include).
       if fileExists(extendedPath(blake3Inc / "blake3.h")):
         result.add("--passC:-I" & quoteShell(blake3Inc))
       if fileExists(extendedPath(xxhashInc / "xxhash.h")):
         result.add("--passC:-I" & quoteShell(xxhashInc))
-      if not useSystem and
-         fileExists(extendedPath(blake3Inc / "blake3.c")) and
-         fileExists(extendedPath(xxhashInc / "xxhash.c")):
-        # Mirror `config.nims`'s `switch("define", "reproVendoredHash")`
-        # for the runner / provider compile so the `{.compile:.}` pragmas
-        # in `blake3.nim` / `xxh3.nim` fire and the vendored C sources
-        # land in the link.
-        result.add("--define:reproVendoredHash")
-        result.add("--passC:-DREPRO_VENDORED_HASH")
+    if vendored:
+      result.add("--define:reproVendoredHash")
+      result.add("--passC:-DREPRO_VENDORED_HASH")
+  when defined(windows):
     return
 
-  let blake3Prefix = block:
-    let direct = firstExistingPrefix(
-      [getEnv("BLAKE3_PREFIX"), builtLibraryPrefix("BLAKE3_PREFIX"), "/opt/homebrew/opt/blake3",
-        "/usr/local/opt/blake3"],
-      "include/blake3.h",
-      ["libblake3.dylib", "libblake3.so", "libblake3.a"])
-    if direct.len > 0:
-      direct
-    else:
-      nixPrefix("*-libblake3-*", "include/blake3.h",
+  if not vendored:
+    let blake3Prefix = block:
+      let direct = firstExistingPrefix(
+        [getEnv("BLAKE3_PREFIX"), builtLibraryPrefix("BLAKE3_PREFIX"), "/opt/homebrew/opt/blake3",
+          "/usr/local/opt/blake3"],
+        "include/blake3.h",
         ["libblake3.dylib", "libblake3.so", "libblake3.a"])
-  if blake3Prefix.len > 0:
-    result.add("--passC:-I" & (blake3Prefix / "include"))
-    let libDir = firstExistingPrefixLibDir(blake3Prefix,
-      ["libblake3.dylib", "libblake3.so", "libblake3.a"])
-    result.add("--passL:-L" & libDir)
-    # The source bootstrap has no installed wrapper to supply runtime paths.
-    # The generated runner must find the same library it linked against.
-    result.add(runtimeRpathCompilerFlags(@[libDir], hostRuntimeLinkTarget()))
-    result.add("--passL:-lblake3")
+      if direct.len > 0:
+        direct
+      else:
+        nixPrefix("*-libblake3-*", "include/blake3.h",
+          ["libblake3.dylib", "libblake3.so", "libblake3.a"])
+    if blake3Prefix.len > 0:
+      result.add("--passC:-I" & (blake3Prefix / "include"))
+      let libDir = firstExistingPrefixLibDir(blake3Prefix,
+        ["libblake3.dylib", "libblake3.so", "libblake3.a"])
+      result.add("--passL:-L" & libDir)
+      # The source bootstrap has no installed wrapper to supply runtime paths.
+      # The generated runner must find the same library it linked against.
+      result.add(runtimeRpathCompilerFlags(@[libDir], hostRuntimeLinkTarget()))
+      result.add("--passL:-lblake3")
 
-  let xxhashPrefix = block:
-    let direct = firstExistingPrefix(
-      [getEnv("XXHASH_PREFIX"), builtLibraryPrefix("XXHASH_PREFIX"), "/opt/homebrew/opt/xxhash",
-        "/usr/local/opt/xxhash"],
-      "include/xxhash.h",
-      ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
-    if direct.len > 0:
-      direct
-    else:
-      nixPrefix("*-xxHash-*", "include/xxhash.h",
+    let xxhashPrefix = block:
+      let direct = firstExistingPrefix(
+        [getEnv("XXHASH_PREFIX"), builtLibraryPrefix("XXHASH_PREFIX"), "/opt/homebrew/opt/xxhash",
+          "/usr/local/opt/xxhash"],
+        "include/xxhash.h",
         ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
-  if xxhashPrefix.len > 0:
-    result.add("--passC:-I" & (xxhashPrefix / "include"))
-    let libDir = firstExistingPrefixLibDir(xxhashPrefix,
-      ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
-    result.add("--passL:-L" & libDir)
-    # The source bootstrap has no installed wrapper to supply runtime paths.
-    # The generated runner must find the same library it linked against.
-    result.add(runtimeRpathCompilerFlags(@[libDir], hostRuntimeLinkTarget()))
-    result.add("--passL:-lxxhash")
+      if direct.len > 0:
+        direct
+      else:
+        nixPrefix("*-xxHash-*", "include/xxhash.h",
+          ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
+    if xxhashPrefix.len > 0:
+      result.add("--passC:-I" & (xxhashPrefix / "include"))
+      let libDir = firstExistingPrefixLibDir(xxhashPrefix,
+        ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
+      result.add("--passL:-L" & libDir)
+      # The source bootstrap has no installed wrapper to supply runtime paths.
+      # The generated runner must find the same library it linked against.
+      result.add(runtimeRpathCompilerFlags(@[libDir], hostRuntimeLinkTarget()))
+      result.add("--passL:-lxxhash")
 
   # OpenSSL: a recipe may load it at module init (`std/net` under `-d:ssl`,
   # or a direct `loadLib`) even when the host recipe declares no ssl link

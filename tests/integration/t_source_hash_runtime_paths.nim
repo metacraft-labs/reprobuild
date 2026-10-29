@@ -65,6 +65,8 @@ when defined(linux):
       preserveEnv("BLAKE3_PREFIX")
       preserveEnv("XXHASH_PREFIX")
       preserveEnv("REPROBUILD_RUNTIME_LIBRARY_PATH")
+      preserveEnv("REPROBUILD_USE_SYSTEM_HASH_LIBS")
+      putEnv("REPROBUILD_USE_SYSTEM_HASH_LIBS", "1")
       putEnv("BLAKE3_PREFIX", prefix)
       putEnv("XXHASH_PREFIX", prefix)
       delEnv("REPROBUILD_RUNTIME_LIBRARY_PATH")
@@ -105,5 +107,60 @@ int main(void) {
       checkpoint(refused.output)
       check refused.code != 0
       check blakeSoname in refused.output or xxhashSoname in refused.output
+
+    test "portable hash sources compile outside the SDK configuration":
+      let scratch = createTempDir("repro portable hashes ", "")
+      defer: removeDir(scratch)
+      let sourceRoot = scratch / "installed source"
+      for name in ["blake3", "xxh3"]:
+        copyDir(repoRoot / "libs" / name, sourceRoot / "libs" / name)
+      preserveEnv("REPROBUILD_USE_SYSTEM_HASH_LIBS")
+      delEnv("REPROBUILD_USE_SYSTEM_HASH_LIBS")
+      let flags = consumerCompilePathFlags(sourceRoot)
+      check "--passL:-lblake3" notin flags
+      check "--passL:-lxxhash" notin flags
+      # Exercise only the shipped hash closure. External-prefix flags would
+      # let this Nix development host conceal a broken portable installation.
+      # These are production flags, not replacement include paths or libraries.
+      var hashFlags: seq[string]
+      for flag in flags:
+        if flag == "--define:reproVendoredHash" or
+            flag == "--passC:-DREPRO_VENDORED_HASH" or
+            (flag.startsWith("--passC:-I") and sourceRoot in flag):
+          hashFlags.add(flag)
+      let source = scratch / "probe.nim"
+      writeFile(source, """
+import blake3, xxh3
+doAssert blake3.toHex(blake3.digest("")) ==
+  "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+doAssert xxh3.toHex(xxh3.digest64("")) == "2d06800538d394c2"
+echo "portable-hashes-ready"
+""")
+      let nim = getEnv("REPRO_NIM_COMPILER", findExe("nim"))
+      let base = @[nim, "c", "--skipUserCfg:on", "--skipParentCfg:on",
+        "--skipProjCfg:on", "--hints:off",
+        "--path:" & (sourceRoot / "libs/blake3/src"),
+        "--path:" & (sourceRoot / "libs/xxh3/src")]
+      let binary = scratch / "probe"
+      let compiled = run(base & hashFlags & @["--nimcache:" & (scratch / "cache"),
+        "-o:" & binary, source])
+      checkpoint(compiled.output)
+      require compiled.code == 0
+      let loaded = run(@[binary], cleanLoader = true)
+      checkpoint(loaded.output)
+      check loaded.code == 0
+      check "portable-hashes-ready" in loaded.output
+      # Keep real headers but omit the implementation selector: the native
+      # linker must reject the unresolved hash functions, not accept a stub.
+      var withoutImplementation: seq[string]
+      for flag in hashFlags:
+        if flag != "--define:reproVendoredHash":
+          withoutImplementation.add(flag)
+      let refused = run(base & withoutImplementation & @[
+        "--nimcache:" & (scratch / "negative-cache"),
+        "-o:" & (scratch / "negative"), source])
+      checkpoint(refused.output)
+      check refused.code != 0
+      check "undefined reference" in refused.output
 else:
   discard # ELF loader regression; Windows uses vendored C and macOS uses LC_RPATH.
