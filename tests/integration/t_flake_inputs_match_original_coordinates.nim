@@ -4,6 +4,7 @@
 ## Different input and node names prevent accidental name-based success.
 import std/[json, os, strutils, tables, unittest]
 import nf3_override_state_fixture
+from hl11_two_lock_fixture import reproLockText, lockDepEntry
 
 suite "flake input original coordinates":
   test "aliases use source identity and cannot fall back across owners":
@@ -478,3 +479,120 @@ suite "flake input original coordinates":
       if " hook-develop-set " in line: hookLine = line
     check "not substituted by develop mode, not compared: up-src=alpha" in
       hookLine
+
+
+  test "selected source survives renamed membership and checkout URI pins":
+    let binary = getEnv("REPRO_COORDINATE_TEST_BINARY", reproBinaryPath())
+    doAssert fileExists(binary), "build repro before running this regression"
+    doAssert findExe("git").len > 0
+    var fx = setupNf2Fixture("renamed-selected-source")
+    fx.repro = absolutePath(binary)
+    defer: removeDir(fx.scratch)
+    isolateNf2Config(fx)
+    defer: releaseNf2Config()
+    removePreCommitDispatch(fx)
+    let alphaUrl = "https://github.com/metacraft-labs/alpha"
+    let wsLock = readFile(fx.ws / "repro.lock").replace(originUrl(fx, "alpha"), alphaUrl)
+    writeFile(fx.ws / "repro.lock", wsLock)
+    let manifests = fx.ws / ".repro" / "manifests"
+    createDir(manifests / "projects")
+    createDir(manifests / "repos")
+    var remotes = ""
+    var includes: seq[string]
+    for name in Nf2Repos:
+      let url = if name == "alpha": alphaUrl else: originUrl(fx, name)
+      let explicitUrl = if url.endsWith(".git"): url else: url & ".git"
+      remotes.add("\n[[remote]]\nname = \"" & name & "\"\nfetch = \"" & explicitUrl & "\"\n")
+      includes.add("\"repos/" & name & ".toml\"")
+      let member = if name == "alpha": "legacy-alpha" else: name
+      writeFile(manifests / "repos" / (name & ".toml"),
+        "schema = \"reprobuild.workspace.repo.v1\"\n[repo]\nname = \"" & member &
+        "\"\npath = \"" & name & "\"\nremote = \"" & name & "\"\nrevision = \"main\"\n")
+    writeFile(manifests / "projects" / "nf2.toml",
+      "schema = \"reprobuild.workspace.project.v1\"\nincludes = [" & includes.join(", ") &
+      "]\n[project]\nname = \"nf2\"\ndefault_revision = \"main\"\ntrunk = \"main\"\n" & remotes)
+    writeFile(fx.app / "flake.nix", "{ inputs.modules-alias.url = \"github:metacraft-labs/alpha\"; outputs = _: {}; }\n")
+    var lock = parseJson(nf2FlakeLockText(fx, fx.seedSha[0], fx.seedSha[1], fx.seedSha[2]))
+    lock["nodes"]["root"]["inputs"] = %*{"modules-alias": "alpha-src"}
+    lock["nodes"]["alpha-src"]["original"] = %*{"type": "github", "owner": "metacraft-labs", "repo": "alpha"}
+    writeFile(lockPath(fx), $lock)
+    proc bound(doc: JsonNode): JsonNode =
+      for item in doc["overrides"]:
+        if item["input"].getStr() == "modules-alias": return item
+      nil
+    let selected = flakeArgs(fx, "--all --json")
+    checkpoint(selected.stdout & selected.stderr)
+    check selected.code == 0
+    let selectedDoc = parseJson(selected.stdout)
+    let binding = bound(selectedDoc)
+    let hasBinding = binding != nil
+    require hasBinding
+    check binding["repo"].getStr() == "legacy-alpha"
+    check binding["path"].getStr() == siblingDir(fx, "alpha")
+    check %"alpha" in selectedDoc["developSet"]
+    check "NOT in the develop set" notin selected.stdout
+    # Exact-name selectors keep their existing composed-lock universe; a
+    # membership label is not silently added as a selector alias.
+    for flag in ["--only=legacy-alpha", "--except=legacy-alpha"]:
+      let rejected = flakeArgs(fx, flag & " --json")
+      check rejected.code == 2
+      check rejected.stdout.len == 0
+      check "names no repo" in rejected.stderr
+    # The actual checkout HEAD is distinct from the composer's locked pin.
+    let advanced = moveSibling(fx, "alpha", "selected-source-head")
+    check advanced != fx.seedSha[0]
+    let state = flakeStatus(fx, "--json")
+    check state.code == 0
+    let row = statusRow(parseJson(state.stdout), "modules-alias")
+    let hasStatusRow = row != nil
+    require hasStatusRow
+    check row["pinned"].getStr() == fx.seedSha[0]
+    check row["sibling"].getStr() == advanced
+    check readFile(fx.ws / "repro.lock") == wsLock
+    # The checkout URI still identifies the declared primary forge source;
+    # matching selected permission directly against file:// would lose it.
+    let checkoutUrl = "file://" & siblingDir(fx, "alpha")
+    lock["nodes"]["alpha-src"]["original"] = %*{"type": "git", "url": checkoutUrl}
+    writeFile(lockPath(fx), $lock)
+    writeFile(fx.app / "flake.nix", "{ inputs.modules-alias.url = \"git+" & checkoutUrl & "\"; outputs = _: {}; }\n")
+    let local = flakeArgs(fx, "--all --json")
+    check local.code == 0
+    let localBinding = bound(parseJson(local.stdout))
+    let hasLocalBinding = localBinding != nil
+    require hasLocalBinding
+    check localBinding["path"].getStr() == siblingDir(fx, "alpha")
+    # A recipe pin names the primary forge identity while the flake input
+    # names its local checkout. It must not be related by input-name guess.
+    writeFile(siblingDir(fx, "alpha") / "repro.nim",
+      "import repro_project_dsl\n\npackage alpha:\n  versions:\n    \"1.0.0\":\n      sourceRevision = \"refs/tags/a1\"\n")
+    discard gitIn(fx, siblingDir(fx, "alpha"), "tag a1 " & fx.seedSha[0])
+    writeFile(fx.app / "repro.nim", "import repro_project_dsl\n\npackage app:\n  uses:\n    \"alpha ==1.0.0\"\n")
+    writeFile(fx.app / "repro.lock", reproLockText(fx, "app", headOf(fx, fx.app),
+      [lockDepEntry(fx, "alpha", "../alpha", "alpha", fx.seedSha[0])]).replace(originUrl(fx, "alpha"), alphaUrl))
+    let automatic = flakeArgs(fx, "--all --json")
+    check automatic.code == 0
+    let automaticDoc = parseJson(automatic.stdout)
+    check bound(automaticDoc) == nil
+    check automaticDoc["pinnedByRecipe"].len == 1
+    check automaticDoc["pinnedByRecipe"][0]["repo"].getStr() == "alpha"
+    let explicit = flakeArgs(fx, "--only=alpha --json")
+    check explicit.code == 0
+    let explicitBinding = bound(parseJson(explicit.stdout))
+    let hasExplicitBinding = explicitBinding != nil
+    require hasExplicitBinding
+    check explicitBinding["repo"].getStr() == "legacy-alpha"
+    check explicitBinding["path"].getStr() == siblingDir(fx, "alpha")
+    let excluded = flakeArgs(fx, "--all --except=alpha --json")
+    check excluded.code == 0
+    check bound(parseJson(excluded.stdout)) == nil
+    # Two selected records for the same primary source are ambiguous, even
+    # when workspace membership has exactly one candidate. Never pick one.
+    let start = wsLock.find("{ name = \"alpha\"")
+    let finish = wsLock.find(" }", start) + 2
+    require start >= 0 and finish > start
+    let duplicate = wsLock[start ..< finish].replace("name = \"alpha\"", "name = \"shadow-alpha\"")
+    writeFile(fx.ws / "repro.lock", wsLock[0 ..< finish] & ", " & duplicate & wsLock[finish .. ^1])
+    let ambiguous = flakeArgs(fx, "--all --json")
+    check ambiguous.code == 0
+    check bound(parseJson(ambiguous.stdout)) == nil
+    check "multiple selected develop rows" in ambiguous.stdout

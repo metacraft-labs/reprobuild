@@ -8,11 +8,14 @@
 ## an obligatory output inside it. With ``--restore-cached-outputs`` the
 ## engine records the tree whole, so deleting it must bring every file back
 ## from the cache, byte for byte, without running the tool -- where the S7
-## gate admits the record. It does for Maven, .NET and Cabal. Gradle writes
-## under ``GRADLE_USER_HOME`` on every build, outside anything the edge can
-## declare, so S7 withholds its payloads and the deleted tree is rebuilt by
-## running Gradle again; this test pins that too, so the day it changes is
-## visible.
+## gate admits the record. It does for all four: Gradle's build edge runs in
+## a ``GRADLE_USER_HOME`` inside its own scratch directory and reads its
+## modules from the dependency fetch's read-only cache
+## (Language-Conventions/Kotlin.md §"Dependencies: a fetch edge and an
+## isolated user home"), so nothing it writes is left unaccounted for. The
+## case also checks that the build wrote nothing in the ambient
+## ``GRADLE_USER_HOME``, which the test points at a directory that does not
+## exist.
 ##
 ## Spawns the built ``repro`` (``build/bin/repro``) and the real tools; a
 ## case whose toolchain is not on PATH is skipped with its reason. Nothing
@@ -22,6 +25,7 @@
 
 import std/[algorithm, json, os, osproc, sequtils, strutils, tables, tempfiles, unittest]
 import repro_test_support/reasoned_skip
+from repro_core/paths import extendedPath
 
 const reproBinary =
   when defined(windows): "build/bin/repro.exe" else: "build/bin/repro"
@@ -137,7 +141,7 @@ proc cases(): seq[Case] =
         ("reprobuild.nim", reproNim("cabalRestore",
           "    \"ghc >=9\"\n    \"cabal >=3.10\"\n", "hello"))])))
   result.add(Case(name: "gradle", buildId: "kotlin-gradle-build",
-    tree: "build", product: "build/libs/hello-1.0.jar", restorable: false,
+    tree: "build", product: "build/libs/hello-1.0.jar", restorable: true,
     missing: (if findExe("gradle").len == 0 or findExe("javac").len == 0:
       "gradle or javac not on PATH" else: ""),
     setup: proc (root: string) =
@@ -159,10 +163,22 @@ suite "a delegated build's output tree is restored from the cache":
         skip(testCase.missing)
       else:
         let scratch = createTempDir("repro-delegated-restore-" & testCase.name & "-", "")
-        defer: removeDir(scratch)
+        # Extended-length: Gradle's compiled build-script accessors in the
+        # edge's user home nest past Windows' MAX_PATH, and a plain
+        # ``removeDir`` lists them but cannot delete them.
+        defer: removeDir(extendedPath(scratch))
         let project = scratch / "project"
         createDir(project)
         testCase.setup(project)
+        # Gradle must not fall back to the ambient user home: point it at a
+        # path that does not exist, and require that it still does not.
+        let ambientGradleHome = scratch / "ambient-gradle-user-home"
+        let hadGradleHome = existsEnv("GRADLE_USER_HOME")
+        let previousGradleHome = getEnv("GRADLE_USER_HOME")
+        putEnv("GRADLE_USER_HOME", ambientGradleHome)
+        defer:
+          if hadGradleHome: putEnv("GRADLE_USER_HOME", previousGradleHome)
+          else: delEnv("GRADLE_USER_HOME")
         proc build(label: string): Outcome =
           let report = scratch / (label & ".json")
           let res = execCmdEx(@[repro, "build", "--tool-provisioning=path",
@@ -179,6 +195,7 @@ suite "a delegated build's output tree is restored from the cache":
 
         let first = build("first")
         check first.status == "asSucceeded"
+        check not dirExists(ambientGradleHome)
         let tree = project / testCase.tree
         require dirExists(tree)
         if testCase.product.len > 0:

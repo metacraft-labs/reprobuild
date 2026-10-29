@@ -20,7 +20,9 @@
 ##     - the convention emits a ``haskell-cabal-outputs`` discovery
 ##       action and a single ``haskell-cabal-build`` action.
 ##     - the build action's argv carries ``cabal v2-build --offline -j1
-##       --enable-relocatable --builddir=<root>/dist-newstyle``.
+##       --builddir=<root>/dist-newstyle``, with ``--enable-relocatable``
+##       on Linux and macOS only: Cabal refuses a relocatable build on any
+##       other OS (``Cabal-3339``, measured on Windows).
 ##     - the build action declares no outputs of its own: it loads the
 ##       discovery fragment, which is one of its inputs.
 ##   * Where cabal puts each executable (default layout, an
@@ -288,7 +290,10 @@ suite "haskell-cabal convention M55":
       check sawV2BuildVerb
       check sawOfflineFlag
       check sawJ1Flag
-      check sawRelocatableFlag
+      when defined(linux) or defined(macosx):
+        check sawRelocatableFlag
+      else:
+        check not sawRelocatableFlag
 
       check "--builddir=" & (HelloBinaryFixture / "dist-newstyle") in argv
       # The build edge's outputs are discovered, not predicted

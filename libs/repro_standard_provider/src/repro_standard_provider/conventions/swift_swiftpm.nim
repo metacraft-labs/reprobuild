@@ -256,7 +256,14 @@ proc swiftExecutable(): string =
   ## Resolve a ``swift`` driver on PATH. On Windows the binary is
   ## usually ``swift.exe``; ``findExe`` resolves both shapes via
   ## PATHEXT.
-  findExe("swift")
+  ##
+  ## The link is kept, not followed. A toolchain may ship ``swift`` as a
+  ## symlink to a multi-call driver that dispatches on ``argv[0]`` (the
+  ## nixpkgs Swift 6.3.3 toolchain has ``bin/swift -> swift-driver``).
+  ## Following it makes both edges run ``swift-driver build ...``, which
+  ## the driver refuses with "invalid driver name: swift-driver". Same rule
+  ## as ``repro_core/host_tar.nim`` §"WHY followSymlinks = false".
+  findExe("swift", followSymlinks = false)
 
 proc swiftSwiftpmRecognize(projectRoot: string;
                            request: ProviderGraphRequest): bool {.gcsafe.} =

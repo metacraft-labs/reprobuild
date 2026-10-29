@@ -3110,6 +3110,18 @@ package reprobuild:
       nimcache = "build/nimcache/repro_test_runner",
       actionId = "reprobuild.test_helpers.repro_test_runner"))
 
+    # Shared-store seed/read probe used by the external Incus integration
+    # gate. It is a CLI helper, not a unittest or a shipping application.
+    # Keep its compiler inputs and output in the normal helper graph.
+    reprobuildTestHelpersActions.add(nim.c(
+      source = "tests/integration/pm3_cas_probe.nim",
+      binary = "build/test-bin/pm3_cas_probe",
+      paths = sourceOnlyNimPaths,
+      passL = testRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/pm3_cas_probe",
+      actionId = "reprobuild.test_helpers.pm3_cas_probe"))
+
     discard collect("test-helpers", reprobuildTestHelpersActions)
 
     # Test-Fixtures-In-Build-Graph M2: the monitor-shim ``test-fixtures``

@@ -470,6 +470,13 @@ type
     remoteOldOid*: string
     objectFormat*: string
     updateShape*: OutgoingUpdateShape
+    updates*: seq[PrePushRefUpdate]
+      ## Every record of the (well-formed) pre-push stream, whatever the
+      ## outgoing-current verdict. ``headOid`` is the independently observed
+      ## HEAD, which is what provisional publication is about; it is NOT what
+      ## the push publishes. A caller asking "what does this push publish"
+      ## (the membership repo's gate scope) must read these records instead —
+      ## see ``pushedCommitRange``.
 
   HookPublicationMember* = object
     ## An exact source commit in a mutually dependent publication component.
@@ -873,6 +880,7 @@ proc evaluateOutgoingCurrent*(gitBin, repoRoot, refsPath, hookRemoteName,
   if not parsed.ok:
     result.diagnostic = parsed.diagnostic
     return
+  result.updates = parsed.updates
   result.headOid = gitValue(gitBin, repoRoot, ["rev-parse", "HEAD^{commit}"])
     .toLowerAscii()
   if not isHexOid(result.headOid, parsed.oidLength):
@@ -949,6 +957,69 @@ proc evaluateOutgoingCurrent*(gitBin, repoRoot, refsPath, hookRemoteName,
   result.remoteRef = update.remoteRef
   result.remoteOldOid = update.remoteOid
   result.outgoingCurrent = true
+
+type
+  PushedCommitRange* = object
+    ## The commits ONE pre-push record publishes, as ``git rev-list``
+    ## revision arguments. Empty ``revisions`` means the record publishes no
+    ## commit at all (a deletion, or a ref to a non-commit object).
+    remoteRef*: string
+    revisions*: seq[string]
+    unreadable*: bool
+      ## The pushed object itself could not be found or read. Git only pushes
+      ## objects the checkout has, so this means a damaged repository, a
+      ## failing ``git``, or a hand-written refs stream naming an object that
+      ## does not exist. The caller must refuse: "publishes nothing" would be
+      ## a guess, and a wrong guess is an under-check.
+
+proc pushedCommitRange*(gitBin, repoRoot: string;
+    update: PrePushRefUpdate): PushedCommitRange =
+  ## What a single ``<local ref> <local oid> <remote ref> <remote oid>``
+  ## record publishes, measured against what the remote already has
+  ## (https://git-scm.com/docs/githooks#_pre_push):
+  ##
+  ##   * a DELETION (all-zero local oid) publishes nothing;
+  ##   * a local object that does not peel to a commit (a tag of a tree or a
+  ##     blob) publishes no commit either;
+  ##   * an update whose remote old object peels to a commit present locally
+  ##     publishes ``<new> ^<old>`` — exactly the commits the ref gains, for a
+  ##     fast-forward and a rewrite alike (the commits a rewrite discards are
+  ##     not published by it; the history-rewrite stage judges those);
+  ##   * a NEW remote ref (all-zero remote oid), or an old object this
+  ##     checkout does not have, publishes the commits no remote-tracking ref
+  ##     reaches: ``<new> --not --remotes``. That is the "already published"
+  ##     notion the gate's other publication probes use: a commit some remote
+  ##     already carries reached it through a push of its own, which was
+  ##     gated then. (This holds for a remote-tracking ref that is stale or
+  ##     belongs to another remote too; the exclusion rests on the commit
+  ##     having been published once, not on the destination still having it.)
+  ##
+  ## A local object that cannot be read at all sets ``unreadable``.
+  ##
+  ## The pushed object, not ``HEAD``, is the subject: Git may push any object
+  ## to any ref, and pushing an older commit, another branch, or several refs
+  ## at once are all ordinary.
+  result.remoteRef = update.remoteRef
+  if update.localOid.len == 0 or isZeroOid(update.localOid):
+    return
+  # Only the exit status is read: the oids are already validated hex from the
+  # strict stream parser, and ``<oid>^{commit}`` is itself a revision Git peels
+  # wherever it is used, so no git output is parsed (and no stray diagnostic
+  # on the merged stream can be mistaken for an object name).
+  let newCommit = update.localOid & "^{commit}"
+  if runGit(gitBin, repoRoot,
+      ["rev-parse", "--verify", "--quiet", newCommit]).code != 0:
+    # Not a commit, or not there at all? Only the first publishes nothing.
+    if runGit(gitBin, repoRoot, ["cat-file", "-e", update.localOid]).code != 0:
+      result.unreadable = true
+    return
+  if update.remoteOid.len > 0 and not isZeroOid(update.remoteOid):
+    let oldCommit = update.remoteOid & "^{commit}"
+    if runGit(gitBin, repoRoot,
+        ["rev-parse", "--verify", "--quiet", oldCommit]).code == 0:
+      result.revisions = @[newCommit, "^" & oldCommit]
+      return
+  result.revisions = @[newCommit, "--not", "--remotes"]
 
 proc commitsMadeUnreachable*(gitBin, repoRoot, remoteOldOid,
     headOid: string): seq[string] =

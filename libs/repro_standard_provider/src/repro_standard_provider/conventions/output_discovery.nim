@@ -18,7 +18,8 @@
 ##
 ## A convention never falls back to predicting a path: when the tool cannot
 ## answer, discovery fails and names the tool's own diagnostic.
-import std/[algorithm, json, os, osproc, streams, strutils]
+import std/[algorithm, json, os, osproc, sets, streams, strtabs, strutils]
+import blake3
 from repro_core/paths import extendedPath
 from repro_core/ambient_execution import uncontrolledStartProcess
 import repro_project_dsl
@@ -148,6 +149,26 @@ type ToolQuery* = object
   ## build's configuration that plans or builds nothing.
   exe*: string
   args*: seq[string]
+  env*: seq[(string, string)]
+    ## Overrides applied on top of this process's environment. An empty
+    ## value removes the variable: a query that must not see a host
+    ## setting (Gradle's ``GRADLE_RO_DEP_CACHE``) clears it explicitly.
+
+proc queryEnvironment(overrides: openArray[(string, string)]): StringTableRef =
+  ## This process's environment with `overrides` applied, or nil (inherit
+  ## unchanged) when there are none. Windows variable names are
+  ## case-insensitive, so the table is too.
+  if overrides.len == 0:
+    return nil
+  result = when defined(windows): newStringTable(modeCaseInsensitive)
+           else: newStringTable(modeCaseSensitive)
+  for key, value in envPairs():
+    result[key] = value
+  for (key, value) in overrides:
+    if value.len == 0:
+      result.del(key)
+    else:
+      result[key] = value
 
 proc readToEnd*(stream: Stream): string =
   ## Everything `stream` yields until end of file. Not ``Stream.readAll``,
@@ -172,7 +193,8 @@ proc runToolQueries*(cwd: string; queries: openArray[ToolQuery]): seq[string] =
   try:
     for query in queries:
       processes.add(uncontrolledStartProcess(query.exe, workingDir = cwd,
-        args = query.args, options = {poStdErrToStdOut}))
+        args = query.args, env = queryEnvironment(query.env),
+        options = {poStdErrToStdOut}))
     for i, process in processes:
       let output = process.outputStream.readToEnd()
       let code = process.waitForExit()
@@ -297,24 +319,376 @@ rootProject {
   ## a refusal would also write its report into the build directory.
   ## https://docs.gradle.org/current/userguide/init_scripts.html
 
-const GradleOfflineFlags* = ["--offline", "--no-daemon", "-q"]
+const GradleOfflineFlags* = ["--offline", "--no-daemon", "-q",
+  "-Pkotlin.compiler.execution.strategy=in-process"]
   ## Shared by the build and its discovery, so both see the same
   ## configuration.
+  ##
+  ## * ``--offline``: neither edge reaches the network. Every module comes
+  ##   from the read-only dependency cache the fetch edge exported
+  ##   (`gradleDependencies`), and one it missed fails the build with
+  ##   Gradle's "No cached version ... available for offline mode" instead
+  ##   of being downloaded.
+  ## * ``--no-daemon``: no Gradle daemon outlives the edge or carries state
+  ##   between edges. Gradle may still fork a single-use daemon for the
+  ##   build when the build's JVM arguments differ from the client's; it is
+  ##   a child of the edge and exits with it.
+  ## * ``kotlin.compiler.execution.strategy=in-process``: the Kotlin Gradle
+  ##   plugin otherwise starts a Kotlin compile daemon, a JVM that outlives
+  ##   the build and logs to the system temporary directory (measured on
+  ##   eli-pc with KGP 1.9.25: ``%TEMP%\kotlin-daemon.<date>.log``). In
+  ##   process, the compiler runs inside the edge.
+  ##   https://kotlinlang.org/docs/gradle-compilation-and-caches.html#defining-kotlin-compiler-execution-strategy
 
-proc gradleOutputs*(gradleExe, projectRoot, scratch: string): DiscoveredOutputs =
-  ## Asks Gradle through an init script. Gradle's own state for this query
-  ## goes under `scratch` (``--project-cache-dir``), never into the build's
-  ## project cache or build directory.
+const GradleFetchFlags* = ["--no-daemon", "-q", "--no-configuration-cache",
+  "-Pkotlin.compiler.execution.strategy=in-process"]
+  ## The dependency fetch's flags: the build's, less ``--offline``. The
+  ## configuration cache is off because the resolving task reads every
+  ## project's configurations while it runs, which the cache refuses; with it
+  ## off nothing is written into the build directory either.
+
+const GradleDependenciesInitScript* = """
+// Written by reprobuild's kotlin-gradle convention (output_discovery.nim).
+// Resolves every resolvable configuration of every project, and of every
+// project's build script, so each module the build can ask for is in the
+// dependency cache. Plugins and the settings classpath are resolved while
+// the build is configured. This is the task nixpkgs runs to record a Gradle
+// build's dependencies (`nixDownloadDeps`,
+// pkgs/development/tools/build-managers/gradle/init-deps.gradle).
+gradle.projectsLoaded {
+  rootProject.allprojects {
+    tasks.register("reproResolveDependencies") {
+      notCompatibleWithConfigurationCache("resolves every configuration")
+      doLast {
+        project.buildscript.configurations.findAll { it.canBeResolved }.each { it.resolve() }
+        project.configurations.findAll { it.canBeResolved }.each { it.resolve() }
+      }
+    }
+  }
+}
+"""
+
+proc gradleIsolationEnv*(userHome, readOnlyCache: string): seq[(string, string)] =
+  ## The environment of every offline Gradle edge (discovery and build):
+  ## a ``GRADLE_USER_HOME`` the edge owns, emptied before it runs, and the
+  ## fetch edge's export as ``GRADLE_RO_DEP_CACHE``.
+  ## https://docs.gradle.org/current/userguide/dependency_caching.html#sec:shared-readonly-cache
+  ##
+  ## Nothing the build reads therefore comes from the host's ``~/.gradle``:
+  ## the user home is new and empty, so every module, plugin and Kotlin
+  ## compiler jar is read from the read-only cache, where the monitor keys
+  ## the edge on it. Gradle never writes the read-only cache; what it writes
+  ## (lock files, journals, compiled build scripts, extracted native
+  ## libraries) lands in the edge's own user home.
+  ##
+  ## The edge's command line names the same user home
+  ## (`gradleUserHomeArgs`), which outranks a host's ``gradle.user.home``
+  ## system property; the variable stays for the wrapper scripts and for
+  ## anything the build starts that reads it.
+  @[("GRADLE_USER_HOME", userHome), ("GRADLE_RO_DEP_CACHE", readOnlyCache)]
+
+proc gradleUserHomeArgs*(userHome: string): seq[string] =
+  ## ``--gradle-user-home <userHome>``, on the command line of every Gradle
+  ## edge beside the ``GRADLE_USER_HOME`` of `gradleIsolationEnv`.
+  ##
+  ## The environment variable alone does not isolate an edge. Gradle (and the
+  ## wrapper) take the user home from ``-g``/``--gradle-user-home`` first, then
+  ## from the ``gradle.user.home`` system property, and only then from
+  ## ``GRADLE_USER_HOME``; a host that sets
+  ## ``GRADLE_OPTS=-Dgradle.user.home=...`` (a common CI setting) would point
+  ## every edge back at one shared home. Measured on eli-pc with Gradle
+  ## 8.10.2: with that ``GRADLE_OPTS`` and the variable alone, all three edges
+  ## wrote the host-set directory and none wrote its own.
+  ## https://docs.gradle.org/current/userguide/directory_layout.html#dir:gradle_user_home
+  ## https://docs.gradle.org/current/userguide/command_line_interface.html#environment_options
+  @["--gradle-user-home", userHome]
+
+proc gradleReadOnlyCache*(dependenciesRoot: string): string =
+  ## The read-only dependency cache the fetch edge exports: a copy of its
+  ## private user home's ``caches/modules-2`` at ``<this>/modules-2``.
+  dependenciesRoot / "read-only-cache"
+
+proc gradleDistribution*(dependenciesRoot: string): string =
+  ## The Gradle distribution a wrapper project's build runs: the one the
+  ## wrapper downloaded, verified and unpacked during the fetch, copied out
+  ## of the fetch's private user home.
+  dependenciesRoot / "distribution"
+
+proc gradleDistributionLauncher*(dependenciesRoot: string): string =
+  gradleDistribution(dependenciesRoot) / "bin" /
+    (when defined(windows): "gradle.bat" else: "gradle")
+
+proc gradleDependenciesStamp*(dependenciesRoot: string): string =
+  ## The fetch edge's declared output: the digest of what it fetched for.
+  dependenciesRoot / "dependencies.stamp"
+
+proc gradleFetchUserHome(dependenciesRoot: string): string =
+  ## The fetch's own ``GRADLE_USER_HOME``. It persists across fetches, like
+  ## the vendor steps' download caches (`npm_vendor`, `cargo_vendor`), so a
+  ## re-fetch after one changed version downloads only that module. It is
+  ## never read by an offline edge.
+  dependenciesRoot / "home"
+
+proc readJavaProperty(path, key: string): string =
+  ## The value of `key` in a Java properties file, with the backslash escapes
+  ## a ``gradle-wrapper.properties`` uses (``https\://``) undone; "" when the
+  ## file or the key is absent.
+  ## https://docs.oracle.com/javase/8/docs/api/java/util/Properties.html#load-java.io.Reader-
+  if not fileExists(extendedPath(path)):
+    return ""
+  for raw in readFile(extendedPath(path)).splitLines():
+    let line = raw.strip()
+    if line.len == 0 or line[0] in {'#', '!'}:
+      continue
+    let sep = line.find('=')
+    if sep <= 0 or line[0 ..< sep].strip() != key:
+      continue
+    let text = line[sep + 1 .. ^1].strip()
+    var i = 0
+    while i < text.len:
+      if text[i] == '\\' and i + 1 < text.len:
+        result.add(text[i + 1])
+        inc i, 2
+      else:
+        result.add(text[i])
+        inc i
+    return
+  ""
+
+proc gradleWrapperProperties*(projectRoot: string): string =
+  projectRoot / "gradle" / "wrapper" / "gradle-wrapper.properties"
+
+proc gradleWrapperIsVerified*(projectRoot: string): bool =
+  ## Whether the wrapper checks the distribution it downloads against a
+  ## declared SHA-256 (``distributionSha256Sum``).
+  ## https://docs.gradle.org/current/userguide/gradle_wrapper.html#sec:verification
+  readJavaProperty(gradleWrapperProperties(projectRoot),
+    "distributionSha256Sum").len > 0
+
+proc gradleVerificationPinsChecksums*(projectRoot: string): bool =
+  ## Whether the project's ``gradle/verification-metadata.xml`` pins every
+  ## artifact the fetch can download by a checksum Gradle checks: what makes
+  ## the fetch a fixed-output action. The file's presence is necessary, not
+  ## sufficient. Each of these lets an artifact through without a listed
+  ## checksum, so each answers false:
+  ##   * ``<verify-signatures>true</verify-signatures>``: an artifact may be
+  ##     accepted on a trusted key's signature;
+  ##   * ``<trusted-artifacts>`` (``<trust .../>``) and ``<trusted-keys>``:
+  ##     artifacts exempted from verification, or trusted by key;
+  ##   * ``<verify-metadata>false</verify-metadata>``: POM and Gradle module
+  ##     metadata are not checked.
+  ## https://docs.gradle.org/current/userguide/dependency_verification.html
+  ##
+  ## The test is textual (whitespace removed) and can only err toward false:
+  ## a false answer costs the fetch its portable record, while a wrong true
+  ## one would let a portable lookup substitute an unpinned fetch on another
+  ## machine (Cache-Scope P3.4).
+  let path = projectRoot / "gradle" / "verification-metadata.xml"
+  if not fileExists(extendedPath(path)):
+    return false
+  var text = ""
+  try:
+    text = readFile(extendedPath(path))
+  except IOError, OSError:
+    return false
+  var compact = newStringOfCap(text.len)
+  for ch in text:
+    if ch notin Whitespace:
+      compact.add(ch)
+  for exemption in ["<verify-signatures>true</verify-signatures>",
+                    "<verify-metadata>false</verify-metadata>",
+                    "<trust"]:
+    if exemption in compact:
+      return false
+  "<components>" in compact
+
+proc gradleDependenciesToken*(projectRoot, launcher: string; wrapper: bool;
+                              inputs: openArray[string]): string =
+  ## What a fetch is for: the resolving script, the launcher, and the bytes
+  ## of every declared input (build scripts, version catalogs, lockfiles,
+  ## verification metadata, wrapper properties). Equal tokens mean the fetch
+  ## would ask for the same modules.
+  # v2: the fetch passes ``--gradle-user-home``, and its flags are part of
+  # the token. A v1 export fetched under a host ``gradle.user.home`` override
+  # may be empty, so it is fetched again.
+  var text = "repro-gradle-dependencies-v2\n" & GradleDependenciesInitScript &
+    "\nflags=" & GradleFetchFlags.join(" ") &
+    "\nlauncher=" & launcher & "\nwrapper=" & $wrapper & "\n"
+  var sorted = @inputs
+  sorted.sort()
+  for input in sorted:
+    # Relative to the project, so two checkouts of it agree on the token.
+    let name = relativePath(input, projectRoot).replace('\\', '/')
+    text.add("--input " & name & "\n")
+    if fileExists(extendedPath(input)):
+      text.add(readFile(extendedPath(input)))
+    else:
+      text.add("<absent>")
+    text.add("\n")
+  "blake3:" & blake3.toHex(blake3.digest(text))
+
+proc sameFileContent(a, b: string): bool =
+  try:
+    getFileSize(extendedPath(a)) == getFileSize(extendedPath(b)) and
+      readFile(extendedPath(a)) == readFile(extendedPath(b))
+  except OSError, IOError:
+    false
+
+proc syncTree(source, destination: string;
+              skip: proc (relative: string): bool {.closure.}) =
+  ## Makes `destination` hold exactly the files of `source` (less those
+  ## `skip` names), rewriting only a file whose bytes differ. An unchanged
+  ## export therefore leaves every file untouched: the offline edges are
+  ## keyed on what they read here, and a rewrite with the same bytes is
+  ## still a change to the engine's revalidation (the same reason
+  ## `writeOutputFragment` writes only a changed answer).
+  var wanted = initHashSet[string]()
+  if dirExists(extendedPath(source)):
+    # Through the extended-length spelling: a module path under
+    # ``files-2.1/<group>/<name>/<version>/<sha1>/`` routinely passes
+    # Windows' 260-character MAX_PATH.
+    for path in walkDirRec(extendedPath(source),
+                           yieldFilter = {pcFile, pcLinkToFile},
+                           relative = true):
+      let relative = path.replace('\\', '/')
+      if skip(relative):
+        continue
+      wanted.incl(relative)
+      let target = destination / relative
+      if fileExists(extendedPath(target)) and
+          sameFileContent(source / relative, target):
+        continue
+      createDir(extendedPath(target.parentDir))
+      copyFileWithPermissions(extendedPath(source / relative),
+        extendedPath(target))
+  createDir(extendedPath(destination))
+  var stale: seq[string] = @[]
+  for path in walkDirRec(extendedPath(destination),
+                         yieldFilter = {pcFile, pcLinkToFile},
+                         relative = true):
+    if path.replace('\\', '/') notin wanted:
+      stale.add(path)
+  for path in stale:
+    removeFile(extendedPath(destination / path))
+
+proc unpackedWrapperDistribution(fetchHome, projectRoot: string): string =
+  ## Where the wrapper unpacked the distribution its properties name:
+  ## ``<user home>/wrapper/dists/<zip name>/<url hash>/<root>`` with
+  ## ``bin/gradle`` inside. The hash directory is the wrapper's own
+  ## (``PathAssembler``); it is found, not computed.
+  let url = readJavaProperty(gradleWrapperProperties(projectRoot),
+    "distributionUrl")
+  if url.len == 0:
+    raise newException(ValueError, gradleWrapperProperties(projectRoot) &
+      " names no distributionUrl")
+  var name = url
+  let slash = max(name.rfind('/'), name.rfind('\\'))
+  if slash >= 0:
+    name = name[slash + 1 .. ^1]
+  if name.toLowerAscii().endsWith(".zip"):
+    name.setLen(name.len - 4)
+  let launcherName = when defined(windows): "gradle.bat" else: "gradle"
+  let dists = fetchHome / "wrapper" / "dists" / name
+  if dirExists(extendedPath(dists)):
+    for hashDir in walkDir(dists):
+      if hashDir.kind != pcDir:
+        continue
+      for root in walkDir(hashDir.path):
+        if root.kind == pcDir and
+            fileExists(extendedPath(root.path / "bin" / launcherName)):
+          return root.path
+  raise newException(ValueError, "the Gradle wrapper left no unpacked " &
+    "distribution under " & dists)
+
+proc gradleDependencies*(launcher: string; wrapper: bool;
+                         projectRoot, dependenciesRoot, scratch: string;
+                         inputs: openArray[string]): bool =
+  ## The dependency fetch: resolves every module the build can ask for into
+  ## a private user home, online, and exports that home's dependency cache
+  ## as the read-only cache the offline edges read
+  ## (`gradleIsolationEnv`). For a wrapper project the wrapper downloads,
+  ## checks (``distributionSha256Sum``) and unpacks the distribution during
+  ## the same run, and the unpacked distribution is exported too: the
+  ## offline edges run it directly, never the wrapper, which would download
+  ## into their empty user home.
+  ##
+  ## Returns false, having run nothing, when the stamp already names this
+  ## fetch's token and the export is in place: the edge reaches the network,
+  ## so it is never cached and runs on every build (like the vendor steps,
+  ## `npm_vendor`), and the token keeps that run from starting a JVM.
+  ##
+  ## Determinism is Gradle's own: a committed ``gradle/verification-
+  ## metadata.xml`` makes the resolution fail on any module whose checksum
+  ## it does not list, and lockfiles make it fail on any version they do not
+  ## list. https://docs.gradle.org/current/userguide/dependency_verification.html
+  ## https://docs.gradle.org/current/userguide/dependency_locking.html
+  let token = gradleDependenciesToken(projectRoot, launcher, wrapper, inputs)
+  let stamp = gradleDependenciesStamp(dependenciesRoot)
+  let readOnly = gradleReadOnlyCache(dependenciesRoot)
+  let exported = dirExists(extendedPath(readOnly / "modules-2")) and
+    (not wrapper or
+     fileExists(extendedPath(gradleDistributionLauncher(dependenciesRoot))))
+  if exported and fileExists(extendedPath(stamp)):
+    try:
+      if readFile(extendedPath(stamp)).strip() == token:
+        return false
+    except IOError:
+      discard
+  let home = gradleFetchUserHome(dependenciesRoot)
+  createDir(extendedPath(home))
+  createDir(extendedPath(scratch))
+  let script = scratch / "repro-dependencies.init.gradle"
+  writeFile(extendedPath(script), GradleDependenciesInitScript)
+  # A host-wide read-only cache must not stand in for a download: what the
+  # build will read is what this fetch put in its own home.
+  discard runToolQueries(projectRoot, [ToolQuery(exe: launcher,
+    args: @GradleFetchFlags & gradleUserHomeArgs(home) &
+      @["-p", projectRoot, "-I", script,
+      "--project-cache-dir", scratch / "project-cache",
+      "reproResolveDependencies"],
+    env: @[("GRADLE_USER_HOME", home), ("GRADLE_RO_DEP_CACHE", "")])])
+  # Gradle's documented copy: the whole ``modules-2`` less its lock files
+  # and ``gc.properties``.
+  # https://docs.gradle.org/current/userguide/dependency_caching.html#sec:shared-readonly-cache
+  syncTree(home / "caches" / "modules-2", readOnly / "modules-2",
+    proc (relative: string): bool =
+      relative.endsWith(".lock") or relative == "gc.properties")
+  if wrapper:
+    syncTree(unpackedWrapperDistribution(home, projectRoot),
+      gradleDistribution(dependenciesRoot),
+      proc (relative: string): bool = false)
+  var previous = ""
+  if fileExists(extendedPath(stamp)):
+    try: previous = readFile(extendedPath(stamp)).strip()
+    except IOError: discard
+  if previous != token:
+    writeFile(extendedPath(stamp), token & "\n")
+  true
+
+proc gradleOutputs*(gradleExe, projectRoot, scratch,
+                    readOnlyCache: string): DiscoveredOutputs =
+  ## Asks Gradle through an init script, isolated like the build
+  ## (`gradleIsolationEnv`): its user home is ``<scratch>/user-home``,
+  ## emptied first, and its project cache ``<scratch>/project-cache``, so
+  ## nothing is written into the build's project cache, build directory or
+  ## the host's ``~/.gradle``.
   createDir(extendedPath(scratch))
   let script = scratch / "repro-outputs.init.gradle"
   let answer = scratch / "outputs.txt"
+  let userHome = scratch / "user-home"
   writeFile(extendedPath(script), GradleOutputsInitScript)
   if fileExists(extendedPath(answer)):
     removeFile(extendedPath(answer))
+  if dirExists(extendedPath(userHome)):
+    # Extended-length: Gradle's compiled build-script accessors nest past
+    # Windows' MAX_PATH.
+    removeDir(extendedPath(userHome))
   discard runToolQueries(projectRoot, [ToolQuery(exe: gradleExe,
-    args: @GradleOfflineFlags & @["-p", projectRoot, "-I", script,
+    args: @GradleOfflineFlags & gradleUserHomeArgs(userHome) &
+      @["-p", projectRoot, "-I", script,
       "--project-cache-dir", scratch / "project-cache", "reproDescribeOutputs",
-      "-Prepro.outputs.file=" & answer])])
+      "-Prepro.outputs.file=" & answer],
+    env: gradleIsolationEnv(userHome, readOnlyCache))])
   if not fileExists(extendedPath(answer)):
     raise newException(ValueError, "Gradle wrote no output description for " &
       projectRoot)
@@ -341,10 +715,19 @@ proc gradleOutputs*(gradleExe, projectRoot, scratch: string): DiscoveredOutputs 
 
 # --- Cabal -----------------------------------------------------------------
 
-const CabalConfigFlags* = ["--offline", "--enable-relocatable"]
+const CabalConfigFlags*: seq[string] =
+  when defined(linux) or defined(macosx): @["--offline", "--enable-relocatable"]
+  else: @["--offline"]
   ## The configuration flags of the delegated ``cabal v2-build``. Its
   ## discovery passes the same ones: optimisation, relocatability and the
   ## like decide the directory an executable lands in (``opt`` / ``noopt``).
+  ##
+  ## ``--enable-relocatable`` only where Cabal allows it: its configure step
+  ## refuses a relocatable build on any OS but Linux and macOS
+  ## (``checkRelocatable``'s ``checkOS``, Cabal/src/Distribution/Simple/
+  ## Configure.hs at Cabal-v3.16.1.0). Measured on eli-pc with cabal-install
+  ## 3.16.1.0 and GHC 9.12.1: ``Error: [Cabal-3339] Operating system:
+  ## windows, does not support relocatable builds``.
 
 proc cabalOutputs*(cabalExe, projectRoot, discoveryBuildDir, buildDir: string;
                    executables: openArray[string]): DiscoveredOutputs =
@@ -513,7 +896,8 @@ proc delegatedOutputsAction*(conventionName, kind, consumerId, projectRoot,
                              tool: string; inputs: openArray[string];
                              extra: openArray[string] = [];
                              scratchDirs: openArray[string] = [];
-                             env: openArray[(string, string)] = []):
+                             env: openArray[(string, string)] = [];
+                             deps: openArray[string] = []):
     tuple[action: BuildActionDef; fragment: string] =
   ## The discovery edge of a delegating convention, `<conventionName>-
   ## outputs`, and the fragment it writes. The build edge `consumerId` lists
@@ -528,6 +912,7 @@ proc delegatedOutputsAction*(conventionName, kind, consumerId, projectRoot,
     id = conventionName & "-outputs",
     call = inlineExecCall(delegatedOutputsCommand(kind, fragment, consumerId,
       projectRoot, tool, extra), projectRoot),
+    deps = @deps,
     inputs = inputs,
     outputs = @[fragment],
     pool = "compile",
@@ -554,8 +939,8 @@ proc runDelegatedOutputsCommand(args: seq[string]) =
       expectExtra(0)
       mavenOutputs(tool, projectRoot)
     of "gradle":
-      expectExtra(1)
-      gradleOutputs(tool, projectRoot, extra[0])
+      expectExtra(2)
+      gradleOutputs(tool, projectRoot, extra[0], extra[1])
     of "cabal":
       if extra.len < 3:
         raise newException(ValueError, "invalid cabal output discovery arguments")
@@ -567,10 +952,28 @@ proc runDelegatedOutputsCommand(args: seq[string]) =
       raise newException(ValueError, "unknown delegated build kind: " & kind)
   writeOutputFragment(fragment, consumerId, discovered)
 
+proc gradleDependenciesCommand*(projectRoot, launcher: string; wrapper: bool;
+                                dependenciesRoot, scratch: string;
+                                inputs: openArray[string]): seq[string] =
+  ## The argv of the Gradle dependency-fetch edge: this standard-provider
+  ## binary, asked to run `gradleDependencies`. The inputs travel in the argv
+  ## so the fetch's token covers exactly the files the edge declares.
+  @[getAppFilename(), "--gradle-dependencies", projectRoot, launcher,
+    (if wrapper: "wrapper" else: "gradle"), dependenciesRoot, scratch] &
+    @inputs
+
 proc runOutputDiscoveryCommand*(args: seq[string]): bool =
   ## Internal standard-provider operation, invoked by a discovery action.
   if args.len > 0 and args[0] == "--delegated-outputs":
     runDelegatedOutputsCommand(args)
+    return true
+  if args.len > 0 and args[0] == "--gradle-dependencies":
+    if args.len < 6 or args[3] notin ["wrapper", "gradle"]:
+      raise newException(ValueError, "invalid Gradle dependency fetch arguments")
+    let fetched = gradleDependencies(args[2], args[3] == "wrapper", args[1],
+      args[4], args[5], args[6 .. ^1])
+    echo(if fetched: "gradle dependencies: fetched and exported"
+         else: "gradle dependencies: up to date")
     return true
   if args.len > 0 and args[0] == "--swift-output-directory":
     if args.len != 4:

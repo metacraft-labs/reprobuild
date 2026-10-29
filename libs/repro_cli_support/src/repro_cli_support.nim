@@ -10796,8 +10796,11 @@ proc ensureLockPinnedCatalog*(modulePath, consumerRoot: string): string =
     return ""
 
   let startDir =
-    if modulePath.len > 0: modulePath.parentDir
-    elif consumerRoot.len > 0: consumerRoot
+    # Recipe-relative helpers deliberately receive a bare module filename.
+    # Resolve the lookup anchor against their cwd before walking ancestors;
+    # keep the compiler's location-independent argv unchanged.
+    if modulePath.len > 0: absolutePath(modulePath).parentDir
+    elif consumerRoot.len > 0: absolutePath(consumerRoot)
     else: getCurrentDir()
 
   # Develop-mode sibling beside consumer or any ancestor
@@ -36403,6 +36406,7 @@ type
     ## DS-6 — one row of ``repro develop --list``: the six columns
     ## CLI/develop.md §"Action axis" names.
     name: string
+    sourceIdentity: string   ## internal canonical VCS identity, not a display name
     tier: string
     backend: string
     revision: string
@@ -37504,6 +37508,8 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
     var rows: seq[DevelopListRow]
     for node in selected:
       var row = DevelopListRow(name: node.name,
+        sourceIdentity: (if node.coordinates.kind == ckVcs:
+          canonicalRepositoryUrl(node.coordinates.url) else: ""),
         # The PIN's provenance, not the routing assignment — see
         # ``DevelopLockSet.pinTierOf``.
         tier: composed.pinTierOf.getOrDefault(node.name,
@@ -68055,83 +68061,128 @@ proc undeclaredDependsInClosure(repos: seq[ResolvedRepo];
   for edge in undeclaredDependEdges(repos, pushedRepoName):
     result.add(edge.owner & " -> " & edge.dep)
 
-proc repoNameForFragment(identity: GitToolIdentity; membershipRoot, relPath,
-    newTip, oldTip: string): string =
-  ## Resolve a changed ``repos/<file>.toml`` fragment to the repo NAME it
-  ## declares. The file's basename is NOT the name: a fragment may declare a
-  ## different one (``repos/accounting-blocksense.toml`` declares
-  ## ``name = "accounting"``), so read the fragment's own ``[repo] name``. The
-  ## blob is read from the pushed tip, falling back to the pre-push tip for a
-  ## fragment the commit DELETED (removing a repo from the workspace is exactly
-  ## the kind of membership change the scope must cover). Basename is the last
-  ## resort so an unreadable blob narrows the scope rather than dropping it.
-  for tip in [newTip, oldTip]:
-    if tip.len == 0:
-      continue
-    let show = gitRunPlain(identity,
-      ["-C", membershipRoot, "show", tip & ":" & relPath])
-    if show.code != 0:
-      continue
-    for rawLine in show.output.splitLines():
-      let line = rawLine.strip()
-      if line.startsWith("name") and '=' in line:
-        let value = line[line.find('=') + 1 .. ^1].strip()
-        let unquoted = value.strip(chars = {'"', '\''})
-        if unquoted.len > 0:
-          return unquoted
-  relPath.extractFilename.changeFileExt("")
+proc fragmentDeclaredName(text: string): string =
+  ## The repo NAME a ``repos/<file>.toml`` fragment declares (its
+  ## ``[repo] name``), or "" when the text carries none. The file's basename
+  ## is NOT the name: a fragment may declare a different one
+  ## (``repos/accounting-blocksense.toml`` declares ``name = "accounting"``).
+  for rawLine in text.splitLines():
+    let line = rawLine.strip()
+    if line.startsWith("name") and '=' in line:
+      let value = line[line.find('=') + 1 .. ^1].strip()
+      let unquoted = value.strip(chars = {'"', '\''})
+      if unquoted.len > 0:
+        return unquoted
 
 proc membershipPushScope(identity: GitToolIdentity; resolved: ResolvedProject;
-    membershipRoot, newTip, oldTip: string): HashSet[string] =
+    membershipRoot: string; ranges: openArray[PushedCommitRange]):
+      tuple[ok: bool; names: HashSet[string]; diagnostic: string] =
   ## Workspace-And-Develop-Mode.md §"Gate scope when the pushed repo is the
-  ## membership repo" — the repos whose manifest fragments the pushed commit
-  ## range actually modifies. A manifest commit can only break a teammate on a
-  ## repo whose pin or membership IT changes (a revision re-pinned to a SHA
-  ## nobody pushed, a repo added that nobody can clone); a repo the commit does
-  ## not mention cannot be broken by it. An empty result is a real answer —
-  ## "this commit touches no fragment" — and scopes the gate to the membership
-  ## repo's own cleanliness/publication, NOT to the whole workspace.
-  result = initHashSet[string]()
-  if newTip.len == 0:
-    return
-  # Prefer the exact pushed range. A brand-new remote branch has no old tip, so
-  # fall back to the tip commit's own first-parent diff: still a well-defined
-  # "what this push introduces" for the common single-commit case, and far
-  # narrower than widening to every repo in the workspace.
-  var diff = gitRunPlain(identity,
-    ["-C", membershipRoot, "diff", "--name-only", oldTip & ".." & newTip])
-  if oldTip.len == 0 or diff.code != 0:
-    diff = gitRunPlain(identity,
-      ["-C", membershipRoot, "diff", "--name-only", newTip & "^", newTip])
-  if diff.code != 0:
-    return
+  ## membership repo" — the repos named by the added/modified
+  ## ``repos/<name>.toml`` and ``projects/<project>.toml`` files in the diff of
+  ## the PUSHED RANGE. A manifest commit can only break a teammate on a repo
+  ## whose pin or membership IT changes (a revision re-pinned to a SHA nobody
+  ## pushed, a repo added that nobody can clone); a repo the push does not
+  ## mention cannot be broken by it. An empty result is a real answer — "this
+  ## push touches no fragment" — and scopes the gate to the membership repo's
+  ## own cleanliness/publication, NOT to the whole workspace.
+  ##
+  ## ``ranges`` holds one entry per pushed ref (``pushedCommitRange``), and the
+  ## scope is their UNION. Every commit each range publishes contributes, not
+  ## only the newest: the range's end-to-end tree diff would miss a fragment an
+  ## earlier commit re-pins and a later one restores, yet that earlier commit
+  ## is published too and can be checked out. A deletion contributes nothing,
+  ## because it publishes nothing. ``HEAD`` plays no part: what the push
+  ## publishes is named by the pre-push records, and HEAD may be any commit.
+  ##
+  ## ``ok = false`` means the range could not be read. The caller refuses
+  ## rather than guess: a scope that silently came back empty is exactly the
+  ## under-check this rule exists to prevent.
+  result.ok = true
+  result.names = initHashSet[string]()
+  # path -> every blob that path held on either side of a change in range.
+  var touched = initOrderedTable[string, HashSet[string]]()
+  for pushed in ranges:
+    if pushed.unreadable:
+      result.ok = false
+      result.diagnostic = "the object pushed to " &
+        (if pushed.remoteRef.len > 0: pushed.remoteRef else: "the remote") &
+        " is missing or unreadable in this checkout"
+      return
+    if pushed.revisions.len == 0:
+      continue
+    # `--raw --no-abbrev` gives each change's full pre- and post-image blob
+    # ids, so a DELETED fragment still names the repo it declared (removing a
+    # repo from the workspace is exactly the kind of membership change the
+    # scope must cover). `--no-renames` reports a rename as a deletion plus an
+    # addition, so both names are in scope. `--cc` lists, for a merge, only
+    # the paths it changes relative to EVERY parent — what the merge itself
+    # introduces; the commits it brings in are listed on their own when they
+    # are in range. No pathspec: path limiting simplifies history and can hide
+    # a side branch's commits behind a TREESAME merge.
+    # https://git-scm.com/docs/git-log#_raw_output_format
+    var args = @["-C", membershipRoot, "-c", "core.quotePath=false", "log",
+      "--root", "--no-renames", "--no-abbrev", "--raw", "--cc", "--format="]
+    args.add(pushed.revisions)
+    args.add("--")
+    let log = gitRunPlainQuery(identity, args)
+    if log.code != 0:
+      result.ok = false
+      result.diagnostic = "could not list the commits pushed to " &
+        (if pushed.remoteRef.len > 0: pushed.remoteRef else: "the remote") &
+        ": " & log.diagnostic
+      return
+    for rawLine in log.output.splitLines():
+      if not rawLine.startsWith(":"):
+        continue
+      let tab = rawLine.find('\t')
+      if tab < 0:
+        continue
+      let relPath = rawLine[tab + 1 .. ^1].strip()
+      if not relPath.endsWith(".toml") or
+          not (relPath.startsWith("repos/") or relPath.startsWith("projects/")):
+        continue
+      discard touched.mgetOrPut(relPath, initHashSet[string]())
+      for field in rawLine[0 ..< tab].strip(chars = {':'}).splitWhitespace():
+        if field.len >= 40 and field.allCharsInSet(HexDigits) and
+            not isZeroOid(field):
+          touched[relPath].incl(field.toLowerAscii())
   var byName = initTable[string, ResolvedRepo]()
   for repo in resolved.repos:
     byName[repo.name] = repo
-  for rawPath in diff.output.splitLines():
-    let relPath = rawPath.strip()
-    if relPath.len == 0 or not relPath.endsWith(".toml"):
-      continue
+  for relPath, blobs in touched:
     if relPath.startsWith("repos/"):
-      let name = repoNameForFragment(identity, membershipRoot, relPath,
-        newTip, oldTip)
-      if name.len > 0 and name in byName:
-        result.incl(name)
-    elif relPath.startsWith("projects/"):
-      # A project manifest changed: its membership as a whole is what moved, so
-      # the repos that project declares are in scope. Only repos that actually
-      # participate in the resolved workspace can be observed, so intersect.
+      var names = initHashSet[string]()
+      for blob in blobs:
+        let text = gitRunPlainQuery(identity,
+          ["-C", membershipRoot, "cat-file", "blob", blob])
+        if text.code == 0:
+          let name = fragmentDeclaredName(text.output)
+          if name.len > 0:
+            names.incl(name)
+      # Basename is the last resort, so an unreadable blob narrows the scope
+      # to the likeliest name rather than dropping the fragment.
+      if names.len == 0:
+        names.incl(relPath.extractFilename.changeFileExt(""))
+      for name in names:
+        if name in byName:
+          result.names.incl(name)
+    else:
+      # A project manifest changed: its membership as a whole is what moved,
+      # so the repos that project declares are in scope. Only repos that
+      # actually participate in the resolved workspace can be observed, so
+      # intersect.
       let projectName = relPath.extractFilename.changeFileExt("")
       if projectName == resolved.projectName:
         for repo in resolved.repos:
-          result.incl(repo.name)
+          result.names.incl(repo.name)
       else:
         let projectFile = membershipRoot / "projects" / (projectName & ".toml")
         if fileExists(projectFile):
           try:
             for repo in resolveProject(projectFile).repos:
               if repo.name in byName:
-                result.incl(repo.name)
+                result.names.incl(repo.name)
           except CatchableError:
             # A project manifest we cannot resolve (malformed, or referencing
             # fragments this workspace does not carry) contributes nothing
@@ -69109,16 +69160,38 @@ proc executeCheckPrePush(parsed: CheckArgs;
   # scope when the pushed repo is the membership repo").
   var membershipScope = none(HashSet[string])
   if currentRepoName.len == 0 and currentIsMembershipRepo:
-    let newTip =
-      if outgoing.headOid.len > 0: outgoing.headOid
-      else: gitRunPlain(identity,
-        ["-C", membershipRoot, "rev-parse", "HEAD"]).output.strip()
-    let oldTip =
-      if outgoing.remoteOldOid.len > 0 and not isZeroOid(outgoing.remoteOldOid):
-        outgoing.remoteOldOid
-      else: ""
-    membershipScope = some(membershipPushScope(
-      identity, resolved, membershipRoot, newTip, oldTip))
+    # The scope is what the PUSH publishes, read from Git's own pre-push
+    # records — one range per pushed ref, unioned — never from HEAD. HEAD's
+    # own diff over-checks a push of an older commit (refused over repos only
+    # a later, unpushed commit touches), gates a branch deletion that
+    # publishes nothing, and under-checks a range whose newest commit touches
+    # no fragment while an earlier one re-pins a sibling.
+    #
+    # Without a refs stream (``repro check --mode=pre-push`` run by hand) the
+    # question is what a push of HEAD would publish: the commits no
+    # remote-tracking ref reaches yet.
+    var ranges: seq[PushedCommitRange]
+    if parsed.pushedRefsPath.len > 0:
+      for update in outgoing.updates:
+        ranges.add(pushedCommitRange(identity.binaryPath, membershipRoot,
+          update))
+    else:
+      ranges.add(PushedCommitRange(
+        revisions: @["HEAD^{commit}", "--not", "--remotes"]))
+    let membership = membershipPushScope(identity, resolved, membershipRoot,
+      ranges)
+    if not membership.ok:
+      result.failures.add(CheckFailure(
+        repo: parsed.currentRepo,
+        property: "membership-push-scope",
+        remediation: "make the pushed commits readable in " &
+          parsed.currentRepo & " (run 'git -C " & parsed.currentRepo &
+          " fsck' and fetch the remote), then retry the push — the gate " &
+          "cannot tell which repos this manifest push re-pins without them",
+        evidence: membership.diagnostic))
+      result.exitCode = 2
+      return
+    membershipScope = some(membership.names)
   let scope = prePushScope(resolved, currentRepoName, currentManifestLayer,
     membershipScope)
   # A `depends` edge that names no declared repo silently SHRANK the scope the
@@ -93003,6 +93076,7 @@ type
     ok: bool
     workspaceRoot: string
     checkoutOf: Table[string, string]
+    sourceOf: Table[string, string] ## selected row key -> canonical source identity
     selected: seq[string]
     onlyNames: seq[string]
       ## ``--only`` / ``--except`` exactly as given: a repo they excluded was
@@ -93024,6 +93098,7 @@ proc flakeDevelopSelectionOf(passthrough: openArray[string];
   ## before it touches the override file, the engine cache, the receipts
   ## directory or any checkout.
   result.checkoutOf = initTable[string, string]()
+  result.sourceOf = initTable[string, string]()
   var developArgs: DevelopAllArgs
   try:
     var forDevelop: seq[string]
@@ -93070,6 +93145,7 @@ proc flakeDevelopSelectionOf(passthrough: openArray[string];
       continue
     result.selected.add(row.name)
     result.checkoutOf[row.name] = row.path
+    result.sourceOf[row.name] = row.sourceIdentity
   result.ok = true
 
 proc flakeDeclaredInputsAt(flakeRoot: string):
@@ -93249,6 +93325,38 @@ proc hookMemberBindKey(originals: tuple[ok: bool;
       flakeOriginalRepository(originals.inputs[input]).present: repo
   else: bindKey
 
+proc flakeWorkspaceCandidate(sourceIdentity: string;
+    candidates: openArray[ResolvedRepo]; workspaceRoot: string):
+    tuple[repo, path, sourceIdentity, diagnostic: string] =
+  ## A checkout URI and its primary fetch URL name the same declared source.
+  ## Match through the existing workspace declaration before asking whether
+  ## that source was selected. Secondary remotes never authorize a match.
+  var matches: seq[ResolvedRepo]
+  for candidate in candidates:
+    var urls = @[candidate.fetchUrl]
+    if workspaceRoot.len > 0 and candidate.path.len > 0 and candidate.path != ".":
+      urls.add("file://" & os.normalizedPath(absolutePath(
+        workspaceRoot / candidate.path)))
+    for url in urls:
+      if url.len > 0 and canonicalRepositoryUrl(url) == sourceIdentity:
+        matches.add(candidate)
+        break
+  if matches.len == 0:
+    result.diagnostic = "no workspace repository matches original coordinates '" &
+      sourceIdentity & "'"
+  elif matches.len > 1:
+    var names: seq[string]
+    for candidate in matches: names.add(candidate.name)
+    names.sort()
+    result.diagnostic = "original coordinates '" & sourceIdentity &
+      "' match multiple workspace repositories: " & names.join(", ")
+  else:
+    result.repo = matches[0].name
+    result.path = absolutePath(workspaceRoot / matches[0].path)
+    result.sourceIdentity = canonicalRepositoryUrl(matches[0].fetchUrl)
+    if result.sourceIdentity.len == 0:
+      result.diagnostic = "matched workspace repository has no canonical primary source"
+
 proc hookFlakeSelection(hs: HookDevelopSet;
     workspaceRoot, flakeRoot: string): FlakeDevelopSelection =
   ## The managed hooks' flake selection (§16.5), in the shape the NF-1 binder
@@ -93271,6 +93379,7 @@ proc hookFlakeSelection(hs: HookDevelopSet;
   result.ok = true
   result.workspaceRoot = workspaceRoot
   result.checkoutOf = initTable[string, string]()
+  result.sourceOf = initTable[string, string]()
   var ignored: seq[string]
   let originals =
     if flakeRoot.len > 0: flakeInputOriginals(flakeRoot, ignored)
@@ -93278,9 +93387,26 @@ proc hookFlakeSelection(hs: HookDevelopSet;
   proc hasCoordinates(input: string): bool =
     originals.ok and originals.inputs.hasKey(input) and
       flakeOriginalRepository(originals.inputs[input]).present
+  var candidates: seq[ResolvedRepo]
+  try:
+    candidates = resolveWorkspaceProjectShared(workspaceRoot, "",
+      "flake repository coordinates").resolved.repos
+  except CatchableError:
+    discard # The binder retains its existing membership-failure diagnostic.
   for m in hs.flakeMembers:
     let key = hookMemberBindKey(originals, m.input, m.repo, m.bindKey)
     result.checkoutOf[key] = m.path
+    # The hook member was bound from the recipe; its lock original may
+    # still name another source. Never relabel that actual member path from
+    # the lock: the pre-filter must observe and exclude such disagreement.
+    var memberSources: seq[string]
+    for candidate in candidates:
+      if candidate.name == m.repo and candidate.fetchUrl.len > 0 and
+          os.normalizedPath(absolutePath(workspaceRoot / candidate.path)) ==
+            os.normalizedPath(absolutePath(m.path)):
+        memberSources.add(canonicalRepositoryUrl(candidate.fetchUrl))
+    if memberSources.len == 1:
+      result.sourceOf[key] = memberSources[0]
     if key notin result.selected: result.selected.add(key)
   for p in hs.pinnedByRecipe:
     let stripped = stripFlakeInputSuffix(p.input,
@@ -93299,8 +93425,31 @@ proc hookFlakeSelection(hs: HookDevelopSet;
       result.exceptNames.add(key)
   for n in hs.notices: result.notices.add(n)
 
+proc flakeSelectedCheckout(selection: FlakeDevelopSelection;
+    repo, sourceIdentity: string; hasCoordinates: bool):
+    tuple[key, path, diagnostic: string] =
+  ## Membership labels and locked dependency names may differ after a rename.
+  ## Permission comes from the selected source, while its existing path stays
+  ## authoritative. Coordinate-free inputs retain their exact-name fallback.
+  if not hasCoordinates:
+    if repo in selection.checkoutOf:
+      return (repo, selection.checkoutOf[repo], "")
+    return
+  if sourceIdentity.len == 0: return
+  var keys: seq[string]
+  for key in selection.checkoutOf.keys:
+    if selection.sourceOf.getOrDefault(key, "") == sourceIdentity:
+      keys.add(key)
+  keys.sort()
+  if keys.len > 1:
+    result.diagnostic = "source identity '" & sourceIdentity &
+      "' matches multiple selected develop rows: " & keys.join(", ")
+  elif keys.len == 1:
+    result.key = keys[0]
+    result.path = selection.checkoutOf[keys[0]]
+
 proc flakeBindInputsToCheckouts(inputNames: openArray[string];
-    checkoutOf: Table[string, string]; suffixes: openArray[string];
+    selection: FlakeDevelopSelection; suffixes: openArray[string];
     identity: GitToolIdentity; workspaceRoot: string;
     report: var seq[string]; onlyNames: openArray[string] = [];
     exceptNames: openArray[string] = [];
@@ -93393,49 +93542,32 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
     var repo = stripFlakeInputSuffix(name, suffixes)
     var candidatePath = if wsRoot.len > 0: wsRoot / repo else: ""
     let coordinate = flakeOriginalRepository(originals.inputs.getOrDefault(name))
+    var selectedSource = coordinate.identity
     if coordinate.present:
       var reason = coordinate.diagnostic
-      var matches: seq[ResolvedRepo]
       if reason.len == 0 and membershipFailure.len > 0:
         reason = "workspace repository identities could not be resolved (" & membershipFailure & ")"
+      var candidate: tuple[repo, path, sourceIdentity, diagnostic: string]
       if reason.len == 0:
-        # The repo's fetch URL, and its checkout as a `file://` URL (a
-        # `git+file://` input naming the checkout itself). Deliberately NOT
-        # its other declared remotes, which ``hookDevelopSetOf`` also binds
-        # by: a fork declares its upstream as a remote (`noir` declares
-        # `noir-lang/noir`), and an input that fetches the UPSTREAM must not
-        # have the fork's working tree substituted for it, nor the fork's
-        # revision recorded in a lock node that fetches from upstream. Where
-        # the hooks bind an input this does not, the hooks leave it alone
-        # (``hookSubstitutedDevelopSet`` compares only what the shell
-        # substitutes at the same checkout), so the narrower set is the safe
-        # side of the disagreement.
-        for candidate in candidates:
-          var urls = @[candidate.fetchUrl]
-          if wsRoot.len > 0 and candidate.path.len > 0 and candidate.path != ".":
-            urls.add("file://" & os.normalizedPath(absolutePath(
-              wsRoot / candidate.path)))
-          for u in urls:
-            if u.len > 0 and canonicalRepositoryUrl(u) == coordinate.identity:
-              matches.add(candidate)
-              break
-        if matches.len == 0:
-          reason = "no workspace repository matches original coordinates '" & coordinate.identity & "'"
-        elif matches.len > 1:
-          var names: seq[string]
-          for candidate in matches: names.add(candidate.name)
-          names.sort()
-          reason = "original coordinates '" & coordinate.identity & "' match multiple workspace repositories: " & names.join(", ")
+        candidate = flakeWorkspaceCandidate(coordinate.identity, candidates, wsRoot)
+        reason = candidate.diagnostic
       if reason.len > 0:
         report.add("NOT substituted: flake input '" & name & "': " & reason &
           "; it keeps its flake.lock pin (input-name fallback is disabled when original coordinates are present)")
         continue
-      repo = matches[0].name
-      candidatePath = absolutePath(wsRoot / matches[0].path)
-    if repo notin checkoutOf and
+      repo = candidate.repo
+      candidatePath = candidate.path
+      selectedSource = candidate.sourceIdentity
+    let selected = flakeSelectedCheckout(selection, repo, selectedSource,
+      coordinate.present)
+    if selected.diagnostic.len > 0:
+      report.add("NOT substituted: flake input '" & name & "': " &
+        selected.diagnostic & "; it keeps its flake.lock pin")
+      continue
+    if selected.key.len == 0 and
         (repo in exceptNames or (onlyNames.len > 0 and repo notin onlyNames)):
       continue
-    if repo notin checkoutOf:
+    if selected.key.len == 0:
       let sibling = candidatePath
       if sibling.len > 0 and dirExists(extendedPath(sibling)):
         report.add("NOT substituted: flake input '" & name & "' names repo '" &
@@ -93459,7 +93591,7 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
       else:
         unknownToWorkspace.add(name)
       continue
-    let dir = checkoutOf[repo]
+    let dir = selected.path
     if dir.len == 0 or not dirExists(extendedPath(dir)):
       # A `path:` override onto a directory that is not there is not an
       # override; it is a flake that fails to evaluate. NAMED, because
@@ -93610,9 +93742,32 @@ proc bulkExactFlakePins(flakeRoot, workspaceRoot: string;
   let explicitOverrides = explicitDevelopOverrideTargets(workspaceRoot,
     flakeRoot)
   let base = if workspaceRoot.len > 0: workspaceRoot else: flakeRoot
+  let originals = flakeInputOriginals(flakeRoot, report)
+  var candidates: seq[ResolvedRepo]
+  var membershipFailure = ""
+  try:
+    candidates = resolveWorkspaceProjectShared(workspaceRoot, "",
+      "flake repository coordinates").resolved.repos
+  except CatchableError as err:
+    membershipFailure = err.msg
   for name in inputNames:
-    let repo = stripFlakeInputSuffix(name, suffixes)
-    let checkout = selection.checkoutOf.getOrDefault(repo, "")
+    let fallback = stripFlakeInputSuffix(name, suffixes)
+    let coordinate = flakeOriginalRepository(originals.inputs.getOrDefault(name))
+    var sourceIdentity = coordinate.identity
+    var candidateDiagnostic = coordinate.diagnostic
+    if coordinate.present and candidateDiagnostic.len == 0:
+      if membershipFailure.len > 0:
+        candidateDiagnostic = membershipFailure
+      else:
+        let candidate = flakeWorkspaceCandidate(coordinate.identity, candidates,
+          workspaceRoot)
+        candidateDiagnostic = candidate.diagnostic
+        sourceIdentity = candidate.sourceIdentity
+    let selected = flakeSelectedCheckout(selection, fallback,
+      (if candidateDiagnostic.len == 0: sourceIdentity else: ""),
+      coordinate.present)
+    let repo = if selected.key.len > 0: selected.key else: fallback
+    let checkout = selected.path
     var hit = -1
     for i, p in pins:
       if p.input.len > 0 and p.input == name:
@@ -93621,7 +93776,8 @@ proc bulkExactFlakePins(flakeRoot, workspaceRoot: string;
     if hit < 0:
       # A `repro.nim` pin, or a `flake.nix` pin of the same repository under
       # another input name: by identity or by checkout, never by name.
-      let identity = identityOf.getOrDefault(name, "")
+      let identity = if coordinate.present: sourceIdentity
+        else: identityOf.getOrDefault(name, "")
       for i, p in pins:
         if p.input.len > 0: continue
         if (identity.len > 0 and p.identity == identity) or
@@ -93629,7 +93785,7 @@ proc bulkExactFlakePins(flakeRoot, workspaceRoot: string;
              p.path == os.normalizedPath(absolutePath(checkout))):
           hit = i
           break
-    if hit < 0 or repo notin selection.checkoutOf:
+    if hit < 0 or selected.key.len == 0:
       # Not pinned, or not substitutable in the first place (the binder names
       # why): nothing for this rule to skip.
       result.keep.add(name)
@@ -93699,7 +93855,7 @@ proc flakeShellBindingsOf(flakeRoot: string; passthrough: openArray[string];
     result.selection.workspaceRoot, result.inputNames, result.selection,
     suffixes, result.report)
   result.emitted = flakeBindInputsToCheckouts(result.pinRule.keep,
-    result.selection.checkoutOf, suffixes, identity,
+    result.selection, suffixes, identity,
     result.selection.workspaceRoot, result.report, result.selection.onlyNames,
     result.selection.exceptNames, flakeRoot)
   result.ok = true
@@ -96192,7 +96348,7 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     result.exitCode = 2
     return
   result.notices = selection.notices
-  let bound = flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
+  let bound = flakeBindInputsToCheckouts(declared.names, selection,
     suffixes, identity, selection.workspaceRoot, result.notices,
     selection.onlyNames, selection.exceptNames, flakeRoot)
   if bound.len == 0:
@@ -98013,7 +98169,7 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
         if r != nil and r.kind == JObject and r{"inputs"} != nil and
             r["inputs"].kind == JObject: r["inputs"]
         else: newJObject()
-      for b in flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
+      for b in flakeBindInputsToCheckouts(declared.names, selection,
           defaultFlakeInputStripSuffixes,
           ensureGitToolResolvable(tpmPathOnly, getEnv("PATH")),
           selection.workspaceRoot, bindNotices, selection.onlyNames,
@@ -98277,7 +98433,7 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   # at shell entry, which is where the inventory belongs.
   var skipped: seq[string]
   for n in selection.notices: skipped.add(n)
-  let exact = flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
+  let exact = flakeBindInputsToCheckouts(declared.names, selection,
     defaultFlakeInputStripSuffixes, identity, selection.workspaceRoot, skipped,
     selection.onlyNames, selection.exceptNames, flakeRoot)
   var state = flakeOverrideStateReport(flakeRoot, exact, identity)
@@ -98723,7 +98879,7 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
     let pinRule = bulkExactFlakePins(flakeRoot, selection.workspaceRoot,
       declared.names, selection, suffixes, notices)
     bindings = flakeBindInputsToCheckouts(pinRule.keep,
-      selection.checkoutOf, suffixes, identity, selection.workspaceRoot,
+      selection, suffixes, identity, selection.workspaceRoot,
       notices, selection.onlyNames, selection.exceptNames, flakeRoot)
 
   var state = flakeOverrideStateReport(flakeRoot, bindings, identity)
