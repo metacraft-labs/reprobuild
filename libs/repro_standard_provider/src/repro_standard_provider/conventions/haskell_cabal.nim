@@ -48,8 +48,9 @@
 ## sub-command supports ``--offline`` which disables Hackage access and
 ## forces resolution to use only the local store + any pre-populated
 ## ``cabal.project.freeze`` lockfile).
-##   * The action runs ``cabal v2-build --offline -j1
-##     --enable-relocatable``. The ``-j1`` pin keeps the build
+##   * The action runs ``cabal v2-build --offline -j1``, plus
+##     ``--enable-relocatable`` on Linux and macOS, the only systems where
+##     Cabal accepts it (``output_discovery.CabalConfigFlags``). The ``-j1`` pin keeps the build
 ##     deterministic (no race between parallel module-compile jobs) at
 ##     a small wall-clock cost; the convention prefers determinism for
 ##     the M55 fixture-and-test surface. A follow-up M may flip this to
@@ -74,7 +75,7 @@
 ##      fragment. Monitored, so ``cabal.project`` / ``cabal.project.local``
 ##      / the global config cabal reads key the answer.
 ##   2. ``haskell-cabal-build`` -- a single ``<cabal> v2-build --offline
-##      --enable-relocatable -j1 --builddir=<projectRoot>/dist-newstyle``
+##      [--enable-relocatable] -j1 --builddir=<projectRoot>/dist-newstyle``
 ##      action under the project root. Inputs: the ``<name>.cabal`` manifest
 ##      plus ``cabal.project`` / ``cabal.project.freeze`` /
 ##      ``cabal.project.local`` (when present), every Haskell source
@@ -443,8 +444,8 @@ proc emitBuildAction(projectRoot, cabalExe, fragment, discoveryId,
   ## guarantee). ``-j1`` keeps the build deterministic (single-threaded
   ## compile) at a small wall-clock cost; a follow-up M may flip to
   ## ``-j auto`` for larger projects. ``--enable-relocatable`` requests
-  ## relocatable binaries (RPATH-friendly on POSIX; a no-op on Windows
-  ## but harmless).
+  ## relocatable binaries (RPATH-friendly) on Linux and macOS; Cabal refuses
+  ## it elsewhere, Windows included (``CabalConfigFlags``).
   let argv = @[cabalExe, "v2-build"] & @CabalConfigFlags &
     @["-j1", "--builddir=" & (projectRoot / CabalBuildDirName)]
   let inputs = collectHaskellInputs(projectRoot) & @[fragment]

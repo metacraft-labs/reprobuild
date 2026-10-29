@@ -341,10 +341,19 @@ proc gradleOutputs*(gradleExe, projectRoot, scratch: string): DiscoveredOutputs 
 
 # --- Cabal -----------------------------------------------------------------
 
-const CabalConfigFlags* = ["--offline", "--enable-relocatable"]
+const CabalConfigFlags*: seq[string] =
+  when defined(linux) or defined(macosx): @["--offline", "--enable-relocatable"]
+  else: @["--offline"]
   ## The configuration flags of the delegated ``cabal v2-build``. Its
   ## discovery passes the same ones: optimisation, relocatability and the
   ## like decide the directory an executable lands in (``opt`` / ``noopt``).
+  ##
+  ## ``--enable-relocatable`` only where Cabal allows it: its configure step
+  ## refuses a relocatable build on any OS but Linux and macOS
+  ## (``checkRelocatable``'s ``checkOS``, Cabal/src/Distribution/Simple/
+  ## Configure.hs at Cabal-v3.16.1.0). Measured on eli-pc with cabal-install
+  ## 3.16.1.0 and GHC 9.12.1: ``Error: [Cabal-3339] Operating system:
+  ## windows, does not support relocatable builds``.
 
 proc cabalOutputs*(cabalExe, projectRoot, discoveryBuildDir, buildDir: string;
                    executables: openArray[string]): DiscoveredOutputs =
