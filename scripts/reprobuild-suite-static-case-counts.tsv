@@ -47,7 +47,8 @@ libs/repro_binary_cache_client/tests/t_a3_p2_cli_substitute.nim	nim	3
 libs/repro_binary_cache_client/tests/t_a3_p6_closure_walk_r4.nim	nim	1
 libs/repro_binary_cache_client/tests/t_a4_p2_sentinel_wait.nim	nim	2
 libs/repro_binary_cache_client/tests/t_client_cli_prefix_substitute.nim	nim	1
-libs/repro_binary_cache_client/tests/t_portable_memo_cache.nim	nim	12
+libs/repro_binary_cache_client/tests/t_portable_memo_cache.nim	nim	13
+libs/repro_binary_cache_client/tests/t_portable_memo_refuses_timestamp_records.nim	nim	1
 libs/repro_binary_cache_client/tests/t_r1_caches_config.nim	nim	10
 libs/repro_binary_cache_client/tests/t_r1_client_trust.nim	nim	5
 libs/repro_binary_cache_client/tests/test_auto_credentials.nim	nim	9
@@ -97,12 +98,14 @@ libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim	nim	15
 libs/repro_build_engine/tests/t_nix_gc_roots_cover_working_tree_outputs.nim	nim	3
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
 libs/repro_build_engine/tests/t_output_directory_an_action_creates_is_not_an_input.nim	nim	8
-libs/repro_build_engine/tests/t_package_identity_is_the_producing_action.nim	nim	6
+libs/repro_build_engine/tests/t_package_identity_is_the_producing_action.nim	nim	7
 libs/repro_build_engine/tests/t_path_mutation_evidence.nim	nim	4
 libs/repro_build_engine/tests/t_pattern_scoped_enumeration_keys_only_matching_entries.nim	nim	9
 libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim	nim	10
-libs/repro_build_engine/tests/t_portable_record_from_local_hit.nim	nim	4
+libs/repro_build_engine/tests/t_portable_record_from_local_hit.nim	nim	5
 libs/repro_build_engine/tests/t_preserve_tree_rerun_never_writes_through_links.nim	nim	10
+libs/repro_build_engine/tests/t_publishers_refuse_level1_records.nim	nim	3
+libs/repro_build_engine/tests/t_publishers_refuse_zero_evidence_records.nim	nim	3
 libs/repro_build_engine/tests/t_relocatable_record_follows_the_working_tree.nim	nim	8
 libs/repro_build_engine/tests/t_remove_before_run.nim	nim	5
 libs/repro_build_engine/tests/t_run_build_returns_its_results_without_copying.nim	nim	1
@@ -188,7 +191,7 @@ libs/repro_cli_support/tests/t_lock_publish_hook_refusal_classification.nim	nim	
 libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim	nim	8
 libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	nim	17
 libs/repro_cli_support/tests/t_loopback_node_admits_only_its_owner.nim	nim	2
-libs/repro_cli_support/tests/t_m5_peer_cache_build_wiring.nim	nim	3
+libs/repro_cli_support/tests/t_m5_peer_cache_build_wiring.nim	nim	4
 libs/repro_cli_support/tests/t_m9r41_infra_install_root.nim	nim	19
 libs/repro_cli_support/tests/t_m9r74_resolve_canonical_execroot.nim	nim	11
 libs/repro_cli_support/tests/t_materialized_publication_respects_target_selection.nim	nim	4

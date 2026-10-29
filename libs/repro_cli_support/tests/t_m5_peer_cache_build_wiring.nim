@@ -33,6 +33,14 @@
 ##
 ## See `Linux-Distro-Recipe-Validation.milestones.org` §M5
 ## "Cross-Campaign Dependency" / "What M5 actually needs".
+##
+## Campaign M17 (Edge-Derived-Identities.md §3.3a, §3.4 item 1, §3.6): the
+## engine offers a peer-cache publisher only a checksum- or hybrid-policy,
+## Level-0 record that names at least one observed input. The write action
+## below therefore reads one declared input and is recorded under
+## `ffpChecksum` (it was an input-less `ffpTimestamp` record, which the
+## engine now keeps local), and "a timestamp-policy record is not offered to
+## the publisher" pins the refusal on this seam.
 
 import std/[options, os, strutils, tables, unittest]
 
@@ -72,8 +80,15 @@ proc fingerprintForPayload(payload: string): ContentDigest =
   casDigest(payload.toOpenArrayByte(0, payload.high),
             domain = hdActionFingerprint)
 
-proc buildOneAction(outputPath, payload, fingerprintToken: string):
-    BuildGraph =
+proc recipeInput(): string =
+  ## The one input every write action below declares: the same path and
+  ## bytes for producer and consumer, so it keys nothing apart.
+  result = absolutePath(TmpDir / "inputs" / "recipe.txt")
+  createDir(result.parentDir)
+  writeFile(result, "recipe\n")
+
+proc buildOneAction(outputPath, payload, fingerprintToken: string;
+                    policy = ffpChecksum): BuildGraph =
   ## Produces a one-action graph that writes `payload` to `outputPath`.
   ## `fingerprintToken` discriminates the action's weak fingerprint so
   ## the negative test can re-use the same harness with a distinct
@@ -84,10 +99,10 @@ proc buildOneAction(outputPath, payload, fingerprintToken: string):
     kind: bakWriteText,
     id: "t-m5-write",
     deps: @[],
-    inputs: @[],
+    inputs: @[recipeInput()],
     outputs: @[outputPath],
     cacheable: true,
-    actionCachePolicy: ffpTimestamp,
+    actionCachePolicy: policy,
     weakFingerprint: fingerprintForPayload(payload & "|" & fingerprintToken),
     builtinText: payload)
   graph(@[action], newSeq[BuildPool]())
@@ -310,3 +325,28 @@ suite "LDRV-M5 peer-cache action-bundle build wiring":
     # accidentally republished — that would be a regression in the
     # wiring path under test.
     check peer[].len == 1
+
+  test "a timestamp-policy record is not offered to the publisher":
+    # Campaign M17 (Edge-Derived-Identities.md §3.3a, §3.6): the same action
+    # recorded under `ffpTimestamp` stays local. The engine does not hand it
+    # to the publisher, says why in the trace, and still serves it locally.
+    resetTmp()
+    let sourceRoot = TmpDir / "source"
+    let output = absolutePath(TmpDir / "outputs" / "timestamp.txt")
+    createDir(sourceRoot)
+    createDir(splitPath(output).head)
+    let peer: PeerTable = newTable[string, seq[byte]]()
+    let tsGraph = buildOneAction(output, "timestamp payload\n", "m5-timestamp",
+      policy = ffpTimestamp)
+    let built = runBuild(tsGraph, producerConfig(sourceRoot, peer))
+    check built.results[0].status == asSucceeded
+    check peer[].len == 0
+    var refused: seq[string] = @[]
+    for event in built.trace:
+      if event.event == "peer-cache-publish-refused":
+        refused.add(event.detail)
+    check refused.len == 1
+    check refused.len == 1 and "ffpTimestamp input-check policy" in refused[0]
+    let again = runBuild(tsGraph, producerConfig(sourceRoot, peer))
+    check not again.results[0].launched
+    check peer[].len == 0
