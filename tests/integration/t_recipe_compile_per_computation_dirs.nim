@@ -168,6 +168,19 @@ suite "recipe compiles keep one output directory per computation":
       check stampX2.mtime == stampX.mtime
       check stampX2.inode == stampX.inode
 
+      # --- X once more, straight after X: the warm path. ------------------
+      # Consecutive builds of one computation are served by the newest
+      # record's metadata projection, which carries no strong fingerprint;
+      # the computation directory must still be found (from the record's
+      # own outputs), or the owned-outputs guard refuses the record and the
+      # provider recompiles on every warm build.
+      let x2b = runBuildCli(reproBin, projectRoot, actionCacheRoot)
+      if x2b.exitCode != 0: checkpoint(x2b.output)
+      check x2b.exitCode == 0
+      check computationDirs(actionCacheRoot, "provider") == afterY
+      check stampOf(binaryX).inode == stampX.inode
+      check stampOf(binaryX).mtime == stampX.mtime
+
       # --- GC: a directory whose record is gone is collected. ------------
       let recordY = recordFileFor(actionCacheRoot, dirY)
       check recordY.len > 0

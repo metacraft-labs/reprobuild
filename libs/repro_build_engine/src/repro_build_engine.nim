@@ -4419,9 +4419,35 @@ proc computationDirOf*(action: BuildAction;
                        record: ActionResultRecord): string =
   ## The computation directory `record` binds this action's outputs to, or
   ## "" for an action without per-computation outputs.
+  ##
+  ## Named by the record's strong fingerprint. The warm in-place paths see
+  ## only the record's metadata projection (`hotMetadataRecord`), which
+  ## drops the strong fingerprint; there the directory is the one the
+  ## record's own outputs lie in, and it must be a direct child of the
+  ## identity directory other than `staging/`. Its name was fixed by the
+  ## strong fingerprint when the record was published
+  ## (`promoteComputationStaging`), and the inputs that strong fingerprint
+  ## covers are exactly what the lookup has just revalidated. "" when the
+  ## record's outputs fit no such directory; the owned-outputs guard then
+  ## refuses it.
   if not action.hasComputationOutputs():
     return ""
-  computationDirFor(action.computationStagingDir, record.strongFingerprint)
+  if record.strongFingerprint != ContentDigest():
+    return computationDirFor(action.computationStagingDir,
+      record.strongFingerprint)
+  let staging = os.normalizedPath(action.computationStagingDir)
+  let identity = parentDir(staging)
+  for declared in action.outputs:
+    let suffix = os.normalizedPath(declared)[staging.len .. ^1]
+    for output in record.outputs:
+      let path = os.normalizedPath(output.path)
+      if suffix.len > 0 and path.len > suffix.len and path.endsWith(suffix):
+        let dir = path[0 ..< path.len - suffix.len]
+        if parentDir(dir) == identity and
+            extractFilename(dir) != ComputationStagingDirName:
+          return dir
+    return ""
+  ""
 
 proc outputsBoundTo(action: BuildAction;
                     record: ActionResultRecord): seq[string] =
@@ -4430,8 +4456,12 @@ proc outputsBoundTo(action: BuildAction;
   ## the record's own computation directory.
   if not action.hasComputationOutputs():
     return action.outputs
+  let computationDir = action.computationDirOf(record)
+  if computationDir.len == 0:
+    # Unbound: the staging paths, which no published record names.
+    return action.outputs
   rebindComputationOutputs(action.outputs, action.computationStagingDir,
-    action.computationDirOf(record))
+    computationDir)
 
 proc ownedRecordOutputPaths(action: BuildAction;
                             record: ActionResultRecord): seq[string] =
