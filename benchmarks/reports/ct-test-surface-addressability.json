@@ -11,16 +11,6 @@
       "source": "libs/repro_dsl_stdlib/tests/t_workspace_floor_windows_tarball_arms.nim"
     },
     {
-      "ctTestCaseCount": 21,
-      "inventoryStaticCaseCount": 16,
-      "source": "libs/repro_standard_provider/tests/test_delegated_build_outputs.nim"
-    },
-    {
-      "ctTestCaseCount": 9,
-      "inventoryStaticCaseCount": 8,
-      "source": "libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim"
-    },
-    {
       "ctTestCaseCount": 2,
       "inventoryStaticCaseCount": 3,
       "source": "libs/repro_tool_profiles/tests/t_tar_listing_ignores_tar_warnings.nim"
@@ -29,11 +19,6 @@
       "ctTestCaseCount": 4,
       "inventoryStaticCaseCount": 5,
       "source": "tests/e2e/m68/t_e2e_repro_home_depends_on_topological.nim"
-    },
-    {
-      "ctTestCaseCount": 5,
-      "inventoryStaticCaseCount": 4,
-      "source": "tests/integration/t_flake_inputs_match_original_coordinates.nim"
     },
     {
       "ctTestCaseCount": 0,
@@ -258,22 +243,22 @@
     }
   ],
   "reconciliation": {
-    "caseCoveragePercent": 97.42,
+    "caseCoveragePercent": 97.38,
     "caseItemsInCatalog": 15794,
-    "casesAddressableThroughTheSurface": 14867,
+    "casesAddressableThroughTheSurface": 14876,
     "collidingIdentities": 12,
     "distinctCaseIdentities": 15780,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 2390,
-      "compared": 2399,
-      "disagree": 9
+      "agree": 2395,
+      "compared": 2401,
+      "disagree": 6
     },
     "sourceCoveragePercent": 99.67,
-    "sourcesAddressableThroughTheSurface": 2399,
+    "sourcesAddressableThroughTheSurface": 2401,
     "sourcesNotAddressable": 8,
-    "trackedNimSuiteSources": 2407,
-    "trackedStaticCaseCount": 15260
+    "trackedNimSuiteSources": 2409,
+    "trackedStaticCaseCount": 15276
   },
   "schemaVersion": 1,
   "surface": {
