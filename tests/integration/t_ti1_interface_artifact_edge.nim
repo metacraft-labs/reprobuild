@@ -25,7 +25,7 @@
 ##      TI3-readiness property.
 ##
 ##   3. **Producer-declared resource module.** A producer declaring a SEPARATE
-##      resource module (like vm-harness's ``resources.nim``) lifts
+##      resource module (like gosti's ``resources.nim``) lifts
 ##      ``publicResources`` with the REAL resource types (typeId / determinism
 ##      / typed attrs / entry-point ids) from that module.
 
@@ -124,7 +124,7 @@ proc cApply(inst: ResourceInstance; action: ResourceActionKind;
 let containerDriver = ResourceProviderDriver(
   identity: cIdentity, digest: cDigest, observe: cObserve, apply: cApply)
 
-resourceType "vm_harness.container":
+resourceType "gosti.container":
   attrs: ContainerAttrs
   wrapper: container
   determinism: rdVolatile
@@ -138,7 +138,7 @@ resourceType "vm_harness.container":
 const resourceProducerRepro = """
 import repro_project_dsl
 
-package ti1vmharness:
+package ti1gosti:
   executable placeholder:
     discard
 """
@@ -281,7 +281,7 @@ suite "TI1: interface-artifact edge (cached, content-addressed lift)":
     let resources = artifact.projectInterface.publicResources
     check resources.len == 1
     let res = resources[0]
-    check res.typeId == "vm_harness.container"
+    check res.typeId == "gosti.container"
     check res.determinism == irdVolatile
     # The typed attribute schema — the wrapper formals a consumer binds.
     check res.attributes.len == 2
@@ -290,9 +290,9 @@ suite "TI1: interface-artifact edge (cached, content-addressed lift)":
     check res.attributes[1].name == "cpus"
     check res.attributes[1].nimType == "int"
     # The entry-point descriptors (ids) crossed — the driver value did NOT.
-    check res.entrypoints.observe == "vm_harness.container.observe"
-    check res.entrypoints.plan == "vm_harness.container.plan"
-    check res.entrypoints.apply == "vm_harness.container.apply"
+    check res.entrypoints.observe == "gosti.container.observe"
+    check res.entrypoints.plan == "gosti.container.plan"
+    check res.entrypoints.apply == "gosti.container.apply"
 
     # The resource module is part of the lift's input identity: declaring it
     # produces a DIFFERENT action key than the resource-free control lift.

@@ -149,7 +149,7 @@ suite "repro reap is a dispatched verb":
     let store = openStateStore(storeRoot)
 
     # A typeId no provider in `repro` serves and whose attrs codec it does not
-    # link: the live daemon's `vm_harness.nic` shape. `present: true`, so the
+    # link: the live daemon's `gosti.nic` shape. `present: true`, so the
     # sweep must attempt a destroy and fail rather than no-op.
     writeStateRecord(store,
       expiredRecord("nic0", "reapdispatch.unlinked", "reapdispatch.unlinked",

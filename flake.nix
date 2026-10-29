@@ -2625,17 +2625,17 @@
               # are different libraries with different sonames, and this shell
               # needs both for different consumers.
               #
-              # The LINK requirement comes from vm-harness, whose serial-console
-              # matcher (src/vm_harness/serial.nim) is built on Nim's `std/re`
+              # The LINK requirement comes from gosti, whose serial-console
+              # matcher (src/gosti/serial.nim) is built on Nim's `std/re`
               # — a PCRE **1** binding — and pins the dependency into the ELF
               # with `{.passL: "-Wl,--no-as-needed -lpcre -Wl,--as-needed".}`.
               # reprobuild's R2/R9 boot gates
               # (tests/integration/t_r2_iso_boot.nim and t_r9_systemd_boot.nim)
-              # `import vm_harness` whenever the optional sibling checkout is
-              # present (config.nims' `vmHarnessAvailable`), so their `nim c`
-              # link line carries `-lpcre`. vm-harness supplies the matching
+              # `import gosti` whenever the optional sibling checkout is
+              # present (config.nims' `gostiAvailable`), so their `nim c`
+              # link line carries `-lpcre`. gosti supplies the matching
               # `-L` from ITS OWN config.nims via `pcre-config --libs`, and that
-              # file governs builds rooted in vm-harness only — a build rooted
+              # file governs builds rooted in gosti only — a build rooted
               # here reads reprobuild's config.nims instead and never sees it.
               # The `-L` therefore has to come from this shell's NIX_LDFLAGS,
               # exactly as the OpenSSL `-L` does for the `-d:ssl` test edges
@@ -2649,10 +2649,10 @@
               # is consulted by the loader at run time and never by `ld` at
               # link time. Both are needed, for the two different phases.
               #
-              # This mirrors vm-harness's own flake, which lists `pkgs.pcre` in
+              # This mirrors gosti's own flake, which lists `pkgs.pcre` in
               # `buildInputs` (and `pkgs.pcre.dev`, for `pcre-config`, on the
               # lint hook's PATH) for the same library. Listing it here also
-              # puts `pcre-config` on PATH, which is what vm-harness's
+              # puts `pcre-config` on PATH, which is what gosti's
               # config.nims hard-fails without.
               pkgs.pcre
               pkgs.ninja
@@ -2769,10 +2769,10 @@
               pkgs.grub2_efi
               pkgs.kmod
               # ReproOS attestation boot gates: they boot a
-              # disk image under QEMU through vm-harness's
+              # disk image under QEMU through gosti's
               # QemuBootBackend and assert on its serial console.  The
               # gates themselves live in their owning repositories --
-              # vm-harness (tests/integration/t_boot_smoke_harness_*.nim)
+              # gosti (tests/integration/t_boot_smoke_harness_*.nim)
               # and reproos (tests/test_reproos_image_boot_smoke.nim) --
               # but this is the shell much of the campaign's tooling runs
               # in, so it must be able to host a boot.  Two host inputs
@@ -2783,8 +2783,8 @@
               #     needs an OVMF_CODE.fd loader plus an OVMF_VARS.fd
               #     NVRAM template.  It carries no binaries; it is here
               #     so the pair is realised in the store, and the
-              #     shellHook below names it through VMH_OVMF_CODE /
-              #     VMH_OVMF_VARS rather than leaving the harness to
+              #     shellHook below names it through GOSTI_OVMF_CODE /
+              #     GOSTI_OVMF_VARS rather than leaving the harness to
               #     glob /nix/store for whatever it finds.
               #   * ``swtpm`` -- the software TPM 2.0 emulator that
               #     backs QEMU's ``-tpmdev emulator``.  Attaching a
@@ -2838,16 +2838,16 @@
             ''
             + pkgs.lib.optionalString pkgs.stdenv.isLinux ''
               # ReproOS attestation: name the exact edk2 firmware pair the
-              # boot gates should use. vm-harness's firmware resolver
-              # (src/vm_harness/firmware.nim) reads these two variables ahead
+              # boot gates should use. gosti's firmware resolver
+              # (src/gosti/firmware.nim) reads these two variables ahead
               # of any conventional path, and its last-resort fallback is a
               # /nix/store glob whose winner is the lexically greatest store
               # hash -- i.e. not a stable choice. Pinning the pair to this
               # shell's own OVMF means a boot gate asserts against the
               # firmware the flake pins rather than whatever a prior GC root
               # happened to leave behind. Respects an operator override.
-              export VMH_OVMF_CODE="''${VMH_OVMF_CODE:-${pkgs.OVMF.fd}/FV/OVMF_CODE.fd}"
-              export VMH_OVMF_VARS="''${VMH_OVMF_VARS:-${pkgs.OVMF.fd}/FV/OVMF_VARS.fd}"
+              export GOSTI_OVMF_CODE="''${GOSTI_OVMF_CODE:-${pkgs.OVMF.fd}/FV/OVMF_CODE.fd}"
+              export GOSTI_OVMF_VARS="''${GOSTI_OVMF_VARS:-${pkgs.OVMF.fd}/FV/OVMF_VARS.fd}"
             '';
           };
 

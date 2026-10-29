@@ -307,7 +307,7 @@ suite "fs.systemFile: PHASE-5 macOS driver-direct + symlink check":
       echo "  [sandbox-gated] REPRO_PHASE5_MACOS_FS_VM not set (or " &
         "not on macOS) - the macOS-specific /private/etc symlink " &
         "resolution scenario is NOT EXERCISED on this host. Run " &
-        "this gate inside a disposable macOS VM (via vm-harness " &
+        "this gate inside a disposable macOS VM (via gosti " &
         "tart-macos) with REPRO_PHASE5_MACOS_FS_VM=1 to exercise " &
         "the real driver-direct apply + verify + destroy path."
     else:

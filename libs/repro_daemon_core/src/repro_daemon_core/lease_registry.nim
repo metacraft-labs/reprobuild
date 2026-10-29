@@ -77,7 +77,7 @@ proc leaseReapIntervalMs*(): int =
 # ``rtSession`` variant dispatches ``observe``/``apply(rakDestroy)`` over the
 # RP provider-session protocol (``observeViaSession``/``applyViaSession``)
 # against a launched OUT-OF-TREE provider — so the daemon can tear down
-# vm-harness's Incus resources WITHOUT linking their drivers.
+# gosti's Incus resources WITHOUT linking their drivers.
 #
 # What was missing (the L4 deferral): the daemon called ``runLeaseReapTick``
 # with the DEFAULT ``inProcessTransport()`` — it never opened a provider
@@ -152,7 +152,7 @@ const
     ## Four is generous against the real figure because the rotation dimension
     ## is distinct PROVIDER ARTIFACTS, not resource types: one provider binary
     ## serves every type it registers, so the motivating topology slice's four
-    ## types (``vm_harness.network``/``.container``/``.nic``/``.check``) share
+    ## types (``gosti.network``/``.container``/``.nic``/``.check``) share
     ## ONE artifact id and one pool entry. A store would need four separate
     ## out-of-tree providers, their records falling due in strict rotation,
     ## before the limit mattered at all.
@@ -630,7 +630,7 @@ proc runLeaseReapTick*(scope: DaemonLeaseScope = dlsUser;
   ## L5 deferral (i): when no explicit ``transport`` is given, the transport is
   ## chosen PER RECORD by ``leaseReapTransportFactory`` — over a pooled
   ## provider session for a type whose artifact the daemon has registered OR
-  ## whose own record names one (reaping OUT-OF-TREE vm-harness resources over a
+  ## whose own record names one (reaping OUT-OF-TREE gosti resources over a
   ## real session), and in-process for a type neither names (in-closure
   ## providers / the hermetic L4 stub). A store with no artifacts anywhere and
   ## an empty registry yields the plain in-process transport, so the hermetic

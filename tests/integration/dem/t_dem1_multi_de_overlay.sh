@@ -30,7 +30,7 @@
 #   - The DEM1 sentinel /var/lib/reproos-dem1-multi-de-done lands.
 #   - Re-applying is a no-op (sentinel short-circuit).
 #
-# What this test does NOT gate (covered by the optional vm-harness test):
+# What this test does NOT gate (covered by the optional gosti test):
 #   - Booting the ISO and verifying GRUB menu / repro.de= selection.
 #   - Actual DE banner attempts (blocked by cascade G + linker cascade).
 #

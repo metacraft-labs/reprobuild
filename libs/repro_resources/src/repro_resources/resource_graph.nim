@@ -101,7 +101,7 @@ registerRunEdgeConsumerProvider()
 # ---------------------------------------------------------------------------
 # Named-Runnable-Edges N3b — per-typeId provider-artifact refs.
 #
-# An out-of-tree ``stateGroup`` member (a vm-harness Incus type the ``repro``
+# An out-of-tree ``stateGroup`` member (a gosti Incus type the ``repro``
 # CLI does not link) cannot be reconciled in-process; the leased-consumes
 # bridge routes it to a PROVIDER SESSION (N3a). To OPEN that session the CLI
 # must know the provider BINARY that serves the member's ``typeId`` — its

@@ -15,7 +15,7 @@
 ##   netinst kernel + initrd are perfect for a "did the kernel reach
 ##   userspace?" boot-gate assertion target -- they're small, self-
 ##   contained, and produce a text-mode installer banner on serial
-##   COM1 that the R0 vm-harness ``bootFromMedia`` boot gate tails.
+##   COM1 that the R0 gosti ``bootFromMedia`` boot gate tails.
 ##
 ## * Later (R10): the same recipe takes the R8 (from-source kernel)
 ##   and R7 (from-source initramfs) typed outputs as inputs -- only the

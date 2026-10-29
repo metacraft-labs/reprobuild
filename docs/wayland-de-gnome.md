@@ -12,7 +12,7 @@ calendar / contacts daemons, x-display-manager fallback path, GSettings DB
 seeding, multi-monitor profile management, accessibility theming) are called
 out as post-PoC follow-ups but not implemented in this milestone.
 
-* DE-G2 — vm-harness Hyper-V GNOME boot test (consumes the rootfs layout
+* DE-G2 — gosti Hyper-V GNOME boot test (consumes the rootfs layout
   decided here).
 * DE-H1 — parallel Hyprland-equivalent doc (analogous shape; sway used as
   compositor stand-in for Hyprland).
@@ -318,7 +318,7 @@ DesktopNames=GNOME
 `TryExec=` lets gdm3 hide the session entry if the gnome-shell binary
 isn't on PATH (defensive; the symlink-farm always plants it).
 
-## Risks for DE-G2 (vm-harness boot test)
+## Risks for DE-G2 (gosti boot test)
 
 1. **Cascade G blocks the actual boot gate uniformly (same as DE-H2).**
    The R9 systemd dbus.socket non-activation issue surfaced by DE-H2 will

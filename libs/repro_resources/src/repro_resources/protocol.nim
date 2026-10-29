@@ -243,7 +243,7 @@ proc unboxResourceBinding*(box: BoxedValue): ResourceBinding =
 
 proc splitResourceOp(entryPointId: string): tuple[typeId, op: string] =
   ## ``<typeId>.<op>`` where ``<op>`` is the last dotted segment. The typeId
-  ## itself contains dots (e.g. ``vm_harness.container.observe``), so we split
+  ## itself contains dots (e.g. ``gosti.container.observe``), so we split
   ## on the LAST dot.
   let idx = entryPointId.rfind('.')
   if idx <= 0:

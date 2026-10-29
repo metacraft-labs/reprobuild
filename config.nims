@@ -687,8 +687,8 @@ proc addPackagePath(envName: string; candidates: openArray[string];
   ## ``optional = true`` says a checkout is EXPECTED to be able to lack this
   ## package, so its report reads as a note rather than a warning. It is for
   ## packages whose absence the tree already tolerates -- today only
-  ## ``VM_HARNESS_SRC``, which ``config.nims`` itself guards with
-  ## ``vmHarnessAvailable`` further down, and which no Nix execution surface
+  ## ``GOSTI_SRC``, which ``config.nims`` itself guards with
+  ## ``gostiAvailable`` further down, and which no Nix execution surface
   ## exports. The distinction is about how surprising the absence is, not
   ## about whether the build proceeds: see ``reportUnresolvedPackagePath``
   ## for why nothing here refuses.
@@ -835,27 +835,27 @@ addSiblingFirstPackagePath(".." / "nim-shm-gset" / "src", "SHM_GSET_SRC",
 # exists, so removing the duplicate loses no resolution and restores the
 # policy.
 
-# R2: vm-harness lives in the sibling ``D:/metacraft/vm-harness/`` repo
+# R2: gosti lives in the sibling ``D:/metacraft/gosti/`` repo
 # (see ReproOS-MVP R0 status). The R2 boot integration test
-# (tests/integration/t_r2_iso_boot.nim) imports ``vm_harness`` to drive
+# (tests/integration/t_r2_iso_boot.nim) imports ``gosti`` to drive
 # the bootFromMedia/captureSerial/expectLine primitives against the
-# Hyper-V Gen-2 UEFI backend. Prefer $VM_HARNESS_SRC, then the
+# Hyper-V Gen-2 UEFI backend. Prefer $GOSTI_SRC, then the
 # sibling-repo checkout.
-addPackagePath("VM_HARNESS_SRC", [
-  ".." / "vm-harness" / "src",
-], "vm_harness.nim", optional = true)
+addPackagePath("GOSTI_SRC", [
+  ".." / "gosti" / "src",
+], "gosti.nim", optional = true)
 
-# Define ``vmHarnessAvailable`` only when the optional vm-harness sibling is
+# Define ``gostiAvailable`` only when the optional gosti sibling is
 # actually present. The R2/R9 boot integration tests guard their
-# ``import vm_harness`` on this symbol so they skip-compile when the sibling is
+# ``import gosti`` on this symbol so they skip-compile when the sibling is
 # absent, instead of hard-failing the whole test-build. A missing optional
 # sibling must skip, not be fatal (Workspace-alignment RA-23;
 # Interactive-UX-And-Progress.md Principle 2).
 block:
-  let vmhEnv = getEnv("VM_HARNESS_SRC")
-  if (vmhEnv.len > 0 and repoFileExists(vmhEnv / "vm_harness.nim")) or
-     repoFileExists(".." / "vm-harness" / "src" / "vm_harness.nim"):
-    switch("define", "vmHarnessAvailable")
+  let gostiEnv = getEnv("GOSTI_SRC")
+  if (gostiEnv.len > 0 and repoFileExists(gostiEnv / "gosti.nim")) or
+     repoFileExists(".." / "gosti" / "src" / "gosti.nim"):
+    switch("define", "gostiAvailable")
 
 # Lib subdirectories to probe under a system prefix. The order matters:
 # `lib` covers the default + Debian-multiarch case (Debian/Ubuntu install
