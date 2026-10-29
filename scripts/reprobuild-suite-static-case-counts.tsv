@@ -744,7 +744,7 @@ libs/repro_standard_provider/tests/test_crude_fallback.nim	nim	3
 libs/repro_standard_provider/tests/test_crystal_convention.nim	nim	10
 libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim	nim	7
 libs/repro_standard_provider/tests/test_d_direct_convention.nim	nim	12
-libs/repro_standard_provider/tests/test_delegated_build_outputs.nim	nim	16
+libs/repro_standard_provider/tests/test_delegated_build_outputs.nim	nim	21
 libs/repro_standard_provider/tests/test_delegated_output_discovery.nim	nim	2
 libs/repro_standard_provider/tests/test_elixir_mix_convention.nim	nim	14
 libs/repro_standard_provider/tests/test_emit_cache_m18.nim	nim	7
@@ -763,7 +763,7 @@ libs/repro_standard_provider/tests/test_haskell_cabal_convention.nim	nim	8
 libs/repro_standard_provider/tests/test_java_maven_convention.nim	nim	7
 libs/repro_standard_provider/tests/test_jsts_convention.nim	nim	19
 libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	nim	11
-libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim	nim	8
+libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim	nim	9
 libs/repro_standard_provider/tests/test_mode1_loader.nim	nim	12
 libs/repro_standard_provider/tests/test_nim_convention.nim	nim	23
 libs/repro_standard_provider/tests/test_ocaml_dune_convention.nim	nim	12
