@@ -353,7 +353,7 @@ proc newPeerCacheEngineHooks*(client: PeerCacheClient;
     {.cast(gcsafe).}:
       try:
         let outcome = publishTwoPhase(st.memo, engineCas, record,
-          twoPhaseContextOf(query), att)
+          twoPhaseContextOf(query), att, query.evidenceLevel)
         if not outcome.published:
           inc stats.publishSkips
           stats.lastPublishReason = outcome.reason

@@ -520,6 +520,7 @@ libs/repro_peer_cache/tests/t_peer_cache_mint_cert_ca_signed_chain.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_mint_cert_self_signed_round_trip.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_multicast_cidr_allowlist_drops_off_network.nim	nim	2
 libs/repro_peer_cache/tests/t_peer_cache_multicast_loopback_discovery.nim	nim	1
+libs/repro_peer_cache/tests/t_peer_cache_refuses_timestamp_records_across_hosts.nim	nim	6
 libs/repro_peer_cache/tests/t_peer_cache_registry_advertise_snapshot_and_delta.nim	nim	3
 libs/repro_peer_cache/tests/t_peer_cache_sim_fetch_workload_hits_peer_cache.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_sim_mixed_tenant_isolation.nim	nim	1

@@ -4626,6 +4626,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_peer_cache/tests/t_peer_cache_refuses_timestamp_records_across_hosts.nim",
+    binary: "build/test-bin/t_peer_cache_refuses_timestamp_records_across_hosts",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_peer_cache/tests/t_peer_cache_registry_advertise_snapshot_and_delta.nim",
     binary: "build/test-bin/t_peer_cache_registry_advertise_snapshot_and_delta",
     defines: @[],

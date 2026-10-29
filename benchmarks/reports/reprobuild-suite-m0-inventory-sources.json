@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2410,
+    "nimTestBinaries": 2411,
     "pureUnitConsolidationGroups": 68,
     "pureUnitTests": 686,
     "staticallyDetectedRuntimeCompilerFlowTests": 130,
-    "testEntries": 2449
+    "testEntries": 2450
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1385,7 +1385,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1339,
+      "integration": 1340,
       "platform/destructive": 146,
       "pure unit": 686,
       "unclassified": 260
@@ -1596,9 +1596,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2410,
+    "nimTestBinaryCount": 2411,
     "pythonTestFileCount": 39,
-    "testEntryCount": 2449
+    "testEntryCount": 2450
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -17210,6 +17210,30 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_peer_cache_refuses_timestamp_records_across_hosts",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cas_store",
+        "repro_cli_support",
+        "repro_core",
+        "repro_hash",
+        "repro_local_store",
+        "repro_peer_cache",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_peer_cache",
+      "requiresReproBinary": true,
+      "source": "libs/repro_peer_cache/tests/t_peer_cache_refuses_timestamp_records_across_hosts.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_peer_cache_registry_advertise_snapshot_and_delta",
       "class": "unclassified",
       "classificationReason": "binds a fixed OS-global port",
@@ -17592,6 +17616,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
+        "repro_cas_store",
         "repro_cli_support",
         "repro_hash",
         "repro_local_store",
@@ -34094,6 +34119,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_local_store",
         "repro_peer_cache",
         "repro_test_support"
       ],

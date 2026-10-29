@@ -18,6 +18,14 @@
 ##           (`mkGetActionRecordRequest`), check it describes that selector,
 ##           and fetch every output blob it references by content digest.
 ##
+## Campaign M17 (Edge-Derived-Identities.md §3.3a, §3.4 item 1, §3.6) applies
+## one publication rule at both ends (`publicationRefusalOf`): only a record
+## made under `ffpChecksum` or `ffpHybrid`, graded Level 0 by the producer's
+## engine, and naming at least one observed input crosses hosts. The producer
+## refuses anything else before computing an identity; the consumer refuses
+## it in Step 4 as a miss, judging the record's own policy and the evidence
+## level its issuer signed into the memo entry (`memo_store.nim`, entry v3).
+##
 ## The producer side (`publishTwoPhase`) writes exactly what those steps
 ## read: the PathSet blob and the output blobs into the local CAS (the
 ## content plane serves them), and a memo entry under its own
@@ -98,6 +106,11 @@ type
     newerFormatMisses*: int
       ## Entries skipped because a newer node wrote them in a format this
       ## build does not read (a miss, never a rejection).
+    publicationRuleMisses*: int
+      ## Entries skipped because the record may not cross hosts at all
+      ## (`publicationRefusalOf`): a timestamp-policy, non-Level-0, unstated-
+      ## level or zero-evidence record. What an older or non-conforming
+      ## producer publishes; a miss, never a rejection, and no suspicion.
 
 const
   TwoPhaseBundleMagic = "RPTB"
@@ -258,6 +271,17 @@ proc identitiesFor*(pathSet: PeerPathSet; ctx: TwoPhaseContext): seq[string] =
   for entry in pathSet:
     result.add(entryIdentity(entry, ctx))
 
+proc publicationRefusalOf*(record: ActionResultRecord;
+                           level: EvidenceLevel): string =
+  ## Why `record` may not cross hosts through the peer cache, or "" when it
+  ## may: `repro_local_store.publicationRefusal`, the one rule every
+  ## publisher and consumer applies (Edge-Derived-Identities.md §3.3a, §3.4
+  ## item 1, §3.6). The producer asks it of the record it is about to
+  ## publish, before computing a single identity; the consumer asks it of the
+  ## record a peer served, with the level the issuer signed, whatever that
+  ## producer's version or conformance.
+  publicationRefusal(record, level)
+
 proc inputsStillMatch*(record: ActionResultRecord;
                        cwd: string): tuple[ok: bool; changed: string] =
   ## Whether every input the record names still observes as recorded, under
@@ -375,11 +399,19 @@ proc blobDigestOf(blob: CasBlobRef): BlobDigest =
 proc publishTwoPhase*(store: PeerMemoStore; cas: var CasStore;
                       record: ActionResultRecord;
                       ctx: TwoPhaseContext;
-                      attestor: LeafProvider = nil): TwoPhasePublishOutcome =
+                      attestor: LeafProvider = nil;
+                      evidenceLevel = elUnstated): TwoPhasePublishOutcome =
   ## Publishes one freshly recorded execution into the two-phase stores.
   ##
   ## Refuses (returns `published = false` with a reason) rather than
   ## publishing anything it cannot stand behind:
+  ##   * a record that may not leave this host at all
+  ##     (`publicationRefusalOf`, campaign M17): made under `ffpTimestamp`,
+  ##     a regular-file input without a content hash, monitor evidence other
+  ##     than Level 0 (`evidenceLevel`, which the engine graded; a caller
+  ##     that does not say is refused), or no observed input. Checked FIRST,
+  ##     before any input is re-observed or hashed: publication never
+  ##     computes content identities for such a record after the fact;
   ##   * a record without CAS payloads (nothing a peer could restore);
   ##   * an output blob missing from the CAS;
   ##   * an input that no longer observes as recorded (edited since the
@@ -394,6 +426,9 @@ proc publishTwoPhase*(store: PeerMemoStore; cas: var CasStore;
   ## the memo entry is on disk under `(peerKey, strong)`, and `advertKeys`
   ## lists what the caller should advertise. Re-publishing the same
   ## execution is idempotent and never rewrites another selector's entry.
+  let refusal = publicationRefusalOf(record, evidenceLevel)
+  if refusal.len > 0:
+    return TwoPhasePublishOutcome(reason: "not published: " & refusal)
   if attestor.isNil:
     return TwoPhasePublishOutcome(reason: "no issuer identity to attest " &
       "the entry with (the memoization plane requires tls=1)")
@@ -415,6 +450,13 @@ proc publishTwoPhase*(store: PeerMemoStore; cas: var CasStore;
       normalizeRecord(record, ctx)
     except CatchableError as err:
       return TwoPhasePublishOutcome(reason: "normalize failed: " & err.msg)
+  # What a consumer receives is the NORMALIZED record, which drops the
+  # workspace's ancestor existence probes; it has to pass the same rule the
+  # consumer will apply to it.
+  let normalizedRefusal = publicationRefusalOf(normalized, evidenceLevel)
+  if normalizedRefusal.len > 0:
+    return TwoPhasePublishOutcome(reason: "not published: " &
+      normalizedRefusal)
   let pathSet = pathSetOf(normalized)
   let pathSetBytes = encodePeerPathSet(pathSet)
   let pathSetDigest = digestOf(pathSetBytes)
@@ -437,7 +479,8 @@ proc publishTwoPhase*(store: PeerMemoStore; cas: var CasStore;
     pathSetDigest: pathSetDigest,
     strongFingerprint: strong,
     recordBytes: encodeActionResultRecord(normalized),
-    outputDigests: outputDigests)
+    outputDigests: outputDigests,
+    evidenceLevel: evidenceLevel)
   try:
     attest(entry, attestor())
   except CatchableError as err:
@@ -631,6 +674,20 @@ proc fetchTwoPhase*(client: PeerCacheClient; ctx: TwoPhaseContext;
       if not consistent:
         reject("selector-validation-failed",
           "memo entry output digests disagree with its record")
+        continue
+      # Campaign M17 (Edge-Derived-Identities.md §3.6): a record that may not
+      # cross hosts is refused HERE, whatever produced it -- an older
+      # producer that published timestamp-policy or Level-1 records, or a
+      # non-conforming one. Judged after every consistency check above, so a
+      # malformed or relabelled entry is still rejected and reported rather
+      # than passing as a plain miss, and before any output blob is fetched,
+      # so nothing it names is materialised. Not suspicion: an honest older
+      # producer serves exactly this.
+      let ruleRefusal = publicationRefusalOf(record, entry.evidenceLevel)
+      if ruleRefusal.len > 0:
+        inc outcome.publicationRuleMisses
+        outcome.reason = "peer " & $item.peerId & " serves a record this " &
+          "host does not accept from another host: " & ruleRefusal
         continue
       var blobs: seq[seq[byte]] = @[]
       var complete = true

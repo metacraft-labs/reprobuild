@@ -34,15 +34,26 @@ import std/[algorithm, options, os, strutils]
 
 import blake3
 from repro_core/codec import elementCountFits
+import repro_core/evidence_level
+
+export evidence_level
 
 import ./types
 
 const
   MemoEntryMagic = "RPME"
-  MemoEntryVersion = 2'u16
+  MemoEntryVersion = 3'u16
     ## v2 (Distributed-Execution M7) appends the issuer attestation. A v1
     ## entry still decodes — with an empty attestation, which every
     ## consumer refuses (`memo_attestation.nim`).
+    ##
+    ## v3 (campaign M17; Edge-Derived-Identities.md §3.4 item 1 and §3.6)
+    ## adds one byte after the output digests: the monitor-evidence level of
+    ## the execution, which the record frame cannot carry. The attestation
+    ## covers it. An entry with no stated level (`elUnstated`) is written in
+    ## the v2 layout, byte for byte, so a legacy entry re-encoded by this
+    ## build is the entry its issuer signed; v1 and v2 entries decode with
+    ## `elUnstated`, which every consumer of this build refuses.
   MaxIssuerLeafBytes* = 8 * 1024
   MemoEntryExt = ".rpme"
   MemoStoreLayoutDir = "v1"
@@ -89,6 +100,11 @@ type
     issuerLeafDer*: seq[byte]
     issuedAtUnix*: int64
     issuerSignature*: seq[byte]
+    evidenceLevel*: EvidenceLevel
+      ## Campaign M17: the monitor-evidence level the PRODUCER graded this
+      ## execution at, signed by the issuer with the rest. Only `elComplete`
+      ## is accepted by a consumer; `elUnstated` is what an entry from a
+      ## producer older than the field reads as.
 
   PeerMemoStore* = object
     root*: string
@@ -260,9 +276,14 @@ proc twoPhaseStrongFingerprint*(weakFingerprint, pathSetDigest: BlobDigest;
 proc encodeMemoEntry*(entry: MemoEntry): seq[byte] =
   ## "RPME" u16 version weak[32] pathSet[32] strong[32]
   ## u32 recordLen record u32 outputCount {digest[32]}*
+  ## [v3: u8 evidenceLevel] u32 leafLen leaf i64 issuedAt issuer[32]
+  ## u32 sigLen sig
+  ##
+  ## An entry with no stated evidence level is written as v2, unchanged.
+  let stated = entry.evidenceLevel != elUnstated
   for ch in MemoEntryMagic:
     result.add(byte(ord(ch)))
-  result.putU16(MemoEntryVersion)
+  result.putU16(if stated: MemoEntryVersion else: 2'u16)
   result.putDigest(entry.weakFingerprint)
   result.putDigest(entry.pathSetDigest)
   result.putDigest(entry.strongFingerprint)
@@ -272,6 +293,8 @@ proc encodeMemoEntry*(entry: MemoEntry): seq[byte] =
   result.putU32(uint32(entry.outputDigests.len))
   for d in entry.outputDigests:
     result.putDigest(d)
+  if stated:
+    result.add(evidenceLevelByte(entry.evidenceLevel))
   result.putU32(uint32(entry.issuerLeafDer.len))
   for b in entry.issuerLeafDer:
     result.add(b)
@@ -304,7 +327,7 @@ proc decodeMemoEntryHeader(data: openArray[byte]):
   checkMagic(data, MemoEntryMagic, "memo entry")
   var pos = MemoEntryMagic.len
   let version = getU16(data, pos, "memo entry version")
-  if version != MemoEntryVersion and version != 1'u16:
+  if version notin [1'u16, 2'u16, MemoEntryVersion]:
     raise newException(PeerMemoStoreError,
       "unsupported memo entry version " & $version)
   result.version = version
@@ -335,6 +358,14 @@ proc decodeMemoEntry*(data: openArray[byte]): MemoEntry =
   need(data, pos, outputs * 32, "memo entry output digests")
   for _ in 0 ..< outputs:
     result.outputDigests.add(getDigest(data, pos, "memo entry output digest"))
+  if header.version >= 3'u16:
+    need(data, pos, 1, "memo entry evidence level")
+    # A v3 entry STATES a level; the unstated byte is a v2 entry's to have.
+    if not evidenceLevelFromByte(data[pos], result.evidenceLevel) or
+        result.evidenceLevel == elUnstated:
+      raise newException(PeerMemoStoreError,
+        "memo entry carries an unknown evidence level " & $data[pos])
+    pos += 1
   if header.version >= 2'u16:
     let leafLen = int(getU32(data, pos, "memo entry issuer leaf length"))
     if leafLen > MaxIssuerLeafBytes:

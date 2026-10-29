@@ -65,6 +65,11 @@
 ## refuses (the no-evidence epoch) — both malformed, not newer: rejected,
 ## reported and suspected.
 ##
+## Campaign M17: the edge is built under `ffpChecksum` (it was
+## `ffpTimestamp`, whose records a peer-cache producer no longer publishes),
+## and the hardened case checks that the same edge under `ffpTimestamp` is
+## not published.
+##
 ## MOCK POLICY — none: real sockets, real TLS with host-CA leaves, the real
 ## build engine and a real C compiler, real disk stores, the real sink
 ## binary. The "malicious" behaviour uses the server's production
@@ -106,14 +111,15 @@ proc writeWorkspace(ws, config: string) =
   writeFile(ws / "main.c", MainSource)
   writeFile(ws / "config.h", config)
 
-proc helloGraph(ws: string): BuildGraph =
+proc helloGraph(ws: string; policy = ffpChecksum;
+                weakText = "t-m7-poisoned-record.hello"): BuildGraph =
   let output = ws / "out" / "hello"
   graph([action(ActionId,
     [ccPath(), "-O1", "-MD", "-MF", "out/hello.d", "-o", output, "main.c"],
     cwd = ws, inputs = ["main.c"], outputs = [output],
     depfile = "out/hello.d", cacheable = true,
-    weakFingerprint = weakFingerprintFromText("t-m7-poisoned-record.hello"),
-    actionCachePolicy = ffpTimestamp,
+    weakFingerprint = weakFingerprintFromText(weakText),
+    actionCachePolicy = policy,
     governingLockIdentity = lockIdentityOutsideSolvedGraph())])
 
 proc engineConfig(cacheRoot, ws: string;
@@ -209,6 +215,23 @@ suite "Distributed-Execution M7: poisoned cache records":
         selA.strongFingerprint).get()
       check entryA.issuerHostId == a.identity.hostId
       check entryA.issuerSignature.len == 64
+      # Campaign M17 (Edge-Derived-Identities.md §3.3a, §3.6): the build runs
+      # under ffpChecksum, because a timestamp-policy record is never
+      # published. The same edge under ffpTimestamp leaves A's memo store as
+      # it was, and the trace names the policy.
+      let wsAT = base / "ws-a-timestamp"
+      writeWorkspace(wsAT, ConfigV1)
+      let tsBuilt = runBuild(helloGraph(wsAT, ffpTimestamp,
+        "t-m7-poisoned-record.timestamp"), engineConfig(cacheA, wsAT, hooksA))
+      check tsBuilt.byId(ActionId).status == asSucceeded
+      check hooksA.stats.publishes == 1
+      check storageA.memo.weakFingerprints() == @[weak]
+      var tsRefused = false
+      for event in tsBuilt.trace:
+        if event.event == "peer-cache-publish-refused" and
+            "ffpTimestamp input-check policy" in event.detail:
+          tsRefused = true
+      check tsRefused
 
       # -- Positive control: an honest peer's record is accepted -------------
       let wsC1 = base / "ws-c1"
