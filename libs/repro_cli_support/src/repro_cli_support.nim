@@ -7444,6 +7444,19 @@ proc writeKeyedInspection(path: string; identity: PathOnlyBuildIdentity) =
   replaceFile(path, proc (staged: string) =
     writeInspectionJson(staged, identity))
 
+proc ensureCompleteToolInspection(path: string; identity: PathOnlyBuildIdentity) =
+  ## Diagnostics may have been replaced by a partial fallback without changing
+  ## this valid complete cache. Restore only the inspection of the identity
+  ## actually being returned; diagnostic IO must not invalidate that cache.
+  try:
+    let expected = inspectionJson(identity)
+    if fileExists(extendedPath(path)) and readFile(extendedPath(path)) == expected:
+      return
+    writeKeyedInspection(path, identity)
+  except CatchableError as err:
+    stderr.writeLine("repro: warning: could not refresh complete tool inspection at " &
+      path & " (" & err.msg & "); an earlier inspection may be stale.")
+
 proc writeKeyedToolIdentity(outDir: string; key: string;
                             identity: PathOnlyBuildIdentity) =
   let keyed = keyedToolIdentityPaths(outDir, key)
@@ -7525,7 +7538,6 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
     let alreadyCurrent =
       fileExists(extendedPath(stableKeyPath)) and
         fileExists(extendedPath(stableIdentityPath)) and
-        fileExists(extendedPath(stableInspectionPath)) and
         readFile(extendedPath(stableKeyPath)).strip() == key
     if alreadyCurrent and served.refreshed:
       # The stable copy names this key, so it is this identity: give it the
@@ -7534,11 +7546,9 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
       rewriteRefreshedIdentity([stableIdentityPath], identity)
     if not alreadyCurrent:
       writePathOnlyBuildIdentity(stableIdentityPath, identity)
-      createDir(extendedPath(parentDir(stableInspectionPath)))
-      copyFile(extendedPath(keyed.inspectionPath),
-        extendedPath(stableInspectionPath))
       createDir(extendedPath(cacheDir))
       writeFile(extendedPath(stableKeyPath), key & "\n")
+    ensureCompleteToolInspection(stableInspectionPath, identity)
     return (hit: true, identity: identity)
   except CatchableError:
     return (hit: false, identity: PathOnlyBuildIdentity())
@@ -8018,6 +8028,7 @@ proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
           warm.identityEvidence = durableFileEvidence(warm.identityPath)
         if warm.populatedByPid != getCurrentProcessId():
           inc warmBuildCacheCounters.inheritedWarmHits
+        ensureCompleteToolInspection(warm.inspectionPath, warm.identity)
         return (identity: warm.identity, identityPath: warm.identityPath,
           inspectionPath: warm.inspectionPath)
   inc warmBuildCacheCounters.toolIdentityResolves

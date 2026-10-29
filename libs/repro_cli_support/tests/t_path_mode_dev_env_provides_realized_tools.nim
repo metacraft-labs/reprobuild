@@ -44,11 +44,16 @@ import repro_interface_artifacts
 import repro_provider_runtime
 import repro_local_store
 import repro_tool_profiles
+import repro_tool_profiles/executable_evidence
 import repro_core/paths
 
 const ExeSuffix = when defined(windows): ".exe" else: ""
 
 if commandLineParams() == @["--version"]:
+  let counter = getEnv("REPRO_TEST_TOOL_PROBE_COUNTER")
+  if counter.len > 0:
+    let count = if fileExists(counter): parseInt(readFile(counter)) else: 0
+    writeFile(counter, $(count + 1))
   echo "fixture-tool 1.0"
   quit(if getAppFilename().extractFilename.startsWith("probe-fails"): 7 else: 0)
 
@@ -114,6 +119,8 @@ suite "path-mode dev environment":
     let savedStore = getEnv(StoreRootEnvVar)
     let savedMode = getEnv("REPRO_TOOL_PROVISIONING")
     let savedCacheDisable = getEnv("REPRO_CACHE_DISABLE")
+    let savedProbeCounter = getEnv("REPRO_TEST_TOOL_PROBE_COUNTER")
+    delEnv("REPRO_TEST_TOOL_PROBE_COUNTER")
     putEnv(StoreRootEnvVar, root / "store")
     # No shared cache: a fixture prefix must never be published anywhere.
     putEnv("REPRO_CACHE_DISABLE", "1")
@@ -141,6 +148,9 @@ suite "path-mode dev environment":
     if savedMode.len > 0: putEnv("REPRO_TOOL_PROVISIONING", savedMode)
     if savedCacheDisable.len > 0: putEnv("REPRO_CACHE_DISABLE", savedCacheDisable)
     else: delEnv("REPRO_CACHE_DISABLE")
+    if savedProbeCounter.len > 0:
+      putEnv("REPRO_TEST_TOOL_PROBE_COUNTER", savedProbeCounter)
+    else: delEnv("REPRO_TEST_TOOL_PROBE_COUNTER")
     removeTree(root)
 
   test "a tool missing from PATH is realized and prepended":
@@ -227,3 +237,60 @@ suite "path-mode dev environment":
     for path in walkDirRec(outDir):
       check not path.endsWith(".rbtp")
       check not path.endsWith(".current-key")
+
+  test "complete cold and warm cache hits restore inspection after partial fallback":
+    let probeCounter = root / "probe-counter"
+    putEnv("REPRO_TEST_TOOL_PROBE_COUNTER", probeCounter)
+    # This fixture needs a stable complete cache. A freshly copied executable
+    # legitimately refreshes its racy evidence on a hit; age the owned file
+    # before the first resolution rather than bypass that production check.
+    sleep(int(RacyWindowNs div 1_000_000) + 10)
+    let mixed = readInterfaceArtifact(interfacePath)
+    var complete = mixed.projectInterface
+    complete.toolUses = complete.toolUses.filterIt(it.packageSelector == "present")
+    let completeArtifact = artifactFor(complete)
+    for warm in [false, true]:
+      let destination = root / (if warm: "warm-transition" else: "cold-transition")
+      let iface = destination / "project-interface.rbsz"
+      let inspection = destination / "path-only-tool-identities.inspect.json"
+      writeInterfaceArtifact(iface, completeArtifact)
+      if warm:
+        discard warmResolveAndWriteIdentity(completeArtifact, destination, tpmPathOnly)
+      else:
+        discard devEnvToolShellOpsAt(iface, destination)
+      let completeInspection = parseFile(inspection)
+      require completeInspection["profiles"].len == 1
+      var cacheBytes: seq[tuple[path, digest: string]]
+      for path in walkDirRec(destination):
+        if path.endsWith(".rbtp") or path.endsWith(".current-key"):
+          cacheBytes.add((path, fileSha256Hex(path)))
+      require cacheBytes.len >= 3
+      writeInterfaceArtifact(iface, mixed)
+      discard devEnvToolShellOpsAt(iface, destination)
+      require parseFile(inspection){"partial"}.getBool()
+      for saved in cacheBytes:
+        check fileSha256Hex(saved.path) == saved.digest
+      let countAfterPartial = readFile(probeCounter)
+      let resolvesBefore = warmBuildCacheCounters.toolIdentityResolves
+      writeInterfaceArtifact(iface, completeArtifact)
+      if warm:
+        discard warmResolveAndWriteIdentity(completeArtifact, destination, tpmPathOnly)
+        check warmBuildCacheCounters.toolIdentityResolves == resolvesBefore
+      else:
+        discard devEnvToolShellOpsAt(iface, destination)
+      check readFile(probeCounter) == countAfterPartial
+      check parseFile(inspection) == completeInspection
+      for saved in cacheBytes:
+        check fileSha256Hex(saved.path) == saved.digest
+      # An unavailable diagnostic destination must not turn a complete hit
+      # into re-resolution or rewrite its authoritative binary/key artifacts.
+      removeFile(inspection)
+      createDir(inspection)
+      if warm:
+        discard warmResolveAndWriteIdentity(completeArtifact, destination, tpmPathOnly)
+      else:
+        discard devEnvToolShellOpsAt(iface, destination)
+      check dirExists(inspection)
+      check readFile(probeCounter) == countAfterPartial
+      for saved in cacheBytes:
+        check fileSha256Hex(saved.path) == saved.digest
