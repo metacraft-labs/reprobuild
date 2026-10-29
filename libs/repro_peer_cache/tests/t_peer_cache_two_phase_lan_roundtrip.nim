@@ -44,7 +44,9 @@
 ##      and B's memo store gains no entry.
 ##   6. A timestamp-policy record is hand-injected into A's memo store,
 ##      attested by A and claiming Level 0, as an older or non-conforming A
-##      would have published it. B, from a checkout with no record of the
+##      would have published it, and A serves it as such an A would (this
+##      build's entry reader declines it; node A falls back to the raw store
+##      for what the reader declines). B, from a checkout with no record of the
 ##      edge, looks it up over TCP: A serves the selector, the strong
 ##      fingerprint matches, the attestation verifies, and B still refuses
 ##      the entry (`fetchTwoPhase`, naming the policy), installs nothing and
@@ -195,6 +197,23 @@ proc runProducerNode(ws, cacheRoot, stateDir, readyFile, stopFile: string;
   let host = startPeerCacheHost(tlsConfig(node, profile = profile),
     nodePeerId('A'),
     cacheRoot = cacheRoot, stateDir = stateDir)
+  # Step 6 injects into this node's store an entry that only an OLDER or
+  # non-conforming build serves: this build's entry reader applies the M17
+  # publication rule to what it serves (`entryReaderFor`), so it declines a
+  # timestamp-policy record (`t_peer_cache_refuses_timestamp_records_across_
+  # hosts`, "the producer does not serve a non-conforming entry already in
+  # its memo store"). Node A plays that older build for what its reader
+  # declines, serving it straight from the store, so that B's own refusal
+  # is what step 6 exercises. Everything A's reader serves goes through it
+  # unchanged.
+  let conformingReader = host.server.memoEntryReader
+  let rawStorage = openPeerCacheStorage(cacheRoot)
+  host.server.memoEntryReader = proc(weak, strong: BlobDigest):
+      Option[seq[byte]] {.gcsafe.} =
+    {.cast(gcsafe).}:
+      result = conformingReader(weak, strong)
+      if result.isNone:
+        result = rawStorage.memo.readMemoEntryBytes(weak, strong)
   let hooks = newPeerCacheEngineHooks(host.client,
     openPeerCacheStorage(cacheRoot), host.registry, host.attestorFor())
   let res = runBuild(helloGraph(ws), nodeEngineConfig(cacheRoot, ws, hooks))

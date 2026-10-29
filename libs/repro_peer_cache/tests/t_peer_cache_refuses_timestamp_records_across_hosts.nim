@@ -344,6 +344,70 @@ suite "M17: the peer-cache PRODUCER publishes only checksum/hybrid Level-0 recor
     check published.published
     check published.entry.evidenceLevel == elComplete
 
+  test "the producer does not serve a non-conforming entry already in its memo store":
+    # Found by the independent verification of M17 chunk 1. A memo store
+    # outlives the build that wrote it: entries a pre-M17 build of this host
+    # published (timestamp-policy, no stated level), or that an older build
+    # sharing the cache root still publishes, are on disk when this build's
+    # node serves the root. Serving one -- and re-attesting it with this
+    # host's current leaf when its attestation is stale -- publishes it
+    # again, to every consumer, including an older one that applies no rule.
+    # The node's entry reader applies the same rule as the publisher.
+    let ws = newWorkspace("served")
+    let tsRecord = producerRecord(ws, TmpDir / "served" / "ts-cache",
+      ffpTimestamp)
+    let csRecord = producerRecord(ws, TmpDir / "served" / "cs-cache",
+      ffpChecksum)
+    let ctx = contextFor(ws)
+    let storage = openPeerCacheStorage(TmpDir / "served" / "node")
+    proc stored(record: ActionResultRecord; level: EvidenceLevel;
+                leaf: LeafCredential): MemoEntry =
+      let normalized = normalizeRecord(record, ctx)
+      let pathSetDigest = digestOf(encodePeerPathSet(pathSetOf(normalized)))
+      var outputs: seq[BlobDigest] = @[]
+      for output in record.outputs:
+        outputs.add(blobDigestFromBytes(output.blob.digest.bytes))
+      # A distinct strong per case, so each is its own selector.
+      let identities = @[$level, $record.policy]
+      result = MemoEntry(weakFingerprint: ctx.peerKey,
+        pathSetDigest: pathSetDigest,
+        strongFingerprint: twoPhaseStrongFingerprint(ctx.peerKey,
+          pathSetDigest, identities),
+        recordBytes: encodeActionResultRecord(normalized),
+        outputDigests: outputs, evidenceLevel: level)
+      attest(result, leaf)
+      discard storage.memo.writeMemoEntry(result)
+    # Leaves close to expiry, so the reader would re-attest what it serves.
+    let stale = mintLeaf(producerIdentity, lrDaemon, ttlSeconds = 600)
+    let legacyTimestamp = stored(tsRecord, elUnstated, stale)
+    let legacyChecksum = stored(csRecord, elUnstated, stale)
+    let level1 = stored(csRecord, elKnownScopeLoss, stale)
+    let conforming = stored(csRecord, elComplete, stale)
+    let node = PeerCacheHost(
+      config: PeerCacheConfig(trustMode: tmTls, trustProfile: tpHardened),
+      selfPeerId: producerIdentity.hostId, storages: @[storage],
+      identity: producerIdentity, leaf: producerLeaf)
+    let reader = entryReaderFor(node)
+    for (label, entry) in [("legacy timestamp entry", legacyTimestamp),
+                           ("legacy entry stating no level", legacyChecksum),
+                           ("Level-1 entry", level1)]:
+      checkpoint(label)
+      check reader(entry.weakFingerprint, entry.strongFingerprint).isNone
+      # Not re-attested either: the stored entry keeps its old signature.
+      check storage.memo.readMemoEntry(entry.weakFingerprint,
+        entry.strongFingerprint).get().issuerSignature ==
+        entry.issuerSignature
+    # Control: the conforming entry is served, re-attested with the
+    # node's current leaf.
+    let served = reader(conforming.weakFingerprint,
+      conforming.strongFingerprint)
+    require served.isSome
+    let fresh = decodeMemoEntry(served.get())
+    check fresh.evidenceLevel == elComplete
+    check fresh.issuerSignature != conforming.issuerSignature
+    check verifyAttestation(fresh, loadTrustAnchorFile(producerCaPath),
+      initHashSet[PeerId]()).ok
+
 suite "M17: the peer-cache CONSUMER refuses records that may not cross hosts":
 
   setup:
