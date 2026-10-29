@@ -1746,6 +1746,7 @@ tests/integration/t_membership_model_retired_names_fail_as_unknown.nim	nim	5
 tests/integration/t_membership_model_schemas_round_trip.nim	nim	6
 tests/integration/t_membership_model_sets_cli.nim	nim	6
 tests/integration/t_membership_model_templates_scaffold_sets.nim	nim	7
+tests/integration/t_membership_push_scope_is_the_pushed_range.nim	nim	5
 tests/integration/t_membership_repo_push_anchors_no_foreign_lock_record.nim	nim	1
 tests/integration/t_microarch_lives_in_the_key_not_the_namespace.nim	nim	6
 tests/integration/t_migrate_leaves_a_pinned_checkout_on_its_pin.nim	nim	2

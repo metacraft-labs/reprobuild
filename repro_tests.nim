@@ -15660,6 +15660,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_membership_push_scope_is_the_pushed_range.nim",
+    binary: "build/test-bin/t_membership_push_scope_is_the_pushed_range",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_membership_repo_push_anchors_no_foreign_lock_record.nim",
     binary: "build/test-bin/t_membership_repo_push_anchors_no_foreign_lock_record",
     defines: @[],

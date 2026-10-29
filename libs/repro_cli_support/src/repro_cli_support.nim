@@ -68055,83 +68055,128 @@ proc undeclaredDependsInClosure(repos: seq[ResolvedRepo];
   for edge in undeclaredDependEdges(repos, pushedRepoName):
     result.add(edge.owner & " -> " & edge.dep)
 
-proc repoNameForFragment(identity: GitToolIdentity; membershipRoot, relPath,
-    newTip, oldTip: string): string =
-  ## Resolve a changed ``repos/<file>.toml`` fragment to the repo NAME it
-  ## declares. The file's basename is NOT the name: a fragment may declare a
-  ## different one (``repos/accounting-blocksense.toml`` declares
-  ## ``name = "accounting"``), so read the fragment's own ``[repo] name``. The
-  ## blob is read from the pushed tip, falling back to the pre-push tip for a
-  ## fragment the commit DELETED (removing a repo from the workspace is exactly
-  ## the kind of membership change the scope must cover). Basename is the last
-  ## resort so an unreadable blob narrows the scope rather than dropping it.
-  for tip in [newTip, oldTip]:
-    if tip.len == 0:
-      continue
-    let show = gitRunPlain(identity,
-      ["-C", membershipRoot, "show", tip & ":" & relPath])
-    if show.code != 0:
-      continue
-    for rawLine in show.output.splitLines():
-      let line = rawLine.strip()
-      if line.startsWith("name") and '=' in line:
-        let value = line[line.find('=') + 1 .. ^1].strip()
-        let unquoted = value.strip(chars = {'"', '\''})
-        if unquoted.len > 0:
-          return unquoted
-  relPath.extractFilename.changeFileExt("")
+proc fragmentDeclaredName(text: string): string =
+  ## The repo NAME a ``repos/<file>.toml`` fragment declares (its
+  ## ``[repo] name``), or "" when the text carries none. The file's basename
+  ## is NOT the name: a fragment may declare a different one
+  ## (``repos/accounting-blocksense.toml`` declares ``name = "accounting"``).
+  for rawLine in text.splitLines():
+    let line = rawLine.strip()
+    if line.startsWith("name") and '=' in line:
+      let value = line[line.find('=') + 1 .. ^1].strip()
+      let unquoted = value.strip(chars = {'"', '\''})
+      if unquoted.len > 0:
+        return unquoted
 
 proc membershipPushScope(identity: GitToolIdentity; resolved: ResolvedProject;
-    membershipRoot, newTip, oldTip: string): HashSet[string] =
+    membershipRoot: string; ranges: openArray[PushedCommitRange]):
+      tuple[ok: bool; names: HashSet[string]; diagnostic: string] =
   ## Workspace-And-Develop-Mode.md §"Gate scope when the pushed repo is the
-  ## membership repo" — the repos whose manifest fragments the pushed commit
-  ## range actually modifies. A manifest commit can only break a teammate on a
-  ## repo whose pin or membership IT changes (a revision re-pinned to a SHA
-  ## nobody pushed, a repo added that nobody can clone); a repo the commit does
-  ## not mention cannot be broken by it. An empty result is a real answer —
-  ## "this commit touches no fragment" — and scopes the gate to the membership
-  ## repo's own cleanliness/publication, NOT to the whole workspace.
-  result = initHashSet[string]()
-  if newTip.len == 0:
-    return
-  # Prefer the exact pushed range. A brand-new remote branch has no old tip, so
-  # fall back to the tip commit's own first-parent diff: still a well-defined
-  # "what this push introduces" for the common single-commit case, and far
-  # narrower than widening to every repo in the workspace.
-  var diff = gitRunPlain(identity,
-    ["-C", membershipRoot, "diff", "--name-only", oldTip & ".." & newTip])
-  if oldTip.len == 0 or diff.code != 0:
-    diff = gitRunPlain(identity,
-      ["-C", membershipRoot, "diff", "--name-only", newTip & "^", newTip])
-  if diff.code != 0:
-    return
+  ## membership repo" — the repos named by the added/modified
+  ## ``repos/<name>.toml`` and ``projects/<project>.toml`` files in the diff of
+  ## the PUSHED RANGE. A manifest commit can only break a teammate on a repo
+  ## whose pin or membership IT changes (a revision re-pinned to a SHA nobody
+  ## pushed, a repo added that nobody can clone); a repo the push does not
+  ## mention cannot be broken by it. An empty result is a real answer — "this
+  ## push touches no fragment" — and scopes the gate to the membership repo's
+  ## own cleanliness/publication, NOT to the whole workspace.
+  ##
+  ## ``ranges`` holds one entry per pushed ref (``pushedCommitRange``), and the
+  ## scope is their UNION. Every commit each range publishes contributes, not
+  ## only the newest: the range's end-to-end tree diff would miss a fragment an
+  ## earlier commit re-pins and a later one restores, yet that earlier commit
+  ## is published too and can be checked out. A deletion contributes nothing,
+  ## because it publishes nothing. ``HEAD`` plays no part: what the push
+  ## publishes is named by the pre-push records, and HEAD may be any commit.
+  ##
+  ## ``ok = false`` means the range could not be read. The caller refuses
+  ## rather than guess: a scope that silently came back empty is exactly the
+  ## under-check this rule exists to prevent.
+  result.ok = true
+  result.names = initHashSet[string]()
+  # path -> every blob that path held on either side of a change in range.
+  var touched = initOrderedTable[string, HashSet[string]]()
+  for pushed in ranges:
+    if pushed.unreadable:
+      result.ok = false
+      result.diagnostic = "the object pushed to " &
+        (if pushed.remoteRef.len > 0: pushed.remoteRef else: "the remote") &
+        " is missing or unreadable in this checkout"
+      return
+    if pushed.revisions.len == 0:
+      continue
+    # `--raw --no-abbrev` gives each change's full pre- and post-image blob
+    # ids, so a DELETED fragment still names the repo it declared (removing a
+    # repo from the workspace is exactly the kind of membership change the
+    # scope must cover). `--no-renames` reports a rename as a deletion plus an
+    # addition, so both names are in scope. `--cc` lists, for a merge, only
+    # the paths it changes relative to EVERY parent — what the merge itself
+    # introduces; the commits it brings in are listed on their own when they
+    # are in range. No pathspec: path limiting simplifies history and can hide
+    # a side branch's commits behind a TREESAME merge.
+    # https://git-scm.com/docs/git-log#_raw_output_format
+    var args = @["-C", membershipRoot, "-c", "core.quotePath=false", "log",
+      "--root", "--no-renames", "--no-abbrev", "--raw", "--cc", "--format="]
+    args.add(pushed.revisions)
+    args.add("--")
+    let log = gitRunPlainQuery(identity, args)
+    if log.code != 0:
+      result.ok = false
+      result.diagnostic = "could not list the commits pushed to " &
+        (if pushed.remoteRef.len > 0: pushed.remoteRef else: "the remote") &
+        ": " & log.diagnostic
+      return
+    for rawLine in log.output.splitLines():
+      if not rawLine.startsWith(":"):
+        continue
+      let tab = rawLine.find('\t')
+      if tab < 0:
+        continue
+      let relPath = rawLine[tab + 1 .. ^1].strip()
+      if not relPath.endsWith(".toml") or
+          not (relPath.startsWith("repos/") or relPath.startsWith("projects/")):
+        continue
+      discard touched.mgetOrPut(relPath, initHashSet[string]())
+      for field in rawLine[0 ..< tab].strip(chars = {':'}).splitWhitespace():
+        if field.len >= 40 and field.allCharsInSet(HexDigits) and
+            not isZeroOid(field):
+          touched[relPath].incl(field.toLowerAscii())
   var byName = initTable[string, ResolvedRepo]()
   for repo in resolved.repos:
     byName[repo.name] = repo
-  for rawPath in diff.output.splitLines():
-    let relPath = rawPath.strip()
-    if relPath.len == 0 or not relPath.endsWith(".toml"):
-      continue
+  for relPath, blobs in touched:
     if relPath.startsWith("repos/"):
-      let name = repoNameForFragment(identity, membershipRoot, relPath,
-        newTip, oldTip)
-      if name.len > 0 and name in byName:
-        result.incl(name)
-    elif relPath.startsWith("projects/"):
-      # A project manifest changed: its membership as a whole is what moved, so
-      # the repos that project declares are in scope. Only repos that actually
-      # participate in the resolved workspace can be observed, so intersect.
+      var names = initHashSet[string]()
+      for blob in blobs:
+        let text = gitRunPlainQuery(identity,
+          ["-C", membershipRoot, "cat-file", "blob", blob])
+        if text.code == 0:
+          let name = fragmentDeclaredName(text.output)
+          if name.len > 0:
+            names.incl(name)
+      # Basename is the last resort, so an unreadable blob narrows the scope
+      # to the likeliest name rather than dropping the fragment.
+      if names.len == 0:
+        names.incl(relPath.extractFilename.changeFileExt(""))
+      for name in names:
+        if name in byName:
+          result.names.incl(name)
+    else:
+      # A project manifest changed: its membership as a whole is what moved,
+      # so the repos that project declares are in scope. Only repos that
+      # actually participate in the resolved workspace can be observed, so
+      # intersect.
       let projectName = relPath.extractFilename.changeFileExt("")
       if projectName == resolved.projectName:
         for repo in resolved.repos:
-          result.incl(repo.name)
+          result.names.incl(repo.name)
       else:
         let projectFile = membershipRoot / "projects" / (projectName & ".toml")
         if fileExists(projectFile):
           try:
             for repo in resolveProject(projectFile).repos:
               if repo.name in byName:
-                result.incl(repo.name)
+                result.names.incl(repo.name)
           except CatchableError:
             # A project manifest we cannot resolve (malformed, or referencing
             # fragments this workspace does not carry) contributes nothing
@@ -69109,16 +69154,38 @@ proc executeCheckPrePush(parsed: CheckArgs;
   # scope when the pushed repo is the membership repo").
   var membershipScope = none(HashSet[string])
   if currentRepoName.len == 0 and currentIsMembershipRepo:
-    let newTip =
-      if outgoing.headOid.len > 0: outgoing.headOid
-      else: gitRunPlain(identity,
-        ["-C", membershipRoot, "rev-parse", "HEAD"]).output.strip()
-    let oldTip =
-      if outgoing.remoteOldOid.len > 0 and not isZeroOid(outgoing.remoteOldOid):
-        outgoing.remoteOldOid
-      else: ""
-    membershipScope = some(membershipPushScope(
-      identity, resolved, membershipRoot, newTip, oldTip))
+    # The scope is what the PUSH publishes, read from Git's own pre-push
+    # records — one range per pushed ref, unioned — never from HEAD. HEAD's
+    # own diff over-checks a push of an older commit (refused over repos only
+    # a later, unpushed commit touches), gates a branch deletion that
+    # publishes nothing, and under-checks a range whose newest commit touches
+    # no fragment while an earlier one re-pins a sibling.
+    #
+    # Without a refs stream (``repro check --mode=pre-push`` run by hand) the
+    # question is what a push of HEAD would publish: the commits no
+    # remote-tracking ref reaches yet.
+    var ranges: seq[PushedCommitRange]
+    if parsed.pushedRefsPath.len > 0:
+      for update in outgoing.updates:
+        ranges.add(pushedCommitRange(identity.binaryPath, membershipRoot,
+          update))
+    else:
+      ranges.add(PushedCommitRange(
+        revisions: @["HEAD^{commit}", "--not", "--remotes"]))
+    let membership = membershipPushScope(identity, resolved, membershipRoot,
+      ranges)
+    if not membership.ok:
+      result.failures.add(CheckFailure(
+        repo: parsed.currentRepo,
+        property: "membership-push-scope",
+        remediation: "make the pushed commits readable in " &
+          parsed.currentRepo & " (run 'git -C " & parsed.currentRepo &
+          " fsck' and fetch the remote), then retry the push — the gate " &
+          "cannot tell which repos this manifest push re-pins without them",
+        evidence: membership.diagnostic))
+      result.exitCode = 2
+      return
+    membershipScope = some(membership.names)
   let scope = prePushScope(resolved, currentRepoName, currentManifestLayer,
     membershipScope)
   # A `depends` edge that names no declared repo silently SHRANK the scope the
