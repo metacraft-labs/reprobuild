@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2410,
+    "nimTestBinaries": 2415,
     "pureUnitConsolidationGroups": 69,
     "pureUnitTests": 687,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2450
+    "testEntries": 2455
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1398,7 +1398,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1338,
+      "integration": 1343,
       "platform/destructive": 146,
       "pure unit": 687,
       "unclassified": 261
@@ -1609,9 +1609,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2410,
+    "nimTestBinaryCount": 2415,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2450
+    "testEntryCount": 2455
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8403,7 +8403,29 @@
       "requiresReproBinary": true,
       "source": "libs/repro_binary_cache_client/tests/t_portable_memo_cache.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 12,
+      "staticCaseCount": 13,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_portable_memo_refuses_timestamp_records",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_binary_cache_client",
+        "repro_build_engine",
+        "repro_core",
+        "repro_hash",
+        "repro_local_store",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_binary_cache_client",
+      "requiresReproBinary": true,
+      "source": "libs/repro_binary_cache_client/tests/t_portable_memo_refuses_timestamp_records.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9361,7 +9383,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_package_identity_is_the_producing_action.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9427,6 +9449,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_portable_memo_hybrid_hit_publishes_only_recorded_content",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_portable_memo_hybrid_hit_publishes_only_recorded_content.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_portable_record_from_local_hit",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -9443,7 +9485,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_portable_record_from_local_hit.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9462,6 +9504,50 @@
       "source": "libs/repro_build_engine/tests/t_preserve_tree_rerun_never_writes_through_links.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_publishers_refuse_level1_records",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine",
+        "repro_cas_store",
+        "repro_core",
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_publishers_refuse_level1_records.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_publishers_refuse_zero_evidence_records",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine",
+        "repro_cas_store",
+        "repro_core",
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_publishers_refuse_zero_evidence_records.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -11113,7 +11199,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_cli_support/tests/t_m5_peer_cache_build_wiring.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -17133,6 +17219,30 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_peer_cache_refuses_timestamp_records_across_hosts",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cas_store",
+        "repro_cli_support",
+        "repro_core",
+        "repro_hash",
+        "repro_local_store",
+        "repro_peer_cache",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_peer_cache",
+      "requiresReproBinary": true,
+      "source": "libs/repro_peer_cache/tests/t_peer_cache_refuses_timestamp_records_across_hosts.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_peer_cache_registry_advertise_snapshot_and_delta",
       "class": "unclassified",
       "classificationReason": "binds a fixed OS-global port",
@@ -17515,6 +17625,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
+        "repro_cas_store",
         "repro_cli_support",
         "repro_hash",
         "repro_local_store",
@@ -34019,6 +34130,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_local_store",
         "repro_peer_cache",
         "repro_test_support"
       ],

@@ -2120,6 +2120,13 @@ type
       ## under it so the engine's local lookup can validate it.
     workspaceRoot*: string
       ## `BuildEngineConfig.peerCacheWorkspaceRoot`.
+    evidenceLevel*: EvidenceLevel
+      ## Campaign M17: the monitor-evidence level the engine graded the
+      ## execution being PUBLISHED at, filled in by the publish site
+      ## (`publishPeerCacheBundle`); `elUnstated` on a lookup query. The
+      ## publisher signs it into the memo entry so a consumer can refuse a
+      ## record that is not Level 0 (Edge-Derived-Identities.md §3.4 item 1);
+      ## a publisher handed `elUnstated` refuses.
 
   PeerCacheActionFetcher* = proc(query: PeerCacheActionQuery):
     Option[seq[byte]] {.gcsafe, closure.}
@@ -7124,6 +7131,17 @@ proc worseMonitorStatus(a, b: MonitorEvidenceStatus): MonitorEvidenceStatus =
   ## mesMonitorUnavailable. Return whichever is more severe.
   if ord(a) >= ord(b): a else: b
 
+func evidenceLevelOf*(status: MonitorEvidenceStatus): EvidenceLevel =
+  ## The ladder grade as a record states it to another host (campaign M17,
+  ## Edge-Derived-Identities.md §3.4 item 1). An execution no monitor graded
+  ## -- a builtin, a recognized-format report -- keeps the collection's
+  ## default `mesComplete`, which is what it has always been graded locally.
+  case status
+  of mesComplete: elComplete
+  of mesKnownScopeLoss: elKnownScopeLoss
+  of mesUnknownScopeLoss: elUnknownScopeLoss
+  of mesMonitorUnavailable: elMonitorUnavailable
+
 const FailedExecDetailToken = "execstatus=failed"
   ## The token io-mon puts in an `mrProcessExec` record's `detail` when the
   ## exec syscall RETURNED — i.e. it failed and no new image ran. Emitted by
@@ -8704,6 +8722,13 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
     # lookups. The current action still publishes its own cache
     # entry — the narrow invalidation covers downstream consumers
     # of its outputs, not the action itself.
+    #
+    # That entry is LOCAL. Campaign M17 (Edge-Derived-Identities.md §3.4
+    # item 1): the narrowing lives in this session's memory and travels
+    # with nothing, so neither cross-host publisher offers a Level-1
+    # record. The publish sites pass `evidenceLevelOf(monitorStatus)` on,
+    # and the portable recorder stores it beside the record so a later
+    # local hit does not publish it either.
     col.evidence.diagnostics.add(
       "monitor depfile has known-scope loss; downstream cache " &
       "lookups intersecting this action's outputs will be skipped " &
@@ -18314,13 +18339,23 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       item.cacheRecordInputs.add(materialPath(action.cwd, input.path))
 
   proc publishPeerCacheBundle(query: PeerCacheActionQuery;
-                              record: ActionResultRecord) =
+                              record: ActionResultRecord;
+                              evidenceLevel: EvidenceLevel;
+                              actionId: string) =
     ## Peer-Cache publisher hook. Hands the freshly recorded execution and
     ## the engine's CAS (which holds its output blobs) to the configured
     ## publisher closure; Distributed-Execution M0's two-phase publish
     ## (PathSet blob + memo entry) happens there. Nil-safe; inactive when
     ## the CLI didn't pass ``--peer-cache=…`` or when the record has no
     ## CAS-backed outputs (``opkMetadataOnly``).
+    ##
+    ## `evidenceLevel` is the monitor-evidence level the scheduler graded
+    ## THIS execution at (``EvidenceCollection.monitorStatus``). Campaign M17
+    ## (Edge-Derived-Identities.md §3.3a, §3.4 item 1, §3.6): a record made
+    ## under ``ffpTimestamp``, graded other than Level 0, or naming no
+    ## observed input is not offered to the publisher at all. The refusal is
+    ## a trace event naming the policy or the level, never a failure: the
+    ## record is already stored and keeps serving this host.
     if config.peerCacheActionPublisher == nil:
       return
     if record.outputPayloadKind != opkCasBlobs:
@@ -18340,6 +18375,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if record.determinism.declared and
         not record.determinism.class.allowsCrossMachineSubstitution():
       return
+    let refusal = publicationRefusal(record, evidenceLevel)
+    if refusal.len > 0:
+      runResult.trace(actionId, "peer-cache-publish-refused", refusal)
+      return
     let publishStart = statStart()
     for output in record.outputs:
       # The publisher serves these blobs to peers by digest; a record whose
@@ -18348,7 +18387,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if not cas.casExists(payloadHash):
         raise newException(CacheIntegrityError, "CAS blob missing for " &
           digestHex(output.blob.digest))
-    config.peerCacheActionPublisher(query, record, cas)
+    var stated = query
+    stated.evidenceLevel = evidenceLevel
+    config.peerCacheActionPublisher(stated, record, cas)
     finishStat("repro peer-cache publish", publishStart)
 
   proc portableEnvOf(action: BuildAction): seq[(string, string)] =
@@ -18930,9 +18971,23 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
 
   proc finishPortableRecord(idx: int; launched: BuildAction;
                             reads, probes, enumerations: seq[string];
-                            observedEnv: seq[ObservedEnv] = @[]) =
+                            observedEnv: seq[ObservedEnv];
+                            policy: FileFingerprintPolicy;
+                            recordInputs: seq[FileFingerprint];
+                            evidenceLevel: EvidenceLevel) =
     ## The shared tail of both portable recorders: fingerprint, outputs,
     ## local memo record, and (once per record) publication.
+    ##
+    ## `policy`, `recordInputs` and `evidenceLevel` describe the LOCAL record
+    ## this portable record is the projection of: the input-check policy it
+    ## was made under, its inputs as recorded (for their content hashes), and
+    ## the monitor-evidence level of the execution that produced it. They
+    ## decide publication alone (campaign M17; Edge-Derived-Identities.md
+    ## §3.3a, §3.4 item 1): a timestamp-policy, non-Level-0 or zero-evidence
+    ## record is not offered to the publisher, and the trace says why. The
+    ## local memo record is written either way -- it serves this host, which
+    ## is what the local record does -- and nothing is hashed to make the
+    ## record publishable.
     ##
     ## Keyed by the action AS THE GRAPH DECLARED IT, the same object the
     ## pre-pass looks up — never the launch-time copy, which the monitor and
@@ -18974,7 +19029,25 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           runResult.trace(action.id, "portable-memo-host-bound",
             "determinism class " & $action.determinismClass &
             " forbids cross-machine substitution")
+        # The portable record's path set is what a consumer verifies, so it
+        # is the evidence counted: a record naming no input in it would be
+        # accepted on its weak fingerprint alone. A FIXED-OUTPUT action is
+        # the exception, and only to this count: what it produces is fixed
+        # by the content hashes its description declares and verifies, so a
+        # fetch with no declared input is complete on its weak fingerprint
+        # (`t_portable_memo_cache`, "a record whose path set is EMPTY is
+        # discoverable"). Its policy and evidence level are judged as any
+        # other record's.
+        let observations =
+          if action.fixedOutput: max(fp.inputs.len, 1)
+          else: fp.inputs.len
+        let refusal = publicationRefusal(policy, recordInputs, evidenceLevel,
+          observations)
+        if refusal.len > 0 and config.portableMemoPublisher != nil and
+            substitutable:
+          runResult.trace(action.id, "portable-memo-publish-refused", refusal)
         if config.portableMemoPublisher != nil and substitutable and
+            refusal.len == 0 and
             not memoPublished(memoRoot, memo, withOutputs):
           let failure =
             try: config.portableMemoPublisher(config.portableRoots, memo,
@@ -19037,15 +19110,20 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
 
   proc recordPortableFingerprint(idx: int; action: BuildAction;
                                  evidence: PathSetEvidence;
-                                 record: ActionResultRecord) =
+                                 record: ActionResultRecord;
+                                 evidenceLevel: EvidenceLevel) =
     ## Cache-Scope P3.1: compute the action's portable weak/strong
     ## fingerprint over logical paths from `portableAccessesOf`. Reported on
     ## the result and the trace, and recorded in the portable memo.
     ##
     ## `record` is the local record this run just published. The accesses
     ## are stored beside it whether or not portable roots are configured, so
-    ## a local cache written now can seed the portable plane later.
-    let accesses = portableAccessesOf(action, evidence)
+    ## a local cache written now can seed the portable plane later -- with
+    ## `evidenceLevel`, the grade of this execution, because a later hit on
+    ## the record is served without it and must not publish what this run
+    ## could not (campaign M17).
+    var accesses = portableAccessesOf(action, evidence)
+    accesses.evidenceLevel = evidenceLevel
     cache.recordInputAccesses(record.weakFingerprint,
       record.strongFingerprint, accesses)
     if config.portableRoots.len == 0:
@@ -19058,22 +19136,30 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       observed.add(ObservedEnv(name: variable.name,
         present: variable.present, value: variable.value))
     finishPortableRecord(idx, action, accesses.reads, accesses.probes,
-      accesses.enumerations, observed)
+      accesses.enumerations, observed, record.policy, record.inputs,
+      evidenceLevel)
 
-  proc recordFixedOutputPortable(idx: int; action: BuildAction) =
+  proc recordFixedOutputPortable(idx: int; action: BuildAction;
+                                 evidenceLevel: EvidenceLevel) =
     ## A fixed-output action is not locally cacheable and leaves no local
     ## record, but its outputs are fixed by the content hashes it declares
     ## and verifies. Its portable record is therefore keyed by what it
     ## DECLARES — its static description (the URLs and hashes are in its
     ## argv) and its declared inputs' content — and not by what its tools
     ## read from the network or the host while fetching.
+    ##
+    ## Publication follows the same rule as every other record (campaign
+    ## M17): the action's own input-check policy and this execution's
+    ## evidence level. There is no local record, so no recorded input to
+    ## check for a content hash.
     if config.portableRoots.len == 0:
       return
     var reads: seq[string] = @[]
     for input in portableDeclaredInputsOf(action):
       if fileExists(extendedPath(input)):
         reads.add(input)
-    finishPortableRecord(idx, action, reads, @[], @[])
+    finishPortableRecord(idx, action, reads, @[], @[], @[],
+      action.actionCachePolicy, @[], evidenceLevel)
 
   proc recordPortableFromLocalHit(idx: int; action: BuildAction;
                                   record: ActionResultRecord) =
@@ -19108,13 +19194,37 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       runResult.trace(action.id, "portable-fingerprint-unavailable",
         runResult.results[idx].portableReason)
       return
+    if record.policy == ffpHybrid:
+      # A hybrid hit trusted every input whose metadata is unchanged without
+      # reading it, and the portable record below takes each input's content
+      # identity NOW. Derived from bytes the execution never saw, it would
+      # bind them to this record's outputs for every host that reads it
+      # (Edge-Derived-Identities.md §3.3a). Derive it only while the inputs
+      # still have the content the record was made from. The hit itself is
+      # served as the hybrid policy decided. (A checksum hit re-hashed every
+      # input in its lookup; a timestamp record is never published.)
+      let still = inputContentStillRecorded(record, action.cwd)
+      if not still.ok:
+        runResult.results[idx].portable = false
+        runResult.results[idx].portableReason =
+          "input " & still.changed & " no longer has the content this " &
+          "ffpHybrid record was made from (the hit was served on its " &
+          "unchanged metadata), so no portable record is derived from it " &
+          "and nothing is published (Edge-Derived-Identities.md §3.3a)"
+        runResult.trace(action.id, "portable-fingerprint-unavailable",
+          runResult.results[idx].portableReason)
+        return
     var observed: seq[ObservedEnv] = @[]
     for variable in record.envInputs:
       observed.add(ObservedEnv(name: variable.name,
         present: variable.present, value: variable.value))
     let derived = accesses.get()
+    # The level the producing run stored beside the record: a hit is served
+    # without monitor evidence of its own, and a Level-1 record must not
+    # publish from its hit what it could not publish when it ran.
     finishPortableRecord(idx, action, derived.reads, derived.probes,
-      derived.enumerations, observed)
+      derived.enumerations, observed, record.policy, record.inputs,
+      derived.evidenceLevel)
 
   proc publishBinaryCacheBundle(action: BuildAction;
                                 record: ActionResultRecord;
@@ -21471,8 +21581,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 finishStat("repro cache record", recordStart)
                 writeActionResultRecordFile(
                   dependencyEvidencePath(cacheRoot, action.id), record)
-                recordPortableFingerprint(idx, action, evidence.evidence, record)
-                publishPeerCacheBundle(peerCacheQueryOf(action), record)
+                recordPortableFingerprint(idx, action, evidence.evidence, record,
+                  evidenceLevelOf(evidence.monitorStatus))
+                publishPeerCacheBundle(peerCacheQueryOf(action), record,
+                  evidenceLevelOf(evidence.monitorStatus), action.id)
                 publishBinaryCacheBundle(action, record)
               except UnreadableInputError as err:
                 runResult.traceUnreadableInput(id, idToIndex.resultIndex(id), err.msg)
@@ -21481,7 +21593,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 idToIndex.resultIndex(id),
                 unobservableRootImageNote(action, unsafeAddr config))
             elif action.fixedOutput:
-              recordFixedOutputPortable(idToIndex.resultIndex(id), action)
+              recordFixedOutputPortable(idToIndex.resultIndex(id), action,
+                evidenceLevelOf(evidence.monitorStatus))
             completeSuccess(id, asSucceeded,
               runResult.results[idx].cacheDecision, true, "elevated")
           else:
@@ -21712,8 +21825,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 writeActionResultRecordFile(
                   dependencyEvidencePath(cacheRoot, plan.action.id), record)
                 recordPortableFingerprint(idx, plan.action, evidence.evidence,
-                  record)
-                publishPeerCacheBundle(peerCacheQueryOf(plan.action), record)
+                  record, evidenceLevelOf(evidence.monitorStatus))
+                publishPeerCacheBundle(peerCacheQueryOf(plan.action), record,
+                  evidenceLevelOf(evidence.monitorStatus), plan.action.id)
                 publishBinaryCacheBundle(plan.action, record)
               except UnreadableInputError as err:
                 runResult.traceUnreadableInput(finished.id, idToIndex.resultIndex(finished.id), err.msg)
@@ -21723,7 +21837,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 unobservableRootImageNote(plan.action, unsafeAddr config))
             elif plan.action.fixedOutput:
               recordFixedOutputPortable(
-                idToIndex.resultIndex(finished.id), plan.action)
+                idToIndex.resultIndex(finished.id), plan.action,
+                evidenceLevelOf(evidence.monitorStatus))
             completeSuccess(finished.id, asSucceeded,
               runResult.results[idx].cacheDecision, true, "builtin")
           else:
@@ -22328,8 +22443,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             finishStat("repro cache record", recordStart)
             writeActionResultRecordFile(
               dependencyEvidencePath(cacheRoot, action.id), record)
-            recordPortableFingerprint(idx, action, evidence.evidence, record)
-            publishPeerCacheBundle(peerCacheQueryOf(action), record)
+            recordPortableFingerprint(idx, action, evidence.evidence, record,
+              evidenceLevelOf(evidence.monitorStatus))
+            publishPeerCacheBundle(peerCacheQueryOf(action), record,
+              evidenceLevelOf(evidence.monitorStatus), action.id)
             publishBinaryCacheBundle(action, record)
           except UnreadableInputError as err:
             runResult.traceUnreadableInput(finished.id, idx, err.msg)
@@ -22337,7 +22454,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           runResult.traceCacheIneligibility(finished.id, evidence, idx,
             unobservableRootImageNote(action, unsafeAddr config))
         elif action.fixedOutput:
-          recordFixedOutputPortable(idx, action)
+          recordFixedOutputPortable(idx, action,
+            evidenceLevelOf(evidence.monitorStatus))
         completeSuccess(finished.id, asSucceeded, runResult.results[idx].cacheDecision,
           true, "exit=0")
       else:

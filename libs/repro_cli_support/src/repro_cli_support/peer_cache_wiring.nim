@@ -353,7 +353,7 @@ proc newPeerCacheEngineHooks*(client: PeerCacheClient;
     {.cast(gcsafe).}:
       try:
         let outcome = publishTwoPhase(st.memo, engineCas, record,
-          twoPhaseContextOf(query), att)
+          twoPhaseContextOf(query), att, query.evidenceLevel)
         if not outcome.published:
           inc stats.publishSkips
           stats.lastPublishReason = outcome.reason
@@ -657,9 +657,20 @@ proc entryReaderFor*(host: PeerCacheHost): MemoEntryReader =
         if found.isNone:
           continue
         var entry: MemoEntry
+        var record: ActionResultRecord
         try:
           entry = decodeMemoEntry(found.get())
+          record = decodeActionResultRecord(entry.recordBytes)
         except CatchableError:
+          continue
+        # Campaign M17 (Edge-Derived-Identities.md §3.3a, §3.4 item 1,
+        # §3.6): what this node serves, it publishes, so it serves only what
+        # the publisher would publish now. A memo store outlives the build
+        # that wrote it: an entry a pre-M17 build of this host published (a
+        # timestamp-policy record, no stated level), or one an older build
+        # sharing the root still writes, is not served -- and not
+        # re-attested below, which would sign it again as this host's.
+        if publicationRefusalOf(record, entry.evidenceLevel).len > 0:
           continue
         if h.config.trustMode == tmTls and
             entry.issuerHostId == h.selfPeerId and h.identity.canMint:

@@ -170,11 +170,19 @@ proc makeFixture(root: string;
   let outputPath = absolutePath(root / "out" / "artifact.txt")
   createDir(cacheRoot)
   createDir(splitPath(outputPath).head)
+  # One declared input. Campaign M17 (Edge-Derived-Identities.md §3.4 item
+  # 1): a record naming no input at all is never offered to a cross-host
+  # publisher, and the peer arm below is about blob storage, not about that
+  # rule (`t_publishers_refuse_zero_evidence_records` pins it).
+  let inputPath = absolutePath(root / "in" / "source.txt")
+  createDir(splitPath(inputPath).head)
+  writeFile(inputPath, "m4 source " & tag & "\n")
   let payload = "m4 publisher payload " & tag & "\n"
   let act = BuildAction(
     governingLockIdentity: lockIdentityOutsideSolvedGraph(),
     kind: bakWriteText,
     id: "m4-publisher-write",
+    inputs: @[inputPath],
     outputs: @[outputPath],
     cacheable: true,
     actionCachePolicy: ffpChecksum,
