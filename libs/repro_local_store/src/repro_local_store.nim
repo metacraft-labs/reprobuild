@@ -3074,6 +3074,104 @@ proc outputStateCheckStats*(): tuple[calls: int; nanos: int64;
    revalidateDirEntries: revalidateDirEntries,
    recordDirWalks: recordDirWalks, recordDirEntries: recordDirEntries)
 
+# --- Per-computation output directories ------------------------------------
+#
+# Hermetic-Builds-And-Path-Independence.md §"Per-computation output
+# directories" (owner decision 2026-10-29). An action with per-computation
+# outputs declares every output under one STAGING directory; the record that
+# describes a run names those outputs in a sibling directory named after the
+# record's own strong fingerprint. Two computations that share an action's
+# weak fingerprint (and therefore its declared paths) then never overwrite
+# each other's outputs, and a metadata-only record still finds its own bytes
+# in place. The directory belongs to the record that names it, and is removed
+# with it.
+
+const
+  ComputationStagingDirName* = "staging"
+    ## The directory an executing per-computation action writes into.
+  ComputationDirNameLen = 32
+    ## Hex digits of the strong fingerprint in a computation directory's
+    ## name: 128 bits, short enough for deep cache roots.
+
+proc computationDirName*(strong: ContentDigest): string =
+  ## The name of the directory that holds the outputs of the computation
+  ## whose record carries `strong`.
+  toHex(strong.bytes).toLowerAscii()[0 ..< ComputationDirNameLen]
+
+proc computationDirFor*(stagingDir: string; strong: ContentDigest): string =
+  ## The computation directory beside `stagingDir` for the record `strong`.
+  parentDir(os.normalizedPath(stagingDir)) / computationDirName(strong)
+
+proc rebindComputationOutputs*(outputs: openArray[string];
+                               stagingDir, computationDir: string):
+    seq[string] =
+  ## `outputs` with the `stagingDir` prefix replaced by `computationDir`.
+  ## A path outside the staging directory is returned unchanged, so it still
+  ## fails the owned-outputs comparison it would fail without binding.
+  let staging = os.normalizedPath(stagingDir)
+  for path in outputs:
+    let normalized = os.normalizedPath(path)
+    if normalized == staging:
+      result.add(computationDir)
+    elif normalized.startsWith(staging & "/"):
+      result.add(computationDir & normalized[staging.len .. ^1])
+    else:
+      result.add(path)
+
+proc recordComputationDir*(record: ActionResultRecord): string =
+  ## The computation directory `record` owns, or "" when it owns none: the
+  ## nearest directory named `computationDirName(record.strongFingerprint)`
+  ## that contains every one of its (absolute) outputs.
+  if record.outputs.len == 0:
+    return ""
+  let name = computationDirName(record.strongFingerprint)
+  for output in record.outputs:
+    if not output.path.isAbsolute:
+      return ""
+    var dir = os.normalizedPath(output.path)
+    var found = ""
+    while true:
+      if extractFilename(dir) == name:
+        found = dir
+        break
+      let parent = parentDir(dir)
+      if parent.len == 0 or parent == dir:
+        break
+      dir = parent
+    if found.len == 0:
+      return ""
+    if result.len == 0:
+      result = found
+    elif result != found:
+      return ""
+
+proc removeRecordComputationDir*(record: ActionResultRecord): string
+    {.discardable.} =
+  ## Remove the computation directory `record` owns, if any, and return it.
+  ## Best-effort: a directory that survives is garbage for the orphan sweep
+  ## (`sweepOrphanComputationDirs`), and a record whose directory is gone
+  ## fails its in-place check and re-runs, so neither outcome is unsound.
+  result = recordComputationDir(record)
+  if result.len > 0 and dirExists(extendedPath(result)):
+    try:
+      removeDir(extendedPath(result))
+    except OSError:
+      discard
+
+proc promoteComputationStaging*(stagingDir, computationDir: string) =
+  ## Move a finished run's staging directory to its computation directory,
+  ## replacing an earlier run of the same computation. The caller serializes
+  ## writers of one identity (the per-identity lock). The mtime is stamped so
+  ## the orphan sweep's grace period counts from the promotion, not from
+  ## when the run created the directory.
+  if dirExists(extendedPath(computationDir)):
+    removeDir(extendedPath(computationDir))
+  moveDir(extendedPath(stagingDir), extendedPath(computationDir))
+  try:
+    setLastModificationTime(extendedPath(computationDir), getTime())
+  except OSError:
+    discard
+
 proc ownedOutputKey(outputRoot, path: string): string =
   ## One spelling per output location: resolved against the action's cwd the
   ## way `restoreOutputs` and `outputStateMismatch` resolve it, separators
@@ -4578,11 +4676,26 @@ proc capRecFiles(cache: ActionCache; dirPath: string): seq[string]
       result = cmp(a.strongHex, b.strongHex))
   if entries.len > MaxRecFilesPerEdge:
     for i in 0 ..< entries.len - MaxRecFilesPerEdge:
+      # A per-computation record owns its computation directory
+      # (`recordComputationDir`); it goes right after the record, before the
+      # caller tombstones the key. Read before the unlink, the only moment
+      # the record still says which directory that is.
+      var evictedRecords: seq[ActionResultRecord] = @[]
+      try:
+        evictedRecords =
+          decodePerEdgeFileWithSeq(bytes(readFile(entries[i].path))).records
+      except CatchableError:
+        evictedRecords = @[]
+      var unlinked = false
       try:
         removeFile(entries[i].path)
         result.add(entries[i].strongHex)
+        unlinked = true
       except OSError:
         discard
+      if unlinked:
+        for record in evictedRecords:
+          removeRecordComputationDir(record)
       # Drop the evicted record's sidecars too, or they leak.
       for sidecar in [entries[i].path.parentDir /
                         witnessFileName(entries[i].strongHex),
@@ -5455,7 +5568,8 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
                          metadataCache: ptr FileMetadataCache = nil;
                          envInputs: openArray[EnvFingerprint] = [];
                          enumeratedDirectories: openArray[string] = [];
-                         determinism = EntryDeterminism()):
+                         determinism = EntryDeterminism();
+                         computationStagingDir = ""):
                          ActionResultRecord =
   result.weakFingerprint = weak
   result.policy = policy
@@ -5487,7 +5601,18 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
     result.envInputs)
   result.outputPayloadKind =
     if storeOutputBlobs: opkCasBlobs else: opkMetadataOnly
-  for path in outputPaths:
+  # Per-computation outputs (`promoteComputationStaging`): the strong
+  # fingerprint is known now, so the run's staging directory becomes the
+  # computation directory this record names, before any output is observed.
+  var boundOutputPaths = @outputPaths
+  if computationStagingDir.len > 0 and
+      dirExists(extendedPath(computationStagingDir)):
+    let computationDir = computationDirFor(computationStagingDir,
+      result.strongFingerprint)
+    promoteComputationStaging(computationStagingDir, computationDir)
+    boundOutputPaths = rebindComputationOutputs(outputPaths,
+      computationStagingDir, computationDir)
+  for path in boundOutputPaths:
     let source = materialPath(outputRoot, path)
     # Read straight from the inode we just wrote, not through
     # `metadataCache`: the engine invalidates that entry right after
@@ -5533,7 +5658,8 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
                          metadataCache: ptr FileMetadataCache = nil;
                          envInputs: openArray[EnvFingerprint] = [];
                          enumeratedDirectories: openArray[string] = [];
-                         determinism = EntryDeterminism()):
+                         determinism = EntryDeterminism();
+                         computationStagingDir = ""):
                          ActionResultRecord =
   result.weakFingerprint = weak
   result.policy = policy
@@ -5565,7 +5691,18 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
     result.envInputs)
   result.outputPayloadKind =
     if storeOutputBlobs: opkCasBlobs else: opkMetadataOnly
-  for path in outputPaths:
+  # Per-computation outputs (`promoteComputationStaging`): the strong
+  # fingerprint is known now, so the run's staging directory becomes the
+  # computation directory this record names, before any output is observed.
+  var boundOutputPaths = @outputPaths
+  if computationStagingDir.len > 0 and
+      dirExists(extendedPath(computationStagingDir)):
+    let computationDir = computationDirFor(computationStagingDir,
+      result.strongFingerprint)
+    promoteComputationStaging(computationStagingDir, computationDir)
+    boundOutputPaths = rebindComputationOutputs(outputPaths,
+      computationStagingDir, computationDir)
+  for path in boundOutputPaths:
     let source = materialPath(outputRoot, path)
     # Read straight from the inode we just wrote, not through
     # `metadataCache`: the engine invalidates that entry right after
@@ -6056,6 +6193,9 @@ type
     meta*: EntryDeterminism
     expired*: bool
     blobDigests*: seq[string]
+    computationDirs*: seq[string]
+      ## The per-computation output directories its records own
+      ## (`recordComputationDir`), removed with the entry.
 
   RetentionGcPolicy* = object
     nowUnix*: int64
@@ -6140,6 +6280,9 @@ proc scanCacheEntries*(cache: ActionCache;
       try:
         let decoded = decodePerEdgeFileWithSeq(bytes(readFile(path)))
         for record in decoded.records:
+          let owned = recordComputationDir(record)
+          if owned.len > 0:
+            entry.computationDirs.add(owned)
           if record.outputPayloadKind != opkCasBlobs:
             continue
           for output in record.outputs:
@@ -6171,6 +6314,10 @@ proc removeEntry(entry: CacheEntryRef): bool =
       except OSError: discard
   try:
     removeFile(extendedPath(entry.recPath))
+    for dir in entry.computationDirs:
+      if dirExists(extendedPath(dir)):
+        try: removeDir(extendedPath(dir))
+        except OSError: discard
     true
   except OSError:
     false
@@ -6266,3 +6413,142 @@ proc runRetentionGc*(cache: ActionCache;
       result.evicted.add(entry.weakDirName & "/" & entry.strongHex)
       for d in entry.blobDigests:
         result.releasedBlobs.add(d)
+
+# ===========================================================================
+# Orphaned recipe-compile directories.
+#
+# Hermetic-Builds-And-Path-Independence.md §"Per-computation output
+# directories": a directory under `recipe-compiles/<kind>/<identity>/` other
+# than `staging/` that no live record's outputs lie under is garbage. The
+# eviction and retention paths above remove a record's directory with the
+# record; this sweep catches the rest (a crash between promotion and the
+# record write, a record removed by an older binary, the directories of the
+# earlier single-directory layout).
+# ===========================================================================
+
+const RecipeCompilesDirName* = "recipe-compiles"
+
+when defined(posix):
+  proc cRenamePath(src, dst: cstring): cint
+    {.importc: "rename", header: "<stdio.h>".}
+
+type
+  OrphanComputationSweep* = object
+    scannedRecords*: int
+    liveDirs*: int
+    orphaned*: seq[string]      ## orphan directories found (and acted on)
+    quarantined*: seq[string]   ## where each moved orphan now lives
+    removedInPlace*: seq[string]
+    skippedYoung*: int          ## orphans still inside the grace period
+    refused*: string
+      ## Non-empty when the sweep did nothing because a record could not be
+      ## read: it could name any directory, so nothing is provably orphaned.
+
+proc recipeCompileEntryOf(recipeRoot, path: string): string =
+  ## The `<recipeRoot>/<kind>/<identity>/<entry>` prefix of `path`, or "".
+  let normalized = os.normalizedPath(path)
+  if not normalized.startsWith(recipeRoot & "/"):
+    return ""
+  let parts = normalized[recipeRoot.len + 1 .. ^1].split('/')
+  if parts.len < 3:
+    return ""
+  recipeRoot / parts[0] / parts[1] / parts[2]
+
+proc sweepOrphanComputationDirs*(actionCacheRoot, pendingRoot: string;
+                                 graceSeconds: int64;
+                                 nowUnix: int64 = 0;
+                                 dryRun = false): OrphanComputationSweep =
+  ## Find every directory under `<actionCacheRoot>/recipe-compiles/<kind>/
+  ## <identity>/` that no live record in `<actionCacheRoot>/action-cache`
+  ## names, and move each one older than `graceSeconds` into `pendingRoot`
+  ## (the store's `gc/pending-deletion/`, whose own sweep unlinks it after the
+  ## grace period). Removed in place when it cannot be moved there. `staging/`
+  ## is never touched: it belongs to whichever run holds the identity lock.
+  let recipeRoot = os.normalizedPath(absolutePath(
+    actionCacheRoot / RecipeCompilesDirName))
+  if not dirExists(extendedPath(recipeRoot)):
+    return
+  var live = initHashSet[string]()
+  let hotRoot = actionCacheRoot / "action-cache" / "hot-records"
+  if dirExists(extendedPath(hotRoot)):
+    for edgeKind, edgeDir in walkDir(extendedPath(hotRoot)):
+      if edgeKind != pcDir:
+        continue
+      for kind, path in walkDir(edgeDir):
+        if kind != pcFile or not path.endsWith(PerEdgeRecFileExt):
+          continue
+        var records: seq[ActionResultRecord] = @[]
+        try:
+          records = decodePerEdgeFileWithSeq(bytes(readFile(path))).records
+        except CatchableError:
+          records = @[]
+        if records.len == 0:
+          result.refused = "cannot read cache record " & path &
+            "; it may name any recipe-compile directory, so none is collected"
+          return
+        for record in records:
+          inc result.scannedRecords
+          for output in record.outputs:
+            if output.path.isAbsolute:
+              let entry = recipeCompileEntryOf(recipeRoot, output.path)
+              if entry.len > 0:
+                live.incl(entry)
+  result.liveDirs = live.len
+  let now = if nowUnix != 0: nowUnix else: toUnix(getTime())
+  var serial = 0
+  for kindKind, kindDir in walkDir(extendedPath(recipeRoot)):
+    if kindKind != pcDir:
+      continue
+    for identityKind, identityDir in walkDir(kindDir):
+      if identityKind != pcDir:
+        continue
+      for entryKind, entryDir in walkDir(identityDir):
+        if entryKind != pcDir or
+            extractFilename(entryDir) == ComputationStagingDirName:
+          continue
+        let entry = recipeRoot / extractFilename(kindDir) /
+          extractFilename(identityDir) / extractFilename(entryDir)
+        if entry in live:
+          continue
+        var age = int64.high
+        try:
+          age = now - toUnix(getLastModificationTime(entryDir))
+        except OSError:
+          discard
+        if age < graceSeconds:
+          inc result.skippedYoung
+          continue
+        result.orphaned.add(entry)
+        if dryRun:
+          continue
+        var moved = ""
+        if pendingRoot.len > 0:
+          inc serial
+          let target = pendingRoot / ("recipe-compile-" &
+            extractFilename(identityDir)[0 ..< min(16,
+              extractFilename(identityDir).len)] & "-" &
+            extractFilename(entryDir) & "." & $getCurrentProcessId() & "." &
+            $now & "." & $serial)
+          try:
+            createDir(extendedPath(pendingRoot))
+            # The pending sweep counts its grace from the mtime: stamp it so
+            # the quarantine gets the whole grace period.
+            setLastModificationTime(entryDir, getTime())
+            when defined(posix):
+              # rename(2) only: a cross-filesystem move would copy the tree,
+              # and removing it in place below is cheaper.
+              if cRenamePath(entryDir.cstring, target.cstring) == 0:
+                moved = target
+            else:
+              moveDir(entryDir, extendedPath(target))
+              moved = target
+          except OSError:
+            moved = ""
+        if moved.len > 0:
+          result.quarantined.add(moved)
+        else:
+          try:
+            removeDir(entryDir)
+            result.removedInPlace.add(entry)
+          except OSError:
+            discard

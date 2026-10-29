@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2407,
+    "nimTestBinaries": 2409,
     "pureUnitConsolidationGroups": 68,
-    "pureUnitTests": 686,
+    "pureUnitTests": 687,
     "staticallyDetectedRuntimeCompilerFlowTests": 130,
-    "testEntries": 2446
+    "testEntries": 2448
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -424,7 +424,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 3,
+      "count": 4,
       "defines": [],
       "dependencyShape": [
         "repro_core",
@@ -435,6 +435,7 @@
       "sources": [
         "libs/repro_local_store/tests/t_input_access_sidecar.nim",
         "libs/repro_local_store/tests/t_observed_execution_mark_is_local_only.nim",
+        "libs/repro_local_store/tests/t_per_computation_output_dirs.nim",
         "libs/repro_local_store/tests/t_retention_gc.nim"
       ],
       "targetOs": "soAny"
@@ -1385,9 +1386,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1336,
+      "integration": 1337,
       "platform/destructive": 146,
-      "pure unit": 686,
+      "pure unit": 687,
       "unclassified": 260
     },
     "graphOwnedTestArtifacts": [
@@ -1596,9 +1597,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2407,
+    "nimTestBinaryCount": 2409,
     "pythonTestFileCount": 39,
-    "testEntryCount": 2446
+    "testEntryCount": 2448
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -15879,6 +15880,25 @@
       "source": "libs/repro_local_store/tests/t_pattern_scoped_enumeration_names.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_per_computation_output_dirs",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_per_computation_output_dirs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -41504,6 +41524,23 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_recertify_is_noop_when_no_executed_function_changed.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_recipe_compile_per_computation_dirs",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_recipe_compile_per_computation_dirs.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

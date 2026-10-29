@@ -3960,6 +3960,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_local_store/tests/t_per_computation_output_dirs.nim",
+    binary: "build/test-bin/t_per_computation_output_dirs",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_local_store/tests/t_portable_fingerprint.nim",
     binary: "build/test-bin/t_portable_fingerprint",
     defines: @[],
@@ -16805,6 +16814,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_recertify_is_noop_when_no_executed_function_changed.nim",
     binary: "build/test-bin/t_recertify_is_noop_when_no_executed_function_changed",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_recipe_compile_per_computation_dirs.nim",
+    binary: "build/test-bin/t_recipe_compile_per_computation_dirs",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

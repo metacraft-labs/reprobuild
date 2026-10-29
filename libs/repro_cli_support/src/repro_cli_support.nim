@@ -10531,13 +10531,47 @@ proc recipeCompileOutputDir(kind, identity: string): string =
   ## (`recordOutputsNotOwnedBy`) at any location, and a hit restores there.
   ##
   ## Two computations with one identity (same recipe bytes and variant,
-  ## different sibling or ancestor content, or a different observed
-  ## environment) share the directory. Each edge holds the directory's lock
-  ## from execution until the CLI has copied the outputs to the caller's own
-  ## paths (`extractInterfaceEdge`), and a lookup whose bytes on disk are
-  ## another record's restores its own from the record's payloads (the
-  ## extraction edge runs in the restore configuration for that reason).
+  ## different sibling or ancestor content, a different lock, or a different
+  ## observed environment) share this directory and its lock, but never
+  ## their outputs: Hermetic-Builds-And-Path-Independence.md §"Per-computation
+  ## output directories" (owner decision 2026-10-29). The edge writes into
+  ## `recipeCompileStagingDir` and the engine moves that to
+  ## `<identity>/<computation>/`, named by the record's strong fingerprint,
+  ## when it publishes; a hit is served from the hit record's directory.
+  ## Each edge holds the identity's lock (`acquireRecipeCompileIdentityLock`)
+  ## from before execution until the CLI has copied the outputs to the
+  ## caller's own paths.
   absolutePath(currentActionCacheRoot() / "recipe-compiles" / kind / identity)
+
+proc recipeCompileStagingDir(identityDir: string): string =
+  ## Where an executing recipe-compile edge writes: every declared output and
+  ## its scratch. Emptied under the identity lock before each run.
+  identityDir / ComputationStagingDirName
+
+proc acquireRecipeCompileIdentityLock(identityDir: string): ReproFileLock =
+  ## The per-identity lock: one writer of `staging/`, and no promotion or
+  ## copy-out racing another, for every computation of the identity.
+  createDir(extendedPath(identityDir))
+  acquireExclusiveFileLock(identityDir / "identity.lock")
+
+proc resetRecipeCompileStaging(identityDir: string) =
+  ## Empty the staging directory (a run whose publish was withheld, or one
+  ## that crashed, leaves its outputs there). Called with the identity lock
+  ## held, before the edge is constructed.
+  let staging = recipeCompileStagingDir(identityDir)
+  if dirExists(extendedPath(staging)):
+    removeDir(extendedPath(staging))
+  createDir(extendedPath(staging))
+
+proc recipeCompileOutputDirOf(run: BuildRunResult; actionId,
+                              stagingDir: string): string =
+  ## The directory holding a recipe-compile edge's outputs after `result`:
+  ## the computation directory the engine reported for the hit or published
+  ## record, or the staging directory when nothing was published.
+  for item in run.results:
+    if item.id == actionId and item.computationOutputDir.len > 0:
+      return item.computationOutputDir
+  stagingDir
 
 proc recipeCompileRelocationAnchors(workDir, helperCliPath: string;
                                     compileCommand: openArray[string] = []):
@@ -10621,8 +10655,12 @@ type
     anchors: seq[string]
     edgePlan: ProviderCompilePlan
       ## The plan as the edge keys it: recipe-relative identities, the
-      ## binary under `recipeCompileOutputDir("provider", ...)`.
+      ## binary under the identity's `staging/` directory.
     edgeArtifactPath: string
+      ## The edge's artifact in `staging/` (a declared output).
+    identityDir: string
+      ## `recipeCompileOutputDir("provider", <ProviderCompileActionKey>)`.
+    stagingDir: string
 
 proc planRecipeRelativeProviderCompile(callerPlan: ProviderCompilePlan;
     modulePath, helperCliPath, workDir, providerRoot: string):
@@ -10656,13 +10694,14 @@ proc planRecipeRelativeProviderCompile(callerPlan: ProviderCompilePlan;
   # directory the key names.
   let keyed = recipeRelativeProviderCompilePlan(callerPlan, modulePath,
     callerPlan.outputBinaryPath, result.anchors)
-  let edgeDir = recipeCompileOutputDir("provider",
+  result.identityDir = recipeCompileOutputDir("provider",
     toHex(keyed.providerCompileActionKey.bytes).toLowerAscii)
+  result.stagingDir = recipeCompileStagingDir(result.identityDir)
   result.edgePlan = recipeRelativeProviderCompilePlan(callerPlan, modulePath,
-    edgeDir / "provider" / "project-provider", result.anchors)
+    result.stagingDir / "provider" / "project-provider", result.anchors)
   doAssert result.edgePlan.providerCompileActionKey ==
     keyed.providerCompileActionKey
-  result.edgeArtifactPath = edgeDir / "provider-compile.rbsz"
+  result.edgeArtifactPath = result.stagingDir / "provider-compile.rbsz"
 
 proc recipeRelativeProviderCompileAction(edge: RecipeRelativeProviderCompile;
     modulePath, helperCliPath, workDir: string): BuildAction =
@@ -10718,16 +10757,21 @@ proc recipeRelativeProviderCompileAction(edge: RecipeRelativeProviderCompile;
     dependencyPolicy = automaticMonitorGatheringPolicy(
       providerCompileIgnoredInputPrefixes(scratchDir)),
     relocatable = true,
-    relocationAnchors = edge.anchors)
+    relocationAnchors = edge.anchors,
+    # Each computation of this identity keeps its own outputs
+    # (`recipeCompileOutputDir`): the engine moves `staging/` to the
+    # record's computation directory when it publishes.
+    computationStagingDir = edge.stagingDir)
 
-proc recipeRelativeProviderLocationBound(
-    edge: RecipeRelativeProviderCompile): bool =
+proc recipeRelativeProviderLocationBound(outputDir: string): bool =
   ## Whether the recipe-relative edge's binary may NOT be served to another
   ## copy of the recipe: its verdict (`providerLocationEmbedding`) names an
   ## embedded location. A verdict that is absent or unreadable is treated
   ## as binding — sharing is the optimisation, and a binary nobody vouched
   ## for is not shared.
-  let path = recipeRelativeProviderVerdictPath(edge.edgeArtifactPath)
+  ## `outputDir` is the directory holding the edge's outputs.
+  let path = recipeRelativeProviderVerdictPath(
+    outputDir / "provider-compile.rbsz")
   try:
     readFile(extendedPath(path)).strip() != RelocatableProviderVerdict
   except IOError, OSError:
@@ -10749,22 +10793,31 @@ proc runProviderCompileEdge(plan: ProviderCompilePlan;
     return runBuild(graph([providerCompileBuildAction(plan, modulePath,
       interfacePath, artifactPath, helperCliPath, workDir, scratchDir)]),
       config)
-  # Every copy of the recipe shares the edge's outputs; hold them from
-  # execution until this caller has its own copy.
+  # Every copy of the recipe shares the identity's directories; hold them
+  # from before execution until this caller has its own copy.
   var locationBound = false
-  var edgeLock = acquireInterfaceArtifactLock(edge.edgeArtifactPath)
+  var edgeLock = acquireRecipeCompileIdentityLock(edge.identityDir)
   try:
+    if not config.dryRun:
+      resetRecipeCompileStaging(edge.identityDir)
     result = runBuild(graph([recipeRelativeProviderCompileAction(edge,
       modulePath, helperCliPath, workDir)]), config)
+    # The outputs are in the hit or published record's computation
+    # directory, or still in `staging/` when nothing was published.
+    let outputDir = recipeCompileOutputDirOf(result, ProviderCompileActionId,
+      edge.stagingDir)
+    let edgeArtifact = outputDir / extractFilename(edge.edgeArtifactPath)
+    let edgeBinary = outputDir / "provider" / "project-provider"
     if not result.hasFailedActions() and not config.dryRun and
-        fileExists(extendedPath(edge.edgeArtifactPath)) and
-        fileExists(extendedPath(edge.edgePlan.outputBinaryPath)):
-      locationBound = recipeRelativeProviderLocationBound(edge)
+        fileExists(extendedPath(edgeArtifact)) and
+        fileExists(extendedPath(edgeBinary)):
+      locationBound = recipeRelativeProviderLocationBound(outputDir)
       if not locationBound:
         discard publishRecipeRelativeProviderCompile(plan,
-          edge.edgeArtifactPath, artifactPath, modulePath, workDir)
+          edgeArtifact, artifactPath, modulePath, workDir,
+          edgeBinaryPath = edgeBinary)
   finally:
-    releaseInterfaceArtifactLock(edgeLock)
+    releaseExclusiveFileLock(edgeLock)
   if locationBound:
     # The shared binary names the directory it was compiled in, so it
     # evaluates THAT copy's paths. This copy gets its own location-bound
@@ -10969,6 +11022,9 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
       variantArgs.add(if relocatable: recipeSpelling(extra) else: extra)
   var command: seq[string]
   var edgeArtifact, edgeStub, edgeCwd: string
+  # Recipe-relative only: the identity directory and its staging directory
+  # (`recipeCompileOutputDir`, `recipeCompileStagingDir`).
+  var identityDir, stagingDir: string
   if relocatable:
     let moduleName = extractFilename(modulePath)
     # One directory per extraction VARIANT of this recipe, named by
@@ -10982,7 +11038,9 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
       "\x00" & anchors.join("\x00") & keySuffix & "\x00recipe\x00" &
       digestHex(blake3DomainDigest(readFile(extendedPath(modulePath)).bytesOf(),
         hdActionFingerprint))).bytes).toLowerAscii
-    let edgeDir = recipeCompileOutputDir("interface", identity)
+    identityDir = recipeCompileOutputDir("interface", identity)
+    stagingDir = recipeCompileStagingDir(identityDir)
+    let edgeDir = stagingDir
     edgeArtifact = edgeDir / "project-interface.rbsz"
     edgeStub = edgeDir / "project-interface.nim"
     edgeCwd = recipeDir
@@ -10999,7 +11057,7 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     for anchor in anchors:
       command.add("--anchor")
       command.add(anchor)
-    createDir(extendedPath(edgeDir))
+    createDir(extendedPath(identityDir))
   else:
     edgeArtifact = artifactPath
     edgeStub = stubPath
@@ -11094,7 +11152,11 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     dependencyPolicy =
       automaticMonitorGatheringPolicy(ignoredInputPrefixes),
     relocatable = relocatable,
-    relocationAnchors = anchors)
+    relocationAnchors = anchors,
+    # Each computation of this identity keeps its own outputs
+    # (`recipeCompileOutputDir`): the engine moves `staging/` to the
+    # record's computation directory when it publishes.
+    computationStagingDir = stagingDir)
   var edgeConfig = BuildEngineConfig(
     cacheRoot: cacheRoot,
     actionCacheRoot: currentActionCacheRoot(),
@@ -11128,25 +11190,21 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     cancelCallback: cancelCheck)
   edgeConfig.statsEnabled = statsEnabled
   if relocatable:
-    # The recipe-relative edge's outputs live in ONE directory per identity
-    # (`recipeCompileOutputDir`), and that identity cannot name what the
-    # compile observes from its environment: the monitor records it only
-    # when the edge runs. Two runs of one recipe whose observed environments
-    # differ — `t_e2e_codetracer_in_place_project_file`'s PATH variants also
-    # differ in the `C_INCLUDE_PATH`/`LIBRARY_PATH` gcc reads, and the recipe
-    # resolves `sh`, `find`, `sort` through `PATH` — are two records over the
-    # same output paths. With metadata-only records the second run's outputs
-    # replaced the first's, so switching back found the first record's inputs
-    # unchanged, its outputs another record's, and re-ran the whole
-    # extraction (every switch, six recipes, thousands of seconds).
+    # Each computation of the recipe-relative edge has its own output
+    # directory (`recipeCompileOutputDir`, Hermetic-Builds-And-Path-
+    # Independence.md §"Per-computation output directories"), so two runs
+    # whose observed environments differ — `t_e2e_codetracer_in_place_
+    # project_file`'s PATH variants also differ in the `C_INCLUDE_PATH`/
+    # `LIBRARY_PATH` gcc reads — no longer overwrite each other's outputs.
     #
-    # So each record carries its outputs' bytes (a few hundred KB: the
+    # The records still carry their outputs' bytes (a few hundred KB: the
     # interface artifact, its stub and its input manifest; the scratch tree
-    # under `work/` is derived state and is not stored), and a hit on a
-    # record whose outputs are not the ones on disk restores ITS bytes into
-    # the directory (`enableCachedOutputRestore`, gated on the monitor seeing
-    # no undeclared surviving write). A hit whose outputs are already in
-    # place restores nothing and keeps their mtimes.
+    # under `work/` is derived state and is not stored), so a hit whose
+    # computation directory was removed (evicted with a sibling record,
+    # collected as an orphan, deleted by hand) restores ITS bytes there
+    # (`enableCachedOutputRestore`, gated on the monitor seeing no undeclared
+    # surviving write) instead of re-running the extraction. A hit whose
+    # outputs are already in place restores nothing and keeps their mtimes.
     edgeConfig.enableCachedOutputRestore()
   # The workspace's root classification, for `Incremental-Invalidation.md`
   # §"Validation Criteria"'s second mandatory exemption: an enumerated
@@ -11156,14 +11214,28 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   # key carries the immediate membership of `/` and of the user's home.
   wireFilesystemRoots(edgeConfig, projectRootForModule(modulePath), workDir,
     outRoot = consumerRoot)
-  # The recipe-relative outputs are shared by every caller of this edge for
-  # this recipe; the caller's own copy is its own.
+  # The recipe-relative directories are shared by every caller of this edge
+  # for this recipe; the caller's own copy is its own.
   var edgeLock =
-    if relocatable: acquireInterfaceArtifactLock(edgeArtifactPath)
+    if relocatable: acquireRecipeCompileIdentityLock(identityDir)
     else: ReproFileLock()
   var artifactLock = acquireInterfaceArtifactLock(artifactPath)
   try:
+    if relocatable and not validateExistingOnly:
+      resetRecipeCompileStaging(identityDir)
     let edgeResult = runBuild(graph([extractAction]), edgeConfig)
+    # The outputs are in the hit or published record's computation
+    # directory, or still in `staging/` when nothing was published.
+    let edgeOutputDir =
+      if relocatable:
+        recipeCompileOutputDirOf(edgeResult, extractAction.id, stagingDir)
+      else: ""
+    let boundEdgeArtifact =
+      if relocatable: edgeOutputDir / extractFilename(edgeArtifactPath)
+      else: edgeArtifactPath
+    let boundEdgeStub =
+      if relocatable: edgeOutputDir / extractFilename(edgeStubPath)
+      else: edgeStubPath
     stats.mergeStats(edgeResult.stats)
     interfaceExtractReportItems.add(edgeResult.results)
     interfaceExtractReportTrace.add(edgeResult.trace)
@@ -11218,22 +11290,22 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
              " (" & validationDetails.join("; ") & ")"
            else:
              ""))
-    if not fileExists(extendedPath(edgeArtifactPath)):
+    if not fileExists(extendedPath(boundEdgeArtifact)):
       raise newException(IOError,
         "interface extraction edge did not write artifact: " &
-        edgeArtifactPath)
+        boundEdgeArtifact)
     if relocatable:
       # The edge's artifact names the recipe's files relative to the recipe;
       # the caller's copy names them at THIS location, which is what every
       # reader of a project interface expects.
-      result = readInterfaceArtifactRebased(edgeArtifactPath, recipeDir)
+      result = readInterfaceArtifactRebased(boundEdgeArtifact, recipeDir)
       let encoded = encodeProjectInterfaceArtifact(result)
       var text = newString(encoded.len)
       if encoded.len > 0:
         copyMem(addr text[0], unsafeAddr encoded[0], encoded.len)
       publishIfChanged(artifactPath, text)
-      if stubPath.len > 0 and fileExists(extendedPath(edgeStubPath)):
-        publishIfChanged(stubPath, readFile(extendedPath(edgeStubPath)))
+      if stubPath.len > 0 and fileExists(extendedPath(boundEdgeStub)):
+        publishIfChanged(stubPath, readFile(extendedPath(boundEdgeStub)))
     else:
       result = readInterfaceArtifact(artifactPath)
     # Shared-Development-Services §4.3's STALE-LIFT PRECONDITION: record
@@ -38854,8 +38926,23 @@ proc runStoreCommand*(args: seq[string]): int =
           inc droppedPins
       var store = openStore(root)
       defer: store.close()
+      # Hermetic-Builds-And-Path-Independence.md §"Per-computation output
+      # directories": a recipe-compile directory no live record names is
+      # garbage. It is moved into this store's pending-deletion area, which
+      # the sweep below unlinks once the grace period has passed.
+      let orphanSweep = sweepOrphanComputationDirs(currentActionCacheRoot(),
+        store.gcPendingRoot, graceSeconds.int64)
       let report = store.gc(graceSeconds = graceSeconds)
       echo "repro store gc: store-root=" & root
+      echo "recipe-compile directories without a record: " &
+        $orphanSweep.orphaned.len & " (quarantined: " &
+        $orphanSweep.quarantined.len & ", removed in place: " &
+        $orphanSweep.removedInPlace.len & ", within grace: " &
+        $orphanSweep.skippedYoung & ")"
+      if orphanSweep.refused.len > 0:
+        echo "  recipe-compile sweep skipped: " & orphanSweep.refused
+      for path in orphanSweep.orphaned:
+        echo "  - " & path
       echo "pin roots re-derived: " & $pinOutcomes.len &
         " (dropped: " & $droppedPins & ")"
       for outcome in pinOutcomes:
@@ -88388,37 +88475,53 @@ proc tryLoadDurableSolverProviderArtifacts(
       let helperCliPath = internalReproHelperCliPath(publicCliPath)
       let relocated = planRecipeRelativeProviderCompile(plan, modulePath,
         helperCliPath, compileWorkDir, projectRootForModule(modulePath))
-      let providerAction =
-        if relocated.active and
-            not recipeRelativeProviderLocationBound(relocated):
-          recipeRelativeProviderCompileAction(relocated, modulePath,
-            helperCliPath, compileWorkDir)
-        else:
-          providerCompileBuildAction(plan,
-            modulePath, interfacePath, providerArtifactPath,
-            helperCliPath, compileWorkDir, outDir / "provider-work")
-      let validation = runBuild(graph([providerAction]), BuildEngineConfig(
-        cacheRoot: outDir / "build-engine-cache",
-        actionCacheRoot: currentActionCacheRoot(),
-        runQuotaCliPath: publicCliPath,
-        monitorCliPath: selfSpawnIoMonitorPath(publicCliPath),
-        monitorCliArgs: internalIoMonitorArgs,
-        maxParallelism: 1'u32,
-        stdoutLimit: 1024 * 1024,
-        stderrLimit: 1024 * 1024,
-        rebuildMissingOutputsOnCacheHit: true,
-        deferLocalOutputBlobs: true,
-        bypassRunQuota: runQuotaBypassedByEnv(),
-        inlineRunQuota: true,
-        dryRun: true,
-        suppressTrace: true,
-        skipCacheHitEvidence: true))
-      if validation.hasFailedActions():
-        return none(DurableSolverProviderArtifacts)
+      proc locationBoundAction(): BuildAction =
+        providerCompileBuildAction(plan,
+          modulePath, interfacePath, providerArtifactPath,
+          helperCliPath, compileWorkDir, outDir / "provider-work")
+      proc validates(providerAction: BuildAction):
+          tuple[validated: bool; run: BuildRunResult] =
+        let validation = runBuild(graph([providerAction]), BuildEngineConfig(
+          cacheRoot: outDir / "build-engine-cache",
+          actionCacheRoot: currentActionCacheRoot(),
+          runQuotaCliPath: publicCliPath,
+          monitorCliPath: selfSpawnIoMonitorPath(publicCliPath),
+          monitorCliArgs: internalIoMonitorArgs,
+          maxParallelism: 1'u32,
+          stdoutLimit: 1024 * 1024,
+          stderrLimit: 1024 * 1024,
+          rebuildMissingOutputsOnCacheHit: true,
+          deferLocalOutputBlobs: true,
+          bypassRunQuota: runQuotaBypassedByEnv(),
+          inlineRunQuota: true,
+          dryRun: true,
+          suppressTrace: true,
+          skipCacheHitEvidence: true))
+        result.run = validation
+        if validation.hasFailedActions():
+          return
+        for item in validation.results:
+          if item.id == providerAction.id and item.status == asUpToDate:
+            result.validated = true
       var validated = false
-      for item in validation.results:
-        if item.id == providerAction.id and item.status == asUpToDate:
-          validated = true
+      if relocated.active:
+        # The build ran the recipe-relative edge first. Its verdict
+        # (`providerLocationEmbedding`) lives with the outputs, in the hit
+        # record's own computation directory; a location-bound verdict means
+        # the build then compiled this copy location-bound, so THAT edge is
+        # the one that must validate.
+        let shared = validates(recipeRelativeProviderCompileAction(relocated,
+          modulePath, helperCliPath, compileWorkDir))
+        if shared.validated:
+          let sharedOutputs = recipeCompileOutputDirOf(shared.run,
+            ProviderCompileActionId, relocated.stagingDir)
+          validated =
+            if recipeRelativeProviderLocationBound(sharedOutputs):
+              validates(locationBoundAction()).validated
+            else:
+              true
+      else:
+        validated = validates(locationBoundAction()).validated
       if not validated:
         return none(DurableSolverProviderArtifacts)
       provider = some(durableProvider)

@@ -9446,7 +9446,8 @@ proc providerLocationEmbedding*(binaryBytes, recipeDir: string): string =
 
 proc publishRecipeRelativeProviderCompile*(plan: ProviderCompilePlan;
     edgeArtifactPath, artifactPath, modulePath: string;
-    workDir = getCurrentDir()): ProviderCompileArtifact =
+    workDir = getCurrentDir();
+    edgeBinaryPath = ""): ProviderCompileArtifact =
   ## The caller's side of a recipe-relative provider compile: the edge wrote
   ## its binary and a recipe-relative artifact under the action-cache root
   ## (shared by every copy of the recipe); the caller's binary
@@ -9455,7 +9456,14 @@ proc publishRecipeRelativeProviderCompile*(plan: ProviderCompilePlan;
   ## is rewritten only when its bytes change, so a served edge leaves the
   ## caller's files - and every key on their mtimes - untouched.
   let edge = readProviderCompileArtifact(edgeArtifactPath)
-  let edgeBinary = normalizedProviderOutputPath(edge.outputBinaryPath)
+  # `edgeBinaryPath`: where the edge's binary is NOW. A per-computation
+  # edge recorded the staging path it was compiled to, and the engine has
+  # since moved it to its computation directory
+  # (Hermetic-Builds-And-Path-Independence.md §"Per-computation output
+  # directories").
+  let edgeBinary =
+    if edgeBinaryPath.len > 0: normalizedProviderOutputPath(edgeBinaryPath)
+    else: normalizedProviderOutputPath(edge.outputBinaryPath)
   let binary = normalizedProviderOutputPath(plan.outputBinaryPath)
   var current = false
   if fileExists(extendedPath(binary)):

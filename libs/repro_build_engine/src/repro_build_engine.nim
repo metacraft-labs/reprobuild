@@ -429,6 +429,17 @@ type
       ## toolchain, the reprobuild libraries, host configuration — whose
       ## inputs stay recorded by absolute path. A root that contains `cwd`
       ## anchors nothing.
+    computationStagingDir*: string
+      ## Per-computation outputs (Hermetic-Builds-And-Path-Independence.md
+      ## §"Per-computation output directories"). When set, every declared
+      ## output lies under this absolute STAGING directory, where the action
+      ## writes when it runs. A record names its outputs in the sibling
+      ## directory `computationDirFor(staging, record.strongFingerprint)`:
+      ## the publish renames the staging directory there, the lookup checks
+      ## (or restores) the record's own paths, the owned-outputs guard
+      ## compares after that binding, and the result reports the directory
+      ## in `ActionResult.computationOutputDir`. Two computations sharing a
+      ## weak fingerprint therefore never overwrite each other's outputs.
     depfile*: string
     dynamicDepsFile*: string
     monitorDepfile*: string
@@ -1880,6 +1891,13 @@ type
       ## only moment at which it exists — and it is the quantity the
       ## compatibility key must be COARSER than, so a row carrying one
       ## without the other cannot show that the two diverge.
+    computationOutputDir*: string
+      ## For an action with per-computation outputs
+      ## (`BuildAction.computationStagingDir`): the computation directory
+      ## that holds its outputs after this build — the hit record's, or the
+      ## one its publish just promoted. Empty when no record was hit or
+      ## published; the outputs are then wherever the run left them (the
+      ## staging directory).
     cacheMissReason*: string
       ## Why the lookup did not hit, in the cache layer's own words
       ## ("no cache record for weak fingerprint", "input changed: <path>",
@@ -3351,6 +3369,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              requiresElevation = false;
              relocatable = false;
              relocationAnchors: openArray[string] = [];
+             computationStagingDir = "";
              governingLockIdentity: LockIdentity): BuildAction =
   ## Named-Lock-Files §7.2: `governingLockIdentity` has NO DEFAULT, and that
   ## is the point. "An action constructed without a governing lock identity is
@@ -3375,6 +3394,21 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
       legacyDepfileGatheringPolicy(depfile, [])
     else:
       requestedPolicy.get(automaticMonitorGatheringPolicy())
+  if computationStagingDir.len > 0:
+    # Binding replaces the staging prefix; an output outside it could not be
+    # bound, and an optional output would make the bound set record-shaped.
+    if not computationStagingDir.isAbsolute:
+      raise newException(ValueError, "action '" & id &
+        "': computationStagingDir must be absolute: " & computationStagingDir)
+    if optionalOutputs.len > 0:
+      raise newException(ValueError, "action '" & id &
+        "': per-computation outputs cannot be optional")
+    let staging = os.normalizedPath(computationStagingDir)
+    for output in outputs:
+      if not os.normalizedPath(output).startsWith(staging & "/"):
+        raise newException(ValueError, "action '" & id & "': output " &
+          output & " is not under its computation staging directory " &
+          staging)
   BuildAction(
     governingLockIdentity: governingLockIdentity,
     kind: bakProcess,
@@ -3416,6 +3450,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     actionCachePolicy: actionCachePolicy,
     relocatable: relocatable,
     relocationAnchors: @relocationAnchors,
+    computationStagingDir: computationStagingDir,
     depfile: depfile,
     dynamicDepsFile: dynamicDepsFile,
     monitorDepfile: monitorDepfile,
@@ -4376,10 +4411,36 @@ proc recordedOutputPaths*(action: BuildAction): seq[string] =
     if pathExists(materialPath(action.cwd, path)) and path notin result:
       result.add(path)
 
+proc hasComputationOutputs*(action: BuildAction): bool {.inline.} =
+  ## Per-computation outputs (`BuildAction.computationStagingDir`).
+  action.computationStagingDir.len > 0
+
+proc computationDirOf*(action: BuildAction;
+                       record: ActionResultRecord): string =
+  ## The computation directory `record` binds this action's outputs to, or
+  ## "" for an action without per-computation outputs.
+  if not action.hasComputationOutputs():
+    return ""
+  computationDirFor(action.computationStagingDir, record.strongFingerprint)
+
+proc outputsBoundTo(action: BuildAction;
+                    record: ActionResultRecord): seq[string] =
+  ## The action's declared outputs as `record` must name them: unchanged,
+  ## or for per-computation outputs moved from the staging directory into
+  ## the record's own computation directory.
+  if not action.hasComputationOutputs():
+    return action.outputs
+  rebindComputationOutputs(action.outputs, action.computationStagingDir,
+    action.computationDirOf(record))
+
 proc ownedRecordOutputPaths(action: BuildAction;
                             record: ActionResultRecord): seq[string] =
   ## Required paths must all be recorded; a conditional path may be absent.
-  result = action.outputs
+  ## Per-computation outputs are compared after binding them to the
+  ## record's computation directory (`outputsBoundTo`): a record naming any
+  ## other directory — another computation's, or the staging one — is
+  ## another computation's record.
+  result = action.outputsBoundTo(record)
   for candidate in action.optionalOutputs:
     for output in record.outputs:
       if materialPath(action.cwd, candidate) ==
@@ -4591,7 +4652,13 @@ proc restoreWouldOverwriteMatchingOutputs(action: BuildAction;
   ## restore path it has today.
   if action.declaresNoOutputs() and action.optionalOutputs.len == 0:
     return false
-  if action.outputs.len > 0 and not action.allOutputsExist():
+  if action.hasComputationOutputs():
+    # The declared paths are the staging ones; the record's own are in its
+    # computation directory, and `outputStateMismatch` reads those.
+    for output in action.outputsBoundTo(record):
+      if not action.outputPathReady(materialPath(action.cwd, output)):
+        return false
+  elif action.outputs.len > 0 and not action.allOutputsExist():
     return false
   outputStateMismatch(record, action.cwd,
     action.containerDirectoryOutputs()).len == 0
@@ -19387,6 +19454,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       # the prefix has nothing it could revalidate against.
       if action.dynamicDepsFile.len > 0 or action.optionalOutputs.len > 0:
         return none(BuildRunResult)
+      # Per-computation outputs: the declared paths are the staging ones, so
+      # this prefix has nothing it could stat. The per-edge lookup binds
+      # each record to its own computation directory.
+      if action.hasComputationOutputs():
+        return none(BuildRunResult)
     var fastResult: BuildRunResult
     fastResult.traceEnabled = not config.suppressTrace
     if config.skipCacheHitEvidence:
@@ -21025,7 +21097,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               # false so the no-record "outputs-present" shortcut below
               # cannot fire for such an edge.
               let outputStatStart = statStart()
-              outputsPresentBeforeLookup = action.allOutputsExist()
+              # Per-computation outputs: the declared (staging) paths say
+              # nothing about a record's outputs, which lie in its own
+              # computation directory. Count them present so the lookup runs
+              # in place and checks the RECORD's paths; a record whose
+              # directory is gone or changed fails that check.
+              outputsPresentBeforeLookup =
+                action.hasComputationOutputs() or action.allOutputsExist()
               outputsPresentKnown = true
               finishStat("repro output stat", outputStatStart)
             reusableInPlace =
@@ -21134,6 +21212,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             for output in lookup.record.outputs:
               recordedPaths.add(output.path)
             action.removeAbsentOptionalOutputs(recordedPaths)
+            runResult.results[idToIndex.resultIndex(id)].computationOutputDir =
+              action.computationDirOf(lookup.record)
             if config.rebuildMissingOutputsOnCacheHit and reusableInPlace:
               assignCacheHitEvidence(
                 runResult.results[idToIndex.resultIndex(id)], action,
@@ -21155,6 +21235,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
               runResult.results[idToIndex.resultIndex(id)].reason =
                 "missing-output"
+              runResult.results[idToIndex.resultIndex(id)].computationOutputDir = ""
               runResult.trace(id, "cache-skipped", "missing-output")
             else:
               # Nothing to restore when the outputs are already the recorded
@@ -21188,6 +21269,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             for output in lookup.record.outputs:
               recordedPaths.add(output.path)
             action.removeAbsentOptionalOutputs(recordedPaths)
+            runResult.results[idToIndex.resultIndex(id)].computationOutputDir =
+              action.computationDirOf(lookup.record)
             if config.rebuildMissingOutputsOnCacheHit and reusableInPlace:
               assignCacheHitEvidence(
                 runResult.results[idToIndex.resultIndex(id)], action,
@@ -21209,6 +21292,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
               runResult.results[idToIndex.resultIndex(id)].reason =
                 "missing-output"
+              runResult.results[idToIndex.resultIndex(id)].computationOutputDir = ""
               runResult.trace(id, "cache-skipped", "missing-output")
             else:
               # Same reasoning as the `aclHit` arm above.
@@ -21278,7 +21362,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           let outputStatStart = statStart()
           outputsPresent = action.allOutputsExist()
           finishStat("repro output stat", outputStatStart)
+        # Not for per-computation outputs: their declared paths are the
+        # staging ones, and only a record binds them to a computation, so
+        # "present without a hit" says nothing about which computation they
+        # are (`BuildAction.computationStagingDir`).
         if outputsPresent and action.optionalOutputs.len == 0 and
+            not action.hasComputationOutputs() and
             not cacheMissInputChanged and
             not cacheRejectedOutput and
             not cacheInvalidatedByPolicy and
@@ -21467,8 +21556,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                   # missing.
                   enumeratedDirectories = action.recordedInputNames(
                     enumeratedDirectoriesForKey(action, evidence.evidence)),
-                  determinism = entryDeterminismFor(config, action))
+                  determinism = entryDeterminismFor(config, action),
+                  computationStagingDir = action.computationStagingDir)
                 finishStat("repro cache record", recordStart)
+                runResult.results[idx].computationOutputDir =
+                  recordComputationDir(record)
                 writeActionResultRecordFile(
                   dependencyEvidencePath(cacheRoot, action.id), record)
                 recordPortableFingerprint(idx, action, evidence.evidence, record)
@@ -21707,8 +21799,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                   # `collectEvidence` has already folded by this point.
                   enumeratedDirectories = plan.action.recordedInputNames(
                     enumeratedDirectoriesForKey(plan.action, evidence.evidence)),
-                  determinism = entryDeterminismFor(config, plan.action))
+                  determinism = entryDeterminismFor(config, plan.action),
+                  computationStagingDir = plan.action.computationStagingDir)
                 finishStat("repro cache record", recordStart)
+                runResult.results[idx].computationOutputDir =
+                  recordComputationDir(record)
                 writeActionResultRecordFile(
                   dependencyEvidencePath(cacheRoot, plan.action.id), record)
                 recordPortableFingerprint(idx, plan.action, evidence.evidence,
@@ -22324,8 +22419,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
               enumeratedDirectories = action.recordedInputNames(
                 enumeratedDirectoriesForKey(action, evidence.evidence)),
-              determinism = entryDeterminismFor(config, action))
+              determinism = entryDeterminismFor(config, action),
+              computationStagingDir = action.computationStagingDir)
             finishStat("repro cache record", recordStart)
+            runResult.results[idx].computationOutputDir =
+              recordComputationDir(record)
             writeActionResultRecordFile(
               dependencyEvidencePath(cacheRoot, action.id), record)
             recordPortableFingerprint(idx, action, evidence.evidence, record)
