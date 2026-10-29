@@ -195,8 +195,7 @@ suite "TC-7 — canonical form":
     check emptyBase.status == crsMalformed
     check "base" in emptyBase.detail
     # Input that is not TOML is refused, never read as something close to it:
-    # a JSON ``\/`` escape, and a bare word that is no TOML value (even under
-    # an unknown key, which a well-formed record may carry and have ignored).
+    # a JSON ``\/`` escape, and a bare word that is no TOML value.
     let jsonEscape = readCertificateRecord(serializeCertificateToToml(cert).replace(
       "platform = \"linux/amd64\"", "platform = \"linux\\/amd64\""))
     check jsonEscape.status == crsMalformed
@@ -205,7 +204,12 @@ suite "TC-7 — canonical form":
     check bareWord.status == crsMalformed
     let unknownNumber = readCertificateRecord(serializeCertificateToToml(cert).replace(
       "[certificate.vcs]\n", "[certificate.vcs]\nextra = 1_000\n"))
-    check unknownNumber.status == crsOk
+    # Valid TOML under a key the v1 schema does not define: since Standard
+    # §3.4 (spec 5b43c20) the record is closed to extensions, so this is
+    # malformed too — for the unknown key, not for the number.
+    check unknownNumber.status == crsMalformed
+    check "unknown key or table 'certificate.vcs.extra'" in
+      unknownNumber.detail
 
     # --- 6. reconstruct FROM THE PARSED FIELDS, not from the bytes --------
     let reread = readCertificateRecord(record)

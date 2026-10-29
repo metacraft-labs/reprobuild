@@ -150,6 +150,13 @@ commit's `reprobuild.nimble` version, and every `*Src` default is that
 commit's `flake.lock` pin. `nix build .#checks.<system>.nixpkgs-package-src-sync`
 enforces it. It compares against the `src` commit's lock, not this tree's,
 so refreshing sibling pins here does not require editing `package.nix`.
+The one exception is a source input added after the `src` commit: that
+commit's lock has no node for it, so its default is held to this tree's
+`flake.lock` (listed as `pending` in the check's output) until the next
+release snapshot moves `src` past it. When the fork syncs that release,
+`update.sh` stops on the new input until `pins.json` maps it to its
+recipe argument (for `test-certificates-tools-src`, the argument is
+`testCertificatesToolsSrc`).
 
 ## Upstream-submission status
 
@@ -167,7 +174,7 @@ packaging cannot paper over either:
    compiler-side changes upstream in Nim, or to add the fork as a
    first-class `nim-unwrapped-*` variant in its own right. Until one of
    those happens this package is fork-only.
-2. **Seventeen pinned source fetches.** Legal, but well outside what a
+2. **Nineteen pinned source fetches.** Legal, but well outside what a
    reviewer expects; nixpkgs would rather see the Nim libraries packaged
    individually (or a `buildNimPackage` lockfile). Three of them
    (`nim-shm-gset`, `reprobuild-test-adapters`,

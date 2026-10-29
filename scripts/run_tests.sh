@@ -228,6 +228,10 @@ if [[ -z "${REPRO_TEST_ADAPTERS_SRC:-}" &&
       -f "../reprobuild-test-adapters/src/repro_test_adapters/test_runner.nim" ]]; then
   export REPRO_TEST_ADAPTERS_SRC="$(cd ../reprobuild-test-adapters/src && pwd)"
 fi
+if [[ -z "${TEST_CERTIFICATES_TOOLS_SRC:-}" &&
+      -f "../test-certificates-tools/src/test_certificates.nim" ]]; then
+  export TEST_CERTIFICATES_TOOLS_SRC="$(cd ../test-certificates-tools/src && pwd)"
+fi
 if [[ -z "${REPRO_CT_TEST_RUNNER_SRC:-}" &&
       -f "../reprobuild-ct-test-runner/libs/ct_test_runner_adapter/src/ct_test_runner_adapter.nim" ]]; then
   export REPRO_CT_TEST_RUNNER_SRC="$(cd ../reprobuild-ct-test-runner && pwd)"

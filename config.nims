@@ -299,6 +299,22 @@ let reproTestAdaptersSrc = block:
 if repoDirExists(reproTestAdaptersSrc):
   switch("path", reproTestAdaptersSrc)
 
+# The test-certificate standard's store, note-framing and two-note merge rules
+# live in the standalone ``test-certificates-tools`` package (Nim package
+# ``test_certificates``, stdlib-only), which the engine links instead of
+# keeping a second implementation of them. Same resolution as the TestRunner
+# contract above: ``TEST_CERTIFICATES_TOOLS_SRC`` (seeded from the pinned
+# ``test-certificates-tools-src`` flake input by the dev shell and the
+# sandboxed package build), else the sibling checkout.
+let testCertificatesToolsSrc = block:
+  let fromEnv = getEnv("TEST_CERTIFICATES_TOOLS_SRC")
+  if fromEnv.len > 0:
+    fromEnv
+  else:
+    ".." / "test-certificates-tools" / "src"
+if repoFileExists(testCertificatesToolsSrc / "test_certificates.nim"):
+  switch("path", testCertificatesToolsSrc)
+
 for libName in [
   # Build-side test typed-tool, moved in-tree (see the ctTestRoot note
   # above): ``ct_test_interface`` is the leaf contract, ``ct_test_nim_unittest``

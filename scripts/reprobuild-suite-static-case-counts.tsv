@@ -207,6 +207,7 @@ libs/repro_cli_support/tests/t_portable_cache_roots.nim	nim	2
 libs/repro_cli_support/tests/t_provider_compile_entry_points_publish_bootstrap_toolchain.nim	nim	3
 libs/repro_cli_support/tests/t_provisioning_lock_reselect_and_diff.nim	nim	7
 libs/repro_cli_support/tests/t_refresh_flake_lock_text_writes_the_fields_nix_reports.nim	nim	11
+libs/repro_cli_support/tests/t_reused_result_refused_when_key_does_not_cover_reads.nim	nim	1
 libs/repro_cli_support/tests/t_revocation_takes_effect_on_the_next_frame.nim	nim	1
 libs/repro_cli_support/tests/t_runquota_auto_spawn_defers_to_host_config.nim	nim	8
 libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim	nim	6
@@ -1400,6 +1401,7 @@ tests/integration/t_certificate_declaration_exports_a_selectable_name.nim	nim	1
 tests/integration/t_certificate_matches_by_content_never_by_base.nim	nim	1
 tests/integration/t_certificate_name_collision_is_a_compile_error.nim	nim	4
 tests/integration/t_certificate_note_read_keeps_git_stderr_apart.nim	nim	1
+tests/integration/t_certificate_notes_push_merges_a_moved_remote.nim	nim	1
 tests/integration/t_certificate_policy_required_advisory_off_modes.nim	nim	3
 tests/integration/t_certificate_requires_verified_tree.nim	nim	2
 tests/integration/t_certificate_round_trips_against_the_canonical_form.nim	nim	1
@@ -1691,6 +1693,7 @@ tests/integration/t_local_daemons_control_plane_m8.nim	nim	3
 tests/integration/t_local_file_enters_managed_exclude_block.nim	nim	1
 tests/integration/t_local_gateway_pre_receive_rejects_uncovered_push_even_with_no_verify.nim	nim	1
 tests/integration/t_local_store_prune_keeps_newest_and_head_tree.nim	nim	7
+tests/integration/t_local_store_refuses_foreign_roots_and_protects_head_scopes.nim	nim	1
 tests/integration/t_lock_coherence_reports_the_diff_advisory_only.nim	nim	1
 tests/integration/t_lock_entry_pins_the_resolved_target.nim	nim	5
 tests/integration/t_lock_failure_remedies_name_a_runnable_command.nim	nim	1
@@ -1817,7 +1820,7 @@ tests/integration/t_post_commit_reports_the_hook_path_it_will_not_rewrite.nim	ni
 tests/integration/t_post_merge_hook_reconciles_local_state.nim	nim	2
 tests/integration/t_pre_commit_gate_ignores_the_record_store_lock.nim	nim	1
 tests/integration/t_pre_commit_gate_is_advisory_when_the_dispatcher_is_displaced.nim	nim	1
-tests/integration/t_pre_commit_gate_judges_the_index_being_committed.nim	nim	3
+tests/integration/t_pre_commit_gate_judges_the_index_being_committed.nim	nim	4
 tests/integration/t_pre_commit_gate_names_the_re_pin_as_the_cause.nim	nim	1
 tests/integration/t_pre_commit_gate_requires_what_the_branch_rule_names.nim	nim	1
 tests/integration/t_pre_commit_gate_stands_down_during_replay.nim	nim	1
@@ -2014,6 +2017,7 @@ tests/integration/t_stdlib_catalog_tarball_arms_realize.nim	nim	1
 tests/integration/t_stdlib_python_tarball_arms_realize.nim	nim	1
 tests/integration/t_store_and_registry_deps_carry_coordinates_and_integrity.nim	nim	1
 tests/integration/t_store_daemon_m66_dev.nim	nim	6
+tests/integration/t_store_roots_resolve_or_report_unresolved.nim	nim	1
 tests/integration/t_suite_artifact_generator_refuses_arguments_it_cannot_honour.nim	nim	6
 tests/integration/t_switch_mainline_and_fetch.nim	nim	6
 tests/integration/t_switch_new_branch_marks_feature_branch.nim	nim	7

@@ -178,6 +178,19 @@ import repro_cli_support/content_id
 # local certificate store (test-certificates Transport §2).
 import repro_cli_support/certificate_store
 export certificate_store
+# The reference ``test_certificates`` library (test-certificates-tools),
+# linked for what the standard fixes byte for byte and reprobuild has no
+# reason to own: the strict TOML reader certificates are parsed with, note
+# framing and the two-note union merge (Transport §3.1), the notes-ref push
+# with its fetch-merge-retry, and declared-scope ``HEAD`` protection for
+# pruning (Transport §2.5). Imported QUALIFIED ONLY: its names overlap this
+# engine's (``parseContentId``, ``isSigned``, ``Certificate``…), and an
+# unqualified import would let overload resolution quietly pick the wrong
+# one.
+from test_certificates/toml as tctoml import nil
+from test_certificates/note_framing as tcnotes import nil
+from test_certificates/notes as tcnotesref import nil
+from test_certificates/scopes as tcscopes import nil
 import repro_cli_support/provisioning_lock_selection
 import repro_cli_support/catalog_publication
 # HL-11: the recipe-constraint reader. What a `flake.nix` input URL and a
@@ -9957,6 +9970,21 @@ proc recordActionStarts(config: var BuildEngineConfig;
     if inner != nil:
       inner(event)
 
+proc actionKeyCoversObservedReads*(action: BuildAction): bool =
+  ## Whether ``action``'s cache key covers every input the monitor observed
+  ## it reading, which is what lets a cache record of it stand for an
+  ## execution over THESE inputs (test-certificates Standard §6.2.1, "the
+  ## record covers the inputs"; TC-8e). Only a cacheable process action whose
+  ## dependency policy is MONITORED and elides no input prefix qualifies:
+  ## ``cacheInputPaths`` keys the observed reads, and the only other elision
+  ## — content-addressed tool roots — is in the weak fingerprint. A declared
+  ## or recognised-format policy keys what was declared or reported, not what
+  ## was read, so a record of such an action is refused by
+  ## ``reusedResultRefusal``.
+  action.cacheable and action.kind == bakProcess and
+    action.dependencyPolicy.kind in MonitorPolicyKinds and
+    action.dependencyPolicy.ignoredInputPrefixes.len == 0
+
 proc executedActionRecords(actions: openArray[BuildAction];
                            run: BuildRunResult;
                            started: seq[string]): seq[ExecutedActionRecord] =
@@ -9982,10 +10010,7 @@ proc executedActionRecords(actions: openArray[BuildAction];
       let action = actions[byId[item.id]]
       record.kind = action.kind
       record.argv = action.argv
-      record.keyCoversObservedReads = action.cacheable and
-        action.kind == bakProcess and
-        action.dependencyPolicy.kind in MonitorPolicyKinds and
-        action.dependencyPolicy.ignoredInputPrefixes.len == 0
+      record.keyCoversObservedReads = actionKeyCoversObservedReads(action)
     result.add(record)
 
 proc emitFailedActionSummaries(buildResult: BuildRunResult;
@@ -25098,6 +25123,9 @@ const
     "REPROBUILD_RUNTIME_LIBRARY_PATH",
     "NIMCRYPTO_SRC", "RUNQUOTA_SRC", "BEARSSL_SRC",
     "REPRO_TEST_ADAPTERS_SRC", "REPRO_CT_TEST_RUNNER_SRC",
+    # The `test_certificates` library (test-certificates-tools) the engine
+    # links for the certificate store, note framing and notes merge.
+    "TEST_CERTIFICATES_TOOLS_SRC",
     # Both spellings of "where the incremental-test seam comes from", and they
     # are not interchangeable: CODETRACER_SRC is the user's override and is
     # usually unset, CODETRACER_PINNED_SRC is the flake pin the daemon must
@@ -62280,402 +62308,35 @@ proc parseTomlStringArray(rhs: string): seq[string] =
 #
 # A received certificate may differ from canonical form in whitespace, key
 # order, table order, key quoting and string form while parsing to identical
-# values (Canonical-Payload §5), so the reader is a real (small) TOML parser
-# rather than a line matcher. It builds a tree first and maps the tree onto a
-# record second, so every way of spelling the same table — ``[certificate.vcs]``
-# or ``vcs = { … }`` inside ``[certificate]``; ``[[certificate.command]]`` or
+# values (Canonical-Payload §5), so the reader is a real TOML parser rather
+# than a line matcher. It builds a tree first and maps the tree onto a record
+# second, so every way of spelling the same table — ``[certificate.vcs]`` or
+# ``vcs = { … }`` inside ``[certificate]``; ``[[certificate.command]]`` or
 # ``command = [ { argv = … } ]``; a sub-table before its parent; quoted keys;
 # literal, multi-line and ``\uXXXX``-escaped strings; CRLF — reads alike.
 #
-# What it will NOT do is repair. A value it cannot represent canonically, a
-# key defined twice, a table header repeated, a known field of the wrong TOML
-# type: each makes the record malformed rather than something to normalise.
+# THE PARSER IS THE REFERENCE LIBRARY'S (``test_certificates/toml``), linked
+# rather than kept as a second copy: a strict TOML 1.0 reader (duplicate keys
+# and tables, malformed UTF-8, raw control characters, undefined escapes and
+# surrogate ``\u`` escapes are errors) that reads every physical newline in a
+# multi-line string as LF while leaving an ESCAPED ``\r`` alone, exactly as
+# Canonical-Payload §5 now requires (``payload/crlf-multiline``). reprobuild
+# kept its own until the library existed; the two had to be held to the same
+# vectors anyway, and one parser cannot disagree with itself. Why neither is
+# ``toml_serialization``: measured 2026-10-11, its ``TomlValueRef`` decoder
+# refuses ``[certificate]`` defined AFTER ``[certificate.signature]`` (``store/
+# signed-non-canonical``, ``payload/escapes/received.toml``) as a duplicate
+# table, and a verifier that cannot read a cosmetically reordered certificate
+# fails it against its own valid signature.
 #
-# Why not ``toml_serialization`` (vendored, and reachable here through
-# ``repro_workspace_manifests``): measured 2026-10-11, its ``TomlValueRef``
-# decoder refuses valid TOML the conformance suite requires a reader to accept
-# — ``store/signed-non-canonical`` and ``payload/escapes/received.toml`` define
-# ``[certificate]`` AFTER ``[certificate.signature]`` / ``[[certificate.command]]``
-# and are rejected as "duplicate table key not allowed: 'certificate'". A
-# verifier that cannot read a cosmetically reordered certificate fails it
-# against its own valid signature (Canonical-Payload §5). Re-test and switch if
-# the library is fixed; the record mapping below is independent of the parser.
-
-type
-  CertTomlKind = enum
-    ctkString, ctkBool, ctkArray, ctkTable, ctkOther
-
-  CertTomlNode = ref object
-    case kind: CertTomlKind
-    of ctkString:
-      str: string
-    of ctkBool:
-      flag: bool
-    of ctkArray:
-      items: seq[CertTomlNode]
-      ofTables: bool       ## created by ``[[header]]``; extendable by one
-    of ctkTable:
-      fields: Table[string, CertTomlNode]
-      defined: bool        ## an explicit ``[header]`` or a key/value made it
-      sealed: bool         ## an inline table: closed to every later addition
-    of ctkOther:
-      raw: string          ## a number, date or time — no certificate field
-                           ## is one, so it is kept only to be ignored
-
-proc newCertTomlTable(): CertTomlNode =
-  CertTomlNode(kind: ctkTable, fields: initTable[string, CertTomlNode]())
+# What the mapping below will NOT do is repair. A key defined twice, a known
+# field of the wrong TOML type, and — Standard §3.4 — ANY key or table the
+# schema does not define at its location (the root, ``[certificate]``, its
+# ``vcs``, each command entry, the signature block), empty tables included,
+# make the record malformed rather than something to normalise.
 
 proc certTomlFail(msg: string) {.noreturn.} =
   raise newException(TestCertificateParseError, msg)
-
-proc appendUtf8(dest: var string; codePoint: int) =
-  ## Encode one code point as UTF-8. Hand-rolled rather than pulled from
-  ## ``std/unicode`` so this module's import surface does not grow a
-  ## name-clashing dependency for four lines of arithmetic.
-  if codePoint < 0x80:
-    dest.add(chr(codePoint))
-  elif codePoint < 0x800:
-    dest.add(chr(0xC0 or (codePoint shr 6)))
-    dest.add(chr(0x80 or (codePoint and 0x3F)))
-  elif codePoint < 0x10000:
-    dest.add(chr(0xE0 or (codePoint shr 12)))
-    dest.add(chr(0x80 or ((codePoint shr 6) and 0x3F)))
-    dest.add(chr(0x80 or (codePoint and 0x3F)))
-  else:
-    dest.add(chr(0xF0 or (codePoint shr 18)))
-    dest.add(chr(0x80 or ((codePoint shr 12) and 0x3F)))
-    dest.add(chr(0x80 or ((codePoint shr 6) and 0x3F)))
-    dest.add(chr(0x80 or (codePoint and 0x3F)))
-
-proc hexDigitValue(ch: char): int =
-  case ch
-  of '0'..'9': ord(ch) - ord('0')
-  of 'a'..'f': ord(ch) - ord('a') + 10
-  of 'A'..'F': ord(ch) - ord('A') + 10
-  else: -1
-
-proc skipCertTomlBlanks(s: string; i: var int) =
-  ## Spaces and tabs only — never a newline, so a key with no value on its
-  ## own line cannot silently borrow the next line's.
-  while i < s.len and s[i] in {' ', '\t'}: inc i
-
-proc skipCertTomlTrivia(s: string; i: var int) =
-  ## Whitespace (including newlines) and comments.
-  while i < s.len:
-    case s[i]
-    of ' ', '\t', '\r', '\n': inc i
-    of '#':
-      while i < s.len and s[i] != '\n': inc i
-    else: return
-
-proc expectCertTomlLineEnd(s: string; i: var int; what: string) =
-  ## After a header or a key/value pair only blanks and a comment may follow
-  ## on the same line. ``a = "x" b = "y"`` is not two assignments.
-  skipCertTomlBlanks(s, i)
-  if i < s.len and s[i] == '#':
-    while i < s.len and s[i] != '\n': inc i
-  if i < s.len and s[i] == '\r' and i + 1 < s.len and s[i + 1] == '\n':
-    inc i
-  if i < s.len and s[i] != '\n':
-    certTomlFail("unexpected '" & $s[i] & "' after " & what)
-
-proc isRawControl(ch: char): bool =
-  ## TOML strings cannot carry a raw control character other than TAB.
-  (ord(ch) < 0x20 and ch != '\t') or ord(ch) == 0x7F
-
-proc parseCertTomlEscape(s: string; i: var int; dest: var string) =
-  ## One escape sequence; ``s[i]`` is the character after the backslash.
-  ## ``\uXXXX`` / ``\UXXXXXXXX`` are accepted on INPUT for interoperability
-  ## and never produced when re-serializing (Canonical-Payload §4).
-  if i >= s.len: certTomlFail("trailing backslash")
-  case s[i]
-  of '\\': dest.add('\\'); inc i
-  of '"': dest.add('"'); inc i
-  of 'n': dest.add('\n'); inc i
-  of 'r': dest.add('\r'); inc i
-  of 't': dest.add('\t'); inc i
-  of 'b': dest.add('\b'); inc i
-  of 'f': dest.add('\f'); inc i
-  of 'u', 'U':
-    let width = if s[i] == 'u': 4 else: 8
-    inc i
-    if i + width > s.len: certTomlFail("truncated unicode escape")
-    var codePoint = 0
-    for k in 0 ..< width:
-      let digit = hexDigitValue(s[i + k])
-      if digit < 0: certTomlFail("invalid unicode escape")
-      codePoint = codePoint * 16 + digit
-    if codePoint > 0x10FFFF or (codePoint >= 0xD800 and codePoint <= 0xDFFF):
-      certTomlFail("unicode escape names no Unicode scalar value")
-    i += width
-    appendUtf8(dest, codePoint)
-  else:
-    certTomlFail("unknown escape '\\" & $s[i] & "'")
-
-proc parseCertTomlString(s: string; i: var int): string =
-  ## One TOML string in any of its four forms. Escapes are processed in the
-  ## two basic forms only; a literal string keeps every character as written.
-  if i >= s.len: certTomlFail("expected a string")
-  let quote = s[i]
-  if quote notin {'"', '\''}:
-    certTomlFail("expected a quoted string, found '" & $s[i] & "'")
-  let multiLine = i + 2 < s.len and s[i + 1] == quote and s[i + 2] == quote
-  if multiLine:
-    i += 3
-    # A newline immediately after the opening delimiter is trimmed.
-    if i < s.len and s[i] == '\n': inc i
-    elif i + 1 < s.len and s[i] == '\r' and s[i + 1] == '\n': i += 2
-    result = newStringOfCap(32)
-    while true:
-      if i >= s.len: certTomlFail("unterminated multi-line string")
-      if s[i] == quote and i + 2 < s.len and s[i + 1] == quote and
-          s[i + 2] == quote:
-        # Up to two quotes may sit directly before the closing delimiter.
-        var run = 3
-        while i + run < s.len and s[i + run] == quote and run < 5: inc run
-        for _ in 0 ..< run - 3: result.add(quote)
-        i += run
-        return
-      let ch = s[i]
-      if quote == '"' and ch == '\\':
-        inc i
-        # A line-ending backslash trims the newline and the whitespace that
-        # follows it.
-        var j = i
-        while j < s.len and s[j] in {' ', '\t'}: inc j
-        if j < s.len and (s[j] == '\n' or
-            (s[j] == '\r' and j + 1 < s.len and s[j + 1] == '\n')):
-          i = j
-          while i < s.len and s[i] in {' ', '\t', '\r', '\n'}: inc i
-        else:
-          parseCertTomlEscape(s, i, result)
-        continue
-      if ch == '\r' and i + 1 < s.len and s[i + 1] == '\n':
-        result.add('\n')
-        i += 2
-        continue
-      if ch != '\n' and isRawControl(ch):
-        certTomlFail("raw control character in a string")
-      result.add(ch)
-      inc i
-  inc i
-  result = newStringOfCap(32)
-  while true:
-    if i >= s.len or s[i] == '\n':
-      certTomlFail("unterminated string")
-    let ch = s[i]
-    if ch == quote:
-      inc i
-      return
-    if quote == '"' and ch == '\\':
-      inc i
-      parseCertTomlEscape(s, i, result)
-      continue
-    if isRawControl(ch):
-      certTomlFail("raw control character in a string")
-    result.add(ch)
-    inc i
-
-proc parseCertTomlKey(s: string; i: var int): seq[string] =
-  ## A possibly dotted key: bare segments (``A-Za-z0-9_-``) or quoted ones,
-  ## with blanks allowed around each ``.``.
-  while true:
-    skipCertTomlBlanks(s, i)
-    if i >= s.len: certTomlFail("expected a key")
-    if s[i] in {'"', '\''}:
-      if i + 2 < s.len and s[i + 1] == s[i] and s[i + 2] == s[i]:
-        certTomlFail("a multi-line string cannot be a key")
-      result.add(parseCertTomlString(s, i))
-    else:
-      let start = i
-      while i < s.len and s[i] in {'A'..'Z', 'a'..'z', '0'..'9', '_', '-'}:
-        inc i
-      if i == start:
-        certTomlFail("expected a key, found '" & $s[i] & "'")
-      result.add(s[start ..< i])
-    skipCertTomlBlanks(s, i)
-    if i < s.len and s[i] == '.':
-      inc i
-      continue
-    return
-
-proc parseCertTomlValue(s: string; i: var int): CertTomlNode
-
-proc parseCertTomlArray(s: string; i: var int): CertTomlNode =
-  ## ``[ v, v, ]`` — newlines, comments and a trailing comma allowed.
-  inc i  # '['
-  result = CertTomlNode(kind: ctkArray)
-  while true:
-    skipCertTomlTrivia(s, i)
-    if i >= s.len: certTomlFail("unterminated array")
-    if s[i] == ']':
-      inc i
-      return
-    result.items.add(parseCertTomlValue(s, i))
-    skipCertTomlTrivia(s, i)
-    if i < s.len and s[i] == ',':
-      inc i
-    elif i < s.len and s[i] == ']':
-      inc i
-      return
-    else:
-      certTomlFail("expected ',' or ']' in an array")
-
-proc certTomlDescend(table: CertTomlNode; key: string;
-                     what: string): CertTomlNode =
-  ## The table ``key`` names inside ``table``, created implicitly when absent.
-  ## An array of tables yields its LAST element, as TOML specifies.
-  if table.sealed:
-    certTomlFail("'" & what & "' extends an inline table")
-  if key notin table.fields:
-    let created = newCertTomlTable()
-    table.fields[key] = created
-    return created
-  let node = table.fields[key]
-  case node.kind
-  of ctkTable:
-    if node.sealed:
-      certTomlFail("'" & what & "' extends an inline table")
-    node
-  of ctkArray:
-    if not node.ofTables or node.items.len == 0:
-      certTomlFail("'" & what & "' is not a table")
-    node.items[^1]
-  else:
-    certTomlFail("'" & what & "' is not a table")
-
-proc certTomlAssign(table: CertTomlNode; key: seq[string];
-                    value: CertTomlNode) =
-  var at = table
-  for k in 0 ..< key.high:
-    at = certTomlDescend(at, key[k], key[0 .. k].join("."))
-    at.defined = true
-  if at.sealed:
-    certTomlFail("'" & key.join(".") & "' extends an inline table")
-  if key[^1] in at.fields:
-    certTomlFail("key '" & key.join(".") & "' is defined twice")
-  at.fields[key[^1]] = value
-
-proc parseCertTomlInlineTable(s: string; i: var int): CertTomlNode =
-  ## ``{ k = v, k = v }`` — on one line, as TOML 1.0 requires; sealed once
-  ## parsed.
-  inc i  # '{'
-  result = newCertTomlTable()
-  result.defined = true
-  skipCertTomlBlanks(s, i)
-  if i < s.len and s[i] == '}':
-    inc i
-    result.sealed = true
-    return
-  while true:
-    let key = parseCertTomlKey(s, i)
-    if i >= s.len or s[i] != '=':
-      certTomlFail("expected '=' after key '" & key.join(".") & "'")
-    inc i
-    skipCertTomlBlanks(s, i)
-    certTomlAssign(result, key, parseCertTomlValue(s, i))
-    skipCertTomlBlanks(s, i)
-    if i < s.len and s[i] == ',':
-      inc i
-      continue
-    if i < s.len and s[i] == '}':
-      inc i
-      result.sealed = true
-      return
-    certTomlFail("expected ',' or '}' in an inline table")
-
-proc parseCertTomlValue(s: string; i: var int): CertTomlNode =
-  if i >= s.len: certTomlFail("missing value")
-  case s[i]
-  of '"', '\'':
-    CertTomlNode(kind: ctkString, str: parseCertTomlString(s, i))
-  of '[':
-    parseCertTomlArray(s, i)
-  of '{':
-    parseCertTomlInlineTable(s, i)
-  else:
-    let start = i
-    while i < s.len and s[i] notin {' ', '\t', '\r', '\n', ',', ']', '}', '#'}:
-      inc i
-    let word = s[start ..< i]
-    if word.len == 0:
-      certTomlFail("missing value")
-    case word
-    of "true": CertTomlNode(kind: ctkBool, flag: true)
-    of "false": CertTomlNode(kind: ctkBool, flag: false)
-    else:
-      # A number, date or time. TOML has them; no certificate field is one.
-      # Kept so an unknown key carrying one is ignored, and a KNOWN key
-      # carrying one is a type error below — never coerced to a string.
-      # Only the characters TOML numbers, dates and times are spelled with,
-      # starting as one of them does; ``inf`` / ``nan`` are the only words.
-      # Anything else is not TOML and is refused, not kept as a value.
-      let special = word in ["inf", "+inf", "-inf", "nan", "+nan", "-nan"]
-      if not special and (word[0] notin {'0'..'9', '+', '-'} or
-          not word.allCharsInSet({'0'..'9', 'A'..'Z', 'a'..'z', '+', '-',
-            '.', ':', '_'})):
-        certTomlFail("unexpected bare value '" & word & "'")
-      CertTomlNode(kind: ctkOther, raw: word)
-
-proc parseCertTomlDocument(content: string): CertTomlNode =
-  ## The whole document as a tree. Raises ``TestCertificateParseError``.
-  result = newCertTomlTable()
-  result.defined = true
-  var current = result
-  var i = 0
-  while true:
-    skipCertTomlTrivia(content, i)
-    if i >= content.len: break
-    if content[i] == '[':
-      let arrayOfTables = i + 1 < content.len and content[i + 1] == '['
-      i += (if arrayOfTables: 2 else: 1)
-      let key = parseCertTomlKey(content, i)
-      let closing = if arrayOfTables: "]]" else: "]"
-      if not content.continuesWith(closing, i):
-        certTomlFail("unterminated table header '" & key.join(".") & "'")
-      i += closing.len
-      expectCertTomlLineEnd(content, i, "table header")
-      var parent = result
-      for k in 0 ..< key.high:
-        parent = certTomlDescend(parent, key[k], key[0 .. k].join("."))
-      let name = key.join(".")
-      let last = key[^1]
-      if arrayOfTables:
-        if parent.sealed:
-          certTomlFail("'" & name & "' extends an inline table")
-        if last notin parent.fields:
-          parent.fields[last] = CertTomlNode(kind: ctkArray, ofTables: true)
-        let arr = parent.fields[last]
-        if arr.kind != ctkArray or not arr.ofTables:
-          certTomlFail("'" & name & "' is not an array of tables")
-        let element = newCertTomlTable()
-        element.defined = true
-        arr.items.add(element)
-        current = element
-      else:
-        if last in parent.fields:
-          let existing = parent.fields[last]
-          if existing.kind != ctkTable or existing.defined or existing.sealed:
-            certTomlFail("table '" & name & "' is defined twice")
-          existing.defined = true
-          current = existing
-        else:
-          if parent.sealed:
-            certTomlFail("'" & name & "' extends an inline table")
-          let created = newCertTomlTable()
-          created.defined = true
-          parent.fields[last] = created
-          current = created
-      continue
-    let key = parseCertTomlKey(content, i)
-    if i >= content.len or content[i] != '=':
-      certTomlFail("expected '=' after key '" & key.join(".") & "'")
-    inc i
-    skipCertTomlBlanks(content, i)
-    if i >= content.len or content[i] in {'\r', '\n', '#'}:
-      certTomlFail("missing value for key '" & key.join(".") & "'")
-    certTomlAssign(current, key, parseCertTomlValue(content, i))
-    expectCertTomlLineEnd(content, i, "the value of '" & key.join(".") & "'")
 
 type
   CertificateReadStatus* = enum
@@ -62721,47 +62382,74 @@ proc certificateStructuralDefect*(cert: TestCertificate): string =
 type
   CertificateFieldPresence = object
     ## What the tree carried that a ``TestCertificate`` cannot remember.
-    result, untracked, content: bool
+    schema, result, untracked, content: bool
     earlierDraftKeys: seq[string]   ## ``commit`` / ``clean`` / ``worktree``
+    unknownKeys: seq[string]
+      ## Every key or table the v1 schema does not define where it appears,
+      ## as a dotted path (Standard §3.4). Collected rather than raised so
+      ## that the CLASSIFICATIONS that outrank "malformed" — a retired or
+      ## unimplemented schema, an earlier-draft record that must be
+      ## re-issued — are still reported as what they are.
 
-proc certTomlString(table: CertTomlNode; key, path: string;
+const
+  certificateRootKeys = ["schema", "certificate"]
+  certificateTableKeys = ["framework", "project", "platform", "targets",
+    "result", "issued_at", "issuer", "key_id", "vcs", "command", "signature"]
+  certificateVcsKeys = ["repo", "paths", "content", "untracked", "base"]
+  certificateCommandKeys = ["argv"]
+  certificateSignatureKeys = ["algorithm", "value"]
+    ## Standard §3.1–§3.3 and §6: the ONLY keys each table may carry. A
+    ## record is closed to extensions (§3.4); a new field is a new schema.
+
+proc noteUnknownCertKeys(table: tctoml.TomlNode; allowed: openArray[string];
+                         prefix: string;
+                         presence: var CertificateFieldPresence) =
+  for key in table.keys:
+    if key notin allowed:
+      presence.unknownKeys.add(prefix & key)
+
+proc certTomlString(table: tctoml.TomlNode; key, path: string;
                     present: var bool): string =
   if table == nil or key notin table.fields: return ""
   let node = table.fields[key]
-  if node.kind != ctkString:
+  if node.kind != tctoml.tkString:
     certTomlFail("'" & path & "' must be a string")
   present = true
   node.str
 
-proc certTomlString(table: CertTomlNode; key, path: string): string =
+proc certTomlString(table: tctoml.TomlNode; key, path: string): string =
   var ignored = false
   certTomlString(table, key, path, ignored)
 
-proc certTomlStrings(table: CertTomlNode; key, path: string): seq[string] =
+proc certTomlStrings(table: tctoml.TomlNode; key, path: string): seq[string] =
   if table == nil or key notin table.fields: return @[]
   let node = table.fields[key]
-  if node.kind != ctkArray or node.ofTables:
+  if node.kind != tctoml.tkArray:
     certTomlFail("'" & path & "' must be an array of strings")
   for item in node.items:
-    if item.kind != ctkString:
+    if item.kind != tctoml.tkString:
       certTomlFail("'" & path & "' must be an array of strings")
     result.add(item.str)
 
-proc certTomlTable(table: CertTomlNode; key, path: string): CertTomlNode =
+proc certTomlTable(table: tctoml.TomlNode; key, path: string): tctoml.TomlNode =
   if table == nil or key notin table.fields: return nil
   let node = table.fields[key]
-  if node.kind != ctkTable:
+  if node.kind != tctoml.tkTable:
     certTomlFail("'" & path & "' must be a table")
   node
 
-proc certificateFromTomlTree(root: CertTomlNode;
+proc certificateFromTomlTree(root: tctoml.TomlNode;
     presence: var CertificateFieldPresence): TestCertificate =
-  ## Map the tree onto the record. Unknown keys are ignored (a later revision
-  ## may add optional fields); a KNOWN key of the wrong type is malformed.
-  result.schema = certTomlString(root, "schema", "schema")
+  ## Map the tree onto the record. A KNOWN key of the wrong type is
+  ## malformed at once; an UNKNOWN key or table is recorded in ``presence``
+  ## and rejected by ``readCertificateRecord`` once the record has been
+  ## classified.
+  noteUnknownCertKeys(root, certificateRootKeys, "", presence)
+  result.schema = certTomlString(root, "schema", "schema", presence.schema)
   let c = certTomlTable(root, "certificate", "certificate")
   if c == nil:
     return
+  noteUnknownCertKeys(c, certificateTableKeys, "certificate.", presence)
   result.framework = certTomlString(c, "framework", "certificate.framework")
   result.project = certTomlString(c, "project", "certificate.project")
   result.platform = certTomlString(c, "platform", "certificate.platform")
@@ -62778,16 +62466,17 @@ proc certificateFromTomlTree(root: CertTomlNode;
   result.keyId = certTomlString(c, "key_id", "certificate.key_id")
   let v = certTomlTable(c, "vcs", "certificate.vcs")
   if v != nil:
+    noteUnknownCertKeys(v, certificateVcsKeys, "certificate.vcs.", presence)
     result.vcs.repo = certTomlString(v, "repo", "certificate.vcs.repo")
     result.vcs.paths = certTomlStrings(v, "paths", "certificate.vcs.paths")
     result.vcs.content = certTomlString(v, "content",
       "certificate.vcs.content", presence.content)
     if "untracked" in v.fields:
       let node = v.fields["untracked"]
-      if node.kind != ctkBool:
+      if node.kind != tctoml.tkBool:
         certTomlFail("'certificate.vcs.untracked' must be a boolean")
       presence.untracked = true
-      result.vcs.untracked = node.flag
+      result.vcs.untracked = node.boolean
     var basePresent = false
     result.vcs.base = certTomlString(v, "base", "certificate.vcs.base",
       basePresent)
@@ -62800,15 +62489,21 @@ proc certificateFromTomlTree(root: CertTomlNode;
         presence.earlierDraftKeys.add(key)
   if "command" in c.fields:
     let commands = c.fields["command"]
-    if commands.kind != ctkArray:
+    if commands.kind != tctoml.tkArray:
       certTomlFail("'certificate.command' must be an array of tables")
     for entry in commands.items:
-      if entry.kind != ctkTable:
+      if entry.kind != tctoml.tkTable:
         certTomlFail("'certificate.command' must be an array of tables")
+      noteUnknownCertKeys(entry, certificateCommandKeys,
+        "certificate.command.", presence)
       result.commands.add(TestCertificateCommand(
         argv: certTomlStrings(entry, "argv", "certificate.command.argv")))
   let s = certTomlTable(c, "signature", "certificate.signature")
   if s != nil:
+    # Excluding the block from the payload does not exempt it from the
+    # schema (Canonical-Payload §5).
+    noteUnknownCertKeys(s, certificateSignatureKeys,
+      "certificate.signature.", presence)
     result.signature.algorithm = certTomlString(s, "algorithm",
       "certificate.signature.algorithm")
     result.signature.value = certTomlString(s, "value",
@@ -62836,18 +62531,37 @@ proc readCertificateRecord*(content: string): CertificateReadResult =
   ##   * ``crsUnknownSchema`` — a schema version this build does not
   ##     implement. It may be a perfectly good certificate this consumer
   ##     simply cannot read, so it is reported UNVERIFIABLE, not invalid.
-  ##   * ``crsMalformed`` — unparseable, missing a required v1 field, or
-  ##     carrying a value with no canonical form. The consumer asked the
-  ##     question and got an answer: not evidence.
+  ##   * ``crsMalformed`` — unparseable, missing a required v1 field,
+  ##     carrying a key or table the v1 schema does not define (Standard
+  ##     §3.4), or carrying a value with no canonical form. The consumer
+  ##     asked the question and got an answer: not evidence.
+  ##
+  ## The ORDER of the checks is part of the contract: a retired or
+  ## unimplemented schema, and then the earlier-draft shape, are recognised
+  ## BEFORE unknown keys are rejected. An earlier-draft record carries
+  ## ``vcs.commit`` and ``vcs.clean``, which the current schema does not
+  ## define, and reporting it as merely "unknown keys" would lose the
+  ## re-issue remedy its owner needs.
   var presence: CertificateFieldPresence
   try:
-    result.cert = certificateFromTomlTree(parseCertTomlDocument(content),
+    result.cert = certificateFromTomlTree(tctoml.parseToml(content),
       presence)
   except TestCertificateParseError as err:
     result.status = crsMalformed
     result.detail = err.msg
     return
+  except tctoml.TomlError as err:
+    result.status = crsMalformed
+    result.detail = "not valid TOML: " & err.msg
+    return
   result.schemaSeen = result.cert.schema
+  if not presence.schema:
+    # No ``schema`` at all is not "a schema this build does not implement":
+    # nothing claims to be a certificate of any version, so there is nothing
+    # a newer verifier could read either. Malformed, not unverifiable.
+    result.status = crsMalformed
+    result.detail = "certificate is missing a required field: schema"
+    return
   if result.cert.schema == retiredReprobuildCertificateSchema:
     result.status = crsRetiredSchema
     result.detail = "certificate uses the retired '" &
@@ -62870,6 +62584,14 @@ proc readCertificateRecord*(content: string): CertificateReadResult =
       "invalid and is not translated, because a content id derived from " &
       "its commit would sign a payload no run produced — run 'repro test' " &
       "/ 'repro certify' to re-issue it"
+    return
+  if presence.unknownKeys.len > 0:
+    result.status = crsMalformed
+    result.detail = "malformed: unknown key or table " &
+      presence.unknownKeys.mapIt("'" & it & "'").join(", ") &
+      ": a test-certificate.v1 record is closed to extensions " &
+      "(Standard §3.4), so it is rejected rather than read with the field " &
+      "dropped, which would name a claim different from the one received"
     return
   var defect = certificateStructuralDefect(result.cert)
   if defect.len == 0 and not presence.result: defect = "result"
@@ -63418,71 +63140,42 @@ proc parseRegisteredKeyStoreStrict*(content: string): RegisteredKeyStore =
   ## damaged configuration file that re-running tests cannot fix. The two
   ## answers have to stay apart (Verification §3.1), and they can only stay
   ## apart if the reader can say "I could not read this".
-  var i = 0
-  var table = ""
-  var cur: RegisteredKey
-  var inKey = false
-  template flush() =
-    if inKey and cur.keyId.len > 0:
+  ##
+  ## The document is read with the same strict TOML 1.0 reader certificates
+  ## are (the reference library's ``test_certificates/toml``): a duplicate
+  ## key, an unterminated string or header, or malformed UTF-8 is an error.
+  ## Every ``[[key]]`` entry's ``key_id``, ``public_key`` and ``status`` must
+  ## be strings; other keys are ignored, as they always were.
+  var doc: tctoml.TomlNode
+  try:
+    doc = tctoml.parseToml(content)
+  except tctoml.TomlError as err:
+    raise newException(ValueError, "registered-key store: " & err.msg)
+  if "key" notin doc.fields:
+    return
+  let entries = doc.fields["key"]
+  if entries.kind != tctoml.tkArray:
+    raise newException(ValueError,
+      "registered-key store: 'key' must be an array of tables ([[key]])")
+  for entry in entries.items:
+    if entry.kind != tctoml.tkTable:
+      raise newException(ValueError,
+        "registered-key store: 'key' must be an array of tables ([[key]])")
+    var cur = RegisteredKey(status: rksActive)
+    for key in ["key_id", "public_key", "status"]:
+      if key notin entry.fields:
+        continue
+      let node = entry.fields[key]
+      if node.kind != tctoml.tkString:
+        raise newException(ValueError,
+          "registered-key store: '" & key & "' must be a string")
+      case key
+      of "key_id": cur.keyId = node.str
+      of "public_key": cur.publicKey = node.str
+      else:
+        cur.status = if node.str == $rksRevoked: rksRevoked else: rksActive
+    if cur.keyId.len > 0:
       result.keys.add(cur)
-    cur = RegisteredKey(status: rksActive)
-    inKey = false
-  while true:
-    skipCertTomlTrivia(content, i)
-    if i >= content.len: break
-    if content[i] == '[':
-      var doubled = false
-      inc i
-      if i < content.len and content[i] == '[':
-        doubled = true
-        inc i
-      let start = i
-      while i < content.len and content[i] != ']': inc i
-      if i >= content.len:
-        raise newException(ValueError,
-          "registered-key store: unterminated table header")
-      table = content[start ..< i].strip()
-      inc i
-      if doubled:
-        if i >= content.len or content[i] != ']':
-          raise newException(ValueError,
-            "registered-key store: unterminated array-of-tables header")
-        inc i
-        if table == "key":
-          flush()
-          inKey = true
-      continue
-    let keyStart = i
-    while i < content.len and content[i] notin {'=', ' ', '\t', '\r', '\n'}:
-      inc i
-    let key = content[keyStart ..< i]
-    if key.len == 0:
-      raise newException(ValueError,
-        "registered-key store: expected a key at offset " & $keyStart)
-    skipCertTomlBlanks(content, i)
-    if i >= content.len or content[i] != '=':
-      raise newException(ValueError,
-        "registered-key store: expected '=' after key '" & key & "'")
-    inc i
-    skipCertTomlBlanks(content, i)
-    if i >= content.len:
-      raise newException(ValueError,
-        "registered-key store: missing value for key '" & key & "'")
-    let value =
-      try:
-        parseCertTomlString(content, i)
-      except TestCertificateParseError as err:
-        raise newException(ValueError,
-          "registered-key store: " & err.msg & " (key '" & key & "')")
-    if not inKey:
-      continue
-    case key
-    of "key_id": cur.keyId = value
-    of "public_key": cur.publicKey = value
-    of "status":
-      cur.status = if value == $rksRevoked: rksRevoked else: rksActive
-    else: discard
-  flush()
 
 type
   KeyStoreAvailability* = enum
@@ -64366,15 +64059,47 @@ type
       ## Reported, never silently dropped: an unreadable root, directory or
       ## file, a record filed under another content, a root that could not
       ## be resolved, a state whose content id could not be computed.
+    notSearched*: seq[string]
+      ## The roots the search could NOT cover, each with why: unresolved
+      ## (Transport §2.1 — no usable absolute value) or unreadable on the way
+      ## to or at the content directory. Non-empty makes the search
+      ## INCOMPLETE (``searchIncomplete``): an empty result then does not
+      ## mean "none found", only "none found where it could look" — the
+      ## distinction Tooling §2's ``find`` draws between exit 3 and exit 1.
     userRootUnreadable*: bool
       ## The user root exists and could not be read: the search could not
       ## look where reprobuild itself delivers.
     searchFailed*: bool
-      ## The search could not look: the state's content id could not be
-      ## computed, or the user root could not be read. A consumer that finds
-      ## no coverage then reports UNVERIFIABLE, not "run the tests"
-      ## (Verification §7). A state that HAS no content id is not this: no
-      ## certificate can describe it, which is simply not covered.
+      ## The search could not look everywhere it must: the state's content
+      ## id could not be computed, or a root (the system root included) was
+      ## unresolved or unreadable. A consumer that finds no coverage then
+      ## reports UNVERIFIABLE, not "run the tests" (Verification §7). A state
+      ## that HAS no content id is not this: no certificate can describe it,
+      ## which is simply not covered.
+
+proc searchIncomplete*(lookup: LocalStoreLookup): bool =
+  ## Some root could not be searched (``notSearched``), so an empty result is
+  ## not a completed empty search.
+  lookup.notSearched.len > 0
+
+proc describeLocalStoreSearch*(lookup: LocalStoreLookup): string =
+  ## How a gate states what the store search established when it found no
+  ## candidate — "search incomplete" and "none found" are different findings
+  ## with different remedies, and are never worded alike.
+  if lookup.contentIds.len == 0:
+    return ""
+  if lookup.searchIncomplete:
+    "local certificate store search INCOMPLETE: " &
+      lookup.notSearched.join("; ") &
+      " — no certificate was found under " & lookup.contentIds.join(", ") &
+      " in what could be searched" &
+      (if lookup.searched.len > 0: " (" & lookup.searched.join(", ") & ")"
+       else: "") &
+      ", which does not establish that none exists"
+  else:
+    "no certificate found in the local store under " &
+      lookup.contentIds.join(", ") & "; searched " &
+      lookup.searched.join(", ")
 
 proc certificates*(lookup: LocalStoreLookup): seq[TestCertificate] =
   ## The candidates that read as ``test-certificate.v1`` records.
@@ -64423,6 +64148,12 @@ proc findCertificatesInLocalStore*(state: CertificateState;
   ## ``v1/<algorithm>/<digest>/`` for the state's content id in BOTH roots and
   ## read every record there. Nothing is decided about the records here; the
   ## caller evaluates them.
+  ##
+  ## Completeness (Transport §2.1, §5; Tooling §2): an UNRESOLVED root
+  ## contributes no candidates and the other root is still searched, and an
+  ## unreadable root likewise; either makes the search incomplete
+  ## (``notSearched``, ``searchFailed``) instead of reading as an empty
+  ## store. The system root counts as much as the user root.
   for p in roots.problems:
     result.problems.add("local certificate store: " & p)
   let (ids, idProblems, idFailed) = localStoreContentIds(state)
@@ -64430,17 +64161,28 @@ proc findCertificatesInLocalStore*(state: CertificateState;
   result.searchFailed = idFailed
   for p in idProblems:
     result.problems.add(p)
+  var dirs: seq[tuple[id, relative: string]]
   for id in ids:
     let dir = storeContentDir(id)
     if not dir.ok:
       result.problems.add(dir.problem)
       continue
-    var seen: seq[string]
+    dirs.add((id, dir.relative))
+  if dirs.len == 0:
+    return
+  for (label, root) in [("user", roots.user), ("system", roots.system)]:
+    if root.len == 0:
+      result.notSearched.add("the " & label & " root is unresolved" &
+        (if roots.problems.len > 0: " (" & roots.problems.join("; ") & ")"
+         else: ""))
+      result.searchFailed = true
+  var seen: seq[string]
+  for (id, relative) in dirs:
     for (label, root) in [("user", roots.user), ("system", roots.system)]:
       if root.len == 0:
         continue
-      let listing = listStoreContentDir(root, dir.relative)
-      result.searched.add(root / dir.relative.replace('/', DirSep))
+      let listing = listStoreContentDir(root, relative)
+      result.searched.add(root / relative.replace('/', DirSep))
       case listing.status
       of slsAbsent:
         discard
@@ -64448,10 +64190,15 @@ proc findCertificatesInLocalStore*(state: CertificateState;
         result.problems.add("the local certificate store's " & label &
           " root '" & root & "' could not be read (" &
           listing.problems.join("; ") & ")" &
-          (if label == "user": "" else: "; the user root was still searched"))
+          (if label == "user": "; the system root was still searched"
+           else: "; the user root was still searched"))
+        let unread = "the " & label & " root '" & root &
+          "' could not be read"
+        if unread notin result.notSearched:
+          result.notSearched.add(unread)
+        result.searchFailed = true
         if label == "user":
           result.userRootUnreadable = true
-          result.searchFailed = true
         continue
       of slsListed:
         discard
@@ -64546,14 +64293,46 @@ proc headContentDir*(repository: string): string =
   let dir = storeContentDir(head.id)
   if dir.ok: dir.relative else: ""
 
+proc headPruneProtection*(repository: string):
+    tuple[ok: bool; dirs: seq[string]; problem: string] =
+  ## The store directories a prune of a root must keep for ``repository``
+  ## (Transport §2.5): ``HEAD``'s content in the repository's native
+  ## ``git-tree-*`` algorithm AND ``manifest-v1-sha256``, unscoped and in
+  ## every scope the repository DECLARES (Tooling §3.1,
+  ## ``[testCertificatesScope "<name>"] path = …``), all from one frozen
+  ## ``HEAD`` tree — computed by the reference library's ``pruneProtection``.
+  ##
+  ## ``ok`` with no ``dirs``: there is nothing to protect — no repository
+  ## (``repository`` is "" or not inside one) or an unborn branch. ``ok =
+  ## false``: ``HEAD`` exists and one of its ids could not be computed, or
+  ## the scope declaration is invalid; the caller MUST then not prune at all
+  ## — not even the leftovers of an interrupted prune — since pruning
+  ## without that protection could delete the certificates of the very
+  ## content checked out.
+  if repository.len == 0:
+    return (true, @[], "")
+  let protection = tcscopes.pruneProtection(repository)
+  if not protection.ok:
+    return (false, @[], protection.problem)
+  result.ok = true
+  for id in protection.ids:
+    let dir = storeContentDir(id)
+    if not dir.ok:
+      return (false, @[], "HEAD content id '" & id & "' names no store " &
+        "directory: " & dir.problem)
+    if dir.relative notin result.dirs:
+      result.dirs.add(dir.relative)
+
 proc publishCertificateToLocalStore*(cert: TestCertificate;
     repository: string; roots = nativeCertificateStoreRoots();
     keep = -1; signatureMade = false): LocalStorePublishOutcome =
   ## Deliver one issued certificate to the USER root and prune that root
   ## (Transport §2.3, §2.5). ``repository`` is the checkout the tests ran in:
   ## the root must not lie inside it (a certificate never belongs in the
-  ## working tree it attests), and its ``HEAD^{tree}`` directory survives the
-  ## prune. ``keep < 0`` reads the user-level retention setting.
+  ## working tree it attests), and its ``HEAD`` content directories — every
+  ## id ``headPruneProtection`` computes, declared scopes included — survive
+  ## the prune, which does not run at all when they cannot be computed.
+  ## ``keep < 0`` reads the user-level retention setting.
   if roots.user.len == 0:
     result.error = "the local certificate store's user root could not be " &
       "resolved" &
@@ -64587,10 +64366,19 @@ proc publishCertificateToLocalStore*(cert: TestCertificate;
       proc(name: string): string = getEnv(name))
     count = setting.keep
     result.retentionProblem = setting.problem
+  let protection = headPruneProtection(repository)
+  if not protection.ok:
+    # Transport §2.5: a failure computing a required id for an existing
+    # HEAD aborts pruning before anything is removed. The certificate was
+    # still delivered; only the bounding of the store waits for a run that
+    # can compute what to keep.
+    result.pruned.errors.add("the local certificate store was not pruned: " &
+      protection.problem)
+    return
   var protected = @[relative[0 ..< relative.rfind('/')]]
-  let head = headContentDir(repository)
-  if head.len > 0:
-    protected.add(head)
+  for dir in protection.dirs:
+    if dir notin protected:
+      protected.add(dir)
   result.pruned = pruneStoreRoot(roots.user, count, protected)
 
 # ---- one three-valued verdict for every consumer ---------------------------
@@ -64951,7 +64739,7 @@ const
     ## reference tool and ``ct test`` (D10). Notes are NOT pushed/fetched by
     ## default; the push path pushes this ref explicitly and verifiers fetch
     ## it.
-  certificateNoteDelimiter* = "# --- test-certificate ---"
+  certificateNoteDelimiter* = tcnotes.NoteDelimiter
     ## The line that PRECEDES every record in a note (Transport §3.1). A
     ## line, not a substring: a value holding the text with escaped newlines
     ## around it is part of its record.
@@ -65044,7 +64832,10 @@ type
       ## some other way, or not framed at all. Never parsed as a record, even
       ## when it would parse.
     text*: string
-      ## The piece's exact bytes, without the delimiter line before it.
+      ## The piece's exact bytes, without the delimiter line before it. An
+      ## exact delimiter line at the very end of the blob, without its LF,
+      ## is still a delimiter line, and the piece after it is EMPTY: it is
+      ## yielded, reported and skipped like any piece that does not parse.
 
   CertificateNoteEntry* = object
     ## What a reader yields for one piece, in blob order.
@@ -65054,34 +64845,25 @@ type
       ## is never parsed: it reads ``crsMalformed`` with ``detail`` saying
       ## why it was skipped.
 
+# THE FRAMING IS THE REFERENCE LIBRARY'S (``test_certificates/note_framing``):
+# splitting on whole delimiter lines (a final line without LF is a line too),
+# the relay writer rule, the LF repair an append makes after an unterminated
+# piece, and the two-note union merge. What stays here is reprobuild's glue:
+# READING each piece through ``readCertificateRecord``, whose classification
+# (retired schema, earlier draft, unimplemented schema, malformed) the
+# library deliberately does not make, and the SIGNING-writer replacement,
+# which the library — a relay by definition (Tooling §1) — has no use for.
+
 proc splitCertificateNote*(note: string): seq[CertificateNotePiece] =
   ## Split a note blob on lines EQUAL to ``certificateNoteDelimiter`` — never
-  ## on occurrences of its text. Lines end at LF and a CR belongs to its line,
-  ## so a blob written with CRLF line endings has no delimiter line and all of
-  ## it is one leading piece. The empty piece before the first delimiter of a
-  ## conforming note is dropped; a non-empty one is returned with ``leading``.
-  var pieceStart = 0
-  var sawDelimiter = false
-  var lineStart = 0
-  template closePiece(pieceEnd: int) =
-    if sawDelimiter:
-      result.add(CertificateNotePiece(leading: false,
-        text: note[pieceStart ..< pieceEnd]))
-    elif pieceEnd > 0:
-      result.add(CertificateNotePiece(leading: true,
-        text: note[0 ..< pieceEnd]))
-  while lineStart < note.len:
-    var lineEnd = note.find('\n', lineStart)
-    let nextLine = if lineEnd < 0: note.len else: lineEnd + 1
-    if lineEnd < 0: lineEnd = note.len
-    if lineEnd < note.len and lineEnd - lineStart ==
-        certificateNoteDelimiter.len and
-        note.continuesWith(certificateNoteDelimiter, lineStart):
-      closePiece(lineStart)
-      sawDelimiter = true
-      pieceStart = nextLine
-    lineStart = nextLine
-  closePiece(note.len)
+  ## on occurrences of its text. Lines end at LF, a final line without one is
+  ## a line too, and a CR belongs to its line, so a blob written with CRLF
+  ## line endings has no delimiter line and all of it is one leading piece.
+  ## The empty piece before the first delimiter of a conforming note is
+  ## dropped; a non-empty one is returned with ``leading``.
+  for p in tcnotes.splitNote(note):
+    result.add(CertificateNotePiece(leading: p.kind == tcnotes.pkLeading,
+      text: p.body))
 
 proc describeLeadingNoteText(text: string): string =
   var firstLine = text
@@ -65107,6 +64889,12 @@ proc readCertificateNote*(note: string): seq[CertificateNoteEntry] =
       result.add(CertificateNoteEntry(piece: piece,
         read: CertificateReadResult(status: crsMalformed,
           detail: describeLeadingNoteText(piece.text))))
+    elif piece.text.len == 0:
+      result.add(CertificateNoteEntry(piece: piece,
+        read: CertificateReadResult(status: crsMalformed,
+          detail: "an empty piece after a delimiter line (a delimiter at " &
+            "the end of the note, or two in a row) holds no record and was " &
+            "skipped (Transport §3.1)")))
     else:
       result.add(CertificateNoteEntry(piece: piece,
         read: readCertificateRecord(piece.text)))
@@ -65116,49 +64904,103 @@ proc addCertificateToNote*(note: string; cert: TestCertificate;
     tuple[note: string; changed: bool] =
   ## Add ``cert`` to a note blob as Transport §3.1 requires a writer to:
   ##
-  ##   * a piece whose payload — rebuilt from its parsed fields — equals
-  ##     ``cert``'s is the same claim. A signed relay upgrades an unsigned
-  ##     piece and preserves a signed one. Only ``signatureMade = true``
-  ##     permits replacing a signed piece; an unsigned copy never replaces;
+  ##   * a parsed record whose canonical payload equals ``cert``'s is the
+  ##     same claim, and no second copy is ever added;
+  ##   * as a RELAY (the default): a signed copy replaces the first unsigned
+  ##     record with that payload, but only when no signed copy is present
+  ##     anywhere — a relay cannot tell a valid signature from an invalid
+  ##     one, so it keeps the first signed copy; an unsigned copy never
+  ##     replaces anything;
+  ##   * as the SIGNING writer (``signatureMade``: this caller just made the
+  ##     signature, so it knows it verifies): a signed copy replaces the FIRST
+  ##     matching record, signed or not;
   ##   * otherwise the record goes after the last piece, behind its own
-  ##     delimiter line;
-  ##   * every other piece — a record not touched, one that does not parse,
-  ##     text before the first delimiter — is kept byte for byte.
+  ##     delimiter line — after exactly one LF is added if the blob does not
+  ##     end in one (an unterminated record, corrupt piece, foreign text or a
+  ##     delimiter at EOF), the only change §3.1 permits to existing bytes;
+  ##   * every other piece is kept byte for byte, and a note that is not
+  ##     appended to gets no LF repair.
   ##
-  ## When several pieces carry the payload (a note no conforming writer
-  ## produced; the standard leaves which one a signed write replaces open)
-  ## the FIRST is replaced and the rest are kept.
-  let payload = canonicalCertificatePayload(cert)
+  ## Raises ``CertificateSerializationError`` when ``cert`` has no canonical
+  ## record form.
   let record = certificateNoteRecord(cert)
-  let pieces = splitCertificateNote(note)
-  var match = -1
-  var existingSigned = false
-  for i, piece in pieces:
-    if piece.leading: continue
-    let read = readCertificateRecord(piece.text)
-    if read.status == crsOk and
-        canonicalCertificatePayload(read.cert) == payload:
-      if match < 0: match = i
-      existingSigned = existingSigned or read.cert.isSigned
-  if match >= 0 and (not cert.isSigned or
-      (not signatureMade and existingSigned)):
+  let incoming = tcnotes.recordPiece(record)
+  if incoming.kind != tcnotes.pkRecord:
+    raise newException(CertificateSerializationError,
+      "the certificate's note record does not read back as a " &
+      "test-certificate.v1 record: " & incoming.problem)
+  var pieces = tcnotes.splitNote(note)
+  if signatureMade and cert.isSigned:
+    for i, piece in pieces:
+      if piece.kind == tcnotes.pkRecord and
+          piece.payloadSha256 == incoming.payloadSha256:
+        if piece.body == incoming.body:
+          return (note, false)
+        # The replacement ends in LF (canonical records do), so a delimiter
+        # after it stays on its own line.
+        pieces[i] = incoming
+        let updated = tcnotes.renderNote(pieces)
+        return (updated, updated != note)
+  let outcome = tcnotes.addRecord(pieces, incoming)
+  if outcome == tcnotes.aoPresent:
     return (note, false)
-  if match < 0:
-    var updated = note
-    if updated.len > 0 and not updated.endsWith("\n"):
-      # A delimiter is a whole line; a final piece without its LF would
-      # swallow it.
-      updated.add("\n")
-    updated.add(certificateNoteDelimiter & "\n" & record)
-    return (updated, true)
-  var updated = ""
-  for i, piece in pieces:
-    if piece.leading:
-      updated.add(piece.text)
-    else:
-      updated.add(certificateNoteDelimiter & "\n")
-      updated.add(if i == match: record else: piece.text)
+  let updated = tcnotes.renderNote(pieces)
   (updated, updated != note)
+
+type
+  NoteMergeReportKind* = enum
+    ## The report categories Transport §3.1 requires of a merge (the
+    ## ``expected.json`` categories of the ``notes/merge-*`` vectors).
+    nmrSignedConflict = "signed-conflict"
+      ## Both sides carry differently signed copies of one payload; the
+      ## published (base) copy was kept.
+    nmrLeadingJoined = "leading-joined"
+      ## Both sides carry different text before the first delimiter; the
+      ## incoming block was joined after the published one.
+    nmrLfRepair = "lf-repair"
+      ## One LF was supplied so that a following delimiter stays on its own
+      ## line (an append after an unterminated piece, an inserted leading
+      ## block or a replacement before a delimiter).
+    nmrOther = "other"
+      ## A remark the pinned library makes that maps to none of the above.
+
+  NoteMergeReport* = object
+    kind*: NoteMergeReportKind
+    message*: string
+
+  CertificateNoteMerge* = object
+    ## The union of two note blobs for the same object.
+    note*: string          ## the merged blob
+    changed*: bool         ## ``note`` differs from the published blob
+    added*: int            ## pieces of the incoming blob appended
+    replaced*: int         ## unsigned published records replaced in place
+    reports*: seq[NoteMergeReport]
+
+proc noteMergeReportKind*(remark: string): NoteMergeReportKind =
+  ## The §3.1 category of one of the library's merge remarks. Matched on the
+  ## remark's wording, which the PINNED library fixes; the conformance walker
+  ## asserts every ``merge-*`` vector's categories through this function, so
+  ## a library bump that rewords a remark fails there instead of silently
+  ## dropping a report.
+  if "published copy was kept" in remark: nmrSignedConflict
+  elif "text before the first delimiter" in remark: nmrLeadingJoined
+  elif "LF" in remark: nmrLfRepair
+  else: nmrOther
+
+proc mergeCertificateNotes*(published, incoming: string): CertificateNoteMerge =
+  ## Transport §3.1 "Merging two notes": ``published`` (the already
+  ## published side, the merge's base) with every piece of ``incoming`` it
+  ## lacks, in incoming order. Deterministic for the ordered inputs; neither
+  ## side is a signing writer, so a signed copy upgrades an unsigned one but
+  ## never replaces a signed one (that tie is reported). Repeating the merge
+  ## with the same ``incoming`` changes nothing. The merge itself is the
+  ## reference library's ``mergeNotes``; this adds the report categories.
+  let merged = tcnotes.mergeNotes(published, incoming)
+  result = CertificateNoteMerge(note: merged.blob, changed: merged.changed,
+    added: merged.added, replaced: merged.replaced)
+  for remark in merged.remarks:
+    result.reports.add(NoteMergeReport(kind: noteMergeReportKind(remark),
+      message: remark))
 
 proc certificateNoteKey*(content: string): tuple[ok: bool; oid, problem: string] =
   ## The object a certificate's note is attached to: the tree its content id
@@ -65501,25 +65343,55 @@ proc readAttachedCertificates*(gitBin, repoPath, commit: string):
   readAttachedCertificatesFromRef(gitBin, repoPath, commit, certificateNotesRef)
 
 proc pushCertificateNotes*(gitBin, repoPath, remote: string):
-    tuple[ok: bool; pushed: bool; diagnostic: string] =
+    tuple[ok: bool; pushed: bool; diagnostic: string; remarks: seq[string]] =
   ## Carry the certificate notes ref to ``remote`` (TC-2: the push path pushes
   ## ``certificateNotesRef`` explicitly, since notes are not pushed by
-  ## default). Every noted certificate travels in the single ref. ``pushed=false`` with ``ok=true`` means there were no
-  ## certificate notes to carry (benign — nothing attached).
+  ## default). Every noted certificate travels in the single ref.
+  ## ``pushed=false`` with ``ok=true`` means there were no certificate notes
+  ## to carry (benign — nothing attached).
+  ##
+  ## The push is the reference library's ``pushNotes`` (Tooling §3 ``notes
+  ## push``): when the remote ref has moved, it fetches it, merges the two
+  ## sides as a UNION (Transport §3.1 — never one side's, the published side
+  ## as the base) and retries with backoff, instead of failing on the first
+  ## non-fast-forward the way a bare ``git push`` did. What the merges
+  ## decided — a signed tie kept, leading text joined, an LF supplied after
+  ## an unterminated piece — comes back in ``remarks``. Hooks run as for any
+  ## push the user asked for (``repro push`` is not itself a hook).
+  ##
+  ## Every git command, the library's included (``PushOptions.gitExe``),
+  ## runs ``gitBin``: the git this push resolved, never another one that
+  ## happens to be first on ``PATH``.
   let probe = gitNoteRun(gitBin,
     ["-C", repoPath, "rev-parse", "--verify", "--quiet",
      certificateNotesRef])
+  if probe.code == 1:
+    # `--verify --quiet` exits 1 exactly when the ref does not exist locally
+    # → nothing attached, nothing to push.
+    return (ok: true, pushed: false, diagnostic: "no certificate notes",
+      remarks: newSeq[string]())
   if probe.code != 0:
-    # The notes ref does not exist locally → nothing attached, nothing to push.
-    return (ok: true, pushed: false, diagnostic: "no certificate notes")
-  let res = gitNoteRun(gitBin,
-    ["-C", repoPath, "push", remote,
-     certificateNotesRef & ":" & certificateNotesRef])
-  if res.code != 0:
+    # Any other status is git failing to answer (not runnable, not a
+    # repository): that is not "nothing to push", and saying so would let a
+    # broken git hide every certificate this push should have carried.
+    return (ok: false, pushed: false, diagnostic: "could not read " &
+      certificateNotesRef & " with '" & gitBin & "' (exit " &
+      $probe.code & "): " & probe.output.strip(),
+      remarks: newSeq[string]())
+  var options = tcnotesref.defaultPushOptions()
+  options.gitExe = gitBin
+  let sync = tcnotesref.pushNotes(repoPath, remote, certificateNotesRef,
+    options)
+  if not sync.ok:
     return (ok: false, pushed: false,
       diagnostic: "git push " & certificateNotesRef & " failed: " &
-        res.output.strip())
-  (ok: true, pushed: true, diagnostic: "")
+        sync.problems.join("; "), remarks: sync.remarks)
+  case sync.outcome
+  of tcnotesref.soNoLocalNotes:
+    (ok: true, pushed: false, diagnostic: "no certificate notes",
+     remarks: sync.remarks)
+  else:
+    (ok: true, pushed: true, diagnostic: "", remarks: sync.remarks)
 
 type
   PushedRefJudgement* = object
@@ -65657,11 +65529,11 @@ proc certificateGate(report: var CheckReport;
     let verdict = evaluateRequirementCoverage(lookup.found, evaluated,
       requirement.requires, keys, lockSource,
       (if lookup.searchFailed: lookup.problems else: @[]))
+    # "Search incomplete" and "none found" are different findings: the
+    # first does not establish absence (Tooling §2, find exit 3 vs 1).
     let searched =
       if lookup.found.len == 0 and lookup.contentIds.len > 0:
-        " (no certificate found in the local store under " &
-          lookup.contentIds.join(", ") & "; searched " &
-          lookup.searched.join(", ") & ")"
+        " (" & describeLocalStoreSearch(lookup) & ")"
       else: ""
     case verdict.outcome
     of voCovered:
@@ -65693,7 +65565,7 @@ proc certificateGate(report: var CheckReport;
       # Under ``required`` the push is still refused, but the diagnostic
       # names WHY the certificates could not be judged — re-running tests
       # changes nothing.
-      let detail = describeCoverageVerdict(verdict)
+      let detail = describeCoverageVerdict(verdict) & searched
       if requirement.mode == cgmAdvisory:
         report.notices.add("certificate advisory: coverage UNVERIFIABLE — " &
           detail & " (" & applied & "; advisory mode does not block this " &
@@ -65995,14 +65867,15 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
     stderr.writeLine(prefix & "coverage of the content being committed (" &
       content & ") could not be established: " &
       describeCoverageVerdict(verdict))
+    if lookup.found.len == 0 and lookup.searchIncomplete:
+      stderr.writeLine(prefix & describeLocalStoreSearch(lookup))
     stderr.writeLine(prefix & "fix what is named (an unreadable key store " &
       "or certificate store, an algorithm this reprobuild cannot compute); " &
       "re-running the tests changes nothing")
   else:
     let searched =
-      if lookup.found.len == 0 and lookup.searched.len > 0:
-        " (no certificate in the local store; searched " &
-          lookup.searched.join(", ") & ")"
+      if lookup.found.len == 0 and lookup.contentIds.len > 0:
+        " (" & describeLocalStoreSearch(lookup) & ")"
       else: ""
     stderr.writeLine(prefix & "no trusted certificate covers the content " &
       "being committed (" & content & "): " &
@@ -71573,6 +71446,10 @@ type
       ## TC-2: repo paths whose attached certificate notes
       ## (``certificateNotesRef``) were carried to the upstream.
     certNotesDiagnostic: string ## TC-2: a non-fatal note-push diagnostic.
+    certNotesRemarks: seq[string]
+      ## What the notes push decided while merging a moved remote notes ref
+      ## (Transport §3.1): a signed tie kept, leading text joined, an LF
+      ## supplied after an unterminated piece. Informational.
     lockPublished: bool
     lockDiagnostic: string
     stoppedRepo: string
@@ -72817,6 +72694,8 @@ proc executePush(args: PushArgs): PushReport =
   proc carryCertNotes(report: var PushReport;
                       gitBin, repoAbs, repoPath, remoteName: string) =
     let notePush = pushCertificateNotes(gitBin, repoAbs, remoteName)
+    for remark in notePush.remarks:
+      report.certNotesRemarks.add(repoPath & ": " & remark)
     if notePush.pushed:
       report.certNotesPushed.add(repoPath)
     elif not notePush.ok:
@@ -73350,6 +73229,8 @@ proc renderPushTextLines(report: PushReport): seq[string] =
   if report.certNotesDiagnostic.len > 0:
     result.add("repro push: certificate-notes carry warning — " &
       report.certNotesDiagnostic)
+  for remark in report.certNotesRemarks:
+    result.add("repro push: certificate notes: " & remark)
   if report.lockDiagnostic.len > 0:
     result.add("repro push: " & report.lockDiagnostic)
   if report.stoppedStage.len > 0:
@@ -86016,7 +85897,7 @@ type
       ## executions read, from ``recordedSources`` records.
     recordedSources: int
 
-proc reusedResultRefusal(record: ExecutedActionRecord): string =
+proc reusedResultRefusal*(record: ExecutedActionRecord): string =
   ## Why a test command the action cache answered may NOT be attested, or
   ## ``""`` when it may (test-certificates Standard §6.2.1, decision D16 of
   ## Test-Certificates.milestones.org). All three of the standard's
@@ -87629,6 +87510,13 @@ proc runCiPlanCommand(args: openArray[string]): int =
     let stored = findCertificatesInLocalStore(evaluated)
     for problem in stored.problems:
       plan.problems.add(problem)
+    if stored.searchIncomplete:
+      # Reported as its own finding: an incomplete search is not "no
+      # certificate in the store" (Tooling §2, find exit 3 vs 1).
+      let incomplete = "certificate-store-search-incomplete: " &
+        stored.notSearched.join("; ")
+      plan.problems.add(incomplete)
+      couldNotLook.add(incomplete)
     if stored.searchFailed:
       for problem in stored.problems:
         couldNotLook.add(problem)

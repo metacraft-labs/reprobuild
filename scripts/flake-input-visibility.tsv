@@ -72,6 +72,7 @@ metacraft-labs/reprobuild-packages	public
 metacraft-labs/reprobuild-test-adapters	public
 metacraft-labs/runquota	public
 metacraft-labs/stackable-hooks-macos-tools	public
+metacraft-labs/test-certificates-tools	public
 mitchellh/zig-overlay	public
 nim-lang/checksums	public
 nim-lang/csources_v3	public

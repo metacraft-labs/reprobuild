@@ -960,6 +960,7 @@ def external_source_checkouts(
             "STACKABLE_HOOKS_SRC",
         ),
         "reprobuild-test-adapters": ("REPRO_TEST_ADAPTERS_SRC",),
+        "test-certificates-tools": ("TEST_CERTIFICATES_TOOLS_SRC",),
         "reprobuild-ct-test-runner": ("REPRO_CT_TEST_RUNNER_SRC",),
     }
     for name, env_names in env_sources.items():
@@ -1005,6 +1006,7 @@ def runtime_metadata(
         "NIM_STACKABLE_HOOKS_SRC",
         "STACKABLE_HOOKS_SRC",
         "REPRO_TEST_ADAPTERS_SRC",
+        "TEST_CERTIFICATES_TOOLS_SRC",
         "REPRO_CT_TEST_RUNNER_SRC",
     ]
     tools: dict[str, str] = {"python": f"Python {platform.python_version()}"}

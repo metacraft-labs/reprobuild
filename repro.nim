@@ -892,12 +892,13 @@ package reprobuild:
 
     # THE SIBLING NIM LIBRARIES THIS REPOSITORY IMPORTS, DECLARED.
     #
-    # Each of the three names a workspace PROJECT whose ``repro.nim``
+    # Each of the four names a workspace PROJECT whose ``repro.nim``
     # declares a ``library`` and NO ``executable``:
     #
     #   reprobuild-test-adapters -> ``library repro_test_adapters`` (src/)
     #   nim-stackable-hooks      -> ``library stackable_hooks``     (src/)
     #   nim-shm-queue            -> ``library shm_queue``           (src/)
+    #   test-certificates-tools  -> ``library test_certificates``   (src/)
     #
     # That is Cross-Repo-Source-Consumption §4.2a (SC-11), the Nim
     # library-source channel: reprobuild resolves the producer through the
@@ -943,13 +944,17 @@ package reprobuild:
     # BOOTSTRAP ORDER. ``declaresProducerEdge`` materializes a producer only
     # for a develop override or a committed ``LockedDep``. A bare ``uses:``
     # string with neither falls through to PATH and fails outright, exactly
-    # as the ``runquotad`` note above describes. So these three lines and the
+    # as the ``runquotad`` note above describes. So these lines and the
     # ``repro.lock`` entries that pin them are ONE change: adding a name here
     # without running ``repro lock refresh`` breaks every checkout that has
     # no develop override for it.
     "reprobuild-test-adapters"
     "nim-stackable-hooks"
     "nim-shm-queue"
+    # The test-certificate standard's store, note framing and two-note merge
+    # (``import test_certificates`` in repro_cli_support). Same SC-11 channel
+    # and the same one-change rule: this line and its ``repro.lock`` entry.
+    "test-certificates-tools"
 
     # Note: the remaining system libraries (libblake3, xxhash, sqlite3) and
     # the source-only fixed inputs that are NOT workspace repos (nimcrypto,

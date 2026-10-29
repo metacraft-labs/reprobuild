@@ -264,14 +264,16 @@ suite "TC-8b — the lock comes from the content":
       check reprobuildLockVerdict(source, indexUnderEvaluation(repo)).verdict ==
         fvValid
 
-    # The record carries no lock digest, and a stray one is no binding.
+    # The record carries no lock digest, and a stray one is no binding: since
+    # Standard §3.4 (spec 5b43c20) it makes the record malformed outright,
+    # rather than being read with the key dropped.
     let payload = canonicalCertificatePayload(cert)
     check "lock = " notin payload
     check "blake3:" notin payload
     let stray = readCertificateRecord(serializeCertificateToToml(cert).replace(
       "[certificate.vcs]\n", "[certificate.vcs]\nlock = \"blake3:deadbeef\"\n"))
-    check stray.status == crsOk
-    check canonicalCertificatePayload(stray.cert) == payload
+    check stray.status == crsMalformed
+    check "unknown key or table 'certificate.vcs.lock'" in stray.detail
 
     check libraryTempLeftovers(scratch).len == 0
     removeDir(scratch)

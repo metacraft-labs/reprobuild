@@ -74,6 +74,12 @@
   # (`fetchFromGitHub` and the flake's github fetcher produce the same store
   # path for the same revision).
   #
+  # An entry for a source input added AFTER the `src` commit (its lock has no
+  # such node yet) mirrors this tree's `flake.lock` instead, and the check
+  # holds it to that until the next release snapshot moves `src` past it.
+  # The metacraft-labs/nixpkgs fork must map such an input in its `pins.json`
+  # when it syncs the first release that carries it (nix/README.md).
+  #
   # `src` and `version` are deliberately NOT arguments: `callPackage` fills an
   # argument from the package set whenever the set HAS that name, default or no
   # default, and nixpkgs does have a `src` attribute (a throw that renames it to
@@ -155,6 +161,15 @@
     repo = "reprobuild-test-adapters";
     rev = "b0fc1bcb9c2f1cb6a7fc3a558592ae7051782c24";
     hash = "sha256-bDuj7DYj2nZtvG0em05EMy6/hK/RWIE917GHHZPq62Y=";
+  },
+  # The `test_certificates` package (test-certificates-tools): the store,
+  # note-framing and note-merge rules of the test-certificate standard, which
+  # the engine links instead of re-implementing. Source only, pure stdlib.
+  testCertificatesToolsSrc ? fetchFromGitHub {
+    owner = "metacraft-labs";
+    repo = "test-certificates-tools";
+    rev = "9864082065c8acb1db315e65a6a4157a3ab77117";
+    hash = "sha256-zxOEf1NeCOiKN1KMxwFsr2leww43cfJJB0Oo2g2JZSA=";
   },
   # Source only. reprobuild compiles `runquota_client`/`_codec`/`_core`/`_ipc`/
   # `_process`/`_protocol` out of this tree. The separate runquotaTools package
@@ -292,6 +307,7 @@ stdenv.mkDerivation (finalAttrs: {
     CODETRACER_PINNED_SRC = "${codetracerSrc}/src";
     REPRO_CT_TEST_RUNNER_SRC = "${ctTestRunnerSrc}";
     REPRO_TEST_ADAPTERS_SRC = "${testAdaptersSrc}/src";
+    TEST_CERTIFICATES_TOOLS_SRC = "${testCertificatesToolsSrc}/src";
     REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
     RUNQUOTA_SRC = "${runquotaSrc}";
     SQLITE_PREFIX = "${sqlite.out}";
@@ -424,6 +440,7 @@ stdenv.mkDerivation (finalAttrs: {
         --set-default CODETRACER_PINNED_SRC ${codetracerSrc}/src \
         --set-default REPRO_CT_TEST_RUNNER_SRC ${ctTestRunnerSrc} \
         --set-default REPRO_TEST_ADAPTERS_SRC ${testAdaptersSrc}/src \
+        --set-default TEST_CERTIFICATES_TOOLS_SRC ${testCertificatesToolsSrc}/src \
         --set-default REPROBUILD_USE_SYSTEM_HASH_LIBS 1 \
         --set-default REPROBUILD_NIX_DAEMON_BIN "$out/libexec/reprobuild-nix-daemon" \
         --set-default RUNQUOTA_SRC ${runquotaSrc} \
@@ -519,6 +536,7 @@ stdenv.mkDerivation (finalAttrs: {
         codetracerSrc
         ctTestRunnerSrc
         testAdaptersSrc
+        testCertificatesToolsSrc
         runquotaSrc
         ;
     };

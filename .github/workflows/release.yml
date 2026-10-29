@@ -308,6 +308,7 @@ jobs:
             nim-shm-queue-src=../nim-shm-queue
             nim-stackable-hooks-src=../nim-stackable-hooks
             reprobuild-test-adapters-src=../reprobuild-test-adapters
+            test-certificates-tools-src=../test-certificates-tools
 
       # Clone status-im/nim-bearssl manually on Windows (since it belongs to a
       # foreign organization and is not resolvable by metacraft-labs clone-siblings).

@@ -93,6 +93,7 @@ const
     ("CODETRACER_PINNED_SRC", "codetracer/src"),
     ("REPRO_CT_TEST_RUNNER_SRC", "reprobuild-ct-test-runner"),
     ("REPRO_TEST_ADAPTERS_SRC", "reprobuild-test-adapters/src"),
+    ("TEST_CERTIFICATES_TOOLS_SRC", "test-certificates-tools/src"),
     ("RUNQUOTA_SRC", "runquota"),
   ]
 

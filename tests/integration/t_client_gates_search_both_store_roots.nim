@@ -110,7 +110,11 @@ suite "TC-8c — client gates search both store roots":
       else:
         let lookup = findCertificatesInLocalStore(state)
         check lookup.found.len == 1
-        check not lookup.searchFailed
+        # The search could not cover the system root, so it is INCOMPLETE
+        # (Transport §2.1/§5) — but the certificate it did find covers the
+        # commit, so the gate still passes.
+        check lookup.searchIncomplete
+        check lookup.searchFailed
         check lookup.problems.anyIt("system root" in it and
           "could not be read" in it)
         let gate = checkPrePush(fx, head)
@@ -118,6 +122,25 @@ suite "TC-8c — client gates search both store roots":
         check gate.code == 0
         check "system root" in noticesText(gate.report)
         check "could not be read" in noticesText(gate.report)
+
+        # ---- 3b. ... and with nothing in the user root, the gate says the
+        # search was INCOMPLETE — an unverifiable outcome, not "no
+        # certificate found" (Tooling §2 find exit 3 vs 1): the system root
+        # it could not read may hold the certificate.
+        let aside = fx.scratch / "user-root-aside"
+        moveDir(fx.userRoot, aside)
+        defer:
+          if dirExists(aside) and not dirExists(fx.userRoot):
+            moveDir(aside, fx.userRoot)
+        let incomplete = checkPrePush(fx, head)
+        checkpoint("incomplete search: " & incomplete.output)
+        check incomplete.code == 2
+        let properties = failureProperties(incomplete.report)
+        check "certificate-unverifiable" in properties
+        check "certificate-coverage" notin properties
+        check "search INCOMPLETE" in $incomplete.report
+        check "no certificate found in the local store" notin
+          $incomplete.report
 
   test "the client gate does not read certificate notes":
     let fx = setupStoreFixture(

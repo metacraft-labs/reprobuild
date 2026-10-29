@@ -179,6 +179,7 @@ stage_src "$WS/nim-shm-queue/src"             nim-shm-queue/src
 stage_src "$WS/codetracer/src"                codetracer/src
 stage_src "$WS/reprobuild-ct-test-runner"     reprobuild-ct-test-runner
 stage_src "$WS/reprobuild-test-adapters/src"  reprobuild-test-adapters/src
+stage_src "$WS/test-certificates-tools/src"   test-certificates-tools/src
 stage_src "$WS/runquota"                      runquota
 
 # ---- 5. tree/libexec/reprobuild/nim --------------------------------

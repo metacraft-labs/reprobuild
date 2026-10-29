@@ -2565,7 +2565,8 @@
         "reprobuild-nix-packages-src": "reprobuild-nix-packages-src",
         "reprobuild-test-adapters-src": "reprobuild-test-adapters-src",
         "runquota-src": "runquota-src",
-        "stackable-hooks-macos-tools": "stackable-hooks-macos-tools"
+        "stackable-hooks-macos-tools": "stackable-hooks-macos-tools",
+        "test-certificates-tools-src": "test-certificates-tools-src"
       }
     },
     "runquota-package-catalog": {
@@ -2864,6 +2865,23 @@
       "original": {
         "owner": "terranix",
         "repo": "terranix",
+        "type": "github"
+      }
+    },
+    "test-certificates-tools-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793296561,
+        "narHash": "sha256-zxOEf1NeCOiKN1KMxwFsr2leww43cfJJB0Oo2g2JZSA=",
+        "owner": "metacraft-labs",
+        "repo": "test-certificates-tools",
+        "rev": "9864082065c8acb1db315e65a6a4157a3ab77117",
+        "type": "github"
+      },
+      "original": {
+        "owner": "metacraft-labs",
+        "repo": "test-certificates-tools",
+        "rev": "9864082065c8acb1db315e65a6a4157a3ab77117",
         "type": "github"
       }
     },

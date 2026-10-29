@@ -5511,6 +5511,8 @@ proc ensureWorkspaceSourceEnv(repoRoot: string) =
   putEnvIfUnsetDir("REPROBUILD_SOURCE_ROOT", repoRoot)
   putEnvIfUnsetDir("REPRO_TEST_ADAPTERS_SRC",
     parent / "reprobuild-test-adapters" / "src")
+  putEnvIfUnsetDir("TEST_CERTIFICATES_TOOLS_SRC",
+    parent / "test-certificates-tools" / "src")
   putEnvIfUnsetDir("REPRO_CT_TEST_RUNNER_SRC",
     parent / "reprobuild-ct-test-runner")
   putEnvIfUnsetDir("CODETRACER_SRC", parent / "codetracer" / "src")

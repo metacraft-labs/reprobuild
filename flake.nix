@@ -470,6 +470,21 @@
       url = "github:metacraft-labs/reprobuild-test-adapters";
       flake = false;
     };
+    test-certificates-tools-src = {
+      # The ``test_certificates`` Nim package: the reference implementation of
+      # the test-certificate standard's local store, note framing and two-note
+      # merge (test-certificates-spec Transport §2, §3.1). The engine links it
+      # rather than keeping a second copy of those rules. config.nims reads
+      # TEST_CERTIFICATES_TOOLS_SRC (then falls back to a
+      # ``../test-certificates-tools`` sibling); the sandboxed package build
+      # has no sibling, so seed it from here. Pinned at an ``agents`` commit
+      # (the first that lets the caller name its git, ``PushOptions.gitExe``)
+      # until the v0.1.0 tag carries it; then it moves to the tag. Keep this
+      # URL, flake.lock, package.nix, repro.lock and .github/sibling-repos
+      # aligned.
+      url = "github:metacraft-labs/test-certificates-tools/9864082065c8acb1db315e65a6a4157a3ab77117";
+      flake = false;
+    };
     # A source-only input was removed from this set, and this note is where
     # a future reader finds out why rather than re-deriving it -- it names
     # no repository on purpose, because the removal was about a dependency
@@ -837,6 +852,7 @@
       nim-stackable-hooks-src,
       reprobuild-ct-test-runner-src,
       reprobuild-test-adapters-src,
+      test-certificates-tools-src,
       codetracer-src,
       runquota-src,
       io-mon-src,
@@ -1076,6 +1092,7 @@
               (row "SHM_QUEUE_SRC" "nim-shm-queue-src" "/src")
               (row "REPRO_CT_TEST_RUNNER_SRC" "reprobuild-ct-test-runner-src" "")
               (row "REPRO_TEST_ADAPTERS_SRC" "reprobuild-test-adapters-src" "/src")
+              (row "TEST_CERTIFICATES_TOOLS_SRC" "test-certificates-tools-src" "/src")
               (row "CODETRACER_PINNED_SRC" "codetracer-src" "/src")
             ];
           siblingCheckoutSourcesHook = ''
@@ -1295,6 +1312,7 @@
                 export CODETRACER_PINNED_SRC=${codetracer-src}/src
                 export REPRO_CT_TEST_RUNNER_SRC=${reprobuild-ct-test-runner-src}
                 export REPRO_TEST_ADAPTERS_SRC=${reprobuild-test-adapters-src}/src
+                export TEST_CERTIFICATES_TOOLS_SRC=${test-certificates-tools-src}/src
                 export REPROBUILD_USE_SYSTEM_HASH_LIBS=1
                 export RUNQUOTA_SRC=${runquota-src}
                 export XXHASH_PREFIX=${pkgs.xxHash}
@@ -1416,6 +1434,7 @@
               codetracerSrc = codetracer-src;
               ctTestRunnerSrc = reprobuild-ct-test-runner-src;
               testAdaptersSrc = reprobuild-test-adapters-src;
+              testCertificatesToolsSrc = test-certificates-tools-src;
               runquotaSrc = runquota-src;
               inherit runquotaTools;
             }).overrideAttrs
@@ -1569,6 +1588,7 @@
                 CODETRACER_PINNED_SRC|${codetracer-src}/src
                 REPRO_CT_TEST_RUNNER_SRC|${reprobuild-ct-test-runner-src}
                 REPRO_TEST_ADAPTERS_SRC|${reprobuild-test-adapters-src}/src
+                TEST_CERTIFICATES_TOOLS_SRC|${test-certificates-tools-src}/src
                 REPROBUILD_USE_SYSTEM_HASH_LIBS|1
                 RUNQUOTA_SRC|${runquota-src}
                 RUNQUOTAD_BIN|${runquotaTools}/bin/runquotad
@@ -1797,6 +1817,7 @@
                                       ${codetracer-src} \
                                       ${reprobuild-ct-test-runner-src} \
                                       ${reprobuild-test-adapters-src} \
+                                      ${test-certificates-tools-src} \
                                       ${runquota-src} \
                                       ${blake3Prefix} \
                                       ${pkgs.sqlite.out} \
@@ -2077,7 +2098,10 @@
             # time by its rev and its own hash (a locked, pure fetch), so a
             # wrong `src` hash fails here too. Each default's rev must equal
             # the lock node's, and its hash the node's `narHash` where the
-            # lock records one. Decided at evaluation time, like `lib-tests`,
+            # lock records one. A source input this tree gained after
+            # the `src` commit is held to THIS tree's lock instead, until the
+            # next release snapshot moves `src` past it (`pending` in the
+            # result names those). Decided at evaluation time, like `lib-tests`,
             # so it builds nothing.
             nixpkgs-package-src-sync =
               let
@@ -2093,6 +2117,18 @@
                 rootInputs = lock.nodes.${lock.root}.inputs;
                 srcNimbleVersion = nimbleVersionOf "${srcTree}/reprobuild.nimble";
                 lockedOf = input: lock.nodes.${rootInputs.${input}}.locked;
+                # A source input this tree gained AFTER the `src` commit has
+                # no node in that commit's lock, and cannot have one until the
+                # next release moves `src`. Until then its default mirrors
+                # THIS tree's flake.lock, the only lock that pins it; the
+                # release snapshot then holds it to the `src` lock like every
+                # other entry. An input in neither lock is still an error.
+                treeLock = builtins.fromJSON (builtins.readFile ./flake.lock);
+                treeRootInputs = treeLock.nodes.${treeLock.root}.inputs;
+                pendingInputs = args:
+                  builtins.filter (input: !(rootInputs ? ${input}) && treeRootInputs ? ${input}) (
+                    builtins.attrValues args
+                  );
                 defaultNimFork = pkgs.callPackage ./nix/pkgs/by-name/re/reprobuild/nim-fork.nix { };
                 defaultPackage = pkgs.callPackage ./nix/pkgs/by-name/re/reprobuild/package.nix {
                   # Same as the flake's own call: the pinned nixpkgs spells it
@@ -2118,6 +2154,7 @@
                   codetracerSrc = "codetracer-src";
                   ctTestRunnerSrc = "reprobuild-ct-test-runner-src";
                   testAdaptersSrc = "reprobuild-test-adapters-src";
+                  testCertificatesToolsSrc = "test-certificates-tools-src";
                   runquotaSrc = "runquota-src";
                 };
                 nimForkArgs = {
@@ -2136,21 +2173,23 @@
                       arg: input:
                       let
                         src = sources.${arg};
-                        locked = lockedOf input;
+                        inSrcLock = rootInputs ? ${input};
+                        lockName = if inSrcLock then "the `src` commit's flake.lock" else "this tree's flake.lock (`${input}` postdates the `src` commit)";
+                        locked = if inSrcLock then lockedOf input else treeLock.nodes.${treeRootInputs.${input}}.locked;
                       in
                       if !(sources ? ${arg}) then
                         [ "${file}: `${arg}` is not in passthru.sources" ]
-                      else if !(rootInputs ? ${input}) then
+                      else if !inSrcLock && !(treeRootInputs ? ${input}) then
                         [
-                          "${file}: `${arg}`: the `src` commit's flake.lock has no input `${input}`"
+                          "${file}: `${arg}`: neither the `src` commit's flake.lock nor this tree's has an input `${input}`"
                         ]
                       else if (src.rev or null) != locked.rev then
                         [
-                          "${file}: `${arg}` defaults to rev ${toString (src.rev or null)}, the `src` commit's flake.lock pins `${input}` at ${locked.rev}"
+                          "${file}: `${arg}` defaults to rev ${toString (src.rev or null)}, ${lockName} pins `${input}` at ${locked.rev}"
                         ]
                       else if locked ? narHash && (src.outputHash or null) != locked.narHash then
                         [
-                          "${file}: `${arg}` hash ${toString (src.outputHash or null)} != the `src` commit's flake.lock `${input}` narHash ${locked.narHash}"
+                          "${file}: `${arg}` hash ${toString (src.outputHash or null)} != ${lockName} `${input}` narHash ${locked.narHash}"
                         ]
                       else
                         [ ]
@@ -2176,6 +2215,8 @@
                     checked =
                       builtins.length (builtins.attrNames packageArgs)
                       + builtins.length (builtins.attrNames nimForkArgs);
+                    # Checked against this tree's lock until `src` moves.
+                    pending = pendingInputs packageArgs ++ pendingInputs nimForkArgs;
                   }
                 )
               else
@@ -2423,6 +2464,7 @@
             CODETRACER_PINNED_SRC = "${codetracer-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
+            TEST_CERTIFICATES_TOOLS_SRC = "${test-certificates-tools-src}/src";
             REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
             RUNQUOTA_SRC = runquota-src;
             # Read by RUNQUOTA'S ``config.nims``, not by ours.
