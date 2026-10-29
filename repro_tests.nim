@@ -1341,6 +1341,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_catalog_preparation_anchor.nim",
+    binary: "build/test-bin/t_catalog_preparation_anchor",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_catalog_publication.nim",
     binary: "build/test-bin/t_catalog_publication",
     defines: @[],

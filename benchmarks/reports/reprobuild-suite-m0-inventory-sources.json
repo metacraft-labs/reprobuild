@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
-    "graphOwnedHelperArtifacts": 33,
-    "nimTestBinaries": 2406,
+    "graphOwnedHelperArtifacts": 34,
+    "nimTestBinaries": 2407,
     "pureUnitConsolidationGroups": 68,
     "pureUnitTests": 686,
     "staticallyDetectedRuntimeCompilerFlowTests": 130,
-    "testEntries": 2445
+    "testEntries": 2446
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1385,7 +1385,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1335,
+      "integration": 1336,
       "platform/destructive": 146,
       "pure unit": 686,
       "unclassified": 260
@@ -1554,6 +1554,12 @@
         "source": "tests/e2e/m83/nim_spy.nim"
       },
       {
+        "actionId": "reprobuild.test_helpers.pm3_cas_probe",
+        "kind": "test-helper",
+        "output": "build/test-bin/pm3_cas_probe",
+        "source": "tests/integration/pm3_cas_probe.nim"
+      },
+      {
         "actionId": "reprobuild.test_helpers.repro_binary_cache",
         "kind": "test-helper",
         "output": "build/test-bin/repro_binary_cache",
@@ -1590,9 +1596,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2406,
+    "nimTestBinaryCount": 2407,
     "pythonTestFileCount": 39,
-    "testEntryCount": 2445
+    "testEntryCount": 2446
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10473,6 +10479,24 @@
       "source": "libs/repro_cli_support/tests/t_build_worker_holds_no_daemon_key.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_catalog_preparation_anchor",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_catalog_preparation_anchor.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -35635,7 +35659,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_flake_inputs_match_original_coordinates.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

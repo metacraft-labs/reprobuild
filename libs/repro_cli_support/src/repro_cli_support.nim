@@ -10796,8 +10796,11 @@ proc ensureLockPinnedCatalog*(modulePath, consumerRoot: string): string =
     return ""
 
   let startDir =
-    if modulePath.len > 0: modulePath.parentDir
-    elif consumerRoot.len > 0: consumerRoot
+    # Recipe-relative helpers deliberately receive a bare module filename.
+    # Resolve the lookup anchor against their cwd before walking ancestors;
+    # keep the compiler's location-independent argv unchanged.
+    if modulePath.len > 0: absolutePath(modulePath).parentDir
+    elif consumerRoot.len > 0: absolutePath(consumerRoot)
     else: getCurrentDir()
 
   # Develop-mode sibling beside consumer or any ancestor
@@ -36403,6 +36406,7 @@ type
     ## DS-6 — one row of ``repro develop --list``: the six columns
     ## CLI/develop.md §"Action axis" names.
     name: string
+    sourceIdentity: string   ## internal canonical VCS identity, not a display name
     tier: string
     backend: string
     revision: string
@@ -37504,6 +37508,8 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
     var rows: seq[DevelopListRow]
     for node in selected:
       var row = DevelopListRow(name: node.name,
+        sourceIdentity: (if node.coordinates.kind == ckVcs:
+          canonicalRepositoryUrl(node.coordinates.url) else: ""),
         # The PIN's provenance, not the routing assignment — see
         # ``DevelopLockSet.pinTierOf``.
         tier: composed.pinTierOf.getOrDefault(node.name,
@@ -93070,6 +93076,7 @@ type
     ok: bool
     workspaceRoot: string
     checkoutOf: Table[string, string]
+    sourceOf: Table[string, string] ## selected row key -> canonical source identity
     selected: seq[string]
     onlyNames: seq[string]
       ## ``--only`` / ``--except`` exactly as given: a repo they excluded was
@@ -93091,6 +93098,7 @@ proc flakeDevelopSelectionOf(passthrough: openArray[string];
   ## before it touches the override file, the engine cache, the receipts
   ## directory or any checkout.
   result.checkoutOf = initTable[string, string]()
+  result.sourceOf = initTable[string, string]()
   var developArgs: DevelopAllArgs
   try:
     var forDevelop: seq[string]
@@ -93137,6 +93145,7 @@ proc flakeDevelopSelectionOf(passthrough: openArray[string];
       continue
     result.selected.add(row.name)
     result.checkoutOf[row.name] = row.path
+    result.sourceOf[row.name] = row.sourceIdentity
   result.ok = true
 
 proc flakeDeclaredInputsAt(flakeRoot: string):
@@ -93316,6 +93325,38 @@ proc hookMemberBindKey(originals: tuple[ok: bool;
       flakeOriginalRepository(originals.inputs[input]).present: repo
   else: bindKey
 
+proc flakeWorkspaceCandidate(sourceIdentity: string;
+    candidates: openArray[ResolvedRepo]; workspaceRoot: string):
+    tuple[repo, path, sourceIdentity, diagnostic: string] =
+  ## A checkout URI and its primary fetch URL name the same declared source.
+  ## Match through the existing workspace declaration before asking whether
+  ## that source was selected. Secondary remotes never authorize a match.
+  var matches: seq[ResolvedRepo]
+  for candidate in candidates:
+    var urls = @[candidate.fetchUrl]
+    if workspaceRoot.len > 0 and candidate.path.len > 0 and candidate.path != ".":
+      urls.add("file://" & os.normalizedPath(absolutePath(
+        workspaceRoot / candidate.path)))
+    for url in urls:
+      if url.len > 0 and canonicalRepositoryUrl(url) == sourceIdentity:
+        matches.add(candidate)
+        break
+  if matches.len == 0:
+    result.diagnostic = "no workspace repository matches original coordinates '" &
+      sourceIdentity & "'"
+  elif matches.len > 1:
+    var names: seq[string]
+    for candidate in matches: names.add(candidate.name)
+    names.sort()
+    result.diagnostic = "original coordinates '" & sourceIdentity &
+      "' match multiple workspace repositories: " & names.join(", ")
+  else:
+    result.repo = matches[0].name
+    result.path = absolutePath(workspaceRoot / matches[0].path)
+    result.sourceIdentity = canonicalRepositoryUrl(matches[0].fetchUrl)
+    if result.sourceIdentity.len == 0:
+      result.diagnostic = "matched workspace repository has no canonical primary source"
+
 proc hookFlakeSelection(hs: HookDevelopSet;
     workspaceRoot, flakeRoot: string): FlakeDevelopSelection =
   ## The managed hooks' flake selection (§16.5), in the shape the NF-1 binder
@@ -93338,6 +93379,7 @@ proc hookFlakeSelection(hs: HookDevelopSet;
   result.ok = true
   result.workspaceRoot = workspaceRoot
   result.checkoutOf = initTable[string, string]()
+  result.sourceOf = initTable[string, string]()
   var ignored: seq[string]
   let originals =
     if flakeRoot.len > 0: flakeInputOriginals(flakeRoot, ignored)
@@ -93345,9 +93387,26 @@ proc hookFlakeSelection(hs: HookDevelopSet;
   proc hasCoordinates(input: string): bool =
     originals.ok and originals.inputs.hasKey(input) and
       flakeOriginalRepository(originals.inputs[input]).present
+  var candidates: seq[ResolvedRepo]
+  try:
+    candidates = resolveWorkspaceProjectShared(workspaceRoot, "",
+      "flake repository coordinates").resolved.repos
+  except CatchableError:
+    discard # The binder retains its existing membership-failure diagnostic.
   for m in hs.flakeMembers:
     let key = hookMemberBindKey(originals, m.input, m.repo, m.bindKey)
     result.checkoutOf[key] = m.path
+    # The hook member was bound from the recipe; its lock original may
+    # still name another source. Never relabel that actual member path from
+    # the lock: the pre-filter must observe and exclude such disagreement.
+    var memberSources: seq[string]
+    for candidate in candidates:
+      if candidate.name == m.repo and candidate.fetchUrl.len > 0 and
+          os.normalizedPath(absolutePath(workspaceRoot / candidate.path)) ==
+            os.normalizedPath(absolutePath(m.path)):
+        memberSources.add(canonicalRepositoryUrl(candidate.fetchUrl))
+    if memberSources.len == 1:
+      result.sourceOf[key] = memberSources[0]
     if key notin result.selected: result.selected.add(key)
   for p in hs.pinnedByRecipe:
     let stripped = stripFlakeInputSuffix(p.input,
@@ -93366,8 +93425,31 @@ proc hookFlakeSelection(hs: HookDevelopSet;
       result.exceptNames.add(key)
   for n in hs.notices: result.notices.add(n)
 
+proc flakeSelectedCheckout(selection: FlakeDevelopSelection;
+    repo, sourceIdentity: string; hasCoordinates: bool):
+    tuple[key, path, diagnostic: string] =
+  ## Membership labels and locked dependency names may differ after a rename.
+  ## Permission comes from the selected source, while its existing path stays
+  ## authoritative. Coordinate-free inputs retain their exact-name fallback.
+  if not hasCoordinates:
+    if repo in selection.checkoutOf:
+      return (repo, selection.checkoutOf[repo], "")
+    return
+  if sourceIdentity.len == 0: return
+  var keys: seq[string]
+  for key in selection.checkoutOf.keys:
+    if selection.sourceOf.getOrDefault(key, "") == sourceIdentity:
+      keys.add(key)
+  keys.sort()
+  if keys.len > 1:
+    result.diagnostic = "source identity '" & sourceIdentity &
+      "' matches multiple selected develop rows: " & keys.join(", ")
+  elif keys.len == 1:
+    result.key = keys[0]
+    result.path = selection.checkoutOf[keys[0]]
+
 proc flakeBindInputsToCheckouts(inputNames: openArray[string];
-    checkoutOf: Table[string, string]; suffixes: openArray[string];
+    selection: FlakeDevelopSelection; suffixes: openArray[string];
     identity: GitToolIdentity; workspaceRoot: string;
     report: var seq[string]; onlyNames: openArray[string] = [];
     exceptNames: openArray[string] = [];
@@ -93460,49 +93542,32 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
     var repo = stripFlakeInputSuffix(name, suffixes)
     var candidatePath = if wsRoot.len > 0: wsRoot / repo else: ""
     let coordinate = flakeOriginalRepository(originals.inputs.getOrDefault(name))
+    var selectedSource = coordinate.identity
     if coordinate.present:
       var reason = coordinate.diagnostic
-      var matches: seq[ResolvedRepo]
       if reason.len == 0 and membershipFailure.len > 0:
         reason = "workspace repository identities could not be resolved (" & membershipFailure & ")"
+      var candidate: tuple[repo, path, sourceIdentity, diagnostic: string]
       if reason.len == 0:
-        # The repo's fetch URL, and its checkout as a `file://` URL (a
-        # `git+file://` input naming the checkout itself). Deliberately NOT
-        # its other declared remotes, which ``hookDevelopSetOf`` also binds
-        # by: a fork declares its upstream as a remote (`noir` declares
-        # `noir-lang/noir`), and an input that fetches the UPSTREAM must not
-        # have the fork's working tree substituted for it, nor the fork's
-        # revision recorded in a lock node that fetches from upstream. Where
-        # the hooks bind an input this does not, the hooks leave it alone
-        # (``hookSubstitutedDevelopSet`` compares only what the shell
-        # substitutes at the same checkout), so the narrower set is the safe
-        # side of the disagreement.
-        for candidate in candidates:
-          var urls = @[candidate.fetchUrl]
-          if wsRoot.len > 0 and candidate.path.len > 0 and candidate.path != ".":
-            urls.add("file://" & os.normalizedPath(absolutePath(
-              wsRoot / candidate.path)))
-          for u in urls:
-            if u.len > 0 and canonicalRepositoryUrl(u) == coordinate.identity:
-              matches.add(candidate)
-              break
-        if matches.len == 0:
-          reason = "no workspace repository matches original coordinates '" & coordinate.identity & "'"
-        elif matches.len > 1:
-          var names: seq[string]
-          for candidate in matches: names.add(candidate.name)
-          names.sort()
-          reason = "original coordinates '" & coordinate.identity & "' match multiple workspace repositories: " & names.join(", ")
+        candidate = flakeWorkspaceCandidate(coordinate.identity, candidates, wsRoot)
+        reason = candidate.diagnostic
       if reason.len > 0:
         report.add("NOT substituted: flake input '" & name & "': " & reason &
           "; it keeps its flake.lock pin (input-name fallback is disabled when original coordinates are present)")
         continue
-      repo = matches[0].name
-      candidatePath = absolutePath(wsRoot / matches[0].path)
-    if repo notin checkoutOf and
+      repo = candidate.repo
+      candidatePath = candidate.path
+      selectedSource = candidate.sourceIdentity
+    let selected = flakeSelectedCheckout(selection, repo, selectedSource,
+      coordinate.present)
+    if selected.diagnostic.len > 0:
+      report.add("NOT substituted: flake input '" & name & "': " &
+        selected.diagnostic & "; it keeps its flake.lock pin")
+      continue
+    if selected.key.len == 0 and
         (repo in exceptNames or (onlyNames.len > 0 and repo notin onlyNames)):
       continue
-    if repo notin checkoutOf:
+    if selected.key.len == 0:
       let sibling = candidatePath
       if sibling.len > 0 and dirExists(extendedPath(sibling)):
         report.add("NOT substituted: flake input '" & name & "' names repo '" &
@@ -93526,7 +93591,7 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
       else:
         unknownToWorkspace.add(name)
       continue
-    let dir = checkoutOf[repo]
+    let dir = selected.path
     if dir.len == 0 or not dirExists(extendedPath(dir)):
       # A `path:` override onto a directory that is not there is not an
       # override; it is a flake that fails to evaluate. NAMED, because
@@ -93677,9 +93742,32 @@ proc bulkExactFlakePins(flakeRoot, workspaceRoot: string;
   let explicitOverrides = explicitDevelopOverrideTargets(workspaceRoot,
     flakeRoot)
   let base = if workspaceRoot.len > 0: workspaceRoot else: flakeRoot
+  let originals = flakeInputOriginals(flakeRoot, report)
+  var candidates: seq[ResolvedRepo]
+  var membershipFailure = ""
+  try:
+    candidates = resolveWorkspaceProjectShared(workspaceRoot, "",
+      "flake repository coordinates").resolved.repos
+  except CatchableError as err:
+    membershipFailure = err.msg
   for name in inputNames:
-    let repo = stripFlakeInputSuffix(name, suffixes)
-    let checkout = selection.checkoutOf.getOrDefault(repo, "")
+    let fallback = stripFlakeInputSuffix(name, suffixes)
+    let coordinate = flakeOriginalRepository(originals.inputs.getOrDefault(name))
+    var sourceIdentity = coordinate.identity
+    var candidateDiagnostic = coordinate.diagnostic
+    if coordinate.present and candidateDiagnostic.len == 0:
+      if membershipFailure.len > 0:
+        candidateDiagnostic = membershipFailure
+      else:
+        let candidate = flakeWorkspaceCandidate(coordinate.identity, candidates,
+          workspaceRoot)
+        candidateDiagnostic = candidate.diagnostic
+        sourceIdentity = candidate.sourceIdentity
+    let selected = flakeSelectedCheckout(selection, fallback,
+      (if candidateDiagnostic.len == 0: sourceIdentity else: ""),
+      coordinate.present)
+    let repo = if selected.key.len > 0: selected.key else: fallback
+    let checkout = selected.path
     var hit = -1
     for i, p in pins:
       if p.input.len > 0 and p.input == name:
@@ -93688,7 +93776,8 @@ proc bulkExactFlakePins(flakeRoot, workspaceRoot: string;
     if hit < 0:
       # A `repro.nim` pin, or a `flake.nix` pin of the same repository under
       # another input name: by identity or by checkout, never by name.
-      let identity = identityOf.getOrDefault(name, "")
+      let identity = if coordinate.present: sourceIdentity
+        else: identityOf.getOrDefault(name, "")
       for i, p in pins:
         if p.input.len > 0: continue
         if (identity.len > 0 and p.identity == identity) or
@@ -93696,7 +93785,7 @@ proc bulkExactFlakePins(flakeRoot, workspaceRoot: string;
              p.path == os.normalizedPath(absolutePath(checkout))):
           hit = i
           break
-    if hit < 0 or repo notin selection.checkoutOf:
+    if hit < 0 or selected.key.len == 0:
       # Not pinned, or not substitutable in the first place (the binder names
       # why): nothing for this rule to skip.
       result.keep.add(name)
@@ -93766,7 +93855,7 @@ proc flakeShellBindingsOf(flakeRoot: string; passthrough: openArray[string];
     result.selection.workspaceRoot, result.inputNames, result.selection,
     suffixes, result.report)
   result.emitted = flakeBindInputsToCheckouts(result.pinRule.keep,
-    result.selection.checkoutOf, suffixes, identity,
+    result.selection, suffixes, identity,
     result.selection.workspaceRoot, result.report, result.selection.onlyNames,
     result.selection.exceptNames, flakeRoot)
   result.ok = true
@@ -96259,7 +96348,7 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     result.exitCode = 2
     return
   result.notices = selection.notices
-  let bound = flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
+  let bound = flakeBindInputsToCheckouts(declared.names, selection,
     suffixes, identity, selection.workspaceRoot, result.notices,
     selection.onlyNames, selection.exceptNames, flakeRoot)
   if bound.len == 0:
@@ -98080,7 +98169,7 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
         if r != nil and r.kind == JObject and r{"inputs"} != nil and
             r["inputs"].kind == JObject: r["inputs"]
         else: newJObject()
-      for b in flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
+      for b in flakeBindInputsToCheckouts(declared.names, selection,
           defaultFlakeInputStripSuffixes,
           ensureGitToolResolvable(tpmPathOnly, getEnv("PATH")),
           selection.workspaceRoot, bindNotices, selection.onlyNames,
@@ -98344,7 +98433,7 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   # at shell entry, which is where the inventory belongs.
   var skipped: seq[string]
   for n in selection.notices: skipped.add(n)
-  let exact = flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
+  let exact = flakeBindInputsToCheckouts(declared.names, selection,
     defaultFlakeInputStripSuffixes, identity, selection.workspaceRoot, skipped,
     selection.onlyNames, selection.exceptNames, flakeRoot)
   var state = flakeOverrideStateReport(flakeRoot, exact, identity)
@@ -98790,7 +98879,7 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
     let pinRule = bulkExactFlakePins(flakeRoot, selection.workspaceRoot,
       declared.names, selection, suffixes, notices)
     bindings = flakeBindInputsToCheckouts(pinRule.keep,
-      selection.checkoutOf, suffixes, identity, selection.workspaceRoot,
+      selection, suffixes, identity, selection.workspaceRoot,
       notices, selection.onlyNames, selection.exceptNames, flakeRoot)
 
   var state = flakeOverrideStateReport(flakeRoot, bindings, identity)
