@@ -278,6 +278,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let root = getTempDir() / (\"repro-addon-nofollow-\" & $getCur..."),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim",
+    binary: "build/test-bin/t_addon_uninstall_keeps_pre_bootstrap_inputs",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let root = getTempDir() / (\"repro-addon-uninstall-kept-\" & $..."),
+  TestSpec(
     source: "libs/repro_agent_backend/tests/t_agent_ownership_and_checkout.nim",
     binary: "build/test-bin/t_agent_ownership_and_checkout",
     defines: @[],

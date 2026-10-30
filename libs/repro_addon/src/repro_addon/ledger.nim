@@ -65,6 +65,13 @@ type
       ## Key material bootstrap created (the recipient key pair).
     lcStorePrefix = "storePrefix"
       ## A store prefix the add-on realised into ``/repro/store``.
+    lcKept = "kept"
+      ## A pre-bootstrap input kept with its content UNPINNED: one of the
+      ## deploy agent's own records (the sequence floor, the tick files),
+      ## which the agent rewrites at every tick. Never drift, never
+      ## restored from preserved bytes: uninstall captures it live before
+      ## anything is removed and puts those bytes back (spec §6.1, §6.4).
+      ## Always ``collision = adopt`` with no resource.
     lcStaticLink = "staticLink"
       ## The generation's static tree link, ``/etc/repro/static ->
       ## /repro/store/<...>-etc`` (spec §7.2); ``linkTarget`` is the tree.
@@ -307,6 +314,10 @@ proc observeDrift*(e: LedgerEntry): string =
     if not dirExists(e.path) or symlinkExists(e.path):
       return "missing (or no longer a directory)"
     ""
+  of lcKept:
+    # Content unpinned by definition: the agent owns the bytes. Even a
+    # missing record is not drift -- the agent may rotate its files.
+    ""
   of lcMount, lcDiversion, lcStorePrefix, lcAccount, lcUnitState:
     ""
 
@@ -455,7 +466,7 @@ proc expectedRecords*(l: Ledger): seq[ExpectedRecord] =
         if k != e.path:
           result.add(ExpectedRecord(component: fcSysctl, key: k, value: "*",
                                     coupled: true))
-    of lcKey, lcStorePrefix:
+    of lcKey, lcStorePrefix, lcKept:
       discard  # under /var/lib/repro and /repro: not fingerprinted
 
 proc expectedDelta*(before, after: Ledger): seq[Expectation] =

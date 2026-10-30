@@ -119,14 +119,48 @@ proc priorModeOwner(value: string): tuple[mode: int; uid, gid: int] =
   let (uid, gid) = parseOwner(f[2])
   (parseOctInt(f[1]), uid, gid)
 
-proc restorePreBootstrapInputs(roots: seq[LedgerEntry];
-                               files: seq[tuple[e: LedgerEntry; bytes: string]];
-                               keepStore: bool; r: var UninstallResult) =
+type
+  CapturedInputs* = object
+    ## The pre-bootstrap inputs an uninstall must put back (spec §6.4):
+    ## the directories, and every kept file with the bytes it holds NOW --
+    ## captured before anything is removed, because the agent's records
+    ## (``lcKept``) are rewritten at every tick and must survive byte for
+    ## byte, floor included.
+    roots*: seq[LedgerEntry]
+    files*: seq[tuple[e: LedgerEntry; bytes: string]]
+    drift*: seq[string]   ## a content-pinned input whose bytes changed
+
+proc capturePreBootstrapInputs*(l: Ledger): CapturedInputs =
+  ## Read every pre-bootstrap input off the host. An agent record is taken
+  ## as it is (its content is unpinned, so it cannot drift); a
+  ## content-pinned file is taken only when it still has its ledger
+  ## digest, else reported in ``drift`` for the drift gate.
+  for e in l.entries:
+    if not e.isPreBootstrapInput: continue
+    case e.class
+    of lcRoot, lcDir: result.roots.add(e)
+    of lcKept:
+      if fileExists(e.path) and not symlinkExists(e.path):
+        result.files.add((e, readFile(e.path)))
+    of lcEtcFile, lcKey:
+      let d = observeDrift(e)
+      if d.len > 0:
+        if not d.startsWith("missing"):
+          result.drift.add(e.path & ": " & d)
+        continue
+      result.files.add((e, if e.preserved.len > 0 and fileExists(e.preserved):
+                              readFile(e.preserved) else: readFile(e.path)))
+    else: discard
+
+proc restorePreBootstrapInputs*(captured: CapturedInputs; keepStore: bool;
+                                r: var UninstallResult) =
   ## Put the pre-bootstrap inputs back as the preflight found them: the
   ## directories first (parents before children, with their prior mode and
-  ## owner), then the kept files from the captured bytes. Below a kept
-  ## store nothing is re-created: it is still there.
-  for e in roots:
+  ## owner), then the kept files from the captured bytes, with the mode
+  ## and owner the ledger recorded for them (bootstrap never changes a
+  ## kept file's). Below a kept store nothing is re-created: it is still
+  ## there.
+  for e in captured.roots:
     if keepStore and (e.path == ReproRoot or e.path.startsWith(ReproRoot & "/")):
       continue
     try:
@@ -140,10 +174,11 @@ proc restorePreBootstrapInputs(roots: seq[LedgerEntry];
       r.removed.add(e.path & " (put back as found)")
     except CatchableError as ex:
       r.errors.add(e.path & ": " & ex.msg)
-  for (e, bytes) in files:
+  for (e, bytes) in captured.files:
     try:
-      let (mode, uid, gid) = priorModeOwner(e.replaced)
-      writeFileNoFollow(e.path, bytes, mode, uid, gid)
+      let (uid, gid) = parseOwner(e.owner)
+      createDir(parentDir(e.path))
+      writeFileNoFollow(e.path, bytes, parseOctInt(e.mode), uid, gid)
       r.removed.add(e.path & " (put back as found)")
     except CatchableError as ex:
       r.errors.add(e.path & ": " & ex.msg)
@@ -151,6 +186,15 @@ proc restorePreBootstrapInputs(roots: seq[LedgerEntry];
 proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
   let l = readLedger(ledgerCopyPath(stateDir))
+  # Pre-bootstrap inputs the add-on took over go back exactly as found
+  # (spec §6.1, §6.4). Their bytes are captured FIRST -- before any unit
+  # is stopped, any file removed or any drift judged -- because the
+  # agent's records are live: the sequence floor must come back byte for
+  # byte, or a manifest this host already accepted would replay on its
+  # kept key. A changed content-pinned input is drift like any other.
+  let captured = capturePreBootstrapInputs(l)
+  for d in captured.drift: result.drift.add(d)
+
   var byClass: array[LedgerClass, seq[LedgerEntry]]
   for e in l.entries:
     byClass[e.class].add(e)
@@ -251,24 +295,6 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
         " are kept: the uninstall is incomplete (see the drift and errors " &
         "above); fix or accept them and run uninstall again")
       return
-  # Pre-bootstrap inputs the add-on took over go back exactly as found
-  # (spec §6.1, §6.4): their bytes are captured now, before the roots they
-  # live under are removed, and written back after.
-  var keptFiles: seq[tuple[e: LedgerEntry; bytes: string]]
-  var keptRoots: seq[LedgerEntry]
-  for e in l.entries:
-    if not e.isPreBootstrapInput: continue
-    case e.class
-    of lcRoot, lcDir: keptRoots.add(e)
-    of lcEtcFile, lcKey:
-      let d = observeDrift(e)
-      if d.len > 0:
-        if not d.startsWith("missing"):
-          result.drift.add(e.path & ": " & d)
-        continue
-      keptFiles.add((e, if e.preserved.len > 0 and fileExists(e.preserved):
-                            readFile(e.preserved) else: readFile(e.path)))
-    else: discard
   for k in byClass[lcKey]:
     if not k.isPreBootstrapInput:
       removeOwned(k, result)
@@ -287,4 +313,4 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
         result.removed.add(root)
       except OSError as ex:
         result.errors.add(root & ": " & ex.msg)
-  restorePreBootstrapInputs(keptRoots, keptFiles, opts.keepStore, result)
+  restorePreBootstrapInputs(captured, opts.keepStore, result)

@@ -115,13 +115,14 @@ proc rootKindHint*(path: string): string =
     if isBtrfsSubvolume(path): "btrfs-subvolume" else: "btrfs-dir"
   else: "dir"
 
-proc takeOverRootDir*(path: string; mode = -1): string =
+proc takeOverRootDir*(path: string; mode: int): string =
   ## Take over a directory that already exists as one of the add-on's
   ## pre-bootstrap inputs (spec §6.1): it must be a real directory, never
-  ## a link; it becomes root's, and gets exactly ``mode`` when one is given
-  ## (the modes of §5.3; -1 keeps the mode it has). Returns the ledger
-  ## kind hint. The preflight accepted the directory by shape; this is the
-  ## write that the acknowledged plan authorises.
+  ## a link; it becomes root's, and gets exactly ``mode`` (the modes of
+  ## §5.3 -- every taken-over directory gets one, nothing keeps the mode it
+  ## had). Returns the ledger kind hint. The preflight accepted the
+  ## directory by shape, owner and mode; this is the write that the
+  ## acknowledged plan authorises.
   var st: Stat
   if lstat(path.cstring, st) != 0:
     raise newException(StoreRootError, path & " does not exist; the " &
@@ -130,7 +131,7 @@ proc takeOverRootDir*(path: string; mode = -1): string =
     raise newException(StoreRootError, path & " is not a directory")
   if posix.chown(path.cstring, 0, 0) != 0:
     raiseOSError(osLastError(), "chown " & path)
-  if mode >= 0 and posix.chmod(path.cstring, Mode(mode)) != 0:
+  if posix.chmod(path.cstring, Mode(mode)) != 0:
     raiseOSError(osLastError(), "chmod " & path)
   rootKindHint(path)
 

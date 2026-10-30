@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2471,
+    "nimTestBinaries": 2472,
     "pureUnitConsolidationGroups": 72,
-    "pureUnitTests": 698,
+    "pureUnitTests": 697,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2511
+    "testEntries": 2512
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1447,8 +1447,8 @@
       "graph-fixture": 18,
       "integration": 1369,
       "platform/destructive": 153,
-      "pure unit": 698,
-      "unclassified": 273
+      "pure unit": 697,
+      "unclassified": 275
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1656,9 +1656,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2471,
+    "nimTestBinaryCount": 2472,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2511
+    "testEntryCount": 2512
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8114,24 +8114,25 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_ledger_and_plan.nim",
       "sourceSuiteCount": 7,
-      "staticCaseCount": 25,
+      "staticCaseCount": 26,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
       "binary": "build/test-bin/t_addon_preflight_pre_bootstrap_inputs",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_addon"
+        "repro_addon",
+        "repro_peer_cache"
       ],
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_preflight_pre_bootstrap_inputs.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 19,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 37,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -8151,6 +8152,23 @@
       "source": "libs/repro_addon/tests/t_addon_switch_planning.nim",
       "sourceSuiteCount": 5,
       "staticCaseCount": 25,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_uninstall_keeps_pre_bootstrap_inputs",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
