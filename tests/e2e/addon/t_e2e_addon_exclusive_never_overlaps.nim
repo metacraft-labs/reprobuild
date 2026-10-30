@@ -41,18 +41,21 @@ const
   # (`@LOG@` is substituted below: a Nim triple-quoted literal swallows a
   # leading newline, so splicing the path with `&` would glue the next line
   # onto the redirect target.)
+  # The timestamp is read with the shell's own `read` builtin: a command
+  # substitution inside the TERM handler would fork while systemd is
+  # signalling the whole control group and can come back empty.
   ScriptTemplate = """#!/bin/sh
 id="$1"
-now() { cut -d' ' -f1 /proc/uptime; }
-echo "start $id $(now)" >> @LOG@
-trap 'echo "stop $id $(now)" >> @LOG@; exit 0' TERM
+read up _ < /proc/uptime
+echo "start $id $up" >> @LOG@
+trap 'read up _ < /proc/uptime; echo "stop $id $up" >> @LOG@; exit 0' TERM
 while :; do sleep 0.2; done
 """
   # Ignores SIGTERM; systemd gives up after TimeoutStopSec without a KILL.
   StubbornTemplate = """#!/bin/sh
 id="$1"
-now() { cut -d' ' -f1 /proc/uptime; }
-echo "start $id $(now)" >> @LOG@
+read up _ < /proc/uptime
+echo "start $id $up" >> @LOG@
 trap '' TERM
 while :; do sleep 0.2; done
 """
@@ -77,9 +80,13 @@ type Lifetime = object
 
 proc lifetimes(log: string): seq[Lifetime] =
   ## The instances in log order, with their start and (when logged) stop.
+  ## A malformed line is an error, never skipped: a skipped stop would
+  ## hide an overlap.
   for line in log.splitLines():
+    if line.strip().len == 0: continue
     let f = line.splitWhitespace()
-    if f.len != 3: continue
+    if f.len != 3:
+      raise newException(ValueError, "malformed lifetime log line: " & line)
     let t = parseFloat(f[2])
     if f[0] == "start":
       result.add(Lifetime(id: f[1], start: t, stop: -1))
@@ -180,7 +187,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
                                     ("repro-fixture-excl-d.service", stubborn)]))
     let currentBefore = g.run(repro & " system addon status")
     let staticBefore = g.run("readlink /etc/repro/static").strip()
-    let pidBefore = g.run("systemctl show -p MainPID --value repro-fixture-excl-d.service").strip()
+    # The stubborn instance is identified by its own process, not by the
+    # unit's MainPID: after a stop that timed out under SendSIGKILL=no the
+    # unit is `failed` and reports MainPID=0 while the process lives on.
+    let pidBefore = g.run("pgrep -f 'repro-fixture-stubborn d1' | sort").strip()
     # Generation 6: change it; the old instance will not die.
     let changed = exclusiveUnit("d2", "/usr/local/bin/repro-fixture-stubborn",
                                 "TimeoutStopSec=3\nSendSIGKILL=no\n")
@@ -190,11 +200,14 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("g6: refused with EAddOnExclusiveOverlap",
          r6.exitCode == 2 and "EAddOnExclusiveOverlap" in r6.stderr and
          "repro-fixture-excl-d.service" in r6.stderr, "exit " & $r6.exitCode & "\n" & r6.stdout & r6.stderr)
-    step("g6: the old instance is still the only one (same PID), the successor never started",
-         g.run("systemctl show -p MainPID --value repro-fixture-excl-d.service").strip() == pidBefore and
+    step("g6: the old instance is still the only one (same process), the successor never started",
+         pidBefore.len > 0 and
+         g.run("pgrep -f 'repro-fixture-stubborn d1' | sort").strip() == pidBefore and
+         g.exec("pgrep -f 'repro-fixture-stubborn d2'").exitCode != 0 and
          "d2" notin g.run("cat " & LogPath) and
          "d2" notin g.run("systemctl show -p ExecStart --value repro-fixture-excl-d.service"),
-         g.run("cat " & LogPath))
+         "pids before [" & pidBefore & "] now [" &
+         g.run("pgrep -f 'repro-fixture-stubborn' | sort").strip() & "]\n" & g.run("cat " & LogPath))
     step("g6: current and the static tree are unchanged, no pending marker",
          g.run(repro & " system addon status") == currentBefore and
          g.run("readlink /etc/repro/static").strip() == staticBefore and
