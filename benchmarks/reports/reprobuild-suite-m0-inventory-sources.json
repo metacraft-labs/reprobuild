@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2470,
+    "nimTestBinaries": 2471,
     "pureUnitConsolidationGroups": 72,
-    "pureUnitTests": 697,
+    "pureUnitTests": 698,
     "staticallyDetectedRuntimeCompilerFlowTests": 131,
-    "testEntries": 2510
+    "testEntries": 2511
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -514,7 +514,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 2,
+      "count": 3,
       "defines": [],
       "dependencyShape": [
         "repro_peer_cache"
@@ -522,7 +522,8 @@
       "owner": "libs/repro_peer_cache",
       "sources": [
         "libs/repro_peer_cache/tests/t_evidence_store_receipts_and_key_separation.nim",
-        "libs/repro_peer_cache/tests/t_peer_cache_memo_codec_round_trip.nim"
+        "libs/repro_peer_cache/tests/t_peer_cache_memo_codec_round_trip.nim",
+        "libs/repro_peer_cache/tests/t_peer_cache_private_scalar_range.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1447,7 +1448,7 @@
       "graph-fixture": 18,
       "integration": 1369,
       "platform/destructive": 153,
-      "pure unit": 697,
+      "pure unit": 698,
       "unclassified": 273
     },
     "graphOwnedTestArtifacts": [
@@ -1656,9 +1657,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2470,
+    "nimTestBinaryCount": 2471,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2510
+    "testEntryCount": 2511
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8162,13 +8163,14 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_addon"
+        "repro_addon",
+        "repro_infra"
       ],
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -17713,6 +17715,23 @@
       "source": "libs/repro_peer_cache/tests/t_peer_cache_multicast_loopback_discovery.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_peer_cache_private_scalar_range",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_peer_cache",
+      "requiresReproBinary": false,
+      "source": "libs/repro_peer_cache/tests/t_peer_cache_private_scalar_range.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

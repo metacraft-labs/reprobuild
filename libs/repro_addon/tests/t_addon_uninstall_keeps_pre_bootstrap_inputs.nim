@@ -19,6 +19,7 @@
 
 import std/[os, posix, strutils, unittest]
 
+import repro_infra
 import repro_addon/fingerprint
 import repro_addon/[addon_apply, ledger, uninstall]
 
@@ -98,6 +99,22 @@ suite "a profile cannot declare a resource at a kept path":
     check "pre-bootstrap input" in why and "cannot declare" in why
     check keptPathRefusal(previous,
       "/var/lib/repro/agent/state/deploy-agent/rpi2.seq").len > 0
+
+  test "a tmpfiles rule named like the kept fragment lands on its path and is refused":
+    # The refusal uses the planner's own targetPathOf, so every
+    # file-shaped kind is covered, not only systemFile / unit / diversion.
+    let kept = Ledger(entries: @[LedgerEntry(class: lcEtcFile,
+      path: "/etc/tmpfiles.d/repro-addon-bootstrap.conf", sha256: "cc",
+      mode: "0644", owner: "0:0", collision: "adopt")])
+    let rule = SystemResource(kind: srkLinuxTmpfilesRule,
+      address: "linux.tmpfilesRule:repro-addon-bootstrap.conf",
+      tmpfilesName: "repro-addon-bootstrap.conf")
+    check targetPathOf(rule) == "/etc/tmpfiles.d/repro-addon-bootstrap.conf"
+    check keptPathRefusal(kept, targetPathOf(rule)).len > 0
+    let other = SystemResource(kind: srkLinuxTmpfilesRule,
+      address: "linux.tmpfilesRule:repro-agent.conf",
+      tmpfilesName: "repro-agent.conf")
+    check keptPathRefusal(kept, targetPathOf(other)) == ""
 
   test "an ordinary owned path and an unknown path are not":
     check keptPathRefusal(previous, "/etc/app/app.conf") == ""
