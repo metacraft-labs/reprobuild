@@ -13,6 +13,7 @@
 ##   repro system adopt <address> --profile <file>
 ##   repro infra plan --profile <file>  (the add-on's plan sections)
 ##   repro infra apply --profile <file> (an add-on generation)
+##   repro store gc | roots | list      (the system-scope store)
 ##   repro --version
 ##
 ## Invoked under the name ``repro-addon-fingerprint`` it is the base
@@ -41,9 +42,12 @@ proc main(): int =
     return runAddonInfraApplyCli(args[2 .. ^1])
   if args.len >= 2 and args[0] == "infra" and args[1] == "plan":
     return runAddonInfraPlanCli(args[2 .. ^1])
+  if args.len >= 1 and args[0] == "store":
+    return runAddonStoreCli(args[1 .. ^1])
   stderr.write("usage: repro system addon <command> … | " &
                "repro system adopt <address> --profile <file> | " &
-               "repro infra plan|apply --profile <file> | repro --version\n\n")
+               "repro infra plan|apply --profile <file> | " &
+               "repro store gc|roots|list | repro --version\n\n")
   stderr.write(AddonUsage)
   2
 

@@ -88,9 +88,16 @@ suite "add-on-debian realisation profile":
     linuxFirewallRule(r, chain = "inet repro input", name = "web",
       protocol = "tcp", action = "accept", direction = "inbound",
       localPort = "443")
-    # The collision opt-ins (A3) and the unit-state and tool kinds.
+    # The collision opt-ins (A3), the unit-state and tool kinds, and the
+    # switch's transition fields and classes (A4).
     systemdSystemUnit(r, name = "cron.service", content = "[Service]\n",
-      collision = "dropIn", dropInName = "nice", restartIfChanged = false)
+      collision = "dropIn", dropInName = "nice", restartIfChanged = false,
+      stopOnRemoval = false, reloadIfChanged = true, exclusive = true)
+    systemdSystemDropIn(r, unit = "cron.service", name = "nice",
+      content = "[Service]\nNice=5\n", restartIfChanged = false)
+    linuxSysusersEntry(r, name = "web", kind = "user", id = "990",
+      description = "web service", home = "/var/lib/web",
+      shell = "/usr/sbin/nologin")
     fsSystemFile(r, path = "/etc/ssh/sshd_config", content = "x",
       collision = "divert")
     systemdUnitState(r, name = "avahi-daemon.service", enabled = true,

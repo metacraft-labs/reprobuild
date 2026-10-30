@@ -129,13 +129,21 @@ proc addOnDebianProfile*(): RealisationProfile =
   result.kinds = @[
     KindRule(kind: "systemd.systemUnit", class: fcShared,
       fields: shared("name", "content", "enabled", "aptClosureLock",
-                     "restartIfChanged") &
+                     "restartIfChanged", "stopOnRemoval", "reloadIfChanged",
+                     "exclusive") &
         @[FieldRule(field: "collision", class: fcAddOnSpecific,
             reason: "the opt-in when a package provides a unit of the " &
               "same name (spec §4.3): `dropIn` or `replace`"),
           FieldRule(field: "dropInName", class: fcAddOnSpecific,
             reason: "names the drop-in file of a `collision = dropIn` " &
               "unit")]),
+    KindRule(kind: "systemd.systemDropIn", class: fcAddOnSpecific,
+      reason: "a drop-in for a distribution unit the add-on does not " &
+        "own, at `/etc/systemd/system/<unit>.d/50-repro-<name>.conf` " &
+        "(spec §4.1, the `dropIn` class)",
+      fields: shared("unit", "name", "content", "restartIfChanged")),
+    KindRule(kind: "linux.sysusersEntry", class: fcShared,
+      fields: shared("name", "kind", "id", "description", "home", "shell")),
     KindRule(kind: "systemd.unitState", class: fcAddOnSpecific,
       reason: "the desired enablement and activity of a distribution " &
         "unit the add-on does not own (spec §4.1)",

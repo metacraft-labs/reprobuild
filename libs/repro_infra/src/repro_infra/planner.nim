@@ -162,7 +162,7 @@ proc desiredDigestForKind*(op: PrivilegedOperation): string =
      pokLinuxFirewallRule,
      pokLinuxNixosSystemModule, pokMacosDarwinSystemModule,
      pokLinuxFhsSandbox, pokLinuxDpkgDiversion, pokSystemdUnitState,
-     pokLinuxAddOnTool:
+     pokLinuxAddOnTool, pokSystemdSystemDropIn, pokLinuxSysusersEntry:
     # The M2 (Dotfiles-Migration-Completion) NixOS + nix-darwin
     # escape-hatch drivers are POSIX-side; their digest lives in
     # posix_system_driver alongside the other Phase-C kinds.
@@ -246,6 +246,10 @@ proc observeResource*(r: SystemResource): ResourceObservation =
         observeSystemdUnitState(op)
       of srkLinuxAddOnTool:
         observeLinuxAddOnTool(op)
+      of srkSystemdSystemDropIn:
+        observeSystemdSystemDropIn(op)
+      of srkLinuxSysusersEntry:
+        observeLinuxSysusersEntry(op)
       of srkLinuxFhsSandbox:
         observeLinuxFhsSandbox(op)
       of srkLinuxDpkgDiversion:
@@ -429,6 +433,11 @@ proc summaryLine(r: SystemResource; action: string): string =
       " state=" & (if r.usRunning: "Running" else: "Stopped")
   of srkLinuxAddOnTool:
     action & " add-on-tool " & r.atCommand & " -> " & r.atProgram
+  of srkSystemdSystemDropIn:
+    action & " system-drop-in " & r.diUnit & ".d/50-repro-" & r.diName &
+      ".conf" & (if r.diRestartHeld: " (restart held)" else: "")
+  of srkLinuxSysusersEntry:
+    action & " sysusers-entry " & r.seKind & " " & r.seName
   of srkLinuxFhsSandbox:
     action & " fhs-sandbox " & r.fsbBinPath &
       " (" & $r.fsbFhsTreeRoots.len & " tree-root" &

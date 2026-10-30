@@ -44,6 +44,7 @@ import ./etc_write
 import ./fingerprint
 import ./host_exec
 import ./mutations
+import ./static_tree
 
 type
   PackageOwnership* = object
@@ -267,6 +268,10 @@ type
     ## Everything the decision table looks at for one target path.
     path*: string
     linkComponent*: string     ## a symlink on the path, or ""
+    ownLink*: bool             ## the leaf is the add-on's own link into
+                               ## the static tree (`/etc/X ->
+                               ## /etc/repro/static/X`, spec §7.2): not a
+                               ## foreign link, and observed through it
     exists*: bool
     isRegular*: bool
     sha256*: string            ## of the file, when a regular file
@@ -281,7 +286,21 @@ proc observeTarget*(d: CollisionDriver; path: string;
   result.path = path
   when not mutated("observer-checks-path-text-only"):
     result.linkComponent = symlinkComponent(path)
-  if symlinkExists(path):
+  # The add-on's own materialisation of this very path is not a foreign
+  # link: a leaf link whose target is exactly `/etc/repro/static/<rel>`
+  # is the previous generation's link-form object, read through (its
+  # content is what the consumer sees) and never refused. Any other
+  # target, or a link on a parent component, stays a refusal.
+  if result.linkComponent == path and
+      isStaticLinkTarget(path, readLinkNoFollow(path)):
+    result.linkComponent = ""
+    result.ownLink = true
+  if result.ownLink:
+    result.exists = true
+    if fileExists(path):
+      result.isRegular = true
+      result.sha256 = sha256OfFile(path)
+  elif symlinkExists(path):
     result.exists = true
   elif fileExists(path):
     result.exists = true
@@ -517,6 +536,9 @@ type
     unit*: string
     observation*: string
     observedSha256*: string
+    desiredSha256*: string
+      ## What the switch's flip (step 3, between the plan and this
+      ## guard) legitimately puts behind the add-on's own link.
     verdict*: CollisionVerdict
 
 proc preWriteRefusal*(d: CollisionDriver; t: PlannedTarget): string =
@@ -533,6 +555,10 @@ proc preWriteRefusal*(d: CollisionDriver; t: PlannedTarget): string =
     return "refusing " & t.address & " at write time: the ownership " &
       "observation changed since the plan (" & t.observation & " -> " &
       obsNow & ")"
+  if o.ownLink and o.sha256 == t.desiredSha256:
+    # The static tree was flipped after the plan: the add-on's own link
+    # now shows the planned bytes. That is the switch, not a change.
+    return ""
   if t.kind != tkDiversion and o.sha256 != t.observedSha256 and
       t.verdict notin {cvDivert}:
     return "refusing " & t.address & " at write time: " & t.path &
@@ -560,6 +586,14 @@ proc makePreWriteGuard*(d: CollisionDriver;
       if op.suDestroy: return ""
     of pokLinuxDpkgDiversion:
       if op.ddDestroy: return ""
+    of pokSystemdSystemDropIn:
+      if op.diDestroy: return ""
+    of pokLinuxSysctl:
+      if op.sysctlDestroy: return ""
+    of pokLinuxTmpfilesRule:
+      if op.tmpfilesDestroy: return ""
+    of pokLinuxSysusersEntry:
+      if op.seDestroy: return ""
     else:
       discard
     preWriteRefusal(d, t)

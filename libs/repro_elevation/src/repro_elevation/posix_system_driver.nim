@@ -53,6 +53,7 @@ import repro_dsl_stdlib/packages/apt_closure
 
 import ./errors
 import ./fixture_driver
+import ./nofollow_write
 import ./operations
 import ./os_system_parse
 import ./posix_system_parse
@@ -412,6 +413,16 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       ZeroDigestHex
     else:
       posixDigestHexOfText(op.tmpfilesContent)
+  of pokSystemdSystemDropIn:
+    if op.diDestroy:
+      ZeroDigestHex
+    else:
+      posixDigestHexOfText(op.diContent)
+  of pokLinuxSysusersEntry:
+    if op.seDestroy:
+      ZeroDigestHex
+    else:
+      posixDigestHexOfText(op.seContent)
   of pokLinuxSudoersRule:
     if op.sudoersDestroy:
       ZeroDigestHex
@@ -605,6 +616,119 @@ proc applyMacosSystemDefault*(op: PrivilegedOperation):
     raiseNotImplementedPlatform("macos.systemDefault apply")
 
 # ===========================================================================
+# Managed objects under /etc: how every Linux driver below reads and writes
+# a file it owns.
+#
+# WRITES NEVER FOLLOW A LINK (ReproOS Add-On Mode threat model T34, G29).
+# A path-based `open(fmWrite)` resolves every symlink on the way, so a
+# link planted on a managed path between the plan and the write redirects
+# root's bytes anywhere. Every writer here goes through
+# `nofollow_write`: the directory is walked with `openat(O_NOFOLLOW)`,
+# the new inode is created beside the leaf and renamed over it.
+#
+# LINK OR COPY. On an add-on host the switch decides per operation whether
+# the object is a symlink into the generation's static tree or a regular
+# file (`FixtureContext.addOn`, spec §7.2 steps 4 and 5); outside add-on
+# mode every object is a copy, as before.
+#
+# A DANGLING LINK IS PRESENT. `fileExists` says no for a symlink whose
+# target is gone -- exactly what a link-form object of a previous
+# generation looks like after the static tree was flipped to one that no
+# longer carries it. Reporting it absent would make the destroy a no-op
+# and leave the dangling link behind, so the observers below report it
+# present with a digest no desired state has.
+# ===========================================================================
+
+proc danglingLinkDigestHex(path: string): string =
+  ## The digest observed for a symlink at `path` whose target is gone:
+  ## distinct from every content digest and from `ZeroDigestHex`.
+  posixDigestHexOfText("dangling-link:" & expandSymlink(path) & "\n")
+
+proc observeManagedFile(path: string): ObservedOperationState =
+  ## Observe a managed file through its link (the content is what the
+  ## consumer sees), a dangling link as present (see above), anything
+  ## else as absent.
+  if fileExists(path):
+    result.present = true
+    result.digestHex = posixDigestHexOfText(readFile(path))
+  elif symlinkExists(path):
+    result.present = true
+    result.digestHex = danglingLinkDigestHex(path)
+  else:
+    result.present = false
+    result.digestHex = ZeroDigestHex
+
+const DriverMutation {.strdefine: "reproAddonMutation".} = ""
+  ## The add-on's falsifying-mutation build switch
+  ## (`repro_addon/mutations.nim`); read here because the mutation
+  ## `path-based-write-follows-links` is a property of this writer. A
+  ## build without the define has none of that code.
+
+proc writeManagedFile(m: AddOnMaterialisation; path, content: string;
+                      defaultMode: int; what: string) =
+  ## Put `content` at `path` as the add-on asked: a link to
+  ## `m.linkTarget` when set, else a copy with the mode an existing
+  ## regular file at the path already has (an operator's `chmod 0600`
+  ## on a managed configuration file survives an update) or
+  ## `defaultMode`. Atomic and never through a link; a link on the path
+  ## is `EProtocol` naming it.
+  when DriverMutation == "path-based-write-follows-links":
+    # The falsifying mutation: the pre-A4 writer, a path-based
+    # `open(fmWrite)` that resolves every link on the path.
+    if m.linkTarget.len == 0:
+      createDir(parentDir(path))
+      var f: File
+      if not open(f, path, fmWrite):
+        raiseProtocol(what & " cannot open " & path)
+      try:
+        if content.len > 0:
+          discard f.writeBuffer(unsafeAddr content[0], content.len)
+      finally:
+        close(f)
+      return
+  try:
+    if m.linkTarget.len > 0:
+      replaceWithLinkNoFollow(path, m.linkTarget)
+    else:
+      let (kind, mode) = leafNoFollow(path)
+      let finalMode = if kind == lkFile and mode != 0: mode else: defaultMode
+      writeFileNoFollow(path, content, finalMode)
+  except SymlinkOnPath as e:
+    raiseProtocol(what & " refuses to write through a symbolic link: " &
+      e.link & " (threat model G29)")
+  except NoFollowError as e:
+    raiseProtocol(what & " cannot write " & path & ": " & e.msg)
+
+proc removeManagedFile(path, what: string): bool =
+  ## Remove the file or link (dangling included) at `path` without
+  ## following anything; false when there was nothing there.
+  try:
+    removeLeafNoFollow(path)
+  except SymlinkOnPath as e:
+    raiseProtocol(what & " refuses to remove through a symbolic link: " &
+      e.link & " (threat model G29)")
+  except NoFollowError as e:
+    raiseProtocol(what & " cannot remove " & path & ": " & e.msg)
+
+proc createManagedDirs(path, what: string) =
+  ## `mkdir -p` that refuses a link on the way.
+  when DriverMutation == "path-based-write-follows-links":
+    createDir(path)
+    return
+  try:
+    createDirsNoFollow(path)
+  except SymlinkOnPath as e:
+    raiseProtocol(what & " refuses to create a directory through a " &
+      "symbolic link: " & e.link & " (threat model G29)")
+  except NoFollowError as e:
+    raiseProtocol(what & " cannot create " & path & ": " & e.msg)
+
+proc systemctlDaemonReload(what: string) =
+  let (reloadOut, reloadCode) = execCmdEx("systemctl daemon-reload")
+  if reloadCode != 0:
+    raiseProtocol(what & " daemon-reload failed: " & reloadOut.strip())
+
+# ===========================================================================
 # systemd.systemUnit — unit file under /etc/systemd/system/, `systemctl`.
 # ===========================================================================
 
@@ -616,13 +740,9 @@ proc observeSystemdSystemUnit*(op: PrivilegedOperation):
   ## the lifecycle compares).
   when defined(linux):
     let path = systemUnitPath(op.suName)
-    if not fileExists(path):
-      result.present = false
-      result.digestHex = ZeroDigestHex
+    result = observeManagedFile(path)
+    if not result.present or not fileExists(path):
       return
-    let content = readFile(path)
-    result.present = true
-    result.digestHex = posixDigestHexOfText(content)
     # A unit whose `package(apt)` closure is missing from the store is not
     # in its desired state even when the file bytes match: report a digest
     # no desired state has, so the plan carries an update that realises it.
@@ -630,7 +750,8 @@ proc observeSystemdSystemUnit*(op: PrivilegedOperation):
       let lock = parseAptClosureLock(op.suAptClosureLock)
       if not aptClosureRealised(AddOnSystemStoreRoot, lock):
         result.digestHex = posixDigestHexOfText("apt-closure-absent:" &
-          aptClosurePrefixPath(AddOnSystemStoreRoot, lock) & "\n" & content)
+          aptClosurePrefixPath(AddOnSystemStoreRoot, lock) & "\n" &
+          readFile(path))
     # `systemctl show` is queried for completeness; the exit code is
     # not an error (a disabled / inactive unit is a valid state).
     discard execCmdEx("systemctl show " & quoteShell(op.suName) &
@@ -673,13 +794,23 @@ proc systemdUnitIsActive*(name: string): bool =
   else:
     false
 
-proc applySystemdSystemUnit*(op: PrivilegedOperation):
+proc applySystemdSystemUnit*(ctx: FixtureContext;
+                             op: PrivilegedOperation):
     ObservedOperationState =
   ## Write the unit file, `systemctl daemon-reload`, then optionally
   ## `systemctl enable --now` (NO `--user` — this is a system unit), then
   ## the §7.3 transition: a unit that was active and whose file, closure or
   ## dependency changed is restarted (`systemdUnitTransition`). The
   ## destroy direction `disable --now`s and removes the file.
+  ##
+  ## ON AN ADD-ON HOST (`ctx.addOn`, ReproOS Add-On Mode §7.2) the file
+  ## may be a link into the generation's static tree, and when the switch
+  ## orchestrates the transitions this driver only writes, reloads and
+  ## converges enablement (`enable` / `disable` without `--now`): the
+  ## switch stopped what had to stop before the files changed (step 2)
+  ## and starts, restarts or reloads in dependency order afterwards
+  ## (step 7). The destroy direction then removes the file (the switch
+  ## disabled and stopped the unit in step 2) and reloads.
   ##
   ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): once the dispatch-layer
   ## plan-time-baseline drift gate is removed (per
@@ -715,15 +846,15 @@ proc applySystemdSystemUnit*(op: PrivilegedOperation):
         "(staging another agent's install), declare the resource as " &
         "`fs.systemFile` so the carve-out doesn't apply.")
     let path = systemUnitPath(op.suName)
+    let m = ctx.materialisationOf(op)
     if op.suDestroy:
-      discard execCmd("systemctl disable --now " & quoteShell(op.suName))
-      if fileExists(path):
-        try: removeFile(path)
-        except OSError: discard
+      if not m.orchestrated:
+        discard execCmd("systemctl disable --now " & quoteShell(op.suName))
+      discard removeManagedFile(path, "systemd.systemUnit")
       discard execCmd("systemctl daemon-reload")
       # Post-apply re-probe: a destroy is "done" when the unit file
       # no longer exists.
-      if fileExists(path):
+      if fileExists(path) or symlinkExists(path):
         raiseProtocol("systemd.systemUnit destroy of '" & op.suName &
           "' post-apply observation disagrees with desired state: " &
           "unit file " & path & " still exists after `disable --now` " &
@@ -752,47 +883,42 @@ proc applySystemdSystemUnit*(op: PrivilegedOperation):
       except CatchableError as ex:
         raiseProtocol("systemd.systemUnit '" & op.suName &
           "': realising its package(apt) closure failed: " & ex.msg)
-    createDir(SystemdSystemUnitDir)
-    # Binary-mode write so the bytes on disk equal the operator's
-    # `suContent` verbatim — drift detection compares BLAKE3 digests,
-    # so any CRLF translation would be constant false-positive drift.
-    block:
-      var f: File
-      if not open(f, path, fmWrite):
-        raiseProtocol("systemd.systemUnit cannot open " & path)
-      try:
-        if op.suContent.len > 0:
-          discard f.writeBuffer(unsafeAddr op.suContent[0], op.suContent.len)
-      finally:
-        close(f)
-    let (reloadOut, reloadCode) = execCmdEx("systemctl daemon-reload")
-    if reloadCode != 0:
-      raiseProtocol("systemd.systemUnit daemon-reload failed: " &
-        reloadOut.strip())
+    createManagedDirs(SystemdSystemUnitDir, "systemd.systemUnit")
+    # The bytes on disk equal the operator's `suContent` verbatim — drift
+    # detection compares BLAKE3 digests, so any translation would be
+    # constant false-positive drift. Written beside the leaf and renamed
+    # over it, never through a link.
+    writeManagedFile(m, path, op.suContent, 0o644, "systemd.systemUnit")
+    systemctlDaemonReload("systemd.systemUnit")
     if op.suEnabled:
+      # Orchestrated: `enable` only converges the [Install] links; the
+      # switch starts the unit in its own step.
+      let verb = if m.orchestrated: "enable" else: "enable --now"
       let (enOut, enCode) = execCmdEx(
-        "systemctl enable --now " & quoteShell(op.suName))
+        "systemctl " & verb & " " & quoteShell(op.suName))
       if enCode != 0:
-        raiseProtocol("systemd.systemUnit enable --now of '" &
+        raiseProtocol("systemd.systemUnit " & verb & " of '" &
           op.suName & "' failed: " & enOut.strip())
     # §7.3: a running unit picks up a changed file, closure or dependency
     # now. `enable --now` above does not restart an already-running unit,
     # and before this step the new configuration waited for whatever
     # restarted the daemon next (Bring-Up-Plan.md §6 item 4 of the rpi2
-    # profile).
+    # profile). An orchestrated apply leaves this to the switch's
+    # transition list.
     var restartPending = false
-    case systemdUnitTransition(wasActive, fileChanged,
-        op.suRestartRequested, op.suRestartHeld)
-    of sutRestart:
-      let (rsOut, rsCode) = execCmdEx(
-        "systemctl restart " & quoteShell(op.suName))
-      if rsCode != 0:
-        raiseProtocol("systemd.systemUnit restart of '" & op.suName &
-          "' after its change failed: " & rsOut.strip())
-    of sutPendingRestart:
-      restartPending = true
-    of sutNone:
-      discard
+    if not m.orchestrated:
+      case systemdUnitTransition(wasActive, fileChanged,
+          op.suRestartRequested, op.suRestartHeld)
+      of sutRestart:
+        let (rsOut, rsCode) = execCmdEx(
+          "systemctl restart " & quoteShell(op.suName))
+        if rsCode != 0:
+          raiseProtocol("systemd.systemUnit restart of '" & op.suName &
+            "' after its change failed: " & rsOut.strip())
+      of sutPendingRestart:
+        restartPending = true
+      of sutNone:
+        discard
     # Post-apply re-probe — see the contract comment above.
     var post = observeSystemdSystemUnit(op)
     post.serviceRestartPending = restartPending
@@ -1216,21 +1342,18 @@ proc observeFsSystemFile*(op: PrivilegedOperation): ObservedOperationState =
     let scopeErr = systemFileScopeError(op.sfPath, programDataRoot())
     if scopeErr.len > 0:
       raiseProtocol(scopeErr)
-    if not fileExists(op.sfPath):
-      result.present = false
-      result.digestHex = ZeroDigestHex
-      return
-    let content = readFile(op.sfPath)
-    result.present = true
-    result.digestHex = posixDigestHexOfText(content)
+    result = observeManagedFile(op.sfPath)
   else:
     raiseNotImplementedPlatform("fs.systemFile observe")
 
-proc applyFsSystemFile*(op: PrivilegedOperation): ObservedOperationState =
+proc applyFsSystemFile*(ctx: FixtureContext;
+                        op: PrivilegedOperation): ObservedOperationState =
   ## Write (or, for the destroy direction, delete) the managed file.
   ## The path is re-validated against the allowlist before any I/O —
   ## a path outside `/etc/`, `/usr/local/etc/`, `${PROGRAMDATA}` is
-  ## refused with an out-of-scope protocol error.
+  ## refused with an out-of-scope protocol error. The write never follows
+  ## a symbolic link on the path (G29), and on an add-on host the file may
+  ## be a link into the generation's static tree (`ctx.addOn`).
   ##
   ## The bytes written come from `desiredFileContent(op)`, which
   ## dispatches on the external-source fields (`sfSourceUrl`,
@@ -1252,12 +1375,15 @@ proc applyFsSystemFile*(op: PrivilegedOperation): ObservedOperationState =
     if scopeErr.len > 0:
       raiseProtocol(scopeErr)
     if op.sfDestroy:
-      if fileExists(op.sfPath):
-        try: removeFile(op.sfPath)
-        except OSError: discard
+      when defined(linux):
+        discard removeManagedFile(op.sfPath, "fs.systemFile")
+      else:
+        if fileExists(op.sfPath):
+          try: removeFile(op.sfPath)
+          except OSError: discard
       # Post-apply re-probe: a destroy is "done" when the file no
       # longer exists.
-      if fileExists(op.sfPath):
+      if fileExists(op.sfPath) or symlinkExists(op.sfPath):
         raiseProtocol("fs.systemFile destroy of " & op.sfPath &
           " post-apply observation disagrees with desired state: " &
           "the file still exists after `removeFile`.")
@@ -1270,17 +1396,23 @@ proc applyFsSystemFile*(op: PrivilegedOperation): ObservedOperationState =
     # the target with empty bytes when the source is bad.
     let desired = desiredFileContent(op)
     let parent = parentDir(op.sfPath)
-    if parent.len > 0:
-      createDir(parent)
-    block:
-      var f: File
-      if not open(f, op.sfPath, fmWrite):
-        raiseProtocol("fs.systemFile cannot open " & op.sfPath)
-      try:
-        if desired.len > 0:
-          discard f.writeBuffer(unsafeAddr desired[0], desired.len)
-      finally:
-        close(f)
+    when defined(linux):
+      if parent.len > 0:
+        createManagedDirs(parent, "fs.systemFile")
+      writeManagedFile(ctx.materialisationOf(op), op.sfPath, desired, 0o644,
+                       "fs.systemFile")
+    else:
+      if parent.len > 0:
+        createDir(parent)
+      block:
+        var f: File
+        if not open(f, op.sfPath, fmWrite):
+          raiseProtocol("fs.systemFile cannot open " & op.sfPath)
+        try:
+          if desired.len > 0:
+            discard f.writeBuffer(unsafeAddr desired[0], desired.len)
+        finally:
+          close(f)
     # Post-apply re-probe — see the contract comment above.
     let post = observeFsSystemFile(op)
     let desiredHex = posixDigestHexOfText(desired)
@@ -1643,18 +1775,11 @@ proc applyEnvSystemVariable*(op: PrivilegedOperation):
       result.present = false
       result.digestHex = ZeroDigestHex
       return
-    createDir(SystemEnvProfileDir)
+    createManagedDirs(SystemEnvProfileDir, "env.systemVariable")
     let content = systemEnvFragmentContent(
       op.evName, op.evContribution, op.evIsPathList)
-    block:
-      var f: File
-      if not open(f, path, fmWrite):
-        raiseProtocol("env.systemVariable cannot open " & path)
-      try:
-        if content.len > 0:
-          discard f.writeBuffer(unsafeAddr content[0], content.len)
-      finally:
-        close(f)
+    writeManagedFile(AddOnMaterialisation(), path, content, 0o644,
+                     "env.systemVariable")
     # Post-apply re-probe — see the contract comment above.
     let post = observeEnvSystemVariable(op)
     let desiredHex = posixDigestHexOfText(op.evContribution.join("\n"))
@@ -2116,17 +2241,20 @@ proc readSysctlDropInValue*(content, key: string): tuple[present: bool;
 # ---------------------------------------------------------------------------
 
 when defined(linux):
-  proc writeLinuxDropInFile(path, content: string; modeOctal: int) =
-    var f: File
-    if not open(f, path, fmWrite):
-      raiseProtocol("linux drop-in driver cannot open " & path)
+  proc writeLinuxDropInFile(path, content: string; modeOctal: int;
+                            m = AddOnMaterialisation()) =
+    ## A copy with exactly `modeOctal` (or, on an add-on host, the link
+    ## the switch asked for), never written through a link on the path.
     try:
-      if content.len > 0:
-        discard f.writeBuffer(unsafeAddr content[0], content.len)
-    finally:
-      close(f)
-    let modeStr = toOct(modeOctal, 4)
-    discard execCmd("chmod " & modeStr & " " & quoteShell(path))
+      if m.linkTarget.len > 0:
+        replaceWithLinkNoFollow(path, m.linkTarget)
+      else:
+        writeFileNoFollow(path, content, modeOctal)
+    except SymlinkOnPath as e:
+      raiseProtocol("linux drop-in driver refuses to write through a " &
+        "symbolic link: " & e.link & " (threat model G29)")
+    except NoFollowError as e:
+      raiseProtocol("linux drop-in driver cannot write " & path & ": " & e.msg)
 
 proc observeLinuxSysctl*(op: PrivilegedOperation):
     ObservedOperationState =
@@ -2140,8 +2268,7 @@ proc observeLinuxSysctl*(op: PrivilegedOperation):
   when defined(linux):
     let path = sysctlDropInPath(op)
     if not fileExists(path):
-      result.present = false
-      result.digestHex = ZeroDigestHex
+      result = observeManagedFile(path)
       return
     let content = readFile(path)
     let observed = readSysctlDropInValue(content, op.sysctlKey)
@@ -2172,10 +2299,8 @@ proc destroyLinuxSysctl*(op: PrivilegedOperation):
   ## Post-apply re-probe asserts the file is gone.
   when defined(linux):
     let path = sysctlDropInPath(op)
-    if fileExists(path):
-      try: removeFile(path)
-      except OSError: discard
-    if fileExists(path):
+    discard removeManagedFile(path, "linux.sysctl")
+    if fileExists(path) or symlinkExists(path):
       raiseProtocol("linux.sysctl destroy of " & path &
         " post-apply observation disagrees with desired state: " &
         "the drop-in file still exists after `removeFile`.")
@@ -2184,11 +2309,19 @@ proc destroyLinuxSysctl*(op: PrivilegedOperation):
   else:
     raiseNotImplementedPlatform("linux.sysctl destroy")
 
-proc applyLinuxSysctl*(op: PrivilegedOperation):
-    ObservedOperationState =
+proc applyLinuxSysctl*(ctx: FixtureContext;
+                       op: PrivilegedOperation): ObservedOperationState =
   ## Write the drop-in file, then `sysctl -p <path>` to load it into
   ## the live kernel. Idempotent: a re-apply with unchanged content
   ## still re-runs `sysctl -p`, which is itself idempotent.
+  ##
+  ## ON AN ADD-ON HOST the switch applies sysctl fragments itself by
+  ## restarting the host's `systemd-sysctl.service` and observes the
+  ## values from the host namespaces (ReproOS Add-On Mode §7.2 step 6,
+  ## threat model G35): a `net.*` key written from inside the apply
+  ## unit's `PrivateNetwork=yes` would land in a throwaway namespace. So
+  ## an orchestrated apply writes the fragment (a link or a copy) and
+  ## runs nothing here.
   ##
   ## POST-APPLY RE-PROBE CONTRACT (M82 Phase A): the per-driver post-
   ## apply re-probe is the integrity check. After the write +
@@ -2199,16 +2332,18 @@ proc applyLinuxSysctl*(op: PrivilegedOperation):
     if op.sysctlDestroy:
       return destroyLinuxSysctl(op)
     let path = sysctlDropInPath(op)
-    createDir(LinuxSysctlDir)
+    createManagedDirs(LinuxSysctlDir, "linux.sysctl")
     let content = sysctlDropInContent(op.sysctlKey, op.sysctlValue)
-    writeLinuxDropInFile(path, content, 0o644)
-    # `sysctl -p <path>` loads only this file's keys; `quoteShell` on
-    # the path is defence in depth (the basename charset already blocks
-    # shell metacharacters).
-    let (loadOut, loadCode) = execCmdEx("sysctl -p " & quoteShell(path))
-    if loadCode != 0:
-      raiseProtocol("linux.sysctl `sysctl -p " & path & "` failed: " &
-        loadOut.strip())
+    let m = ctx.materialisationOf(op)
+    writeLinuxDropInFile(path, content, 0o644, m)
+    if not m.orchestrated:
+      # `sysctl -p <path>` loads only this file's keys; `quoteShell` on
+      # the path is defence in depth (the basename charset already blocks
+      # shell metacharacters).
+      let (loadOut, loadCode) = execCmdEx("sysctl -p " & quoteShell(path))
+      if loadCode != 0:
+        raiseProtocol("linux.sysctl `sysctl -p " & path & "` failed: " &
+          loadOut.strip())
     # Post-apply re-probe — see the contract comment above.
     let post = observeLinuxSysctl(op)
     let desiredHex = posixDigestHexOfText(content)
@@ -2226,6 +2361,128 @@ proc applyLinuxSysctl*(op: PrivilegedOperation):
     result = post
   else:
     raiseNotImplementedPlatform("linux.sysctl apply")
+
+# ===========================================================================
+# systemd.systemDropIn — a drop-in of a unit the profile does not own
+# (ReproOS Add-On Mode §4.1, `dropIn` class):
+# /etc/systemd/system/<unit>.d/50-repro-<name>.conf + daemon-reload.
+# ===========================================================================
+
+proc systemDropInOpPath*(op: PrivilegedOperation): string =
+  systemDropInPath(op.diUnit, op.diName)
+
+proc observeSystemdSystemDropIn*(op: PrivilegedOperation):
+    ObservedOperationState =
+  when defined(linux):
+    observeManagedFile(systemDropInOpPath(op))
+  else:
+    raiseNotImplementedPlatform("systemd.systemDropIn observe")
+
+proc applySystemdSystemDropIn*(ctx: FixtureContext;
+                               op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Write the drop-in (a link or a copy, never through a link on the
+  ## path) and reload systemd so the unit's definition picks it up. The
+  ## destroy direction removes it, the `.d` directory when that leaves
+  ## it empty, and reloads. The unit itself is NOT restarted here: on an
+  ## add-on host the switch's transition list does that (§7.3), and
+  ## nowhere else is this kind reachable.
+  when defined(linux):
+    if not hostUsesSystemd():
+      raiseProtocol("systemd.systemDropIn for '" & op.diUnit &
+        "' refused on a non-systemd host")
+    let path = systemDropInOpPath(op)
+    if op.diDestroy:
+      discard removeManagedFile(path, "systemd.systemDropIn")
+      discard removeEmptyDirNoFollow(parentDir(path))
+      systemctlDaemonReload("systemd.systemDropIn")
+      if fileExists(path) or symlinkExists(path):
+        raiseProtocol("systemd.systemDropIn destroy of " & path &
+          " post-apply observation disagrees with desired state: the " &
+          "drop-in still exists")
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    createManagedDirs(parentDir(path), "systemd.systemDropIn")
+    writeManagedFile(ctx.materialisationOf(op), path, op.diContent, 0o644,
+                     "systemd.systemDropIn")
+    systemctlDaemonReload("systemd.systemDropIn")
+    let post = observeSystemdSystemDropIn(op)
+    let desiredHex = posixDigestHexOfText(op.diContent)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("systemd.systemDropIn " & path &
+        " post-apply observation disagrees with desired state: " &
+        "observed present=" & $post.present & " digest " &
+        (if post.digestHex.len >= 12: post.digestHex[0 ..< 12]
+         else: post.digestHex) & ", desired digest " &
+        (if desiredHex.len >= 12: desiredHex[0 ..< 12] else: desiredHex))
+    result = post
+  else:
+    raiseNotImplementedPlatform("systemd.systemDropIn apply")
+
+# ===========================================================================
+# linux.sysusersEntry — one sysusers.d(5) fragment, applied with
+# `systemd-sysusers <file>` (ReproOS Add-On Mode §4.1, `sysusers` class).
+# The account it creates is never deleted: a reused UID would hand the
+# files the old account owns to a new owner (spec §6.4).
+# ===========================================================================
+
+proc sysusersEntryOpPath*(op: PrivilegedOperation): string =
+  sysusersFragmentPath(op.seName)
+
+proc observeLinuxSysusersEntry*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## The digest covers the fragment's bytes; whether the account exists
+  ## is checked after the apply, not folded into the digest (an account
+  ## that exists already is exactly what a re-apply finds).
+  when defined(linux):
+    observeManagedFile(sysusersEntryOpPath(op))
+  else:
+    raiseNotImplementedPlatform("linux.sysusersEntry observe")
+
+proc sysusersAccountExists*(name, kind: string): bool =
+  ## `getent passwd|group <name>` exits 0 when the account exists.
+  when defined(linux):
+    let db = if kind == "group": "group" else: "passwd"
+    execCmd("getent " & db & " " & quoteShell(name) & " >/dev/null 2>&1") == 0
+  else:
+    false
+
+proc applyLinuxSysusersEntry*(op: PrivilegedOperation):
+    ObservedOperationState =
+  ## Write the fragment as a copy (it must stay readable when the store
+  ## is not, §7.2 step 5), then `systemd-sysusers <file>` creates the
+  ## account or group if it is missing, then the account's existence is
+  ## verified. The destroy direction removes the fragment only.
+  when defined(linux):
+    let path = sysusersEntryOpPath(op)
+    if op.seDestroy:
+      discard removeManagedFile(path, "linux.sysusersEntry")
+      if fileExists(path) or symlinkExists(path):
+        raiseProtocol("linux.sysusersEntry destroy of " & path &
+          " post-apply observation disagrees with desired state: the " &
+          "fragment still exists")
+      result.present = false
+      result.digestHex = ZeroDigestHex
+      return
+    createManagedDirs(SystemdSysusersDir, "linux.sysusersEntry")
+    writeLinuxDropInFile(path, op.seContent, 0o644)
+    let (toolOut, toolCode) = execCmdEx("systemd-sysusers " & quoteShell(path))
+    if toolCode != 0:
+      raiseProtocol("linux.sysusersEntry `systemd-sysusers " & path &
+        "` failed: " & toolOut.strip())
+    let kind = if op.seContent.startsWith("g "): "group" else: "user"
+    if not sysusersAccountExists(op.seName, kind):
+      raiseProtocol("linux.sysusersEntry '" & op.seName & "': systemd-" &
+        "sysusers ran but the " & kind & " does not exist afterwards")
+    let post = observeLinuxSysusersEntry(op)
+    let desiredHex = posixDigestHexOfText(op.seContent)
+    if not post.present or post.digestHex != desiredHex:
+      raiseProtocol("linux.sysusersEntry " & path &
+        " post-apply observation disagrees with desired state")
+    result = post
+  else:
+    raiseNotImplementedPlatform("linux.sysusersEntry apply")
 
 # ===========================================================================
 # linux.udevRule — write /etc/udev/rules.d/<name> + reload rules.
@@ -2410,14 +2667,7 @@ proc tmpfilesRulePath*(name: string): string =
 proc observeLinuxTmpfilesRule*(op: PrivilegedOperation):
     ObservedOperationState =
   when defined(linux):
-    let path = tmpfilesRulePath(op.tmpfilesName)
-    if not fileExists(path):
-      result.present = false
-      result.digestHex = ZeroDigestHex
-      return
-    let content = readFile(path)
-    result.present = true
-    result.digestHex = posixDigestHexOfText(content)
+    result = observeManagedFile(tmpfilesRulePath(op.tmpfilesName))
   else:
     raiseNotImplementedPlatform("linux.tmpfilesRule observe")
 
@@ -2430,10 +2680,8 @@ proc destroyLinuxTmpfilesRule*(op: PrivilegedOperation):
   ## re-running. Post-apply re-probe asserts the file is gone.
   when defined(linux):
     let path = tmpfilesRulePath(op.tmpfilesName)
-    if fileExists(path):
-      try: removeFile(path)
-      except OSError: discard
-    if fileExists(path):
+    discard removeManagedFile(path, "linux.tmpfilesRule")
+    if fileExists(path) or symlinkExists(path):
       raiseProtocol("linux.tmpfilesRule destroy of " & path &
         " post-apply observation disagrees with desired state: " &
         "the rule file still exists after `removeFile`.")
@@ -2451,7 +2699,7 @@ proc applyLinuxTmpfilesRule*(op: PrivilegedOperation):
     if op.tmpfilesDestroy:
       return destroyLinuxTmpfilesRule(op)
     let path = tmpfilesRulePath(op.tmpfilesName)
-    createDir(LinuxTmpfilesDir)
+    createManagedDirs(LinuxTmpfilesDir, "linux.tmpfilesRule")
     writeLinuxDropInFile(path, op.tmpfilesContent, 0o644)
     if op.tmpfilesApplyNow:
       # `systemd-tmpfiles --create <path>` processes ONLY this file's
@@ -3217,19 +3465,12 @@ proc applySystemdSystemTimer*(op: PrivilegedOperation):
       result.present = false
       result.digestHex = ZeroDigestHex
       return
-    createDir(SystemdSystemUnitDir)
-    # Binary-mode write so the bytes on disk equal the operator's
-    # `stContent` verbatim — drift detection compares BLAKE3 digests,
-    # so any CRLF translation would be constant false-positive drift.
-    block:
-      var f: File
-      if not open(f, path, fmWrite):
-        raiseProtocol("systemd.systemTimer cannot open " & path)
-      try:
-        if op.stContent.len > 0:
-          discard f.writeBuffer(unsafeAddr op.stContent[0], op.stContent.len)
-      finally:
-        close(f)
+    createManagedDirs(SystemdSystemUnitDir, "systemd.systemTimer")
+    # The bytes on disk equal the operator's `stContent` verbatim — drift
+    # detection compares BLAKE3 digests, so any translation would be
+    # constant false-positive drift. Never written through a link.
+    writeManagedFile(AddOnMaterialisation(), path, op.stContent, 0o644,
+                     "systemd.systemTimer")
     let (reloadOut, reloadCode) = execCmdEx("systemctl daemon-reload")
     if reloadCode != 0:
       raiseProtocol("systemd.systemTimer daemon-reload failed: " &

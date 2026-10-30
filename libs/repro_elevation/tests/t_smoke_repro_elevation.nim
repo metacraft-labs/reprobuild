@@ -2779,7 +2779,7 @@ kernel.x = 7
       expect ENotImplementedPlatform:
         discard observeLinuxSysctl(op)
       expect ENotImplementedPlatform:
-        discard applyLinuxSysctl(op)
+        discard applyLinuxSysctl(FixtureContext(), op)
       expect ENotImplementedPlatform:
         discard destroyLinuxSysctl(op)
 
@@ -4366,7 +4366,7 @@ suite "Recipe-Val side-findings: parseOsReleaseId / systemd carve-out":
           suEnabled: false)
         var caught = false
         try:
-          discard applySystemdSystemUnit(op)
+          discard applySystemdSystemUnit(FixtureContext(), op)
         except EProtocol as e:
           caught = true
           # The diagnostic must name the distro AND point at the

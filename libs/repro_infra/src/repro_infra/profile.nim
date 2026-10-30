@@ -67,6 +67,8 @@ type
     srkLinuxDpkgDiversion = "linux.dpkgDiversion"
     srkSystemdUnitState = "systemd.unitState"
     srkLinuxAddOnTool = "linux.addOnTool"
+    srkSystemdSystemDropIn = "systemd.systemDropIn"
+    srkLinuxSysusersEntry = "linux.sysusersEntry"
 
   ResourceDependency* = tuple[kind: string, name: string]
     ## A single `depends_on` edge: `"kind:name"` parsed into its two
@@ -189,6 +191,24 @@ type
         ## With `collision = dropIn`: the drop-in is
         ## `/etc/systemd/system/<unit>.d/50-repro-<dropInName>.conf`.
         ## Defaults to `addon`. One path segment of `[A-Za-z0-9._-]`.
+      suStopHeld*: bool
+        ## `stopOnRemoval = false` (ReproOS Add-On Mode §7.3): when the
+        ## unit leaves the profile its file is removed but the running
+        ## instance is left alone (it ends when it ends). Default: a
+        ## removed unit is stopped first.
+      suReloadIfChanged*: bool
+        ## `reloadIfChanged = true` (§7.3): when only a resource the unit
+        ## `depends_on` changed (its unit file, drop-ins and closure are
+        ## unchanged), the running instance is reloaded (`ExecReload=`)
+        ## instead of restarted.
+      suExclusive*: bool
+        ## `exclusive = true` (§7.3): two instances of this service must
+        ## never run at once (a validator client signing with one key).
+        ## The switch stops and confirms the old instance has exited
+        ## before the new one starts, and refuses the apply
+        ## (`EAddOnExclusiveOverlap`) when it cannot. A unit whose
+        ## rendered file carries `X-Repro-Exclusive=true` is exclusive
+        ## too, so an adopted hand-written unit can declare it.
     of srkLaunchdSystemDaemon:
       sdaLabel*: string
       sdaProgramArgs*: seq[string]
@@ -299,6 +319,29 @@ type
       atCommand*: string                  ## wrapper name under /etc/repro/bin
       atAptClosureLock*: string           ## the closure the command runs from
       atProgram*: string                  ## FHS path inside the closure
+    of srkSystemdSystemDropIn:
+      ## A drop-in for a unit the profile does NOT own (a distribution
+      ## unit), ReproOS Add-On Mode §4.1 `dropIn` class:
+      ## `/etc/systemd/system/<diUnit>.d/50-repro-<diName>.conf`. A
+      ## changed drop-in restarts an active `diUnit` (§7.3) unless
+      ## `restartIfChanged = false`.
+      diUnit*: string                     ## the unit it modifies
+      diName*: string                     ## `<name>` of `50-repro-<name>.conf`
+      diContent*: string
+      diRestartHeld*: bool                ## `restartIfChanged = false`
+    of srkLinuxSysusersEntry:
+      ## A system account or group for a service, declared as one
+      ## sysusers.d(5) entry in `/etc/sysusers.d/repro-<seName>.conf` and
+      ## applied with `systemd-sysusers <file>` (§4.1 `sysusers` class).
+      ## `passwd.user` / `passwd.group` stay for accounts that need
+      ## `useradd` semantics. An account the add-on created is never
+      ## deleted (a reused UID would hand its files to a new owner).
+      seName*: string
+      seKind*: string                     ## "user" (default) or "group"
+      seId*: string                       ## pinned UID / GID, "" => chosen
+      seDescription*: string              ## GECOS, users only
+      seHome*: string                     ## "" => systemd's default (/)
+      seShell*: string                    ## "" => systemd's default (nologin)
 
   AddOnSettings* = object
     ## The profile-wide `addOn { ... }` stanza of ReproOS add-on mode
@@ -387,6 +430,10 @@ proc realWorldIdentity*(r: SystemResource): string =
     "unitState:" & r.usName
   of srkLinuxAddOnTool:
     "addOnTool:" & r.atCommand
+  of srkSystemdSystemDropIn:
+    "systemDropIn:" & r.diUnit & "/" & r.diName
+  of srkLinuxSysusersEntry:
+    "sysusersEntry:" & r.seName
 
 proc resourceKindTag*(r: SystemResource): string =
   ## The string form of the resource's kind — the LEFT half of the
@@ -438,6 +485,8 @@ proc resourceName*(r: SystemResource): string =
   of srkLinuxDpkgDiversion: r.ddPath
   of srkSystemdUnitState: r.usName
   of srkLinuxAddOnTool: r.atCommand
+  of srkSystemdSystemDropIn: r.diUnit & "/" & r.diName
+  of srkLinuxSysusersEntry: r.seName
 
 # ---------------------------------------------------------------------------
 # The declarative-format parser. Pure — no filesystem access.
@@ -695,6 +744,84 @@ proc checkAddOnToolResource*(r: SystemResource) =
     raiseSystemProfileInvalid("linux.addOnTool '" & r.atCommand & "': " &
       getCurrentExceptionMsg())
 
+proc checkDropInResource*(r: SystemResource) =
+  ## The refusals both profile paths apply to a `systemd.systemDropIn`
+  ## (ReproOS Add-On Mode §4.1): a unit name systemd would accept and a
+  ## fragment name that is one safe path segment, so the drop-in cannot
+  ## land outside `/etc/systemd/system/<unit>.d/`.
+  doAssert r.kind == srkSystemdSystemDropIn
+  if not isSafeUnitName(r.diUnit) or not hasKnownUnitSuffix(r.diUnit):
+    raiseSystemProfileInvalid("systemd.systemDropIn unit '" & r.diUnit &
+      "' is not a safe unit name with a unit-type suffix " &
+      "(e.g. cron.service)")
+  if not isSafeFragmentName(r.diName):
+    raiseSystemProfileInvalid("systemd.systemDropIn name '" & r.diName &
+      "' must be one path segment of letters, digits, '.', '-' or '_'")
+
+proc checkSysusersEntryResource*(r: SystemResource) =
+  ## The refusals both profile paths apply to a `linux.sysusersEntry`
+  ## (§4.1): a name sysusers.d(5) accepts, a kind of `user` or `group`, a
+  ## numeric id when pinned, and no field that could break out of its
+  ## line in the fragment (a newline, a quote in the description).
+  doAssert r.kind == srkLinuxSysusersEntry
+  if not isSafePosixUserOrGroupName(r.seName):
+    raiseSystemProfileInvalid("linux.sysusersEntry name '" & r.seName &
+      "' is not a safe account name (letters, digits, '.', '-', '_'; " &
+      "must start with a letter or '_')")
+  if r.seKind notin ["user", "group"]:
+    raiseSystemProfileInvalid("linux.sysusersEntry '" & r.seName &
+      "' kind '" & r.seKind & "' is not one of user / group")
+  if r.seId.len > 0 and not isSafeGid(r.seId):
+    raiseSystemProfileInvalid("linux.sysusersEntry '" & r.seName &
+      "' id '" & r.seId & "' is not a numeric id")
+  for (field, value) in [("description", r.seDescription), ("home", r.seHome),
+                         ("shell", r.seShell)]:
+    if '\n' in value or '\r' in value or '"' in value or
+        (value.len > 0 and value.splitWhitespace().len != 1 and
+         field != "description"):
+      raiseSystemProfileInvalid("linux.sysusersEntry '" & r.seName & "' " &
+        field & " may not contain a newline, a double quote" &
+        (if field != "description": " or whitespace" else: ""))
+  if r.seKind == "group" and (r.seDescription.len > 0 or r.seHome.len > 0 or
+                              r.seShell.len > 0):
+    raiseSystemProfileInvalid("linux.sysusersEntry '" & r.seName &
+      "' is a group: description, home and shell apply to users only")
+  for (field, value) in [("home", r.seHome), ("shell", r.seShell)]:
+    if value.len > 0 and not isPosixAbsolutePath(value):
+      raiseSystemProfileInvalid("linux.sysusersEntry '" & r.seName & "' " &
+        field & " '" & value & "' must be an absolute path")
+
+proc sysusersEntryContent*(r: SystemResource): string =
+  ## The fragment bytes a `linux.sysusersEntry` installs
+  ## (`sysusersFragmentContent`): what the driver writes and digests.
+  doAssert r.kind == srkLinuxSysusersEntry
+  sysusersFragmentContent(r.seKind, r.seName, r.seId, r.seDescription,
+                          r.seHome, r.seShell)
+
+proc unitContentDeclaresExclusive*(content: string): bool =
+  ## `X-Repro-Exclusive=true|yes|1` in the `[Unit]` section (ReproOS Add-On
+  ## Mode §7.3: "a unit whose X- metadata says exclusive = true"). systemd
+  ## ignores `X-` keys, so the marker travels in the unit file itself and
+  ## an adopted hand-written unit can carry it.
+  var inUnit = false
+  for raw in content.splitLines():
+    let line = raw.strip()
+    if line.startsWith("["):
+      inUnit = line == "[Unit]"
+      continue
+    if not inUnit or line.len == 0 or line[0] in {'#', ';'}:
+      continue
+    let eq = line.find('=')
+    if eq < 0: continue
+    if line[0 ..< eq].strip() == "X-Repro-Exclusive":
+      return line[eq + 1 .. ^1].strip().toLowerAscii() in ["true", "yes", "1", "on"]
+  false
+
+proc isExclusiveUnit*(r: SystemResource): bool =
+  ## The resource's `exclusive` field, or the marker in its content.
+  r.kind == srkSystemdSystemUnit and
+    (r.suExclusive or unitContentDeclaresExclusive(r.suContent))
+
 proc checkUnitStateConflicts*(resources: openArray[SystemResource]) =
   ## A unit name may not be declared both as a `systemd.unitState` (a unit
   ## the add-on does NOT own) and as a `systemd.systemUnit` (one it writes):
@@ -935,6 +1062,8 @@ proc parseSystemProfile*(text: string): SystemProfile =
     of $srkLinuxDpkgDiversion: srk = srkLinuxDpkgDiversion
     of $srkSystemdUnitState: srk = srkSystemdUnitState
     of $srkLinuxAddOnTool: srk = srkLinuxAddOnTool
+    of $srkSystemdSystemDropIn: srk = srkSystemdSystemDropIn
+    of $srkLinuxSysusersEntry: srk = srkLinuxSysusersEntry
     else:
       raiseSystemProfileInvalid("unknown system resource kind '" &
         kindTag & "'")
@@ -1239,7 +1368,19 @@ proc parseSystemProfile*(text: string): SystemProfile =
           (if "collision" in fields: fields["collision"] else: ""),
           UnitCollisionOptIns),
         suDropInName:
-          if "dropInName" in fields: fields["dropInName"] else: "")
+          if "dropInName" in fields: fields["dropInName"] else: "",
+        suStopHeld:
+          if "stopOnRemoval" in fields:
+            not parseBoolField("stopOnRemoval", fields["stopOnRemoval"])
+          else: false,
+        suReloadIfChanged:
+          if "reloadIfChanged" in fields:
+            parseBoolField("reloadIfChanged", fields["reloadIfChanged"])
+          else: false,
+        suExclusive:
+          if "exclusive" in fields:
+            parseBoolField("exclusive", fields["exclusive"])
+          else: false)
       if res.suDropInName.len > 0 and res.suCollision != "dropIn":
         raiseSystemProfileInvalid("systemd.systemUnit '" & res.suName &
           "' sets dropInName without `collision = \"dropIn\"`")
@@ -1617,6 +1758,26 @@ proc parseSystemProfile*(text: string): SystemProfile =
           if "program" in fields: fields["program"]
           else: "/usr/bin/" & command)
       checkAddOnToolResource(res)
+    of srkSystemdSystemDropIn:
+      res = SystemResource(kind: srkSystemdSystemDropIn,
+        diUnit: need("unit"),
+        diName: (if "name" in fields: fields["name"] else: "addon"),
+        diContent: need("content"),
+        diRestartHeld:
+          if "restartIfChanged" in fields:
+            not parseBoolField("restartIfChanged", fields["restartIfChanged"])
+          else: false)
+      checkDropInResource(res)
+    of srkLinuxSysusersEntry:
+      res = SystemResource(kind: srkLinuxSysusersEntry,
+        seName: need("name"),
+        seKind: (if "kind" in fields: fields["kind"] else: "user"),
+        seId: (if "id" in fields: fields["id"] else: ""),
+        seDescription:
+          (if "description" in fields: fields["description"] else: ""),
+        seHome: (if "home" in fields: fields["home"] else: ""),
+        seShell: (if "shell" in fields: fields["shell"] else: ""))
+      checkSysusersEntryResource(res)
     of srkLinuxFhsSandbox:
       let binPath = need("binPath")
       if not isPosixAbsolutePath(binPath):
@@ -1884,6 +2045,17 @@ proc toPrivilegedOperation*(r: SystemResource;
       atAptClosureLock: r.atAptClosureLock,
       atProgram: r.atProgram,
       atDestroy: destroy)
+  of srkSystemdSystemDropIn:
+    PrivilegedOperation(kind: pokSystemdSystemDropIn, address: r.address,
+      diUnit: r.diUnit,
+      diName: r.diName,
+      diContent: r.diContent,
+      diDestroy: destroy)
+  of srkLinuxSysusersEntry:
+    PrivilegedOperation(kind: pokLinuxSysusersEntry, address: r.address,
+      seName: r.seName,
+      seContent: sysusersEntryContent(r),
+      seDestroy: destroy)
   of srkLinuxFhsSandbox:
     PrivilegedOperation(kind: pokLinuxFhsSandbox, address: r.address,
       fsbBinPath: r.fsbBinPath,

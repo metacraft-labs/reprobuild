@@ -315,7 +315,10 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       suRestartHeld: not fieldBool(r, "restartIfChanged", true),
       suCollision: parseCollisionField("systemd.systemUnit",
         fieldString(r, "collision"), UnitCollisionOptIns),
-      suDropInName: fieldString(r, "dropInName"))
+      suDropInName: fieldString(r, "dropInName"),
+      suStopHeld: not fieldBool(r, "stopOnRemoval", true),
+      suReloadIfChanged: fieldBool(r, "reloadIfChanged", false),
+      suExclusive: fieldBool(r, "exclusive", false))
     if result.suDropInName.len > 0 and result.suCollision != "dropIn":
       raise newException(ValueError, "systemd.systemUnit '" &
         result.suName & "' sets dropInName without `collision = \"dropIn\"`")
@@ -651,6 +654,23 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       atAptClosureLock: fieldString(r, "aptClosureLock"),
       atProgram: fieldString(r, "program", "/usr/bin/" & command))
     checkAddOnToolResource(result)
+  of "systemd.systemDropIn":
+    result = SystemResource(kind: srkSystemdSystemDropIn,
+      diUnit: fieldString(r, "unit"),
+      diName: fieldString(r, "name", "addon"),
+      diContent: fieldString(r, "content"),
+      diRestartHeld: not fieldBool(r, "restartIfChanged", true))
+    # Same parse-time refusals as the text path.
+    checkDropInResource(result)
+  of "linux.sysusersEntry":
+    result = SystemResource(kind: srkLinuxSysusersEntry,
+      seName: fieldString(r, "name"),
+      seKind: fieldString(r, "kind", "user"),
+      seId: fieldString(r, "id"),
+      seDescription: fieldString(r, "description"),
+      seHome: fieldString(r, "home"),
+      seShell: fieldString(r, "shell"))
+    checkSysusersEntryResource(result)
   of "linux.fhsSandbox":
     # Linux-Third-Party-Sandbox-MVP M1. The closed-set / shape checks
     # mirror the `parseSystemProfile` arm in repro_infra/profile.nim
@@ -1098,6 +1118,12 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
         pairs.add(("collision", quoteSystemValue(r.suCollision)))
       if r.suDropInName.len > 0:
         pairs.add(("dropInName", quoteSystemValue(r.suDropInName)))
+      if r.suStopHeld:
+        pairs.add(("stopOnRemoval", "false"))
+      if r.suReloadIfChanged:
+        pairs.add(("reloadIfChanged", "true"))
+      if r.suExclusive:
+        pairs.add(("exclusive", "true"))
     of srkLaunchdSystemDaemon:
       pairs.add(("label", quoteSystemValue(r.sdaLabel)))
       pairs.add(("programArgs", renderListLiteral(r.sdaProgramArgs)))
@@ -1204,6 +1230,24 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       pairs.add(("command", quoteSystemValue(r.atCommand)))
       pairs.add(("aptClosureLock", quoteSystemValue(r.atAptClosureLock)))
       pairs.add(("program", quoteSystemValue(r.atProgram)))
+    of srkSystemdSystemDropIn:
+      pairs.add(("unit", quoteSystemValue(r.diUnit)))
+      pairs.add(("name", quoteSystemValue(r.diName)))
+      pairs.add(("content", quoteSystemValue(r.diContent)))
+      if r.diRestartHeld:
+        pairs.add(("restartIfChanged", "false"))
+    of srkLinuxSysusersEntry:
+      pairs.add(("name", quoteSystemValue(r.seName)))
+      pairs.add(("kind", quoteSystemValue(
+        if r.seKind.len > 0: r.seKind else: "user")))
+      if r.seId.len > 0:
+        pairs.add(("id", quoteSystemValue(r.seId)))
+      if r.seDescription.len > 0:
+        pairs.add(("description", quoteSystemValue(r.seDescription)))
+      if r.seHome.len > 0:
+        pairs.add(("home", quoteSystemValue(r.seHome)))
+      if r.seShell.len > 0:
+        pairs.add(("shell", quoteSystemValue(r.seShell)))
     of srkLinuxFhsSandbox:
       pairs.add(("binPath", quoteSystemValue(r.fsbBinPath)))
       pairs.add(("fhsTrees", renderListLiteral(r.fsbFhsTreeRoots)))

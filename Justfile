@@ -104,6 +104,26 @@ e2e_addon_removal_respects_ledger:
 e2e_addon_symlink_on_target_path_is_refused:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_symlink_on_target_path_is_refused
 
+# A4: the add-on switch and service transitions (Debian 13 and Ubuntu 24.04
+# by default). Falsifying mutations: REPRO_ADDON_MUTATION=exclusive-as-plain-restart
+# (exclusive_never_overlaps), sysctl-in-apply-namespace
+# (net_sysctl_applies_in_host_namespace), path-based-write-follows-links
+# (writes_never_follow_symlinks); the gate is then expected to fail.
+e2e_addon_switch_is_planned_exactly:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_switch_is_planned_exactly
+
+e2e_addon_exclusive_never_overlaps:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_exclusive_never_overlaps
+
+e2e_addon_gc_keeps_current_and_previous:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_gc_keeps_current_and_previous
+
+e2e_addon_writes_never_follow_symlinks:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_writes_never_follow_symlinks
+
+e2e_addon_net_sysctl_applies_in_host_namespace:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_net_sysctl_applies_in_host_namespace
+
 test-hcr-native-library-prerequisite:
     nim c -r -d:reproProviderMode --parallelBuild:2 --nimcache:build/nimcache/hcr-native-library-prerequisite --out:build/test-bin/t_hcr_native_library_prerequisite tests/integration/t_hcr_native_library_prerequisite.nim
 

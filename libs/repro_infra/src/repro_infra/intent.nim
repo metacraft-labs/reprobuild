@@ -323,6 +323,12 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  collision = " & renderScalar(r.suCollision))
     if r.suDropInName.len > 0:
       result.add("  dropInName = " & renderScalar(r.suDropInName))
+    if r.suStopHeld:
+      result.add("  stopOnRemoval = false")
+    if r.suReloadIfChanged:
+      result.add("  reloadIfChanged = true")
+    if r.suExclusive:
+      result.add("  exclusive = true")
   of srkLaunchdSystemDaemon:
     result.add("  label = " & renderScalar(r.sdaLabel))
     result.add("  programArgs = " & renderList(r.sdaProgramArgs))
@@ -434,6 +440,24 @@ proc renderStanza*(r: SystemResource): seq[string] =
     result.add("  command = " & renderScalar(r.atCommand))
     result.add("  aptClosureLock = " & renderScalar(r.atAptClosureLock))
     result.add("  program = " & renderScalar(r.atProgram))
+  of srkSystemdSystemDropIn:
+    result.add("  unit = " & renderScalar(r.diUnit))
+    result.add("  name = " & renderScalar(r.diName))
+    result.add("  content = " & renderScalar(r.diContent))
+    if r.diRestartHeld:
+      result.add("  restartIfChanged = false")
+  of srkLinuxSysusersEntry:
+    result.add("  name = " & renderScalar(r.seName))
+    if r.seKind.len > 0 and r.seKind != "user":
+      result.add("  kind = " & renderScalar(r.seKind))
+    if r.seId.len > 0:
+      result.add("  id = " & renderScalar(r.seId))
+    if r.seDescription.len > 0:
+      result.add("  description = " & renderScalar(r.seDescription))
+    if r.seHome.len > 0:
+      result.add("  home = " & renderScalar(r.seHome))
+    if r.seShell.len > 0:
+      result.add("  shell = " & renderScalar(r.seShell))
   of srkLinuxFhsSandbox:
     result.add("  binPath = " & renderScalar(r.fsbBinPath))
     result.add("  fhsTrees = " & renderList(r.fsbFhsTreeRoots))

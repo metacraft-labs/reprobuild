@@ -143,6 +143,34 @@ type
     ## explicitly forbids (see ``Windows-System-Resources.md`` § "What
     ## NOT to do — silent fallbacks").
 
+  ApplyPhaseHooks* = object
+    ## Hooks a layered apply attaches around the privileged set. The
+    ## ReproOS add-on switch (ReproOS-Add-On-Mode §7.2) uses them: its
+    ## steps 1-3 (realise, pre-stop, flip) run after the plan is resolved
+    ## and before the first write, its steps 6-8 (fragment tools, start,
+    ## confirm) and its ledger run after the last write and before the
+    ## generation is committed. Every field is optional.
+    beforePrivilegedSet*: proc(planId: string) {.gcsafe.}
+      ## Called once the plan is resolved and persisted, before any
+      ## privileged operation is dispatched. A raise aborts the apply
+      ## with nothing written by it.
+    afterPrivilegedSet*: proc(generationId: string; clean: bool):
+      seq[string] {.gcsafe.}
+      ## Called after the privileged set with the generation id the
+      ## commit would use (its directory and audit log exist by then) and
+      ## whether the set ran without an error or drift finding. Returns
+      ## diagnostics: a non-empty result is an error, counted and
+      ## withholding the commit under `commitOnlyWhenClean`.
+    commitOnlyWhenClean*: bool
+      ## Move `current` and write the generation envelope only when the
+      ## privileged set and the after-hook reported no error and no
+      ## drift. Otherwise the attempt's audit log stays under the
+      ## generation's directory (no envelope, so `history` and `rollback`
+      ## never see it as a state the host reached) and `current` keeps
+      ## naming the previous generation: a failed switch is not a
+      ## generation (spec §7.2 step 9, §7.5; reprobuild-pm issue
+      ## 2026-10-30-infra-apply-commits-a-generation-whose-privileged-set-failed).
+
   ApplyOptions* = object
     stateDir*: string
     hostIdentity*: string
@@ -192,10 +220,20 @@ type
     buildActionDispatcher*: BuildActionDispatcher
       ## See ``BuildActionDispatcher``. ``nil`` is the default;
       ## non-nil enables the action-edge half of the apply.
+    phases*: ApplyPhaseHooks
+      ## See ``ApplyPhaseHooks``; all-nil (the default) applies as before.
+    addOnDispatch*: AddOnDispatchPolicy
+      ## The add-on switch's per-operation materialisation policy
+      ## (`repro_elevation.AddOnDispatchPolicy`), carried to the drivers
+      ## through the in-process dispatch context. `nil` outside add-on
+      ## mode.
 
   ApplyResult* = object
     generationId*: string
     planId*: string
+    committed*: bool
+      ## `current` names `generationId` now. False only under
+      ## `ApplyPhaseHooks.commitOnlyWhenClean` for an apply that failed.
     appliedCount*: int
     noOpCount*: int
     skippedCount*: int
@@ -546,6 +584,12 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
     writePlanFile(planPath(opts.stateDir, env.planId), env)
   result.planId = env.planId
   refreshApplyLock(opts.stateDir)
+  # A layered apply's work between the plan and the first write (the
+  # add-on switch's realise, pre-stop and flip steps). A raise here leaves
+  # the plan on disk and nothing else touched.
+  if opts.phases.beforePrivilegedSet != nil:
+    opts.phases.beforePrivilegedSet(env.planId)
+    refreshApplyLock(opts.stateDir)
 
   # --- 2. Partition the effective operations. ---
   var planned = plannedOperationsFor(profileText, env)
@@ -608,7 +652,7 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
       # Already-elevated fast path: run the privileged set in-process,
       # no broker, no prompt.
       outcome = applyPrivilegedSetInProcess(
-        FixtureContext(), planned, onProgress = beat,
+        FixtureContext(addOn: opts.addOnDispatch), planned, onProgress = beat,
         preWriteGuard = opts.preWriteGuard)
       result.usedBroker = false
     else:
@@ -645,6 +689,11 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
     if rec.restartNeeded:
       result.restartNeeded = true
 
+  for d in outcome.results:
+    if d.driftDetected or (not d.ok and "requires elevation" notin
+        d.diagnostic):
+      result.diagnostics.add(d.operationAddress & ": " & d.diagnostic)
+
   # --- 4. Commit the generation + write the audit log. ---
   var commitTs = getTime().toUnix()
   let previousGenerationId = readCurrentGenerationId(opts.stateDir)
@@ -660,6 +709,27 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   writeAuditRecords(logPath, outcome.applyLog, noOps,
     result.buildActionResults)
   result.auditLogPath = logPath
+  # A layered apply's work between the last write and the commit (the
+  # add-on switch's fragment tools, service starts, confirmation and
+  # ledger). Its diagnostics are errors of this apply.
+  var clean = result.errorCount == 0 and result.driftCount == 0
+  if opts.phases.afterPrivilegedSet != nil:
+    let problems = opts.phases.afterPrivilegedSet(generationId, clean)
+    for p in problems:
+      inc result.errorCount
+      result.diagnostics.add(p)
+    clean = clean and problems.len == 0
+    refreshApplyLock(opts.stateDir)
+  if opts.phases.commitOnlyWhenClean and not clean:
+    # The attempt is on disk for audit (its log, under its id) but it is
+    # not a generation: no envelope, and `current` stays where it was.
+    result.committed = false
+    result.diagnostics.add("generation " & generationId & " was NOT " &
+      "committed: the apply did not complete cleanly, so `current` still " &
+      "names " & (if previousGenerationId.len > 0: previousGenerationId
+                  else: "no generation"))
+    refreshApplyLock(opts.stateDir)
+    return
   # Write the per-generation RBSG envelope. It embeds the applied
   # `system.nim` text so `repro system history` can enumerate this
   # generation and `repro system rollback` can re-apply a prior
@@ -680,8 +750,5 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   # The generation pointer / `current` marker is updated by the
   # NON-elevated parent (this proc), never the broker.
   writeCurrentGenerationId(opts.stateDir, generationId)
-  refreshApplyLock(opts.stateDir)
-  for d in outcome.results:
-    if d.driftDetected or (not d.ok and "requires elevation" notin
-        d.diagnostic):
-      result.diagnostics.add(d.operationAddress & ": " & d.diagnostic)
+  result.committed = true
+  discard refreshApplyLock(opts.stateDir)

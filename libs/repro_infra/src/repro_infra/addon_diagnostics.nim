@@ -108,6 +108,22 @@ proc newAddOnModeMismatch*(host, declaredMode, observedBase, detail: string):
   result.declaredMode = declaredMode
   result.observedBase = observedBase
 
+type
+  EAddOnExclusiveOverlap* = object of EAddOn
+    ## An `exclusive` unit could not be confirmed stopped before its
+    ## successor starts (ReproOS Add-On Mode §7.3): the apply is refused
+    ## before the switch flips anything, so the old instance keeps running
+    ## alone and the successor is never started.
+    unit*: string
+
+proc newAddOnExclusiveOverlap*(unit, detail: string):
+    ref EAddOnExclusiveOverlap =
+  result = newException(EAddOnExclusiveOverlap,
+    diagnosticMessage(adExclusiveOverlap, "unit " & unit &
+      " could not be confirmed stopped: " & detail &
+      "; the successor is not started and nothing was switched"))
+  result.unit = unit
+
 proc newAddOnUnsupportedBase*(observedBase, detail: string):
     ref EAddOnUnsupportedBase =
   ## `EAddOnUnsupportedBase` for a base no add-on realisation covers.
