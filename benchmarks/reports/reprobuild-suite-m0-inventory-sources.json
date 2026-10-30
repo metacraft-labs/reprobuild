@@ -8128,6 +8128,7 @@
       "localDependencyShape": [
         "repro_addon",
         "repro_binary_cache_client",
+        "repro_core",
         "repro_elevation",
         "repro_infra",
         "repro_profile"
@@ -8135,8 +8136,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_ledger_and_plan.nim",
-      "sourceSuiteCount": 15,
-      "staticCaseCount": 43,
+      "sourceSuiteCount": 17,
+      "staticCaseCount": 45,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

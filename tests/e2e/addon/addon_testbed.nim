@@ -514,12 +514,7 @@ proc prepareBase*(g: Guest) =
     "motd-news.timer ua-timer.timer 2>/dev/null; " &
     "systemctl stop apt-daily.service apt-daily-upgrade.service " &
     "unattended-upgrades.service 2>/dev/null; " &
-    "systemctl mask --now unattended-upgrades.service 2>/dev/null; " &
-    # fwupd is D-Bus activated at an unpredictable moment, and its first
-    # start rewrites /etc/fwupd/fwupd.conf to mode 0640 (Ubuntu 24.04,
-    # measured 2026-10-30 inside a collision-matrix run): base noise, not
-    # the add-on's doing. Masked before the baseline like the timers.
-    "systemctl mask --now fwupd.service 2>/dev/null; true")
+    "systemctl mask --now unattended-upgrades.service 2>/dev/null; true")
   discard g.run("apt-get update -qq", timeoutSec = 1800)
   # Let anything first boot started settle.
   discard g.exec("systemctl is-system-running --wait >/dev/null 2>&1; true",
@@ -586,13 +581,31 @@ proc planDigestOf*(preflightOutput: string): string =
   raise newException(TestBedError, "no plan digest in preflight output:\n" &
                      preflightOutput)
 
+proc withoutBaseNoise*(d: seq[DiffEntry]): seq[DiffEntry] =
+  ## The fingerprint differences the base makes on its own, removed by name
+  ## and as narrowly as they happen. One so far: fwupd is D-Bus activated
+  ## at an unpredictable moment, and its first start re-creates
+  ## /etc/fwupd/fwupd.conf with mode 0640 (Ubuntu 24.04, measured
+  ## 2026-10-30 inside a collision-matrix run). Only a change of that
+  ## file's MODE is dropped; its content, owner or existence still count.
+  for e in d:
+    if e.component == fcEtc and e.key == "/etc/fwupd/fwupd.conf" and
+        e.before.len > 0 and e.after.len > 0:
+      var b = e.before.splitWhitespace()
+      var a = e.after.splitWhitespace()
+      if a.len == b.len and a.len >= 2:
+        a[1] = ""
+        b[1] = ""
+        if a == b: continue
+    result.add(e)
+
 proc deltaReport*(before, after: string; ledgerBefore, ledgerAfter: string):
     tuple[ok: bool; text: string] =
   ## Does ``fingerprint(after) - fingerprint(before)`` equal the delta the
   ## two ledgers account for, exactly? "" for a ledger means "no add-on".
   let lb = if ledgerBefore.len == 0: Ledger() else: parseLedger(ledgerBefore)
   let la = if ledgerAfter.len == 0: Ledger() else: parseLedger(ledgerAfter)
-  let d = diff(parseFingerprint(before), parseFingerprint(after))
+  let d = withoutBaseNoise(diff(parseFingerprint(before), parseFingerprint(after)))
   let r = matchExpectations(d, expectedDelta(lb, la))
   (r.ok, (if r.ok: "fingerprint diff == ledger delta (" & $d.len & " records)"
           else: renderExpectationReport(r)))
@@ -603,8 +616,8 @@ proc identityReport*(before, after: string;
   ## Byte identity modulo the enumerated exceptions.
   var rules: seq[ExceptionRule]
   for e in exceptions: rules.add(parseExceptionRule(e))
-  let d = applyExceptions(diff(parseFingerprint(before),
-                               parseFingerprint(after)), rules)
+  let d = applyExceptions(withoutBaseNoise(diff(parseFingerprint(before),
+                               parseFingerprint(after))), rules)
   (d.len == 0, (if d.len == 0: "fingerprints identical" else: renderDiff(d)))
 
 proc waitPoweredOff*(g: Guest; timeoutSec: int): bool =

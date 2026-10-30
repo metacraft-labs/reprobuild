@@ -343,7 +343,13 @@ proc observeDrift*(e: LedgerEntry): string =
     ""
   of lcInstallLink:
     if not symlinkExists(e.path):
-      return "missing (or no longer a symlink)"
+      # A file or directory put where the add-on's link was is someone
+      # else's: drift, never "missing" (which removal would clean up).
+      if dirExists(e.path):
+        return "replaced by a directory, ledger link to " & e.linkTarget
+      if fileExists(e.path):
+        return "replaced by a regular file, ledger link to " & e.linkTarget
+      return "missing"
     let t = expandSymlink(e.path)
     if t != e.linkTarget:
       return "points at " & t & ", ledger " & e.linkTarget

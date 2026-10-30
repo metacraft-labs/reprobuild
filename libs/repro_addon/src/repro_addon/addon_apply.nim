@@ -1333,6 +1333,18 @@ proc decideInstall(driver: CollisionDriver; r: SystemResource;
       let path = unitPath(t.target)
       if path in ownedLinks:
         continue          # the alias link this resource already holds
+      if r.suCollision == "replace" and leafNoFollow(path).kind == lkLink:
+        # The base's own alias of the package unit this resource replaces
+        # (Debian's `sshd.service -> /lib/systemd/system/ssh.service`): the
+        # package's enablement, left to the base and never ledgered, like
+        # its other install links; `systemctl enable` treats a link to a
+        # same-named unit as already in place.
+        let existing = readLinkNoFollow(path)
+        var basePackageAlias = false
+        for d in PackageUnitDirs:
+          if existing == d & r.suName: basePackageAlias = true
+        if basePackageAlias:
+          continue
       if leafNoFollow(path).kind != lkAbsent:
         raise newException(AddonDriftError, "EDrift: " & path & " (" &
           r.address & ", [Install] Alias=" & t.target & ") already exists " &
@@ -1345,6 +1357,35 @@ proc decideInstall(driver: CollisionDriver; r: SystemResource;
       targets.add(plannedTarget(r.address, inp, path, dec, obs))
     else:
       discard
+
+proc newlyShadowedVendorUnits*(previous: Ledger;
+                                driver: CollisionDriver): seq[string] =
+  ## Every unit name the add-on owns in /etc/systemd/system (a unit file,
+  ## or an alias link) that a package or vendor unit directory now
+  ## provides too: the add-on's /etc copy shadows it silently since the
+  ## package arrived. Reported by every plan and apply as actionable drift
+  ## (spec §4.3, `EAddOnUnitShadows`); a `replace`d unit was shadowed by
+  ## opt-in and is not reported.
+  var seen = initHashSet[string]()
+  for e in previous.entries:
+    if e.resource.len == 0: continue
+    let isAlias = e.class == lcInstallLink and
+                  parentDir(e.path) == SystemdUnitDir
+    if not ((e.class == lcUnit and e.collision != "replace") or isAlias):
+      continue
+    let name = extractFilename(e.path)
+    if name in seen: continue
+    seen.incl(name)
+    for d in @PackageUnitDirs & @["/usr/local/lib/systemd/system/"]:
+      let vendor = d & name
+      if fileExists(vendor) or symlinkExists(vendor):
+        let pkg = driver.packageOwner(vendor).package
+        result.add("EAddOnUnitShadows: " & name & " is now also provided by " &
+          (if pkg.len > 0: "package " & pkg else: "a vendor unit") & " at " &
+          vendor & "; the add-on's " & e.path & " (" & e.resource &
+          ") shadows it. Declare `collision = \"replace\"` on the resource " &
+          "to keep shadowing it, or remove the resource")
+        break
 
 proc recordingRefusals(inner: PreWriteGuard;
                        refused: var HashSet[string]): PreWriteGuard =
@@ -1517,6 +1558,10 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   # re-observation before each write still sees a package installed since
   # the plan, without re-reading every file list for every operation.
   let driver = if opts.driver != nil: opts.driver else: detectCollisionDriver()
+  # A package that arrived since the add-on took a unit name (spec §4.3):
+  # reported on every plan and apply as actionable drift.
+  for why in newlyShadowedVendorUnits(previous, driver):
+    result.drift.add(why)
   let newDriver: DriverFactory = proc(): CollisionDriver = driver
   var dropIns = initHashSet[string]()
   var userResources = reshape(user, dropIns)
@@ -2318,13 +2363,15 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                            orchestrated: true)
 
   let transitions = result.transitions
-  var disableOnRemoval: seq[tuple[unit: string; links: seq[string]]]
+  # The install links of each removed unit, decided in step 2 together
+  # with the unit's own destroy (``removalDisables``).
+  var removedUnitEntries: seq[tuple[unit, address: string;
+                                    entries: seq[LedgerEntry]]]
   for r in removedUnits:
-    var links: seq[string]
+    var es: seq[LedgerEntry]
     for e in previous.entries:
-      if e.resource == r.address and e.class == lcInstallLink:
-        links.add(e.path)
-    disableOnRemoval.add((unit: r.suName, links: links))
+      if e.resource == r.address: es.add(e)
+    removedUnitEntries.add((unit: r.suName, address: r.address, entries: es))
   var changedSysctl: seq[string]
   for p in plans:
     if p.r.kind == srkLinuxSysctl and p.verdict != $cvNoOp and not p.skipInfra:
@@ -2404,7 +2451,44 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
                      else: u
           if name notin marker.stopped: marker.stopped.add(name)
         writePendingMarker(stateDir, marker)
+      # Step 2 removes the install links of the units this generation
+      # removes. Each unit is observed again first (spec §4.2 rule 1): one
+      # whose file or any link changed since the plan is left in place
+      # whole -- its links with it -- as drift, and its destroy is kept the
+      # same way by the write-time check; the rest have exactly their
+      # ledgered links removed, each only while it still points where the
+      # ledger says.
+      var disableOnRemoval: seq[tuple[unit: string;
+                                      links: seq[tuple[path, target: string]]]]
+      var linkOwner = initTable[string, string]()
+      for u in removedUnitEntries:
+        var why: seq[string]
+        when not mutated("pause-before-write-no-recheck"):
+          for e in u.entries:
+            if e.class in {lcUnit, lcInstallLink}:
+              let d = changedSincePlan(e, planDrift.getOrDefault(entryKeyOf(e)))
+              if d.len > 0: why.add(e.path & ": " & d)
+        if why.len > 0:
+          hookKept.incl(u.address)
+          for w in why:
+            hookKeptDrift.add(w & " (changed after the plan; left in " &
+              "place with its unit, --reconcile-drift removes it)")
+          continue
+        var links: seq[tuple[path, target: string]]
+        for e in u.entries:
+          if e.class == lcInstallLink:
+            when mutated("pause-before-write-no-recheck"):
+              links.add((path: e.path, target: ""))
+            else:
+              links.add((path: e.path, target: e.linkTarget))
+            linkOwner[e.path] = u.address
+        disableOnRemoval.add((unit: u.unit, links: links))
       let pre = runPreStop(transitions, disableOnRemoval, onStop)
+      for kept in pre.keptLinks:
+        # Changed in the instant between the re-check and the unlink.
+        hookKept.incl(linkOwner.getOrDefault(kept))
+        hookKeptDrift.add(kept & ": no longer the add-on's link when it " &
+          "came to be removed; left in place")
       paused = pre.paused
       notRunning = pre.notRunning
       marker.step = ssPreStop
@@ -2796,7 +2880,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
 
 proc renderLedgerDiff*(r: AddonApplyResult): string =
   ## The plan's ledger diff section (spec §7.1).
-  if r.ledgerDiff.len == 0:
+  # Drift is reported even when the ledger itself does not change (a vendor
+  # unit that arrived under an owned name changes nothing the add-on owns).
+  if r.ledgerDiff.len == 0 and r.unlisted.len == 0 and r.drift.len == 0:
     return "ledger diff: no change\n"
   result = "ledger diff:\n"
   for line in r.ledgerDiff:

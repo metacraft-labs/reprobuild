@@ -303,6 +303,40 @@ proc removeLeafNoFollow*(path: string): bool =
   syncDir(dirfd, path)
   true
 
+type
+  LinkRemoval* = enum
+    lrRemoved      ## the link was there, pointing at ``target``: removed
+    lrAbsent       ## nothing was there
+    lrDifferent    ## something else is there (a file, a directory, a link
+                   ## elsewhere): left untouched
+
+proc removeLinkIfTarget*(path, target: string): LinkRemoval =
+  ## Unlink the symbolic link at ``path`` only while it still points at
+  ## ``target``, relative to its parent's descriptor and without following
+  ## anything on the way. Anything else at the path is someone else's and
+  ## is left exactly as it is. Raises on any other failure.
+  let parts = components(path)
+  let leaf = parts[^1]
+  let dirfd = openDirNoFollow(parentDir(path))
+  defer: discard posix.close(dirfd)
+  let (kind, _) = statLeaf(dirfd, leaf)
+  case kind
+  of lkAbsent: return lrAbsent
+  of lkLink: discard
+  else: return lrDifferent
+  var buf = newString(4096)
+  let n = c_readlinkat(dirfd, leaf.cstring, buf.cstring, csize_t(buf.len))
+  if n < 0:
+    if osLastError() == OSErrorCode(ENOENT): return lrAbsent
+    raiseOSError(osLastError(), "readlink " & path)
+  buf.setLen(n)
+  if buf != target:
+    return lrDifferent
+  if c_unlinkat(dirfd, leaf.cstring, 0) != 0:
+    if osLastError() == OSErrorCode(ENOENT): return lrAbsent
+    raiseOSError(osLastError(), "unlink " & path)
+  lrRemoved
+
 proc removeEmptyDirNoFollow*(path: string): bool =
   ## ``rmdir`` the leaf of ``path`` without following a link on the way;
   ## false when it is absent or not empty.

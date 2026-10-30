@@ -321,6 +321,11 @@ type
                             ## stop-start units step 2 found not running
                             ## (they ended since the plan): step 7 does not
                             ## start them, as a restart would not have
+    keptLinks*: seq[string]
+                            ## install links of removed units that were no
+                            ## longer the add-on's link when step 2 came to
+                            ## remove them (replaced by a file, re-pointed):
+                            ## left in place, the caller reports the drift
 
 type
   PreStopObserver* = proc(unit: string) {.closure.}
@@ -330,7 +335,8 @@ type
     ## marker never misses one that a crash or a refusal interrupts.
 
 proc runPreStop*(ts: seq[Transition];
-                 disable: openArray[tuple[unit: string; links: seq[string]]];
+                 disable: openArray[tuple[unit: string;
+                                          links: seq[tuple[path, target: string]]]];
                  onStop: PreStopObserver = nil): PreStopResult =
   ## Step 2: the transition list's stops, exclusive ones first and
   ## confirmed, then the units this generation removes are disabled by
@@ -379,8 +385,13 @@ proc runPreStop*(ts: seq[Transition];
   for d in disable:
     note("disable:" & d.unit)
     for l in d.links:
-      try: discard removeLeafNoFollow(l)
-      except CatchableError: discard   # already gone, or not a leaf
+      # Only while it is still the add-on's link (pointing where the ledger
+      # says); anything else at the path is left and reported. An empty
+      # target is the re-check's falsifying build: unlink whatever is there.
+      if l.target.len == 0:
+        discard removeLeafNoFollow(l.path)
+      elif removeLinkIfTarget(l.path, l.target) == lrDifferent:
+        result.keptLinks.add(l.path)
 
 proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
                notRunning: openArray[string] = []; noBlock = false) =

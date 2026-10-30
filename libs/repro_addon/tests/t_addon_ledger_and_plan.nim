@@ -16,6 +16,8 @@ import repro_infra/addon_diagnostics
 import repro_profile
 import repro_addon/[addon_apply, collision, fingerprint, generation0, ledger, preflight, store_root]
 import repro_elevation/posix_system_parse
+import repro_elevation/nofollow_write
+import repro_core/host_apply_lock
 import repro_binary_cache_client/caches_config
 
 proc sampleLedger(): Ledger =
@@ -544,3 +546,34 @@ suite "removal by ledger: a resource with no ledger entry is never removed":
     check r.removed.len == 0
     check "unlisted\tsystemFile:/etc/repro-unlisted-fixture/c.conf\t" &
           "systemFile:/etc/repro-unlisted-fixture/c.conf" in r.ledgerDiff
+
+suite "install links are removed only while they are the add-on's":
+  test "removeLinkIfTarget leaves a file, a directory or a re-pointed link":
+    let dir = getTempDir() / ("repro-addon-linkrm-" & $getCurrentProcessId())
+    createDir(dir)
+    defer: removeDir(dir)
+    createSymlink("/etc/systemd/system/x.service", dir / "a.service")
+    check removeLinkIfTarget(dir / "a.service", "/elsewhere") == lrDifferent
+    check symlinkExists(dir / "a.service")
+    check removeLinkIfTarget(dir / "a.service", "/etc/systemd/system/x.service") == lrRemoved
+    check not symlinkExists(dir / "a.service")
+    check removeLinkIfTarget(dir / "a.service", "/etc/systemd/system/x.service") == lrAbsent
+    writeFile(dir / "a.service", "[Service]\n")
+    check removeLinkIfTarget(dir / "a.service", "/etc/systemd/system/x.service") == lrDifferent
+    check readFile(dir / "a.service") == "[Service]\n"
+    let e = LedgerEntry(class: lcInstallLink, path: dir / "a.service",
+                        linkTarget: "/etc/systemd/system/x.service")
+    check observeDrift(e).startsWith("replaced by a regular file")
+    removeFile(dir / "a.service")
+    check observeDrift(e).startsWith("missing")
+
+suite "the host-wide apply lock and the add-on's roots":
+  test "bootstrap's own lock never changes the preflight plan it re-checks":
+    # Bootstrap takes the host-wide apply lock, then re-runs the preflight
+    # and refuses unless the plan digest equals the acknowledged one. The
+    # preflight requires every add-on root to be absent and the fingerprint
+    # records them, so a lock file inside one (it once lived at
+    # /run/repro/apply.lock) made every bootstrap refuse itself.
+    let lockPath = hostApplyLockPathFor(0, "", "/tmp")
+    for root in @AddonOwnedRoots & @AddonRootPaths:
+      check not (lockPath == root or lockPath.startsWith(root & "/"))

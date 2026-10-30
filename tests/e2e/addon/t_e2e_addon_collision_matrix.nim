@@ -32,6 +32,17 @@
 ##   (systemd 252 on Debian 12 makes none for ``UpheldBy``), and its removal
 ##   takes exactly those away -- cron and ``fixture-base.service`` stay
 ##   enabled, ``fixture-off.service`` stays disabled.
+## - **replace with a base alias**: ``ssh.service`` replaced by a copy of
+##   the package's own unit. Its ``[Install]`` names ``Alias=sshd.service``,
+##   and on Debian the base already has
+##   ``/etc/systemd/system/sshd.service -> /lib/systemd/system/ssh.service``:
+##   that link is the package's enablement, left to the base (not
+##   ledgered, not refused), and removal hands ssh back with it intact.
+## - **a vendor unit arriving under an owned name**: a package installed
+##   after the add-on took ``repro-fx-owned.service`` ships
+##   ``/usr/lib/systemd/system/repro-fx-owned.service``; the next apply and
+##   plan report ``EAddOnUnitShadows`` naming the package, as actionable
+##   drift (exit 1).
 ## - **unit search directories**: a managed prefix over
 ##   ``/etc/systemd/system.control/`` (where a file shadows a unit past the
 ##   unit class) is refused.
@@ -842,14 +853,26 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       let upholds = "/etc/systemd/system/rescue.target.upholds/repro-fx-inst.service"
       let alias = "/etc/systemd/system/repro-fx-inst-alias.service"
       # systemd 252 (Debian 12) creates no link for UpheldBy= (measured
-      # 2026-10-30); 257 and 255 do. Whatever systemctl created is ledgered,
-      # and nothing else is.
+      # 2026-10-30); 255 (Ubuntu 24.04) and 257 (Debian 13) do. From 253 on
+      # the link is required, and ledgered; before it, it must not exist.
+      let sdVersion = block:
+        let tok = g.run("systemctl --version").splitWhitespace()
+        var v = 0
+        if tok.len >= 2:
+          var digits = ""
+          for c in tok[1]:
+            if c in {'0'..'9'}: digits.add(c) else: break
+          if digits.len > 0: v = parseInt(digits)
+        v
+      let upholdsExpected = sdVersion >= 253
       let upholdsMade = g.sha256InGuest(upholds) == "link"
-      step("install-own: the WantedBy, UpheldBy (where systemd makes it) and Alias links are ledgered",
-           wants in links and alias in links and
-           (upholds in links) == upholdsMade and
-           links.len == (if upholdsMade: 3 else: 2),
-           links.join(" ") & " (upholds link made: " & $upholdsMade & ")")
+      step("install-own: the WantedBy, UpheldBy (systemd >= 253) and Alias links are made and ledgered",
+           sdVersion > 0 and wants in links and alias in links and
+           upholdsMade == upholdsExpected and
+           (upholds in links) == upholdsExpected and
+           links.len == (if upholdsExpected: 3 else: 2),
+           links.join(" ") & " (systemd " & $sdVersion & ", upholds link made: " &
+           $upholdsMade & ")")
     discard applied("install-own-remove", Empty)
     step("install-own-remove: exactly the add-on's links are gone; base enablement unchanged",
          g.exec("test ! -e /etc/systemd/system/multi-user.target.wants/repro-fx-inst.service && " &
@@ -860,6 +883,76 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.exec("systemctl is-enabled fixture-off.service").stdout.strip() == "disabled",
          g.exec("ls -la /etc/systemd/system /etc/systemd/system/multi-user.target.wants; " &
                 "systemctl is-enabled cron.service fixture-base.service fixture-off.service").stdout)
+
+    # --- Row: replace a package unit that has a base alias (ssh.service). ---
+    block:
+      let frag = g.run("systemctl show -p FragmentPath --value ssh.service").strip()
+      let baseEnabled = g.exec("systemctl is-enabled ssh.service").stdout.strip()
+      let aliasBefore = g.exec("readlink /etc/systemd/system/sshd.service").stdout.strip()
+      var content = ""
+      for line in g.run("cat " & frag).splitLines():
+        if line.startsWith("#"): continue
+        content.add(line & "\n")
+      while content.endsWith("\n\n"): content.setLen(content.len - 1)
+      let isDebian = g.exec("grep -qx 'ID=debian' /etc/os-release").exitCode == 0
+      step("replace-ssh: vacuity guard: ssh.service is a package unit with Alias=sshd.service" &
+           (if isDebian: ", and the base's alias link points at it" else: ""),
+           "Alias=sshd.service" in content and '"' notin content and
+           (not isDebian or aliasBefore == frag or
+            aliasBefore == frag.replace("/usr/lib/", "/lib/")),
+           frag & " alias " & aliasBefore & " enabled " & baseEnabled)
+      let prof = "systemd.systemUnit {\n  name = \"ssh.service\"\n  content = \"" &
+        content & "\"\n  enabled = " & (if baseEnabled == "enabled": "true" else: "false") &
+        "\n  collision = \"replace\"\n}\n"
+      discard applied("replace-ssh", prof)
+      var aliasLedgered = false
+      for e in entriesFor(l, "systemUnit:ssh.service"):
+        if e.path == "/etc/systemd/system/sshd.service": aliasLedgered = true
+      step("replace-ssh: the /etc unit is loaded; the base's alias link is left to the base",
+           g.run("systemctl show -p FragmentPath --value ssh.service").strip() ==
+             "/etc/systemd/system/ssh.service" and
+           g.exec("readlink /etc/systemd/system/sshd.service").stdout.strip() == aliasBefore and
+           (not isDebian or not aliasLedgered), "")
+      discard applied("replace-ssh-remove", Empty)
+      step("replace-ssh-remove: ssh is the package's again, its enablement and alias as the base had them",
+           g.run("systemctl show -p FragmentPath --value ssh.service").strip() == frag and
+           g.exec("systemctl is-enabled ssh.service").stdout.strip() == baseEnabled and
+           g.exec("readlink /etc/systemd/system/sshd.service").stdout.strip() == aliasBefore, "")
+
+    # --- Row: a vendor unit arriving under a name the add-on owns. ---
+    block:
+      let owned = """systemd.systemUnit {
+  name = "repro-fx-owned.service"
+  content = "[Service]
+ExecStart=/bin/sleep infinity
+"
+  enabled = false
+}
+"""
+      discard applied("vendor-owned", owned)
+      let dir = "/root/fixture/repro-fixture-vendor"
+      discard g.run("set -e; rm -rf " & dir & "; mkdir -p " & dir & "/DEBIAN " & dir &
+        "/usr/lib/systemd/system\n" &
+        "printf '[Service]\\nExecStart=/bin/true\\n' > " & dir &
+        "/usr/lib/systemd/system/repro-fx-owned.service\n" &
+        "printf 'Package: repro-fixture-vendor\\nVersion: 1.0\\nArchitecture: all\\n" &
+        "Maintainer: Reprobuild add-on test bed <addon@testbed.invalid>\\n" &
+        "Description: a vendor unit under a name the add-on owns\\n' > " & dir & "/DEBIAN/control\n" &
+        "dpkg-deb --build --root-owner-group " & dir & " " & dir & ".deb >/dev/null\n" &
+        "dpkg -i " & dir & ".deb >/dev/null < /dev/null")
+      let pl = g.planProfile(repro, "vendor-plan", owned)
+      let ap = g.applyProfile(repro, "vendor-apply", owned)
+      step("vendor-owned: plan and apply report the newly shadowed vendor unit as drift",
+           "EAddOnUnitShadows" in (pl.stdout & pl.stderr) and
+           "repro-fixture-vendor" in (pl.stdout & pl.stderr) and
+           ap.exitCode == 1 and "EAddOnUnitShadows" in (ap.stdout & ap.stderr) and
+           "repro-fixture-vendor" in (ap.stdout & ap.stderr),
+           "plan " & pl.stdout & pl.stderr & "\napply exit " & $ap.exitCode & "\n" &
+           ap.stdout & ap.stderr)
+      discard g.run("dpkg -P repro-fixture-vendor >/dev/null && systemctl daemon-reload")
+      f = g.takeFingerprint(repro)
+      l = g.ledgerOf()
+      discard applied("vendor-owned-remove", Empty)
 
     # --- Row: a foreign LOCAL diversion to the name the add-on would use. ---
     discard g.run("dpkg-divert --local --rename --divert /etc/issue.distrib --add /etc/issue")
