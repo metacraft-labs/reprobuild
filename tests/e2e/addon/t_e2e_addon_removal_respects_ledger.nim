@@ -9,10 +9,10 @@
 ##   ``--reconcile-drift`` authorises the removal, which preserves the
 ##   current bytes (``b.conf``);
 ## - a same-named file the ledger does not list is never removed: ``c.conf``
-##   is declared in a generation whose fetch of it fails (so the apply
-##   errors and the ledger has no entry for it), then hand-written; when the
-##   resource leaves the profile the file stays and the apply names it as
-##   unlisted. Uninstall leaves it too.
+##   is declared in a generation whose fetch of it fails (the switch is
+##   rolled back to the previous generation, so the ledger has no entry for
+##   it), then hand-written; the next generations leave it alone, and so
+##   does uninstall.
 ## - a copy-form object (a tmpfiles fragment) that an operator replaced
 ##   with a symbolic link of their own is drift, not a missing object: when
 ##   it leaves the profile the link is left in place (exit 1, the ledger
@@ -33,6 +33,19 @@ const
   Dir = "/etc/repro-fixture"
   Prefix = """addOn {
   managedEtcPrefixes = ["/etc/repro-fixture/"]
+}
+"""
+  Gen0 = Prefix & """
+fs.systemFile {
+  path = "/etc/repro-fixture/a.conf"
+  content = "a
+"
+}
+
+fs.systemFile {
+  path = "/etc/repro-fixture/b.conf"
+  content = "b
+"
 }
 """
   Gen1 = Prefix & """
@@ -97,14 +110,18 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     if not det.ok: return fails
     if not g.bootstrapAddon(repro, step): return fails
 
-    # gen1: a and b are written; c's fetch fails, so the apply errors and
-    # the ledger lists a and b only.
+    # gen0: a and b are written and ledgered.
+    let a0 = g.applyProfile(repro, "gen0", Gen0)
+    step("gen0: a and b applied", a0.exitCode == 0, a0.stdout & a0.stderr)
+    # gen1 adds c, whose fetch fails: the switch is rolled back to gen0, so
+    # the ledger lists a and b only and c was never the add-on's.
     let a1 = g.applyProfile(repro, "gen1", Gen1)
     let l1 = g.ledgerOf()
-    step("gen1: the apply reports c's failure, a and b are ledgered, c is not",
-         a1.exitCode == 1 and "c.conf" in (a1.stdout & a1.stderr) and
+    step("gen1: the apply reports c's failure and rolls back; a and b are ledgered, c is not",
+         a1.exitCode != 0 and "c.conf" in (a1.stdout & a1.stderr) and
          listed(l1, Dir & "/a.conf").len == 1 and listed(l1, Dir & "/b.conf").len == 1 and
-         listed(l1, Dir & "/c.conf").len == 0,
+         listed(l1, Dir & "/c.conf").len == 0 and
+         g.sha256InGuest(Dir & "/c.conf") == "absent",
          "exit " & $a1.exitCode & "\n" & a1.stdout & a1.stderr)
     discard g.run("printf 'foreign\\n' > " & Dir & "/c.conf")
     var f = g.takeFingerprint(repro)
@@ -112,10 +129,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # gen2: a leaves unchanged (removed); c leaves unlisted (kept).
     let a2 = g.applyProfile(repro, "gen2", Gen2)
     let l2 = g.ledgerOf()
-    step("gen2: a removed, c kept and reported as unlisted",
+    step("gen2: a removed; c, which the ledger does not list, kept",
          a2.exitCode == 0 and g.sha256InGuest(Dir & "/a.conf") == "absent" and
          g.run("cat " & Dir & "/c.conf") == "foreign\n" and
-         "unlisted\tsystemFile:/etc/repro-fixture/c.conf" in a2.stdout,
+         listed(l2, Dir & "/c.conf").len == 0,
          "exit " & $a2.exitCode & "\n" & a2.stdout & a2.stderr)
     block:
       let after = g.takeFingerprint(repro)

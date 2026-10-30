@@ -1167,6 +1167,9 @@ when TestPauseSeam:
       return
     writeFile(dir & "/paused", $getCurrentProcessId() & "\n")
     discard readFile(dir & "/continue")
+    # Once per run: the FIFO goes with the release, so an apply this one
+    # starts (a rollback's re-apply) does not pause again.
+    removeFile(dir & "/continue")
     removeFile(dir & "/paused")
 
 proc planIdOf*(inputs: openArray[string]): string =
@@ -1224,6 +1227,18 @@ proc recordRolledBack(stateDir, attempt, backTo, asGeneration, why: string;
     diagnostic: (if healthFailed: "confirm failed: " else: "") & why &
       " -> back to " & backTo & " as " & asGeneration,
     recordClass: AuditClassLiveState))
+
+proc recordingRefusals(inner: PreWriteGuard;
+                       refused: var HashSet[string]): PreWriteGuard =
+  ## ``inner``, also noting in ``refused`` every address it refuses (not
+  ## one it keeps as drift), for the ledger built after the writes.
+  let sink = addr refused
+  result = proc(op: PrivilegedOperation): string {.gcsafe.} =
+    let why = inner(op)
+    if why.len > 0 and not why.startsWith(PreWriteKeepPrefix):
+      {.cast(gcsafe).}:
+        sink[].incl(op.address)
+    why
 
 proc seamedGuard(stateDir: string; inner: PreWriteGuard): PreWriteGuard =
   ## The pre-write guard, with the two write-time test seams in front of
@@ -2056,6 +2071,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
   var newLedger = Ledger()
   var hookRestored: seq[string]
   var hookKept = initHashSet[string]()   # addresses left in place at write time
+  var hookRefused = initHashSet[string]()
+    # Addresses whose operation the write-time re-check refused: nothing of
+    # theirs was written, so the ledger must not claim what is there.
   var hookKeptDrift: seq[string]
   # The objects each destroy removes, for the destroy's re-observation.
   var destroyEntries = initTable[string, seq[LedgerEntry]]()
@@ -2251,6 +2269,14 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
       put(LedgerEntry(class: lcStorePrefix, path: treePath,
         sha256: prefixIdHex(treePrefixId), resource: "static-tree"))
       for p in plans:
+        if p.r.address in hookRefused:
+          # The write-time re-check refused this resource's operation: what
+          # is at its path now is not the add-on's doing (a package that
+          # installed a file there since the plan, say), so it is not
+          # claimed. What the previous ledger held for it stays.
+          for e in previous.entries:
+            if e.resource == p.r.address: put(e)
+          continue
         for e in entriesFor(p, previous.entries, driver):
           put(e)
       # A removed resource whose objects are still there stays in the
@@ -2325,7 +2351,9 @@ proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult =
            # Falsifying build of the write-time re-check gate: every
            # operation is let through unchecked.
            PreWriteGuard(proc(op: PrivilegedOperation): string {.gcsafe.} = "")
-         else: makePreWriteGuard(newDriver, targets, destroyCheck))),
+         else: recordingRefusals(
+           makePreWriteGuard(newDriver, targets, destroyCheck),
+           hookRefused))),
       addOnDispatch: policy,
       phases: ApplyPhaseHooks(beforePrivilegedSet: beforeSet,
                               afterPrivilegedSet: afterSet,
