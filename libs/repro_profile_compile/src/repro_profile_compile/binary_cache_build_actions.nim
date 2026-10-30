@@ -471,10 +471,11 @@ proc trySubstituteBuildAction*(action: ProfileBuildAction;
     if not res.ok or res.outcomes.len == 0:
       result.reason = "cache miss for " & entryHex &
         (if res.reason.len > 0: ": " & res.reason else: "")
-      # The walk's trust refusal wording (`closure_walk.fetchAndVerifyManifest`
-      # / `compat_check` gate 6) is the signal the dispatcher reports per
-      # edge: an entry existed and was refused, which is not a plain miss.
-      result.trustRejected = "not trusted" in res.reason
+      # Typed, not parsed: the walk raises `ClosureWalkTrustError` and the
+      # compat gate sets `SubstituteOutcome.trustRejected`; `substituteInProcess`
+      # ORs both across every endpoint, so a refusal on the preferred cache
+      # followed by a plain miss on the next is still reported as a refusal.
+      result.trustRejected = res.trustRejected
       return
     let rootOutcome = res.outcomes[^1]
     if rootOutcome.casPath.len == 0 or not fileExists(rootOutcome.casPath):

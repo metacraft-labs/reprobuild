@@ -136,6 +136,7 @@ int repro_lease_spawn(const char *buf, int len) {
   (void)buf; (void)len;
   return -ENOTSUP;
 }
+int repro_lease_arch_supported(void) { return 0; }
 int repro_lease_supported(void) { return -1; }
 int repro_lease_pidfd_supported(void) { return 0; }
 int repro_lease_userns_supported(void) { return 0; }
@@ -1880,6 +1881,12 @@ int repro_lease_spawn(const char *buf, int len) {
   free(copy);
   return (int)sup;
 }
+
+/* Whether this file has a confinement backend for the CPU it was built for.
+   The probe the worker role checks FIRST: without it the other probes'
+   zeros read as a kernel lacking user namespaces, which is the wrong cause
+   (and the wrong remedy) on a CPU the launcher does not support at all. */
+int repro_lease_arch_supported(void) { return 1; }
 
 int repro_lease_supported(void) {
   int abi = (int)syscall(SYS_landlock_create_ruleset, NULL, 0, RL_LL_CREATE_RULESET_VERSION);

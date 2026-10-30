@@ -198,6 +198,18 @@ suite "Distributed-Execution M7: trust profiles":
     let noNs = LinuxLeaseHostProbe(userNamespaces: false, pidfdGetfd: true,
       landlock: true, subordinateIds: true, idMappingTools: true)
     check not decideLinuxLeaseLayers(noNs, hardened = false).ok
+    # A CPU the launcher has no backend for (32-bit ARM) is refused by its
+    # own name, before the kernel probes: there every one of those answers
+    # "absent", and reading that as "no user namespaces" sends the operator
+    # to a remedy that cannot help.
+    let noArch = LinuxLeaseHostProbe(noConfinementBackend: true,
+      userNamespaces: false, pidfdGetfd: false, landlock: false,
+      subordinateIds: false, idMappingTools: false)
+    for hardened in [false, true]:
+      let r = decideLinuxLeaseLayers(noArch, hardened)
+      check not r.ok
+      check "not supported on this architecture" in r.reason
+      check "user namespaces" notin r.reason
     check not decideLinuxLeaseLayers(noNs, hardened = true).ok
 
   test "long-lived keys: pinned peers both ways, an unpinned peer refused":

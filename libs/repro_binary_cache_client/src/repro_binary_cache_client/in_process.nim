@@ -58,6 +58,11 @@ type
     outcomes*: seq[SubstituteOutcome]
     ok*: bool
     reason*: string
+    trustRejected*: bool
+      ## At least one endpoint refused the root (or a member) on TRUST. OR-ed
+      ## across every endpoint tried, so a trust refusal on a higher-priority
+      ## cache followed by a plain miss on a lower one is still reported as a
+      ## trust refusal; `reason` alone keeps only the last endpoint's text.
 
   PublishInProcessRequest* = object
     ## M9.L.4-refactor Step A. Self-contained request carrying every
@@ -681,6 +686,8 @@ proc substituteInProcess*(rootEntryKeyHex: string;
         outcomes.add(outcome)
         if not outcome.ok:
           allOk = false
+          if outcome.trustRejected:
+            result.trustRejected = true
           break
       if allOk:
         result.ok = true
@@ -691,6 +698,10 @@ proc substituteInProcess*(rootEntryKeyHex: string;
       else:
         result.outcomes = outcomes
         result.reason = "one or more substitutes failed on " & endpoint.baseUrl
+    except ClosureWalkTrustError as e:
+      result.trustRejected = true
+      result.reason = "endpoint " & endpoint.baseUrl & ": " & e.msg
+      continue
     except CatchableError as e:
       result.reason = "endpoint " & endpoint.baseUrl & ": " & e.msg
       continue

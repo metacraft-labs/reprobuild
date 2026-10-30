@@ -101,11 +101,17 @@ echo "fetch_target_sysroot: unpacking link-time files of: ${dev_packages[*]}"
 # Unpacked ON THE TARGET with its own `dpkg-deb -x` (a Debian host always has
 # it; the build host need not have `ar` or `dpkg-deb`), into a temporary
 # directory that is removed again, and streamed back as one tarball.
+# The exact package versions unpacked are recorded (`dev_packages=`), read
+# off the .deb control files: `dpkg-deb -f <deb> Package Version`.
+dev_packages_record="$(mktemp)"
 remote "set -e; d=\$(mktemp -d); trap 'rm -rf \"\$d\"' EXIT; cd \"\$d\"; \
 apt-get download ${dev_packages[*]} >/dev/null; mkdir root; \
-for deb in *.deb; do dpkg-deb -x \"\$deb\" root; echo \"  \$deb\" >&2; done; \
+for deb in *.deb; do dpkg-deb -x \"\$deb\" root; echo \"  \$deb\" >&2; \
+printf '%s=%s\\n' \"\$(dpkg-deb -f \"\$deb\" Package)\" \"\$(dpkg-deb -f \"\$deb\" Version)\" > root/.dev-package-\$(dpkg-deb -f \"\$deb\" Package); done; \
 tar -C root -cf - ." |
   tar -C "${staging}" -xf -
+cat "${staging}"/.dev-package-* | sort | tr '\n' ' ' | sed 's/ $//' > "${dev_packages_record}"
+rm -f "${staging}"/.dev-package-*
 
 # Rewrite absolute symlinks to point inside the sysroot.
 while IFS= read -r -d '' link; do
@@ -132,11 +138,15 @@ fi
 
 rm -rf "${sysroot_abs}"
 mv "${staging}" "${sysroot_abs}"
+# What the sysroot IS, not when it was taken: the target's glibc and the exact
+# versions of the -dev packages whose link-time files were unpacked. A
+# timestamp would make two identical sysroots look different and two different
+# ones (same date, different package versions) look the same.
 {
   echo "# sysroot fetched by scripts/cross/fetch_target_sysroot.sh"
-  echo "triple=${triple}"
-  echo "fetched=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "glibc=$(remote 'ldd --version | head -n1')"
-  echo "dev_packages=${dev_packages[*]}"
+  echo "sysroot_triple=${triple}"
+  echo "sysroot_glibc=$(remote 'ldd --version | head -n1')"
+  echo "sysroot_dev_packages=$(cat "${dev_packages_record}")"
 } > "${sysroot_abs}/.sysroot-info"
+rm -f "${dev_packages_record}"
 echo "fetch_target_sysroot: sysroot ready at ${sysroot_abs}"

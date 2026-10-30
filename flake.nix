@@ -305,7 +305,14 @@
       # are interposed separately, which is what `scripts/cross/
       # build_linux_cross.sh` ships to an armhf add-on host. LP64 builds are
       # unchanged.
-      url = "github:metacraft-labs/io-mon/b46797064a419d031234b9b685f7dcbbdf1eeafe";
+      # Bumped b4679706 -> e0fe6b44 (2026-10-30, io-mon `agents`): the shim's inline
+      # raw-syscall trap and syscall(2) owner protocol are compiled on 32-bit ARM too,
+      # on nim-stackable-hooks' ARM EABI substrate (below), and the classifier knows
+      # ARM's stat64/lstat64/fstat64/fstatat64/mmap2. An armhf capture now grades
+      # mcComplete where it graded mcIncomplete on two unsupported-architecture
+      # losses (rpi2). io-mon's own pins of nim-shm-gset/-queue move to the
+      # preallocating revisions below.
+      url = "github:metacraft-labs/io-mon/e0fe6b4461f0555a7b44d57f42d1dbc6e07d1255";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -323,7 +330,12 @@
       # stability; its authoritative probe additionally rejects OS errors
       # because shard warm-up tolerates uncertainty but live-writer reclamation
       # does not. Keep this URL, flake.lock, and .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-shm-gset/c9048e9a7e0ba2b11c1ec137acc5fc2c0bcfec27";
+      # Bumped c9048e9 -> 6333cc9 (2026-10-30, `agents`): a new shard file is backed
+      # with storage at creation (`posix_fallocate`). With `/tmp` full, the previous
+      # ftruncate-only sizing let the first header store through the MAP_SHARED
+      # mapping fault with SIGBUS inside `reprobuild internal io monitor` (rpi2,
+      # about one cold `repro infra plan` in five); it is ENOSPC at creation now.
+      url = "github:metacraft-labs/nim-shm-gset/6333cc915689559b00f81371734783c2e894ca45";
       flake = false;
     };
     nim-shm-queue-src = {
@@ -339,7 +351,9 @@
       # Includes the Layer-1 EmbeddedRing (repro_shm_index's action-cache ring
       # embeds it in the control region). 91451f22 aligns the workspace agent
       # landing branch and its complete compiler source closure.
-      url = "github:metacraft-labs/nim-shm-queue/91451f2250beb89d1d221f0a77be0841c19b182e";
+      # Bumped 91451f22 -> 84fd76b (2026-10-30, `agents`): the same preallocation
+      # for a new ring segment file as nim-shm-gset's shards.
+      url = "github:metacraft-labs/nim-shm-queue/84fd76b174d4868e703ba3d599668ee340e0b6ea";
       flake = false;
     };
     nimcrypto-src = {
@@ -454,7 +468,10 @@
       # 059c549 (2026-10-22) moves with io-mon-src: io-mon names the Windows
       # borrow-timeout policy (BorrowTimeoutPolicy), which exists only from
       # 059c549 on; its additions since 6082ee94 are Windows-only.
-      url = "github:metacraft-labs/nim-stackable-hooks/059c549306621e2f769adf75630b0b7f29018dca";
+      # Bumped 059c549 -> 3af8a4e (2026-10-30, `agents`): the 32-bit ARM (armhf)
+      # raw-syscall substrate (glibc `syscall` body patch, svc->udf inline trap on
+      # SIGILL, ucontext capture/replay, Elf32 vDSO) io-mon e0fe6b44 compiles against.
+      url = "github:metacraft-labs/nim-stackable-hooks/3af8a4e937dcf68666d1e47e4191cad496c6d793";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
