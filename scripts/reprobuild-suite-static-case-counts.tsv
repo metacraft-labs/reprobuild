@@ -1671,6 +1671,7 @@ tests/integration/t_health_reports_a_disagreement_between_two_repro_resolutions.
 tests/integration/t_health_reports_a_malformed_repo_fragment.nim	nim	1
 tests/integration/t_health_reports_a_refusing_hook_as_not_ok.nim	nim	3
 tests/integration/t_health_reports_a_worktree_unsafe_hooks_path.nim	nim	5
+tests/integration/t_health_reports_certificate_propagation_config.nim	nim	2
 tests/integration/t_health_reports_disjoint_local_branches.nim	nim	1
 tests/integration/t_health_reports_each_layer_status_with_remedy.nim	nim	6
 tests/integration/t_health_reports_forge_repository_renames.nim	nim	1
@@ -1833,6 +1834,7 @@ tests/integration/t_managed_hook_reentry_guard_prevents_recursive_publish.nim	ni
 tests/integration/t_managed_hooks_gate_every_worktree_of_a_repo.nim	nim	4
 tests/integration/t_managed_hooks_refuse_a_repro_that_does_not_speak_their_contract.nim	nim	1
 tests/integration/t_managed_hooks_stand_down_during_git_operations.nim	nim	7
+tests/integration/t_managed_pre_push_propagates_certificates_through_the_reference_hook.nim	nim	10
 tests/integration/t_manifest_cache_serves_only_the_url_it_was_cloned_for.nim	nim	4
 tests/integration/t_manifest_commit_targets_the_manifest_repo_under_inherited_git_dir.nim	nim	1
 tests/integration/t_manifest_copyfile_linkfile_materialized_after_sync.nim	nim	1
@@ -1892,6 +1894,7 @@ tests/integration/t_pcr_composite_matches_tpm.nim	nim	2
 tests/integration/t_personal_workspace_restores_on_fresh_machine_from_pushed_lock_and_dotfiles.nim	nim	1
 tests/integration/t_pinned_attestation_signatures.nim	nim	7
 tests/integration/t_pkgconf_bootstrap_provisioning.nim	nim	1
+tests/integration/t_plain_git_push_reaches_the_gateway_with_its_certificates.nim	nim	1
 tests/integration/t_plan_reports_its_certificate_producing_nodes.nim	nim	2
 tests/integration/t_plan_without_certificate_node_never_writes_the_lock.nim	nim	1
 tests/integration/t_platform_refusal_surfaces_through_realize_and_plan.nim	nim	1

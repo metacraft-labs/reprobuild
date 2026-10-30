@@ -10,8 +10,8 @@
 ##      `git push --no-verify origin main` carries no certificate note, and
 ##      the gateway reads no certificate store any more, so under `required`
 ##      it is REFUSED — although the certificate sits in the local store.
-##      TC-8j restores the one-ref case once the reference tool propagates
-##      notes from the store.
+##      A push that runs the managed hook gets there, because the hook propagates
+##      notes from the store first; `--no-verify` skips it.
 ##   3. ANY ONE PLATFORM (§4.2), BRANCH + NOTES. The certificate is noted on
 ##      the pushed tree and the branch is pushed together with the notes ref;
 ##      the pushed tree's policy (TC-9d: a requirement on

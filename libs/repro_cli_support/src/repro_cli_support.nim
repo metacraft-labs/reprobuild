@@ -181,6 +181,9 @@ import repro_cli_support/content_id
 # local certificate store (test-certificates Transport §2).
 import repro_cli_support/certificate_store
 export certificate_store
+# The managed pre-push hook's call into the linked reference library, and what
+# ``repro health`` reports about the configuration it reads.
+import repro_cli_support/certificate_propagation
 # The reference ``test_certificates`` library (test-certificates-tools),
 # linked for what the standard fixes byte for byte and reprobuild has no
 # reason to own: the strict TOML reader certificates are parsed with, note
@@ -24263,6 +24266,14 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
       # guessed/replayed token had no pending record). With the token already
       # scrubbed, the loser receives no exemption and must pass the exact same
       # ordinary policy gate as a source push.
+    # Propagation runs before the gate reports, so that a refusal below is the
+    # last thing the operator reads and the notes are already on the remote
+    # when the gateway judges the branch update that follows this hook. Its
+    # outcome decides nothing here: Tooling §4.3 leaves that to the receiving
+    # gate. A publisher's own lock-record push returned above and a record
+    # store returned before that: neither carries content anyone certified.
+    discard propagateCertificates(prePushRepoRoot, remoteName, remoteLocation,
+      refsBytes, proc (line: string) = stderr.writeLine(line))
     var checkArgs = @["--mode=pre-push"]
     if repoRoot.len > 0:
       checkArgs.add("--current-repo=" & repoRoot)
@@ -67053,14 +67064,27 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
       let label =
         if verdict.outcome == voUnverifiable: "unverifiable"
         else: "uncovered"
-      let noneArrived =
-        if found.len == 0 and couldNotLook.len == 0:
-          " (no certificate note on the pushed tree under " &
-            certificateNotesRef & "; push that ref with the branch)"
-        else: ""
-      let remedies = unmetRemedies(verdict)
+      let noneArrived = found.len == 0 and couldNotLook.len == 0
+      # When no note arrived, the gateway cannot tell an uncertified tree from
+      # certificates that never travelled, and "go and certify" would send a
+      # developer who has them to redo the work. So it names what is missing.
+      var unmetNames: seq[string]
+      for u in verdict.unmet:
+        let pair = "'" & u.name & "' on " &
+          (if u.platform == anyCertificatePlatform: "any platform"
+           else: u.platform)
+        if pair notin unmetNames: unmetNames.add(pair)
+      let remedies =
+        if noneArrived: unmetNames else: unmetRemedies(verdict)
       let detail = u.refName & ": " & label & ": " &
-        describeCoverageVerdict(verdict) & noneArrived &
+        describeCoverageVerdict(verdict) &
+        (if noneArrived:
+           " (no certificate note on the pushed tree under " &
+             certificateNotesRef & ": nothing propagated one. The managed " &
+             "pre-push hook carries them from the local certificate store, " &
+             "and --no-verify skips it; otherwise push that ref with the " &
+             "branch)"
+         else: "") &
         (if verdict.outcome == voNotCovered and remedies.len > 0:
            " — " & remedies.join("; ") else: "")
       result.outcome = verdict.outcome
@@ -74959,6 +74983,34 @@ proc healthBranchAncestry(identity: GitToolIdentity; abs: string;
     result.diagnostic = "cannot compare with " & result.comparison & ": " &
       mb.output.strip().splitLines().join(" | ")
 
+proc certificatePropagationCheck(workspaceRoot: string): HealthCheck =
+  ## The ``certificate-propagation`` row of ``repro health``. The hook body is
+  ## linked, so its presence is not in question. What can still stop
+  ## certificates reaching a gateway is each repository's own configuration,
+  ## and a push reports that only in output nobody may be reading.
+  const name = "certificate-propagation"
+  let enumerated = enumerateParticipatingRepos(workspaceRoot)
+  var findings: seq[string]
+  var inspected = 0
+  for repo in enumerated.repos:
+    if gitTopLevel(repo.repoPath).len == 0: continue
+    inc inspected
+    for finding in certificatePropagationFindings(repo.repoPath):
+      findings.add(repo.name & ": " & finding)
+  if findings.len == 0:
+    return HealthCheck(name: name, status: hsOk,
+      detail: "scope declarations and notes ref valid in " &
+        $inspected & " repo(s)",
+      remedy: "", fixKind: hfNone)
+  HealthCheck(name: name, status: hsWarn,
+    detail: $findings.len & " configuration problem(s) keep certificates " &
+      "from reaching a gateway; pushes still go through: " &
+      findings.join("; "),
+    remedy: "fix or remove the named value: git -C <repo> config --unset-all " &
+      "testCertificates.notesRef, or git -C <repo> config --remove-section " &
+      "testCertificatesScope.<name>",
+    fixKind: hfNone)
+
 proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     tuple[checks: seq[HealthCheck]; ctx: HealthContext] =
   ## Diagnose every layer once and return the ordered check list plus the
@@ -75827,6 +75879,11 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     per repo is PG-16's; this row is the machine-wide skew and the
   #     disagreement between shells, which is PG-14's.)
   checks.add(hookInterpreterSkewCheck(parsed.workspaceRoot))
+
+  # 8c'. The configuration the managed pre-push hook's propagation reads.
+  #      Warnings, never failures: a push goes through regardless (Tooling
+  #      §4.3). What is lost is what a receiving gate will see.
+  checks.add(certificatePropagationCheck(parsed.workspaceRoot))
 
   # 8d. The post-commit lock writer's OUTCOME (CLI/health.md, **Lock writer**).
   #

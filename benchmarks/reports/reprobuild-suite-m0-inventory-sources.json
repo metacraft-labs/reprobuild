@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2517,
+    "nimTestBinaries": 2520,
     "pureUnitConsolidationGroups": 73,
     "pureUnitTests": 701,
     "staticallyDetectedRuntimeCompilerFlowTests": 132,
-    "testEntries": 2557
+    "testEntries": 2560
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1460,7 +1460,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 18,
-      "integration": 1392,
+      "integration": 1395,
       "platform/destructive": 159,
       "pure unit": 701,
       "unclassified": 287
@@ -1671,9 +1671,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2517,
+    "nimTestBinaryCount": 2520,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2557
+    "testEntryCount": 2560
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -38023,6 +38023,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_health_reports_certificate_propagation_config",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_health_reports_certificate_propagation_config.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_health_reports_disjoint_local_branches",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -40902,6 +40917,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_managed_pre_push_propagates_certificates_through_the_reference_hook",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_managed_pre_push_propagates_certificates_through_the_reference_hook.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_manifest_cache_serves_only_the_url_it_was_cloned_for",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -41959,6 +41989,21 @@
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_pkgconf_bootstrap_provisioning.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_plain_git_push_reaches_the_gateway_with_its_certificates",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_plain_git_push_reaches_the_gateway_with_its_certificates.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
